@@ -397,17 +397,25 @@ a new dead end. The hover comes from the same
 `active_container_menu` + `hit_test_with_scale` pair the mouse path uses, so key
 and mouse cannot disagree about which slot is under the pointer.
 
-**The off-hand key (vanilla's `F`) is still missing, and it is a decision, not
-code.** `Click::offhand_swap` and `do_swap`'s `button == 40` arm both exist and are
-tested (#27), and `send_container_swap` already has the branch. What is missing is
-an `InputAction::SwapOffhand` — and adding it with vanilla's default of `F`
-(`Options.java:663`, GLFW keysym 70) collides with this client's Lodestone-only
-`key.lodestone.toggleFly`, which turns `keybinds.rs`'s conflict-free-defaults test
-red. Either move `toggleFly` off `F` (vanilla parity, changes a default in use) or
-ship `key.swapOffhand` unbound (no collision, unreachable out of the box). Both
-options and the separate matter of the *gameplay* hand-swap — a
-`ServerboundPlayerActionPacket SWAP_ITEM_WITH_OFFHAND` this client never sends —
-are recorded in `keybinds.rs`'s module header.
+**The off-hand key (vanilla's `F`) now works here too, and it took a deletion to
+unblock.** `Click::offhand_swap` and `do_swap`'s `button == 40` arm both existed
+and were tested (#27), and `send_container_swap` already had the branch — the only
+missing piece was an `InputAction::SwapOffhand`, and adding it with vanilla's
+default of `F` (`Options.java:663`, GLFW keysym 70) collided with this client's
+Lodestone-only `key.lodestone.toggleFly` and turned `keybinds.rs`'s
+conflict-free-defaults test red. **Issue #382 deleted `toggleFly`** (as one of
+several bespoke debug affordances that vanilla's cheat commands cover), which
+freed `F`, and `resolve_key`'s container arm now asks
+`binds.is(InputAction::SwapOffhand, code)` **before** the hotbar keys — matching
+`checkHotbarKeyPressed`'s own order, so rebinding the off-hand key onto a number
+key swaps with slot `40` rather than that number's slot.
+`app::tests::the_offhand_key_swaps_with_slot_forty_while_a_container_is_open` is
+the gate.
+
+The separate *gameplay* hand-swap — a `ServerboundPlayerActionPacket
+SWAP_ITEM_WITH_OFFHAND` with no screen open — is still not sent at all, so `F` in
+the world does nothing. That is #378's remaining half, and the gate above asserts
+its absence explicitly so landing it has to change that line on purpose.
 
 ## How to change it
 

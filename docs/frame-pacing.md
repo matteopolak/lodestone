@@ -104,30 +104,24 @@ this module exists to fix.
 `app::tests::the_unfocused_frame_schedule_does_not_drift_below_its_target` keeps
 the naive gate as a live control and requires it to be observed *failing*.
 
-### The uncapped-frame-rate debug option
+### There is no frame-rate option, and the plumbing for one is already here
 
-`OPTIONS` → `UNCAP FRAMERATE` (Enter toggles it) exists so the F3 `fps=` figure is
-a **measurement** rather than a readout of the display's refresh rate. Vsynced,
-every frame that fits inside the refresh interval reports the same number, so the
-counter cannot tell a 2× speedup from a 20% one — it is the wrong instrument for
-judging a perf change.
+`SurfaceTarget` can switch the swapchain's present mode at runtime
+(`set_present_mode`) and remembers the mode `Surface::get_default_config` chose at
+bring-up (`default_present_mode`). Nothing in the shell calls either today.
 
-It is a **debug knob, not a video setting.** Vanilla's real equivalent ("Max
-Framerate", `Options.framerateLimit`, with `Unlimited` at the top of the range) is
-a proper option with a slider; this is one boolean added ahead of that screen
-existing, and should be replaced by the real thing rather than grown.
+That is deliberate. A boolean `UNCAP FRAMERATE` row lived on the options screen
+for a while, added so the F3 `fps=` figure could be a **measurement** rather than a
+readout of the display's refresh rate — vsynced, every frame that fits inside the
+refresh interval reports the same number, so the counter cannot tell a 2× speedup
+from a 20% one. Issue #382 deleted it as a bespoke debug affordance. Vanilla's real
+equivalent is **Max Framerate** (`Options.framerateLimit`, a slider whose top notch
+is `Unlimited`), and that is what should land here instead.
 
-What it actually does is switch the swapchain's present mode:
+Two details are load-bearing for whoever writes it:
 
-| `unlock_framerate` | present mode |
-|---|---|
-| `false` | whatever `Surface::get_default_config` chose at bring-up (`Fifo` in practice) |
-| `true` | `wgpu::PresentMode::AutoNoVsync` |
-
-Three details that are load-bearing:
-
-- **Off restores a *remembered* mode, not `AutoVsync`.** Those are not the same:
-  `AutoVsync` resolves to `FifoRelaxed` wherever that exists, which permits
+- **Off must restore the *remembered* mode, not `AutoVsync`.** Those are not the
+  same: `AutoVsync` resolves to `FifoRelaxed` wherever that exists, which permits
   tearing on a late frame, while the default config picks plain `Fifo`. Restoring
   by name would quietly change the default presentation on every platform that
   has `FifoRelaxed`. `SurfaceTarget` stores `default_present_mode` for this.
@@ -136,18 +130,20 @@ Three details that are load-bearing:
   `Fifo` and simply stays capped. (wgpu's Metal backend does advertise
   `Immediate` on macOS — `wgpu-hal/src/metal/adapter.rs` gates it on
   `OsFeatures::display_sync()` — so it resolves to that here.)
-- **`WindowApp::sync_present_mode` runs every presented frame and is a no-op
-  unless the mode changed.** `surface.configure` *recreates the swapchain*, so
-  the equality guard inside `SurfaceTarget::set_present_mode` is the feature, not
-  an optimisation. Polling beats firing on the toggle because the menu layer is
-  pure and GPU-free by design, and threading a `wgpu::Device` into it to save one
-  `PresentMode` comparison per frame would be a bad trade.
+- **Do not "optimise away" the equality guard inside
+  `SurfaceTarget::set_present_mode`.** `surface.configure` *recreates the
+  swapchain*, so that guard is what makes it safe to call the setter from a
+  per-frame poll at all. The deleted knob did exactly that, and polling was the
+  right shape: the menu layer is pure and GPU-free by design, and threading a
+  `wgpu::Device` into it to save one `PresentMode` comparison per frame would be
+  a bad trade.
 
-This only removes *our* cap on a **focused** window. Everything in the table above
-still holds: an unfocused window is still throttled to `UNFOCUSED_FPS`, and an
-occluded one still presents nothing. Neither of those is vsync, and neither should
-follow a debug knob — the occluded case in particular exists to stop `acquire()`
-stalling, which uncapping would make worse rather than better.
+Note an uncapped present mode only removes *our* cap on a **focused** window.
+Everything in the table above still holds: an unfocused window is still throttled
+to `UNFOCUSED_FPS`, and an occluded one still presents nothing. Neither of those is
+vsync, and neither should follow a frame-rate setting — the occluded case in
+particular exists to stop `acquire()` stalling, which uncapping would make worse
+rather than better.
 
 ## How to change it
 
@@ -168,11 +164,17 @@ stalling, which uncapping would make worse rather than better.
 The pacing itself is all compile-time constants — `MAX_TICKS_PER_UPDATE`,
 `TICK_SECS`, `UNFOCUSED_FPS`, `BACKGROUND_POLL`, none of them settings.
 
-One runtime knob, described above: `unlock_framerate` in
-[`Options`](../crates/lodestone-shell/src/config.rs), persisted to `options.json`
-beside `gui_scale` and only written when set, so an untouched install has no key
-for it. There is still no real frame-rate *limiter* setting (see
-[Main menu](./main-menu.md) for where a video-settings screen would go).
+**No runtime knobs.** There is no frame-rate setting of any kind: the
+`unlock_framerate` boolean that used to live in
+[`Options`](../crates/lodestone-shell/src/config.rs) was deleted by #382, and the
+real thing (vanilla's Max Framerate) has not landed. See
+[Main menu](./main-menu.md) for where a video-settings screen would go.
+
+An install that toggled the old knob still has `"unlock_framerate": true` sitting
+in its `options.json`. That is harmless — `Options::from_json` reads the keys it
+knows and ignores the rest, which
+`config::tests::an_unknown_key_in_the_file_is_ignored_rather_than_failing_the_load`
+pins, so a stale key can never cost `gui_scale` or the keybinds table.
 
 ## Dependencies
 

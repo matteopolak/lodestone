@@ -219,7 +219,6 @@ pub(crate) enum KeyOutcome {
     /// Open the chat prompt. `command` pre-fills the `/` prefix.
     OpenChat { command: bool },
     OpenContainer,
-    ToggleFly,
     TogglePerspective,
     /// Select hotbar slot `0..=8`.
     SelectSlot(usize),
@@ -309,15 +308,19 @@ pub(crate) fn resolve_key(
         // The number keys used to fall into that swallow, which is issue #378's
         // part 3: they neither selected a slot (correct) nor swapped (the gap).
         //
-        // The **off-hand key is not here**, and that is a blocked decision rather
-        // than an oversight: vanilla's `key.swapOffhand` defaults to `F`, which
-        // this client's Lodestone-only `key.lodestone.toggleFly` already occupies.
-        // Adding it turns `keybinds.rs`'s own conflict-free-defaults test red. The
-        // two ways out, and why neither is free, are recorded in that module's
-        // header. `Click::offhand_swap` and `do_swap`'s `button == 40` arm are both
-        // already in place and tested, so it is one binding away.
+        // The off-hand key is here too, as of issue #382: it was blocked purely
+        // by a keybind collision (`key.swapOffhand` defaults to `F`, which the
+        // now-deleted `key.lodestone.toggleFly` squatted on), never by the click
+        // path — `Click::offhand_swap` and `do_swap`'s `button == 40` arm were
+        // already in place and tested. Asked **before** the hotbar keys, matching
+        // `checkHotbarKeyPressed`'s own order, so rebinding the off-hand key onto
+        // a number key swaps with slot `40` rather than that number's slot.
         if binds.is(InputAction::Inventory, code) {
             Some(KeyOutcome::CloseContainer)
+        } else if binds.is(InputAction::SwapOffhand, code) {
+            Some(KeyOutcome::ContainerSwap {
+                button: OFFHAND_SWAP_BUTTON,
+            })
         } else {
             hotbar_slot_for(binds, code).map(|slot| KeyOutcome::ContainerSwap {
                 button: slot as i32,
@@ -341,8 +344,6 @@ pub(crate) fn resolve_key(
         })
     } else if binds.is(InputAction::Inventory, code) && pressed && gate.gameplay {
         Some(KeyOutcome::OpenContainer)
-    } else if binds.is(InputAction::ToggleFly, code) && pressed && gate.gameplay {
-        Some(KeyOutcome::ToggleFly)
     } else if binds.is(InputAction::TogglePerspective, code) && pressed && gate.gameplay {
         Some(KeyOutcome::TogglePerspective)
     } else if let Some(slot) = hotbar_slot_for(binds, code)
@@ -1254,40 +1255,6 @@ impl WindowApp {
         })
     }
 
-    /// Bring the swapchain's present mode in line with the `unlock_framerate`
-    /// debug option (`OPTIONS` → `UNCAP FRAMERATE`, Enter).
-    ///
-    /// Called once per presented frame. That is cheap because
-    /// [`lodestone_render::SurfaceTarget::set_present_mode`] returns immediately
-    /// when the mode already matches — only the frame the setting actually flips
-    /// pays for a swapchain rebuild. Polling here rather than firing on the
-    /// toggle avoids threading a GPU handle into the menu layer, which is pure
-    /// and GPU-free by design.
-    ///
-    /// Off restores the adapter's **remembered** default rather than
-    /// `AutoVsync`; see `SurfaceTarget`'s field docs for why those are not the
-    /// same thing.
-    ///
-    /// Note this only removes *our* cap on a focused window. `FramePacer` still
-    /// throttles an unfocused one to `UNFOCUSED_FRAME_INTERVAL` and still skips
-    /// presentation entirely when occluded — neither is vsync, and neither
-    /// should follow a debug knob.
-    fn sync_present_mode(&mut self) {
-        let (Some(gpu), Some(target)) = (self.gpu.as_ref(), self.target.as_mut()) else {
-            return;
-        };
-        let mode = if self.nav.unlock_framerate() {
-            // `AutoNoVsync`, not a concrete `Immediate`: an unadvertised
-            // concrete mode is a validation error, while this degrades to
-            // `Fifo` and simply stays capped. On this machine's Metal backend
-            // the adapter does advertise `Immediate`, so it resolves to that.
-            wgpu::PresentMode::AutoNoVsync
-        } else {
-            target.default_present_mode()
-        };
-        target.set_present_mode(gpu.device(), mode);
-    }
-
     /// Draw one menu screen. Returns `false` when the current screen is not a
     /// menu, so the caller falls through to the world path.
     fn draw_menu(&mut self) -> bool {
@@ -1395,10 +1362,6 @@ impl WindowApp {
             // window, so it is precisely what must not run here.
             return;
         }
-
-        // Before either draw path, since the toggle lives on a menu screen and
-        // should take effect while that screen is still showing.
-        self.sync_present_mode();
 
         // A menu screen owns the whole frame — its pass clears, so there is no
         // world render behind it and none of the HUD state below is built.
@@ -1771,9 +1734,15 @@ impl WindowApp {
             // in physical pixels — the same space `hit_test` and the menu layout
             // use (see the `cursor` field). Without this the stack is built but
             // never positioned, and nothing draws.
+            // The live drag preview (issue #378 part 2). `drag_paint` is the
+            // *same* paint set `MenuInput::release` will turn into the
+            // QUICK_CRAFT sequence, and the counts drawn from it come out of
+            // `Menu::quick_craft_plan`, which is what distributes them — so the
+            // preview cannot show a split the release will not produce.
             let container_frame = ContainerFrame::new(container_menu, &container_title)
                 .with_inventory_label(&inventory_label)
                 .with_cursor(Some([self.cursor.0, self.cursor.1]))
+                .with_drag(self.menu_input.drag_paint())
                 .with_recipe_book(self.recipe_book.as_ref());
             // `render_with_icons_scaled`, **not** `render_scaled`: the latter
             // hardcodes `depth: None, models: None`, so `want_models` was always
@@ -2376,7 +2345,6 @@ impl ApplicationHandler for WindowApp {
                         self.tab_held = false;
                         self.set_grab(false);
                     }
-                    Some(KeyOutcome::ToggleFly) => self.sim.toggle_fly(),
                     // Vanilla's own third-/first-person toggle.
                     Some(KeyOutcome::TogglePerspective) => self.sim.toggle_third_person(),
                     Some(KeyOutcome::SelectSlot(slot)) => self.sim.select_slot(slot),
@@ -2992,7 +2960,6 @@ mod tests {
             (KeyCode::KeyT, KeyOutcome::OpenChat { command: false }),
             (KeyCode::Slash, KeyOutcome::OpenChat { command: true }),
             (KeyCode::Tab, KeyOutcome::PlayerList(true)),
-            (KeyCode::KeyF, KeyOutcome::ToggleFly),
             (KeyCode::F5, KeyOutcome::TogglePerspective),
             (KeyCode::F3, KeyOutcome::ToggleDebugOverlay),
             (KeyCode::Escape, KeyOutcome::Pause),
@@ -3224,6 +3191,51 @@ mod tests {
                 "{code:?} must not change the selected slot behind a screen"
             );
         }
+    }
+
+    /// The off-hand key's container half (issues #378 part 3 / #382).
+    ///
+    /// `key.swapOffhand` defaults to `F` (`Options.java:663`, GLFW keysym 70).
+    /// It could not be added while `key.lodestone.toggleFly` squatted on `F`;
+    /// #382 deleted that binding, and this is the assertion that the freed key
+    /// actually reaches `Click::offhand_swap` rather than merely existing in
+    /// the table.
+    #[test]
+    fn the_offhand_key_swaps_with_slot_forty_while_a_container_is_open() {
+        let gate = KeyGate {
+            container_open: true,
+            ..KeyGate::default()
+        };
+        assert_eq!(
+            resolve(gate, KeyCode::KeyF, true),
+            Some(KeyOutcome::ContainerSwap {
+                button: OFFHAND_SWAP_BUTTON
+            }),
+            "F must issue a SWAP against the off-hand's native slot"
+        );
+        // -- three controls, each for a different way this could be hollow ---
+        // 1. The button number is the off-hand's, not a hotbar index. `40` is
+        //    outside `0..=8`, so a resolver that had fallen through to
+        //    `hotbar_slot_for` cannot satisfy this.
+        assert!(
+            !(0..=8).contains(&OFFHAND_SWAP_BUTTON),
+            "control failed: 40 overlaps the hotbar range, so the assertion \
+             above cannot distinguish the two routes"
+        );
+        // 2. A release is not a swap — vanilla acts on `keyPressed` only.
+        assert_eq!(resolve(gate, KeyCode::KeyF, false), None);
+        // 3. **The gameplay half is deliberately absent.** With no screen open
+        //    `F` does nothing, because the serverbound
+        //    `SWAP_ITEM_WITH_OFFHAND` action does not exist yet (#378's
+        //    remainder). Asserted rather than left unsaid so that landing it
+        //    has to come here and change this line on purpose — and so the
+        //    swallow test above is honest about why it skips `F`.
+        assert_eq!(
+            resolve(playing(), KeyCode::KeyF, true),
+            None,
+            "the world-side off-hand swap is not implemented; if this now \
+             resolves, #378's gameplay half landed and this test should assert it"
+        );
     }
 
     #[test]
