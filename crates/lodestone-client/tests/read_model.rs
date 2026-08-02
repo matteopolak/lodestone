@@ -1890,6 +1890,118 @@ async fn respawning_into_another_dimension_updates_the_read_model() {
     );
 }
 
+/// Issue #390: **drown, die, respawn — the bubble meter must be gone.**
+///
+/// Reported from play. `Vitals::air` was written only by
+/// `apply_local_player_air_supply`, so the dying reading (`0`) survived the
+/// respawn and the HUD kept drawing an *empty* row until the server's next
+/// metadata packet arrived with 300 — the instant refill the player saw on
+/// touching water.
+///
+/// This drives the same route production does — `SharedState::apply`'s routing
+/// switch, then `NetIngest` — rather than the ECS directly, because that switch
+/// is the island factory `CLAUDE.md` §1 names: `Respawned` reaching the schedule
+/// at all depends on `session::handles_event` claiming it, and a hermetic
+/// `run_schedule` call passes either way.
+///
+/// `player.air == MAX_AIR` is the *hidden-row* condition, not a separate claim:
+/// `HudFrame::air` is built from this snapshot and vanilla's visibility rule is
+/// `isUnderWater || air < maxAir` (`Hud.java:910`). Dry plus full air is both
+/// disjuncts false.
+///
+/// The pre-respawn assertions are the controls, and the metadata event is the
+/// one that makes them non-vacuous: `air` is asserted at `0` and `on_fire` at
+/// `true` *before* the respawn, so the post state is a clearing rather than a
+/// value that was never set.
+#[tokio::test]
+async fn a_respawn_clears_a_drowned_air_supply_in_the_read_model() {
+    const LOGIN: i32 = 1;
+    const DROWN: i32 = 2;
+    const RESPAWN: i32 = 3;
+    let max_air = lodestone_game::player_state::HudState::MAX_AIR;
+
+    let adapter = FakeAdapter::new()
+        .begin(vec![Directive::SetState(ConnectionState::Play)])
+        .on(
+            ConnectionState::Play,
+            LOGIN,
+            vec![Directive::Emit(ClientEvent::Login {
+                entity_id: 7,
+                game_mode: GameMode::Survival,
+                dimension: dim("overworld"),
+            })],
+        )
+        // Metadata for **our own id**, which is the only way `air`/`on_fire`
+        // can ever be written — `Login` is what puts id 7 in the `EntityIndex`.
+        .on(
+            ConnectionState::Play,
+            DROWN,
+            vec![
+                Directive::Emit(ClientEvent::EntityMetadataUpdated {
+                    entity_id: 7,
+                    metadata: EntityMetadataUpdate {
+                        air_supply: Some(0),
+                        flags: Some(0x01),
+                        ..Default::default()
+                    },
+                }),
+                Directive::Emit(ClientEvent::Death {
+                    message: Text::literal("drowned"),
+                }),
+            ],
+        )
+        .on(
+            ConnectionState::Play,
+            RESPAWN,
+            vec![Directive::Emit(ClientEvent::Respawned {
+                dimension: dim("overworld"),
+                game_mode: GameMode::Survival,
+                previous_game_mode: Some(GameMode::Survival),
+                last_death_location: None,
+            })],
+        );
+
+    let (handle, mut events, mut peer) = start(adapter);
+
+    peer.write_packet(LOGIN, &[]).await.unwrap();
+    events.recv().await.unwrap();
+    assert_eq!(
+        handle.player().air,
+        max_air,
+        "control: nothing reported yet reads as full, so the row is hidden on join"
+    );
+
+    peer.write_packet(DROWN, &[]).await.unwrap();
+    for _ in 0..2 {
+        events.recv().await.unwrap();
+    }
+    let drowned = handle.player();
+    assert_eq!(
+        drowned.air, 0,
+        "control: the metadata must actually reach the read model, or the \
+         assertion after the respawn is measuring nothing"
+    );
+    assert!(drowned.on_fire, "control: and so must the burning flag");
+    assert!(!drowned.alive, "control: the death packet landed");
+
+    peer.write_packet(RESPAWN, &[]).await.unwrap();
+    events.recv().await.unwrap();
+    let respawned = handle.player();
+    assert_eq!(
+        respawned.air, max_air,
+        "#390: the bubble row must be hidden after respawning from a drowning, \
+         not drawn empty until the next metadata packet"
+    );
+    assert!(
+        !respawned.on_fire,
+        "#390's sibling: a stale burning flag would paint the fire overlay on a \
+         player who just respawned"
+    );
+    assert!(respawned.alive);
+
+    drop(handle);
+}
+
 // ---------------------------------------------------------------------------
 // §4.1(c): the caller's `World`
 // ---------------------------------------------------------------------------

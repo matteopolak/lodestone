@@ -635,6 +635,83 @@ the range it actually saw (`0.121..0.832`), so an empty bucket can no longer
 satisfy it. Third instance of this exact failure on this one feature, all three
 found by asserting the premise rather than reasoning about it.
 
+## A respawn clears the metadata-fed vitals (issue #390)
+
+Reported from play: **after respawning from a drowning the bubble meter drew
+completely empty**, and stepping into water refilled it instantly.
+
+Both halves of that sentence are the same bug. `Vitals::air` has exactly one
+writer — `apply_local_player_air_supply`, off `EntityMetadataUpdated` naming our
+own id — so it is *sticky*: the last reading stands until a packet contradicts
+it. Drowning drives it to `0`, nothing cleared it on `Respawned`, and the row
+kept rendering `0/300` until the server's next metadata update arrived carrying
+`300`. That update is the "instant refill"; it was never a refill, it was the
+first correction.
+
+The row's visibility rule is `isUnderWater || air < maxAir` (`Hud.java:910`), so
+a stale `0` satisfies the second disjunct on dry land forever.
+
+**Why the value has to be cleared rather than left alone.** A respawn is a
+brand-new entity on both sides. `PlayerList.respawn` builds
+`new ServerPlayer(...)` (`PlayerList.java:393`); vanilla's client discards its
+`LocalPlayer` and constructs another through `gameMode.createPlayer`
+(`ClientPacketListener.handleRespawn`, `:1286`), copying across only the entity
+id. The new entity's synched data therefore starts at
+`entityDataBuilder.define(DATA_AIR_SUPPLY_ID, getMaxAirSupply())`
+(`Entity.java:319`) — 300 — with shared flags `0`. We keep **one** long-lived
+local-player entity for the whole session, which is why nothing does this for us.
+
+The fix is two lines in `session::apply_local_player_state`'s `Respawned` arm:
+
+```rust
+vitals.air = None;
+vitals.on_fire = None;
+```
+
+**`None`, not `Some(300)`.** `None` is the documented pre-report state and
+already reads as full (`PlayerSnapshot::air`'s `unwrap_or(MAX_AIR)`), so the row
+stays hidden until the server says otherwise. `Some(300)` would be us inventing a
+reading, and would also make "the server has told us nothing" indistinguishable
+from "the server says we are fine" for any future consumer.
+
+`on_fire` was checked in the same pass and **had the identical bug** — see
+[`screen-overlays.md`](./screen-overlays.md#a-session-scoped-flag-needs-an-explicit-reset-issue-390).
+Its polarity makes it quieter (absence reads as `false`), not less real:
+`app.rs:1543` feeds `PlayerSnapshot::on_fire` straight into the fire overlay, so
+dying while burning left the flames painted over a freshly respawned player.
+
+### The gotcha for the next metadata-fed session field
+
+`Respawned` is folded by `session::apply_local_player_state`, but `air`/`on_fire`
+are written by systems in `ingest.rs`. Those two systems are **unordered** with
+respect to each other in `IngestSet::Apply`, so a `Respawned` and a metadata
+packet landing in one batch have no defined winner. It is benign here because
+both orderings converge — the metadata a respawn triggers carries the new
+entity's full 300 — but do not extend the arm to a field where the two answers
+would differ. Fold that field's reset into its own writing system instead, where
+batch order settles it.
+
+### The controls, all executed
+
+Three, all watched failing before being made to pass:
+
+| control | what it rules out | observed when neutered |
+|---|---|---|
+| unit: `a_respawn_clears_the_drowned_air_supply_and_the_burning_flag` (`lodestone-ecs/src/session.rs`) | the clear does not happen | `air: Some(0)`, i.e. the reported bug verbatim |
+| the same test, with **only** `air` cleared | a half-fix passing as a whole one | `on_fire: Some(true)` |
+| integration: `a_respawn_clears_a_drowned_air_supply_in_the_read_model` (`lodestone-client/tests/read_model.rs`) | the routing switch dropping `Respawned` | `air: 0` where 300 was required |
+
+Plus one control that must **pass** in both states, and does:
+`a_respawn_does_not_clear_air_and_fire_for_a_still_drowning_player` — a
+`HealthChanged` and a `GameModeChanged` for a player who has not died leave
+`Some(120)`/`Some(true)` intact. Without it, a fold that cleared `air` on *every*
+event would satisfy the assertions above while making the bubble row undrawable.
+
+The unit test installs `SessionPlugin` **and** `IngestPlugin`, and reaches the
+drowned state by feeding a real `EntityMetadataUpdated`, never by assigning
+`Vitals`. Writing the component directly would have been the *world* species of
+vacuous test: an input state the fold might not be able to produce.
+
 ## Configuration
 
 None. The sky reads the same day clock the rest of the renderer does — there is

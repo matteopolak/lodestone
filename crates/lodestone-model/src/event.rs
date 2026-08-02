@@ -397,7 +397,7 @@ pub struct EntityMetadataUpdate {
     /// this".
     pub item: Reported<ItemStack>,
     /// Current air supply in ticks, when present (`Entity.DATA_AIR_SUPPLY_ID`).
-    /// Feeds the HUD's underwater bubble row (`docs/air-supply.md`).
+    /// Feeds the HUD's underwater bubble row (`docs/sky-and-air-bubbles.md`).
     pub air_supply: Option<i32>,
 }
 

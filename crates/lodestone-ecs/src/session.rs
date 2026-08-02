@@ -164,7 +164,7 @@ pub struct Vitals {
     /// folded by [`crate::ingest::apply_local_player_air_supply`] off
     /// `ClientEvent::EntityMetadataUpdated` instead of by
     /// [`apply_local_player_state`] alongside the other three. See
-    /// `docs/air-supply.md`.
+    /// `docs/sky-and-air-bubbles.md`.
     pub air: Option<i32>,
     /// Whether the player entity is burning, or `None` before the first
     /// entity-metadata update naming our own id arrives.
@@ -579,6 +579,45 @@ pub fn apply_local_player_state(
                     dimension.0 = Some(dim.clone());
                     game_mode.0 = Some(*mode);
                     alive.0 = true;
+                    // Issue #390. The two entity-metadata-fed fields go back to
+                    // "no reading yet", because a respawn is a **brand-new
+                    // player entity on both sides**: `PlayerList.respawn` does
+                    // `new ServerPlayer(...)` (`PlayerList.java:393`) and
+                    // vanilla's *client* likewise builds a fresh `LocalPlayer`
+                    // via `gameMode.createPlayer`
+                    // (`ClientPacketListener.handleRespawn`, `:1286`) and only
+                    // copies the old id onto it. Its synched data therefore
+                    // starts at `Entity`'s own defaults —
+                    // `entityDataBuilder.define(DATA_AIR_SUPPLY_ID,
+                    // getMaxAirSupply())` (`Entity.java:319`, i.e. 300) and
+                    // shared flags 0 — so nothing in the dead entity's last
+                    // metadata survives. We keep one long-lived entity instead
+                    // of respawning ours, which is exactly why the clear has to
+                    // be explicit here.
+                    //
+                    // `None`, not `Some(300)`/`Some(false)`: `None` is the
+                    // documented pre-report state and already reads as full air
+                    // and not-burning downstream ([`Vitals::air`],
+                    // [`Vitals::on_fire`]), so the row stays hidden until the
+                    // server actually says otherwise. Writing a literal here
+                    // would invent a reading we were never given.
+                    //
+                    // Drowning drove `air` to `0` and nothing cleared it, so the
+                    // bubble row kept drawing an **empty** meter after respawn
+                    // until the server's next metadata arrived with 300 — which
+                    // the player sees as an instant refill on touching water.
+                    // `on_fire` has the same shape and the quieter polarity: a
+                    // stale `Some(true)` leaves the fire overlay painted on a
+                    // freshly respawned player.
+                    //
+                    // Ordering note: `crate::ingest::apply_local_player_air_supply`
+                    // is the other writer of these fields and is unordered with
+                    // respect to this system. Both orderings converge for a
+                    // respawn — a same-batch metadata packet carries the new
+                    // entity's full 300 — so the ambiguity is benign here, but do
+                    // not extend this arm to a field where it would not be.
+                    vitals.air = None;
+                    vitals.on_fire = None;
                 }
                 ClientEvent::HealthChanged {
                     health,
@@ -1228,6 +1267,168 @@ mod tests {
             world.get::<ServerAlive>(entity).unwrap().0,
             "a respawn is exactly when the player stops being dead"
         );
+    }
+
+    /// A `World` carrying **both** halves of the fold — the session scalars and
+    /// the per-entity ingest that owns [`Vitals::air`]/[`Vitals::on_fire`].
+    ///
+    /// [`session_app`] alone cannot express issue #390: `air` and `on_fire` are
+    /// written only by `crate::ingest::apply_local_player_air_supply` /
+    /// `apply_local_player_on_fire`, which are registered by `IngestPlugin`. A
+    /// test that reached the drowned state by assigning `Vitals` directly would
+    /// be asserting against a state the fold might never be able to produce —
+    /// so both plugins go on, and every value below arrives as an event.
+    fn drowning_app() -> (App, bevy_ecs::entity::Entity) {
+        let mut app = App::new();
+        app.add_plugins(SessionPlugin);
+        app.add_plugins(crate::ingest::IngestPlugin);
+        let entity = spawn_session(app.world_mut());
+        (app, entity)
+    }
+
+    /// Drown, die, respawn: `EntityMetadataUpdate` naming our own id.
+    fn air_and_fire(entity_id: i32, air: i32, on_fire: bool) -> ClientEvent {
+        ClientEvent::EntityMetadataUpdated {
+            entity_id,
+            metadata: lodestone_model::EntityMetadataUpdate {
+                air_supply: Some(air),
+                flags: Some(if on_fire { 0x01 } else { 0x00 }),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// Issue #390: **a respawn clears the two entity-metadata-fed vitals.**
+    ///
+    /// Reported from play — after drowning, the bubble row rendered *completely
+    /// empty* until the server's next metadata packet arrived with 300, which is
+    /// what the player saw as an instant refill on touching water. Nothing wrote
+    /// `air` on `Respawned`, so the dead entity's last reading (`0`) survived
+    /// into the new life.
+    ///
+    /// `None`, not `Some(300)`: `None` is the documented "no reading yet" state
+    /// and reads as full downstream, so the row stays hidden until the server
+    /// says otherwise rather than us inventing a number.
+    ///
+    /// `on_fire` is checked in the same pass because it has the identical shape
+    /// and the *quieter* polarity — its absence reads as `false`, so a stale
+    /// `Some(true)` paints the fire overlay on a freshly respawned player with
+    /// nothing to make the failure obvious.
+    ///
+    /// Every intermediate assertion here is a control: the drowned/burning state
+    /// is asserted **before** the respawn, so a `None` afterwards is a clearing
+    /// and not a value that was never set. See
+    /// `a_respawn_does_not_clear_air_and_fire_for_a_still_drowning_player` for
+    /// the other direction.
+    #[test]
+    fn a_respawn_clears_the_drowned_air_supply_and_the_burning_flag() {
+        let (mut app, entity) = drowning_app();
+        fold(
+            &mut app,
+            ClientEvent::Login {
+                entity_id: 7,
+                game_mode: GameMode::Survival,
+                dimension: dim("overworld"),
+            },
+        );
+        assert_eq!(
+            app.world().get::<Vitals>(entity).unwrap().air,
+            None,
+            "nothing has reported air yet — the join state the row must stay hidden for"
+        );
+
+        // Drown to zero, on fire on the way down (a burning player who then
+        // drowns is unusual but it is the state that proves both fields move).
+        fold(&mut app, air_and_fire(7, 0, true));
+        let drowned = *app.world().get::<Vitals>(entity).unwrap();
+        assert_eq!(
+            drowned.air,
+            Some(0),
+            "control: the fold must actually reach zero, or the clear below asserts nothing"
+        );
+        assert_eq!(drowned.on_fire, Some(true), "control: and the flag must be set");
+
+        fold(
+            &mut app,
+            ClientEvent::Death {
+                message: Text::literal("drowned"),
+            },
+        );
+        assert_eq!(
+            app.world().get::<Vitals>(entity).unwrap().air,
+            Some(0),
+            "control: the death packet alone must NOT clear it — that would make the \
+             respawn arm below untestable by hiding which packet does the work"
+        );
+
+        fold(
+            &mut app,
+            ClientEvent::Respawned {
+                dimension: dim("overworld"),
+                game_mode: GameMode::Survival,
+                previous_game_mode: Some(GameMode::Survival),
+                last_death_location: None,
+            },
+        );
+        let after = *app.world().get::<Vitals>(entity).unwrap();
+        assert_eq!(
+            after.air, None,
+            "#390: a respawn is a brand-new entity on both sides — the drowned \
+             reading must not survive it, or the bubble row draws empty until the \
+             server's next metadata packet"
+        );
+        assert_eq!(
+            after.on_fire, None,
+            "#390's sibling: a stale burning flag paints the fire overlay on a \
+             player who just respawned"
+        );
+    }
+
+    /// **The other control.** The clear must be keyed to `Respawned` and nothing
+    /// else: a still-drowning player who has not died keeps their reading, so the
+    /// assertion above is not satisfied by a fold that clears `air` on every
+    /// event (or by one that never lets it hold a value at all).
+    ///
+    /// A portal trip *does* clear, and that is correct rather than a false
+    /// positive: `Respawned` is the same packet, vanilla builds the same new
+    /// `LocalPlayer` for it, and 300-on-arrival is exactly what the server then
+    /// reports.
+    #[test]
+    fn a_respawn_does_not_clear_air_and_fire_for_a_still_drowning_player() {
+        let (mut app, entity) = drowning_app();
+        fold(
+            &mut app,
+            ClientEvent::Login {
+                entity_id: 7,
+                game_mode: GameMode::Survival,
+                dimension: dim("overworld"),
+            },
+        );
+        fold(&mut app, air_and_fire(7, 120, true));
+
+        // Everything a drowning player's tick actually carries, short of dying.
+        fold(
+            &mut app,
+            ClientEvent::HealthChanged {
+                health: 6.0,
+                food: 17,
+                saturation: 0.0,
+            },
+        );
+        fold(
+            &mut app,
+            ClientEvent::GameModeChanged {
+                game_mode: GameMode::Survival,
+            },
+        );
+        let mid = *app.world().get::<Vitals>(entity).unwrap();
+        assert_eq!(
+            mid.air,
+            Some(120),
+            "an un-respawned player must keep their air reading — otherwise the \
+             bubble row could never draw at all and #390's assertion is vacuous"
+        );
+        assert_eq!(mid.on_fire, Some(true));
     }
 
     /// A dimension type as the adapter builds it from `registry_data`.
