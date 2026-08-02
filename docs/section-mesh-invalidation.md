@@ -237,3 +237,31 @@ worth stating plainly: convergence is a property of the mesher's culling, not of
 the deferral. A suite containing only the convergence half would have passed with
 the fix fully reverted, which is exactly why the deferral controls exist and why
 `ready()`/`any()` are two separate accessors rather than one.
+
+### What was *not* run when this landed
+
+The session that wrote this was told to stop using cargo mid-verification (a
+build hung compiling `aws-lc-sys` and `target/` was being deleted), so the
+following are **owed** rather than green:
+
+- `cargo test -p lodestone-shell --doc` — started, killed before it reported. No
+  doctest in the tree names any symbol this change touched (grepped:
+  `snapshot_section*`, `mesh_snapshot*`, `SectionSnapshot`, `SnapshotOutcome`,
+  `ColumnSource` — every hit is ordinary code or `docs/*.md` prose, and the shell
+  crate has no `rust` doc fences), so the expectation is that it is clean, but
+  per `CLAUDE.md` **no `cargo check` sees a doctest** and that expectation is
+  reasoning, not a measurement.
+- `cargo test -p lodestone-shell --no-fail-fast` to completion. It got through
+  the lib target (**556 passed, 0 failed**) and 20 further `ok` results before
+  being cut off partway through the `#[ignore]`d pixel-gate binaries. Those
+  binaries all *compile* under `cargo check --workspace --all-targets`, which was
+  green, and they are `#[ignore]`d, so nothing was skipped that would have run.
+- No live oracle and no GPU gate. `scripts/live-oracles/terrain.sh` (:25580)
+  against a real ocean is the obvious next confirmation and has not been done —
+  the seam is argued from the two hermetic/jar-backed gates and from vanilla's
+  source, not from a screenshot.
+
+What *was* green before the stop: `cargo check --workspace --all-targets`; the
+same with `--all-features --exclude lodestone-allocbench`; `cargo check -p
+lodestone-shell --no-default-features`; `cargo test -p lodestone-shell --lib`
+(556/556); and the jar-backed gate 5/5 under `--ignored`.
