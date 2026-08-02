@@ -357,8 +357,12 @@ three screens → `AbstractContainerScreen`. Two changes, both from measurement:
 
 ## Configuration
 
-- `crates/lodestone-shell/src/config.rs` — the persisted `Options` (`options.json`). Four vanilla
-  options today; see the census.
+- `crates/lodestone-shell/src/config.rs` — the persisted `Options` (`options.json`). **Two** vanilla
+  options today (`gui_scale`, `view_bobbing`) plus the `keybinds` map, which is #15's rather than an
+  option row. `render_distance` and `sensitivity` are *not* here — they live on `config::Config`,
+  which is argv-only and never written back — so the settings tree renders them inactive. See the
+  census under [What we persist](#what-we-persist); the "four" this line used to claim came from
+  counting both structs.
 - `crates/lodestone-shell/src/resources.rs` — `load_gui_atlas()` (HUD) and `load_menu_gui_atlas()`
   (menu, `build_with_extras` + `TITLE_TEXTURES` at `:372-381`). Two stitches deliberately; `:386-394`
   explains why, and notes the tidier end state is one shared atlas handed to both renderers.
