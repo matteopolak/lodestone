@@ -281,6 +281,10 @@ rather than by counting vertices.
 
 ### The server list on disk
 
+> The **screen** is [`docs/server-list.md`](./server-list.md) since #396 — its
+> geometry, its footer buttons, the ping sprites and the favicon's quadrant
+> actions. This section is the model and the file it persists to.
+
 JSON array of `{name, host, port?}` at `<data dir>/servers.json`:
 
 | platform | data dir |
@@ -365,16 +369,18 @@ covers how the *screen* is built:
 
 - **Scrollable, unlike the server list.** `VISIBLE_ROWS` (5) rows show at
   once; `AccountsNav` tracks a `scroll` offset and keeps the highlighted row
-  inside the window on every Up/Down. The server list still has no scrolling
-  at all (see "Left for polish" below) — fixing it here first, on a new
-  screen, does not fix it there; that remains a real gap.
+  inside the window on every Up/Down. The server list still has no scroll
+  offset — since #396 it clips to its band instead of overflowing (see "Left for
+  polish" below and [`server-list.md`](./server-list.md)) — so fixing it here
+  first, on a new screen, did not fix it there; that remains a real gap.
 - **Real nine-slice buttons on a row-stack screen, for the first time.** Add
   account / Select / Remove / Cancel draw through the exact same
   `draw_widget` path `MainButton`/`PauseButton` use (`widget/button`,
   `_highlighted`, `_disabled`, borders read from the pack's `.mcmeta`, never
   hardcoded — `button_disabled`'s border is 1, its siblings' is 3), via
   `MenuRow::slot`. The account rows above them stay on the ordinary centred
-  stack (unslotted, like the server list), which is a genuinely new
+  stack (unslotted — as the server list's rows were before #396 moved them onto
+  `AbstractSelectionList`'s grid), which is a genuinely new
   combination: **`row_rect` used to sum every row's height into the centred
   stack's total, including slotted ones, because no screen had ever mixed the
   two kinds.** That silently corrupted the stack's math the moment a slotted
@@ -445,28 +451,30 @@ covers how the *screen* is built:
 ### Left for polish
 
 Functional first; none of these block use. Items 1 and 2 applied to *every*
-screen when this was written; the **title screen** and the **pause screen** now
-draw real GUI textures and real vanilla text at a DPI-correct scale (see the
-sections at the top of this file), so 1 and 2 are now specifically about the
-server list, the edit form, Options and the error screen.
+screen when this was written; the **title screen**, the **pause screen** and (since
+#396) the **multiplayer list** now draw real GUI textures and real vanilla text at
+a DPI-correct scale (see the sections at the top of this file, and
+[`server-list.md`](./server-list.md)), so 1 is now specifically about the edit
+form, Options and the error screen.
 
-1. **No dirt/panorama backdrop; no button textures on the list/form/options
+1. **No dirt/panorama backdrop; no button textures on the form/options
    screens.** Flat coloured rectangles and the 5×7 bitmap font there.
 2. ~~**No DPI scaling.**~~ Fixed: layout happens in a `logical_canvas` divided
    from the framebuffer by `config::calculate_gui_scale`, and `hit_test` divides
    the incoming cursor by the same factor.
-3. **No scrolling in the server list.** Rows are laid out centred and unbounded, so
-   past roughly a dozen servers they run off the viewport. Row rects are already
-   computed by one function (`row_rect`), which is where a scroll offset goes.
-   The account screen *does* scroll now (`accounts::VISIBLE_ROWS`) — see
-   "Account list" above — but that scroll offset lives in `AccountsNav`, not in
-   `row_rect` itself, so this item is still open for the server list
-   specifically.
+3. **No scrolling in the server list.** Still open after #396, but for a different
+   reason: the rows are now `AbstractSelectionList`'s own 36 px grid rather than an
+   unbounded centred stack, and `server_row_visible` skips any row that would
+   overflow the footer (vanilla's scissor). So a long list is *truncated* rather
+   than running off the viewport, and what is missing is the scroll offset and the
+   scrollbar — which `Screen::WorldSelect` needs too, and which want doing once.
 4. **No caret positioning, selection, or clipboard in the edit form.** Typing
    appends and Backspace removes from the end; there are no arrow keys within a
    field and no paste.
-5. **No reordering** of the server list (no move up/down), and no delete
-   confirmation — `d`/`Delete` removes immediately.
+5. ~~**No reordering** of the server list~~ Fixed by #396: the hovered row's
+   favicon carries vanilla's move-up/move-down arrows, and a click on either
+   quadrant swaps and persists. Still **no delete confirmation** — vanilla opens a
+   `ConfirmScreen`; `d`/`Delete` and the Delete button remove immediately.
 6. **No mouse wheel scroll and no drag.** Hover and click only.
 7. **Favicon is a 16×16 mosaic of quads, not a sampled texture.** Recognisable,
    not sharp. Swapping in a texture is a change to `favicon_mosaic` plus one bind
@@ -479,9 +487,13 @@ server list, the edit form, Options and the error screen.
    `lodestone-server` to serve in-process. The menu's Singleplayer button
    deliberately drives the working worldgen path rather than the staged launcher.
 10. **No "Direct Connect"** — every multiplayer target must be saved as an entry
-    first.
-11. **No automatic re-ping.** Statuses are probed when the list opens and on `r`;
-    there is no periodic refresh and no timeout badge distinct from an error.
+    first. Since #396 the button is *present and greyed out* in vanilla's own
+    position rather than absent, which is the epic's rule for a control this shell
+    cannot honour; the screen it opens (`DirectJoinServerScreen`) is what is
+    missing.
+11. **No automatic re-ping.** Statuses are probed when the list opens, on `r` (that
+    row alone) and on F5 or the Refresh button (every row); there is no periodic
+    refresh and no timeout badge distinct from an error.
 12. **`--host 127.0.0.1` spelled out explicitly lands on the menu**, because
     `requested_a_connection` compares against `Config::default()` rather than
     reading a "flag was seen" bit. The clean fix is one `Option`-shaped field in

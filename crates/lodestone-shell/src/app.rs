@@ -1246,6 +1246,11 @@ impl WindowApp {
                 KeyCode::Tab => return Some(MenuKey::Tab),
                 KeyCode::Backspace => return Some(MenuKey::Backspace),
                 KeyCode::Delete => return Some(MenuKey::Delete),
+                // F5 refreshes the multiplayer list (#396), which is
+                // `JoinMultiplayerScreen.keyPressed`'s only key. It has to be here
+                // rather than falling through to the text path below: a function
+                // key has no `text`, so without this it would reach nothing.
+                KeyCode::F5 => return Some(MenuKey::Refresh),
                 _ => {}
             }
         }
@@ -1286,6 +1291,13 @@ impl WindowApp {
             MenuAction::Reprobe(Some(entry)) => self.statuses.refresh_one(&entry),
             MenuAction::Reprobe(None) => {
                 self.statuses.refresh(self.nav.list().entries());
+            }
+            // F5 or the Refresh button (#396). `refresh_all`, not `refresh`:
+            // `refresh` skips any address it already has a result for, so it would
+            // make the button do nothing at all.
+            MenuAction::RefreshList => {
+                let entries = self.nav.list().entries().to_vec();
+                self.statuses.refresh_all(&entries);
             }
             MenuAction::Forget(entry) => {
                 self.statuses.forget(&entry);
@@ -1352,6 +1364,14 @@ impl WindowApp {
         let (w, h) = crate::menu::render::logical_canvas(frame.gui_scale, fb_w, fb_h);
         let scale = crate::config::calculate_gui_scale(frame.gui_scale, fb_w, fb_h).max(1) as f32;
         let (lx, ly) = (x / scale, y / scale);
+        // Record the logical position as well as the row (#396). The multiplayer
+        // list needs the position itself — which quadrant of a row's favicon the
+        // cursor is in decides whether a click joins or reorders — and this is the
+        // one place that has already converted physical pixels to the canvas the
+        // draw uses, so recording it here covers hover *and* click with no new
+        // plumbing at either site. Recorded before the hit-test, so a cursor over
+        // the backdrop still updates it.
+        self.nav.set_menu_cursor(lx, ly, w, h);
         (0..frame.rows.len()).find(|&i| {
             crate::menu::render::row_rect(&frame.rows, i, w, h)
                 .is_some_and(|(rx, ry, rw, rh)| {

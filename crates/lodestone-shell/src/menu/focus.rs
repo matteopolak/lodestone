@@ -194,6 +194,9 @@ pub const KEY_UP: i32 = 265;
 pub const KEY_HOME: i32 = 268;
 /// `GLFW_KEY_END`.
 pub const KEY_END: i32 = 269;
+/// GLFW `GLFW_KEY_F5`, the code `JoinMultiplayerScreen.keyPressed` compares
+/// against to refresh the server list (`JoinMultiplayerScreen.java:234`).
+pub const KEY_F5: i32 = 294;
 /// `GLFW_KEY_A` — Ctrl/Cmd+A is select-all.
 pub const KEY_A: i32 = 65;
 /// `GLFW_KEY_C` — Ctrl/Cmd+C is copy.
@@ -347,6 +350,11 @@ impl KeyEvent {
             MenuKey::Tab => KEY_TAB,
             MenuKey::Backspace => KEY_BACKSPACE,
             MenuKey::Delete => KEY_DELETE,
+            // F5 is a real key event, so a focused child is offered it first
+            // exactly as vanilla's `Screen.keyPressed` does — `EditBox` declines
+            // 294 (it is in `keyPressed`'s `default:` group), which is what lets
+            // the multiplayer screen's own `keyPressed` see it.
+            MenuKey::Refresh => KEY_F5,
             MenuKey::Char(_) => return None,
         }))
     }

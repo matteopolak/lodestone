@@ -487,6 +487,39 @@ impl Widget {
     }
 }
 
+/// `SelectableEntry.mouseOverRightHalf` (`SelectableEntry.java:12-14`): the
+/// cursor is in the right half of a `size`×`size` icon whose top-left is the
+/// origin of `(rel_x, rel_y)`.
+///
+/// The three predicates below are vanilla's own, and they live here — beside
+/// [`Widget`], the components layer — rather than in either caller, because the
+/// **draw** (which sprite to highlight) and the **click** (what activating that
+/// quadrant does) have to agree exactly. Two copies of `rel_x >= size / 2` is
+/// how a highlight ends up one quadrant away from what a click does, and no
+/// pixel gate on the highlight alone can see it.
+///
+/// Note the halves are open at the top: `rel_x < size`, so a cursor one pixel
+/// past the icon is over nothing. Vanilla's are `int`s; ours take `f32` because
+/// the logical canvas is fractional (`render::logical_canvas` divides by an
+/// integer scale), and `size / 2` is the same 16 for the 32 px icon either way.
+#[must_use]
+pub fn over_right_half(rel_x: f32, rel_y: f32, size: f32) -> bool {
+    rel_x >= size * 0.5 && rel_x < size && rel_y >= 0.0 && rel_y < size
+}
+
+/// `SelectableEntry.mouseOverTopLeftQuarter` (`:24-26`) — the move-up quadrant.
+#[must_use]
+pub fn over_top_left_quarter(rel_x: f32, rel_y: f32, size: f32) -> bool {
+    rel_x >= 0.0 && rel_x < size * 0.5 && rel_y >= 0.0 && rel_y < size * 0.5
+}
+
+/// `SelectableEntry.mouseOverBottomLeftQuarter` (`:28-30`) — the move-down
+/// quadrant.
+#[must_use]
+pub fn over_bottom_left_quarter(rel_x: f32, rel_y: f32, size: f32) -> bool {
+    rel_x >= 0.0 && rel_x < size * 0.5 && rel_y >= size * 0.5 && rel_y < size
+}
+
 /// Vanilla's `LayoutElement` (`gui/layouts/LayoutElement.java`), the interface
 /// every `AbstractLayout` arranges.
 ///
@@ -797,6 +830,45 @@ mod tests {
         // arranging through the trait cannot place a widget somewhere the draw
         // does not read.
         assert_eq!(w.rectangle(), w.rect());
+    }
+
+    /// The three quadrant predicates partition the icon the way the server
+    /// list's three actions need, and the *negative* half is the point: a
+    /// cursor in the right half must not also read as move-up, or clicking to
+    /// join would reorder the list.
+    #[test]
+    fn the_icon_quadrants_partition_the_way_vanilla_splits_them() {
+        const S: f32 = 32.0;
+        // Right half joins; neither left quadrant claims it.
+        for (x, y) in [(16.0, 0.0), (31.0, 31.0), (24.0, 16.0)] {
+            assert!(over_right_half(x, y, S), "({x}, {y})");
+            assert!(!over_top_left_quarter(x, y, S), "({x}, {y})");
+            assert!(!over_bottom_left_quarter(x, y, S), "({x}, {y})");
+        }
+        // Top-left moves up, bottom-left moves down, and they are disjoint.
+        assert!(over_top_left_quarter(0.0, 0.0, S));
+        assert!(over_top_left_quarter(15.0, 15.0, S));
+        assert!(!over_top_left_quarter(15.0, 16.0, S));
+        assert!(over_bottom_left_quarter(15.0, 16.0, S));
+        assert!(over_bottom_left_quarter(0.0, 31.0, S));
+        assert!(!over_bottom_left_quarter(15.0, 15.0, S));
+        // Every point inside the icon belongs to exactly one of the three.
+        for y in 0..32i32 {
+            for x in 0..32i32 {
+                let (fx, fy) = (x as f32, y as f32);
+                let n = usize::from(over_right_half(fx, fy, S))
+                    + usize::from(over_top_left_quarter(fx, fy, S))
+                    + usize::from(over_bottom_left_quarter(fx, fy, S));
+                assert_eq!(n, 1, "({x}, {y}) belongs to {n} quadrants");
+            }
+        }
+        // Outside the icon, none of them fire — a click just past the icon must
+        // fall through to plain selection.
+        for (x, y) in [(-1.0, 4.0), (32.0, 4.0), (4.0, -1.0), (4.0, 32.0)] {
+            assert!(!over_right_half(x, y, S), "({x}, {y})");
+            assert!(!over_top_left_quarter(x, y, S), "({x}, {y})");
+            assert!(!over_bottom_left_quarter(x, y, S), "({x}, {y})");
+        }
     }
 
     #[test]

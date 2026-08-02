@@ -280,6 +280,16 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   guess: **vanilla has no empty-list state for this screen** — `NoWorldsEntry` is
   Realms-only and `SINGLEPLAYER` with no worlds *leaves* for `CreateWorldScreen`,
   so the empty state here is a deliberate choice rather than a transcription.
+- [The multiplayer server list](./server-list.md) — the fourth child (#396) and
+  `HeaderAndFooterLayout`'s other consumer: vanilla's `JoinMultiplayerScreen` and
+  `ServerSelectionList` at vanilla's geometry, with the seven footer buttons and
+  three of them inactive when nothing is selected. Also the latency buckets (which
+  run *downward* — five bars for a fast server) and the pinging animation's
+  ping-pong fold, why `getRowLeft()`'s **two separate integer divisions** mean a
+  list row cannot be a `Slot`, how a mouse *position* reaches a frame at all so the
+  favicon's join / move-up / move-down quadrants can be both drawn and clicked from
+  one definition, and why Refresh needed a verb of its own (`refresh` skips every
+  row that already has a result, so the button would have done nothing).
 - [Main menu](./main-menu.md) — the screen state machine, the persisted
   multiplayer server list, per-server status pings (MOTD, players, favicon), the
   dependency edge that gave `lodestone-net`'s ping its first consumer, the

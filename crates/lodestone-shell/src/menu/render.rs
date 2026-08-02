@@ -1146,6 +1146,379 @@ pub fn world_select_no_worlds_label() -> MenuLabel {
         scale: 1.0,
     }
 }
+
+// -- vanilla's `JoinMultiplayerScreen` / `ServerSelectionList` metrics --------
+//
+// Every number below is from `.cache/mc/26.2/client-src/net/minecraft/client/gui/
+// screens/multiplayer/`, with the line named. Deliberately its own set of
+// constants rather than shared with the world-select block above: the two
+// screens agree on several values *by coincidence* (both list `itemHeight`s are
+// 36, both content paddings are 2 because they inherit the same base class), and
+// a shared constant would make a divergence in one screen silently move the
+// other.
+
+/// `new HeaderAndFooterLayout(this, 33, 60)` (`JoinMultiplayerScreen.java:30`) —
+/// the header band. This is the default 33 spelled out, not
+/// [`layout::DEFAULT_HEADER_AND_FOOTER_HEIGHT`], because the *footer* is not the
+/// default and the pair is one constructor call.
+const SERVER_LIST_HEADER_H: f32 = 33.0;
+/// The same call's footer band: 60, because this screen's footer is two rows of
+/// buttons rather than one.
+const SERVER_LIST_FOOTER_H: f32 = 60.0;
+/// `LinearLayout.vertical().spacing(4)` and both
+/// `LinearLayout.horizontal().spacing(4)` rows (`:64,66,67`).
+const SERVER_LIST_FOOTER_SPACING: i32 = 4;
+/// `JoinMultiplayerScreen.TOP_ROW_BUTTON_WIDTH` (`:28`) — Join Server / Direct
+/// Connection / Add Server.
+const SERVER_LIST_TOP_BUTTON_W: f32 = 100.0;
+/// `JoinMultiplayerScreen.LOWER_ROW_BUTTON_WIDTH` (`:29`) — Edit / Delete /
+/// Refresh / Back.
+const SERVER_LIST_LOWER_BUTTON_W: f32 = 74.0;
+/// The `itemHeight` the list is constructed with: the last argument of
+/// `new ServerSelectionList(…, 36)` (`:61-62`).
+const SERVER_LIST_ITEM_H: f32 = 36.0;
+/// `ServerSelectionList.getRowWidth()` (`ServerSelectionList.java:139-141`) — a
+/// 305 px override of `AbstractSelectionList`'s 220.
+const SERVER_LIST_ROW_W: f32 = 305.0;
+/// `AbstractSelectionList.Entry.CONTENT_PADDING` (`AbstractSelectionList.java:435`).
+/// The entry rect is inset by this on each side, so a 36 px row has a **32** px
+/// content box — exactly [`SERVER_ENTRY_ICON`], which is why the favicon fills
+/// the row's height.
+const SERVER_LIST_ENTRY_PADDING: f32 = 2.0;
+/// `getFirstEntryY() = getY() + 2` (`AbstractSelectionList.java:104-106`): the
+/// gap above row 0. A different expression from [`SERVER_LIST_ENTRY_PADDING`]
+/// that happens to be the same 2 — only one of them insets a row.
+const SERVER_LIST_FIRST_ENTRY_Y: f32 = 2.0;
+/// `OnlineServerEntry.ICON_SIZE` (`ServerSelectionList.java:246`).
+const SERVER_ENTRY_ICON: f32 = 32.0;
+/// `OnlineServerEntry.SPACING` (`:247`) — the gap the status icon and the status
+/// text keep from the content's right edge, and from each other.
+const SERVER_ENTRY_SPACING: f32 = 5.0;
+/// `OnlineServerEntry.STATUS_ICON_WIDTH` (`:248`).
+const SERVER_STATUS_ICON_W: f32 = 10.0;
+/// `OnlineServerEntry.STATUS_ICON_HEIGHT` (`:249`).
+const SERVER_STATUS_ICON_H: f32 = 8.0;
+/// The gap between the favicon and the name/MOTD column: vanilla writes
+/// `getContentX() + 32 + 3` (`:306,310`) — a literal 3, *not*
+/// [`SERVER_ENTRY_SPACING`]'s 5.
+const SERVER_ENTRY_TEXT_GAP: f32 = 3.0;
+/// The first MOTD line's offset below the content's top: `getContentY() + 12`
+/// (`:310`). Subsequent lines step by [`LINE_H`] (`+ 9 * i`).
+const SERVER_ENTRY_MOTD_Y: f32 = 12.0;
+/// How many MOTD lines a row shows — `Math.min(lines.size(), 2)` (`:309`).
+const SERVER_ENTRY_MOTD_LINES: usize = 2;
+/// The width the MOTD wraps to: `getContentWidth() - 32 - 2` (`:307`). The 2 is
+/// its own literal, not the content padding.
+const SERVER_ENTRY_MOTD_INSET: f32 = SERVER_ENTRY_ICON + 2.0;
+/// A `StringWidget`'s height, which is what the title header is
+/// (`StringWidget.java:15`, `HeaderAndFooterLayout.addTitleHeader`).
+const SERVER_LIST_TITLE_H: f32 = 9.0;
+
+/// The MOTD and status colour, `-8355712` (`ServerSelectionList.java:310,349`).
+/// A mid grey — `0xFF808080`.
+const SERVER_ENTRY_DIM: [f32; 4] = [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 1.0];
+/// `CANT_RESOLVE_TEXT`/`CANT_CONNECT_TEXT`'s `withColor(-65536)` (`:68-69`) —
+/// pure red, and a *component* colour, so it overrides the `-8355712` the MOTD
+/// line is otherwise drawn with.
+const SERVER_ENTRY_BAD: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+/// `ChatFormatting.RED`, `0xFF5555` — the version string an incompatible row
+/// shows where a compatible one shows its player count (`:344-346`).
+const SERVER_ENTRY_INCOMPATIBLE: [f32; 4] = [1.0, 85.0 / 255.0, 85.0 / 255.0, 1.0];
+/// The selected row's interior, `-16777216` — opaque black, filled inside the
+/// 1 px outline (`AbstractSelectionList.java:363-370`).
+const SERVER_LIST_SELECTION_FILL: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+/// The hovered row's icon dim, `fill(…, -1601138544)` (`ServerSelectionList.java:365`)
+/// — `0xA0909090`, a translucent grey *over* the favicon, which is what makes
+/// the join/move arrows on top of it readable.
+const SERVER_ICON_DARKEN: [f32; 4] = [144.0 / 255.0, 144.0 / 255.0, 144.0 / 255.0, 160.0 / 255.0];
+
+/// `ServerSelectionList.JOIN_SPRITE` and its highlighted twin (`:52-53`).
+const SERVER_JOIN_SPRITES: (&str, &str) = ("server_list/join", "server_list/join_highlighted");
+/// `MOVE_UP_SPRITE` / `MOVE_UP_HIGHLIGHTED_SPRITE` (`:54-55`).
+const SERVER_MOVE_UP_SPRITES: (&str, &str) =
+    ("server_list/move_up", "server_list/move_up_highlighted");
+/// `MOVE_DOWN_SPRITE` / `MOVE_DOWN_HIGHLIGHTED_SPRITE` (`:56-57`).
+const SERVER_MOVE_DOWN_SPRITES: (&str, &str) =
+    ("server_list/move_down", "server_list/move_down_highlighted");
+/// `FaviconTexture`'s fallback, blitted for a row whose server sent no usable
+/// icon. A **loose** texture, so it reaches the atlas through
+/// [`crate::resources::UNKNOWN_SERVER_TEXTURE`] rather than the sprite glob.
+const SERVER_UNKNOWN_ICON: &str = "misc/unknown_server";
+
+/// Vanilla's `JoinMultiplayerScreen.init` (`JoinMultiplayerScreen.java:48-130`)
+/// as a real [`layout::HeaderAndFooterLayout`], arranged for a `width`×`height`
+/// canvas.
+///
+/// Two notes before changing it:
+///
+/// - **The title cell is zero-width**, for the reason `world_select_layout`
+///   gives: `addTitleHeader` adds a `StringWidget(title, font)` and there is no
+///   font at arrange time, but the header frame centres its child, so a
+///   zero-width cell lands exactly on the centre a real-width one would be
+///   centred about.
+/// - **The list is a [`layout::SpacerElement`]**, sized to
+///   `layout.getContentHeight()` exactly as `:61-62` does. It has to take part in
+///   the measurement — `HeaderAndFooterLayout`'s content clamp reads the content
+///   frame's height — and a spacer is measured and never drawn, which is right:
+///   the list draws through [`draw_server_entry`], not as a widget.
+fn server_list_layout(width: f32, height: f32) -> layout::HeaderAndFooterLayout {
+    let button = |w: f32| -> Box<dyn widget::LayoutElement> {
+        Box::new(Widget::button(0.0, 0.0, w, WIDGET_H, ""))
+    };
+    let mut root = layout::HeaderAndFooterLayout::with_heights(
+        width,
+        height,
+        SERVER_LIST_HEADER_H,
+        SERVER_LIST_FOOTER_H,
+    );
+
+    // `this.layout.addTitleHeader(this.title, this.font)` (`:49`).
+    root.add_to_header(Box::new(Widget::new(
+        0.0,
+        0.0,
+        0.0,
+        SERVER_LIST_TITLE_H,
+        super::nav::SERVER_LIST_TITLE,
+    )));
+
+    let content_height = root.content_height();
+    root.add_to_contents(Box::new(layout::SpacerElement::new(width, content_height)));
+
+    // `LinearLayout footer = this.layout.addToFooter(LinearLayout.vertical().spacing(4));`
+    // `footer.defaultCellSetting().alignHorizontallyCenter();` (`:64-65`) — the
+    // *live* baseline, so both rows inherit the centring.
+    let mut footer = layout::LinearLayout::vertical().spacing(SERVER_LIST_FOOTER_SPACING);
+    {
+        let baseline = footer.default_cell_setting();
+        *baseline = baseline.align_horizontally_center();
+    }
+    let mut top = layout::LinearLayout::horizontal().spacing(SERVER_LIST_FOOTER_SPACING);
+    for _ in 0..3 {
+        top.add_child(button(SERVER_LIST_TOP_BUTTON_W));
+    }
+    footer.add_child(Box::new(top));
+    let mut bottom = layout::LinearLayout::horizontal().spacing(SERVER_LIST_FOOTER_SPACING);
+    for _ in 0..4 {
+        bottom.add_child(button(SERVER_LIST_LOWER_BUTTON_W));
+    }
+    footer.add_child(Box::new(bottom));
+    root.add_to_footer(Box::new(footer));
+
+    root.arrange_elements();
+    root
+}
+
+/// One arranged multiplayer screen: the title cell, the seven footer buttons,
+/// and where the content band starts.
+///
+/// Same shape and same reason as `WorldSelectBlock`: the two bands are anchored
+/// to *different* [`Origin`]s, so a flat list of absolute rects could not be
+/// turned back into canvas-independent offsets.
+#[derive(Debug)]
+struct ServerListBlock {
+    /// The header's one leaf — the title cell.
+    title: (f32, f32, f32, f32),
+    /// The footer's leaves, in [`super::nav::SERVER_LIST_BUTTONS`]' order.
+    footer: Vec<(f32, f32, f32, f32)>,
+    /// The content frame's top, i.e. `list.getY()`.
+    content_top: f32,
+    /// The canvas this was arranged at, so band offsets can be made relative to
+    /// it.
+    canvas: (f32, f32),
+}
+
+impl ServerListBlock {
+    /// Arrange the tree at `width`×`height` and read its leaves back. The leaf
+    /// counts are asserted for [`MenuBlock::of`]'s reason.
+    fn at(width: f32, height: f32) -> Self {
+        let root = server_list_layout(width, height);
+        let header = layout::widget_rects(root.header());
+        let footer = layout::widget_rects(root.footer());
+        assert_eq!(
+            header.len(),
+            1,
+            "the multiplayer header has {} leaves, the screen has 1 (the title)",
+            header.len()
+        );
+        assert_eq!(
+            footer.len(),
+            super::nav::SERVER_LIST_BUTTONS.len(),
+            "the multiplayer footer has {} leaves, the screen has {}",
+            footer.len(),
+            super::nav::SERVER_LIST_BUTTONS.len()
+        );
+        Self {
+            title: header[0],
+            footer,
+            content_top: root.contents().y(),
+            canvas: (width, height),
+        }
+    }
+
+    /// The footer leaf `index` as a slot measured from [`Origin::ScreenBottom`].
+    /// Its `dy` is negative — the footer is pinned to the bottom edge.
+    fn footer_slot(&self, index: usize) -> Slot {
+        let (x, y, w, h) = self.footer[index];
+        Slot {
+            origin: Origin::ScreenBottom,
+            dx: x - self.canvas.0 * 0.5,
+            dy: y - self.canvas.1,
+            w,
+            h,
+        }
+    }
+}
+
+/// The multiplayer screen, arranged once at [`SERVER_LIST_REF_CANVAS`].
+///
+/// Canvas-independence is the same argument, and it is asserted the same way:
+/// `the_server_list_slots_do_not_depend_on_the_reference_canvas` re-arranges at
+/// three sizes and requires every slot to come out identical. The footer column
+/// measures 308 wide at any width (both its rows do — `3 * 100 + 2 * 4` and
+/// `4 * 74 + 3 * 4`), and the content band always begins at the header height,
+/// because the list is sized to `getContentHeight()` exactly.
+fn server_list_block() -> &'static ServerListBlock {
+    static BLOCK: std::sync::OnceLock<ServerListBlock> = std::sync::OnceLock::new();
+    BLOCK.get_or_init(|| ServerListBlock::at(SERVER_LIST_REF_CANVAS.0, SERVER_LIST_REF_CANVAS.1))
+}
+
+/// The canvas [`server_list_block`] arranges at. See that function.
+const SERVER_LIST_REF_CANVAS: (f32, f32) = (854.0, 480.0);
+
+/// The screen title, positioned from the arranged header's own title cell.
+///
+/// `Align::Centre` because that cell is zero-width and therefore *is* the text's
+/// centre — see [`server_list_layout`].
+#[must_use]
+pub fn server_list_title_label() -> MenuLabel {
+    let block = server_list_block();
+    let (x, y, _, _) = block.title;
+    MenuLabel {
+        text: super::nav::SERVER_LIST_TITLE.to_string(),
+        origin: Origin::ScreenTop,
+        dx: x - block.canvas.0 * 0.5,
+        dy: y,
+        align: Align::Centre,
+        colour: LABEL,
+        scale: 1.0,
+    }
+}
+
+/// Vanilla's rect for one footer button, read out of the arranged footer.
+///
+/// Exhaustive rather than an `as usize`, for [`title_slot`]'s reason: a new
+/// variant must be a compile error, not a silent off-by-one across every rect.
+#[must_use]
+pub fn server_list_footer_slot(button: super::nav::ServerListButton) -> Slot {
+    use super::nav::ServerListButton as B;
+    let index = match button {
+        B::Select => 0,
+        B::Direct => 1,
+        B::Add => 2,
+        B::Edit => 3,
+        B::Delete => 4,
+        B::Refresh => 5,
+        B::Back => 6,
+    };
+    server_list_block().footer_slot(index)
+}
+
+/// The left edge of every list row: `getRowLeft()`, which is
+/// `getX() + this.width / 2 - getRowWidth() / 2` with `getX() == 0`
+/// (`AbstractSelectionList.java:372-374`).
+///
+/// **Not `(width - 305) / 2`.** Vanilla halves each term separately with integer
+/// division, so at an odd width the two differ by a pixel; the `floor`s are that
+/// arithmetic, and they are why this takes a width instead of folding into a
+/// [`Slot`]'s `dx`.
+#[must_use]
+pub fn server_row_left(width: f32) -> f32 {
+    (width * 0.5).floor() - (SERVER_LIST_ROW_W * 0.5).floor()
+}
+
+/// The top of list row `index`: `getFirstEntryY() + index * itemHeight`.
+///
+/// No scroll term — see [`server_row_visible`] on what this screen does instead
+/// of scrolling.
+#[must_use]
+pub fn server_row_top(index: usize) -> f32 {
+    server_list_block().content_top + SERVER_LIST_FIRST_ENTRY_Y + index as f32 * SERVER_LIST_ITEM_H
+}
+
+/// The rect of list row `index` at a `width`-wide canvas.
+#[must_use]
+pub fn server_row_rect(index: usize, width: f32) -> (f32, f32, f32, f32) {
+    (
+        server_row_left(width),
+        server_row_top(index),
+        SERVER_LIST_ROW_W,
+        SERVER_LIST_ITEM_H,
+    )
+}
+
+/// A row's *content* rect — the entry rect inset by
+/// [`SERVER_LIST_ENTRY_PADDING`] on each side
+/// (`AbstractSelectionList.java:477-506`). Everything an
+/// `OnlineServerEntry` draws is measured from this, not from the row.
+#[must_use]
+pub fn server_row_content_rect(index: usize, width: f32) -> (f32, f32, f32, f32) {
+    let (x, y, w, h) = server_row_rect(index, width);
+    (
+        x + SERVER_LIST_ENTRY_PADDING,
+        y + SERVER_LIST_ENTRY_PADDING,
+        w - 2.0 * SERVER_LIST_ENTRY_PADDING,
+        h - 2.0 * SERVER_LIST_ENTRY_PADDING,
+    )
+}
+
+/// Whether row `index` is inside the list's band on a `height`-tall canvas —
+/// `extractListItems`' own visibility test, `child.getY() + child.getHeight() >=
+/// getY() && child.getY() <= getBottom()` (`AbstractSelectionList.java:346-352`).
+///
+/// This stands in for vanilla's **scissor**, which this pipeline has no
+/// equivalent of: a row that would overflow into the footer is skipped entirely
+/// rather than half-drawn. What is deliberately *not* here is scrolling — see
+/// `docs/server-list.md` — so on a short canvas a long list is truncated instead
+/// of scrollable, and `row_rect` (which `app.rs` hit-tests through) still reports
+/// a rect for the skipped rows. The consequence is bounded: a click on an
+/// off-band row selects it and nothing else.
+#[must_use]
+pub fn server_row_visible(index: usize, height: f32) -> bool {
+    let top = server_row_top(index);
+    let list_top = server_list_block().content_top;
+    let list_bottom = height - SERVER_LIST_FOOTER_H;
+    top + SERVER_LIST_ITEM_H >= list_top && top <= list_bottom
+}
+
+/// The favicon's rect in row `index` — the content origin, 32×32
+/// (`ServerSelectionList.java:313,438-440`).
+///
+/// **Public because the click needs it too.** `MenuNav::click` decides whether a
+/// click joins, moves the row up or moves it down from which quadrant of *this*
+/// rect the cursor is in, and a second copy of the arithmetic is how the
+/// highlighted quadrant and the acting quadrant drift apart.
+#[must_use]
+pub fn server_entry_icon_rect(index: usize, width: f32) -> (f32, f32, f32, f32) {
+    let (cx, cy, _, _) = server_row_content_rect(index, width);
+    (cx, cy, SERVER_ENTRY_ICON, SERVER_ENTRY_ICON)
+}
+
+/// The rect of the status icon in row `index`, and the x the status *text* is
+/// right-aligned against.
+///
+/// `statusIconX = getContentRight() - 10 - 5` (`ServerSelectionList.java:329`),
+/// at `getContentY()` — the icon is **not** vertically centred in the row.
+#[must_use]
+pub fn server_status_icon_rect(index: usize, width: f32) -> (f32, f32, f32, f32) {
+    let (cx, cy, cw, _) = server_row_content_rect(index, width);
+    (
+        cx + cw - SERVER_STATUS_ICON_W - SERVER_ENTRY_SPACING,
+        cy,
+        SERVER_STATUS_ICON_W,
+        SERVER_STATUS_ICON_H,
+    )
+}
+
 /// Horizontal alignment of a [`MenuLabel`] about its anchored x.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Align {
@@ -1236,6 +1609,53 @@ pub struct MenuRow {
     /// (`SpriteIconButton.java:236-244`). `label` is still carried (it is the
     /// tooltip/narration text in vanilla) but not drawn.
     pub icon: Option<&'static str>,
+    /// Set on a [`super::Screen::ServerList`] row: everything an
+    /// `OnlineServerEntry` draws that a button row has no field for.
+    ///
+    /// Its presence is what routes the row to [`draw_server_entry`] instead of
+    /// [`draw_widget`], *before* the `slot` test — a list entry is not a button
+    /// with an icon, it is a different drawable with three text columns and a
+    /// hover overlay. `label` (the server's name) and `favicon` are read from the
+    /// row itself rather than duplicated in here.
+    pub entry: Option<ServerEntryView>,
+}
+
+/// One multiplayer-list row's state, in the form
+/// `ServerSelectionList.OnlineServerEntry.extractContent` needs it.
+///
+/// Everything here is resolved by [`server_list_frame`] — which sprite, which
+/// colour, whether the move arrows apply — so the draw decides nothing except
+/// where. The one thing it cannot resolve is *hover*, because that depends on the
+/// canvas, and the canvas is only known at draw time (see [`MenuFrame::cursor`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ServerEntryView {
+    /// The row's index in the list — vanilla's
+    /// `ServerSelectionList.this.children().indexOf(this)`, which is what the
+    /// pinging animation's phase and both move arrows key on.
+    pub index: usize,
+    /// The MOTD, unwrapped and possibly multi-line. Wrapped at draw time,
+    /// because the wrap width is measured in the font the draw will use.
+    pub motd: String,
+    /// Draw the MOTD in [`SERVER_ENTRY_BAD`] — vanilla's `CANT_RESOLVE_TEXT` /
+    /// `CANT_CONNECT_TEXT`, which carry their own red component colour.
+    pub motd_is_error: bool,
+    /// The right-aligned status column: the player count, or an incompatible
+    /// server's version string.
+    pub status: String,
+    /// Draw `status` in [`SERVER_ENTRY_INCOMPATIBLE`] rather than
+    /// [`SERVER_ENTRY_DIM`].
+    pub status_is_error: bool,
+    /// The `server_list/*` sprite for this row's state — see
+    /// [`super::status::status_sprite`], which is the only thing that picks one.
+    pub status_sprite: &'static str,
+    /// Whether this is the list's selected entry (`getSelected() == this`), which
+    /// is a different question from [`MenuFrame::selected`]: on this screen that
+    /// field carries the *footer button* the cursor is over.
+    pub selected: bool,
+    /// `index > 0` — vanilla's guard on the move-up arrow (`:375`).
+    pub can_move_up: bool,
+    /// `index < servers.size() - 1` — the move-down guard (`:386`).
+    pub can_move_down: bool,
 }
 
 /// Everything one menu screen draws.
@@ -1306,6 +1726,21 @@ pub struct MenuFrame<'a> {
     /// "Game Menu" heading, the title screen's version string and copyright
     /// line.
     pub labels: Vec<MenuLabel>,
+    /// The mouse position in **logical** pixels, when it is known.
+    ///
+    /// Every other screen here resolves the mouse to a *row index* before it ever
+    /// reaches a frame ([`super::nav::MenuNav::hover`]), which is all a button
+    /// needs. The multiplayer list needs more: vanilla's row draws a different
+    /// sprite depending on which **quadrant of the 32 px favicon** the cursor is
+    /// in (`ServerSelectionList.java:364-395`), and that cannot be decided before
+    /// the canvas is known, because the icon's rect depends on it. So the raw
+    /// position rides along on the frame and [`draw_server_entry`] does the
+    /// quadrant test against the rect it is about to draw into.
+    ///
+    /// `None` means "no mouse has moved yet", which is the state a keyboard-only
+    /// session and every hermetic test are in — and it must draw *no* hover
+    /// overlay rather than one at `(0, 0)`.
+    pub cursor: Option<(f32, f32)>,
 }
 
 /// Decoded favicon mosaics, keyed by the status cache's address key.
@@ -1746,6 +2181,149 @@ fn accounts_failed_frame(message: &str) -> MenuFrame<'static> {
     }
 }
 
+/// Builds vanilla's `JoinMultiplayerScreen` (#396): one row per saved server at
+/// `ServerSelectionList`'s geometry, then the seven footer buttons.
+///
+/// ## What each row's state resolves to
+///
+/// The MOTD column is vanilla's `serverData.motd`, which the pinger *overwrites*
+/// per state rather than keeping alongside the real MOTD: it is
+/// `multiplayer.status.pinging` while a probe is in flight
+/// (`ServerStatusPinger.java:65`) and the red `CANT_CONNECT_MESSAGE` when one
+/// fails (`:168`). So a failed row shows its reason in the MOTD line and an empty
+/// status column (`:169` sets `status` to empty), which is exactly where this
+/// screen already put it.
+///
+/// The one row state that is **ours** is [`super::status::StatusSlot::Idle`] — a
+/// row nothing has probed yet. Vanilla has no such state for longer than a frame,
+/// so it has no text for it; this shows the address, which is the only thing
+/// known about a server before it answers, and is what this screen showed for
+/// every row before #396.
+///
+/// ## Selection, and vanilla's null
+///
+/// `JoinMultiplayerScreen.onSelectedChange` starts with **nothing** selected and
+/// three inactive buttons (`:246-257`). This shell has a keyboard row cursor that
+/// always points somewhere, so "has a selection" is modelled as "the list is not
+/// empty" — see [`super::nav::ServerListButton::enabled`], which is where that
+/// deviation is argued.
+#[must_use]
+fn server_list_frame(
+    nav: &super::nav::MenuNav,
+    statuses: &super::status::StatusCache,
+    favicons: &mut FaviconCache,
+) -> MenuFrame<'static> {
+    use super::nav::SERVER_LIST_BUTTONS;
+    use super::status::{self, ServerState, StatusCache, StatusSlot};
+
+    let entries = nav.list().entries();
+    let last = entries.len().saturating_sub(1);
+    // One clock read for the whole frame, so every pinging row animates in step
+    // (out of phase by index, which is `pinging_sprite`'s own doing).
+    let millis = statuses.millis();
+
+    let mut rows: Vec<MenuRow> = entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let slot = statuses.get(e);
+            let state = slot.state(status::STATUS_PROTOCOL);
+            let (motd, motd_is_error) = match slot {
+                StatusSlot::Idle => (e.address_label(), false),
+                StatusSlot::Pending => (status::PINGING_MOTD.to_string(), false),
+                StatusSlot::Ok(s) => (s.motd.clone(), false),
+                StatusSlot::Failed(why) => (why.clone(), true),
+            };
+            let (status_text, status_is_error) = match (state, slot) {
+                (ServerState::Successful, StatusSlot::Ok(s)) => (s.players.clone(), false),
+                // An incompatible server shows its *version* where a compatible
+                // one shows its player count (`:344-346`), which is the whole
+                // point: the row says what it speaks, in red.
+                (ServerState::Incompatible, StatusSlot::Ok(s)) => (s.version.clone(), true),
+                _ => (String::new(), false),
+            };
+            let latency = match slot {
+                StatusSlot::Ok(s) => s.latency_ms,
+                _ => None,
+            };
+            MenuRow {
+                label: e.name.clone(),
+                favicon: match slot {
+                    StatusSlot::Ok(s) => s
+                        .favicon_png
+                        .as_deref()
+                        .and_then(|png| favicons.get(&StatusCache::key(e), png)),
+                    _ => None,
+                },
+                enabled: true,
+                // No `slot`: a list row's left edge is `floor(width / 2) - 152`,
+                // Java integer division on *each* term, which a `Slot`'s
+                // `anchor + dx` cannot express (see `server_row_left`). `row_rect`
+                // resolves it from `entry.index` instead, which keeps the draw and
+                // `app.rs`'s hit-test on one definition all the same.
+                entry: Some(ServerEntryView {
+                    index: i,
+                    motd,
+                    motd_is_error,
+                    status: status_text,
+                    status_is_error,
+                    status_sprite: status::status_sprite(state, latency, millis, i),
+                    selected: i == nav.server_index(),
+                    can_move_up: i > 0,
+                    can_move_down: i < last,
+                }),
+                ..Default::default()
+            }
+        })
+        .collect();
+
+    // `onSelectedChange`'s three conditional buttons plus the four unconditional
+    // ones, in the order they are added to the two footer rows (`:68-125`).
+    let has_selection = !entries.is_empty();
+    for button in SERVER_LIST_BUTTONS {
+        rows.push(MenuRow {
+            label: button.label().to_string(),
+            enabled: button.enabled(has_selection),
+            slot: Some(server_list_footer_slot(button)),
+            ..Default::default()
+        });
+    }
+
+    let mut labels = vec![server_list_title_label()];
+    // Not vanilla's: a failed `servers.json` write has no vanilla equivalent
+    // (vanilla's `ServerList.save` swallows its own IOException into the log), and
+    // a player who adds a server and sees it vanish deserves the reason. Placed
+    // just above the footer band so it cannot collide with a row.
+    if let Some(err) = nav.save_error() {
+        labels.push(MenuLabel {
+            text: err.to_uppercase(),
+            origin: Origin::ScreenBottom,
+            dx: 0.0,
+            dy: -(SERVER_LIST_FOOTER_H + LINE_H + 2.0),
+            align: Align::Centre,
+            colour: FG_BAD,
+            scale: 1.0,
+        });
+    }
+
+    MenuFrame {
+        rows,
+        // On this screen `selected` is the **footer button** the cursor is over,
+        // not the selected server: a list entry carries its own
+        // `ServerEntryView::selected`, because vanilla draws the two completely
+        // differently (a 1 px row outline versus `widget/button_highlighted`) and
+        // both can be visible at once.
+        selected: match nav.list_button() {
+            Some(b) => entries.len() + b,
+            None => usize::MAX,
+        },
+        vanilla: true,
+        labels,
+        cursor: nav.menu_cursor(),
+        ..Default::default()
+    }
+}
+
 /// Builds the frame for whichever menu screen `ui` is on.
 ///
 /// This is the single place menu *state* becomes menu *content*, so the app has
@@ -1761,7 +2339,6 @@ pub fn frame_for<'a>(
 ) -> Option<MenuFrame<'a>> {
     use super::Screen;
     use super::nav::{FormField, MAIN_BUTTONS};
-    use super::status::StatusSlot;
 
     let frame = match ui.screen() {
         // Vanilla's `TitleScreen`: the logo pair, eight widgets at vanilla's
@@ -1804,76 +2381,12 @@ pub fn frame_for<'a>(
             ],
             ..Default::default()
         }),
-        Screen::ServerList => {
-            let entries = nav.list().entries();
-            let rows: Vec<MenuRow> = entries
-                .iter()
-                .map(|e| {
-                    let slot = statuses.get(e);
-                    let (detail, is_error) = match slot {
-                        StatusSlot::Idle => (e.address_label(), false),
-                        StatusSlot::Pending => (format!("{}  PINGING", e.address_label()), false),
-                        StatusSlot::Ok(s) => {
-                            let motd = s.motd.split('\n').next().unwrap_or("").trim().to_string();
-                            if motd.is_empty() {
-                                (e.address_label(), false)
-                            } else {
-                                (motd, false)
-                            }
-                        }
-                        StatusSlot::Failed(why) => (why.clone(), true),
-                    };
-                    let trailing = match slot {
-                        StatusSlot::Ok(s) => match s.latency_ms {
-                            Some(ms) => format!("{}  {ms}MS", s.players),
-                            None => s.players.clone(),
-                        },
-                        _ => String::new(),
-                    };
-                    MenuRow {
-                        label: e.name.clone(),
-                        detail,
-                        trailing,
-                        favicon: match slot {
-                            StatusSlot::Ok(s) => s
-                                .favicon_png
-                                .as_deref()
-                                .and_then(|png| {
-                                    favicons.get(&super::status::StatusCache::key(e), png)
-                                }),
-                            _ => None,
-                        },
-                        head: None,
-                        enabled: true,
-                        detail_is_error: is_error,
-                        field: false,
-                        edit: None,
-                        // The server list is not one of vanilla's own screens
-                        // (vanilla's is a scrolling `ObjectSelectionList`), so it
-                        // stays on the centred row stack.
-                        slot: None,
-                        icon: None,
-                    }
-                })
-                .collect();
-            let subtitle = if rows.is_empty() {
-                "NO SERVERS SAVED - PRESS A TO ADD ONE"
-            } else {
-                ""
-            };
-            Some(MenuFrame {
-                title: "MULTIPLAYER",
-                subtitle,
-                rows,
-                selected: nav.server_index(),
-                footer: vec![
-                    "ENTER JOIN   A ADD   E EDIT   D DELETE   R REFRESH".to_string(),
-                    "ESC BACK".to_string(),
-                ],
-                message: nav.save_error().map(str::to_string),
-                ..Default::default()
-            })
-        }
+        // Vanilla's `JoinMultiplayerScreen` (#396): a `HeaderAndFooterLayout`
+        // title, the `ServerSelectionList`'s 36 px rows, and seven footer buttons
+        // three of which are inactive with nothing selected. Built in its own
+        // function because the row content alone is thirty lines of state
+        // resolution — see `server_list_frame`.
+        Screen::ServerList => Some(server_list_frame(nav, statuses, favicons)),
         Screen::ServerEdit => {
             let form = nav.form();
             Some(MenuFrame {
@@ -2122,6 +2635,18 @@ fn row_height(row: &MenuRow) -> f32 {
 #[must_use]
 pub fn row_rect(rows: &[MenuRow], i: usize, width: f32, height: f32) -> Option<(f32, f32, f32, f32)> {
     let row = rows.get(i)?;
+    // A multiplayer-list entry (#396) is placed by `AbstractSelectionList`'s
+    // arithmetic, which a `Slot` cannot express: `getRowLeft()` halves the canvas
+    // width and the row width *separately* with integer division, so it is not
+    // `anchor + dx` for any anchor. Answered here rather than in the caller for
+    // this function's whole reason — `app.rs`'s hit-test reads it too, so a second
+    // definition is how a click lands on a row the draw put somewhere else.
+    //
+    // Note this returns a rect for a row that `server_row_visible` would skip
+    // drawing; see that function on the bounded consequence.
+    if let Some(view) = row.entry.as_ref() {
+        return Some(server_row_rect(view.index, width));
+    }
     if let Some(slot) = row.slot {
         return Some(slot.resolve(width, height));
     }
@@ -2305,6 +2830,14 @@ pub fn build(
     }
 
     for (i, row) in frame.rows.iter().enumerate() {
+        // A multiplayer-list entry (#396) is neither a button nor a field: it is
+        // an `ObjectSelectionList` row with a favicon, two text columns, a status
+        // sprite and a quadrant hover overlay. Tested before `slot` because it
+        // carries none — `row_rect` places it from `entry.index`.
+        if row.entry.is_some() {
+            draw_server_entry(&mut b, &frame.rows, i, width, height, frame.cursor);
+            continue;
+        }
         if row.slot.is_some() {
             // A vanilla-positioned row can be a **text field** rather than a
             // button: `Screen::WorldSelect`'s search box is placed by the header
@@ -2441,6 +2974,194 @@ pub fn build(
         backdrop_floats,
         sprite: b.sprites,
     }
+}
+
+/// Draws one multiplayer-list row: the selection outline, the favicon, the name,
+/// up to two wrapped MOTD lines, the right-aligned status column, the status
+/// sprite, and — when the cursor is inside the row — the join/move-up/move-down
+/// overlay on the icon.
+///
+/// Mirrors `ServerSelectionList.OnlineServerEntry.extractContent`
+/// (`ServerSelectionList.java:267-397`) plus `AbstractSelectionList.extractItem`'s
+/// selection pass (`:354-370`), and it **decides nothing**: which sprite, which
+/// colour and which arrows apply are all resolved into [`ServerEntryView`] by
+/// [`server_list_frame`]. What it does own is everything canvas-dependent — the
+/// rects, and therefore the quadrant the cursor is in.
+///
+/// ## Two things that are not vanilla's, named rather than hidden
+///
+/// - **The MOTD wrap is greedy on whitespace**, where vanilla's `font.split` is a
+///   full `StringSplitter` that also breaks inside an over-long word and carries
+///   style across the break. A word wider than the column is therefore drawn past
+///   the wrap width here instead of being cut; the column is 267 px, so it takes a
+///   ~44-character unbroken run to notice.
+/// - **The row's own background is the screen's**, not a per-row texture. Vanilla
+///   blits `menu_list_background.png` tiled across the whole list band
+///   (`AbstractSelectionList.java:226-238`) and draws *no* per-row fill for an
+///   unselected row, so an unselected row here correctly paints nothing but its
+///   content. The band texture itself is a loose `textures/gui/` PNG (the same
+///   89-texture gap `resources.rs` documents) and is left to the flat [`BG`]
+///   fill — which is what every other menu screen already draws.
+fn draw_server_entry(
+    b: &mut Quads<'_>,
+    rows: &[MenuRow],
+    i: usize,
+    width: f32,
+    height: f32,
+    cursor: Option<(f32, f32)>,
+) {
+    let Some(row) = rows.get(i) else { return };
+    let Some(view) = row.entry.as_ref() else { return };
+    // `extractListItems` only draws the rows inside the band (`:346-352`); this is
+    // that test, standing in for the scissor this pipeline has no equivalent of.
+    if !server_row_visible(view.index, height) {
+        return;
+    }
+    let Some((x, y, w, h)) = row_rect(rows, i, width, height) else {
+        return;
+    };
+
+    // `extractItem`: the selected row gets a 1 px outline of `-1` when the list is
+    // focused and `-8355712` when it is not, with the interior filled black —
+    // drawn *under* the content (`:354-370`). This shell's list is focused
+    // whenever the screen is up (there is nowhere else for the keyboard to be, and
+    // the footer buttons are mouse-driven), so the outline is the focused one.
+    if view.selected {
+        b.rect(x, y, w, h, LABEL);
+        b.rect(x + 1.0, y + 1.0, w - 2.0, h - 2.0, SERVER_LIST_SELECTION_FILL);
+    }
+
+    let (cx, cy, cw, _) = server_row_content_rect(view.index, width);
+    let (ix, iy, iw, ih) = server_entry_icon_rect(view.index, width);
+    let text_x = cx + SERVER_ENTRY_ICON + SERVER_ENTRY_TEXT_GAP;
+
+    // The favicon, or `FaviconTexture`'s fallback when the server sent none
+    // (`:313,438-440`). The mosaic path is this shell's stand-in for a per-server
+    // runtime texture — see the module docs.
+    if let Some(icon) = row.favicon.as_ref() {
+        b.mosaic(icon, ix, iy, iw);
+    } else {
+        b.sprite(SERVER_UNKNOWN_ICON, ix, iy, iw, ih, LABEL);
+    }
+
+    // The status column first, because the name's room depends on where it lands.
+    let (icon_x, icon_y, icon_w, icon_h) = server_status_icon_rect(view.index, width);
+    b.sprite(view.status_sprite, icon_x, icon_y, icon_w, icon_h, LABEL);
+    let status_w = b.text_width(&view.status, 1.0);
+    let status_x = icon_x - status_w - SERVER_ENTRY_SPACING;
+    if !view.status.is_empty() {
+        let colour = if view.status_is_error {
+            SERVER_ENTRY_INCOMPATIBLE
+        } else {
+            SERVER_ENTRY_DIM
+        };
+        b.text(&view.status, status_x, cy + 1.0, 1.0, colour);
+    }
+
+    // `graphics.text(font, serverData.name, contentX + 32 + 3, contentY + 1, -1)`
+    // (`:306`). Vanilla does not clip the name — it can and does run under the
+    // status column — but this shell has no scissor, so it is clipped to the room
+    // the status column leaves rather than drawn over it.
+    let name = clip_measured(b, &row.label, (status_x - text_x).max(0.0));
+    b.text(name, text_x, cy + 1.0, 1.0, LABEL);
+
+    // Up to two MOTD lines at `contentY + 12 + 9 * i`, wrapped to
+    // `contentWidth - 32 - 2` (`:307-311`).
+    let motd_colour = if view.motd_is_error {
+        SERVER_ENTRY_BAD
+    } else {
+        SERVER_ENTRY_DIM
+    };
+    let wrap_w = (cw - SERVER_ENTRY_MOTD_INSET).max(0.0);
+    for (line, text) in wrap_measured(b, &view.motd, wrap_w, SERVER_ENTRY_MOTD_LINES)
+        .iter()
+        .enumerate()
+    {
+        b.text(
+            text,
+            text_x,
+            cy + SERVER_ENTRY_MOTD_Y + LINE_H * line as f32,
+            1.0,
+            motd_colour,
+        );
+    }
+
+    // The hover overlay (`:364-395`). All three sprites blit at the *same* 32×32
+    // icon rect, and only the one whose quadrant holds the cursor is drawn
+    // highlighted — so the discriminator is position, not which row is hovered.
+    let Some((mx, my)) = cursor else { return };
+    if mx < x || mx >= x + w || my < y || my >= y + h {
+        return;
+    }
+    b.rect(ix, iy, iw, ih, SERVER_ICON_DARKEN);
+    let (rx, ry) = (mx - ix, my - iy);
+    let pick = |hit: bool, sprites: (&'static str, &'static str)| {
+        if hit { sprites.1 } else { sprites.0 }
+    };
+    let mut blit = |id: &'static str| b.sprite(id, ix, iy, iw, ih, LABEL);
+    blit(pick(
+        widget::over_right_half(rx, ry, iw),
+        SERVER_JOIN_SPRITES,
+    ));
+    if view.can_move_up {
+        blit(pick(
+            widget::over_top_left_quarter(rx, ry, iw),
+            SERVER_MOVE_UP_SPRITES,
+        ));
+    }
+    if view.can_move_down {
+        blit(pick(
+            widget::over_bottom_left_quarter(rx, ry, iw),
+            SERVER_MOVE_DOWN_SPRITES,
+        ));
+    }
+}
+
+/// Greedy whitespace wrap of `s` to at most `max_lines` lines of `max_px`, in
+/// whatever font `b` draws with — this shell's stand-in for `Font.split`.
+///
+/// Explicit `\n`s break a line too, because a MOTD is a chat component that has
+/// already been flattened to text by `lodestone_net` and may carry them; vanilla
+/// splits on both.
+///
+/// A single word wider than `max_px` is *not* broken (see [`draw_server_entry`]'s
+/// note), and lines past `max_lines` are dropped rather than truncated with an
+/// ellipsis, because the font has no ellipsis glyph.
+fn wrap_measured(b: &Quads<'_>, s: &str, max_px: f32, max_lines: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for paragraph in s.split('\n') {
+        // Per paragraph, not per call: without this the first word after a `\n`
+        // would be appended to the previous paragraph's last line whenever it
+        // happened to fit, which is the one thing splitting on `\n` exists to stop.
+        let mut open_line = false;
+        for word in paragraph.split_whitespace() {
+            if out.len() >= max_lines {
+                return out;
+            }
+            let fits = open_line
+                && out.last().is_some_and(|line| {
+                    b.text_width(&format!("{line} {word}"), 1.0) <= max_px
+                });
+            if fits {
+                if let Some(line) = out.last_mut() {
+                    line.push(' ');
+                    line.push_str(word);
+                }
+            } else {
+                // A word that does not fit starts a line rather than overflowing
+                // the one before it.
+                out.push(word.to_string());
+                open_line = true;
+            }
+        }
+        // A blank line in the MOTD is a line: vanilla's split keeps it, and losing
+        // it would pull a two-line MOTD's second line up into the first's place.
+        if out.len() < max_lines && paragraph.trim().is_empty() {
+            out.push(String::new());
+        }
+    }
+    out.truncate(max_lines);
+    out
 }
 
 /// Draws one vanilla widget: its `widget/button*` nine-slice background, then
@@ -3440,6 +4161,10 @@ mod tests {
                 motd: "A LODESTONE SERVER\nsecond line".into(),
                 players: "3/20".into(),
                 version: "26.2".into(),
+                // Our own protocol, so the row resolves to
+                // `ServerState::Successful` and shows a player count rather than
+                // the red version string an incompatible server gets.
+                protocol: Some(crate::menu::status::STATUS_PROTOCOL),
                 favicon_png: None,
                 latency_ms: Some(12),
             })
@@ -3453,15 +4178,119 @@ mod tests {
 
         let mut fav = FaviconCache::new();
         let f = frame_for(&ui, &nav, &statuses, &mut fav).expect("the list draws");
-        assert_eq!(f.rows.len(), 1);
-        assert_eq!(f.rows[0].label, "HOME");
         assert_eq!(
-            f.rows[0].detail, "A LODESTONE SERVER",
-            "only the MOTD's first line fits a row"
+            f.rows.len(),
+            1 + crate::menu::nav::SERVER_LIST_BUTTONS.len(),
+            "one entry plus vanilla's seven footer buttons"
         );
-        assert!(f.rows[0].trailing.contains("3/20"), "{:?}", f.rows[0]);
-        assert!(f.rows[0].trailing.contains("12"), "latency should show");
-        assert!(!f.rows[0].detail_is_error);
+        assert_eq!(f.rows[0].label, "HOME");
+        let view = f.rows[0].entry.as_ref().expect("row 0 is a list entry");
+        // The **whole** MOTD, newline included: the wrap to two lines happens at
+        // draw time, in the font the draw measures with (`wrap_measured`).
+        assert_eq!(view.motd, "A LODESTONE SERVER\nsecond line");
+        assert!(!view.motd_is_error);
+        // The status column is the player count, not the latency: vanilla puts
+        // `formatPlayerCount` there and the round-trip only in the ping *sprite*
+        // and its tooltip (`ServerStatusPinger.java:88`).
+        assert_eq!(view.status, "3/20");
+        assert!(!view.status_is_error);
+        // 12 ms is the fastest bucket, so five bars. Asserted by identity — a gate
+        // that only proved "a ping sprite drew" passes on all five.
+        assert_eq!(view.status_sprite, "server_list/ping_5");
+        assert!(view.selected, "the one row is the selected one");
+        assert!(
+            !view.can_move_up && !view.can_move_down,
+            "a single row has nowhere to move"
+        );
+    }
+
+    /// The three states that are *not* "answered by a compatible server" each get
+    /// their own sprite, and the assertion is by **identity**: a gate that only
+    /// proves a ping bar exists passes on all four rendering the same bar.
+    #[test]
+    fn every_row_state_resolves_to_its_own_status_sprite() {
+        use crate::menu::status::{PINGING_SPRITES, ServerStatus};
+
+        let mut nav = test_nav("states");
+        let mut ui = UiState::new();
+        add_server(&mut nav, &mut ui, "SLOW", "slow.example");
+
+        // A compatible server, 700 ms — the fourth bucket down.
+        let mut statuses = StatusCache::with_probe(std::sync::Arc::new(|_| {
+            Ok(ServerStatus {
+                motd: "hi".into(),
+                players: "1/1".into(),
+                protocol: Some(crate::menu::status::STATUS_PROTOCOL),
+                latency_ms: Some(700),
+                ..Default::default()
+            })
+        }));
+        let entries = nav.list().entries().to_vec();
+        // While the probe is in flight the row is `Pending`, which must animate.
+        // Read *before* draining, and only asserted to be one of the five frames:
+        // which one depends on a clock.
+        statuses.refresh(&entries);
+        let mut fav = FaviconCache::new();
+        let pending = frame_for(&ui, &nav, &statuses, &mut fav).unwrap();
+        let pending_view = pending.rows[0].entry.clone().unwrap();
+        assert!(
+            PINGING_SPRITES.contains(&pending_view.status_sprite),
+            "an in-flight row must animate, got {}",
+            pending_view.status_sprite
+        );
+        assert_eq!(
+            pending_view.motd, "Pinging...",
+            "vanilla overwrites the MOTD while pinging"
+        );
+        assert!(
+            pending_view.status.is_empty(),
+            "and blanks the status column"
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while statuses.pump() == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let slow = frame_for(&ui, &nav, &statuses, &mut fav).unwrap().rows[0]
+            .entry
+            .clone()
+            .unwrap();
+        assert_eq!(slow.status_sprite, "server_list/ping_2", "700 ms is two bars");
+
+        // An answered server speaking a different protocol is *incompatible*, not
+        // unreachable: its own sprite, and its version in place of a player count.
+        let mut old = StatusCache::with_probe(std::sync::Arc::new(|_| {
+            Ok(ServerStatus {
+                motd: "hi".into(),
+                players: "1/1".into(),
+                version: "1.21.11".into(),
+                protocol: Some(1),
+                latency_ms: Some(5),
+                ..Default::default()
+            })
+        }));
+        old.refresh(&entries);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while old.pump() == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let view = frame_for(&ui, &nav, &old, &mut fav).unwrap().rows[0]
+            .entry
+            .clone()
+            .unwrap();
+        assert_eq!(view.status_sprite, "server_list/incompatible");
+        assert_eq!(view.status, "1.21.11", "the version, where the count goes");
+        assert!(view.status_is_error, "and in red");
+
+        // And the four sprites are four different sprites.
+        let mut all = vec![
+            pending_view.status_sprite,
+            slow.status_sprite,
+            view.status_sprite,
+        ];
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), 3, "two states share a sprite: {all:?}");
     }
 
     #[test]
@@ -3482,29 +4311,613 @@ mod tests {
 
         let mut fav = FaviconCache::new();
         let f = frame_for(&ui, &nav, &statuses, &mut fav).unwrap();
-        assert_eq!(f.rows[0].detail, "connection refused");
+        let view = f.rows[0].entry.as_ref().expect("row 0 is a list entry");
+        // The reason goes in the **MOTD** column and the status column stays
+        // empty, which is vanilla's own arrangement: `onPingFailed` sets
+        // `data.motd = CANT_CONNECT_MESSAGE` and `data.status` to empty
+        // (`ServerStatusPinger.java:168-169`).
+        assert_eq!(view.motd, "connection refused");
         assert!(
-            f.rows[0].detail_is_error,
+            view.motd_is_error,
             "a failure must be visually distinct from a MOTD"
         );
-        assert!(f.rows[0].trailing.is_empty(), "no player count to show");
+        assert!(view.status.is_empty(), "no player count to show");
+        assert_eq!(
+            view.status_sprite, "server_list/unreachable",
+            "an unreachable row gets its own sprite, not a ping bar"
+        );
     }
 
+    /// With nothing to act on, Join / Edit / Delete are **present and inactive** —
+    /// `onSelectedChange`'s three, which is #393's disabled path reaching its first
+    /// list screen. Direct Connection is inactive whatever the selection.
+    ///
+    /// The control is executed rather than described: adding a server must flip all
+    /// three, or "they are disabled" would pass on a screen whose buttons are
+    /// *always* disabled.
     #[test]
-    fn an_empty_server_list_says_how_to_add_one() {
-        // A blank screen with no rows and no instruction is a dead end.
-        let nav = test_nav("emptylist");
+    fn the_footer_buttons_are_present_and_three_are_inactive_with_no_selection() {
+        use crate::menu::nav::{SERVER_LIST_BUTTONS, ServerListButton as B};
+
+        let mut nav = test_nav("emptylist");
         let mut ui = UiState::new();
         ui.open_server_list();
         let statuses = StatusCache::with_probe(unavailable_probe());
         let mut fav = FaviconCache::new();
         let f = frame_for(&ui, &nav, &statuses, &mut fav).unwrap();
-        assert!(f.rows.is_empty());
-        assert!(f.subtitle.contains('A'), "no hint: {:?}", f.subtitle);
+
+        // Every one of vanilla's seven is on screen even with an empty list — a
+        // missing button is a layout that reads wrong, a greyed-out one reads
+        // exactly like vanilla with the feature unavailable.
+        assert_eq!(f.rows.len(), SERVER_LIST_BUTTONS.len());
+        let row_of = |b: B| {
+            SERVER_LIST_BUTTONS
+                .iter()
+                .position(|x| *x == b)
+                .expect("every button is in the table")
+        };
+        for (i, button) in SERVER_LIST_BUTTONS.iter().enumerate() {
+            assert_eq!(
+                f.rows[i].label,
+                button.label(),
+                "row {i} is not {button:?} — the footer order is what click() assumes"
+            );
+        }
+        for b in [B::Select, B::Edit, B::Delete, B::Direct] {
+            assert!(!f.rows[row_of(b)].enabled, "{b:?} must be inactive");
+        }
+        for b in [B::Add, B::Refresh, B::Back] {
+            assert!(f.rows[row_of(b)].enabled, "{b:?} must be active");
+        }
+
+        // Control: a selection enables three of the four, and Direct Connection
+        // stays inactive because nothing here can honour it.
+        add_server(&mut nav, &mut ui, "HOME", "mc.example.com");
+        let f = frame_for(&ui, &nav, &statuses, &mut fav).unwrap();
+        let base = 1;
+        for b in [B::Select, B::Edit, B::Delete] {
+            assert!(
+                f.rows[base + row_of(b)].enabled,
+                "{b:?} must be active once a row exists"
+            );
+        }
         assert!(
-            f.footer.iter().any(|l| l.contains("ADD")),
-            "the footer should name the add key: {:?}",
-            f.footer
+            !f.rows[base + row_of(B::Direct)].enabled,
+            "Direct Connection has no screen to open, selection or not"
+        );
+    }
+
+    /// Vanilla's own rects for `JoinMultiplayerScreen` at 854×480, hand-derived
+    /// from the Java rather than read back out of the layout — `CLAUDE.md`'s rule
+    /// that an expected value must originate outside the code under test.
+    ///
+    /// The derivation, which is what a future reader has to be able to check:
+    ///
+    /// - `HeaderAndFooterLayout(this, 33, 60)`, so `getContentHeight()` is
+    ///   `480 - 33 - 60` = **387**, and the list is sized to exactly that
+    ///   (`:61-62`). The content clamp is then `min(33 + 30, 480 - 60 - 387)` =
+    ///   `min(63, 33)` = **33** — flush under the header, because the content
+    ///   fills the band.
+    /// - `getFirstEntryY()` is `getY() + 2` = **35**, and rows stack by
+    ///   `itemHeight` 36 with no gap.
+    /// - `getRowLeft()` is `0 + 854/2 - 305/2` = `427 - 152` = **275**. Note the
+    ///   two halvings are separate integer divisions; `(854 - 305) / 2` is 274.
+    /// - `CONTENT_PADDING` insets the entry by 2 a side, so content is
+    ///   `(277, 37, 301, 32)` and the 32 is exactly the favicon's height.
+    /// - `statusIconX = getContentRight() - 10 - 5` = `578 - 15` = **563**, at
+    ///   `getContentY()` = 37 — the status icon is *not* vertically centred.
+    /// - The title is a 9 px `StringWidget` centred in the 854×33 header frame:
+    ///   `round((33 - 9) / 2)` = **12** from the top, on `width / 2`.
+    /// - The footer column is `3*100 + 2*4` = 308 wide on its top row and
+    ///   `4*74 + 3*4` = 308 on its lower one — they match, which is why the
+    ///   column is 308 and both rows sit at its left edge — and `20 + 4 + 20` = 44
+    ///   tall. Centred in the 854×60 footer frame pinned at y 420:
+    ///   `((854 - 308) / 2, 420 + (60 - 44) / 2)` = **(273, 428)**.
+    #[test]
+    fn the_server_list_rects_are_vanillas_own() {
+        use crate::menu::nav::{SERVER_LIST_BUTTONS, ServerListButton as B};
+
+        let expected = [
+            // Top row: 100 wide, 104 apart.
+            (B::Select, (273.0, 428.0, 100.0, 20.0)),
+            (B::Direct, (377.0, 428.0, 100.0, 20.0)),
+            (B::Add, (481.0, 428.0, 100.0, 20.0)),
+            // Lower row: 74 wide, 78 apart, 24 px below.
+            (B::Edit, (273.0, 452.0, 74.0, 20.0)),
+            (B::Delete, (351.0, 452.0, 74.0, 20.0)),
+            (B::Refresh, (429.0, 452.0, 74.0, 20.0)),
+            (B::Back, (507.0, 452.0, 74.0, 20.0)),
+        ];
+        for (button, want) in expected {
+            assert_eq!(
+                server_list_footer_slot(button).resolve(V_W, V_H),
+                want,
+                "{button:?} is not where vanilla puts it"
+            );
+            // The enum's declared width and the arranged one must agree, or the
+            // footer was built with its two rows swapped.
+            assert_eq!(
+                server_list_footer_slot(button).w,
+                button.width(),
+                "{button:?}'s arranged width is not its declared one"
+            );
+        }
+        // Both footer gutters are 4 — this screen's, not the pause screen's 8.
+        let (sx, _, sw, _) = server_list_footer_slot(B::Select).resolve(V_W, V_H);
+        let (dx, ..) = server_list_footer_slot(B::Direct).resolve(V_W, V_H);
+        assert_eq!(dx - (sx + sw), 4.0, "top row spacing");
+        let (ex, _, ew, _) = server_list_footer_slot(B::Edit).resolve(V_W, V_H);
+        let (delx, ..) = server_list_footer_slot(B::Delete).resolve(V_W, V_H);
+        assert_eq!(delx - (ex + ew), 4.0, "lower row spacing");
+        assert_eq!(SERVER_LIST_BUTTONS.len(), 7);
+
+        // The rows.
+        assert_eq!(server_row_rect(0, V_W), (275.0, 35.0, 305.0, 36.0));
+        assert_eq!(
+            server_row_rect(1, V_W),
+            (275.0, 71.0, 305.0, 36.0),
+            "rows stack by itemHeight with no gap"
+        );
+        assert_eq!(
+            server_row_content_rect(0, V_W),
+            (277.0, 37.0, 301.0, 32.0),
+            "CONTENT_PADDING insets the entry by 2, and 36 - 4 is the icon's 32"
+        );
+        assert_eq!(server_entry_icon_rect(0, V_W), (277.0, 37.0, 32.0, 32.0));
+        assert_eq!(
+            server_status_icon_rect(0, V_W),
+            (563.0, 37.0, 10.0, 8.0),
+            "contentRight - 10 - 5, at contentY"
+        );
+        // `getRowLeft()` is not `(width - rowWidth) / 2`, and the difference shows
+        // at an odd canvas: 855/2 = 427 either way here, 856 is where they split.
+        assert_eq!(server_row_left(856.0), 276.0, "floor(856/2) - 152");
+        assert_eq!(
+            (856.0 - SERVER_LIST_ROW_W) / 2.0,
+            275.5,
+            "control: the naive centring is half a pixel off"
+        );
+
+        // The title.
+        let title = server_list_title_label();
+        assert_eq!(title.text, crate::menu::nav::SERVER_LIST_TITLE);
+        assert_eq!((title.dx, title.dy), (0.0, 12.0));
+        assert_eq!(title.align, Align::Centre);
+        assert_eq!(title.origin, Origin::ScreenTop);
+    }
+
+    /// The whole screen is arranged **once**, at a reference canvas, and every
+    /// rect is then expressed relative to an [`Origin`]. That is only sound if the
+    /// arrangement is canvas-independent once so expressed — so re-arrange at three
+    /// sizes and require identical slots.
+    ///
+    /// This is what stands between the screen and being correct at 854×480 and
+    /// wrong everywhere else. It holds because the footer column measures 308 at
+    /// any width and the content band always starts at the header height (the list
+    /// is sized to `getContentHeight()`, so the clamp always picks it).
+    ///
+    /// **Even widths only, and that is a real limit rather than a convenient
+    /// choice.** `Origin::ScreenBottom`'s x is `width * 0.5` unrounded, while
+    /// `FrameLayout` truncates its centring, so at an odd logical width the two
+    /// disagree by half a pixel — the same limit `Screen::WorldSelect`'s footer
+    /// has, for the same reason. It is invisible in practice because
+    /// `logical_canvas` divides the framebuffer by an integer scale and can
+    /// produce a fractional width anyway; the row geometry, which *is* floored
+    /// per-term, is exact at every width (see `server_row_left`).
+    #[test]
+    fn the_server_list_slots_do_not_depend_on_the_reference_canvas() {
+        let reference = ServerListBlock::at(SERVER_LIST_REF_CANVAS.0, SERVER_LIST_REF_CANVAS.1);
+        for (w, h) in [(320.0, 240.0), (1280.0, 720.0), (1920.0, 1080.0)] {
+            let other = ServerListBlock::at(w, h);
+            assert_eq!(
+                other.content_top, reference.content_top,
+                "the content band moved at {w}x{h}"
+            );
+            for i in 0..reference.footer.len() {
+                assert_eq!(
+                    other.footer_slot(i),
+                    reference.footer_slot(i),
+                    "footer slot {i} moved at {w}x{h}"
+                );
+            }
+            // And the slot really resolves to where that canvas' own arrangement
+            // put it, which is the assertion that makes the two derivations
+            // independent rather than merely equal to each other.
+            for (i, want) in other.footer.iter().enumerate() {
+                assert_eq!(
+                    reference.footer_slot(i).resolve(w, h),
+                    *want,
+                    "footer slot {i} does not land on {w}x{h}'s own arrangement"
+                );
+            }
+        }
+    }
+
+    /// A nav sitting on the multiplayer screen with `servers` saved, reached the
+    /// way a player reaches it.
+    fn list_nav(tag: &str, servers: &[(&str, &str)]) -> (MenuNav, UiState) {
+        let mut nav = test_nav(tag);
+        let mut ui = UiState::new();
+        ui.open_server_list();
+        for (name, address) in servers {
+            add_server(&mut nav, &mut ui, name, address);
+        }
+        assert_eq!(ui.screen(), Screen::ServerList, "premise: the list is up");
+        assert_eq!(nav.list().len(), servers.len());
+        (nav, ui)
+    }
+
+    /// The bounding box of every colour-stream vertex drawn in exactly `want`, in
+    /// logical pixels, or `None` if that colour never appeared.
+    ///
+    /// Keyed on the **colour** rather than on a rect, because the thing under test
+    /// here is *where* a mark landed: a rect-shaped detector would need to know the
+    /// answer first. Reports a box, never a count, per `CLAUDE.md`.
+    fn colour_bounds(colour: &[f32], w: f32, h: f32, want: [f32; 4]) -> Option<(f32, f32, f32, f32)> {
+        let (mut x0, mut y0) = (f32::MAX, f32::MAX);
+        let (mut x1, mut y1) = (f32::MIN, f32::MIN);
+        let mut seen = false;
+        for v in colour.chunks_exact(STRIDE) {
+            if (2..6).any(|c| (v[c] - want[c - 2]).abs() > 1e-4) {
+                continue;
+            }
+            seen = true;
+            let px = (v[0] + 1.0) * 0.5 * w;
+            let py = (1.0 - v[1]) * 0.5 * h;
+            x0 = x0.min(px);
+            y0 = y0.min(py);
+            x1 = x1.max(px);
+            y1 = y1.max(py);
+        }
+        seen.then_some((x0, y0, x1 - x0, y1 - y0))
+    }
+
+    /// #376's rule applied to this screen: the discriminator for a hover overlay
+    /// is **position**. A gate that proved "an overlay drew in a row" would pass
+    /// on an overlay nailed to row 0.
+    ///
+    /// The measurement is the icon-dim quad (`fill(…, -1601138544)`), which is the
+    /// one part of the overlay that reaches the *colour* stream — the three arrow
+    /// sprites need an atlas, and they get their own gate below.
+    #[test]
+    fn the_hover_overlay_follows_the_cursor_rather_than_the_row() {
+        let (nav, ui) = list_nav("hover", &[("A", "a.example"), ("B", "b.example")]);
+        let statuses = StatusCache::with_probe(unavailable_probe());
+        let mut fav = FaviconCache::new();
+        let mut f = frame_for(&ui, &nav, &statuses, &mut fav).unwrap();
+
+        let dim_at = |f: &MenuFrame<'_>| {
+            colour_bounds(&geometry(f, V_W, V_H), V_W, V_H, SERVER_ICON_DARKEN)
+        };
+        // A tolerance, not `assert_eq!`: the measurement round-trips through NDC
+        // and back (`2x/w - 1` then its inverse), so 277.0 comes out 277.00003.
+        let is = |got: Option<(f32, f32, f32, f32)>, want: (f32, f32, f32, f32), what: &str| {
+            let g = got.unwrap_or_else(|| panic!("{what}: nothing drew, expected {want:?}"));
+            let near = (g.0 - want.0).abs() < 0.01
+                && (g.1 - want.1).abs() < 0.01
+                && (g.2 - want.2).abs() < 0.01
+                && (g.3 - want.3).abs() < 0.01;
+            assert!(near, "{what}: overlay at {g:?}, expected {want:?}");
+        };
+
+        // No cursor at all — a keyboard-only session, and every hermetic test.
+        // This is also the control that makes the absences below real: if the
+        // detector could not see the quad, every assertion here would pass on a
+        // screen that never drew one.
+        f.cursor = None;
+        assert_eq!(dim_at(&f), None, "no cursor must mean no hover overlay");
+
+        // Row 0, then row 1: the same overlay, one `itemHeight` lower.
+        let icon0 = server_entry_icon_rect(0, V_W);
+        f.cursor = Some((icon0.0 + 4.0, icon0.1 + 4.0));
+        is(dim_at(&f), icon0, "row 0's icon");
+        let icon1 = server_entry_icon_rect(1, V_W);
+        f.cursor = Some((icon1.0 + 4.0, icon1.1 + 20.0));
+        is(dim_at(&f), icon1, "row 1's icon");
+        assert_eq!(
+            icon1.1 - icon0.1,
+            SERVER_LIST_ITEM_H,
+            "premise: the two rows are a row apart, or this proves nothing"
+        );
+
+        // Vanilla's `hovered` is the *row*, not the icon: the cursor anywhere in
+        // the row lights the icon up, and anywhere outside it does not.
+        f.cursor = Some((icon0.0 + 200.0, icon0.1 + 4.0));
+        is(dim_at(&f), icon0, "the whole row hovers");
+        f.cursor = Some((10.0, 10.0));
+        assert_eq!(dim_at(&f), None, "the backdrop is not a row");
+    }
+
+    /// A synthetic pack carrying the `server_list/*` sprites plus the button set,
+    /// so sprite *identity* can be asserted with no jar — `button_pack`'s trick.
+    fn server_list_pack() -> lodestone_assets::ResourceManager {
+        use crate::menu::status::{PING_SPRITES, PINGING_SPRITES};
+        use lodestone_assets::{MemorySource, ResourceSource};
+        let mut src = MemorySource::default();
+        for (id, border) in [
+            ("widget/button", 3u32),
+            ("widget/button_highlighted", 3),
+            ("widget/button_disabled", 1),
+        ] {
+            src.insert(
+                format!("assets/minecraft/textures/gui/sprites/{id}.png"),
+                solid_rgba_png(200, 20, [10, 20, 30, 255]),
+            );
+            src.insert(
+                format!("assets/minecraft/textures/gui/sprites/{id}.png.mcmeta"),
+                format!(
+                    r#"{{"gui":{{"scaling":{{"type":"nine_slice","width":200,"height":20,"border":{border}}}}}}}"#
+                )
+                .into_bytes(),
+            );
+        }
+        // Every status sprite at vanilla's own 10×8, and the three 32×32 overlays.
+        for id in PING_SPRITES.iter().chain(PINGING_SPRITES.iter()).chain([
+            &crate::menu::status::INCOMPATIBLE_SPRITE,
+            &crate::menu::status::UNREACHABLE_SPRITE,
+        ]) {
+            src.insert(
+                format!("assets/minecraft/textures/gui/sprites/{id}.png"),
+                solid_rgba_png(10, 8, [40, 90, 200, 255]),
+            );
+        }
+        for (a, b) in [
+            SERVER_JOIN_SPRITES,
+            SERVER_MOVE_UP_SPRITES,
+            SERVER_MOVE_DOWN_SPRITES,
+        ] {
+            for id in [a, b] {
+                src.insert(
+                    format!("assets/minecraft/textures/gui/sprites/{id}.png"),
+                    solid_rgba_png(32, 32, [200, 40, 90, 255]),
+                );
+            }
+        }
+        // The favicon fallback is a **loose** texture, so it arrives through the
+        // extras list rather than the sprite glob — the same path the logo takes.
+        src.insert(
+            crate::resources::UNKNOWN_SERVER_TEXTURE.1,
+            solid_rgba_png(32, 32, [70, 70, 70, 255]),
+        );
+        lodestone_assets::ResourceManager::new(vec![Box::new(src) as Box<dyn ResourceSource>])
+    }
+
+    /// The atlas the two sprite gates below sample against.
+    fn server_list_atlas() -> GuiAtlas {
+        GuiAtlas::build_with_extras(
+            &server_list_pack(),
+            &[crate::resources::UNKNOWN_SERVER_TEXTURE],
+        )
+        .expect("synthetic atlas builds")
+    }
+
+    /// Whether any whole **quad** on the sprite stream samples inside `id`'s atlas
+    /// region.
+    ///
+    /// `all_uvs_within`'s companion, and needed because the hover overlay blits
+    /// **three** sprites into the same 32×32 rect: "every UV is inside join" is
+    /// false by construction there, while "some quad is inside join_highlighted and
+    /// none is inside join" is exactly the question.
+    ///
+    /// A *quad* rather than a vertex, and that is not fussiness: the packer may
+    /// place two sprites edge to edge, and a vertex exactly on the shared edge is
+    /// inside both regions to within any epsilon. A whole quad can only be inside
+    /// one of two equal-sized regions.
+    fn any_quad_within(sprite: &[f32], min: [f32; 2], max: [f32; 2]) -> bool {
+        sprite
+            .chunks_exact(SPRITE_FLOATS_PER_VERTEX * 6)
+            .any(|quad| all_uvs_within(quad, min, max))
+    }
+
+    /// Every sprite-stream UV whose **destination** falls inside `rect`.
+    ///
+    /// The pair of questions together — where it landed and which region it
+    /// sampled — is what makes a per-widget assertion possible on a stream that
+    /// carries every sprite on the screen at once.
+    fn uvs_in_dest(sprite: &[f32], w: f32, h: f32, rect: (f32, f32, f32, f32)) -> Vec<[f32; 2]> {
+        let (rx, ry, rw, rh) = rect;
+        sprite
+            .chunks_exact(SPRITE_FLOATS_PER_VERTEX)
+            .filter(|v| {
+                let px = (v[0] + 1.0) * 0.5 * w;
+                let py = (1.0 - v[1]) * 0.5 * h;
+                px >= rx - 0.01 && px <= rx + rw + 0.01 && py >= ry - 0.01 && py <= ry + rh + 0.01
+            })
+            .map(|v| [v[2], v[3]])
+            .collect()
+    }
+
+    /// The quadrant under the cursor decides which of the three overlay sprites is
+    /// drawn **highlighted**, and the other two must stay plain. All three blit
+    /// into the same rect, so this is asserted by atlas region rather than by
+    /// position — position is what the previous gate covers.
+    #[test]
+    fn each_hovered_icon_quadrant_highlights_its_own_sprite() {
+        let atlas = server_list_atlas();
+        let (nav, ui) = list_nav(
+            "quadrants",
+            &[("A", "a.example"), ("B", "b.example"), ("C", "c.example")],
+        );
+        let statuses = StatusCache::with_probe(unavailable_probe());
+        let mut fav = FaviconCache::new();
+        let mut f = frame_for(&ui, &nav, &statuses, &mut fav).unwrap();
+
+        let region = |id: &str| sprite_uv_bounds(&atlas, id);
+        let regions = [
+            SERVER_JOIN_SPRITES,
+            SERVER_MOVE_UP_SPRITES,
+            SERVER_MOVE_DOWN_SPRITES,
+        ];
+        // The six regions must be disjoint, or "sampled inside X" proves nothing.
+        let all: Vec<([f32; 2], [f32; 2])> = regions
+            .into_iter()
+            .flat_map(|(a, b)| [region(a), region(b)])
+            .collect();
+        for i in 0..all.len() {
+            for j in (i + 1)..all.len() {
+                let (a, b) = (all[i], all[j]);
+                assert!(
+                    a.1[0] <= b.0[0] || b.1[0] <= a.0[0] || a.1[1] <= b.0[1] || b.1[1] <= a.0[1],
+                    "two overlay sprites share atlas space: {a:?} {b:?}"
+                );
+            }
+        }
+
+        // Row 1 of three, so both move arrows apply.
+        let (ix, iy, iw, ih) = server_entry_icon_rect(1, V_W);
+        let cases = [
+            // (cursor, which of the three is highlighted)
+            ((ix + iw * 0.75, iy + ih * 0.5), 0usize),
+            ((ix + 4.0, iy + 4.0), 1),
+            ((ix + 4.0, iy + ih - 4.0), 2),
+        ];
+        for ((mx, my), highlighted) in cases {
+            f.cursor = Some((mx, my));
+            let sprite = build(&f, Some(&atlas), None, V_W, V_H).sprite;
+            for (which, (plain, hot)) in regions.into_iter().enumerate() {
+                let (p, hgt) = (region(plain), region(hot));
+                if which == highlighted {
+                    assert!(
+                        any_quad_within(&sprite, hgt.0, hgt.1),
+                        "cursor ({mx}, {my}) must highlight {hot}"
+                    );
+                    assert!(
+                        !any_quad_within(&sprite, p.0, p.1),
+                        "and must not also draw the plain {plain}"
+                    );
+                } else {
+                    assert!(
+                        any_quad_within(&sprite, p.0, p.1),
+                        "cursor ({mx}, {my}) must still draw the plain {plain}"
+                    );
+                    assert!(
+                        !any_quad_within(&sprite, hgt.0, hgt.1),
+                        "and must not highlight {hot}"
+                    );
+                }
+            }
+        }
+
+        // Row 0 has nowhere to move up to, so its arrow must not be drawn at all —
+        // vanilla's `if (index > 0)` guard (`ServerSelectionList.java:375`).
+        let (ix0, iy0, iw0, ih0) = server_entry_icon_rect(0, V_W);
+        f.cursor = Some((ix0 + 4.0, iy0 + 4.0));
+        let sprite = build(&f, Some(&atlas), None, V_W, V_H).sprite;
+        let up = region(SERVER_MOVE_UP_SPRITES.0);
+        let up_hot = region(SERVER_MOVE_UP_SPRITES.1);
+        assert!(
+            !any_quad_within(&sprite, up.0, up.1) && !any_quad_within(&sprite, up_hot.0, up_hot.1),
+            "row 0 must draw no move-up arrow"
+        );
+        let down = region(SERVER_MOVE_DOWN_SPRITES.0);
+        assert!(
+            any_quad_within(&sprite, down.0, down.1),
+            "control: its move-down arrow is there, so the detector works"
+        );
+        // And with no cursor, none of the six is drawn.
+        f.cursor = None;
+        let sprite = build(&f, Some(&atlas), None, V_W, V_H).sprite;
+        for (plain, hot) in regions {
+            let (p, hgt) = (region(plain), region(hot));
+            assert!(!any_quad_within(&sprite, p.0, p.1), "{plain} without a cursor");
+            assert!(!any_quad_within(&sprite, hgt.0, hgt.1), "{hot} without a cursor");
+        }
+    }
+
+    /// The status sprite is asserted **by identity through the atlas**, at the rect
+    /// vanilla puts it at: a gate that only proved a ping bar exists passes on all
+    /// four states rendering the same bar.
+    ///
+    /// Also the footer's disabled path, per button, by the same joint test — where
+    /// it landed *and* which region it sampled. The expected sprite comes from
+    /// `WidgetSprites::get`, never spelled out.
+    #[test]
+    fn the_status_sprite_and_the_disabled_footer_sample_the_sprites_they_should() {
+        use crate::menu::nav::{SERVER_LIST_BUTTONS, ServerListButton as B};
+        use crate::menu::status::{PING_SPRITES, ServerStatus};
+
+        let atlas = server_list_atlas();
+        let (mut nav, mut ui) = list_nav("sprites", &[]);
+        let statuses = StatusCache::with_probe(unavailable_probe());
+        let mut fav = FaviconCache::new();
+
+        // Empty list: Join / Edit / Delete / Direct all draw `button_disabled`,
+        // each at its own rect, and the other three draw `button`.
+        let f = frame_for(&ui, &nav, &statuses, &mut fav).unwrap();
+        let stream = build(&f, Some(&atlas), None, V_W, V_H).sprite;
+        let check = |stream: &[f32], button: B, enabled: bool| {
+            let want = widget::BUTTON_SPRITES.get(enabled, false);
+            let (min, max) = sprite_uv_bounds(&atlas, want);
+            let rect = server_list_footer_slot(button).resolve(V_W, V_H);
+            let uvs = uvs_in_dest(stream, V_W, V_H, rect);
+            assert!(!uvs.is_empty(), "{button:?} drew nothing at {rect:?}");
+            assert!(
+                uvs.iter().all(|uv| {
+                    uv[0] >= min[0] - 1e-6
+                        && uv[0] <= max[0] + 1e-6
+                        && uv[1] >= min[1] - 1e-6
+                        && uv[1] <= max[1] + 1e-6
+                }),
+                "{button:?} did not sample {want} (enabled={enabled})"
+            );
+        };
+        for button in SERVER_LIST_BUTTONS {
+            check(&stream, button, button.enabled(false));
+        }
+
+        // Control, executed: a saved server flips three of them, so the assertion
+        // above measures the selection and not a screen that is always disabled.
+        add_server(&mut nav, &mut ui, "HOME", "mc.example.com");
+        let mut statuses = StatusCache::with_probe(std::sync::Arc::new(|_| {
+            Ok(ServerStatus {
+                motd: "hello".into(),
+                players: "2/8".into(),
+                protocol: Some(crate::menu::status::STATUS_PROTOCOL),
+                latency_ms: Some(400),
+                ..Default::default()
+            })
+        }));
+        let entries = nav.list().entries().to_vec();
+        statuses.refresh(&entries);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while statuses.pump() == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let f = frame_for(&ui, &nav, &statuses, &mut fav).unwrap();
+        let stream = build(&f, Some(&atlas), None, V_W, V_H).sprite;
+        for button in SERVER_LIST_BUTTONS {
+            check(&stream, button, button.enabled(true));
+        }
+        for b in [B::Select, B::Edit, B::Delete] {
+            assert!(b.enabled(true) && !b.enabled(false), "control premise: {b:?}");
+        }
+
+        // 400 ms is the middle bucket. Asserted at the status icon's own rect, so
+        // this is both "the right sprite" and "in the right place".
+        let rect = server_status_icon_rect(0, V_W);
+        let uvs = uvs_in_dest(&stream, V_W, V_H, rect);
+        assert!(!uvs.is_empty(), "no status sprite at {rect:?}");
+        let (min, max) = sprite_uv_bounds(&atlas, PING_SPRITES[2]);
+        assert!(
+            uvs.iter().all(|uv| {
+                uv[0] >= min[0] - 1e-6
+                    && uv[0] <= max[0] + 1e-6
+                    && uv[1] >= min[1] - 1e-6
+                    && uv[1] <= max[1] + 1e-6
+            }),
+            "400 ms must sample {} — three bars",
+            PING_SPRITES[2]
+        );
+        // Control: it is not sampling a *different* bucket's sprite, which is what
+        // "some ping bar drew" would have accepted.
+        let (fmin, fmax) = sprite_uv_bounds(&atlas, PING_SPRITES[4]);
+        assert!(
+            !uvs
+                .iter()
+                .all(|uv| uv[0] >= fmin[0] - 1e-6 && uv[0] <= fmax[0] + 1e-6
+                    && uv[1] >= fmin[1] - 1e-6
+                    && uv[1] <= fmax[1] + 1e-6),
+            "the detector cannot tell ping_3 from ping_5"
         );
     }
 
