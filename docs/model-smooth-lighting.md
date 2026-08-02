@@ -164,6 +164,47 @@ and the new `model_ao_corner_gate` (below) reads a single-occluder corner byte o
 linear byte multiply would have landed further off given the same non-linear
 sRGB re-encode the shade gate already characterises.
 
+### The directional face shade, and why it is *not* a dot product
+
+`face_shade` in `models.rs` multiplies into the same `ao` slot as the corner
+blend. It is a **fixed constant per face direction**, not a diffuse term:
+`CardinalLighting.DEFAULT` in the 26.2 jar
+(`net/minecraft/world/level/CardinalLighting.java`) is the record
+`(down 0.5, up 1.0, north 0.8, south 0.8, west 0.6, east 0.6)`, and
+`face_shade` is exactly that. The nether variant
+(`(0.9, 0.9, 0.8, 0.8, 0.6, 0.6)`, selected by `CardinalLighting.Type.NETHER`) is
+**not** ported — a dimension-dependent shade table is the open half here.
+
+Do not confuse this with the *entity* diffuse. Entities and the first-person arm
+have no per-face direction to look up, so they run vanilla's two-light
+`minecraft_mix_light` instead (see
+[entity-rendering.md](./entity-rendering.md)); blocks never do. Issue #383 asked
+whether block faces had drifted onto a dot product, and they had not.
+
+Re-verified against the **live** mesher (`mesh_models`, which is what
+`lodestone-shell/src/mesher.rs` calls for real terrain — never `mesh_simple`,
+which cannot exercise `face_shade` at all), on a mid-grey byte-128 texel at full
+sky light, `entity_light_pixels::lighting_census_by_location`:
+
+| face | `face_shade` | measured byte | `128 x shade` | if multiplied in *linear* |
+| --- | --- | --- | --- | --- |
+| up | 1.0 | 128 | 128 | 128 |
+| north/south | 0.8 | 102 | 102.4 | 115 |
+| east/west | 0.6 | 77 | 76.8 | 100 |
+| down | 0.5 | 64 | 64.0 | 92 |
+
+Every face lands on `128 x shade` to within a byte, and every one is far from the
+linear-space column — so the constants and the colour space are both vanilla, and
+neither needed changing for #383.
+
+Grass was singled out in that report because it carries a biome tint *and* a face
+shade, so a colour-space error would show up on it first. It does not:
+`grass_light_response_gate` measures the `grass_block` top at `(89, 116, 54)`,
+`G/R = 1.298`, against the plains tint `#91BD59`'s own `G/R = 1.303`. A
+linear-space tint multiply collapses that ratio to ~1.13 (the defect `4e8f058`
+removed). What is still missing on grass is **per-biome** tint — the palette holds
+each tinted source's *plains* colour — which changes hue, not brightness.
+
 ### Non-full-cube models and fluids
 
 - **Non-cube models** (stairs, slabs, fences): AO still applies, using the

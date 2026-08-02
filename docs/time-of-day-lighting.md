@@ -366,6 +366,79 @@ exactly the "changing several consumers" case where a half-wired version
 would be worse than none. Left as a scoped follow-up with the ground-truth
 data (`sky_light_timeline_jvm.txt`'s third column) already captured.
 
+## The ramp is linear where vanilla's is a curve (issue #383, not fixed)
+
+`light_term`'s `0.2 + 0.8 * level` is a **straight line** in the light level.
+Vanilla's is not. Both `Lightmap.getBrightness` and `shaders/core/lightmap.fsh`
+apply
+
+```glsl
+float get_brightness(float level) { return level / (4.0 - 3.0 * level); }
+```
+
+with `level = raw / 15`, then `lerp(dimensionType.ambientLight(), curvedV, 1.0)`
+— and the overworld's `ambientLight` is `0.0`, so overworld brightness is the
+bare curve. It agrees with our line only at the two endpoints:
+
+| sky level | ours (`0.2 + 0.8 * l`) | vanilla (`l / (4 - 3l)`) |
+| --- | --- | --- |
+| 15 | 1.000 | 1.000 |
+| 14 | 0.947 | 0.778 |
+| 13 | 0.893 | 0.619 |
+| 12 | 0.840 | 0.500 |
+| 11 | 0.787 | 0.407 |
+| 10 | 0.733 | 0.333 |
+| 8 | 0.627 | 0.222 |
+| 4 | 0.413 | 0.083 |
+| 0 | 0.200 | 0.000 |
+
+So **in partial light we are consistently too bright, never too dark** — at sky
+12, the sort of level a tree canopy leaves under it, by 0.84 against 0.50.
+
+This matters for how #383's third report — *"standing under a tree in daylight
+darkens the arm more than vanilla does"* — was diagnosed. The two hypotheses in
+the issue were that the arm's skylight was used without the day-of-time scaling,
+or sampled from the wrong cell. **Both are false:**
+
+* The scaling is applied. `entity_pipeline.rs`'s vertex shader computes
+  `sky = ((light >> 4) & 15) / 15 * sky_darken()`, and
+  `gpu/first_person.rs::write_hand_camera` fills the `sky_darken` lane for
+  *both* hand branches (arm and held item) from the same source terrain uses.
+  At noon `sky_darken_for_time_of_day` returns exactly `1.0`, so under a tree at
+  midday the factor removes nothing.
+* The cell is right. `hand_light` samples `entity_light.sample(camera.position)`
+  — the **eye** — which is what vanilla's
+  `EntityRenderer.getPackedLightCoords` does via
+  `entity.getLightProbePosition(partialTick)`.
+
+And the skylight value itself is the server's own array, not something we
+recompute. With the same input and a ramp that is uniformly *brighter* than
+vanilla's, the light term cannot be what over-darkens the arm.
+
+What was over-darkening it is the **diffuse** term, which was fixed: the arm's
+dominant face rendered at `0.497` where vanilla puts it at `0.877`. Under a tree
+that lands at `0.497 x 0.84 = 0.42` against vanilla's `0.877 x 0.50 = 0.44` — so
+in the open the arm was 1.8x too dark and under a canopy the two happened to
+nearly coincide, which is exactly why the symptom read as *"the tree makes it
+worse"* rather than *"the arm is always dark"*. See
+[entity-rendering.md](./entity-rendering.md).
+
+**Why the ramp is left alone.** It is not an entity defect and must not be fixed
+in one shader: `model_pipeline.rs`, the fluid shader and `entity_pipeline.rs` all
+compute the identical expression on purpose, and `entity_light_pixels` exists
+specifically to catch a mob that stops agreeing with the terrain it stands on.
+Changing the curve changes the brightness of **every** partially-lit surface in
+the game simultaneously and would need every absolute-byte gate in the repo
+re-derived (`entity_light_pixels`, `entity_night_pixels`,
+`grass_light_response_gate`, `model_shade_gamma_gate`, the shell's HUD and
+container item gates). It also interacts with the already-scoped `SKY_LIGHT_COLOR`
+work above, which has to split this same scalar into separate sky and block
+contributions — the curve should be ported in that change, where `max(sky, block)`
+becomes `curve(sky)*skyFactor + curve(block)*1.4` and the two land together, not
+as a third partial step. Also unported and belonging to the same change:
+`BlockFactor = blockLightFlicker + 1.4` (torchlight flickers and exceeds 1.0) and
+`AmbientColor`.
+
 ## Gates
 
 Kept deliberately separate so a pass on one cannot mask the other.
