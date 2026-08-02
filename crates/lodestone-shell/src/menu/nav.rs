@@ -586,6 +586,14 @@ impl MenuNav {
         self.options.gui_scale
     }
 
+    /// Vanilla's **View Bobbing** option — see
+    /// [`crate::config::Options::view_bobbing`]. Read once per presented frame
+    /// by `app.rs` and handed to `Sim::set_view_bobbing`.
+    #[must_use]
+    pub fn view_bobbing(&self) -> bool {
+        self.options.view_bobbing
+    }
+
     /// The last options-save failure, if any.
     #[must_use]
     pub fn options_save_error(&self) -> Option<&str> {
@@ -893,15 +901,17 @@ impl MenuNav {
         }
     }
 
-    /// The settings screen has no row highlight: its one control owns Up/Down
-    /// directly, which steps the GUI scale.
+    /// The settings screen still has no row highlight: each control owns its own
+    /// key. Up/Down step the GUI scale, Enter toggles View Bobbing.
     ///
-    /// It briefly had a second row (the `unlock_framerate` debug knob, on
-    /// Enter), deleted with the rest of the bespoke debug affordances in issue
-    /// #382. When a real second control lands — vanilla's Max Framerate slider
-    /// is the obvious one — that is the point to introduce a proper highlight
-    /// (and vanilla's own `OptionsScreen` list) and re-point the GUI-scale
-    /// tests once, on purpose, rather than handing each control its own key.
+    /// Enter briefly meant nothing at all: it used to flip the `unlock_framerate`
+    /// debug knob, #382 deleted that row, and #58 put a **real** vanilla option
+    /// (`options.viewBobbing`) in its place. Giving the second control its own key
+    /// rather than adding a cursor is still deliberate — a cursor would change
+    /// what Up/Down *mean* here, and the GUI-scale binding is what every existing
+    /// test on this screen asserts. When a third control lands, that is the point
+    /// to introduce a real highlight (and vanilla's own `OptionsScreen` list) and
+    /// re-point those tests once, on purpose.
     fn key_settings(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         match key {
             MenuKey::Up => {
@@ -910,6 +920,10 @@ impl MenuNav {
             }
             MenuKey::Down => {
                 self.cycle_gui_scale(-1);
+                MenuAction::None
+            }
+            MenuKey::Enter => {
+                self.toggle_view_bobbing();
                 MenuAction::None
             }
             MenuKey::Escape => {
@@ -1034,6 +1048,13 @@ impl MenuNav {
         let current = self.options.gui_scale as i32;
         let next = (current + delta).rem_euclid(span);
         self.options.gui_scale = next as u32;
+        self.persist_options();
+    }
+
+    /// Flips vanilla's View Bobbing option and saves immediately, same
+    /// eager-persistence rule as [`MenuNav::cycle_gui_scale`].
+    fn toggle_view_bobbing(&mut self) {
+        self.options.view_bobbing = !self.options.view_bobbing;
         self.persist_options();
     }
 
@@ -1542,29 +1563,35 @@ mod tests {
     }
 
     #[test]
-    fn settings_enter_is_inert_now_that_the_debug_knob_is_gone() {
-        // The screen's one control is the GUI scale, on Up/Down. Enter used to
-        // flip the `unlock_framerate` debug row (#382); with that row deleted
-        // Enter must do *nothing at all* rather than fall through to some other
-        // screen's meaning of Enter, and in particular must not disturb the
-        // scale — the one setting this screen still owns.
-        let (mut nav, path) = nav("settings-enter-inert");
+    fn settings_enter_toggles_view_bobbing_without_disturbing_the_scale() {
+        // Enter meant nothing between #382 (which deleted the `unlock_framerate`
+        // debug row from it) and #58 (which put vanilla's real
+        // `options.viewBobbing` there).
+        let (mut nav, path) = nav("settings-view-bobbing");
         let mut ui = UiState::new();
         ui.open_settings();
         let options_path = path.parent().unwrap().join("options.json");
 
+        assert!(nav.view_bobbing(), "vanilla's default is ON, unlike a debug knob");
+        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
+        assert!(!nav.view_bobbing());
+        // On disk immediately, same rule as the scale.
+        assert!(!crate::config::Options::load_from(&options_path).view_bobbing);
+
+        nav.key(&mut ui, MenuKey::Enter);
+        assert!(nav.view_bobbing(), "Enter is a toggle, not a latch");
+        assert!(crate::config::Options::load_from(&options_path).view_bobbing);
+
+        // The two controls share a screen and no cursor, so the thing that can
+        // actually go wrong is one key reaching the other's setting.
         nav.key(&mut ui, MenuKey::Up);
         nav.key(&mut ui, MenuKey::Up);
         assert_eq!(nav.gui_scale(), 2);
-
-        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
-        assert_eq!(ui.screen(), Screen::Settings, "Enter must not leave");
+        assert!(nav.view_bobbing(), "Up must not touch the toggle");
+        nav.key(&mut ui, MenuKey::Enter);
+        assert!(!nav.view_bobbing());
         assert_eq!(nav.gui_scale(), 2, "Enter must not touch the scale");
-        assert_eq!(
-            crate::config::Options::load_from(&options_path).gui_scale,
-            2,
-            "and must not rewrite the file with something else"
-        );
+        assert_eq!(ui.screen(), Screen::Settings, "and must not leave the screen");
         assert_eq!(nav.options_save_error(), None);
     }
 

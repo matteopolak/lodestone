@@ -121,6 +121,19 @@ pub struct Options {
     /// struct stays `Copy` and the menu layer that reads it by value does not
     /// have to change.
     pub keybinds: Keybinds,
+    /// Vanilla's **View Bobbing** option (`options.viewBobbing`,
+    /// `Options.java:600`, `OptionInstance.createBoolean(..., true)`), which
+    /// lives on the Accessibility screen in 26.2.
+    ///
+    /// Gates the walking bob only. `GameRenderer.renderLevel` (`:534-536`)
+    /// applies `bobHurt` **unconditionally** and only `bobView` behind this flag,
+    /// so a player who turns bobbing off still gets the damage tilt — that is
+    /// vanilla's split, not an oversight here. The damage tilt has its own
+    /// separate accessibility option (`damageTiltStrength`, default `1.0`), which
+    /// this client does not surface yet.
+    ///
+    /// Default **on**, matching vanilla. See `docs/view-bobbing.md`.
+    pub view_bobbing: bool,
 }
 
 impl Default for Options {
@@ -128,6 +141,7 @@ impl Default for Options {
         Self {
             gui_scale: AUTO_GUI_SCALE,
             keybinds: Keybinds::new(),
+            view_bobbing: true,
         }
     }
 }
@@ -164,9 +178,18 @@ impl Options {
         let keybinds = obj
             .get("keybinds")
             .map_or_else(Keybinds::new, Keybinds::from_json_value);
+        // Absent or malformed is **on**, because that is vanilla's default —
+        // note this is the opposite rule from the deleted `unlock_framerate`
+        // knob, whose default was off. A degrade-to-`false` here would silently
+        // turn a real setting off for anyone whose file got mangled.
+        let view_bobbing = obj
+            .get("view_bobbing")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
         Self {
             gui_scale,
             keybinds,
+            view_bobbing,
         }
     }
 
@@ -196,6 +219,11 @@ impl Options {
         let keybinds = self.keybinds.to_json_value();
         if !keybinds.as_object().is_some_and(serde_json::Map::is_empty) {
             obj.insert("keybinds".into(), keybinds);
+        }
+        // Written only when it differs from the default, same rule as
+        // `keybinds`: an untouched install has no key for it.
+        if !self.view_bobbing {
+            obj.insert("view_bobbing".into(), false.into());
         }
         let text = serde_json::to_string_pretty(&serde_json::Value::Object(obj))
             .unwrap_or_else(|_| "{}".to_string());
@@ -585,6 +613,50 @@ mod tests {
             5,
             "gui_scale must survive keys this version does not know"
         );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn view_bobbing_defaults_on_and_only_writes_a_key_when_turned_off() {
+        // The **opposite** default from the deleted `unlock_framerate` knob, and
+        // the asymmetry is the point: vanilla ships `options.viewBobbing` on, so
+        // a missing or garbled value must read as ON. Degrading to `false` here
+        // would silently disable a real setting for anyone whose file got
+        // mangled — the failure mode a debug knob is allowed to have and a
+        // shipped option is not.
+        let path = temp_options_path("view-bobbing");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        assert!(Options::default().view_bobbing);
+
+        Options::default().save_to(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("view_bobbing"),
+            "the default writes no key: {text}"
+        );
+        assert!(Options::load_from(&path).view_bobbing);
+
+        let off = Options {
+            view_bobbing: false,
+            ..Options::default()
+        };
+        off.save_to(&path).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("view_bobbing"));
+        assert_eq!(Options::load_from(&path), off);
+
+        for bad in ["\"false\"", "0", "[]", "null", "{}"] {
+            std::fs::write(
+                &path,
+                format!("{{\"gui_scale\": 5, \"view_bobbing\": {bad}}}"),
+            )
+            .unwrap();
+            let loaded = Options::load_from(&path);
+            assert!(
+                loaded.view_bobbing,
+                "view_bobbing: {bad} must degrade to ON, not OFF"
+            );
+            assert_eq!(loaded.gui_scale, 5, "gui_scale must survive {bad}");
+        }
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
