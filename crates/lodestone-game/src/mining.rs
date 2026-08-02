@@ -229,6 +229,33 @@ pub struct Mining {
     /// value the server echoes when it acks or rolls back; `ABORT` carries `0`,
     /// matching vanilla's 3-argument packet constructor.
     next_sequence: i32,
+    /// The block this machine decided was **destroyed** during the most recent
+    /// [`start`](Self::start) / [`continue_`](Self::continue_) / [`stop`](Self::stop)
+    /// call. Every entry point clears it first, so it describes that call only,
+    /// and [`take_destroyed`](Self::take_destroyed) consumes it.
+    ///
+    /// # Why the machine reports destruction instead of callers reading the packets
+    ///
+    /// This is vanilla's shape. `MultiPlayerGameMode` has exactly one destroy
+    /// funnel — `destroyBlock(pos)` — and **four** call sites reach it
+    /// (`MultiPlayerGameMode.java`, 26.2): the two creative branches, the
+    /// instant-break branch inside `startDestroyBlock`, and the
+    /// progress-reached-`1.0` branch inside `continueDestroyBlock`. Everything
+    /// keyed on a block actually breaking hangs off that funnel, not off any
+    /// one of the four: `destroyBlock` calls
+    /// `Block.playerWillDestroy` → `Block.spawnDestroyParticles` →
+    /// `level.levelEvent(player, 2001, pos, id)`, which on `ClientLevel`
+    /// dispatches **locally** into `LevelEventHandler`'s `case 2001` →
+    /// `addDestroyBlockEffect` and the break sound.
+    ///
+    /// The serverbound packets do **not** identify that moment. A progressive
+    /// break concludes with `STOP_DESTROY_BLOCK`; an instant break concludes with
+    /// `START_DESTROY_BLOCK` and nothing else, because the block is already gone.
+    /// A consumer that scanned the returned [`ClientAction`]s for `StopDestroy`
+    /// therefore saw progressive breaks and silently missed every one-shot block —
+    /// which is exactly issue #387: grass, saplings and flowers threw no debris
+    /// while stone did.
+    destroyed: Option<BlockPos>,
 }
 
 impl Mining {
@@ -265,6 +292,24 @@ impl Mining {
         if p > 0.0 { (p * 10.0) as i32 } else { -1 }
     }
 
+    /// The block destroyed by the call just made, consumed by the read.
+    ///
+    /// This is the port's stand-in for vanilla's
+    /// `MultiPlayerGameMode.destroyBlock` funnel — the one moment a block goes
+    /// away because *this* player broke it, covering both the progressive finish
+    /// and the single-tick instant break. Drive it right after
+    /// [`start`](Self::start) / [`continue_`](Self::continue_) and treat a `Some`
+    /// as "spawn the destroy effect for this position", the way
+    /// `Block.spawnDestroyParticles` does off that funnel.
+    ///
+    /// Consuming rather than peeking, so a caller cannot double-emit by reading
+    /// twice, and so a caller that skips a tick's read does not see a stale
+    /// break on the next one. See the `destroyed` field's own docs for why this
+    /// is not derivable from the returned [`ClientAction`]s.
+    pub fn take_destroyed(&mut self) -> Option<BlockPos> {
+        self.destroyed.take()
+    }
+
     fn take_sequence(&mut self) -> i32 {
         // Vanilla pre-increments, so the first prediction is sequence 1.
         self.next_sequence += 1;
@@ -294,6 +339,7 @@ impl Mining {
         inputs: &BreakInputs,
         tool: Option<ItemStack>,
     ) -> Vec<ClientAction> {
+        self.destroyed = None;
         let mut out = Vec::new();
         if self.state.is_none() || !self.same_target(pos, &tool) {
             if let Some(old) = &self.state {
@@ -303,7 +349,15 @@ impl Mining {
             if !inputs.is_air && inputs.progress_per_tick() >= 1.0 {
                 // Instant break: the server breaks the block on START, so no
                 // live dig is retained and no STOP is ever sent.
+                //
+                // Vanilla's equivalent branch (`startDestroyBlock`'s
+                // `getDestroyProgress(..) >= 1.0F` arm) calls
+                // `this.destroyBlock(pos)` here, which is the *same* funnel the
+                // progressive finish in `continue_` reaches. Latching it is what
+                // makes the effect keyed on destruction rather than on the
+                // `StopDestroy` packet a one-shot never sends (issue #387).
                 self.state = None;
+                self.destroyed = Some(pos);
                 out.push(block_action(BlockActionKind::StartDestroy, pos, face, seq));
             } else {
                 self.state = Some(Active {
@@ -334,6 +388,7 @@ impl Mining {
         inputs: &BreakInputs,
         tool: Option<ItemStack>,
     ) -> Vec<ClientAction> {
+        self.destroyed = None;
         if self.delay > 0 {
             self.delay -= 1;
             // Cooldown tick: vanilla returns true here, so the arm swings.
@@ -361,6 +416,10 @@ impl Mining {
                 out.push(block_action(BlockActionKind::StopDestroy, pos, face, seq));
                 self.state = None;
                 self.delay = 5;
+                // Vanilla's `continueDestroyBlock` calls `this.destroyBlock(pos)`
+                // here — the same funnel the instant-break branch of `start`
+                // reaches. One latch, both paths.
+                self.destroyed = Some(pos);
             }
             out.push(swing());
             out
@@ -375,6 +434,10 @@ impl Mining {
     /// `Direction.DOWN` for this abort) and clears progress. No arm swing. A
     /// no-op when nothing is being mined.
     pub fn stop(&mut self) -> Vec<ClientAction> {
+        // An abort destroys nothing, and clearing here keeps the latch scoped to
+        // the call that set it even for a driver that only reads it on the ticks
+        // it is actually digging.
+        self.destroyed = None;
         if let Some(active) = self.state.take() {
             vec![block_action(
                 BlockActionKind::AbortDestroy,
@@ -804,6 +867,99 @@ mod tests {
         assert!(
             !m.is_destroying(),
             "an instant-break block leaves no live dig — the server breaks it on START"
+        );
+        assert!(
+            !acts.iter().any(|a| is_stop(a, p)),
+            "an instant break sends no STOP — which is why a consumer keyed on \
+             STOP misses it entirely (issue #387)"
+        );
+        assert_eq!(
+            m.take_destroyed(),
+            Some(p),
+            "a one-shot break must still report the block as destroyed: vanilla's \
+             instant-break branch calls the same `destroyBlock` funnel the \
+             progressive finish does"
+        );
+    }
+
+    /// Both destroy paths report through the one latch, and nothing else does.
+    ///
+    /// The two `Some` assertions are each other's control for the two `None`s:
+    /// the same `take_destroyed()` call that answers `None` on a mid-dig tick
+    /// and after an abort is proven to answer `Some` on the ticks a block really
+    /// breaks, so "no destruction reported" here cannot be a detector that never
+    /// fires.
+    #[test]
+    fn destruction_is_latched_on_both_break_paths_and_only_those() {
+        // Progressive: nothing until the finishing tick, then exactly the target.
+        let mut m = Mining::new();
+        let p = pos(10, 64, 10);
+        let inputs = stone_with_diamond_pickaxe(); // 6 continue ticks
+        m.start(p, BlockFace::Up, &inputs, None);
+        assert_eq!(
+            m.take_destroyed(),
+            None,
+            "starting a multi-tick dig destroys nothing"
+        );
+        let mut finished_on = None;
+        for tick in 1..=20 {
+            let acts = m.continue_(p, BlockFace::Up, &inputs, None);
+            match m.take_destroyed() {
+                Some(at) => {
+                    assert_eq!(at, p, "the latch names the block that broke");
+                    assert!(
+                        acts.iter().any(|a| is_stop(a, p)),
+                        "the progressive finish latches on the same tick it sends STOP"
+                    );
+                    finished_on = Some(tick);
+                    break;
+                }
+                None => assert!(
+                    !acts.iter().any(|a| is_stop(a, p)),
+                    "tick {tick} sent STOP without latching a destruction"
+                ),
+            }
+        }
+        assert_eq!(
+            finished_on,
+            Some(6),
+            "the dig must finish on vanilla's 6th continue tick, or this test \
+             never exercised the finishing branch at all"
+        );
+
+        // Abort: releasing mid-dig destroys nothing.
+        let mut m = Mining::new();
+        let slow = stone();
+        m.start(p, BlockFace::Up, &slow, None);
+        m.continue_(p, BlockFace::Up, &slow, None);
+        m.stop();
+        assert_eq!(
+            m.take_destroyed(),
+            None,
+            "an ABORT is not a destruction"
+        );
+
+        // Instant: the very first call latches, with no STOP anywhere.
+        let mut m = Mining::new();
+        let grass = BreakInputs {
+            hardness: 0.0,
+            ..BreakInputs::default()
+        };
+        let acts = m.continue_(p, BlockFace::Up, &grass, None);
+        assert!(
+            !acts.iter().any(|a| is_stop(a, p)),
+            "a one-shot block never reaches the STOP branch"
+        );
+        assert_eq!(
+            m.take_destroyed(),
+            Some(p),
+            "…and must still be reported destroyed — this is issue #387"
+        );
+        assert_eq!(
+            m.take_destroyed(),
+            None,
+            "the latch is consumed by the read, so a second look cannot \
+             double-emit the burst"
         );
     }
 

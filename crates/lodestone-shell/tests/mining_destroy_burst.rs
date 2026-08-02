@@ -14,10 +14,36 @@
 //! instead. So the player's own break could never produce a burst; only a
 //! break some other cause reported could.
 //!
-//! The fix adds a local **predicted** emit in `drive_mining`, on the same tick
-//! its own `Mining` predictor emits `BlockAction { action: StopDestroy, .. }`
-//! — vanilla's `MultiPlayerGameMode.destroyBlock` does the identical thing
-//! client-side, synchronously, without waiting for a server round trip.
+//! The fix adds a local **predicted** emit in `drive_mining` — vanilla's
+//! `MultiPlayerGameMode.destroyBlock` does the identical thing client-side,
+//! synchronously, without waiting for a server round trip.
+//!
+//! # Issue #387: the same emit, keyed on the wrong thing
+//!
+//! That fix keyed the emit on the predictor queueing
+//! `BlockAction { action: StopDestroy, .. }`. Reported from play afterwards:
+//! punching grass and saplings still produced no debris, while blocks that take
+//! a real mining cycle did.
+//!
+//! `StopDestroy` is not the moment a block breaks — it is one of the **four**
+//! ways vanilla's `MultiPlayerGameMode` reaches its single `destroyBlock(pos)`
+//! funnel (the two creative branches, `startDestroyBlock`'s instant-break
+//! branch, and `continueDestroyBlock`'s progress-reached-`1.0` branch), and it
+//! is the one a one-shot block never takes: `Mining::start`'s
+//! `progress_per_tick() >= 1.0` branch emits `StartDestroy` and nothing else,
+//! because the block is already gone. The destroy effect hangs off the funnel,
+//! not off a packet — `destroyBlock` → `Block.playerWillDestroy` →
+//! `Block.spawnDestroyParticles` → `level.levelEvent(player, 2001, pos, id)`,
+//! which `ClientLevel` dispatches locally into `LevelEventHandler`'s `case
+//! 2001`.
+//!
+//! So `Mining` now latches the destruction itself
+//! (`Mining::take_destroyed`), both branches set it, and `drive_mining` keys on
+//! that. [`an_instant_break_throws_a_debris_burst_on_its_very_first_tick`] is
+//! the gate for the one-shot path;
+//! [`a_completed_dig_throws_a_debris_burst_on_the_tick_it_finishes`] keeps the
+//! progressive path pinned so the re-keying cannot fix one by breaking the
+//! other.
 //!
 //! # How this gate proves it
 //!
@@ -43,7 +69,11 @@
 //! Same as `mining_deadlock.rs`: `lodestone_net::memory_pair` and a fake
 //! [`VersionAdapter`] for a hermetic `ClientHandle`; `lodestone_ecs` for the
 //! handle, schedule and component set; `lodestone::interact` for the system
-//! under test.
+//! under test. Plus `lodestone_data::{block_states, hardness}` — the jar-derived
+//! censuses the instant-break fixture is *derived from* rather than asserted
+//! against, so a block that stopped being one-shot cannot leave the gate
+//! measuring a slow dig (the *precondition* species of vacuous test, and the one
+//! this fixture is most exposed to).
 
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -59,15 +89,27 @@ use lodestone_ecs::ecs::world::World as EcsWorld;
 use lodestone_ecs::player::{ActionQueue, Egress};
 use lodestone_ecs::session::SessionMenus;
 use lodestone_ecs::{EcsHandle, GameTick, LockHolds, VersionData};
+use lodestone_game::mining::BreakInputs;
 use lodestone_model::{AdapterError, BlockHardness, ClientAction, ItemStack, ToolMining};
 use lodestone_world::{
     ChunkColumn, ChunkPos, ColumnLight, Heightmaps, LoadedChunk, PaletteKind, WorldSink,
 };
 
-/// The block state the dig targets. Any non-air id the census resolves works.
+/// The progressive fixture's block state id. Any non-air id works — the dig
+/// timing comes from the fixture's hardness, not from the id.
 const STONE: u32 = 1;
 
-/// The world position of that block, and therefore of the pick target.
+/// The progressive fixture's hardness. Deliberately a synthetic `1.0` rather than
+/// the census value for `minecraft:stone`: this fixture's whole job is to take
+/// *several* ticks, so the "no burst yet" control window exists.
+const STONE_HARDNESS: f32 = 1.0;
+
+/// The name of the instant-break fixture. Grass is what the play report named;
+/// [`instant_break_fixture`] proves it is genuinely one-shot rather than assuming
+/// so.
+const INSTANT_BREAK_BLOCK: &str = "minecraft:short_grass";
+
+/// The world position of the targeted block, and therefore of the pick target.
 const TARGET: [i32; 3] = [3, 4, 5];
 
 /// Generous upper bound on ticks to reach `StopDestroy`. Hardness `1.0` at
@@ -82,11 +124,21 @@ const MAX_TICKS: u32 = 200;
 const BURST_THRESHOLD: usize = 8;
 
 /// A [`VersionAdapter`] that speaks no protocol and knows exactly one block —
-/// identical in shape to `mining_deadlock.rs`'s `OneBlockVersion`, duplicated
-/// rather than shared because the two test binaries do not share a support
-/// crate for it and the type is small.
-#[derive(Debug, Default)]
-struct OneBlockVersion;
+/// the same shape as `mining_deadlock.rs`'s `OneBlockVersion`, duplicated rather
+/// than shared because the two test binaries do not share a support crate for it
+/// and the type is small.
+///
+/// Carries the state id and hardness so the two tests can point the *same*
+/// harness, predictor and particle sink at a slow block and at a one-shot one.
+/// The hardness is the only thing that decides which of `Mining`'s two destroy
+/// branches runs, which is exactly what issue #387 is about.
+#[derive(Debug, Clone, Copy)]
+struct OneBlockVersion {
+    /// The one block-state id this adapter answers for.
+    state: u32,
+    /// That state's hardness, as `BreakInputs` will see it.
+    hardness: f32,
+}
 
 impl VersionAdapter for OneBlockVersion {
     fn protocol_version(&self) -> i32 {
@@ -128,19 +180,119 @@ impl VersionAdapter for OneBlockVersion {
     }
 
     fn block_hardness(&self, state_id: u32) -> Option<BlockHardness> {
-        (state_id == STONE).then_some(BlockHardness {
-            hardness: 1.0,
+        (state_id == self.state).then_some(BlockHardness {
+            hardness: self.hardness,
             requires_correct_tool: false,
         })
     }
 
     fn tool_mining(&self, _held: Option<&ItemStack>, state_id: u32) -> Option<ToolMining> {
-        (state_id == STONE).then_some(ToolMining {
+        (state_id == self.state).then_some(ToolMining {
             speed: 1.0,
             correct_tool: true,
             damage_per_block: 0,
         })
     }
+}
+
+/// The block-state id `name` resolves to in the jar-derived state census, taking
+/// the block's **first** state (grass and saplings have one or two, all of the
+/// same hardness).
+///
+/// Scanned rather than hardcoded: a bare id would silently start naming an
+/// unrelated block the next time the census is regenerated, and that is the
+/// failure mode this whole fixture exists to avoid.
+fn state_id_of(name: &str) -> u32 {
+    (0..lodestone_data::block_states::STATE_COUNT)
+        .find(|&id| lodestone_data::block_states::block_name(id) == Some(name))
+        .unwrap_or_else(|| panic!("{name} is not in the protocol-776 block-state census"))
+}
+
+/// The instant-break fixture, **derived** from the hardness census rather than
+/// asserted against it.
+///
+/// This is the *precondition* guard the issue calls out. A fixture whose block
+/// takes even one extra tick exercises `Mining::continue_`'s progress branch —
+/// the path that already worked — and the gate below would then pass while the
+/// reported bug was untouched. So the census supplies the hardness the adapter
+/// reports, and this function refuses to hand back anything the predictor's own
+/// formula does not classify as one-shot.
+fn instant_break_fixture() -> OneBlockVersion {
+    let state = state_id_of(INSTANT_BREAK_BLOCK);
+    let census = lodestone_data::hardness::hardness(state)
+        .unwrap_or_else(|| panic!("{INSTANT_BREAK_BLOCK} (state {state}) has no census hardness"));
+
+    // The predictor's own instant-break condition, not a proxy for it: this is
+    // the expression `Mining::start` branches on. `tool_speed`/`on_ground` are
+    // `BreakInputs::default()`'s bare-handed-on-dry-land values, matching what
+    // `dig_break_inputs` will build for this harness's player, and
+    // `correct_tool` mirrors the adapter's `ToolMining` above.
+    let inputs = BreakInputs {
+        hardness: census.hardness,
+        correct_tool: true,
+        ..BreakInputs::default()
+    };
+    assert_eq!(
+        inputs.ticks_to_break(),
+        Some(0),
+        "{INSTANT_BREAK_BLOCK} (state {state}) must be genuinely one-shot for this \
+         gate to exercise issue #387 at all — the census reports hardness {} \
+         (requires_correct_tool={}), which needs {:?} mining ticks. Pick a block \
+         the census still says is instant-break.",
+        census.hardness,
+        census.requires_correct_tool,
+        inputs.ticks_to_break(),
+    );
+    assert_ne!(
+        state, 0,
+        "the fixture must not be air — `dig_break_inputs` sets `is_air`, which \
+         short-circuits the instant-break branch entirely"
+    );
+
+    OneBlockVersion {
+        state,
+        hardness: census.hardness,
+    }
+}
+
+/// The progressive fixture: several ticks of accumulation before it breaks.
+fn progressive_fixture() -> OneBlockVersion {
+    let version = OneBlockVersion {
+        state: STONE,
+        hardness: STONE_HARDNESS,
+    };
+    let inputs = BreakInputs {
+        hardness: version.hardness,
+        correct_tool: true,
+        ..BreakInputs::default()
+    };
+    assert!(
+        inputs.ticks_to_break().is_some_and(|t| t > 1),
+        "the progressive fixture must take more than one tick, or its own \
+         'no burst yet' control window does not exist"
+    );
+    version
+}
+
+/// Whether the tick's queued actions contain the `StopDestroy` this emit used to
+/// be keyed on.
+///
+/// Deliberately one function used by both tests. The progressive gate asserts it
+/// answers **true** on the finishing tick, which is the control proving the
+/// detector works; the instant-break gate asserts it answers **false** on a tick
+/// that nonetheless bursts, which is what pins the re-keying. Without the shared
+/// helper, "no `StopDestroy`" would be an absence measured by an unproven
+/// detector.
+fn stop_destroy_queued(actions: &[ClientAction]) -> bool {
+    actions.iter().any(|a| {
+        matches!(
+            a,
+            ClientAction::BlockAction {
+                action: lodestone_model::BlockActionKind::StopDestroy,
+                ..
+            }
+        )
+    })
 }
 
 /// A live-shaped session with no server, holding just enough state for
@@ -153,7 +305,7 @@ struct Harness {
 }
 
 impl Harness {
-    fn build() -> Self {
+    fn build(version: OneBlockVersion) -> Self {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
@@ -163,7 +315,7 @@ impl Harness {
         let session = {
             let mut world = ecs.write();
             world.insert_resource(LockHolds::default());
-            build_resources(&mut world);
+            build_resources(&mut world, version);
             spawn_player(&mut world)
         };
 
@@ -179,7 +331,7 @@ impl Harness {
                     username: "destroy_burst".into(),
                     uuid: uuid::Uuid::nil(),
                 },
-                Box::new(OneBlockVersion),
+                Box::new(version),
             )
             .ecs(Arc::clone(&ecs), session)
             .connect_with(client_io);
@@ -188,7 +340,7 @@ impl Harness {
 
         client.chunk_world().write().load(
             ChunkPos::new(TARGET[0].div_euclid(16), TARGET[2].div_euclid(16)),
-            column_with(TARGET, STONE),
+            column_with(TARGET, version.state),
         );
 
         let shared: lodestone::net::SharedHandle = Arc::new(OnceLock::new());
@@ -211,7 +363,7 @@ impl Harness {
     }
 }
 
-fn build_resources(world: &mut EcsWorld) {
+fn build_resources(world: &mut EcsWorld, version: OneBlockVersion) {
     world.insert_resource(Egress {
         in_world: true,
         live: true,
@@ -221,7 +373,7 @@ fn build_resources(world: &mut EcsWorld) {
     world.insert_resource(MiningPredictor::default());
     world.insert_resource(ParticleSim(Particles::new(None)));
     world.insert_resource(ActionQueue::default());
-    world.insert_resource(VersionData(Some(Box::new(OneBlockVersion))));
+    world.insert_resource(VersionData(Some(Box::new(version))));
 }
 
 fn spawn_player(world: &mut EcsWorld) -> lodestone_ecs::ecs::entity::Entity {
@@ -253,12 +405,15 @@ fn column_with(pos: [i32; 3], id: u32) -> LoadedChunk {
     LoadedChunk::new(column, ColumnLight::new(16), Heightmaps::new(), Vec::new())
 }
 
-/// **The gate.** Ticks a real dig to completion, recording the per-tick
-/// particle-count delta, and asserts the shape: small (or zero) before
-/// `StopDestroy`, large exactly on it.
+/// **The gate for the progressive path** (issue #360), and — since #387 re-keyed
+/// the emit off `StopDestroy` — the control proving
+/// [`stop_destroy_queued`] actually detects something.
+///
+/// Ticks a real dig to completion, recording the per-tick particle-count delta,
+/// and asserts the shape: small (or zero) before completion, large exactly on it.
 #[test]
 fn a_completed_dig_throws_a_debris_burst_on_the_tick_it_finishes() {
-    let harness = Harness::build();
+    let harness = Harness::build(progressive_fixture());
     let mut world = harness.ecs.write();
 
     let mut previous_count = world.resource_mut::<ParticleSim>().0.engine_mut().particles().len();
@@ -272,15 +427,7 @@ fn a_completed_dig_throws_a_debris_burst_on_the_tick_it_finishes() {
         let delta = count.saturating_sub(previous_count);
         previous_count = count;
 
-        let stopped = actions.iter().any(|a| {
-            matches!(
-                a,
-                ClientAction::BlockAction {
-                    action: lodestone_model::BlockActionKind::StopDestroy,
-                    ..
-                }
-            )
-        });
+        let stopped = stop_destroy_queued(&actions);
 
         if stopped {
             stop_tick = Some(tick);
@@ -318,5 +465,86 @@ fn a_completed_dig_throws_a_debris_burst_on_the_tick_it_finishes() {
         "the dig completed on the very first tick, so there were no \
          pre-completion ticks to serve as the control — widen the block's \
          hardness so this gate actually exercises the 'no burst yet' window"
+    );
+}
+
+/// **The gate for issue #387.** A genuinely one-shot block must throw its debris
+/// burst on the very first tick of the dig, on a tick where no `StopDestroy` is
+/// queued at all.
+///
+/// # What each assertion is for
+///
+/// * The fixture comes from [`instant_break_fixture`], which derives the hardness
+///   from the jar census and refuses to return anything the predictor's own
+///   formula does not call one-shot. That is the *precondition* guard: a fixture
+///   with a real `destroySpeed` would quietly turn this into a second copy of the
+///   progressive test.
+/// * `delta >= BURST_THRESHOLD` on tick 0 is the gate. Pre-fix this was `0`:
+///   `drive_mining` emitted nothing, and it emitted no per-tick mining chip
+///   either, because an instant break leaves `Mining::target()` `None` both
+///   before and after the call.
+/// * **The control**, and the reason this is not simply a duplicate assertion:
+///   `stop_destroy_queued` must answer **false** on that same tick. That is what
+///   proves the burst did not come back through the old key — the emit really is
+///   keyed on destruction now. The detector itself is proven live by
+///   [`a_completed_dig_throws_a_debris_burst_on_the_tick_it_finishes`], which
+///   calls the same function and requires a `true` from it; without that pairing
+///   this `false` would be an absence measured by an untested detector.
+#[test]
+fn an_instant_break_throws_a_debris_burst_on_its_very_first_tick() {
+    let version = instant_break_fixture();
+    let harness = Harness::build(version);
+    let mut world = harness.ecs.write();
+
+    let before = world
+        .resource_mut::<ParticleSim>()
+        .0
+        .engine_mut()
+        .particles()
+        .len();
+    assert_eq!(
+        before, 0,
+        "the harness must start with an empty particle engine, or the delta below \
+         is measuring something else"
+    );
+
+    world.run_schedule(GameTick);
+
+    let actions = std::mem::take(&mut world.resource_mut::<ActionQueue>().0);
+    let after = world
+        .resource_mut::<ParticleSim>()
+        .0
+        .engine_mut()
+        .particles()
+        .len();
+    let delta = after.saturating_sub(before);
+
+    assert!(
+        actions.iter().any(|a| matches!(
+            a,
+            ClientAction::BlockAction {
+                action: lodestone_model::BlockActionKind::StartDestroy,
+                ..
+            }
+        )),
+        "the dig must actually have started — queued actions were {actions:?}. \
+         Without a START this tick did nothing at all and the burst assertion \
+         below would be measuring an unrelated failure."
+    );
+    assert!(
+        !stop_destroy_queued(&actions),
+        "the control is broken: a one-shot break queued a `StopDestroy`, so this \
+         gate is exercising the progressive path that already worked rather than \
+         issue #387. Queued actions were {actions:?}."
+    );
+    assert!(
+        delta >= BURST_THRESHOLD,
+        "breaking {INSTANT_BREAK_BLOCK} (state {}, census hardness {}) in one \
+         swing threw {delta} particles, wanted at least {BURST_THRESHOLD}. This \
+         is issue #387: the burst was keyed on the `StopDestroy` packet, which a \
+         one-shot break never sends, so grass and saplings produced no debris \
+         while stone did.",
+        version.state,
+        version.hardness,
     );
 }
