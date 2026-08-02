@@ -156,9 +156,13 @@ impl EntityRenderer {
 
         // The arm pass's own group-0 uniform (see the field docs). Fog is
         // disabled rather than shared: the arm sits ~0.7 blocks from the eye and
-        // fog begins at 0.75× the render distance, so a shared fog block could
-        // only ever contribute rounding — and vanilla likewise does not fog the
-        // hand. The *sky darken* lane is still rewritten each frame, because a
+        // the nearest fog onset any preset produces is lava's 0 (and the sky
+        // fog's is `render_distance * 16 - clamp(that / 10, 4, 64)`, i.e. 115.2
+        // blocks at the default render distance — issue #388 replaced a flat
+        // 0.75× fraction with vanilla's span, but either way the arm is orders of
+        // magnitude nearer than the ramp), so a shared fog block could only ever
+        // contribute rounding — and vanilla likewise does not fog the hand.
+        // The *sky darken* lane is still rewritten each frame, because a
         // permanently noon-lit arm over a dark world is exactly the "mobs are
         // super bright at night" defect in miniature.
         let hand_cam_buffer = entity_camera_buffer(
