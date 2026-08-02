@@ -41,13 +41,23 @@
 //!    are dark" defect, in which nothing was wrong with the blocks.
 //! 2. **Direction.** [`ModelVertex`] carries no normal, so the fragment shader
 //!    reconstructs a face normal from screen-space derivatives of the
-//!    interpolated world position (`cross(dpdx, dpdy)`) and applies a cheap
-//!    directional term. Using the magnitude of the light dot means the shade is
-//!    correct whether a face is front- or back-facing, which pairs with the
-//!    double-sided raster state below: entity meshes are drawn without back-face
-//!    culling for now (robust visibility while per-model winding parity is still
-//!    being pixel-verified), so both sides shade consistently rather than one
-//!    going black.
+//!    interpolated world position (`-cross(dpdx, dpdy)`, negated to point at the
+//!    eye) and applies **vanilla's two-light diffuse**: `min(1, (max(0, n·L0) +
+//!    max(0, n·L1)) * 0.6 + 0.4)` with `L0/L1` from
+//!    `blaze3d.platform.Lighting.DIFFUSE_LIGHT_0/1`. The negation is what makes
+//!    the double-sided raster state below safe — entity meshes are drawn without
+//!    back-face culling (robust visibility while per-model winding parity is
+//!    still being pixel-verified), and taking the eye-facing side is exactly what
+//!    vanilla's front/back pair in `entity.vsh` resolves to.
+//!
+//!    This was **one** light and an `abs()` until issue #383. That formula lights
+//!    a face pointing away from the light as brightly as one pointing into it
+//!    (up and down both `0.9085`, vanilla `1.0` and `0.4`) and bottoms out at
+//!    `0.4` on every normal *perpendicular* to its single direction. Box faces
+//!    never land on that band, so standing mobs looked passable; the rotated
+//!    first-person arm sat at `0.497` across 97% of its pixels, which is the dark
+//!    side a player reported. See `entity_diffuse_two_lights_pixels.rs` and
+//!    `docs/entity-rendering.md`.
 //!
 //! Their product is multiplied into the texel in **gamma space**, through the
 //! same `srgb_to_linear(linear_to_srgb(rgb) * shade)` round-trip the model
@@ -1000,11 +1010,56 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if (tex_col.a < 0.5) {
         discard;
     }
-    // Reconstruct a face normal from world-position derivatives so the mob reads
-    // as 3D without a per-vertex normal. abs() keeps both sides lit (double-sided).
-    let n = normalize(cross(dpdx(in.world), dpdy(in.world)));
-    let light_dir = normalize(vec3<f32>(0.3, 1.0, 0.55));
-    let diffuse = 0.4 + 0.6 * clamp(abs(dot(n, light_dir)), 0.0, 1.0);
+    // Reconstruct a face normal from world-position derivatives, so the mob reads
+    // as 3D without a per-vertex normal.
+    //
+    // The **negation** is the outward (camera-facing) normal, and it is derived
+    // rather than asserted. With a right-handed view matrix, NDC y points up while
+    // framebuffer y points down, so for a plane facing the camera `dpdx` runs along
+    // view +x and `dpdy` along view -y: `cross(+x, -y) = -z`, i.e. the raw cross
+    // product points *away* from the eye. Negating it gives the normal of the side
+    // being looked at, which for a closed mesh is the outward one — the same result
+    // vanilla gets by computing both signs and letting `gl_FrontFacing` choose
+    // (`entity.vsh`'s PER_FACE_LIGHTING pair). The pipeline is `cull_mode: None`,
+    // so a lone quad is lit from whichever side is visible, again as vanilla does.
+    //
+    // Getting this sign backwards is invisible on `+X`/`-X` and `+Z`/`-Z` box faces
+    // (the two lights are mirror images, so those pairs are equal) and shows up
+    // only as an inverted up/down: a mob lit from below. It is also invisible to
+    // any gate that checks a frame's *set* of shades rather than which surface got
+    // which — a flip permutes the set without changing it, and a sign-flip control
+    // was measured passing exactly such an assertion. What pins it is
+    // `entity_diffuse_two_lights_pixels.rs`'s `modal_byte_at_edge_row`: the topmost
+    // band of a box seen from above must read vanilla's `1.0`, and the bottommost
+    // band seen from below must read `0.4`.
+    let n = -normalize(cross(dpdx(in.world), dpdy(in.world)));
+    // Vanilla's **two** diffuse lights, not one. Read from the 26.2 client jar:
+    // `com.mojang.blaze3d.platform.Lighting.DIFFUSE_LIGHT_0/1` are
+    // `(0.2, 1.0, -0.7)` and `(-0.2, 1.0, 0.7)` normalised, and `updateLevel`
+    // installs exactly those for the world — the entry the first-person hand also
+    // renders under, since `renderItemInHand` runs inside `renderLevel` and the
+    // only `setupFor(ITEMS_3D)` in `GameRenderer` is afterwards, for the GUI.
+    let light_0 = normalize(vec3<f32>(0.2, 1.0, -0.7));
+    let light_1 = normalize(vec3<f32>(-0.2, 1.0, 0.7));
+    // `assets/minecraft/shaders/include/light.glsl`:
+    //
+    //     lightValue = max(vec2(0.0), light);
+    //     min(1.0, (lightValue.x + lightValue.y) * 0.6 + 0.4)
+    //
+    // with MINECRAFT_LIGHT_POWER 0.6 and MINECRAFT_AMBIENT_LIGHT 0.4. The two
+    // `max`es are the whole difference from what this shader used to do, which was
+    // one light and an `abs()`: that lights a face pointing *away* from the light
+    // exactly as brightly as one pointing into it (up and down both 0.9085, where
+    // vanilla is 1.0 and 0.4), and drops to the 0.4 floor on every normal
+    // *perpendicular* to the single direction. Axis-aligned box faces never land
+    // on that band, which is why standing mobs looked passable; the first-person
+    // arm is rotated and sat at 0.497 over 97% of its pixels, reported as issue
+    // #383's dark side. Two near-opposing lights have no perpendicular band at
+    // all — their dark region is the underside, which is what a shaded model
+    // should have.
+    let d0 = max(dot(n, light_0), 0.0);
+    let d1 = max(dot(n, light_1), 0.0);
+    let diffuse = min(1.0, (d0 + d1) * 0.6 + 0.4);
     // Direction, world light and the per-instance tint are one shade, multiplied
     // in gamma space through a single transfer round-trip (one round-trip, not
     // one per factor, so there is less rounding) — exactly the model shader's
