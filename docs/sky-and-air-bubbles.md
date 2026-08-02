@@ -91,9 +91,11 @@ this is deliberately unwired rather than approximated. Purely cosmetic.
 
 **Deliberate sky omissions, so nobody reads them as bugs:** clouds are vanilla's
 flat "fast" mode, not the 3-D voxel-extruded fancy mode; there is no
-below-horizon dark disc; there is no per-biome sky tint (#96 — see below for the
-exact missing link, which is *not* the protocol gap an earlier revision recorded);
-and the star field uses splitmix64 rather than Java's RNG — same
+below-horizon dark disc; the biome's own `minecraft:visual/fog_color` is not
+decoded, so only the disc *centre* is per-biome and the horizon end stays the
+dimension fog colour (the sky tint itself landed — see
+[below](#per-biome-sky-tint-issue-96s-fourth-box)); and the star field uses
+splitmix64 rather than Java's RNG — same
 distribution shape, different exact positions, a visual choice and not a
 decode-parity claim.
 
@@ -269,7 +271,7 @@ the re-derivation, not a footnote to it.** What #96 actually still owed was:
 | 1 | horizon-to-zenith gradient, without banding | **done** |
 | 2 | sunrise/sunset horizon tint band | **done** |
 | 3 | void fog below the negative build limit | **done** |
-| 4 | per-biome sky tint | **open** — no longer blocked on protocol; the gap is a 4-file plumbing chain, see below |
+| 4 | per-biome sky tint | **done** — see [below](#per-biome-sky-tint-issue-96s-fourth-box); the estimate below it of "a 4-file plumbing chain" was itself wrong, and how is recorded |
 
 ### Where vanilla's gradient actually comes from
 
@@ -383,10 +385,16 @@ float brightness = Mth.square(1.0F - darkness);   // note the square
 (`ClientLevel.java:1277`). The scale multiplies `ARGB.redFloat(color)`, i.e.
 gamma space, hence `fog::scale_gamma`.
 
-### What is still open on #96, and exactly why
+### Per-biome sky tint (issue #96's fourth box)
 
-**Per-biome sky tint is still open — but the reason recorded above was stale
-within the hour, and the real blocker is one seam further on.** In 26.2 a biome
+**Done.** What follows is the record of two successive blockers, both of which
+were true when written and false when acted on, and one estimate that was simply
+wrong — kept in full, because the pattern is more valuable than the conclusion.
+Skip to [What actually landed](#what-actually-landed) for current state.
+
+#### Blocker one: "the client does not decode `registry_data`"
+
+**Stale within the hour.** In 26.2 a biome
 carries `"attributes": {"minecraft:visual/sky_color": "#78a7ff"}`.
 
 The paragraph this replaces said biome ids arrive in `registry_data`, "which this
@@ -397,8 +405,11 @@ so it is false now. This is `CLAUDE.md` rule 2 in its purest form: nothing about
 the claim looked wrong on inspection, and a re-read of the file it cited would
 have confirmed it, because the thing that changed lives in a different file.
 
+#### Blocker two: "the names have no caller across the version-free seam"
+
 Re-verified end to end, by grepping the *producer* across the whole tree rather
-than a named consumer file:
+than a named consumer file. This table was correct when written, and it is what
+the work below acted on:
 
 | link | state | evidence |
 |---|---|---|
@@ -410,32 +421,84 @@ than a named consumer file:
 | id → colour table | absent | no data yet; deliberately not built, see below |
 | colour → draw | **wired** | `SkyFrame::day_sky_color`, fed at `gpu.rs`'s sky block from `self.clear` |
 
-So **both ends are built and the join is missing**, and the ids cannot be
+So **both ends were built and the join was missing**, and the ids cannot be
 hardcoded around it: a data pack reorders the registry, which is exactly why
-#288's own doc says never to assume a holder id.
+#288's own doc says never to assume a holder id. That analysis was right, and the
+patch it proposed was not.
 
-#### The smallest patch
+#### The estimate that was wrong: "four edits, carrying the names"
 
-Four edits, mirroring how `dimension_type` was plumbed in #288:
+Recorded above as the smallest patch: carry the ordered biome **names** on
+`ClientEvent::Login`, land them in a resource, and look the colour up in the
+shell against a table derived from our jar — `event.rs`, `adapter.rs`,
+`session.rs`/`state.rs`, `gpu.rs`. Two things were wrong with it, and both were
+found by trying to write it:
 
-1. `lodestone-model/src/event.rs` — carry the ordered names on `ClientEvent::Login`
-   beside `dimension_type` (`Login` is the right carrier: re-entering
-   configuration resends the registries and is followed by a fresh `Login`).
-2. `protocol/v770/src/adapter.rs` — at the `ClientEvent::Login` construction,
-   read `entry_names("minecraft:worldgen/biome")` and pass it.
-3. `lodestone-ecs/src/session.rs` + `lodestone-client/src/state.rs` — land it in a
-   resource beside `ServerDimensionType` and surface it on the snapshot.
-4. `lodestone-shell/src/gpu.rs` — resolve camera → biome id → name → colour and
-   feed `day_sky_color` instead of `self.clear`.
+* **`Login` cannot cheaply carry anything.** It is constructed at 17 sites across
+  **four** protocol families (`v47`, `v340`, `v735`, `v770`) plus a dozen tests;
+  `DimensionTypeChanged` is cheaper but is constructed inside
+  `lodestone-ecs/src/ingest.rs`. A **new** `#[non_exhaustive]` variant has zero
+  existing construction sites and needs one arm in one routing switch, which is
+  strictly the smaller change.
+* **`gpu.rs` had nowhere for the colour to enter.** `SkyFrame::day_sky_color` was
+  fed from `RenderState::clear`, and `app.rs` sets the clear colour to
+  `FogSettings::color` — so the disc centre and the horizon were reading the same
+  value by construction, and there was no second channel to tint. The colour also
+  has to be resolved *at the camera* (the standing biome changes as the player
+  walks and nothing on the network announces it), which is `Sim`'s job, not
+  `RenderState`'s.
 
-Note that hop 4 lands in `gpu.rs` and hops 1 and 3 in shared files, which is why
-this was not landed by the sky work: no part of it is in the sky renderer.
+Both of these are the same lesson in different clothes: the previous pass counted
+the hops it could see from `entry_names` outward, and the cost was in the hops it
+had not opened yet. Nothing in the analysis looked wrong on inspection.
 
-The *composition* half is done and pinned: `sunrise_sunset_timeline.rs`'s fourth
+#### What actually landed
+
+**Names never travel. The colours do.** Because we reply to
+`select_known_packs` with an empty list, the server elides nothing, so every
+biome entry arrives with its full NBT — including the sky colour. That makes the
+server authoritative and deletes the jar-derived table entirely: a data pack can
+reorder the registry, rename a biome, or change a colour, and shipping the value
+at the holder id is correct for all three. It also means no table needs
+re-deriving each version.
+
+| hop | where |
+|---|---|
+| decode the attribute | `protocol/v770/src/packets/registry.rs` — `ClientRegistries::biome_sky_colors()`, a `Vec<Option<u32>>` where index `i` is holder id `i`, packed `0x00RR_GGBB` in **sRGB bytes** |
+| cross the version-free seam | `lodestone-model/src/event.rs` — `ClientEvent::BiomeVisuals { sky_colors }`, emitted beside `DimensionTypeChanged` at `Login` |
+| route it | `lodestone-ecs/src/session.rs` — an arm in **`session::handles_event`** (not `ingest`: registry data is a session scalar), folded into `ServerBiomeSkyColors(Arc<[Option<u32>]>)` |
+| surface it | `lodestone-client/src/state.rs` — `PlayerSnapshot::biome_sky_colors`, an `Arc` clone per frame rather than a copy of the table |
+| resolve at the camera | `lodestone-shell/src/sim.rs` — `Sim::biome_sky_color()`: eye block → `ChunkSection::biome_at_block` → index the table → `srgb_u8_to_linear` |
+| reach the draw | `lodestone-render/src/fog.rs` — `FogSettings::sky_color`, consumed by `gpu.rs`'s `SkyFrame` |
+
+Two design notes worth keeping:
+
+* **The sky colour rides in `FogSettings`, a struct named for fog.** Deliberately.
+  In vanilla they are one record (`EnvironmentAttributes` carries
+  `visual/fog_color` and `visual/sky_color` side by side, and
+  `FogRenderer.computeFogColor` blends them), and the disc's horizon *is* its fog
+  end — so two independently-callable setters is exactly how the horizon has
+  banded in a colour the sky never is before. One struct, one call, cannot drift.
+  Every constructor defaults `sky_color` to `color`, so an untinted frame is
+  byte-identical to the pre-#96 behaviour.
+* **`Sim::biome_sky_color` scans *downward* for a section.** `sections_at` elides
+  an empty section to `None`, and the section holding the player's feet is very
+  often empty — standing on a plain at `y=64` puts the eye in section `64..80`
+  while the ground is the last block of `48..64`. Sampling only the eye's section
+  leaves the sky untinted over open ground, which is precisely where a sky is
+  visible.
+
+Every `None` in that chain means one thing — *the server has not told us* — and
+falls back to the dimension colour the caller already computed. Never to a
+plausible-looking overworld blue; that is the explicit-fallback shape #34 was
+filed over.
+
+The *composition* half was already pinned: `sunrise_sunset_timeline.rs`'s fourth
 column checks `ARGB.multiply(plains #78a7ff, sky_color_track)` against the JVM at
-every tick, so the gamma-space arithmetic the biome path needs is already proven.
-The colour table is deliberately **not** landed ahead of its caller — that is the
-island shape `CLAUDE.md` rule 1 is about, and it would be the fourteenth.
+every tick, so the gamma-space arithmetic was proven correct before the biome
+path existed. The colour table was deliberately **not** landed ahead of its
+caller in the previous pass — that is the island shape `CLAUDE.md` rule 1 is
+about, and it would have been the fourteenth.
 
 #### A measured warning for whoever gates it
 
@@ -467,6 +530,32 @@ a difference no constant can fake, and add `desert` against `frozen_peaks`
 (`#859dff`, ΔR 23 / ΔG 20) to prove the gate resolves a *slight* difference too —
 otherwise it only ever proves grey is not blue.
 
+**That survey has since been confirmed against the wire, independently.**
+`live_registry_data.rs::biome_sky_colours_from_a_real_server_match_mojangs_own_biome_files`
+joins the creative oracle and checks all **66** entries of the server's own
+`minecraft:worldgen/biome` payload (20238 bytes) against Mojang's own
+`worldgen/biome/*.json`, parsed at test time: **56** declare a sky colour, **16**
+distinct values, and the 10 without are exactly `basalt_deltas`,
+`crimson_forest`, `nether_wastes`, `soul_sand_valley`, `warped_forest`,
+`end_barrens`, `end_highlands`, `end_midlands`, `small_end_islands`, `the_end`.
+The advice above stands, and both pairs it recommends are now gated — plus the
+vacuous pair itself, as `control_plains_and_swamp_cannot_discriminate`, which
+**asserts zero differing pixels**. Recording the zero is the cheapest inoculation
+against someone "simplifying" the real gates back onto plains-versus-swamp.
+
+The wire shape took three guesses to get right and only one of them is obvious:
+`attributes` → an attribute-**id** key (`minecraft:visual/sky_color`) → an
+`Either<value, {modifier, argument}>`. `EnvironmentAttributes.SKY_COLOR` is
+`AttributeTypes.RGB_COLOR`, whose value codec is
+`ExtraCodecs.STRING_RGB_COLOR = withAlternative(hexColor(6), RGB_COLOR_CODEC)`,
+and vanilla *encodes* through the first alternative — so what arrives is the NBT
+**string** `"#78a7ff"`, not an int. Note the contrast with
+`visual/sunrise_sunset_color`, which is `ARGB_COLOR`: there the alpha animates
+and the hex is 8 digits. A hermetic fixture built with our own `Nbt` writer would
+have confirmed all three guesses at once whether or not any was right, which is
+why the authority for the shape is the live gate and the hermetic sibling
+(`registry_data.rs`) is scoped to the holder-id mapping and the failure modes.
+
 Also still open: the below-horizon dark disc, and void fog's `min_y`/`onset_range`
 come from `VoidFog::OVERWORLD` (`-64`/`32.0`) rather than the real dimension
 height. `lodestone_ecs::ChunkWorld::extent` already carries `min_y`; threading it
@@ -497,8 +586,11 @@ this machine:
 | gradient | **0** of 28142 disc px outside a 3/255 tolerance; worst error 1 | fog == sky (the pre-#96 flat disc): **28142** bad; per-vertex fog factor: **16062** bad |
 | sunrise band | 9408 of 30880 disc px warm, bbox `y82..120`, mean elevation **7.5°** against the disc region's 18.6° | noon (band alpha `0x00`): **0** warm; camera turned 180°: **0** warm |
 | void fog | eye `+32` → mean byte 135.3; eye `-48` → 7.5; eye `-64` → 0.0. Measured midpoint ratio **0.0552** vs gamma-space prediction **0.0554** | `VoidFog::DISABLED` at the same eye height `-64`: 135.3 |
+| **biome tint, gross** | `pale_garden #b9b9b9` vs `desert #6eb1ff`: **28142 of 28142** disc px differ, worst per-channel delta **115**; each frame **0** px outside the 3/255 gradient tolerance against *its own* colour | same colour twice: **0** differ · **`plains` vs `swamp` (byte-identical `#78a7ff`): 0 differ** — the vacuous pair, asserted rather than avoided |
+| **biome tint, slight** | `desert #6eb1ff` vs `frozen_peaks #859dff`: **28142 of 28142** differ, worst delta **23** — proves the path resolves a real neighbouring value, not a coarse bucket | (shares the two controls above) |
+| **biome tint, composition** | every disc px moves by exactly `(1 - t)` of the colour change: worst error vs that prediction **1/255** over 28142 px, fog value spanning `0.121..0.832`; delta **115** at `t=0.121` falling to **22** at `t=0.832` | a tint applied to the fog end too, or replacing the disc colour, differs from its neighbour just as much and breaks the `(1-t)` law immediately |
 
-Three things about those gates are worth keeping:
+Four things about those gates are worth keeping:
 
 **Two control premises were false, and running them is what found it.**
 
@@ -530,12 +622,28 @@ apex; the void-fog heights come from `VoidFog::OVERWORLD`'s own fields. That is
 the rule a HUD gate in this repo learned the hard way by hardcoding a moving
 anchor.
 
+**A third control premise was false, in the biome-tint gate, and the same rule
+caught it.** The composition gate was first written as "the tint moves the disc's
+*centre* (`t < 0.15`) and not its fogged *rim* (`t > 0.97`)". The rim bucket came
+back **empty — 0 of 28142 px** — so the rim assertion measured nothing while
+looking rigorous. The cause is not the camera: `expected_fog_value` caps the disc
+at `0.9 ×` the nine-gon's inradius on purpose, so
+`hypot(0.9 · 512 · cos 22.5°, 16) / 512 = 0.832` is the largest fog value any
+admitted pixel can have, and `0.97` was unreachable by construction. `0.97` was a
+restated constant; the fix predicts every pixel from **its own** `t` and prints
+the range it actually saw (`0.121..0.832`), so an empty bucket can no longer
+satisfy it. Third instance of this exact failure on this one feature, all three
+found by asserting the premise rather than reasoning about it.
+
 ## Configuration
 
 None. The sky reads the same day clock the rest of the renderer does — there is
-no second clock — and `SkyFrame`'s `day_sky_color`/`day_fog_color` are fed the
-renderer's existing clear and fog colours, so noon is unchanged from before the
-gradient existed. Air supply is entirely server-driven.
+no second clock. `SkyFrame::day_fog_color` is fed the renderer's existing fog
+colour and `day_sky_color` is fed `FogSettings::sky_color`, which every
+`FogSettings` constructor defaults to the fog colour — so a caller that never
+tints is byte-identical to before the gradient existed. The only thing that moves
+it is `Sim::biome_sky_color` finding a real biome colour on a live server. Air
+supply is entirely server-driven.
 
 ## Dependencies
 

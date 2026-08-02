@@ -2230,12 +2230,28 @@ impl V770Adapter {
             let dimension = body.dimension.parse().map_err(|_| {
                 AdapterError::Decode(format!("invalid dimension {}", body.dimension))
             })?;
+            // The biome registry's sky colours, indexed by holder id — the
+            // integer a chunk section's biome palette stores (issue #96).
+            // Emitted here rather than off `registry_data` itself for the same
+            // reason `DimensionTypeChanged` is: `Login` is the point at which
+            // the Configuration set is known complete, and re-entering
+            // Configuration resends the registries and is followed by a fresh
+            // `Login`, so this can never be stale.
+            let biome_sky_colors = self
+                .registries
+                .lock()
+                .ok()
+                .map(|registries| registries.biome_sky_colors().to_vec())
+                .unwrap_or_default();
             return Ok(vec![
                 // Before `Login`, deliberately: a consumer folding both sees the
                 // dimension's geometry before the level name that depends on it.
                 Directive::Emit(ClientEvent::DimensionTypeChanged {
                     holder_id: body.dimension_type,
                     dimension_type,
+                }),
+                Directive::Emit(ClientEvent::BiomeVisuals {
+                    sky_colors: biome_sky_colors,
                 }),
                 Directive::Emit(ClientEvent::Login {
                     entity_id: body.entity_id,

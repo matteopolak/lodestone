@@ -376,6 +376,9 @@ fn entity_fog_darkens_with_depth() {
     };
     let fog = FogSettings {
         color: FOG_COLOR,
+        // Entity pass only; no sky disc is drawn, so this tracks the fog colour
+        // the way every `FogSettings` constructor defaults it.
+        sky_color: FOG_COLOR,
         start: FOG_START,
         end: FOG_END,
     };
