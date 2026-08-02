@@ -245,7 +245,8 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   are mouse-bound by default), the `resolve_key` precedence chain that lets chat and
   container screens swallow keys before gameplay sees them, and the persisted format
   in `options.json` — plus the check that F3 *is* a real `KeyMapping` in 26.2 while
-  Escape genuinely is not.
+  Escape genuinely is not, and `key.swapOffhand`'s **two** mechanisms (a container
+  `SWAP` with a screen open, a bare `ServerboundPlayerAction` without one).
 - [Tool mining speeds](./tool-mining.md) — how a held item's mining speed and
   correct-tool-for-drops verdict are resolved from the vanilla `minecraft:tool`
   census, the `correct_tool`/`requires_correct_tool` inversion trap, the
@@ -264,6 +265,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Chunk world resource](./chunk-world-resource.md) — the one `lodestone_world::World`
   behind an ECS resource, terrain meshing as `Update` state, and why §4.1's two clauses
   are independent: unifying the *chunk* store did not unify the *bevy* worlds.
+- [Section mesh invalidation](./section-mesh-invalidation.md) — "air, and air is the
+  truth" vs. "air, and air is a guess" as a type rather than a convention (issue #389):
+  why a seam meshed before its neighbour arrived draws water twice, why the frontier
+  ring had no mechanism to heal it, and the two things vanilla does that we now both do.
 - [Session and HUD components](./session-components.md) — the scoreboard, tab list,
   boss bars and menus as ECS components: the *three* implementations Stage 3 collapsed,
   the two that disagreed, and why `PlayerSnapshot`'s vitals are still a real duplicate
