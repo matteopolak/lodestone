@@ -30,6 +30,8 @@
 //! skips `Drop`), and a server list that survives only a graceful quit is one
 //! that silently loses the entry the player just added.
 
+use super::edit_box::EditBox;
+use super::focus::{self, FocusChildren, FocusSet, FocusTarget, KeyEvent, KeyOutcome};
 use super::servers::{MAX_NAME_CHARS, ServerEntry, ServerList, servers_path};
 use super::{Screen, SessionKind, UiState};
 use crate::config::{MAX_MANUAL_GUI_SCALE, Options};
@@ -105,44 +107,212 @@ pub enum FormField {
     Address,
 }
 
-/// The add/edit form's contents.
-///
-/// The address is held as the **single string the user typed** and split into
-/// host/port only on save. Splitting per keystroke would make `mc.example.com:2`
-/// unrepresentable halfway through typing `:25565`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct EditForm {
-    /// Display label being typed.
-    pub name: String,
-    /// Address being typed, `host` or `host:port`.
-    pub address: String,
-    /// Which field has focus.
-    pub field: FormField,
-    /// Index being edited, or `None` when adding a new entry.
-    pub editing: Option<usize>,
-}
-
 impl Default for FormField {
     fn default() -> Self {
         Self::Name
     }
 }
 
+/// [`EditForm`]'s name field, as a [`super::focus::FocusChildren`] id.
+///
+/// The ids double as the row indices [`super::render::frame_for`] builds and
+/// `app.rs`'s hit-test reports, which is why they are `0`/`1` and not opaque —
+/// `the_form_field_ids_are_the_row_indices_the_mouse_reports` asserts the two
+/// still agree.
+pub const NAME_FIELD: usize = 0;
+/// [`EditForm`]'s address field. See [`NAME_FIELD`].
+pub const ADDRESS_FIELD: usize = 1;
+
+/// The logical canvas [`EditForm`]'s boxes are seeded against.
+///
+/// It matters for exactly two things — the **relative** y order of the two
+/// fields (which is what makes Up/Down move between them, since arrow
+/// navigation is geometric) and the box **width** `displayPos` scrolls against.
+/// `super::render::row_rect` centres the stack vertically, so the ordering holds
+/// at every canvas, and it clamps the width to `ROW_W` at every canvas at least
+/// `ROW_W + 2 * PAD` wide — so a seeded box is correct everywhere that is not a
+/// pathologically narrow window.
+///
+/// It is a *seed*, not the draw geometry: `super::render::build` moves a
+/// per-frame clone of each box into that frame's real rect (see
+/// `super::render`'s `draw_edit_box`), which is `OptionsSubScreen`'s
+/// reposition-don't-rebuild order. A `&mut MenuNav` per frame would let the
+/// originals be repositioned instead, and `frame_for` takes `&MenuNav` — see
+/// `docs/menu-focus.md` on why that is `app.rs`'s call to make.
+const SEED_CANVAS: (f32, f32) = (854.0, 480.0);
+
+/// The two [`EditBox`]es [`EditForm`] owns, as one struct so
+/// [`super::focus::FocusSet`] can borrow them while `EditForm` borrows the set.
+///
+/// **This split is load-bearing, not cosmetic.** `FocusSet`'s methods take
+/// `&mut dyn FocusChildren`, and a `FocusSet` living in the same struct as the
+/// children it dispatches to could not be called at all — `&mut self.focus` and
+/// `&mut self` are not disjoint. Vanilla has the same shape (a `Screen` holds
+/// both) and no such rule.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FormFields {
+    /// The display label. Capped at [`MAX_NAME_CHARS`].
+    pub name: EditBox,
+    /// `host` or `host:port`. Capped at [`MAX_ADDRESS_CHARS`].
+    pub address: EditBox,
+}
+
+impl FocusChildren for FormFields {
+    fn get(&self, id: usize) -> Option<&dyn FocusTarget> {
+        match id {
+            NAME_FIELD => Some(&self.name as &dyn FocusTarget),
+            ADDRESS_FIELD => Some(&self.address as &dyn FocusTarget),
+            _ => None,
+        }
+    }
+
+    fn get_mut(&mut self, id: usize) -> Option<&mut dyn FocusTarget> {
+        match id {
+            NAME_FIELD => Some(&mut self.name as &mut dyn FocusTarget),
+            ADDRESS_FIELD => Some(&mut self.address as &mut dyn FocusTarget),
+            _ => None,
+        }
+    }
+}
+
+/// What one key did to the form, from the screen's point of view.
+///
+/// Only [`Self::Save`] and [`Self::Cancel`] need the screen's cooperation; every
+/// other keystroke was fully answered by the focused [`EditBox`] or by focus
+/// navigation. This is the distinction [`super::focus::KeyOutcome`] exists to
+/// preserve and vanilla's `boolean` throws away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormOutcome {
+    /// The field or the focus layer dealt with it.
+    Handled,
+    /// Escape: discard the form.
+    Cancel,
+    /// Enter, and nothing else wanted it: save.
+    Save,
+}
+
+/// The add/edit form's contents: two real [`EditBox`]es and the focus that
+/// decides which of them a keystroke reaches.
+///
+/// The address is held as the **single string the user typed** and split into
+/// host/port only on save. Splitting per keystroke would make `mc.example.com:2`
+/// unrepresentable halfway through typing `:25565`.
+///
+/// ## These widgets outlive a frame, and that is the point
+///
+/// Every other screen in this shell rebuilds its rows — labels included — in
+/// [`super::render::frame_for`], every frame. That is fine for a button, whose
+/// whole state is derivable, and impossible for a text field: rebuilding one
+/// would reset the caret, the selection and the scroll offset sixty times a
+/// second. `Screen.rebuildWidgets` has exactly this consequence in vanilla too
+/// — it calls `clearFocus()` (`Screen.java:342-347`), so a rebuilt screen has no
+/// focus by construction.
+///
+/// So this is the first menu state in the shell that is *widget* state rather
+/// than derived state, and #394's note that `OptionsSubScreen`'s
+/// build→reposition order "becomes the right one once a widget holds state" is
+/// where it lands. The cost is one clone of each box per frame, in
+/// [`super::render`]'s `draw_edit_box`, which is what stands in for the
+/// reposition a `&mut` frame hook would do in place.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EditForm {
+    /// The two fields. Public so [`super::render`] can read a box's own
+    /// geometry, value, caret and selection rather than re-deriving them.
+    pub fields: FormFields,
+    /// Which field has focus, and the Tab/arrow traversal between them.
+    focus: FocusSet,
+    /// Index being edited, or `None` when adding a new entry.
+    pub editing: Option<usize>,
+}
+
+impl Default for EditForm {
+    fn default() -> Self {
+        Self::adding()
+    }
+}
+
 impl EditForm {
-    /// A blank form for a new entry.
+    /// A blank form for a new entry, focused on the name field.
+    ///
+    /// The initial focus is set explicitly, which is
+    /// `Screen.setInitialFocus(GuiEventListener)` (`Screen.java:171-176`) rather
+    /// than the no-argument overload — that one is gated on
+    /// `minecraft.getLastInputType().isKeyboard()`, a piece of state this shell
+    /// does not track. Without it the form would open with **nothing** focused
+    /// and the first keystroke would go nowhere, which is precisely the island
+    /// this issue is about.
     #[must_use]
     pub fn adding() -> Self {
-        Self::default()
+        let [name_rect, address_rect] =
+            super::render::field_row_rects(SEED_CANVAS.0, SEED_CANVAS.1);
+        let mut fields = FormFields {
+            name: EditBox::new(name_rect.0, name_rect.1, name_rect.2, name_rect.3, "Name")
+                .with_max_length(MAX_NAME_CHARS),
+            address: EditBox::new(
+                address_rect.0,
+                address_rect.1,
+                address_rect.2,
+                address_rect.3,
+                "Address",
+            )
+            .with_max_length(MAX_ADDRESS_CHARS),
+        };
+        let mut focus = FocusSet::new();
+        // `addRenderableWidget`, not `addWidget` or `addRenderableOnly`: these
+        // are drawn *and* interactive *and* narrated. Getting this wrong is the
+        // island `super::focus`'s docs describe — a field that renders and never
+        // takes a keystroke, with nothing failing loudly.
+        focus.add_renderable_widget(NAME_FIELD);
+        focus.add_renderable_widget(ADDRESS_FIELD);
+        focus.set_initial_focus(&mut fields, NAME_FIELD);
+        Self {
+            fields,
+            focus,
+            editing: None,
+        }
     }
 
     /// A form pre-filled from `entry`, editing the row at `index`.
     #[must_use]
     pub fn editing(index: usize, entry: &ServerEntry) -> Self {
-        Self {
-            name: entry.name.clone(),
-            address: entry.address_label(),
-            field: FormField::Name,
-            editing: Some(index),
+        let mut form = Self::adding();
+        form.fields.name.set_value(&entry.name);
+        form.fields.address.set_value(entry.address_label());
+        form.editing = Some(index);
+        form
+    }
+
+    /// The name field's text.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        self.fields.name.value()
+    }
+
+    /// The address field's text.
+    #[must_use]
+    pub fn address(&self) -> &str {
+        self.fields.address.value()
+    }
+
+    /// Which field has focus, for [`super::render`]'s `selected` row.
+    ///
+    /// Derived from [`super::focus::FocusSet`] rather than stored: two sources of
+    /// truth for "which field is being typed into" is how a caret ends up drawn
+    /// on a row that is not receiving the keys.
+    #[must_use]
+    pub fn field(&self) -> FormField {
+        match self.focus.focused() {
+            Some(ADDRESS_FIELD) => FormField::Address,
+            _ => FormField::Name,
+        }
+    }
+
+    /// The focused field's box, or the name field's when nothing is focused.
+    #[must_use]
+    pub fn focused_box(&self) -> &EditBox {
+        match self.field() {
+            FormField::Name => &self.fields.name,
+            FormField::Address => &self.fields.address,
         }
     }
 
@@ -150,53 +320,94 @@ impl EditForm {
     /// the host); the address may not.
     #[must_use]
     pub fn is_valid(&self) -> bool {
-        !self.address.trim().is_empty()
+        !self.address().trim().is_empty()
     }
 
     /// The entry this form would save.
     #[must_use]
     pub fn to_entry(&self) -> ServerEntry {
-        let (host, port) = ServerEntry::split_host_port(&self.address);
-        let name = if self.name.trim().is_empty() {
+        let (host, port) = ServerEntry::split_host_port(self.address());
+        let name = if self.name().trim().is_empty() {
             host.clone()
         } else {
-            self.name.clone()
+            self.name().to_owned()
         };
         ServerEntry::new(name, host, port)
     }
 
-    fn active_mut(&mut self) -> (&mut String, usize) {
-        match self.field {
-            FormField::Name => (&mut self.name, MAX_NAME_CHARS),
-            FormField::Address => (&mut self.address, MAX_ADDRESS_CHARS),
+    /// One key, routed through vanilla's `Screen.keyPressed` order: Escape, then
+    /// the focused field, then — only if it declined — Tab and the arrows as
+    /// focus navigation, and only then the screen's own meaning for the key.
+    ///
+    /// **That order is why Up/Down move between fields while Left/Right move the
+    /// caret**, with no rule anywhere saying so: `EditBox.keyPressed` handles
+    /// 262/263 and declines 264/265 (`EditBox.java:279-284`), so the vertical
+    /// pair falls through to navigation and the horizontal pair never gets there.
+    pub fn handle_key(&mut self, key: MenuKey) -> FormOutcome {
+        // A printable character is `charTyped`, a *different* callback in vanilla
+        // — see `super::focus::KeyEvent::from_menu_key`. Routing it through
+        // `keyPressed` would make the letter `a` and Ctrl+A the same event.
+        if let MenuKey::Char(ch) = key {
+            self.focus.char_typed(&mut self.fields, ch);
+            return FormOutcome::Handled;
         }
-    }
-
-    /// Appends a printable character to the focused field, respecting its cap.
-    /// Control characters and `§` are refused — `§` because it is the legacy
-    /// formatting-code introducer and has no business in a hostname or a label.
-    pub fn push(&mut self, ch: char) {
-        if ch.is_control() || ch == '\u{a7}' {
-            return;
-        }
-        let (buf, cap) = self.active_mut();
-        if buf.chars().count() < cap {
-            buf.push(ch);
-        }
-    }
-
-    /// Removes the last character of the focused field.
-    pub fn backspace(&mut self) {
-        let (buf, _) = self.active_mut();
-        buf.pop();
-    }
-
-    /// Moves focus to the other field.
-    pub fn next_field(&mut self) {
-        self.field = match self.field {
-            FormField::Name => FormField::Address,
-            FormField::Address => FormField::Name,
+        let Some(event) = KeyEvent::from_menu_key(key) else {
+            return FormOutcome::Handled;
         };
+        match self.focus.screen_key_pressed(&mut self.fields, event) {
+            KeyOutcome::Close => FormOutcome::Cancel,
+            KeyOutcome::Consumed | KeyOutcome::FocusMoved => FormOutcome::Handled,
+            KeyOutcome::Declined if key == MenuKey::Enter => FormOutcome::Save,
+            KeyOutcome::Declined => FormOutcome::Handled,
+        }
+    }
+
+    /// Focus the field drawn at row `row`, as a mouse click or hover does.
+    /// Out-of-range rows are ignored rather than clamped.
+    pub fn focus_row(&mut self, row: usize) {
+        if row == NAME_FIELD || row == ADDRESS_FIELD {
+            self.focus.set_focused(&mut self.fields, Some(row));
+        }
+    }
+
+    /// A click at logical `(x, y)`, dispatched through
+    /// `ContainerEventHandler.mouseClicked` — so it both focuses the field it
+    /// landed in and puts the caret at the clicked character.
+    ///
+    /// Not reachable from `app.rs` today, which routes a click as a *row index*
+    /// (`MenuNav::click`) and therefore carries no x. See `docs/menu-focus.md`.
+    pub fn click_at(&mut self, x: f32, y: f32) -> bool {
+        self.focus.mouse_clicked(&mut self.fields, x, y)
+    }
+
+    /// Types one character into the focused field, refusing whatever
+    /// [`super::edit_box::is_allowed_chat_character`] refuses.
+    ///
+    /// Kept as a named method because it is the form's whole text-entry API to
+    /// its tests; the cap and the filter now live in [`EditBox`] rather than
+    /// here, so `§` is still refused for vanilla's own reason (it is the legacy
+    /// formatting-code introducer) rather than for one written twice.
+    pub fn push(&mut self, ch: char) {
+        self.focus.char_typed(&mut self.fields, ch);
+    }
+
+    /// Deletes the character before the caret in the focused field.
+    ///
+    /// Now genuinely "before the caret" rather than "off the end", which is what
+    /// the pre-`EditBox` form did — it had no caret to be before.
+    pub fn backspace(&mut self) {
+        self.focus
+            .key_pressed(&mut self.fields, KeyEvent::new(focus::KEY_BACKSPACE));
+    }
+
+    /// Moves focus to the other field, through real Tab traversal.
+    ///
+    /// With two children this is also the wrap, and the wrap is vanilla's
+    /// `clearFocus()`-then-retry rather than modular arithmetic — see
+    /// [`super::focus`].
+    pub fn next_field(&mut self) {
+        self.focus
+            .screen_key_pressed(&mut self.fields, KeyEvent::new(focus::KEY_TAB));
     }
 }
 
@@ -680,13 +891,10 @@ impl MenuNav {
             Screen::Paused if row < PAUSE_BUTTONS.len() => self.paused = row,
             Screen::Death if row < DEATH_BUTTONS.len() => self.death = row,
             Screen::Accounts => self.accounts.hover(row),
-            Screen::ServerEdit => {
-                self.form.field = match row {
-                    0 => FormField::Name,
-                    1 => FormField::Address,
-                    _ => self.form.field,
-                };
-            }
+            // `focus_row` *is* `ContainerEventHandler.setFocused(child)` — real
+            // focus, not a highlight index — because the row indices and
+            // `EditForm`'s focus ids are the same numbers (see [`NAME_FIELD`]).
+            Screen::ServerEdit => self.form.focus_row(row),
             _ => {}
         }
     }
@@ -721,6 +929,18 @@ impl MenuNav {
     /// so reordering that vector fails a test here instead of silently rebinding
     /// the mouse to the wrong control.
     pub fn click(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
+        // The edit form is the second screen where "hover then Enter" is wrong,
+        // and #395 is what makes it visible. `ContainerEventHandler.mouseClicked`
+        // focuses the child it hit and calls *its* `onClick`; it does not activate
+        // the screen. Translating a click into `Enter` here meant **clicking
+        // either address field tried to save the form** — the same shape as #391,
+        // one screen over: with a valid address it closed the form the player was
+        // still typing into, and without one it flashed "AN ADDRESS IS REQUIRED"
+        // at someone who had just clicked the field to fix that.
+        if ui.screen() == Screen::ServerEdit {
+            self.form.focus_row(row);
+            return MenuAction::None;
+        }
         if ui.screen() == Screen::Settings {
             match row {
                 0 => self.cycle_gui_scale(1),
@@ -891,26 +1111,26 @@ impl MenuNav {
         }
     }
 
+    /// The add/edit form. **Every key goes through [`EditForm::handle_key`]**,
+    /// which is vanilla's `Screen.keyPressed` order — so this arm only decides
+    /// what "cancel" and "save" *mean*, not which key is which.
+    ///
+    /// That replaced a flat `match key`, and the difference is worth naming: the
+    /// old arm mapped `Tab | Up | Down` to "toggle field" and swallowed
+    /// `Delete`. Now the focused [`EditBox`] is offered the key first, so
+    /// Backspace/Delete edit at the caret, Tab and the vertical arrows fall
+    /// through to real focus traversal, and the horizontal arrows would move the
+    /// caret if `app.rs` produced them (it does not yet — see
+    /// [`focus::KeyEvent::from_menu_key`]).
     fn key_edit(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
-        match key {
-            MenuKey::Escape => {
+        match self.form.handle_key(key) {
+            FormOutcome::Handled => MenuAction::None,
+            FormOutcome::Cancel => {
                 // Cancel: the form is discarded, the list is untouched.
                 ui.close_server_edit();
                 MenuAction::None
             }
-            MenuKey::Tab | MenuKey::Up | MenuKey::Down => {
-                self.form.next_field();
-                MenuAction::None
-            }
-            MenuKey::Backspace => {
-                self.form.backspace();
-                MenuAction::None
-            }
-            MenuKey::Char(c) => {
-                self.form.push(c);
-                MenuAction::None
-            }
-            MenuKey::Enter => {
+            FormOutcome::Save => {
                 if !self.form.is_valid() {
                     // Refuse rather than saving a row that cannot be dialed.
                     return MenuAction::None;
@@ -942,7 +1162,6 @@ impl MenuNav {
                 }
                 MenuAction::Reprobe(Some(entry))
             }
-            MenuKey::Delete => MenuAction::None,
         }
     }
 
@@ -1299,8 +1518,8 @@ mod tests {
         // Edit: 'e', clear the name, retype, Enter.
         nav.key(&mut ui, MenuKey::Char('e'));
         assert_eq!(ui.screen(), Screen::ServerEdit);
-        assert_eq!(nav.form().name, "Home", "the form pre-fills");
-        assert_eq!(nav.form().address, "mc.example.com:25566");
+        assert_eq!(nav.form().name(), "Home", "the form pre-fills");
+        assert_eq!(nav.form().address(), "mc.example.com:25566");
         for _ in 0..8 {
             nav.key(&mut ui, MenuKey::Backspace);
         }
@@ -1372,7 +1591,7 @@ mod tests {
         assert_eq!(ui.screen(), Screen::ServerEdit);
         nav.key(&mut ui, MenuKey::Tab);
         type_str(&mut nav, &mut ui, "aaa.example");
-        assert_eq!(nav.form().address, "aaa.example");
+        assert_eq!(nav.form().address(), "aaa.example");
         assert_eq!(ui.screen(), Screen::ServerEdit, "text must not navigate");
     }
 
@@ -1498,17 +1717,241 @@ mod tests {
         form.push('\n');
         form.push('\u{a7}');
         form.push('\t');
-        assert!(form.name.is_empty(), "control chars must not enter a field");
+        assert!(form.name().is_empty(), "control chars must not enter a field");
 
         for _ in 0..1000 {
             form.push('x');
         }
-        assert_eq!(form.name.chars().count(), MAX_NAME_CHARS);
+        assert_eq!(form.name().chars().count(), MAX_NAME_CHARS);
         form.next_field();
         for _ in 0..1000 {
             form.push('y');
         }
-        assert_eq!(form.address.chars().count(), MAX_ADDRESS_CHARS);
+        assert_eq!(form.address().chars().count(), MAX_ADDRESS_CHARS);
+    }
+
+    /// The exact focused-field sequence, as a sequence — not a property.
+    ///
+    /// `CLAUDE.md`'s `ClientEvent::BiomeVisuals` precedent: an ordering change
+    /// has to fail *here*, and no `cargo check` can see one. The wrap on the
+    /// fourth press is the interesting entry, because it is vanilla's
+    /// `clearFocus()`-then-retry (`Screen.java:139-143`) and not `(i + 1) % n` —
+    /// see `super::focus`.
+    #[test]
+    fn tab_walks_the_form_fields_in_order_and_wraps() {
+        let mut form = EditForm::adding();
+        assert_eq!(form.field(), FormField::Name, "setInitialFocus lands here");
+        let seen: Vec<FormField> = (0..5)
+            .map(|_| {
+                form.handle_key(MenuKey::Tab);
+                form.field()
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                FormField::Address,
+                FormField::Name,
+                FormField::Address,
+                FormField::Name,
+                FormField::Address,
+            ]
+        );
+        // Shift is not routed by `app.rs`, so backward Tab is not reachable from
+        // the keyboard yet — but the mechanism is, and it is the same walk.
+        form.next_field();
+        assert_eq!(form.field(), FormField::Name);
+    }
+
+    /// The ordering that is the whole of #395 at this screen: the focused field
+    /// is offered the key **first**, so the keys it wants never become
+    /// navigation, and the keys it declines do.
+    #[test]
+    fn the_focused_field_swallows_its_keys_before_they_can_move_focus() {
+        let mut form = EditForm::adding();
+        for c in "abc".chars() {
+            form.push(c);
+        }
+        assert_eq!(form.name(), "abc");
+        assert_eq!(form.field(), FormField::Name);
+
+        // Backspace and Delete are the field's; focus must not budge.
+        assert_eq!(form.handle_key(MenuKey::Backspace), FormOutcome::Handled);
+        assert_eq!((form.name(), form.field()), ("ab", FormField::Name));
+        assert_eq!(form.handle_key(MenuKey::Delete), FormOutcome::Handled);
+        assert_eq!(
+            (form.name(), form.field()),
+            ("ab", FormField::Name),
+            "Delete at the end of the value is consumed and changes nothing — \
+             it used to fall through to the screen and mean nothing at all"
+        );
+
+        // Down is not the field's — `EditBox.keyPressed` lists 264 in its
+        // `default:` group — so it reaches navigation and moves focus.
+        assert_eq!(form.handle_key(MenuKey::Down), FormOutcome::Handled);
+        assert_eq!(form.field(), FormField::Address);
+        assert_eq!(form.handle_key(MenuKey::Up), FormOutcome::Handled);
+        assert_eq!(form.field(), FormField::Name);
+        // And arrow navigation does not wrap, unlike Tab: Up from the top field
+        // stays put. (The old form toggled on Up/Down, so this is a deliberate
+        // behaviour change *toward* vanilla, not a regression.)
+        assert_eq!(form.handle_key(MenuKey::Up), FormOutcome::Handled);
+        assert_eq!(form.field(), FormField::Name);
+        assert_eq!(form.handle_key(MenuKey::Tab), FormOutcome::Handled);
+        assert_eq!(form.field(), FormField::Address, "Tab still moves");
+
+        // Escape and Enter are the screen's, and Escape is answered *before* the
+        // field — a text field must never be able to trap the player.
+        assert_eq!(form.handle_key(MenuKey::Escape), FormOutcome::Cancel);
+        assert_eq!(form.handle_key(MenuKey::Enter), FormOutcome::Save);
+
+        // The horizontal arrows are the field's, and this is the half `app.rs`
+        // does not produce yet: asserted through the focus layer directly so the
+        // capability is proved rather than assumed. See
+        // `focus::KeyEvent::from_menu_key`.
+        let mut form = EditForm::adding();
+        for c in "abc".chars() {
+            form.push(c);
+        }
+        assert_eq!(form.fields.name.cursor_position(), 3);
+        assert_eq!(
+            form.focus
+                .screen_key_pressed(&mut form.fields, KeyEvent::new(focus::KEY_LEFT)),
+            KeyOutcome::Consumed,
+            "Left is the caret's, not the focus layer's"
+        );
+        assert_eq!(form.fields.name.cursor_position(), 2);
+        assert_eq!(form.field(), FormField::Name, "and focus did not move");
+    }
+
+    /// `EditForm`'s focus ids and `menu::render`'s row indices are the same
+    /// numbers, and `app.rs` reports a click as a row index — so if they ever
+    /// diverge, clicking the address field would focus the name one. Same shape
+    /// as `the_settings_rows_are_in_the_order_click_assumes`, and the same bug
+    /// (#391) it guards against.
+    #[test]
+    fn the_form_field_ids_are_the_row_indices_the_mouse_reports() {
+        let (mut nav, _) = nav("form-ids");
+        let mut ui = UiState::new();
+        ui.open_server_list();
+        nav.key(&mut ui, MenuKey::Char('a'));
+        let frame = crate::menu::render::frame_for(
+            &ui,
+            &nav,
+            &crate::menu::status::StatusCache::new(),
+            &mut crate::menu::render::FaviconCache::new(),
+        )
+        .expect("the edit form owns its frame");
+        assert_eq!(frame.rows.len(), 2);
+        assert_eq!(frame.rows[NAME_FIELD].detail, "NAME");
+        assert!(frame.rows[ADDRESS_FIELD].detail.starts_with("ADDRESS"));
+        // A hover on row 1 must focus the *address* field, and the frame's own
+        // `selected` must follow it.
+        nav.hover(&ui, ADDRESS_FIELD);
+        assert_eq!(nav.form().field(), FormField::Address);
+        let frame = crate::menu::render::frame_for(
+            &ui,
+            &nav,
+            &crate::menu::status::StatusCache::new(),
+            &mut crate::menu::render::FaviconCache::new(),
+        )
+        .unwrap();
+        assert_eq!(frame.selected, ADDRESS_FIELD);
+        // Out of range does nothing rather than clamping onto a real field.
+        nav.hover(&ui, 7);
+        assert_eq!(nav.form().field(), FormField::Address);
+    }
+
+    /// Clicking a field must **focus** it, not activate the screen.
+    ///
+    /// `MenuNav::click` translates a click into `hover` + `Enter` for every screen
+    /// that has a row cursor, and on this screen `Enter` means *save* — so
+    /// clicking either field used to submit the form. That is #391's shape one
+    /// screen over, and #395's dispatch is what makes it visible:
+    /// `ContainerEventHandler.mouseClicked` focuses the child it hit and calls its
+    /// `onClick`; it never activates the screen.
+    #[test]
+    fn clicking_a_form_field_focuses_it_instead_of_saving() {
+        let (mut nav, _) = nav("form-click");
+        let mut ui = UiState::new();
+        ui.open_server_list();
+        nav.key(&mut ui, MenuKey::Char('a'));
+        for c in "play.example".chars() {
+            nav.key(&mut ui, MenuKey::Char(c));
+        }
+        nav.key(&mut ui, MenuKey::Tab);
+        for c in "play.example".chars() {
+            nav.key(&mut ui, MenuKey::Char(c));
+        }
+        // Premise: the form *is* saveable, so a stray `Enter` would really have
+        // closed it — without this the test would pass on an invalid form for the
+        // wrong reason.
+        assert!(nav.form().is_valid());
+        assert_eq!(
+            nav.click(&mut ui, NAME_FIELD),
+            MenuAction::None,
+            "a click on a field must not produce a save action"
+        );
+        assert_eq!(
+            ui.screen(),
+            Screen::ServerEdit,
+            "and must not close the form the player is still typing into"
+        );
+        assert_eq!(nav.form().field(), FormField::Name, "it focuses the field");
+        assert!(nav.list().is_empty(), "and saves nothing");
+        // The control: `Enter` on the same form *does* save, so the assertions
+        // above are about the click and not about an unsaveable form.
+        assert!(matches!(
+            nav.key(&mut ui, MenuKey::Enter),
+            MenuAction::Reprobe(_)
+        ));
+        assert_eq!(ui.screen(), Screen::ServerList);
+        assert_eq!(nav.list().len(), 1);
+    }
+
+    /// The seed geometry and the draw geometry must be the same rects, because
+    /// arrow navigation between the fields is *geometric*: a seed with both boxes
+    /// at `(0, 0)` would make Up/Down silently stop working while every unit test
+    /// that drives `next_field` still passed.
+    #[test]
+    fn the_seeded_field_geometry_is_the_layout_the_draw_uses() {
+        let form = EditForm::adding();
+        let [name_rect, address_rect] =
+            crate::menu::render::field_row_rects(SEED_CANVAS.0, SEED_CANVAS.1);
+        assert_eq!(
+            (
+                form.fields.name.widget.x,
+                form.fields.name.widget.y,
+                form.fields.name.widget.width,
+                form.fields.name.widget.height
+            ),
+            name_rect
+        );
+        assert_eq!(
+            (
+                form.fields.address.widget.x,
+                form.fields.address.widget.y,
+                form.fields.address.widget.width,
+                form.fields.address.widget.height
+            ),
+            address_rect
+        );
+        // The premise arrow navigation rests on: the address field is *below* the
+        // name field and they share a column. Both halves matter — the strict
+        // pass in `focus` requires the orthogonal overlap.
+        assert!(
+            address_rect.1 > name_rect.1 + name_rect.3,
+            "the address field must be strictly below the name field: \
+             {name_rect:?} then {address_rect:?}"
+        );
+        assert_eq!(address_rect.0, name_rect.0, "and in the same column");
+        assert!(name_rect.2 > 0.0 && name_rect.3 > 0.0, "with a real size");
+        // And the width the boxes scroll against is the drawn width, so a long
+        // address does not scroll half a field early.
+        assert!(
+            form.fields.address.inner_width() > 0.0,
+            "an inner width of zero makes every character invisible"
+        );
     }
 
     #[test]

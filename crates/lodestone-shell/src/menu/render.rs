@@ -60,6 +60,7 @@ use lodestone_render::{GpuAtlas, GuiAtlas, GuiSpriteQuad};
 use crate::hud::VanillaFont;
 use crate::hud::glyph_rows;
 use crate::hud::item_icon::{ColourStream, push_sprite_quad};
+use crate::menu::edit_box::{self, EditBox};
 use crate::menu::layout;
 use crate::menu::nav::{MainButton, PauseButton};
 use crate::menu::widget::{self, LayoutElement, Widget};
@@ -838,8 +839,24 @@ pub struct MenuRow {
     pub enabled: bool,
     /// Draw `detail` in the failure colour.
     pub detail_is_error: bool,
-    /// Draw the row as a text-entry field with a caret after `label`.
+    /// Draw the row as a text-entry field.
+    ///
+    /// With [`Self::edit`] set this only selects the field *fill* for the
+    /// jar-less fallback; the caret, the selection and the visible slice all come
+    /// from the widget. Without it, the pre-#395 draw applies: the whole label
+    /// with a caret parked after it.
     pub field: bool,
+    /// The live [`EditBox`] this row draws — a **clone**, taken per frame from
+    /// [`super::nav::EditForm`]'s persistent widgets.
+    ///
+    /// This is the one piece of menu state that is not derivable from the screen
+    /// (a caret and a scroll offset are not), so the widget outlives the frame
+    /// and the frame carries a copy. `build`'s `draw_edit_box` repositions the
+    /// copy into this frame's rect — `OptionsSubScreen.repositionElements`'
+    /// order, not `rebuildWidgets`' — and then *asks* it for its geometry rather
+    /// than restating any of `EditBox`'s arithmetic here. See
+    /// [`super::edit_box`] and [`super::nav::EditForm`].
+    pub edit: Option<EditBox>,
     /// Vanilla placement. `Some` puts the row at a rect derived from vanilla's
     /// own arithmetic ([`title_slot`] / [`pause_slot`]) and draws it as a real
     /// `widget/button*` nine-slice sprite; `None` keeps the centred row stack
@@ -1441,6 +1458,7 @@ pub fn frame_for<'a>(
                         enabled: true,
                         detail_is_error: is_error,
                         field: false,
+                        edit: None,
                         // The server list is not one of vanilla's own screens
                         // (vanilla's is a scrolling `ObjectSelectionList`), so it
                         // stays on the centred row stack.
@@ -1476,23 +1494,32 @@ pub fn frame_for<'a>(
                     "ADD SERVER"
                 },
                 subtitle: "",
+                // `edit` carries a **clone of the live widget**, which is how
+                // #395's persistent `EditBox` reaches a draw through a `&MenuNav`
+                // frame builder: `build`'s `draw_edit_box` moves the clone into
+                // this frame's rect and asks it where the text, caret and
+                // selection go. `label` stays populated because it is what
+                // `the_edit_form_shows_both_fields_and_marks_the_focused_one` and
+                // every other frame-shape test read; nothing draws it now.
                 rows: vec![
                     MenuRow {
-                        label: form.name.clone(),
+                        label: form.name().to_string(),
                         detail: "NAME".to_string(),
                         enabled: true,
                         field: true,
+                        edit: Some(form.fields.name.clone()),
                         ..Default::default()
                     },
                     MenuRow {
-                        label: form.address.clone(),
+                        label: form.address().to_string(),
                         detail: "ADDRESS - HOST OR HOST:PORT".to_string(),
                         enabled: true,
                         field: true,
+                        edit: Some(form.fields.address.clone()),
                         ..Default::default()
                     },
                 ],
-                selected: match form.field {
+                selected: match form.field() {
                     FormField::Name => 0,
                     FormField::Address => 1,
                 },
@@ -1687,6 +1714,64 @@ pub fn row_rect(rows: &[MenuRow], i: usize, width: f32, height: f32) -> Option<(
     Some(((width - w) * 0.5, y, w, row_height(row)))
 }
 
+/// An [`EditBox`] row's **box** height: vanilla's own 20
+/// (`EditBox.java:61-63`, `Button.DEFAULT_HEIGHT`), taken off the *top* of the
+/// 40 px [`LIST_ROW_H`] the row occupies so its `detail` hint still fits
+/// underneath.
+///
+/// 20 rather than the whole row is not an arbitrary choice: it puts
+/// [`EditBox::text_y`] — `y + floor((h - 8) / 2)` — at `y + 6`, which is exactly
+/// where the pre-#395 draw put the label (`y + PAD`). The conversion therefore
+/// leaves the *text* where it was and only changes the background from a flat
+/// fill to vanilla's real `widget/text_field` nine-slice.
+pub const EDIT_BOX_H: f32 = 20.0;
+
+/// The rect an [`EditBox`] row's box occupies, as distinct from the whole row's.
+///
+/// Derived from [`row_rect`] rather than restated, so the field, the row fill,
+/// `app.rs`'s hit-test and [`super::nav::EditForm`]'s seed geometry cannot drift
+/// apart — `CLAUDE.md`'s "derive layout from the same expression the draw uses".
+#[must_use]
+pub fn field_rect(
+    rows: &[MenuRow],
+    i: usize,
+    width: f32,
+    height: f32,
+) -> Option<(f32, f32, f32, f32)> {
+    let (x, y, w, _) = row_rect(rows, i, width, height)?;
+    Some((x, y, w, EDIT_BOX_H))
+}
+
+/// The two [`super::Screen::ServerEdit`] field rects at a given canvas, through
+/// [`field_rect`].
+///
+/// Exists so [`super::nav::EditForm::adding`] can seed its two `EditBox`es'
+/// geometry from the layout the draw actually uses instead of hardcoding a width
+/// — the boxes need real bounds *before* any frame exists, because arrow
+/// navigation between them is geometric and `displayPos` scrolling is measured
+/// against the width. Both probe rows carry a non-empty `detail`, which is what
+/// makes [`row_height`] give them [`LIST_ROW_H`]; a blank one would be 30 px and
+/// the seed would be a different rect from the draw.
+#[must_use]
+pub fn field_row_rects(width: f32, height: f32) -> [(f32, f32, f32, f32); 2] {
+    let rows = [
+        MenuRow {
+            detail: "NAME".to_string(),
+            field: true,
+            ..Default::default()
+        },
+        MenuRow {
+            detail: "ADDRESS".to_string(),
+            field: true,
+            ..Default::default()
+        },
+    ];
+    [
+        field_rect(&rows, 0, width, height).unwrap_or_default(),
+        field_rect(&rows, 1, width, height).unwrap_or_default(),
+    ]
+}
+
 /// Both vertex streams one menu frame produces.
 ///
 /// Two streams because the buttons are **textured** (nine-slice sprites off the
@@ -1790,6 +1875,28 @@ pub fn build(
             continue;
         };
         let selected = i == frame.selected;
+        // A row carrying a live `EditBox` (#395) draws through the widget: it
+        // owns the caret, the selection and the horizontal scroll, none of which
+        // are derivable from a `MenuRow`. Its `detail` hint still draws
+        // underneath, at the same offset the pre-widget path used.
+        if let Some(edit) = row.edit.as_ref() {
+            let (fx, fy, fw, fh) =
+                field_rect(&frame.rows, i, width, height).unwrap_or((x, y, w, EDIT_BOX_H));
+            draw_edit_box(&mut b, edit, fx, fy, fw, fh);
+            if !row.detail.is_empty() {
+                let room = (fw - 2.0 * PAD).max(0.0);
+                let detail = clip(&row.detail, room, SMALL_SCALE);
+                let colour = if row.detail_is_error { FG_BAD } else { FG_DIM };
+                b.text(
+                    detail,
+                    fx + PAD,
+                    fy + fh + 3.0,
+                    SMALL_SCALE,
+                    colour,
+                );
+            }
+            continue;
+        }
         let fill = if row.field {
             FIELD_BG
         } else if selected {
@@ -1911,10 +2018,14 @@ fn draw_widget(
     let Some((x, y, w, h)) = row_rect(rows, i, width, height) else {
         return;
     };
-    // One widget, carrying this row's state. `focused` takes `selected` because
-    // the shell has a single row cursor that both the keyboard and
-    // `MenuNav::hover` move, and vanilla's sprite argument is
-    // `isHoveredOrFocused()` — see `menu::widget`'s docs.
+    // One widget, carrying this row's state. `focused` takes `selected`, and
+    // `hovered` is left false, because these screens still have a *single* row
+    // cursor that both the keyboard and `MenuNav::hover` move — there is no
+    // second fact to record. #395 split the two flags on `Widget` for the
+    // screens that do have real focus (`Screen::ServerEdit`'s fields), and
+    // vanilla's sprite argument is `isHoveredOrFocused()`, so either flag alone
+    // still selects `widget/button_highlighted` here. That `||` lives in
+    // `Widget::is_hovered_or_focused`; do not re-derive it in this function.
     //
     // Built per frame, so the message is copied per frame. That is the same cost
     // the row itself already pays — `frame_for` and `pause_frame` both rebuild
@@ -1981,6 +2092,120 @@ fn draw_widget(
     let tx = ((left + right) * 0.5 - tw * 0.5).floor();
     let ty = widget.label_top(LINE_H);
     b.text(label, tx, ty, 1.0, colour);
+}
+
+/// Draws one [`EditBox`]: its `widget/text_field` background, the selection
+/// block, the text either side of the caret, and the caret.
+///
+/// **This is `EditBox`'s draw consumer, and it decides nothing.** Every offset
+/// comes from [`EditBox::draw_state`], every colour from
+/// [`EditBox::text_colour`], and the sprite id from
+/// [`EditBox::background_sprite`] — which is `SPRITES.get(isActive(),
+/// isFocused())`, *not* the button's `isHoveredOrFocused()`, so hovering a field
+/// deliberately does not highlight it. Mirrors
+/// `EditBox.extractWidgetRenderState` (`EditBox.java:404-473`).
+///
+/// ## The reposition, and why it is on a clone
+///
+/// The widget lives in [`super::nav::EditForm`] and outlives the frame;
+/// `frame_for` takes `&MenuNav`, so the row carries a *copy* and this function
+/// moves the copy into `(x, y, w, h)` before reading it. That is
+/// `OptionsSubScreen.init`'s build → reposition order (`:28-34`) rather than
+/// `PauseScreen`'s build → arrange, which is the switch #394 predicted would
+/// happen "once a widget holds state". The seeded geometry in `EditForm` is what
+/// the *input* side measures against; see [`field_row_rects`].
+///
+/// ## Two deliberate departures from the jar
+///
+/// - **The caret and the selection are 14 px tall, not 11.** Vanilla's are
+///   `9`/`9 + 1` because its font is 9 px; this shell draws menu text at
+///   [`TEXT_SCALE`] `2.0`, so a glyph is `GLYPH_H * 2 = 14` tall and an 11 px
+///   caret would sit visibly short of the text it marks. The *horizontal*
+///   arithmetic is already in scale-2 units inside the widget (see
+///   `edit_box::MENU_TEXT_ADVANCE`); this is the vertical half of the same
+///   consistency.
+/// - **The append caret is a bar, not an `_` glyph.** `extractAppendCursor`
+///   draws the underscore character (`TextCursorUtils.java:16-18`), and the
+///   jar-less fallback font here has no guaranteed `_`. Drawing a baseline bar
+///   keeps the insert/append distinction visible without depending on a glyph
+///   that may not exist, and the distinction itself
+///   ([`edit_box::EditBoxDraw::insert_cursor`]) is asserted in `edit_box`'s own
+///   tests.
+fn draw_edit_box(b: &mut Quads<'_>, edit: &EditBox, x: f32, y: f32, w: f32, h: f32) {
+    let mut edit = edit.clone();
+    edit.widget.x = x;
+    edit.widget.y = y;
+    edit.widget.width = w;
+    edit.widget.height = h;
+    // `AbstractWidget.extractRenderState`'s `if (this.visible)`
+    // (`AbstractWidget.java:56-62`).
+    if !edit.widget.visible {
+        return;
+    }
+
+    match edit.background_sprite() {
+        Some(sprite) if b.has_sprite(sprite) => b.sprite(sprite, x, y, w, h, LABEL),
+        // Jar-less fallback: the flat field fill the form has always used, plus
+        // a border when focused so the focused field is still identifiable in a
+        // headless screenshot.
+        _ => {
+            b.rect(x, y, w, h, FIELD_BG);
+            if edit.widget.focused {
+                b.outline(x, y, w, h, 2.0, FG);
+            }
+        }
+    }
+
+    let state = edit.draw_state(None);
+    let colour = edit.text_colour();
+    let glyph_h = GLYPH_H as f32 * TEXT_SCALE;
+
+    // Selection first, so the glyphs land on top of it. Vanilla inverts the text
+    // under the block (`graphics.textHighlight(.., invertHighlightedTextColor)`);
+    // a flat fill is the equivalent this pipeline can draw, and it is the same
+    // colour the row cursor uses elsewhere.
+    if let Some((from, to)) = state.highlight {
+        let (lo, hi) = if from <= to { (from, to) } else { (to, from) };
+        if hi > lo {
+            b.rect(lo, state.text_y, hi - lo, glyph_h, ROW_SEL);
+        }
+    }
+    if !state.before.is_empty() {
+        b.text(&state.before, state.before_x, state.text_y, TEXT_SCALE, colour);
+    }
+    if !state.after.is_empty() {
+        b.text(&state.after, state.after_x, state.text_y, TEXT_SCALE, colour);
+    }
+    if state.show_cursor {
+        if state.insert_cursor {
+            // `extractInsertCursor`: a 1 px bar, widened to `TEXT_SCALE` here for
+            // the same reason the height is scaled.
+            b.rect(state.cursor_x, state.text_y, TEXT_SCALE, glyph_h, colour);
+        } else {
+            b.rect(
+                state.cursor_x,
+                state.text_y + glyph_h - TEXT_SCALE,
+                edit.advance,
+                TEXT_SCALE,
+                colour,
+            );
+        }
+    }
+    // The hint (`EditBox.hint`) draws only when the box is empty *and*
+    // unfocused (`EditBox.java:438-440`), which is the opposite of a placeholder
+    // that vanishes on the first keystroke.
+    if let Some(hint) = edit.hint.as_deref() {
+        if state.before.is_empty() && state.after.is_empty() && !edit.widget.focused {
+            let room = (w - 2.0 * edit_box::BORDER_INSET).max(0.0);
+            b.text(
+                clip(hint, room, TEXT_SCALE),
+                state.before_x,
+                state.text_y,
+                TEXT_SCALE,
+                colour,
+            );
+        }
+    }
 }
 
 /// Longest prefix of `s` that measures at most `max_px` in whatever font `b`
@@ -2846,6 +3071,195 @@ mod tests {
         assert_eq!(fav.len(), 2);
         fav.forget("b.example:25565");
         assert_eq!(fav.len(), 1);
+    }
+
+    /// What reached one rectangle of the colour stream: how many vertices, and
+    /// **where**.
+    ///
+    /// A box rather than a fraction, per `CLAUDE.md`: a gate that reports only a
+    /// count cannot tell a shifted widget from a missing one, and both of the
+    /// control-premise failures recorded there were diagnosed by printing a
+    /// bounding box instead of a percentage.
+    #[derive(Debug)]
+    struct BandCoverage {
+        count: usize,
+        /// `(x0, y0, x1, y1)` in logical pixels, or `None` when nothing reached.
+        bounds: Option<(f32, f32, f32, f32)>,
+    }
+
+    /// Colour-stream vertices inside `band`, in logical pixels — the inverse of
+    /// `Quads::rect`'s `(2x/w - 1, 1 - 2y/h)`.
+    ///
+    /// **Strict on y, inclusive on x**, and the asymmetry is the whole reason
+    /// this reads a *band* rather than the field rect. `CLAUDE.md`'s rule is to
+    /// ask what else already paints here; the answer is the field's own chrome:
+    ///
+    /// - its background fill and its focus outline's left/right edges sit at the
+    ///   field's outer `x`, which is `BORDER_INSET` outside the band's — so the
+    ///   horizontal test can be inclusive and still exclude them, which keeps the
+    ///   caret's own left edge (exactly at `text_x`) counted;
+    /// - its outline's **bottom** edge, though, lands *inside* the band's
+    ///   vertical extent while spanning the full field width. Only a strict `y`
+    ///   keeps it out, and an inclusive one would report a bounding box the width
+    ///   of the whole field whatever the value was — a control that fires while
+    ///   measuring something unrelated.
+    fn band_coverage(
+        colour: &[f32],
+        w: f32,
+        h: f32,
+        band: (f32, f32, f32, f32),
+    ) -> BandCoverage {
+        let (bx, by, bw, bh) = band;
+        let mut count = 0;
+        let (mut x0, mut y0) = (f32::MAX, f32::MAX);
+        let (mut x1, mut y1) = (f32::MIN, f32::MIN);
+        for v in colour.chunks_exact(STRIDE) {
+            let px = (v[0] + 1.0) * 0.5 * w;
+            let py = (1.0 - v[1]) * 0.5 * h;
+            if px >= bx - 0.01 && px <= bx + bw + 0.01 && py > by && py < by + bh {
+                count += 1;
+                x0 = x0.min(px);
+                y0 = y0.min(py);
+                x1 = x1.max(px);
+                y1 = y1.max(py);
+            }
+        }
+        BandCoverage {
+            count,
+            bounds: (count > 0).then_some((x0, y0, x1, y1)),
+        }
+    }
+
+    /// #395's pixel gate: a real `EditBox` on a real screen, measured **inside
+    /// its own rect**, with the caret at two different positions.
+    ///
+    /// Every bound here is derived from the widget rather than restated: the rect
+    /// comes from [`field_rect`] (the same function the draw calls) and the text
+    /// band from a clone of the live box repositioned into it, so the gate cannot
+    /// pass by agreeing with a constant that the draw does not use.
+    #[test]
+    fn the_edit_box_draws_its_text_and_its_caret_inside_its_own_rect() {
+        const W: f32 = 854.0;
+        const H: f32 = 480.0;
+        let mut nav = test_nav("editbox-pixels");
+        let mut ui = UiState::new();
+        ui.open_server_list();
+        nav.key(&mut ui, MenuKey::Char('a'));
+        assert_eq!(ui.screen(), Screen::ServerEdit, "premise: the form is open");
+        let statuses = StatusCache::with_probe(unavailable_probe());
+        let mut fav = FaviconCache::new();
+
+        // The widget as the draw sees it: a clone of the live box moved into this
+        // frame's rect, exactly as `draw_edit_box` does it.
+        let probe_of = |frame: &MenuFrame<'_>| -> EditBox {
+            let rect = field_rect(&frame.rows, 0, W, H).expect("row 0 is the name field");
+            let mut probe = frame.rows[0]
+                .edit
+                .clone()
+                .expect("the name row must carry its EditBox, or nothing draws");
+            probe.widget.x = rect.0;
+            probe.widget.y = rect.1;
+            probe.widget.width = rect.2;
+            probe.widget.height = rect.3;
+            probe
+        };
+        let band_of = |probe: &EditBox| -> (f32, f32, f32, f32) {
+            (
+                probe.text_x(),
+                probe.text_y(),
+                probe.inner_width(),
+                GLYPH_H as f32 * TEXT_SCALE,
+            )
+        };
+
+        // The control, executed rather than described: an empty focused field
+        // paints its caret and nothing else. If this were zero the band would be
+        // pointing somewhere nothing draws and every measurement below would be of
+        // the wrong rectangle.
+        let empty = frame_for(&ui, &nav, &statuses, &mut fav).expect("the form owns its frame");
+        let band = band_of(&probe_of(&empty));
+        let blank = band_coverage(&geometry(&empty, W, H), W, H, band);
+        assert!(
+            blank.count > 0,
+            "premise: a focused empty field paints a caret inside {band:?}, found \
+             nothing — the band is in the wrong place"
+        );
+        let (_, blank_y0, _, blank_y1) = blank.bounds.unwrap();
+        assert!(
+            blank_y1 - blank_y0 < 4.0,
+            "premise: with no value the band holds only the caret, so its vertical \
+             extent is a bar and not a line of glyphs; got {}",
+            blank_y1 - blank_y0
+        );
+
+        for c in "mc.example.com".chars() {
+            nav.key(&mut ui, MenuKey::Char(c));
+        }
+        let typed = frame_for(&ui, &nav, &statuses, &mut fav).unwrap();
+        let probe = probe_of(&typed);
+        assert_eq!(
+            band_of(&probe),
+            band,
+            "the field must not move between frames, or the two measurements are \
+             of different rectangles"
+        );
+        let full = band_coverage(&geometry(&typed, W, H), W, H, band);
+        assert!(
+            full.count > blank.count * 8,
+            "typing must paint glyphs inside the field: empty {blank:?}, typed {full:?}"
+        );
+        let (x0, y0, x1, y1) = full.bounds.expect("checked non-empty above");
+        // The band is the *counting window*, so "it is inside the band" would be
+        // vacuous. The claim is that what was painted matches the widget's **own**
+        // arithmetic: the leftmost pixel is the box's `text_x` and the rightmost is
+        // its caret's right edge. Both are read off the widget, never restated —
+        // a draw that used the row's `PAD` (6) instead of `BORDER_INSET` (4) would
+        // land two pixels out and fail here.
+        let state = probe.draw_state(None);
+        assert!(
+            (x0 - probe.text_x()).abs() <= 0.5,
+            "the value must start at the box's own text_x {}, painted from {x0}",
+            probe.text_x()
+        );
+        assert!(
+            (x1 - (state.cursor_x + probe.advance)).abs() <= 0.5,
+            "the rightmost pixel must be the caret's right edge {}, painted to {x1} \
+             (bounds ({x0}, {y0})..({x1}, {y1}))",
+            state.cursor_x + probe.advance
+        );
+        assert!(
+            y1 - y0 >= GLYPH_H as f32 * TEXT_SCALE - 6.0,
+            "a full line of glyphs must be present, not just the caret bar: the \
+             band's vertical extent is only {}",
+            y1 - y0
+        );
+
+        // The caret at two positions: one Backspace and the rightmost painted
+        // pixel in the band must retreat by about one character — not by nothing
+        // (a frozen caret) and not by the whole field (a re-laid-out one).
+        nav.key(&mut ui, MenuKey::Backspace);
+        let shorter = frame_for(&ui, &nav, &statuses, &mut fav).unwrap();
+        let after = band_coverage(&geometry(&shorter, W, H), W, H, band);
+        let (_, _, x1_after, _) = after.bounds.expect("still drawing");
+        let advance = probe.advance;
+        assert!(
+            x1_after < x1 - 1.0,
+            "the caret must move left with the text: {x1} -> {x1_after}"
+        );
+        assert!(
+            x1 - x1_after <= advance * 1.5,
+            "one Backspace moved the right edge by {}, which is more than one \
+             character ({advance} px)",
+            x1 - x1_after
+        );
+        // And it landed on the shorter value's own caret, not just somewhere left.
+        let shorter_probe = probe_of(&shorter);
+        let shorter_state = shorter_probe.draw_state(None);
+        assert!(
+            (x1_after - (shorter_state.cursor_x + shorter_probe.advance)).abs() <= 0.5,
+            "expected the caret's right edge at {}, painted to {x1_after}",
+            shorter_state.cursor_x + shorter_probe.advance
+        );
     }
 
     #[test]
