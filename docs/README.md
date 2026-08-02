@@ -211,6 +211,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   presentation must never gate simulation (a stalled client is sent no chunks), and
   the measured reason the unfocused frame schedule is absolute rather than
   elapsed-based: the obvious gate delivers 26 fps at a 30 fps target.
+- [Menu UI framework](./ui-framework.md) — the plan of record for vanilla-faithful
+  menu screens (epic #392): the vanilla→us mapping, why `AbstractContainerScreen` was
+  re-derived by four separate agents in one day, and the measured reason the port is
+  closer than it looks — 26.2's `Renderable.extractRenderState`/`GuiRenderState` split
+  is structurally our `ExtractSet`/`FrameSet`. Also the settings census (93
+  `OptionInstance` accessors, ~198 controls, 4 persisted), the disabled path
+  (`active = false`, grey `-6250336`, and the three widgets with no disabled sprite),
+  why sprite/nine-slice reachability was **deleted** from the plan rather than
+  scheduled, and the HUD/container boundary this deliberately does not cross.
 - [Main menu](./main-menu.md) — the screen state machine, the persisted
   multiplayer server list, per-server status pings (MOTD, players, favicon), the
   dependency edge that gave `lodestone-net`'s ping its first consumer, the
