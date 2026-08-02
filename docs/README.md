@@ -225,6 +225,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   (`active = false`, grey `-6250336`, and the three widgets with no disabled sprite),
   why sprite/nine-slice reachability was **deleted** from the plan rather than
   scheduled, and the HUD/container boundary this deliberately does not cross.
+- [Menu widgets](./menu-widgets.md) — the first child of that epic (#393):
+  `Widget`, `WidgetSprites` and the disabled render path, converted title and pause
+  rows with pixels unmoved, why `Checkbox`/`EditBox`/`AbstractSliderButton` must
+  **not** get disabled art, and three things the written record had wrong that the
+  jar settles — the sprite argument is `isHoveredOrFocused()` and not
+  `isFocused()`, the two `WidgetSprites::get` arguments are different predicates,
+  and `EditBox` does route through the record.
 - [Main menu](./main-menu.md) — the screen state machine, the persisted
   multiplayer server list, per-server status pings (MOTD, players, favicon), the
   dependency edge that gave `lodestone-net`'s ping its first consumer, the

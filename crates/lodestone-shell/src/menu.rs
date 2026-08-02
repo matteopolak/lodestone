@@ -9,6 +9,7 @@
 //! | [`render`] | layout + a self-contained GPU pipeline |
 //! | [`servers`] | the saved server list and its on-disk JSON |
 //! | [`status`] | background status pings and their cache |
+//! | [`widget`] | vanilla's widget contract, and the disabled render path |
 //!
 //! The lifecycle is the actual hard part: choosing a session, establishing it,
 //! playing, pausing, and every way it can fail. A menu that can only succeed is
@@ -37,6 +38,7 @@ pub mod nav;
 pub mod render;
 pub mod servers;
 pub mod status;
+pub mod widget;
 
 /// What the player chose to start from the menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
