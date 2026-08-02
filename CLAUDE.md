@@ -412,6 +412,28 @@ geometry and no `destroySpeed`. Per-block-state tables come from booting the rea
 `Block.BLOCK_STATE_REGISTRY` — see `crates/protocol/v770/tests/{collision_shapes,hardness}.rs` for
 the generate-or-assert + `LODESTONE_REGEN=1` pattern, and `oracle-java/` for the dump programs.
 
+**Never hand-count an entity metadata index. Run `EntityDataIndexOracle.java`.** It dumps every
+`EntityDataAccessor` in the game sorted by index, so collisions land on adjacent lines. The first
+time it was run it immediately found **two shipped bugs**: `Sheep.DATA_WOOL_ID` and
+`Horse.DATA_ID_TYPE_VARIANT` were each off by one, both hand counts having missed
+`AgeableMob.AGE_LOCKED`. **Every sheep in the game was rendering its default colour** while the
+decoder reported a clean parse — invisible precisely because the tests encode with the same
+constants they decode with, which is the `decode(encode(x))` trap in its most expensive form, and
+because every sheep pixel gate builds its `EntityDraw` *downstream* of the wire.
+
+Indices are reused across classes and **the guard you need depends on which classes collide**:
+- Index 8 is `LivingEntity.DATA_LIVING_ENTITY_FLAGS` **and** `AbstractArrow.ID_FLAGS`, both `BYTE`,
+  with the arrow's crit bit `0x01` bit-identical to "using item" — living vs **non**-living, so
+  `entity_census::is_living` is the right guard.
+- Index 15 is `Mob`'s flags (aggressive `0x04`) **and** `ArmorStand.DATA_CLIENT_FLAGS`, whose `0x04`
+  is `CLIENT_FLAG_SHOW_ARMS` — and an armour stand *is* a `LivingEntity`, so `is_living` would report
+  **every decorative armour stand with arms as an aggressive mob**. That collision is living vs
+  living and needs `entity_census::is_mob`. `Display` also claims 15 as a `BYTE`.
+
+So: check the oracle dump for the index, then pick the census column that separates the *actual*
+claimants. Assuming the previous collision's guard generalises is how the armour-stand bug would
+have shipped.
+
 ## Documentation
 
 Keep [`docs/`](./docs/README.md) current: one doc per subsystem, `kebab-case`, named after the
