@@ -56,33 +56,32 @@
 //!    is not a thing vanilla's Controls screen offers either. The boundary is
 //!    "gameplay and world bindings are rebindable; UI chrome is not".
 //!
-//! 4. **[`InputAction::ToggleFly`] is ours.** Vanilla has no fly-toggle binding
-//!    (creative flight is a double-tap of jump), so it is namespaced
-//!    `key.lodestone.toggleFly` rather than squatting on a vanilla name. `F` in
-//!    vanilla is `key.swapOffhand`, which this client does not implement.
+//! 4. **`F` is [`InputAction::SwapOffhand`], and it took a deletion to get
+//!    there.** This table used to carry a Lodestone-only `key.lodestone.toggleFly`
+//!    on `F` — a free-cam/noclip developer affordance with no vanilla
+//!    counterpart. Issue #382 deleted it (vanilla's `/gamemode creative` plus
+//!    #191's real double-tap-jump flight cover it), which freed `F` for vanilla's
+//!    actual binding: `key.swapOffhand`, `Options.java:663`, GLFW keysym 70.
 //!
-//!    **That last sentence is now the only thing keeping `F` here, and it is
-//!    load-bearing rather than incidental** (issue #378 part 3). The container
-//!    half of `key.swapOffhand` — `ContainerInput::SWAP` with button `40`
-//!    against the hovered slot, `AbstractContainerScreen.java:506-522` — is now
-//!    implemented on the machine side and reachable from
-//!    `app.rs`'s `KeyOutcome::ContainerSwap`; the number keys `1`–`9` route to it
-//!    already. The **off-hand key does not**, and the blocker is this table, not
-//!    the click path: adding `SwapOffhand` with vanilla's default of `F`
-//!    (`Options.java:663`, GLFW keysym 70) collides with `ToggleFly` and turns
+//!    That collision was a real blocker, not a tidiness complaint — adding
+//!    `SwapOffhand` on `F` alongside `ToggleFly` turned
 //!    `a_conflict_is_reported_for_both_actions_and_only_for_them` red, which is
-//!    that test doing its job. Landing the off-hand key needs a **decision**
-//!    first, not more code:
+//!    that test doing its job, and #378's off-hand half was correctly reverted
+//!    rather than forced past it.
 //!
-//!    * move `key.lodestone.toggleFly` off `F` (restores vanilla parity, changes
-//!      a default a player is using today), or
-//!    * ship `key.swapOffhand` as [`Binding::Unbound`] and let the player bind it
-//!      (no default collision, but the feature is unreachable out of the box).
+//!    **The binding is currently half a feature, deliberately.** Vanilla's `F`
+//!    means two different things depending on what is on screen:
 //!
-//!    Whichever is chosen, note the *gameplay* half of vanilla's `F` — the
-//!    `ServerboundPlayerActionPacket SWAP_ITEM_WITH_OFFHAND` that swaps hands in
-//!    the world — is a separate serverbound action this client does not send at
-//!    all, so a binding added for the container half only is half a feature.
+//!    * **container half — implemented.** `ContainerInput::SWAP` with button `40`
+//!      against the hovered slot (`AbstractContainerScreen.java:506-522`),
+//!      reached through `app.rs`'s `KeyOutcome::ContainerSwap` exactly like the
+//!      number keys `1`–`9`. `Click::offhand_swap` and `do_swap`'s `button == 40`
+//!      arm were already in place and tested; this binding is what finally
+//!      reaches them.
+//!    * **gameplay half — not implemented.** With no screen open, vanilla sends
+//!      `ServerboundPlayerActionPacket SWAP_ITEM_WITH_OFFHAND`. This client does
+//!      not send that action at all, so pressing `F` in the world does nothing
+//!      today. That is issue #378's remaining half.
 //!
 //! ## Physical keys, and what that costs on non-QWERTY layouts
 //!
@@ -185,7 +184,7 @@ impl Category {
 /// A rebindable thing the player can ask for.
 ///
 /// Every variant here has a real consumer in `app.rs` — vanilla mappings this
-/// client does not implement (`key.drop`, `key.swapOffhand`, `key.pickItem`,
+/// client does not implement (`key.drop`, `key.pickItem`,
 /// `key.screenshot`, `key.advancements`, …) are deliberately **absent** rather
 /// than listed and dead. Adding one is a two-line change here plus the branch
 /// that consumes it; adding one *without* the branch is the island defect
@@ -209,6 +208,15 @@ pub enum InputAction {
     Use,
     // -- inventory --------------------------------------------------------
     Inventory,
+    /// Vanilla's `key.swapOffhand` (`Options.java:663`).
+    ///
+    /// **Only its container half is implemented** — a `ContainerInput::SWAP`
+    /// with button `40` against the hovered slot, which is what `app.rs`'s
+    /// container arm routes it to. Pressed with no screen open it does nothing,
+    /// because the serverbound `SWAP_ITEM_WITH_OFFHAND` action this client
+    /// would need does not exist yet (issue #378's remaining half). See the
+    /// module docs.
+    SwapOffhand,
     Hotbar1,
     Hotbar2,
     Hotbar3,
@@ -226,8 +234,6 @@ pub enum InputAction {
     PlayerList,
     // -- misc -------------------------------------------------------------
     TogglePerspective,
-    /// Lodestone-only; see the module docs. Vanilla has no fly-toggle binding.
-    ToggleFly,
     /// Open the pause screen, or close an open container.
     ///
     /// **Not a vanilla `KeyMapping`** — vanilla handles Escape in `Screen` /
@@ -262,6 +268,7 @@ impl InputAction {
         InputAction::Attack,
         InputAction::Use,
         InputAction::Inventory,
+        InputAction::SwapOffhand,
         InputAction::Hotbar1,
         InputAction::Hotbar2,
         InputAction::Hotbar3,
@@ -275,7 +282,6 @@ impl InputAction {
         InputAction::Command,
         InputAction::PlayerList,
         InputAction::TogglePerspective,
-        InputAction::ToggleFly,
         InputAction::Pause,
         InputAction::DebugOverlay,
     ];
@@ -298,6 +304,7 @@ impl InputAction {
             InputAction::Attack => "key.attack",
             InputAction::Use => "key.use",
             InputAction::Inventory => "key.inventory",
+            InputAction::SwapOffhand => "key.swapOffhand",
             InputAction::Hotbar1 => "key.hotbar.1",
             InputAction::Hotbar2 => "key.hotbar.2",
             InputAction::Hotbar3 => "key.hotbar.3",
@@ -311,7 +318,6 @@ impl InputAction {
             InputAction::Command => "key.command",
             InputAction::PlayerList => "key.playerlist",
             InputAction::TogglePerspective => "key.togglePerspective",
-            InputAction::ToggleFly => "key.lodestone.toggleFly",
             InputAction::Pause => "key.lodestone.pause",
             InputAction::DebugOverlay => "key.debug.overlay",
         }
@@ -339,6 +345,7 @@ impl InputAction {
             | InputAction::Sprint => Category::Movement,
             InputAction::Attack | InputAction::Use => Category::Gameplay,
             InputAction::Inventory
+            | InputAction::SwapOffhand
             | InputAction::Hotbar1
             | InputAction::Hotbar2
             | InputAction::Hotbar3
@@ -351,9 +358,7 @@ impl InputAction {
             InputAction::Chat | InputAction::Command | InputAction::PlayerList => {
                 Category::Multiplayer
             }
-            InputAction::TogglePerspective | InputAction::ToggleFly | InputAction::Pause => {
-                Category::Misc
-            }
+            InputAction::TogglePerspective | InputAction::Pause => Category::Misc,
             InputAction::DebugOverlay => Category::Debug,
         }
     }
@@ -380,8 +385,9 @@ impl InputAction {
             // in the source is `keyUse` (button 1) then `keyAttack` (button 0).
             InputAction::Attack => Binding::Mouse(MouseButton::Left),
             InputAction::Use => Binding::Mouse(MouseButton::Right),
-            // `Options.java:662` — 69.
+            // `Options.java:662-663` — 69 and 70.
             InputAction::Inventory => Binding::Key(KeyCode::KeyE),
+            InputAction::SwapOffhand => Binding::Key(KeyCode::KeyF),
             // `Options.java:684-692` — 49..57, i.e. the number row, not the keypad.
             InputAction::Hotbar1 => Binding::Key(KeyCode::Digit1),
             InputAction::Hotbar2 => Binding::Key(KeyCode::Digit2),
@@ -398,8 +404,6 @@ impl InputAction {
             InputAction::PlayerList => Binding::Key(KeyCode::Tab),
             // `Options.java:676` — 294.
             InputAction::TogglePerspective => Binding::Key(KeyCode::F5),
-            // No vanilla counterpart; this client's existing key.
-            InputAction::ToggleFly => Binding::Key(KeyCode::KeyF),
             // No vanilla counterpart (Escape is not a `KeyMapping`); GLFW 256.
             InputAction::Pause => Binding::Key(KeyCode::Escape),
             // `Options.java:698` — 292.
@@ -1257,7 +1261,14 @@ mod tests {
         assert_eq!(Keybinds::in_category(Category::Creative).count(), 0);
         assert_eq!(Keybinds::in_category(Category::Spectator).count(), 0);
         assert_eq!(Keybinds::in_category(Category::Movement).count(), 7);
-        assert_eq!(Keybinds::in_category(Category::Inventory).count(), 10);
+        // Inventory: `key.inventory`, `key.swapOffhand`, and the nine hotbar
+        // slots. Vanilla puts all eleven in `Category.INVENTORY`
+        // (`Options.java:662-663,683-693`); `key.drop` is the twelfth there and
+        // this client does not implement it.
+        assert_eq!(Keybinds::in_category(Category::Inventory).count(), 11);
+        // Misc lost a member to #382: `key.lodestone.toggleFly` is gone, leaving
+        // `key.togglePerspective` and this client's non-vanilla pause entry.
+        assert_eq!(Keybinds::in_category(Category::Misc).count(), 2);
     }
 
     // -- persistence -------------------------------------------------------

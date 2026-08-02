@@ -586,14 +586,6 @@ impl MenuNav {
         self.options.gui_scale
     }
 
-    /// The persisted `unlock_framerate` **debug** option — see
-    /// [`crate::config::Options::unlock_framerate`]. Read once per presented
-    /// frame by `crate::app::WindowApp::sync_present_mode`.
-    #[must_use]
-    pub fn unlock_framerate(&self) -> bool {
-        self.options.unlock_framerate
-    }
-
     /// The last options-save failure, if any.
     #[must_use]
     pub fn options_save_error(&self) -> Option<&str> {
@@ -901,16 +893,15 @@ impl MenuNav {
         }
     }
 
-    /// The settings screen still has no row highlight: each control owns its own
-    /// key instead. Up/Down step the GUI scale, Enter toggles the uncapped-frame
-    /// -rate debug row.
+    /// The settings screen has no row highlight: its one control owns Up/Down
+    /// directly, which steps the GUI scale.
     ///
-    /// Giving the second control its own key rather than adding a cursor is
-    /// deliberate — a cursor would change what Up/Down *mean* on this screen,
-    /// and the GUI-scale binding is what every existing test on it asserts. When
-    /// a third control lands, that is the point to introduce a real highlight
-    /// (and vanilla's own `OptionsScreen` list) and re-point those tests once,
-    /// on purpose.
+    /// It briefly had a second row (the `unlock_framerate` debug knob, on
+    /// Enter), deleted with the rest of the bespoke debug affordances in issue
+    /// #382. When a real second control lands — vanilla's Max Framerate slider
+    /// is the obvious one — that is the point to introduce a proper highlight
+    /// (and vanilla's own `OptionsScreen` list) and re-point the GUI-scale
+    /// tests once, on purpose, rather than handing each control its own key.
     fn key_settings(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         match key {
             MenuKey::Up => {
@@ -919,10 +910,6 @@ impl MenuNav {
             }
             MenuKey::Down => {
                 self.cycle_gui_scale(-1);
-                MenuAction::None
-            }
-            MenuKey::Enter => {
-                self.toggle_unlock_framerate();
                 MenuAction::None
             }
             MenuKey::Escape => {
@@ -1047,13 +1034,6 @@ impl MenuNav {
         let current = self.options.gui_scale as i32;
         let next = (current + delta).rem_euclid(span);
         self.options.gui_scale = next as u32;
-        self.persist_options();
-    }
-
-    /// Flips the `unlock_framerate` debug option and saves immediately, same
-    /// eager-persistence rule as [`MenuNav::cycle_gui_scale`].
-    fn toggle_unlock_framerate(&mut self) {
-        self.options.unlock_framerate = !self.options.unlock_framerate;
         self.persist_options();
     }
 
@@ -1562,31 +1542,29 @@ mod tests {
     }
 
     #[test]
-    fn settings_enter_toggles_the_framerate_knob_without_disturbing_the_scale() {
-        let (mut nav, path) = nav("settings-uncap");
+    fn settings_enter_is_inert_now_that_the_debug_knob_is_gone() {
+        // The screen's one control is the GUI scale, on Up/Down. Enter used to
+        // flip the `unlock_framerate` debug row (#382); with that row deleted
+        // Enter must do *nothing at all* rather than fall through to some other
+        // screen's meaning of Enter, and in particular must not disturb the
+        // scale — the one setting this screen still owns.
+        let (mut nav, path) = nav("settings-enter-inert");
         let mut ui = UiState::new();
         ui.open_settings();
         let options_path = path.parent().unwrap().join("options.json");
 
-        assert!(!nav.unlock_framerate(), "a debug knob starts off");
-        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
-        assert!(nav.unlock_framerate());
-        // On disk immediately, same rule as the scale.
-        assert!(crate::config::Options::load_from(&options_path).unlock_framerate);
-
-        nav.key(&mut ui, MenuKey::Enter);
-        assert!(!nav.unlock_framerate(), "Enter is a toggle, not a latch");
-        assert!(!crate::config::Options::load_from(&options_path).unlock_framerate);
-
-        // The two controls share a screen and no cursor, so the thing that can
-        // actually go wrong is one key reaching the other's setting.
         nav.key(&mut ui, MenuKey::Up);
         nav.key(&mut ui, MenuKey::Up);
         assert_eq!(nav.gui_scale(), 2);
-        assert!(!nav.unlock_framerate(), "Up must not touch the knob");
-        nav.key(&mut ui, MenuKey::Enter);
-        assert!(nav.unlock_framerate());
+
+        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::Settings, "Enter must not leave");
         assert_eq!(nav.gui_scale(), 2, "Enter must not touch the scale");
+        assert_eq!(
+            crate::config::Options::load_from(&options_path).gui_scale,
+            2,
+            "and must not rewrite the file with something else"
+        );
         assert_eq!(nav.options_save_error(), None);
     }
 

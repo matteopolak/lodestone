@@ -1335,23 +1335,9 @@ pub fn frame_for<'a>(
                         enabled: true,
                         ..Default::default()
                     },
-                    // The uncapped-frame-rate debug row. `selected: 0` below
-                    // still points at the scale row and this screen has no
-                    // cursor, so being second costs nothing — see
-                    // `MenuNav::key_settings` on why each control owns a key
-                    // rather than sharing a highlight.
-                    MenuRow {
-                        label: format!(
-                            "UNCAP FRAMERATE: {}",
-                            if nav.unlock_framerate() { "ON" } else { "OFF" }
-                        ),
-                        detail: "ENTER TOGGLES IT - DEBUG, MEASURES REAL FPS ON F3".to_string(),
-                        enabled: true,
-                        ..Default::default()
-                    },
                 ],
                 selected: 0,
-                footer: vec!["UP/DOWN SCALE   ENTER UNCAP FPS   ESC BACK".to_string()],
+                footer: vec!["UP/DOWN SCALE   ESC BACK".to_string()],
                 message: nav.options_save_error().map(str::to_string),
                 ..Default::default()
             })

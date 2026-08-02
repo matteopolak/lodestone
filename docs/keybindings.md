@@ -124,8 +124,19 @@ A table entry, not a structural change. Four places, all in `keybinds.rs`:
 **Step 4 is not optional.** An action with no consumer is a Controls-menu row
 that does nothing — the island defect of `CLAUDE.md` §1. Only actions this client
 actually dispatches are in the table today, which is why vanilla mappings we do
-not implement (`key.drop`, `key.swapOffhand`, `key.pickItem`, `key.screenshot`)
-are absent rather than listed and dead.
+not implement (`key.drop`, `key.pickItem`, `key.screenshot`) are absent rather
+than listed and dead.
+
+`key.swapOffhand` is the one **partial** entry, and it is worth knowing why it is
+allowed to be. Vanilla's `F` means two different things depending on what is on
+screen: a `ContainerInput::SWAP` against the hovered slot with a container open,
+and a serverbound `SWAP_ITEM_WITH_OFFHAND` without one. The container half is
+implemented and reached; the gameplay half is not (#378's remainder), so pressing
+`F` in the world does nothing. That is not an island — the binding *does* reach a
+pixel on the screen it matters most on — but it is half a feature, and
+`app::tests::the_offhand_key_swaps_with_slot_forty_while_a_container_is_open`
+asserts the absent half explicitly so landing it has to change that line on
+purpose.
 
 If the new action is a movement one, also add it to `movement()` so it reaches
 `lodestone-controller`.
