@@ -62,19 +62,25 @@
 //!
 //! Adding a consumer is [`AssetObjectStore::read`] with the right index key; note
 //! the key has no `assets/` prefix, which is the mistake that resolves nothing.
-//! Populating the store is `cargo run -p xtask -- fetch-assets --version 26.2`,
-//! which downloads exactly the shadowed set (see `fetch_shadowed_objects`) — not
-//! all 5057 objects.
+//! Populating the store takes **two** commands, and which one you need depends on
+//! what is missing:
 //!
-//! **`crate::audio` has an older private copy of this logic** (`find_asset_index`
-//! / `parse_asset_index` / `AssetObjectSource`), written for `sounds.json` and the
-//! 4871 `.ogg` objects before this module existed. It is left alone deliberately:
-//! `audio.rs` is `#![cfg(not(target_arch = "wasm32"))]` and depending on it from
-//! `resources.rs` would make a cfg-gated module load-bearing for texture loading.
-//! Collapsing the two is a named follow-up, not an accident. If you are here to
-//! do that, note the two also disagree on which env var names the root:
-//! `audio.rs` takes `LODESTONE_ASSET_ROOT`, while this module is handed whatever
-//! [`crate::resources`] resolved (`LODESTONE_ASSETS`, or a `.cache/mc/*` scan).
+//! * `cargo run -p xtask -- fetch-assets --version 26.2` — the index plus the 8
+//!   jar-shadowed objects plus `minecraft/sounds.json`, ~3.2 MB (see
+//!   `fetch_shadowed_objects`). Not all 5057 objects.
+//! * `cargo run -p xtask -- fetch-sounds --version 26.2` — the `.ogg` corpus,
+//!   4751 objects / 80 MB, derived from `sounds.json`. Without it the store opens,
+//!   `sounds.json` resolves 1968 events, and every one of them plays silence.
+//!
+//! Finding the root is [`discover_store_root`], which is also where the
+//! `LODESTONE_ASSET_ROOT` / `LODESTONE_ASSETS` split is reconciled — read its docs
+//! before adding a third variable or a second walk.
+//!
+//! Note that `crate::audio` used to hold a private copy of the index reader
+//! (`find_asset_index` / `parse_asset_index` / `AssetObjectSource`), written for
+//! `sounds.json` before this module existed. That copy is **gone**: `audio.rs`
+//! goes through [`AssetObjectStore`] like everything else, and this module is the
+//! single reader of the index.
 //!
 //! ## Dependencies
 //!
@@ -194,6 +200,132 @@ impl AssetObjectStore {
             std::fs::metadata(&path).is_ok_and(|m| m.len() == meta.size)
         })
     }
+
+    /// `(present, declared)` over the index names `filter` accepts.
+    ///
+    /// This exists for one reason: **a store can open cleanly, resolve nothing,
+    /// and look like working code.** That is precisely how audio came up "enabled"
+    /// with 11 of 4871 samples on disk and played silence, with the only clue a
+    /// `debug`-level line per event. A census at startup turns that into one
+    /// visible number.
+    ///
+    /// It is `stat` per matching entry and no reads — ~4871 `metadata` calls for
+    /// the `.ogg` census, tens of milliseconds once, which is worth paying to make
+    /// a silent install self-describing.
+    #[must_use]
+    pub fn present_count(&self, filter: impl Fn(&str) -> bool) -> (usize, usize) {
+        let mut declared = 0;
+        let mut present = 0;
+        for (name, meta) in &self.index {
+            if !filter(name.as_str()) {
+                continue;
+            }
+            declared += 1;
+            let path = object_relpath(&self.root, &meta.hash);
+            if std::fs::metadata(&path).is_ok_and(|m| m.len() == meta.size) {
+                present += 1;
+            }
+        }
+        (present, declared)
+    }
+}
+
+/// Environment variable naming the asset-object root directly (one holding
+/// `asset-index-*.json` and `objects/`, e.g. `.cache/mc/26.2`). Highest priority
+/// in [`discover_store_root`].
+pub const ASSET_ROOT_ENV: &str = "LODESTONE_ASSET_ROOT";
+
+/// The environment variable the *rest* of the shell uses to name a pack root
+/// ([`crate::resources`]). Honoured here too, because in a vanilla install it is
+/// the same directory and requiring two variables for one directory is the config
+/// trap this constant exists to close.
+pub const ASSETS_ENV: &str = "LODESTONE_ASSETS";
+
+/// Resolve the asset-object root, or explain why not.
+///
+/// # The trap this closes
+///
+/// There were **two** environment variables naming one directory, and they
+/// disagreed about who had to be set. `crate::resources::asset_root` honours
+/// `LODESTONE_ASSETS` and otherwise walks ancestors for a `.cache/mc/*` pack, so
+/// the title screen, the block atlas and every texture come up with **no
+/// environment at all**. `crate::audio` required `LODESTONE_ASSET_ROOT` and
+/// returned `None` without it. The net effect of a plain `cargo run --release` was
+/// therefore: everything visual works, and audio is *off*, with one `info` line
+/// about a variable nothing else in the project mentions. Setting the documented
+/// `LODESTONE_ASSETS` did not help, because audio never read it.
+///
+/// So the order here is: `LODESTONE_ASSET_ROOT` (explicit, still wins and still
+/// the way to point at a non-standard store), then `LODESTONE_ASSETS`, then the
+/// same ancestor walk. An explicitly-set variable is used **verbatim** and its
+/// failure is reported against the path the user gave — never silently skipped in
+/// favour of a scan, which would hide a typo behind a working default.
+///
+/// # Why the predicate differs from `resources`
+///
+/// [`crate::resources`] asks for `client.jar` + `generated/reports/blocks.json`,
+/// because that is what stitches an atlas. This asks for exactly one
+/// `asset-index-*.json` **and** an `objects/` directory, because that is what
+/// makes a store readable. The distinction is real and not pedantic:
+/// `.cache/mc/1.8.9` and `.cache/mc/1.12.2` in this checkout each carry an
+/// `asset-index-*.json` with **no** `objects/` tree, so an index-only predicate
+/// would select one of them and resolve nothing.
+///
+/// # Errors
+///
+/// Returns a message naming the fix when an explicitly-set variable points at
+/// something unusable, or when the walk finds no candidate.
+pub fn discover_store_root() -> Result<PathBuf, String> {
+    for env in [ASSET_ROOT_ENV, ASSETS_ENV] {
+        if let Some(value) = std::env::var_os(env) {
+            let path = PathBuf::from(value);
+            return if is_store_root(&path) {
+                Ok(path)
+            } else {
+                Err(format!(
+                    "{env} is set to {} which is not an asset-object root (wanted exactly \
+                     one asset-index-*.json and an objects/ directory); run: cargo run -p \
+                     xtask -- fetch-assets --version <version>",
+                    path.display()
+                ))
+            };
+        }
+    }
+
+    let cwd = std::env::current_dir()
+        .map_err(|e| format!("cannot read the current directory to search for assets: {e}"))?;
+    for base in cwd.ancestors() {
+        if let Some(root) = best_store_in(&base.join(".cache/mc")) {
+            return Ok(root);
+        }
+    }
+    Err(format!(
+        "no asset-object store found: no .cache/mc/<version> above {} holds an \
+         asset-index-*.json and an objects/ directory. Run: cargo run -p xtask -- \
+         fetch-assets --version <version>, or set {ASSET_ROOT_ENV}",
+        cwd.display()
+    ))
+}
+
+/// True when `dir` can be read as an asset-object store: exactly one
+/// `asset-index-*.json` and an `objects/` directory.
+#[must_use]
+pub fn is_store_root(dir: &Path) -> bool {
+    dir.join("objects").is_dir() && find_asset_index(dir).is_ok()
+}
+
+/// The highest-sorting readable store directly under `cache_dir`, or `None`.
+///
+/// Highest-sorting, matching [`crate::resources`]: never directory order, which
+/// is the cross-agent landmine both of these avoid the same way.
+fn best_store_in(cache_dir: &Path) -> Option<PathBuf> {
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(cache_dir)
+        .ok()?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| is_store_root(path))
+        .collect();
+    entries.sort();
+    entries.pop()
 }
 
 /// Lets the store stand in as a pack source for anything built on
@@ -450,6 +582,83 @@ mod tests {
                 .object_path("minecraft/textures/gui/title/background/panorama_0.png")
                 .is_some()
         );
+    }
+
+    /// A store root needs an `objects/` tree *and* an index, and this is not
+    /// pedantry: this checkout's `.cache/mc/1.8.9` and `.cache/mc/1.12.2` each
+    /// carry an `asset-index-*.json` with no `objects/` at all, so an index-only
+    /// predicate would happily select one and then resolve nothing.
+    #[test]
+    fn an_index_without_an_objects_tree_is_not_a_store_root() {
+        let root = std::env::temp_dir().join(format!(
+            "lodestone-asset-objects-{}-{}",
+            std::process::id(),
+            "storeroot"
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("temp dir");
+        std::fs::write(root.join("asset-index-32.json"), b"{}").expect("write");
+        assert!(
+            !is_store_root(&root),
+            "an index with no objects/ must not qualify"
+        );
+
+        // Control: adding the objects/ tree is the one thing that flips it, which
+        // is what proves the rejection above was that check.
+        std::fs::create_dir_all(root.join("objects")).expect("objects dir");
+        assert!(is_store_root(&root));
+
+        // And an objects/ tree with no index does not qualify either.
+        std::fs::remove_file(root.join("asset-index-32.json")).expect("rm");
+        assert!(!is_store_root(&root));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The census is the diagnostic that makes "the store opened and plays
+    /// nothing" visible, so it has to count *presence*, not index entries.
+    #[test]
+    fn the_presence_census_counts_disk_not_the_index() {
+        let root = std::env::temp_dir().join(format!(
+            "lodestone-asset-objects-{}-{}",
+            std::process::id(),
+            "census"
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut index = HashMap::new();
+        for (key, hash, size, write) in [
+            ("minecraft/sounds/a.ogg", "aa00000000000000000000000000000000000001", 3, Some(&b"abc"[..])),
+            ("minecraft/sounds/b.ogg", "bb00000000000000000000000000000000000002", 3, None),
+            // Present but truncated: the census must agree with `object_bytes`
+            // and call this absent.
+            ("minecraft/sounds/c.ogg", "cc00000000000000000000000000000000000003", 99, Some(&b"xy"[..])),
+            ("minecraft/sounds.json", "dd00000000000000000000000000000000000004", 2, Some(&b"{}"[..])),
+        ] {
+            index.insert(
+                key.to_string(),
+                ObjectMeta {
+                    hash: hash.to_string(),
+                    size,
+                },
+            );
+            if let Some(bytes) = write {
+                let dir = root.join("objects").join(&hash[0..2]);
+                std::fs::create_dir_all(&dir).expect("object dir");
+                std::fs::write(dir.join(hash), bytes).expect("write object");
+            }
+        }
+        let store = AssetObjectStore {
+            root: root.clone(),
+            index,
+        };
+        assert_eq!(
+            store.present_count(|name| name.ends_with(".ogg")),
+            (1, 3),
+            "one of three .ogg objects is on disk at its declared length"
+        );
+        // The filter is what scopes it: without one, sounds.json counts too.
+        assert_eq!(store.present_count(|_| true), (2, 4));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

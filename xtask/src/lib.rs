@@ -832,6 +832,14 @@ pub enum CliCommand {
         minecraft_version: String,
         force: bool,
     },
+    FetchSounds {
+        minecraft_version: String,
+        /// Include background music and jukebox discs (+293 MB).
+        all: bool,
+        force: bool,
+        /// Concurrent downloads; `None` means [`SOUND_FETCH_JOBS`].
+        jobs: Option<usize>,
+    },
     FetchVersion {
         minecraft_version: String,
         force: bool,
@@ -865,7 +873,7 @@ pub enum CliCommand {
 
 #[must_use]
 pub const fn root_help() -> &'static str {
-    "xtask\n\nUsage:\n    cargo run -p xtask -- <command> [options]\n\nCommands:\n    gen-packet-ids   Generate Rust packet ID tables from a Mojang report or minecraft-data\n    fetch-assets     Download and verify vanilla client.jar, the asset index, and the asset-store objects client.jar stubs, into .cache/mc/<version>/\n    fetch-version    Download and verify vanilla server.jar into .cache/mc/<version>/\n    version-table    Generate/check the epic-343 16-version protocol/data-version table\n    gen-registries   Generate selected registry id->ResourceKey tables from registries.json\n    check-isolation  Enforce protocol version crate dependency isolation\n    check-connected  Enforce workspace crates are reachable from shipped binary/cdylib roots\n    connectedness    Report v770 play packet reachability\n    check-deletable  Simulate deleting a version family's folder and report the fallout\n    codegen-ratio    Report generated-vs-hand-written codec metrics per protocol family\n    new-version      Scaffold a protocol family; registry support is withheld until SHAPE_REVIEW.toml is discharged\n    gen-reports      Not implemented yet\n    conformance      Run packet-id, registry, isolation, deletability, test, and clippy checks for a family\n\nOptions for gen-packet-ids:\n    --version <version>   Minecraft version, e.g. 26.2 (Mojang) or 1.8 (minecraft-data dir)\n    --protocol <id>       Protocol version, e.g. 776 or 47\n    --source <source>     Report source: mojang (default) or minecraft-data\n    --out <path>          Output path under crates/protocol/*/src/generated/\n    --check               Compare generated output against disk and fail on drift without writing\n\nOptions for gen-registries:\n    --version <version>       Minecraft version, e.g. 26.2\n    --protocol <id>           Protocol version, e.g. 776\n    --out-dir <path>          Output directory under crates/protocol/*/src/generated\n    --registries <csv>        Registry keys to generate (default: sound_event,particle_type,menu,item)\n    --check                   Compare generated registry tables against disk without writing\n\nOptions for check-connected:\n    --allowlist <path>    TOML file of explicit exceptions (default: xtask/check-connected.toml)\n\nOptions for connectedness:\n    Parses v770's generated packet_ids.rs for play denominators, then classifies adapter dispatch outlets (ClientEvent, Directive, world/sink writes) with explicit UNCLASSIFIED output.\n\nOptions for check-deletable:\n    <version>             Version family to simulate deleting: package name (lodestone-v47), folder (v47), or path\n\nOptions for codegen-ratio:\n    Reports both the optimistic per-struct derive/manual ratio and the more decision-useful absolute hand-written source lines.\n\nOptions for new-version:\n    --protocol <id>       Protocol number for the new family (required)\n    --minecraft <ver>    Minecraft version key for the packet-id oracle (required)\n    --from <family>       Existing family to copy from, e.g. v770 (default) or v47\n    --source <source>     Oracle: mojang or minecraft-data (default inferred from --from)\n    --name <vNNN>         Family folder/label (default v<protocol>)\n    --force               Overwrite the target folder if it already exists\n    SHAPE_REVIEW.toml     Generated when packet shapes differ; every entry must be reviewed before registry support may be added\n\nOptions for conformance:\n    --family <vNNN>       Version family folder/label to check, e.g. v735\n    --minecraft <ver>     Minecraft version key for packet-id/registry checks\n    --protocol <id>       Protocol number for the family\n    --source <source>     Packet-id oracle: mojang or minecraft-data (default mojang)\n    --skip-cargo          Only run xtask structural checks; skip cargo test/clippy\n\nOptions for fetch-version:\n    --version <version>   Minecraft version, e.g. 1.16.5\n    --force               Re-download even when cached server.jar already matches its SHA-1\n\nOptions for fetch-assets:\n    --version <version>   Minecraft version, e.g. 26.2\n    --force               Re-download even when cached files already match their SHA-1\n    -h, --help            Print help\n  Also fetches asset-store objects, ~3.2 MB in total:\n    - the 8 whose name is in client.jar at a DIFFERENT size, i.e. the stubs the jar ships to be\n      overridden (the 6 panorama faces, panorama_overlay, unifont.json). Nothing at runtime can\n      tell a stub from the real asset, which is why these must be eager.\n    - minecraft/sounds.json (626 KB), which ShellAudio reads eagerly and cannot start without.\n  The 4871 .ogg samples (375 MB) are NOT fetched: a missing sample is one silent sound, resolved\n  lazily per event. Use xtask::ensure_object if you want the corpus.\n\nOptions for version-table:\n    --check               Compare the generated table against crates/lodestone-registry/src/generated/version_table.rs and fail on drift without writing\n    --fetch-missing       Also run fetch-version for any of the 16 target versions with no cached .cache/mc/<version>/server.jar (network + disk heavy; off by default)\n"
+    "xtask\n\nUsage:\n    cargo run -p xtask -- <command> [options]\n\nCommands:\n    gen-packet-ids   Generate Rust packet ID tables from a Mojang report or minecraft-data\n    fetch-assets     Download and verify vanilla client.jar, the asset index, and the asset-store objects client.jar stubs, into .cache/mc/<version>/\n    fetch-sounds     Download and verify the vanilla .ogg sound corpus (~80 MB) into .cache/mc/<version>/objects/\n    fetch-version    Download and verify vanilla server.jar into .cache/mc/<version>/\n    version-table    Generate/check the epic-343 16-version protocol/data-version table\n    gen-registries   Generate selected registry id->ResourceKey tables from registries.json\n    check-isolation  Enforce protocol version crate dependency isolation\n    check-connected  Enforce workspace crates are reachable from shipped binary/cdylib roots\n    connectedness    Report v770 play packet reachability\n    check-deletable  Simulate deleting a version family's folder and report the fallout\n    codegen-ratio    Report generated-vs-hand-written codec metrics per protocol family\n    new-version      Scaffold a protocol family; registry support is withheld until SHAPE_REVIEW.toml is discharged\n    gen-reports      Not implemented yet\n    conformance      Run packet-id, registry, isolation, deletability, test, and clippy checks for a family\n\nOptions for gen-packet-ids:\n    --version <version>   Minecraft version, e.g. 26.2 (Mojang) or 1.8 (minecraft-data dir)\n    --protocol <id>       Protocol version, e.g. 776 or 47\n    --source <source>     Report source: mojang (default) or minecraft-data\n    --out <path>          Output path under crates/protocol/*/src/generated/\n    --check               Compare generated output against disk and fail on drift without writing\n\nOptions for gen-registries:\n    --version <version>       Minecraft version, e.g. 26.2\n    --protocol <id>           Protocol version, e.g. 776\n    --out-dir <path>          Output directory under crates/protocol/*/src/generated\n    --registries <csv>        Registry keys to generate (default: sound_event,particle_type,menu,item)\n    --check                   Compare generated registry tables against disk without writing\n\nOptions for check-connected:\n    --allowlist <path>    TOML file of explicit exceptions (default: xtask/check-connected.toml)\n\nOptions for connectedness:\n    Parses v770's generated packet_ids.rs for play denominators, then classifies adapter dispatch outlets (ClientEvent, Directive, world/sink writes) with explicit UNCLASSIFIED output.\n\nOptions for check-deletable:\n    <version>             Version family to simulate deleting: package name (lodestone-v47), folder (v47), or path\n\nOptions for codegen-ratio:\n    Reports both the optimistic per-struct derive/manual ratio and the more decision-useful absolute hand-written source lines.\n\nOptions for new-version:\n    --protocol <id>       Protocol number for the new family (required)\n    --minecraft <ver>    Minecraft version key for the packet-id oracle (required)\n    --from <family>       Existing family to copy from, e.g. v770 (default) or v47\n    --source <source>     Oracle: mojang or minecraft-data (default inferred from --from)\n    --name <vNNN>         Family folder/label (default v<protocol>)\n    --force               Overwrite the target folder if it already exists\n    SHAPE_REVIEW.toml     Generated when packet shapes differ; every entry must be reviewed before registry support may be added\n\nOptions for conformance:\n    --family <vNNN>       Version family folder/label to check, e.g. v735\n    --minecraft <ver>     Minecraft version key for packet-id/registry checks\n    --protocol <id>       Protocol number for the family\n    --source <source>     Packet-id oracle: mojang or minecraft-data (default mojang)\n    --skip-cargo          Only run xtask structural checks; skip cargo test/clippy\n\nOptions for fetch-version:\n    --version <version>   Minecraft version, e.g. 1.16.5\n    --force               Re-download even when cached server.jar already matches its SHA-1\n\nOptions for fetch-assets:\n    --version <version>   Minecraft version, e.g. 26.2\n    --force               Re-download even when cached files already match their SHA-1\n    -h, --help            Print help\n  Also fetches asset-store objects, ~3.2 MB in total:\n    - the 8 whose name is in client.jar at a DIFFERENT size, i.e. the stubs the jar ships to be\n      overridden (the 6 panorama faces, panorama_overlay, unifont.json). Nothing at runtime can\n      tell a stub from the real asset, which is why these must be eager.\n    - minecraft/sounds.json (626 KB), which ShellAudio reads eagerly and cannot start without.\n  The 4871 .ogg samples (375 MB) are NOT fetched: a missing sample is one silent sound, resolved\n  lazily per event. Run `fetch-sounds` for the corpus.\n\nOptions for fetch-sounds:\n    --version <version>   Minecraft version, e.g. 26.2 (fetch-assets must have run first)\n    --all                 Also fetch background music and jukebox discs (+293 MB, 92 objects)\n    --jobs <n>            Concurrent downloads (default 12)\n    --force               Re-download every object even when it already matches its SHA-1\n  Derives the corpus from sounds.json, not a file list: every sample any non-music event can\n  select. Measured on 26.2 -- 4751 objects, 80.14 MB, including all six biome ambience loops.\n  Excluded by default: 70 music tracks + 22 jukebox records = 92 objects, 293.23 MB. The 28 index\n  .ogg objects no event references are fetched in neither mode. Every object's SHA-1 is verified\n  against the index, and a re-run of a complete fetch downloads nothing.\n\nOptions for version-table:\n    --check               Compare the generated table against crates/lodestone-registry/src/generated/version_table.rs and fail on drift without writing\n    --fetch-missing       Also run fetch-version for any of the 16 target versions with no cached .cache/mc/<version>/server.jar (network + disk heavy; off by default)\n"
 }
 
 pub fn parse_cli_args<I, S>(args: I) -> Result<CliCommand>
@@ -885,6 +893,7 @@ where
         "-h" | "--help" | "help" => Ok(CliCommand::Help),
         "gen-packet-ids" => parse_gen_packet_ids_args(&args[1..]),
         "fetch-assets" => parse_fetch_assets_args(&args[1..]),
+        "fetch-sounds" => parse_fetch_sounds_args(&args[1..]),
         "gen-registries" => parse_gen_registries_args(&args[1..]),
         "check-isolation" => Ok(CliCommand::CheckIsolation),
         "check-connected" => parse_check_connected_args(&args[1..]),
@@ -948,6 +957,24 @@ pub fn run_cli_command(command: CliCommand) -> Result<()> {
             let workspace_root =
                 std::env::current_dir().context("determine current workspace directory")?;
             let summary = fetch_assets(&workspace_root, &minecraft_version, force)?;
+            print!("{}", summary.render());
+            Ok(())
+        }
+        CliCommand::FetchSounds {
+            minecraft_version,
+            all,
+            force,
+            jobs,
+        } => {
+            let workspace_root =
+                std::env::current_dir().context("determine current workspace directory")?;
+            let summary = fetch_sounds(
+                &workspace_root,
+                &minecraft_version,
+                all,
+                force,
+                jobs.unwrap_or(SOUND_FETCH_JOBS),
+            )?;
             print!("{}", summary.render());
             Ok(())
         }
@@ -1160,6 +1187,51 @@ fn parse_fetch_assets_args(args: &[String]) -> Result<CliCommand> {
     Ok(CliCommand::FetchAssets {
         minecraft_version: minecraft_version.ok_or_else(|| anyhow!("--version is required"))?,
         force,
+    })
+}
+
+fn parse_fetch_sounds_args(args: &[String]) -> Result<CliCommand> {
+    let mut minecraft_version = None;
+    let mut all = false;
+    let mut force = false;
+    let mut jobs = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "-h" | "--help" => return Ok(CliCommand::Help),
+            "--all" => all = true,
+            "--force" => force = true,
+            "--version" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| anyhow!("--version requires a value"))?;
+                minecraft_version = Some(value.clone());
+            }
+            "--jobs" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| anyhow!("--jobs requires a value"))?;
+                let parsed: usize = value
+                    .parse()
+                    .with_context(|| format!("--jobs expects a positive integer, got {value:?}"))?;
+                if parsed == 0 {
+                    bail!("--jobs must be at least 1");
+                }
+                jobs = Some(parsed);
+            }
+            unknown => bail!("unknown fetch-sounds option {unknown:?}"),
+        }
+        index += 1;
+    }
+
+    Ok(CliCommand::FetchSounds {
+        minecraft_version: minecraft_version.ok_or_else(|| anyhow!("--version is required"))?,
+        all,
+        force,
+        jobs,
     })
 }
 
@@ -5637,6 +5709,419 @@ pub fn fetch_shadowed_objects(
     Ok(wanted)
 }
 
+/// The `.ogg` corpus a `fetch-sounds` run should ensure is present, split out of
+/// `sounds.json` by [`plan_sound_corpus`].
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SoundCorpus {
+    /// Index names to fetch, sorted, with their declared sizes.
+    pub wanted: Vec<(String, u64)>,
+    /// Index names deliberately left out (music and records under the default
+    /// policy), sorted, with their declared sizes. Reported, never fetched.
+    pub excluded: Vec<(String, u64)>,
+    /// `.ogg` objects in the index that **no** `sounds.json` event references.
+    /// Neither mode fetches these: nothing can select them.
+    pub unreferenced: Vec<(String, u64)>,
+    /// Distinct events walked (`sounds.json` top-level keys).
+    pub events: usize,
+}
+
+impl SoundCorpus {
+    /// Total declared bytes of [`Self::wanted`].
+    #[must_use]
+    pub fn wanted_bytes(&self) -> u64 {
+        self.wanted.iter().map(|(_, size)| size).sum()
+    }
+
+    /// Total declared bytes of [`Self::excluded`].
+    #[must_use]
+    pub fn excluded_bytes(&self) -> u64 {
+        self.excluded.iter().map(|(_, size)| size).sum()
+    }
+}
+
+/// True for a `sounds.json` event key that is background music or a music disc.
+///
+/// This is the **whole** exclusion policy, and it is a two-token prefix over the
+/// event namespace rather than a list of files, because a file list rots at the
+/// next version bump and a namespace does not. 26.2's music events are `music.*`
+/// (biome/menu/credits tracks) and `music_disc.*` (jukebox records); the bare key
+/// `music` is accepted defensively in case a version ever ships one.
+pub fn is_music_event(event: &str) -> bool {
+    event == "music" || event.starts_with("music.") || event.starts_with("music_disc.")
+}
+
+/// The asset-index name of a `sounds.json` sound name: `entity.zombie.hurt`'s
+/// `"mob/zombie/hurt1"` becomes `minecraft/sounds/mob/zombie/hurt1.ogg`.
+///
+/// A name may carry its own namespace (`somepack:foo/bar`), in which case that
+/// namespace replaces `minecraft`. Measured on 26.2: all 4843 distinct names
+/// resolve to a real index entry through this rule, with zero misses — which is
+/// what makes the derivation trustworthy rather than approximate.
+pub fn sound_object_name(sound_name: &str) -> String {
+    let (namespace, path) = match sound_name.split_once(':') {
+        Some((namespace, path)) => (namespace, path),
+        None => ("minecraft", sound_name),
+    };
+    format!("{namespace}/sounds/{path}.ogg")
+}
+
+/// Decide which `.ogg` objects to fetch, **derived from `sounds.json`** rather
+/// than from a hand-written list.
+///
+/// # Why this is derived and what the derivation is
+///
+/// The index declares 4871 `.ogg` objects totalling 375 MB, so an unconditional
+/// fetch is not acceptable and a curated file list would be stale within one
+/// version. Instead this walks every event in `sounds.json` (1968 of them on
+/// 26.2), collects each entry's sound name, and resolves it to an index name.
+/// `"type": "event"` entries are indirections to another event and contribute no
+/// sample of their own, so they are skipped — the event they name is walked in its
+/// own right.
+///
+/// A sample is **excluded** only when *every* event that references it is a music
+/// event ([`is_music_event`]). "Every", not "any": a sample shared between a music
+/// event and a world event still has to be fetched, and phrasing the rule the
+/// other way round would silently drop it.
+///
+/// # What the default covers, measured on 26.2
+///
+/// | set | objects | bytes |
+/// |---|---|---|
+/// | fetched (default) | 4751 | 80.14 MB |
+/// | excluded: 70 music tracks + 22 records | 92 | 293.23 MB |
+/// | referenced by no event at all | 28 | — |
+///
+/// So the default is **every sample any non-music event can select**: mobs,
+/// blocks, items, entities, steps, digs, liquid, UI, notes, enchanting,
+/// fireworks, minecarts, portals — *and* all six biome ambience loops, which is
+/// the reason the rule is "music events" and not vanilla's `"stream": true` flag.
+/// `stream: true` is the other candidate derivation and it is cheaper to state,
+/// but it selects 98 samples including those six nether/underwater loops, so it
+/// would silence cave and nether ambience to save 2.9 MB. Measured, not assumed.
+///
+/// `include_music` (the `--all` flag) folds the excluded set back in: 4843
+/// objects, 373.37 MB. The 28 unreferenced objects are never fetched in either
+/// mode — no event can select them, so they would be 28 downloads no code path
+/// can reach.
+///
+/// # Errors
+///
+/// Returns an error when `sounds_json` is not a JSON object, when it is empty, or
+/// when a resolved name is not in the asset index — the last of which means the
+/// resolution rule is wrong for this version and must be fixed rather than
+/// worked around.
+pub fn plan_sound_corpus(
+    index: &serde_json::Map<String, Value>,
+    sounds_json: &[u8],
+    include_music: bool,
+) -> Result<SoundCorpus> {
+    let parsed: Value =
+        serde_json::from_slice(sounds_json).context("parse minecraft/sounds.json")?;
+    let events = parsed
+        .as_object()
+        .ok_or_else(|| anyhow!("sounds.json is not a JSON object of event -> definition"))?;
+    if events.is_empty() {
+        bail!("sounds.json declares no events");
+    }
+
+    // name -> whether every referencing event so far is a music event. Starting
+    // from `true` and `&&`-ing keeps the "only music references it" semantics.
+    let mut only_music: BTreeMap<String, bool> = BTreeMap::new();
+    for (event, definition) in events {
+        let Some(entries) = definition.get("sounds").and_then(Value::as_array) else {
+            continue;
+        };
+        let music = is_music_event(event);
+        for entry in entries {
+            let name = match entry {
+                // The shorthand form: a bare string is a sound name.
+                Value::String(name) => name.as_str(),
+                Value::Object(map) => {
+                    // `"type": "event"` names another event, not a file.
+                    if map.get("type").and_then(Value::as_str).unwrap_or("sound") != "sound" {
+                        continue;
+                    }
+                    match map.get("name").and_then(Value::as_str) {
+                        Some(name) => name,
+                        None => continue,
+                    }
+                }
+                _ => continue,
+            };
+            let object = sound_object_name(name);
+            only_music
+                .entry(object)
+                .and_modify(|flag| *flag = *flag && music)
+                .or_insert(music);
+        }
+    }
+
+    let mut corpus = SoundCorpus {
+        events: events.len(),
+        ..SoundCorpus::default()
+    };
+    for (name, music_only) in &only_music {
+        let size = index
+            .get(name)
+            .and_then(|meta| meta.get("size"))
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                anyhow!(
+                    "sounds.json references {name:?}, which the asset index does not \
+                     declare — the sound-name resolution rule is wrong for this version"
+                )
+            })?;
+        if *music_only && !include_music {
+            corpus.excluded.push((name.clone(), size));
+        } else {
+            corpus.wanted.push((name.clone(), size));
+        }
+    }
+
+    // Index-only `.ogg` objects no event mentions. Reported so the count is
+    // visible rather than looking like a shortfall in the plan.
+    for (name, meta) in index {
+        if !name.ends_with(".ogg") || only_music.contains_key(name) {
+            continue;
+        }
+        let size = meta.get("size").and_then(Value::as_u64).unwrap_or(0);
+        corpus.unreferenced.push((name.clone(), size));
+    }
+
+    // `wanted` and `excluded` came out of a `BTreeMap`, so they are already sorted;
+    // `unreferenced` came out of the index (a `serde_json::Map`, insertion-ordered
+    // unless the `preserve_order` feature is off), so sort it explicitly. Stable
+    // output matters: the summary is read by a human comparing two runs.
+    corpus.unreferenced.sort();
+    Ok(corpus)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FetchSoundsSummary {
+    pub asset_index_path: PathBuf,
+    /// The plan this run executed.
+    pub corpus: SoundCorpus,
+    /// How many objects this run actually downloaded.
+    pub downloaded: usize,
+    /// How many were already present and SHA-1 verified.
+    pub cached: usize,
+    /// Whether music and records were included (`--all`).
+    pub included_music: bool,
+}
+
+impl FetchSoundsSummary {
+    #[must_use]
+    pub fn render(&self) -> String {
+        let mut out = format!(
+            "asset index: {}\nsounds.json: {} events\nsamples: {} ({} downloaded, {} cached), {:.2} MB\n",
+            self.asset_index_path.display(),
+            self.corpus.events,
+            self.corpus.wanted.len(),
+            self.downloaded,
+            self.cached,
+            self.corpus.wanted_bytes() as f64 / 1e6,
+        );
+        if self.included_music {
+            out.push_str("music and records: included (--all)\n");
+        } else {
+            out.push_str(&format!(
+                "music and records: {} objects, {:.2} MB NOT fetched — re-run with --all for \
+                 background music and jukebox discs\n",
+                self.corpus.excluded.len(),
+                self.corpus.excluded_bytes() as f64 / 1e6,
+            ));
+        }
+        if !self.corpus.unreferenced.is_empty() {
+            out.push_str(&format!(
+                "unreferenced: {} .ogg objects no sounds.json event names (never fetched)\n",
+                self.corpus.unreferenced.len()
+            ));
+        }
+        out
+    }
+}
+
+/// Default worker count for [`fetch_sounds`].
+///
+/// Each object is one `curl` process, and the corpus averages ~17 KB per file, so
+/// wall time is dominated by connection setup rather than bandwidth: serial would
+/// be ~4751 round trips. Twelve is well within what `resources.download.minecraft.net`
+/// serves without throttling and keeps a cold fetch in the low minutes.
+pub const SOUND_FETCH_JOBS: usize = 12;
+
+/// Ensure the `.ogg` corpus [`plan_sound_corpus`] selected is on disk, SHA-1
+/// verified against the asset index.
+///
+/// This is deliberately **not** part of `fetch-assets`: 80 MB (or 373 with
+/// `--all`) must be an explicit act, and a missing sample degrades honestly — one
+/// silent sound — where a `client.jar` stub lies. See
+/// [`fetch_shadowed_objects`] for the other half of that boundary.
+///
+/// Every object goes through [`ensure_object`], which verifies the SHA-1 the
+/// index declares; there is no second fetcher here. A re-run of a complete fetch
+/// downloads nothing: it re-hashes what is on disk (80 MB of SHA-1, well under a
+/// second) and reports every object as cached.
+///
+/// # Errors
+///
+/// Returns an error when the version cache has no single `asset-index-*.json`,
+/// when `minecraft/sounds.json` is not in the store (run `fetch-assets` first),
+/// or on the first download or SHA-1 failure — reported with the object that
+/// failed, not as a bare count.
+pub fn fetch_sounds(
+    workspace_root: &Path,
+    minecraft_version: &str,
+    include_music: bool,
+    force: bool,
+    jobs: usize,
+) -> Result<FetchSoundsSummary> {
+    let version_cache = workspace_root
+        .join(".cache")
+        .join("mc")
+        .join(minecraft_version);
+    let asset_index_path = find_cached_asset_index(&version_cache)?;
+    let index_bytes = std::fs::read(&asset_index_path)
+        .with_context(|| format!("read asset index {}", asset_index_path.display()))?;
+    let index_json: Value = serde_json::from_slice(&index_bytes)
+        .with_context(|| format!("parse asset index {}", asset_index_path.display()))?;
+    let index = index_json
+        .get("objects")
+        .and_then(|objects| objects.as_object())
+        .ok_or_else(|| anyhow!("asset index has no \"objects\" map"))?;
+
+    // sounds.json is the plan's input, so it has to be present first. It is in
+    // `REQUIRED_OBJECT_NAMES`, meaning `fetch-assets` already put it there;
+    // ensuring it again here makes this command usable on its own.
+    ensure_object(&version_cache, index, "minecraft/sounds.json", false)
+        .context("ensure minecraft/sounds.json (the corpus is derived from it)")?;
+    let sounds_hash = index
+        .get("minecraft/sounds.json")
+        .and_then(|meta| meta.get("hash"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("asset index has no hash for minecraft/sounds.json"))?;
+    let sounds_path = version_cache
+        .join("objects")
+        .join(&sounds_hash[0..2])
+        .join(sounds_hash);
+    let sounds_json = std::fs::read(&sounds_path)
+        .with_context(|| format!("read {}", sounds_path.display()))?;
+
+    let corpus = plan_sound_corpus(index, &sounds_json, include_music)?;
+    let total = corpus.wanted.len();
+    println!(
+        "fetch-sounds: {total} samples, {:.2} MB declared ({} events in sounds.json)",
+        corpus.wanted_bytes() as f64 / 1e6,
+        corpus.events
+    );
+    if !include_music {
+        println!(
+            "  skipping {} music/record objects ({:.2} MB); --all includes them",
+            corpus.excluded.len(),
+            corpus.excluded_bytes() as f64 / 1e6
+        );
+    }
+
+    let jobs = jobs.max(1);
+    let cursor = std::sync::atomic::AtomicUsize::new(0);
+    let done = std::sync::atomic::AtomicUsize::new(0);
+    let downloaded = std::sync::atomic::AtomicUsize::new(0);
+    let failure: std::sync::Mutex<Option<anyhow::Error>> = std::sync::Mutex::new(None);
+
+    std::thread::scope(|scope| {
+        for _ in 0..jobs {
+            scope.spawn(|| {
+                loop {
+                    // A failure anywhere stops every worker: the first error is
+                    // the useful one, and 4750 more retries after a dead CDN are
+                    // not.
+                    if failure.lock().is_ok_and(|slot| slot.is_some()) {
+                        return;
+                    }
+                    let next = cursor.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let Some((name, _size)) = corpus.wanted.get(next) else {
+                        return;
+                    };
+                    match ensure_object(&version_cache, index, name, force) {
+                        Ok(true) => {
+                            downloaded.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            if let Ok(mut slot) = failure.lock() {
+                                slot.get_or_insert(error);
+                            }
+                            return;
+                        }
+                    }
+                    let finished = done.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    // One line per 250 objects: enough to see it moving, few
+                    // enough not to bury the summary.
+                    if finished % 250 == 0 || finished == total {
+                        println!(
+                            "  {finished}/{total} ({} downloaded)",
+                            downloaded.load(std::sync::atomic::Ordering::SeqCst)
+                        );
+                    }
+                }
+            });
+        }
+    });
+
+    if let Some(error) = failure.into_inner().ok().flatten() {
+        return Err(error);
+    }
+
+    let downloaded = downloaded.into_inner();
+    Ok(FetchSoundsSummary {
+        asset_index_path,
+        downloaded,
+        cached: total - downloaded,
+        corpus,
+        included_music: include_music,
+    })
+}
+
+/// The single `asset-index-*.json` already in a version cache.
+///
+/// `fetch-assets` learns the index id from Mojang's manifest; this command works
+/// off what is on disk instead, so it needs no network before it can plan. Zero
+/// or several candidates is an error rather than a guess — several client versions
+/// coexist under `.cache/mc` and "first match wins over a shared directory" is a
+/// known landmine here.
+///
+/// # Errors
+///
+/// Returns an error when the directory is unreadable, holds no
+/// `asset-index-*.json`, or holds more than one.
+fn find_cached_asset_index(version_cache: &Path) -> Result<PathBuf> {
+    let entries = std::fs::read_dir(version_cache).with_context(|| {
+        format!(
+            "read {} — run: cargo run -p xtask -- fetch-assets --version <version>",
+            version_cache.display()
+        )
+    })?;
+    let mut matches: Vec<PathBuf> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("asset-index-") && name.ends_with(".json") {
+            matches.push(entry.path());
+        }
+    }
+    matches.sort();
+    match matches.len() {
+        0 => bail!(
+            "no asset-index-*.json in {} — run: cargo run -p xtask -- fetch-assets --version <version>",
+            version_cache.display()
+        ),
+        1 => Ok(matches.remove(0)),
+        n => bail!(
+            "{n} asset-index-*.json files in {}; refusing to guess",
+            version_cache.display()
+        ),
+    }
+}
+
 pub fn fetch_version(
     workspace_root: &Path,
     minecraft_version: &str,
@@ -7117,6 +7602,261 @@ reason = "fixture has no shipped binary root"
         assert!(error.contains("expected:"), "{error}");
         assert!(error.contains("actual:"), "{error}");
         assert!(std::fs::read_to_string(&item_path)?.contains("minecraft:dirt"));
+        Ok(())
+    }
+
+    /// A hand-written `sounds.json` exercising every entry shape vanilla uses,
+    /// with an index that declares one size per sample. The expected partition is
+    /// stated by hand from the fixture, not read back out of the planner.
+    const SOUNDS_FIXTURE: &[u8] = br#"{
+        "block.stone.break":      { "sounds": ["dig/stone1", "dig/stone2"] },
+        "entity.zombie.hurt":     { "sounds": [{ "name": "mob/zombie/hurt1" }] },
+        "entity.player.hurt":     { "sounds": [{ "type": "event", "name": "entity.generic.hurt" }] },
+        "ambient.cave":           { "sounds": [{ "name": "ambient/cave/cave1", "stream": true }] },
+        "music.creative":         { "sounds": [{ "name": "music/game/creative/creative1", "stream": true }] },
+        "music_disc.cat":         { "sounds": [{ "name": "records/cat", "stream": true }] },
+        "jukebox.play":           { "sounds": ["records/cat"] }
+    }"#;
+
+    fn sounds_fixture_index() -> serde_json::Map<String, Value> {
+        let mut index = serde_json::Map::new();
+        // Sizes are arbitrary but distinct, so a byte total cannot come out right
+        // by coincidence.
+        for (name, size) in [
+            ("minecraft/sounds/dig/stone1.ogg", 100),
+            ("minecraft/sounds/dig/stone2.ogg", 200),
+            ("minecraft/sounds/mob/zombie/hurt1.ogg", 400),
+            ("minecraft/sounds/ambient/cave/cave1.ogg", 800),
+            ("minecraft/sounds/music/game/creative/creative1.ogg", 1600),
+            ("minecraft/sounds/records/cat.ogg", 3200),
+            // An index-only sample no event names.
+            ("minecraft/sounds/orphan.ogg", 6400),
+            // A non-ogg object, which must not land in `unreferenced`.
+            ("minecraft/sounds.json", 12800),
+        ] {
+            index.insert(
+                name.to_string(),
+                serde_json::json!({ "hash": "abcdef0123456789abcdef0123456789abcdef01", "size": size }),
+            );
+        }
+        index
+    }
+
+    #[test]
+    fn the_sound_corpus_excludes_music_only_samples_and_keeps_everything_else() -> Result<()> {
+        let index = sounds_fixture_index();
+        let corpus = plan_sound_corpus(&index, SOUNDS_FIXTURE, false)?;
+
+        assert_eq!(corpus.events, 7, "one entry per top-level sounds.json key");
+        let wanted: Vec<&str> = corpus.wanted.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            wanted,
+            vec![
+                // The cave loop is `stream: true` and still fetched: the policy is
+                // "music events", not vanilla's streaming flag, precisely so
+                // ambience survives.
+                "minecraft/sounds/ambient/cave/cave1.ogg",
+                "minecraft/sounds/dig/stone1.ogg",
+                "minecraft/sounds/dig/stone2.ogg",
+                "minecraft/sounds/mob/zombie/hurt1.ogg",
+                // `records/cat` is referenced by `music_disc.cat` *and* by
+                // `jukebox.play`, so "every referencing event is music" is false
+                // and it must be fetched. This is the case an "any music event"
+                // rule would silently drop.
+                "minecraft/sounds/records/cat.ogg",
+            ],
+            "the wanted set is wrong"
+        );
+        assert_eq!(corpus.wanted_bytes(), 100 + 200 + 400 + 800 + 3200);
+
+        assert_eq!(
+            corpus
+                .excluded
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>(),
+            vec!["minecraft/sounds/music/game/creative/creative1.ogg"],
+            "only the sample referenced exclusively by a music event is excluded"
+        );
+        assert_eq!(corpus.excluded_bytes(), 1600);
+
+        // The `type: event` indirection contributes no file of its own, so
+        // `entity.generic.hurt` (which this fixture does not even define) must not
+        // appear as a sample.
+        assert!(
+            !wanted
+                .iter()
+                .any(|name| name.contains("generic") || name.contains("entity.")),
+            "a type:event entry must not be resolved as a file: {wanted:?}"
+        );
+
+        // Only `.ogg` objects count as unreferenced; `sounds.json` itself must not.
+        assert_eq!(
+            corpus
+                .unreferenced
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>(),
+            vec!["minecraft/sounds/orphan.ogg"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn all_folds_music_back_in_and_leaves_nothing_excluded() -> Result<()> {
+        let index = sounds_fixture_index();
+        let default = plan_sound_corpus(&index, SOUNDS_FIXTURE, false)?;
+        let all = plan_sound_corpus(&index, SOUNDS_FIXTURE, true)?;
+
+        assert!(all.excluded.is_empty(), "--all excludes nothing");
+        assert_eq!(all.wanted.len(), default.wanted.len() + 1);
+        assert_eq!(
+            all.wanted_bytes(),
+            default.wanted_bytes() + default.excluded_bytes(),
+            "the two modes must partition the same total"
+        );
+        // The orphan is fetched by neither mode: no event can select it.
+        assert!(
+            !all.wanted
+                .iter()
+                .any(|(name, _)| name == "minecraft/sounds/orphan.ogg")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_sound_name_the_index_does_not_declare_is_an_error_not_a_skip() {
+        // The resolution rule being wrong for a version must fail loudly: silently
+        // dropping the name would fetch a short corpus and read as success.
+        let mut index = sounds_fixture_index();
+        index.remove("minecraft/sounds/mob/zombie/hurt1.ogg");
+        let error = plan_sound_corpus(&index, SOUNDS_FIXTURE, false)
+            .expect_err("a name missing from the index must fail");
+        let error = error.to_string();
+        assert!(error.contains("mob/zombie/hurt1.ogg"), "{error}");
+        assert!(error.contains("resolution rule"), "{error}");
+
+        // Control: with the entry restored the same input plans cleanly, so the
+        // failure above was the missing declaration and not the fixture.
+        assert!(plan_sound_corpus(&sounds_fixture_index(), SOUNDS_FIXTURE, false).is_ok());
+    }
+
+    #[test]
+    fn a_namespaced_sound_name_resolves_under_its_own_namespace() {
+        assert_eq!(
+            sound_object_name("mob/zombie/hurt1"),
+            "minecraft/sounds/mob/zombie/hurt1.ogg"
+        );
+        assert_eq!(
+            sound_object_name("somepack:foo/bar"),
+            "somepack/sounds/foo/bar.ogg"
+        );
+    }
+
+    #[test]
+    fn music_event_keys_are_recognised_and_world_events_are_not() {
+        assert!(is_music_event("music.creative"));
+        assert!(is_music_event("music_disc.cat"));
+        assert!(is_music_event("music"));
+        // The near-misses that a substring test would get wrong.
+        assert!(!is_music_event("ambient.cave"));
+        assert!(!is_music_event("block.note_block.harp"));
+        assert!(!is_music_event("item.goat_horn.sound.0"));
+        assert!(!is_music_event("musical"));
+    }
+
+    #[test]
+    fn fetch_sounds_args_parse_and_reject_nonsense() -> Result<()> {
+        assert_eq!(
+            parse_cli_args(["fetch-sounds", "--version", "26.2"])?,
+            CliCommand::FetchSounds {
+                minecraft_version: "26.2".to_string(),
+                all: false,
+                force: false,
+                jobs: None,
+            }
+        );
+        assert_eq!(
+            parse_cli_args([
+                "fetch-sounds",
+                "--version",
+                "26.2",
+                "--all",
+                "--force",
+                "--jobs",
+                "4",
+            ])?,
+            CliCommand::FetchSounds {
+                minecraft_version: "26.2".to_string(),
+                all: true,
+                force: true,
+                jobs: Some(4),
+            }
+        );
+        assert!(parse_cli_args(["fetch-sounds"]).is_err(), "--version is required");
+        assert!(parse_cli_args(["fetch-sounds", "--version", "26.2", "--jobs", "0"]).is_err());
+        assert!(parse_cli_args(["fetch-sounds", "--version", "26.2", "--jobs", "x"]).is_err());
+        assert!(parse_cli_args(["fetch-sounds", "--nope"]).is_err());
+        assert!(root_help().contains("fetch-sounds"));
+        Ok(())
+    }
+
+    /// The real 26.2 corpus plan, against numbers derived by an **independent**
+    /// walk of the same two files (a throwaway Python pass over
+    /// `asset-index-32.json` and `sounds.json`) rather than by running this code
+    /// and writing down what it said.
+    ///
+    /// `#[ignore]`d because it needs a populated `.cache/mc/26.2`; an opted-in run
+    /// with no cache is a failure with a named fix, never a silent pass.
+    #[test]
+    #[ignore = "requires .cache/mc/26.2 (cargo run -p xtask -- fetch-assets --version 26.2)"]
+    fn the_real_26_2_corpus_matches_an_independently_derived_partition() -> Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let cache = root.join(".cache/mc/26.2");
+        let index_path = find_cached_asset_index(&cache)?;
+        let index_json: Value = serde_json::from_slice(&std::fs::read(&index_path)?)?;
+        let index = index_json
+            .get("objects")
+            .and_then(|o| o.as_object())
+            .ok_or_else(|| anyhow!("no objects map"))?;
+        let hash = index["minecraft/sounds.json"]["hash"]
+            .as_str()
+            .ok_or_else(|| anyhow!("no hash"))?;
+        let sounds =
+            std::fs::read(cache.join("objects").join(&hash[0..2]).join(hash)).with_context(|| {
+                "minecraft/sounds.json is not in the store; run: cargo run -p xtask -- \
+                 fetch-assets --version 26.2"
+            })?;
+
+        let corpus = plan_sound_corpus(index, &sounds, false)?;
+        assert_eq!(corpus.events, 1968);
+        assert_eq!(corpus.wanted.len(), 4751);
+        assert_eq!(corpus.wanted_bytes(), 80_139_855);
+        assert_eq!(corpus.excluded.len(), 92);
+        assert_eq!(corpus.excluded_bytes(), 293_228_876);
+        assert_eq!(corpus.unreferenced.len(), 28);
+        // Every excluded object is under music/ or records/ — the derivation is by
+        // *event key*, so agreement with the path layout is a real cross-check
+        // rather than a restatement.
+        for (name, _) in &corpus.excluded {
+            assert!(
+                name.starts_with("minecraft/sounds/music/")
+                    || name.starts_with("minecraft/sounds/records/"),
+                "excluded by event key but not a music/records path: {name}"
+            );
+        }
+        // And the six streamed ambience loops are on the *fetched* side, which is
+        // the whole reason the policy is not vanilla's `stream: true` flag.
+        assert!(
+            corpus
+                .wanted
+                .iter()
+                .any(|(name, _)| name == "minecraft/sounds/ambient/underwater/underwater_ambience.ogg")
+        );
+
+        let all = plan_sound_corpus(index, &sounds, true)?;
+        assert_eq!(all.wanted.len(), 4843);
+        assert_eq!(all.wanted_bytes(), 373_368_731);
         Ok(())
     }
 
