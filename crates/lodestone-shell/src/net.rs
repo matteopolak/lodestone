@@ -106,7 +106,7 @@
 
 use std::sync::{
     Arc, OnceLock,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     mpsc::{self, Receiver, Sender},
 };
 use std::thread::JoinHandle;
@@ -138,6 +138,96 @@ use crate::entities::{EntitySnapshot, NameTag};
 /// `Arc`-based (`Send + Sync + 'static`) and resolves lazily once login
 /// completes, same as `NetClient`'s own reads.
 pub type SharedHandle = Arc<OnceLock<Arc<ClientHandle>>>;
+
+/// The world's weather, published lock-free by the net thread and read once per
+/// frame by the render thread.
+///
+/// # Why this is not a [`NetUpdate`]
+///
+/// `GAME_EVENT`'s rain and thunder levels arrive **every tick** while the server
+/// ramps them (`ServerLevel.java:762-775` broadcasts on any change, and the
+/// change is ±0.01 per tick), and the consumer wants only the newest value. That
+/// is the same "latest wins, never queue" shape as [`SharedHandle`]: a channel
+/// would carry ~20 messages a second whose only purpose is to be superseded, and
+/// the render side would have to fold them back into one scalar anyway.
+///
+/// It also keeps the weather read out of `Sim`. Every other `NetUpdate` is
+/// drained by `Sim::poll_net`, which is the right home for anything the
+/// simulation acts on; rain level is consumed **only** by the renderer and the
+/// audio cadence, both of which `crate::app` reaches directly.
+///
+/// Rain and thunder are stored as raw `f32` bits rather than behind a lock
+/// because they are independent scalars and a torn read between them is
+/// indistinguishable from the ordinary one-tick staleness a per-frame poll
+/// already has.
+#[derive(Debug, Default)]
+pub struct WeatherCell {
+    rain_bits: AtomicU32,
+    thunder_bits: AtomicU32,
+    /// Bumped once per `lightning_bolt` spawn. A **sequence number**, not a
+    /// countdown: the flash's 5-tick lifetime is timed on the render side against
+    /// the game-tick clock, which the net thread does not have. See
+    /// [`lodestone_render::weather::LIGHTNING_FLASH_TICKS`].
+    lightning_seq: AtomicU64,
+}
+
+/// One frame's read of a [`WeatherCell`].
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct WeatherSnapshot {
+    /// The server's `RAIN_LEVEL_CHANGE`, or the level a `START_RAINING` /
+    /// `STOP_RAINING` implied. **Not** clamped or composed here — hand it to
+    /// [`lodestone_render::weather::WeatherState::apply_rain_level`], which does
+    /// both exactly as `Level.setRainLevel` does.
+    pub rain_level: f32,
+    /// The server's `THUNDER_LEVEL_CHANGE`, **raw**: not yet multiplied by the
+    /// rain level. `WeatherState::thunder_level` is what composes them; reading
+    /// this field into a darkening term directly is the mistake
+    /// `lodestone_render::weather`'s module doc warns about.
+    pub thunder_level: f32,
+    /// Monotonic count of lightning bolts seen this session.
+    pub lightning_seq: u64,
+}
+
+impl WeatherCell {
+    /// Fold one `ClientEvent::WeatherChanged`. Only the `Some` fields are written,
+    /// matching the event's own three-optional shape — the adapter emits exactly
+    /// one of them per `GAME_EVENT`.
+    fn apply(&self, raining: Option<bool>, rain_level: Option<f32>, thunder_level: Option<f32>) {
+        // `START_RAINING` → 0.0 and `STOP_RAINING` → 1.0 is vanilla's own
+        // inversion, reproduced in `WeatherState::apply_raining`; the polarity
+        // lives there so there is one place to read about it, not two.
+        if let Some(raining) = raining {
+            let mut state = lodestone_render::weather::WeatherState::clear();
+            state.apply_raining(raining);
+            self.rain_bits
+                .store(state.rain_level().to_bits(), Ordering::Relaxed);
+        }
+        if let Some(level) = rain_level {
+            self.rain_bits.store(level.to_bits(), Ordering::Relaxed);
+        }
+        if let Some(level) = thunder_level {
+            self.thunder_bits.store(level.to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    /// Record a lightning bolt.
+    fn strike(&self) {
+        self.lightning_seq.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Read this frame's weather.
+    #[must_use]
+    pub fn snapshot(&self) -> WeatherSnapshot {
+        WeatherSnapshot {
+            rain_level: f32::from_bits(self.rain_bits.load(Ordering::Relaxed)),
+            thunder_level: f32::from_bits(self.thunder_bits.load(Ordering::Relaxed)),
+            lightning_seq: self.lightning_seq.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// A [`WeatherCell`] shared between the net thread and the render thread.
+pub type SharedWeather = Arc<WeatherCell>;
 
 /// A decoded, version-free update the app can act on without touching tokio.
 #[derive(Debug, Clone)]
@@ -419,6 +509,10 @@ pub struct NetClient {
     /// Published by the net thread once login completes; lets the render/mesh
     /// thread read the client-owned world lock-free of tokio.
     handle: SharedHandle,
+    /// The world's rain/thunder levels and lightning count, folded by
+    /// [`forward`]'s `WeatherChanged` arm. See [`WeatherCell`] for why this is a
+    /// shared cell rather than a [`NetUpdate`].
+    weather: SharedWeather,
     /// The driver's `World` and session entity, for a **loopback** client that has
     /// no `ClientBuilder` to hand them to.
     ///
@@ -625,6 +719,8 @@ impl NetClient {
         let stop_thread = Arc::clone(&stop);
         let handle: SharedHandle = Arc::new(OnceLock::new());
         let handle_thread = Arc::clone(&handle);
+        let weather: SharedWeather = Arc::new(WeatherCell::default());
+        let weather_thread = Arc::clone(&weather);
 
         let thread = std::thread::Builder::new()
             .name("lodestone-net".into())
@@ -636,6 +732,7 @@ impl NetClient {
                     action_rx,
                     stop_thread,
                     handle_thread,
+                    weather_thread,
                     session,
                 )
             })
@@ -647,6 +744,7 @@ impl NetClient {
             stop,
             thread: Some(thread),
             handle,
+            weather,
             #[cfg(test)]
             session: None,
         }
@@ -835,6 +933,21 @@ impl NetClient {
         Arc::clone(&self.handle)
     }
 
+    /// Clone out the `Arc`-backed weather cell, for the same reason
+    /// [`shared_handle`](Self::shared_handle) exists: `crate::app` builds a
+    /// `'static` per-frame closure at connect time, and this `NetClient` is moved
+    /// into `Sim::attach_net` immediately afterwards.
+    #[must_use]
+    pub fn shared_weather(&self) -> SharedWeather {
+        Arc::clone(&self.weather)
+    }
+
+    /// This frame's weather, read directly. Clear until the first `GAME_EVENT`.
+    #[must_use]
+    pub fn weather(&self) -> WeatherSnapshot {
+        self.weather.snapshot()
+    }
+
     /// A server-less client used only in tests: no thread, no connection. It
     /// captures every [`send_action`](Self::send_action) on the returned
     /// receiver so the outbound path can be asserted without a live server.
@@ -849,6 +962,7 @@ impl NetClient {
             stop: Arc::new(AtomicBool::new(false)),
             thread: None,
             handle: Arc::new(OnceLock::new()),
+            weather: Arc::new(WeatherCell::default()),
             // Bound by `Sim::attach_net`; a loopback with no `Sim` folds nothing.
             session: None,
         };
@@ -898,6 +1012,7 @@ impl NetClient {
             stop: Arc::new(AtomicBool::new(false)),
             thread: None,
             handle: Arc::new(OnceLock::new()),
+            weather: Arc::new(WeatherCell::default()),
             // Bound by `Sim::attach_net`; a loopback with no `Sim` folds nothing.
             session: None,
         };
@@ -964,6 +1079,7 @@ fn run(
     action_rx: Receiver<ClientAction>,
     stop: Arc<AtomicBool>,
     shared_handle: SharedHandle,
+    weather: SharedWeather,
     session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -1124,7 +1240,7 @@ fn run(
             // server is quiet (no inbound events to wake us).
             match tokio::time::timeout(Duration::from_millis(15), events.recv()).await {
                 Ok(Some(event)) => {
-                    if forward(&tx, event).is_err() {
+                    if forward(&tx, &weather, event).is_err() {
                         break;
                     }
                 }
@@ -1154,7 +1270,18 @@ fn run(
 }
 
 /// Forward one event; `Err` signals the loop to stop.
-fn forward(tx: &Sender<NetUpdate>, event: ClientEvent) -> Result<(), ()> {
+///
+/// `weather` is folded in place for the two arms that publish into it instead of
+/// producing a [`NetUpdate`] — see [`WeatherCell`] for why. Those arms still live
+/// **here**, in the router, rather than being intercepted in the net loop above:
+/// this `match` is the one place a reader looks to answer "does anything consume
+/// event X", and an event handled outside it is invisible to that reading. Three
+/// separate islands have already been found in this one function.
+fn forward(
+    tx: &Sender<NetUpdate>,
+    weather: &WeatherCell,
+    event: ClientEvent,
+) -> Result<(), ()> {
     let update = match event {
         ClientEvent::Login { entity_id, .. } => NetUpdate::LoggedIn { entity_id },
         ClientEvent::Chat { text, kind, .. } => match kind {
@@ -1334,6 +1461,48 @@ fn forward(tx: &Sender<NetUpdate>, event: ClientEvent) -> Result<(), ()> {
             rotation,
             flags,
         },
+        // World weather (`GAME_EVENT` codes 1, 2, 7, 8). Folded into the shared
+        // [`WeatherCell`] and **deliberately not** forwarded: the levels change
+        // every tick while the server ramps them and only the newest value
+        // matters, so a channel would carry ~20 superseded messages a second.
+        //
+        // Until this arm existed the event reached the terminal `_ =>` below and
+        // was dropped. The decode has been correct and hermetically tested since
+        // it was written (`crates/protocol/v770/tests/world_events.rs` has five
+        // `game_event_*` tests, including one asserting rain **and** thunder
+        // levels are surfaced) and `ClientEvent::WeatherChanged` had **zero**
+        // consumers anywhere in the tree — not in `ingest::handles_event`, not in
+        // `session::handles_event`, not here. Fourth island in this router, after
+        // `BLOCK_EVENT`, `ItemPickup`, and the sound family.
+        //
+        // Neither ECS router was the right home, per `CLAUDE.md`'s rule of thumb:
+        // rain level is not per-entity state (so not `ingest`) and not a
+        // local-player scalar (so not `session`) — it is *world* state, which
+        // travels this stream, exactly as `BlockEvent` does.
+        ClientEvent::WeatherChanged {
+            raining,
+            rain_level,
+            thunder_level,
+        } => {
+            weather.apply(raining, rain_level, thunder_level);
+            return Ok(());
+        }
+        // The lightning flash (`ClientLevel.java:264-268`). A bolt is an ordinary
+        // entity on the wire, so this arm **observes** the spawn and returns
+        // without producing a `NetUpdate`: entities already reach the shell
+        // through the ECS ingest fold, and forwarding one here would put a second
+        // writer on state that has one. Only the *count* is published.
+        //
+        // This is a spawn-only approximation. Vanilla re-flashes `rand(3) + 1`
+        // times per bolt by resetting the entity's `life`
+        // (`LightningBolt.java:47`, `:131-134`), which needs the bolt's own
+        // per-tick state; see `lodestone_render::weather::LIGHTNING_FLASH_TICKS`.
+        ClientEvent::EntitySpawned { ref entity_type, .. }
+            if entity_type.path() == "lightning_bolt" =>
+        {
+            weather.strike();
+            return Ok(());
+        }
         // Everything else (keep-alive, entities, time, player list, chunk
         // unloads) isn't needed by the shell yet.
         _ => return Ok(()),
@@ -1557,8 +1726,10 @@ mod tests {
     #[test]
     fn the_vitals_events_are_not_forwarded_to_the_shell_at_all() {
         let (tx, rx) = mpsc::channel();
+        let weather = WeatherCell::default();
         forward(
             &tx,
+            &weather,
             ClientEvent::ExperienceChanged {
                 progress: 0.25,
                 level: 5,
@@ -1568,6 +1739,7 @@ mod tests {
         .expect("forward does not stop the loop");
         forward(
             &tx,
+            &weather,
             ClientEvent::HealthChanged {
                 health: 12.0,
                 food: 8,
@@ -1585,6 +1757,7 @@ mod tests {
         // this straight off `NetUpdate::Death`, through `Sim::death_message`).
         forward(
             &tx,
+            &weather,
             ClientEvent::Death {
                 message: lodestone_client::Text::literal("you died"),
             },
@@ -1612,7 +1785,7 @@ mod tests {
             show_icon: true,
             blend: false,
         };
-        forward(&tx, event).expect("forward does not stop the loop");
+        forward(&tx, &WeatherCell::default(), event).expect("forward does not stop the loop");
         match rx.try_recv().expect("an update was forwarded") {
             NetUpdate::EffectApplied {
                 entity_id,
@@ -1653,7 +1826,7 @@ mod tests {
             max_speed: 0.5,
             count: 12,
         };
-        forward(&tx, event).expect("forward does not stop the loop");
+        forward(&tx, &WeatherCell::default(), event).expect("forward does not stop the loop");
         match rx.try_recv().expect("an update was forwarded") {
             NetUpdate::Particles {
                 kind,
@@ -1687,7 +1860,7 @@ mod tests {
             entity_id: 99,
             effect: ResourceKey::from_str("minecraft:levitation").unwrap(),
         };
-        forward(&tx, event).expect("forward does not stop the loop");
+        forward(&tx, &WeatherCell::default(), event).expect("forward does not stop the loop");
         match rx.try_recv().expect("an update was forwarded") {
             NetUpdate::EffectRemoved { entity_id, effect } => {
                 assert_eq!(entity_id, 99);
@@ -1695,6 +1868,113 @@ mod tests {
             }
             other => panic!("expected EffectRemoved, got {other:?}"),
         }
+    }
+
+    /// The island this feature closed: `ClientEvent::WeatherChanged` was decoded,
+    /// hermetically tested in `protocol/v770/tests/world_events.rs`, and consumed
+    /// by **nothing** in the tree. This asserts the fold happens *and* that it
+    /// stays off the channel.
+    #[test]
+    fn forward_folds_weather_into_the_cell_without_using_the_channel() {
+        let (tx, rx) = mpsc::channel();
+        let weather = WeatherCell::default();
+        assert_eq!(weather.snapshot(), WeatherSnapshot::default());
+
+        forward(
+            &tx,
+            &weather,
+            ClientEvent::WeatherChanged {
+                raining: None,
+                rain_level: Some(0.75),
+                thunder_level: None,
+            },
+        )
+        .expect("forward does not stop the loop");
+        forward(
+            &tx,
+            &weather,
+            ClientEvent::WeatherChanged {
+                raining: None,
+                rain_level: None,
+                thunder_level: Some(0.5),
+            },
+        )
+        .expect("forward does not stop the loop");
+
+        let snapshot = weather.snapshot();
+        assert_eq!(snapshot.rain_level, 0.75, "RAIN_LEVEL_CHANGE must land");
+        assert_eq!(
+            snapshot.thunder_level, 0.5,
+            "THUNDER_LEVEL_CHANGE must land, and must land *raw* — composing it \
+             with rain is `WeatherState::thunder_level`'s job"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "weather must not cross the NetUpdate channel: only the newest level \
+             matters and the server sends one every tick while it ramps"
+        );
+
+        // The `START_RAINING` inversion reaches here intact (see
+        // `lodestone_render::weather`'s module doc — this is vanilla's own
+        // polarity at ClientPacketListener.java:1543, not a bug on this side).
+        forward(
+            &tx,
+            &weather,
+            ClientEvent::WeatherChanged {
+                raining: Some(true),
+                rain_level: None,
+                thunder_level: None,
+            },
+        )
+        .expect("forward does not stop the loop");
+        assert_eq!(weather.snapshot().rain_level, 0.0);
+        assert_eq!(
+            weather.snapshot().thunder_level, 0.5,
+            "a start/stop must not disturb the thunder level"
+        );
+    }
+
+    /// The lightning arm: it must fire for a bolt, must **not** fire for any other
+    /// entity, and must never put an entity spawn on the channel (entities reach
+    /// the shell through the ECS fold, which is the only writer).
+    #[test]
+    fn forward_counts_lightning_bolts_and_ignores_every_other_spawn() {
+        use lodestone_client::ResourceKey;
+        use std::str::FromStr;
+
+        let spawn = |kind: &str| ClientEvent::EntitySpawned {
+            entity_id: 7,
+            uuid: None,
+            entity_type: ResourceKey::from_str(kind).unwrap(),
+            pos: Vec3::new(0.0, 64.0, 0.0),
+            rotation: Rotation::new(0.0, 0.0),
+            velocity: None,
+        };
+
+        let (tx, rx) = mpsc::channel();
+        let weather = WeatherCell::default();
+
+        // The negative control first, so a passing positive cannot be "every
+        // spawn bumps it".
+        forward(&tx, &weather, spawn("minecraft:zombie")).expect("forward continues");
+        assert_eq!(
+            weather.snapshot().lightning_seq,
+            0,
+            "a zombie must not flash the sky"
+        );
+
+        forward(&tx, &weather, spawn("minecraft:lightning_bolt")).expect("forward continues");
+        assert_eq!(weather.snapshot().lightning_seq, 1);
+        forward(&tx, &weather, spawn("minecraft:lightning_bolt")).expect("forward continues");
+        assert_eq!(
+            weather.snapshot().lightning_seq,
+            2,
+            "the counter is a sequence, so two bolts in one session are two flashes"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "an entity spawn must not cross this channel — the ECS ingest fold owns it"
+        );
     }
 
     #[test]
