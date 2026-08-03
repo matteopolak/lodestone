@@ -348,6 +348,19 @@ const CELESTIAL_BLEND: wgpu::BlendState = wgpu::BlendState {
     },
 };
 
+/// Vanilla's `BlendFunction.TRANSLUCENT`, which `CLOUDS_SNIPPET` uses for both
+/// cloud pipelines (`RenderPipelines.java:106-113`): ordinary
+/// `SrcAlpha`/`OneMinusSrcAlpha` compositing.
+///
+/// The cloud pipeline was **opaque** (`blend: None`), which made
+/// [`crate::sky::CLOUD_COLOR_ALPHA`]'s `0.8` inert — the fragment's alpha was
+/// written to the target and never used to weight anything, so clouds painted
+/// solid. Vanilla's clouds are 80% white over the sky, which is most of why they
+/// read as *cloud*. Note this is deliberately not [`CELESTIAL_BLEND`]: the sun
+/// and moon are additive (`dst_factor: One`) because their art is a near-black
+/// falloff meant to be added; clouds replace what they cover, in proportion.
+const CLOUD_BLEND: wgpu::BlendState = wgpu::BlendState::ALPHA_BLENDING;
+
 fn depthless_targets(color_format: wgpu::TextureFormat, blend: Option<wgpu::BlendState>) -> [Option<wgpu::ColorTargetState>; 1] {
     [Some(wgpu::ColorTargetState {
         format: color_format,
@@ -571,7 +584,8 @@ impl StarPipeline {
     }
 }
 
-/// The cloud-plane pipeline: alpha-tested, textured, tinted.
+/// The cloud-plane pipeline: alpha-tested, textured, tinted, and **blended**
+/// (see [`CLOUD_BLEND`]).
 #[derive(Debug)]
 pub struct CloudPipeline {
     pipeline: wgpu::RenderPipeline,
@@ -601,7 +615,7 @@ impl CloudPipeline {
             &[camera_layout, &texture_layout],
             vertex_layout(std::mem::size_of::<CloudVertex>() as u64, &ATTRS),
             color_format,
-            None,
+            Some(CLOUD_BLEND),
         );
         Self {
             pipeline,
@@ -819,7 +833,11 @@ impl SkyFrame {
     }
 
     /// The four colours this frame resolves to, in linear RGB: `(sky, fog,
-    /// cloud, sunrise_rgba)`.
+    /// cloud_rgba, sunrise_rgba)`.
+    ///
+    /// The cloud entry carries **alpha**, because vanilla's cloud colour is
+    /// `ARGB.white(0.8F)` and the `0.8` is the whole reason clouds read as cloud
+    /// rather than as paint — see [`crate::sky::CLOUD_COLOR_ALPHA`].
     ///
     /// Pure, GPU-free and public so a gate can assert what the pass *will*
     /// paint without a device — and so the composition order (timeline track,
@@ -833,7 +851,7 @@ impl SkyFrame {
     /// visible anyway — but a gate that measured the band while standing in the
     /// void would otherwise be measuring void fog.)
     #[must_use]
-    pub fn resolve_colors(&self, eye_y: f32) -> ([f32; 3], [f32; 3], [f32; 3], [f32; 4]) {
+    pub fn resolve_colors(&self, eye_y: f32) -> ([f32; 3], [f32; 3], [f32; 4], [f32; 4]) {
         let brightness = self.void_fog.brightness(eye_y);
         let sky = scale_gamma(
             sky_color_for_time_of_day(self.time_of_day, self.day_sky_color),
@@ -843,10 +861,23 @@ impl SkyFrame {
             fog_color_for_time_of_day(self.time_of_day, self.day_fog_color),
             brightness,
         );
-        // Clouds are tinted a touch darker than their own track so they read as
-        // solid rather than glowing, the same 0.9 the pass has always applied.
-        let cloud = cloud_color_for_time_of_day(self.time_of_day, self.day_sky_color)
-            .map(|c| c * 0.9);
+        // Vanilla's cloud colour is the `CLOUD_COLOR` attribute — **pure white**
+        // at alpha 0.8 for the overworld (`ARGB.white(0.8F)`) — multiplied by the
+        // `CLOUD_COLOR` timeline track. It is *not* derived from the sky colour.
+        //
+        // This used to pass `day_sky_color` as the base and then scale the result
+        // by an invented `0.9` ("so they read as solid rather than glowing"),
+        // which made a noon cloud `#78A7FF × 0.9`: the reported blue-grey. Both
+        // the base and the `0.9` are gone. Void fog does not touch clouds —
+        // `FogRenderer.computeFogColor` darkens the fog colour, and the cloud
+        // attribute is read straight off the probe in `LevelExtractor.java:202`.
+        let cloud_rgb = cloud_color_for_time_of_day(self.time_of_day, crate::sky::CLOUD_COLOR_RGB);
+        let cloud = [
+            cloud_rgb[0],
+            cloud_rgb[1],
+            cloud_rgb[2],
+            crate::sky::CLOUD_COLOR_ALPHA,
+        ];
         let [r, g, b, a] = sunrise_sunset_color_for_time_of_day(self.time_of_day);
         let sunrise = [
             crate::fog::srgb_to_linear_f32(f32::from(r) / 255.0),
@@ -1306,9 +1337,11 @@ impl SkyRenderer {
             CLOUD_PLANE_HALF_EXTENT,
         );
         // Resolved by `SkyFrame::resolve_colors` from the real `CLOUD_COLOR`
-        // track (not from the sky colour, which is now correctly black at
-        // night — see `crate::sky::CLOUD_COLOR_TRACK`).
-        let cloud_tint = [cloud_color[0], cloud_color[1], cloud_color[2], 1.0];
+        // attribute (pure white at alpha 0.8) times the real `CLOUD_COLOR` track
+        // — not from the sky colour, and with no invented darkening factor. The
+        // alpha rides through to the fragment stage and needs the pipeline's
+        // `CLOUD_BLEND`; an opaque pipeline would discard it silently.
+        let cloud_tint = cloud_color;
         let cloud_verts: Vec<CloudVertex> = (0..4)
             .map(|i| CloudVertex {
                 position: cloud_pos[i],
@@ -1461,6 +1494,69 @@ mod tests {
         // And the blocks-space builder clamps rather than trusting its caller.
         assert_eq!(default.with_sky_fog_end(4_096.0).sky_fog_end, 512.0);
         assert_eq!(default.with_sky_fog_end(128.0).sky_fog_end, 128.0);
+    }
+
+    /// Clouds are **white**, not a shade of the sky.
+    ///
+    /// The reported "clouds are blue-grey" had a single cause with two halves:
+    /// `resolve_colors` passed `day_sky_color` as the base for the `CLOUD_COLOR`
+    /// track, and then scaled the result by an invented `0.9`. Vanilla's base is
+    /// the `CLOUD_COLOR` attribute, `ARGB.white(0.8F)` — RGB `0xFFFFFF`, alpha
+    /// `0.8` (`DimensionTypes.java:37`, `ARGB.java:188`).
+    ///
+    /// The discriminator has to be *chromatic*, not brightness: the old
+    /// expression was `sky × 0.9`, so any "the clouds are bright at noon" check
+    /// passes under both. What only white satisfies is **R == G == B**, and the
+    /// old value could not: `SKY_COLOR`'s blue is 3.4x its red.
+    #[test]
+    fn noon_clouds_are_white_at_vanillas_alpha() {
+        // A deliberately saturated day sky, so "clouds ignore the sky colour" is
+        // a strong statement rather than a near-miss.
+        let sky_blue = [0.242_867_f32, 0.462_361, 0.827_571];
+        let frame = SkyFrame::new(6_000, sky_blue);
+        let (_, _, cloud, _) = frame.resolve_colors(64.0);
+
+        // Noon: the CLOUD_COLOR track's keyframes at 133 and 11_867 are both
+        // #FFFFFF, so the multiply is the identity and the base shows through.
+        assert!(
+            (cloud[0] - 1.0).abs() < 1e-4
+                && (cloud[1] - 1.0).abs() < 1e-4
+                && (cloud[2] - 1.0).abs() < 1e-4,
+            "a noon cloud must be pure white (the CLOUD_COLOR attribute), got {cloud:?}"
+        );
+        assert!(
+            (cloud[3] - 0.8).abs() < 1e-6,
+            "the cloud alpha must be ARGB.white(0.8)'s 0.8, got {}",
+            cloud[3]
+        );
+        // And the pre-fix value must be excluded, chromatically: `sky * 0.9` has
+        // blue 3.4x red, white has a ratio of exactly 1.
+        let bug = sky_blue.map(|c| c * 0.9);
+        assert!(
+            (cloud[2] / cloud[0] - 1.0).abs() < 1e-3,
+            "clouds must be achromatic; blue/red is {:.3}",
+            cloud[2] / cloud[0]
+        );
+        assert!(
+            (bug[2] / bug[0]) > 3.0,
+            "control: the pre-fix expression really was strongly blue (ratio {:.3}), \
+             so the assertion above can tell the two apart",
+            bug[2] / bug[0]
+        );
+
+        // Night keeps its own non-black track (#191926) rather than following the
+        // sky to true black, and the alpha does not move: every CLOUD_COLOR
+        // keyframe has alpha 0xff, so the per-tick multiply leaves 0.8 alone.
+        let night = SkyFrame::new(18_000, sky_blue).resolve_colors(64.0).2;
+        assert!(
+            night[0] > 0.0 && night[2] > night[0],
+            "night clouds must stay visible and faintly blue (#191926): {night:?}"
+        );
+        assert!((night[3] - 0.8).abs() < 1e-6, "night cloud alpha: {}", night[3]);
+        assert!(
+            night[2] < cloud[2] * 0.1,
+            "night clouds must be far darker than noon's: {night:?} vs {cloud:?}"
+        );
     }
 
     /// The clear colour and the disc's outermost fragment must be the *same*

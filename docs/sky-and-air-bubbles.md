@@ -138,6 +138,36 @@ And whichever pass owns it, the *colour* must stay the resolved fog colour — s
 [above](#the-sky-passs-clear-colour-is-the-world-below-the-horizon); a scratch
 value there is a pure-black band across the horizon, not an invisible detail.
 
+**Fancy clouds and the `cloudStatus` option: what is left, precisely.** Not done,
+and scoped here so the next attempt does not have to re-derive it. All constants
+below are read from `CloudRenderer.java` and `CloudStatus.java` in
+`.cache/mc/26.2/client-src`, not remembered.
+
+1. **Two meshes, not one flag.** `buildFlatCell` emits a single quad per filled
+   cell; `buildExtrudedCell` emits a box, per face, carrying two flags in the
+   vertex data — `FLAG_INSIDE_FACE = 16` (the face is being viewed from inside
+   the cloud layer) and `FLAG_USE_TOP_COLOR = 32`. `FAST` is the first, `FANCY`
+   the second. `CELL_SIZE_IN_BLOCKS = 12.0`, `TICKS_PER_CELL = 400`,
+   `BLOCKS_PER_SECOND = 0.6`.
+2. **Cell data is CPU-side, from `clouds.png`.** `buildMesh` packs one entry per
+   column; `isCellEmpty` is `alpha < 10`. `SkyRenderer` already decodes the image
+   (`lodestone_assets::load_cloud_texture`) and currently keeps only its
+   dimensions (`cloud_size`) after upload — the pixels are available at
+   construction and would need retaining. **Shape comes from the texture, not
+   from noise**; do not reach for a noise function.
+3. **`CloudStatus` is `OFF("false")`, `FAST("fast")`, `FANCY("true")`** — three
+   values, and the serialized forms are those strings, not the enum names.
+   `LevelRenderer.java:216-217` also skips the pass entirely when the status is
+   `OFF` *or* `ARGB.alpha(cloudColor) == 0`.
+4. **Making the row live is the `LiveOption` mechanism, not a new one.**
+   `menu/options.rs` currently has exactly two live options; a third means a
+   `LiveOption` variant, a `live_value` arm, a `config::Options` field (**not**
+   `config::Config` — that is argv-only and never written back, so a row driving
+   it would be fabricated persistence), turning `cycle("cloudStatus", …)` into
+   `live_cycle`, and updating the live/inactive census in this repo's docs and in
+   `the_census_matches_the_written_one`. Read `docs/ui-framework.md`'s "What we
+   persist" first.
+
 **`sprite_vitals` lays out relative to a moving anchor.** `row_y` derives from
 `cluster_top`, which starts at `b.h - margin` and is pulled up only `if
 frame.hotbar` and again only `if frame.xp`. Any test or layout change that
@@ -150,7 +180,10 @@ empty row's last bubble. No per-frame tick parity is piped into `HudFrame`, so
 this is deliberately unwired rather than approximated. Purely cosmetic.
 
 **Deliberate sky omissions, so nobody reads them as bugs:** clouds are vanilla's
-flat "fast" mode, not the 3-D voxel-extruded fancy mode; there is no
+flat "fast" mode, not the 3-D voxel-extruded fancy mode (and the `cloudStatus`
+settings row is inactive, so a player cannot ask for either — see
+[the cloud section](#per-biome-sky-tint-issue-96s-fourth-box) and the plan below);
+there is no
 below-horizon dark disc; the biome's own `minecraft:visual/fog_color` is not
 decoded, so only the disc *centre* is per-biome and the horizon end stays the
 dimension fog colour (the sky tint itself landed — see
@@ -425,6 +458,48 @@ Things that are easy to get wrong and were checked rather than assumed:
 That last change is why `CLOUD_COLOR` is in scope at all: the cloud tint used to
 be `sky_color * 0.9`, which becomes exactly invisible once the sky is correctly
 black at night. Vanilla keeps clouds visible with their own non-black track.
+
+**And that fix stopped one step short, which is the "clouds are blue-grey"
+report.** #96 gave clouds the right *track* and left them the wrong *base*:
+`resolve_colors` still passed `day_sky_color` into
+`cloud_color_for_time_of_day`, and still scaled the result by the invented `0.9`.
+The track is `#FFFFFF` at noon, so a day cloud came out `SKY_COLOR × 0.9` — a
+blue-grey. Vanilla's base is a separate attribute:
+
+```java
+// DimensionTypes.java:37, and ARGB.java:188
+.set(EnvironmentAttributes.CLOUD_COLOR, ARGB.white(0.8F))
+// ARGB.white(alpha) == as8BitChannel(alpha) << 24 | 16777215
+```
+
+i.e. **RGB `0xFFFFFF`, alpha `0.8`** — pure white geometry at 80% opacity. Both
+the sky-colour base and the `0.9` are gone (`sky::CLOUD_COLOR_RGB`,
+`sky::CLOUD_COLOR_ALPHA`), and `resolve_colors` now returns the cloud entry as
+`[f32; 4]` so the alpha travels.
+
+Two things had to change with it or the colour would not have reached pixels:
+
+* **`CloudPipeline` was opaque** (`blend: None`), so the `0.8` was written to the
+  target and weighted nothing. It now uses `CLOUD_BLEND` =
+  `BlendState::ALPHA_BLENDING`, vanilla's `BlendFunction.TRANSLUCENT`
+  (`RenderPipelines.java:106-113`). This is deliberately *not* the additive
+  `CELESTIAL_BLEND` the sun and moon use.
+* **`CLOUD_HEIGHT` was a rounded `192.0`**; the attribute is `192.33F`
+  (`DimensionTypes.java:38`).
+
+The gate is `noon_clouds_are_white_at_vanillas_alpha`, and its discriminator is
+**chromatic, not brightness**: the old expression was `sky × 0.9`, so any "clouds
+are bright at noon" assertion passes under both. Only white satisfies
+`R == G == B`, and `SKY_COLOR`'s blue is 3.4x its red — which the test asserts as
+an executed control.
+
+**Still flat.** This is the colour half of the report only. Vanilla's `FANCY`
+setting is a genuinely different mesh — `CloudRenderer.buildExtrudedCell` walks
+`clouds.png` into a cell grid and extrudes per-face boxes with `FLAG_INSIDE_FACE`
+(16) and `FLAG_USE_TOP_COLOR` (32), against `buildFlatCell`'s single quad — and
+`CloudStatus` is a real three-way player option (`OFF("false")`, `FAST("fast")`,
+`FANCY("true")`). What we draw is one flat camera-centred quad, i.e. `FAST`, and
+the settings row for `cloudStatus` is still inactive. See "How to change it".
 
 **And the stale note.** `sky.rs`'s module doc used to say it ported the classic
 1.21 cosine formulas, *"the same ones `entity.rs`'s validated port already uses

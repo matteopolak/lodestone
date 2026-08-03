@@ -462,7 +462,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         [-1.0, 1.0, 0.0],
     ];
     let uvs: [[f32; 2]; 4] = [[u0, v0], [u1, v0], [u1, v1], [u0, v1]];
-    let tint = [DAY_SKY[0] * 0.9, DAY_SKY[1] * 0.9, DAY_SKY[2] * 0.9, 1.0];
+    // The same tint the shipped path now uses: the real `CLOUD_COLOR` attribute,
+    // pure white at alpha 0.8 (`sky::CLOUD_COLOR_RGB`/`CLOUD_COLOR_ALPHA`), which
+    // at noon the `CLOUD_COLOR` track leaves untouched. A control whose tint
+    // differed from the subject's would not be a control for the subject.
+    let tint = [1.0, 1.0, 1.0, lodestone_render::sky::CLOUD_COLOR_ALPHA];
     let verts: Vec<CloudVertex> = (0..4)
         .map(|i| CloudVertex {
             position: positions[i],
@@ -487,11 +491,29 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         &cloud_image.rgba,
         wgpu::AddressMode::Repeat,
         filter,
-        None, // opaque, matching the shipped `CloudPipeline`
+        // Alpha-blended, matching the shipped `CloudPipeline`'s `CLOUD_BLEND`
+        // (vanilla's `BlendFunction.TRANSLUCENT`). This was `None` while the
+        // shipped pipeline was opaque.
+        Some(wgpu::BlendState::ALPHA_BLENDING),
     );
     let background = DAY_SKY.map(|c| (c * 255.0).round() as u8);
-    let full_color = DAY_SKY.map(|c| (c * 0.9 * 255.0).round() as u8);
+    let full_color = cloud_over_sky();
     fringe_fraction(&pixels, full_color, background, 12)
+}
+
+/// The byte value a fully-covered cloud pixel reads back as: vanilla's white
+/// cloud colour composited over the day sky at [`CLOUD_COLOR_ALPHA`]'s `0.8`.
+///
+/// `render_textured_quad` and the real-jar cloud gate both target
+/// **`Rgba8Unorm`** (see that gate's comment on why), so the shader's linear
+/// output lands in the bytes unchanged and `dst = a*1.0 + (1-a)*sky` is the whole
+/// arithmetic. Derived from the constants rather than written out, because the
+/// alpha it depends on is vanilla's and belongs in one place.
+///
+/// It used to be `DAY_SKY * 0.9` — the invented cloud darkening this replaced.
+fn cloud_over_sky() -> [u8; 3] {
+    let a = lodestone_render::sky::CLOUD_COLOR_ALPHA;
+    DAY_SKY.map(|c| ((a + (1.0 - a) * c) * 255.0).round() as u8)
 }
 
 /// Shared plumbing for both control renderers above: one textured quad, one
@@ -895,11 +917,10 @@ fn real_jar_clouds_are_not_black_fringed() {
 
     // The two known colours a correctly-drawn frame can show: the disc's sky
     // colour (`DAY_SKY` exactly, at noon — `sky_color_for_time_of_day`'s day
-    // endpoint) wherever nothing else covers it, and the cloud plane's own
-    // tint (`sky_color4 * 0.9`, mirroring `SkyRenderer::render`'s comment on
-    // why clouds read a touch darker than the sky) wherever it does.
+    // endpoint) wherever nothing else covers it, and vanilla's white cloud
+    // colour composited over it at alpha 0.8 wherever the cloud plane does.
     let background = DAY_SKY.map(|c| (c * 255.0).round() as u8);
-    let full_color = DAY_SKY.map(|c| (c * 0.9 * 255.0).round() as u8);
+    let full_color = cloud_over_sky();
 
     // ---- Subject: the real, shipped SkyRenderer, real jar art. ----
     let sky =

@@ -827,11 +827,37 @@ pub fn build_star_field(seed: u64) -> Vec<[[f32; 3]; 4]> {
 // Clouds
 // ---------------------------------------------------------------------------
 
-/// Cloud plane height in blocks (vanilla's cloud `bottomY`, from
-/// `LevelRenderer`/dimension-type default).
-pub const CLOUD_HEIGHT: f32 = 192.0;
+/// Cloud plane height in blocks: the overworld's
+/// `EnvironmentAttributes.CLOUD_HEIGHT`, which `DimensionTypes.java:38` sets to
+/// `192.33F` — the same value as the attribute's registered default
+/// (`EnvironmentAttributes.java:52-54`). This was a rounded `192.0`.
+pub const CLOUD_HEIGHT: f32 = 192.33;
 /// Blocks per cloud-texture cell (vanilla `CloudRenderer.CELL_SIZE_IN_BLOCKS`).
 pub const CLOUD_CELL_BLOCKS: f32 = 12.0;
+
+/// The overworld's `EnvironmentAttributes.CLOUD_COLOR`, as **linear** RGB.
+///
+/// `DimensionTypes.java:37` sets it to `ARGB.white(0.8F)`, and `ARGB.white`
+/// (`ARGB.java:188`) is `as8BitChannel(alpha) << 24 | 16777215` — so the RGB is
+/// `0xFFFFFF`, **pure white**, and only the alpha is `0.8`. Vanilla's clouds are
+/// white geometry at 80% opacity, tinted per-tick by [`CLOUD_COLOR_TRACK`]'s
+/// `multiply` modifier (`#FFFFFF` by day, `#191926` at night).
+///
+/// This is the base [`cloud_color_for_time_of_day`] must be given. It used to be
+/// handed `SkyFrame::day_sky_color` and then scaled by an invented `0.9`, which
+/// made day clouds `#78A7FF × 0.9` — the reported *blue-grey, flat* clouds. The
+/// sky colour is not a cloud colour and never was; they are two separate
+/// attributes with two separate timeline tracks.
+pub const CLOUD_COLOR_RGB: [f32; 3] = [1.0, 1.0, 1.0];
+
+/// The alpha of the same attribute: `as8BitChannel(0.8F) = 204`, i.e. `204/255`
+/// exactly `0.8`. Every [`CLOUD_COLOR_TRACK`] keyframe has alpha `0xff`, so the
+/// per-tick `multiply` leaves it untouched and this is the alpha at every hour.
+///
+/// It needs the cloud pipeline to blend (vanilla's `CLOUDS_SNIPPET` uses
+/// `BlendFunction.TRANSLUCENT`, `RenderPipelines.java:109`). An opaque cloud
+/// pipeline silently discards it.
+pub const CLOUD_COLOR_ALPHA: f32 = 0.8;
 /// Scroll speed in blocks per tick (vanilla `CloudRenderer.BLOCKS_PER_SECOND`
 /// applied per-tick as `0.03` — the renderer's own comment there literally
 /// reads `0.030000001F`, i.e. this constant).
