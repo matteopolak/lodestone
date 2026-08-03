@@ -24,6 +24,7 @@
 //! real chunk would use. See [`net`] and the accompanying report.
 
 pub mod app;
+pub mod asset_objects;
 pub mod audio;
 pub mod block_entities;
 pub mod blocks;

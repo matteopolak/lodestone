@@ -865,7 +865,7 @@ pub enum CliCommand {
 
 #[must_use]
 pub const fn root_help() -> &'static str {
-    "xtask\n\nUsage:\n    cargo run -p xtask -- <command> [options]\n\nCommands:\n    gen-packet-ids   Generate Rust packet ID tables from a Mojang report or minecraft-data\n    fetch-assets     Download and verify vanilla client.jar plus asset index into .cache/mc/<version>/\n    fetch-version    Download and verify vanilla server.jar into .cache/mc/<version>/\n    version-table    Generate/check the epic-343 16-version protocol/data-version table\n    gen-registries   Generate selected registry id->ResourceKey tables from registries.json\n    check-isolation  Enforce protocol version crate dependency isolation\n    check-connected  Enforce workspace crates are reachable from shipped binary/cdylib roots\n    connectedness    Report v770 play packet reachability\n    check-deletable  Simulate deleting a version family's folder and report the fallout\n    codegen-ratio    Report generated-vs-hand-written codec metrics per protocol family\n    new-version      Scaffold a protocol family; registry support is withheld until SHAPE_REVIEW.toml is discharged\n    gen-reports      Not implemented yet\n    conformance      Run packet-id, registry, isolation, deletability, test, and clippy checks for a family\n\nOptions for gen-packet-ids:\n    --version <version>   Minecraft version, e.g. 26.2 (Mojang) or 1.8 (minecraft-data dir)\n    --protocol <id>       Protocol version, e.g. 776 or 47\n    --source <source>     Report source: mojang (default) or minecraft-data\n    --out <path>          Output path under crates/protocol/*/src/generated/\n    --check               Compare generated output against disk and fail on drift without writing\n\nOptions for gen-registries:\n    --version <version>       Minecraft version, e.g. 26.2\n    --protocol <id>           Protocol version, e.g. 776\n    --out-dir <path>          Output directory under crates/protocol/*/src/generated\n    --registries <csv>        Registry keys to generate (default: sound_event,particle_type,menu,item)\n    --check                   Compare generated registry tables against disk without writing\n\nOptions for check-connected:\n    --allowlist <path>    TOML file of explicit exceptions (default: xtask/check-connected.toml)\n\nOptions for connectedness:\n    Parses v770's generated packet_ids.rs for play denominators, then classifies adapter dispatch outlets (ClientEvent, Directive, world/sink writes) with explicit UNCLASSIFIED output.\n\nOptions for check-deletable:\n    <version>             Version family to simulate deleting: package name (lodestone-v47), folder (v47), or path\n\nOptions for codegen-ratio:\n    Reports both the optimistic per-struct derive/manual ratio and the more decision-useful absolute hand-written source lines.\n\nOptions for new-version:\n    --protocol <id>       Protocol number for the new family (required)\n    --minecraft <ver>    Minecraft version key for the packet-id oracle (required)\n    --from <family>       Existing family to copy from, e.g. v770 (default) or v47\n    --source <source>     Oracle: mojang or minecraft-data (default inferred from --from)\n    --name <vNNN>         Family folder/label (default v<protocol>)\n    --force               Overwrite the target folder if it already exists\n    SHAPE_REVIEW.toml     Generated when packet shapes differ; every entry must be reviewed before registry support may be added\n\nOptions for conformance:\n    --family <vNNN>       Version family folder/label to check, e.g. v735\n    --minecraft <ver>     Minecraft version key for packet-id/registry checks\n    --protocol <id>       Protocol number for the family\n    --source <source>     Packet-id oracle: mojang or minecraft-data (default mojang)\n    --skip-cargo          Only run xtask structural checks; skip cargo test/clippy\n\nOptions for fetch-version:\n    --version <version>   Minecraft version, e.g. 1.16.5\n    --force               Re-download even when cached server.jar already matches its SHA-1\n\nOptions for fetch-assets:\n    --version <version>   Minecraft version, e.g. 26.2\n    --force               Re-download even when cached files already match their SHA-1\n    -h, --help            Print help\n\nOptions for version-table:\n    --check               Compare the generated table against crates/lodestone-registry/src/generated/version_table.rs and fail on drift without writing\n    --fetch-missing       Also run fetch-version for any of the 16 target versions with no cached .cache/mc/<version>/server.jar (network + disk heavy; off by default)\n"
+    "xtask\n\nUsage:\n    cargo run -p xtask -- <command> [options]\n\nCommands:\n    gen-packet-ids   Generate Rust packet ID tables from a Mojang report or minecraft-data\n    fetch-assets     Download and verify vanilla client.jar, the asset index, and the asset-store objects client.jar stubs, into .cache/mc/<version>/\n    fetch-version    Download and verify vanilla server.jar into .cache/mc/<version>/\n    version-table    Generate/check the epic-343 16-version protocol/data-version table\n    gen-registries   Generate selected registry id->ResourceKey tables from registries.json\n    check-isolation  Enforce protocol version crate dependency isolation\n    check-connected  Enforce workspace crates are reachable from shipped binary/cdylib roots\n    connectedness    Report v770 play packet reachability\n    check-deletable  Simulate deleting a version family's folder and report the fallout\n    codegen-ratio    Report generated-vs-hand-written codec metrics per protocol family\n    new-version      Scaffold a protocol family; registry support is withheld until SHAPE_REVIEW.toml is discharged\n    gen-reports      Not implemented yet\n    conformance      Run packet-id, registry, isolation, deletability, test, and clippy checks for a family\n\nOptions for gen-packet-ids:\n    --version <version>   Minecraft version, e.g. 26.2 (Mojang) or 1.8 (minecraft-data dir)\n    --protocol <id>       Protocol version, e.g. 776 or 47\n    --source <source>     Report source: mojang (default) or minecraft-data\n    --out <path>          Output path under crates/protocol/*/src/generated/\n    --check               Compare generated output against disk and fail on drift without writing\n\nOptions for gen-registries:\n    --version <version>       Minecraft version, e.g. 26.2\n    --protocol <id>           Protocol version, e.g. 776\n    --out-dir <path>          Output directory under crates/protocol/*/src/generated\n    --registries <csv>        Registry keys to generate (default: sound_event,particle_type,menu,item)\n    --check                   Compare generated registry tables against disk without writing\n\nOptions for check-connected:\n    --allowlist <path>    TOML file of explicit exceptions (default: xtask/check-connected.toml)\n\nOptions for connectedness:\n    Parses v770's generated packet_ids.rs for play denominators, then classifies adapter dispatch outlets (ClientEvent, Directive, world/sink writes) with explicit UNCLASSIFIED output.\n\nOptions for check-deletable:\n    <version>             Version family to simulate deleting: package name (lodestone-v47), folder (v47), or path\n\nOptions for codegen-ratio:\n    Reports both the optimistic per-struct derive/manual ratio and the more decision-useful absolute hand-written source lines.\n\nOptions for new-version:\n    --protocol <id>       Protocol number for the new family (required)\n    --minecraft <ver>    Minecraft version key for the packet-id oracle (required)\n    --from <family>       Existing family to copy from, e.g. v770 (default) or v47\n    --source <source>     Oracle: mojang or minecraft-data (default inferred from --from)\n    --name <vNNN>         Family folder/label (default v<protocol>)\n    --force               Overwrite the target folder if it already exists\n    SHAPE_REVIEW.toml     Generated when packet shapes differ; every entry must be reviewed before registry support may be added\n\nOptions for conformance:\n    --family <vNNN>       Version family folder/label to check, e.g. v735\n    --minecraft <ver>     Minecraft version key for packet-id/registry checks\n    --protocol <id>       Protocol number for the family\n    --source <source>     Packet-id oracle: mojang or minecraft-data (default mojang)\n    --skip-cargo          Only run xtask structural checks; skip cargo test/clippy\n\nOptions for fetch-version:\n    --version <version>   Minecraft version, e.g. 1.16.5\n    --force               Re-download even when cached server.jar already matches its SHA-1\n\nOptions for fetch-assets:\n    --version <version>   Minecraft version, e.g. 26.2\n    --force               Re-download even when cached files already match their SHA-1\n    -h, --help            Print help\n  Also fetches asset-store objects, ~3.2 MB in total:\n    - the 8 whose name is in client.jar at a DIFFERENT size, i.e. the stubs the jar ships to be\n      overridden (the 6 panorama faces, panorama_overlay, unifont.json). Nothing at runtime can\n      tell a stub from the real asset, which is why these must be eager.\n    - minecraft/sounds.json (626 KB), which ShellAudio reads eagerly and cannot start without.\n  The 4871 .ogg samples (375 MB) are NOT fetched: a missing sample is one silent sound, resolved\n  lazily per event. Use xtask::ensure_object if you want the corpus.\n\nOptions for version-table:\n    --check               Compare the generated table against crates/lodestone-registry/src/generated/version_table.rs and fail on drift without writing\n    --fetch-missing       Also run fetch-version for any of the 16 target versions with no cached .cache/mc/<version>/server.jar (network + disk heavy; off by default)\n"
 }
 
 pub fn parse_cli_args<I, S>(args: I) -> Result<CliCommand>
@@ -5136,6 +5136,25 @@ pub struct JarAssetCounts {
     pub blockstates: usize,
 }
 
+/// One asset-store object `fetch-assets` ensures is present: either one
+/// `client.jar` shadows with a differently-sized stub, or one named in
+/// [`REQUIRED_OBJECT_NAMES`]. See [`fetch_shadowed_objects`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FetchedObject {
+    /// The asset-index name (no `assets/` prefix).
+    pub name: String,
+    /// Lowercase hex SHA-1, which is also the object's path.
+    pub hash: String,
+    /// The index's declared size — the real asset.
+    pub size: u64,
+    /// The size of the `client.jar` entry of the same name — the stub. `0` when
+    /// the jar has no copy at all, which is the case for every
+    /// [`REQUIRED_OBJECT_NAMES`] entry.
+    pub jar_size: u64,
+    /// Whether this run downloaded it (false = already cached and verified).
+    pub downloaded: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FetchAssetsSummary {
     pub client_path: PathBuf,
@@ -5145,12 +5164,16 @@ pub struct FetchAssetsSummary {
     pub asset_index_size: u64,
     pub asset_index_downloaded: bool,
     pub jar_counts: JarAssetCounts,
+    /// The asset-store objects this command ensures are present — the ones the jar
+    /// shadows with a differently-sized stub, plus `REQUIRED_OBJECT_NAMES`. All are
+    /// on disk and SHA-1 verified by the time this is returned.
+    pub fetched_objects: Vec<FetchedObject>,
 }
 
 impl FetchAssetsSummary {
     #[must_use]
     pub fn render(&self) -> String {
-        format!(
+        let mut out = format!(
             "client.jar: {} ({} bytes, {})\nasset index: {} ({} bytes, {})\njar assets: block textures={}, block models={}, blockstates={}\n",
             self.client_path.display(),
             self.client_size,
@@ -5169,7 +5192,36 @@ impl FetchAssetsSummary {
             self.jar_counts.block_textures,
             self.jar_counts.block_models,
             self.jar_counts.blockstates
-        )
+        );
+        let fetched = self
+            .fetched_objects
+            .iter()
+            .filter(|o| o.downloaded)
+            .count();
+        out.push_str(&format!(
+            "asset objects: {} ({} downloaded, {} cached)\n",
+            self.fetched_objects.len(),
+            fetched,
+            self.fetched_objects.len() - fetched
+        ));
+        for object in &self.fetched_objects {
+            out.push_str(&format!(
+                "  {} {} real={} {}\n",
+                object.name,
+                if object.jar_size == 0 {
+                    "not-in-jar".to_string()
+                } else {
+                    format!("jar-stub={}", object.jar_size)
+                },
+                object.size,
+                if object.downloaded {
+                    "downloaded"
+                } else {
+                    "cached"
+                }
+            ));
+        }
+        out
     }
 }
 
@@ -5331,9 +5383,6 @@ pub fn fetch_assets(
 
     let asset_index_path =
         version_cache.join(format!("asset-index-{}.json", downloads.asset_index.id));
-    // We intentionally do not download the asset object store yet. For Lodestone's current
-    // renderer work, textures, models, and blockstates come from client.jar; the object store is
-    // primarily sounds and language files that we do not need at this stage.
     let asset_index_downloaded = download_verified_file(
         &downloads.asset_index.url,
         &asset_index_path,
@@ -5368,6 +5417,10 @@ pub fn fetch_assets(
         );
     }
 
+    let fetched_objects =
+        fetch_shadowed_objects(&version_cache, &asset_index_path, &client_path, force)
+            .context("download and verify the required asset-store objects")?;
+
     Ok(FetchAssetsSummary {
         client_path,
         client_size,
@@ -5376,7 +5429,212 @@ pub fn fetch_assets(
         asset_index_size,
         asset_index_downloaded,
         jar_counts,
+        fetched_objects,
     })
+}
+
+/// Base URL of the launcher's content-addressed asset store.
+const RESOURCES_BASE_URL: &str = "https://resources.download.minecraft.net";
+
+/// Logical asset names to fetch **regardless** of whether `client.jar` shadows
+/// them, because something refuses to start without them.
+///
+/// `minecraft/sounds.json` is the whole list today: `ShellAudio::load_from_root`
+/// reads it eagerly and returns an error if it is absent, so without it audio does
+/// not come up at all. It is one 626 KB file describing 1968 sound events, and it
+/// is *not* jar-shadowed — the jar has no copy — so the size-disagreement rule
+/// below would never select it.
+///
+/// The 4871 `.ogg` samples it references are deliberately **not** here. They are
+/// 375 MB, and unlike a stub they fail *honestly*: a missing sample is one silent
+/// sound, resolved lazily per event, not a wrong asset masquerading as the right
+/// one. Someone wanting real audio should fetch them with [`ensure_object`] rather
+/// than by growing this list.
+const REQUIRED_OBJECT_NAMES: &[&str] = &["minecraft/sounds.json"];
+
+/// Ensure one asset-store object is on disk, verifying its SHA-1 against the
+/// index.
+///
+/// This is the general primitive — *given a logical asset name, make the object
+/// present and prove it is the right bytes* — that everything else here is built
+/// from. `name` is an asset-index name with no `assets/` prefix. Returns whether
+/// this call downloaded it (`false` = already cached and verified).
+///
+/// The hash is both the object's address and its integrity check, which is the
+/// only one available: there is no signature and no manifest beyond the index.
+/// [`download_verified_file`] does the verify-then-rename, so a failed digest
+/// leaves nothing behind.
+///
+/// # Errors
+///
+/// Returns an error when `name` is not in the index, its hash is implausible, the
+/// download fails, the SHA-1 does not match, or the resulting file's length
+/// disagrees with the index.
+pub fn ensure_object(
+    version_cache: &Path,
+    index: &serde_json::Map<String, Value>,
+    name: &str,
+    force: bool,
+) -> Result<bool> {
+    let meta = index
+        .get(name)
+        .ok_or_else(|| anyhow!("asset index has no object named {name:?}"))?;
+    let hash = meta
+        .get("hash")
+        .and_then(|h| h.as_str())
+        .ok_or_else(|| anyhow!("asset index entry {name:?} has no hash"))?;
+    if hash.len() < 2 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        bail!("asset index entry {name:?} has an implausible hash {hash:?}");
+    }
+    let size = meta
+        .get("size")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("asset index entry {name:?} has no size"))?;
+
+    let destination = version_cache
+        .join("objects")
+        .join(&hash[0..2])
+        .join(hash);
+    let url = format!("{RESOURCES_BASE_URL}/{}/{hash}", &hash[0..2]);
+    let downloaded = download_verified_file(&url, &destination, hash, force)
+        .with_context(|| format!("download asset object {name} ({url})"))?;
+
+    let on_disk = std::fs::metadata(&destination)
+        .with_context(|| format!("stat {}", destination.display()))?
+        .len();
+    if on_disk != size {
+        bail!(
+            "asset object {name} size mismatch: index says {size} bytes, {} has {on_disk}",
+            destination.display()
+        );
+    }
+    Ok(downloaded)
+}
+
+/// Download every asset-store object whose name is **also** a `client.jar` entry
+/// of a *different* size — i.e. every object the jar shadows with a stub — plus
+/// [`REQUIRED_OBJECT_NAMES`].
+///
+/// # Why this exists, and why the boundary is where it is
+///
+/// `client.jar` ships deliberate stubs for a handful of files the object store
+/// overrides, and reading the jar copy silently gives you the stub. Measured on
+/// 26.2: of 5057 index objects exactly **8** share a name with a jar entry, and
+/// all 8 differ in size —
+///
+/// | name | jar | real |
+/// |---|---|---|
+/// | `textures/gui/title/background/panorama_0.png` | 69 | 547,239 |
+/// | `panorama_1.png` | 69 | 294,940 |
+/// | `panorama_2.png` | 69 | 425,769 |
+/// | `panorama_3.png` | 69 | 461,522 |
+/// | `panorama_4.png` | 69 | 738,917 |
+/// | `panorama_5.png` | 69 | 118,484 |
+/// | `font/include/unifont.json` | 29 | 3,993 |
+/// | `panorama_overlay.png` | 68 | 86 |
+///
+/// — about 2.6 MB in total. The title-screen panorama was ported against those
+/// stubs and shipped a flat grey sky that looked like working code; this command
+/// is what stops that recurring.
+///
+/// **The shadowed set is derived from the data, not hardcoded.** A name list would
+/// rot at the next version bump; "present in both, sizes disagree" cannot. The one
+/// hardcoded part is [`REQUIRED_OBJECT_NAMES`], for objects the jar does not
+/// shadow but something refuses to start without.
+///
+/// It also keeps the boundary honest: this deliberately does **not** fetch the
+/// remaining index-only objects, 4871 of which are `.ogg` samples totalling
+/// 375 MB. A missing sample fails *honestly* — one silent sound, resolved lazily
+/// per event — whereas nothing at runtime can tell a stub from the real asset.
+/// [`ensure_object`] is the primitive to reach for if you do want the corpus.
+///
+/// SHA-1 is verified against the index hash after download by
+/// [`download_verified_file`] — that is what the index hash is for, and the only
+/// integrity check available here.
+///
+/// # Errors
+///
+/// Propagates a read/parse failure of the index or the jar, and any download or
+/// SHA-1 verification failure.
+pub fn fetch_shadowed_objects(
+    version_cache: &Path,
+    asset_index_path: &Path,
+    client_path: &Path,
+    force: bool,
+) -> Result<Vec<FetchedObject>> {
+    let index_bytes = std::fs::read(asset_index_path)
+        .with_context(|| format!("read asset index {}", asset_index_path.display()))?;
+    let index: serde_json::Value = serde_json::from_slice(&index_bytes)
+        .with_context(|| format!("parse asset index {}", asset_index_path.display()))?;
+    let objects = index
+        .get("objects")
+        .and_then(|o| o.as_object())
+        .ok_or_else(|| anyhow!("asset index has no \"objects\" map"))?;
+
+    // Jar entry sizes, keyed the way the index names things (no `assets/`).
+    let file = File::open(client_path)
+        .with_context(|| format!("open client jar {}", client_path.display()))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .with_context(|| format!("read zip {}", client_path.display()))?;
+    let mut jar_sizes: BTreeMap<String, u64> = BTreeMap::new();
+    for i in 0..archive.len() {
+        let entry = archive
+            .by_index(i)
+            .with_context(|| format!("read zip entry {i} of {}", client_path.display()))?;
+        let name = entry.name();
+        if let Some(key) = name.strip_prefix("assets/") {
+            jar_sizes.insert(key.to_string(), entry.size());
+        }
+    }
+
+    let mut wanted: Vec<FetchedObject> = Vec::new();
+    for (name, meta) in objects {
+        let Some(size) = meta.get("size").and_then(Value::as_u64) else {
+            continue;
+        };
+        let jar_size = jar_sizes.get(name.as_str()).copied();
+        let shadowed_stub = jar_size.is_some_and(|jar| jar != size);
+        let required = REQUIRED_OBJECT_NAMES.contains(&name.as_str());
+        if !shadowed_stub && !required {
+            // Either byte-for-byte the same asset in both places (the jar copy is
+            // fine), or index-only and nothing refuses to start without it.
+            continue;
+        }
+        let hash = meta
+            .get("hash")
+            .and_then(|h| h.as_str())
+            .ok_or_else(|| anyhow!("asset index entry {name:?} has no hash"))?;
+        wanted.push(FetchedObject {
+            name: name.clone(),
+            hash: hash.to_string(),
+            // `jar_size` is 0 for a required-but-unshadowed object, which is what
+            // the summary prints and is honest: there is no jar copy.
+            jar_size: jar_size.unwrap_or(0),
+            size,
+            downloaded: false,
+        });
+    }
+    wanted.sort_by(|a, b| a.name.cmp(&b.name));
+
+    // Every name in `REQUIRED_OBJECT_NAMES` must have been found. A typo there
+    // would otherwise silently fetch nothing and leave audio dead exactly as
+    // before, which is the failure this whole change exists to stop.
+    for required in REQUIRED_OBJECT_NAMES {
+        if !wanted.iter().any(|o| o.name == *required) {
+            bail!(
+                "required asset object {required:?} is not in {} — the name is \
+                 wrong, or this version's index does not carry it",
+                asset_index_path.display()
+            );
+        }
+    }
+
+    for object in &mut wanted {
+        let downloaded = ensure_object(version_cache, objects, &object.name, force)?;
+        object.downloaded = downloaded;
+    }
+
+    Ok(wanted)
 }
 
 pub fn fetch_version(

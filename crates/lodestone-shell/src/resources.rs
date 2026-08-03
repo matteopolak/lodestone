@@ -449,23 +449,58 @@ pub fn load_menu_gui_atlas() -> Option<Arc<GuiAtlas>> {
 /// `textures/gui/title/background/panorama_{0..5}.png`, decoded and stacked into
 /// cubemap layer order by [`crate::menu::panorama::load`].
 ///
-/// Same fail-open contract as every other loader here: `None` on a jar-less run,
-/// a missing face, or faces that disagree in size, which leaves the menu screens
-/// on their flat backdrop rather than failing startup. The six faces are *not*
-/// added to [`MENU_TEXTURES`] because they are not atlas sprites: a cubemap has
-/// to be six equal layers of one texture, and stitching them into a sheet is the
-/// one thing that would make them unusable.
+/// **This is the one loader here that must not read `client.jar` first.** The jar
+/// ships 69-byte 1×1 grey stubs for all six faces and the real 1024×1024 art
+/// comes from the launcher's asset-object store, so this opens an
+/// [`AssetObjectStore`](crate::asset_objects::AssetObjectStore) over the *same*
+/// root and hands it to `panorama::load`, which prefers it per face. A root with
+/// no populated store still loads — from the stubs, with a warning that says so —
+/// because a flat title screen beats a failed startup. `cargo run -p xtask --
+/// fetch-assets --version <v>` is what populates it.
+///
+/// Same fail-open contract as every other loader here otherwise: `None` on a
+/// jar-less run, a missing face, or faces that disagree in size, which leaves the
+/// menu screens on their flat backdrop rather than failing startup. The six faces
+/// are *not* added to [`MENU_TEXTURES`] because they are not atlas sprites: a
+/// cubemap has to be six equal layers of one texture, and stitching them into a
+/// sheet is the one thing that would make them unusable.
 #[must_use]
 pub fn load_panorama() -> Option<Arc<crate::menu::panorama::PanoramaFaces>> {
     let root = asset_root()?;
     let manager = open_client_jar(&root)?;
-    match crate::menu::panorama::load(&manager) {
-        Ok(faces) => {
-            tracing::info!(
+    // Absent or unreadable is not fatal: `panorama::load` falls back to the jar
+    // per face and reports how many faces it actually got from the store.
+    let objects = match crate::asset_objects::AssetObjectStore::open(&root) {
+        Ok(store) => Some(store),
+        Err(e) => {
+            tracing::warn!(
                 target: "assets",
-                face = faces.size,
-                "loaded the title-screen panorama cubemap"
+                "no asset-object store at {}: {e} — the panorama will fall back to \
+                 client.jar's 1x1 stub faces, which render a flat grey sky",
+                root.display()
             );
+            None
+        }
+    };
+    match crate::menu::panorama::load(&manager, objects.as_ref()) {
+        Ok(faces) => {
+            if faces.is_real_art() {
+                tracing::info!(
+                    target: "assets",
+                    face = faces.size,
+                    "loaded the title-screen panorama cubemap from the asset-object store"
+                );
+            } else {
+                tracing::warn!(
+                    target: "assets",
+                    face = faces.size,
+                    from_object_store = faces.from_object_store,
+                    "the title-screen panorama fell back to client.jar stubs for {} of \
+                     6 faces; the sky will be flat. Run: cargo run -p xtask -- \
+                     fetch-assets --version <version>",
+                    6 - faces.from_object_store
+                );
+            }
             Some(Arc::new(faces))
         }
         Err(e) => {

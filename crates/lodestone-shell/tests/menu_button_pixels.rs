@@ -230,15 +230,23 @@ fn title_screen_buttons_draw_vanillas_nine_slice_art_not_flat_fills() {
         menu.gui_attached(),
         "the GUI atlas must be bound or every measurement below is of the fallback"
     );
-    // Pin the backdrop to the flat `BG` fill. Every absolute luminance bound in
-    // this gate (`PLAIN_BORDER_MAX`, the backdrop control above the logo, the
-    // "nothing is drawn in the gap below the button" bound) was measured against
-    // that fill, and the cubemap panorama that now draws behind every
-    // out-of-world screen would move all three — 26.2's flat grey panorama reads
-    // ~38 in this linear target where `BG` reads ~28, which the `< 40.0` bound
-    // below has no room for. Calling this *before* the first draw also stops
-    // `ensure_panorama` loading it lazily. The panorama has its own gate in
-    // `menu_panorama_pixels.rs`; see `docs/menu-panorama.md`.
+    // Pin the backdrop to the flat `BG` fill, so that every absolute luminance
+    // bound in this gate (`PLAIN_BORDER_MAX`, the backdrop control above the logo,
+    // the "nothing is drawn in the gap below the button" bound) is measured
+    // against a **compile-time constant instead of a 2.6 MB asset**.
+    //
+    // The cubemap panorama now draws behind every out-of-world screen, and its six
+    // real faces are 1024×1024 of varied sky delivered through the launcher's
+    // asset-object store — so without this, three bounds in a button-chrome gate
+    // would depend on which part of Mojang's sky happens to land in each sampled
+    // rect, and on whether the object store is even populated (unpopulated falls
+    // back to flat grey stubs, a different number again). That is a confound, not
+    // a measurement, and no re-calibration fixes it because the backdrop is no
+    // longer a constant to calibrate against.
+    //
+    // Calling this *before* the first draw also stops `ensure_panorama` loading
+    // ~2.6 MB of PNG that this gate would then throw away. The panorama has its
+    // own gates in `menu_panorama_pixels.rs`; see `docs/menu-panorama.md`.
     menu.detach_panorama();
     assert!(!menu.panorama_attached());
 
