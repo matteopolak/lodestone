@@ -856,6 +856,42 @@ impl SkyFrame {
         ];
         (sky, fog, cloud, sunrise)
     }
+
+    /// The colour the sky pass's colour target must be cleared to for this
+    /// frame — **this frame's resolved fog colour**, in linear RGB.
+    ///
+    /// Everything the finite overhead disc does not cover keeps this colour, so
+    /// it is what the player sees below the horizon wherever terrain does not
+    /// reach. See [`SkyRenderer::render`]'s `clear` parameter for the full
+    /// account and for vanilla's equivalent (`LevelRenderer`'s `"clear"` pass at
+    /// `fogColor`).
+    ///
+    /// It reads [`resolve_colors`](Self::resolve_colors) rather than
+    /// `day_fog_color` for two reasons, and both have bitten this file before:
+    /// the `FOG_COLOR` track darkens the horizon at night (a day-colour clear
+    /// would paint a bright band under a near-black night sky), and void fog
+    /// darkens it underground. Reading the *resolved* colour also makes the
+    /// clear equal the disc's own rim colour by construction — the disc paints
+    /// `mix(sky, fog, 1.0)` at and beyond `sky_fog_end`, which is exactly `fog`
+    /// — so the horizon cannot band. `the_clear_colour_is_the_discs_own_rim`
+    /// asserts that identity.
+    #[must_use]
+    pub fn clear_color(&self, eye_y: f32) -> [f32; 3] {
+        self.resolve_colors(eye_y).1
+    }
+
+    /// [`clear_color`](Self::clear_color) as an opaque `wgpu::Color`, ready to
+    /// hand straight to [`SkyRenderer::render`].
+    #[must_use]
+    pub fn clear_color_wgpu(&self, eye_y: f32) -> wgpu::Color {
+        let [r, g, b] = self.clear_color(eye_y);
+        wgpu::Color {
+            r: f64::from(r),
+            g: f64::from(g),
+            b: f64::from(b),
+            a: 1.0,
+        }
+    }
 }
 
 fn sprite_uv(sprite: &lodestone_assets::AtlasSprite) -> [f32; 4] {
@@ -1114,6 +1150,36 @@ impl SkyRenderer {
     /// (for the cloud plane's world-space UV and height, and for void fog);
     /// `frame` carries the day clock and this frame's base colours — see
     /// [`SkyFrame`].
+    ///
+    /// # `clear` is not a decoration — it is what the world looks like below the
+    /// horizon
+    ///
+    /// This pass clears the colour target itself and then draws a *finite*
+    /// overhead disc, so every pixel the disc, the celestial quads and the
+    /// clouds do not cover keeps `clear`: the whole of the frame below the
+    /// horizon line, plus the thin `atan(16 / SKY_DISC_RADIUS)` ≈ 1.79° band
+    /// just above it where a ray leaves the disc's rim rather than hitting it.
+    /// Terrain draws over that afterwards, and whatever terrain does not reach
+    /// **is** `clear` on screen.
+    ///
+    /// Vanilla does exactly this and it is easy to miss, because vanilla's clear
+    /// does not live in `SkyRenderer` at all:
+    /// `LevelRenderer.java:195-204` clears the main target to `fogColor` in its
+    /// own `"clear"` pass, and every `SkyRenderer` render pass then passes
+    /// `Optional.empty()` for the clear value. So the below-horizon void is the
+    /// **fog colour** — which is also, by construction, the colour the disc's
+    /// own gradient reaches at `sky_fog_end`, so the seam is invisible.
+    ///
+    /// Pass [`SkyFrame::clear_color`] for that. It was `wgpu::Color::BLACK`
+    /// until this became a parameter, which is why the reported "the skybox ends
+    /// too early and the bottom half is always black" was a hard *pure black*
+    /// band rather than a wrong-shade one: black is not a plausible near-miss
+    /// for any sky colour, it is the absence of one.
+    ///
+    /// It is a required parameter rather than something this method derives so
+    /// that the GPU gates in `tests/sky_pipeline_gpu.rs` can keep clearing to
+    /// black — their whole measure is "did anything paint here", which a
+    /// sky-coloured clear satisfies for free.
     pub fn render(
         &self,
         device: &wgpu::Device,
@@ -1122,6 +1188,7 @@ impl SkyRenderer {
         color_view: &wgpu::TextureView,
         camera: &Camera,
         frame: &SkyFrame,
+        clear: wgpu::Color,
     ) {
         let time_of_day = frame.time_of_day;
         let view_proj = camera.sky_view_projection();
@@ -1260,7 +1327,10 @@ impl SkyRenderer {
                 resolve_target: None,
                 depth_slice: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    // See `render`'s doc: this is the below-horizon void, not a
+                    // scratch value. Vanilla's equivalent is
+                    // `LevelRenderer`'s `"clear"` pass at the fog colour.
+                    load: wgpu::LoadOp::Clear(clear),
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -1391,5 +1461,64 @@ mod tests {
         // And the blocks-space builder clamps rather than trusting its caller.
         assert_eq!(default.with_sky_fog_end(4_096.0).sky_fog_end, 512.0);
         assert_eq!(default.with_sky_fog_end(128.0).sky_fog_end, 128.0);
+    }
+
+    /// The clear colour and the disc's outermost fragment must be the *same*
+    /// colour, or the horizon bands — which is the whole reason
+    /// [`SkyFrame::clear_color`] reads the resolved fog colour rather than
+    /// `day_fog_color` or a second constant.
+    ///
+    /// `sky_disc.wgsl`'s fragment stage is
+    /// `mix(color.rgb, fog_color.rgb, clamp(length/fog_end, 0, 1) * fog_color.a)`
+    /// with `fog_color.a == 1.0`, so at `length >= fog_end` it is `mix(sky, fog,
+    /// 1.0)`. `crate::fog::apply_fog` is that expression in Rust. Asserting the
+    /// identity here rather than describing it is what would catch a future
+    /// "clear from the day colour" or "clear from `sky_color`" regression, both
+    /// of which compile and neither of which any GPU gate looks at (they all
+    /// clear to black deliberately).
+    #[test]
+    fn the_clear_colour_is_the_discs_own_rim() {
+        // Two clocks and two eye heights, so neither the FOG_COLOR track nor
+        // void fog can be the thing that happens to make this hold.
+        for time in [1_000_i64, 6_000, 13_000, 18_000, 23_500] {
+            for eye_y in [-60.0_f32, -40.0, 64.0] {
+                let frame = SkyFrame::new(time, [0.25, 0.46, 0.83])
+                    .with_fog_color([0.31, 0.53, 0.86])
+                    .with_render_distance(8)
+                    .with_void_fog(crate::fog::VoidFog::OVERWORLD);
+                let (sky, fog, _, _) = frame.resolve_colors(eye_y);
+                let rim = crate::fog::apply_fog(sky, fog, 1.0);
+                let clear = frame.clear_color(eye_y);
+                // `apply_fog` is `a + (b - a) * t`, so `t == 1.0` is `b` only up
+                // to one rounding step — hence a tolerance rather than `==`.
+                for c in 0..3 {
+                    assert!(
+                        (clear[c] - rim[c]).abs() < 1e-6,
+                        "t={time} eye_y={eye_y} channel {c}: the clear colour must equal \
+                         the disc's rim, or the horizon bands — clear {clear:?} rim {rim:?}"
+                    );
+                }
+            }
+        }
+
+        // And the clear must actually *track* the clock — a clear taken from
+        // `day_fog_color` would be identical at noon and midnight, which is the
+        // specific mistake this guards.
+        let day = SkyFrame::new(6_000, [0.25, 0.46, 0.83]).with_fog_color([0.31, 0.53, 0.86]);
+        let night = SkyFrame::new(18_000, [0.25, 0.46, 0.83]).with_fog_color([0.31, 0.53, 0.86]);
+        assert!(
+            night.clear_color(64.0)[2] < day.clear_color(64.0)[2] * 0.25,
+            "the night clear must be far darker than the day clear: day {:?} night {:?}",
+            day.clear_color(64.0),
+            night.clear_color(64.0)
+        );
+        // But never black: `FOG_COLOR_TRACK` bottoms out at #161616, which is
+        // why the night horizon reads faintly blue-grey. A black clear here is
+        // the reported defect.
+        assert!(
+            night.clear_color(64.0)[2] > 0.0,
+            "the night clear must not be black: {:?}",
+            night.clear_color(64.0)
+        );
     }
 }

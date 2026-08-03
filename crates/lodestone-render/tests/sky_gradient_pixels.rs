@@ -137,7 +137,20 @@ fn render(ctx: &GpuContext, camera: &Camera, frame: &SkyFrame) -> Vec<u8> {
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("sky-gradient-gate"),
     });
-    sky.render(device, queue, &mut encoder, view.view(), camera, frame);
+    // Black, not `SkyFrame::clear_color`. Every gate in this file samples the
+    // *disc* by pixel coordinate, and clearing to the fog colour would make a
+    // pixel the disc failed to cover read as a perfectly plausible horizon
+    // sample — i.e. it would hide exactly the geometry gap that the shipped
+    // clear exists to make invisible to the player.
+    sky.render(
+        device,
+        queue,
+        &mut encoder,
+        view.view(),
+        camera,
+        frame,
+        wgpu::Color::BLACK,
+    );
     queue.submit(std::iter::once(encoder.finish()));
     target.read_texels(device, queue)
 }

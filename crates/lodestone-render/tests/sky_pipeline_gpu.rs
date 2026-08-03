@@ -164,6 +164,10 @@ fn sky_pass_paints_the_whole_frame() {
         frame.view(),
         &camera,
         &lodestone_render::SkyFrame::new(18_000, [0.24, 0.46, 0.83]),
+        // Deliberately black, *not* `SkyFrame::clear_color`: this gate's whole
+        // metric is "did anything paint here", and the shipped clear (the fog
+        // colour) satisfies it for free. See `SkyRenderer::render`'s doc.
+        wgpu::Color::BLACK,
     );
     ctx.queue().submit(std::iter::once(encoder.finish()));
 
@@ -785,6 +789,10 @@ fn real_jar_sun_is_not_solid_black() {
         frame.view(),
         &camera,
         &lodestone_render::SkyFrame::new(6_000, DAY_SKY),
+        // Black, not the shipped fog-coloured clear: this gate counts
+        // *near-black* pixels inside the sun's footprint, so a lit clear would
+        // hide the defect it exists to catch.
+        wgpu::Color::BLACK,
     );
     queue.submit(std::iter::once(encoder.finish()));
     let subject_pixels = target.read_texels(device, queue);
@@ -908,6 +916,10 @@ fn real_jar_clouds_are_not_black_fringed() {
         frame.view(),
         &camera,
         &lodestone_render::SkyFrame::new(6_000, DAY_SKY),
+        // Black, not the shipped fog-coloured clear: `fringe_fraction` classifies
+        // pixels against `background`/`full_color`, and a third colour under the
+        // quad would be scored as a fringe.
+        wgpu::Color::BLACK,
     );
     queue.submit(std::iter::once(encoder.finish()));
     let subject_pixels = target.read_texels(device, queue);
