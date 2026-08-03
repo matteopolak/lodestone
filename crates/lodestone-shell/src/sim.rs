@@ -3628,6 +3628,16 @@ impl Sim {
             // from a slab or fence fills the whole cell rather than hugging the
             // model.
             self.particles_mut(|p| p.destroy_block(hit.block, broken, [1.0; 3]));
+            // Vanilla's own break is *predicted*, not received: the client's
+            // `MultiPlayerGameMode.destroyBlock` runs `playerWillDestroy` →
+            // `spawnDestroyParticles` → `level.levelEvent(player, 2001, …)`, and
+            // `ClientLevel.levelEvent` ignores the exclusion and dispatches
+            // straight into `LevelEventHandler`'s `case 2001` locally
+            // (`ClientLevel.java:877-882`) — sound and debris together. This is
+            // the offline mirror of that; the live predicted break is still
+            // silent because its emit lives in `interact.rs`'s ECS system, which
+            // has no audio handle (see `docs/sound-playback.md`).
+            self.play_block_break_sound(hit.block, broken);
             self.remesh_around(hit.block);
             self.set_target(None);
             true
@@ -3998,6 +4008,20 @@ impl Sim {
             if let Some(state) = state_for_placement(name, states, *orientation, &prediction.state) {
                 let pos = prediction.pos;
                 self.predict_block([pos.x, pos.y, pos.z], state);
+                // Vanilla's placement sound is the tail of `BlockItem.place`
+                // (`BlockItem.java:87`), which passes the placing player as
+                // `playSound`'s **excluded** entity — so the server broadcasts it
+                // to everyone but us, and our own copy is predicted locally by
+                // `ClientLevel.playSound`, whose exclusion test is inverted
+                // (`if (except == this.minecraft.player)`, `ClientLevel.java:705`).
+                // It therefore hangs off the prediction, exactly as vanilla's
+                // does: no prediction, no sound, and no double-play either.
+                //
+                // Tied to the *predicted state* rather than to the item, because
+                // the sound is `placedState.getSoundType()` — a waterlogged or
+                // half-slab placement can be a different `SoundType` from the
+                // block's default state.
+                self.play_block_place_sound([pos.x, pos.y, pos.z], state);
             }
         }
     }
@@ -4626,6 +4650,18 @@ impl Sim {
                     self.particles_mut(|p| {
                         p.destroy_block([pos.x, pos.y, pos.z], state, [1.0, 1.0, 1.0]);
                     });
+                    // The *other* half of vanilla's `case 2001`, which this arm
+                    // used to drop: `playLocalSound(pos, getBreakSound(), …)`.
+                    // `Level.destroyBlock` fires the event with **no** excluded
+                    // entity (`Level.java:280-289`), so this is a genuinely
+                    // server-sent sound, not a prediction — every client in range
+                    // hears it, the breaker included. Note which breaks reach here:
+                    // `Level.destroyBlock`'s callers (a torch losing support, fire
+                    // spread, an explosion), *not* a player's own dig, which
+                    // `ServerPlayerGameMode.destroyBlock` routes through
+                    // `removeBlock` with no `levelEvent` at all — see the long note
+                    // in `interact.rs` on the same asymmetry for the particles.
+                    self.play_block_break_sound([pos.x, pos.y, pos.z], state);
                 }
                 NetUpdate::Particles {
                     kind,
@@ -4880,6 +4916,118 @@ impl Sim {
         if let Some(audio) = &self.audio {
             audio.set_listener(camera);
         }
+    }
+
+    /// Play a block's break sound at the centre of `block`, the half of vanilla's
+    /// `LevelEventHandler` `case 2001` this shell used to drop on the floor.
+    ///
+    /// `case 2001` does *two* things with the state id the event carries
+    /// (`LevelEventHandler.java:283-291`): `addDestroyBlockEffect` **and**
+    /// `playLocalSound(pos, soundType.getBreakSound(), SoundSource.BLOCKS, …)`.
+    /// Only the first was wired, so every block break in the game was visually
+    /// right and silent — from an event already decoded, routed and handled. See
+    /// `docs/sound-playback.md`.
+    fn play_block_break_sound(&mut self, block: [i32; 3], state: u32) {
+        self.play_block_surface_sound(block, state, lodestone_data::sound_types::break_sound_name);
+    }
+
+    /// Play a block's place sound at the centre of `block` — vanilla's
+    /// `BlockItem.place` tail (`BlockItem.java:87`), which passes the placing
+    /// player as the *excluded* entity, so on the acting client the sound is
+    /// **predicted** rather than received. (`ClientLevel.playSound` inverts the
+    /// exclusion: it plays only when `except == minecraft.player`.) Another
+    /// player's placement arrives as an ordinary `SOUND` packet and is already
+    /// audible through the [`NetUpdate::Sound`] arm.
+    fn play_block_place_sound(&mut self, block: [i32; 3], state: u32) {
+        self.play_block_surface_sound(block, state, lodestone_data::sound_types::place_sound_name);
+    }
+
+    /// The shared body of the two above: resolve the block state's `SoundType`,
+    /// pick one of its sounds, and play it at the block's centre with vanilla's
+    /// break/place scaling.
+    ///
+    /// Three things here are vanilla's, not ours, and all three come from the
+    /// same two call sites (`LevelEventHandler.java:288-289` and
+    /// `BlockItem.java:87`):
+    ///
+    /// * the position is the **block centre** — `Level.playLocalSound(BlockPos, …)`
+    ///   forwards `pos.getX() + 0.5` and so on (`Level.java:472-476`);
+    /// * the volume is `(soundType.getVolume() + 1.0) / 2.0` and the pitch is
+    ///   `soundType.getPitch() * 0.8`, both computed by
+    ///   [`lodestone_data::sound_types::BlockSoundType`] so neither multiplier is
+    ///   retyped per call site;
+    /// * the category is `SoundSource.BLOCKS`.
+    ///
+    /// The **air guard** is vanilla's too (`case 2001`'s `if (!blockState.isAir())`)
+    /// and is not redundant: air has a `SoundType` in the table — `STONE`, as it
+    /// happens — so without it an air-state level event would play a stone break.
+    fn play_block_surface_sound(
+        &mut self,
+        block: [i32; 3],
+        state: u32,
+        pick: fn(u32) -> Option<&'static str>,
+    ) {
+        if is_air_state(state) {
+            return;
+        }
+        let Some(sound) = lodestone_data::sound_types::sound_type(state) else {
+            return;
+        };
+        // `None` also covers `minecraft:intentionally_empty`, the sentinel vanilla
+        // parks in a slot it does not want to fill (water, lava and bubble columns
+        // are the three blocks with no break sound at all).
+        let Some(name) = pick(state) else {
+            return;
+        };
+        let seed = self.block_sound_seed(block);
+        let volume = sound.break_or_place_volume();
+        let pitch = sound.break_or_place_pitch();
+        let Some(audio) = &mut self.audio else {
+            return;
+        };
+        audio.play_sound(
+            name,
+            lodestone_model::event::SoundCategory::Block,
+            glam::Vec3::new(
+                block[0] as f32 + 0.5,
+                block[1] as f32 + 0.5,
+                block[2] as f32 + 0.5,
+            ),
+            volume,
+            pitch,
+            seed,
+        );
+    }
+
+    /// A variant-selection seed for a sound this client decided to play.
+    ///
+    /// Vanilla uses `this.random.nextLong()` for a level event
+    /// (`ClientLevel.java:723-733`), i.e. the variant is *client*-chosen and needs
+    /// no cross-client agreement — unlike a `SOUND` packet's seed, which must be
+    /// passed through unchanged (`lodestone-audio/src/select.rs`).
+    ///
+    /// So this is a `splitmix64` finalizer over the block position and the fixed
+    /// tick count. Two properties are deliberate:
+    ///
+    /// * **not `Instant::now`** — `select.rs` rules it out (it panics on wasm), and
+    ///   this crate's other RNG-free paths avoid `getrandom` for the same reason;
+    /// * **not the particle engine's `JavaRandom`** (`Particles`' own
+    ///   `engine.rng()`), even though it is already in scope at the break site.
+    ///   Drawing from it would shift every subsequent particle draw, and the
+    ///   destroy-burst golden tests (`mining_destroy_burst`,
+    ///   `break_particle_tint`) are written against that exact sequence.
+    ///
+    /// Mixing in `ticks` rather than position alone is what stops re-breaking one
+    /// cell from picking the same `.ogg` variant every time.
+    fn block_sound_seed(&self, block: [i32; 3]) -> i64 {
+        let mut x = (block[0] as i64 as u64)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            ^ (block[1] as i64 as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+            ^ (block[2] as i64 as u64).wrapping_mul(0x1656_67B1_9E37_79F9)
+            ^ self.clock().ticks;
+        x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        (x ^ (x >> 31)) as i64
     }
 
     fn refresh_stats(&mut self) {
