@@ -445,6 +445,40 @@ pub fn load_menu_gui_atlas() -> Option<Arc<GuiAtlas>> {
     }
 }
 
+/// Load the title screen's panorama cubemap —
+/// `textures/gui/title/background/panorama_{0..5}.png`, decoded and stacked into
+/// cubemap layer order by [`crate::menu::panorama::load`].
+///
+/// Same fail-open contract as every other loader here: `None` on a jar-less run,
+/// a missing face, or faces that disagree in size, which leaves the menu screens
+/// on their flat backdrop rather than failing startup. The six faces are *not*
+/// added to [`MENU_TEXTURES`] because they are not atlas sprites: a cubemap has
+/// to be six equal layers of one texture, and stitching them into a sheet is the
+/// one thing that would make them unusable.
+#[must_use]
+pub fn load_panorama() -> Option<Arc<crate::menu::panorama::PanoramaFaces>> {
+    let root = asset_root()?;
+    let manager = open_client_jar(&root)?;
+    match crate::menu::panorama::load(&manager) {
+        Ok(faces) => {
+            tracing::info!(
+                target: "assets",
+                face = faces.size,
+                "loaded the title-screen panorama cubemap"
+            );
+            Some(Arc::new(faces))
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "assets",
+                "load panorama cubemap from {}: {e}",
+                root.display()
+            );
+            None
+        }
+    }
+}
+
 /// Load vanilla's real container-panel art (issue #51):
 /// `container/{generic_54,crafting_table,inventory}.png`, stitched into one
 /// small atlas via [`crate::container::ContainerBackground`]. Version-free and

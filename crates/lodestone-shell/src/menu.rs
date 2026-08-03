@@ -41,6 +41,7 @@ pub mod focus;
 pub mod layout;
 pub mod nav;
 pub mod options;
+pub mod panorama;
 pub mod render;
 pub mod servers;
 pub mod status;
