@@ -73,8 +73,13 @@ itself.
 Re-read against the jar after the port landed. Each of these is a **real** difference,
 not a simplification that happens to agree; none is currently covered by a gate.
 
-**1. The occluder predicate is the wrong question (most visible).**
-`quad_corner_sample` decides "does this neighbour darken the corner?" with
+**1. ~~The occluder predicate is the wrong question (most visible).~~ Fixed** —
+see [The occluder predicate](#the-occluder-predicate) below for what shipped, the
+census it reads, and three things this section used to get wrong (ice, honey and
+copper grates). The description of the *bug* is kept verbatim because it is the
+clearest statement of why the two predicates are not interchangeable.
+
+`quad_corner_sample` decided "does this neighbour darken the corner?" with
 `ModelSectionView::occludes_at`, i.e. `BlockModels::occludes` — a *rendering*
 predicate (all six faces fully cover, opaque, non-cutout). Vanilla never asks that.
 It calls `cache.getShadeBrightness(state, level, pos)`, which is
@@ -108,13 +113,80 @@ collision cube that does not occlude for culling". The player-visible symptom is
 **the underside of a tree canopy does not darken**, where in vanilla it is markedly
 dimmer than open sky.
 
-This one is **actionable today**, unlike the light-emission gap below:
-`lodestone_data::collision_shapes` is pure rodata, O(1) by state id. `lodestone-render`
-does not currently depend on `lodestone-data`, so the clean seam is a new
-`ModelSectionView` method (`ao_occludes_at`, defaulting to `occludes_at` so no existing
-view changes behaviour) overridden in `crates/lodestone-shell/src/mesher.rs` beside the
-`occludes_at` override already there. The seven overrides then need a small
-by-state-id exception table, not just the collision test.
+That seam is what shipped, one layer better sourced: `ao_occludes_at` defaults to
+`occludes_at`, is overridden in `crates/lodestone-shell/src/mesher.rs`, and reads
+`lodestone_data::shade_brightness` — vanilla's **own answer**, dumped per state —
+rather than `collision_shapes` plus a by-hand exception table.
+
+### The occluder predicate
+
+`quad_corner_sample` now uses **two** predicates, and mixing them up is the whole
+bug:
+
+| term | trait method | vanilla | why |
+| --- | --- | --- | --- |
+| **AO shade** | `ModelSectionView::ao_occludes_at` | `getShadeBrightness == 0.2F` | `BlockModelLighter.java:45-110` averages `cache.getShadeBrightness` per corner |
+| **smooth light** | `ModelSectionView::occludes_at` | `translucentN` / `smoothBlend` | `BlockModelLighter.java:59-66` keys the light substitution on `!isViewBlocking \|\| getLightDampening() == 0`, which is a *rendering* question, not a collision one |
+
+So only the AO half moved. `occludes_at` and `corner_light_at` were not touched —
+swapping the light half too would have a leaf cell hand its own darkness to its
+neighbours' *light*, which vanilla does not do. `models.rs`'s
+`ao_reads_the_shade_predicate_and_light_reads_the_culling_one` drives the two
+predicates to **opposite** answers in one call and pins both outputs (`ao 0.8`
+with `light 0xB0`, then `ao 1.0` with `light 0xF0`), so neither can be mistaken
+for the other.
+
+`ao_occludes_at`'s default **is** `occludes_at`. That is deliberate — a view with
+no block census (the GUI item path, unit-test doubles) keeps its old behaviour —
+and it is also the island hazard: the mechanism is inert until
+`SnapshotModelView` overrides it, exactly like `ambient_occlusion_at` before
+`2b96bbb`.
+
+#### Where the census comes from
+
+`lodestone_data::shade_brightness` — one 4,046-byte bitset, O(1) by global
+block-state id, generated into `src/generated/shade_brightness.rs` from
+`crates/lodestone-data/oracle-java/ShadeBrightnessOracle.java`: a headless 26.2
+server walking `Block.BLOCK_STATE_REGISTRY` and calling
+`state.getShadeBrightness(EmptyBlockGetter.INSTANCE, BlockPos.ZERO)`. Dump
+committed at `crates/lodestone-data/tests/support/shade_brightness_jvm.txt`
+(byte-reproducible across two runs, md5 `a03cd79dfd71f4753960c129eba88f49`).
+
+**It dumps vanilla's answer, not the recipe for it**, which is the point: the
+seven overrides are on *classes*, and `TransparentBlock` alone is **26 registered
+blocks** (glass, all 16 stained glasses, tinted glass, and the eight copper
+grates via `WaterloggedTransparentBlock`). Any hand-written block list has to
+expand that family by hand — the mistake that shipped two off-by-one entity
+metadata indices.
+
+Measured facts the dump establishes, each asserted in
+`crates/lodestone-data/tests/shade_brightness.rs`:
+
+- `getShadeBrightness` returns **exactly two** distinct values across all 32,366
+  states — 1.0 for 29,112 and 0.2 for 3,254. That is what makes the one-bit
+  encoding lossless rather than merely convenient, and a third value would fail
+  loudly instead of being silently rounded.
+- The overrides move **39 states across 30 blocks** relative to
+  `isCollisionShapeFullBlock` alone, and they move them in **both** directions:
+  3 states become occluding (`mud`, `soul_sand`, `snow[layers=8]`) and 36 stop
+  (the glass family, `barrier`, the copper grates). So no monotone "also treat X
+  as solid" shortcut over `collision_shapes` works.
+- `snow` is the one per-**state** override, which is why the census is keyed by
+  state id and not by block.
+
+#### Three things the old version of this doc had wrong
+
+Each was true-looking and evidenced by a `grep`; the JVM dump disagreed.
+
+| claim | reality |
+| --- | --- |
+| "glass and ice agree with `occludes` by coincidence" | glass does; **ice does not**. `IceBlock extends HalfTransparentBlock`, and only `TransparentBlock` overrides `getShadeBrightness`. Ice, packed ice and blue ice all darken at `0.2`, so they were part of the bug, not part of the agreement. |
+| "slime, **honey**, spawner, grates diverge" | slime and spawner do (and `beacon`, `trial_spawner`, `vault`, `mangrove_roots`, every leaf). **honey_block does not** — its collision box is inset, so the base formula already answers `1.0`. **Copper grates do not** either — they are `WaterloggedTransparentBlock`, so vanilla exempts them. |
+| "`TransparentBlock`, `Barrier`, `Light`, `Mud`, `SnowLayer`, `SoulSand`, `StructureVoid` all override to a flat `1.0`" | four of them do. `MudBlock` and `SoulSandBlock` override to a flat **`0.2`** (both sink an entity, so neither collision box is a full cube — the override exists to keep them dark), and `SnowLayerBlock` is `LAYERS == 8 ? 0.2 : 1.0`. |
+
+The pattern is the same each time: the class list came from `grep -l`, which
+tells you *which files* override the method and nothing about what they return or
+how wide each family is.
 
 **2. The AO neighbourhood is centred on the wrong cell for partial quads.**
 `prepareQuadAmbientOcclusion` (`BlockModelLighter.java:39`):
@@ -317,6 +389,21 @@ each tinted source's *plains* colour — which changes hue, not brightness.
   `mesh_models`. `ambient_occlusion_at_false_flattens_ao_through_mesh_models`
   (`models.rs`) exercises it end to end, with an executed control proving the
   same occluder darkens the mesh when the flag is left at its default.
+- **The predicate has three layers of gate, and they cover different failures:**
+
+  | gate | proves | control that must fail |
+  | --- | --- | --- |
+  | `models.rs`'s `ao_reads_the_shade_predicate_and_light_reads_the_culling_one` (hermetic, in the default suite) | `quad_corner_sample` routes each term to the right method | the mirror view, `occludes_at` true / `ao_occludes_at` false |
+  | `lodestone-render/tests/model_ao_corner_gate.rs`'s `ao_occluder_predicate_is_shade_brightness_not_face_culling` (GPU) | the **pixel** consequence, against a predicted byte of `round(255 x 0.8) = 204` | `barrier` (vanilla-exempt but a full collision cube) and a culling-only occluder, both of which must stay ≥ 250 |
+  | `lodestone-shell/tests/canopy_ao.rs` (real `client.jar` geometry) | the **production** path — `mesh_snapshot_models` over a real `SectionSnapshot`, i.e. that the shell override is not an island | a solid glass section, whose distinct vertex `ao` set must be exactly the four `face_shade` constants |
+
+  `canopy_ao.rs` measures a solid oak-leaves section's darkest vertex against
+  `face_shade(Down) x (1 - 0.2 x 3) = 0.20`, with the bug's value (`0.50`) computed
+  alongside it — both from constants outside this codebase, and far enough apart
+  that no predicate satisfies both. It deliberately does **not** locate a single
+  quad by centroid: a block's `Down` quad and the block-below's `Up` quad are
+  geometrically identical, so telling them apart would mean asserting a winding
+  polarity, which `CLAUDE.md` forbids.
 - **To close the light-emission gap**: add a per-block-state light-emission
   source. The natural approach, matching how `collision_shapes`/`hardness` are
   sourced (`crates/protocol/v770/tests/{collision_shapes,hardness}.rs` +
@@ -325,13 +412,16 @@ each tinted source's *plains* colour — which changes hue, not brightness.
   `BlockStateRegistry` (or a sibling lookup) so `block_models.rs`'s baking loop
   can fold `light_emission == 0` into `StateModel::ambient_occlusion` alongside
   the model flag already there.
-- **To close the leaves/slime/spawner gap** (divergence 1 above, the most visible
-  one left): add an `ao_occludes_at` to `ModelSectionView` defaulting to
-  `occludes_at`, have `quad_corner_sample` call it instead, and override it in
-  `crates/lodestone-shell/src/mesher.rs` from `lodestone_data::collision_shapes`
-  plus a table for vanilla's seven `getShadeBrightness` overrides. Gate it on a
-  leaves-over-stone scene: the shaded corner should land on `0.8` (one occluder)
-  where it currently reads `1.0`.
+- **The leaves/slime/spawner gap is closed** (divergence 1). To change the
+  predicate, the only two places are `quad_corner_sample`'s `shade_occ` closure
+  and `SnapshotModelView::ao_occludes_at`. To refresh the census after a version
+  bump, follow the module docs on
+  `crates/lodestone-data/tests/shade_brightness.rs` — re-dump with the Docker
+  command there, then `LODESTONE_REGEN=1 cargo test -p lodestone-data --test
+  shade_brightness committed_table_matches_dump -- --ignored`.
+  **Do not replace the census with a `collision_shapes` derivation.** It is wrong
+  on 39 states in both directions, and `canopy_ao.rs`'s glass control plus
+  `model_ao_corner_gate`'s barrier scene both exist to fail if someone tries.
 - The flag is already wired into live rendering — `2b96bbb` added the
   `ambient_occlusion_at` override to the shell (see the data-path section above).
   This bullet used to say it still needed doing.
@@ -349,6 +439,11 @@ in `models.rs` are vanilla-derived constants, not meant to be tuned.
   flag, resolved down the parent chain (nearest-defined wins, default `true`).
 - `crates/lodestone-render/src/block_models.rs` — per-state baking and the
   `BlockModels::ambient_occlusion` accessor.
+- `lodestone_data::shade_brightness` — the AO occluder census. A dependency of
+  `lodestone-shell` (which supplies the `ao_occludes_at` override) and a
+  **dev**-dependency of `lodestone-render` (so `model_ao_corner_gate`'s scenes use
+  real state ids). `lodestone-render` itself still needs no block census, which is
+  the whole reason `ao_occludes_at` has a default.
 - The real 26.2 client jar decompile
   (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/block/`) for the
   vanilla behaviour this ports.

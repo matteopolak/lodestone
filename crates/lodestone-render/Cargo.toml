@@ -67,3 +67,10 @@ pollster.workspace = true
 png.workspace = true
 lodestone-model.workspace = true
 lodestone-testsupport.workspace = true
+# Test-only, and deliberately not a real dependency: `ModelSectionView`'s
+# `ao_occludes_at` defaults to `occludes_at` precisely so this crate needs no
+# block census, with the override supplied by `lodestone-shell` (the seam
+# `docs/model-smooth-lighting.md` argues for). `model_ao_corner_gate` reads the
+# census so its leaves/barrier scenes use real vanilla state ids rather than
+# hand-typed ones — version-free crate, so `check-isolation` stays clean.
+lodestone-data.workspace = true

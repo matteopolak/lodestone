@@ -70,6 +70,8 @@ pub(crate) mod generated_outline_shapes;
 pub(crate) mod generated_particle_types;
 #[path = "generated/path_types.rs"]
 pub(crate) mod generated_path_types;
+#[path = "generated/shade_brightness.rs"]
+pub(crate) mod generated_shade_brightness;
 #[path = "generated/sound_events.rs"]
 pub(crate) mod generated_sound_events;
 #[path = "generated/tools.rs"]
@@ -92,5 +94,6 @@ pub mod mob_effects;
 pub mod outline_shapes;
 pub mod particle_types;
 pub mod path_types;
+pub mod shade_brightness;
 pub mod sound_events;
 pub mod tool;

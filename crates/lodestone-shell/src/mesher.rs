@@ -831,6 +831,33 @@ impl ModelSectionView for SnapshotModelView<'_> {
         self.models.occludes(id)
     }
 
+    /// Vanilla's ambient-occlusion occluder test, `getShadeBrightness == 0.2F`
+    /// — a **collision** predicate, not the `occludes_at` culling one above.
+    ///
+    /// The trait default forwards to `occludes_at`, which is why this override
+    /// is the whole fix: without it, leaves (a full collision cube whose cutout
+    /// sprite means it does not occlude for culling) contributed `1.0` to every
+    /// AO corner and the underside of a tree canopy stayed full-bright. Same
+    /// island shape as `ambient_occlusion_at` above — the default preserved
+    /// behaviour, so the mechanism was inert in the running game until the
+    /// override existed.
+    ///
+    /// `SectionSnapshot` stores **vanilla global block-state ids** (see
+    /// `quads_at`), which is exactly `lodestone_data::shade_brightness`'s key
+    /// space, so this is an O(1) bitset read with no allocation. An id past the
+    /// snapshotted 3×3×3 neighbourhood, or past the table, reads as open — the
+    /// same conservative answer `occludes_at` gives.
+    fn ao_occludes_at(&self, x: i32, y: i32, z: i32) -> bool {
+        let (dx, lx) = split16(x);
+        let (dy, ly) = split16(y);
+        let (dz, lz) = split16(z);
+        if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dy) || !(-1..=1).contains(&dz) {
+            return false;
+        }
+        let id = self.snapshot.at(dx, dy, dz).get_block(lx, ly, lz);
+        lodestone_data::shade_brightness::occludes_ambient_light(id) == Some(true)
+    }
+
     fn light_at(&self, x: usize, y: usize, z: usize) -> u8 {
         // No facing (cross plants, and any view that ignores `face_light_at`):
         // the brightest cell in the immediate neighbourhood, self included.
