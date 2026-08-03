@@ -58,7 +58,8 @@ architectural dead end — see `docs/roadmap/server-entities.md`.
     directly.
   - **JVM-walked tables** (`block_entity_types`, `hardness`, `collision_shapes`, `block_solidity`,
     `entity_census`, `entity_dimensions`, `item_prototypes`, `outline_shapes`,
-    `path_types`, `tools`) need an `oracle-java/*Oracle.java` program that boots
+    `path_types`, `shade_brightness`, `sound_types`, `tools`) need an
+    `oracle-java/*Oracle.java` program that boots
     the real 26.2 server headlessly (`SharedConstants.tryDetectVersion();
     Bootstrap.bootStrap();`) and walks a registry or `Block.BLOCK_STATE_REGISTRY`
     directly, because the fact in question (collision geometry, hardness,

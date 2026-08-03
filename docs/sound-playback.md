@@ -92,61 +92,100 @@ would select one of them and resolve nothing.
 
 ## What is audible, and what is not
 
-Every sound lodestone plays is one the **server sent** as `SOUND` or
-`SOUND_ENTITY`. There is no client-side sound prediction anywhere in the tree —
-`play_sound`/`play_entity_sound` have exactly two call sites, both the `NetUpdate`
-arms above. Which sounds that costs is not guesswork; it follows from whether
-vanilla's server passes an *excluded player* to `Level.playSound`, checked in
-26.2's own source:
+Most sounds lodestone plays are ones the **server sent** as `SOUND` or
+`SOUND_ENTITY`. Since the `SoundType` census landed
+([block sound types](./block-sound-types.md)) there are also three
+*client-predicted* producers, all in `sim.rs`. Which sounds we get is not
+guesswork; it follows from whether vanilla's server passes an *excluded player* to
+`Level.playSound`, checked in 26.2's own source:
 
 | sound | vanilla mechanism | lodestone |
 |---|---|---|
 | mob idle / hurt / death | `Entity.playSound` → `playSound(null, …)`, broadcast to all | **plays** |
 | chest lid open / close | `ChestBlockEntity.playSound` → `playSound(null, …)` server-side | **plays** |
 | item and XP pickup, explosions, ambient loops, weather | server-broadcast | **plays** |
-| *another* player's footsteps and placements | excluded player is *them*, so we get it | **plays** |
+| *another* player's placements | excluded player is *them*, so we get it | **plays** |
+| **cascading** block break (torch losing support, fire, explosion) | `Level.destroyBlock` → `levelEvent(2001, …)`, no exclusion (`Level.java:280-289`) | **plays** (new) |
+| **your own** block placement | `BlockItem.place` → `playSound(player, …)` (`BlockItem.java:87`) — predicted | **plays** (new) |
+| block break in the **offline demo world** | the same `case 2001` dispatched locally | **plays** (new) |
+| **your own** mined break | predicted; the emit lives in an ECS system with no audio handle — see below | silent |
 | **your own** footsteps | `Player.playSound` overrides to pass `this` (`Player.java:399`) — server broadcasts to everyone but you | silent |
-| **your own** block placement | `BlockItem.place` → `playSound(player, …)` (`BlockItem.java:87`) | silent |
+| *another* player's footsteps and mined breaks | never on the wire at all — see below | silent |
 | UI clicks | `SimpleSoundInstance.forUI`, never on the wire | silent |
-| **any** block break | *arrives, and is dropped* — see below | silent |
 
 Note that the first four rows are not a theoretical list: `lodestone-sound`'s
 `live_sound_gate` already proves a server-decided sound crosses the public
 `ClientHandle` stream, decodes a real ogg, and mixes to a peak above 0.3.
 
-### The one that arrives and is thrown away
+### The one that arrived and was thrown away — and the correction
 
 `Level.destroyBlock` fires `levelEvent(2001, pos, stateId)` with **no** excluded
-entity (`Level.java:288`), so the packet reaches the breaking player too — this is
-not a predicted sound. Vanilla's `LevelEventHandler` `case 2001` does *two* things
-with it (`LevelEventHandler.java:283-291`): `playLocalSound(soundType.getBreakSound())`
-**and** `addDestroyBlockEffect`. Lodestone's `NetUpdate::BlockDestroyed` arm
-(`sim.rs:4552`) does only the second. So every block break in the game — yours and
-everyone else's — is visually right and silent, from an event that is already
-decoded, already routed, and already handled.
+entity (`Level.java:280-289`), so the packet reaches every client in range. Vanilla's
+`LevelEventHandler` `case 2001` does *two* things with it
+(`LevelEventHandler.java:283-291`): `playLocalSound(soundType.getBreakSound())`
+**and** `addDestroyBlockEffect`. Lodestone's `NetUpdate::BlockDestroyed` arm did only
+the second. Both halves are wired now: the arm calls
+`Sim::play_block_break_sound`, which reads
+`lodestone_data::sound_types::break_sound_name(state)` and plays at the block centre
+with vanilla's `(volume + 1) / 2` and `pitch * 0.8`.
 
-Fixing it needs one thing the tree does not have: a **per-block-state `SoundType`
-table**. `grep` finds no break/step/place sound data anywhere; the only hit is
-`minecraft:break_sound` as a data-component *name*. Per the data-sources rule that
-table comes from booting the real server and walking `Block.BLOCK_STATE_REGISTRY`
-for `state.getSoundType()`, next to `collision_shapes` and `hardness` — not from a
-community dataset. With it, the same table also unlocks predicted footsteps and
-placement sounds, which is the other three silent rows. `lodestone-audio` already
-documents a `play_sound(SoundInstance)` entry point for prediction and `select.rs`
-already takes an injected seed for it, so the engine side is ready and only the
-producer and the data are missing.
+**But this page used to claim that fixed "every block break in the game — yours and
+everyone else's", and that was wrong.** A player's own dig never produces a `2001`
+packet at all: `ServerPlayerGameMode.destroyBlock`
+(`ServerPlayerGameMode.java:262-298`) calls `this.level.removeBlock(pos, false)` and
+contains **no** `levelEvent` or `playSound` anywhere in the method. `interact.rs`
+had already documented that asymmetry for the *particles* — the sound row was
+written without cross-referencing it. So `2001` covers cascading breaks and nothing
+else, and **another player's mined break is silent in vanilla too**.
+
+Vanilla makes your own break audible by *predicting* it: the client's
+`MultiPlayerGameMode.destroyBlock` runs `playerWillDestroy` →
+`Block.spawnDestroyParticles` → `level.levelEvent(player, 2001, pos, id)`, and
+`ClientLevel.levelEvent` **ignores the exclusion** and dispatches straight into the
+same `case 2001` locally (`ClientLevel.java:877-882`) — sound and debris together.
+
+### What is still missing, and the exact seam
+
+The live predicted break. Its debris sibling is emitted in
+`interact.rs`'s `drive_mining` at `mining.0.take_destroyed()`, which is a Bevy system
+running *inside* the one `World` — and `ShellAudio` is a private field on `Sim`, not an
+ECS resource, so the system cannot reach it. (Making it a resource is not a
+one-liner: `AudioEngine` owns a live `cpal` stream, and `interact.rs` already records
+a deadlock from a system taking a read guard on the `World` it runs in.)
+
+The seam that closes it: a small `PredictedBlockSounds(Vec<([i32; 3], u32)>)` ECS
+resource that `drive_mining` pushes to next to the `destroy_block` call, drained by
+`Sim` immediately after it runs the `GameTick` schedule and fed to
+`Sim::play_block_break_sound`. That is a *new producer path*, deliberately not
+half-built here.
+
+Footsteps are the other missing producer and a bigger one — per-tick, per-surface,
+distance-gated, and keyed off the block *below* the player. The data is now free
+(`sound_types::step_sound_name(id)`), so what remains is the step-distance
+accumulator and the surface pick, not a census.
 
 ## How to change it
 
 * **Adding a server sound source**: nothing to do. Any `SOUND`/`SOUND_ENTITY`
   packet already reaches the mixer.
-* **Adding the block-break sound**: generate the `SoundType` table first (above),
-  then extend `sim.rs`'s `NetUpdate::BlockDestroyed` arm with the `play_sound` half
-  of vanilla's `case 2001`. This is the cheapest audible win left.
-* **Adding a predicted sound**: the producer is the missing half. Call
-  `ShellAudio::play_sound` from wherever the prediction happens (mining, placement,
-  step), with a locally-chosen seed — *not* `Instant::now`, per
-  `lodestone-audio/src/select.rs`.
+* **Adding a block surface sound**: the data is
+  [`lodestone_data::sound_types`](./block-sound-types.md) and the three shell
+  entry points are `sim.rs`'s `play_block_break_sound`,
+  `play_block_place_sound` and the shared `play_block_surface_sound`. Do not
+  retype `(volume + 1) / 2` or `pitch * 0.8` — they are
+  `BlockSoundType::break_or_place_volume`/`_pitch`, because vanilla uses the
+  identical expression at both its call sites.
+* **Adding a predicted sound**: the producer is the missing half, and the seed is
+  the trap. Call `ShellAudio::play_sound` from wherever the prediction happens
+  with a locally-chosen seed — *not* `Instant::now`, per
+  `lodestone-audio/src/select.rs` (it panics on wasm). `Sim::block_sound_seed` is
+  the existing answer: a `splitmix64` over the block position and
+  `FrameClock::ticks`. It deliberately does **not** draw from the particle
+  engine's `JavaRandom`, even though that is already in scope at the break site,
+  because shifting that sequence would break the `mining_destroy_burst` and
+  `break_particle_tint` golden gates.
+* **Reaching audio from an ECS system**: you cannot, today. See "What is still
+  missing" above for the seam.
 * **Changing the corpus policy**: `xtask::plan_sound_corpus`. Keep it derived from
   `sounds.json`; a file list rots at the next version bump.
 * **Gotcha — the index key has no `assets/` prefix.** `AssetObjectStore`'s

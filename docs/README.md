@@ -418,11 +418,22 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   sample a non-music event can select (`--all` adds 92 music and record tracks,
   +293 MB), and the excluded-only-if-*every*-referencing-event-is-music rule is what
   keeps `records/cat` — shared with `jukebox.play` — from being dropped. Ends with
-  what is still silent and why: there is **no client-side prediction at all**, so
-  your own footsteps and placements never reach the wire — and, separately, the
-  block-break sound *does* arrive as `LEVEL_EVENT` 2001 and is discarded, because
-  vanilla's `case 2001` plays a sound and lodestone's arm only spawns particles.
-  That one needs a per-block-state `SoundType` table, which does not exist yet.
+  what is still silent and why. Now also carries the **correction** that the
+  `LEVEL_EVENT` 2001 fix does *not* make every break audible: a player's own dig
+  never emits `2001` at all (`ServerPlayerGameMode.destroyBlock` calls `removeBlock`
+  with no `levelEvent` in the method), so vanilla predicts its own break locally
+  through `ClientLevel.levelEvent`, and the live predicted break is the one producer
+  still missing — its emit sits in an ECS system with no audio handle.
+- [Block sound types](./block-sound-types.md) — the per-block-state `SoundType`
+  census (break / step / place / hit / fall + volume + pitch) that block sounds were
+  waiting on, dumped from the real 26.2 server by `SoundTypeOracle.java`. Measured
+  **126** distinct sound types across 32,366 states, so a 126-entry table plus a
+  per-state `u8` index is 34,634 bytes against 647,320 for a per-state record. Also
+  the three ways a hand-transcription of `SoundType.java` would have been wrong:
+  `TWISTING_VINES` is declared with pitch `0.5` and assigned to **no block**,
+  `IRON` and `METAL` are not the pairing the names suggest (iron blocks are `IRON`;
+  `METAL`'s 1.5 pitch is gold, rails and hoppers), and `HARD_CROP`/`GLOW_LICHEN`
+  mix sounds from two families.
 - [Keybindings](./keybindings.md) — the rebindable action → input table behind every
   gameplay key, why a `Binding` must hold a mouse button (vanilla's attack and use
   are mouse-bound by default), the `resolve_key` precedence chain that lets chat and

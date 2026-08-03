@@ -74,6 +74,8 @@ pub(crate) mod generated_path_types;
 pub(crate) mod generated_shade_brightness;
 #[path = "generated/sound_events.rs"]
 pub(crate) mod generated_sound_events;
+#[path = "generated/sound_types.rs"]
+pub(crate) mod generated_sound_types;
 #[path = "generated/tools.rs"]
 pub(crate) mod generated_tools;
 
@@ -96,4 +98,5 @@ pub mod particle_types;
 pub mod path_types;
 pub mod shade_brightness;
 pub mod sound_events;
+pub mod sound_types;
 pub mod tool;
