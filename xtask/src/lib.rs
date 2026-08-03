@@ -2692,6 +2692,15 @@ impl ConnectednessReport {
                 family.play_serverbound_total,
                 family.examined_clientbound_arms
             );
+            if !family.play_clientbound_internal.is_empty() {
+                let _ = write!(
+                    out,
+                    "\n  protocol-internal (decoded, no event by design — not islands):"
+                );
+                for (packet, reason) in &family.play_clientbound_internal {
+                    let _ = write!(out, "\n    - {packet}: {reason}");
+                }
+            }
             if !family.unclassified.is_empty() {
                 let _ = write!(out, "\n  UNCLASSIFIED:");
                 for arm in &family.unclassified {
@@ -2717,6 +2726,38 @@ impl ConnectednessReport {
     }
 }
 
+/// Clientbound packets that are **decoded and deliberately emit no `ClientEvent`**,
+/// with the reason each one is legitimate.
+///
+/// The "decoded-but-stranded" verdict means an arm parses a packet and produces no
+/// event, which is normally an island — the defect this whole tool exists to find.
+/// But a handful of packets are *protocol-internal*: the client consumes them to
+/// drive its own side of a handshake, and there is nothing for a renderer or a fold
+/// to observe. Reporting those as stranded is a false positive, and a false positive
+/// in an island detector is expensive here — Tier 1 item 9 has carried
+/// `CHUNK_BATCH_START` as an open defect, and it was never one.
+///
+/// This is an allowlist with a **reason per entry**, printed in the report rather
+/// than silently subtracted, so the exemption cannot itself become a hiding place.
+/// Adding an entry needs the same standard as any other claim: say what consumes the
+/// packet and why no event is right.
+const PROTOCOL_INTERNAL_CLIENTBOUND: &[(&str, &str)] = &[(
+    "CHUNK_BATCH_START",
+    "empty marker; starts the batch rate timer (`begin_chunk_batch`). The client's \
+     reply is emitted from CHUNK_BATCH_FINISHED as CHUNK_BATCH_RECEIVED carrying the \
+     measured rate, and the server halts chunk delivery after ten unacknowledged \
+     batches — so the handshake is load-bearing and complete, with nothing observable \
+     at the START edge",
+)];
+
+/// The reason `packet` is exempt from the stranded verdict, if it is.
+fn protocol_internal_reason(packet: &str) -> Option<&'static str> {
+    PROTOCOL_INTERNAL_CLIENTBOUND
+        .iter()
+        .find(|(name, _)| *name == packet)
+        .map(|(_, reason)| *reason)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectednessFamily {
     pub family: String,
@@ -2725,6 +2766,10 @@ pub struct ConnectednessFamily {
     pub play_clientbound_emits: usize,
     pub play_clientbound_reaches_consumer: usize,
     pub play_clientbound_stranded_names: Vec<String>,
+    /// Decoded, emitting no event, and **justified** — see
+    /// [`PROTOCOL_INTERNAL_CLIENTBOUND`]. Held separately from
+    /// `play_clientbound_stranded_names` so the exemption is visible in the report.
+    pub play_clientbound_internal: Vec<(String, String)>,
     pub play_serverbound_total: usize,
     pub play_serverbound_encoded: usize,
     pub examined_clientbound_arms: usize,
@@ -2825,6 +2870,7 @@ pub fn connectedness_report(workspace_root: &Path) -> Result<ConnectednessReport
             .to_string();
 
         let mut stranded = Vec::new();
+        let mut internal = Vec::new();
         let mut unclassified = Vec::new();
         let mut depth_limited = Vec::new();
         let mut decoded = 0;
@@ -2837,7 +2883,14 @@ pub fn connectedness_report(workspace_root: &Path) -> Result<ConnectednessReport
                 }
                 ClientboundVerdict::DecodedButStranded => {
                     decoded += 1;
-                    stranded.push(arm.packet.clone());
+                    // Protocol-internal packets are decoded on purpose and have no
+                    // event to emit; anything else with this verdict is an island.
+                    match protocol_internal_reason(&arm.packet) {
+                        Some(reason) => {
+                            internal.push((arm.packet.clone(), reason.to_owned()));
+                        }
+                        None => stranded.push(arm.packet.clone()),
+                    }
                 }
                 ClientboundVerdict::Unclassified {
                     reason,
@@ -2858,6 +2911,7 @@ pub fn connectedness_report(workspace_root: &Path) -> Result<ConnectednessReport
             }
         }
         stranded.sort();
+        internal.sort();
         unclassified.sort_by(|a, b| a.packet.cmp(&b.packet));
         depth_limited.sort_by(|a, b| a.packet.cmp(&b.packet));
 
@@ -2868,6 +2922,7 @@ pub fn connectedness_report(workspace_root: &Path) -> Result<ConnectednessReport
             play_clientbound_emits: emits,
             play_clientbound_reaches_consumer: emits,
             play_clientbound_stranded_names: stranded,
+            play_clientbound_internal: internal,
             play_serverbound_total: play_ids.serverbound.len(),
             play_serverbound_encoded: serverbound_encoded.len(),
             examined_clientbound_arms: arms.len(),

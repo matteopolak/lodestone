@@ -174,10 +174,26 @@ recurring defect classes, not because they are generically useful — see
 8. **Riding.** `EntityPassengersChanged` decodes and reaches nothing. Needs passenger
    attachment offsets, camera on the vehicle, vehicle-specific input (boat paddles and
    horse jump charge are client-driven), the horse jump bar, dismount.
-9. **The remaining ~33 clientbound packets.** Measured `108/141` decoded, `107/141`
-   emitted, `53/69` serverbound encoded, 1 decoded-but-stranded (`CHUNK_BATCH_START`).
-   **Use `cargo xtask connectedness`, never a hand count** — the hand-derived figure has
-   been wrong four times in four different ways.
+9. **The remaining ~32 clientbound packets.** **Use `cargo xtask connectedness`, never a
+   hand count** — the hand-derived figure has been wrong four times in four different
+   ways, and do not trust the numbers written here either: run it.
+
+   **`CHUNK_BATCH_START` was never a defect, and this entry carried it as one.** It was
+   listed as "1 decoded-but-stranded". It is decoded on purpose and correctly emits no
+   `ClientEvent`: it is an empty marker that starts the batch rate timer
+   (`begin_chunk_batch`), and the client's reply goes out from `CHUNK_BATCH_FINISHED` as
+   `CHUNK_BATCH_RECEIVED` carrying the measured rate. That handshake is load-bearing —
+   `PlayerChunkSender.MAX_UNACKNOWLEDGED_BATCHES` is 10 and `sendNextChunks` stops
+   entirely above it, so a client that never acknowledged would lose chunk delivery
+   after ten batches — and it is complete. There is simply nothing observable at the
+   *start* edge.
+
+   The tool now reports it under **protocol-internal**, with that reason printed, and
+   `decoded-but-stranded` reads `0`. The exemption is an allowlist carrying a reason per
+   entry rather than a silent subtraction, because a false positive in an island
+   detector costs real work and a hidden exemption is where a real island would go to
+   die. Adding an entry needs the same standard as any other claim here: say what
+   consumes the packet and why no event is correct.
 
 ## Tier 1½ — smaller, player-requested
 
