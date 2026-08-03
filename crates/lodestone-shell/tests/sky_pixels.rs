@@ -253,13 +253,15 @@ fn the_sky_pass_reaches_the_screen_through_render_state_render() {
 /// Fraction of pixels that are near-black (`NIGHT` in `sky_color_for_time_of_day`
 /// is `[0.006, 0.008, 0.02]`, i.e. bytes `~[2, 2, 5]`) — the discriminator for
 /// the noon-vs-midnight control below. Deliberately **not** "differs from
-/// `SKY_COLOR`": the cloud plane's own tint (`sky_color4 * 0.9`, see
-/// `SkyRenderer::render`'s comment on why clouds read a touch darker) makes
-/// even a noon frame differ slightly from an exact `SKY_COLOR` clear wherever
-/// clouds cover the frustum, which would make that comparison fail on a
-/// correctly-wired sky, not just a broken one. Near-black has no such
-/// ambiguity: neither the day disc nor the tinted-day clouds are ever close to
-/// it, only the night blend is.
+/// `SKY_COLOR`": the cloud plane's own colour (vanilla's `CLOUD_COLOR`
+/// attribute — pure white at alpha 0.8, composited over the disc) makes even a
+/// noon frame differ from an exact `SKY_COLOR` clear wherever clouds cover the
+/// frustum, which would make that comparison fail on a correctly-wired sky, not
+/// just a broken one. Near-black has no such ambiguity: neither the day disc nor
+/// the day clouds are anywhere near it, only the night blend is. Night clouds
+/// carry their own `#191926` track, whose linear value is `~0.010`–`0.019`, i.e.
+/// bytes `[3, 3, 5]` on this test's non-sRGB target — still comfortably inside
+/// the `< 20` threshold.
 fn near_black_fraction(pixels: &[u8]) -> f64 {
     let mut near_black = 0usize;
     let mut total = 0usize;

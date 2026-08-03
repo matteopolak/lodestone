@@ -35,5 +35,18 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if sampled.a < 0.04 {
         discard;
     }
+    // `in.color` is the real `CLOUD_COLOR` attribute times its timeline track:
+    // pure white by day, `#191926` at night, alpha 0.8 throughout. The alpha is
+    // load-bearing and only reaches pixels because `CloudPipeline` blends
+    // (`CLOUD_BLEND`); with an opaque pipeline it was written to the target and
+    // weighted nothing, and clouds painted solid.
+    //
+    // The multiply is nominally in the wrong space — both operands are linear
+    // light, where vanilla multiplies gamma bytes — but it is exactly the
+    // identity here and so cannot be wrong: `clouds.png` in the real jar is a
+    // hard binary mask (see `load_cloud_texture`), so every texel that survives
+    // the discard above is opaque **pure white** and `sampled.rgb` is 1.0. If a
+    // resource pack ever ships a non-white clouds.png, this needs the same gamma
+    // round-trip the terrain shaders use.
     return vec4<f32>(sampled.rgb * in.color.rgb, in.color.a);
 }
