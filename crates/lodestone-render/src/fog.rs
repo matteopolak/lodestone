@@ -440,13 +440,60 @@ pub fn fog_factor(distance: f32, start: f32, end: f32) -> f32 {
 }
 
 /// Blend a fragment `color` toward `fog_color` by `factor` (component-wise
-/// `mix`). `factor` is assumed already clamped to `0.0..=1.0`.
+/// `mix`), **in whatever space the inputs are in**. `factor` is assumed already
+/// clamped to `0.0..=1.0`.
+///
+/// This is the CPU twin of `sky_disc.wgsl`'s fragment stage, which mixes its two
+/// linear-light vertex colours directly. It is **not** the twin of the world
+/// shaders any more: `model.wgsl`, `fluid.wgsl` and `entity.wgsl` mix in gamma
+/// space, per vanilla — use [`apply_fog_gamma`] for those.
 #[must_use]
 pub fn apply_fog(color: [f32; 3], fog_color: [f32; 3], factor: f32) -> [f32; 3] {
     [
         color[0] + (fog_color[0] - color[0]) * factor,
         color[1] + (fog_color[1] - color[1]) * factor,
         color[2] + (fog_color[2] - color[2]) * factor,
+    ]
+}
+
+/// Blend a **linear** fragment colour toward a **linear** `fog_color` by
+/// `factor` the way vanilla does — in gamma space — and return linear light.
+/// The CPU twin of the fog mix in `model.wgsl`, `fluid.wgsl` and `entity.wgsl`.
+///
+/// # Why gamma, and how much it mattered
+///
+/// `fog.glsl`'s `apply_fog` is `mix(inColor.rgb, fogColor.rgb, fogValue)` over
+/// `terrain.fsh`'s `color = texture * vertexColor` — raw, non-colour-managed
+/// bytes — against a `FogColor` that came from `ARGB.vector4fFromARGB32`, i.e.
+/// bytes over 255. Nothing in that chain is linear light, exactly as
+/// `CLAUDE.md`'s rendering constraints record for tint and shade.
+///
+/// This client mixed in linear light until it did not. The defect is a
+/// *magnitude* one — the sign is right, so "distant things are foggier" holds
+/// under both — and linear mixing always pulls the result toward the brighter
+/// colour, i.e. toward the fog, with the **largest** error at the **smallest**
+/// factor. That is what a player sees as "too foggy too early".
+///
+/// Worked from constants outside this code (sRGB 0.3 fragment, sRGB 0.75 fog),
+/// as apparent gamma-space fog factor:
+///
+/// | true factor | correct (gamma) | as shipped (linear) | overshoot |
+/// |---|---|---|---|
+/// | 0.25 | 0.25 | 0.373 | +49% |
+/// | 0.50 | 0.50 | 0.627 | +25% |
+/// | 1.00 | 1.00 | 1.00 | none — the two spaces agree at both ends |
+///
+/// The endpoints agreeing is why `fog_gate.rs` (which measures a *fully* fogged
+/// fragment) could not see this, and why the horizon seam between the sky disc
+/// — still a linear mix, see [`apply_fog`] — and terrain stays invisible.
+#[must_use]
+pub fn apply_fog_gamma(color: [f32; 3], fog_color: [f32; 3], factor: f32) -> [f32; 3] {
+    let c = color.map(linear_to_srgb_f32);
+    let f = fog_color.map(linear_to_srgb_f32);
+    [
+        srgb_to_linear_f32(c[0] + (f[0] - c[0]) * factor),
+        srgb_to_linear_f32(c[1] + (f[1] - c[1]) * factor),
+        srgb_to_linear_f32(c[2] + (f[2] - c[2]) * factor),
     ]
 }
 
@@ -853,6 +900,74 @@ mod tests {
         assert!((mid[0] - 0.6).abs() < 1e-6);
         assert!((mid[1] - 0.7).abs() < 1e-6);
         assert!((mid[2] - 0.8).abs() < 1e-6);
+    }
+
+    /// The world shaders' fog mix, as a **magnitude** test rather than a
+    /// direction one — the species `CLAUDE.md` records as the subtlest, where
+    /// everything about the gate is right except that its predicate is satisfied
+    /// by both hypotheses.
+    ///
+    /// Both numbers below are computed by hand from the sRGB transfer function,
+    /// not by calling anything in this module: a fragment at sRGB `0.3` against a
+    /// fog at sRGB `0.75`.
+    ///
+    /// | factor | gamma mix (correct) | linear mix (the bug) |
+    /// |---|---|---|
+    /// | 0.25 | sRGB `0.4125` → linear `0.141799` | linear `0.185560` |
+    /// | 0.50 | sRGB `0.5250` → linear `0.237916` | linear `0.297880` |
+    ///
+    /// The measurement has to land on the first column *and miss the second*.
+    /// Asserting only "the fogged value is between the fragment and the fog"
+    /// passes under either, which is how the linear mix survived a fog gate, an
+    /// entity fog gate and a ramp gate.
+    #[test]
+    fn the_world_fog_mix_is_in_gamma_space_at_a_predicted_magnitude() {
+        // The two endpoints, stated in sRGB and converted here so the linear
+        // inputs below are derived from the sRGB literals rather than guessed.
+        let frag_srgb = 0.3_f32;
+        let fog_srgb = 0.75_f32;
+        let frag = [srgb_to_linear_f32(frag_srgb); 3];
+        let fog = [srgb_to_linear_f32(fog_srgb); 3];
+
+        for (factor, correct, bug) in [
+            (0.25_f32, 0.141_799_f32, 0.185_560_f32),
+            (0.50, 0.237_916, 0.297_880),
+        ] {
+            let got = apply_fog_gamma(frag, fog, factor)[0];
+            assert!(
+                (got - correct).abs() < 2e-3,
+                "factor {factor}: gamma mix should be {correct:.6} linear, got {got:.6}"
+            );
+            // And it must be nowhere near the linear-space value, which is the
+            // whole point: the two are 31% apart in linear light at 0.25.
+            assert!(
+                (got - bug).abs() > 0.02,
+                "factor {factor}: {got:.6} is indistinguishable from the linear-mix \
+                 value {bug:.6}, so this test cannot tell the two implementations apart"
+            );
+            // Control: the *linear* mix must land on the second column, proving
+            // the two columns really are the two implementations and not two
+            // arbitrary numbers.
+            let linear = apply_fog(frag, fog, factor)[0];
+            assert!(
+                (linear - bug).abs() < 2e-3,
+                "control failed: the linear mix should be {bug:.6}, got {linear:.6} — \
+                 the hand-computed predictions above are wrong, not the code"
+            );
+        }
+
+        // Both spaces agree exactly at the ends. This is not padding: it is why
+        // `fog_gate.rs`, which measures a fully-fogged fragment, was blind to
+        // the difference, and why the sky disc (still a linear mix) and terrain
+        // do not band against each other at the horizon.
+        for factor in [0.0_f32, 1.0] {
+            let g = apply_fog_gamma(frag, fog, factor);
+            let l = apply_fog(frag, fog, factor);
+            assert!(
+                (g[0] - l[0]).abs() < 1e-6,
+                "the two spaces must agree at factor {factor}: {g:?} vs {l:?}"
+            );
+        }
     }
 
     #[test]
