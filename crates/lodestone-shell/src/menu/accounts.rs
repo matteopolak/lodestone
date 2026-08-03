@@ -376,7 +376,12 @@ impl AccountsNav {
                 let (tx, rx) = channel();
                 let cancel = Arc::new(AtomicBool::new(false));
                 let worker_cancel = Arc::clone(&cancel);
-                std::thread::spawn(move || run_device_code_login(tx, worker_cancel));
+                // The **loopback** flow, not the device-code one: it opens the real
+                // Microsoft login in the user's browser and needs no code typed.
+                // `run_device_code_login` is kept beside it and still compiled —
+                // it is the only option on a headless host, and it is the fallback
+                // if the browser cannot be launched.
+                std::thread::spawn(move || run_browser_login(tx, worker_cancel));
                 (rx, cancel)
             }),
         )
@@ -740,6 +745,139 @@ fn run_device_code_login(tx: Sender<WorkerMsg>, cancel: Arc<AtomicBool>) {
             }
         }
     });
+}
+
+/// Runs the **loopback** sign-in: the real Microsoft login page in the user's
+/// browser, no code to type. This is what Add Account uses.
+///
+/// Everything from the `MsToken` onward is identical to
+/// [`run_device_code_login`] — same Xbox Live → XSTS → Minecraft-services chain,
+/// same keychain save here on the worker thread, same `SignedIn` message with the
+/// metadata write left to [`AccountsNav::pump`]. Only how the authorization code
+/// arrives differs, which is the whole reason
+/// [`lodestone_auth::browser_login`] was shaped to mirror
+/// `flow::PendingLogin`'s `poll_once`.
+///
+/// The URL still goes to the screen as [`WorkerMsg::Prompt`]'s
+/// `verification_uri`, with an **empty** `user_code`: there is no code in this
+/// flow, and the URL is the copy-paste fallback for when the browser cannot be
+/// launched. `render.rs` renders an empty code as "no code to show".
+fn run_browser_login(tx: Sender<WorkerMsg>, cancel: Arc<AtomicBool>) {
+    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) => {
+            let _ = tx.send(WorkerMsg::Failed(format!("could not start a runtime: {e}")));
+            return;
+        }
+    };
+    rt.block_on(async move {
+        // Same refusal to fall back to the official launcher's id as the
+        // device-code path — see `run_device_code_login`'s comment and
+        // `lodestone_auth::login`'s docs.
+        let client_id = match lodestone_auth::login::resolve_client_id() {
+            Ok(id) => id,
+            Err(e) => {
+                let _ = tx.send(WorkerMsg::Failed(describe_auth_error(&e)));
+                return;
+            }
+        };
+        let client = reqwest::Client::new();
+        let mut pending = match lodestone_auth::browser_login::LoopbackLogin::begin(&client_id).await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = tx.send(WorkerMsg::Failed(describe_auth_error(&e)));
+                return;
+            }
+        };
+
+        // Show the URL *before* opening the browser, so a failed launch still
+        // leaves the user something to copy rather than a blank screen.
+        let _ = tx.send(WorkerMsg::Prompt {
+            user_code: String::new(),
+            verification_uri: pending.authorize_url().to_owned(),
+        });
+        open_in_browser(pending.authorize_url());
+
+        loop {
+            // 100ms rather than the device flow's server-dictated interval: this
+            // polls our own listener, not Microsoft, so there is no rate limit to
+            // respect and a tighter loop makes sign-in feel immediate.
+            if cancellable_sleep_ms(100, &cancel).await {
+                let _ = tx.send(WorkerMsg::Cancelled);
+                return;
+            }
+            if pending.is_expired() {
+                let _ = tx.send(WorkerMsg::Failed(
+                    "Sign-in timed out waiting for the browser. Try again.".to_owned(),
+                ));
+                return;
+            }
+            match pending.poll_once(&client, &client_id).await {
+                Ok(None) => continue,
+                Ok(Some(ms_token)) => {
+                    finish_ms_token(&tx, &client, ms_token).await;
+                    return;
+                }
+                Err(e) => {
+                    let _ = tx.send(WorkerMsg::Failed(describe_auth_error(&e)));
+                    return;
+                }
+            }
+        }
+    });
+}
+
+/// The half of a sign-in that is identical for both flows: an `MsToken` becomes a
+/// session, a saved refresh token and a [`WorkerMsg::SignedIn`].
+///
+/// Extracted so the two workers cannot drift. The keychain write happens here, on
+/// the worker thread; the `profiles.json` write deliberately does not — it stays
+/// in [`AccountsNav::pump`] so every metadata write funnels through one place
+/// rather than racing a foreground Remove.
+async fn finish_ms_token(
+    tx: &Sender<WorkerMsg>,
+    client: &reqwest::Client,
+    ms_token: lodestone_auth::flow::MsToken,
+) {
+    let session =
+        match lodestone_auth::flow::session_from_ms_token(client, &ms_token.access_token).await {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = tx.send(WorkerMsg::Failed(describe_auth_error(&e)));
+                return;
+            }
+        };
+    let secrets = lodestone_auth::AccountSecrets::open();
+    if let Err(e) = secrets.save_refresh_token(session.profile.id, &ms_token.refresh_token) {
+        let _ = tx.send(WorkerMsg::Failed(format!(
+            "signed in, but could not save the credential: {e}"
+        )));
+        return;
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = tx.send(WorkerMsg::SignedIn(AccountProfile {
+        profile_id: session.profile.id,
+        username: session.profile.name.clone(),
+        skin_url: None,
+        last_used: now,
+    }));
+}
+
+/// [`cancellable_sleep`] in milliseconds, for the loopback flow's tighter poll.
+///
+/// Separate rather than making the existing function take millis: that one's
+/// `secs` argument comes straight from Microsoft's `interval` field, and widening
+/// it would invite passing a millisecond value where a second value is meant.
+async fn cancellable_sleep_ms(millis: u64, cancel: &AtomicBool) -> bool {
+    if cancel.load(Ordering::Relaxed) {
+        return true;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(millis)).await;
+    cancel.load(Ordering::Relaxed)
 }
 
 /// Sleeps up to `secs` seconds, checking `cancel` every 100ms so an

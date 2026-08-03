@@ -2544,7 +2544,12 @@ pub fn frame_for<'a>(
                     verification_uri,
                 } => accounts_flow_frame(
                     "SIGN IN WITH MICROSOFT",
-                    Some(&user_code),
+                    // Empty means "no code to show", which is the loopback flow:
+                    // the browser is already open at the URL and there is nothing
+                    // to type. The device-code flow still fills both. `None` is a
+                    // shape `accounts_flow_frame` already handles — see the
+                    // `Requesting` arm above, which passes it for both.
+                    (!user_code.is_empty()).then_some(user_code.as_str()),
                     Some(&verification_uri),
                     true,
                 ),

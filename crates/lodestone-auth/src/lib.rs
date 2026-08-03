@@ -44,6 +44,12 @@ mod hash;
 pub use error::{AuthError, Result};
 pub use hash::server_hash;
 
+/// The loopback authorization-code sign-in — the real login page in the user's
+/// browser, with no code to type. The other front end onto the same
+/// [`flow`]-shaped token; see that module's docs for why loopback rather than an
+/// embedded webview.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod browser_login;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cache;
 #[cfg(not(target_arch = "wasm32"))]

@@ -108,6 +108,11 @@ cfb8 = "0.9"
 rsa = "0.9"
 rand = "0.8"
 sha1 = "0.10"
+# PKCE's S256 challenge is `base64url(sha256(verifier))` (RFC 7636 §4.2). `sha1`
+# above is for the Minecraft server-ID hash and is not interchangeable — the two
+# live side by side because they answer to different specs, not because either is
+# a fallback for the other.
+sha2 = "0.10"
 num-bigint = "0.4"
 base64 = "0.23"
 serde = { version = "1", features = ["derive"] }
