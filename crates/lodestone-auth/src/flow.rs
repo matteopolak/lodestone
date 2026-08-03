@@ -472,14 +472,8 @@ async fn authenticate_xbl(client: &reqwest::Client, ms_access_token: &str) -> Re
         "RelyingParty": "http://auth.xboxlive.com",
         "TokenType": "JWT",
     });
-    let resp: XboxResponse = client
-        .post(XBL_URL)
-        .json(&body)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+    let http = client.post(XBL_URL).json(&body).send().await?;
+    let resp: XboxResponse = step_result("xbl", http).await?.json().await?;
     Ok(resp.token)
 }
 
@@ -519,7 +513,7 @@ async fn authorize_xsts(client: &reqwest::Client, xbl_token: &str) -> Result<Xst
             message: text,
         });
     }
-    let resp: XboxResponse = http.error_for_status()?.json().await?;
+    let resp: XboxResponse = step_result("xsts", http).await?.json().await?;
     let user_hash = resp
         .display_claims
         .xui
@@ -536,22 +530,108 @@ async fn authorize_xsts(client: &reqwest::Client, xbl_token: &str) -> Result<Xst
     })
 }
 
+/// Logs one step's outcome and types any non-2xx.
+///
+/// # What is and is not logged
+///
+/// **On success: the status only, never the body.** Every success body in this chain
+/// carries a credential — the XBL token, the XSTS token, the Minecraft access token —
+/// so logging one would write a live token to a plaintext file. On failure the body
+/// *is* logged (truncated), because these endpoints return diagnostics there and none
+/// of them echo the token we sent.
+///
+/// The request bodies are never logged either, and those are the ones that carry the
+/// token *inbound* (`identityToken`, `UserTokens`, `RpsTicket`).
+///
+/// This exists because the chain had **no logging at all**: a player hit a 403 and the
+/// only evidence was a UI string, so which of five steps failed had to be inferred.
+/// Now each step announces itself and the log shows how far a sign-in reached.
+async fn step_result(
+    step: &'static str,
+    http: reqwest::Response,
+) -> Result<reqwest::Response> {
+    let status = http.status();
+    if status.is_success() {
+        tracing::info!(target: "auth", step, status = status.as_u16(), "step ok");
+        return Ok(http);
+    }
+    let body = http.text().await.unwrap_or_default();
+    // Truncated on chars, not bytes — a byte slice can split a UTF-8 sequence and
+    // panic on a non-ASCII error message.
+    let snippet: String = body.chars().take(400).collect();
+    tracing::warn!(
+        target: "auth",
+        step,
+        status = status.as_u16(),
+        body = %snippet,
+        "step failed"
+    );
+    Err(AuthError::Service {
+        step,
+        message: format!("{status}: {snippet}"),
+    })
+}
+
 #[derive(Deserialize)]
 struct McLoginResponse {
     access_token: String,
 }
 
 /// Exchanges an XSTS token for a Minecraft services access token.
+///
+/// # The 403 that means "wait", not "broken"
+///
+/// This is where Mojang's **app allow list** is enforced, and it is the only step in
+/// the chain that can fail for a reason the user cannot fix. Every new Azure
+/// application must be reviewed and added by hand
+/// (<https://aka.ms/mce-reviewappid>); until that lands, this endpoint answers
+/// **403** no matter how correct the registration, the redirect URI and the whole
+/// Microsoft → Xbox Live → XSTS chain in front of it are.
+///
+/// It used to surface as a bare `error_for_status()?`, i.e. reqwest's
+/// `HTTP status client error (403 Forbidden) for url (…)` with no explanation — which
+/// is indistinguishable from a real misconfiguration and sent a player looking for a
+/// bug that was not there. Reaching this step at all is *positive* evidence: the
+/// client id resolved, the redirect matched, Xbox Live and XSTS both issued tokens.
+/// Only the allow list is outstanding.
 async fn login_with_xbox(client: &reqwest::Client, xsts: &XstsToken) -> Result<String> {
     let identity = format!("XBL3.0 x={};{}", xsts.user_hash, xsts.token);
-    let resp: McLoginResponse = client
+    let http = client
         .post(MC_LOGIN_URL)
         .json(&serde_json::json!({ "identityToken": identity }))
         .send()
-        .await?
-        .error_for_status()?
-        .json()
         .await?;
+    if http.status() == reqwest::StatusCode::FORBIDDEN {
+        // The long explanation belongs in the **log**, not in the returned message.
+        // Its first version put the whole paragraph in `message`, which the accounts
+        // screen renders as a single unwrapped line — it ran off the edge and was
+        // unreadable, reported from play. A user-facing auth error has to be one
+        // short sentence.
+        //
+        // Logged explicitly here rather than through `step_result`, because this arm
+        // returns before reaching it: the first version of *that* bug meant the 403
+        // produced no log line at all, and which step failed had to be inferred from
+        // the absence of one.
+        let body = http.text().await.unwrap_or_default();
+        let snippet: String = body.chars().take(400).collect();
+        tracing::warn!(
+            target: "auth",
+            step = "login_with_xbox",
+            status = 403,
+            body = %snippet,
+            "Mojang's API allow list has not accepted this Azure application yet. \
+             Everything before this step succeeded — the client id resolved, the \
+             redirect URI matched, and both Xbox Live and XSTS issued tokens — so \
+             there is nothing misconfigured to fix. New app ids are reviewed by hand \
+             (https://aka.ms/mce-reviewappid) and this starts working on its own once \
+             approved. See https://aka.ms/AppRegInfo"
+        );
+        return Err(AuthError::Service {
+            step: "login_with_xbox",
+            message: "Not yet approved by Mojang — see the log.".to_owned(),
+        });
+    }
+    let resp: McLoginResponse = step_result("login_with_xbox", http).await?.json().await?;
     Ok(resp.access_token)
 }
 
@@ -571,7 +651,7 @@ async fn fetch_profile(client: &reqwest::Client, mc_access_token: &str) -> Resul
     if http.status() == reqwest::StatusCode::NOT_FOUND {
         return Err(AuthError::NoMinecraftProfile);
     }
-    let resp: ProfileResponse = http.error_for_status()?.json().await?;
+    let resp: ProfileResponse = step_result("profile", http).await?.json().await?;
     let id = Uuid::parse_str(&resp.id).map_err(|e| AuthError::Service {
         step: "profile",
         message: format!("invalid profile uuid {:?}: {e}", resp.id),
@@ -588,6 +668,11 @@ async fn fetch_profile(client: &reqwest::Client, mc_access_token: &str) -> Resul
 /// # Errors
 ///
 /// Propagates any failure from the Xbox, XSTS, Minecraft-login or profile steps.
+/// Runs the whole Xbox Live -> XSTS -> Minecraft-services -> profile chain.
+///
+/// Each step logs its own outcome through [`step_result`], so the log shows exactly
+/// how far a sign-in reached. Reaching `login_with_xbox` at all means everything
+/// before it succeeded.
 pub async fn session_from_ms_token(
     client: &reqwest::Client,
     ms_access_token: &str,
