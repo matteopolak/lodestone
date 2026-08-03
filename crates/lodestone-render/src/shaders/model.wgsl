@@ -218,9 +218,31 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // linear texel to sRGB, multiply tint and shade there, convert back. A
     // single round-trip (rather than one per multiply) means fewer transfer
     // applications and less rounding.
-    let lit = srgb_to_linear(linear_to_srgb(tex.rgb) * tint_col * in.shade);
+    let lit_srgb = linear_to_srgb(tex.rgb) * tint_col * in.shade;
     // Fade the lit fragment toward the fog colour by its view distance, so the
     // outermost loaded chunks dissolve into the sky rather than ending in a wall.
+    //
+    // The mix is in **gamma** space, inside the same round-trip as the tint and
+    // shade above, because vanilla's is: `fog.glsl`'s `apply_fog` does
+    // `mix(inColor.rgb, fogColor.rgb, fogValue)` on `terrain.fsh`'s
+    // `texture * vertexColor`, which are raw non-colour-managed bytes, and
+    // `FogColor` is `ARGB.vector4fFromARGB32(...)`, i.e. bytes over 255.
+    //
+    // This used to mix in linear light, and it is exactly the failure the
+    // comment above warns about — one line later, on the same value. It is a
+    // *magnitude* bug, so nothing that asserted "distant things are foggier"
+    // could see it: linear mixing pulls the result toward the brighter colour,
+    // and the error is largest where the factor is *smallest*. For a grey-0.3
+    // fragment against a 0.75 fog, a true factor of 0.25 rendered as an apparent
+    // 0.373 and 0.5 as 0.627 — roughly 50% and 25% too much haze, worst right at
+    // the ramp's onset, which is the reported "too foggy too early".
+    //
+    // `linear_to_srgb(camera.fog_color_start.rgb)` is three `pow`s per fragment
+    // on a value that is uniform across the whole draw. Storing the fog colour
+    // gamma-encoded in `FogUniform` would remove them; it also changes what
+    // `FogUniform::color_start` *means* for every reader, so it is deliberately
+    // not done here. See `docs/fog.md`.
     let amount = fog_amount(length(in.world - camera.fog_eye.xyz));
-    return vec4<f32>(mix(lit, camera.fog_color_start.rgb, amount), tex.a);
+    let fogged_srgb = mix(lit_srgb, linear_to_srgb(camera.fog_color_start.rgb), amount);
+    return vec4<f32>(srgb_to_linear(fogged_srgb), tex.a);
 }

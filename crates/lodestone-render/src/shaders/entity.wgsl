@@ -242,10 +242,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // weight is its complement, taken only when the overlay is actually present.
     let red_weight = select(0.0, 1.0 - in.overlay, in.overlay > 0.0);
     let overlaid = mix(shaded, vec3<f32>(1.0, 0.0, 0.0), red_weight);
-    let lit = srgb_to_linear(overlaid);
     // Fade toward the fog colour by view distance, on the same curve as terrain,
     // so a mob at the render-distance edge or under water dissolves with the
     // blocks around it instead of hanging in front of them.
+    //
+    // In **gamma** space, folded into this shader's existing round-trip, per
+    // vanilla's `apply_fog` — see the model shader for the derivation and the
+    // measured size of the linear-space error this replaced. Terrain, water and
+    // entities must all mix in the same space or a mob fogs at a different rate
+    // from the block it is standing on.
     let amount = fog_amount(length(in.world - camera.fog_eye.xyz));
-    return vec4<f32>(mix(lit, camera.fog_color_start.rgb, amount), tex_col.a);
+    let fogged_srgb = mix(overlaid, linear_to_srgb(camera.fog_color_start.rgb), amount);
+    return vec4<f32>(srgb_to_linear(fogged_srgb), tex_col.a);
 }

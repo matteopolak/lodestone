@@ -21,11 +21,64 @@ eye. `FogUniform` packs it into three `vec4`s and every world shader applies
 
 ```wgsl
 let amount = fog_amount(length(in.world - camera.fog_eye.xyz));
-mix(lit, camera.fog_color_start.rgb, amount)
+let fogged_srgb = mix(lit_srgb, linear_to_srgb(camera.fog_color_start.rgb), amount);
+return vec4<f32>(srgb_to_linear(fogged_srgb), tex.a);
 ```
 
-`fog::fog_factor` is the CPU twin of `fog_amount`, so headless tests describe
-the shader's behaviour exactly.
+`fog::fog_factor` is the CPU twin of `fog_amount` and `fog::apply_fog_gamma` is
+the CPU twin of the mix, so headless tests describe the shader's behaviour
+exactly.
+
+### The mix is in gamma space, and this was wrong for a long time
+
+`fog.glsl`'s `apply_fog` is `mix(inColor.rgb, fogColor.rgb, fogValue)` over
+`terrain.fsh`'s `color = texture * vertexColor` — raw, non-colour-managed bytes —
+against a `FogColor` that came from `ARGB.vector4fFromARGB32`, i.e. bytes over
+255. **Nothing in vanilla's fog chain is linear light**, exactly as `CLAUDE.md`'s
+rendering constraints already record for tint and shade.
+
+The three fogged shaders (`model.wgsl`, `fluid.wgsl`, `entity.wgsl`) mixed in
+**linear** light, one line after a comment in `model.wgsl` warning about that
+precise failure for the tint and shade on the same value. Linear mixing pulls the
+result toward the brighter colour — the fog — and the error is **largest where
+the factor is smallest**:
+
+| true factor | correct (gamma) | as shipped (linear) | apparent overshoot |
+|---|---|---|---|
+| 0.25 | 0.25 | 0.373 | **+49%** |
+| 0.50 | 0.50 | 0.627 | +25% |
+| 1.00 | 1.00 | 1.00 | none |
+
+(sRGB 0.3 fragment against an sRGB 0.75 fog, expressed as the gamma-space factor
+that would produce the same pixel.) This is the reported "too foggy too early":
+haze appearing well before the ramp says it should, with the onset the worst part.
+
+**It is a *magnitude* defect, which is why every existing gate was blind to it.**
+The sign is right, so "distant things are foggier" holds under both. Worse, the
+two spaces agree **exactly at both endpoints**, and `fog_gate.rs` measures a
+*fully* fogged fragment (factor 1.0) — so the gate that exists to prove fog works
+provably cannot see the strength being wrong. `entity_fog_pixels.rs` compares two
+mid-ramp depths and only asserts a floor on the delta
+(`MIN_FOGGED_DELTA = 25.0`); its mob and fog colour are both bright, so the two
+mixes differ by about 1.4 bytes there and it passes either way.
+
+The replacement gate is `fog.rs`'s
+`the_world_fog_mix_is_in_gamma_space_at_a_predicted_magnitude`, which computes
+**both** hypotheses by hand from the sRGB transfer function and requires the
+measurement to land on one and miss the other — plus an executed control that the
+linear mix really does produce the second column.
+
+The endpoint agreement has one useful consequence: **the sky disc still mixes in
+linear light** (`sky_disc.wgsl`, `fog::apply_fog`) and the horizon seam is still
+invisible, because the disc reaches its rim at factor 1.0 where the two spaces
+coincide. Bringing the disc over is a separate change with its own gates
+(`sky_gradient_pixels.rs` predicts a lot of mid-ramp pixel values).
+
+The shader spends three extra `pow`s per fragment on
+`linear_to_srgb(camera.fog_color_start.rgb)`, a value that is uniform across the
+draw. Storing the fog colour gamma-encoded in `FogUniform` would remove them, at
+the cost of changing what `FogUniform::color_start` *means* for every reader; not
+done, deliberately.
 
 ### Vanilla's two terms
 
@@ -150,6 +203,43 @@ Both gaps need a wider `FogUniform` **and** an edit inside three shader bodies
    and compares against the render distance in **chunks**, which is a different
    quantity from `:73`'s blocks; reading the two as one expression is how this
    entry was nearly written backwards.
+
+4. **The fog *colour* is the sky colour, where vanilla's is mostly `#C0D8FF`.**
+   `sim::fog_for_render_distance` fades terrain toward `gpu::SKY_COLOR`
+   (`#89B5EC` once encoded). Vanilla fades it toward
+   `AtmosphericFogEnvironment.getBaseColor`, which is
+   `ARGB.srgbLerp(skyColorMixFactor, fogColor, skyColor)` with
+
+   ```java
+   // AtmosphericFogEnvironment.java:42-47
+   float skyFogEnd = Math.min(SKY_FOG_END_DISTANCE / 16.0F, renderDistance);  // in CHUNKS
+   float skyColorMixFactor = Mth.clampedLerp(skyFogEnd / 32.0F, 0.25F, 1.0F);
+   skyColorMixFactor = 1.0F - (float)Math.pow(skyColorMixFactor, 0.25);
+   return ARGB.srgbLerp(skyColorMixFactor, fogColor, skyColor);
+   ```
+
+   The overworld's `FOG_COLOR` attribute is `-4138753` = **`#C0D8FF`**
+   (`DimensionTypes.java:34`), a pale near-white blue, and `SKY_COLOR` is
+   `calculateSkyColor(0.8)` = `#78A7FF`. The mix factor is `0.187` at render
+   distance 8 and **`0.0`** at 32 and above, so vanilla's terrain fog is
+   81–100% `#C0D8FF`: a *haze*, where ours is terrain dissolving into a
+   saturated sky blue. That difference reads as "too foggy" independently of the
+   ramp, because a saturated fog colour looks like the sky eating the world
+   rather than air between you and it.
+
+   Note `:44` divides the attribute by 16 and compares against the render
+   distance in **chunks**, a different quantity from `:73`'s blocks; reading the
+   two as one expression is how item 3 above was nearly written backwards.
+
+   **Not changed, and the reason is blast radius, not doubt.** `app.rs` sets the
+   frame clear from `FogSettings::color`, and roughly a dozen shell pixel gates
+   (`sky_pixels`, `hurt_overlay_pixels`, `view_bob_pixels`, `nametag_pixels`,
+   `armour_pixels`, `sheep_wool_pixels`, `chest_block_entity_pixels`, …) hardcode
+   `SKY_COLOR.map(|c| (c * 255.0).round())` as "the background". Changing the fog
+   colour means re-deriving every one of those backgrounds, and now that the sky
+   pass clears to the fog colour too (`docs/sky-and-air-bubbles.md`) it also moves
+   the below-horizon void. Worth doing; do it as its own change, with a GPU to run
+   those gates on.
 
 `FogUniform` has exactly two free lanes today (`eye.w` and `end_enabled.w` —
 `end_enabled.z` is the sky-darken factor), which is enough for an

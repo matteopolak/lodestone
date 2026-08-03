@@ -149,7 +149,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // fixed there, on this shader's own multiply.
     let water = vec3<f32>(0.247, 0.463, 0.894);
     let tint_col = mix(vec3<f32>(1.0, 1.0, 1.0), water, in.tinted);
-    let lit = srgb_to_linear(linear_to_srgb(tex.rgb) * tint_col * in.shade);
+    let lit_srgb = linear_to_srgb(tex.rgb) * tint_col * in.shade;
+    // Fog mixes in gamma space, inside the same round-trip — see the model
+    // shader for the derivation from `fog.glsl` and for the measured size of the
+    // linear-space error this replaced. All three fogged shaders must agree, or
+    // water and the terrain it sits in dissolve at visibly different rates.
     let amount = fog_amount(length(in.world - camera.fog_eye.xyz));
-    return vec4<f32>(mix(lit, camera.fog_color_start.rgb, amount), tex.a);
+    let fogged_srgb = mix(lit_srgb, linear_to_srgb(camera.fog_color_start.rgb), amount);
+    return vec4<f32>(srgb_to_linear(fogged_srgb), tex.a);
 }
