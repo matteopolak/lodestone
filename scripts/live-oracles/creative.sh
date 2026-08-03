@@ -67,6 +67,15 @@ echo "waiting for '$NAME' to accept connections..."
 for _ in $(seq 1 60); do
   if docker logs "$NAME" 2>&1 | grep -q 'Done ('; then
     op_interactive_player
+    # ...and keep opping, for every player that joins from now on. The live gates
+    # join under `unique_username`, so no gate's name can be opped in advance —
+    # see op-on-join.sh for why the log is watched rather than ops.json written.
+    # Backgrounded and detached: it outlives this script and dies with the
+    # container, since `docker logs -f` exits when the container stops.
+    nohup "$ROOT/scripts/live-oracles/op-on-join.sh" \
+      "$NAME" "$RCON_PORT" "$RCON_PASSWORD" >>"$WORLD/op-on-join.log" 2>&1 &
+    disown 2>/dev/null || true
+    echo "op-on-join watching '$NAME' (log: $WORLD/op-on-join.log)"
     echo "ready: game on :25570, RCON on :25571"
     exit 0
   fi
