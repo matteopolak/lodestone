@@ -73,12 +73,22 @@
 //! Nothing here is configurable at runtime, and the client id is a parameter
 //! rather than a constant — see [`crate::login::CLIENT_ID_ENV`].
 //!
-//! **The Azure app registration needs `http://localhost` as a redirect URI**,
-//! under platform *Mobile and desktop applications*. Azure treats loopback
-//! specially and ignores the port, so one entry covers every port the OS hands
-//! out; without it Microsoft rejects the request with `invalid_request` naming
-//! the redirect URI. The device-code flow needs no redirect URI at all, which is
-//! why an app registered only for that will fail here until the entry is added.
+//! **The Azure app registration needs exactly `http://localhost` as a redirect
+//! URI** — no port — under platform *Mobile and desktop applications*. Azure
+//! treats `http://localhost` as loopback and ignores the port, which is the only
+//! reason an OS-assigned random port can work: a URI Azure matched *including* the
+//! port could not be registered in advance.
+//!
+//! The registered string and [`LoopbackLogin::begin`]'s `redirect_uri` must agree
+//! on the spelling, and they did not at first: this doc said `localhost` while the
+//! code sent `127.0.0.1`. Azure string-matches the host, so that combination fails
+//! with `invalid_request: The provided value for the input parameter
+//! 'redirect_uri' is not valid` — which reads like a missing registration rather
+//! than a mismatched one. See that function for why the code moved rather than the
+//! instruction.
+//!
+//! The device-code flow needs no redirect URI at all, so an app registered only for
+//! that will fail here until the entry is added.
 //!
 //! # Dependencies
 //!
@@ -417,10 +427,29 @@ impl LoopbackLogin {
             })?
             .port();
 
-        // `127.0.0.1` rather than `localhost`: the literal cannot be redirected by
-        // a hosts file or resolve to IPv6 `::1` while we listen on IPv4. Azure's
-        // loopback exemption covers both spellings and ignores the port.
-        let redirect_uri = format!("http://127.0.0.1:{port}");
+        // **`localhost`, not `127.0.0.1`** — and the reason is Azure, not us.
+        //
+        // The literal would be preferable on its own merits: it cannot be
+        // redirected by a hosts file, and it cannot resolve to IPv6 `::1` while we
+        // listen on IPv4. That was this line's first form, with a comment asserting
+        // "Azure's loopback exemption covers both spellings and ignores the port".
+        //
+        // It does not, or at least not verifiably: Microsoft documents the
+        // port-agnostic loopback exemption for `http://localhost`, and a registered
+        // `http://127.0.0.1` is not documented to wildcard the port. Since the port
+        // is chosen by the OS at bind time, a redirect URI Azure matches *with* its
+        // port cannot be registered in advance at all — so `localhost` is the only
+        // spelling that can work here. Reported from play as
+        // `invalid_request: The provided value for the input parameter
+        // 'redirect_uri' is not valid`.
+        //
+        // Residual risk, accepted knowingly: a browser that resolves `localhost` to
+        // `::1` will not reach a listener bound to `127.0.0.1`. Browsers try the
+        // other family on a refused connection, and the listener stays IPv4-only
+        // because binding both families needs two sockets and Azure only needs the
+        // *string* to say `localhost`. If a callback ever hangs with the browser on
+        // the redirect page, this is the first thing to suspect.
+        let redirect_uri = format!("http://localhost:{port}");
 
         let pkce = Pkce::generate();
         let mut state_bytes = [0u8; 16];
@@ -798,7 +827,14 @@ mod tests {
         let addr = login.listener.local_addr().unwrap();
         assert!(addr.ip().is_loopback(), "bound a non-loopback address {addr}");
         assert_ne!(addr.port(), 0, "the OS must have assigned a real port");
-        assert_eq!(login.redirect_uri, format!("http://127.0.0.1:{}", addr.port()));
+        // The *string* must say `localhost` even though the *socket* is bound to
+        // 127.0.0.1 — Azure matches the host textually and only port-wildcards
+        // `localhost`. This assertion is the one that would have caught the
+        // mismatch that reached a player as `invalid_request` on `redirect_uri`:
+        // it pinned `127.0.0.1`, agreeing with the code and disagreeing with the
+        // registration the module docs told the user to create. A test can only
+        // catch that if it knows which of the two is authoritative, and Azure is.
+        assert_eq!(login.redirect_uri, format!("http://localhost:{}", addr.port()));
         assert!(
             login.authorize_url().contains(&percent_encode(&login.redirect_uri)),
             "the authorize URL must carry the encoded redirect URI it bound"
