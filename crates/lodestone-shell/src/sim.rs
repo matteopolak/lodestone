@@ -6507,9 +6507,49 @@ mod tests {
     /// engine does not silently drop the tail.
     const HOLD_MEASUREMENT_PARTICLES: i32 = 4_000;
 
-    /// Spawns [`HOLD_MEASUREMENT_PARTICLES`] live particles around the player and
-    /// returns the `Sim` and a camera to extract them with.
-    fn sim_with_many_particles() -> (Sim, Camera) {
+    /// The small end of the scaling measurement, a tenth of
+    /// [`HOLD_MEASUREMENT_PARTICLES`]. The two are compared against each other —
+    /// see [`extract_particles_does_not_hold_the_world_guard_across_the_per_particle_work`]
+    /// for why a *ratio between two particle counts* replaced a ratio against wall
+    /// time.
+    const HOLD_MEASUREMENT_PARTICLES_SMALL: i32 = HOLD_MEASUREMENT_PARTICLES / 10;
+
+    /// How much the guarded time may grow when the particle count grows 10x.
+    ///
+    /// A guard held *outside* the per-particle work is O(1) in the count — the same
+    /// handful of resource moves either way — so the expectation is ~1.0. A guard
+    /// held *across* it is O(N).
+    ///
+    /// Measured over eight runs, averaged per [`HOLD_MEASUREMENT_REPEATS`]:
+    ///
+    /// | shape | ratio for a 10x count | margin to this bound |
+    /// |---|---|---|
+    /// | correct (guard outside the work) | **0.40 - 0.97x** | 3.1x |
+    /// | pre-fix (guard across the work) | **5.60 - 10.93x** | 1.9x |
+    ///
+    /// The bound is placed between the two measured populations rather than at a
+    /// round number. Note the O(N) shape does **not** reach the naive 10.0 reliably:
+    /// the pre-fix extract carries O(1) setup, which is a larger share of the small
+    /// measurement, so a bound of 5 would have been inside its range — an earlier
+    /// draft used 5 and the control failed 1 run in 5.
+    ///
+    /// Averaging is what made the populations separate. Single samples ran
+    /// 0.6-1.6x and 4.3-8.9x, which overlap far too closely for a threshold; the
+    /// spread was scheduler noise on a few tens of microseconds, and summing several
+    /// extracts attacks it directly rather than hiding it behind a rounder number.
+    const HOLD_SCALING_LIMIT: u128 = 3;
+
+    /// How many extracts each side of the ratio averages over.
+    ///
+    /// Both hold measurements are a few tens of microseconds, where scheduler noise
+    /// is a large fraction of a single sample. Summing several extracts before
+    /// taking the ratio shrinks that without changing what is being measured, since
+    /// the count — the thing the ratio is *about* — is identical in every repeat.
+    const HOLD_MEASUREMENT_REPEATS: usize = 5;
+
+    /// Spawns `count` live particles around the player and returns the `Sim` and a
+    /// camera to extract them with.
+    fn sim_with_particles(count: i32) -> (Sim, Camera) {
         let mut sim = Sim::new(test_config());
         let origin = sim.player().position;
         sim.particles_mut(|p| {
@@ -6518,11 +6558,48 @@ mod tests {
                 [origin.x, origin.y, origin.z],
                 [0.5, 0.5, 0.5],
                 0.02,
-                HOLD_MEASUREMENT_PARTICLES,
+                count,
             );
         });
         let camera = sim.camera(1.0);
         (sim, camera)
+    }
+
+    /// [`sim_with_particles`] at the full [`HOLD_MEASUREMENT_PARTICLES`].
+    fn sim_with_many_particles() -> (Sim, Camera) {
+        sim_with_particles(HOLD_MEASUREMENT_PARTICLES)
+    }
+
+    /// Guarded nanoseconds for one `extract_particles` over `count` particles.
+    fn guarded_ns_for_extract(count: i32) -> (u64, usize) {
+        let (mut sim, camera) = sim_with_particles(count);
+        sim.reset_lock_holds();
+        let mut alive = 0;
+        for _ in 0..HOLD_MEASUREMENT_REPEATS {
+            alive = sim.extract_particles(&camera).alive;
+        }
+        (sim.lock_holds().total_ns, alive)
+    }
+
+    /// Guarded nanoseconds for the **pre-fix shape** over `count` particles: the
+    /// whole extract run inside the write guard.
+    ///
+    /// `light` is the offline arm (`self.net == None`), so this *understates* the
+    /// old hold — the live arm additionally took a chunk-store lock per particle
+    /// inside it.
+    fn guarded_ns_for_prefix_shape(count: i32) -> (u64, usize) {
+        let (mut sim, camera) = sim_with_particles(count);
+        sim.reset_lock_holds();
+        let mut alive = 0;
+        for _ in 0..HOLD_MEASUREMENT_REPEATS {
+            alive = lodestone_ecs::hold_write(sim.ecs(), |w| {
+                w.resource_mut::<ParticleSim>()
+                    .0
+                    .extract(&camera, 0.0, &|_, _, _| None)
+            })
+            .alive;
+        }
+        (sim.lock_holds().total_ns, alive)
     }
 
     /// **The measurement §4.1(c) could not make.**
@@ -6535,45 +6612,65 @@ mod tests {
     /// measuring the duration is the species of vacuous test `CLAUDE.md` names, so
     /// this is the number.
     ///
-    /// The assertion is a **ratio against the call's own wall time**, not an
-    /// absolute nanosecond ceiling: an absolute bound is a statement about this
-    /// machine and fails on a slower one (or under a loaded CI), whereas both sides
-    /// of a ratio are measured in the same run on the same core. Expected value is
-    /// a fraction of a percent; the threshold is 25%, i.e. two orders of margin.
+    /// The assertion is a ratio of **guarded time at two particle counts**, not a
+    /// ratio against the call's own wall time.
+    ///
+    /// It used to be the latter — guarded < 25% of wall — and that instrument was
+    /// wrong in a way worth recording, because it looked like the careful choice.
+    /// The reasoning was that an absolute nanosecond ceiling is a statement about
+    /// one machine, whereas both sides of a ratio are measured in the same run; the
+    /// doc claimed an expected value of "a fraction of a percent" against a 25%
+    /// threshold, i.e. two orders of margin.
+    ///
+    /// Measured, the real figure was **27-33%**, so the test failed 5 runs in 6
+    /// standing still. Worse, and this is the part that makes it a bad instrument
+    /// rather than a mistuned one: the guarded work is O(1) while the wall time is
+    /// O(N), so the ratio is not scale-free at all — and *load* inflates wall time
+    /// far more than it inflates four lock acquisitions. **A busier machine made
+    /// this test more likely to pass.** It went green inside the full suite, where
+    /// contention stretched the wall time, and red standalone. "Green in the batch"
+    /// was therefore never evidence of anything.
+    ///
+    /// What the property actually says is that the guard does not span the
+    /// *per-particle* work — a statement about **scaling**. So: extract over
+    /// [`HOLD_MEASUREMENT_PARTICLES_SMALL`] and over ten times as many, and require
+    /// the guarded time not to grow with the count. Both measurements sit in one
+    /// run under the same load, and neither is compared to a wall clock.
     ///
     /// Its negative control is
     /// [`the_pre_fix_shape_of_extract_particles_fails_the_hold_bound`], which
     /// reproduces the old shape and must fail this same bound.
     #[test]
     fn extract_particles_does_not_hold_the_world_guard_across_the_per_particle_work() {
-        let (mut sim, camera) = sim_with_many_particles();
-
-        sim.reset_lock_holds();
-        let started = std::time::Instant::now();
-        let frame = sim.extract_particles(&camera);
-        let wall = started.elapsed();
-        let holds = sim.lock_holds();
+        let (small_ns, small_alive) = guarded_ns_for_extract(HOLD_MEASUREMENT_PARTICLES_SMALL);
+        let (large_ns, large_alive) = guarded_ns_for_extract(HOLD_MEASUREMENT_PARTICLES);
 
         // The *world*-species guard: the flaw in a vacuous duration test lives in
         // the input, not the assert. An extract over an empty engine would satisfy
-        // the ratio below trivially and prove nothing, so assert the volume first.
+        // the bound below trivially, so assert the volume first — at both ends,
+        // since the ratio is meaningless if either side did no work.
         assert!(
-            frame.alive >= HOLD_MEASUREMENT_PARTICLES as usize,
-            "the measurement is only meaningful over real particle volume; alive={}",
-            frame.alive
+            small_alive >= HOLD_MEASUREMENT_PARTICLES_SMALL as usize
+                && large_alive >= HOLD_MEASUREMENT_PARTICLES as usize,
+            "the measurement needs real volume at both ends; alive={small_alive} and {large_alive}"
+        );
+        // A clock that cannot see the small case cannot produce a ratio either.
+        assert!(
+            small_ns > 0,
+            "the hold meter reported 0 ns over {small_alive} particles, so no ratio below is \
+             meaningful — the meter, not the guard, is what failed"
         );
         eprintln!(
-            "extract_particles over {} particles: wall {:?}, guarded {} ns across {} holds \
-             (longest {} ns)",
-            frame.alive, wall, holds.total_ns, holds.holds, holds.longest_ns
+            "extract_particles guarded time: {small_ns} ns over {small_alive} particles, \
+             {large_ns} ns over {large_alive} — ratio {:.2}x for a 10x count \
+             (bound {HOLD_SCALING_LIMIT}x)",
+            large_ns as f64 / small_ns as f64
         );
         assert!(
-            u128::from(holds.total_ns) * 4 < wall.as_nanos(),
-            "the `World` guard must not span the per-particle work: guarded {} ns of a {} ns \
-             call over {} particles",
-            holds.total_ns,
-            wall.as_nanos(),
-            frame.alive
+            u128::from(large_ns) < u128::from(small_ns) * HOLD_SCALING_LIMIT,
+            "the `World` guard must not span the per-particle work: guarded time grew from \
+             {small_ns} ns to {large_ns} ns for a 10x particle count, which scales with the \
+             count rather than staying flat"
         );
     }
 
@@ -6584,41 +6681,37 @@ mod tests {
     /// This is deliberately hand-written rather than a switch on `Sim`: a test
     /// switch would have to survive in production code, and what needs proving is
     /// that the detector distinguishes two shapes, not that a flag works.
+    ///
+    /// Under the scaling formulation this control is *stronger* than it was against
+    /// wall time. Holding the guard across the extract makes the guarded time equal
+    /// the work, so it is O(N) and lands near the full 10x — whereas the old
+    /// wall-time form asked it to exceed 25% of a quantity it *was*, which is
+    /// nearly tautological and would have been satisfied by any hold at all.
     #[test]
     fn the_pre_fix_shape_of_extract_particles_fails_the_hold_bound() {
-        let (mut sim, camera) = sim_with_many_particles();
-
-        sim.reset_lock_holds();
-        let started = std::time::Instant::now();
-        // Exactly what `extract_particles` used to do. `light` is the offline arm
-        // (`self.net == None`), so this control *understates* the old hold — the
-        // live arm additionally took a chunk-store lock per particle inside it.
-        let frame = lodestone_ecs::hold_write(sim.ecs(), |w| {
-            w.resource_mut::<ParticleSim>()
-                .0
-                .extract(&camera, 0.0, &|_, _, _| None)
-        });
-        let wall = started.elapsed();
-        let holds = sim.lock_holds();
+        let (small_ns, small_alive) =
+            guarded_ns_for_prefix_shape(HOLD_MEASUREMENT_PARTICLES_SMALL);
+        let (large_ns, large_alive) = guarded_ns_for_prefix_shape(HOLD_MEASUREMENT_PARTICLES);
 
         assert!(
-            frame.alive >= HOLD_MEASUREMENT_PARTICLES as usize,
-            "same input volume as the positive case; alive={}",
-            frame.alive
+            small_alive >= HOLD_MEASUREMENT_PARTICLES_SMALL as usize
+                && large_alive >= HOLD_MEASUREMENT_PARTICLES as usize,
+            "same input volume as the positive case; alive={small_alive} and {large_alive}"
         );
+        assert!(small_ns > 0, "the hold meter reported 0 ns over {small_alive} particles");
         eprintln!(
-            "pre-fix shape over {} particles: wall {:?}, guarded {} ns across {} holds \
-             (longest {} ns)",
-            frame.alive, wall, holds.total_ns, holds.holds, holds.longest_ns
+            "pre-fix shape guarded time: {small_ns} ns over {small_alive} particles, \
+             {large_ns} ns over {large_alive} — ratio {:.2}x for a 10x count \
+             (must reach {HOLD_SCALING_LIMIT}x)",
+            large_ns as f64 / small_ns as f64
         );
         assert!(
-            u128::from(holds.total_ns) * 4 >= wall.as_nanos(),
-            "the detector must fire on the shape it exists to reject; it reported only {} ns \
-             guarded of a {} ns call, so the bound in \
+            u128::from(large_ns) >= u128::from(small_ns) * HOLD_SCALING_LIMIT,
+            "the detector must fire on the shape it exists to reject: holding the guard across \
+             the extract grew guarded time only from {small_ns} ns to {large_ns} ns for a 10x \
+             particle count, so the bound in \
              `extract_particles_does_not_hold_the_world_guard_across_the_per_particle_work` \
-             is not discriminating",
-            holds.total_ns,
-            wall.as_nanos()
+             is not discriminating"
         );
     }
 
