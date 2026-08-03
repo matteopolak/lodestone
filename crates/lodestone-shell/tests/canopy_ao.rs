@@ -75,7 +75,7 @@ use std::path::PathBuf;
 use lodestone::mesher::{ColumnSource, SectionKey, mesh_snapshot_models, snapshot_section_in};
 use lodestone_assets::{ResourceManager, ResourceSource, ZipSource};
 use lodestone_model::BlockStateRegistry;
-use lodestone_render::{BlockModels, ModelMesh, SkyDefault, blocks_json_registry};
+use lodestone_render::{BlockModels, BlocksJsonRegistry, ModelMesh, SkyDefault, blocks_json_registry};
 use lodestone_world::{
     ChunkColumn, ChunkPos, ColumnLight, Heightmaps, LoadedChunk, PaletteKind, World,
 };
@@ -134,13 +134,14 @@ fn load_models(root: &std::path::Path) -> BlockModels {
     BlockModels::build(&manager, &registry).expect("bake block models")
 }
 
-fn registry(root: &std::path::Path) -> BlockStateRegistry {
+// `BlockStateRegistry` is a *trait*; the concrete registry is `BlocksJsonRegistry`.
+fn registry(root: &std::path::Path) -> BlocksJsonRegistry {
     blocks_json_registry(&root.join("generated/reports/blocks.json")).expect("blocks.json")
 }
 
 /// First state id of `name` that is not waterlogged, out of the real report — so
 /// no state id is hand-typed and the fixture survives a data bump's renumbering.
-fn state_id(reg: &BlockStateRegistry, name: &str) -> u32 {
+fn state_id(reg: &impl BlockStateRegistry, name: &str) -> u32 {
     for id in 0..reg.state_count() {
         let Some(state) = reg.resolve(id) else {
             continue;
@@ -156,7 +157,7 @@ fn state_id(reg: &BlockStateRegistry, name: &str) -> u32 {
     panic!("{name} present in blocks.json");
 }
 
-fn air_id(reg: &BlockStateRegistry) -> u32 {
+fn air_id(reg: &impl BlockStateRegistry) -> u32 {
     state_id(reg, "minecraft:air")
 }
 
