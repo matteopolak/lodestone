@@ -42,6 +42,10 @@ pub mod block_resolver;
 pub mod blocks_json;
 pub mod camera;
 pub mod caps;
+/// Vanilla's **fancy** cloud mesh — `clouds.png` voxelized into cells and the
+/// visible faces extruded. The `FANCY` counterpart to
+/// [`sky::cloud_plane_geometry`]'s flat `FAST` quad; pure geometry, no GPU.
+pub mod cloud_mesh;
 pub mod crack;
 pub mod crack_pipeline;
 pub mod crack_resolver;
