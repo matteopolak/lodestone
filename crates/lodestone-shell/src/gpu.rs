@@ -273,6 +273,18 @@ pub struct RenderState {
     /// world in via [`RenderState::set_block_entity_source`] — the same
     /// "unset means draw nothing" convention every other source here uses.
     block_entity_source: BlockEntitySource,
+    /// The rain/snow pass, built once `textures/environment/{rain,snow}.png` are
+    /// available. `None` — no `client.jar`, a headless test, or simply before
+    /// [`RenderState::install_weather`] runs — draws no precipitation, the same
+    /// "no pass installed, nothing extra drawn" convention [`Self::sky`] uses.
+    ///
+    /// Note the *darkening* half of weather does not live here at all: rain and
+    /// thunder reach pixels through the sky/fog colours and the `sky_darken`
+    /// source, all of which `crate::app` composes before it calls
+    /// [`Self::set_fog`] / [`Self::set_sky_darken_source`]. So a build with no
+    /// jar still gets a correctly darkened storm — it just gets no visible
+    /// droplets, which is the honest degradation.
+    weather: Option<lodestone_render::WeatherRenderer>,
 }
 
 impl RenderState {
@@ -480,6 +492,9 @@ impl RenderState {
             // No chests until the shell installs a world source; see
             // `set_block_entity_source`.
             block_entity_source: BlockEntitySource::default(),
+            // No rain/snow droplets until the shell installs the two environment
+            // textures; see `install_weather`.
+            weather: None,
             // A calm sky blue, so terrain reads clearly against it.
             clear: wgpu::Color {
                 r: SKY_COLOR[0] as f64,
@@ -653,6 +668,88 @@ impl RenderState {
     #[must_use]
     pub fn has_screen_effects(&self) -> bool {
         self.screen_effects.is_some()
+    }
+
+    /// Install the rain/snow pass from the two already-decoded environment
+    /// textures — same caller/IO split as [`install_sky`](Self::install_sky).
+    ///
+    /// `depth_format` is taken from this state's own depth buffer rather than
+    /// asked for: the pass draws inside the existing block pass, so a mismatch
+    /// would be a wgpu validation error at draw time and there is exactly one
+    /// right answer.
+    pub fn install_weather(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color_format: wgpu::TextureFormat,
+        textures: &lodestone_render::WeatherTextures,
+    ) {
+        self.weather = Some(lodestone_render::WeatherRenderer::new(
+            device,
+            queue,
+            color_format,
+            lodestone_render::DEPTH_FORMAT,
+            textures,
+        ));
+    }
+
+    /// Whether the rain/snow pass is installed. Same reason as
+    /// [`has_sky`](Self::has_sky).
+    ///
+    /// A `false` here with a non-zero rain level is a *jar* problem, not a wiring
+    /// problem — the darkening still reaches pixels. `weather_columns() > 0` with
+    /// this `false` is the state that draws nothing while claiming to.
+    #[must_use]
+    pub fn has_weather(&self) -> bool {
+        self.weather.is_some()
+    }
+
+    /// Upload this frame's precipitation columns. Must run **before**
+    /// [`render`](Self::render), like [`prepare_particles`](Self::prepare_particles)
+    /// and for the same reason: buffers cannot be created mid-pass.
+    ///
+    /// `instances` must come from [`lodestone_render::column_instance`] over a
+    /// [`lodestone_render::extract_columns`] result, and `rain_count` from
+    /// [`lodestone_render::rain_count`] over that same (rain-first-sorted) list.
+    /// The two travel together because the sort order is what makes the split
+    /// meaningful; passing a count from a differently-ordered list textures snow
+    /// as rain.
+    ///
+    /// A no-op with no pass installed, so a jar-less caller need not branch.
+    pub fn prepare_weather(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        instances: &[lodestone_render::WeatherInstance],
+        rain_count: usize,
+        camera: &Camera,
+    ) {
+        if let Some(weather) = &mut self.weather {
+            weather.prepare(device, queue, instances, rain_count, camera);
+        }
+    }
+
+    /// Columns uploaded by the last [`prepare_weather`](Self::prepare_weather),
+    /// i.e. what the next frame will submit. `0` with no pass installed.
+    ///
+    /// Exposed for the same reason [`sky_darken`](Self::sky_darken) is: "the rain
+    /// is not drawing" has two causes — no columns extracted, or columns extracted
+    /// into no pass — and they look identical on screen.
+    #[must_use]
+    pub fn weather_columns(&self) -> usize {
+        self.weather.as_ref().map_or(0, |w| w.count())
+    }
+
+    /// Of [`weather_columns`](Self::weather_columns), how many are rain rather
+    /// than snow. `0` with no pass installed.
+    ///
+    /// Worth surfacing separately: with the biome-climate registry lane still
+    /// missing (see [`lodestone_render::WeatherProbe::precipitation`]) this is
+    /// currently *always* equal to `weather_columns`, and the day it stops being
+    /// is the day snow started working.
+    #[must_use]
+    pub fn weather_rain_columns(&self) -> usize {
+        self.weather.as_ref().map_or(0, |w| w.rain_count())
     }
 
     /// Upload the stitched particle sheet and rebind the particle pass to it
@@ -1738,6 +1835,27 @@ impl RenderState {
             stats.particles_drawn = self.particles.count();
             stats.particles_from_sheet = self.particles.sheet_count();
             stats.particle_sheet_atlas_bound = self.particle_sheet_atlas.is_some();
+
+            // Precipitation after the debris, for exactly the reason the debris is
+            // after the terrain: alpha-blended with depth write off, so it needs a
+            // depth buffer that already holds every opaque surface or rain shows
+            // through walls. Before the outline, which is a UI-ish overlay and
+            // should read over the weather rather than be rained on.
+            //
+            // Vanilla runs this as its own pass against a dedicated
+            // `WEATHER_TARGET` (`WeatherEffectRenderer.render`) because it feeds
+            // its transparency-sorting chain; this client has no such chain, so a
+            // second pass would only cost a depth attachment. See
+            // `lodestone_render::weather_pipeline`'s module doc.
+            if let Some(weather) = &self.weather {
+                weather.draw(&mut pass);
+                if weather.count() > 0 {
+                    // Two draws when the frame is mixed rain and snow, one
+                    // otherwise — the pass skips an empty range itself.
+                    stats.draw_calls += usize::from(weather.rain_count() > 0)
+                        + usize::from(weather.count() > weather.rain_count());
+                }
+            }
 
             if outline.is_some() {
                 self.outline.draw(&mut pass);

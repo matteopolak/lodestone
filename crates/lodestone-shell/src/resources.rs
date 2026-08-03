@@ -354,6 +354,40 @@ pub fn load_screen_effects(
     }
 }
 
+/// Load the two precipitation sheets (`textures/environment/rain.png`,
+/// `textures/environment/snow.png`) for the weather pass.
+///
+/// Same shape as [`load_sky`] and [`load_screen_effects`] — fail-open, `None` on a
+/// jar-less run or a pack missing either texture — with one difference worth
+/// naming: unlike those two, this returns the **decoded images** rather than a
+/// built renderer, because the weather pass needs the depth format of the
+/// caller's own depth buffer and `crate::gpu::RenderState::install_weather` is the
+/// only thing that knows it.
+///
+/// A `None` here is *not* "no weather": rain and thunder still darken the sky,
+/// the fog and the lightmap, because that half is composed in `crate::app` from
+/// scalars and needs no textures at all. Only the visible droplets are lost.
+#[must_use]
+pub fn load_weather_textures() -> Option<lodestone_render::WeatherTextures> {
+    let root = asset_root()?;
+    let manager = open_client_jar(&root)?;
+    match lodestone_render::load_weather_textures(&manager) {
+        Ok(textures) => {
+            tracing::info!(
+                target: "assets",
+                rain = format!("{}x{}", textures.rain.width, textures.rain.height),
+                snow = format!("{}x{}", textures.snow.width, textures.snow.height),
+                "loaded vanilla rain/snow textures"
+            );
+            Some(textures)
+        }
+        Err(e) => {
+            tracing::warn!(target: "assets", "load weather textures from {}: {e}", root.display());
+            None
+        }
+    }
+}
+
 /// The **loose** GUI textures the title screen needs, as
 /// `(lookup id, in-pack path)` pairs for
 /// [`GuiAtlas::build_with_extras`](lodestone_render::GuiAtlas::build_with_extras).

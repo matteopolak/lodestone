@@ -76,6 +76,8 @@ pub mod texture;
 pub mod translucency;
 pub mod vertex;
 pub mod visibility;
+pub mod weather;
+pub mod weather_pipeline;
 pub mod world;
 
 #[cfg(feature = "window")]
@@ -202,6 +204,16 @@ pub use translucency::{RenderLayer, SortViewpoint, TranslucentMesh};
 pub use vertex::{BYTES_PER_VERTEX, PackedVertex, VertexFields};
 pub use visibility::{
     SectionCoord, SectionVisibility, VisibilityGraph, compute_visibility, walk_visible,
+};
+pub use weather::{
+    DEFAULT_WEATHER_RADIUS, FullBrightRainProbe, LIGHTNING_FLASH_TICKS, Precipitation,
+    RainAmbience, RainSound, WeatherColumn, WeatherInstance, WeatherProbe, WeatherState,
+    column_instance, column_offset_table, extract_columns, lightning_flash_linear,
+    lightning_flash_srgb, precipitation_for_temperature, rain_count, weather_darken_linear,
+    weather_darken_srgb, weather_sky_light_factor,
+};
+pub use weather_pipeline::{
+    WeatherAssetError, WeatherRenderer, WeatherTextures, load_weather_textures,
 };
 pub use world::{
     BlockClassifier, ChunkSectionView, SectionLight, SkyDefault, UniformLight, WorldSectionLight,

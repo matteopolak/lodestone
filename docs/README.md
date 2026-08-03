@@ -603,6 +603,18 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   protocol hop after all: both ends are built, `entry_names` has no caller outside
   its own crate, and the 66 biome files hold only 16 distinct sky colours, with
   `plains` and `swamp` byte-identical so the obvious gate discriminator is vacuous.
+- [Weather](./weather.md) — rain, the storm darkening of sky/fog/lightmap, and the
+  lightning flash. `ClientEvent::WeatherChanged` was a **fourth** island in `net.rs`'s
+  `forward`: decoded, hermetically tested since it was written, and consumed by
+  nothing in any of the three routers. Also why the levels ride a shared cell rather
+  than `NetUpdate` (~20 superseded messages a second otherwise), why the arm still
+  lives in the router anyway, three traps that each look like a bug on this side and
+  are not — vanilla's own `START_RAINING` → `0.0` inversion, thunder always being
+  multiplied by rain (a stale non-zero thunder level arrives on **every** join), and
+  the `SKY_LIGHT_FACTOR` layer split that stops a full storm being darkened twice —
+  and exactly what blocks snow: biome ids reach the client but biome *climate* does
+  not, so vanilla's temperature predicate is built and tested with no caller that has
+  real input.
 - [Served session liveness](./served-session-liveness.md) — keep-alive (vanilla's
   own 15s interval and disconnect-on-timeout, not two different numbers), the
   day/night clock actually advancing over a live connection instead of a

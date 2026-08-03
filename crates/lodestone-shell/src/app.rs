@@ -796,6 +796,197 @@ impl ContinuousTimeOfDay {
     }
 }
 
+/// How long a lightning flash is held, in wall-clock time.
+///
+/// [`lodestone_render::LIGHTNING_FLASH_TICKS`] is 5 game ticks, which is 250 ms at
+/// the standard 20 ticks/sec. Timed off the wall clock rather than the tick clock
+/// because the two consumers are a per-*frame* render source and a per-frame fog
+/// composition, neither of which has a tick edge to hang a countdown on — the same
+/// reason [`ContinuousTimeOfDay`] extrapolates rather than stepping.
+const LIGHTNING_FLASH_HOLD: Duration = Duration::from_millis(
+    (lodestone_render::LIGHTNING_FLASH_TICKS as u64) * 1000 / 20,
+);
+
+/// Resolves the net thread's raw weather scalars into a
+/// [`lodestone_render::WeatherState`], and times the lightning flash.
+///
+/// One of these is shared (`Arc`) between the `set_sky_darken_source` closure and
+/// `redraw`'s per-frame fog/column composition, so both halves of "weather" read
+/// the **same** state on the same frame. Two independent reads of the cell would
+/// be almost identical and occasionally not, and a lightmap disagreeing with the
+/// sky it is lit by is exactly the class of bug that reads as a shader problem.
+///
+/// `Mutex` for the same reason [`ContinuousTimeOfDay`] uses one: the render
+/// source's trait bound is `Fn`, not `FnMut`.
+#[derive(Debug)]
+struct WeatherTracker {
+    cell: crate::net::SharedWeather,
+    flash: std::sync::Mutex<(u64, Option<Instant>)>,
+}
+
+impl WeatherTracker {
+    fn new(cell: crate::net::SharedWeather) -> Self {
+        Self {
+            cell,
+            flash: std::sync::Mutex::new((0, None)),
+        }
+    }
+
+    /// This frame's weather.
+    ///
+    /// The two levels are handed to `WeatherState` **raw** and it does the
+    /// clamping and the `thunder × rain` composition — see
+    /// `lodestone_render::weather`'s module doc for why composing them here
+    /// instead would black out a clear sky on join.
+    fn state(&self) -> lodestone_render::WeatherState {
+        let snapshot = self.cell.snapshot();
+        let mut state = lodestone_render::WeatherState::clear();
+        state.apply_rain_level(snapshot.rain_level);
+        state.apply_thunder_level(snapshot.thunder_level);
+
+        let now = Instant::now();
+        let mut flash = self
+            .flash
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if flash.0 != snapshot.lightning_seq {
+            // A new bolt (or several — the seq can jump by more than one between
+            // frames; one flash either way, which is also what vanilla shows).
+            *flash = (snapshot.lightning_seq, Some(now));
+        }
+        if let Some(started) = flash.1 {
+            if now.duration_since(started) < LIGHTNING_FLASH_HOLD {
+                state.flash();
+            } else {
+                // Cleared rather than left set, so a long session does not keep
+                // re-reading a stale `Instant` every frame.
+                flash.1 = None;
+            }
+        }
+        state
+    }
+}
+
+/// The world knowledge [`lodestone_render::extract_columns`] needs, resolved from
+/// **one** light sample per frame rather than one per column.
+///
+/// # Why one sample, and what it costs
+///
+/// Vanilla samples a heightmap, a biome and a lightmap **per column** (441 of each
+/// at the default radius, `WeatherEffectRenderer.java:72-88`), reading a level it
+/// owns directly. This client reaches the world through
+/// [`crate::net::entity_light_at`], which takes the client's world lock **per
+/// call**; 441 locks per frame at 60 fps is not a trade worth making for a first
+/// landing, so the probe is built from a single sample at the camera and answers
+/// every column from it.
+///
+/// The three divergences, in order of how visible they are:
+///
+/// * **No per-column terrain height.** `column_top` is `None`, so every column
+///   spans `camera_y ± radius` instead of stopping at the ground. Invisible — the
+///   pass is depth-tested, so sub-surface fragments are occluded — but it costs
+///   vertices that vanilla would not draw. Closing it needs a `column_height`
+///   accessor on `ClientHandle`; the heightmaps are already decoded into
+///   `lodestone_world::LoadedChunk::heightmaps` and nothing reads them yet.
+/// * **Sky visibility is the camera's, not the column's.** In a cave the camera's
+///   own sky light is 0 and the whole pass draws nothing, which is right; standing
+///   at a cave *mouth* it draws rain across the cavern, which is wrong. Vanilla's
+///   per-column `canSeeSky` is what fixes it, and it needs the same heightmap
+///   accessor.
+/// * **One light level for the whole square.** Rain seen through a shaded gully is
+///   as bright as rain in the open. Barely visible in practice: rain is drawn
+///   outdoors, where sky light is uniform.
+///
+/// Rain-versus-snow is **not** in that list, because it is not an approximation
+/// here — it is missing data. See
+/// [`lodestone_render::WeatherProbe::precipitation`].
+struct ShellWeatherProbe {
+    /// The already-resolved lightmap term at the camera, weather included.
+    light: f32,
+    /// Whether any sky light reaches the camera. `false` draws no precipitation at
+    /// all, which is the cave case.
+    sky_visible: bool,
+}
+
+impl lodestone_render::WeatherProbe for ShellWeatherProbe {
+    fn column_top(&self, _x: i32, _z: i32) -> Option<i32> {
+        None
+    }
+
+    fn precipitation(&self, _x: i32, _y: i32, _z: i32) -> lodestone_render::Precipitation {
+        if self.sky_visible {
+            // Always rain, never snow. This is the honest state of the biome
+            // lane, not a choice: `ClientRegistries` keeps only each biome's
+            // `sky_color`, so there is no `temperature` to decide with. The
+            // predicate itself
+            // (`lodestone_render::precipitation_for_temperature`) is vanilla's and
+            // is unit-tested; it has no caller with real input yet.
+            lodestone_render::Precipitation::Rain
+        } else {
+            lodestone_render::Precipitation::None
+        }
+    }
+
+    fn light(&self, _x: i32, _y: i32, _z: i32) -> f32 {
+        self.light
+    }
+}
+
+/// This frame's precipitation quads and the rain/snow split point, ready for
+/// [`crate::gpu::RenderState::prepare_weather`].
+///
+/// A free function, not a `WindowApp` method: `redraw` holds a live `&mut` borrow
+/// of `self.render` across the call site, so any `&self` method would be a second
+/// borrow of the same struct.
+///
+/// The two returned values travel together on purpose. `extract_columns` sorts
+/// rain-first so the pass can bind two textures over one buffer, and the count is
+/// only meaningful against *that* ordering — a count taken from a differently
+/// sorted list textures snow as rain with no error anywhere.
+fn weather_columns_for_frame(
+    weather: &lodestone_render::WeatherState,
+    camera: &lodestone_render::Camera,
+    tick: u64,
+    probe: &dyn lodestone_render::WeatherProbe,
+) -> (Vec<lodestone_render::WeatherInstance>, usize) {
+    let camera_pos = [
+        f64::from(camera.position.x),
+        f64::from(camera.position.y),
+        f64::from(camera.position.z),
+    ];
+    // The animation phase is driven by the **tick** clock, not by frame time.
+    // `rain_column`'s scroll is `-(ticks + offset + partial) / 32 * speed`, so
+    // feeding it a frame counter makes the fall speed frame-rate dependent — the
+    // defect `entities.rs`'s
+    // `limb_swing_tracks_per_tick_travel_not_the_interpolation_gap` records for the
+    // walk cycle. `partial_ticks` is 0.0 rather than the real sub-tick alpha: at
+    // 3-4 texture tiles per tick the sub-tick smoothing is below one texel, and
+    // `Sim` exposes no partial tick to this layer.
+    let columns = lodestone_render::extract_columns(
+        weather,
+        lodestone_render::DEFAULT_WEATHER_RADIUS,
+        tick as i64,
+        0.0,
+        camera_pos,
+        probe,
+    );
+    let rain = lodestone_render::rain_count(&columns);
+    let offsets = lodestone_render::column_offset_table();
+    let instances = columns
+        .iter()
+        .map(|c| {
+            lodestone_render::column_instance(
+                c,
+                camera_pos,
+                &offsets,
+                lodestone_render::DEFAULT_WEATHER_RADIUS,
+                weather.rain_level(),
+            )
+        })
+        .collect();
+    (instances, rain)
+}
+
 struct WindowApp {
     config: Config,
     sim: Sim,
@@ -898,6 +1089,21 @@ struct WindowApp {
     /// debug-overlay counter — the crafting result slot itself is always the
     /// server's, never a local match (see `docs/crafting.md`).
     recipe_book: Option<RecipeBook>,
+    /// The world's weather, resolved from the net thread's cell once per frame.
+    /// `None` before a session exists; installed alongside the other render
+    /// sources by [`WindowApp::install_session_render_sources`] and cleared with
+    /// the session, so a fresh connect never inherits the last one's storm.
+    /// The rain **ambience** is deliberately absent from this struct. Its cadence
+    /// lives in [`lodestone_render::RainAmbience`] (vanilla's `rainSoundTime`,
+    /// unit-tested), but it has **no producer**, because the only `ShellAudio` in
+    /// the process is a private field on `Sim` with no public play method. Adding
+    /// one `pub fn play_local_sound(&mut self, name: &str, category, pos, volume,
+    /// pitch)` to `crate::sim::Sim` — forwarding to `self.audio` exactly as the
+    /// `NetUpdate::Sound` arm at `sim.rs:4722` already does — is the whole
+    /// remaining wiring. Recorded here rather than left as two dead fields, per
+    /// `CLAUDE.md`'s island rule: an unused field reads as an oversight, a named
+    /// blocker does not.
+    weather: Option<Arc<WeatherTracker>>,
 }
 
 impl WindowApp {
@@ -941,6 +1147,9 @@ impl WindowApp {
             applied_fog,
             ecs,
             recipe_book: None,
+            // No session yet, so no weather cell to read; see
+            // `install_session_render_sources`.
+            weather: None,
         }
     }
 
@@ -1145,6 +1354,14 @@ impl WindowApp {
         let Some(net_handle) = self.sim.net().map(crate::net::NetClient::shared_handle) else {
             return;
         };
+        // The weather cell, cloned out for the same reason `shared_handle` is: the
+        // `NetClient` is moved into `Sim::attach_net` and the closures below outlive
+        // it. Re-created on every connect so a new session starts clear.
+        let weather = self
+            .sim
+            .net()
+            .map(|net| Arc::new(WeatherTracker::new(net.shared_weather())));
+        self.weather = weather.clone();
         if let Some(render) = self.render.as_mut() {
             let handle = net_handle.clone();
             // Terrain and mobs must read the same clock: `RenderState` folds this
@@ -1157,10 +1374,24 @@ impl WindowApp {
             // already-derived factor.
             let sky_clock = net_handle;
             let continuous_time_of_day = ContinuousTimeOfDay::new();
+            // Weather rides *this* lane rather than getting one of its own.
+            // `EnvironmentAttributes.SKY_LIGHT_FACTOR` is a single attribute in
+            // vanilla too: the time-of-day curve is its base and
+            // `WeatherAttributes`' two layers modify it
+            // (`WeatherAttributes.java:19`, `:30`), so a separate uniform would be
+            // a second writer of one value and the two would drift. This is the
+            // exact `sky_darken` `lodestone_render::light`'s module doc derives,
+            // and terrain, mobs and the first-person arm all read it through the
+            // same fog lane — so one line here darkens all three under a storm.
+            let darken_weather = weather.clone();
             render.set_sky_darken_source(move || {
-                clock
-                    .get()
-                    .map(|h| lodestone_render::entity::sky_darken_for_time_of_day(h.world_time().1))
+                let base = clock.get().map(|h| {
+                    lodestone_render::entity::sky_darken_for_time_of_day(h.world_time().1)
+                })?;
+                Some(match &darken_weather {
+                    Some(w) => lodestone_render::weather_sky_light_factor(base, &w.state()),
+                    None => base,
+                })
             });
             render.set_entity_light_source(move |feet| {
                 crate::net::entity_light_at(
@@ -1200,6 +1431,16 @@ impl WindowApp {
                 && let Some(fx) = crate::resources::load_screen_effects(device, queue, format)
             {
                 render.install_screen_effects(fx);
+            }
+            // The rain/snow pass: same shape and same `has_*` re-connect guard as
+            // the two above. Note this is only the *droplets* — a jar-less run
+            // still darkens correctly, because that half went in through
+            // `set_sky_darken_source` and `set_fog` above.
+            if let Some(render) = self.render.as_mut()
+                && !render.has_weather()
+                && let Some(textures) = crate::resources::load_weather_textures()
+            {
+                render.install_weather(device, queue, format, &textures);
             }
         }
         self.install_outline_source();
@@ -1717,7 +1958,50 @@ impl WindowApp {
         // re-uploading only when it changes (crossing a water/lava surface) so a
         // submerged eye dissolves terrain into short water/lava fog and the
         // surface restores the render-distance sky fog.
-        let desired_fog = self.sim.fog_settings();
+        //
+        // Weather darkens *both* ends of the gradient before the change check, so
+        // the storm reaches the sky disc's centre, its horizon, the terrain fog and
+        // the below-horizon clear colour from one place. Doing it after would leave
+        // the clear colour bright and put a hard clear-vs-fog seam at the horizon,
+        // which is exactly what `set_clear_color`'s own doc warns about.
+        //
+        // A ramping rain level therefore re-uploads the fog uniform every tick
+        // rather than only on a fluid crossing. That is intended: the ramp is
+        // ±0.01/tick over ~100 ticks (`ServerLevel.java:762-768`), and a
+        // change-detected upload that ignored it would render a storm at clear-sky
+        // colours until the player happened to swim.
+        let weather_state = self.weather.as_ref().map(|w| w.state());
+        let desired_fog = {
+            let base = self.sim.fog_settings();
+            match &weather_state {
+                Some(w) => {
+                    let rain = w.rain_level();
+                    let thunder = w.thunder_level();
+                    let flashing = w.flashing();
+                    // Vanilla's layer order: the flash tint is added by
+                    // `ClientLevel.addEnvironmentAttributeLayers` and the weather
+                    // darkening by `WeatherAttributes.addBuiltinLayers` on top, so
+                    // a bolt during a storm brightens a sky that is *then* darkened
+                    // — not the other way round, which would wash the flash out.
+                    let sky = lodestone_render::weather_darken_linear(
+                        lodestone_render::lightning_flash_linear(base.sky_color, flashing),
+                        rain,
+                        thunder,
+                    );
+                    let fog = lodestone_render::weather_darken_linear(
+                        lodestone_render::lightning_flash_linear(base.color, flashing),
+                        rain,
+                        thunder,
+                    );
+                    lodestone_render::fog::FogSettings {
+                        color: fog,
+                        sky_color: sky,
+                        ..base
+                    }
+                }
+                None => base,
+            }
+        };
         if self.applied_fog != Some(desired_fog) {
             render.set_fog(desired_fog, self.config.render_distance);
             // The clear colour must never disagree with the fog colour it is
@@ -1741,6 +2025,55 @@ impl WindowApp {
         render.prepare_particles(device, queue, &self.sim.particle_instances(), &camera);
         let tick = self.sim.tick_count();
         render.update_animation(queue, tick);
+
+        // Precipitation columns. Inlined rather than a `self.` method because
+        // `render` is a live `&mut` borrow of `self.render` for the rest of this
+        // function, so any `&self` method call here is a second borrow; the pure
+        // half lives in `weather_columns_for_frame` instead.
+        //
+        // Skipped entirely in clear weather — `extract_columns` returns empty on a
+        // zero rain level, and the light sample below is the one world lock this
+        // costs, so a clear frame pays nothing.
+        {
+            let (columns, rain_columns) = weather_state
+                .as_ref()
+                .filter(|w| w.any_precipitation())
+                .map(|w| {
+                    // ONE light sample per frame, at the eye, reused for every
+                    // column — see `ShellWeatherProbe`'s doc for the three
+                    // divergences that buys and why 441 world locks per frame was
+                    // not the trade to make first. `sky_darken()` is the
+                    // weather-folded factor the terrain and entity passes are
+                    // already using this frame, so the rain cannot be lit by a
+                    // different sky than the blocks it falls past.
+                    let packed = self
+                        .sim
+                        .net()
+                        .map(crate::net::NetClient::shared_handle)
+                        .and_then(|h| {
+                            crate::net::entity_light_at(
+                                &h,
+                                camera.position.x.floor() as i32,
+                                camera.position.y.floor() as i32,
+                                camera.position.z.floor() as i32,
+                            )
+                        });
+                    let probe = ShellWeatherProbe {
+                        light: lodestone_render::light::light_term(
+                            packed.unwrap_or(lodestone_render::ENTITY_FULLBRIGHT),
+                            render.sky_darken(),
+                        ),
+                        // No sample at all is "world not loaded yet", which must
+                        // read as open sky: a `false` here would make the very
+                        // first rainy frames after a join silently empty, which is
+                        // indistinguishable from the pass being unwired.
+                        sky_visible: packed.is_none_or(|p| ((p >> 4) & 0x0F) > 0),
+                    };
+                    weather_columns_for_frame(w, &camera, tick, &probe)
+                })
+                .unwrap_or_default();
+            render.prepare_weather(device, queue, &columns, rain_columns, &camera);
+        }
         // The underwater/fire overlay pass's per-frame input (issues #108,
         // #112). `eye_in_water` is the *same* `PhysicsState` predicate the
         // submerged fog and the air-bubble row already read
@@ -2194,10 +2527,21 @@ impl ApplicationHandler for WindowApp {
             // packets so the cloud scroll advances smoothly instead of
             // stepping once a second.
             let continuous_time_of_day = ContinuousTimeOfDay::new();
+            // See `install_session_render_sources` for why weather rides the
+            // `sky_darken` lane rather than getting its own uniform. Installed on
+            // this path too, or a `--connect` launch renders a storm at full
+            // daylight brightness while a menu-launched session does not: the
+            // duplicated-source hazard this whole function's doc warns about.
+            let weather = Arc::new(WeatherTracker::new(net.shared_weather()));
+            self.weather = Some(weather.clone());
             render.set_sky_darken_source(move || {
-                clock
-                    .get()
-                    .map(|h| lodestone_render::entity::sky_darken_for_time_of_day(h.world_time().1))
+                let base = clock.get().map(|h| {
+                    lodestone_render::entity::sky_darken_for_time_of_day(h.world_time().1)
+                })?;
+                Some(lodestone_render::weather_sky_light_factor(
+                    base,
+                    &weather.state(),
+                ))
             });
             render.set_entity_light_source(move |feet| {
                 crate::net::entity_light_at(
@@ -2227,6 +2571,13 @@ impl ApplicationHandler for WindowApp {
                     crate::resources::load_screen_effects(gpu.device(), gpu.queue(), format)
             {
                 render.install_screen_effects(fx);
+            }
+            // See `install_session_render_sources`: the rain/snow pass, from the
+            // same local GPU handles.
+            if !render.has_weather()
+                && let Some(textures) = crate::resources::load_weather_textures()
+            {
+                render.install_weather(gpu.device(), gpu.queue(), format, &textures);
             }
         }
         // No target requested: stay on `Screen::MainMenu`, which `UiState::new`
