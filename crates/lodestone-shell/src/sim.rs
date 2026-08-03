@@ -1191,6 +1191,21 @@ pub struct Sim {
     /// only "somebody is looking in this chest", and the *angle* is a client-side
     /// accumulator — see `crate::block_entities::ChestLids`.
     chest_lids: crate::block_entities::ChestLids,
+
+    /// This frame's item pickups (`take_item_entity`), awaiting the fly-to-collector
+    /// animation — issue #365.
+    ///
+    /// A **frame-scoped batch**, not persistent state: [`Self::poll_net`] folds
+    /// every `NetUpdate::ItemPickup` into it and drains the whole lot into
+    /// `crate::entities::begin_item_pickup` once, at the end of the same call, so a
+    /// burst of pickups (walking through a pile of drops) takes one ECS write guard
+    /// rather than one per item. The animation state itself lives in the one
+    /// `World`, as `crate::entities::PickupAnimations`.
+    ///
+    /// `PickupFeed` had a correct, tested `apply`/`drain` and **no caller anywhere**
+    /// before this field existed; it is reused rather than reimplemented for that
+    /// reason.
+    pickups: lodestone_game::mining::PickupFeed,
 }
 
 impl Sim {
@@ -1435,6 +1450,7 @@ impl Sim {
             // rather than a silently disabled feature.
             view_bobbing: true,
             chest_lids: crate::block_entities::ChestLids::new(),
+            pickups: lodestone_game::mining::PickupFeed::new(),
         };
         sim.refresh_mesh_policy();
         sim
@@ -4442,6 +4458,12 @@ impl Sim {
                     // direction) and is dropped by `apply_block_event`.
                     self.chest_lids.apply_block_event(pos, b0, b1);
                 }
+                NetUpdate::ItemPickup(event) => {
+                    // Issue #365. Accumulated, not acted on here: the drain at the
+                    // end of this function needs a `&mut World` guard and there is
+                    // no reason to take one per collected item.
+                    self.pickups.apply(&event);
+                }
                 NetUpdate::Teleport {
                     pos,
                     rotation,
@@ -4744,6 +4766,31 @@ impl Sim {
                     self.set_phase(SessionPhase::Ended(format!("net error: {e}")));
                 }
             }
+        }
+
+        // Start this frame's pickup animations (issue #365) — **inside `poll_net`,
+        // ahead of `fold_entities`, and that ordering is the whole trick.**
+        // `handleTakeItemEntity` removes the item entity in the same breath as it
+        // spawns the animation, so by the time `Sim::step` reaches `fold_entities`
+        // the server has stopped reporting the item and `fold_snapshots` prunes its
+        // render track and its `ItemStacks` entry. `begin_item_pickup` reads both.
+        // Deferring this by even one call site draws nothing, silently.
+        let pickups = self.pickups.drain();
+        if !pickups.is_empty() {
+            self.write(|w| {
+                for pickup in pickups {
+                    // `false` is "the item was not tracked on the render side" —
+                    // no stack ever reported, or the track already pruned. Nothing
+                    // to animate, and that is the pre-#365 behaviour rather than a
+                    // failure worth logging every time somebody walks over an
+                    // unreported drop.
+                    let _ = crate::entities::begin_item_pickup(
+                        w,
+                        pickup.item_entity_id,
+                        pickup.collector_id,
+                    );
+                }
+            });
         }
     }
 

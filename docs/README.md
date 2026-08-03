@@ -142,6 +142,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   landed — one of which was then cited as the root cause of four separate issues.
   The stack count now reaches `EntityDraw::count` with no model dependency; the
   multi-copy jittered draw itself is still a specified, unlanded patch.
+- [Item pickup animation](./item-pickup-animation.md) — the 3-tick fly-to-collector
+  flight (issue #365): why the item entity is **removed immediately** and what flies
+  is a frozen copy, the quadratic ease that spends half the flight on a quarter of
+  the distance, `getEyeY()` being absolute rather than an offset (read as an offset
+  it aims 32 blocks underground), the missing arm in `net.rs`'s `forward` that left a
+  correct decode and a tested fold reaching zero pixels, and why the local player
+  needs a second collector lookup that a mob does not.
 - [Thrown projectiles](./thrown-projectiles.md) — the nine `ThrownItemRenderer`
   entities (snowball, egg, pearl, potions, fireballs, eye of ender) as camera-facing
   billboards of their own item model, why the billboard rotation is *derived* from
@@ -169,6 +176,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   working build. Also issue #74: why the held item stayed lit as if it were noon
   after dark while the arm right next to it correctly dimmed — one `FogUniform`
   never carrying the world's sky-darken factor, not a missing light sample.
+- [Held-item equip animation](./held-item-equip-animation.md) — the dip-and-raise on a
+  hotbar change (issue #366): the real 26.2 field names (`mainHandHeight`, *not* the
+  `equippedProgress` every reference including the issue cites), the ±0.4-per-tick
+  ramp and the 300 ms swap, why the visible item is exchanged at the **bottom** of the
+  dip and why branching the arm/item fork on the *selected* item instead produces a
+  recognisably wrong animation, the count-and-components half of vanilla's retrigger
+  predicate that a bare item id cannot see, and the `#[derive(Default)]` that would
+  have drawn every test's bare arm 0.6 blocks off the bottom of frame.
 - [Entity metadata: the item field](./entity-metadata-item.md) — decoding the
   `ITEM_STACK` serializer so a dropped item knows what it is, why the item codec
   is shared rather than duplicated, and the one place the decoder deliberately
