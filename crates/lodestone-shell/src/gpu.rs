@@ -223,6 +223,16 @@ pub struct RenderState {
     /// pass. Empty (bare arm) until the shell wires it in via
     /// [`RenderState::set_main_hand_source`].
     main_hand: MainHandSource,
+    /// Vanilla's `ItemInHandRenderer` swap state (issue #366): which held item is
+    /// *drawn* — which lags [`Self::main_hand`] across a hotbar change — and how far
+    /// the hand is lowered.
+    ///
+    /// Stepped by [`RenderState::set_main_hand_source`], which is the shell's one
+    /// per-frame `&mut self` hop; read by `prepare_first_person_hand` for both the
+    /// item and the bare-arm branch. Its default is "fully equipped, empty hand", so
+    /// a caller that never installs a main-hand source sees exactly the pre-#366
+    /// behaviour.
+    equip: first_person::HeldItemEquip,
     outline_shape: OutlineShapeSource,
     /// The sky pass (disc/sun/moon/stars/clouds), built once the vanilla
     /// celestial atlas and cloud texture are available. `None` — no
@@ -452,6 +462,10 @@ impl RenderState {
             // An empty hand until the shell installs a source; see
             // `set_main_hand_source`.
             main_hand: MainHandSource::default(),
+            // Fully equipped and holding nothing: `Default` is the resting state, so
+            // the first `set_main_hand_source` seeds rather than animating from a
+            // dipped hand. See `HeldItemEquip::last`.
+            equip: first_person::HeldItemEquip::default(),
             outline_shape: OutlineShapeSource::default(),
             // No sky until the shell installs one; see `install_sky`.
             sky: None,
@@ -803,11 +817,37 @@ impl RenderState {
     /// render.set_main_hand_source(move || held.clone());
     /// # }
     /// ```
+    ///
+    /// # This also steps the equip/swap animation (issue #366)
+    ///
+    /// A setter with a side effect, deliberately, and worth reading before moving
+    /// it. Vanilla's swap state (`ItemInHandRenderer.mainHandItem` /
+    /// `mainHandHeight`) needs to see the selected item *change*, once per unit of
+    /// time. This call is exactly that observation: the shell re-installs the source
+    /// every in-world frame with this frame's selection, it is the only `&mut self`
+    /// hop on that path, and [`RenderState::render`] takes `&self` so the state
+    /// cannot be advanced there.
+    ///
+    /// The alternative — a second per-frame setter carrying an already-computed
+    /// height — would have needed a new `app.rs` install to do anything at all, and
+    /// a source nobody installs draws nothing: the island `CLAUDE.md` §1 names.
+    /// Advancing here means the animation is live for every caller that already
+    /// draws a held item, including the existing GPU gates, with no new wiring.
+    ///
+    /// The source is stored first and then read back through
+    /// `MainHandSource::value`, so the equip state observes exactly the value
+    /// `prepare_first_person_hand` would have seen — one spelling of "the selected
+    /// item", not two. The closure is invoked
+    /// once per install and must stay cheap and side-effect-free (a clone of an
+    /// `Option<ResourceLocation>`, as the example above), which it already is for
+    /// every caller.
     pub fn set_main_hand_source(
         &mut self,
         f: impl Fn() -> Option<lodestone_assets::ResourceLocation> + Send + Sync + 'static,
     ) {
         self.main_hand = MainHandSource(Some(Box::new(f)));
+        let selected = self.main_hand.value();
+        self.equip.advance(selected.as_ref());
     }
 
     /// Install the source for this frame's block entities (chests, issue #23).

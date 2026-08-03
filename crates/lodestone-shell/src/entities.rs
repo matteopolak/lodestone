@@ -13,7 +13,9 @@
 //! | [`advance_interp_clocks`] | [`Update`] / `FrameSet::Interpolate` |
 //! | [`tick_item_physics`] | [`GameTick`] / `TickSet::Physics` |
 //! | [`tick_walk_animation`] | [`GameTick`] / `TickSet::Animate` |
+//! | [`tick_pickup_animations`] | [`GameTick`] / `TickSet::Animate` |
 //! | [`extract_entity_draws`] | [`Extract`] / `ExtractSet::Entities` |
+//! | [`extract_pickup_draws`] | [`Extract`] / `ExtractSet::Entities`, after the above |
 //!
 //! [`EntityInterpolator`] is the driver for those schedules and nothing else: it
 //! owns the `World`, runs the schedules in order, and hands out the extracted
@@ -130,7 +132,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use bevy_ecs::prelude::{Component, Entity, IntoScheduleConfigs, Query, Res, ResMut, Resource};
+use bevy_ecs::prelude::{
+    Component, Entity, IntoScheduleConfigs, Query, Res, ResMut, Resource, With,
+};
 use bevy_ecs::world::World;
 use glam::Vec3;
 use lodestone_assets::ResourceLocation;
@@ -138,7 +142,9 @@ use lodestone_ecs::app::{App, Plugin};
 use lodestone_ecs::entity::{
     AttackSwing, EntityIndex, HurtTime, ItemUse, MinecraftEntityId, MobState,
 };
-use lodestone_ecs::player::{CollisionSource, PlayerCollision, Profile};
+use lodestone_ecs::player::{
+    CollisionSource, LocalPlayer, PhysicsState, PlayerCollision, Profile,
+};
 use lodestone_ecs::{CorePlugin, Extract, ExtractSet, FrameSet, GameTick, TickSet, Update};
 use lodestone_entity::item_entity::{ITEM_AIR_DRAG, ITEM_GRAVITY, ItemMotion};
 use lodestone_entity::pose::{
@@ -799,9 +805,294 @@ pub struct ItemStacks(HashMap<i32, TrackedStack>);
 #[derive(Resource, Debug, Default)]
 pub struct TrackIndex(HashMap<i32, Entity>);
 
-/// This frame's extracted draw list, written by [`extract_entity_draws`].
+/// This frame's extracted draw list, written by [`extract_entity_draws`] and
+/// appended to by [`extract_pickup_draws`].
 #[derive(Resource, Debug, Default)]
 pub struct ExtractedDraws(Vec<EntityDraw>);
+
+// ---------------------------------------------------------------------------
+// The item-pickup fly-to-collector animation (issue #365)
+// ---------------------------------------------------------------------------
+
+/// `ItemPickupParticle.LIFE_TIME` — the pickup flight lasts **3 ticks** (150 ms).
+///
+/// Read from `net/minecraft/client/particle/ItemPickupParticle.java`:
+/// `protected static final int LIFE_TIME = 3;`, and `tick()` removes the particle
+/// on the tick `life` reaches it.
+const PICKUP_LIFE_TICKS: f32 = 3.0;
+
+/// The height above the collector's feet the item flies *to*, as a fraction of
+/// the collector's eye height.
+///
+/// `ItemPickupParticle.updatePosition()` targets
+/// `(target.getY() + target.getEyeY()) / 2.0`, and `Entity.getEyeY()` is
+/// `position.y + eyeHeight` (`Entity.java:3798`) — an **absolute** Y, not an
+/// offset. So the midpoint is `y + eyeHeight / 2`, i.e. this constant times the
+/// eye height above the feet. Reading `getEyeY()` as a relative offset instead
+/// would target `y + (y + 1.62)/2`, which for a player at y = 64 is 32 blocks
+/// below the floor.
+const PICKUP_TARGET_EYE_FRACTION: f32 = 0.5;
+
+/// A **remote** collector's assumed eye height, for the
+/// [`PICKUP_TARGET_EYE_FRACTION`] midpoint.
+///
+/// `lodestone_physics::player::DEFAULT_EYE_HEIGHT` is `Avatar.DEFAULT_EYE_HEIGHT`
+/// (`1.62`). The local player's own live `PhysicsState` eye height is used instead
+/// when the collector *is* us (it tracks the swimming/crawling pose), so this
+/// constant only covers other players and mobs — a fox or an allay picking
+/// something up aims 0.81 blocks up rather than at its own smaller midpoint. An
+/// approximation, and the only one in this animation: the render-side track set
+/// carries no per-entity eye height, and inventing one from [`RenderScale`] would
+/// be a guess dressed as a measurement.
+const REMOTE_COLLECTOR_EYE_HEIGHT: f32 = lodestone_physics::player::DEFAULT_EYE_HEIGHT;
+
+/// One in-flight item-pickup animation: a **frozen copy** of a collected item,
+/// travelling from where the item was drawn to the entity that collected it.
+///
+/// # Why a copy, and not the item entity retargeted
+///
+/// This is the part that is easy to get backwards. Vanilla does **not** keep the
+/// item entity alive and lerp it: `ClientPacketListener.handleTakeItemEntity`
+/// extracts the item's render state (`extractEntity(from, 1.0F)`), hands that
+/// *copy* to a new `ItemPickupParticle`, and then calls
+/// `this.level.removeEntity(packet.getItemId(), RemovalReason.DISCARDED)` in the
+/// same breath. The entity is gone before the animation starts; what flies is a
+/// snapshot.
+///
+/// That is also why this is a resource rather than a component: by the time
+/// `fold_snapshots` next runs, the server has stopped reporting the item and the
+/// render track is pruned. An animation hung off the track would be despawned
+/// with it, one frame in.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PickupAnimation {
+    /// The collected item entity's id, kept only as the bob-phase key
+    /// [`lodestone_render::entity::item_bob_offset`] hashes — the same phase the
+    /// item had before it was picked up, so the copy does not visibly re-roll.
+    pub item_entity_id: i32,
+    /// Which item model to draw.
+    pub item: ResourceLocation,
+    /// The collected stack size, carried for parity with [`EntityDraw::count`].
+    pub count: u32,
+    /// The item's render scale at capture.
+    pub scale: f32,
+    /// Where the item was **drawn** when the pickup arrived — not its last
+    /// reported position. `ItemPickupParticle` is constructed from the extracted
+    /// render state, which is the interpolated pose, so this is the same quantity.
+    pub start: Vec3,
+    /// Frozen `ageInTicks`, so the bob/spin stop the instant the copy is taken —
+    /// vanilla's render state is extracted once and never re-extracted.
+    pub age_ticks: f32,
+    /// The collecting entity's id. **Any** entity, not just the local player:
+    /// vanilla animates a mob's pickup too.
+    pub collector_id: i32,
+    /// Whole ticks elapsed, `0..PICKUP_LIFE_TICKS`.
+    pub life: f32,
+}
+
+/// Every item-pickup animation currently in flight.
+///
+/// Started by [`begin_item_pickup`] (from `Sim::poll_net`, off
+/// `ClientEvent::ItemPickup`), advanced by [`tick_pickup_animations`] at 20 Hz,
+/// and drawn by [`extract_pickup_draws`] — which is the answer to "what consumes
+/// this": it appends an ordinary [`EntityDraw`] per animation, so the flight goes
+/// through the *existing* dropped-item geometry path
+/// (`RenderState::prepare_item_geometry`) with no new pipeline.
+#[derive(Resource, Debug, Default)]
+pub struct PickupAnimations(Vec<PickupAnimation>);
+
+impl PickupAnimations {
+    /// How many animations are in flight.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether nothing is in flight.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The in-flight animations, for a test or a debug overlay.
+    #[must_use]
+    pub fn animations(&self) -> &[PickupAnimation] {
+        &self.0
+    }
+}
+
+/// Vanilla's `ItemPickupParticleGroup.ParticleInstance.fromParticle` easing:
+///
+/// ```text
+/// time = (life + partialTick) / 3.0;  time *= time;
+/// pos  = lerp(time, itemRenderState.pos, targetPos)
+/// ```
+///
+/// So the interpolant is **quadratic in the age fraction** — an ease-*in*: the
+/// item leaves slowly and arrives fast. A linear lerp is the obvious wrong
+/// reading and is visibly different at the midpoint: at `life + partial = 1.5`
+/// the correct fraction is `0.25`, a linear one gives `0.5`.
+#[must_use]
+fn pickup_progress(life: f32, partial_tick: f32) -> f32 {
+    let t = ((life + partial_tick) / PICKUP_LIFE_TICKS).clamp(0.0, 1.0);
+    t * t
+}
+
+/// Start a pickup animation for `item_entity_id` flying to `collector_id`.
+///
+/// Returns `false` — and starts nothing — when the item was not tracked on the
+/// render side, either because its stack was never reported or because the track
+/// has already been pruned. Drawing a flight from a made-up start point would be
+/// worse than drawing none, and "no animation" is exactly the pre-#365
+/// behaviour rather than a new failure.
+///
+/// **Must be called before the frame's `fold_snapshots`.** `Sim::poll_net` runs
+/// ahead of `Sim::fold_entities`, so the track the server has stopped reporting
+/// is still present here and gone one call later — that ordering is the whole
+/// reason this is a function called from `poll_net` rather than a system.
+pub fn begin_item_pickup(world: &mut World, item_entity_id: i32, collector_id: i32) -> bool {
+    let Some(stack) = world
+        .resource::<ItemStacks>()
+        .0
+        .get(&item_entity_id)
+        .cloned()
+    else {
+        return false;
+    };
+    let Some(entity) = world
+        .resource::<TrackIndex>()
+        .0
+        .get(&item_entity_id)
+        .copied()
+    else {
+        return false;
+    };
+    let Some((start, age_ticks, scale)) = world.get_entity(entity).ok().and_then(|entity| {
+        let from = entity.get::<InterpFrom>()?;
+        let to = entity.get::<InterpTo>()?;
+        let clock = entity.get::<InterpClock>()?;
+        let scale = entity.get::<RenderScale>()?;
+        Some((render_feet(from, to, clock), clock.age, scale.0))
+    }) else {
+        return false;
+    };
+    world
+        .resource_mut::<PickupAnimations>()
+        .0
+        .push(PickupAnimation {
+            item_entity_id,
+            item: stack.id,
+            count: stack.count,
+            scale,
+            start,
+            age_ticks,
+            collector_id,
+            life: 0.0,
+        });
+    true
+}
+
+/// `GameTick` / `TickSet::Animate`: one 20 Hz step of every pickup flight.
+///
+/// `ItemPickupParticle.tick()` is `life++; if (life == 3) remove();` — so an
+/// animation is drawn on ticks 0, 1 and 2 and gone on 3. Advancing this per
+/// *frame* would make the flight last 3 frames (50 ms at 60 fps), the same
+/// frame-rate-dependence `Sim::step`'s note on `chest_lids.tick()` records.
+pub fn tick_pickup_animations(mut pickups: ResMut<PickupAnimations>) {
+    for pickup in &mut pickups.0 {
+        pickup.life += 1.0;
+    }
+    pickups.0.retain(|pickup| pickup.life < PICKUP_LIFE_TICKS);
+}
+
+/// `Extract` / `ExtractSet::Entities`, **after** [`extract_entity_draws`]:
+/// append one [`EntityDraw`] per in-flight pickup at its interpolated position.
+///
+/// This is the consumer that makes the animation reach pixels. It emits a draw
+/// whose `type_path` is [`ITEM_ENTITY_TYPE_PATH`], the same one a live dropped item
+/// emits, so
+/// `RenderState::prepare_item_geometry` picks it up with no change at all on the
+/// GPU side — the flight is an existing draw at a new position, not a new pass.
+///
+/// Ordering matters twice over: [`extract_entity_draws`] **clears**
+/// [`ExtractedDraws`], so running before it would have every pickup wiped in the
+/// same frame it was written — a green-unit-test island of exactly the shape
+/// `CLAUDE.md` §1 describes.
+pub fn extract_pickup_draws(
+    clock: Res<lodestone_ecs::FrameClock>,
+    pickups: Res<PickupAnimations>,
+    index: Res<TrackIndex>,
+    poses: Query<(&InterpFrom, &InterpTo, &InterpClock)>,
+    locals: Query<(&MinecraftEntityId, &PhysicsState), With<LocalPlayer>>,
+    mut out: ResMut<ExtractedDraws>,
+) {
+    if pickups.0.is_empty() {
+        return;
+    }
+    let partial_tick = clock.interp_alpha.clamp(0.0, 1.0);
+    for pickup in &pickups.0 {
+        let Some(target) = collector_target(pickup.collector_id, &index, &poses, &locals) else {
+            continue;
+        };
+        let feet = pickup.start.lerp(target, pickup_progress(pickup.life, partial_tick));
+        out.0.push(EntityDraw {
+            id: pickup.item_entity_id,
+            type_path: ITEM_ENTITY_TYPE_PATH.to_string(),
+            item: Some(pickup.item.clone()),
+            count: pickup.count,
+            equipment: Vec::new(),
+            wool: None,
+            feet,
+            yaw: 0.0,
+            head_yaw: 0.0,
+            pitch: 0.0,
+            scale: pickup.scale,
+            anim: AnimInput {
+                // Frozen at capture, like the extracted render state it stands
+                // in for. Everything else in `AnimInput` is meaningless for an
+                // item model, which has no skeleton.
+                age_ticks: pickup.age_ticks,
+                ..AnimInput::default()
+            },
+            name_tag: None,
+            hurt: false,
+        });
+    }
+}
+
+/// Where a pickup flies *to*: the collector's `(x, y + eyeHeight/2, z)`.
+///
+/// Resolved fresh every frame rather than captured at pickup time, because
+/// `ItemPickupParticle.updatePosition()` re-reads `target.getX()/getY()` on every
+/// tick — a pickup while walking must chase the collector, not aim at where they
+/// used to be.
+///
+/// Two sources, in order, and the local player needs the second one: it has no
+/// [`RenderKind`]/[`InterpTo`] render track at all (that absence is deliberate —
+/// see `lodestone_ecs::ingest::apply_local_player_login` on why a self-model
+/// stays off the render path), so resolving only through [`TrackIndex`] would
+/// silently animate nothing for **every pickup the player makes**, which is all
+/// of them that matter.
+fn collector_target(
+    collector_id: i32,
+    index: &TrackIndex,
+    poses: &Query<(&InterpFrom, &InterpTo, &InterpClock)>,
+    locals: &Query<(&MinecraftEntityId, &PhysicsState), With<LocalPlayer>>,
+) -> Option<Vec3> {
+    for (id, state) in locals {
+        if id.0 == collector_id {
+            let p = state.0.position;
+            return Some(Vec3::new(
+                p.x as f32,
+                p.y as f32 + state.0.eye_height * PICKUP_TARGET_EYE_FRACTION,
+                p.z as f32,
+            ));
+        }
+    }
+    let entity = index.0.get(&collector_id).copied()?;
+    let (from, to, clock) = poses.get(entity).ok()?;
+    let feet = render_feet(from, to, clock);
+    Some(feet + Vec3::Y * (REMOTE_COLLECTOR_EYE_HEIGHT * PICKUP_TARGET_EYE_FRACTION))
+}
 
 // ---------------------------------------------------------------------------
 // Pose readers
@@ -1519,6 +1810,9 @@ impl Plugin for EntityInterpPlugin {
         app.init_resource::<ItemStacks>();
         app.init_resource::<TrackIndex>();
         app.init_resource::<ExtractedDraws>();
+        // Issue #365. Written by `begin_item_pickup` from `Sim::poll_net`, aged by
+        // `tick_pickup_animations`, drawn by `extract_pickup_draws`.
+        app.init_resource::<PickupAnimations>();
         // `extract_entity_draws` reads `AttackSwing` through this — normally
         // `lodestone_ecs::ingest::IngestPlugin` owns it, but this plugin is
         // also installed alone by `EntityInterpolator::new()` (this module's
@@ -1542,7 +1836,19 @@ impl Plugin for EntityInterpPlugin {
                 .before(tick_walk_animation),
         );
         app.add_systems(GameTick, tick_walk_animation.in_set(TickSet::Animate));
+        app.add_systems(GameTick, tick_pickup_animations.in_set(TickSet::Animate));
         app.add_systems(Extract, extract_entity_draws.in_set(ExtractSet::Entities));
+        // **`.after` is load-bearing, not tidiness.** `extract_entity_draws`
+        // clears `ExtractedDraws`; without the ordering, bevy is free to run this
+        // first and have every appended pickup draw erased in the same frame it
+        // was written — a system that runs, is unit-testable, and reaches zero
+        // pixels.
+        app.add_systems(
+            Extract,
+            extract_pickup_draws
+                .in_set(ExtractSet::Entities)
+                .after(extract_entity_draws),
+        );
     }
 }
 
@@ -1564,6 +1870,9 @@ pub fn reset_entity_tracks(world: &mut World) {
     world.resource_mut::<TrackIndex>().0.clear();
     world.resource_mut::<ItemStacks>().0.clear();
     world.resource_mut::<ExtractedDraws>().0.clear();
+    // A pickup in flight when the session ends has no collector to fly to any
+    // more, and its start point is in a world we are leaving.
+    world.resource_mut::<PickupAnimations>().0.clear();
 }
 
 /// Fold this frame's snapshots into the render-side component set — the free
@@ -2965,4 +3274,232 @@ mod tests {
              prove the positive test's floor is load-bearing; got {final_y}"
         );
     }
+    // ---- the item-pickup fly-to-collector animation (issue #365) ----------
+
+    /// The interpolant is **quadratic** in the age fraction, and the midpoint is
+    /// where that matters: `ItemPickupParticleGroup` computes
+    /// `time = (life + partial) / 3; time *= time`.
+    ///
+    /// A linear lerp — the obvious wrong reading, and the one the issue's own
+    /// summary implies — puts the item at `0.5` of the way across when the truth is
+    /// `0.25`. Half the flight is spent covering the first quarter of the distance,
+    /// which is what makes the pickup read as a snap toward the player rather than a
+    /// glide.
+    #[test]
+    fn the_pickup_ease_is_quadratic_not_linear() {
+        assert!((pickup_progress(0.0, 0.0) - 0.0).abs() < 1e-6);
+        assert!(
+            (pickup_progress(1.5, 0.0) - 0.25).abs() < 1e-6,
+            "halfway through the 3-tick flight the item must be a quarter of the way \
+             there, not half; got {}",
+            pickup_progress(1.5, 0.0)
+        );
+        assert!((pickup_progress(3.0, 0.0) - 1.0).abs() < 1e-6);
+        // Clamped past the end rather than overshooting the collector.
+        assert!((pickup_progress(4.0, 0.0) - 1.0).abs() < 1e-6);
+    }
+
+    /// **The end-to-end gate for #365, and the one that would have caught the
+    /// island.** `begin_item_pickup` → `tick_pickup_animations` → the `Extract`
+    /// schedule → an `EntityDraw` in the list `RenderState::prepare_item_geometry`
+    /// consumes, at the position vanilla's own constants predict.
+    ///
+    /// The item is dropped from the second poll's snapshot list, exactly as the
+    /// server drops it after `take_item_entity`: `fold_snapshots` despawns its track
+    /// and prunes its `ItemStacks` entry, so a draw that still appears afterwards can
+    /// only have come from the animation.
+    ///
+    /// Magnitude, not direction. One tick into the flight the progress is
+    /// `(1/3)² = 1/9`, so with the collector 4 blocks away on `x` and its
+    /// `y + 1.62/2 = 0.81` target height the item must be `4/9 ≈ 0.444` along `x`.
+    /// A linear ease would put it at `4/3 ≈ 1.333` — three times further, and a
+    /// "did it move?" assertion accepts both.
+    ///
+    /// The first poll's `dt` is **exactly `0.0`** so the frame clock banks no
+    /// residual: `interp_alpha` is then `0.0` at the extract below and the predicted
+    /// value is arithmetic rather than a range. A `0.016` there (the obvious "one
+    /// frame") leaves `alpha == 0.32` and moves the answer to `0.19`, which reads as
+    /// a broken ease.
+    #[test]
+    fn a_pickup_draws_the_item_in_flight_toward_its_collector() {
+        const COLLECTOR: i32 = 2;
+        const ITEM: i32 = 1;
+        let collector_feet = Vec3::new(4.0, 0.0, 0.0);
+        let mut interp = EntityInterpolator::new();
+        interp.update(
+            &[
+                item_snap_with(ITEM, Vec3::ZERO, Some(stone())),
+                snap(COLLECTOR, collector_feet, 0.0),
+            ],
+            0.0,
+        );
+        assert!(
+            begin_item_pickup(interp.world_mut(), ITEM, COLLECTOR),
+            "the item was tracked with a reported stack, so a pickup must start"
+        );
+
+        // One tick, with the item gone from the server's report.
+        interp.update(&[snap(COLLECTOR, collector_feet, 0.0)], TICK);
+
+        let draws = interp.draws();
+        let flying: Vec<&EntityDraw> = draws
+            .iter()
+            .filter(|d| d.type_path == ITEM_ENTITY_TYPE_PATH)
+            .collect();
+        assert_eq!(
+            flying.len(),
+            1,
+            "exactly one item draw must survive the prune — the animation's"
+        );
+        let draw = flying[0];
+        assert_eq!(draw.item.as_ref(), Some(&stone()));
+        assert_eq!(draw.id, ITEM, "the bob phase key must stay the item's own id");
+
+        // The target: `(x, y + eyeHeight/2, z)` — `ItemPickupParticle.updatePosition`.
+        let target = Vec3::new(
+            collector_feet.x,
+            collector_feet.y + REMOTE_COLLECTOR_EYE_HEIGHT * PICKUP_TARGET_EYE_FRACTION,
+            collector_feet.z,
+        );
+        let fraction = draw.feet.x / target.x;
+        assert!(
+            (fraction - 1.0 / 9.0).abs() < 1.0e-3,
+            "one tick in, the item must be 1/9 of the way to the collector \
+             (quadratic), not 1/3 (linear); it is at {} of the way, feet {:?}",
+            fraction,
+            draw.feet
+        );
+        assert!(
+            draw.feet.y > 0.0 && draw.feet.y < target.y,
+            "the flight must rise toward the collector's midpoint {} without \
+             overshooting it; y is {}",
+            target.y,
+            draw.feet.y
+        );
+    }
+
+    /// **The executed negative control** for the gate above: with no
+    /// `begin_item_pickup` call, the very same two polls leave **no** item draw at
+    /// all.
+    ///
+    /// Without this, the positive test is satisfied by an item track that simply
+    /// failed to be pruned — which is a different bug with the same symptom, and one
+    /// that would make the "1/9 of the way" assertion fail for the *right* reason
+    /// only by luck.
+    #[test]
+    fn without_a_pickup_event_the_collected_item_simply_disappears() {
+        const COLLECTOR: i32 = 2;
+        const ITEM: i32 = 1;
+        let collector_feet = Vec3::new(4.0, 0.0, 0.0);
+        let mut interp = EntityInterpolator::new();
+        interp.update(
+            &[
+                item_snap_with(ITEM, Vec3::ZERO, Some(stone())),
+                snap(COLLECTOR, collector_feet, 0.0),
+            ],
+            0.0,
+        );
+        interp.update(&[snap(COLLECTOR, collector_feet, 0.0)], TICK);
+        assert!(
+            !interp
+                .draws()
+                .iter()
+                .any(|d| d.type_path == ITEM_ENTITY_TYPE_PATH),
+            "the control must draw no item at all — otherwise the positive gate is \
+             measuring an unpruned track, not an animation"
+        );
+    }
+
+    /// `ItemPickupParticle.tick()` removes the particle when `life` reaches
+    /// `LIFE_TIME == 3`, so the flight lasts exactly three ticks (150 ms) and then
+    /// nothing is drawn. An animation that never expires leaves a copy of every item
+    /// you have ever picked up hovering at your waist.
+    #[test]
+    fn a_pickup_animation_expires_after_exactly_three_ticks() {
+        const COLLECTOR: i32 = 2;
+        const ITEM: i32 = 1;
+        let collector_feet = Vec3::new(4.0, 0.0, 0.0);
+        let mut interp = EntityInterpolator::new();
+        interp.update(
+            &[
+                item_snap_with(ITEM, Vec3::ZERO, Some(stone())),
+                snap(COLLECTOR, collector_feet, 0.0),
+            ],
+            0.0,
+        );
+        assert!(begin_item_pickup(interp.world_mut(), ITEM, COLLECTOR));
+
+        let mut drawn = Vec::new();
+        for _ in 0..5 {
+            interp.update(&[snap(COLLECTOR, collector_feet, 0.0)], TICK);
+            drawn.push(
+                interp
+                    .draws()
+                    .iter()
+                    .filter(|d| d.type_path == ITEM_ENTITY_TYPE_PATH)
+                    .count(),
+            );
+        }
+        assert_eq!(
+            drawn,
+            vec![1, 1, 0, 0, 0],
+            "the flight must be drawn on ticks 1 and 2 and be gone on tick 3 \
+             (`life == LIFE_TIME` removes it before that tick's extract)"
+        );
+        assert!(interp.world().resource::<PickupAnimations>().is_empty());
+    }
+
+    /// A pickup for an item the render side never knew about starts nothing, rather
+    /// than animating from a made-up position.
+    ///
+    /// Both halves are needed and they fail differently: an untracked *id* has no
+    /// start point, and a tracked item with **no reported stack** has no model to
+    /// draw. The second is the common case — `Reported::Unreported` is what a drop
+    /// looks like until its `ITEM_STACK` metadata arrives.
+    #[test]
+    fn a_pickup_for_an_unknown_or_stackless_item_starts_nothing() {
+        let mut interp = EntityInterpolator::new();
+        interp.update(&[item_snap(7, Vec3::ZERO)], 0.0);
+        assert!(
+            !begin_item_pickup(interp.world_mut(), 7, 2),
+            "a tracked item with no reported stack has no model to fly"
+        );
+        assert!(
+            !begin_item_pickup(interp.world_mut(), 999, 2),
+            "an id with no track at all has no start point"
+        );
+        assert!(interp.world().resource::<PickupAnimations>().is_empty());
+    }
+
+    /// A pickup whose collector cannot be resolved draws nothing — and, critically,
+    /// **does not panic and does not leak**: the animation still ages out on
+    /// schedule.
+    ///
+    /// This is the live case where a mob picks something up just as it leaves view
+    /// distance, and it is also the shape of the local-player fallback: if
+    /// `collector_target`'s second lookup were removed, *every* pickup the player
+    /// makes would land here silently.
+    #[test]
+    fn a_pickup_with_no_resolvable_collector_draws_nothing_and_still_expires() {
+        let mut interp = EntityInterpolator::new();
+        interp.update(&[item_snap_with(1, Vec3::ZERO, Some(stone()))], 0.0);
+        assert!(begin_item_pickup(interp.world_mut(), 1, 4242));
+        interp.update(&[], TICK);
+        assert!(
+            !interp
+                .draws()
+                .iter()
+                .any(|d| d.type_path == ITEM_ENTITY_TYPE_PATH),
+            "an unresolvable collector must draw nothing rather than aim at the origin"
+        );
+        for _ in 0..3 {
+            interp.update(&[], TICK);
+        }
+        assert!(
+            interp.world().resource::<PickupAnimations>().is_empty(),
+            "the animation must still expire, or an out-of-range collector leaks one \
+             entry per pickup for the whole session"
+        );
+    }
 }
+

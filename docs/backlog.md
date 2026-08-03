@@ -184,8 +184,13 @@ recurring defect classes, not because they are generically useful — see
 - **HUD animations**: hearts jump and flash on heal/damage, hunger shakes when
   depleting, XP bar flashes on level-up, hotbar selector pop.
 - **Air-supply bubbles** underwater. The submerged flag exists (`69f66c2`).
-- **Item pickup fly-to-player.** `TakeItemEntity` decodes and `PickupFeed` already folds
-  it with tests; **nothing calls it**. Needs a consumer, not adapter work.
+- ~~**Item pickup fly-to-player.**~~ Landed, issue #365 — see
+  [item-pickup-animation.md](./item-pickup-animation.md). The diagnosis here was right
+  (`TakeItemEntity` decoded, `PickupFeed` folded with tests, nothing called it) and the
+  consumer was one arm in `net.rs`'s `forward` plus a resource and two systems in
+  `entities.rs`. One correction to the description this entry inherited from #29: vanilla
+  does **not** retarget the item entity — it removes it immediately and animates a frozen
+  copy of its render state (`ItemPickupParticle`).
 - **Mob equipment.** `SET_EQUIPMENT → EntityEquipmentUpdated → EntityView.equipment →
   nothing`. Unblocked now that item geometry exists; needs `EntityDraw` widened and
   `display.thirdperson_righthand` plumbed.

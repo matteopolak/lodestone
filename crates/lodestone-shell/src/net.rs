@@ -351,6 +351,20 @@ pub enum NetUpdate {
         /// Canonical effect id, namespace stripped.
         effect: String,
     },
+    /// An item entity was collected (`take_item_entity`), for the fly-to-collector
+    /// animation — issue #365.
+    ///
+    /// Carried as the raw [`ClientEvent::ItemPickup`], like [`Self::TitleEvent`]:
+    /// the consumer is [`lodestone_game::mining::PickupFeed`], whose `apply` folds
+    /// a `&ClientEvent` directly, so a re-typed struct variant here would be a
+    /// second spelling of the same three fields.
+    ///
+    /// **This is the animation only, never an inventory change.** The stack that
+    /// actually lands in the player's inventory arrives separately as
+    /// `set_player_inventory`/`container_set_slot`, which `Menus` folds — see
+    /// `PickupFeed`'s own "This is not an inventory" note for why folding a count
+    /// from here would be a second, silently-diverging source of truth.
+    ItemPickup(ClientEvent),
     /// A title/subtitle delta for the shell-owned
     /// [`lodestone_game::player_state::TitleState`] fold.
     TitleEvent(ClientEvent),
@@ -1296,6 +1310,18 @@ fn forward(tx: &Sender<NetUpdate>, event: ClientEvent) -> Result<(), ()> {
             b0,
             b1,
         },
+        // The item-pickup fly-to-collector animation (issue #365), forwarded
+        // **raw** for the same reason `TitleEvent` is: the one consumer is a
+        // `lodestone-game` fold that already takes a `&ClientEvent`
+        // (`lodestone_game::mining::PickupFeed::apply`), and re-typing the three
+        // fields here only to rebuild the event on the far side would put a second
+        // spelling of the same record in the tree.
+        //
+        // Until this arm existed the event fell through the terminal `_ =>` below —
+        // the decode (`v770`'s `TAKE_ITEM_ENTITY`) and the fold (`PickupFeed`) were
+        // both correct, both tested, and reached zero pixels. Third instance of the
+        // island in this one router, after `BLOCK_EVENT`.
+        event @ ClientEvent::ItemPickup { .. } => NetUpdate::ItemPickup(event),
         // The server placing/relocating the player. The shell camera must adopt
         // this authoritative pose — the read-model's own `position()` is an
         // optimistic echo of our outbound moves, so it cannot substitute here.

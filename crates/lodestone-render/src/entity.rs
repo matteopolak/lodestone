@@ -2278,6 +2278,15 @@ pub fn held_item_mesh(
 /// [`Arm::invert`].
 pub const FIRST_PERSON_ARM_Z_ROT: f32 = 0.1;
 
+/// `renderPlayerArm`'s `inverseArmHeight` coefficient on `y`
+/// (`ARM_HEIGHT_SCALE = -0.6F`, applied at `ItemInHandRenderer.java:270`).
+///
+/// Numerically equal to [`FIRST_PERSON_ITEM_EQUIP_DIP`], and deliberately a
+/// separate constant: the two live in different vanilla methods over different base
+/// offsets (`-0.6` for the arm, `-0.52` for the item), so the equality is a
+/// coincidence of 26.2's numbers rather than a shared rule.
+pub const FIRST_PERSON_ARM_EQUIP_DIP: f32 = -0.6;
+
 /// Vertical FOV the first-person arm is projected with, in degrees.
 ///
 /// **Not the player's FOV.** `GameRenderer.renderLevel` sets a *separate*
@@ -2371,11 +2380,6 @@ pub fn hand_projection(aspect: f32) -> Mat4 {
 ///
 /// The dropped terms and why:
 ///
-/// * `inverseArmHeight` is `swapAnimationScale(item) * (1 - lerp(oHeight, height))`
-///   — vanilla's equip/swap raise. It contributes `-0.6 · inverseArmHeight` to `y`.
-///   The shell tracks neither the held stack's identity for the local player nor
-///   the two interpolated heights, so this is `0`: the arm sits permanently at its
-///   fully-equipped height and never dips on a hotbar change.
 /// * `submitHandsWithItems` prefixes `Rx((viewXRot - xBob) · 0.1°)` and
 ///   `Ry((viewYRot - yBob) · 0.1°)`, and `renderItemInHand` prefixes `bobHurt` and
 ///   `bobView`. All four need state the shell does not have (`xBob`/`yBob`, hurt
@@ -2396,6 +2400,33 @@ pub fn hand_projection(aspect: f32) -> Mat4 {
 /// `the_first_person_arm_lands_in_the_bottom_right_of_frame` pins.
 #[must_use]
 pub fn first_person_arm_chain(arm: Arm, attack_anim: f32) -> Mat4 {
+    first_person_arm_chain_with_equip(arm, attack_anim, 0.0)
+}
+
+/// [`first_person_arm_chain`] with vanilla's `inverseArmHeight` — the equip/swap
+/// dip (issue #366).
+///
+/// `renderPlayerArm` (`ItemInHandRenderer.java:270`) translates `y` by
+/// `ySwingPosition + -0.6F + inverseArmHeight * -0.6F`, so the dip coefficient is
+/// [`FIRST_PERSON_ARM_EQUIP_DIP`] and it is **the same `-0.6`** the item chain uses
+/// ([`FIRST_PERSON_ITEM_EQUIP_DIP`]) even though the two chains' *base* offsets
+/// differ (`-0.6` here against the item's `-0.52`). Two constants rather than one
+/// shared alias, because the equality is a coincidence of vanilla's numbers and
+/// not a rule: they sit in different methods and either could move.
+///
+/// `inverse_arm_height` runs `0.0` (fully equipped, at rest) to `1.0` (fully
+/// lowered, mid-swap). Passing a value outside that range is not clamped here —
+/// the caller owns the ramp, and clamping in the matrix would hide a broken one.
+///
+/// [`first_person_arm_chain`] is this function at `0.0` and is kept as the name
+/// every existing caller and gate uses, so adding the dip changed no call site's
+/// behaviour and no test's expected matrix.
+#[must_use]
+pub fn first_person_arm_chain_with_equip(
+    arm: Arm,
+    attack_anim: f32,
+    inverse_arm_height: f32,
+) -> Mat4 {
     let i = arm.invert();
     let ArmSwingTerms {
         x_position,
@@ -2406,7 +2437,7 @@ pub fn first_person_arm_chain(arm: Arm, attack_anim: f32) -> Mat4 {
     } = ArmSwingTerms::new(attack_anim);
     Mat4::from_translation(Vec3::new(
         i * (x_position + 0.640_000_05),
-        y_position - 0.6,
+        y_position - 0.6 + inverse_arm_height * FIRST_PERSON_ARM_EQUIP_DIP,
         z_position - 0.719_999_97,
     )) * Mat4::from_rotation_y((i * 45.0).to_radians())
         * Mat4::from_rotation_y((i * y_rotation * 70.0).to_radians())
@@ -2490,11 +2521,23 @@ impl ArmSwingTerms {
 /// matrix exactly; [`first_person_arm_parts`] returns both indices for one matrix.
 #[must_use]
 pub fn first_person_arm_pose(mesh: &EntityMesh, arm: Arm, attack_anim: f32) -> Option<Mat4> {
+    first_person_arm_pose_with_equip(mesh, arm, attack_anim, 0.0)
+}
+
+/// [`first_person_arm_pose`] with vanilla's `inverseArmHeight` equip dip — see
+/// [`first_person_arm_chain_with_equip`] (issue #366).
+#[must_use]
+pub fn first_person_arm_pose_with_equip(
+    mesh: &EntityMesh,
+    arm: Arm,
+    attack_anim: f32,
+    inverse_arm_height: f32,
+) -> Option<Mat4> {
     let index = mesh.skeleton.index_of(arm.part_name())?;
     let rest = mesh.skeleton.rest_pose();
     let local = *rest.get(index)?;
     Some(
-        first_person_arm_chain(arm, attack_anim)
+        first_person_arm_chain_with_equip(arm, attack_anim, inverse_arm_height)
             * local
             * Mat4::from_rotation_z(arm.invert() * FIRST_PERSON_ARM_Z_ROT),
     )

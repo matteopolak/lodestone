@@ -216,10 +216,12 @@ sample from `RenderState`'s `EntityLightSource` — the same source the mobs use
      `Vec3` here and adding it to `draw.feet` before the existing call — the
      latter needs no render-crate signature change at all.
 
-- **Pickup animation.** `TakeItemEntity` *does* decode — into
-  `ClientEvent::ItemPickup`, folded by `lodestone-game`'s `PickupFeed` — but
-  nothing in the shell consumes that feed, so a collected item vanishes instead
-  of arcing to the collector.
+- **Pickup animation — landed** (issue #365), see
+  [item-pickup-animation.md](./item-pickup-animation.md). The flight reuses this
+  page's draw path exactly: it emits an ordinary `EntityDraw` with
+  `type_path == "item"`, so `prepare_item_geometry` needed no change. This bullet
+  used to read "nothing in the shell consumes that feed, so a collected item
+  vanishes"; the missing hop was one arm in `net.rs`'s `forward`.
 
 ## Configuration
 

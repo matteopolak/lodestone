@@ -169,9 +169,13 @@ any shader math.
   is correct for every item whatever its type; mid-swing a spear gets `WHACK`'s
   motion. Fixing it needs the item's `SwingAnimation` component, which the item
   pipeline does not decode.
-- **`inverseArmHeight` is hardcoded `0.0`**, so the item never dips and rises on a
-  hotbar change. It is `swapAnimationScale(item) · (1 - lerp(oHeight, height))` and
-  the shell tracks neither height — the same gap the bare arm has.
+- **`inverseArmHeight` is live** (issue #366) — see
+  [held-item-equip-animation.md](./held-item-equip-animation.md). This bullet used
+  to read "hardcoded `0.0`, so the item never dips and rises on a hotbar change".
+  `RenderState` now owns vanilla's `ItemInHandRenderer` swap state, and both this
+  pass's branches read it. `swapAnimationScale(item)` is still the vanilla default
+  `1.0` for every item: the per-item-model override needs item-model definitions
+  the item pipeline does not read.
 - **The special-cased poses are all absent here**: bow and crossbow while drawing,
   shield, spyglass, map (one- and two-handed), trident, and the eating/drinking and
   brush animations. Each is its own branch in `submitArmWithItem`. An item in one of
