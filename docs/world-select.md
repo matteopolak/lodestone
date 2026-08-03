@@ -5,13 +5,17 @@
 `Screen::WorldSelect` — vanilla's `SelectWorldScreen`, reached from the title
 screen's **Singleplayer** button. A title, a search field, a world list, and six
 footer buttons: Play Selected World, Create New World, Edit, Delete, Re-Create,
-Back. **Five of the six are present and disabled, Create New World among them**,
-and the list is **empty**.
+Back. **Four of the six are present and disabled, Create New World among them**,
+and the list holds **exactly one** world.
 
 This is issue #397, the fifth child of the menu-framework epic #392, and the first
 consumer of #394's `HeaderAndFooterLayout` — which landed as a knowing exception to
 this repo's island rule precisely so this screen could be the thing that wires it
 to pixels.
+
+**Issue #287 then gave it a world and made Play Selected World live**, so this is
+now the screen a real session starts from. The launch chain itself is documented in
+[`singleplayer.md`](./singleplayer.md); what follows is the screen.
 
 Two files:
 
@@ -101,10 +105,11 @@ position is therefore the real one rather than an approximation of it.
 ### What is disabled, and why
 
 `active = false` is the whole mechanism (see [`menu-widgets.md`](./menu-widgets.md)).
-Vanilla disables four of these itself, for our exact reason —
-`updateButtonStatus(null)` (`SelectWorldScreen.java:159-166`) turns Play, Edit,
-Delete and Re-Create off whenever nothing is selected, and nothing here can be
-selected.
+Vanilla disables Play, Edit, Delete and Re-Create together whenever nothing is
+selected (`updateButtonStatus(null)`, `SelectWorldScreen.java:159-166`), which is
+where three of our four disabled buttons come from — but **not Play**: since #287
+there is always a selection, so Play is active and Edit/Delete/Re-Create are off for
+their own reasons (below).
 
 **The one deviation is Create New World**, which vanilla leaves active: its press is
 `CreateWorldScreen.openFresh` (`:87`), and `CreateWorldScreen` (828 lines) plus
@@ -116,29 +121,39 @@ Rendering Create greyed rather than omitting it is the point of the issue: a
 missing row changes the footer grid's shape, so the screen would read as a
 *different* screen rather than as vanilla with a feature unavailable.
 
-`WorldSelectNav::update_button_status` is vanilla's method with only its
-`summary == null` branch. Its other branch reads `primaryActionActive()`,
+`WorldSelectNav::update_button_status` is vanilla's method collapsed to a constant,
+because the selection is one. Vanilla's non-null branch reads `primaryActionActive()`,
 `canEdit()`, `canRecreate()`, `canDelete()` (`LevelSummary.java:189-211`, overridden
 by `SymlinkLevelSummary`/`CorruptedLevelSummary` at `:273-347`) plus a
-`requiresFileFixing()` tooltip. **None of that is ported**, deliberately: with no
-world storage there is no `LevelSummary` to evaluate it against, and an enum whose
-variants nothing constructs is the island `CLAUDE.md` names as this repo's dominant
-defect. Those line numbers are the lookup for whoever ports it with #287.
+`requiresFileFixing()` tooltip. Only the first is ported, and as a constant `true`:
+`BUNDLED_WORLD` is always the selection and is always playable, while the other three
+ask about a *file* — there is none, and Edit/Delete/Re-Create have no screen to open
+anyway. The rest stays unported rather than modelled-and-unused, because an enum
+whose variants nothing constructs is the island `CLAUDE.md` names as this repo's
+dominant defect. Those line numbers are the lookup for whoever adds world storage.
 
 No tooltip either. `WidgetTooltipHolder` is what makes "disabled with an
 explanation" honest and #393 deferred it to "whatever knows how long the cursor has
 rested"; #395's input layer sees clicks and keys, not hover dwell time, so it is
 still deferred. See [`menu-focus.md`](./menu-focus.md)'s deliberate-gaps list.
 
-### The empty list, and why vanilla has nothing to copy
+### The one row, and why vanilla has nothing to copy
 
-There is no singleplayer world storage in this client — no `LevelStorageSource`, no
-save directory, and the integrated server that would write one is #287. So the list
-has no rows, and this module ships **no `LevelSummary` equivalent**: fabricated rows
-would read as working saves.
+There is still no singleplayer world *storage* in this client — no
+`LevelStorageSource`, no save directory, no save format. What #287 added is the
+**server**: `lodestone_server::IntegratedServer` runs in-process over an in-memory
+duplex, so a world can be played without ever being written. The one row is
+`BUNDLED_WORLD` — a fixed seed for the bundled overworld generator, regenerated
+identically on every launch and never persisted. This module still ships **no
+`LevelSummary` equivalent**; a fabricated *save* would read as a working one, and the
+row's label says "generated, not saved" instead.
+
+One row rather than a list because one is the honest count: with no storage there is
+nothing to enumerate and a second row would have to be invented.
 
 **Vanilla has no empty-list rendering for this screen**, which contradicts the
-obvious guess and is the thing to know before "fixing" this.
+obvious guess. It is worth keeping even now that the list is not empty, because it is
+why the one row looks the way it does.
 `WorldSelectionList.handleNewLevels` (`WorldSelectionList.java:167-183`) switches on
 the list type, and for `SINGLEPLAYER` an empty result calls
 `CreateWorldScreen.openFresh` — it *leaves the screen*. `NoWorldsEntry`
@@ -147,23 +162,27 @@ the list type, and for `SINGLEPLAYER` an empty result calls
 Neither is a state a vanilla player sees on `SelectWorldScreen` with no worlds.
 
 So the choice here is deliberate rather than transcribed: the screen draws
-**`NoWorldsEntry`'s geometry** — one non-selectable entry, a `StringWidget` centred
-in row 0's content box — carrying `NO_WORLDS_MESSAGE`, which names our own gap.
-Vanilla's own two branches are both wrong for us: `openFresh` needs the screen #190
-will build, and a `LoadingHeader` would claim a load that never finishes.
+**`NoWorldsEntry`'s geometry** — one entry, a `StringWidget` centred in row 0's
+content box — carrying `BUNDLED_WORLD.label`. `WorldListEntry`'s own geometry (a
+32×32 icon plus three text lines off a `LevelSummary`, `:494-502`) is the one we
+*cannot* draw, because there is no `LevelSummary` to fill it from.
 
 The centring is exact rather than approximate, and the derivation is short enough to
 keep: `contentXMiddle` is `rowLeft + 2 + 133` and `rowLeft` is `floor(w/2) - 135`,
 so the halves cancel and the centre is the screen's own. The text's top is
 `contentYMiddle - 4`, where the `4` is Java's `9 / 2` and not 4.5.
 
-The message's **length** is a constraint: `NoWorldsEntry`'s `StringWidget` has no
-`maxWidth`, so nothing clips it and a longer string would overhang the 266 px row.
-`the_empty_world_list_message_fits_the_row_it_is_centred_in` pins that.
+The label's **length** is a constraint: `NoWorldsEntry`'s `StringWidget` has no
+`maxWidth`, so nothing clips it and a longer string would overhang the 266 px row —
+44 characters at the jar-less fixed advance.
+`the_world_list_row_label_fits_the_row_it_is_centred_in` pins that.
 
-Because the list has zero selectable rows, `AbstractSelectionList`'s scrolling,
-selection and per-entry hit-testing are **not** ported. #396 is the issue that needs
-a real one, for the server list.
+`AbstractSelectionList`'s scrolling and per-entry hit-testing are still **not**
+ported. With exactly one world, that world is always the selection
+(`WorldSelectNav::selected`), so nothing needs clicking to select — which is the one
+deliberate deviation from vanilla in this screen's *behaviour*, and it is what makes
+Play Selected World active. #396 is the issue that needs a real list, for the server
+screen.
 
 ### Hover is not focus — the first screen where that matters
 
@@ -283,9 +302,10 @@ reachable again the moment this list has a world.
   buttons, and the six rects must be distinct.
 - `a_disabled_world_select_label_lands_on_vanillas_grey` predicts `-6250336` rather
   than asserting "greyer", with the enabled label as the executed control.
-- `the_empty_world_list_draws_its_message_inside_row_zeros_content_rect` is the
-  empty-state assertion, so "there are no worlds" is distinguishable from "the list
-  failed to draw". It reports a **bounding box**, checks the extent is a line of
+- `the_world_list_draws_its_one_row_inside_row_zeros_content_rect` is the list
+  assertion, so "the list has a world" is distinguishable from "the list failed to
+  draw" — since #287 it is also the pixel half of Play Selected World being honest.
+  It reports a **bounding box**, checks the extent is a line of
   text rather than a fill, and runs two controls: the row *below* must be empty, and
   the same band on the **title screen** must be empty — because per `CLAUDE.md` a
   control's premise can be false before the feature exists, and the question "what

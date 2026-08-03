@@ -490,11 +490,15 @@ form, Options and the error screen.
    group.
 8. **No settings screen** (video, controls, sensitivity, render distance). Those
    remain CLI flags.
-9. **Singleplayer enters the shell's local worldgen world, not an integrated
-   server.** `app::launch_singleplayer` is staged and returns
-   `LaunchError::NoServerProtocol` until a versioned `ServerProtocol` exists for
-   `lodestone-server` to serve in-process. The menu's Singleplayer button
-   deliberately drives the working worldgen path rather than the staged launcher.
+9. ~~**Singleplayer enters the shell's local worldgen world, not an integrated
+   server.**~~ Fixed by #287: the title screen's Singleplayer button opens the world
+   list (#397), and **Play Selected World** there runs a real
+   `lodestone_server::IntegratedServer` in-process with the client joining it over an
+   in-memory duplex. `app::launch_singleplayer` resolves the serverbound protocol
+   from `lodestone_registry::server_protocol_for_protocol`, so the shell still names
+   no version. See [`singleplayer.md`](./singleplayer.md). Still **no world storage
+   and no world creation** (#190): the list holds one fixed-seed world that is
+   regenerated rather than saved.
 10. **No "Direct Connect"** — every multiplayer target must be saved as an entry
     first. Since #396 the button is *present and greyed out* in vanilla's own
     position rather than absent, which is the epic's rule for a control this shell

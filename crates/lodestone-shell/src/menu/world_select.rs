@@ -36,47 +36,55 @@
 //! time*, so a `tooltip` field would reach zero pixels. See
 //! `docs/menu-focus.md`'s deliberate-gaps list.
 //!
-//! ## The list is empty, and that is the honest state
+//! ## The list has exactly one world, and no storage behind it
 //!
-//! There is no singleplayer world storage in this client at all — no
-//! `LevelStorageSource`, no save directory, and the integrated server that would
-//! write one is #287. So the list has **no rows**, and this module ships no
-//! `LevelSummary` equivalent: fabricating one would put invented worlds on screen
-//! that read as working saves.
+//! There is still no `LevelStorageSource`, no save directory and no save format
+//! in this client. What #287 added is the *server*: the integrated server can be
+//! started in-process over an in-memory duplex, so a world can be **played**
+//! without ever being written. That is what the one row is —
+//! [`BUNDLED_WORLD`]: a fixed seed handed to `lodestone_server`'s bundled
+//! overworld generator, regenerated identically on every launch and never
+//! persisted.
 //!
-//! **Vanilla has no empty-list rendering for this screen to copy**, which
-//! contradicts the obvious guess and is worth writing down.
-//! `WorldSelectionList.handleNewLevels` (`WorldSelectionList.java:167-183`)
-//! switches on the list type, and for `SINGLEPLAYER` an empty result calls
-//! `CreateWorldScreen.openFresh` — it *leaves the screen*. `NoWorldsEntry`
-//! (`:379-397`) exists but is only reachable from the Realms `UPLOAD_WORLD`
-//! branch, and `LoadingHeader` (`:354-377`) is only up while a
-//! `CompletableFuture` is pending. Neither is a state a vanilla player reaches on
-//! `SelectWorldScreen` with no worlds.
+//! One row rather than a list because one is the honest count: with no storage
+//! there is nothing to enumerate, and a second row would have to be invented.
+//! The row's label says so ("generated, not saved") rather than presenting
+//! itself as a save.
 //!
-//! So the choice here is deliberate rather than transcribed: this screen draws
-//! **`NoWorldsEntry`'s geometry** — one non-selectable entry, a `StringWidget`
-//! centred in row 0's content box — carrying [`NO_WORLDS_MESSAGE`], which names
-//! our own gap instead of pretending to be a vanilla string. Vanilla's own
-//! branches are both wrong for us: `openFresh` needs the screen #190 will build,
-//! and a `LoadingHeader` would claim a load is in progress that never finishes.
+//! **Vanilla has no empty-list rendering for this screen to copy** — worth
+//! keeping even now that the list is not empty, because it is why the one row
+//! looks the way it does. `WorldSelectionList.handleNewLevels`
+//! (`WorldSelectionList.java:167-183`) switches on the list type, and for
+//! `SINGLEPLAYER` an empty result calls `CreateWorldScreen.openFresh` — it
+//! *leaves the screen*. `NoWorldsEntry` (`:379-397`) exists but is only
+//! reachable from the Realms `UPLOAD_WORLD` branch. So the row this screen draws
+//! is **`NoWorldsEntry`'s geometry** — one entry, a `StringWidget` centred in row
+//! 0's content box — rather than `WorldListEntry`'s, whose icon + three text
+//! lines (`:494-502`) describe a `LevelSummary` we have no source for.
 //!
-//! The consequence for the list machinery is that `AbstractSelectionList`'s
-//! scrolling, selection and per-entry hit-testing are **not** ported here. With
-//! zero selectable rows there is nothing for them to do, and #396 is the issue
-//! that needs a real one for the server list.
+//! The consequence for the list machinery is unchanged: `AbstractSelectionList`'s
+//! scrolling and per-entry hit-testing are **not** ported. There is exactly one
+//! world and it is therefore always the selection ([`WorldSelectNav::selected`]),
+//! so nothing needs clicking to select — which is the one deliberate deviation
+//! from vanilla on this screen's *behaviour*, and it is what makes **Play
+//! Selected World** active. #396 is the issue that needs a real list for the
+//! server screen.
 //!
 //! ## What consumes it
 //!
 //! The title screen's Singleplayer button — [`super::nav::MainButton::Singleplayer`]
-//! now calls [`UiState::open_world_select`](super::UiState::open_world_select)
-//! instead of returning `MenuAction::Singleplayer`, which is vanilla's own wiring
-//! (`TitleScreen.java` opens `SelectWorldScreen`; nothing launches a world
-//! straight off the title). One consequence is worth naming: `app.rs`'s staged
-//! `begin_singleplayer` failure path — the honest "the integrated server is not
-//! wired yet" error — is no longer reachable from the menu, because the only
-//! button that produced it now opens this screen and Play Selected World is
-//! inactive. It becomes reachable again the moment #287 gives this list a world.
+//! calls [`UiState::open_world_select`](super::UiState::open_world_select), which
+//! is vanilla's own wiring (`TitleScreen.java` opens `SelectWorldScreen`; nothing
+//! launches a world straight off the title).
+//!
+//! Play Selected World is what launches: it returns
+//! [`WorldSelectOutcome::Play`], `nav.rs` lifts that to
+//! `MenuAction::Singleplayer`, and `app.rs`'s arm calls `begin_singleplayer` →
+//! `launch_singleplayer`, which resolves a server protocol from
+//! `lodestone_registry::server_protocol_for_protocol` and starts the integrated
+//! server. That chain is the whole of #287's shell half, and
+//! `MenuAction::Singleplayer` had **no producer at all** between #397 and #287 —
+//! it was kept as exactly this seam.
 
 use super::edit_box::EditBox;
 use super::focus::{FocusChildren, FocusSet, FocusTarget, KeyEvent, KeyOutcome};
@@ -97,20 +105,44 @@ pub const SEARCH_HINT: &str = "Search...";
 /// the title through as the narration message). Never drawn.
 pub const SEARCH_NARRATION: &str = "Select World";
 
-/// What the one list row says.
+/// The one world this client can play, and everything that is known about it.
 ///
-/// **Not a vanilla string**, deliberately — see the module docs: vanilla has no
-/// empty-singleplayer-list state, so there is no key to transcribe, and every
-/// candidate (`mco.upload.select.world.none` = "No singleplayer worlds found!",
-/// `selectWorld.loading_list` = "Loading World List") would claim something
-/// untrue. This names the actual reason the list is empty, so the screen cannot
-/// be mistaken for a working one with no saves.
+/// Not a save file and not a `LevelSummary`: there is no world storage here (see
+/// the module docs). It is a seed plus a label. Playing it starts
+/// `lodestone_server`'s integrated server over that seed, which regenerates the
+/// identical terrain every launch — so it behaves like the same world each time
+/// without anything being written to disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorldEntry {
+    /// What the list row says. See [`BUNDLED_WORLD`] for the length limit and why
+    /// it is not a vanilla string.
+    pub label: &'static str,
+    /// The world seed, handed to `lodestone_server::overworld_chunk_source`.
+    pub seed: i64,
+}
+
+/// The bundled world.
 ///
-/// Its **length** is a constraint, not a preference: vanilla's `NoWorldsEntry`
-/// wraps a `StringWidget` with no `maxWidth`, so nothing clips it, and a longer
-/// string would visibly overhang the 266 px row it is centred in.
-/// `the_empty_world_list_message_fits_the_row_it_is_centred_in` pins that.
-pub const NO_WORLDS_MESSAGE: &str = "No worlds - this client has no world storage";
+/// The seed is fixed rather than random **on purpose**: a random seed per launch
+/// would make "the world" a different world every time it is opened, which is
+/// worse than not persisting it — a player would notice their surroundings
+/// changing and reasonably read it as a bug. A fixed seed plus a deterministic
+/// generator is the closest thing to persistence available without a save
+/// format, and it is honest because the label says the world is generated.
+pub const BUNDLED_WORLD: WorldEntry = WorldEntry {
+    // **Not a vanilla string.** Vanilla's row would carry a `LevelSummary`'s
+    // name, folder and last-played timestamp, none of which exists here; every
+    // candidate vanilla key would claim something untrue. This names what the
+    // world actually is.
+    //
+    // Its **length** is a constraint, not a preference: vanilla's `NoWorldsEntry`
+    // wraps a `StringWidget` with no `maxWidth`, so nothing clips it, and a
+    // longer string would visibly overhang the 266 px row it is centred in — the
+    // ceiling is 44 characters at the jar-less fixed advance.
+    // `the_world_list_row_label_fits_the_row_it_is_centred_in` pins that.
+    label: "New World (generated, not saved)",
+    seed: 20_260_731,
+};
 
 /// The search box's row index, and its [`FocusSet`] id.
 ///
@@ -134,8 +166,12 @@ pub const FIRST_BUTTON_ROW: usize = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorldSelectButton {
     /// `LevelSummary.PLAY_WORLD` = `selectWorld.select` (`LevelSummary.java:18`).
-    /// Two columns wide. Disabled: vanilla disables it with no selection
-    /// (`:163`), and nothing here can be selected.
+    /// Two columns wide. **Enabled** (issue #287): vanilla's
+    /// `updateButtonStatus` turns this on for a selection whose
+    /// `primaryActionActive()` holds (`:163`), and [`BUNDLED_WORLD`] is always
+    /// the selection because it is the only world. Pressing it starts the
+    /// integrated server — see [`WorldSelectOutcome::Play`] and the module docs'
+    /// "what consumes it".
     Play,
     /// `selectWorld.create`. Two columns wide. Disabled — **the one deviation
     /// from vanilla on this screen**, because its press opens
@@ -187,9 +223,16 @@ impl WorldSelectButton {
     /// Whether the button can be activated — what draws
     /// `widget/button_disabled` with a `-6250336` label and makes both the
     /// keyboard and the mouse step over it. See each variant's docs for why.
+    ///
+    /// This is a constant rather than a function of the selection because the
+    /// selection is a constant: there is exactly one world and it is always
+    /// selected (module docs). If world storage ever lands, Play's answer moves
+    /// into [`WorldSelectNav::update_button_status`] — where vanilla computes it
+    /// — and this method keeps only the buttons whose availability is a property
+    /// of the *client* rather than of a selection.
     #[must_use]
     pub fn enabled(self) -> bool {
-        matches!(self, WorldSelectButton::Back)
+        matches!(self, WorldSelectButton::Play | WorldSelectButton::Back)
     }
 
     /// This button's row index, i.e. its [`FocusSet`] id.
@@ -275,6 +318,12 @@ pub enum WorldSelectOutcome {
     Handled,
     /// Escape, or the Back button: leave for the title screen.
     Close,
+    /// Play Selected World: launch [`BUNDLED_WORLD`] (issue #287).
+    ///
+    /// Carries nothing, because there is one world and the launcher reads
+    /// [`BUNDLED_WORLD`] directly. When a real list arrives this becomes
+    /// `Play(WorldEntry)` and the change is compile-visible at both ends.
+    Play,
 }
 
 /// The world-select screen's live state: its widgets, its focus, and which row
@@ -344,18 +393,21 @@ impl WorldSelectNav {
         nav
     }
 
-    /// `SelectWorldScreen.updateButtonStatus(summary)` (`:159-184`) — and only
-    /// its `summary == null` branch, because there is no selection to have.
+    /// `SelectWorldScreen.updateButtonStatus(summary)` (`:159-184`), collapsed to
+    /// a constant because the selection is one.
     ///
-    /// Vanilla's other branch reads four `LevelSummary` predicates —
+    /// Vanilla's non-null branch reads four `LevelSummary` predicates —
     /// `primaryActionActive()`, `canEdit()`, `canRecreate()`, `canDelete()`
     /// (`LevelSummary.java:189-211`, overridden by its `SymlinkLevelSummary` and
     /// `CorruptedLevelSummary` subclasses at `:273-347`) — plus a
-    /// `requiresFileFixing()` tooltip. None of it is ported: with no world
-    /// storage there is no `LevelSummary` to evaluate it against, and an enum
-    /// whose variants nothing constructs is the island `CLAUDE.md` names as this
-    /// repo's dominant defect. The lines above are the lookup for whoever ports
-    /// it with #287.
+    /// `requiresFileFixing()` tooltip. Only the first is ported, and as a
+    /// constant: [`BUNDLED_WORLD`] is always the selection and is always
+    /// playable, so `primaryActionActive()` is `true`, while the other three ask
+    /// about a *file* — there is none, and Edit/Delete/Re-Create additionally
+    /// have no screen to open (#190). An enum whose variants nothing constructs
+    /// is the island `CLAUDE.md` names as this repo's dominant defect, so the
+    /// predicates stay unported rather than modelled and unused; the lines above
+    /// are the lookup for whoever adds world storage.
     fn update_button_status(&mut self) {
         for (widget, button) in self.widgets.buttons.iter_mut().zip(WORLD_SELECT_BUTTONS) {
             widget.active = button.enabled();
@@ -491,12 +543,42 @@ impl WorldSelectNav {
     fn press(&mut self, button: WorldSelectButton) -> WorldSelectOutcome {
         match button {
             WorldSelectButton::Back => WorldSelectOutcome::Close,
+            // Vanilla's `loadSelectedWorld()` (`:117-121`), which is
+            // `WorldSelectionList.getSelectedOpt().ifPresent(Entry::joinWorld)`.
+            // Ours is issue #287's launch — see this module's "what consumes it".
+            WorldSelectButton::Play => WorldSelectOutcome::Play,
             // Disabled above, and unreachable through either press path.
-            WorldSelectButton::Play
-            | WorldSelectButton::Create
+            WorldSelectButton::Create
             | WorldSelectButton::Edit
             | WorldSelectButton::Delete
             | WorldSelectButton::ReCreate => WorldSelectOutcome::Handled,
+        }
+    }
+
+    /// The selected world — always [`BUNDLED_WORLD`], because it is the only one.
+    ///
+    /// An `Option` rather than a plain [`WorldEntry`] so the "nothing selected"
+    /// state vanilla's `updateButtonStatus(null)` exists for stays expressible;
+    /// a real list will return `None` before the player clicks a row, and every
+    /// caller already has to handle it.
+    #[must_use]
+    pub fn selected(&self) -> Option<WorldEntry> {
+        Some(BUNDLED_WORLD)
+    }
+
+    /// What the one list row draws.
+    ///
+    /// Derived from [`Self::selected`] rather than reading [`BUNDLED_WORLD`] at
+    /// the draw site, so the row the player reads and the world Play launches
+    /// cannot become two different things.
+    #[must_use]
+    pub fn world_row_label(&self) -> &'static str {
+        match self.selected() {
+            Some(world) => world.label,
+            // Unreachable while there is exactly one world. Kept as an answer
+            // rather than an `expect` because the day a real list exists this
+            // becomes the empty-list state, and it must not panic there.
+            None => "No worlds",
         }
     }
 }
@@ -505,14 +587,14 @@ impl WorldSelectNav {
 mod tests {
     use super::*;
 
-    /// Every button is present, and exactly one of them is active.
+    /// Every button is present, and exactly two of them are active.
     ///
-    /// The count is asserted both ways round on purpose: "five disabled" is what
-    /// makes the screen honest, and "one enabled" is what stops it being a dead
-    /// end — a screen whose every control is inactive cannot be left except by
-    /// Escape.
+    /// The count is asserted both ways round on purpose: "four disabled" is what
+    /// makes the screen honest about what this client cannot do, and Play being
+    /// enabled is #287 — the screen stopped being a dead end that could only be
+    /// left again.
     #[test]
-    fn five_of_the_six_footer_buttons_are_present_and_disabled() {
+    fn four_of_the_six_footer_buttons_are_present_and_disabled() {
         assert_eq!(WORLD_SELECT_BUTTONS.len(), 6, "vanilla has six footer buttons");
         let enabled: Vec<_> = WORLD_SELECT_BUTTONS
             .iter()
@@ -521,8 +603,8 @@ mod tests {
             .collect();
         assert_eq!(
             enabled,
-            vec![WorldSelectButton::Back],
-            "Back is the only button with anything to do"
+            vec![WorldSelectButton::Play, WorldSelectButton::Back],
+            "Play launches the bundled world (#287); Back leaves"
         );
         // The headline of #397: Create New World is *there*, and inactive.
         assert!(
@@ -531,6 +613,30 @@ mod tests {
         );
         assert!(!WorldSelectButton::Create.enabled());
         assert_eq!(WorldSelectButton::Create.label(), "Create New World");
+    }
+
+    /// The list has a world, and the row the player reads is the world Play
+    /// launches.
+    ///
+    /// The label's length is the load-bearing part: nothing clips a
+    /// `NoWorldsEntry` `StringWidget`, so an overlong label overhangs the row
+    /// (`render`'s `the_world_list_row_label_fits_the_row_it_is_centred_in`
+    /// measures it against the real row width).
+    #[test]
+    fn the_list_has_one_world_and_it_is_always_the_selection() {
+        let nav = WorldSelectNav::new();
+        assert_eq!(nav.selected(), Some(BUNDLED_WORLD));
+        assert_eq!(nav.world_row_label(), BUNDLED_WORLD.label);
+        assert!(
+            !BUNDLED_WORLD.label.is_empty(),
+            "an empty row is indistinguishable from a list that failed to draw"
+        );
+        // The selection is what makes Play active, so the two must agree — this
+        // is the link that would otherwise let a greyed Play sit above a world.
+        assert_eq!(
+            nav.is_active(WorldSelectButton::Play.row()),
+            nav.selected().is_some()
+        );
     }
 
     /// The row indices the mouse reports are the ids focus dispatches on.
@@ -583,14 +689,19 @@ mod tests {
         assert!(nav.is_active(SEARCH_FIELD), "the search field is editable");
     }
 
-    /// The keyboard starts in the search field and Tab reaches exactly the two
+    /// The keyboard starts in the search field and Tab reaches exactly the three
     /// widgets that are active.
     ///
-    /// Five inactive buttons must be *skipped*, not merely un-pressable —
+    /// Four inactive buttons must be *skipped*, not merely un-pressable —
     /// `AbstractWidget.nextFocusPath` returns null for an inactive widget — and
     /// the wrap is vanilla's `clearFocus()`-then-retry, not `(i + 1) % n`.
+    ///
+    /// The order is **registration order, not geometry**: Tab sorts by
+    /// `getTabOrderGroup` (all default) with a stable sort, and this screen
+    /// registers header → footer, so Play comes before Back even though Back is
+    /// the earlier row visually in neither sense. See `focus.rs`'s module docs.
     #[test]
-    fn tab_visits_the_search_field_and_back_and_nothing_else() {
+    fn tab_visits_the_search_field_play_and_back_and_nothing_else() {
         let mut nav = WorldSelectNav::new();
         assert_eq!(nav.focused_row(), Some(SEARCH_FIELD), "setInitialFocus");
         let mut seen = vec![nav.focused_row()];
@@ -602,26 +713,27 @@ mod tests {
             seen,
             vec![
                 Some(SEARCH_FIELD),
+                Some(WorldSelectButton::Play.row()),
                 Some(WorldSelectButton::Back.row()),
                 Some(SEARCH_FIELD),
-                Some(WorldSelectButton::Back.row()),
-                Some(SEARCH_FIELD),
+                Some(WorldSelectButton::Play.row()),
             ],
-            "tab must cycle between the only two active widgets"
+            "tab must cycle between the only three active widgets"
         );
 
         // -- control ---------------------------------------------------------
         // The walk has to be able to reach a button it was skipping, or the
         // assertion above is satisfied by a traversal that can only ever find
-        // two things.
+        // three things.
         let mut nav = WorldSelectNav::new();
         let create = WorldSelectButton::Create.row();
         nav.widgets.buttons[create - FIRST_BUTTON_ROW].active = true;
         nav.handle_key(MenuKey::Tab);
+        nav.handle_key(MenuKey::Tab);
         assert_eq!(
             nav.focused_row(),
             Some(create),
-            "an enabled Create must be the next tab stop, before Back"
+            "an enabled Create must be the tab stop after Play, before Back"
         );
     }
 
@@ -636,34 +748,78 @@ mod tests {
         nav.handle_key(MenuKey::Backspace);
         assert_eq!(nav.search().value(), "cav", "backspace edits at the caret");
 
-        // Down must leave the field for the button below it — geometric
-        // navigation, so this is also the premise assertion that the seeded
-        // bounds put Back below the search box and overlapping it in x.
+        // Down must leave the field for the nearest active widget below it —
+        // geometric navigation, so this is also the premise assertion that the
+        // seeded bounds put the footer below the search box and overlapping it in
+        // x. **Play, not Back**: the strict pass sorts by leading edge and Play's
+        // row (y 428) is above Back's (y 452).
         nav.handle_key(MenuKey::Down);
-        assert_eq!(nav.focused_row(), Some(WorldSelectButton::Back.row()));
+        assert_eq!(nav.focused_row(), Some(WorldSelectButton::Play.row()));
         assert_eq!(nav.search().value(), "cav", "the field kept its text");
-        // Arrows do not wrap (`Screen.java:139-143` gates the retry on Tab), so
-        // Down again stays put.
+        // Down again reaches Back through the *vague* pass — nothing active
+        // overlaps Play in x below it, so the strict pass finds nothing and the
+        // fallback takes the nearest by squared distance.
         nav.handle_key(MenuKey::Down);
         assert_eq!(nav.focused_row(), Some(WorldSelectButton::Back.row()));
-        // And Up comes back.
+        // Arrows do not wrap (`Screen.java:139-143` gates the retry on Tab), so
+        // Down off the last active widget stays put.
+        nav.handle_key(MenuKey::Down);
+        assert_eq!(nav.focused_row(), Some(WorldSelectButton::Back.row()));
+        // And Up comes back to the field: Back's x band (510..581) overlaps the
+        // search box's (327..527) and nothing else active sits between them.
         nav.handle_key(MenuKey::Up);
         assert_eq!(nav.focused_row(), Some(SEARCH_FIELD));
     }
 
-    /// Escape closes the screen, and Enter closes it only from Back.
+    /// Escape closes the screen, Enter on Play launches, and Enter closes only
+    /// from Back.
     #[test]
-    fn escape_closes_and_enter_closes_only_from_back() {
+    fn escape_closes_and_enter_launches_from_play_and_closes_from_back() {
         let mut nav = WorldSelectNav::new();
         assert_eq!(nav.handle_key(MenuKey::Escape), WorldSelectOutcome::Close);
 
         let mut nav = WorldSelectNav::new();
         // Enter with the field focused is `EditBox`'s decline plus a screen that
-        // has nothing to do with it — it must *not* close.
+        // has nothing to do with it — it must *not* close, and must not launch.
         assert_eq!(nav.handle_key(MenuKey::Enter), WorldSelectOutcome::Handled);
+        nav.handle_key(MenuKey::Tab);
+        assert_eq!(nav.focused_row(), Some(WorldSelectButton::Play.row()));
+        assert_eq!(nav.handle_key(MenuKey::Enter), WorldSelectOutcome::Play);
         nav.handle_key(MenuKey::Tab);
         assert_eq!(nav.focused_row(), Some(WorldSelectButton::Back.row()));
         assert_eq!(nav.handle_key(MenuKey::Enter), WorldSelectOutcome::Close);
+    }
+
+    /// A click on Play launches, and it is the *only* footer button that does.
+    ///
+    /// The negative half matters as much as the positive one: five of the six
+    /// buttons must not start a world, and `press` spells every variant out so a
+    /// newly-enabled button cannot inherit Play's action by falling through a
+    /// `_` arm.
+    #[test]
+    fn only_play_launches_the_world() {
+        let mut nav = WorldSelectNav::new();
+        assert_eq!(
+            nav.click_row(WorldSelectButton::Play.row()),
+            WorldSelectOutcome::Play
+        );
+
+        for button in WORLD_SELECT_BUTTONS
+            .iter()
+            .copied()
+            .filter(|b| *b != WorldSelectButton::Play)
+        {
+            let mut nav = WorldSelectNav::new();
+            // Enabled, so the click is definitely delivered — this is the
+            // control shape `a_click_on_a_disabled_button_does_nothing_at_all`
+            // uses, inverted: here a *disabled* button would pass vacuously.
+            nav.widgets.buttons[button.row() - FIRST_BUTTON_ROW].active = true;
+            assert_ne!(
+                nav.click_row(button.row()),
+                WorldSelectOutcome::Play,
+                "{button:?} must not start a world"
+            );
+        }
     }
 
     /// A click is not a hover-then-Enter, and this is the assertion that says so.
@@ -673,7 +829,7 @@ mod tests {
         // Focus starts in the field; move it away so "the click focused it" is
         // an observable change rather than the initial state.
         nav.handle_key(MenuKey::Tab);
-        assert_eq!(nav.focused_row(), Some(WorldSelectButton::Back.row()));
+        assert_eq!(nav.focused_row(), Some(WorldSelectButton::Play.row()));
         assert_eq!(
             nav.click_row(SEARCH_FIELD),
             WorldSelectOutcome::Handled,

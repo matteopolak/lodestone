@@ -384,3 +384,281 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 }
+
+/// Forwards every method to the boxed implementor, so a **trait object** can be
+/// handed to the parts of this crate that take `P: ServerProtocol` by value —
+/// [`IntegratedServer::open_in_memory`](crate::IntegratedServer::open_in_memory)
+/// and [`bind`](crate::IntegratedServer::bind).
+///
+/// This is what makes the version seam work in the *serverbound* direction. The
+/// clientbound side hands out `Box<dyn VersionAdapter>` from
+/// `lodestone_registry::adapter_for_protocol`, and its serverbound twin
+/// (`lodestone_registry::server_protocol_for_protocol`) has to do the same: a
+/// registry that resolves a protocol *number* cannot return a concrete type, so
+/// the only thing it can return is a box. [`ServerProtocol`] is object-safe
+/// already (every method takes `&self`, none is generic, none mentions `Self`),
+/// but `Box<dyn ServerProtocol>` does not implement the trait for free — without
+/// this impl the box could not be served, and the only way to start singleplayer
+/// would be for the caller to name the concrete version type. Which is precisely
+/// what the seam exists to forbid.
+///
+/// Written over `Box<P>` with `P: ?Sized` rather than over `Box<dyn ServerProtocol>`
+/// so it also covers a boxed *concrete* protocol; `Box` is `#[fundamental]`, so
+/// the impl is coherent here in the trait's own crate.
+///
+/// **When you add a method to [`ServerProtocol`], add its forward here.** A
+/// defaulted method that is not forwarded is not a compile error — the box would
+/// silently answer with the trait's default (usually
+/// [`ServerDirective::None`]) instead of asking the real protocol, so a boxed
+/// v770 would stop sending, say, keep-alives while a directly-owned one kept
+/// working. That asymmetry is invisible to any test that uses one shape only.
+impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
+    fn decode(&self, state: State, packet_id: i32, payload: &[u8]) -> ServerBound {
+        (**self).decode(state, packet_id, payload)
+    }
+
+    fn login_success(&self, username: &str, uuid: Uuid) -> Vec<ServerDirective> {
+        (**self).login_success(username, uuid)
+    }
+
+    fn begin_configuration(&self) -> Vec<ServerDirective> {
+        (**self).begin_configuration()
+    }
+
+    fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective> {
+        (**self).begin_play(view_radius)
+    }
+
+    fn begin_chunk_batch(&self) -> ServerDirective {
+        (**self).begin_chunk_batch()
+    }
+
+    fn encode_chunk(&self, cx: i32, cz: i32, column: &ChunkColumn) -> ServerDirective {
+        (**self).encode_chunk(cx, cz, column)
+    }
+
+    fn end_chunk_batch(&self, batch_size: i32) -> ServerDirective {
+        (**self).end_chunk_batch(batch_size)
+    }
+
+    fn welcome_message(&self) -> Vec<ServerDirective> {
+        (**self).welcome_message()
+    }
+
+    fn encode_add_entity(&self, entity: &EntitySnapshot) -> ServerDirective {
+        (**self).encode_add_entity(entity)
+    }
+
+    fn encode_entity_update(
+        &self,
+        prev: Option<&EntitySnapshot>,
+        current: &EntitySnapshot,
+    ) -> Vec<ServerDirective> {
+        (**self).encode_entity_update(prev, current)
+    }
+
+    fn encode_remove_entity(&self, ids: &[i32]) -> ServerDirective {
+        (**self).encode_remove_entity(ids)
+    }
+
+    fn encode_keep_alive(&self, id: i64) -> ServerDirective {
+        (**self).encode_keep_alive(id)
+    }
+
+    fn encode_set_time(&self, game_time: i64, day_time: Option<i64>) -> ServerDirective {
+        (**self).encode_set_time(game_time, day_time)
+    }
+
+    fn encode_chunk_cache_center(&self, cx: i32, cz: i32) -> ServerDirective {
+        (**self).encode_chunk_cache_center(cx, cz)
+    }
+
+    fn encode_forget_chunk(&self, cx: i32, cz: i32) -> ServerDirective {
+        (**self).encode_forget_chunk(cx, cz)
+    }
+
+    fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
+        (**self).encode_block_update(x, y, z, state)
+    }
+
+    fn encode_air_supply_update(&self, air: i32) -> ServerDirective {
+        (**self).encode_air_supply_update(air)
+    }
+
+    fn encode_set_health(&self, health: f32) -> ServerDirective {
+        (**self).encode_set_health(health)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A protocol whose every method answers with a *distinct* directive, so
+    /// "the box forwarded" and "the box fell back to the trait default" are
+    /// distinguishable answers rather than both being `None`/empty.
+    #[derive(Debug)]
+    struct Numbered;
+
+    /// One directive per method, numbered so a mixed-up forward is visible too.
+    fn send(id: i32) -> ServerDirective {
+        ServerDirective::Send {
+            packet_id: id,
+            payload: Vec::new(),
+        }
+    }
+
+    impl ServerProtocol for Numbered {
+        fn decode(&self, _state: State, packet_id: i32, _payload: &[u8]) -> ServerBound {
+            // Echoes the id back through a variant that carries one, so the
+            // arguments are proven to survive the forward, not just the call.
+            ServerBound::KeepAlive {
+                id: i64::from(packet_id),
+            }
+        }
+        fn login_success(&self, _username: &str, _uuid: Uuid) -> Vec<ServerDirective> {
+            vec![send(2)]
+        }
+        fn begin_configuration(&self) -> Vec<ServerDirective> {
+            vec![send(3)]
+        }
+        fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective> {
+            vec![send(100 + view_radius)]
+        }
+        fn begin_chunk_batch(&self) -> ServerDirective {
+            send(5)
+        }
+        fn encode_chunk(&self, cx: i32, cz: i32, _column: &ChunkColumn) -> ServerDirective {
+            send(cx * 1000 + cz)
+        }
+        fn end_chunk_batch(&self, batch_size: i32) -> ServerDirective {
+            send(200 + batch_size)
+        }
+        fn welcome_message(&self) -> Vec<ServerDirective> {
+            vec![send(8)]
+        }
+        fn encode_add_entity(&self, entity: &EntitySnapshot) -> ServerDirective {
+            send(entity.id)
+        }
+        fn encode_entity_update(
+            &self,
+            _prev: Option<&EntitySnapshot>,
+            current: &EntitySnapshot,
+        ) -> Vec<ServerDirective> {
+            vec![send(current.id + 1)]
+        }
+        fn encode_remove_entity(&self, ids: &[i32]) -> ServerDirective {
+            send(ids.len() as i32)
+        }
+        fn encode_keep_alive(&self, id: i64) -> ServerDirective {
+            send(id as i32)
+        }
+        fn encode_set_time(&self, game_time: i64, _day_time: Option<i64>) -> ServerDirective {
+            send(game_time as i32)
+        }
+        fn encode_chunk_cache_center(&self, cx: i32, cz: i32) -> ServerDirective {
+            send(cx * 10 + cz)
+        }
+        fn encode_forget_chunk(&self, cx: i32, cz: i32) -> ServerDirective {
+            send(cx * 100 + cz)
+        }
+        fn encode_block_update(&self, x: i32, y: i32, z: i32, _state: &str) -> ServerDirective {
+            send(x + y + z)
+        }
+        fn encode_air_supply_update(&self, air: i32) -> ServerDirective {
+            send(air)
+        }
+        fn encode_set_health(&self, health: f32) -> ServerDirective {
+            send(health as i32)
+        }
+    }
+
+    fn snapshot(id: i32) -> EntitySnapshot {
+        EntitySnapshot {
+            id,
+            uuid: Uuid::nil(),
+            entity_type: ResourceKey::new("minecraft", "pig").expect("static key is valid"),
+            position: Vec3::new(0.0, 0.0, 0.0),
+            rotation: Rotation { yaw: 0.0, pitch: 0.0 },
+            head_yaw: 0.0,
+            velocity: Vec3::new(0.0, 0.0, 0.0),
+        }
+    }
+
+    /// Every [`ServerProtocol`] method must answer identically through a
+    /// `Box<dyn ServerProtocol>` and through the concrete value.
+    ///
+    /// This is the control for the forwarding impl above, and the reason it is
+    /// worth writing is that **thirteen of the eighteen methods have defaults**:
+    /// forgetting to forward one is not a compile error, it silently answers
+    /// `ServerDirective::None`. That failure only ever shows up in a boxed
+    /// server — i.e. only in singleplayer, which is exactly the path with no
+    /// live oracle to catch it.
+    #[test]
+    fn a_boxed_protocol_answers_exactly_as_the_concrete_one_does() {
+        let direct = Numbered;
+        let boxed: Box<dyn ServerProtocol> = Box::new(Numbered);
+        let column = ChunkColumn::new(-64, 384);
+        let entity = snapshot(77);
+
+        assert_eq!(
+            boxed.decode(State::Play, 42, &[]),
+            direct.decode(State::Play, 42, &[])
+        );
+        assert_eq!(
+            boxed.login_success("a", Uuid::nil()),
+            direct.login_success("a", Uuid::nil())
+        );
+        assert_eq!(boxed.begin_configuration(), direct.begin_configuration());
+        assert_eq!(boxed.begin_play(7), direct.begin_play(7));
+        assert_eq!(boxed.begin_chunk_batch(), direct.begin_chunk_batch());
+        assert_eq!(
+            boxed.encode_chunk(3, 4, &column),
+            direct.encode_chunk(3, 4, &column)
+        );
+        assert_eq!(boxed.end_chunk_batch(9), direct.end_chunk_batch(9));
+        assert_eq!(boxed.welcome_message(), direct.welcome_message());
+        assert_eq!(
+            boxed.encode_add_entity(&entity),
+            direct.encode_add_entity(&entity)
+        );
+        assert_eq!(
+            boxed.encode_entity_update(None, &entity),
+            direct.encode_entity_update(None, &entity)
+        );
+        assert_eq!(
+            boxed.encode_remove_entity(&[1, 2, 3]),
+            direct.encode_remove_entity(&[1, 2, 3])
+        );
+        assert_eq!(boxed.encode_keep_alive(11), direct.encode_keep_alive(11));
+        assert_eq!(
+            boxed.encode_set_time(13, Some(1)),
+            direct.encode_set_time(13, Some(1))
+        );
+        assert_eq!(
+            boxed.encode_chunk_cache_center(2, 5),
+            direct.encode_chunk_cache_center(2, 5)
+        );
+        assert_eq!(
+            boxed.encode_forget_chunk(2, 5),
+            direct.encode_forget_chunk(2, 5)
+        );
+        assert_eq!(
+            boxed.encode_block_update(1, 2, 3, "minecraft:stone"),
+            direct.encode_block_update(1, 2, 3, "minecraft:stone")
+        );
+        assert_eq!(
+            boxed.encode_air_supply_update(19),
+            direct.encode_air_supply_update(19)
+        );
+        assert_eq!(boxed.encode_set_health(4.0), direct.encode_set_health(4.0));
+
+        // -- control ---------------------------------------------------------
+        // Every assertion above compares two answers, so it would also pass if
+        // *both* sides were the trait default. This is the premise that says
+        // they are not: the spy's answers differ from what an unforwarded
+        // defaulted method would produce.
+        assert_ne!(direct.encode_keep_alive(11), ServerDirective::None);
+        assert_ne!(direct.welcome_message(), Vec::<ServerDirective>::new());
+    }
+}

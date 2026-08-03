@@ -75,14 +75,18 @@ pub enum MenuKey {
 pub enum MenuAction {
     /// Nothing to do; the menu handled it internally.
     None,
-    /// Enter the singleplayer world.
+    /// Enter the singleplayer world: start the integrated server in-process and
+    /// connect to it (issue #287).
     ///
-    /// **No button produces this any more** (issue #397): the title screen's
-    /// Singleplayer button opens [`Screen::WorldSelect`] instead, which is
-    /// vanilla's own wiring, and that screen's Play Selected World is inactive
-    /// because there is no world to play. The variant and `app.rs`'s arm for it
-    /// stay because they are the seam #287's integrated server lands on — see
-    /// [`super::UiState::open_world_select`].
+    /// Produced by [`Screen::WorldSelect`]'s **Play Selected World** button,
+    /// which is the only producer — the title screen's Singleplayer button opens
+    /// the world list rather than launching, which is vanilla's own wiring
+    /// (#397). `app.rs`'s arm calls `begin_singleplayer`.
+    ///
+    /// Between #397 and #287 this variant had **no producer at all** and was
+    /// kept as the seam the integrated server would land on. It is worth naming
+    /// because "the variant exists and is matched" was true throughout and is
+    /// exactly what an island looks like from the inside.
     Singleplayer,
     /// Connect to this server (the app opens the session and shows Connecting).
     Connect(ServerEntry),
@@ -455,8 +459,9 @@ impl EditForm {
 pub enum MainButton {
     /// Open the singleplayer world list ([`Screen::WorldSelect`], issue #397) —
     /// vanilla's own behaviour for this button. It used to return
-    /// [`MenuAction::Singleplayer`] and drive `app.rs`'s staged launcher
-    /// directly, which vanilla never does.
+    /// [`MenuAction::Singleplayer`] and launch directly, which vanilla never
+    /// does; that action is now produced one screen in, by **Play Selected
+    /// World** (issue #287).
     Singleplayer,
     /// Open the server list.
     Multiplayer,
@@ -1216,7 +1221,8 @@ impl MenuNav {
         // The third screen where it is wrong, and the reason the parent issue
         // insists every cursorless screen gets its own arm (issue #397): here a
         // click means "focus this field" *or* "press this button", never both,
-        // and a click on one of the five disabled buttons means nothing at all.
+        // and a click on one of the four disabled buttons means nothing at all.
+        // Play Selected World is the one that does something — it launches (#287).
         if ui.screen() == Screen::WorldSelect {
             let outcome = self.world_select.click_row(row);
             return Self::apply_world_select(ui, outcome);
@@ -1627,6 +1633,13 @@ impl MenuNav {
                 ui.close_world_select();
                 MenuAction::None
             }
+            // Vanilla's `loadSelectedWorld()`. The screen is left *by the app*,
+            // not here: `begin_singleplayer` calls `ui.begin(Singleplayer)`,
+            // which moves to `Screen::Connecting` — and it must stay on the world
+            // list until then, because a launch that fails (no version family
+            // compiled in) has to be able to show its error over a screen the
+            // player recognises rather than over a blank one.
+            WorldSelectOutcome::Play => MenuAction::Singleplayer,
         }
     }
 
@@ -1956,8 +1969,9 @@ mod tests {
         let (mut nav, _) = nav("buttons");
         let mut ui = UiState::new();
         // Issue #397: Singleplayer opens the world list — vanilla's own wiring —
-        // where it used to return `MenuAction::Singleplayer` and let `app.rs`
-        // drive its staged launcher. There is no action for the app to take.
+        // where it used to return `MenuAction::Singleplayer` and launch directly.
+        // There is no action for the app to take at *this* button; the launch is
+        // Play Selected World, one screen in (#287).
         assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
         assert_eq!(ui.screen(), Screen::WorldSelect);
         ui.on_escape();
@@ -2827,7 +2841,7 @@ mod tests {
 
         // The disabled buttons first, so a stray activation would be visible as a
         // screen change before Back is ever pressed.
-        for button in [B::Play, B::Create, B::Edit, B::Delete, B::ReCreate] {
+        for button in [B::Create, B::Edit, B::Delete, B::ReCreate] {
             assert_eq!(nav.click(&mut ui, button.row()), MenuAction::None);
             assert_eq!(
                 ui.screen(),
@@ -2848,6 +2862,49 @@ mod tests {
         assert_eq!(nav.click(&mut ui, B::Back.row()), MenuAction::None);
         assert_eq!(ui.screen(), Screen::MainMenu);
         assert!(!ui.quit_requested(), "Back is not a quit");
+    }
+
+    /// **Play Selected World reaches the app** (issue #287).
+    ///
+    /// This is the link that turns `MenuAction::Singleplayer` from a variant
+    /// nothing produced into a button: without it the launcher `app.rs` holds is
+    /// unreachable, which is this repo's dominant defect class. It stops at the
+    /// action deliberately — `app.rs`'s `apply_menu_action` arm is what starts a
+    /// server, and `lodestone-shell`'s
+    /// `pressing_play_reaches_a_running_integrated_server` carries it the rest of
+    /// the way.
+    ///
+    /// The screen must **not** change here: `begin_singleplayer` is what moves to
+    /// `Screen::Connecting`, and a launch that cannot proceed needs to fail onto
+    /// a screen the player recognises.
+    #[test]
+    fn play_selected_world_asks_the_app_to_start_singleplayer() {
+        use crate::menu::world_select::WorldSelectButton as B;
+        let (mut nav, _) = self::nav("world-select-play");
+        let mut ui = UiState::new();
+        nav.key(&mut ui, MenuKey::Enter);
+        assert_eq!(ui.screen(), Screen::WorldSelect, "premise: the list is open");
+
+        assert_eq!(
+            nav.click(&mut ui, B::Play.row()),
+            MenuAction::Singleplayer,
+            "Play Selected World must ask the app to launch"
+        );
+        assert_eq!(
+            ui.screen(),
+            Screen::WorldSelect,
+            "the nav layer must not leave the list; `begin_singleplayer` does that"
+        );
+
+        // The keyboard path is the same action, not a second implementation:
+        // Tab off the search field lands on Play (registration order), and Enter
+        // presses it.
+        let (mut nav, _) = self::nav("world-select-play-keys");
+        let mut ui = UiState::new();
+        nav.key(&mut ui, MenuKey::Enter);
+        nav.key(&mut ui, MenuKey::Tab);
+        assert_eq!(nav.world_select().focused_row(), Some(B::Play.row()));
+        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::Singleplayer);
     }
 
     /// Typing on the world list goes into the search box, and Escape leaves.

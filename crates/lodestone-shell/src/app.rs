@@ -667,44 +667,86 @@ impl FramePacer {
 
 /// Why an integrated-server (Singleplayer) launch could not proceed.
 ///
-/// Typed so the Error screen can eventually distinguish "the server failed to
-/// start" from "the client failed to connect" — see the ergonomics note on
-/// `IntegratedServer` in the session report.
+/// Typed rather than a string so the Error screen can distinguish causes. There
+/// is exactly one today, and it is a *build* property rather than a runtime
+/// failure: everything else on this path is infallible (see
+/// [`launch_singleplayer`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LaunchError {
-    /// The integrated server's transport/lifecycle exists
-    /// (`lodestone_server::IntegratedServer::open_in_memory`), but no *versioned*
-    /// `ServerProtocol` does — only test stand-ins. So there is nothing for the
-    /// registry's real adapter to speak to in-process yet. Staged, not a runtime
-    /// failure. Verified 2026-07-28; reported upstream (impl-worldgen / impl-v770).
-    NoServerProtocol,
+    /// No version family is compiled into this build that can be **hosted**, so
+    /// `lodestone_registry::server_protocol_for_protocol` returned `None`.
+    ///
+    /// This is what `--no-default-features` produces, and it is the whole reason
+    /// the shell asks the registry for a trait object instead of naming a
+    /// version: the version-free build must *compile* and report, not fail to
+    /// build. It is also reachable with a family compiled in but no
+    /// `ServerProtocol` for it — a family can be joinable and unhostable.
+    NoVersionFamily {
+        /// The protocol number that found no server protocol.
+        protocol: i32,
+    },
 }
 
 impl std::fmt::Display for LaunchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LaunchError::NoServerProtocol => write!(
-                f,
-                "Singleplayer is not available yet: the integrated server's \
-                 transport is ready, but no versioned server protocol exists for \
-                 the client to speak to in-process. Use Multiplayer for now."
-            ),
+            LaunchError::NoVersionFamily { protocol } => {
+                let compiled = lodestone_registry::compiled_server_families();
+                write!(
+                    f,
+                    "Singleplayer is unavailable in this build: no version family \
+                     compiled in can host protocol {protocol}"
+                )?;
+                if compiled.is_empty() {
+                    write!(f, " (none are). Build with the `live` feature.")
+                } else {
+                    write!(f, " (this build can host: {}).", compiled.join(", "))
+                }
+            }
         }
     }
 }
 
-/// Staged singleplayer launcher. Returns [`LaunchError::NoServerProtocol`] until
-/// a versioned `ServerProtocol` exists for `lodestone-server` to serve the
-/// registry adapter in-process. The `IntegratedServer::open_in_memory(protocol,
-/// source, view_radius)` transport/lifecycle and the `Transport` seam
-/// (`ClientBuilder::connect_with`) are both already there — the missing piece is
-/// the server-side encoder/decoder, which lives outside this crate. Deliberately
-/// does **not** fork a stand-in adapter into the shell (that would smuggle
-/// version knowledge past the registry) or call a real server (a non-compiling
-/// `lodestone-shell` breaks every agent's cargo); the gap is recorded here and in
-/// the report, not as a build break.
-pub(crate) fn launch_singleplayer() -> Result<NetClient, LaunchError> {
-    Err(LaunchError::NoServerProtocol)
+/// Start singleplayer: an integrated server in-process, with the client speaking
+/// to it over an in-memory duplex (issue #287).
+///
+/// This is vanilla's own architecture — one client, one dispatch, a different
+/// transport — and the whole of it is three steps:
+///
+/// 1. ask the registry for the **serverbound** half of the version family
+///    (`server_protocol_for_protocol`, the twin of the `adapter_for_protocol`
+///    call `net.rs` already makes for the clientbound half);
+/// 2. hand that trait object to [`NetClient::open_singleplayer`], which starts
+///    `lodestone_server::IntegratedServer::open_in_memory` on the net thread's
+///    runtime and connects the client to the returned duplex;
+/// 3. attach the result to the `Sim` exactly as a multiplayer connect does.
+///
+/// **The shell names no version here, and that is load-bearing rather than
+/// stylistic.** `cargo check -p lodestone-shell --no-default-features` exists to
+/// prove this crate compiles with *no* version family, and a `V770ServerProtocol`
+/// on this line would break it — which is why the previous version of this
+/// function was a deliberate stub returning an error. What changed is not the
+/// constraint; it is that the registry now has a serverbound table to ask.
+///
+/// The only failure is [`LaunchError::NoVersionFamily`]: `open_in_memory` cannot
+/// fail (no port to bind), and `connect_with` cannot fail (no dial). So a
+/// successful return means a server is running and a client is talking to it —
+/// though login is asynchronous, so "running" is proven by the session reaching
+/// `Screen::Playing`, not by this returning `Ok`.
+pub(crate) fn launch_singleplayer(
+    protocol: i32,
+    view_radius: i32,
+    session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
+) -> Result<NetClient, LaunchError> {
+    let server_protocol = lodestone_registry::server_protocol_for_protocol(protocol)
+        .ok_or(LaunchError::NoVersionFamily { protocol })?;
+    Ok(NetClient::open_singleplayer(
+        server_protocol,
+        protocol,
+        crate::menu::world_select::BUNDLED_WORLD.seed,
+        view_radius,
+        session,
+    ))
 }
 
 /// Whether argv asked for a connection, i.e. whether to bypass the main menu.
@@ -1016,14 +1058,38 @@ impl WindowApp {
         });
     }
 
+    /// Start singleplayer and show the loading screen (issue #287).
+    ///
+    /// The multiplayer twin of this is [`Self::connect_to`], and after the
+    /// session is attached the two are *the same function*: both call
+    /// [`Self::install_session_render_sources`], because the sky, fog clock,
+    /// entity light sampler and screen-effect passes are properties of having a
+    /// session, not of how it was obtained. That sharing is the point — a
+    /// singleplayer path with its own render wiring is how one of the two ends up
+    /// silently missing a pass.
+    ///
+    /// `attach_net` rather than a `Sim::connect`-style helper because the client
+    /// is already built *with* this `Sim`'s `World` and local entity: that is what
+    /// [`launch_singleplayer`]'s `session` argument is, threaded through
+    /// `NetClient::open_singleplayer` into `ClientBuilder::ecs` (§4.1(c)).
+    /// Attaching without it is the silent failure `Sim::connect`'s docs warn
+    /// about — every HUD accessor would read an empty default.
     fn begin_singleplayer(&mut self) {
         self.ui.begin(crate::menu::SessionKind::Singleplayer);
-        match launch_singleplayer() {
+        let session = Some((self.sim.ecs().clone(), self.sim.local_player()));
+        // Vanilla streams `simulationDistance`/`viewDistance` chunks around the
+        // player; ours is the same number the camera's far plane and the mesher
+        // already use, so the server never sends a column the renderer would
+        // discard and never withholds one it wants.
+        let view_radius = i32::try_from(self.config.render_distance).unwrap_or(i32::MAX);
+        match launch_singleplayer(self.config.protocol, view_radius, session) {
             Ok(net) => {
                 self.sim.attach_net(net);
-                self.install_outline_source();
-                self.install_debug_lines_source();
+                self.install_session_render_sources();
             }
+            // Reported, never routed around: the only cause is a build with no
+            // hostable version family, and telling the player that is strictly
+            // better than a world that silently never loads.
             Err(e) => self.ui.session_failed(e.to_string()),
         }
     }
@@ -1035,6 +1101,26 @@ impl WindowApp {
     /// installed at connect time, not after login (see the long note at the
     /// `resumed` call site for why).
     fn connect_to(&mut self, host: String, port: u16) {
+        // §4.1(c): `Sim::connect` builds the client *with* the shell's one `World`
+        // and attaches it, so the render sources below are installed from the
+        // already-attached client's shared handle rather than from a `NetClient`
+        // this function still owns. `shared_handle` survives the move either way
+        // (it is an `Arc<OnceLock<_>>` the net thread publishes into).
+        self.sim.connect(host, port, self.config.protocol);
+        self.install_session_render_sources();
+    }
+
+    /// Install every render source a live session feeds, for **either** session
+    /// kind: the fog/sky clock, the entity light sampler, the sky pass and the
+    /// screen-effect overlays, plus the outline and debug-line sources.
+    ///
+    /// Shared by [`Self::connect_to`] and [`Self::begin_singleplayer`] (issue
+    /// #287) rather than duplicated, because a source installed for one session
+    /// kind and not the other is invisible until someone plays the other one —
+    /// and the two differ *only* in transport (see `net.rs`'s `Origin`). A no-op
+    /// when there is no session or no GPU yet, so it is safe to call from either
+    /// path unconditionally.
+    fn install_session_render_sources(&mut self) {
         // `sky_clock.get().map(|h| h.world_time().1)` used to be handed to
         // `set_time_of_day_source` directly. `WorldTime` is a flat snapshot the
         // network thread only overwrites on a decoded `SET_TIME`
@@ -1052,12 +1138,10 @@ impl WindowApp {
         // clock-agnostic per its own module docs ("there is deliberately no
         // second clock... anywhere in this module"): the extrapolation lives here,
         // at the render-source boundary, not inside the sky module.
-        // §4.1(c): `Sim::connect` builds the client *with* the shell's one `World`
-        // and attaches it, so the render sources below are installed from the
-        // already-attached client's shared handle rather than from a `NetClient`
-        // this function still owns. `shared_handle` survives the move either way
-        // (it is an `Arc<OnceLock<_>>` the net thread publishes into).
-        self.sim.connect(host, port, self.config.protocol);
+        //
+        // The handle comes from the already-attached client rather than from a
+        // `NetClient` a caller still owns; `shared_handle` survives the move
+        // either way (it is an `Arc<OnceLock<_>>` the net thread publishes into).
         let Some(net_handle) = self.sim.net().map(crate::net::NetClient::shared_handle) else {
             return;
         };
@@ -1277,11 +1361,13 @@ impl WindowApp {
         match action {
             MenuAction::None => {}
             MenuAction::Singleplayer => {
-                // The honest staged failure, not the old offline demo world.
-                // `Sim::new` no longer builds one (see its docs): a client holds
-                // the server's world or none at all, and a demo world left
-                // resident under a later multiplayer join is the two-worlds
-                // defect this button used to be the entry point for.
+                // A real integrated server (#287), not the old offline demo
+                // world. `Sim::new` no longer builds one (see its docs): a client
+                // holds the server's world or none at all, and a demo world left
+                // resident under a later multiplayer join is the two-worlds defect
+                // this button used to be the entry point for. Singleplayer now
+                // takes the *same* path a join does, so there is only ever one
+                // world and it always came off the wire.
                 self.begin_singleplayer();
             }
             MenuAction::Connect(entry) => {
@@ -2126,16 +2212,16 @@ impl ApplicationHandler for WindowApp {
                     .get()
                     .map(|h| continuous_time_of_day.advance(h.world_time().1))
             });
-            // See `connect_to`: the sky pass itself, from the GPU handles this
-            // path already has locally (`self.gpu`/`self.target` are not set
-            // until the end of this function).
+            // See `install_session_render_sources`: the sky pass itself, from the
+            // GPU handles this path already has locally (`self.gpu`/`self.target`
+            // are not set until the end of this function).
             if !render.has_sky()
                 && let Some(sky) = crate::resources::load_sky(gpu.device(), gpu.queue(), format)
             {
                 render.install_sky(sky);
             }
-            // See `connect_to`: the overlay pass, from the same local GPU
-            // handles.
+            // See `install_session_render_sources`: the overlay pass, from the
+            // same local GPU handles.
             if !render.has_screen_effects()
                 && let Some(fx) =
                     crate::resources::load_screen_effects(gpu.device(), gpu.queue(), format)
@@ -3704,20 +3790,85 @@ mod tests {
         );
     }
 
+    /// **Pressing Play Selected World reaches a running integrated server**
+    /// (issue #287).
+    ///
+    /// This is the anti-island gate for singleplayer, and it is the only test
+    /// anywhere that crosses *every* seam of it in one go: the registry's
+    /// serverbound lookup, the boxed `ServerProtocol`, the net thread, the
+    /// in-memory duplex, `IntegratedServer`'s serving loop, the real v770 wire
+    /// format, and the client's decode — ending at a `NetUpdate` the shell's own
+    /// frame loop consumes.
+    ///
+    /// The button half is `menu::nav`'s
+    /// `play_selected_world_asks_the_app_to_start_singleplayer`, which asserts the
+    /// click produces `MenuAction::Singleplayer`; `apply_menu_action`'s arm
+    /// between the two is a single call this file can be read for. The seam
+    /// *without* the shell is `crates/protocol/v770/tests/singleplayer_seam.rs`.
+    ///
+    /// **Chunks, not just login, is the load-bearing assertion.** Login is five
+    /// `ServerProtocol` methods with no trait defaults, so it cannot silently fall
+    /// through the box; terrain is where a half-wired server shows up, and it is
+    /// also the only thing here that proves the *world* exists rather than just a
+    /// handshake. A world that logs in and streams nothing is precisely the shape
+    /// of the chunk-blackout failures `CLAUDE.md` records.
+    ///
+    /// `view_radius = 0` is one column: the bundled generator costs ~12 ms per
+    /// column, and one is enough to prove terrain crosses the wire (its *content*
+    /// is verified block-for-block in `lodestone-server`'s own tests, against a
+    /// JVM oracle rather than against our encoder).
     #[test]
-    fn staged_singleplayer_launch_fails_loudly_with_a_fix_hint() {
-        // The integrated server isn't wired, so the launcher must report an
-        // honest, actionable failure rather than silently doing nothing.
-        let err = launch_singleplayer().expect_err("singleplayer must be staged, not silent");
-        assert_eq!(err, LaunchError::NoServerProtocol);
-        let msg = err.to_string();
+    fn pressing_play_reaches_a_running_integrated_server() {
+        let protocol = Config::default().protocol;
+        let net = match launch_singleplayer(protocol, 0, None) {
+            Ok(net) => net,
+            Err(e) => {
+                // A build with no hostable family must *report*, which is the
+                // `--no-default-features` contract. In the default build (`live`)
+                // this is a failure, not a skip.
+                assert!(
+                    !cfg!(feature = "live"),
+                    "the default build must be able to host singleplayer: {e}"
+                );
+                assert!(matches!(e, LaunchError::NoVersionFamily { .. }));
+                return;
+            }
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut logged_in = false;
+        let mut chunks = 0usize;
+        let mut errors: Vec<String> = Vec::new();
+        while Instant::now() < deadline && !(logged_in && chunks > 0) {
+            for update in net.poll() {
+                match update {
+                    crate::net::NetUpdate::LoggedIn { .. } => logged_in = true,
+                    crate::net::NetUpdate::Chunk { .. } => chunks += 1,
+                    // Collected rather than ignored: an `Error`/`Disconnected`
+                    // here is the actual diagnosis, and without it the failure
+                    // message would only say "timed out".
+                    crate::net::NetUpdate::Error(e) => errors.push(e),
+                    crate::net::NetUpdate::Disconnected(reason) => {
+                        errors.push(format!("disconnected: {reason:?}"));
+                    }
+                    _ => {}
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
         assert!(
-            msg.contains("integrated server"),
-            "unhelpful message: {msg}"
+            logged_in,
+            "the client never logged in to the integrated server; errors: {errors:?}"
         );
         assert!(
-            msg.contains("Multiplayer"),
-            "should point at the working path: {msg}"
+            chunks > 0,
+            "logged in but no terrain arrived — the server is serving nothing; \
+             errors: {errors:?}"
+        );
+        assert!(
+            errors.is_empty(),
+            "the session reported errors while starting: {errors:?}"
         );
     }
 }
