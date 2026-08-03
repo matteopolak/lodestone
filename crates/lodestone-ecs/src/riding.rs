@@ -423,7 +423,18 @@ mod tests {
         // `EntityTypes.java:941`: strider is `sized(0.9F, 1.7F)` and declares no
         // `passengerAttachments`, so vanilla itself uses `(0, 1.7, 0)`.
         let local = passenger_attachment_local("strider", 1.7, 0);
-        assert!((local.y - 1.7).abs() < 1e-9, "strider fallback {}", local.y);
+        // Tolerance is f32-sized, not f64-sized, and that is not slack: the height
+        // crosses an `f32` boundary in `EntityBaseDimensions` before the seat maths
+        // widens it to `f64`, so `1.7f32 as f64` is 1.700_000_047_683_715_8. A
+        // `1e-9` bound here — which the vertical-attachment test above can afford
+        // because 1.443_75 is f32-exact — is tighter than the type can represent and
+        // fails on a correct answer. Discrimination is untouched: the wrong
+        // hypothesis below sits 0.255 away, five orders of magnitude outside this.
+        assert!(
+            (local.y - 1.7).abs() < 1e-6,
+            "strider fallback {} (f32-widened 1.7 is 1.700_000_047_683_715_8)",
+            local.y
+        );
         // And the wrong-but-plausible neighbour: `defaultEyeHeight`'s 0.85 factor
         // would give 1.445. Predicting both is the point.
         assert!(

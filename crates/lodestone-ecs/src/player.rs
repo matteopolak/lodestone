@@ -2048,6 +2048,41 @@ mod tests {
                 pushes_players: false,
             })
         }
+
+        // The three wire methods. This fixture exists only to answer
+        // `entity_facts` for the passenger-attachment rule — it never sees a
+        // socket, and `VersionData` is read for facts alone in these tests.
+        //
+        // `unreachable!` rather than an empty `Ok(vec![])`: a silent success here
+        // would let a future test wire this adapter to something that really does
+        // expect protocol behaviour and get *nothing*, which is the fail-open
+        // shape this repo has been bitten by. If one of these ever fires, the
+        // fixture is being used for something it cannot do, and the panic says so.
+        fn begin_login(
+            &self,
+            _profile: &lodestone_model::LoginProfile,
+            _server: &lodestone_model::ServerAddress,
+        ) -> Result<Vec<lodestone_model::Directive>, lodestone_model::AdapterError> {
+            unreachable!("HeightOnlyAdapter answers entity_facts only; it has no wire")
+        }
+
+        fn handle_packet(
+            &self,
+            _world: &mut dyn lodestone_model::WorldSink,
+            _state: lodestone_model::ConnectionState,
+            _packet_id: i32,
+            _payload: &[u8],
+        ) -> Result<Vec<lodestone_model::Directive>, lodestone_model::AdapterError> {
+            unreachable!("HeightOnlyAdapter answers entity_facts only; it has no wire")
+        }
+
+        fn encode_action(
+            &self,
+            _state: lodestone_model::ConnectionState,
+            _action: &lodestone_model::ClientAction,
+        ) -> Result<Option<(i32, Vec<u8>)>, lodestone_model::AdapterError> {
+            unreachable!("HeightOnlyAdapter answers entity_facts only; it has no wire")
+        }
     }
 
     /// A world with the full local-player component set, a tracked vehicle at
