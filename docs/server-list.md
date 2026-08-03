@@ -107,8 +107,29 @@ footer button the **mouse** is over, and it reaches the draw as
 separate because both are visible at once, and because they are drawn completely
 differently.
 
+**Hover never moves the selection.** Only a click does (and the keyboard, via
+`MenuKey`). Vanilla reaches `AbstractSelectionList.setSelected` from `setFocused`
+(`AbstractSelectionList.java:298-311`) and from the click paths, and from nowhere
+else — so `MenuNav::hover_list` deliberately does nothing at all for a server row
+except clear `list_button`.
+
+This was wrong at first: `hover_list` set `MenuNav::server`, on the reasoning that
+the mouse and keyboard should drive one cursor rather than two. A player reported it
+immediately — the row outline followed the mouse, so a server could not stay
+selected while the cursor travelled down to the Join button. That reasoning *is*
+right for a screen of buttons, which is why `MenuNav::hover` still moves the row
+cursor on the title, pause and settings screens; it is wrong for a selection list,
+where the selection is a persistent choice rather than a highlight.
+`hovering_a_server_row_does_not_move_the_selection` is the gate, with clicks as its
+control so that "hover is inert" cannot pass on a screen where nothing works.
+
 A hovered row's icon overlay is a third thing again, and it depends on the mouse
-*position* rather than any row index — see below.
+*position* rather than any row index — see below. That is also why nothing has to be
+recorded for a hovered row: both hover visuals (the icon scrim and the quadrant
+sprite) are derived in `render.rs` from `MenuFrame::cursor` bounds-tested against the
+row rect being drawn, so a `hovered` row index here would have had no consumer. Note
+`WorldSelectNav::hovered` *does* exist, because on that screen a hovered row must not
+pull focus out of the search field.
 
 ### The favicon's quadrants
 

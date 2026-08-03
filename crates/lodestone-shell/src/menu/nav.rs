@@ -1136,10 +1136,11 @@ impl MenuNav {
     pub fn hover(&mut self, ui: &UiState, row: usize) {
         match ui.screen() {
             Screen::MainMenu if row < MAIN_BUTTONS.len() => self.main = row,
-            // Two cursors on one screen (#396): the rows below `list.len()` are
-            // server entries and move the *selection*; the seven above them are
-            // footer buttons and move a separate button highlight, which is what
-            // lets a selected server stay outlined while a button lights up.
+            // Two cursors on one screen (#396), and hover drives only one of
+            // them: the seven rows above `list.len()` are footer buttons and move
+            // a button highlight, while the server entries below it move
+            // **nothing**. That is what lets a selected server stay outlined
+            // while the cursor travels to Join — see `hover_list`.
             Screen::ServerList => self.hover_list(row),
             Screen::Paused if row < PAUSE_BUTTONS.len() => self.paused = row,
             Screen::Death if row < DEATH_BUTTONS.len() => self.death = row,
@@ -1240,11 +1241,30 @@ impl MenuNav {
         self.key(ui, MenuKey::Enter)
     }
 
-    /// [`Self::hover`]'s multiplayer arm: a server row moves the selection, a
-    /// footer row moves the button highlight.
+    /// [`Self::hover`]'s multiplayer arm. A footer row moves the button
+    /// highlight; a **server row does nothing but clear it**, because on a
+    /// selection list hover is not selection.
+    ///
+    /// This used to set `self.server`, so the 1 px row outline followed the mouse
+    /// and a server could not stay selected while the cursor travelled to Join. A
+    /// player reported it immediately. Vanilla reaches
+    /// `AbstractSelectionList.setSelected` only from `setFocused`
+    /// (`AbstractSelectionList.java:298-311`) and the click paths — never from
+    /// hover; `ServerSelectionList.java:364-382` shows what hover *does* draw,
+    /// which is a `fill(…, -1601138544)` scrim over the 32 px favicon plus the
+    /// join / move-up / move-down sprite for the quadrant under the cursor.
+    ///
+    /// **Nothing is recorded for the row**, and that is deliberate rather than an
+    /// omission: both of those visuals are driven by `MenuFrame::cursor` in
+    /// `render.rs`, which bounds-tests the logical cursor against the row rect it
+    /// is about to draw into. A `hovered` row index here would have no consumer —
+    /// see `super::world_select::WorldSelectNav::hovered`, which *does* need one,
+    /// because on that screen a hovered row must not steal focus from the search
+    /// field.
     fn hover_list(&mut self, row: usize) {
         if row < self.list.len() {
-            self.server = row;
+            // Moving from the footer onto a row must put the button highlight
+            // out, or it stays burnt in on whichever button was last crossed.
             self.list_button = None;
         } else if row - self.list.len() < SERVER_LIST_BUTTONS.len() {
             self.list_button = Some(row - self.list.len());
@@ -3256,6 +3276,63 @@ mod tests {
         }
     }
 
+    /// **Hovering a server row does not select it.** Reported by a player: the
+    /// 1 px row outline followed the mouse, so a server could not stay selected
+    /// while the cursor travelled down to the Join button.
+    ///
+    /// Vanilla reaches `AbstractSelectionList.setSelected` only from `setFocused`
+    /// (`AbstractSelectionList.java:298-311`) and the click paths, never from
+    /// hover — so this asserts hover is inert on rows *and* that click still
+    /// works, because "hover does nothing" is also satisfied by a screen where
+    /// nothing works at all.
+    #[test]
+    fn hovering_a_server_row_does_not_move_the_selection() {
+        let (mut nav, mut ui, _) = listing("list-hover", 3);
+        // Establish a known selection by clicking, rather than assuming one:
+        // `listing` adds each server through the real add path, which highlights
+        // the row it just created, so a 3-entry list arrives selected on row 2.
+        let (cx, cy) = icon_point(0, 3.0, 0.5);
+        point_at(&mut nav, cx, cy);
+        nav.click(&mut ui, 0);
+        assert_eq!(nav.server_index(), 0, "precondition: row 0 is selected");
+
+        // Sweep the cursor across every row, including back to the start. Under
+        // the old `hover_list` each of these moved the selection.
+        for row in [1_usize, 2, 0, 2, 1] {
+            nav.hover(&ui, row);
+            assert_eq!(
+                nav.server_index(),
+                0,
+                "hovering row {row} moved the selection; on a selection list only \
+                 a click may do that"
+            );
+        }
+
+        // The control: the same rows, clicked, *do* move it — so the assertion
+        // above is measuring hover-versus-click and not a dead screen.
+        for row in [1_usize, 2, 0] {
+            let (bx, by) = icon_point(row, 3.0, 0.5);
+            point_at(&mut nav, bx, by);
+            nav.click(&mut ui, row);
+            assert_eq!(
+                nav.server_index(),
+                row,
+                "the control failed: a click on row {row} must select it, so the \
+                 hover assertion above proves nothing"
+            );
+        }
+
+        // And a selection survives the cursor leaving the rows entirely for the
+        // footer, which is the exact motion the report was about.
+        nav.hover(&ui, 0);
+        nav.hover(&ui, nav.list().len()); // first footer button
+        assert_eq!(
+            nav.server_index(),
+            0,
+            "reaching for a footer button must not disturb the selected server"
+        );
+    }
+
     /// A click on a row **selects**; only the favicon's right half joins. That is
     /// `OnlineServerEntry.mouseClicked`'s order (`ServerSelectionList.java:490-515`),
     /// and it is also the `MenuNav::click` hazard #395 recorded from the other side:
@@ -3415,11 +3492,22 @@ mod tests {
     /// F5 refreshes, and hovering the footer moves a **second** cursor rather than
     /// the selection — which is what lets a selected row stay outlined while a
     /// button under the mouse highlights.
+    ///
+    /// This test used to assert that hovering row 1 *selected* row 1, which was
+    /// the defect a player reported rather than a property worth keeping; see
+    /// `hovering_a_server_row_does_not_move_the_selection`. Only the row-hover
+    /// assertions changed — everything about F5 and the footer cursor is as it
+    /// was, including that a row hover still clears the button cursor.
     #[test]
     fn f5_refreshes_and_hovering_the_footer_leaves_the_selection_alone() {
         let (mut nav, mut ui, _) = listing("list-f5", 2);
+        let selected = nav.server_index();
         nav.hover(&ui, 1);
-        assert_eq!(nav.server_index(), 1);
+        assert_eq!(
+            nav.server_index(),
+            selected,
+            "a row hover must not move the selection"
+        );
         assert_eq!(nav.list_button(), None, "a row hover clears the button cursor");
 
         assert_eq!(nav.key(&mut ui, MenuKey::Refresh), MenuAction::RefreshList);
@@ -3430,17 +3518,18 @@ mod tests {
         assert_eq!(nav.list_button(), Some(3));
         assert_eq!(
             nav.server_index(),
-            1,
+            selected,
             "hovering a button must not move the selected server"
         );
-        // Back onto a row clears it again.
+        // Back onto a row clears the button cursor and *still* leaves the
+        // selection where the last click put it.
         nav.hover(&ui, 0);
         assert_eq!(nav.list_button(), None);
-        assert_eq!(nav.server_index(), 0);
+        assert_eq!(nav.server_index(), selected);
         // A row index past every button is ignored rather than clamped.
         nav.hover(&ui, 99);
         assert_eq!(nav.list_button(), None);
-        assert_eq!(nav.server_index(), 0);
+        assert_eq!(nav.server_index(), selected);
     }
 
     /// F5 must not reach the edit form as text — the trap `MenuKey::Refresh`
