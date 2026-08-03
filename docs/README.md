@@ -56,6 +56,20 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `getFlyingSpeed` sprint arm whose absence made **every sprint-jump** 30% short —
   in the Rust *and* in the Python oracle, which is why they agreed. Spectator is
   explicitly deferred rather than half-modelled.
+- [Riding](./riding.md) — Tier 1 item 8: `EntityPassengersChanged` was a **complete**
+  island (four grep hits: the decode, its two tests, the variant), and so were all
+  five other riding-shaped wire items, three of them serverbound with zero
+  producers. What landed is mount / seat / camera / dismount; what is deferred is
+  the vehicle *moving*, and for one reason — **every vehicle is client-authoritative
+  while a player rides it**, horses included, so the server zeroes its delta and
+  waits for `ServerboundMoveVehiclePacket`. Also: 26.2's data-driven attachment rule
+  and its two easy-to-invert constants (the `PASSENGER` fallback is `height × 1.0`,
+  *not* the eye height's `× 0.85`; the player's own `VEHICLE` attachment is `0.6`
+  and is **subtracted**), why the camera needed no code at all (vanilla's own
+  `Camera` has no `isPassenger()` branch), why dismount needed none either (it is
+  the sneak bit of a packet we already send, and vanilla does not predict it), and
+  the measured correction that the server *cannot* kick a passenger over
+  `on_ground` — its float check is explicitly `&& !isPassenger()`.
 - [Fluid rendering](./fluid-rendering.md) — given that a cell carries water, what
   gets drawn: vanilla `FluidRenderer`'s three different face predicates, which
   sprite each face takes, and the shoreline bug that proved occlusion is a

@@ -3775,6 +3775,42 @@ impl Sim {
         }
     }
 
+    /// Send the serverbound **use-on-entity** for `entity_id` — vanilla's
+    /// `MultiPlayerGameMode.interact`, the outbound half of mounting a boat,
+    /// minecart or saddled animal.
+    ///
+    /// This is the mirror image of [`Self::attack_entity`]: same packet family,
+    /// same direct-send reasoning (a click is a discrete event, not a per-tick
+    /// one, and [`ActionQueue`] only drains inside the tick loop), same
+    /// tick-derived `sneaking` bit so the local decision cannot disagree with the
+    /// crouch state the wire already reported this tick. The differences are the
+    /// interaction kind and that there is no attack cooldown to reset.
+    ///
+    /// **`Interact`, never `InteractAt`** — see [`Self::use_item_live`]'s entity
+    /// branch for why the entity-local hit position is not fabricated here.
+    ///
+    /// The swing is vanilla's too: `MultiPlayerGameMode.interact` is followed by
+    /// `player.swing(hand)` at the `Minecraft.startUseItem` call site whenever the
+    /// result `consumesAction()`. We swing unconditionally, matching what
+    /// [`Self::use_item_live`]'s block path already does with its own
+    /// `SwingArm` — the result is server-side and one round trip away, and a
+    /// suppressed swing on a refused interaction is a smaller error than a
+    /// missing swing on an accepted one.
+    fn interact_entity(&mut self, entity_id: i32) {
+        let sneaking = self.movement_intent().sneak;
+        if let Some(net) = &self.net {
+            net.send_action(ClientAction::InteractEntity {
+                entity_id,
+                interaction: EntityInteraction::Interact { hand: Hand::Main },
+                sneaking,
+            });
+            net.send_action(ClientAction::SwingArm { hand: Hand::Main });
+        }
+        // Client-side animation, so it runs with or without a socket — the same
+        // split `use_item_live` makes for its own unconditional `swing_hand`.
+        self.swing_hand();
+    }
+
     /// End an attack (attack button released). Aborts a live dig in progress so
     /// the server stops mining; a no-op on the demo world.
     pub fn end_attack(&mut self) {
@@ -3854,6 +3890,31 @@ impl Sim {
     /// toward *not* predicting but never toward predicting something wrong.
     fn use_item_live(&mut self) {
         if self.is_dead() {
+            return;
+        }
+        // **Entity before block, and this branch is the whole of "get in a boat".**
+        // Vanilla's `Minecraft.startUseItem` switches on `hitResult.getType()` and
+        // `case ENTITY` comes first (`Minecraft.java`'s `useItem`), the identical
+        // priority [`Self::begin_attack_live`] already implements for the left
+        // button off the same [`EntityRayTarget`]. Before this, `use_item_live`
+        // returned early on `self.target()` being `None` and never looked at the
+        // entity ray at all, so a right-click on a boat, minecart or saddled horse
+        // sent nothing — the mount packet had no producer, which is the outbound
+        // half of the island `EntityPassengersChanged` was the inbound half of.
+        //
+        // `InteractAt` is deliberately **not** used, even though vanilla sends both
+        // it and `Interact` for a `case ENTITY` click: `InteractAt` carries the
+        // entity-local hit position, and [`Self::update_entity_target`] keeps only
+        // the winning entity's id, not the ray's hit point on its box. A fabricated
+        // local offset would be a wrong number where the server accepts a missing
+        // one — `ServerGamePacketListenerImpl` dispatches mounting off the plain
+        // `Interact` (it is `Entity.interact` that returns `InteractionResult` and
+        // calls `player.startRiding`), and `InteractAt` only matters for the
+        // per-part hit an armour stand or a horse's saddle slot resolves. So the
+        // honest subset is sent, and refining it needs the ray to start reporting
+        // its hit position, not a guess here.
+        if let Some(entity_id) = self.entity_target() {
+            self.interact_entity(entity_id);
             return;
         }
         let Some(hit) = self.target() else { return };

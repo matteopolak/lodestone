@@ -66,6 +66,31 @@
 //! (`lodestone-shell/src/sim.rs:3429-3437`). That call site is out of this
 //! change's scope (`sim.rs` is held by another agent) — see `docs/swimming.md`
 //! for the exact patch to apply there.
+//!
+//! # Riding needs nothing here, and that is a measured claim
+//!
+//! The obvious place to put "the camera sits on the vehicle" is this module, and
+//! it would be wrong. 26.2's `Camera.alignWithEntity`
+//! (`.cache/mc/26.2/client-src/net/minecraft/client/Camera.java:246-264`) has
+//! **no `isPassenger()` branch** — it lerps `entity.xo/yo/zo` and adds the
+//! smoothed eye height, mounted or not. The single exception is a fix-up for
+//! *new-behaviour minecarts* (`:247-256`), which recomputes the attachment
+//! against `behavior.getCartLerpPosition(partialTicks)` so the camera does not
+//! stutter against a cart interpolating between server positions; that is a
+//! smoothing correction, not a different camera.
+//!
+//! Riding also does not change the eye height: `Player.updatePlayerPose`
+//! (`src/net/minecraft/world/entity/player/Player.java:343-357`) has no riding
+//! case and there is no `SITTING` pose, so a mounted player keeps
+//! `Avatar.DEFAULT_EYE_HEIGHT = 1.62` (`Avatar.java:16`).
+//!
+//! So the whole of camera-on-the-vehicle is `lodestone_ecs::player::
+//! pin_passenger_to_vehicle` moving the player's **feet** onto the seat — which
+//! this module then reads through [`PlayerState`] exactly as it reads a walking
+//! player's. Adding a passenger branch here would double-apply the attachment.
+//! The one thing genuinely missing is the minecart lerp fix-up above, which needs
+//! per-vehicle interpolation state the ECS does not hold yet; its symptom is
+//! camera stutter on a *moving* vehicle, not a wrong seat.
 
 use glam::Vec3;
 use lodestone_physics::{Aabb, CollisionView, PlayerState};

@@ -50,7 +50,7 @@ use lodestone_physics::Vec3d;
 use crate::entity::{
     Attributes, AttackSwing, Baby, CustomName, CustomNameVisible, DisplayItem, EntityFlags,
     EntityIndex, EntityKind, EntityUuid, Equipment, HeadYaw, Health, HurtTime, MinecraftEntityId,
-    MobState, OnGround, Pose, Position, Rotation, Variant, Velocity,
+    MobState, OnGround, Passengers, Pose, Position, Rotation, Variant, Vehicle, Velocity,
 };
 use crate::player::{LocalPlayer, PhysicsState};
 use crate::schedules::{GameTick, NetIngest};
@@ -129,6 +129,23 @@ pub fn handles_event(event: &ClientEvent) -> bool {
             | ClientEvent::EntityDamaged { .. }
             | ClientEvent::EntityHurtAnimation { .. }
             | ClientEvent::EntityAnimation { .. }
+            // `EntityPassengersChanged` (Tier 1 item 8). **This arm is the whole
+            // wiring**, exactly as the four islands above it were: the decode has
+            // been correct and tested since v770 landed, and without this line
+            // `SharedState::apply` routes the event to the dead legacy fallback and
+            // `apply_entity_passengers` never runs in production however green a
+            // hermetic test that calls it directly happens to be.
+            //
+            // It belongs *here* and not in `crate::session::handles_event` because
+            // "which entity is riding which" is per-entity ECS state — the
+            // `Passengers`/`Vehicle` component pair. The **local player's own**
+            // ride state is the session-scoped half of the same packet and is
+            // claimed by `session::handles_event` as well, the same
+            // deliberate double-claim `Login` documents at the top of this
+            // `matches!`: two disjoint writes off one event, and
+            // `SharedState::apply` unions the two switches so the event still
+            // reaches the schedule exactly once.
+            | ClientEvent::EntityPassengersChanged { .. }
     )
 }
 
@@ -498,6 +515,102 @@ pub fn apply_entity_animation(
             let mut swing = AttackSwing::default();
             swing.start_swing(duration);
             commands.entity(entity).insert(swing);
+        }
+    }
+}
+
+/// `IngestSet::Apply`: `ClientEvent::EntityPassengersChanged` → [`Passengers`]
+/// on the vehicle and [`Vehicle`] on each rider (issue: Tier 1 item 8).
+///
+/// # This was a total island
+///
+/// `SET_PASSENGERS` decoded correctly at
+/// `crates/protocol/v770/src/adapter.rs:3080` and was round-tripped by
+/// `crates/protocol/v770/tests/entity_events.rs`, and a tree-wide grep for
+/// `EntityPassengersChanged` found **four** hits: the decode, its two tests, and
+/// the `ClientEvent` variant itself. Zero consumers, and — the usual
+/// factory — no arm in [`handles_event`], so `SharedState::apply` never routed
+/// it here at all. Adding the system without that arm would have reproduced the
+/// island exactly, which is why the arm and this function landed together.
+///
+/// # The packet is absolute, so the fold must clear as well as set
+///
+/// `ClientboundSetPassengersPacket` carries the vehicle's **complete** rider
+/// list, and a dismount is announced as that list going empty rather than as a
+/// separate event. So every fold does three things in order:
+///
+/// 1. read the vehicle's *previous* [`Passengers`], and remove [`Vehicle`] from
+///    every id in it that the new list does not contain — this is the only place
+///    a dismount is observable;
+/// 2. write the new list onto the vehicle;
+/// 3. insert `Vehicle(vehicle_id)` on every id in the new list.
+///
+/// Skipping step 1 is what would strand a dismounted player: their `Vehicle`
+/// would still name a boat they are no longer in, and
+/// [`crate::player::player_physics`] would keep pinning them to its seat forever
+/// with no packet left that could ever free them.
+///
+/// # A passenger the client has not spawned is kept, not dropped
+///
+/// `Passengers` stores raw server ids precisely so this system never has to
+/// resolve one. `Vehicle` *is* a component and does need an [`EntityIndex`]
+/// lookup — an id with no entity yet simply gets no `Vehicle` this batch. That
+/// asymmetry is deliberate and it is safe in the direction that matters: the
+/// forward list (which the camera and the seat maths read through the vehicle) is
+/// always complete, and the reverse edge is a convenience that re-arrives with
+/// the next `SET_PASSENGERS` the server sends on any seat change. It is also
+/// self-healing for the local player, whose entity always exists by the time any
+/// vehicle can seat them.
+pub fn apply_entity_passengers(
+    batch: Res<IngestBatch>,
+    index: Res<EntityIndex>,
+    mut passengers: Query<&mut Passengers>,
+    mut commands: Commands,
+) {
+    for event in batch.events() {
+        let ClientEvent::EntityPassengersChanged {
+            vehicle_id,
+            passenger_ids,
+        } = event
+        else {
+            continue;
+        };
+        let Some(vehicle) = index.get(*vehicle_id) else {
+            continue;
+        };
+        // Step 1: whoever *was* aboard and is not on the new list has dismounted.
+        // Read before the write below, so the comparison is against the real
+        // previous state and not against what we are about to store.
+        let departed: Vec<i32> = passengers
+            .get(vehicle)
+            .map(|previous| {
+                previous
+                    .0
+                    .iter()
+                    .copied()
+                    .filter(|id| !passenger_ids.contains(id))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for id in departed {
+            if let Some(entity) = index.get(id) {
+                commands.entity(entity).remove::<Vehicle>();
+            }
+        }
+        // Step 2: the vehicle's list, replaced wholesale.
+        if let Ok(mut current) = passengers.get_mut(vehicle) {
+            current.0.clear();
+            current.0.extend_from_slice(passenger_ids);
+        } else {
+            commands
+                .entity(vehicle)
+                .insert(Passengers(passenger_ids.clone()));
+        }
+        // Step 3: the reverse edge, for the riders the client can resolve.
+        for id in passenger_ids {
+            if let Some(entity) = index.get(*id) {
+                commands.entity(entity).insert(Vehicle(*vehicle_id));
+            }
         }
     }
 }
@@ -964,6 +1077,11 @@ impl Plugin for IngestPlugin {
                 apply_entity_damaged,
                 apply_entity_hurt_animation,
                 apply_entity_animation,
+                // Ordered after `apply_entity_spawn` by the same `.chain()` sync
+                // point the id-addressed systems above rely on, which is what lets
+                // a `SET_PASSENGERS` in the *same* batch as the vehicle's
+                // `AddEntity` still resolve the vehicle through `EntityIndex`.
+                apply_entity_passengers,
             )
                 .chain()
                 .in_set(IngestSet::Apply),
@@ -2380,6 +2498,28 @@ mod tests {
             entity_id: 1,
             action: AnimationAction::SwingMainHand,
         }));
+        // `EntityPassengersChanged` (Tier 1 item 8) was the fifth instance of the
+        // identical island: decoded at `v770`'s `SET_PASSENGERS`, round-tripped by
+        // `crates/protocol/v770/tests/entity_events.rs`, and a tree-wide grep for
+        // the variant returned exactly **four** hits — the decode, those two tests,
+        // and the `ClientEvent` declaration. No consumer anywhere and no arm here.
+        assert!(handles_event(&ClientEvent::EntityPassengersChanged {
+            vehicle_id: 1,
+            passenger_ids: vec![2],
+        }));
+        // And **both** routers claim it, which is the part that is easy to get
+        // wrong: this side folds the per-entity `Passengers`/`Vehicle` pair,
+        // `session` folds the local player's own `Riding` scalar off the same
+        // event. An arm in only one of the two would leave whichever half it
+        // missed as a fold that never fires — the fork `CLAUDE.md` records as
+        // having cost work twice. This is the assertion that pins the answer
+        // rather than the reasoning.
+        assert!(crate::session::handles_event(
+            &ClientEvent::EntityPassengersChanged {
+                vehicle_id: 1,
+                passenger_ids: vec![2],
+            }
+        ));
         assert!(!handles_event(&ClientEvent::TimeChanged {
             world_age: 1,
             time_of_day: 2,
@@ -2419,6 +2559,124 @@ mod tests {
             "registry-driven dimension facts must reach a fold, or #288's decode \
              is an island"
         );
+    }
+
+    /// `SET_PASSENGERS` names the vehicle and lists its riders, and the fold must
+    /// produce **both** edges: the list on the vehicle and the back-pointer on
+    /// each rider.
+    #[test]
+    fn seating_a_passenger_writes_both_edges() {
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(10, "minecraft:oak_boat"));
+        feed(&mut world, spawn_event(11, "minecraft:pig"));
+        feed(
+            &mut world,
+            ClientEvent::EntityPassengersChanged {
+                vehicle_id: 10,
+                passenger_ids: vec![11],
+            },
+        );
+        let boat = world
+            .resource::<EntityIndex>()
+            .get(10)
+            .expect("the boat is tracked");
+        let pig = world
+            .resource::<EntityIndex>()
+            .get(11)
+            .expect("the pig is tracked");
+        assert_eq!(
+            world.get::<Passengers>(boat).map(|p| p.0.clone()),
+            Some(vec![11]),
+            "the vehicle must carry the rider list"
+        );
+        assert_eq!(
+            world.get::<Vehicle>(pig).copied(),
+            Some(Vehicle(10)),
+            "the rider must carry the reverse edge"
+        );
+    }
+
+    /// **The dismount case, which is the one with no event of its own.** Vanilla
+    /// announces a dismount as the same absolute packet with the rider gone, so
+    /// the fold has to compare against the previous list and *remove* the reverse
+    /// edge. Without that step a dismounted rider keeps naming a vehicle it is no
+    /// longer in, and nothing later can ever free it.
+    #[test]
+    fn an_empty_passenger_list_clears_the_reverse_edge() {
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(10, "minecraft:oak_boat"));
+        feed(&mut world, spawn_event(11, "minecraft:pig"));
+        feed(
+            &mut world,
+            ClientEvent::EntityPassengersChanged {
+                vehicle_id: 10,
+                passenger_ids: vec![11],
+            },
+        );
+        let pig = world
+            .resource::<EntityIndex>()
+            .get(11)
+            .expect("the pig is tracked");
+        // The precondition, asserted rather than assumed: if the seat never
+        // existed, the clear below would pass vacuously.
+        assert!(
+            world.get::<Vehicle>(pig).is_some(),
+            "precondition: the pig must be aboard before the dismount is meaningful"
+        );
+        feed(
+            &mut world,
+            ClientEvent::EntityPassengersChanged {
+                vehicle_id: 10,
+                passenger_ids: Vec::new(),
+            },
+        );
+        assert_eq!(
+            world.get::<Vehicle>(pig).copied(),
+            None,
+            "an empty list must remove the reverse edge, not merely shorten the \
+             vehicle's own list"
+        );
+        assert_eq!(
+            world.get::<Passengers>(
+                world
+                    .resource::<EntityIndex>()
+                    .get(10)
+                    .expect("the boat is tracked")
+            )
+            .map(|p| p.0.clone()),
+            Some(Vec::new()),
+            "…and the vehicle's list must be empty, not stale"
+        );
+    }
+
+    /// A rider the client has not spawned is kept in the vehicle's list rather
+    /// than silently dropped: `SET_PASSENGERS` can arrive before the passenger's
+    /// own `AddEntity`, and resolving through [`EntityIndex`] at fold time would
+    /// lose the seat permanently.
+    #[test]
+    fn an_unspawned_passenger_id_survives_in_the_vehicles_list() {
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(10, "minecraft:minecart"));
+        feed(
+            &mut world,
+            ClientEvent::EntityPassengersChanged {
+                vehicle_id: 10,
+                passenger_ids: vec![999],
+            },
+        );
+        let cart = world
+            .resource::<EntityIndex>()
+            .get(10)
+            .expect("the minecart is tracked");
+        assert_eq!(
+            world.get::<Passengers>(cart).map(|p| p.0.clone()),
+            Some(vec![999]),
+            "an id with no entity yet must still be recorded"
+        );
+        // The control: the id really is unresolvable, so the assertion above is
+        // about the *forward* list surviving and not about a lookup happening to
+        // succeed.
+        assert_eq!(world.resource::<EntityIndex>().get(999), None);
     }
 
     #[test]

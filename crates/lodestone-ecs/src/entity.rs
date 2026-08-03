@@ -379,6 +379,55 @@ pub struct Equipment(pub Vec<EntityEquipment>);
 #[derive(Component, Debug, Clone, PartialEq)]
 pub struct DisplayItem(pub Option<ItemStack>);
 
+/// Who is riding this entity, in mounting order — `Entity.passengers`, folded
+/// from `ClientboundSetPassengersPacket` by
+/// [`crate::ingest::apply_entity_passengers`].
+///
+/// **Server entity ids, not `bevy_ecs::Entity`s**, and deliberately so: the
+/// packet can name a passenger the client has not spawned yet (the vehicle's
+/// `AddEntity` and the passenger's arrive in either order, and `SET_PASSENGERS`
+/// can precede both), so resolving through [`EntityIndex`] at fold time would
+/// silently drop the seat. The id survives; the lookup happens at read time,
+/// where a miss is an honest "not tracked yet" rather than a lost seat.
+///
+/// # This is not `Option`-wrapped, and absence is not "never reported"
+///
+/// Unlike most of this module, the empty case is a *real* state the server
+/// reports: `SET_PASSENGERS` with a zero-length array is how vanilla announces a
+/// dismount. So `Passengers(vec![])` means "explicitly nobody", while the
+/// component being **absent** means the same thing by default — an entity nobody
+/// has ever mounted. Both read as "no riders", which is why this one field does
+/// not need the three-state encoding the module docs describe.
+///
+/// [`crate::ingest::apply_entity_passengers`] is the only writer, and it
+/// *replaces* the list wholesale: the packet is absolute, never a delta.
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
+pub struct Passengers(pub Vec<i32>);
+
+/// The server entity id of the vehicle this entity is riding, if any —
+/// `Entity.vehicle`, the reverse of [`Passengers`].
+///
+/// Derived by [`crate::ingest::apply_entity_passengers`] from the same packet
+/// rather than reported separately: `SET_PASSENGERS` names the vehicle and lists
+/// its riders, so the reverse edge is a fold of the forward one.
+///
+/// # Why the reverse edge is stored rather than searched
+///
+/// The question every consumer actually asks is "what am *I* riding" — the
+/// camera, the `on_ground` override, the dismount key. Answering that from
+/// [`Passengers`] alone is a scan over every tracked entity per tick. More
+/// importantly a scan cannot be made *correct* cheaply: a passenger transferring
+/// from one vehicle to another produces two `SET_PASSENGERS` packets in an
+/// unspecified order, and this component is written by the same system that
+/// writes both lists, so the transient double-membership a scan would see cannot
+/// be observed here.
+///
+/// **Absent** means not riding anything. That is the whole state; there is no
+/// "unreported" case, because a rider is always announced by the packet that
+/// seats it.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Vehicle(pub i32);
+
 /// Server entity id → `bevy_ecs` [`Entity`].
 ///
 /// Maintained eagerly by [`apply_entity_spawn`](crate::ingest::apply_entity_spawn)
