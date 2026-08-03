@@ -44,6 +44,63 @@ attachment**. This is deliberate and worth preserving: our depth is `[0,1]`
 DirectX-style rather than vanilla's reversed-Z, so every ported depth comparison
 flips sign. Having nothing to flip is worth more than having it right.
 
+#### The sky pass's clear colour *is* the world below the horizon
+
+`SkyRenderer::render` takes a required `clear: wgpu::Color` and the shell passes
+`SkyFrame::clear_color_wgpu(camera.position.y)` — this frame's **resolved fog
+colour**.
+
+This is not a detail. The disc is a *finite* plane 16 blocks above the eye with a
+512-block rim, so it covers the frame above the horizon line and nothing below
+it, plus it leaves a thin `atan(16 / 512)` ≈ **1.79°** band immediately above the
+horizon where a ray leaves past the rim instead of hitting the disc. Terrain draws
+over that afterwards; wherever terrain does not reach — open ocean past the render
+distance, an unmeshed chunk, anything beyond the far plane — **the clear colour is
+literally what the player sees.**
+
+It was `wgpu::Color::BLACK` from the day this pass was written, and that is the
+whole of the reported *"the skybox ends too early and the bottom half is always
+black"*: a hard **pure black** band with a flat top edge sitting at the horizon,
+visible wherever distant terrain did not paint. Pure black is not a wrong shade of
+sky; it is the absence of one, which is why it read as a missing skybox rather
+than as a colour bug.
+
+Vanilla does exactly the same thing and it is easy to miss, because vanilla's
+clear does not live in `SkyRenderer` at all:
+
+```java
+// LevelRenderer.java:195-204 — its own "clear" FramePass, before the sky pass
+.clearColorAndDepthTextures(
+   mainRenderTarget.getColorTexture(), new Vector4f(fogColor.x, fogColor.y, fogColor.z, 0.0F), ...)
+```
+
+and every `SkyRenderer` render pass then passes `Optional.empty()` for the clear
+value. `shouldRenderDarkDisc` is **not** the mechanism here — it is true only when
+the eye is *below* `getHorizonHeight` and not underwater (the in-a-cave case),
+drawn at `translate(0, 12, 0)` in `(0,0,0,1)`. In normal play vanilla draws the
+top disc only, and everything under the horizon is terrain over a fog-coloured
+clear.
+
+Two properties of `SkyFrame::clear_color` are load-bearing:
+
+* It reads the **resolved** colour, not `day_fog_color`. The `FOG_COLOR` track
+  darkens the horizon to `#161616` at deep night and void fog darkens it
+  underground; a day-colour clear would paint a bright band beneath a near-black
+  night sky.
+* It is therefore *identical to the disc's own rim*: `sky_disc.wgsl` paints
+  `mix(sky, fog, 1.0) == fog` at and past `sky_fog_end`, so the seam where the
+  disc's coverage ends cannot band. `the_clear_colour_is_the_discs_own_rim`
+  (`sky_pipeline.rs`) asserts that identity across five clocks and three eye
+  heights, and also asserts the night clear is both much darker than the day one
+  *and* not black.
+
+**The GPU gates deliberately keep passing `wgpu::Color::BLACK`.** Every one of
+them measures "did anything paint here" (`non_black_fraction`,
+`near_black_fraction`, `fringe_fraction`), and a sky-coloured clear satisfies all
+three for free — the gates would go green and stop measuring. That is why the
+clear is a required parameter of `render` rather than something `render` derives
+from the frame itself.
+
 ### Air bubbles
 
 `airSupply` was decoded nowhere, so the chain is six hops:
@@ -77,6 +134,9 @@ which is what makes the gradual refill watchable after surfacing.
 **The `Clear`/`Load` handover is the fragile part of the sky wiring.** If you add
 another pass before the block pass, decide explicitly which one owns the clear.
 `stats.sky_drawn` is the signal; do not re-derive it from `self.sky.is_some()`.
+And whichever pass owns it, the *colour* must stay the resolved fog colour — see
+[above](#the-sky-passs-clear-colour-is-the-world-below-the-horizon); a scratch
+value there is a pure-black band across the horizon, not an invisible detail.
 
 **`sprite_vitals` lays out relative to a moving anchor.** `row_y` derives from
 `cluster_top`, which starts at `b.h - margin` and is pulled up only `if
@@ -634,7 +694,9 @@ Four things about those gates are worth keeping:
   asserted the warm pixels landed inside it. The rect came out as the entire
   upper frame, which is how the fan-wraps-the-eye geometry above was discovered.
   The measurement is now confined to pixels where the *disc* paints (below the
-  horizon the destination is the pass's black clear, so any band fragment
+  horizon the destination is the *gate's* black clear — these gates pass
+  `wgpu::Color::BLACK` rather than the shipped fog-coloured clear, see the
+  clear-colour section above — so any band fragment
   trivially "beats blue" there) and localisation is by **mean elevation** and by
   **turning the camera around** — the only measurement that can distinguish a
   horizon band from a global warm tint, which no frame average can.

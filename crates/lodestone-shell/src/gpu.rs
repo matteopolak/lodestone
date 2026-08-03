@@ -1365,9 +1365,22 @@ impl RenderState {
         // attachment, run *before* the block pass (`SkyRenderer::render`'s own
         // doc: it must run first and take no depth, so it can never occlude
         // terrain and terrain always draws over it normally). It clears the
-        // target itself (`Color::BLACK`, overwritten by every pixel the four
-        // sky draws touch), so the block pass below must switch from its own
+        // target itself, so the block pass below must switch from its own
         // `Clear` to a `Load` — clearing twice would just discard the sky.
+        //
+        // **That clear is the below-horizon void, not a scratch value.** The sky
+        // disc is a finite overhead plane: everything under the horizon line
+        // keeps the clear colour until terrain paints over it, and wherever
+        // terrain does not reach (open ocean past the render distance, an
+        // unmeshed chunk) the clear is what the player sees. It was
+        // `Color::BLACK` for as long as this pass existed, which is the reported
+        // "the skybox ends too early and the bottom half is always black" — a
+        // hard *pure black* band with a flat top edge at the horizon. Vanilla
+        // clears the same target to the fog colour in a separate `"clear"` pass
+        // (`LevelRenderer.java:195-204`) and its `SkyRenderer` passes never
+        // clear at all. `SkyFrame::clear_color` is that colour, resolved for
+        // this frame's clock and eye height so it is identical to the disc's own
+        // rim.
         stats.sky_drawn = if let Some(sky) = &self.sky {
             // The disc's *centre* colour is `self.fog.sky_color`, not
             // `self.clear`. Those two were the same value until #96's biome tint:
@@ -1395,7 +1408,8 @@ impl RenderState {
             .with_fog_color(self.fog.color)
             .with_render_distance(self.render_distance_chunks)
             .with_void_fog(lodestone_render::fog::VoidFog::OVERWORLD);
-            sky.render(device, queue, &mut encoder, view, camera, &frame);
+            let clear = frame.clear_color_wgpu(camera.position.y);
+            sky.render(device, queue, &mut encoder, view, camera, &frame, clear);
             true
         } else {
             false
