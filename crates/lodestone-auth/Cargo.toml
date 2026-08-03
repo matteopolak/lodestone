@@ -34,6 +34,13 @@ reqwest = { workspace = true }
 tokio = { workspace = true }
 keyring = { workspace = true }
 
+# The loopback authorization-code flow (`browser_login`): PKCE needs SHA-256 and
+# base64url, and both the verifier and the CSRF `state` need a CSPRNG. Native-only
+# for the same reason as `reqwest` above — the flow binds a `127.0.0.1` listener
+# and launches the platform's browser, neither of which a wasm build can do.
+sha2 = { workspace = true }
+rand = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true }
 reqwest = { workspace = true }
