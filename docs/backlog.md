@@ -122,14 +122,23 @@ recurring defect classes, not because they are generically useful — see
    eighth instance.
 
    Still open, in descending order of visibility — details and vanilla citations in the doc:
-   - **The AO occluder predicate diverges.** Ours is `BlockModels::occludes`; vanilla's is
-     `BlockBehaviour.getShadeBrightness` (`isCollisionShapeFullBlock ? 0.2 : 1.0`,
-     overridden to a flat `1.0` by exactly `TransparentBlock`, `Barrier`, `Light`, `Mud`,
-     `SnowLayer`, `SoulSand`, `StructureVoid` — **not** `LeavesBlock`). The two agree on
-     glass and ice by coincidence and disagree on every full-collision-cube block that
-     does not occlude for culling: **leaves**, slime, honey, spawner, grates. Vanilla
-     darkens the underside of a tree canopy; we do not. **Actionable now** —
-     `lodestone_data::collision_shapes` is already O(1) by state id.
+   - ~~**The AO occluder predicate diverges.**~~ **Fixed.** `ModelSectionView::ao_occludes_at`
+     now answers vanilla's `getShadeBrightness == 0.2F` from
+     `lodestone_data::shade_brightness`, a per-state bitset dumped from the real 26.2 server
+     (`ShadeBrightnessOracle.java`); the light half keeps `occludes_at`, because vanilla keys
+     `smoothBlend` on view-blocking/light-dampening instead. Canopies darken.
+
+     **Three details in the note this replaces were wrong**, and all three came from reading a
+     `grep -l` of override *files* as if it told you what they return. **Ice diverged too** —
+     `IceBlock extends HalfTransparentBlock`, and only `TransparentBlock` overrides, so
+     "agree on glass and ice by coincidence" was half false. **Honey and the copper grates
+     never diverged** — honey's collision box is inset, and the grates are
+     `WaterloggedTransparentBlock`. And `Mud`/`SoulSand` override to a flat **`0.2`**, not
+     `1.0`, with `SnowLayer` per-state (`LAYERS == 8`). Measured from the dump: the seven
+     overrides move **39 states across 30 blocks** against the collision shape alone, in
+     **both** directions, which is exactly why the `collision_shapes` derivation this bullet
+     recommended would have been wrong. See
+     [`model-smooth-lighting.md`](./model-smooth-lighting.md#the-occluder-predicate).
    - Vanilla's AO neighbourhood is centred on the neighbour cell only when the face is
      *cubic*; for a partial quad it centres on the block's own cell. Ours always uses the
      neighbour, so stair/slab interior faces sample one cell off.
