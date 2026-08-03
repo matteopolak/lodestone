@@ -4,7 +4,10 @@ A from-scratch Minecraft client in Rust. Active scope is **v770 only** (protocol
 
 This file is the short, durable set of rules. The long-form record lives in
 [`DESIGN.md`](./DESIGN.md) (architecture, plus a §12 validation log of ~20 beliefs that were
-confidently held and empirically false) and [`HANDOFF.md`](./HANDOFF.md) (what is open and why).
+confidently held and empirically false). What is open lives in
+[GitHub issues](https://github.com/matteopolak/lodestone/issues), with the tier definitions and
+per-item traps in [`docs/backlog.md`](./docs/backlog.md). [`HANDOFF.md`](./HANDOFF.md) is the
+workflow for an agent *orchestrating* this repo rather than writing code in it.
 Per-subsystem detail goes in [`docs/`](./docs/README.md).
 
 ---
