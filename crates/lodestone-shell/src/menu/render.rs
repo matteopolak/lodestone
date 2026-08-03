@@ -63,6 +63,7 @@ use crate::hud::item_icon::{ColourStream, push_sprite_quad};
 use crate::menu::edit_box::{self, EditBox};
 use crate::menu::layout;
 use crate::menu::nav::{MainButton, PauseButton};
+use crate::menu::panorama::{self, PanoramaFaces, PanoramaRenderer};
 use crate::menu::widget::{self, LayoutElement, Widget};
 
 /// Bitmap-font cell metrics, matching [`crate::hud`]'s font (`glyph_rows`
@@ -3609,9 +3610,10 @@ struct MenuSprites {
 }
 
 /// GPU renderer for the menu screens: a coloured-quad pipeline, a textured GUI
-/// sprite pipeline, and a growable dynamic vertex buffer for each. Drawn in a
-/// `Clear` pass for a screen that owns the frame and a `Load` pass for the pause
-/// overlay.
+/// sprite pipeline, and a growable dynamic vertex buffer for each, plus the
+/// cubemap panorama ([`crate::menu::panorama`]) that draws behind all three on an
+/// out-of-world screen. Drawn in a `Clear` pass for a screen that owns the frame
+/// and a `Load` pass for the pause overlay.
 #[derive(Debug)]
 pub struct MenuRenderer {
     pipeline: wgpu::RenderPipeline,
@@ -3631,6 +3633,14 @@ pub struct MenuRenderer {
     /// Needs no GPU resources, so it is resolved in `new` exactly as
     /// `HudRenderer` does. `None` on a jar-less run.
     font: Option<Arc<VanillaFont>>,
+    /// The title screen's spinning cubemap, attached lazily on the first draw
+    /// (see [`MenuRenderer::ensure_panorama`]). `None` leaves every screen on the
+    /// flat [`BG`] backdrop, which is the pre-panorama behaviour.
+    panorama: Option<PanoramaRenderer>,
+    /// Whether the lazy panorama load has already been tried — same purpose as
+    /// [`Self::gui_attempted`]: without it a jar-less run re-decodes six PNGs
+    /// every frame.
+    panorama_attempted: bool,
 }
 
 impl MenuRenderer {
@@ -3706,6 +3716,8 @@ impl MenuRenderer {
             sprites: None,
             gui_attempted: false,
             font: VanillaFont::shared(),
+            panorama: None,
+            panorama_attempted: false,
         }
     }
 
@@ -3880,6 +3892,61 @@ impl MenuRenderer {
         }
     }
 
+    /// Whether the title screen's cubemap panorama is bound, i.e. whether the
+    /// out-of-world screens draw vanilla's spinning sky rather than the flat
+    /// [`BG`] backdrop.
+    ///
+    /// Same discipline as [`Self::gui_attached`]: a gate that means to measure the
+    /// panorama **must assert this**, because a jar-less run degrades silently to
+    /// a fill that satisfies any "something drew here" assertion.
+    #[must_use]
+    pub fn panorama_attached(&self) -> bool {
+        self.panorama.is_some()
+    }
+
+    /// Bind a panorama cubemap: uploads the six layers and builds its pipeline.
+    ///
+    /// Public so a gate can hand in a synthetic cubemap with six distinguishable
+    /// faces — which is the only way to check the [`panorama::FACE_SUFFIXES`]
+    /// order from pixels, since vanilla's shipped faces in 26.2 are a single flat
+    /// grey (see `docs/menu-panorama.md`).
+    pub fn attach_panorama(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        faces: &PanoramaFaces,
+    ) {
+        self.panorama_attempted = true;
+        self.panorama = Some(PanoramaRenderer::new(
+            device,
+            queue,
+            self.color_format,
+            faces,
+        ));
+    }
+
+    /// Drop back to the flat [`BG`] backdrop. The executed negative control for
+    /// every "the panorama reached pixels" assertion.
+    pub fn detach_panorama(&mut self) {
+        self.panorama = None;
+        // As `detach_gui`: leave the attempted flag set so the next draw does not
+        // helpfully undo the control.
+        self.panorama_attempted = true;
+    }
+
+    /// Load and bind the panorama cubemap on first use — twin of
+    /// [`Self::ensure_gui`], and lazy for the same reason (the upload needs a
+    /// `Queue`, which only the draw paths have).
+    fn ensure_panorama(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        if self.panorama_attempted {
+            return;
+        }
+        self.panorama_attempted = true;
+        if let Some(faces) = crate::resources::load_panorama() {
+            self.attach_panorama(device, queue, &faces);
+        }
+    }
+
     /// Draws one menu frame, clearing the target first. For a screen owning
     /// the whole frame (see [`owns_frame`]) — nothing renders behind a menu,
     /// so clearing rather than loading is what keeps the last world frame
@@ -3953,6 +4020,21 @@ impl MenuRenderer {
         load: wgpu::LoadOp<wgpu::Color>,
     ) {
         self.ensure_gui(device, queue);
+        // The panorama is vanilla's out-of-world background: `extractBackground`
+        // draws it whenever `minecraft.level == null`, which for this renderer is
+        // exactly `!frame.overlay` (the one overlay frame is the pause menu, drawn
+        // over a live world). See `docs/menu-panorama.md`.
+        // `frame.logo` is set for the title screen and nothing else, which is the
+        // one screen whose `extractBackground` override is empty.
+        let panorama_dim = panorama::dim_for_screen(frame.logo);
+        if !frame.overlay {
+            self.ensure_panorama(device, queue);
+            if let Some(pano) = self.panorama.as_mut() {
+                pano.advance(std::time::Instant::now());
+                pano.prepare(queue, width, height, panorama_dim);
+            }
+        }
+        let panorama_drawn = !frame.overlay && self.panorama.is_some();
         let (logical_w, logical_h) = logical_canvas(frame.gui_scale, width, height);
         let geo = build(
             frame,
@@ -3987,7 +4069,8 @@ impl MenuRenderer {
             queue.write_buffer(&sprites.buffer, 0, bytemuck::cast_slice(&geo.sprite));
         }
 
-        // Three draws, one pass. The split is `MenuGeometry::backdrop_floats`:
+        // Three colour/sprite draws, one pass (four with the panorama in front of
+        // them). The split is `MenuGeometry::backdrop_floats`:
         // backdrop, then every GUI sprite, then the rest of the colour stream —
         // so a button's label lands *on* its nine-slice background rather than
         // under it. A render pass can rebind its pipeline, so this needs no
@@ -4015,9 +4098,21 @@ impl MenuRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            // The panorama replaces the flat backdrop rather than sitting under
+            // it: it covers every pixel (you are inside a closed cube), so an
+            // opaque `BG` quad drawn afterwards would hide it entirely. The
+            // `menu_background.png` wash vanilla puts on top on every screen but
+            // the title screen travels as `panorama_dim` in its own shader — see
+            // `panorama::dim_for_screen`, and `docs/menu-panorama.md` on why the
+            // multiply and a black quad at alpha 64/255 are the same operation.
+            if let Some(pano) = self.panorama.as_ref()
+                && panorama_drawn
+            {
+                pano.draw(&mut pass);
+            }
             pass.set_pipeline(&self.pipeline);
             pass.set_vertex_buffer(0, self.buffer.slice(..));
-            if backdrop_verts > 0 {
+            if backdrop_verts > 0 && !panorama_drawn {
                 pass.draw(0..backdrop_verts, 0..1);
             }
             if let Some(sprites) = self.sprites.as_ref()

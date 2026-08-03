@@ -323,6 +323,16 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `Clear` pass; pause overlays with `LoadOp::Load` instead), and `Sim::end_session`
   — what it resets, what it deliberately keeps, and why reconnecting is the actual
   acceptance test.
+- [Menu background and title panorama](./menu-panorama.md) — the spinning cubemap
+  behind every out-of-world screen: vanilla's `_1,_3,_5,_4,_0,_2` face order and
+  per-face vertical flip, the Linear sampler that must not be "fixed" to Nearest,
+  why the pipeline runs with no depth and no culling rather than betting on a
+  winding polarity, and why the `menu_background.png` wash is a shader uniform
+  instead of a second quad. Plus the measurement that deletes most of the work:
+  in 26.2's `client.jar` both menu-background textures are flat `(0,0,0,64)`, the
+  six panorama faces are **1×1 solid grey** and the overlay is 1×1 transparent —
+  so tiling is a no-op, the overlay is a provable no-op, and a gate asserting the
+  panorama is non-uniform would fail against the real pack.
 - [Keybindings](./keybindings.md) — the rebindable action → input table behind every
   gameplay key, why a `Binding` must hold a mouse button (vanilla's attack and use
   are mouse-bound by default), the `resolve_key` precedence chain that lets chat and

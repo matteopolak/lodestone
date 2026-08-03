@@ -230,6 +230,17 @@ fn title_screen_buttons_draw_vanillas_nine_slice_art_not_flat_fills() {
         menu.gui_attached(),
         "the GUI atlas must be bound or every measurement below is of the fallback"
     );
+    // Pin the backdrop to the flat `BG` fill. Every absolute luminance bound in
+    // this gate (`PLAIN_BORDER_MAX`, the backdrop control above the logo, the
+    // "nothing is drawn in the gap below the button" bound) was measured against
+    // that fill, and the cubemap panorama that now draws behind every
+    // out-of-world screen would move all three — 26.2's flat grey panorama reads
+    // ~38 in this linear target where `BG` reads ~28, which the `< 40.0` bound
+    // below has no room for. Calling this *before* the first draw also stops
+    // `ensure_panorama` loading it lazily. The panorama has its own gate in
+    // `menu_panorama_pixels.rs`; see `docs/menu-panorama.md`.
+    menu.detach_panorama();
+    assert!(!menu.panorama_attached());
 
     let nav = MenuNav::with_path(
         std::env::temp_dir().join(format!("lodestone-menu-pixels-{}/servers.json", std::process::id())),
