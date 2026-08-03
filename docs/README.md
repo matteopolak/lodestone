@@ -343,6 +343,20 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   favicon's join / move-up / move-down quadrants can be both drawn and clicked from
   one definition, and why Refresh needed a verb of its own (`refresh` skips every
   row that already has a result, so the button would have done nothing).
+- [The accounts screen](./accounts-screen.md) — the same idiom applied to
+  `Screen::Accounts`, which has **no vanilla original** (Minecraft picks an account
+  in the launcher), so the server list *is* the reference and every constant cites
+  it rather than a jar line. Mostly the record of a reported bug: the sign-in error
+  was one unwrapped `TEXT_SCALE` line, and shortening the message is not a fix
+  because the screen does not own the string — `AuthError` embeds up to 400
+  characters of raw response body and a loopback URL is a few hundred characters of
+  query string, both of which are **whitespace-free**, so the multiplayer screen's
+  greedy `wrap_measured` does nothing for them. Hence `MenuNotice`: text carried
+  unwrapped and wrapped in the draw's own font, a line *count* the layout derives
+  from the band rather than a constant, and a `wrap_bounded` that breaks inside a
+  word. Also why `Enter` had to start cancelling a sign-in (a button that draws,
+  highlights and does nothing is #391's shape), and which half of #402's
+  scroll-window gap is now closed and which is still open.
 - [The settings tree](./settings-screen.md) — the sixth child (#55) and
   `HeaderAndFooterLayout`'s **first production** consumer: vanilla's whole
   `OptionsScreen` tree over eight pages, **135 controls of which 18 work and 117
