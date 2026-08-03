@@ -46,6 +46,35 @@
 //!   the occluder — proving `mesh_models` actually consults the flag rather
 //!   than always computing smooth AO.
 //!
+//! ## And three more scenes for the **occluder predicate** itself
+//!
+//! [`ao_occluder_predicate_is_shade_brightness_not_face_culling`] is a second
+//! gate in this file, added when the AO term stopped reading
+//! [`ModelSectionView::occludes_at`] (a *face-culling* predicate) and started
+//! reading [`ModelSectionView::ao_occludes_at`] (vanilla's
+//! `getShadeBrightness`, a *collision* predicate). The three scenes are chosen
+//! so that each of the two candidate predicates produces a **different**
+//! prediction, which is the only way a gate can tell them apart:
+//!
+//! | scene | `occludes_at` | `ao_occludes_at` | correct byte | byte if the old predicate were still in use |
+//! |---|---|---|---|---|
+//! | [`LeavesOccluder`] | `false` (cutout sprite) | `true` (full collision cube) | ~204 | 255 |
+//! | [`BarrierOccluder`] | `false` | `false` (`BarrierBlock` overrides to `1.0`) | 255 | 255 |
+//! | [`CullingOccluderOnly`] | `true` | `false` | 255 | ~204 |
+//!
+//! `LeavesOccluder` is the bug this closes — the underside of a tree canopy. Its
+//! occluder is a real `minecraft:*_leaves` state id, looked up by name in
+//! `lodestone_data::block_states` and answered by
+//! `lodestone_data::shade_brightness`, so nothing about the block population is
+//! hand-typed here.
+//!
+//! `BarrierOccluder` is the control that fails if the predicate went the *other*
+//! way: `barrier`'s collision shape **is** a full block, so a naive
+//! `isCollisionShapeFullBlock` derivation with the seven `getShadeBrightness`
+//! overrides dropped would darken this scene. `CullingOccluderOnly` is the
+//! control that fails if the AO term still reads `occludes_at` at all — it was
+//! byte ~204 before this change and must be 255 after.
+//!
 //! `#[ignore]`d because it needs a real GPU adapter; run explicitly:
 //! `cargo test -p lodestone-render --test model_ao_corner_gate -- --ignored --nocapture`.
 
@@ -193,6 +222,72 @@ impl ModelSectionView for OneOccluderAoFlat {
         [x, y, z] == OCCLUDER
     }
     fn ambient_occlusion_at(&self, _x: usize, _y: usize, _z: usize) -> bool {
+        false
+    }
+}
+
+/// First state id whose block name matches `name`, from the committed vanilla
+/// block-state census. Panics rather than skipping — a missing block would make
+/// the scenes below vacuous, which is the "precondition species" of vacuous test
+/// `CLAUDE.md` names.
+fn first_id_named(name: &str) -> u32 {
+    (0..lodestone_data::block_states::STATE_COUNT)
+        .find(|&id| lodestone_data::block_states::block_name(id) == Some(name))
+        .unwrap_or_else(|| panic!("{name} present in the block-state census"))
+}
+
+/// A [`ModelSectionView`] whose single occluding cell is a real vanilla block
+/// state, answering `ao_occludes_at` from
+/// `lodestone_data::shade_brightness::occludes_ambient_light` — a faithful
+/// miniature of the production override in
+/// `crates/lodestone-shell/src/mesher.rs`.
+///
+/// `occludes_at` is hard-`false`, which is *not* a simplification: it is what
+/// `BlockModels::occludes` genuinely answers for every block in this family
+/// (leaves are cutout, `barrier` has no geometry at all), and it is exactly what
+/// made the canopy bug invisible. So a scene that darkens here can only have
+/// consulted `ao_occludes_at`.
+struct CensusOccluder {
+    state_id: u32,
+}
+
+impl ModelSectionView for CensusOccluder {
+    fn quads_at(&self, x: usize, y: usize, z: usize) -> &[BakedQuad] {
+        static ONCE: std::sync::OnceLock<Vec<BakedQuad>> = std::sync::OnceLock::new();
+        if (x, y, z) == (0, 0, 0) {
+            ONCE.get_or_init(|| vec![corner_ao_quad()])
+        } else {
+            &[]
+        }
+    }
+    fn occludes_at(&self, _x: i32, _y: i32, _z: i32) -> bool {
+        false
+    }
+    fn ao_occludes_at(&self, x: i32, y: i32, z: i32) -> bool {
+        [x, y, z] == OCCLUDER
+            && lodestone_data::shade_brightness::occludes_ambient_light(self.state_id)
+                == Some(true)
+    }
+}
+
+/// The mirror control: the *culling* predicate says the diagonal occludes and
+/// the *AO* predicate says it does not. This scene darkened at ~204 before the
+/// predicate swap and must be uniformly full-bright after it — the single
+/// cleanest way to observe that the AO term changed which method it calls.
+struct CullingOccluderOnly;
+impl ModelSectionView for CullingOccluderOnly {
+    fn quads_at(&self, x: usize, y: usize, z: usize) -> &[BakedQuad] {
+        static ONCE: std::sync::OnceLock<Vec<BakedQuad>> = std::sync::OnceLock::new();
+        if (x, y, z) == (0, 0, 0) {
+            ONCE.get_or_init(|| vec![corner_ao_quad()])
+        } else {
+            &[]
+        }
+    }
+    fn occludes_at(&self, x: i32, y: i32, z: i32) -> bool {
+        [x, y, z] == OCCLUDER
+    }
+    fn ao_occludes_at(&self, _x: i32, _y: i32, _z: i32) -> bool {
         false
     }
 }
@@ -497,6 +592,126 @@ fn model_path_ao_darkens_exactly_one_corner_and_the_flag_can_disable_it() {
             "{label} must be full-bright when ambient_occlusion_at() = false, got {byte} — \
              the same occluder darkens vertex 0 in scene 1, so this can only be the flag \
              failing to gate the AO computation"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires a GPU adapter; run explicitly to watch the negative controls fail"]
+fn ao_occluder_predicate_is_shade_brightness_not_face_culling() {
+    let Some(gpu) = setup() else {
+        panic!(
+            "model_ao_corner_gate: no GPU adapter. This test is #[ignore]d, so running it is an \
+             explicit request for a real GPU frame — a headless CI box has none and should not \
+             run it."
+        );
+    };
+
+    // Anti-vacuity, before any pixel: the census must actually disagree with the
+    // culling predicate on these two blocks in *opposite* directions, or the two
+    // scenes below measure nothing. Both facts are anchored to the real 26.2
+    // server in `crates/lodestone-data/tests/shade_brightness.rs`.
+    let leaves = first_id_named("minecraft:oak_leaves");
+    let barrier = first_id_named("minecraft:barrier");
+    assert_eq!(
+        lodestone_data::shade_brightness::occludes_ambient_light(leaves),
+        Some(true),
+        "premise: oak_leaves darkens an AO corner in vanilla (full collision cube, no \
+         getShadeBrightness override). Without this the leaves scene proves nothing"
+    );
+    assert_eq!(
+        lodestone_data::shade_brightness::occludes_ambient_light(barrier),
+        Some(false),
+        "premise: barrier does NOT darken an AO corner (BarrierBlock overrides \
+         getShadeBrightness to 1.0) even though its collision shape IS a full block — this is \
+         what makes it a control against the naive collision derivation"
+    );
+
+    let leaves_frame = render_frame(&gpu, &CensusOccluder { state_id: leaves });
+    let barrier_frame = render_frame(&gpu, &CensusOccluder { state_id: barrier });
+    let culling_only = render_frame(&gpu, &CullingOccluderOnly);
+
+    let predicted_byte = (255.0 * ONE_OCCLUDER_RATIO).round() as i32;
+
+    println!("=== AO OCCLUDER PREDICATE GATE ===");
+    println!("--- scene A: leaves occluder (occludes_at = false, ao_occludes_at = true) ---");
+    for (label, byte) in corner_samples(&leaves_frame) {
+        println!("  {label}: byte = {byte}");
+    }
+    let leaves_bbox = dark_bbox(&leaves_frame, 220);
+    println!("  near-corner-value (byte < 220) bounding box: {leaves_bbox:?}");
+    println!("  predicted darkened byte {predicted_byte}; 255 if the old predicate were in use");
+
+    println!("--- scene B (control): barrier occluder, vanilla-exempt ---");
+    for (label, byte) in corner_samples(&barrier_frame) {
+        println!("  {label}: byte = {byte}");
+    }
+    let barrier_bbox = dark_bbox(&barrier_frame, 245);
+    println!("  dark-region bounding box: {barrier_bbox:?}");
+
+    println!("--- scene C (control): occludes_at = true, ao_occludes_at = false ---");
+    for (label, byte) in corner_samples(&culling_only) {
+        println!("  {label}: byte = {byte}");
+    }
+    let culling_bbox = dark_bbox(&culling_only, 245);
+    println!("  dark-region bounding box: {culling_bbox:?}");
+
+    // --- Scene A: the canopy. Predicts a *value*, and the wrong-hypothesis
+    // value (255, full-bright) is outside the tolerance band, so this cannot be
+    // satisfied by both predicates the way a sign-only assertion could be.
+    let [v0, v1, v2, v3] = corner_samples(&leaves_frame).map(|(_, b)| b);
+    assert!(
+        (predicted_byte - 12..=predicted_byte + 12).contains(&i32::from(v0)),
+        "vertex 0's neighbour is a leaf block: vanilla's getShadeBrightness is 0.2 there, so \
+         the corner must read near {predicted_byte}, got {v0}. A reading of 255 means the AO \
+         term is still asking occludes_at (leaves are cutout, so it answers `false`) — the \
+         canopy-underside bug"
+    );
+    for (label, byte) in [("vertex 1", v1), ("vertex 2", v2), ("vertex 3", v3)] {
+        assert!(
+            byte >= 250,
+            "{label} shares no AO-corner sample with the leaf occluder and must stay \
+             full-bright (>=250), got {byte}"
+        );
+    }
+    let (lx0, ly0, lx1, ly1) = leaves_bbox.expect(
+        "scene A must have a non-empty near-corner-value (<220) region — vertex 0 reads near \
+         the predicted byte, well under this threshold",
+    );
+    let (lw, lh) = (lx1 - lx0 + 1, ly1 - ly0 + 1);
+    assert!(
+        lw <= W / 3 && lh <= H / 3 && lx1 < W / 2 && ly0 >= H / 2,
+        "scene A's darkening must be the same tightly-confined bottom-left corner gradient \
+         scene 1 produces, got {lw}x{lh} at {leaves_bbox:?} — a larger or differently-placed \
+         region means something other than one AO corner moved"
+    );
+
+    // --- Scene B: the exemption control. If someone "simplifies" the predicate
+    // to `collision_shapes`-derived `isCollisionShapeFullBlock`, barrier becomes
+    // an occluder and this fires.
+    assert!(
+        barrier_bbox.is_none(),
+        "barrier is exempt in vanilla (BarrierBlock.getShadeBrightness returns 1.0) but \
+         darkened a region at {barrier_bbox:?} — the predicate has been replaced by something \
+         that only looks at the collision shape, where barrier IS a full block"
+    );
+    for (label, byte) in corner_samples(&barrier_frame) {
+        assert!(byte >= 250, "{label} must be full-bright for a barrier occluder, got {byte}");
+    }
+
+    // --- Scene C: the mirror control. This is the frame that changed sign with
+    // this fix: ~204 before, 255 after.
+    assert!(
+        culling_bbox.is_none(),
+        "the AO term must no longer consult occludes_at: this scene's diagonal occludes for \
+         culling but not for shade brightness, and it darkened a region at {culling_bbox:?}"
+    );
+    for (label, byte) in corner_samples(&culling_only) {
+        assert!(
+            byte >= 250,
+            "{label} must be full-bright when only occludes_at (not ao_occludes_at) reports \
+             the diagonal as occluding, got {byte} — the AO term is reading the culling \
+             predicate again"
         );
     }
 }

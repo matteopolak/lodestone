@@ -392,6 +392,46 @@ pub trait ModelSectionView {
         0xF0
     }
 
+    /// Whether the block at a **signed** coordinate darkens an adjacent
+    /// ambient-occlusion corner — vanilla's
+    /// `BlockBehaviour.getShadeBrightness(state, level, pos) == 0.2F`
+    /// (`BlockBehaviour.java:315-317`), the value
+    /// `BlockModelLighter.prepareQuadAmbientOcclusion` averages into every
+    /// smooth-lit vertex (`BlockModelLighter.java:45-110`).
+    ///
+    /// **This is deliberately not [`occludes_at`](Self::occludes_at).** That one
+    /// is a *rendering* predicate (does an opaque quad cover the boundary on all
+    /// six faces), which is the right question for `cullface` and the wrong one
+    /// here: vanilla's is a *collision* predicate,
+    /// `state.isCollisionShapeFullBlock(..) ? 0.2F : 1.0F`, with seven class
+    /// overrides. The two agree on stone, on slabs, on water and — by
+    /// coincidence, via `TransparentBlock`'s override — on glass, and they
+    /// disagree on **every full collision cube whose model does not occlude for
+    /// culling**: leaves above all, plus slime, spawner, beacon and ice.
+    /// Dumping vanilla's own answer measured **39 states across 30 blocks**
+    /// where a derivation from the collision shape alone is wrong, in both
+    /// directions — see `lodestone_data::shade_brightness`.
+    ///
+    /// The player-visible symptom of getting this wrong is the one issue #22's
+    /// remaining divergence named: the underside of a tree canopy stays
+    /// full-bright, where vanilla renders it markedly dimmer.
+    ///
+    /// Only the **AO** half of [`quad_corner_sample`] consults this. The
+    /// *light* half keeps using [`occludes_at`](Self::occludes_at), because
+    /// vanilla's smooth-light substitution is keyed on a third predicate again
+    /// (`translucentN` = `!isViewBlocking || getLightDampening() == 0`, plus
+    /// `LightCoordsUtil.smoothBlend`'s packed-light-is-zero test) which
+    /// `occludes_at` is much the nearer stand-in for. Swapping both would make
+    /// a leaf cell hand its own darkness to its neighbours' *light*, which
+    /// vanilla does not do.
+    ///
+    /// Defaults to [`occludes_at`](Self::occludes_at) so a view that models no
+    /// block registry (tests, GUI items) keeps its previous behaviour exactly,
+    /// and so this stays a one-method override for views that do.
+    fn ao_occludes_at(&self, x: i32, y: i32, z: i32) -> bool {
+        self.occludes_at(x, y, z)
+    }
+
     /// Whether ambient occlusion applies to the block at section-local
     /// `(x, y, z)`, or its quads should fall back to flat per-face light —
     /// vanilla's `ModelBlockRenderer.tesselateBlock` choosing between
@@ -472,12 +512,18 @@ fn round_level(v: f32) -> u8 {
 /// neighbours and the diagonal at that corner:
 ///
 /// * **AO** averages a per-cell shade (`1.0` open, [`AO_OCCLUDED`] occluding)
-///   over those three plus the always-open front cell.
+///   over those three plus the always-open front cell. "Occluding" here is
+///   [`ModelSectionView::ao_occludes_at`] — vanilla's `getShadeBrightness`, a
+///   *collision* test — **not** [`ModelSectionView::occludes_at`]. Read that
+///   method's docs before touching this: using the culling predicate is what
+///   left the underside of a tree canopy full-bright.
 /// * **Light** averages the same four cells' sky/block levels, but an
 ///   occluding neighbour's value is replaced by the centre light
 ///   (`smoothBlend`) once the centre itself is lit above
 ///   [`SMOOTH_LIGHT_MIN_CENTRE`] — so a corner against a wall does not read as
-///   pitch black.
+///   pitch black. This half keeps [`ModelSectionView::occludes_at`], because
+///   vanilla keys it on view-blocking / light dampening rather than on shade
+///   brightness.
 ///
 /// **Not ported**: vanilla weights these four samples by how much of the
 /// quad's actual face area is nearest each cube corner, which matters for a
@@ -501,10 +547,18 @@ fn quad_corner_sample(
     let b = [np[0] + sv * v[0], np[1] + sv * v[1], np[2] + sv * v[2]];
     let d = [a[0] + sv * v[0], a[1] + sv * v[1], a[2] + sv * v[2]];
 
+    // Two different predicates, on purpose — see
+    // `ModelSectionView::ao_occludes_at`. Vanilla's AO term is
+    // `getShadeBrightness` (a collision test); its smooth-light substitution is
+    // keyed on view-blocking / light dampening instead, for which `occludes_at`
+    // is the nearer stand-in. Leaves are the population that separates them.
+    let shade_occ = |c: [i32; 3]| view.ao_occludes_at(c[0], c[1], c[2]);
+    let (shade_a, shade_b, shade_d) = (shade_occ(a), shade_occ(b), shade_occ(d));
+    let ao_of = |o: bool| if o { AO_OCCLUDED } else { 1.0 };
+    let ao = (ao_of(shade_a) + ao_of(shade_b) + ao_of(shade_d) + 1.0) * 0.25;
+
     let occ = |c: [i32; 3]| view.occludes_at(c[0], c[1], c[2]);
     let (occ_a, occ_b, occ_d) = (occ(a), occ(b), occ(d));
-    let ao_of = |o: bool| if o { AO_OCCLUDED } else { 1.0 };
-    let ao = (ao_of(occ_a) + ao_of(occ_b) + ao_of(occ_d) + 1.0) * 0.25;
 
     let centre_sky = centre_light >> 4;
     let centre_block = centre_light & 0xF;
@@ -1331,6 +1385,92 @@ mod tests {
         // smeared across the whole quad.
         let (ao_far, _) = quad_corner_sample(&view, [8, 9, 8], Face::PosY, [1.0, 1.0, 0.0], 0xF0);
         assert!((ao_far - 1.0).abs() < 1e-6, "got {ao_far}");
+    }
+
+    /// The AO term reads [`ModelSectionView::ao_occludes_at`] (vanilla's
+    /// `getShadeBrightness`) and the light term reads
+    /// [`ModelSectionView::occludes_at`] (the culling predicate). The two are
+    /// driven to **opposite** answers here so neither can be mistaken for the
+    /// other — the leaves case is `ao` only, and it darkened nothing before this
+    /// split existed.
+    #[test]
+    fn ao_reads_the_shade_predicate_and_light_reads_the_culling_one() {
+        /// `occludes_at` says no, `ao_occludes_at` says yes — a leaf cell.
+        struct ShadeOnly {
+            at: [i32; 3],
+        }
+        impl ModelSectionView for ShadeOnly {
+            fn quads_at(&self, _x: usize, _y: usize, _z: usize) -> &[BakedQuad] {
+                &[]
+            }
+            fn occludes_at(&self, _x: i32, _y: i32, _z: i32) -> bool {
+                false
+            }
+            fn ao_occludes_at(&self, x: i32, y: i32, z: i32) -> bool {
+                [x, y, z] == self.at
+            }
+            /// Pitch black **only** in the occluding cell, full-bright elsewhere
+            /// — so the light average is a different number depending on whether
+            /// `smoothBlend` substituted, and the two hypotheses are separable.
+            fn corner_light_at(&self, x: i32, y: i32, z: i32) -> u8 {
+                if [x, y, z] == self.at { 0x00 } else { 0xF0 }
+            }
+        }
+        /// The mirror: `occludes_at` says yes, `ao_occludes_at` says no.
+        struct CullingOnly {
+            at: [i32; 3],
+        }
+        impl ModelSectionView for CullingOnly {
+            fn quads_at(&self, _x: usize, _y: usize, _z: usize) -> &[BakedQuad] {
+                &[]
+            }
+            fn occludes_at(&self, x: i32, y: i32, z: i32) -> bool {
+                [x, y, z] == self.at
+            }
+            fn ao_occludes_at(&self, _x: i32, _y: i32, _z: i32) -> bool {
+                false
+            }
+            fn corner_light_at(&self, x: i32, y: i32, z: i32) -> u8 {
+                if [x, y, z] == self.at { 0x00 } else { 0xF0 }
+            }
+        }
+
+        // Same geometry as the test above: an Up quad on (8,8,8), occluder at
+        // the vertex's `-X` edge neighbour.
+        let leaf = ShadeOnly { at: [7, 9, 8] };
+        let (ao, light) =
+            quad_corner_sample(&leaf, [8, 9, 8], Face::PosY, [0.0, 1.0, 0.0], 0xF0);
+        assert!(
+            (ao - 0.8).abs() < 1e-6,
+            "a cell that occludes for shade brightness but not for culling must still darken \
+             the corner to vanilla's one-occluder ratio 0.8, got {ao} — 1.0 here is the \
+             canopy-underside bug"
+        );
+        // …and it must NOT trigger `smoothBlend`, whose key is view-blocking /
+        // light dampening. The dark cell's stored 0x00 therefore stands:
+        // `round((15 + 15 + 15 + 0) / 4) = 11` sky — the lit centre, the two
+        // bright cells of the corner triple, and the dark occluding one.
+        assert_eq!(
+            light, 0xB0,
+            "the light term must ignore ao_occludes_at: with no culling occluder the raw dark \
+             sample stands, giving round((15+15+15+0)/4) = 11 sky. 0xF0 would mean the shade \
+             predicate leaked into smoothBlend"
+        );
+
+        // The mirror: culling-only occlusion must leave AO untouched and drive
+        // the light substitution instead.
+        let culling = CullingOnly { at: [7, 9, 8] };
+        let (ao, light) =
+            quad_corner_sample(&culling, [8, 9, 8], Face::PosY, [0.0, 1.0, 0.0], 0xF0);
+        assert!(
+            (ao - 1.0).abs() < 1e-6,
+            "a cell that occludes only for culling must not darken the corner, got {ao}"
+        );
+        assert_eq!(
+            light, 0xF0,
+            "the culling occluder's dark 0x00 sample must be replaced by the lit centre \
+             (smoothBlend), giving 15 sky"
+        );
     }
 
     #[test]
