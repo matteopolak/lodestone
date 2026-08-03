@@ -44,16 +44,34 @@
 //! has no world clock, so [`PanoramaRenderer::advance`] measures wall time and
 //! converts at [`TICKS_PER_SECOND`]. At the default `panoramaSpeed` of 1.0
 //! (`Options.java:313-320`) that is 2°/s — a three-minute revolution, which is
-//! slow enough that "it looks static" is not evidence of a bug.
+//! slow enough that "it looks static" is not evidence of a bug. (It *was* also
+//! genuinely invisible for one commit, for a different reason: the faces were
+//! being read from the jar's 1×1 stubs, and a solid-coloured cube looks identical
+//! at every yaw. Both explanations are live; check
+//! [`PanoramaFaces::from_object_store`] before believing either.)
+//!
+//! ## Where the faces come from — not the jar
+//!
+//! **`client.jar` ships a 69-byte 1×1 grey stub for all six faces.** The real
+//! 1024×1024 art is delivered through the launcher's asset-object store, and
+//! [`load`] prefers that store per face, falling back to the stub so a checkout
+//! with an unpopulated store still runs. [`crate::asset_objects`] holds the
+//! measurement and the reason this is only eight names in the whole game;
+//! [`PanoramaFaces::from_object_store`] is how a caller tells the two apart,
+//! because a flat-grey cubemap renders perfectly and is not the game.
 //!
 //! ## What this deliberately does not do
 //!
-//! **`panorama_overlay.png` is not drawn.** Vanilla blits it over the panorama at
-//! texture size 16×128, tiled to the full screen (`Panorama.java:31`). In 26.2's
-//! `client.jar` that file is a **1×1 fully transparent** PNG (measured: one
-//! distinct RGBA, `(255, 255, 255, 0)`), so blitting it cannot change any pixel.
-//! Adding it later means one more textured quad on the existing menu-sprite
-//! pipeline, not another pass. See `docs/menu-panorama.md`.
+//! **`panorama_overlay.png` is not drawn — and this is now measured on the real
+//! object, not on the jar's copy.** Vanilla blits it over the panorama at texture
+//! size 16×128, tiled to the full screen (`Panorama.java:31`). The asset-store
+//! object (hash `9dd32387…`, 86 bytes) decodes to **1×1 RGBA, one distinct value,
+//! `(255, 255, 255, 0)`, alpha extrema `(0, 0)`** — confirmed by hexdump: the
+//! IHDR is `1×1`, colour type 6, and the whole IDAT is `ff ff ff 00`. The 86 vs
+//! the jar stub's 68 bytes is a `gAMA` chunk, not content. Blitting a fully
+//! transparent texture cannot change a pixel, so drawing it would be provable
+//! dead code. Adding it if a future pack makes it real means one more textured
+//! quad on the existing menu-sprite pipeline, not another pass.
 //!
 //! **There is no blur.** `Screen.extractBlurredBackground` blurs whatever is
 //! behind a menu when `menuBackgroundBlurriness >= 1`; at the option's 0 this is
@@ -271,7 +289,23 @@ pub struct PanoramaFaces {
     pub size: u32,
     /// `size * size * 6 * 4` bytes: layer 0 first, each layer a top-down RGBA8
     /// image of the (already vertically flipped) source face.
+    ///
+    /// At vanilla's real 1024×1024 this is **25 MB**, held only until
+    /// [`PanoramaRenderer::new`] has uploaded it (`ensure_panorama` drops the
+    /// `Arc` at the end of its block). Do not cache it.
     pub rgba: Vec<u8>,
+    /// How many of the six faces came from the launcher's asset-object store
+    /// rather than from `client.jar`.
+    ///
+    /// **6 is the real art; 0 means every face is a jar stub.** This is not
+    /// diagnostic decoration — the jar ships 1×1 grey stubs for all six faces
+    /// (see [`crate::asset_objects`]), so a panorama built entirely from the jar
+    /// renders a flat colour and *looks* like a working-but-boring sky. A gate
+    /// that means to measure the real cubemap must assert this is 6.
+    ///
+    /// [`assemble`] leaves this 0 because it does not know where its `Image`s came
+    /// from; [`load`] sets it.
+    pub from_object_store: usize,
 }
 
 impl PanoramaFaces {
@@ -279,6 +313,13 @@ impl PanoramaFaces {
     #[must_use]
     pub fn layer_bytes(&self) -> usize {
         (self.size as usize) * (self.size as usize) * 4
+    }
+
+    /// Whether all six faces came from the object store, i.e. whether this is
+    /// vanilla's real panorama rather than the jar's stubs.
+    #[must_use]
+    pub fn is_real_art(&self) -> bool {
+        self.from_object_store == 6
     }
 }
 
@@ -335,30 +376,84 @@ pub fn assemble(faces: &[Image; 6]) -> Result<PanoramaFaces, String> {
         }
     }
 
-    Ok(PanoramaFaces { size, rgba })
+    Ok(PanoramaFaces {
+        size,
+        rgba,
+        from_object_store: 0,
+    })
 }
 
-/// Read and assemble the cubemap from an open pack.
+/// The asset-index key for face `layer`, i.e. the jar path minus its `assets/`
+/// prefix. See [`crate::asset_objects`] on why the two differ.
+#[must_use]
+pub fn face_index_key(layer: usize) -> String {
+    let path = face_jar_path(layer);
+    path.strip_prefix("assets/")
+        .unwrap_or(&path)
+        .to_string()
+}
+
+/// The `client.jar` path for face `layer`.
+#[must_use]
+pub fn face_jar_path(layer: usize) -> String {
+    format!("{PANORAMA_BASE}{}.png", FACE_SUFFIXES[layer % 6])
+}
+
+/// Read and assemble the cubemap, **preferring the asset-object store over the
+/// jar** for every face.
+///
+/// That preference is the whole point of this function rather than a detail.
+/// `client.jar` ships a 69-byte 1×1 grey stub for all six faces and the real
+/// 1024×1024 art is delivered through the asset index; reading the jar gives you
+/// a flat colour that renders perfectly and is not the game. See
+/// [`crate::asset_objects`] for the measurement and the eight-name scope.
+///
+/// The jar is still the fallback, per face, so a checkout with no populated
+/// object store keeps a working (if flat) title screen instead of failing. What
+/// came from where is reported in [`PanoramaFaces::from_object_store`] — a caller
+/// that cares must read it, because the two are visually indistinguishable from
+/// "it drew something".
 ///
 /// # Errors
 ///
-/// Returns a message naming the missing or undecodable face, or [`assemble`]'s
-/// error.
-pub fn load(manager: &lodestone_assets::ResourceManager) -> Result<PanoramaFaces, String> {
+/// Returns a message naming the face that is in neither source or fails to
+/// decode, or [`assemble`]'s error.
+pub fn load(
+    manager: &lodestone_assets::ResourceManager,
+    objects: Option<&crate::asset_objects::AssetObjectStore>,
+) -> Result<PanoramaFaces, String> {
     let mut decoded = Vec::with_capacity(6);
-    for suffix in FACE_SUFFIXES {
-        let path = format!("{PANORAMA_BASE}{suffix}.png");
-        let bytes = manager
-            .read(&path)
-            .ok_or_else(|| format!("panorama face missing from pack: {path}"))?;
-        let image =
-            Image::decode_png(&bytes).map_err(|e| format!("decode {path}: {e}"))?;
+    let mut from_store = 0usize;
+    for layer in 0..6 {
+        let jar_path = face_jar_path(layer);
+        let key = face_index_key(layer);
+        // Object store first; the jar entry is a stub whenever both exist.
+        let (bytes, whence) = match objects.and_then(|store| store.object_bytes(&key)) {
+            Some(bytes) => {
+                from_store += 1;
+                (bytes, "object store")
+            }
+            None => match manager.read(&jar_path) {
+                Some(bytes) => (bytes, "client.jar (stub)"),
+                None => {
+                    return Err(format!(
+                        "panorama face {} is in neither the asset-object store \
+                         (key {key}) nor client.jar ({jar_path})",
+                        FACE_SUFFIXES[layer]
+                    ));
+                }
+            },
+        };
+        let image = Image::decode_png(&bytes)
+            .map_err(|e| format!("decode panorama face {} from {whence}: {e}", FACE_SUFFIXES[layer]))?;
         decoded.push(image);
     }
     let faces: [Image; 6] = decoded
         .try_into()
         .map_err(|_| "expected exactly six panorama faces".to_string())?;
-    assemble(&faces)
+    let mut stacked = assemble(&faces)?;
+    stacked.from_object_store = from_store;
+    Ok(stacked)
 }
 
 /// GPU renderer for the panorama: cube texture, its own pipeline and bind group,
@@ -385,6 +480,9 @@ pub struct PanoramaRenderer {
     texture: wgpu::Texture,
     /// Side length of one face, for diagnostics and gates.
     size: u32,
+    /// [`PanoramaFaces::from_object_store`], carried through so a gate can assert
+    /// it is bound to the real art rather than the jar's flat stubs.
+    from_object_store: usize,
     /// The accumulator, in vanilla's sign. Negated on the way to the matrix.
     spin: f32,
     /// `panoramaSpeed`.
@@ -611,6 +709,7 @@ impl PanoramaRenderer {
             verts,
             texture,
             size,
+            from_object_store: faces.from_object_store,
             spin: 0.0,
             speed: DEFAULT_SPIN_SPEED,
             last: None,
@@ -621,6 +720,17 @@ impl PanoramaRenderer {
     #[must_use]
     pub fn face_size(&self) -> u32 {
         self.size
+    }
+
+    /// How many of the six bound faces came from the asset-object store —
+    /// [`PanoramaFaces::from_object_store`], carried through.
+    ///
+    /// A gate measuring the real sky must assert this is 6: with the jar's stubs
+    /// the cubemap is a single flat colour, and every "the panorama drew" test
+    /// still passes.
+    #[must_use]
+    pub fn faces_from_object_store(&self) -> usize {
+        self.from_object_store
     }
 
     /// The spin accumulator, in vanilla's sign and range (`[-180, 180)`).
@@ -722,6 +832,53 @@ mod tests {
         assert_eq!(FACE_SUFFIXES, ["_1", "_3", "_5", "_4", "_0", "_2"]);
         // And the naive order a reader would guess must *not* be what we ship.
         assert_ne!(FACE_SUFFIXES, ["_0", "_1", "_2", "_3", "_4", "_5"]);
+    }
+
+    #[test]
+    fn the_index_key_drops_the_assets_prefix_the_jar_path_keeps() {
+        // The asset index names objects *without* the leading `assets/`; the jar
+        // names entries *with* it. Using the jar path as an index key resolves
+        // nothing, silently, and you get the stub — which is the exact mistake
+        // that made the panorama a flat grey for a commit. `audio.rs` documents
+        // the same trap for sounds.
+        let jar = face_jar_path(4);
+        let key = face_index_key(4);
+        assert!(
+            jar.starts_with("assets/"),
+            "the jar path must be pack-absolute, got {jar}"
+        );
+        assert!(
+            !key.starts_with("assets/"),
+            "an asset-index key must not carry the assets/ prefix, got {key}"
+        );
+        assert_eq!(key, jar.strip_prefix("assets/").expect("checked above"));
+        // Layer 4 is +Z, which vanilla's suffix table fills from `panorama_0`.
+        assert_eq!(
+            key,
+            "minecraft/textures/gui/title/background/panorama_0.png",
+            "layer 4 must be panorama_0 — see FACE_SUFFIXES"
+        );
+    }
+
+    #[test]
+    fn every_layer_has_a_distinct_key_across_all_six() {
+        // A modulo or index slip would give two layers the same face, which
+        // renders as a plausible sky with a duplicated wall.
+        let keys: Vec<String> = (0..6).map(face_index_key).collect();
+        let mut unique = keys.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), 6, "duplicate panorama face keys: {keys:?}");
+    }
+
+    #[test]
+    fn assemble_reports_no_object_store_faces_because_it_cannot_know() {
+        // `assemble` takes decoded images and has no idea where they came from;
+        // `load` is what sets the count. If this ever reported 6 by default, a
+        // gate asserting "real art" would pass against the jar's stubs.
+        let stacked = assemble(&six_marked_faces(2)).expect("assemble");
+        assert_eq!(stacked.from_object_store, 0);
+        assert!(!stacked.is_real_art());
     }
 
     #[test]

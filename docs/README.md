@@ -344,11 +344,18 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   per-face vertical flip, the Linear sampler that must not be "fixed" to Nearest,
   why the pipeline runs with no depth and no culling rather than betting on a
   winding polarity, and why the `menu_background.png` wash is a shader uniform
-  instead of a second quad. Plus the measurement that deletes most of the work:
-  in 26.2's `client.jar` both menu-background textures are flat `(0,0,0,64)`, the
-  six panorama faces are **1×1 solid grey** and the overlay is 1×1 transparent —
-  so tiling is a no-op, the overlay is a provable no-op, and a gate asserting the
-  panorama is non-uniform would fail against the real pack.
+  instead of a second quad. Also **the asset-object store**, and the mistake that
+  makes it worth reading: `client.jar` ships deliberate 69-byte 1×1 grey **stubs**
+  for all six panorama faces, and the real 1024×1024 art is delivered through
+  `asset-index-*.json`. Reading the jar gave a flat sky that bound, drew and passed
+  every "it reached pixels" gate. Exactly **8** of 5057 index objects share a name
+  with a jar entry (the 6 faces, `panorama_overlay`, `unifont.json`), so the rule
+  is narrow — *for a name in both, prefer the object store* — but the same index
+  holds all 4871 `.ogg` sounds, so `audio.rs`'s private copy of this lookup was
+  **extracted into `crate::asset_objects`** and audio now runs through it. Also
+  measures what actually blocks sound: `sounds.json` is present and parses (1968
+  events), but only **11 of 4871** samples are on disk, so audio comes up and plays
+  nothing — the "connected but silent" state, not a startup failure.
 - [Keybindings](./keybindings.md) — the rebindable action → input table behind every
   gameplay key, why a `Binding` must hold a mouse button (vanilla's attack and use
   are mouse-bound by default), the `resolve_key` precedence chain that lets chat and

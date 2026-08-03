@@ -111,7 +111,55 @@ fn synthetic_cubemap() -> PanoramaFaces {
             rgba.extend_from_slice(&[colour[0], colour[1], colour[2], 255]);
         }
     }
-    PanoramaFaces { size: FACE, rgba }
+    PanoramaFaces {
+        size: FACE,
+        rgba,
+        // Synthetic, so neither source: this gate is about layer selection, and
+        // it must not claim to be the real art. The real-art gates below are the
+        // ones that assert 6.
+        from_object_store: 0,
+    }
+}
+
+/// Mean and population standard deviation of per-pixel luminance inside a rect,
+/// plus the bounding box of the darkest and brightest pixels found.
+///
+/// Standard deviation is the discriminator the real cubemap makes available and
+/// the jar's stubs do not: vanilla's faces measure a luminance stdev of 3.7–13.6
+/// each, while a stub face — and the flat `BG` backdrop — is *exactly* 0.
+fn luminance_spread(texels: &[u8], rect: (u32, u32, u32, u32)) -> (f32, f32, (u32, u32, u32, u32)) {
+    let (x0, y0, x1, y1) = rect;
+    let mut values: Vec<(f32, u32, u32)> = Vec::new();
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let i = ((y * W + x) * 4) as usize;
+            if i + 2 >= texels.len() {
+                continue;
+            }
+            let lum = (f32::from(texels[i]) + f32::from(texels[i + 1]) + f32::from(texels[i + 2]))
+                / 3.0;
+            values.push((lum, x, y));
+        }
+    }
+    if values.is_empty() {
+        return (0.0, 0.0, (0, 0, 0, 0));
+    }
+    let n = values.len() as f32;
+    let mean = values.iter().map(|v| v.0).sum::<f32>() / n;
+    let var = values.iter().map(|v| (v.0 - mean) * (v.0 - mean)).sum::<f32>() / n;
+    let darkest = values
+        .iter()
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .expect("non-empty");
+    let brightest = values
+        .iter()
+        .max_by(|a, b| a.0.total_cmp(&b.0))
+        .expect("non-empty");
+    (
+        mean,
+        var.sqrt(),
+        (darkest.1, darkest.2, brightest.1, brightest.2),
+    )
 }
 
 /// Count how many pixels of each face colour appear inside a rect, and the
@@ -337,6 +385,182 @@ fn the_title_screen_draws_the_cubemap_panorama_with_vanillas_face_order() {
         0,
         "the control shows some face colour: {}",
         describe(&counts, other)
+    );
+}
+
+/// The loaded cubemap is vanilla's **real** art out of the asset-object store,
+/// 1024×1024 and richly non-uniform — not `client.jar`'s 1×1 grey stubs.
+///
+/// No GPU: this measures the decoded, stacked RGBA that `attach_panorama` would
+/// upload. It is the cheapest possible check that the object-store preference in
+/// `panorama::load` is working, and it fails loudly rather than skipping when the
+/// store is unpopulated, because a skip here would leave the flat-sky regression
+/// completely undetected.
+#[test]
+#[ignore = "requires the vanilla pack with a populated asset-object store"]
+fn the_panorama_loads_vanillas_real_faces_from_the_asset_object_store() {
+    let faces = lodestone::resources::load_panorama().expect(
+        "no panorama could be loaded at all; set LODESTONE_ASSETS to a pack root \
+         holding client.jar + generated/reports/blocks.json",
+    );
+
+    eprintln!("=== panorama source gate ===");
+    eprintln!("face size            = {}x{}", faces.size, faces.size);
+    eprintln!("faces from store     = {}/6", faces.from_object_store);
+    eprintln!("assembled RGBA bytes = {}", faces.rgba.len());
+
+    assert_eq!(
+        faces.from_object_store, 6,
+        "only {} of 6 panorama faces came from the asset-object store; the rest \
+         are client.jar's 69-byte 1x1 grey stubs, which render a flat sky that \
+         looks like a working panorama. Run: \
+         cargo run -p xtask -- fetch-assets --version 26.2",
+        faces.from_object_store
+    );
+    assert!(faces.is_real_art());
+
+    // Vanilla 26.2's faces are 1024x1024. Asserted as a floor plus squareness
+    // rather than an equality, since a resource pack may legitimately differ —
+    // but the stub's 1 must fail, and that is the case this exists for.
+    assert!(
+        faces.size >= 64,
+        "a {}x{} panorama face is a stub, not art",
+        faces.size,
+        faces.size
+    );
+    assert_eq!(
+        faces.rgba.len(),
+        faces.layer_bytes() * 6,
+        "the stacked buffer is not six whole layers"
+    );
+
+    // Non-uniformity, per layer. Predicted from the real files, measured with PIL
+    // before this gate was written: luminance stdev per face is 3.7 (panorama_5,
+    // the up face, the flattest) through 13.6 (panorama_4). A stub face is
+    // *exactly* 0.0, so the floor below separates the two hypotheses by a wide
+    // margin rather than testing the sign of a difference.
+    const STDEV_FLOOR: f32 = 1.0;
+    let layer = faces.layer_bytes();
+    let mut flattest = f32::INFINITY;
+    for index in 0..6 {
+        let bytes = &faces.rgba[index * layer..(index + 1) * layer];
+        let lum: Vec<f32> = bytes
+            .chunks_exact(4)
+            .map(|p| (f32::from(p[0]) + f32::from(p[1]) + f32::from(p[2])) / 3.0)
+            .collect();
+        let n = lum.len() as f32;
+        let mean = lum.iter().sum::<f32>() / n;
+        let stdev = (lum.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / n).sqrt();
+        flattest = flattest.min(stdev);
+        eprintln!(
+            "layer {index} ({:>2}) mean={mean:6.1} stdev={stdev:5.1}",
+            panorama::FACE_SUFFIXES[index]
+        );
+        assert!(
+            stdev > STDEV_FLOOR,
+            "layer {index} (panorama{}) has luminance stdev {stdev:.3}, at or below \
+             the {STDEV_FLOOR} floor — a uniform face means the stub was loaded \
+             (a stub reads exactly 0.0; vanilla's flattest real face reads 3.7)",
+            panorama::FACE_SUFFIXES[index]
+        );
+    }
+    eprintln!("flattest layer stdev = {flattest:.2} (vanilla's is ~3.7)");
+
+    // The detector's control: the same computation over a deliberately flat
+    // buffer must report 0, which is what proves the assertions above are
+    // measuring variation and not something every buffer has.
+    let flat = vec![0x40u8; layer];
+    let lum: Vec<f32> = flat
+        .chunks_exact(4)
+        .map(|p| (f32::from(p[0]) + f32::from(p[1]) + f32::from(p[2])) / 3.0)
+        .collect();
+    let n = lum.len() as f32;
+    let mean = lum.iter().sum::<f32>() / n;
+    let control = (lum.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / n).sqrt();
+    eprintln!("control (flat buffer) stdev = {control:.6}");
+    assert!(
+        control <= f32::EPSILON,
+        "the stdev detector reports {control} for a uniform buffer, so it cannot \
+         tell a stub from real art and every assertion above is vacuous"
+    );
+}
+
+/// With the real cubemap bound, the rendered title screen is non-uniform — and
+/// with it detached, it is exactly flat.
+///
+/// This is the pixel-level twin of the gate above and the one that actually
+/// distinguishes *bound* from *unbound*: the backdrop `MenuRenderer` falls back to
+/// is a single flat quad, so its luminance stdev is 0 by construction.
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla pack with a populated object store"]
+fn the_real_panorama_paints_a_non_uniform_sky_where_the_backdrop_is_flat() {
+    let ctx = GpuContext::new_headless_blocking().expect(
+        "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU — do NOT treat a skip as a pass",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    let mut menu = MenuRenderer::new(device, format);
+
+    let faces = lodestone::resources::load_panorama().expect("the vanilla panorama loads");
+    menu.attach_panorama(device, queue, &faces);
+    assert_eq!(
+        menu.panorama_faces_from_object_store(),
+        6,
+        "this gate measures the real art; with client.jar's flat stubs bound the \
+         sky is uniform and the assertion below would fail for the wrong reason. \
+         Run: cargo run -p xtask -- fetch-assets --version 26.2"
+    );
+
+    let nav = MenuNav::with_path(std::env::temp_dir().join(format!(
+        "lodestone-panorama-real-{}/servers.json",
+        std::process::id()
+    )));
+    let statuses = StatusCache::with_probe(unavailable_probe());
+    let mut favicons = FaviconCache::new();
+    let ui = UiState::new();
+    let frame = frame_for(&ui, &nav, &statuses, &mut favicons).expect("the title screen draws");
+
+    let band = straight_ahead_band();
+    assert_band_is_background(band);
+
+    let mut shoot = |menu: &mut MenuRenderer| -> Vec<u8> {
+        let acquired = target.acquire().expect("headless acquire");
+        menu.render(device, queue, acquired.view(), &frame, W, H);
+        target.read_texels(device, queue)
+    };
+
+    let real = shoot(&mut menu);
+    let (mean, stdev, bbox) = luminance_spread(&real, band);
+    eprintln!("=== real panorama pixel gate ===");
+    eprintln!("band {band:?}");
+    eprintln!("real  mean={mean:.2} stdev={stdev:.3} (darkest x,y / brightest x,y = {bbox:?})");
+
+    menu.detach_panorama();
+    let control = shoot(&mut menu);
+    let (c_mean, c_stdev, c_bbox) = luminance_spread(&control, band);
+    eprintln!("flat  mean={c_mean:.2} stdev={c_stdev:.3} (darkest/brightest = {c_bbox:?})");
+
+    // The control first: if the flat backdrop is not flat, the whole comparison
+    // is measuring something else (this is how a sky gate once "proved" a bare
+    // first-person arm).
+    assert!(
+        c_stdev <= 0.51,
+        "the panorama-less backdrop is not flat (stdev {c_stdev:.3} at {c_bbox:?}); \
+         something else is painting this band, so the assertion below proves nothing"
+    );
+    assert!(
+        stdev > 4.0 * c_stdev.max(0.25),
+        "the real panorama's band has stdev {stdev:.3} against the flat backdrop's \
+         {c_stdev:.3} at {bbox:?} — a bound real cubemap must be visibly varied. \
+         Either the cubemap is not reaching pixels or the stub faces were loaded"
+    );
+    assert!(
+        stdev > 1.0,
+        "stdev {stdev:.3} in {band:?} (extremes at {bbox:?}) is stub-flat; vanilla's \
+         flattest face measures 3.7 over the whole face"
     );
 }
 

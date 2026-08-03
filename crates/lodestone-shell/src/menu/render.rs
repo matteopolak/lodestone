@@ -3916,6 +3916,20 @@ impl MenuRenderer {
         self.panorama.is_some()
     }
 
+    /// How many of the bound panorama's six faces came from the launcher's
+    /// asset-object store rather than `client.jar` — 6 is vanilla's real art, 0 is
+    /// the jar's 1×1 grey stubs. `0` when no panorama is bound at all.
+    ///
+    /// `panorama_attached()` is **not** enough for a gate that means to measure the
+    /// real sky: the jar stubs bind and draw perfectly, as a flat colour. See
+    /// [`crate::asset_objects`].
+    #[must_use]
+    pub fn panorama_faces_from_object_store(&self) -> usize {
+        self.panorama
+            .as_ref()
+            .map_or(0, PanoramaRenderer::faces_from_object_store)
+    }
+
     /// Bind a panorama cubemap: uploads the six layers and builds its pipeline.
     ///
     /// Public so a gate can hand in a synthetic cubemap with six distinguishable
