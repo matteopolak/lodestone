@@ -60,6 +60,16 @@ use super::nav::MenuKey;
 /// `docs/main-menu.md`'s "left for polish" list, item 3, for why that one
 /// still doesn't and why fixing it here first (a new screen, not shared
 /// code) does not fix it there too.
+///
+/// **A count, not a measurement**, and that is the residual gap #402 records:
+/// this module has no canvas, so it cannot ask how many 36 px rows actually fit
+/// between the header and the footer. `render::accounts_row_visible` is the
+/// second half — it refuses to *draw* a row that would overlap the footer band,
+/// so a short canvas truncates the window rather than painting over the
+/// buttons. What that leaves is bounded and the same shape the server list
+/// already documents: `render::row_rect` still answers for a skipped row, so a
+/// click there selects it and nothing else. Raising this number is only safe
+/// once the window itself is canvas-derived.
 pub const VISIBLE_ROWS: usize = 5;
 
 /// One row of the account list: a real Microsoft account, or the synthetic
@@ -352,6 +362,14 @@ impl AccountsNav {
     /// window and button rows are laid out, not [`Self::rows`]'s full list).
     pub fn hover(&self, rendered_row: usize) {
         let mut st = self.state.borrow_mut();
+        // The sign-in and failure states draw a *different* frame — one wide
+        // button, no list rows — so a row index there means nothing to the
+        // mapping below, and applying it anyway would move the account cursor
+        // when the player clicked "Cancel". `render::accounts_flow_frame` and
+        // `accounts_failed_frame` are the frames in question.
+        if !matches!(st.sign_in, SignIn::Idle) {
+            return;
+        }
         let list_len = st.metadata.profiles.len() + 1;
         let shown = list_len.saturating_sub(st.scroll).min(VISIBLE_ROWS);
         if rendered_row < shown {
@@ -512,7 +530,13 @@ fn activate_button(st: &mut State, button: usize, path: &Path, spawn: Spawn) -> 
 
 fn handle_key_mid_flow(st: &mut State, key: MenuKey) -> AccountsSignal {
     match key {
-        MenuKey::Escape => {
+        // `Enter` as well as `Escape`, because the sign-in screen now *has* a
+        // Cancel button and a click on it arrives here as `hover` + `Enter`
+        // (`MenuNav::click`'s default translation). Cancel is the only control on
+        // the screen while a sign-in is in flight, so "activate the focused
+        // widget" and "cancel" are the same verb — without this the button would
+        // draw, highlight, and do nothing, which is #391's shape.
+        MenuKey::Escape | MenuKey::Enter => {
             if let SignIn::Requesting { cancel, .. } | SignIn::Waiting { cancel, .. } = &st.sign_in {
                 cancel.store(true, Ordering::Relaxed);
             }
@@ -826,6 +850,11 @@ fn run_browser_login(tx: Sender<WorkerMsg>, cancel: Arc<AtomicBool>) {
                     return;
                 }
                 Err(e) => {
+                    // Log as well as show: the on-screen string is transient and the
+                    // user cannot copy it, so a failed sign-in left no evidence at
+                    // all. `AuthError`'s Debug carries the step and status that
+                    // `describe_auth_error` flattens for display.
+                    tracing::warn!(target: "auth", error = ?e, "browser sign-in failed");
                     let _ = tx.send(WorkerMsg::Failed(describe_auth_error(&e)));
                     return;
                 }
@@ -850,6 +879,16 @@ async fn finish_ms_token(
         match lodestone_auth::flow::session_from_ms_token(client, &ms_token.access_token).await {
             Ok(s) => s,
             Err(e) => {
+                // **This is the arm a real sign-in failure takes**, and its
+                // silence is why a failed attempt left no log line for the
+                // failing step: `run_browser_login`'s `poll_once` arm logs, but
+                // that one only fires before the browser hands the code back.
+                // `AuthError`'s `Debug` carries the step and the untruncated
+                // response body that `describe_auth_error` flattens to one
+                // sentence for display, and the on-screen string is transient
+                // and uncopyable — so this line is the only thing that makes a
+                // failure diagnosable after the fact.
+                tracing::warn!(target: "auth", error = ?e, "sign-in failed after the browser step");
                 let _ = tx.send(WorkerMsg::Failed(describe_auth_error(&e)));
                 return;
             }

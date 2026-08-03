@@ -426,10 +426,13 @@ pub enum Origin {
     /// The gap above the logo (`y < LOGO_Y`, i.e. `y < 30`) is free at every
     /// canvas size instead, which is where this corner sits.
     TopRight,
-    /// `(w / 2, h)` — bottom-centre, for the account screen's row of
-    /// non-vanilla nine-slice buttons (Add account / Select / Remove /
-    /// Cancel). Not vanilla-sourced like the others above: nothing in
-    /// `TitleScreen`/`PauseScreen` anchors a widget row to the bottom edge.
+    /// `(w / 2, h)` — bottom-centre, for the footer band of the account screen
+    /// (Add Account / Select / Remove / Back) and the multiplayer screen's seven.
+    /// Not vanilla-sourced like the others above: nothing in
+    /// `TitleScreen`/`PauseScreen` anchors a widget row to the bottom edge. Since
+    /// #396 it is where both `HeaderAndFooterLayout` footers are pinned, which is
+    /// canvas-independent even though the arranged rects are not — see
+    /// [`ACCOUNTS_REF_CANVAS`].
     ScreenBottom,
     /// `(w / 4, 0)` — the death screen's title anchor (issue #103).
     /// `DeathScreen.visitText` draws it at `middleLine / 2` where
@@ -1657,6 +1660,103 @@ pub struct MenuRow {
     /// hover overlay. `label` (the server's name) and `favicon` are read from the
     /// row itself rather than duplicated in here.
     pub entry: Option<ServerEntryView>,
+    /// Set on a [`super::Screen::Accounts`] list row: the little an account row
+    /// needs beyond `label`/`detail`/`trailing`/`head`, which it reads off the
+    /// row itself exactly as a multiplayer entry reads `label`/`favicon`.
+    ///
+    /// Its presence routes the row to [`draw_account_entry`] and, in
+    /// [`row_rect`], to [`accounts_row_rect`] — both tested *before* `slot`, for
+    /// [`Self::entry`]'s reason: a list entry is not a button, and the row column
+    /// is `floor(w / 2) - floor(305 / 2)`, which a `Slot` cannot express.
+    pub account: Option<AccountEntryView>,
+}
+
+/// One account-list row's state (issues #66/#402).
+///
+/// Deliberately two fields. Everything else a row draws is already a [`MenuRow`]
+/// field — the username is `label`, "Microsoft account" is `detail`, the
+/// "Selected" marker is `trailing`, the head icon is `head` — and duplicating any
+/// of them here is how a row and its draw end up disagreeing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AccountEntryView {
+    /// The row's index **in the rendered window**, not in the full account list:
+    /// the frame builder has already applied the scroll offset, so this is what
+    /// [`accounts_row_top`] multiplies and what a click hit-tests onto.
+    pub index: usize,
+    /// Whether the list cursor is on this row — `AccountsNav::highlighted`, which
+    /// gets `AbstractSelectionList.extractItem`'s 1 px outline plus black
+    /// interior.
+    ///
+    /// A different question from [`MenuFrame::selected`], which on this screen
+    /// carries the **footer button** the mouse is over. Both are visible at once
+    /// and are drawn completely differently — the same two-cursor split
+    /// `docs/server-list.md` argues for the multiplayer screen.
+    pub selected: bool,
+}
+
+/// A block of **wrapped, bounded** body text: the account screen's sign-in
+/// failure reason, the URL it asks the player to open, and its save-error line.
+///
+/// ## Why this exists
+///
+/// A [`MenuLabel`] is one unwrapped line drawn at whatever scale it asks for, and
+/// [`MenuFrame::message`] is the same thing centred at [`TEXT_SCALE`]. That is
+/// fine for text *we* wrote and whose length we control. It is not fine for text
+/// we did not: [`super::accounts::describe_auth_error`] renders an
+/// `AuthError`, and several of that type's variants carry a snippet of whatever
+/// Microsoft or Mojang actually returned — a few hundred characters of JSON with
+/// no whitespace in it. Drawn as one scale-2 centred line, that ran off both
+/// edges of the screen, which is what a player reported.
+///
+/// ## What is carried, and what is not
+///
+/// The **text**, not the lines. Wrapping has to be measured in the font the draw
+/// will use, so it happens at draw time — the same reason
+/// [`ServerEntryView::motd`] is carried unwrapped. The line *count* is not
+/// carried either: [`Self::bottom`] says how much of the canvas to keep clear and
+/// [`notice_rect`] turns that into however many whole [`LINE_H`] lines fit, so the
+/// layout decides how much text a canvas shows rather than a constant deciding it
+/// for every canvas.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MenuNotice {
+    /// The unwrapped text. May contain `\n`, and may be arbitrarily long.
+    pub text: String,
+    /// Anchor the block is measured from.
+    pub origin: Origin,
+    /// Horizontal offset from the anchor — the block's **left** edge.
+    pub dx: f32,
+    /// Vertical offset from the anchor — the **top** of the first line.
+    pub dy: f32,
+    /// The wrap column's width. No line may measure wider than this, including a
+    /// line made of a single unbroken word (see [`wrap_bounded`]).
+    pub w: f32,
+    /// Pixels kept clear at the **bottom of the canvas**. The line count is
+    /// `floor((height - bottom - top) / LINE_H)`.
+    pub bottom: f32,
+    /// RGBA, sRGB 0..1 verbatim — the shell's convention.
+    pub colour: [f32; 4],
+}
+
+/// The rect a [`MenuNotice`] is bounded to on a `width`×`height` canvas: its wrap
+/// column, and as many whole [`LINE_H`] lines as fit above
+/// [`MenuNotice::bottom`].
+///
+/// **Public because the gate reads it.** A test that restated this arithmetic
+/// would be asserting its own copy of the layout, which `CLAUDE.md` records as
+/// having been wrong twice; this is the expression [`build`] draws from.
+#[must_use]
+pub fn notice_rect(notice: &MenuNotice, width: f32, height: f32) -> (f32, f32, f32, f32) {
+    let (ax, ay) = notice.origin.anchor(width, height);
+    let x = (ax + notice.dx).floor();
+    let y = ay + notice.dy;
+    let room = (height - notice.bottom - y).max(0.0);
+    (x, y, notice.w, (room / LINE_H).floor() * LINE_H)
+}
+
+/// How many whole lines [`notice_rect`] found room for.
+fn notice_lines(notice: &MenuNotice, width: f32, height: f32) -> usize {
+    let (_, _, _, h) = notice_rect(notice, width, height);
+    (h / LINE_H).floor().max(0.0) as usize
 }
 
 /// One multiplayer-list row's state, in the form
@@ -1780,6 +1880,14 @@ pub struct MenuFrame<'a> {
     /// session and every hermetic test are in — and it must draw *no* hover
     /// overlay rather than one at `(0, 0)`.
     pub cursor: Option<(f32, f32)>,
+    /// A wrapped, bounded block of body text — see [`MenuNotice`], which is also
+    /// where the overflow bug this exists to fix is described.
+    ///
+    /// One per frame, because the three states that use it are mutually
+    /// exclusive: a sign-in URL, a failure reason, or a save error. Distinct from
+    /// [`Self::message`], which is a single unwrapped [`TEXT_SCALE`] line and is
+    /// suppressed entirely on a `vanilla` frame.
+    pub notice: Option<MenuNotice>,
 }
 
 /// Decoded favicon mosaics, keyed by the status cache's address key.
@@ -2037,76 +2145,479 @@ pub fn death_frame(nav: &super::nav::MenuNav, message: Option<&str>) -> MenuFram
     }
 }
 
-/// Width of one account-screen action button (Add account / Select / Remove
-/// / Cancel), in logical pixels. Not vanilla-sourced — see [`Origin::ScreenBottom`].
-const ACCOUNTS_BUTTON_W: f32 = 130.0;
-/// Horizontal gap between account-screen buttons.
-const ACCOUNTS_BUTTON_GAP: f32 = 8.0;
-/// Vertical distance from the bottom edge to the account-screen button row,
-/// leaving room for the two lines of footer hint text below it.
-const ACCOUNTS_BUTTON_BOTTOM: f32 = 74.0;
+// -- the account screen's metrics ---------------------------------------------
+//
+// **There is no accounts screen in vanilla to port.** Minecraft picks an account
+// in the launcher, outside the game — see `nav::MainButton::Accounts`, which
+// says the same thing about the title-screen button that opens this. So the
+// reference for every number below is *this repo's own* `JoinMultiplayerScreen`
+// port two screens up: a `HeaderAndFooterLayout` title, a footer of
+// `LinearLayout`-arranged buttons, and 36 px list rows in a 305 px column. Each
+// constant therefore cites the server-list constant it deliberately matches
+// rather than a jar line, and the two that differ say why they differ.
+//
+// Separate constants rather than reusing the `SERVER_LIST_*` ones, for the
+// reason that block states in its own header comment: the agreement is a
+// *choice*, and a shared constant would make a change to the multiplayer screen
+// silently move this one.
 
-/// The rect for account-screen button `index` (0..4, see
-/// [`super::accounts::BUTTON_ADD`] and its siblings), evenly spaced and
-/// centred along the bottom of the screen.
-fn accounts_button_slot(index: usize) -> Slot {
-    let total_w = 4.0 * ACCOUNTS_BUTTON_W + 3.0 * ACCOUNTS_BUTTON_GAP;
-    Slot {
-        origin: Origin::ScreenBottom,
-        dx: -total_w * 0.5 + index as f32 * (ACCOUNTS_BUTTON_W + ACCOUNTS_BUTTON_GAP),
-        dy: -ACCOUNTS_BUTTON_BOTTOM,
-        w: ACCOUNTS_BUTTON_W,
-        h: WIDGET_H,
+/// The header band: [`SERVER_LIST_HEADER_H`]'s 33, which is also
+/// [`layout::DEFAULT_HEADER_AND_FOOTER_HEIGHT`] — one 9 px title `StringWidget`
+/// with 12 px of slack either side.
+const ACCOUNTS_HEADER_H: f32 = 33.0;
+/// The footer band: [`SERVER_LIST_FOOTER_H`]'s 60, **even though this screen's
+/// footer is one row of buttons rather than two**. The 40 px a single 20 px row
+/// leaves is not waste: the `FrameLayout` splits it 20/20, and the lower half is
+/// where the key-hint line sits (see [`accounts_hint_dy`]). A 33 px band would
+/// put that line off the bottom of the canvas.
+const ACCOUNTS_FOOTER_H: f32 = 60.0;
+/// `LinearLayout.horizontal().spacing(4)` — [`SERVER_LIST_FOOTER_SPACING`].
+const ACCOUNTS_FOOTER_SPACING: i32 = 4;
+/// One footer button: [`SERVER_LIST_LOWER_BUTTON_W`]'s 74, so the four of them
+/// measure `4 * 74 + 3 * 4 = 308` — the same footer column width the
+/// multiplayer screen's lower row has, which is what makes the two screens line
+/// up rather than each being centred to its own width.
+const ACCOUNTS_BUTTON_W: f32 = 74.0;
+/// A list row's pitch: [`SERVER_LIST_ITEM_H`]'s 36. With
+/// [`ACCOUNTS_ENTRY_PADDING`] a side that leaves a **32** px content box, which
+/// is exactly [`ACCOUNTS_HEAD_ICON`] — the head fills the row's height the same
+/// way a favicon does.
+const ACCOUNTS_ITEM_H: f32 = 36.0;
+/// A list row's width: [`SERVER_LIST_ROW_W`]'s 305.
+const ACCOUNTS_ROW_W: f32 = 305.0;
+/// `AbstractSelectionList.Entry.CONTENT_PADDING`'s 2, per side.
+const ACCOUNTS_ENTRY_PADDING: f32 = 2.0;
+/// `getFirstEntryY() = getY() + 2` — the gap above row 0. A different
+/// expression from [`ACCOUNTS_ENTRY_PADDING`] that happens to be the same 2;
+/// only one of them insets a row.
+const ACCOUNTS_FIRST_ENTRY_Y: f32 = 2.0;
+/// The head icon, [`SERVER_ENTRY_ICON`]'s 32 — the content box's full height.
+const ACCOUNTS_HEAD_ICON: f32 = 32.0;
+/// The gap between the head icon and the text column, [`SERVER_ENTRY_TEXT_GAP`].
+const ACCOUNTS_TEXT_GAP: f32 = 3.0;
+/// The gap the trailing "Selected" column keeps from the content's right edge,
+/// and from the name — [`SERVER_ENTRY_SPACING`].
+const ACCOUNTS_SPACING: f32 = 5.0;
+/// The detail line's offset below the content's top, [`SERVER_ENTRY_MOTD_Y`].
+const ACCOUNTS_DETAIL_Y: f32 = 12.0;
+/// A `StringWidget`'s height — what the title header is.
+const ACCOUNTS_TITLE_H: f32 = 9.0;
+/// The account list's own title.
+const ACCOUNTS_TITLE: &str = "Accounts";
+/// The sign-in sub-flow's title.
+const ACCOUNTS_SIGN_IN_TITLE: &str = "Sign in with Microsoft";
+/// The failure state's title.
+const ACCOUNTS_FAILED_TITLE: &str = "Sign-in failed";
+/// How many lines a save-error notice is allowed. Two, because it sits *above*
+/// the footer band and therefore grows upward into the list — unlike the
+/// sign-in states' notice, which owns the whole content band.
+const ACCOUNTS_SAVE_ERROR_LINES: f32 = 2.0;
+
+/// A row's detail line: `-8355712`, the same mid grey a multiplayer row's MOTD
+/// uses. Its own constant for the reason above.
+const ACCOUNTS_DIM: [f32; 4] = [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 1.0];
+/// The highlighted row's interior, `-16777216` — opaque black, filled inside the
+/// 1 px outline, exactly `AbstractSelectionList.extractItem`'s selection pass.
+const ACCOUNTS_SELECTION_FILL: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+
+/// The canvas [`accounts_block`] arranges at, for [`SERVER_LIST_REF_CANVAS`]'s
+/// reason and with the same condition attached: every rect must be expressible
+/// relative to an [`Origin`], which
+/// `the_accounts_slots_do_not_depend_on_the_reference_canvas` asserts by
+/// re-arranging at three canvases.
+const ACCOUNTS_REF_CANVAS: (f32, f32) = (854.0, 480.0);
+
+/// The account screen as a real [`layout::HeaderAndFooterLayout`], arranged for
+/// a `width`×`height` canvas — [`server_list_layout`]'s shape, with a
+/// four-button single-row footer instead of a 3 + 4 two-row one.
+///
+/// The two notes from that function apply here unchanged:
+///
+/// - **The title cell is zero-width.** There is no font at arrange time, and the
+///   header frame centres its child, so a zero-width cell lands exactly on the
+///   centre a real-width one would be centred about — which is what
+///   [`accounts_title_label`] draws from.
+/// - **The list is a [`layout::SpacerElement`]** sized to `content_height()`, so
+///   it takes part in the measurement (`HeaderAndFooterLayout`'s content clamp
+///   reads the content frame's height) and is never drawn — the rows draw
+///   through [`draw_account_entry`], not as widgets.
+fn accounts_layout(width: f32, height: f32) -> layout::HeaderAndFooterLayout {
+    let mut root = layout::HeaderAndFooterLayout::with_heights(
+        width,
+        height,
+        ACCOUNTS_HEADER_H,
+        ACCOUNTS_FOOTER_H,
+    );
+
+    root.add_to_header(Box::new(Widget::new(
+        0.0,
+        0.0,
+        0.0,
+        ACCOUNTS_TITLE_H,
+        ACCOUNTS_TITLE,
+    )));
+
+    let content_height = root.content_height();
+    root.add_to_contents(Box::new(layout::SpacerElement::new(width, content_height)));
+
+    // One row, so no `alignHorizontallyCenter` baseline is needed: the footer
+    // `FrameLayout` centres its single child on its own. The server list needs
+    // that baseline because its two rows are different widths.
+    let mut footer = layout::LinearLayout::horizontal().spacing(ACCOUNTS_FOOTER_SPACING);
+    for _ in 0..super::accounts::BUTTON_COUNT {
+        footer.add_child(Box::new(Widget::button(
+            0.0,
+            0.0,
+            ACCOUNTS_BUTTON_W,
+            WIDGET_H,
+            "",
+        )));
+    }
+    root.add_to_footer(Box::new(footer));
+
+    root.arrange_elements();
+    root
+}
+
+/// One arranged account screen: the title cell, the four footer buttons, and
+/// where the content band starts. [`ServerListBlock`]'s shape and its reason —
+/// the two bands are anchored to different [`Origin`]s.
+#[derive(Debug)]
+struct AccountsBlock {
+    /// The header's one leaf — the title cell.
+    title: (f32, f32, f32, f32),
+    /// The footer's leaves, in [`super::accounts::BUTTON_ADD`] order.
+    footer: Vec<(f32, f32, f32, f32)>,
+    /// The content frame's top, i.e. the list's `getY()`.
+    content_top: f32,
+    /// The canvas this was arranged at, so band offsets can be made relative
+    /// to it.
+    canvas: (f32, f32),
+}
+
+impl AccountsBlock {
+    /// Arrange the tree at `width`×`height` and read its leaves back. The leaf
+    /// counts are asserted for [`MenuBlock::of`]'s reason: a tree that no longer
+    /// describes the screen must fail loudly rather than shift every rect by one.
+    fn at(width: f32, height: f32) -> Self {
+        let root = accounts_layout(width, height);
+        let header = layout::widget_rects(root.header());
+        let footer = layout::widget_rects(root.footer());
+        assert_eq!(
+            header.len(),
+            1,
+            "the account header has {} leaves, the screen has 1 (the title)",
+            header.len()
+        );
+        assert_eq!(
+            footer.len(),
+            super::accounts::BUTTON_COUNT,
+            "the account footer has {} leaves, the screen has {}",
+            footer.len(),
+            super::accounts::BUTTON_COUNT
+        );
+        Self {
+            title: header[0],
+            footer,
+            content_top: root.contents().y(),
+            canvas: (width, height),
+        }
+    }
+
+    /// The footer leaf `index` as a slot measured from [`Origin::ScreenBottom`].
+    /// Its `dy` is negative — the footer is pinned to the bottom edge.
+    fn footer_slot(&self, index: usize) -> Slot {
+        let (x, y, w, h) = self.footer[index];
+        Slot {
+            origin: Origin::ScreenBottom,
+            dx: x - self.canvas.0 * 0.5,
+            dy: y - self.canvas.1,
+            w,
+            h,
+        }
     }
 }
 
-/// Builds the account list's ordinary (no sign-in in flight) frame: the
-/// scrollable account + offline list, then the four action buttons.
+/// The account screen, arranged once at [`ACCOUNTS_REF_CANVAS`].
+fn accounts_block() -> &'static AccountsBlock {
+    static BLOCK: std::sync::OnceLock<AccountsBlock> = std::sync::OnceLock::new();
+    BLOCK.get_or_init(|| AccountsBlock::at(ACCOUNTS_REF_CANVAS.0, ACCOUNTS_REF_CANVAS.1))
+}
+
+/// The rect for account-screen button `index` (see
+/// [`super::accounts::BUTTON_ADD`] and its siblings), read out of the arranged
+/// footer rather than computed here — so the width that reaches pixels is the
+/// one the layout produced.
+fn accounts_button_slot(index: usize) -> Slot {
+    accounts_block().footer_slot(index.min(super::accounts::BUTTON_COUNT - 1))
+}
+
+/// The single wide button the sign-in and failure states show, centred at the
+/// same y the four action buttons occupy.
 ///
-/// The list rows are unslotted (the centred row stack [`row_rect`] already
-/// gives every other row-stack screen); the button row is slotted (real
-/// `widget/button*` nine-slice sprites via [`draw_widget`], anchored to the
-/// bottom edge independent of how many rows are above it) — see
-/// [`row_rect`]'s doc comment for why mixing the two within one frame needed
-/// a fix there, not here.
+/// The y and height come off [`accounts_button_slot`] rather than being restated,
+/// so the one-button states and the four-button state cannot end up on different
+/// lines.
+fn accounts_wide_button_slot() -> Slot {
+    let row = accounts_button_slot(0);
+    Slot {
+        origin: row.origin,
+        dx: -(widget::DEFAULT_WIDTH * 0.5),
+        dy: row.dy,
+        w: widget::DEFAULT_WIDTH,
+        h: row.h,
+    }
+}
+
+/// The key-hint line's offset from the bottom edge: 8 px below the arranged
+/// button row, in the lower half of the slack [`ACCOUNTS_FOOTER_H`] leaves.
+///
+/// Derived from the arranged row rather than written as a constant, because the
+/// failure mode of a constant here is a hint line drawn *through* the buttons —
+/// and per `CLAUDE.md` a rect a gate restates is a rect that has been wrong
+/// twice.
+fn accounts_hint_dy() -> f32 {
+    let row = accounts_button_slot(0);
+    row.dy + row.h + 8.0
+}
+
+/// The screen title, positioned from the arranged header's own title cell.
+///
+/// `Align::Centre` because that cell is zero-width and therefore *is* the text's
+/// centre — see [`accounts_layout`]. Takes the text because the three states of
+/// this screen have three different titles.
+fn accounts_title_label(text: &str) -> MenuLabel {
+    let block = accounts_block();
+    let (x, y, _, _) = block.title;
+    MenuLabel {
+        text: text.to_string(),
+        origin: Origin::ScreenTop,
+        dx: x - block.canvas.0 * 0.5,
+        dy: y,
+        align: Align::Centre,
+        colour: LABEL,
+        scale: 1.0,
+    }
+}
+
+/// The left edge of every account row: `getRowLeft()`, i.e.
+/// `floor(width / 2) - floor(rowWidth / 2)`.
+///
+/// **Not `(width - 305) / 2`** — two separate integer divisions, which is what
+/// [`server_row_left`] documents at length. Reproduced here rather than being
+/// approximated by a [`Slot`]'s `dx` so that this screen's rows sit on exactly
+/// the same column as the multiplayer screen's at every canvas width, odd ones
+/// included.
+#[must_use]
+pub fn accounts_row_left(width: f32) -> f32 {
+    (width * 0.5).floor() - (ACCOUNTS_ROW_W * 0.5).floor()
+}
+
+/// The top of account row `index`, where `index` is its position **in the
+/// rendered window** rather than in the full list: `getFirstEntryY() + index *
+/// itemHeight`.
+///
+/// The scroll offset is applied by [`accounts_idle_frame`], which slices the
+/// list before building rows — so this needs no scroll term and the row a click
+/// hit-tests onto is the row that was drawn.
+#[must_use]
+pub fn accounts_row_top(index: usize) -> f32 {
+    accounts_block().content_top + ACCOUNTS_FIRST_ENTRY_Y + index as f32 * ACCOUNTS_ITEM_H
+}
+
+/// The rect of account row `index` at a `width`-wide canvas.
+#[must_use]
+pub fn accounts_row_rect(index: usize, width: f32) -> (f32, f32, f32, f32) {
+    (
+        accounts_row_left(width),
+        accounts_row_top(index),
+        ACCOUNTS_ROW_W,
+        ACCOUNTS_ITEM_H,
+    )
+}
+
+/// A row's *content* rect — the row inset by [`ACCOUNTS_ENTRY_PADDING`] a side.
+/// Everything a row draws is measured from this, not from the row.
+#[must_use]
+pub fn accounts_row_content_rect(index: usize, width: f32) -> (f32, f32, f32, f32) {
+    let (x, y, w, h) = accounts_row_rect(index, width);
+    (
+        x + ACCOUNTS_ENTRY_PADDING,
+        y + ACCOUNTS_ENTRY_PADDING,
+        w - 2.0 * ACCOUNTS_ENTRY_PADDING,
+        h - 2.0 * ACCOUNTS_ENTRY_PADDING,
+    )
+}
+
+/// Whether rendered row `index` fits **entirely** between the content band's top
+/// and the footer on a `height`-tall canvas.
+///
+/// [`server_row_visible`]'s job, one degree stricter: that one reproduces
+/// `extractListItems`' test, which keeps a row that merely *overlaps* the band's
+/// bottom edge (vanilla then scissors it). This pipeline has no scissor, so a
+/// partially-visible row would paint over the footer buttons — and this screen's
+/// footer is where its four actions are. A row that would not fit is therefore
+/// skipped whole.
+///
+/// The consequence is the same bounded one the multiplayer list documents and
+/// that #402 records: [`row_rect`] still answers for a skipped row, so a click
+/// there selects it and nothing else. See [`super::accounts::VISIBLE_ROWS`],
+/// which is the other half of this.
+#[must_use]
+pub fn accounts_row_visible(index: usize, height: f32) -> bool {
+    accounts_row_top(index) + ACCOUNTS_ITEM_H <= height - ACCOUNTS_FOOTER_H
+}
+
+/// The wrapped-text notice the sign-in and failure states use: the content band,
+/// in the same 305 px column the rows occupy, bounded below by the footer.
+///
+/// This is the fix for the reported overflow. The text it carries is **not
+/// ours** — [`super::accounts::describe_auth_error`] renders an `AuthError`, and
+/// several of that type's variants embed a
+/// snippet of whatever Microsoft or Mojang actually returned — so it must wrap
+/// *and* be clipped to a rect the layout sizes, which is exactly what
+/// [`MenuNotice`] is.
+fn accounts_notice(text: String, colour: [f32; 4]) -> MenuNotice {
+    MenuNotice {
+        text,
+        origin: Origin::ScreenTop,
+        // The row column's own left edge at an even canvas width. `dx` is
+        // floored for the same reason `accounts_row_left` floors: a `Slot`-style
+        // offset is `width * 0.5 + dx` unrounded, and this keeps the text block
+        // on the rows' column rather than half a pixel off it.
+        dx: -(ACCOUNTS_ROW_W * 0.5).floor(),
+        dy: accounts_row_top(0),
+        w: ACCOUNTS_ROW_W,
+        bottom: ACCOUNTS_FOOTER_H,
+        colour,
+    }
+}
+
+/// The save-error notice: the same column, but anchored **above** the footer
+/// band and only [`ACCOUNTS_SAVE_ERROR_LINES`] tall, because the list owns the
+/// content band on the screen this one appears on.
+///
+/// Placed where the multiplayer screen puts its own save-error line, and for the
+/// same reason: a failed `profiles.json` write has no vanilla equivalent, and a
+/// player whose account choice silently fails to persist deserves the reason.
+fn accounts_save_error_notice(text: String) -> MenuNotice {
+    MenuNotice {
+        text,
+        origin: Origin::ScreenBottom,
+        dx: -(ACCOUNTS_ROW_W * 0.5).floor(),
+        dy: -(ACCOUNTS_FOOTER_H + LINE_H * ACCOUNTS_SAVE_ERROR_LINES + 2.0),
+        w: ACCOUNTS_ROW_W,
+        bottom: ACCOUNTS_FOOTER_H + 2.0,
+        colour: FG_BAD,
+    }
+}
+
+/// A centred line of body text in the account screen's content band, `line`
+/// lines below the first row's top.
+///
+/// The offsets are all multiples of [`LINE_H`] from [`accounts_row_top`], so the
+/// sign-in state's stack of hints sits on the same grid a list row's two text
+/// lines do rather than on a second set of constants.
+fn accounts_band_label(text: String, line: f32, colour: [f32; 4]) -> MenuLabel {
+    MenuLabel {
+        text,
+        origin: Origin::ScreenTop,
+        dx: 0.0,
+        dy: accounts_row_top(0) + LINE_H * line,
+        align: Align::Centre,
+        colour,
+        scale: 1.0,
+    }
+}
+
+/// The key-hint line, centred along the bottom edge — this screen's stand-in for
+/// the row-stack `footer` that a `vanilla` frame suppresses.
+fn accounts_hint_label(text: &str) -> MenuLabel {
+    MenuLabel {
+        text: text.to_string(),
+        origin: Origin::ScreenBottom,
+        dx: 0.0,
+        dy: accounts_hint_dy(),
+        align: Align::Centre,
+        colour: ACCOUNTS_DIM,
+        scale: 1.0,
+    }
+}
+
+/// Builds the account list's ordinary (no sign-in in flight) frame: the scrolling
+/// account + offline list at [`ACCOUNTS_ITEM_H`] pitch, then the four action
+/// buttons in the arranged footer.
+///
+/// ## Two cursors, as on the multiplayer screen
+///
+/// [`AccountEntryView::selected`] is the *list* cursor (`AccountsNav::highlighted`
+/// — a 1 px outline over a black interior) and [`MenuFrame::selected`] is the
+/// *button* the mouse is on (`AccountsNav::focus` past the end of the list, which
+/// [`draw_widget`] turns into `widget/button_highlighted`). Both can be visible
+/// at once, which is the whole reason they are separate fields; `usize::MAX`
+/// highlights no button, which is the state whenever focus is on a row.
+///
+/// ## The row order is a coupling
+///
+/// `AccountsNav::hover` maps a **rendered** row index back through the scroll
+/// window and then onto the four button slots, so the order here — `shown` list
+/// rows, then Add / Select / Remove / Back — is load-bearing.
+/// `the_account_rows_are_in_the_order_click_assumes` is the guard, the same shape
+/// the settings and multiplayer screens carry against the same #391 bug.
 #[must_use]
 fn accounts_idle_frame(accounts: &super::accounts::AccountsNav) -> MenuFrame<'static> {
-    use super::accounts::{AccountRow, BUTTON_ADD, BUTTON_CANCEL, BUTTON_COUNT, BUTTON_REMOVE, BUTTON_SELECT, VISIBLE_ROWS};
+    use super::accounts::{
+        AccountRow, BUTTON_ADD, BUTTON_CANCEL, BUTTON_COUNT, BUTTON_REMOVE, BUTTON_SELECT,
+        VISIBLE_ROWS,
+    };
 
     let all_rows = accounts.rows();
     let list_len = all_rows.len();
     let accounts_len = list_len.saturating_sub(1); // the offline row is always last
     let scroll = accounts.scroll().min(list_len.saturating_sub(1));
     let shown = list_len.saturating_sub(scroll).min(VISIBLE_ROWS);
+    let highlighted = accounts.highlighted();
     let focus = accounts.focus();
 
     let mut rows: Vec<MenuRow> = all_rows[scroll..scroll + shown]
         .iter()
-        .map(|row| match row {
-            AccountRow::Account(p) => MenuRow {
-                label: p.username.clone(),
-                detail: "MICROSOFT ACCOUNT".to_string(),
-                trailing: if accounts.is_selected(p.profile_id) {
-                    "SELECTED".to_string()
-                } else {
-                    String::new()
+        .enumerate()
+        .map(|(rendered, row)| {
+            let view = AccountEntryView {
+                index: rendered,
+                selected: scroll + rendered == highlighted,
+            };
+            match row {
+                AccountRow::Account(p) => MenuRow {
+                    label: p.username.clone(),
+                    detail: "Microsoft account".to_string(),
+                    trailing: if accounts.is_selected(p.profile_id) {
+                        "Selected".to_string()
+                    } else {
+                        String::new()
+                    },
+                    head: Some(default_head_icon()),
+                    enabled: true,
+                    account: Some(view),
+                    ..Default::default()
                 },
-                head: Some(default_head_icon()),
-                enabled: true,
-                ..Default::default()
-            },
-            AccountRow::Offline => MenuRow {
-                label: "Play Offline".to_string(),
-                detail: "NO SIGN-IN REQUIRED".to_string(),
-                trailing: if accounts.offline_selected() {
-                    "SELECTED".to_string()
-                } else {
-                    String::new()
+                // The offline entry is not an account and has no `profile_id`;
+                // `selected.is_none()` **is** its selected state — see
+                // `super::accounts`' module docs before changing this.
+                AccountRow::Offline => MenuRow {
+                    label: "Play offline".to_string(),
+                    detail: "No sign-in required".to_string(),
+                    trailing: if accounts.offline_selected() {
+                        "Selected".to_string()
+                    } else {
+                        String::new()
+                    },
+                    head: Some(default_head_icon()),
+                    enabled: true,
+                    account: Some(view),
+                    ..Default::default()
                 },
-                head: Some(default_head_icon()),
-                enabled: true,
-                ..Default::default()
-            },
+            }
         })
         .collect();
 
@@ -2120,102 +2631,164 @@ fn accounts_idle_frame(accounts: &super::accounts::AccountsNav) -> MenuFrame<'st
         slot: Some(accounts_button_slot(index)),
         ..Default::default()
     };
-    rows.push(button_row(BUTTON_ADD, "ADD ACCOUNT", true));
-    rows.push(button_row(BUTTON_SELECT, "SELECT", true));
-    rows.push(button_row(BUTTON_REMOVE, "REMOVE", accounts.highlighted() < accounts_len));
-    rows.push(button_row(BUTTON_CANCEL, "CANCEL", true));
+    rows.push(button_row(BUTTON_ADD, "Add Account", true));
+    rows.push(button_row(BUTTON_SELECT, "Select", true));
+    // The offline row cannot be removed (`AccountsNav::remove_highlighted`
+    // refuses), so the button is inactive while the cursor is on it — the same
+    // present-and-disabled treatment the multiplayer footer gives Join with an
+    // empty list, rather than a button that silently does nothing.
+    rows.push(button_row(
+        BUTTON_REMOVE,
+        "Remove",
+        highlighted < accounts_len,
+    ));
+    rows.push(button_row(BUTTON_CANCEL, "Back", true));
 
     let selected = if focus < list_len {
-        focus.saturating_sub(scroll)
+        usize::MAX
     } else {
         shown + (focus - list_len).min(BUTTON_COUNT - 1)
     };
 
-    let mut footer = vec!["ENTER SELECT   DEL REMOVE   ESC CANCEL".to_string()];
-    if list_len > VISIBLE_ROWS {
-        footer.push(format!("SHOWING {}-{} OF {}", scroll + 1, scroll + shown, list_len));
+    let mut labels = vec![
+        accounts_title_label(ACCOUNTS_TITLE),
+        accounts_hint_label("Enter select   Del remove   Esc back"),
+    ];
+    if list_len == 1 {
+        // Placed under the last row rather than under the title: the header band
+        // is 33 px and holds a 9 px title, so there is no room for a subtitle
+        // there. `accounts_row_top(shown)` is the first free row line, derived
+        // from the same expression the rows themselves are placed by.
+        labels.push(MenuLabel {
+            text: "No accounts signed in - add one, or play offline".to_string(),
+            origin: Origin::ScreenTop,
+            dx: 0.0,
+            dy: accounts_row_top(shown) + 4.0,
+            align: Align::Centre,
+            colour: ACCOUNTS_DIM,
+            scale: 1.0,
+        });
+    }
+    if list_len > shown {
+        // Right-aligned on the hint line's own baseline, so the two cannot
+        // collide however wide either gets.
+        labels.push(MenuLabel {
+            text: format!("Showing {}-{} of {}", scroll + 1, scroll + shown, list_len),
+            origin: Origin::BottomRight,
+            dx: -4.0,
+            dy: accounts_hint_dy(),
+            align: Align::Right,
+            colour: ACCOUNTS_DIM,
+            scale: 1.0,
+        });
     }
 
     MenuFrame {
-        title: "ACCOUNTS",
-        subtitle: if list_len == 1 {
-            "NO ACCOUNTS SIGNED IN - ADD ONE, OR PLAY OFFLINE"
-        } else {
-            ""
-        },
         rows,
         selected,
-        footer,
-        message: accounts.save_error(),
+        vanilla: true,
+        labels,
+        // Not `message`: that is one unwrapped `TEXT_SCALE` line, and a keychain
+        // or filesystem error carries an OS string of unknown length. See
+        // `MenuNotice`.
+        notice: accounts.save_error().map(accounts_save_error_notice),
         ..Default::default()
     }
 }
 
-/// Builds the account screen's frame while a device-code sign-in is in
-/// flight (or has just failed): the code/URL to show, or the failure.
+/// Builds the account screen's frame while a sign-in is in flight: the URL to
+/// open, the code to type if the flow has one, and a Cancel button.
+///
+/// **The URL is the [`MenuNotice`], not a label.** A loopback authorize URL is a
+/// few hundred characters of query string with no whitespace in it, so it has to
+/// wrap on character boundaries and be bounded to the content band — the same
+/// requirement the failure message has, for the same reason.
+///
+/// The **code** is a label, and it is pre-clipped with [`clip`] rather than
+/// carried whole. That is safe where the URL is not: `clip` measures at the
+/// fixed-advance fallback font, whose 6 px per glyph is an upper bound on the
+/// real proportional font, so a clip to half the row column is a conservative
+/// bound in either font.
 #[must_use]
 fn accounts_flow_frame(
-    title: &'static str,
     user_code: Option<&str>,
     verification_uri: Option<&str>,
     waiting: bool,
 ) -> MenuFrame<'static> {
-    let mut rows = Vec::new();
-    if let Some(uri) = verification_uri {
-        rows.push(MenuRow {
-            label: uri.to_string(),
-            detail: "GO TO THIS ADDRESS IN YOUR BROWSER (OPENED FOR YOU)".to_string(),
-            enabled: true,
-            ..Default::default()
-        });
-    }
+    let mut labels = vec![accounts_title_label(ACCOUNTS_SIGN_IN_TITLE)];
+    labels.push(accounts_band_label(
+        if waiting {
+            "Waiting for you to finish signing in...".to_string()
+        } else {
+            "Contacting Microsoft...".to_string()
+        },
+        0.0,
+        LABEL,
+    ));
     if let Some(code) = user_code {
-        rows.push(MenuRow {
-            label: code.to_string(),
-            detail: "THEN ENTER THIS CODE".to_string(),
-            enabled: true,
-            ..Default::default()
-        });
+        labels.push(accounts_band_label(
+            format!("Then enter this code: {}", clip(code, ACCOUNTS_ROW_W * 0.5, 1.0)),
+            2.0,
+            LABEL,
+        ));
     }
-    if rows.is_empty() {
-        rows.push(MenuRow {
-            label: "CONTACTING MICROSOFT...".to_string(),
-            enabled: true,
-            ..Default::default()
-        });
+    if verification_uri.is_some() {
+        labels.push(accounts_band_label(
+            "Your browser was opened at this address:".to_string(),
+            4.0,
+            ACCOUNTS_DIM,
+        ));
     }
-    let footer = if waiting {
-        vec![
-            "WAITING FOR YOU TO FINISH SIGNING IN...".to_string(),
-            "O REOPEN BROWSER   C COPY CODE   ESC CANCEL".to_string(),
-        ]
+    labels.push(accounts_hint_label(if waiting {
+        "O reopen browser   C copy code   Esc cancel"
     } else {
-        vec!["ESC CANCEL".to_string()]
-    };
+        "Esc cancel"
+    }));
+
     MenuFrame {
-        title,
-        subtitle: "",
-        rows,
-        selected: usize::MAX,
-        footer,
+        rows: vec![MenuRow {
+            label: "Cancel".to_string(),
+            enabled: true,
+            slot: Some(accounts_wide_button_slot()),
+            ..Default::default()
+        }],
+        selected: 0,
+        vanilla: true,
+        labels,
+        notice: verification_uri.map(|uri| {
+            let mut notice = accounts_notice(uri.to_string(), ACCOUNTS_DIM);
+            // Below the three label lines above, on the same `LINE_H` grid.
+            notice.dy += LINE_H * 5.0;
+            notice
+        }),
         ..Default::default()
     }
 }
 
 /// Builds the account screen's frame for a failed sign-in attempt.
+///
+/// **This is the frame the reported bug was in.** The message used to go into
+/// [`MenuFrame::message`] — one `to_uppercase`d line, centred at [`TEXT_SCALE`]
+/// with no wrap and no clip — so a reason built from a server's own response body
+/// was both unreadably large and wider than the screen. It is now a
+/// [`MenuNotice`]: wrapped in the draw's own font, broken inside an over-long
+/// word, and clipped to as many lines as the content band holds.
 #[must_use]
 fn accounts_failed_frame(message: &str) -> MenuFrame<'static> {
     MenuFrame {
-        title: "SIGN-IN FAILED",
-        subtitle: "",
         rows: vec![MenuRow {
-            label: "BACK TO ACCOUNTS".to_string(),
+            label: "Back to Accounts".to_string(),
             enabled: true,
+            slot: Some(accounts_wide_button_slot()),
             ..Default::default()
         }],
         selected: 0,
-        footer: vec!["ENTER OR ESC CONTINUES".to_string()],
-        message: Some(message.to_uppercase()),
+        vanilla: true,
+        labels: vec![
+            accounts_title_label(ACCOUNTS_FAILED_TITLE),
+            accounts_hint_label("Enter or Esc continues"),
+        ],
+        notice: Some(accounts_notice(message.to_string(), FG_BAD)),
         ..Default::default()
     }
 }
@@ -2545,12 +3118,11 @@ pub fn frame_for<'a>(
             accounts.pump();
             Some(match accounts.sign_in_view() {
                 SignInView::Idle => accounts_idle_frame(accounts),
-                SignInView::Requesting => accounts_flow_frame("SIGN IN WITH MICROSOFT", None, None, false),
+                SignInView::Requesting => accounts_flow_frame(None, None, false),
                 SignInView::Waiting {
                     user_code,
                     verification_uri,
                 } => accounts_flow_frame(
-                    "SIGN IN WITH MICROSOFT",
                     // Empty means "no code to show", which is the loopback flow:
                     // the browser is already open at the URL and there is nothing
                     // to type. The device-code flow still fills both. `None` is a
@@ -2665,6 +3237,15 @@ pub fn row_rect(rows: &[MenuRow], i: usize, width: f32, height: f32) -> Option<(
     // drawing; see that function on the bounded consequence.
     if let Some(view) = row.entry.as_ref() {
         return Some(server_row_rect(view.index, width));
+    }
+    // An account row (#66/#402) is placed the same way and for the same reason —
+    // `floor(width / 2) - floor(305 / 2)` is two integer divisions, not
+    // `anchor + dx`. Answered here so the draw and `app.rs`'s hit-test read one
+    // definition; note this also reports a rect for a row
+    // `accounts_row_visible` would skip, which is the bounded consequence that
+    // function documents.
+    if let Some(view) = row.account.as_ref() {
+        return Some(accounts_row_rect(view.index, width));
     }
     if let Some(slot) = row.slot {
         return Some(slot.resolve(width, height));
@@ -2848,6 +3429,27 @@ pub fn build(
         }
     }
 
+    // A wrapped, bounded block of body text (see `MenuNotice`). Drawn here rather
+    // than through `frame.labels` because it is the one piece of menu text whose
+    // *content* is not ours — it can carry a server's own response body — so it
+    // has to be wrapped in the font this draw measures with and clipped to a rect
+    // the layout sizes. Unconditional rather than inside the `frame.vanilla`
+    // branch above: nothing about it depends on which layout mode a screen is in.
+    if let Some(notice) = frame.notice.as_ref() {
+        let (nx, ny, nw, _) = notice_rect(notice, width, height);
+        let lines = wrap_bounded(&b, &notice.text, nw, notice_lines(notice, width, height));
+        for (i, line) in lines.iter().enumerate() {
+            let lw = b.text_width(line, 1.0);
+            b.text(
+                line,
+                (nx + (nw - lw) * 0.5).floor(),
+                ny + LINE_H * i as f32,
+                1.0,
+                notice.colour,
+            );
+        }
+    }
+
     for (i, row) in frame.rows.iter().enumerate() {
         // A multiplayer-list entry (#396) is neither a button nor a field: it is
         // an `ObjectSelectionList` row with a favicon, two text columns, a status
@@ -2855,6 +3457,14 @@ pub fn build(
         // carries none — `row_rect` places it from `entry.index`.
         if row.entry.is_some() {
             draw_server_entry(&mut b, &frame.rows, i, width, height, frame.cursor);
+            continue;
+        }
+        // An account row (#66/#402) is the same kind of thing one screen over: a
+        // 36 px selection-list entry with a head icon and two small text columns,
+        // not a button. Tested before `slot` for the same reason — it carries
+        // none.
+        if row.account.is_some() {
+            draw_account_entry(&mut b, &frame.rows, i, width, height);
             continue;
         }
         if row.slot.is_some() {
@@ -3181,6 +3791,146 @@ fn wrap_measured(b: &Quads<'_>, s: &str, max_px: f32, max_lines: usize) -> Vec<S
     }
     out.truncate(max_lines);
     out
+}
+
+/// [`wrap_measured`], except that a word wider than the column is **broken**
+/// instead of overflowing it. Used by [`MenuNotice`].
+///
+/// ## Why this is a second function rather than a flag on the first
+///
+/// [`wrap_measured`] deliberately does *not* break inside a word, because
+/// `ServerSelectionList` wraps a MOTD with `Font.split` and the difference only
+/// shows on a ~44-character unbroken run — a documented simplification of the
+/// multiplayer screen, and not one worth changing under it.
+///
+/// For a notice the simplification is a **bug**, not a rounding error, and it is
+/// the bug that was reported: an `AuthError` can carry a snippet of a raw HTTP
+/// response body, and JSON has no whitespace in it at all, so a whitespace-only
+/// wrap emits one enormous line and the greedy fallback ("a word that does not
+/// fit starts a line") does not save it. This is also *closer* to vanilla than
+/// its sibling — `StringSplitter` breaks mid-word too — so the two are not a
+/// fidelity choice, they are two different requirements.
+///
+/// The single-glyph guard is load-bearing: at a column narrower than one
+/// character [`clip_measured`] returns `""`, and pushing an empty line forever is
+/// how this would hang instead of drawing.
+fn wrap_bounded(b: &Quads<'_>, s: &str, max_px: f32, max_lines: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if max_lines == 0 {
+        return out;
+    }
+    for paragraph in s.split('\n') {
+        // Per paragraph, for `wrap_measured`'s reason: an explicit newline must
+        // not be swallowed by the next word happening to fit.
+        let mut open_line = false;
+        for word in paragraph.split_whitespace() {
+            if out.len() >= max_lines {
+                return out;
+            }
+            // Extend the open line if the whole word still fits on it. The fit is
+            // computed into a `bool` first, exactly as `wrap_measured` does it:
+            // holding the `out.last()` borrow across the `out.last_mut()` that
+            // follows would not compile.
+            let fits = open_line
+                && out
+                    .last()
+                    .is_some_and(|line| b.text_width(&format!("{line} {word}"), 1.0) <= max_px);
+            if fits {
+                if let Some(line) = out.last_mut() {
+                    line.push(' ');
+                    line.push_str(word);
+                }
+                continue;
+            }
+            // Otherwise the word starts a line — and keeps starting lines until
+            // what is left of it fits on one.
+            let mut rest = word;
+            loop {
+                if out.len() >= max_lines {
+                    return out;
+                }
+                let head = clip_measured(b, rest, max_px);
+                let head = if head.is_empty() {
+                    match rest.char_indices().nth(1) {
+                        Some((i, _)) => &rest[..i],
+                        None => rest,
+                    }
+                } else {
+                    head
+                };
+                out.push(head.to_string());
+                rest = &rest[head.len()..];
+                if rest.is_empty() {
+                    break;
+                }
+            }
+            open_line = true;
+        }
+        if out.len() < max_lines && paragraph.trim().is_empty() {
+            out.push(String::new());
+        }
+    }
+    out.truncate(max_lines);
+    out
+}
+
+/// Draws one account-list row: the cursor outline, the head icon, the username,
+/// the "Selected" marker and the row's small detail line.
+///
+/// [`draw_server_entry`]'s shape at [`ACCOUNTS_ITEM_H`] pitch, minus the favicon
+/// quadrants (there is nothing to reorder or join on this screen) and minus the
+/// status sprite. Like that function it **decides nothing**: which row is
+/// outlined and what the three text columns say are resolved into the row and its
+/// [`AccountEntryView`] by [`accounts_idle_frame`]; what it owns is the
+/// canvas-dependent part, which is the rects.
+///
+/// Every text column is measured and clipped in the font `b` draws with, and the
+/// name is clipped to the room the marker leaves rather than being drawn under it
+/// — this pipeline has no scissor, so an over-long username would otherwise
+/// overprint the marker instead of being cut by it.
+fn draw_account_entry(b: &mut Quads<'_>, rows: &[MenuRow], i: usize, width: f32, height: f32) {
+    let Some(row) = rows.get(i) else { return };
+    let Some(view) = row.account.as_ref() else {
+        return;
+    };
+    if !accounts_row_visible(view.index, height) {
+        return;
+    }
+    let Some((x, y, w, h)) = row_rect(rows, i, width, height) else {
+        return;
+    };
+
+    // `AbstractSelectionList.extractItem`'s selection pass: a 1 px outline with
+    // the interior filled black, drawn *under* the content (`:354-370`). The
+    // outline is the focused variant because this screen's list is focused
+    // whenever it is up — the buttons are a separate cursor (see
+    // `accounts_idle_frame`).
+    if view.selected {
+        b.rect(x, y, w, h, LABEL);
+        b.rect(x + 1.0, y + 1.0, w - 2.0, h - 2.0, ACCOUNTS_SELECTION_FILL);
+    }
+
+    let (cx, cy, cw, _) = accounts_row_content_rect(view.index, width);
+    let text_x = cx + ACCOUNTS_HEAD_ICON + ACCOUNTS_TEXT_GAP;
+
+    // The head, through the same `FaviconMosaic` path a server's favicon takes —
+    // see `MenuRow::head` on why a head is not a second kind of drawable.
+    if let Some(head) = row.head.as_ref() {
+        b.mosaic(head, cx, cy, ACCOUNTS_HEAD_ICON);
+    }
+
+    // The marker first, because the name's room depends on where it lands.
+    let marker_w = b.text_width(&row.trailing, 1.0);
+    let marker_x = cx + cw - ACCOUNTS_SPACING - marker_w;
+    if !row.trailing.is_empty() {
+        b.text(&row.trailing, marker_x, cy + 1.0, 1.0, LABEL);
+    }
+    let name = clip_measured(b, &row.label, (marker_x - ACCOUNTS_SPACING - text_x).max(0.0));
+    b.text(name, text_x, cy + 1.0, 1.0, LABEL);
+
+    let detail_room = (cx + cw - ACCOUNTS_SPACING - text_x).max(0.0);
+    let detail = clip_measured(b, &row.detail, detail_room);
+    b.text(detail, text_x, cy + ACCOUNTS_DETAIL_Y, 1.0, ACCOUNTS_DIM);
 }
 
 /// Draws one vanilla widget: its `widget/button*` nine-slice background, then
@@ -5682,6 +6432,314 @@ mod tests {
             coverage(&v, w, h, outside),
             0.0,
             "text overran the row's right edge"
+        );
+    }
+
+    // -- the account screen (#66/#402) ----------------------------------------
+
+    /// A nav whose `profiles.json` holds `names`, most-recently-used **first**
+    /// (the order `AccountsNav::ordered` sorts into, so `names[0]` is row 0).
+    /// Written beside a temp `servers.json`, which is where `MenuNav::with_path`
+    /// looks for it.
+    fn accounts_nav(tag: &str, names: &[&str]) -> MenuNav {
+        let path = std::env::temp_dir().join(format!(
+            "lodestone-render-accounts-{}-{tag}/servers.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        let mut meta = lodestone_auth::metadata::AccountsMetadata::default();
+        for (i, name) in names.iter().enumerate() {
+            meta.upsert(lodestone_auth::metadata::AccountProfile {
+                profile_id: uuid::Uuid::new_v4(),
+                username: (*name).to_string(),
+                skin_url: None,
+                last_used: (names.len() - i) as u64,
+            });
+        }
+        meta.save_to(&path.parent().unwrap().join("profiles.json"))
+            .expect("the temp profiles file must be writable");
+        MenuNav::with_path(path)
+    }
+
+    #[test]
+    fn the_accounts_slots_do_not_depend_on_the_reference_canvas() {
+        // The same argument the multiplayer screen's version of this makes: the
+        // block is arranged **once** at `ACCOUNTS_REF_CANVAS`, which is sound only
+        // if every rect it hands out is canvas-independent once expressed as a
+        // `Slot`. Even widths only — `Origin::ScreenBottom`'s x is `width * 0.5`
+        // unrounded while `FrameLayout` truncates, so an odd logical width differs
+        // by half a pixel (the limit `Screen::WorldSelect`'s footer has too).
+        for (w, h) in [(854.0, 480.0), (1280.0, 720.0), (640.0, 400.0)] {
+            let live = AccountsBlock::at(w, h);
+            assert_eq!(
+                accounts_block().content_top,
+                live.content_top,
+                "the content band moved at {w}x{h}"
+            );
+            for i in 0..crate::menu::accounts::BUTTON_COUNT {
+                let slot = accounts_button_slot(i);
+                assert_eq!(
+                    slot,
+                    live.footer_slot(i),
+                    "button {i}'s slot depends on the canvas"
+                );
+                // ...and it must resolve onto *that* canvas' own arrangement,
+                // which is what makes the two derivations independent rather than
+                // merely equal.
+                let got = slot.resolve(w, h);
+                let want = live.footer[i];
+                assert!(
+                    (got.0 - want.0).abs() < 0.01
+                        && (got.1 - want.1).abs() < 0.01
+                        && (got.2 - want.2).abs() < 0.01
+                        && (got.3 - want.3).abs() < 0.01,
+                    "button {i} resolves to {got:?} at {w}x{h}, arranged at {want:?}"
+                );
+            }
+        }
+        // The footer column measures `4 * 74 + 3 * 4`, which is the multiplayer
+        // screen's lower row exactly — the agreement `ACCOUNTS_BUTTON_W`'s doc
+        // claims, asserted rather than described.
+        let first = accounts_button_slot(0).resolve(854.0, 480.0);
+        let last = accounts_button_slot(crate::menu::accounts::BUTTON_COUNT - 1)
+            .resolve(854.0, 480.0);
+        let column = last.0 + last.2 - first.0;
+        let want = 4.0 * ACCOUNTS_BUTTON_W + 3.0 * ACCOUNTS_FOOTER_SPACING as f32;
+        assert!(
+            (column - want).abs() < 0.01,
+            "the footer column is {column}, not {want}"
+        );
+    }
+
+    #[test]
+    fn the_account_rows_are_in_the_order_click_assumes() {
+        // `AccountsNav::hover` maps a **rendered** row index back through the
+        // scroll window and then onto the four button slots, so this order is a
+        // coupling between two files — the same guard shape the settings and
+        // multiplayer screens carry against the same #391 bug.
+        use crate::menu::accounts::{
+            BUTTON_ADD, BUTTON_CANCEL, BUTTON_COUNT, BUTTON_REMOVE, BUTTON_SELECT,
+        };
+        let nav = accounts_nav("order", &["Alex", "Steve"]);
+        let f = accounts_idle_frame(nav.accounts());
+
+        assert_eq!(
+            f.rows.len(),
+            3 + BUTTON_COUNT,
+            "two accounts + the offline entry + four buttons"
+        );
+        for (i, row) in f.rows.iter().take(3).enumerate() {
+            let view = row
+                .account
+                .as_ref()
+                .unwrap_or_else(|| panic!("row {i} is not a list row"));
+            assert_eq!(view.index, i, "row {i} carries the wrong rendered index");
+        }
+        for (button, label) in [
+            (BUTTON_ADD, "Add Account"),
+            (BUTTON_SELECT, "Select"),
+            (BUTTON_REMOVE, "Remove"),
+            (BUTTON_CANCEL, "Back"),
+        ] {
+            let row = &f.rows[3 + button];
+            assert_eq!(row.label, label, "button {button} is labelled wrong");
+            assert_eq!(
+                row.slot,
+                Some(accounts_button_slot(button)),
+                "{label} is not in its own footer slot"
+            );
+            assert!(row.account.is_none(), "{label} must not be a list row");
+        }
+
+        // The two cursors are separate: the keyboard starts on row 0, which is the
+        // *list* cursor, and no footer button may be lit while it is there.
+        assert!(f.rows[0].account.as_ref().unwrap().selected);
+        assert_eq!(
+            f.selected,
+            usize::MAX,
+            "a button is highlighted while focus is on a row"
+        );
+    }
+
+    #[test]
+    fn an_account_row_draws_inside_its_own_36px_row_and_not_the_one_below() {
+        let nav = accounts_nav("rowpixels", &["Alex"]);
+        let f = accounts_idle_frame(nav.accounts());
+        let (w, h) = (854.0, 480.0);
+        let v = geometry(&f, w, h);
+
+        // Row 0 is Alex, row 1 the offline entry, row 2 is past the end.
+        for i in 0..2 {
+            let rect = accounts_row_rect(i, w);
+            assert!(
+                coverage(&v, w, h, rect) > 0.05,
+                "row {i} drew nothing in {rect:?}: {}",
+                coverage(&v, w, h, rect)
+            );
+        }
+        let empty = accounts_row_rect(2, w);
+        assert_eq!(
+            coverage(&v, w, h, empty),
+            0.0,
+            "something drew in the row past the end, at {empty:?}"
+        );
+
+        // The 32 px head fills the content box's full height, which is the whole
+        // point of a 36 px pitch with 2 px of padding.
+        let (cx, cy, _, _) = accounts_row_content_rect(0, w);
+        let head = (cx, cy, ACCOUNTS_HEAD_ICON, ACCOUNTS_HEAD_ICON);
+        assert!(
+            coverage(&v, w, h, head) > 0.95,
+            "the head icon does not fill {head:?}: {}",
+            coverage(&v, w, h, head)
+        );
+    }
+
+    /// **The reported bug.** The sign-in failure reason was drawn as one
+    /// unwrapped centred line at [`TEXT_SCALE`], so a message assembled from a
+    /// server's own response body was both too large to read and wider than the
+    /// screen.
+    ///
+    /// Measured by location, against the rect the *draw* derives — `notice_rect`
+    /// is called here rather than restated, because `CLAUDE.md` records two gates
+    /// whose restated rect was itself the thing that was wrong — and the failure
+    /// output is a bounding box, not a fraction. The control is **executed**: the
+    /// same detector, on the same frame, with a deliberately unbounded wrap
+    /// column, must report a box outside the rect. Without it, "nothing
+    /// overflowed" would pass just as well on a frame where nothing drew at all.
+    #[test]
+    fn a_long_sign_in_failure_is_wrapped_and_bounded_to_the_notice_rect() {
+        // `lodestone-auth`'s `step_result` formats `"{status}: {snippet}"` with up
+        // to 400 characters of whatever the server actually returned, and a JSON
+        // body has **no whitespace in it** — so a wrap that only breaks on spaces
+        // emits one enormous line, and this passes only because `wrap_bounded`
+        // breaks mid-word.
+        let body = format!(
+            "401:{{\"XErr\":2148916238,\"Message\":\"{}\"}}",
+            "x".repeat(360)
+        );
+        assert!(
+            !body.contains(' '),
+            "premise: the message has no whitespace to wrap on"
+        );
+
+        let (w, h) = (854.0, 480.0);
+        let frame = accounts_failed_frame(&body);
+        let notice = frame
+            .notice
+            .clone()
+            .expect("the failure state must carry a notice");
+        let (nx, ny, nw, nh) = notice_rect(&notice, w, h);
+        let v = geometry(&frame, w, h);
+        let got = colour_bounds(&v, w, h, notice.colour)
+            .expect("the failure message reached no pixels at all");
+        assert!(
+            got.0 >= nx - 0.5
+                && got.0 + got.2 <= nx + nw + 0.5
+                && got.1 >= ny - 0.5
+                && got.1 + got.3 <= ny + nh + 0.5,
+            "the failure text drew at {got:?}, outside its notice rect {:?}",
+            (nx, ny, nw, nh)
+        );
+        // Wrapped, not merely cut: one line's box is a single glyph tall.
+        assert!(
+            got.3 > LINE_H,
+            "the message was cut to one line instead of wrapped: box {got:?}"
+        );
+
+        // The control. Same text, same detector, a column twice the canvas wide.
+        let mut unbounded = accounts_failed_frame(&body);
+        unbounded
+            .notice
+            .as_mut()
+            .expect("the control still has a notice")
+            .w = w * 2.0;
+        let cv = geometry(&unbounded, w, h);
+        let control = colour_bounds(&cv, w, h, notice.colour)
+            .expect("the control drew nothing, so it proves nothing");
+        assert!(
+            control.0 + control.2 > nx + nw,
+            "the detector cannot see an overflow: control box {control:?} against rect {:?}",
+            (nx, ny, nw, nh)
+        );
+    }
+
+    #[test]
+    fn wrap_bounded_breaks_a_run_that_no_whitespace_wrap_could() {
+        // The difference from `wrap_measured` in one test, with that function as
+        // the control: what makes a second wrap necessary rather than a flag on
+        // the first is that the multiplayer screen's greedy fallback ("a word that
+        // does not fit starts a line") does nothing at all for a 400-character
+        // token.
+        let b = Quads::new(854.0, 480.0);
+        let run = "x".repeat(400);
+        let column = 120.0;
+
+        let hard = wrap_bounded(&b, &run, column, 8);
+        assert!(hard.len() > 1, "the run was not broken at all: {hard:?}");
+        for (i, line) in hard.iter().enumerate() {
+            let lw = b.text_width(line, 1.0);
+            assert!(lw <= column, "line {i} measures {lw} in a {column} column");
+        }
+
+        let soft = wrap_measured(&b, &run, column, 8);
+        assert_eq!(
+            soft.len(),
+            1,
+            "wrap_measured's documented behaviour changed: {soft:?}"
+        );
+        assert!(
+            b.text_width(&soft[0], 1.0) > column,
+            "the control did not overflow, so it proves nothing"
+        );
+
+        // And it terminates on a column too narrow for a single glyph, rather
+        // than pushing empty lines forever.
+        let starved = wrap_bounded(&b, &run, 1.0, 4);
+        assert_eq!(starved.len(), 4);
+        assert!(starved.iter().all(|l| l.chars().count() == 1));
+    }
+
+    #[test]
+    fn a_short_canvas_truncates_the_account_window_instead_of_drawing_over_the_footer() {
+        // #402's residual gap, bounded rather than closed: `VISIBLE_ROWS` is a
+        // count and this module has no canvas, so the *draw* is what refuses a row
+        // that would not fit whole. The footer band is where all four actions are,
+        // so a half-drawn row there is worse than a missing one.
+        //
+        // Checked against the **arranged button row's own y** rather than against
+        // `accounts_row_visible`'s own formula, which would only restate it: two
+        // independent derivations of one fact is the only shape that catches a
+        // guard that is self-consistently wrong.
+        use crate::menu::accounts::VISIBLE_ROWS;
+        let (w, short) = (854.0, 240.0);
+        let fitting = (0..VISIBLE_ROWS)
+            .filter(|&i| accounts_row_visible(i, short))
+            .count();
+        assert!(
+            fitting < VISIBLE_ROWS,
+            "premise: {short} px must be too short for all {VISIBLE_ROWS} rows of the window"
+        );
+        assert!(fitting > 0, "premise: some rows must still fit at {short} px");
+
+        let (_, button_y, _, _) = accounts_button_slot(0).resolve(w, short);
+        for i in 0..VISIBLE_ROWS {
+            if !accounts_row_visible(i, short) {
+                continue;
+            }
+            let (_, y, _, rh) = accounts_row_rect(i, w);
+            assert!(
+                y + rh <= button_y,
+                "row {i} is kept but reaches {}, past the button row at {button_y}",
+                y + rh
+            );
+        }
+        // The control: at a full-size canvas every row of the window fits, so the
+        // premise above is measuring the canvas rather than a guard that is
+        // unconditionally false.
+        assert!(
+            (0..VISIBLE_ROWS).all(|i| accounts_row_visible(i, 480.0)),
+            "no row of the window fits even at 480 px"
         );
     }
 
