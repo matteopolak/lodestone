@@ -7,6 +7,21 @@
 //! [`ClientBuilder::connect`], preserving the [`Transport`] seam a future wasm
 //! build needs.
 //!
+//! ## Singleplayer is the same code with a different transport (issue #287)
+//!
+//! [`NetClient::open_singleplayer`] starts `lodestone_server`'s
+//! `IntegratedServer` on this module's own net thread and speaks to it over an
+//! in-memory duplex through [`ClientBuilder::connect_with`] — the seam the
+//! paragraph above kept open. Everything downstream of the transport is
+//! byte-identical to a multiplayer join: same adapter, same driver, same
+//! [`NetUpdate`] fold, same outbound action queue. See this module's `Origin`.
+//!
+//! The version seam holds in *both* directions. The serverbound encoder comes
+//! from [`lodestone_registry::server_protocol_for_protocol`] as a trait object,
+//! so this crate names no version for the server either — and a build with no
+//! version family compiled in gets `None` and reports it, which is what keeps
+//! `cargo check -p lodestone-shell --no-default-features` meaningful.
+//!
 //! The client is async (tokio); the shell's render loop is not. So a background
 //! thread owns a current-thread runtime and the [`ClientHandle`]/`EventStream`,
 //! and forwards decoded events as [`NetUpdate`]s down a synchronous channel the
@@ -403,6 +418,74 @@ pub struct NetClient {
     session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
 }
 
+/// Where the net thread's connection comes from.
+///
+/// The two arms are the *whole* difference between multiplayer and singleplayer
+/// in this shell: same client, same adapter, same event fold, same thread, same
+/// outbound action queue — a different `Transport`. That is vanilla's own
+/// architecture and the reason `IntegratedServer` exposes an in-memory duplex
+/// (see its module docs), and it is why this is an enum threaded into one `run`
+/// rather than a second net thread with its own loop.
+enum Origin {
+    /// Dial a real server over TCP. `auth` is `Some` for an online-mode join.
+    Remote {
+        /// Host to dial.
+        host: String,
+        /// Port to dial.
+        port: u16,
+        /// An authenticated Microsoft/Minecraft session, for online mode.
+        auth: Option<lodestone_client::Session>,
+    },
+    /// Host `lodestone-server`'s integrated server in **this thread's runtime**
+    /// and speak to it over an in-memory duplex — singleplayer (issue #287).
+    ///
+    /// `protocol` is a trait object resolved by
+    /// [`lodestone_registry::server_protocol_for_protocol`], which is what keeps
+    /// this crate from naming a version: the shell holds a protocol *number*, and
+    /// the registry is the only thing that turns one into an encoder.
+    Integrated {
+        /// The serverbound half of the version family, from the registry.
+        protocol: Box<dyn lodestone_server::ServerProtocol>,
+        /// World seed for the bundled overworld generator.
+        seed: i64,
+        /// Chunk radius the server streams around the player.
+        view_radius: i32,
+    },
+}
+
+impl std::fmt::Debug for Origin {
+    // Hand-written because `ServerProtocol` does not require `Debug` (it is
+    // implemented by version crates, and forcing a bound on the seam to satisfy
+    // a lint would be the wrong trade). `auth` is deliberately not printed: it
+    // holds a live access token.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Origin::Remote { host, port, auth } => f
+                .debug_struct("Remote")
+                .field("host", host)
+                .field("port", port)
+                .field("online", &auth.is_some())
+                .finish(),
+            Origin::Integrated {
+                seed, view_radius, ..
+            } => f
+                .debug_struct("Integrated")
+                .field("seed", seed)
+                .field("view_radius", view_radius)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+/// The `ServerAddress` a singleplayer session presents to the client.
+///
+/// The client needs one for its handshake (`begin_login` puts the host and port
+/// in the intention packet), and there is no socket here. Vanilla's integrated
+/// server answers this question the same way — its `ServerData` for a
+/// single-player world is synthetic. Nothing routes on the value; it is only
+/// echoed into the handshake the server's own decoder ignores.
+const SINGLEPLAYER_ADDRESS: (&str, u16) = ("singleplayer", 0);
+
 impl NetClient {
     /// Spawn a background thread that connects to `host:port` speaking the given
     /// protocol number and forwards events. Returns immediately.
@@ -432,7 +515,15 @@ impl NetClient {
         protocol: i32,
         session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
     ) -> Self {
-        Self::connect_impl(host, port, protocol, session, None)
+        Self::connect_impl(
+            Origin::Remote {
+                host,
+                port,
+                auth: None,
+            },
+            protocol,
+            session,
+        )
     }
 
     /// As [`Self::connect`], but for an **online-mode** server: `auth` is an
@@ -455,17 +546,64 @@ impl NetClient {
         session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
         auth: lodestone_client::Session,
     ) -> Self {
-        Self::connect_impl(host, port, protocol, session, Some(auth))
+        Self::connect_impl(
+            Origin::Remote {
+                host,
+                port,
+                auth: Some(auth),
+            },
+            protocol,
+            session,
+        )
     }
 
-    /// Shared implementation behind [`Self::connect`]/[`Self::connect_online`]:
-    /// spawns the background net thread and returns immediately.
+    /// Start the **integrated server** in-process and connect to it —
+    /// singleplayer (issue #287).
+    ///
+    /// `server_protocol` is the serverbound half of a version family, obtained
+    /// from [`lodestone_registry::server_protocol_for_protocol`]; `protocol` is
+    /// the same number, used for the *client* adapter. Both come from one
+    /// registry lookup pair in `crate::app`'s `launch_singleplayer`, which is also
+    /// where a build with no version family is turned into a reported error
+    /// instead of a thread that starts and finds nothing.
+    ///
+    /// The server and the client share the net thread's current-thread runtime.
+    /// That is deliberate rather than incidental: `IntegratedServer::open_in_memory`
+    /// spawns its serving task on whatever runtime is entered, so hosting it here
+    /// keeps the whole session — server tick, client driver, and the event fold —
+    /// on one thread with no cross-thread synchronisation at all, and makes the
+    /// server's lifetime exactly the session's. The shell's render loop is
+    /// unaffected; it still drains [`NetUpdate`]s once per frame.
+    ///
+    /// `session` means what it does for [`Self::connect`] (§4.1(c)): pass the
+    /// caller's `World` or the fold lands somewhere nothing reads. Prefer
+    /// [`crate::sim::Sim`]'s own launch path over calling this with `None`.
+    #[must_use]
+    pub fn open_singleplayer(
+        server_protocol: Box<dyn lodestone_server::ServerProtocol>,
+        protocol: i32,
+        seed: i64,
+        view_radius: i32,
+        session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
+    ) -> Self {
+        Self::connect_impl(
+            Origin::Integrated {
+                protocol: server_protocol,
+                seed,
+                view_radius,
+            },
+            protocol,
+            session,
+        )
+    }
+
+    /// Shared implementation behind [`Self::connect`]/[`Self::connect_online`]/
+    /// [`Self::open_singleplayer`]: spawns the background net thread and returns
+    /// immediately.
     fn connect_impl(
-        host: String,
-        port: u16,
+        origin: Origin,
         protocol: i32,
         session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
-        auth: Option<lodestone_client::Session>,
     ) -> Self {
         let (tx, rx) = mpsc::channel();
         let (action_tx, action_rx) = mpsc::channel();
@@ -478,15 +616,13 @@ impl NetClient {
             .name("lodestone-net".into())
             .spawn(move || {
                 run(
-                    host,
-                    port,
+                    origin,
                     protocol,
                     tx,
                     action_rx,
                     stop_thread,
                     handle_thread,
                     session,
-                    auth,
                 )
             })
             .expect("spawn net thread");
@@ -808,15 +944,13 @@ pub fn entity_light_at(handle: &SharedHandle, x: i32, y: i32, z: i32) -> Option<
 }
 
 fn run(
-    host: String,
-    port: u16,
+    origin: Origin,
     protocol: i32,
     tx: Sender<NetUpdate>,
     action_rx: Receiver<ClientAction>,
     stop: Arc<AtomicBool>,
     shared_handle: SharedHandle,
     session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
-    auth: Option<lodestone_client::Session>,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -838,11 +972,62 @@ fn run(
         };
 
         let _ = tx.send(NetUpdate::Connecting);
+
+        // Start the integrated server *before* the client, when this is a
+        // singleplayer session. Its serving task goes onto this thread's runtime
+        // (we are inside `block_on`, so a runtime is entered), and the handle is
+        // held for the whole session below: **dropping `IntegratedServer` aborts
+        // the serving task**, so binding it inside a `match` arm would kill the
+        // server the instant the arm ended.
+        let mut integrated_server = None;
+        let (server, auth, integrated_io) = match origin {
+            Origin::Remote { host, port, auth } => (ServerAddress { host, port }, auth, None),
+            Origin::Integrated {
+                protocol: server_protocol,
+                seed,
+                view_radius,
+            } => {
+                tracing::info!(
+                    target: "net",
+                    seed,
+                    view_radius,
+                    "starting the integrated server (singleplayer)"
+                );
+                // The bundled, JVM-verified overworld generator — the same one
+                // `crate::worldgen` calls directly for the dev world, reached
+                // through the server's `ChunkSource` so the client sees it over
+                // the real wire instead of by a local shortcut. Generation is
+                // lazy per column, but the *initial view* is generated before the
+                // client can finish loading: at ~12 ms/column (see
+                // `docs/chunk-memory-pool-footprint.md`) a radius-8 view is a few
+                // seconds on this thread, which is why the shell stays on the
+                // loading screen rather than the world appearing instantly.
+                let source = lodestone_server::overworld_chunk_source(seed);
+                let (server, client_io) = lodestone_server::IntegratedServer::open_in_memory(
+                    server_protocol,
+                    source,
+                    view_radius,
+                );
+                integrated_server = Some(server);
+                let (host, port) = SINGLEPLAYER_ADDRESS;
+                (
+                    ServerAddress {
+                        host: host.to_string(),
+                        port,
+                    },
+                    None,
+                    Some(client_io),
+                )
+            }
+        };
+
         // Online mode (issue #65) supplies the account's real identity;
         // offline mode keeps the existing unique-per-run name so
         // `lodestone-testsupport`'s dead-player-blackout hazard (see that
         // crate's docs and `CLAUDE.md`) stays avoided for every test oracle,
-        // every one of which is an offline server.
+        // every one of which is an offline server. Singleplayer takes the offline
+        // path too: the integrated server persists no player file, so the hazard
+        // does not exist there, but there is also no account to name it after.
         let profile = match &auth {
             Some(session) => LoginProfile {
                 username: session.profile.name.clone(),
@@ -853,7 +1038,6 @@ fn run(
                 uuid: uuid::Uuid::new_v4(),
             },
         };
-        let server = ServerAddress { host, port };
 
         // §4.1(c): fold into the driver's `World` when we were given one. The
         // builder installs no plugins and spawns no entity — the shell's `App`
@@ -877,17 +1061,20 @@ fn run(
         if let Some((world, entity)) = session {
             builder = builder.ecs(world, entity);
         }
-        let (handle, mut events) =
-            match builder
-                .connect()
-                .await
-            {
+        // The `Transport` seam, and the only line where the two session kinds
+        // diverge after setup. `connect_with` is infallible — the duplex is
+        // already open, there is nothing to dial and no timeout to miss — which
+        // is why singleplayer cannot produce a "connect:" error.
+        let (handle, mut events) = match integrated_io {
+            Some(client_io) => builder.connect_with(client_io),
+            None => match builder.connect().await {
                 Ok(pair) => pair,
                 Err(e) => {
                     let _ = tx.send(NetUpdate::Error(format!("connect: {e}")));
                     return;
                 }
-            };
+            },
+        };
 
         // Publish the handle so the render/mesh thread can read the client-owned
         // world (sections_at / loaded_chunks / position). `send_action` is `&self`
@@ -939,6 +1126,15 @@ fn run(
                     }
                 }
             }
+        }
+
+        // Singleplayer only: stop the server we started. Dropping the handle at
+        // the end of this block would do it too, but saying so is what keeps the
+        // *reason* `integrated_server` is a binding at all from looking like an
+        // unused variable — and it is the read that stops the compiler saying so.
+        if let Some(server) = integrated_server {
+            tracing::info!(target: "net", "stopping the integrated server");
+            server.trigger_shutdown();
         }
     });
 }

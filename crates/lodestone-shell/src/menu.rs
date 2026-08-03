@@ -29,11 +29,13 @@
 //! [`SessionKind::Singleplayer`] means vanilla's architecture: start an
 //! integrated server in-process and connect to it over a local transport — the
 //! *same* client and dispatch as multiplayer, a different transport.
-//! [`SessionKind::Multiplayer`] connects to a remote address. The integrated
-//! server (`impl-worldgen`'s `lodestone-server`) is not yet wired, so the app
-//! does not build a second launch path for it: selecting it fails loudly into
-//! [`Screen::Error`] rather than silently doing nothing (see
-//! [`crate::app`]'s staged launcher).
+//! [`SessionKind::Multiplayer`] connects to a remote address. Both are now real
+//! (issue #287): `app.rs`'s `launch_singleplayer` starts
+//! `lodestone_server::IntegratedServer` on an in-memory duplex and the same
+//! client speaks to it, so there is one client and one dispatch, differing only
+//! in transport. A build with no version family compiled in has no server
+//! protocol to run and fails loudly into [`Screen::Error`] rather than silently
+//! doing nothing.
 
 pub mod accounts;
 pub mod edit_box;
@@ -76,12 +78,13 @@ pub enum Screen {
     /// this screen rather than launching anything; Escape (or the screen's own
     /// Back button) returns there.
     ///
-    /// The list itself is **empty**, and deliberately so: there is no
-    /// singleplayer world storage in this client (#287 is the integrated server,
-    /// #190 world creation), so there is nothing to enumerate and a fabricated
-    /// row would read as a working save. See [`world_select`] for what that
-    /// state draws and why vanilla's own empty-list branches could not be
-    /// copied.
+    /// The list holds **exactly one** world (#287's
+    /// [`world_select::BUNDLED_WORLD`]): a fixed seed the integrated server
+    /// regenerates on every launch, never written to disk. There is still no
+    /// world storage in this client and no world creation (#190), so one is the
+    /// honest count — a second row would have to be invented. Its **Play
+    /// Selected World** button is live and starts a real session; see
+    /// [`world_select`] for the row's geometry and the launch chain.
     WorldSelect,
     /// The account list (issue #66): saved Microsoft accounts plus the
     /// always-present offline entry, and the device-code sign-in flow that
@@ -379,10 +382,11 @@ impl UiState {
         self.screen = Screen::Connecting;
     }
 
-    /// Enter the local dev world directly (the shell's `worldgen` stand-in used
-    /// before the integrated server exists). Distinct from
-    /// [`SessionKind::Singleplayer`], which will start a real server; this is a
-    /// no-session Playing state so we don't fake a launch path that isn't built.
+    /// Enter the local dev world directly (the shell's `worldgen` stand-in).
+    /// Distinct from [`SessionKind::Singleplayer`], which starts a real
+    /// integrated server (#287); this is a no-session Playing state with no
+    /// server behind it, reached only from a `--headless`/dev entry point rather
+    /// than from any menu button.
     pub fn enter_dev_world(&mut self) {
         self.kind = None;
         self.error = None;
@@ -485,13 +489,13 @@ impl UiState {
     /// screen, matching [`open_server_list`](Self::open_server_list)'s
     /// reasoning: a stray call must never pull the player out of a world.
     ///
-    /// This is what the title screen's Singleplayer button now does, and it is
+    /// This is what the title screen's Singleplayer button does, and it is
     /// vanilla's own wiring — `TitleScreen`'s Singleplayer button opens
     /// `SelectWorldScreen`; nothing in vanilla starts a world straight off the
-    /// title. Note the consequence: [`nav::MenuAction::Singleplayer`], and
-    /// therefore `app.rs`'s staged "the integrated server is not wired yet"
-    /// failure, is no longer produced by any button. It becomes reachable again
-    /// when #287 gives the list a world for Play Selected World to open.
+    /// title. The launch is one screen further in: **Play Selected World**
+    /// produces [`nav::MenuAction::Singleplayer`], which `app.rs` turns into a
+    /// real integrated-server session (#287). Between #397 and #287 that action
+    /// had no producer at all and was kept as exactly this seam.
     pub fn open_world_select(&mut self) {
         if self.screen == Screen::MainMenu {
             self.screen = Screen::WorldSelect;
@@ -1086,8 +1090,10 @@ mod tests {
 
     #[test]
     fn singleplayer_from_the_menu_enters_the_offline_world() {
-        // The menu's Singleplayer button drives the existing worldgen path,
-        // not the staged integrated-server launcher (which only errors).
+        // The dev-world entry point, which is **not** a menu button: the menu's
+        // Singleplayer button opens the world list, and Play Selected World
+        // there starts a real integrated server (#287). This asserts only that
+        // `enter_dev_world` still lands in a session-less Playing state.
         let mut ui = UiState::new();
         ui.enter_dev_world();
         assert_eq!(ui.screen(), Screen::Playing);

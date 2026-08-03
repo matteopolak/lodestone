@@ -18,6 +18,19 @@ role = "version-registry"
 
 [dependencies]
 lodestone-model = { workspace = true }
+# Version-free, and **required rather than optional on purpose.** This is the
+# home of the `ServerProtocol` trait, which `server_protocol_for_protocol` (the
+# serverbound twin of `adapter_for_protocol`) has to name in its return type.
+#
+# Feature-gating this edge was tried on paper and is wrong: the shell calls
+# `server_protocol_for_protocol` unconditionally, so a `#[cfg(feature = ...)]`
+# function would stop existing in a build with no version family — turning
+# `cargo check -p lodestone-shell --no-default-features` (a required health
+# check whose entire job is proving the shell compiles with **no** version
+# compiled in) into a *compile* failure instead of the `None` the shell is
+# supposed to observe and report. Required here, the version-free build still
+# gets the function; it just answers `None`.
+lodestone-server = { path = "../lodestone-server" }
 
 # One optional dependency per version family. Adding a family is one line here
 # plus one line in `[features]`; deleting a family is deleting its folder and

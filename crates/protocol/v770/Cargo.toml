@@ -40,6 +40,17 @@ tokio = { workspace = true, features = ["test-util"] }
 # Test-only: the real client talking to our real `V770ServerProtocol` over the
 # in-memory transport, proving the join sequence end-to-end without a socket.
 lodestone-client = { workspace = true }
+# Test-only, and the *production* path for singleplayer (issue #287):
+# `tests/singleplayer_seam.rs` resolves a protocol **number** through
+# `lodestone_registry::server_protocol_for_protocol` and serves the resulting
+# `Box<dyn ServerProtocol>`, which is exactly what `lodestone-shell` does and
+# what `tests/server_liveness.rs` — naming `V770ServerProtocol` directly —
+# cannot cover. `features = ["v770"]` here rather than via a crate feature, for
+# `lodestone-entity`'s reason: a crate feature cannot reference a
+# dev-dependency. The resulting v770 -> registry -> v770 edge is a
+# dev-dependency cycle, which cargo allows and which already exists in this
+# workspace through `lodestone-entity`.
+lodestone-registry = { workspace = true, features = ["v770"] }
 # Direct path dep (not a workspace alias) so the addition stays inside this
 # crate's manifest — feeds the density-router `Density` the server integration
 # test needs to build a `WorldgenChunkSource`, mirroring the same fixture-driven

@@ -1137,8 +1137,14 @@ pub fn world_list_row_content_rect(index: usize, width: f32) -> (f32, f32, f32, 
     )
 }
 
-/// The one entry the list actually has: vanilla's `NoWorldsEntry` geometry
-/// carrying [`super::world_select::NO_WORLDS_MESSAGE`].
+/// The one entry the list has, drawn with vanilla's `NoWorldsEntry` geometry —
+/// `text` is [`super::world_select::WorldSelectNav::world_row_label`], i.e. the
+/// bundled world (issue #287).
+///
+/// `NoWorldsEntry`'s geometry rather than `WorldListEntry`'s is deliberate and
+/// unchanged by #287: `WorldListEntry` draws a 32×32 icon plus three text lines
+/// off a `LevelSummary` (`WorldSelectionList.java:494-502`), and there is no
+/// world storage here to supply one. See `world_select`'s module docs.
 ///
 /// `NoWorldsEntry.extractContent` centres a `StringWidget` in the entry's
 /// content box — `setPosition(getContentXMiddle() - width / 2, getContentYMiddle()
@@ -1151,14 +1157,14 @@ pub fn world_list_row_content_rect(index: usize, width: f32) -> (f32, f32, f32, 
 /// halves cancel and the centre is `floor(w / 2)` — the screen's own centre,
 /// which is why this is an [`Origin::ScreenTop`] label with `dx: 0`.
 #[must_use]
-pub fn world_select_no_worlds_label() -> MenuLabel {
+pub fn world_list_row_label(text: &str) -> MenuLabel {
     // The `x` and `w` of the content rect are discarded — the label is centred on
     // the screen for the reason above — so the width passed here is arbitrary.
     // Reading the rect anyway, instead of restating `row_top + 2`, is
     // `CLAUDE.md`'s "derive layout from the same expression the draw uses".
     let (_, content_y, _, content_h) = world_list_row_content_rect(0, 0.0);
     MenuLabel {
-        text: super::world_select::NO_WORLDS_MESSAGE.to_string(),
+        text: text.to_string(),
         origin: Origin::ScreenTop,
         dx: 0.0,
         dy: content_y + (content_h * 0.5).floor() - (STRING_WIDGET_H * 0.5).floor(),
@@ -2466,9 +2472,10 @@ pub fn frame_for<'a>(
                 ..Default::default()
             })
         }
-        // Vanilla's `SelectWorldScreen` (issue #397): the title, the search box,
-        // the six footer buttons — **five of them present and disabled**, Create
-        // New World among them — and the one list row the list actually has. See
+        // Vanilla's `SelectWorldScreen` (issue #397, then #287): the title, the
+        // search box, the six footer buttons — **four of them present and
+        // disabled**, Create New World among them, with Play Selected World live
+        // since #287 — and the one list row the list has. See
         // `super::world_select` for what is disabled and why, and
         // `world_select_slot` for the geometry.
         Screen::WorldSelect => {
@@ -2507,10 +2514,10 @@ pub fn frame_for<'a>(
                 vanilla: true,
                 labels: vec![
                     world_select_title_label(),
-                    // The empty-list state, drawn rather than implied: without it
-                    // "no worlds" and "the list failed to draw" are the same
-                    // picture.
-                    world_select_no_worlds_label(),
+                    // The one world the list has (#287), read off the nav so the
+                    // row drawn and the world **Play Selected World** launches
+                    // are the same fact rather than two constants.
+                    world_list_row_label(ws.world_row_label()),
                 ],
                 ..Default::default()
             })
@@ -6943,14 +6950,15 @@ mod tests {
                 "Back",
             ]
         );
-        // Five disabled, one enabled — the headline of #397. Create New World is
-        // *present* and inactive, which is what makes the footer's shape vanilla's.
+        // Four disabled, two enabled — #397's headline with #287's launch on top.
+        // Create New World is *present* and inactive, which is what makes the
+        // footer's shape vanilla's; Play is active because the list has a world.
         let enabled: Vec<&str> = f.rows[1..]
             .iter()
             .filter(|r| r.enabled)
             .map(|r| r.label.as_str())
             .collect();
-        assert_eq!(enabled, vec!["Back"]);
+        assert_eq!(enabled, vec!["Play Selected World", "Back"]);
         assert!(
             !f.rows[WorldSelectButton::Create.row()].enabled,
             "Create New World must be present and disabled (issue #190)"
@@ -6970,13 +6978,13 @@ mod tests {
             );
         }
 
-        // The two free-standing strings: the title, and the empty-list message.
+        // The two free-standing strings: the title, and the one list row.
         let texts: Vec<&str> = f.labels.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(
             texts,
             vec![
                 crate::menu::world_select::WORLD_SELECT_TITLE,
-                crate::menu::world_select::NO_WORLDS_MESSAGE,
+                crate::menu::world_select::BUNDLED_WORLD.label,
             ]
         );
     }
@@ -7103,22 +7111,24 @@ mod tests {
         }
     }
 
-    /// The empty list draws its message, inside row 0's own content rect.
+    /// The list draws its one row, inside row 0's own content rect.
     ///
-    /// This is the assertion that keeps "there are no worlds" distinguishable
+    /// This is the assertion that keeps "the list has a world" distinguishable
     /// from "the list failed to draw" — without it the two are the same picture,
-    /// which is exactly the absence-needs-a-control rule. The band is the row's
-    /// content rect from `world_list_row_content_rect`, the same expression the
-    /// label's position is derived from, and the failure output is a bounding box
-    /// rather than a fraction.
+    /// which is exactly the absence-needs-a-control rule. It is also the pixel
+    /// half of #287's world list: the button that launches is only honest if the
+    /// world it launches is on screen. The band is the row's content rect from
+    /// `world_list_row_content_rect`, the same expression the label's position is
+    /// derived from, and the failure output is a bounding box rather than a
+    /// fraction.
     ///
-    /// Two controls, both executed: the band *below* the message must be empty
-    /// (so this is not measuring a frame that paints everywhere), and the same
-    /// band on the **title screen** must be empty too (so it is not measuring
+    /// Two controls, both executed: the band *below* the row must be empty (so
+    /// this is not measuring a frame that paints everywhere), and the same band
+    /// on the **title screen** must be empty too (so it is not measuring
     /// something every menu draws there).
     #[test]
-    fn the_empty_world_list_draws_its_message_inside_row_zeros_content_rect() {
-        let (nav, ui) = world_select_nav("ws-empty");
+    fn the_world_list_draws_its_one_row_inside_row_zeros_content_rect() {
+        let (nav, ui) = world_select_nav("ws-row");
         let frame = world_select_frame(&nav, &ui);
         let colour = geometry(&frame, V_W, V_H);
 
@@ -7126,10 +7136,10 @@ mod tests {
         let inside = band_coverage(&colour, V_W, V_H, band);
         assert!(
             inside.count > 0,
-            "the empty-list message reached no pixels inside {band:?}"
+            "the world-list row reached no pixels inside {band:?}"
         );
         let bounds = inside.bounds.expect("a non-empty band has bounds");
-        // It is a line of text, not a full-height fill: the message is 9 px of
+        // It is a line of text, not a full-height fill: the row label is 9 px of
         // glyphs centred in a 32 px box, so its vertical extent must be well
         // short of the band's.
         assert!(
@@ -7140,7 +7150,7 @@ mod tests {
         // And it is centred, so it must straddle the screen's own centre line.
         assert!(
             bounds.0 < V_W * 0.5 && bounds.2 > V_W * 0.5,
-            "the message is not centred: bounds {bounds:?}"
+            "the row label is not centred: bounds {bounds:?}"
         );
 
         // -- control 1: the row below it is empty ----------------------------
@@ -7172,7 +7182,7 @@ mod tests {
         );
     }
 
-    /// The empty-list message fits the row it is centred in.
+    /// The list row's label fits the row it is centred in.
     ///
     /// Vanilla's `NoWorldsEntry` gives its `StringWidget` no `maxWidth`
     /// (`WorldSelectionList.java:382-384`), so nothing clips it and a longer
@@ -7180,12 +7190,12 @@ mod tests {
     /// fixed-advance measure the jar-less draw uses — the real vanilla font is
     /// narrower, so this is the conservative direction.
     #[test]
-    fn the_empty_world_list_message_fits_the_row_it_is_centred_in() {
+    fn the_world_list_row_label_fits_the_row_it_is_centred_in() {
         let (.., content_w, _) = world_list_row_content_rect(0, V_W);
-        let measured = text_px(crate::menu::world_select::NO_WORLDS_MESSAGE, 1.0);
+        let measured = text_px(crate::menu::world_select::BUNDLED_WORLD.label, 1.0);
         assert!(
             measured <= content_w,
-            "the empty-list message measures {measured} px in a {content_w} px row"
+            "the world-list row label measures {measured} px in a {content_w} px row"
         );
     }
 

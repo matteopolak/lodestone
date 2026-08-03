@@ -271,15 +271,31 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   *not* highlight it.
 - [World select, with creation disabled](./world-select.md) — the fifth child
   (#397) and `HeaderAndFooterLayout`'s first consumer: vanilla's
-  `SelectWorldScreen` with five of its six footer buttons present and greyed,
-  **Create New World among them** (#190 is the screen it would open). Also the
+  `SelectWorldScreen` with four of its six footer buttons present and greyed,
+  **Create New World among them** (#190 is the screen it would open) — Play Selected
+  World went live with #287, see [`singleplayer.md`](./singleplayer.md). Also the
   hand-derived footer arithmetic and why *Play*'s 150 px is what makes all four
   columns 71, why the search box lands at y 21 and not the 22 its own constructor
   says, the gate that a canvas-*dependent* container arranged once is still right
   at 320×240 and 1920×1080, and the jar finding that contradicts the obvious
   guess: **vanilla has no empty-list state for this screen** — `NoWorldsEntry` is
   Realms-only and `SINGLEPLAYER` with no worlds *leaves* for `CreateWorldScreen`,
-  so the empty state here is a deliberate choice rather than a transcription.
+  which is why the one row we do have is drawn with `NoWorldsEntry`'s geometry
+  rather than `WorldListEntry`'s.
+- [Singleplayer](./singleplayer.md) — #287: **Play Selected World now starts a real
+  integrated server in-process** and the client joins it over an in-memory duplex,
+  so singleplayer and multiplayer differ in exactly one thing, the `Transport`.
+  Covers the serverbound half of the version seam
+  (`lodestone_registry::server_protocol_for_protocol`, the twin of
+  `adapter_for_protocol`) and why its `lodestone-server` dependency must be
+  **required rather than feature-gated** — a `#[cfg]`'d function would turn
+  `--no-default-features` from the `None` the shell reports into a compile failure.
+  Also: why `Box<dyn ServerProtocol>` needed a forwarding impl before it could be
+  served, and why forgetting one of its eighteen forwards is **not** a compile error
+  but a silently-defaulted method that only misbehaves in singleplayer; why the
+  server lives on the existing net thread rather than a new one; and that
+  `MenuAction::Singleplayer` sat with **no producer at all** from #397 until this
+  landed, which is what an island looks like from the inside.
 - [The multiplayer server list](./server-list.md) — the fourth child (#396) and
   `HeaderAndFooterLayout`'s other consumer: vanilla's `JoinMultiplayerScreen` and
   `ServerSelectionList` at vanilla's geometry, with the seven footer buttons and
