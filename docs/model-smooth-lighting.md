@@ -68,6 +68,96 @@ shade0`), and blends light via `LightCoordsUtil.smoothBlend`. Not ported: vanill
 models' interior faces, which is a documented, narrower gap than the corner math
 itself.
 
+### Known divergences from vanilla
+
+Re-read against the jar after the port landed. Each of these is a **real** difference,
+not a simplification that happens to agree; none is currently covered by a gate.
+
+**1. The occluder predicate is the wrong question (most visible).**
+`quad_corner_sample` decides "does this neighbour darken the corner?" with
+`ModelSectionView::occludes_at`, i.e. `BlockModels::occludes` — a *rendering*
+predicate (all six faces fully cover, opaque, non-cutout). Vanilla never asks that.
+It calls `cache.getShadeBrightness(state, level, pos)`, which is
+`BlockBehaviour.getShadeBrightness` (`BlockBehaviour.java:315`):
+
+```java
+return state.isCollisionShapeFullBlock(level, pos) ? 0.2F : 1.0F;
+```
+
+— a *collision* predicate, with exactly seven overrides in the whole 26.2 tree
+(`grep -rln "protected float getShadeBrightness" net/`): `TransparentBlock` (glass,
+ice, tinted glass) and `StructureVoidBlock`/`BarrierBlock`/`LightBlock` return a flat
+`1.0`, `SnowLayerBlock` returns `0.2` only at 8 layers, and `MudBlock`/`SoulSandBlock`
+return their own values. **`LeavesBlock` is not among them.**
+
+The consequences of the mismatch:
+
+| block | our `occludes` | vanilla shade | agree? |
+| --- | --- | --- | --- |
+| stone, dirt | `true` → `0.2` | `0.2` (full collision cube) | yes |
+| glass, ice | `false` → `1.0` | `1.0` (`TransparentBlock` override) | yes, **by coincidence** |
+| slab, stairs | `false` → `1.0` | `1.0` (not a full collision cube) | yes |
+| water | `false` → `1.0` | `1.0` (empty collision) | yes |
+| **leaves** | `false` → `1.0` | **`0.2`** (full collision cube, no override) | **no** |
+| **slime, honey** | `false` → `1.0` | **`0.2`** | **no** |
+| **spawner, grates** | `false` → `1.0` | **`0.2`** | **no** |
+
+Glass and ice agreeing is the trap here: it makes the predicate look correct on the
+blocks a test scene is most likely to contain, while the divergence class is "full
+collision cube that does not occlude for culling". The player-visible symptom is that
+**the underside of a tree canopy does not darken**, where in vanilla it is markedly
+dimmer than open sky.
+
+This one is **actionable today**, unlike the light-emission gap below:
+`lodestone_data::collision_shapes` is pure rodata, O(1) by state id. `lodestone-render`
+does not currently depend on `lodestone-data`, so the clean seam is a new
+`ModelSectionView` method (`ao_occludes_at`, defaulting to `occludes_at` so no existing
+view changes behaviour) overridden in `crates/lodestone-shell/src/mesher.rs` beside the
+`occludes_at` override already there. The seven overrides then need a small
+by-state-id exception table, not just the collision test.
+
+**2. The AO neighbourhood is centred on the wrong cell for partial quads.**
+`prepareQuadAmbientOcclusion` (`BlockModelLighter.java:39`):
+
+```java
+BlockPos basePosition = this.faceCubic ? centerPosition.relative(direction) : centerPosition;
+```
+
+`faceCubic` (`:265`) is true when the quad is flat against the block boundary *or* the
+state is a full collision cube. `quad_corner_sample` always uses `np` — the block plus
+the face normal — which is the `faceCubic == true` branch. So for a genuinely partial
+quad (a stair's or slab's interior face) vanilla samples the ring around the block's
+**own** cell and we sample the ring one cell further out. `lightCenter` and
+`shadeCenter` follow the same fork (`:114`–`:123`).
+
+**3. `smoothBlend`'s sky-inherit branch is missing.** `LightCoordsUtil.smoothBlend`
+(`:66`) has three cases per neighbour, not one:
+
+```java
+if (sky(center) > 2 || block(center) > 2) {
+   if (neighbor1 == 0)            neighbor1 = center;              // ported
+   else if (sky(neighbor1) == 0)  neighbor1 |= center & 0xFF0000;  // NOT ported
+}
+```
+
+Two things follow. First, vanilla's substitution triggers on the neighbour's **packed
+light being zero**, not on it occluding — those coincide for opaque blocks but not for a
+pitch-dark air cell. Second, a neighbour with block light but *no* sky light inherits the
+centre's sky. So a cell shadowed under an overhang but lit by a nearby torch averages in
+the centre's sky in vanilla and a sky of `0` here — we render it darker. Note also that
+the threshold gate is `sky > 2 || block > 2` over the whole blend, whereas
+`quad_corner_sample` applies `SMOOTH_LIGHT_MIN_CENTRE` per channel independently.
+
+**4. Smooth light is quantised to a whole light level.** `smoothBlend` returns
+`(n1 + n2 + n3 + center) >> 2` in `pack` format and masks to `smoothPack`, whose scale is
+`0..240` — 16 units per light level, so the blended value carries **quarter-level**
+precision (`MAX_SMOOTH_LIGHT_LEVEL = 240`). `quad_corner_sample` ends in
+`round_level(sum / 4.0)`, a `0..=15` nibble, because `ModelVertex::light` is a `u8`
+holding `sky << 4 | block`. The error is bounded by half a light level per vertex (the
+GPU still interpolates smoothly *between* vertices, so this is a corner-value offset, not
+banding across a face). Widening it means widening the vertex format, so it is a real but
+low-priority cost, recorded here so nobody re-derives it.
+
 ### The `ambientocclusion` gate
 
 Vanilla does not always take the AO path. `ModelBlockRenderer.tesselateBlock`
@@ -235,8 +325,16 @@ each tinted source's *plains* colour — which changes hue, not brightness.
   `BlockStateRegistry` (or a sibling lookup) so `block_models.rs`'s baking loop
   can fold `light_emission == 0` into `StateModel::ambient_occlusion` alongside
   the model flag already there.
-- **To wire the flag into live rendering**: add the one-method
-  `ModelSectionView` override to the shell's implementing type, shown above.
+- **To close the leaves/slime/spawner gap** (divergence 1 above, the most visible
+  one left): add an `ao_occludes_at` to `ModelSectionView` defaulting to
+  `occludes_at`, have `quad_corner_sample` call it instead, and override it in
+  `crates/lodestone-shell/src/mesher.rs` from `lodestone_data::collision_shapes`
+  plus a table for vanilla's seven `getShadeBrightness` overrides. Gate it on a
+  leaves-over-stone scene: the shaded corner should land on `0.8` (one occluder)
+  where it currently reads `1.0`.
+- The flag is already wired into live rendering — `2b96bbb` added the
+  `ambient_occlusion_at` override to the shell (see the data-path section above).
+  This bullet used to say it still needed doing.
 
 ## Configuration
 

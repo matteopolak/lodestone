@@ -106,12 +106,36 @@ recurring defect classes, not because they are generically useful — see
 
 ## Tier 1 — needed before "a stranger could play survival for an hour"
 
-1. **Smooth lighting / AO on the model path.** Flat per-block light plus directional
-   shade today; the most recognisable "not Minecraft" tell now that geometry is right.
-   Vanilla is `ModelBlockRenderer.AmbientOcclusionFace` — four-corner blend, occlusion
-   count, and the `smoothBlend` substitution so a corner against a wall is not black.
-   `render/mesh.rs` has `face_corner_lighting` for the *demo* mesher; the model path
-   needs its own. **AO must multiply in gamma space** (§ `4e8f058`).
+1. ~~**Smooth lighting / AO on the model path.**~~ Landed. `1b8e46b` ported the
+   four-corner blend, the occlusion count and `smoothBlend` into `quad_corner_sample`
+   (`lodestone-render/src/models.rs`); `3fd10ea` added the `ambientocclusion` model-flag
+   gate and the live shell override that took it off the island. AO rides the `ao` vertex
+   slot into `model.wgsl`'s existing gamma round-trip, so `4e8f058`'s rule holds without a
+   shader change. `model_ao_corner_gate` measures a single-occluder corner against a
+   **predicted** byte of `round(255 * 0.8) = 204`, through `mesh_models` — with a
+   no-occluder control and a flag-off control that both must go full-bright. See
+   [`docs/model-smooth-lighting.md`](./model-smooth-lighting.md).
+
+   **This entry stayed stale after the work landed and re-dispatched it once** — it still
+   claimed the model path was "flat per-block light plus directional shade today" and
+   pointed at `render/mesh.rs`'s `face_corner_lighting` as the only implementation. Rule 2,
+   eighth instance.
+
+   Still open, in descending order of visibility — details and vanilla citations in the doc:
+   - **The AO occluder predicate diverges.** Ours is `BlockModels::occludes`; vanilla's is
+     `BlockBehaviour.getShadeBrightness` (`isCollisionShapeFullBlock ? 0.2 : 1.0`,
+     overridden to a flat `1.0` by exactly `TransparentBlock`, `Barrier`, `Light`, `Mud`,
+     `SnowLayer`, `SoulSand`, `StructureVoid` — **not** `LeavesBlock`). The two agree on
+     glass and ice by coincidence and disagree on every full-collision-cube block that
+     does not occlude for culling: **leaves**, slime, honey, spawner, grates. Vanilla
+     darkens the underside of a tree canopy; we do not. **Actionable now** —
+     `lodestone_data::collision_shapes` is already O(1) by state id.
+   - Vanilla's AO neighbourhood is centred on the neighbour cell only when the face is
+     *cubic*; for a partial quad it centres on the block's own cell. Ours always uses the
+     neighbour, so stair/slab interior faces sample one cell off.
+   - `smoothBlend`'s sky-inherit branch and vanilla's sub-nibble (0..240) smooth-light
+     precision are not ported; `getLightEmission() == 0` still has no data source; the
+     Nether `CardinalLighting` shade table is still Overworld's.
 2. **Block entity renderers.** Chest has landed end to end (`docs/block-entity-renderers.md`);
    still absent are beds, banners (layered patterns), item frames, shulkers,
    enchanting-table book, bells, conduits, end crystals and decorated pots.
