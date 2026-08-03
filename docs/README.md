@@ -355,7 +355,23 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   **extracted into `crate::asset_objects`** and audio now runs through it. Also
   measures what actually blocks sound: `sounds.json` is present and parses (1968
   events), but only **11 of 4871** samples are on disk, so audio comes up and plays
-  nothing — the "connected but silent" state, not a startup failure.
+  nothing — the "connected but silent" state, not a startup failure. Closed by
+  [Sound playback](./sound-playback.md).
+- [Sound playback](./sound-playback.md) — the packet-to-speakers chain (all of which
+  already existed) and the two things that kept it quiet: no samples on disk, and
+  **two env vars for one directory** — `audio.rs` demanded `LODESTONE_ASSET_ROOT`
+  while everything else resolved the same folder from `LODESTONE_ASSETS` or an
+  ancestor walk, so a plain `cargo run` rendered vanilla textures with audio
+  switched *off*. Both fixed. Also `xtask fetch-sounds`, whose corpus is **derived
+  from `sounds.json`** rather than a rotting file list: 4751 objects / 80 MB is every
+  sample a non-music event can select (`--all` adds 92 music and record tracks,
+  +293 MB), and the excluded-only-if-*every*-referencing-event-is-music rule is what
+  keeps `records/cat` — shared with `jukebox.play` — from being dropped. Ends with
+  what is still silent and why: there is **no client-side prediction at all**, so
+  your own footsteps and placements never reach the wire — and, separately, the
+  block-break sound *does* arrive as `LEVEL_EVENT` 2001 and is discarded, because
+  vanilla's `case 2001` plays a sound and lodestone's arm only spawns particles.
+  That one needs a per-block-state `SoundType` table, which does not exist yet.
 - [Keybindings](./keybindings.md) — the rebindable action → input table behind every
   gameplay key, why a `Binding` must hold a mouse button (vanilla's attack and use
   are mouse-bound by default), the `resolve_key` precedence chain that lets chat and

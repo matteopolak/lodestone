@@ -271,10 +271,13 @@ No option and no env var of its own. The cubemap comes from the same resolved pa
 every other asset uses (`LODESTONE_ASSETS`, or the default `.cache/mc/*` search in
 `resources::asset_root`), and the object store is read from that *same* directory.
 
-One inconsistency to be aware of rather than surprised by: `crate::audio` resolves
-its asset root from a **different** variable, `LODESTONE_ASSET_ROOT`, and will not
-follow `LODESTONE_ASSETS`. Unifying them is part of the same follow-up as
-unifying the two object-store implementations.
+The `LODESTONE_ASSET_ROOT` / `LODESTONE_ASSETS` inconsistency this section used to
+warn about is **fixed**: `asset_objects::discover_store_root` now resolves a store
+root for audio too, trying `LODESTONE_ASSET_ROOT`, then `LODESTONE_ASSETS`, then the
+ancestor walk. The panorama still goes through `resources::asset_root` because it
+needs `client.jar` in the same breath; see
+[sound-playback](./sound-playback.md#2-two-environment-variables-for-one-directory)
+for why the two predicates differ and why that difference is load-bearing.
 
 `resources::load_panorama` is **fail-open** like every sibling loader: a jar-less
 run, an unopenable object store, a missing face, or faces that disagree in size
@@ -314,11 +317,11 @@ Worth stating precisely, because the obvious guess is wrong in both directions:
 | | state |
 |---|---|
 | `minecraft/sounds.json` | **present**, 626,160 B, parses to **1968** sound events |
-| `.ogg` samples | **11 of 4871** present locally; the corpus is **375 MB** |
-| `LODESTONE_ASSET_ROOT` | must be set, or audio is disabled by design |
+| `.ogg` samples | were **11 of 4871** present; the full corpus is **375 MB** |
+| `LODESTONE_ASSET_ROOT` | had to be set, or audio was disabled by design |
 
-So audio does **not** fail at startup for want of `sounds.json` — it is on disk and
-`ShellAudio::load_from_root` gets past its eager check. The gap is the *samples*:
+So audio did **not** fail at startup for want of `sounds.json` — it is on disk and
+`ShellAudio::load_from_root` gets past its eager check. The gap was the *samples*:
 with 11 of 4871 present, the engine comes up, the registry resolves, and virtually
 every event finds no object and plays nothing. That is the "connected but silent"
 state `audio.rs`'s own module docs warn about, and it is a worse failure than a
@@ -327,18 +330,20 @@ hard error because it looks like it works.
 `sounds.json` is in `REQUIRED_OBJECT_NAMES` anyway, so `fetch-assets` keeps it
 verified rather than assuming it stays there.
 
-### What closes it
+### What closed it
 
-`xtask::ensure_object` — *given a logical asset name, make the object present and
-verify its SHA-1 against the index* — is the general primitive, and fetching the
-sample corpus is a loop over the index's `.ogg` names calling it. It is
-deliberately **not** wired into `fetch-assets`: 375 MB in a command every
-contributor runs is a different decision from 3.2 MB, and unlike a stub a missing
-sample fails honestly. That is a judgement to revisit, not an oversight.
+Both halves are now done, and the detail lives in
+[sound-playback](./sound-playback.md):
 
-One inconsistency to fix while you are there: audio resolves its root from
-`LODESTONE_ASSET_ROOT` and everything else from `LODESTONE_ASSETS`, so a
-correctly-configured pack can still have silent audio.
+- `xtask fetch-sounds --version <v>` fetches the corpus through
+  `xtask::ensure_object` — 4751 objects / 80 MB by default, derived from
+  `sounds.json` (every sample a non-music event can select, ambience included),
+  `--all` for the remaining 92 music and record tracks. Still deliberately **not**
+  part of `fetch-assets`: 80 MB in a command every contributor runs is a different
+  decision from 3.2 MB, and unlike a stub a missing sample fails honestly.
+- the env-var split is unified in `asset_objects::discover_store_root`, and
+  `audio.rs` now censuses the `.ogg` objects at startup and warns at zero, so the
+  silent state describes itself instead of being invisible.
 
 ## Residual risk
 
