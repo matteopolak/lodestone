@@ -110,6 +110,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   and `notGamma` omitted entirely, which together turned "14% too dark at midnight"
   into "5.36× too bright" — why every full-bright gate in the tree was byte-identical
   afterwards, and why a ratio measured against light 0 is now degenerate.
+- [Model smooth lighting / AO](./model-smooth-lighting.md) — vanilla's
+  `AmbientOcclusionFace` four-corner blend on the *model* path (issue #22), the
+  `ambientocclusion` model-flag gate, and why AO rides the shader's existing gamma
+  round-trip. Read its "which mesher this is" section first: `--headless` drives
+  `mesh_simple` and structurally cannot exercise any of this. Also lists four
+  measured divergences still open, the visible one being that our AO occluder test
+  is `occludes` where vanilla's is `isCollisionShapeFullBlock` — so leaves, slime
+  and spawners darken nothing and a tree canopy's underside stays bright.
 - [Block entity renderers](./block-entity-renderers.md) — the cuboid rigs whose
   block model does not describe them (issue #23; chest landed, eleven types not).
   A 26.2 chest has **no block model at all** — `block/chest.json` declares only a
