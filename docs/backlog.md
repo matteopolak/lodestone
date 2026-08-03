@@ -195,9 +195,24 @@ recurring defect classes, not because they are generically useful — see
 7. **Combat feel.** None of the 1.9+ feedback exists: attack-strength cooldown bar,
    cooldown-scaled damage, crit particles, sweep arc, knockback feedback, hurt tint and
    camera shake. `EntityDamaged`/`EntityHurtAnimation` decode — check for consumers.
-8. **Riding.** `EntityPassengersChanged` decodes and reaches nothing. Needs passenger
-   attachment offsets, camera on the vehicle, vehicle-specific input (boat paddles and
-   horse jump charge are client-driven), the horse jump bar, dismount.
+8. **Riding.** The island was real when this was written and is closed —
+   [`riding.md`](./riding.md). Mount (a right-click on an entity, which
+   `use_item_live` never even looked for), the 26.2 attachment seat, camera on the
+   vehicle, the passenger `on_ground` override, and dismount all land; the wire half
+   was worse than this bullet says, with **six** riding items stranded, three of them
+   serverbound with zero producers.
+
+   **What remains is one thing, not four: the vehicle does not move.** Every vehicle
+   is client-authoritative while a player rides it — `Entity.isClientAuthoritative`
+   delegates to the controlling passenger and `Player`'s is `true`, so the server
+   takes `travelRidden`'s `setDeltaMovement(Vec3.ZERO)` branch and waits for
+   `ServerboundMoveVehiclePacket`. **This includes horses**, so the intuitive
+   "a horse steers for free off the `PlayerInput` bitfield we already send" is wrong;
+   do not plan around it. Boat steering, paddle state, the horse jump impulse and the
+   jump bar are all downstream of porting vehicle physics + producing
+   `ClientAction::MoveVehicle`. The jump bar additionally needs a `HudFrame` line in
+   `app.rs`. Camera-on-a-*moving*-vehicle needs the minecart lerp fix-up
+   (`Camera.java:247-256`), which needs per-vehicle interpolation state.
 9. **The remaining ~32 clientbound packets.** **Use `cargo xtask connectedness`, never a
    hand count** — the hand-derived figure has been wrong four times in four different
    ways, and do not trust the numbers written here either: run it.

@@ -116,9 +116,15 @@ pub struct PlayerState {
     /// swimming, climbing, falling); there is no bespoke "supported" notion for
     /// swimming or climbing. The **sole override** is `Player.tick`, which forces
     /// `onGround = false` while a **spectator or passenger** (riding a
-    /// boat/minecart/horse). This engine has no riding state, so a driver that
-    /// adds vehicles must apply that override itself — see the
-    /// `spectator_or_passenger_note` contract test in `tests/on_ground.rs`.
+    /// boat/minecart/horse). This engine still has no riding state — that is a
+    /// session fact, not a physics one — and the override now has a real owner:
+    /// `lodestone_ecs::player::pin_passenger_to_vehicle` applies it off
+    /// `lodestone_ecs::session::Riding` in the same system that snaps the player
+    /// onto the seat, so `on_ground` keeps exactly one writer per tick. See the
+    /// `spectator_or_passenger_note` contract test in `tests/on_ground.rs` for why
+    /// it is not a field here, and for the measured correction that the *server*
+    /// never kicks a passenger over this flag (its float check is
+    /// `&& !isPassenger()`) — the override is for local readers.
     ///
     /// Note: a player starting from rest reports airborne for exactly one settle
     /// tick, because a tick runs `move()` before applying gravity — matching the

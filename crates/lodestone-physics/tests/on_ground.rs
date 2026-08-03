@@ -332,15 +332,42 @@ fn stepping_up_a_slab_preserves_grounded() {
 }
 
 /// Documents (as an executable note) the one vanilla override this engine does
-/// not yet model: `Player.tick` forces `onGround = false` for a **spectator or
-/// passenger**. The physics engine has no riding state, so a driver that adds
-/// vehicles must override the transmitted flag to `false` while mounted rather
-/// than sending the seat's collision result. Kept as a test so the contract is
-/// discoverable next to the ones the engine *does* enforce.
+/// not model **and never will**: `Player.tick` forces `onGround = false` for a
+/// **spectator or passenger** (`Player.java:232-236`, verified in
+/// `.cache/mc/26.2`:
+/// `if (this.isSpectator() || this.isPassenger()) { this.setOnGround(false); }`).
+///
+/// # It has a driver now, and it is not here
+///
+/// The note used to say "if riding state is ever added to `PlayerState`, replace
+/// this with a real assertion". Riding state was added — and *not* to
+/// `PlayerState`, deliberately. Whether we are a passenger is a **session** fact
+/// folded from `ClientboundSetPassengersPacket`
+/// (`lodestone_ecs::session::Riding`), and the override is applied by
+/// `lodestone_ecs::player::pin_passenger_to_vehicle`, which is also what snaps
+/// the player onto the seat. Putting a `passenger: bool` on `PlayerState` would
+/// have given the pure engine a field it can neither set nor act on beyond
+/// forcing one flag, and two writers of `on_ground` in the same tick.
+///
+/// So this file's subject genuinely has nothing to assert, and the real
+/// assertions live where the state does:
+/// `a_passenger_transmits_on_ground_false_while_sitting_just_above_a_block` in
+/// `lodestone-ecs/src/player.rs`, with its dismounted control.
+///
+/// # And the reason usually given for the override is wrong
+///
+/// This module's header frames `on_ground` as a wire contract policed by the
+/// server's `aboveGroundTickCount` / `multiplayer.disconnect.flying` counter. That
+/// is right for a walking player and **not** why the passenger override matters:
+/// the server's float check is explicitly `&& !this.player.isPassenger()`
+/// (`ServerGamePacketListenerImpl.java:323`) and its move handler discards a
+/// passenger's reported position outright, keeping only the rotation
+/// (`ServerGamePacketListenerImpl.java:1086-1088`). A mounted client cannot be
+/// kicked for this flag. The override exists for the *local* readers — pose, view
+/// bob, jump, flight cancel — which would otherwise treat a seated player as
+/// standing on something.
 #[test]
 fn spectator_or_passenger_note() {
-    // No behaviour to assert in the pure engine; this is a living contract note.
-    // If riding state is ever added to PlayerState, replace this with a real
-    // assertion that mounted => transmitted on_ground is false. The engine has no
-    // spectator/passenger state to exercise here.
+    // No behaviour to assert in the pure engine, by design — see the doc above
+    // for where the assertion actually lives now.
 }

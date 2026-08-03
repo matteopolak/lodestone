@@ -375,6 +375,41 @@ impl Default for ServerAlive {
     }
 }
 
+/// The server entity id of the vehicle the **local player** is riding, or `None`
+/// when on foot — vanilla's `Entity.getVehicle()` for our own player.
+///
+/// # Why this is session state and not just [`crate::entity::Vehicle`]
+///
+/// `SET_PASSENGERS` is one packet feeding two disjoint facts, and the fork is the
+/// one `CLAUDE.md` warns costs work when guessed:
+///
+/// | fact | home | why |
+/// |---|---|---|
+/// | which entity rides which | [`crate::entity::Passengers`]/[`crate::entity::Vehicle`], `ingest` | per-entity ECS state, keyed by server id |
+/// | **am I riding, and what** | this component, `session` | a local-player scalar that drives the camera, physics and input |
+///
+/// Both routers therefore claim the event, exactly as both claim `Login`.
+///
+/// The local player is a real member of `EntityIndex` (see
+/// [`crate::ingest::apply_local_player_login`]) so `Vehicle` *is* also written on
+/// our own entity — but it cannot substitute for this. The local player carries no
+/// [`crate::entity::Position`]/[`crate::entity::EntityKind`] by design, so it is
+/// structurally excluded from the entity read-model, and every consumer that needs
+/// "are we mounted" ([`crate::player::player_physics`]'s seat pin,
+/// `lodestone_shell::sim`'s dismount key, the camera) is a local-player consumer
+/// reaching for a scalar, not an id-addressed query. Deriving it would also mean
+/// depending on the *reverse-edge* fold, which
+/// [`crate::ingest::apply_entity_passengers`] documents as best-effort for an
+/// unspawned id; this fold reads the **forward** list and is therefore exact.
+///
+/// # `None` is "on foot", never "unknown"
+///
+/// There is no unreported case: a rider is always announced by the packet that
+/// seats it, and a dismount is announced as that same packet's list going empty.
+/// So the default is a real, correct state and consumers need no fallback.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Riding(pub Option<i32>);
+
 /// Ordering label for the session folds, inside [`IngestSet::Apply`].
 ///
 /// A plugin that wants to observe a folded scoreboard orders
@@ -434,6 +469,19 @@ pub fn handles_event(event: &ClientEvent) -> bool {
             // permanently refused or — worse, and what actually shipped — decided
             // locally with no server grant at all. Fourth instance of this island.
             | ClientEvent::AbilitiesChanged { .. }
+            // `EntityPassengersChanged` (Tier 1 item 8). Claimed by **both**
+            // routers on purpose — `crate::ingest::handles_event` takes the
+            // per-entity `Passengers`/`Vehicle` pair off the same event, this side
+            // takes the local player's own [`Riding`] scalar. That is the `Login`
+            // shape, not a double fold: two disjoint writes, and
+            // `SharedState::apply` routes on the *union* of the two switches so the
+            // event still reaches the schedule exactly once.
+            //
+            // Guessing this fork is what `CLAUDE.md` records as having cost work
+            // twice, and riding is genuinely both halves — which is why it is
+            // listed in both places rather than in whichever one was thought of
+            // first.
+            | ClientEvent::EntityPassengersChanged { .. }
             // `GameModeChanged`: `ServerGameMode` existed and was written only on
             // `Login`/`Respawned`, so a runtime `/gamemode` never reached it.
             | ClientEvent::GameModeChanged { .. }
@@ -520,6 +568,7 @@ pub fn apply_local_player_state(
             &mut ServerBiomeSkyColors,
             &mut ServerAlive,
             &mut Abilities,
+            &mut Riding,
         ),
         With<LocalPlayer>,
     >,
@@ -535,6 +584,7 @@ pub fn apply_local_player_state(
             mut biome_sky_colors,
             mut alive,
             mut abilities,
+            mut riding,
         ) in &mut players
         {
             match event {
@@ -618,6 +668,16 @@ pub fn apply_local_player_state(
                     // not extend this arm to a field where it would not be.
                     vitals.air = None;
                     vitals.on_fire = None;
+                    // Same "fresh entity on both sides" reasoning, one field over:
+                    // vanilla's respawned `ServerPlayer` is never a passenger and
+                    // `ServerPlayer.restoreFrom` carries no vehicle across, so a
+                    // player who died while riding must land on foot. `None` and
+                    // not "leave it alone": the server sends no `SET_PASSENGERS`
+                    // for a vehicle it destroyed our seat in, so without this the
+                    // seat pin in `crate::player::player_physics` would hold a
+                    // respawned player at a boat they are no longer in with no
+                    // packet left that could free them.
+                    riding.0 = None;
                 }
                 ClientEvent::HealthChanged {
                     health,
@@ -663,6 +723,31 @@ pub fn apply_local_player_state(
                         walking_speed: *walking_speed,
                     };
                 }
+                // Tier 1 item 8, the session half of `SET_PASSENGERS`. See
+                // [`Riding`] for why this fact lives here while the per-entity
+                // `Passengers`/`Vehicle` pair lives in `crate::ingest`.
+                //
+                // **The `else if` is load-bearing.** A `SET_PASSENGERS` for some
+                // *other* vehicle — a pig two chunks away gaining a rider — must
+                // not clear our own ride state, so absence from the list only means
+                // "dismounted" when the list belongs to the vehicle we are
+                // currently in. Assigning `None` unconditionally on any list that
+                // does not contain us would eject the player from a boat every time
+                // an unrelated mob was mounted anywhere in view distance.
+                //
+                // `id.0` is set by the `Login` arm above, and a `SET_PASSENGERS`
+                // cannot precede login, so a `None` here means "before login" and
+                // correctly matches nothing.
+                ClientEvent::EntityPassengersChanged {
+                    vehicle_id,
+                    passenger_ids,
+                } => {
+                    if id.0.is_some_and(|own| passenger_ids.contains(&own)) {
+                        riding.0 = Some(*vehicle_id);
+                    } else if riding.0 == Some(*vehicle_id) {
+                        riding.0 = None;
+                    }
+                }
                 _ => {}
             }
         }
@@ -701,6 +786,10 @@ pub fn insert_session_components(world: &mut World, entity: bevy_ecs::entity::En
             ServerBiomeSkyColors::default(),
             ServerAlive::default(),
             Abilities::default(),
+            // Also the quit-to-title reset path (see this function's docs): a new
+            // session must start on foot, never still seated in the last one's
+            // boat.
+            Riding::default(),
         ));
     }
 }
@@ -1875,5 +1964,143 @@ mod tests {
                 .text()
                 .is_some()
         );
+    }
+
+    /// The `Riding` fold, through the schedule (Tier 1 item 8): our own id
+    /// appearing in a vehicle's passenger list is what mounts us, and the list
+    /// going empty is what dismounts us.
+    #[test]
+    fn our_own_id_in_a_passenger_list_mounts_us_and_an_empty_list_dismounts_us() {
+        let (mut app, entity) = session_app();
+        fold(
+            &mut app,
+            ClientEvent::Login {
+                entity_id: 7,
+                game_mode: GameMode::Creative,
+                dimension: dim("overworld"),
+            },
+        );
+        assert_eq!(
+            app.world().get::<Riding>(entity).copied(),
+            Some(Riding(None)),
+            "a freshly logged-in player is on foot"
+        );
+        fold(
+            &mut app,
+            ClientEvent::EntityPassengersChanged {
+                vehicle_id: 42,
+                passenger_ids: vec![7],
+            },
+        );
+        assert_eq!(
+            app.world().get::<Riding>(entity).copied(),
+            Some(Riding(Some(42)))
+        );
+        fold(
+            &mut app,
+            ClientEvent::EntityPassengersChanged {
+                vehicle_id: 42,
+                passenger_ids: Vec::new(),
+            },
+        );
+        assert_eq!(app.world().get::<Riding>(entity).copied(), Some(Riding(None)));
+    }
+
+    /// **The `else if` this pins is the difference between riding a boat and being
+    /// ejected from it by an unrelated mob.** `SET_PASSENGERS` is broadcast for
+    /// every vehicle in view distance, so "our id is not in this list" only means
+    /// "we dismounted" when the list belongs to the vehicle we are actually in.
+    #[test]
+    fn another_vehicles_passenger_list_does_not_dismount_us() {
+        let (mut app, entity) = session_app();
+        fold(
+            &mut app,
+            ClientEvent::Login {
+                entity_id: 7,
+                game_mode: GameMode::Creative,
+                dimension: dim("overworld"),
+            },
+        );
+        fold(
+            &mut app,
+            ClientEvent::EntityPassengersChanged {
+                vehicle_id: 42,
+                passenger_ids: vec![7],
+            },
+        );
+        // Precondition, asserted: without a live seat the assertion below cannot
+        // distinguish "was not ejected" from "was never aboard".
+        assert_eq!(
+            app.world().get::<Riding>(entity).copied(),
+            Some(Riding(Some(42))),
+            "precondition: we must be aboard 42"
+        );
+        // Some pig two chunks away gains a rider.
+        fold(
+            &mut app,
+            ClientEvent::EntityPassengersChanged {
+                vehicle_id: 99,
+                passenger_ids: vec![1234],
+            },
+        );
+        assert_eq!(
+            app.world().get::<Riding>(entity).copied(),
+            Some(Riding(Some(42))),
+            "an unrelated vehicle's passenger list must leave our own seat alone"
+        );
+        // And the negative control for the same detector: a list for *our* vehicle
+        // that omits us does dismount, so the assertion above is about the vehicle
+        // id being compared and not about the fold being inert.
+        fold(
+            &mut app,
+            ClientEvent::EntityPassengersChanged {
+                vehicle_id: 42,
+                passenger_ids: vec![1234],
+            },
+        );
+        assert_eq!(
+            app.world().get::<Riding>(entity).copied(),
+            Some(Riding(None)),
+            "our own vehicle's list without us must dismount"
+        );
+    }
+
+    /// A respawn lands us on foot. Vanilla builds a brand-new `ServerPlayer`
+    /// (`PlayerList.respawn`) which is never a passenger, and no
+    /// `SET_PASSENGERS` follows — so without the explicit clear the seat pin
+    /// would hold a respawned player at a vehicle nothing can free them from.
+    #[test]
+    fn respawning_clears_the_ride_state() {
+        let (mut app, entity) = session_app();
+        fold(
+            &mut app,
+            ClientEvent::Login {
+                entity_id: 7,
+                game_mode: GameMode::Creative,
+                dimension: dim("overworld"),
+            },
+        );
+        fold(
+            &mut app,
+            ClientEvent::EntityPassengersChanged {
+                vehicle_id: 42,
+                passenger_ids: vec![7],
+            },
+        );
+        assert_eq!(
+            app.world().get::<Riding>(entity).copied(),
+            Some(Riding(Some(42))),
+            "precondition: aboard before dying"
+        );
+        fold(
+            &mut app,
+            ClientEvent::Respawned {
+                dimension: dim("overworld"),
+                game_mode: GameMode::Survival,
+                previous_game_mode: None,
+                last_death_location: None,
+            },
+        );
+        assert_eq!(app.world().get::<Riding>(entity).copied(), Some(Riding(None)));
     }
 }

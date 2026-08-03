@@ -909,6 +909,155 @@ pub fn cancel_flight_on_landing(
     }
 }
 
+/// `TickSet::Physics`, **last in the chain**: while the local player is a
+/// passenger, snap them onto their seat and clear the state a walking player
+/// would have written — `Entity.rideTick` + `Entity.positionRider`
+/// (`Entity.java:2385-2403`) and `Player.tick`'s passenger override
+/// (`Player.java:232-236`).
+///
+/// # This is what makes riding reach pixels
+///
+/// The camera is *not* separately taught about vehicles, and 26.2's own client
+/// does not teach it either: `Camera.alignWithEntity`
+/// (`client-src/net/minecraft/client/Camera.java:246-264`) has **no
+/// `isPassenger()` branch** other than a lerp fix-up for new-behaviour minecarts,
+/// and riding changes neither the player's pose nor its eye height
+/// (`Player.updatePlayerPose`, `Player.java:343-357`, has no riding case, and
+/// there is no `SITTING` pose — a mounted player keeps
+/// `Avatar.DEFAULT_EYE_HEIGHT = 1.62`, `Avatar.java:16`). So moving the *feet*
+/// here moves the eye, the block-target ray origin and the audio listener
+/// together, all three through `lodestone_shell::sim::Sim::camera`'s existing
+/// read of [`PhysicsState`]. Nothing downstream needed a new seam.
+///
+/// # Why this runs *after* `player_physics` rather than replacing it
+///
+/// Vanilla runs the passenger's full tick — travel included, with the same
+/// `xxa`/`zza` the vehicle reads — and only then overwrites the position:
+/// `rideTick()` is `setDeltaMovement(ZERO); this.tick(); vehicle.positionRider(this)`
+/// (`Entity.java:2385-2390`), and `LivingEntity.aiStep` still reaches
+/// `travel(input)` for a passenger because `canSimulateMovement()` is
+/// `isLocalInstanceAuthoritative()`, true for the local player
+/// (`LivingEntity.java:3127-3131`, `Entity.java:3594-3609`,
+/// `Player.java:1281`). So a walking player's one tick of drift out of the seat
+/// really does happen upstream and really is thrown away here. Suppressing
+/// `player_physics` instead would be a *different* engine, and it would also
+/// throw away the fluid-state computation the pose and fog read.
+///
+/// The one divergence: vanilla zeroes velocity at the **top** of `rideTick`, this
+/// zeroes it at the bottom. For every tick after the first the two are identical
+/// (travel reads the velocity the previous tick left), so the difference is one
+/// tick of pre-mount momentum, which the same tick's position snap discards
+/// anyway. Measured in ticks it is not observable; stated because the ordering
+/// looks arbitrary otherwise.
+///
+/// # `on_ground` is forced false — but *not* to avoid the flying kick
+///
+/// `Player.java:234-236` is `if (isSpectator() || isPassenger()) setOnGround(false);`
+/// — unconditional, before anything else in `tick()`. This closes the
+/// `spectator_or_passenger_note` contract test in
+/// `lodestone-physics/tests/on_ground.rs`, which existed precisely because the
+/// pure engine has no riding state and the override had to be a driver's.
+///
+/// **The obvious reason to do it is wrong, and the check was worth running.**
+/// `PlayerState::on_ground`'s own docs frame the flag as a wire contract guarded
+/// by the server's `aboveGroundTickCount` / `multiplayer.disconnect.flying`
+/// counter, which would make this a kick-avoidance necessity. It is not: the
+/// server's float check is explicitly `&& !this.player.isPassenger()`
+/// (`server/network/ServerGamePacketListenerImpl.java:323`), and its move handler
+/// **discards a passenger's reported position outright**, keeping only the
+/// rotation (`ServerGamePacketListenerImpl.java:1086-1088`:
+/// `absSnapTo(getX(), getY(), getZ(), targetYRot, targetXRot)`). So neither the
+/// position nor the flag we send while mounted can desync us.
+///
+/// What the override is actually for is every **local** consumer of the flag:
+/// the pose machine, the view bob's `pre_on_ground`, the jump gate and
+/// `cancel_flight_on_landing`, all of which would otherwise read "standing on
+/// something" for a player sitting in a boat. That is a smaller claim than
+/// "prevents a disconnect", and it is the true one.
+///
+/// # Every reason this can decline to pin, and why each is the safe direction
+///
+/// A missing input leaves the player where `player_physics` put them rather than
+/// snapping them somewhere invented:
+///
+/// * [`Riding`](crate::session::Riding) absent or `None` — not riding.
+/// * the vehicle id is not in [`EntityIndex`](crate::entity::EntityIndex) — the
+///   seat's vehicle has not spawned client-side yet. Self-healing:
+///   `SET_PASSENGERS` is re-sent on any seat change, and the vehicle's own
+///   `AddEntity` normally precedes it.
+/// * the vehicle has no [`Position`](crate::entity::Position) /
+///   [`Rotation`](crate::entity::Rotation) /
+///   [`EntityKind`](crate::entity::EntityKind) — the same case one step later.
+/// * [`VersionData`](crate::VersionData) holds no adapter, or the adapter does not
+///   know the type. The seat height comes from the vehicle's real generated box
+///   height, so an unknown type has no height to fall back on and **must not** be
+///   guessed — [`crate::riding`]'s fallback is `(0, height, 0)` and a fabricated
+///   height would put the rider at a plausible wrong altitude, which is worse
+///   than not moving them. Same default-deny rule [`VersionData`](crate::VersionData)
+///   documents.
+pub fn pin_passenger_to_vehicle(
+    index: Res<crate::entity::EntityIndex>,
+    version: Option<Res<crate::VersionData>>,
+    vehicles: Query<(
+        &crate::entity::Position,
+        &crate::entity::Rotation,
+        &crate::entity::EntityKind,
+        Option<&crate::entity::Passengers>,
+    )>,
+    mut players: Query<
+        (
+            &mut PhysicsState,
+            &crate::session::Riding,
+            &crate::session::ServerEntityId,
+        ),
+        With<LocalPlayer>,
+    >,
+) {
+    let Some(version) = version else {
+        return;
+    };
+    for (mut state, riding, own_id) in &mut players {
+        let Some(vehicle_id) = riding.0 else {
+            continue;
+        };
+        // `Player.java:234-236`, and it applies the moment we know we are a
+        // passenger — before, and independently of, whether the seat itself can be
+        // resolved. A tick that cannot find the vehicle still must not tell the
+        // server we are standing on the boat's roof.
+        state.0.on_ground = false;
+        state.0.velocity = Vec3d::ZERO;
+
+        let Some(vehicle) = index.get(vehicle_id) else {
+            continue;
+        };
+        let Ok((position, rotation, kind, passengers)) = vehicles.get(vehicle) else {
+            continue;
+        };
+        let Some(facts) = version.entity_facts(&kind.0) else {
+            continue;
+        };
+        // `Entity.java:2421`: `vehicle.getPassengers().indexOf(passenger)`. A
+        // vehicle with no `Passengers` component yet, or a list that does not
+        // mention us, reads as seat 0 — which is what `indexOf` returning `-1`
+        // then feeding `Mth.clamp(index, 0, size - 1)` gives in vanilla
+        // (`EntityAttachments.java:74`), so the degenerate case agrees rather
+        // than merely being harmless.
+        let seat_index = own_id
+            .0
+            .and_then(|own| {
+                passengers.and_then(|list| list.0.iter().position(|id| *id == own))
+            })
+            .unwrap_or(0);
+        state.0.position = crate::riding::player_seat_position(
+            Vec3d::new(position.0.x, position.0.y, position.0.z),
+            rotation.0.yaw,
+            kind.0.path(),
+            facts.dimensions.height,
+            seat_index,
+        );
+    }
+}
+
 /// `TickSet::Animate`: advance every [`LocalPlayer`]'s [`AttackStrengthTicker`]
 /// one tick, mirroring `Player.tick()`'s unconditional `this
 /// .attackStrengthTicker++` (`Player.java:268`). Same rate and same
@@ -1021,6 +1170,21 @@ impl Plugin for LocalPlayerPlugin {
         app.init_resource::<PlayerCollision>();
         app.init_resource::<Profile>();
         app.init_resource::<NearbyEntities>();
+        // [`pin_passenger_to_vehicle`] resolves the ride's vehicle id through it,
+        // and this plugin is usable **without** `crate::ingest::IngestPlugin` — a
+        // headless physics harness, `lodestone-controller`'s own tests, and the
+        // offline fixture world all add this plugin alone, where a `Res<EntityIndex>`
+        // would panic on first `GameTick`. `init_resource` and not
+        // `insert_resource` precisely so that installing both plugins (which the
+        // shell does) leaves `IngestPlugin`'s populated index untouched whichever
+        // order they are added in; the default is an empty index, which reads as
+        // "nothing tracked" and correctly declines to pin.
+        //
+        // `VersionData` gets the `Option<Res<…>>` treatment in that system instead
+        // of being defaulted here, because a default `VersionData(None)` inserted
+        // by *this* plugin could shadow a real adapter the driver inserts later —
+        // `Sim::build` does exactly that, after `add_plugins`.
+        app.init_resource::<crate::entity::EntityIndex>();
         app.init_resource::<ActionQueue>();
         app.init_resource::<Egress>();
         // `TickSet::Intent` before `TickSet::Physics`: the master chain in
@@ -1056,12 +1220,20 @@ impl Plugin for LocalPlayerPlugin {
         // tick's travel integrates, while the landing cancel must read the
         // `on_ground` that same travel just wrote. Registered as one chain so a
         // plugin cannot reorder them independently.
+        //
+        // `pin_passenger_to_vehicle` is **last**, and the position is what makes
+        // that load-bearing: it is `Entity.positionRider`, which vanilla runs
+        // after the passenger's whole `tick()`, and it is also the writer of the
+        // transmitted `on_ground` for a passenger — so it must land after
+        // `player_physics` (which computes the walking answer) and after
+        // `cancel_flight_on_landing` (which reads it). See that system's docs.
         app.add_systems(
             GameTick,
             (
                 apply_creative_flight_input,
                 player_physics,
                 cancel_flight_on_landing,
+                pin_passenger_to_vehicle,
             )
                 .chain()
                 .in_set(TickSet::Physics),
@@ -1825,6 +1997,250 @@ mod tests {
             app.world().get::<AttackStrengthTicker>(entity).unwrap().0,
             0,
             "reset_local_player must zero the ticker like every other local-only field"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Riding (Tier 1 item 8)
+    // -----------------------------------------------------------------------
+
+    /// A minimal [`lodestone_model::VersionAdapter`] that answers exactly one
+    /// question — the vehicle's base box height — so [`pin_passenger_to_vehicle`]
+    /// can be exercised in a crate that (deliberately) depends on no protocol
+    /// family.
+    ///
+    /// The three required methods are stubs; every other seam keeps its trait
+    /// default, which is what makes this a *narrow* double rather than a second
+    /// implementation of the adapter. The heights fed to it below come from
+    /// `.cache/mc/26.2`'s `EntityTypes.java`, not from `lodestone-data`, so the
+    /// expected seat positions do not originate inside the code under test.
+    #[derive(Debug)]
+    struct HeightOnlyAdapter {
+        height: f32,
+    }
+
+    impl lodestone_model::VersionAdapter for HeightOnlyAdapter {
+        fn protocol_version(&self) -> i32 {
+            0
+        }
+
+        fn minecraft_versions(&self) -> &'static [&'static str] {
+            &[]
+        }
+
+        fn supports(&self, _protocol: i32) -> bool {
+            false
+        }
+
+        fn entity_facts(
+            &self,
+            _entity_type: &lodestone_model::ResourceKey,
+        ) -> Option<lodestone_model::EntityFacts> {
+            Some(lodestone_model::EntityFacts {
+                dimensions: lodestone_model::EntityBaseDimensions {
+                    // Width is not read by the passenger attachment rule at all
+                    // (`EntityAttachment.Fallback.AT_HEIGHT` ignores it), so a
+                    // deliberate zero here would be a silent lie if it ever
+                    // started mattering. The real value is passed instead.
+                    width: 0.98,
+                    height: self.height,
+                },
+                pushes_players: false,
+            })
+        }
+    }
+
+    /// A world with the full local-player component set, a tracked vehicle at
+    /// `vehicle_feet` with yaw `vehicle_yaw`, and the local player seated in it.
+    ///
+    /// Deliberately built through the same `spawn_local_player` +
+    /// `insert_session_components` pair `Sim::build` uses, and the vehicle is
+    /// registered in [`crate::entity::EntityIndex`] the way
+    /// `crate::ingest::apply_entity_spawn` would — so the only thing this fixture
+    /// short-circuits is the wire, never the wiring.
+    fn app_with_mounted_player(
+        entity_type: &str,
+        vehicle_height: f32,
+        vehicle_feet: Vec3d,
+        vehicle_yaw: f32,
+    ) -> (App, Entity) {
+        let (mut app, player) =
+            app_with_flightworthy_player(PlayerCollision::View(Arc::new(Floor)));
+        app.insert_resource(crate::VersionData(Some(Box::new(HeightOnlyAdapter {
+            height: vehicle_height,
+        }))));
+        const OWN_ID: i32 = 7;
+        const VEHICLE_ID: i32 = 42;
+        let vehicle = app
+            .world_mut()
+            .spawn((
+                crate::entity::MinecraftEntityId(VEHICLE_ID),
+                crate::entity::EntityKind(
+                    entity_type.parse().expect("valid entity type key"),
+                ),
+                crate::entity::Position(lodestone_model::Vec3::new(
+                    vehicle_feet.x,
+                    vehicle_feet.y,
+                    vehicle_feet.z,
+                )),
+                crate::entity::Rotation(lodestone_model::Rotation::new(vehicle_yaw, 0.0)),
+                crate::entity::Passengers(vec![OWN_ID]),
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<crate::entity::EntityIndex>()
+            .insert(VEHICLE_ID, vehicle);
+        {
+            let mut entity = app.world_mut().entity_mut(player);
+            entity.get_mut::<crate::session::ServerEntityId>().unwrap().0 = Some(OWN_ID);
+            entity.get_mut::<crate::session::Riding>().unwrap().0 = Some(VEHICLE_ID);
+        }
+        (app, player)
+    }
+
+    /// **The end-to-end seat pin, with the value predicted from vanilla's
+    /// constants rather than from our own arithmetic.**
+    ///
+    /// A minecart is `sized(0.98F, 0.7F)` with `passengerAttachments(0.1875F)`
+    /// (`EntityTypes.java:667`), and the player's own `VEHICLE` attachment is
+    /// `0.6` (`Avatar.java:17`). So a rider's feet sit at
+    /// `cart.y + 0.1875 - 0.6 = cart.y - 0.4125`, i.e. **below** the cart's
+    /// origin, and the camera then sits 1.62 above that.
+    ///
+    /// Predicting the number is the point: "the player moved" is satisfied by any
+    /// pin at all, including one that used the `AT_HEIGHT` fallback (which would
+    /// give `+0.1` here — a 0.5125 error, and the wrong side of the cart origin).
+    /// Both hypotheses are asserted against.
+    #[test]
+    fn a_mounted_player_is_pinned_to_the_vehicles_seat() {
+        let cart = Vec3d::new(10.5, 64.0, -3.5);
+        let (mut app, player) = app_with_mounted_player("minecraft:minecart", 0.7, cart, 0.0);
+        run_tick(&mut app);
+        let state = app.world().get::<PhysicsState>(player).unwrap().0;
+        let expected_y = cart.y + 0.1875 - 0.6;
+        assert!(
+            (state.position.y - expected_y).abs() < 1e-9,
+            "expected the seat at y={expected_y}, got {}",
+            state.position.y
+        );
+        // The horizontal axes are the cart's exactly: a minecart's attachment has
+        // no X or Z component, so any drift here would be leftover walking.
+        assert!(
+            (state.position.x - cart.x).abs() < 1e-9 && (state.position.z - cart.z).abs() < 1e-9,
+            "a rider must sit on the vehicle's own column, got ({}, {})",
+            state.position.x,
+            state.position.z
+        );
+        // The wrong-but-plausible hypothesis: ignoring the declared attachment and
+        // using vanilla's `AT_HEIGHT` fallback gives `0.7 - 0.6 = +0.1`.
+        let fallback_y = cart.y + 0.7 - 0.6;
+        assert!(
+            (state.position.y - fallback_y).abs() > 0.5,
+            "the declared minecart attachment must be used, not the AT_HEIGHT \
+             fallback (which would give {fallback_y})"
+        );
+        // And the other wrong-but-plausible one: forgetting the player's own
+        // `VEHICLE` attachment leaves the rider 0.6 too high.
+        assert!(
+            (state.position.y - (cart.y + 0.1875)).abs() > 0.5,
+            "the player's own 0.6 VEHICLE attachment must be subtracted"
+        );
+    }
+
+    /// The control for the test above: **with the ride state cleared, the same
+    /// fixture must fail the same assertion.** Without this, the pin could be
+    /// passing because the player happened to fall to that height on the `Floor`.
+    #[test]
+    fn an_unmounted_player_in_the_same_fixture_is_not_at_the_seat() {
+        let cart = Vec3d::new(10.5, 64.0, -3.5);
+        let (mut app, player) = app_with_mounted_player("minecraft:minecart", 0.7, cart, 0.0);
+        // The only change from the passing case.
+        app.world_mut()
+            .get_mut::<crate::session::Riding>(player)
+            .unwrap()
+            .0 = None;
+        run_tick(&mut app);
+        let state = app.world().get::<PhysicsState>(player).unwrap().0;
+        let seat_y = cart.y + 0.1875 - 0.6;
+        assert!(
+            (state.position.y - seat_y).abs() > 1.0,
+            "an unmounted player must not land on the seat by coincidence — the \
+             pin's evidence depends on this failing. Got y={}, seat={seat_y}",
+            state.position.y
+        );
+    }
+
+    /// `Player.tick():234-236` — `if (isSpectator() || isPassenger())
+    /// setOnGround(false);`. This is the `spectator_or_passenger_note` contract in
+    /// `lodestone-physics/tests/on_ground.rs`, made executable.
+    ///
+    /// The seat is deliberately placed a fraction of a block **above the floor the
+    /// fixture provides**, so a naive implementation that simply reported the
+    /// collision result would say `true` here within a tick or two — the assertion
+    /// is not vacuous against a floor-less world, which is the shape of control
+    /// premise `CLAUDE.md` records as having been false twice.
+    #[test]
+    fn a_passenger_transmits_on_ground_false_while_sitting_just_above_a_block() {
+        // `Floor` is a solid cube filling y in [0, 1]. A cart at y=1.6 puts its
+        // seat at 1.6 + 0.1875 - 0.6 = 1.1875 — 0.1875 above the floor's top face.
+        let (mut app, player) =
+            app_with_mounted_player("minecraft:minecart", 0.7, Vec3d::new(0.5, 1.6, 0.5), 0.0);
+        for _ in 0..3 {
+            run_tick(&mut app);
+        }
+        let state = app.world().get::<PhysicsState>(player).unwrap().0;
+        assert!(
+            (state.position.y - 1.1875).abs() < 1e-9,
+            "precondition: the pin must be holding the seat, got y={}",
+            state.position.y
+        );
+        assert!(
+            !state.on_ground,
+            "a passenger must report on_ground=false regardless of collision"
+        );
+        // The control: the identical fixture minus the ride state falls the 0.1875
+        // onto that floor and reports grounded, so the assertion above measures the
+        // passenger override rather than a flag that is always false here.
+        app.world_mut()
+            .get_mut::<crate::session::Riding>(player)
+            .unwrap()
+            .0 = None;
+        for _ in 0..4 {
+            run_tick(&mut app);
+        }
+        assert!(
+            app.world().get::<PhysicsState>(player).unwrap().0.on_ground,
+            "the same player, dismounted onto the same floor, must report grounded \
+             — otherwise the passenger assertion above proves nothing"
+        );
+    }
+
+    /// A ride whose vehicle the client has not spawned must not invent a
+    /// position, but must still apply the `on_ground` override — the two halves
+    /// of the system are deliberately separated for exactly this case.
+    #[test]
+    fn an_unresolvable_vehicle_still_forces_on_ground_false_without_moving_us() {
+        let (mut app, player) =
+            app_with_mounted_player("minecraft:minecart", 0.7, Vec3d::new(0.5, 1.0, 0.5), 0.0);
+        // Forget the vehicle, as if `SET_PASSENGERS` had arrived before the
+        // vehicle's own `AddEntity`.
+        app.world_mut()
+            .resource_mut::<crate::entity::EntityIndex>()
+            .remove(42);
+        run_tick(&mut app);
+        let state = app.world().get::<PhysicsState>(player).unwrap().0;
+        assert!(!state.on_ground);
+        assert_eq!(
+            state.velocity, Vec3d::ZERO,
+            "a passenger's velocity is zeroed whether or not the seat resolves"
+        );
+        // And it did not teleport to a fabricated seat: the player is still near
+        // where the fixture spawned them (y=4.0), not at the cart.
+        assert!(
+            state.position.y > 0.5,
+            "an unresolvable vehicle must leave the player where physics put them, \
+             got y={}",
+            state.position.y
         );
     }
 }
