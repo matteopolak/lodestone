@@ -791,13 +791,19 @@ fn run_browser_login(tx: Sender<WorkerMsg>, cancel: Arc<AtomicBool>) {
             }
         };
 
-        // Show the URL *before* opening the browser, so a failed launch still
-        // leaves the user something to copy rather than a blank screen.
+        // `WorkerMsg::Prompt` **already opens the browser**: `pump` turns it into an
+        // effect carrying the URI, and the render thread calls `open_in_browser` on
+        // it (the device-code flow's auto-open). So this must not open it too —
+        // doing both launched the browser twice, reported from play.
+        //
+        // Worth stating because reusing this variant is what caused it: it was
+        // chosen to avoid touching a contended `render.rs`, and it turned out to
+        // carry a side effect. A message that *does* something is not a plain
+        // carrier, and the second mechanism was invisible from the send site.
         let _ = tx.send(WorkerMsg::Prompt {
             user_code: String::new(),
             verification_uri: pending.authorize_url().to_owned(),
         });
-        open_in_browser(pending.authorize_url());
 
         loop {
             // 100ms rather than the device flow's server-dictated interval: this
