@@ -95,37 +95,119 @@ yet (`NavPolicy::min_replan_interval_ticks` exists but is not wired to this path
 "medium journeys work", worth revisiting if a goal that is unreachable *past* the snapshot edge is
 found to spin.
 
-**What is deliberately not built**: witness-set invalidation, per-edge re-verification, the
-look-ahead window, prefix trimming, and early adoption (all `docs/baritone-port.md` §4.5/§4.9 items)
-are still open. Segmentation here is "the mechanism that lets a plan longer than one snapshot exist
-and be driven end to end", not the full executor-robustness story M2's milestone description also
-names.
-
 **Gate**: `tests/drives_to_goal.rs`'s `a_goal_beyond_the_first_snapshot_is_reached_by_splicing_a_continuation`
 sends the goal to `x = 200` while a single search's view caps out at `x = 143` — `Arrived` is only
 reachable through this test if a second search actually ran and its plan was actually spliced on.
 
-### What it does not do yet
+### Witness-set invalidation and the look-ahead window: a committed plan re-checks itself
 
-- **No chat command from this crate.** `docs/baritone-port.md` §9's M1 milestone names `#goto x z`.
-  This crate still routes nothing itself — but `lodestone-shell` has since wired one up
-  (`crates/lodestone-shell/src/sim.rs`'s `#goto` handling, gated by
-  `sim::tests::goto_chat_command_drives_the_player_toward_the_goal_over_real_ticks`), outside this
-  crate's ownership, so the milestone's stated observable is live even though the plumbing is not
-  here.
-- **Now registered.** `lodestone_shell::sim::Sim::new`'s `app.add_plugins((CorePlugin,
-  LocalPlayerPlugin, ControllerPlugin, …, InteractPlugin, lodestone_autopilot::AutopilotPlugin))`
-  tuple has `AutopilotPlugin` in it, plus a `lodestone-autopilot = { workspace = true }` line in
-  `crates/lodestone-shell/Cargo.toml`'s `[dependencies]`. Verified rather than assumed that the
-  plugin's two systems (chained `.after(TickSet::Intent).before(TickSet::Physics)` internally, so
-  registration order in the tuple does not matter) actually *run*, not merely that the plugin is in
-  the list — `AutopilotStatus` defaults to `Idle` and nothing but `plan_route` can move it off that
-  default, so `sim::tests::autopilot_plugin_is_registered_and_its_systems_actually_run` sets a goal,
-  steps one tick, and asserts the status left `Idle`. `cargo check -p lodestone-shell
-  --no-default-features` also stayed clean: none of `lodestone-autopilot`'s production dependencies
-  (`lodestone-nav`, `lodestone-ecs`, `lodestone-model`, `lodestone-physics`, `lodestone-world`,
-  `bevy_ecs`, `bevy_app`) is a version crate, so the workspace dependency does not compromise the
-  version seam.
+`docs/baritone-port.md` §4.5. Segmentation above made a plan longer than one snapshot possible to
+*drive*; it said nothing about the terrain that plan's legality depended on staying what it was. A
+spliced plan that walks blindly into a block someone broke or placed after the search ran is the
+failure mode CLAUDE.md's brief for this work calls out as "the one that bites a real player" — and
+until this pass, nothing in `plan_route` ever looked back at the world once a plan was adopted.
+
+**The mechanism, in `lodestone_nav::witness` (`crates/plugins/lodestone-nav/src/witness.rs`) plus
+`lodestone_autopilot::plan_route`'s invalidation block:**
+
+1. The instant a plan is adopted — a fresh search's `Reached`/`BudgetExhausted`/`WorldExhausted`
+   result, or a continuation splicing in — `plan_route`'s `sample_witness_baseline` (or, for a
+   splice, `drive_plan` moving `continuation_witness_baseline` over) snapshots every witnessed
+   cell's **block-state id** via `lodestone_nav::witness::sample`, keyed by `Plan::witnesses()`'s
+   packed `NavNode` keys. This is `AutopilotState::witness_baseline`.
+2. Every tick a plan is active, before anything else runs: a cheap look-ahead check
+   (`Plan::witnesses_in_range(state.edge..state.edge + LOOKAHEAD_EDGES)`, `LOOKAHEAD_EDGES = 3`)
+   diffs that narrow window's cells against the live `ChunkWorld` via
+   `lodestone_nav::witness::point_state`. This is §4.5/§2.3's "verify a small window of upcoming
+   edges... so a hazard is detected before you are standing next to it."
+3. If the window finds nothing, a rate-limited (`WITNESS_SWEEP_INTERVAL_TICKS = 20`) full sweep of
+   the plan's *remaining* witnesses (`state.edge..plan.len()`) runs via `witness::first_change` —
+   catching a change further down the route the window has not reached yet (a player breaking a
+   block fifty edges ahead).
+4. Either hit sets `need_fresh`, exactly like a goal change: `plan_route` discards the plan, the
+   continuation and both baselines, and dispatches a brand-new search from the player's *live*
+   position — §4.9's "never execute a plan you already know is stale."
+
+**Why this samples rather than subscribes, and what that costs.** §4.5's own design assumes a
+`SectionBlocksChanged`/`BlockChangedAck` event stream a witness set is tested against on arrival,
+`O(block updates)` per tick. **`lodestone-ecs` emits no such event to a plugin today**, and adding
+one is outside this crate's ownership — extending the ECS event surface is a different crate's
+call to make. So this samples the live world directly and diffs against the baseline instead:
+`O(cells checked)` per check, the same asymptotic shape as the design's own analysis, paid on a
+caller-chosen cadence rather than event-driven. The two-tier cadence above is exactly what keeps
+that bounded: the window is a handful of cells every tick, and the full sweep is bounded by one
+segment's own snapshot footprint (never the whole journey — see "prefix trimming" below) and runs
+at most once every twenty ticks.
+
+**Only raw block-state ids are compared, never re-derived legality.** A hit means "this witnessed
+cell no longer reads what it did at commit time," not "and here is why it is now illegal." That
+matches §4.5's own letter ("a hit marks the plan stale") rather than its event source, needs no
+`FactsTable`/`VersionAdapter` at verification time at all, and folds the "chunk unloaded under the
+plan" case into the same trigger — `witness::point_state` returning `None` where it used to return
+`Some` counts as a change too, conservative by construction.
+
+**Gate, and its own control, first** (`tests/drives_to_goal.rs`):
+`a_block_broken_under_a_committed_plan_forces_a_replan_around_it` walks a flat corridor, breaks the
+support block the committed plan's own witnesses cover a few blocks ahead, and asserts the executed
+path actually diverges from the original straight line while crossing that column — the decisive
+signal, because this fixture's `FlatFloor` physics seam is independent of `ChunkWorld` (production's
+two seams, `ChunkWorld` for planning and `PlayerCollision` for physics, kept deliberately separate),
+so nothing about the *executor* would ever notice the missing block; only the planner re-checking
+its own witnesses can produce a different route. **Watched to fail**, not merely asserted to:
+short-circuiting `invalidated_at` to `None` (recorded, then reverted via the `cp`+`md5` discipline
+CLAUDE.md's neuter-window rule asks for) reproduces the exact failure the fix exists to prevent —
+the executed path stays the stale straight line and the assertion trips. A more direct assertion —
+sample `AutopilotStatus::Planning` after the break — does not work here and is worth recording as a
+trap: on this trivial, open-flat-ground search, `plan_route`'s `Planning` write and the same-tick
+`search.step`-to-`Reached` overwrite happen inside one system call, so a status sampled once per
+tick (as every other test in this file does) can never observe it, true even for the very first
+plan's adoption, before any invalidation exists to blame.
+
+**What is still deliberately not built: per-edge cost re-verification (the *inflated* half) and
+early adoption.** §4.5 names per-edge cost re-verification as "a cell can be unchanged and the edge
+still more expensive (a mob in the way, a fluid level shift)" — its *impossible* outcome is already
+subsumed here (a cell becoming illegal is exactly a witnessed-cell change, already caught above),
+but this crate has no mob-avoidance and only an approximate, non-per-tick fluid model (`view.rs`'s
+own doc comment on `fluid_at`), so there is no currently-modelled *live* cost driver beyond what the
+witness diff already catches — a genuine re-verification of the *inflated* case has nothing further
+to check against today, not a gap silently left open. §4.9's early adoption ("if an edge has just
+cleanly completed and your position appears anywhere in the pending continuation, hop straight onto
+it") is unrelated to invalidation and still genuinely unbuilt.
+
+**Prefix trimming is not needed here, and this is a finding, not a gap.** §4.9 motivates it with "on
+a long journey the plan grows without bound and the per-tick scans over it dominate" — true of a
+design that *concatenates* segments into one ever-growing `Plan`. This implementation never does
+that: `drive_plan`'s splice (`state.plan = Some(next)`) **replaces** the active plan wholesale with
+the continuation's own, independently-bounded `Plan` object; it never appends. So a single `Plan`'s
+length — and therefore every `O(plan)` operation on it, including this section's own full-sweep
+witness check — is bounded by one segment's snapshot radius for the entire journey, never by how far
+the player has travelled in total. Nothing to trim, because nothing grows.
+
+### `sim.rs` registration and `#goto`: both closed, re-verified rather than assumed
+
+Issue #38's title ("shell built and driving in a hermetic test; needs `sim.rs` registration +
+`#goto` command") is stale — both halves are done and were re-verified against the tree directly
+for this pass, not from the plan or from this document's own prior wording:
+
+- `lodestone_shell::sim::Sim::new`'s `app.add_plugins((CorePlugin, LocalPlayerPlugin,
+  ControllerPlugin, …, InteractPlugin, lodestone_autopilot::AutopilotPlugin))` tuple has
+  `AutopilotPlugin` in it (`crates/lodestone-shell/src/sim.rs`), plus a
+  `lodestone-autopilot = { workspace = true }` line in `crates/lodestone-shell/Cargo.toml`'s
+  `[dependencies]`. `sim::tests::autopilot_plugin_is_registered_and_its_systems_actually_run` (in
+  `crates/lodestone-shell/src/sim/tests.rs`) proves the two systems actually *run*, not merely that
+  the plugin is in the list.
+- `#goto x z` is a real, tested client-local chat command: `Sim::send_chat` intercepts any
+  `#`-prefixed line before `compose_chat_action` ever sees it (`sim.rs`'s own doc comment: "any
+  `#`-prefixed line is consumed here, matched or not"), `parse_goto_command` parses it, and a
+  well-formed one writes `AutopilotGoal` directly. `sim/tests.rs`'s
+  `goto_chat_command_drives_the_player_toward_the_goal_over_real_ticks` ticks a real schedule and
+  asserts `AutopilotStatus::Arrived`; `goto_chat_command_never_reaches_the_outbound_action_queue`
+  is the negative control that `#goto` never leaks onto the wire as ordinary chat, and that a
+  malformed one is not silently swallowed.
+
+Both landed in `bc41685` and `2830ea2`, some time before this pass. Issue #38 remains open on the
+tracker; nothing in this crate's remaining scope depends on it, and it should be closed with this
+finding rather than left to mislead the next reader into re-doing already-done work.
 
 ### `Climb`: landed, and what the two hard parts actually needed
 
@@ -253,6 +335,23 @@ ladder with nothing to dismount onto; `compute_plan` returns `None`, watched to 
 merely asserted). `search::tests::the_planned_cost_matches_what_executing_a_climb_plan_costs`
 replays a full mount-climb-dismount plan through the real integrator end to end, the strongest gate
 available here, mirroring `WalkDiagonal`'s own precedent.
+
+**`Drop` had no real-collision gate of its own, and now does.** The slab gate above strengthens
+M1's `Walk`; `StepUp`/`WalkDiagonal`/`Climb` each got the same treatment on landing. `fall_step`'s
+`n > 1` branch — the slab-exclusion rule, the hazard-in-the-fall-path scan, the whole "a falling body
+stops at the first surface it reaches" legality — never had a real-jar counterpart, only
+`FixtureCensus`-level unit tests. Closed three ways: `drives_to_goal.rs`'s
+`real_collision::a_goal_past_a_real_two_cell_drop_is_reached_by_falling` (a real `minecraft:stone`
+two-cell cliff, through the real `TickSet::Intent -> Physics` pipeline) and its unreachable control
+`a_real_drop_deeper_than_max_fall_blocks_cannot_reach_a_goal_past_it` (the same shape at a four-cell
+depth, past `NavPolicy::default().max_fall_blocks`, `compute_plan` returns `None`, watched to fail);
+and, in `lodestone-nav` itself,
+`search::tests::the_planned_cost_matches_what_executing_a_drop_plan_costs` — the same "planned cost
+equals executed cost" replay `Walk`/`WalkDiagonal`/`Climb` already had, which `Drop` had not, so
+nothing before this ever confirmed `WalkDrive::arrived`'s same-height straddle fix (the "a synthetic
+`Drop` of 2 cells and one of 6 both completed in identically 4.93 ticks" bug, described below) holds
+once physics, not a hand-picked `to_surface`, decides when the edge is actually done — plus its own
+search-level unreachable control, `a_drop_deeper_than_max_fall_blocks_has_no_route_across_it`.
 
 ## How to change it, and the gotchas
 

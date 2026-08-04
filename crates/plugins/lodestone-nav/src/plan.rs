@@ -156,16 +156,20 @@ impl Plan {
             .chain(self.edges.iter().map(|e| (e.to.x, e.to.y, e.to.z)))
     }
 
-    /// The union of every edge's translated stencil: the cells whose values this
-    /// plan's legality depended on (`docs/baritone-port.md` §4.5).
+    /// The union of every edge's translated stencil, restricted to edges in
+    /// `range`: the cells whose values *those* edges' legality depended on
+    /// (`docs/baritone-port.md` §4.5).
     ///
-    /// Computed **once, at commit**, not during the search. A block update is then
-    /// tested for membership — `O(block updates)` per tick rather than `O(plan)` per
-    /// tick forever, for an event that almost never happens.
+    /// [`Self::witnesses`] is `witnesses_in_range(0..self.edges.len())`. A caller
+    /// re-verifying only a look-ahead window, or only the edges not yet walked,
+    /// passes a narrower range so its own per-tick cost stays bounded — see
+    /// `lodestone_autopilot::plan_route`'s segmentation block, which uses both.
     #[must_use]
-    pub fn witnesses(&self) -> HashSet<u64> {
-        let mut out = HashSet::with_capacity(self.edges.len() * 8);
-        for edge in &self.edges {
+    pub fn witnesses_in_range(&self, range: std::ops::Range<usize>) -> HashSet<u64> {
+        let end = range.end.min(self.edges.len());
+        let start = range.start.min(end);
+        let mut out = HashSet::with_capacity((end - start) * 8);
+        for edge in &self.edges[start..end] {
             for cell in edge.kind.stencil() {
                 let node = NavNode::still(
                     edge.from.x + cell[0],
@@ -178,6 +182,17 @@ impl Plan {
             }
         }
         out
+    }
+
+    /// The union of every edge's translated stencil: the cells whose values this
+    /// plan's legality depended on (`docs/baritone-port.md` §4.5).
+    ///
+    /// Computed **once, at commit**, not during the search. A block update is then
+    /// tested for membership — `O(block updates)` per tick rather than `O(plan)` per
+    /// tick forever, for an event that almost never happens.
+    #[must_use]
+    pub fn witnesses(&self) -> HashSet<u64> {
+        self.witnesses_in_range(0..self.edges.len())
     }
 
     /// Whether a changed cell invalidates a plan with these witnesses.
@@ -314,6 +329,36 @@ mod tests {
             );
         }
         assert!(!Plan::witnesses_contain(&witnesses, 0, 0, 40));
+    }
+
+    /// The look-ahead/full-sweep split (`docs/autonomous-navigation.md`'s
+    /// segmentation section) rests on this: a narrower range must not witness
+    /// cells only a *later* edge reads, or a look-ahead check would flag an
+    /// unrelated far-away change as if it were imminent.
+    #[test]
+    fn witnesses_in_range_excludes_edges_outside_it() {
+        let plan = straight(5);
+        let all = plan.witnesses();
+        let window = plan.witnesses_in_range(0..1);
+        assert!(window.len() < all.len(), "a one-edge window must witness fewer cells than the whole plan");
+        assert!(
+            Plan::witnesses_contain(&window, 0, 0, 0),
+            "the first edge's own support cell must still be in its own window"
+        );
+        assert!(
+            !Plan::witnesses_contain(&window, 4, 0, 0),
+            "the last edge's support cell must not leak into the first edge's window"
+        );
+    }
+
+    /// A range past the end of the plan clamps rather than panicking — the
+    /// autopilot's look-ahead window adds a fixed count to the current edge
+    /// index with no bounds check of its own.
+    #[test]
+    fn witnesses_in_range_clamps_a_range_past_the_end() {
+        let plan = straight(3);
+        assert_eq!(plan.witnesses_in_range(1..99), plan.witnesses_in_range(1..3));
+        assert_eq!(plan.witnesses_in_range(99..999), HashSet::new());
     }
 
     /// Drift is measured to the nearest cell **anywhere** in the plan, so a shortcut
