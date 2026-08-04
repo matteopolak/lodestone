@@ -624,10 +624,17 @@ pub fn upload_instances_tinted(
 }
 
 /// The one place the entity pipeline's raster/depth/vertex state is spelled out,
-/// parameterised by the two things that vary: the label and the depth
-/// comparison. Two pipelines share it — the mob pass and the armour pass — so a
-/// change to the vertex layout or the colour target cannot land on one and miss
-/// the other.
+/// parameterised by the things that vary across callers: the label, the depth
+/// comparison, the colour-target blend state and whether the pass writes depth.
+/// Three pipelines share it — the mob pass, the armour pass and the banner
+/// mask-layer pass — so a change to the vertex layout or the colour target
+/// cannot land on one and miss the others.
+///
+/// `blend`/`depth_write` were added for [`EntityPipeline::banner_layer_pipeline`]
+/// (issue #174 step B) without touching the mob/armour pipelines' own
+/// behaviour: both existing callers pass `blend: None, depth_write: true`,
+/// exactly what this function hardcoded before — zero behaviour change for
+/// either.
 fn build_entity_pipeline(
     device: &wgpu::Device,
     color_format: wgpu::TextureFormat,
@@ -635,6 +642,8 @@ fn build_entity_pipeline(
     texture_layout: &wgpu::BindGroupLayout,
     label: &str,
     depth_compare: wgpu::CompareFunction,
+    blend: Option<wgpu::BlendState>,
+    depth_write: bool,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(&format!("{label}-shader")),
@@ -662,7 +671,7 @@ fn build_entity_pipeline(
             entry_point: Some("fs_main"),
             targets: &[Some(wgpu::ColorTargetState {
                 format: color_format,
-                blend: None,
+                blend,
                 write_mask: wgpu::ColorWrites::ALL,
             })],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -678,7 +687,7 @@ fn build_entity_pipeline(
         },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
-            depth_write_enabled: Some(true),
+            depth_write_enabled: Some(depth_write),
             depth_compare: Some(depth_compare),
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
@@ -749,6 +758,8 @@ impl EntityPipeline {
             &texture_layout,
             "lodestone-entity",
             wgpu::CompareFunction::Less,
+            None,
+            true,
         );
 
         EntityPipeline {
@@ -800,6 +811,59 @@ impl EntityPipeline {
             &self.texture_layout,
             "lodestone-entity-armour",
             wgpu::CompareFunction::LessEqual,
+            None,
+            true,
+        )
+    }
+
+    /// A third render pipeline over this pipeline's own bind-group layouts,
+    /// for banner mask layers (issue #174 step B).
+    ///
+    /// Vanilla's `RenderPipelines.BANNER_PATTERN` (`RenderPipelines.java:311-318`)
+    /// draws the flag opaque, then each pattern mask layer **translucent, at
+    /// equal depth, with depth write off and no alpha cutout** — layers stack
+    /// visually rather than z-fighting or punching holes in each other.
+    /// Concretely, against this pipeline's siblings:
+    ///
+    /// | | mob (`Self::new`) | armour ([`Self::armour_pipeline`]) | banner layer (here) |
+    /// |---|---|---|---|
+    /// | `depth_compare` | `Less` | `LessEqual` | `LessEqual` |
+    /// | `blend` | `None` (cutout) | `None` (cutout) | `ALPHA_BLENDING` |
+    /// | `depth_write` | `true` | `true` | `false` |
+    ///
+    /// `LessEqual`, not `Less`: the flag base and every mask layer share the
+    /// same depth per vanilla's coincident-geometry draw, the same reasoning
+    /// [`armour_pipeline`](Self::armour_pipeline)'s own doc gives for leather's
+    /// coplanar base/overlay pair — under `Less` every mask layer after the
+    /// first would fail the depth test against the base it is coincident
+    /// with and never draw at all.
+    ///
+    /// Per `CLAUDE.md`: depth here is `[0,1]` DirectX-style, not vanilla's
+    /// reversed-Z, so vanilla's `GREATER_THAN_OR_EQUAL` is this engine's
+    /// `LessEqual` — already accounted for above, not a separate flip to
+    /// apply on top.
+    ///
+    /// The shader's alpha-cutout `discard` (`entity.wgsl`) is unconditional
+    /// today and vanilla's banner draw has none, so a mask layer with
+    /// antialiased/partial-alpha edges would lose those texels here rather
+    /// than blending them — a fidelity gap tracked, not fixed, by this pass;
+    /// see `docs/banner-shield-patterns.md`'s step-B note on the deferred
+    /// `fs_main_no_cutout` entry point.
+    #[must_use]
+    pub fn banner_layer_pipeline(
+        &self,
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
+        build_entity_pipeline(
+            device,
+            color_format,
+            &self.camera_layout,
+            &self.texture_layout,
+            "lodestone-entity-banner-layer",
+            wgpu::CompareFunction::LessEqual,
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+            false,
         )
     }
 
