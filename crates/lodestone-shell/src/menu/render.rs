@@ -4266,13 +4266,52 @@ pub fn build(
         }
     }
 
+    // The multiplayer list's scrollbar (the owner's first report: "server list
+    // needs a scrollbar"). Drawn *before* the rows so a row can never be painted
+    // over by the bar — vanilla's order is the reverse (`extractScrollbar` runs
+    // last, `AbstractSelectionList.java:216`) because it scissors the rows to the
+    // band first; the bar sits outside the rows here either way
+    // (`scrollBarX() = getRowRight() + 8`), so the order is not observable.
+    //
+    // Every input is derived from the same expressions the rows are placed by —
+    // `server_list_block().content_top`, `SERVER_LIST_FOOTER_H`,
+    // `SERVER_LIST_ITEM_H`, `server_row_left` — rather than restated, which is the
+    // rule a HUD gate here broke by hardcoding an anchor the draw computed.
+    let server_list = server_scroll_list(frame, width, height);
+    if let Some(list) = server_list.as_ref() {
+        let row_right = server_row_left(width) + SERVER_LIST_ROW_W;
+        draw_scrollbar(&mut b, list, row_right);
+    }
+
     for (i, row) in frame.rows.iter().enumerate() {
         // A multiplayer-list entry (#396) is neither a button nor a field: it is
         // an `ObjectSelectionList` row with a favicon, two text columns, a status
         // sprite and a quadrant hover overlay. Tested before `slot` because it
         // carries none — `row_rect` places it from `entry.index`.
         if row.entry.is_some() {
-            draw_server_entry(&mut b, &frame.rows, i, width, height, frame.cursor);
+            // Clipped to the list's band — vanilla's `enableScissor` around
+            // `extractListItems` (`AbstractSelectionList.java:212-214`, `:242-249`).
+            //
+            // **This is what makes the clip real.** `Quads::with_clip` landed with
+            // no caller, and an unexercised clip is worse than none: it reads as
+            // "clipping is handled" while a row still paints over the footer. It
+            // also removes the reason `server_row_visible` had to reject a row that
+            // was merely *partly* outside the band — with a clip, a straddling row
+            // is cut rather than dropped, which is the precondition for a
+            // pixel-granular offset ever looking right.
+            //
+            // The rect is the band `server_scroll_list` derived, not a restated
+            // one, so the clip and the row placement cannot disagree.
+            match server_list.as_ref() {
+                Some(list) => {
+                    let (bx, bw) = (server_row_left(width), SERVER_LIST_ROW_W);
+                    let (by, bh) = (list.top(), list.height());
+                    b.with_clip(bx, by, bw, bh, |b| {
+                        draw_server_entry(b, &frame.rows, i, width, height, frame.cursor);
+                    });
+                }
+                None => draw_server_entry(&mut b, &frame.rows, i, width, height, frame.cursor),
+            }
             continue;
         }
         // An account row (#66/#402) is the same kind of thing one screen over: a
@@ -4773,6 +4812,83 @@ fn draw_account_entry(b: &mut Quads<'_>, rows: &[MenuRow], i: usize, width: f32,
 /// `Button.java:128-132`) and, for icons,
 /// `SpriteIconButton.CenteredIcon.extractContents`
 /// (`SpriteIconButton.java:236-244`).
+/// The multiplayer list as a [`widget::ScrollList`], or `None` when this frame is
+/// not a server list.
+///
+/// ## Why the frame is reconstructed rather than carried
+///
+/// `MenuNav` does not own a `ScrollList` yet — its `server_scroll` is still the
+/// `usize` row counter — so this rebuilds the list's geometry per frame from the
+/// frame's own rows. Everything here is *derived*, never restated: the band comes
+/// from `server_list_block().content_top` and [`SERVER_LIST_FOOTER_H`], the pitch
+/// from [`SERVER_LIST_ITEM_H`], and the entry count from the rows themselves. So
+/// the bar cannot disagree with the rows about where the list is.
+///
+/// ## The offset is still row-quantized, and the bar shows it honestly
+///
+/// `entry.scroll` is a **row count**, converted here by multiplying by the row
+/// height. That makes the thumb move in 36 px steps rather than continuously —
+/// which is the *input* still being quantized, not the geometry. Making it
+/// continuous is a change to `MenuNav::server_scroll`'s type and to `app.rs`'s
+/// wheel handler, neither of which is this function's file; [`widget::ScrollList`]
+/// already holds the offset as `f32` and needs nothing further. Until then the bar
+/// is correct about extent and position and merely coarse about intermediate
+/// states, which is strictly better than no bar.
+fn server_scroll_list(
+    frame: &MenuFrame<'_>,
+    _width: f32,
+    height: f32,
+) -> Option<widget::ScrollList> {
+    let mut count = 0usize;
+    let mut scroll_rows = 0usize;
+    for row in &frame.rows {
+        if let Some(view) = row.entry.as_ref() {
+            count += 1;
+            scroll_rows = view.scroll;
+        }
+    }
+    if count == 0 {
+        return None;
+    }
+    let top = server_list_block().content_top;
+    let band = height - SERVER_LIST_FOOTER_H - top;
+    if band <= 0.0 {
+        return None;
+    }
+    let mut list = widget::ScrollList::new(SERVER_LIST_ITEM_H, top, band, count);
+    list.set_scroll(scroll_rows as f32 * SERVER_LIST_ITEM_H);
+    Some(list)
+}
+
+/// Draw a [`widget::ScrollList`]'s scrollbar — `extractScrollbar`
+/// (`AbstractScrollArea.java:110-137`).
+///
+/// Track then thumb, both from the list's own [`widget::ScrollList::scrollbar_rects`]
+/// so the bar that draws and the bar [`widget::ScrollList::is_over_scrollbar`]
+/// hit-tests are the same geometry. Nothing is drawn when the list does not
+/// scroll, which is vanilla's `if (this.scrollable())` gate (`:126`) — and is why
+/// a list that fits shows no bar at all rather than a full-height stub.
+///
+/// **The jar-less fallback is not a citation.** 26.2 draws `widget/scroller` and
+/// `widget/scroller_background` and nothing else, so there is no vanilla colour
+/// for a run with no atlas; rather than invent one, the fallback reuses this
+/// shell's existing [`ROW_OFF`]/[`LABEL`] palette. Do not turn those into
+/// "vanilla's scrollbar colours" — they are ours.
+fn draw_scrollbar(b: &mut Quads<'_>, list: &widget::ScrollList, row_right: f32) {
+    let Some((track, thumb)) = list.scrollbar_rects(row_right) else {
+        return;
+    };
+    let (tx, ty, tw, th) = track;
+    let (hx, hy, hw, hh) = thumb;
+    if b.has_sprite(widget::SCROLLER_BACKGROUND_SPRITE) && b.has_sprite(widget::SCROLLER_SPRITE) {
+        b.sprite(widget::SCROLLER_BACKGROUND_SPRITE, tx, ty, tw, th, LABEL);
+        b.sprite(widget::SCROLLER_SPRITE, hx, hy, hw, hh, LABEL);
+    } else {
+        b.rect(tx, ty, tw, th, ROW_OFF);
+        b.rect(hx, hy, hw, hh, LABEL);
+    }
+}
+
 fn draw_widget(
     b: &mut Quads<'_>,
     rows: &[MenuRow],
