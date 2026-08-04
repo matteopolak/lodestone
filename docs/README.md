@@ -183,6 +183,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   builds when the server opens a `minecraft:crafting` screen.
 - [Creative flight](./creative-flight.md) — Two things, and separating them was the
   whole design:
+- [The credits / end-poem screen](./credits-screen.md) — `Screen::Credits` (issue
+  #192): the screen reached after vanilla's dragon fight, on exiting the End through
+  the exit portal — vanilla's `WinScreen`. Reachable through
+  [`UiState::show_credits`](../crates/lodestone-shell/src/menu.rs), dismissed by
+  Enter, Escape, or its own Done button, all of which leave through
+  [`UiState::quit_to_title`](../crates/lodestone-shell/src/menu.rs) — the same
+  teardown the pause menu's Disconnect and the death screen's Title Screen button
+  already use, not a fourth copy of "clear session state and go to the title".
 - [Death screen](./death-screen.md) — Vanilla's `DeathScreen` (issue #103): the
   screen that appears when the local player's health reaches zero — the "You Died!"
   title, the server's death message, a score line, and two buttons (Respawn / Title

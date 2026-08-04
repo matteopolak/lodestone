@@ -160,6 +160,31 @@ pub enum Screen {
     /// A session failed to establish or ended unexpectedly. `error()` carries the
     /// human-readable reason; the only ways forward are back to the menu or quit.
     Error,
+    /// The end-poem/credits roll (issue #192): vanilla's `WinScreen`, shown
+    /// after the dragon fight and exiting the End through the exit portal.
+    ///
+    /// **What this is not**: vanilla's `WinScreen` auto-scrolls a ~1500-word
+    /// poem plus a real Mojang employee credits roll, driven by elapsed time
+    /// (`WinScreen.java`'s own tick counter). Two things rule that out here —
+    /// see [`render::credits_frame`] for the full reasoning:
+    /// 1. [`render::frame_for`] is a pure function of [`UiState`]/[`nav::MenuNav`]
+    ///    with no elapsed-time input, so a real auto-scroll needs a per-frame
+    ///    tick reaching this state machine, which nothing here provides yet
+    ///    (`app.rs`'s `pano.advance(Instant::now())` is the one place this
+    ///    codebase already does that, and it lives outside this crate's frame
+    ///    model).
+    /// 2. Mojang's end-poem text and its own credited employee list are not
+    ///    this project's to reproduce or to relabel as Lodestone's own — see
+    ///    the module docs on [`render::credits_frame`].
+    ///
+    /// So this screen shows a short, Lodestone-authored placeholder message
+    /// instead of vanilla's real scroll, dismissed by Enter/Escape/its own
+    /// Done button — reachable through [`Self::show_credits`], which nothing
+    /// calls yet: the real trigger (dragon defeat, exit portal) is
+    /// server/ECS-driven and outside this crate (`sim.rs`/`app.rs`), so this
+    /// is an island until that patch lands. See issue #192's own tracking
+    /// comment for the exact hook.
+    Credits,
 }
 
 impl Screen {
@@ -185,7 +210,7 @@ impl Screen {
     /// residue is real; it is stated rather than papered over. If a third
     /// consumer ever needs this, a derive is the fix, not another hand-written
     /// list.
-    pub const ALL: [Screen; 13] = [
+    pub const ALL: [Screen; 14] = [
         Screen::MainMenu,
         Screen::ServerList,
         Screen::ServerEdit,
@@ -199,6 +224,7 @@ impl Screen {
         Screen::Paused,
         Screen::Death,
         Screen::Error,
+        Screen::Credits,
     ];
 }
 
@@ -659,6 +685,14 @@ impl UiState {
             // key handler does — so this arm exists only so the match stays
             // exhaustive against a caller that reaches here some other way.
             Screen::Death => {}
+            // In practice `MenuNav::key_credits` intercepts Escape before
+            // this is reached (same reasoning as `Screen::Accounts` above),
+            // and it leaves through `quit_to_title` rather than an ordinary
+            // one-level unwind — there is no "back" from the end-poem screen
+            // in vanilla either, only "return to title". This arm keeps the
+            // match exhaustive and does the same thing for a caller that
+            // reaches here some other way.
+            Screen::Credits => self.quit_to_title(),
         }
     }
 
@@ -695,11 +729,34 @@ impl UiState {
     /// reaction to the [`nav::MenuAction`] this produces — this method only
     /// moves the screen.
     pub fn quit_to_title(&mut self) {
-        if matches!(self.screen, Screen::Paused | Screen::Death) {
+        if matches!(self.screen, Screen::Paused | Screen::Death | Screen::Credits) {
             self.kind = None;
             self.error = None;
             self.death_message = None;
             self.screen = Screen::MainMenu;
+        }
+    }
+
+    /// Show the end-poem/credits screen (issue #192): vanilla's `WinScreen`,
+    /// reached by exiting the End through the exit portal after the dragon
+    /// fight. Valid from the same live-gameplay screens as [`Self::die`] —
+    /// mirroring that guard rather than inventing a different one, since both
+    /// are "the server just ended this session's world for a story reason"
+    /// events.
+    ///
+    /// **Nothing calls this yet.** The real trigger is server/ECS-driven (a
+    /// dimension-change flag on exiting the End) and lives outside this
+    /// crate's ownership for this batch of work — see [`Screen::Credits`]'s
+    /// own doc. Until that patch lands this is reachable only from a test,
+    /// which is this method's whole risk: an island by this project's own
+    /// definition, kept as exactly the seam the trigger will land on (the
+    /// same shape [`nav::MenuAction::Singleplayer`] was between #397 and #287).
+    pub fn show_credits(&mut self) {
+        if matches!(
+            self.screen,
+            Screen::Playing | Screen::Chat | Screen::Container | Screen::Paused
+        ) {
+            self.screen = Screen::Credits;
         }
     }
 
@@ -1393,6 +1450,58 @@ mod tests {
         assert_eq!(ui.screen(), Screen::MainMenu);
         assert!(ui.death_message().is_none());
         assert!(ui.error().is_none(), "this is not a failure, so no reason");
+    }
+
+    /// Issue #192: `show_credits` reaches `Screen::Credits` from every live
+    /// gameplay screen `die` also reaches from, and a stray call from
+    /// anywhere else (the menu, an error screen) is a no-op — same shape as
+    /// every other `open_*`/`show_*` guard in this file.
+    #[test]
+    fn show_credits_only_leaves_from_live_gameplay_screens() {
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.show_credits();
+        assert_eq!(ui.screen(), Screen::Credits);
+
+        let mut ui = UiState::new();
+        ui.show_credits();
+        assert_eq!(
+            ui.screen(),
+            Screen::MainMenu,
+            "a stray call off the title screen must not do anything"
+        );
+    }
+
+    /// `quit_to_title` from the credits screen is the same teardown as from
+    /// pause/death — reused rather than a fourth copy of "clear session state
+    /// and go to the title", per issue #192's own scope (the trigger is out
+    /// of this crate's ownership; the exit is not, and it should not need a
+    /// new mechanism).
+    #[test]
+    fn quit_to_title_from_the_credits_screen_leaves_for_the_main_menu() {
+        let mut ui = UiState::new();
+        ui.begin(SessionKind::Multiplayer);
+        ui.session_ready();
+        ui.show_credits();
+        assert_eq!(ui.screen(), Screen::Credits);
+
+        ui.quit_to_title();
+        assert_eq!(ui.screen(), Screen::MainMenu);
+        assert!(ui.kind().is_none(), "leaving must not remember the old session");
+    }
+
+    /// `on_escape` from the credits screen behaves like every screen whose
+    /// key handler intercepts Escape before `UiState` ever sees it
+    /// (`Screen::Accounts`, `Screen::WorldSelect`) — this only exercises the
+    /// fallback a caller reaching here some other way would hit, and it must
+    /// still leave for the title rather than doing nothing.
+    #[test]
+    fn on_escape_from_credits_leaves_for_the_title() {
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.show_credits();
+        ui.on_escape();
+        assert_eq!(ui.screen(), Screen::MainMenu);
     }
 
     #[test]
