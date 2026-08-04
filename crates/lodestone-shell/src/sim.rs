@@ -9869,6 +9869,7 @@ mod tests {
             // `EntitySnapshot::name_tag` (issue #100) — irrelevant to this
             // gate, which only checks that `end_session` prunes tracks.
             name_tag: None,
+            creeper_swell_dir: None,
         };
         sim.write(|w| crate::entities::fold_entity_snapshots(w, &[snap]));
         assert_eq!(

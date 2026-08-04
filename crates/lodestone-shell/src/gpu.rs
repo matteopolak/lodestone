@@ -3308,6 +3308,8 @@ mod tests {
             count: 1,
             name_tag: None,
             item_use: None,
+            // Not a creeper: only a creeper ever swells.
+            creeper_swelling: 0.0,
         };
 
         let instance = models
@@ -4080,6 +4082,8 @@ mod tests {
                 count: 1,
                 name_tag: None,
                 item_use: None,
+                // Not a creeper: only a creeper ever swells.
+                creeper_swelling: 0.0,
             },
             // A second pig behind the camera so frustum culling has something
             // real to remove — the anti-vacuity guard on the cull path.
@@ -4099,6 +4103,8 @@ mod tests {
                 count: 1,
                 name_tag: None,
                 item_use: None,
+                // Not a creeper: only a creeper ever swells.
+                creeper_swelling: 0.0,
             },
         ];
 
@@ -4271,6 +4277,8 @@ mod tests {
             count: 1,
             name_tag: None,
             item_use: None,
+            // Not a creeper: only a creeper ever swells.
+            creeper_swelling: 0.0,
         }];
 
         // Fraction of a mob's bright pixels whose *hue direction* is far from the

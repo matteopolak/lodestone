@@ -246,6 +246,8 @@ impl ThirdPersonBodyState {
             // `on_false` and draws the resting model, which is what shipped
             // before the variant axis existed.
             item_use: None,
+            // Not a creeper: only a creeper ever swells.
+            creeper_swelling: 0.0,
         }
     }
 }
