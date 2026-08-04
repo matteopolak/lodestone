@@ -750,4 +750,161 @@ mod real_collision {
             "the plugin's own status resource must agree that it arrived"
         );
     }
+
+    // --- M2: StepUp over real, jar-derived collision ---
+    //
+    // `lodestone_nav::graph`'s own unit tests
+    // (`a_one_block_ascend_is_a_legal_step_up`,
+    // `an_ascend_taller_than_the_jump_apex_is_refused`) prove `StepUp`'s
+    // legality against `FixtureCensus` — a synthetic, hand-built census. That
+    // is CLAUDE.md's "world" species of vacuous test waiting to happen: a
+    // fixture that happens to agree with a rule says nothing about whether the
+    // rule reaches real per-state jar data at all. This is the same
+    // strengthening the bottom-slab test above did for `Walk`, applied to
+    // `StepUp`: real `minecraft:stone`, through the real
+    // `VersionAdapter`/`AdapterCensus`/`FactsTable` chain, driven through the
+    // real `TickSet::Intent -> Physics` pipeline.
+
+    /// World `x` at which the real floor rises by one block.
+    const STEP_X: i32 = 3;
+
+    /// Real `minecraft:stone` at `y = 0` everywhere, and *also* at `y = 1` for
+    /// `x >= STEP_X` — a solid, continuous one-block riser, not a floating
+    /// block, so the scene is an ordinary "step up onto a block" rather than
+    /// a contrived overhang.
+    fn stepped_floor_state_at(x: i32, y: i32, stone: u32, air: u32) -> u32 {
+        let solid = if x < STEP_X { y == 0 } else { y == 0 || y == 1 };
+        if solid { stone } else { air }
+    }
+
+    fn stepped_chunk_world(radius: i32, stone: u32, air: u32) -> ChunkWorld {
+        let mut world = World::new();
+        let block_kind = PaletteKind::block_states();
+        let biome_kind = PaletteKind::biomes();
+        const SECTION_COUNT: usize = 4;
+
+        for cx in -radius..=radius {
+            for cz in -radius..=radius {
+                let mut column = ChunkColumn::new(0, SECTION_COUNT, block_kind, biome_kind, air, 0);
+                for lx in 0..16i32 {
+                    for lz in 0..16i32 {
+                        let wx = cx * 16 + lx;
+                        for y in 0..=1i32 {
+                            column.set_block(
+                                lx as usize,
+                                y,
+                                lz as usize,
+                                stepped_floor_state_at(wx, y, stone, air),
+                            );
+                        }
+                    }
+                }
+                let light = ColumnLight::new(SECTION_COUNT);
+                let chunk = LoadedChunk::new(column, light, Heightmaps::default(), Vec::new());
+                world.load(ChunkPos::new(cx, cz), chunk);
+            }
+        }
+
+        ChunkWorld::new(world)
+    }
+
+    /// The physics-side seam for the stepped scene — independent code from
+    /// [`stepped_chunk_world`], same reasoning as [`RealFloorCollision`].
+    #[derive(Debug)]
+    struct SteppedFloorCollision {
+        stone: u32,
+        air: u32,
+    }
+
+    impl CollisionView for SteppedFloorCollision {
+        fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<lodestone_physics::Aabb>) {
+            if !(0..=1).contains(&y) {
+                return;
+            }
+            let state = stepped_floor_state_at(x, y, self.stone, self.air);
+            let Some(boxes) = lodestone_data::collision_shapes::collision_boxes(state) else {
+                return;
+            };
+            for b in boxes {
+                out.push(lodestone_physics::Aabb {
+                    min_x: f64::from(x) + f64::from(b.min[0]),
+                    min_y: f64::from(y) + f64::from(b.min[1]),
+                    min_z: f64::from(z) + f64::from(b.min[2]),
+                    max_x: f64::from(x) + f64::from(b.max[0]),
+                    max_y: f64::from(y) + f64::from(b.max[1]),
+                    max_z: f64::from(z) + f64::from(b.max[2]),
+                });
+            }
+        }
+    }
+
+    impl CollisionSource for SteppedFloorCollision {
+        fn with_view(&self, f: &mut dyn FnMut(&dyn CollisionView)) {
+            f(self);
+        }
+    }
+
+    /// A goal past a real one-block riser is reached — through real collision
+    /// data, the real search (`StepUp` legality gated on the real
+    /// `jump_apex_height`), the real simulated cost (the jump script), and the
+    /// real `TickSet::Intent -> Physics` pipeline. A search or cost bug that
+    /// happened to agree with the synthetic `FixtureCensus` unit tests would
+    /// still have to independently agree here, which is the entire point of a
+    /// second, differently-sourced gate.
+    #[test]
+    fn a_goal_past_a_real_one_block_riser_is_reached_by_stepping_up() {
+        let stone = real_state_id("minecraft:stone");
+        let air = real_state_id("minecraft:air");
+        let stone_top = lodestone_data::collision_shapes::collision_boxes(stone)
+            .and_then(|b| b.iter().map(|b| b.max[1]).reduce(f32::max))
+            .expect("stone has a real collision shape");
+        assert!(
+            (stone_top - 1.0).abs() < 1e-4,
+            "test premise: real minecraft:stone must be a full-height cube, got top={stone_top}"
+        );
+
+        let mut app = App::new();
+        app.add_plugins((lodestone_ecs::CorePlugin, LocalPlayerPlugin, AutopilotPlugin));
+        app.insert_resource(PlayerCollision::View(Arc::new(SteppedFloorCollision { stone, air })));
+        app.insert_resource(stepped_chunk_world(4, stone, air));
+        app.insert_resource(VersionData(Some(Box::new(RealDataAdapter))));
+        let entity = spawn_local_player(app.world_mut(), PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0));
+
+        let start = position(&app, entity);
+        app.insert_resource(AutopilotGoal(Some(BlockPos::new(6, 2, 0))));
+
+        let mut saw_the_climb = false;
+        for _ in 0..400 {
+            run_ticks(&mut app, 1);
+            let p = position(&app, entity);
+            if p.x > f64::from(STEP_X) && (p.y - 2.0).abs() < 0.15 {
+                saw_the_climb = true;
+            }
+        }
+
+        assert!(
+            saw_the_climb,
+            "expected the player to actually settle at the raised surface (y ~= 2.0) \
+             past x={STEP_X} at some point during the walk"
+        );
+
+        let end = position(&app, entity);
+        assert!(
+            (end.x - start.x).abs() > 3.0,
+            "expected real horizontal progress toward the goal, start={start:?} end={end:?}"
+        );
+        assert!(
+            (end.x - 6.5).abs() < 0.6 && (end.z - 0.5).abs() < 0.6,
+            "expected the player to have arrived near block (6, 2, 0), end={end:?}"
+        );
+        assert!(
+            (end.y - 2.0).abs() < 0.15,
+            "expected the player standing on the raised surface, end={end:?}"
+        );
+        assert_eq!(
+            *app.world().resource::<AutopilotStatus>(),
+            AutopilotStatus::Arrived,
+            "the plugin's own status resource must agree that it arrived"
+        );
+    }
 }
