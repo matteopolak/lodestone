@@ -16,6 +16,7 @@ use lodestone_core::State;
 use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Difficulty};
 use lodestone_net::{Connection, NetError, Transport};
 
+use crate::block_entities::{BlockEntityHandle, block_entity_for_item};
 use crate::chunk::{AIR, ChunkSource, STONE, is_air_or_fluid, is_water};
 use crate::fall::FallTracker;
 use crate::inventory::PlayerInventory;
@@ -352,6 +353,7 @@ pub async fn serve_connection<T, P, S, E>(
     source: &S,
     entities: &E,
     view_radius: i32,
+    block_entities: &BlockEntityHandle,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -441,6 +443,7 @@ where
                     view,
                     username,
                     chunks_sent,
+                    block_entities,
                 )
                 .await;
             }
@@ -535,11 +538,24 @@ where
 /// `ServerGamePacketListenerImpl.handleUseItemOn`'s replace-vs-relative
 /// choice of placement cell (`BlockPlaceContext`'s constructor: place at the
 /// clicked block if it `canBeReplaced`, otherwise at its `face`-neighbour) —
-/// simplified per this crate's documented scope (`docs/block-edit.md`):
-/// always places `minecraft:stone`, since this crate has no inventory model
-/// to resolve a real item from, and no survival/collision validation beyond
-/// "is the target cell currently replaceable" (air or a fluid — see
-/// [`is_air_or_fluid`]).
+/// simplified per this crate's documented scope (`docs/block-edit.md`): no
+/// survival/collision validation beyond "is the target cell currently
+/// replaceable" (air or a fluid — see [`is_air_or_fluid`]), and no per-block
+/// orientation (stairs/slabs/doors would need a precise cursor hit this
+/// crate does not decode).
+///
+/// **Placement now honours the held item for the four block-entity blocks**
+/// (issue: `docs/block-entities.md`'s second named gap). `inventory`'s
+/// currently selected item is looked up through
+/// [`block_entity_for_item`]: a furnace/smoker/blast-furnace/composter/
+/// hopper/brewing-stand item writes its own block and inserts a fresh
+/// [`crate::block_entities::BlockEntity`] into `block_entities` at the
+/// target position; anything else (including an empty hand — this crate has
+/// no "consume from an empty hand" concept to reject) still falls back to
+/// [`STONE`], exactly as before this change. This is a deliberately narrow
+/// extension of `docs/block-edit.md`'s existing scope cut, not a general
+/// per-item placement system — see that doc for why a wider one (a real
+/// `BlockItem` registry) is not attempted here.
 ///
 /// Sends [`ServerProtocol::encode_block_update`] for **both** `pos` and its
 /// `face`-neighbour unconditionally, matching vanilla's own
@@ -554,6 +570,8 @@ async fn apply_use_item_on<T, P, S>(
     state: &mut State,
     pos: BlockPos,
     face: BlockFace,
+    inventory: &PlayerInventory,
+    block_entities: &BlockEntityHandle,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -565,7 +583,19 @@ where
     let target = if is_air_or_fluid(&clicked) { pos } else { neighbour };
     let target_state = source.block_state(target.x, target.y, target.z);
     if is_air_or_fluid(&target_state) {
-        source.set_block(target.x, target.y, target.z, STONE);
+        let held_item = inventory.selected_item().map(|stack| stack.item.to_string());
+        let resolved = held_item
+            .as_deref()
+            .and_then(block_entity_for_item);
+        match resolved {
+            Some((block_name, entity)) => {
+                block_entities.with(|registry| registry.insert(target, entity));
+                source.set_block(target.x, target.y, target.z, block_name);
+            }
+            None => {
+                source.set_block(target.x, target.y, target.z, STONE);
+            }
+        }
     }
     for p in [pos, neighbour] {
         let current = source.block_state(p.x, p.y, p.z);
@@ -749,6 +779,7 @@ async fn dispatch_play_packet<T, P, S>(
     vitals: &mut PlayerVitals,
     admin: &mut WorldAdminState,
     inventory: &mut PlayerInventory,
+    block_entities: &BlockEntityHandle,
     packet_id: i32,
     payload: &[u8],
 ) -> Result<(), ServerError>
@@ -794,7 +825,8 @@ where
             face,
             sequence: _,
         } => {
-            apply_use_item_on(conn, proto, source, state, pos, face).await?;
+            apply_use_item_on(conn, proto, source, state, pos, face, inventory, block_entities)
+                .await?;
         }
         ServerBound::DifficultyChanged { difficulty } => {
             admin.difficulty = difficulty;
@@ -886,6 +918,7 @@ async fn serve_play<T, P, S, E>(
     mut view: ViewTracker,
     username: String,
     chunks_sent: usize,
+    block_entities: &BlockEntityHandle,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -944,6 +977,7 @@ where
                     &mut vitals,
                     &mut admin,
                     &mut inventory,
+                    block_entities,
                     packet_id,
                     &payload,
                 )
@@ -1009,6 +1043,7 @@ async fn serve_play<T, P, S, E>(
     mut view: ViewTracker,
     username: String,
     chunks_sent: usize,
+    block_entities: &BlockEntityHandle,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -1049,6 +1084,7 @@ where
             &mut vitals,
             &mut admin,
             &mut inventory,
+            block_entities,
             packet_id,
             &payload,
         )

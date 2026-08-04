@@ -34,7 +34,7 @@ use std::time::Duration;
 use lodestone_client::{ClientBuilder, LoginProfile, ServerAddress};
 use lodestone_model::{ClientAction, ContainerClickType, ContainerSlotChange, ItemStack};
 use lodestone_net::{Connection, memory_pair};
-use lodestone_server::{ChunkColumn, ChunkSource, NoEntities, serve_connection};
+use lodestone_server::{BlockEntityHandle, ChunkColumn, ChunkSource, NoEntities, serve_connection};
 use lodestone_v770::{V770ServerProtocol, adapter};
 use uuid::Uuid;
 
@@ -77,7 +77,15 @@ async fn real_client_hotbar_select_and_container_click_reach_the_server_model() 
 
     let server_task = tokio::spawn(async move {
         let mut conn = Connection::new(server_io);
-        serve_connection(&mut conn, &V770ServerProtocol, &AirSource, &NoEntities, 0).await
+        serve_connection(
+            &mut conn,
+            &V770ServerProtocol,
+            &AirSource,
+            &NoEntities,
+            0,
+            &BlockEntityHandle::default(),
+        )
+        .await
     });
 
     let (mut handle, _events) = ClientBuilder::new(
