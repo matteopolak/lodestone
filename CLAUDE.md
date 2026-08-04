@@ -440,13 +440,34 @@ has been wrong four times in four different ways.
 narrower than its name suggests.** Measured twice today, each time by an agent I had pointed at it
 wrongly:
 
-- It reports **clientbound decode → event wiring, for `v770` only.** `xtask/src/lib.rs:2846` is a hard
-  `if family != "v770" { continue; }`, so v47/v340/v735 are **silently never measured** — and the report's
-  own header string claims it takes "denominators from each family", which is false. Do not read a green
-  connectedness number as saying anything whatever about a legacy family.
-  It does **not** measure serverbound decode. Its `53/69` "serverbound encoded" figure is bare token
-  presence in the *client* adapter — no arm, no body, no direction check — which is why it is an *encode*
-  number: the client adapter only ever names a serverbound id while building a `Directive::Send`.
+- **Both defects below are fixed as of `e164d06` (issue #412) — kept because the numbers matter and the
+  failure modes recur.** It used to measure `v770` **only**, via a hard
+  `if family != "v770" { continue; }`, while its own header claimed "denominators from each family". So
+  for months a green number said nothing whatever about three of the four families. With the filter gone,
+  the first per-family reading was:
+
+  | family | clientbound decoded | serverbound encoded |
+  |---|---|---|
+  | v47 | 17/74 | 17/26 |
+  | v340 | 16/80 | 20/33 |
+  | v735 | 17/92 | 21/48 |
+  | v770 | 111/141 | 53/69 |
+
+  **The legacy families decode under a quarter of their clientbound packets**, which nobody knew, because
+  the instrument that would have said so was skipping them. Do not assume a legacy family is well covered.
+  It now also measures **serverbound decode** (v770: 13/69, all connected, zero stranded), and reports
+  *"not applicable"* rather than a false `0/69` for the three families with no `server_protocol.rs` — only
+  `v770` implements `ServerProtocol`. Note `serverbound encoded` remains a *client*-side figure: bare token
+  presence in the client adapter, no arm and no direction check.
+- **Our source scanners were silently broken by Rust lifetimes, and it took a UTF-8 panic to notice.**
+  `matching_brace` was described as comment-, string- and char-literal-aware. Its "in a char literal" flag
+  **never closes on a lifetime** — `&'static str` opens it and nothing shuts it — so from the first
+  lifetime in a file, comment detection was disabled for the rest of it. Fixed in all three scanners with
+  a lookahead-based `char_literal_span`. Two lessons worth keeping: any coverage number produced before
+  that fix, for a file containing a lifetime before a comment, was **unreliable in an unknown direction**;
+  and the bug surfaced only as an unrelated-looking crash in new code, never as a wrong answer, which is
+  how a scanner bug normally behaves. **A hand-rolled Rust lexer will be wrong about lifetimes** — test
+  one against a file with `&'a` before a `//`.
 - **Serverbound decode does not live in `lodestone-server` at all** —
   `/usr/bin/grep -rn "serverbound::" crates/lodestone-server/src/` returns **zero hits**. It is in
   `crates/protocol/v770/src/server_protocol.rs:880`, as `State::Play if packet_id ==
@@ -515,6 +536,12 @@ session, both of which produced a confident wrong conclusion:
   one command of a commit on a red tree. **Let cargo write its own output to a file and check its
   real exit status**; filter the file afterwards.
 
+- **`| tail` with no `-f` buffers until EOF, so a backgrounded build looks hung.** An agent backgrounded
+  `cargo test … | tail -80`, watched the output file stay **empty** for the whole compile, and concluded
+  the run had hung — it was compiling normally, and `tail` was simply holding everything until the pipe
+  closed. It killed a healthy run. Redirect straight to a file (`> log 2>&1`) and read the file; never put
+  a buffering filter between a long build and your only view of it. Same family as the entries above: the
+  transform that makes output readable is the transform that lies about it.
 - **zsh does not word-split an unquoted `$var`, so a path list in a variable is *one* argument.**
   An audit built as `P="a.rs b.rs …"; git diff --numstat -- $P` printed **nothing** and its companion
   `git diff -- $P | grep -E "<foreign markers>"` printed **none** — both correct answers about an
