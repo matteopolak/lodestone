@@ -7773,6 +7773,24 @@ pub fn generate_docs_index(workspace_root: &Path) -> Result<String> {
         plans.push(DocIndexEntry { link: rel, title, summary });
     }
 
+    // `docs/plans/` joins the same group, for the same reason `docs/research/`
+    // does. It was NOT scanned until 2026-08-04, and the omission was silent in
+    // the worst way: six plan documents for epics #225/#289/#340/#341/#343 and
+    // the server-ECS migration landed invisible to the index, each one having
+    // been written to satisfy the H1 + `## What it is` contract that only
+    // matters *because* the generator reads it. Nothing failed -- the drift test
+    // compares the generator against `docs/README.md`, and both agreed the
+    // directory did not exist. A generated index cannot drift from the docs, but
+    // it can silently omit a whole directory, which is a distinct failure mode
+    // worth remembering: the gate proves consistency, not coverage.
+    for path in read_md_dir_sorted(&docs_dir.join("plans"))? {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        let rel = format!("./plans/{name}");
+        let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let (title, summary) = extract_doc_summary(&text, &rel)?;
+        plans.push(DocIndexEntry { link: rel, title, summary });
+    }
+
     let mut out = String::new();
     out.push_str("# Lodestone docs\n\n");
     out.push_str(
@@ -7803,7 +7821,8 @@ every issue under it inherits.\n\n",
 
     out.push_str("\n---\n\n## Plans and research\n\n");
     out.push_str(
-        "Longer-form artifacts that are not per-subsystem docs: a phased plan, and read-only\n\
+        "Longer-form artifacts that are not per-subsystem docs: phased plans (everything under\n\
+`docs/plans/`, written to be dispatchable before the work starts), and read-only\n\
 diagnoses produced before the corresponding fix was written. They live here because a\n\
 diagnosis is worth keeping *after* the fix lands -- CLAUDE.md's standing claim is that the\n\
 record of confidently-held false beliefs is the most valuable thing in this repo, and several\n\
