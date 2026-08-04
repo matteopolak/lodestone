@@ -393,6 +393,26 @@ Oracles (not part of repo state — recreate them):
   **Volumes are the one thing to keep hesitating over.** 81 local volumes / 2.18 GB survive here
   untouched; they are cheap, and a volume is the only Docker object that can hold data nothing
   recreates. Prune images and build cache freely; think before pruning volumes.
+- **`-j` bounds rustc, not test binaries — and unbounded *test* memory froze the machine.** On
+  2026-08-04 the box ran out of memory and had to be force-rebooted while roughly a dozen agents were
+  live. It was not their idle footprint: single test binaries in this workspace have been measured at
+  **4.8 GB and 5.2 GB RSS**, and with 16 GB total, two or three concurrent `cargo test` runs is the
+  whole budget. `-j 4` caps *compile* parallelism and does nothing about a linked test binary's
+  runtime footprint, which is why the existing per-agent `-j` guidance did not prevent this.
+
+  So, when many agents are live: **pass `-- --test-threads=2` to `cargo test`** (test threads each
+  hold their own fixtures — that is the knob that actually caps peak RSS), **prefer `cargo check`
+  when you only need to know it compiles**, and **never run two cargo commands concurrently or
+  background one and start another**. Before a long run, check
+  `vm_stat | grep -E "Pages free|compressor"` and `sysctl -n vm.loadavg`; **free pages under ~50,000
+  or a compressor above ~200,000 pages is the state that preceded the freeze** — wait rather than
+  start. Note load average alone is a poor proxy: right after a reboot it sat at **31** purely from
+  Spotlight/ML reindexing (`mds_stores`, `mediaanalysisd`, `ANECompilerService`) while memory was 85%
+  free with zero swapouts.
+- **Do not kill Bitwarden.** It hosts the **ssh-agent that authenticates GitHub**, so killing it to
+  reclaim memory breaks every push in the session, including other agents'. It is the one desktop
+  application on this machine that is load-bearing for the repo. Docker and its VM are fair game
+  (see above); Bitwarden is not.
 - **A `cargo check` in this checkout can report hundreds of phantom errors naming another agent's
   worktree.** Measured: `cargo check -p lodestone-shell --no-default-features` produced **435 error
   lines**, mostly `couldn't read …/scratchpad/wt-route-9a4c/crates/lodestone-server/assets/worldgen/
