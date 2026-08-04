@@ -22,6 +22,127 @@ exists ahead of Stages 3–6 rather than after them: every stage decides what be
 stage that lands without an ordering anchor, a component, or a seam a plugin needs has to be reopened
 to add it.
 
+## The doctrine: five clauses, already in force
+
+The driving requirement above is not a wish list — a completed architecture review found the
+client is already substantially built to it, and that the rules below were being derived and
+re-derived by agents rather than read, because nobody had written them down in one place. This
+section is that: five clauses, each checked directly against the source rather than assumed, plus
+the two consequences that make this a *doctrine* — a constraint on the whole codebase — rather
+than a description of one corner of it.
+
+**1. Wishes are expressed in observation vocabulary, never wire vocabulary.**
+`BreakIntent { pos: BlockPos, face: BlockFace }` (`crates/lodestone-ecs/src/player.rs:249-256`) is
+the two facts a mouse ray hit carries — nothing else. No `sequence`, no dig-state id, no `Hand`, no
+raw `ClientAction`. `PlaceIntent { pos, face }` (`crates/lodestone-ecs/src/player.rs:367-377`)
+mirrors it exactly for placement, down to the same two fields; its own docs state the rule
+explicitly ("exactly the two facts a mouse ray hit carries"). A plugin never speaks the packet's
+language — it speaks the mouse's.
+
+**2. Exactly one system owns each machine.**
+The dig state machine, the prediction `sequence` counter and the post-break cooldown are internal
+state of one consumer system, not an API anyone calls. `MiningPredictor(pub Mining)`
+(`crates/lodestone-shell/src/interact.rs:179`) and `PlacementPredictor(pub Placement)`
+(`crates/lodestone-shell/src/interact.rs:184`) are private machines that only `drive_mining`
+(`crates/lodestone-shell/src/interact.rs:500`) and `drive_placement`
+(`crates/lodestone-shell/src/interact.rs:791`) touch. A plugin cannot reach either resource — it
+depends on `lodestone-ecs`, never on `lodestone-shell` — so there is structurally one writer, not a
+convention that could be violated by a second one.
+
+**3. Refusal is always observable.**
+`BreakOutcome(pub BreakStatus)` and `PlaceOutcome { status, generation }`
+(`crates/lodestone-ecs/src/player.rs:281`, `:404-411`) are *always-present* components —
+`spawn_local_player`/`reset_local_player` insert the `Default` on every entity, so a plugin can
+poll on the very first tick without first checking whether the shell has ever run with an intent
+installed at all. Rejections are typed (`BreakRejection`/`PlaceRejection`,
+`crates/lodestone-ecs/src/player.rs:305-321`, `:451-474`), not a silent no-op. Placement is a
+one-shot verb, so `PlaceOutcome::generation` (`player.rs:409-411`) is bumped by exactly one every
+time `drive_placement` resolves an attempt (`crates/lodestone-shell/src/interact.rs:839`,
+`outcome.generation += 1;`) — the counter a late poller needs to tell "the result of the attempt I
+just made" from "an attempt from several ticks ago I never read."
+
+**4. Human input outranks installed intent, per verb, with no handshake.**
+`drive_mining` computes `human_attacking = attacking.0 && dead.is_none()`
+(`crates/lodestone-shell/src/interact.rs:530`) and only falls through to a plugin's `BreakIntent`
+when that is false (`:535-557`). `drive_placement` returns immediately `if using_item.0`
+(`crates/lodestone-shell/src/interact.rs:828`), before even reading `PlaceIntent`. Neither checks
+for a plugin and asks it to back off — a real player's own attack/use button always wins, and a
+plugin's intent left behind after it stops running simply loses every tick the human is active.
+There is no handshake because there is nothing to negotiate: priority is a per-tick predicate, not
+a lock.
+
+**5. Lifecycle encodes verb shape.**
+A dig is continuous — `BreakIntent` stays installed for the whole multi-tick duration, and *the
+plugin* removes it when it wants to stop (`crates/lodestone-ecs/src/player.rs:351`, "the plugin
+removes it itself when it wants to stop"). A placement is one-shot — *the shell* removes
+`PlaceIntent` the instant `drive_placement` resolves an attempt
+(`crates/lodestone-shell/src/interact.rs:838`, `commands.entity(entity).remove::<PlaceIntent>();`),
+whatever the result, and that removal is itself the acknowledgement: one insertion is one attempt,
+so a plugin never has to guess whether a leftover component is still pending or long since
+processed.
+
+**The precedent these five clauses generalise from is movement, and it is fully converted, not
+partially.** `crates/lodestone-controller/src/ecs.rs:704`'s
+`exactly_one_system_writes_movement_intent` is a contract test, not a unit test — it builds the
+real shipped `GameTick` schedule under `ScheduleBuildSettings { ambiguity_detection:
+LogLevel::Error }` and asserts the schedule *itself* has no unordered conflicting writer of
+`MovementIntent`. Its negative control, `a_second_unordered_intent_writer_fails_the_ambiguity_check`
+(`ecs.rs:712`), adds a rogue second writer with no explicit order and asserts the same build then
+*fails* — proof the detector would have caught the thing it exists to catch, not just that the
+happy path is quiet. This is the proof that movement is already fully converted to clause 2, and it
+is the shape `BreakIntent`/`PlaceIntent` (clauses 1, 3, 4, 5 above) were built to match.
+
+### Two consequences that make this doctrine, not description
+
+**Refusing a capability to plugins refuses it to our own engine too.** Under a bolted-on plugin API
+— one written after the fact, on top of an engine that already works some other way — a refusal is
+a preference: the internals can always route around their own API when it is inconvenient. Here
+that route does not exist, because the plugin surface *is* the internal surface. So when
+`docs/plugin-api.md`'s own text above says a plugin "must never push a `ClientAction::BlockAction`
+directly," that is not a capability denial aimed at plugins — it is the **single-writer discipline**
+clause 2 states, applied uniformly, and it binds native code exactly as hard as it binds a plugin,
+because native code reaches the counter through the identical `drive_mining` system. Bukkit has the
+same shape for the same reason: a plugin cannot write the server's entity-id counter directly
+either — it calls `World.spawnEntity(...)` and the server's own single writer assigns the id. The
+sequence-counter refusal here is that same call, not an exception to "plugins can do everything
+native can."
+
+**The complete list of genuinely privileged internals is two items.** §"What stays privileged, and
+why" below names them: the socket and the driver task that owns it (the wire itself — Bukkit hides
+netty from plugins too, for the same reason), and the GPU device/queue/pipelines (a
+hardware-constraint firewall — the 4-bind-group floor documented in `CLAUDE.md` is not something a
+plugin author can be asked to respect correctly, any more than a Bukkit plugin is asked to respect
+OpenGL's own limits). **Everything else in this codebase is single-writer state sitting behind an
+intent, reachable by anyone** who inserts the right component or pushes the right resource entry —
+which is the point of clauses 1–5 above. This list is asserted complete as of this writing; if a
+future pass finds a third thing an internal system can do that no plugin route reaches, the right
+frame for that finding is **a defect in the surface**, to be closed the way `BreakIntent`/
+`PlaceIntent` closed the mining/placement gap — not a third privileged item to add to this list, and
+not policy to defend.
+
+### The half-adopted state: human break/place do not go through the intent seam yet
+
+The five clauses above describe the *plugin* path for breaking and placing blocks. The *human*
+path does not use it. `drive_mining`'s `human_attacking` branch reads `Attacking`
+(`crates/lodestone-shell/src/interact.rs:151`) and `RayTarget`
+(`crates/lodestone-shell/src/interact.rs:122`) — both shell-only resources set by mouse input, not
+`BreakIntent`. `drive_placement`'s human path is `Sim::use_item_live`
+(`crates/lodestone-shell/src/sim/actions.rs:506`), which runs `Placement::use_on` directly, also
+never touching `PlaceIntent`. Both converge one level lower, at the same `MiningPredictor`/
+`Placement::use_on` machines a plugin's intent resolves into (clause 2) — so a human dig and a
+plugin dig run the identical predictor, but only the plugin one arrives through the observable,
+refusable seam.
+
+This is recorded as **the flagship conversion still to do, not as a defect to be quietly worked
+around.** It is also a real, named prerequisite rather than a cosmetic gap: today a protection
+plugin can veto another *plugin's* dig (by never installing `BreakIntent`, or by racing to remove
+it — the mechanisms clauses 3–5 give it), but it has no way to veto a *human* player's dig, because
+the human path never asks the intent seam anything. Routing human break/place through `BreakIntent`/
+`PlaceIntent` — with human input becoming the *default* producer of the same components a plugin
+writes, rather than a separate code path that outranks them — is what would let a plugin cancel a
+human verb at all. Until then, clause 4's "human wins" is really "human bypasses," which happens to
+look like winning because nothing can contest a path it never joins.
+
 ## How it works
 
 ### The surface: read, write, schedule, intercept
