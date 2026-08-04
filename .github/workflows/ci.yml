@@ -2,18 +2,31 @@
 # intentionally NOT run here (the 219 `#[ignore]`d live/GPU/jar-dependent
 # tests), and how to reproduce any of these jobs locally.
 #
-# Four of the five jobs below are exactly CLAUDE.md's "Build and test" health
-# checks, one per job so a failure names itself instead of hiding behind three
-# green jobs and one red one:
+# Four of the five jobs below call the `just` recipes that are exactly
+# CLAUDE.md's "Build and test" health checks, one per job so a failure names
+# itself instead of hiding behind three green jobs and one red one:
 #
-#   cargo check --workspace --all-targets
-#   cargo check --workspace --all-features --all-targets --exclude lodestone-allocbench
-#   cargo check -p lodestone-shell --no-default-features
-#   cargo test --workspace --no-fail-fast
+#   just check       # cargo check --workspace --all-targets
+#   just check-all    # cargo check --workspace --all-features --all-targets --exclude lodestone-allocbench
+#   just check-seam   # cargo check -p lodestone-shell --no-default-features
+#   just test         # cargo test --workspace --no-fail-fast
+#
+# `just` is the canonical *command* layer (docs/task-runner.md) — calling the
+# recipe instead of retyping the raw invocation makes command drift between
+# this file and CLAUDE.md impossible by construction rather than merely
+# checked. Each job installs a pinned `just` (extractions/setup-just, commit
+# SHA below) before its first recipe invocation. CI sets neither
+# `LODESTONE_TARGET_DIR` nor `LODESTONE_JOBS`, so every recipe here expands to
+# the identical bare command it always ran — no shared target dir, no
+# hardcoded `-j`.
 #
 # The fifth (xtask-structural-checks) runs cargo xtask's own dependency-graph
 # checks (check-isolation, check-deletable) — cheap, and CLAUDE.md-adjacent
-# but not one of the four literal commands above.
+# but not one of the four literal commands above. It is left calling `cargo
+# run -p xtask` directly: the Justfile's `xtask *args` passthrough always adds
+# `-q`, which is not byte-identical to this job's existing invocation, so
+# converting it would change what the job actually runs rather than just
+# naming it.
 #
 # Do not "simplify" the --exclude on the all-features job away: lodestone-allocbench
 # has a deliberate compile_error!() when more than one allocator feature is on
@@ -66,7 +79,7 @@ concurrency:
 
 jobs:
   check-default:
-    name: "check: --workspace --all-targets"
+    name: "check: just check"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -79,10 +92,14 @@ jobs:
         with:
           shared-key: check-default
       - uses: mozilla-actions/sccache-action@v0.0.11
-      - run: cargo check --workspace --all-targets
+      - name: Install just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        with:
+          just-version: "1.58.0"
+      - run: just check
 
   check-all-features:
-    name: "check: --all-features (allocbench excluded)"
+    name: "check: just check-all (allocbench excluded)"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -95,10 +112,14 @@ jobs:
         with:
           shared-key: check-all-features
       - uses: mozilla-actions/sccache-action@v0.0.11
-      - run: cargo check --workspace --all-features --all-targets --exclude lodestone-allocbench
+      - name: Install just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        with:
+          just-version: "1.58.0"
+      - run: just check-all
 
   check-shell-no-default:
-    name: "check: lodestone-shell --no-default-features (version seam)"
+    name: "check: just check-seam (version seam)"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -111,7 +132,11 @@ jobs:
         with:
           shared-key: check-shell-no-default
       - uses: mozilla-actions/sccache-action@v0.0.11
-      - run: cargo check -p lodestone-shell --no-default-features
+      - name: Install just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        with:
+          just-version: "1.58.0"
+      - run: just check-seam
 
   xtask-structural-checks:
     name: "xtask: check-isolation / check-deletable"
@@ -138,7 +163,7 @@ jobs:
           done
 
   test:
-    name: "test: --workspace --no-fail-fast"
+    name: "test: just test"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -151,6 +176,10 @@ jobs:
         with:
           shared-key: test-workspace
       - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: Install just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        with:
+          just-version: "1.58.0"
       # The full suite. `.cache/` and `vendor/` are gitignored (no vanilla jar,
       # no minecraft-data checkout on a runner) and there is no GPU adapter, so
       # this intentionally does NOT run everything: 219 tests are #[ignore]d
@@ -160,8 +189,8 @@ jobs:
       # test` stops at the first failing test *binary*, so a later crate's
       # break is invisible — CLAUDE.md records this having hidden 3 failing
       # binaries / 14 failing tests behind one earlier, unrelated failure.
-      - name: cargo test --workspace --no-fail-fast
-        run: cargo test --workspace --no-fail-fast
+      - name: just test
+        run: just test
       # A small, known set of NON-ignored tests intentionally self-skip (with a
       # loud eprintln!, not silently) when .cache/ or vendor/ is absent, per
       # their own doc comments — they anchor against a *committed* dump/table
