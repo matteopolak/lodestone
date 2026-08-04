@@ -18,7 +18,7 @@ use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStac
 use lodestone_net::{Connection, NetError, Transport};
 
 use crate::block_entities::{BlockEntity, BlockEntityHandle, block_entity_for_item};
-use crate::chunk::{AIR, ChunkSource, STONE, is_air_or_fluid, is_water};
+use crate::chunk::{AIR, ChunkSource, STONE, generate_columns_parallel, is_air_or_fluid, is_water};
 use crate::fall::FallTracker;
 use crate::inventory::{ContainerMenuSlot, PlayerInventory, container_menu_slot};
 use crate::mobs::MobHandle;
@@ -264,12 +264,19 @@ impl ViewTracker {
             directives.push(proto.encode_forget_chunk(x, z));
         }
 
-        let added: Vec<(i32, i32)> = next.difference(&self.loaded).copied().collect();
+        // Sorted rather than left in `HashSet::difference`'s hash-iteration
+        // order: that order already varies run-to-run (`RandomState` reseeds
+        // per process), and generating in parallel below means the set of
+        // columns can finish in yet another, scheduling-dependent order.
+        // Fixing the wire order here is what makes the encoded byte sequence
+        // independent of both.
+        let mut added: Vec<(i32, i32)> = next.difference(&self.loaded).copied().collect();
+        added.sort_unstable();
         if !added.is_empty() {
             directives.push(proto.begin_chunk_batch());
-            for &(x, z) in &added {
-                let column = source.column(x, z);
-                directives.push(proto.encode_chunk(x, z, &column));
+            let columns = generate_columns_parallel(source, &added);
+            for (&(x, z), column) in added.iter().zip(columns.iter()) {
+                directives.push(proto.encode_chunk(x, z, column));
             }
             directives.push(proto.end_chunk_batch(added.len() as i32));
         }
@@ -438,13 +445,20 @@ where
                 apply(conn, &mut state, proto.encode_set_time(0, Some(0))).await?;
 
                 apply(conn, &mut state, proto.begin_chunk_batch()).await?;
+                // Generation is fanned out over scoped OS threads
+                // (`generate_columns_parallel`); the wire order is still the
+                // original `cz`-outer/`cx`-inner walk, which is what makes
+                // the emitted byte sequence independent of thread scheduling
+                // — see that function's doc comment for why the fan-out
+                // cannot desync per-chunk RNG-derived content either.
+                let coords: Vec<(i32, i32)> = (-view_radius..=view_radius)
+                    .flat_map(|cz| (-view_radius..=view_radius).map(move |cx| (cx, cz)))
+                    .collect();
+                let columns = generate_columns_parallel(source, &coords);
                 let mut batch_size = 0;
-                for cz in -view_radius..=view_radius {
-                    for cx in -view_radius..=view_radius {
-                        let column = source.column(cx, cz);
-                        apply(conn, &mut state, proto.encode_chunk(cx, cz, &column)).await?;
-                        batch_size += 1;
-                    }
+                for (&(cx, cz), column) in coords.iter().zip(columns.iter()) {
+                    apply(conn, &mut state, proto.encode_chunk(cx, cz, column)).await?;
+                    batch_size += 1;
                 }
                 apply(conn, &mut state, proto.end_chunk_batch(batch_size)).await?;
                 let chunks_sent = batch_size as usize;

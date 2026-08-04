@@ -603,6 +603,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   The three things that make a served session (singleplayer over `memory_pair`, or
   open-to-LAN over TCP) survive, keep time, and follow the player, instead of being a
   static, timeless island that a real client would eventually give up on:
+- [Server chunk generation: fanned out over scoped threads (issue #414)](./server-chunk-generation-parallelism.md) —
+  `crates/lodestone-server/src/chunk.rs`'s `generate_columns_parallel` runs a batch of
+  `ChunkSource::column()` calls across `std::thread::scope` worker threads and hands
+  the results back in the same order the coordinates were given. It replaces the
+  serial, one-column-at-a-time loop the integrated server used to run for both places
+  a connection asks for a burst of terrain: `serve_connection`'s initial `view_radius`
+  join, and `ViewTracker::recenter`'s "chunks that entered the view" diff (both in
+  `crates/lodestone-server/src/server.rs`).
 - [Server-authoritative inventory (issue #408)](./server-inventory.md) —
   `lodestone-server`'s model for a player's own inventory, and the decode + consumer
   that lets `SET_CARRIED_ITEM` and `CONTAINER_CLICK` actually change server state.
