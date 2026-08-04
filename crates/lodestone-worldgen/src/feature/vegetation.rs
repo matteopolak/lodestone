@@ -591,19 +591,19 @@ fn try_parse_int_provider(v: &Value) -> Option<IntProvider> {
                     min: v["min_inclusive"].as_i64()? as i32,
                     max: v["max_inclusive"].as_i64()? as i32,
                 }),
-                "trapezoid" => {
-                    // TrapezoidInt is not exactly Uniform, but every
-                    // xz_spread/y_spread in this module's own scope
-                    // (patch_grass_*/flower_*'s random_offset) is symmetric
-                    // (min == -max, plateau == 0); approximating it as
-                    // Uniform over the same [min, max] preserves the mean
-                    // and support exactly, only the interior shape (triangular
-                    // vs flat) differs — named, not hidden.
-                    Some(IntProvider::Uniform {
-                        min: v["min"].as_i64()? as i32,
-                        max: v["max"].as_i64()? as i32,
-                    })
-                }
+                // The REAL `TrapezoidInt` sample (two draws, triangular),
+                // not a `Uniform` stand-in — see `IntProvider::Trapezoid`'s
+                // own doc comment on why the approximation this replaced
+                // was a real bug, not just a shape simplification: it
+                // changed how many `nextInt` calls this placement consumed,
+                // desyncing every RNG draw after the first `random_offset`
+                // from vanilla's own stream. Found via a real JVM oracle
+                // (`tests/vegetation_parity.rs`), not by inspection.
+                "trapezoid" => Some(IntProvider::Trapezoid {
+                    min: v["min"].as_i64()? as i32,
+                    max: v["max"].as_i64()? as i32,
+                    plateau: v["plateau"].as_i64().unwrap_or(0) as i32,
+                }),
                 "weighted_list" => {
                     let entries = v["distribution"]
                         .as_array()?

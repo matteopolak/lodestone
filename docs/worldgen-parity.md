@@ -348,24 +348,109 @@ passes reliably again.
 
 - **Vegetation features**: engine built and composed (issue #406,
   `crate::feature::vegetation`, wired into `OverworldGenerator::column` as
-  `Self::vegetation_stage`) — grass, flowers, and oak/birch/spruce/pine
-  trees. **Still not composed into `ComposedChunkOracle.java`, and no
-  isolated oracle for it exists yet in `scripts/worldgen-oracle/` either** —
-  that half of the sentence remains true after #406 lands. Every count this
-  module's own tests assert is derived from the embedded placement-modifier
-  JSON itself (an internal-consistency check), not a live-vanilla parity
-  number — see `crate::feature::vegetation`'s own module doc "Scope"
-  section, which states this plainly rather than letting a green test suite
-  imply more than it proves. Two structural things composing this stage did
-  *not* replicate, named rather than hidden: it is **single-chunk only**
-  (unlike the ore stage's real 3×3 `blockStateWriteRadius(1)` driver, so a
-  tree/patch that would spill across a chunk boundary in vanilla simply
-  doesn't in this engine yet), and several trunk/foliage/feature kinds this
-  engine doesn't implement (fancy/giant trunks, `FallenTreeFeature`, most
-  non-vegetation `simple_block` placements) degrade to a silent no-op rather
-  than a panic, so e.g. oak's `fancy_oak` branch (~33% of attempts) and every
-  jungle/dark-oak/acacia tree currently place nothing. See that module's doc
-  for the full, named list.
+  `Self::vegetation_stage`) — grass, flowers, cacti/sugar-cane
+  (`BlockColumnFeature`), and oak/birch/spruce/pine trees. **A real oracle
+  now exists** (`scripts/worldgen-oracle/VegetationOracle.java`,
+  `crates/lodestone-worldgen/tests/vegetation_parity.rs`) — the sentence
+  that used to end here ("no isolated oracle... exists yet") is closed; see
+  "The vegetation oracle" below for what it found, including a real bug the
+  previous internal-consistency-only tests could not have caught. A biome's
+  declared vegetation using a placer this crate doesn't implement is no
+  longer a silent gap either: `lodestone_server::worldgen_data::tests
+  ::vegetation_placer_gaps_are_named_not_silent` diffs every reachable
+  overworld biome's `VEGETAL_DECORATION` step against a maintained
+  `KNOWN_VEGETATION_GAPS` table, both directions (new undeclared gap, or a
+  declared gap that got fixed and needs pruning).
+
+  **Single-chunk only — measured, not assumed.** Unlike the ore stage's real
+  3×3 `blockStateWriteRadius(1)` driver, a tree/patch that would spill
+  across a chunk boundary in vanilla simply doesn't in this engine. The
+  oracle measured this directly (two plains chunks, seed 42): a real
+  vanilla centre chunk's vegetation content is **not** fully captured by
+  the centre's own single-chunk pass — `(-120,-120)`: 25/32 = 78.1%,
+  `(5,5)`: 48/61 = 78.7%. Both land in a tight band around **~78%**, i.e. a
+  consistent **~21-22% undercount** from cross-chunk spill alone, not the
+  "small, rare edge case" a reader might otherwise assume. See
+  `tests/vegetation_parity.rs::single_chunk_only_undercounts_real_vanilla_centre_content`.
+
+  Several trunk/foliage/feature kinds this engine doesn't implement (fancy/
+  giant trunks — oak's `fancy_oak` branch and every jungle/dark-oak/acacia/
+  mangrove/cherry tree — plus `FallenTreeFeature`, and non-vegetation
+  features never in #406's scope to begin with: glow lichen/kelp/seagrass/
+  coral/bamboo/vines/mushroom rings/cave-only features) degrade to a silent
+  no-op rather than a panic — see `KNOWN_VEGETATION_GAPS` above for the
+  exact, current, per-biome list, and the module's own doc for why.
+
+### The vegetation oracle
+
+`scripts/worldgen-oracle/VegetationOracle.java` boots the real 26.2 server
+headlessly, builds the real post-carve 3×3 neighbourhood (the same
+`chunkAt` pattern `FeatureOracle.java` proved), then replays the real
+`UNDERGROUND_ORES` step over all 9 sources — so the vegetal-decoration pass
+it measures starts from the same post-ore terrain
+`OverworldGenerator::vegetation_stage` does on the Rust side, not a pre-ore
+approximation — before running `VEGETAL_DECORATION` **twice** from that
+identical baseline:
+
+- `single` — only the centre chunk's own decoration pass (this engine's
+  real scope).
+- `full3x3` — all 9 chunks, matching vanilla's real `blockStateWriteRadius(1)`
+  spill.
+
+Both passes dump every changed cell over the whole driven `-16..32` region,
+plus the centre's own post-ore terrain (`base.*`, run-length-encoded) so
+the Rust side can seed `VegGrid` from an identical starting point and run
+the real, production `apply_vegetal_decoration_step` — not a
+reimplementation — via `tests/vegetation_parity.rs`.
+
+**What it does not model** (see the oracle's own header comment for the
+full list): no biome variety (single `FixedBiomeSource`, matching every
+isolated oracle in this directory except `ComposedChunkOracle.java`); no
+decoration steps before `UNDERGROUND_ORES` (lakes/springs); `SINGLE`
+mode's own *reads* still see the real, unclamped neighbourhood (only
+*writes* are chunk-scoped), which is narrower than `VegGrid`'s own
+approximation (every read clamps to the local chunk) — a real, small,
+named discrepancy between the oracle's `SINGLE` mode and this engine's own
+behaviour, not measured to matter at either fixture chunk.
+
+**A real bug this oracle found, not by inspection — by a JVM diff.**
+Before this oracle existed, `crate::feature::vegetation::try_parse_int_provider`
+folded `TrapezoidInt` (used by nearly every `random_offset` placement step —
+grass, flowers, sugar cane, cacti, bushes, mushrooms) into `IntProvider::Uniform`
+over the same `[min, max]`, reasoning that it "preserves the mean and
+support exactly, only the interior shape... differs" — true of the
+*distribution*, false of the **draw count**. Vanilla's real `TrapezoidInt
+.sample` for the symmetric case every one of those placements actually uses
+(`min == -max, plateau == 0`) draws `nextInt` **twice** and subtracts
+(`nextInt(max+1) - nextInt(max+1)`), not once. Every RNG call after the
+first `random_offset` therefore desynced completely from vanilla's own
+stream — not "close but off by a block": `patch_grass_plain`'s placed
+positions were entirely disjoint from the real JVM's, at both fixture
+chunks. Fixed by porting `TrapezoidInt.sample` exactly (`IntProvider::Trapezoid`
+in `crate::feature`, shared with — but never previously constructed by —
+the already-proven ore engine). After the fix,
+`tests/vegetation_parity.rs::our_engine_matches_jvm_single_chunk_pass`
+matches the real JVM's `SINGLE`-mode output **bit-for-bit** (23/23 and
+equivalent counts at both fixtures, modulo the named `glow_lichen` gap).
+This is exactly the failure mode CLAUDE.md's evidence standard warns
+about: `decode(encode(x)) == x`-shaped self-consistency (this module's own
+hermetic tests, which never drew a real `TrapezoidInt` sample to compare
+against) cannot see a bug in an approximation's *process*, only in its
+*result* — and the result (mean, support) was genuinely correct here, so
+no internal check would ever have caught it.
+
+Regenerate with:
+```bash
+bash scripts/worldgen-oracle/run.sh VegetationOracle "minecraft:plains <cx> <cz> 42"
+```
+writing the two fixtures at `crates/lodestone-worldgen/tests/support/
+vegetation_plains_land_jvm.txt` (`-120 -120`) and `vegetation_plains_chunk5_5_jvm.txt`
+(`5 5`). `crates/lodestone-worldgen/tests/support/worldgen_data/{configured_feature,
+placed_feature}` were extended to the full 226/262-file sets (copied verbatim
+from `crates/lodestone-server/assets/worldgen/`, same provenance) — the
+prior ore-only subset didn't carry a single vegetation placed/configured
+feature, so `compose::build_biome_vegetation` resolved an empty list against
+it and this test would have measured nothing.
 - **Ore features (composition into `OverworldGenerator::column`)**: **now
   composed** (`crate::feature::apply_ore_step_3x3_per_source`, the real
   vanilla 3×3 driver, per-source biome resolution). What still can't be

@@ -133,6 +133,22 @@ pub enum IntProvider {
     /// #406's cacti/sugar-cane increment). Additive: nothing before that
     /// increment constructs this variant.
     BiasedToBottom { min: i32, max: i32 },
+    /// `net.minecraft.util.valueproviders.TrapezoidInt`, the REAL
+    /// (two-draw, triangular) sample — not the `Uniform` approximation
+    /// `crate::feature::vegetation::try_parse_int_provider` used to fold
+    /// this into. That approximation preserved mean and support but not
+    /// **draw count**: vanilla's symmetric case
+    /// (`min == -max, plateau == 0`, which is every `random_offset` this
+    /// crate's vegetation engine actually uses) draws `nextInt` TWICE and
+    /// subtracts, while `Uniform` draws once — every RNG call after the
+    /// first desyncs completely from vanilla's own stream. Found via
+    /// `tests/vegetation_parity.rs` (issue #406's real-oracle evidence
+    /// gap): `patch_grass_plain`'s placed positions were disjoint,
+    /// bit-for-bit, from the real JVM's — not "close but off by a block",
+    /// a full stream desync — because `random_offset`'s `xz_spread`/
+    /// `y_spread` are exactly this symmetric trapezoid shape. See
+    /// [`IntProvider::sample`] for the exact vanilla formula, ported.
+    Trapezoid { min: i32, max: i32, plateau: i32 },
 }
 
 impl IntProvider {
@@ -192,6 +208,9 @@ impl IntProvider {
                 let n = f64::from(max - min + 1);
                 f64::from(*min) + (n - 1.0) / 4.0
             }
+            // Symmetric (difference-of-uniforms) or plateau'd trapezoid,
+            // both mean `(min+max)/2` regardless of shape.
+            IntProvider::Trapezoid { min, max, .. } => f64::from(min + max) / 2.0,
         }
     }
 
@@ -223,6 +242,24 @@ impl IntProvider {
                 let n = *max - *min + 1;
                 let inner = random.next_int_bounded(n);
                 min + random.next_int_bounded(inner + 1)
+            }
+            // `TrapezoidInt.sample`, ported exactly (see this variant's own
+            // doc comment for why the draw COUNT matters, not just the
+            // resulting distribution's shape).
+            IntProvider::Trapezoid { min, max, plateau } => {
+                if *plateau == 0 && *max == -*min {
+                    random.next_int_bounded(max + 1) - random.next_int_bounded(max + 1)
+                } else {
+                    let range = max - min;
+                    if *plateau == range {
+                        math::random_between_inclusive(random, *min, *max)
+                    } else {
+                        let plateau_start = (range - plateau) / 2;
+                        let plateau_end = range - plateau_start;
+                        min + math::random_between_inclusive(random, 0, plateau_end)
+                            + math::random_between_inclusive(random, 0, plateau_start)
+                    }
+                }
             }
         }
     }
