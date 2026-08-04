@@ -235,6 +235,107 @@ pub enum LiveOption {
     /// [`crate::config::Options::mouse_wheel_sensitivity`] (issue #203). Fed
     /// to the hotbar scroll handler.
     MouseWheelSensitivity,
+    /// `options.chat.scale` → [`crate::config::Options::chat_scale`].
+    ///
+    /// This and the seven below were the inverse of this repo's usual island:
+    /// the field was persisted, `app.rs` already handed it to
+    /// `hud_frame.chat_options`, and `hud.rs` already had a magnitude gate
+    /// proving the draw reads it — and the settings row was still drawn
+    /// **greyed**, so no player could ever reach any of it. The consumer chain
+    /// was complete at both ends with no control in the middle.
+    ChatScale,
+    /// `options.chat.width` → [`crate::config::Options::chat_width`].
+    ChatWidth,
+    /// `options.chat.height.focused` →
+    /// [`crate::config::Options::chat_height_focused`].
+    ChatHeightFocused,
+    /// `options.chat.height.unfocused` →
+    /// [`crate::config::Options::chat_height_unfocused`].
+    ChatHeightUnfocused,
+    /// `options.chat.line_spacing` →
+    /// [`crate::config::Options::chat_line_spacing`].
+    ChatLineSpacing,
+    /// `options.chat.opacity` → [`crate::config::Options::chat_opacity`].
+    ChatOpacity,
+    /// `options.accessibility.text_background_opacity` →
+    /// [`crate::config::Options::chat_background_opacity`]. Appears on **two**
+    /// pages — Chat and Accessibility — as it does in vanilla; both rows drive
+    /// this one field, which is why liveness is a property of the accessor
+    /// rather than of the page.
+    TextBackgroundOpacity,
+    /// `options.chatColors` → [`crate::config::Options::chat_colors`].
+    ChatColors,
+}
+
+impl LiveOption {
+    /// The `[0, 1]` value of this option, for the live options that are built
+    /// on `OptionInstance.UnitDouble.INSTANCE`, or `None` for the ones that are
+    /// not.
+    ///
+    /// `UnitDouble.toSliderValue` is the **identity**
+    /// (`OptionInstance.java:587-589`), so for these options the stored value
+    /// *is* the slider fraction and [`Cell::slider_fraction`] can return it
+    /// directly — no range to port, which is why this set was reachable
+    /// without first closing issue #424.
+    #[must_use]
+    fn unit_double(self, options: &crate::config::Options) -> Option<f32> {
+        match self {
+            LiveOption::ChatScale => Some(options.chat_scale),
+            LiveOption::ChatWidth => Some(options.chat_width),
+            LiveOption::ChatHeightFocused => Some(options.chat_height_focused),
+            LiveOption::ChatHeightUnfocused => Some(options.chat_height_unfocused),
+            LiveOption::ChatLineSpacing => Some(options.chat_line_spacing),
+            LiveOption::ChatOpacity => Some(options.chat_opacity),
+            LiveOption::TextBackgroundOpacity => Some(options.chat_background_opacity),
+            LiveOption::GuiScale
+            | LiveOption::ViewBobbing
+            | LiveOption::ToggleSneak
+            | LiveOption::ToggleSprint
+            | LiveOption::InvertMouseX
+            | LiveOption::InvertMouseY
+            | LiveOption::MouseWheelSensitivity
+            | LiveOption::ChatColors => None,
+        }
+    }
+}
+
+/// `ChatComponent.getWidth` (`ChatComponent.java:416-420`):
+/// `Mth.floor(pct * 280.0 + 40.0)`, i.e. 40px at `0.0` and 320px at `1.0`.
+#[must_use]
+fn chat_width_px(pct: f32) -> i32 {
+    (pct as f64 * 280.0 + 40.0).floor() as i32
+}
+
+/// `ChatComponent.getHeight` (`ChatComponent.java:422-426`):
+/// `Mth.floor(pct * 160.0 + 20.0)`, i.e. 20px at `0.0` and 180px at `1.0`.
+#[must_use]
+fn chat_height_px(pct: f32) -> i32 {
+    (pct as f64 * 160.0 + 20.0).floor() as i32
+}
+
+/// The **value half** of `Options.percentValueLabel` (`Options.java:1971-1973`).
+///
+/// Vanilla's is `translatable("options.percent_value", caption, (int)(value *
+/// 100.0))` with the `en_us.json` pattern `"%s: %s%%"`. This client composes
+/// captions in exactly one place — [`Cell::label`], via
+/// [`generic_value_label`]'s `"%s: %s"` — so returning `"N%"` here reproduces
+/// `percentValueLabel`'s full output *by construction*:
+/// `generic_value_label(c, "100%") == "c: 100%" == percent_value(c, 1.0)`.
+/// Duplicating the caption here instead would be the "fact declared in two
+/// places" the module docs' departure (1) exists to avoid.
+///
+/// The cast is a C-style **truncation**, not a round — `0.999` prints `99%`,
+/// which is why the gates predict `floor`ed integers rather than rounded ones.
+#[must_use]
+fn percent_value(value: f32) -> String {
+    format!("{}%", (value as f64 * 100.0) as i32)
+}
+
+/// The value half of `Options.pixelValueLabel` (`Options.java:1967-1969`),
+/// pattern `"%s: %spx"`. See [`percent_value`] for why the caption is absent.
+#[must_use]
+fn pixel_value(value: i32) -> String {
+    format!("{value}px")
 }
 
 /// One vanilla `OptionInstance`, reduced to what a row needs.
@@ -369,6 +470,16 @@ impl Cell {
         }
         if spec.live == Some(LiveOption::MouseWheelSensitivity) {
             return Some(mouse_wheel_slider_fraction(options.mouse_wheel_sensitivity));
+        }
+        // A **live** `UnitDouble` option reads its handle position from the
+        // real, persisted value; only an inactive one falls through to the
+        // frozen default below. Without this arm the chat sliders would move
+        // the chat and leave their own handles parked at vanilla's boot value —
+        // a control that silently lies about its state.
+        if let Some(live) = spec.live {
+            if let Some(value) = live.unit_double(options) {
+                return Some(value.clamp(0.0, 1.0));
+            }
         }
         unit_double_default_fraction(spec.accessor)
     }
@@ -534,6 +645,41 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
         // `String.format(Locale.ROOT, "%.2f", value)` (`Options.java:479`).
         LiveOption::MouseWheelSensitivity => {
             format!("{:.2}", options.mouse_wheel_sensitivity)
+        }
+        // `value == 0.0 ? CommonComponents.optionStatus(caption, false) :
+        // percentValueLabel(caption, value)` (`Options.java:363-370`) — the one
+        // chat slider with an OFF caption, and `optionStatus(caption, false)`
+        // is itself `genericValueLabel(caption, OPTION_OFF)`, so composing
+        // `"OFF"` through [`Cell::label`] reproduces it exactly.
+        LiveOption::ChatScale => {
+            if options.chat_scale == 0.0 {
+                "OFF".to_string()
+            } else {
+                percent_value(options.chat_scale)
+            }
+        }
+        // `pixelValueLabel(caption, ChatComponent.getWidth(value))`
+        // (`Options.java:371-378`).
+        LiveOption::ChatWidth => pixel_value(chat_width_px(options.chat_width)),
+        // `pixelValueLabel(caption, ChatComponent.getHeight(value))`
+        // (`Options.java:387-394`).
+        LiveOption::ChatHeightFocused => pixel_value(chat_height_px(options.chat_height_focused)),
+        // As above (`Options.java:379-386`).
+        LiveOption::ChatHeightUnfocused => {
+            pixel_value(chat_height_px(options.chat_height_unfocused))
+        }
+        // Plain `Options::percentValueLabel` (`Options.java:292-294`).
+        LiveOption::ChatLineSpacing => percent_value(options.chat_line_spacing),
+        // **Affine, not plain percent**: `percentValueLabel(caption, value *
+        // 0.9 + 0.1)` (`Options.java:284-291`). So a stored `1.0` prints
+        // `100%` but a stored `0.0` prints `10%`, never `0%` — chat text is
+        // never fully transparent in vanilla. Transcribing this as a plain
+        // percent would be wrong at every value but `1.0`.
+        LiveOption::ChatOpacity => percent_value(options.chat_opacity * 0.9 + 0.1),
+        // Plain `Options::percentValueLabel` (`Options.java:305-312`).
+        LiveOption::TextBackgroundOpacity => percent_value(options.chat_background_opacity),
+        LiveOption::ChatColors => {
+            if options.chat_colors { "ON" } else { "OFF" }.to_string()
         }
     }
 }
@@ -845,27 +991,39 @@ static SOUND: &[Entry] = &[
 static CHAT: &[Entry] = &[
     pair(
         cycle("chatVisibility", "Chat"),
-        cycle("chatColors", "Colors"),
+        live_cycle("chatColors", "Colors", LiveOption::ChatColors),
     ),
     pair(
         cycle("chatLinks", "Web Links"),
         cycle("chatLinksPrompt", "Prompt on Links"),
     ),
     pair(
-        slider("chatOpacity", "Chat Text Opacity"),
-        slider("textBackgroundOpacity", "Text Background Opacity"),
+        live_slider("chatOpacity", "Chat Text Opacity", LiveOption::ChatOpacity),
+        live_slider(
+            "textBackgroundOpacity",
+            "Text Background Opacity",
+            LiveOption::TextBackgroundOpacity,
+        ),
     ),
     pair(
-        slider("chatScale", "Chat Text Size"),
-        slider("chatLineSpacing", "Line Spacing"),
+        live_slider("chatScale", "Chat Text Size", LiveOption::ChatScale),
+        live_slider("chatLineSpacing", "Line Spacing", LiveOption::ChatLineSpacing),
     ),
     pair(
         slider("chatDelay", "Chat Delay"),
-        slider("chatWidth", "Width"),
+        live_slider("chatWidth", "Width", LiveOption::ChatWidth),
     ),
     pair(
-        slider("chatHeightFocused", "Focused Height"),
-        slider("chatHeightUnfocused", "Unfocused Height"),
+        live_slider(
+            "chatHeightFocused",
+            "Focused Height",
+            LiveOption::ChatHeightFocused,
+        ),
+        live_slider(
+            "chatHeightUnfocused",
+            "Unfocused Height",
+            LiveOption::ChatHeightUnfocused,
+        ),
     ),
     pair(
         cycle("narrator", "Narrator"),
@@ -902,14 +1060,18 @@ static ACCESSIBILITY: &[Entry] = &[
     ),
     pair(
         slider("menuBackgroundBlurriness", "Menu Background Blur"),
-        slider("textBackgroundOpacity", "Text Background Opacity"),
+        live_slider(
+            "textBackgroundOpacity",
+            "Text Background Opacity",
+            LiveOption::TextBackgroundOpacity,
+        ),
     ),
     pair(
         cycle("backgroundForChatOnly", "Text Background"),
-        slider("chatOpacity", "Chat Text Opacity"),
+        live_slider("chatOpacity", "Chat Text Opacity", LiveOption::ChatOpacity),
     ),
     pair(
-        slider("chatLineSpacing", "Line Spacing"),
+        live_slider("chatLineSpacing", "Line Spacing", LiveOption::ChatLineSpacing),
         slider("chatDelay", "Chat Delay"),
     ),
     pair(
@@ -2421,9 +2583,18 @@ mod tests {
             }
         }
         assert_eq!(total, 143);
-        // Seven *options* are live, in page order (`PAGES`) and then
-        // declaration order within each page — the persisted fields of
-        // `config::Options` besides `keybinds`.
+        // The live *options*, in page order (`PAGES`) and then declaration
+        // order within each page — the persisted fields of `config::Options`
+        // besides `keybinds`.
+        //
+        // **Three appear twice**, and that is vanilla's own shape rather than a
+        // duplicate row: `textBackgroundOpacity`, `chatOpacity` and
+        // `chatLineSpacing` are one `OptionInstance` each, placed on *both*
+        // `ChatOptionsScreen` and `AccessibilityOptionsScreen`
+        // (`Options.java:284-320`, and the two screens' own option arrays). Both
+        // rows drive the same `config::Options` field, so editing either moves
+        // the other's label too — which is why `LiveOption` is keyed by the
+        // option and not by the row.
         let live_options: Vec<LiveOption> = live
             .iter()
             .filter_map(|(_, cell)| match cell {
@@ -2440,11 +2611,26 @@ mod tests {
                 LiveOption::MouseWheelSensitivity,
                 LiveOption::InvertMouseX,
                 LiveOption::InvertMouseY,
+                // Chat page, in `ChatOptionsScreen.options` order.
+                LiveOption::ChatColors,
+                LiveOption::ChatOpacity,
+                LiveOption::TextBackgroundOpacity,
+                LiveOption::ChatScale,
+                LiveOption::ChatLineSpacing,
+                LiveOption::ChatWidth,
+                LiveOption::ChatHeightFocused,
+                LiveOption::ChatHeightUnfocused,
+                // Accessibility page: the three shared with Chat, then
+                // View Bobbing.
+                LiveOption::TextBackgroundOpacity,
+                LiveOption::ChatOpacity,
+                LiveOption::ChatLineSpacing,
                 LiveOption::ViewBobbing,
             ],
             "GUI Scale on Video; Sneak/Sprint toggle on Controls (#202); scroll \
-             sensitivity and both inverts on Mouse (#203); View Bobbing on \
-             Accessibility — and nothing else"
+             sensitivity and both inverts on Mouse (#203); the eight chat \
+             options on Chat with three of them repeated on Accessibility; \
+             View Bobbing on Accessibility — and nothing else"
         );
         // The control: an option we do not persist must report itself inactive,
         // and the detector must be able to tell the difference.
@@ -2457,7 +2643,8 @@ mod tests {
             live_cycle("guiScale", "GUI Scale", LiveOption::GuiScale).is_live(),
             "and the same predicate must answer true for one that is"
         );
-        // The count itself, not just the ratio's ingredients: 7 live options +
+        // The count itself, not just the ratio's ingredients: 18 live option
+        // *rows* (15 distinct options, three of them placed twice — see above) +
         // 9 Done buttons (one per page, always live) + 13 working nav buttons
         // (Skin/Sound/Video/Controls/Chat/Accessibility/**Language**/
         // **Telemetry**/**Resource Packs** from the root grid — issue #415
@@ -2465,7 +2652,7 @@ mod tests {
         // Controls -> Key Binds, and the root's own Online button, live
         // outside a world).
         // A change that adds or removes a live row anywhere must say so here.
-        assert_eq!(live.len(), 29, "outside a world: {live:?}");
+        assert_eq!(live.len(), 40, "outside a world: {live:?}");
     }
 
     /// The companion to [`the_disabled_majority_is_the_point_and_it_is_measured`]:
@@ -2487,8 +2674,8 @@ mod tests {
             .flat_map(|&p| all_controls(p, true))
             .filter(|c| c.is_live())
             .collect();
-        assert_eq!(outside.len(), 29);
-        assert_eq!(inside.len(), 28, "one fewer: the root's Online button");
+        assert_eq!(outside.len(), 40);
+        assert_eq!(inside.len(), 39, "one fewer: the root's Online button");
         assert!(
             outside.contains(&nav("Online...", SettingsPage::Online)),
             "outside a world the root links to Online"
@@ -2520,6 +2707,238 @@ mod tests {
             cycle("entityShadows", "Entity Shadows").label(&options),
             "Entity Shadows"
         );
+    }
+
+    /// Every chat option's label, predicted from vanilla's own stringifier and
+    /// asserted as an exact string.
+    ///
+    /// Each expectation originates outside this client: the pixel figures are
+    /// `ChatComponent.getWidth`/`getHeight` (`ChatComponent.java:416-426`), the
+    /// percentages are `Options.percentValueLabel`'s `(int)(value * 100.0)`
+    /// truncation (`Options.java:1971-1973`), and `chatScale`'s OFF branch is
+    /// `CommonComponents.optionStatus(caption, false)` (`Options.java:365`).
+    ///
+    /// The load-bearing row is `chatOpacity`, which is **affine**:
+    /// `percentValueLabel(caption, value * 0.9 + 0.1)` (`Options.java:287`). The
+    /// wrong-but-plausible transcription — a plain percent — agrees with the
+    /// correct one at `1.0` and nowhere else, so this pins two more values where
+    /// the two hypotheses differ by 10 and 5 percentage points. That is the
+    /// *magnitude* discrimination a direction-only assertion would miss.
+    #[test]
+    fn every_chat_options_label_is_vanillas_own_string() {
+        let mut o = crate::config::Options::default();
+
+        // Percent sliders. `chat_line_spacing`'s default is 0.0, and `0%` is a
+        // real value here rather than an OFF caption — vanilla gives
+        // `chatLineSpacing` a plain `percentValueLabel` with no OFF branch.
+        let spacing = live_slider("chatLineSpacing", "Line Spacing", LiveOption::ChatLineSpacing);
+        assert_eq!(spacing.label(&o), "Line Spacing: 0%");
+        o.chat_line_spacing = 0.25;
+        assert_eq!(spacing.label(&o), "Line Spacing: 25%");
+
+        let bg = live_slider(
+            "textBackgroundOpacity",
+            "Text Background Opacity",
+            LiveOption::TextBackgroundOpacity,
+        );
+        assert_eq!(bg.label(&o), "Text Background Opacity: 50%", "default 0.5");
+
+        // The affine one, and the whole reason this test asserts three values
+        // rather than one.
+        let opacity = live_slider("chatOpacity", "Chat Text Opacity", LiveOption::ChatOpacity);
+        assert_eq!(opacity.label(&o), "Chat Text Opacity: 100%", "1.0 -> 100%");
+        o.chat_opacity = 0.0;
+        assert_eq!(
+            opacity.label(&o),
+            "Chat Text Opacity: 10%",
+            "0.0 -> 10%, NOT 0%: vanilla's chat text is never fully transparent. \
+             A plain-percent transcription would say 0% here"
+        );
+        o.chat_opacity = 0.5;
+        assert_eq!(
+            opacity.label(&o),
+            "Chat Text Opacity: 55%",
+            "0.5 -> 55%, not 50% — the affine map again"
+        );
+
+        // `chatScale`, the one chat slider with an OFF caption.
+        let scale = live_slider("chatScale", "Chat Text Size", LiveOption::ChatScale);
+        assert_eq!(scale.label(&o), "Chat Text Size: 100%");
+        o.chat_scale = 0.0;
+        assert_eq!(
+            scale.label(&o),
+            "Chat Text Size: OFF",
+            "`optionStatus(caption, false)`, not `0%`"
+        );
+
+        // The pixel sliders. 40..=320 for width, 20..=180 for both heights.
+        let width = live_slider("chatWidth", "Width", LiveOption::ChatWidth);
+        assert_eq!(width.label(&o), "Width: 320px", "1.0 -> floor(280 + 40)");
+        o.chat_width = 0.0;
+        assert_eq!(width.label(&o), "Width: 40px");
+        o.chat_width = 0.5;
+        assert_eq!(width.label(&o), "Width: 180px", "floor(140 + 40)");
+
+        let focused = live_slider(
+            "chatHeightFocused",
+            "Focused Height",
+            LiveOption::ChatHeightFocused,
+        );
+        assert_eq!(focused.label(&o), "Focused Height: 180px", "1.0 -> 160 + 20");
+        let unfocused = live_slider(
+            "chatHeightUnfocused",
+            "Unfocused Height",
+            LiveOption::ChatHeightUnfocused,
+        );
+        assert_eq!(
+            unfocused.label(&o),
+            "Unfocused Height: 90px",
+            "`defaultUnfocusedPct() == 70/160 == 0.4375` -> floor(70 + 20)"
+        );
+
+        // The one cycle among them.
+        let colors = live_cycle("chatColors", "Colors", LiveOption::ChatColors);
+        assert_eq!(colors.label(&o), "Colors: ON", "vanilla's default is true");
+        o.chat_colors = false;
+        assert_eq!(colors.label(&o), "Colors: OFF");
+    }
+
+    /// A live `UnitDouble` slider's handle must sit at the **persisted** value,
+    /// not at the frozen boot default in [`UNIT_DOUBLE_DEFAULTS`].
+    ///
+    /// This is the assertion that separates a wired slider from a decorative
+    /// one. Before the chat options were live, `slider_fraction` fell through to
+    /// the default table for all of them, so the handle was pinned at vanilla's
+    /// boot value forever — a control that moved the chat and then lied about
+    /// its own state. The two hypotheses differ by construction here: the stored
+    /// value is set to something that is *not* the default.
+    #[test]
+    fn a_live_unit_double_sliders_handle_tracks_the_stored_value() {
+        let mut o = crate::config::Options::default();
+        let width = live_slider("chatWidth", "Width", LiveOption::ChatWidth);
+
+        // `UnitDouble.toSliderValue` is the identity, so the fraction *is* the
+        // value — no range to port, which is why this needed no part of #424.
+        assert_eq!(width.slider_fraction(&o), Some(1.0), "the default, 1.0");
+        o.chat_width = 0.3;
+        assert_eq!(
+            width.slider_fraction(&o),
+            Some(0.3),
+            "the handle must follow the stored value; the frozen default (1.0) \
+             is the wrong-hypothesis value this distinguishes from"
+        );
+
+        // The control: an **inactive** UnitDouble slider still falls through to
+        // the default table, so the mechanism above is a live-value lookup and
+        // not "slider_fraction now returns whatever it is handed".
+        let master = slider("soundSource.master", "Master Volume");
+        o.chat_width = 0.0;
+        assert_eq!(
+            master.slider_fraction(&o),
+            Some(1.0),
+            "an inactive slider keeps vanilla's boot default"
+        );
+
+        // And a corrupt on-disk value must be clamped onto the track rather
+        // than drawing a handle off the widget.
+        o.chat_width = 7.5;
+        assert_eq!(width.slider_fraction(&o), Some(1.0));
+        o.chat_width = -3.0;
+        assert_eq!(width.slider_fraction(&o), Some(0.0));
+    }
+
+    /// Every [`LiveOption`] must be placed on some page — the island check in
+    /// the *outbound* direction.
+    ///
+    /// The census test above catches a row that claims to be live without a
+    /// consumer. This catches the mirror image: an option wired all the way
+    /// through `config::Options` and `MenuNav::apply_settings` that no row on any
+    /// page actually offers, so a player can never reach it. Both directions have
+    /// happened in this repo; a `LiveOption` is cheap to add and easy to forget
+    /// to place.
+    #[test]
+    fn every_live_option_is_reachable_from_some_row() {
+        const ALL: &[LiveOption] = &[
+            LiveOption::GuiScale,
+            LiveOption::ViewBobbing,
+            LiveOption::ToggleSneak,
+            LiveOption::ToggleSprint,
+            LiveOption::InvertMouseX,
+            LiveOption::InvertMouseY,
+            LiveOption::MouseWheelSensitivity,
+            LiveOption::ChatScale,
+            LiveOption::ChatWidth,
+            LiveOption::ChatHeightFocused,
+            LiveOption::ChatHeightUnfocused,
+            LiveOption::ChatLineSpacing,
+            LiveOption::ChatOpacity,
+            LiveOption::TextBackgroundOpacity,
+            LiveOption::ChatColors,
+        ];
+        let placed: Vec<LiveOption> = PAGES
+            .iter()
+            .flat_map(|&p| all_controls(p, OUTSIDE_A_WORLD))
+            .filter_map(|c| match c {
+                Cell::Option(spec) => spec.live,
+                _ => None,
+            })
+            .collect();
+        for live in ALL {
+            assert!(
+                placed.contains(live),
+                "{live:?} is honoured by `MenuNav` but sits on no page — no \
+                 player can reach it"
+            );
+        }
+        // The control: `ALL` must itself be exhaustive over the enum. A `match`
+        // with no wildcard makes the compiler enforce that, so adding a variant
+        // and forgetting this list is a build error rather than a silent gap.
+        for live in ALL {
+            match live {
+                LiveOption::GuiScale
+                | LiveOption::ViewBobbing
+                | LiveOption::ToggleSneak
+                | LiveOption::ToggleSprint
+                | LiveOption::InvertMouseX
+                | LiveOption::InvertMouseY
+                | LiveOption::MouseWheelSensitivity
+                | LiveOption::ChatScale
+                | LiveOption::ChatWidth
+                | LiveOption::ChatHeightFocused
+                | LiveOption::ChatHeightUnfocused
+                | LiveOption::ChatLineSpacing
+                | LiveOption::ChatOpacity
+                | LiveOption::TextBackgroundOpacity
+                | LiveOption::ChatColors => {}
+            }
+        }
+        assert_eq!(ALL.len(), 15, "fifteen distinct live options");
+    }
+
+    /// [`crate::config::step_unit_double`]'s wrap, including the two places it
+    /// is easy to get wrong: `1.0` must be a *reachable resting* value rather
+    /// than skipped, and a value off the `0.1` grid must stay off it.
+    #[test]
+    fn stepping_a_unit_double_wraps_at_the_top_and_never_snaps_to_a_grid() {
+        use crate::config::step_unit_double;
+        assert_eq!(step_unit_double(0.0, 1), 0.1);
+        assert_eq!(step_unit_double(0.9, 1), 1.0, "1.0 must be reachable");
+        assert_eq!(step_unit_double(1.0, 1), 0.0, "and then wrap to the bottom");
+
+        // `chat_height_unfocused` boots at 70/160 = 0.4375, which is not on the
+        // 0.1 grid. Snapping would silently move a value the user never touched;
+        // the step must stay additive.
+        let off_grid = 70.0_f32 / 160.0;
+        let stepped = step_unit_double(off_grid, 1);
+        assert!(
+            (stepped - 0.5375).abs() < 1e-6,
+            "expected 0.5375 (additive), got {stepped} — a snap-to-grid \
+             implementation would give 0.5"
+        );
+
+        // A corrupt or hand-edited value is pulled back onto the domain.
+        assert_eq!(step_unit_double(f32::NAN, 1), 0.1);
+        assert_eq!(step_unit_double(99.0, 1), 0.0, "clamped to 1.0, then wraps");
     }
 
     #[test]

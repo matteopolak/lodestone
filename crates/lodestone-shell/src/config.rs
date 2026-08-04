@@ -73,6 +73,48 @@ pub const MAX_MOUSE_WHEEL_SENSITIVITY: f32 = 10.0;
 /// or hundreds.
 pub const MOUSE_WHEEL_SENSITIVITY_STEP: f32 = 0.25;
 
+/// The step one settings-row click moves an `OptionInstance.UnitDouble` option
+/// by — every chat and text-background option is one of these.
+///
+/// As with [`MOUSE_WHEEL_SENSITIVITY_STEP`] this is not vanilla's own
+/// granularity: `UnitDouble` is a *drag*, continuous over `[0, 1]`, and this
+/// client's settings rows activate as a click rather than a drag (see
+/// `menu::options::SettingsOutcome::Cycle`). `0.1` is chosen to match the
+/// granularity vanilla's own `percentValueLabel` displays — it prints
+/// `(int)(value * 100)`, so a tenth is a visible 10-percentage-point move and
+/// the whole range is ten clicks.
+pub const UNIT_DOUBLE_STEP: f32 = 0.1;
+
+/// Advances a `UnitDouble` option one click, wrapping past the top back to `0`.
+///
+/// Additive on the **continuous** value rather than a round-trip through a
+/// quantized step index, for exactly the reason
+/// `MenuNav::cycle_mouse_wheel_sensitivity` documents: `chat_height_unfocused`
+/// boots at `70.0 / 160.0 = 0.4375`, which is not a multiple of
+/// [`UNIT_DOUBLE_STEP`] away from `0.0`, so snapping to the nearest grid point
+/// would silently move a value the user never touched.
+///
+/// The period is `1.0 + step` rather than `1.0` so that `1.0` is a *reachable,
+/// resting* value instead of being skipped straight to `0.0` — the same shape
+/// (and the same reason) as the mouse-wheel wrap.
+///
+/// A non-finite or out-of-range input is pulled back into `[0, 1]` rather than
+/// propagated: `options.json` is hand-editable, and a corrupt value must not
+/// put a slider handle off its track.
+#[must_use]
+pub fn step_unit_double(value: f32, delta: i32) -> f32 {
+    let base = if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let period = 1.0 + UNIT_DOUBLE_STEP;
+    let wrapped = (base + delta as f32 * UNIT_DOUBLE_STEP).rem_euclid(period);
+    // `rem_euclid` can land in `(1.0, 1.1)` — the deliberate rest-at-max
+    // window above — so clamp rather than let a handle draw off the track.
+    wrapped.clamp(0.0, 1.0)
+}
+
 /// Reproduces `Window.calculateScale(maxScale, enforceUnicode)`
 /// (`.cache/mc/26.2/client-src/com/mojang/blaze3d/platform/Window.java:445-463`)
 /// exactly, **minus** the legacy `enforceUnicode` even-scale rounding:

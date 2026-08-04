@@ -4002,6 +4002,169 @@ mod tests {
         assert_eq!(nav.options_save_error(), None);
     }
 
+    /// The chat options' **consumed effect**, end to end: clicking the Width
+    /// row on the Chat screen must move the pixel width of the chat box the HUD
+    /// actually draws, to a number predicted from vanilla's own algebra.
+    ///
+    /// This is deliberately not a read-back of what was written. Before this
+    /// wiring the eight chat fields were persisted, `app.rs` already copied
+    /// them into `hud_frame.chat_options`, and `hud.rs` already had magnitude
+    /// gates proving the draw honours them — and the rows were drawn **greyed**,
+    /// so the whole chain reached zero pixels for want of a control. A test that
+    /// asserted `options.chat_width == 0.1` would have passed on that dead
+    /// version just as well; only driving the real widget and then measuring the
+    /// real geometry can tell the difference.
+    ///
+    /// The predicted numbers come from outside this client:
+    /// `ChatComponent.getWidth(pct) = floor(pct * 280 + 40)`
+    /// (`ChatComponent.java:416-420`), so `1.0` is 320px and `0.0` is 40px, and
+    /// `step_unit_double` wraps `1.0` straight to `0.0` — a 280px move on the
+    /// very first click, which no rounding could fake.
+    #[test]
+    fn clicking_the_chat_width_row_resizes_the_chat_box_the_hud_draws() {
+        use crate::hud::{ChatDisplayOptions, DebugStats, HudFrame, HudGeometry};
+
+        // `logical_canvas(AUTO_GUI_SCALE, 640, 480) == (320, 240)`, so the
+        // logical canvas is 320px wide and `b.w == 320` — the same canvas the
+        // `hud.rs` width gate uses, and the reason a 320px box exactly fills it.
+        const CANVAS_W: f32 = 320.0;
+        let stats = DebugStats::default();
+        let chat = [("hi", 0.0_f32)];
+
+        // Vanilla's own `getWidth`, recomputed here from the published formula
+        // rather than by calling this client's `chat_width_px` — so a shared
+        // bug in that helper could not cancel itself out.
+        let expect_px = |pct: f32| (f64::from(pct) * 280.0 + 40.0).floor() as f32;
+        // The box width the HUD really draws, read back out of the vertex
+        // buffer: row 0's background starts at `x == 0`, so its second vertex's
+        // NDC x is `2 * w / b.w - 1` (`verts[6]`, as the `hud.rs` gate does).
+        let drawn_px = |opts: &Options| {
+            let geo = HudGeometry::build(
+                &HudFrame {
+                    crosshair: false,
+                    show_debug: false,
+                    chat: &chat,
+                    chat_options: ChatDisplayOptions {
+                        width_pct: opts.chat_width,
+                        ..ChatDisplayOptions::default()
+                    },
+                    ..HudFrame::new(&stats)
+                },
+                640,
+                480,
+            );
+            (geo.verts[6] + 1.0) * CANVAS_W / 2.0
+        };
+
+        let (mut nav, _path) = self::nav("settings-chat-width-consumed");
+        let mut ui = UiState::new();
+        ui.open_settings();
+        open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::Chat);
+        let row = settings_row(&mut nav, &mut ui, is_option("chatWidth"));
+
+        // Precondition, stated as a real assertion: vanilla's default is 1.0,
+        // i.e. a box that fills the 320px canvas.
+        assert_eq!(nav.options().chat_width, 1.0);
+        assert!(
+            (drawn_px(nav.options()) - 320.0).abs() < 1e-3,
+            "premise: the default must draw a 320px box, got {}",
+            drawn_px(nav.options())
+        );
+
+        // Click 1: `1.0` steps past the top and wraps to `0.0` → 40px.
+        // A 280px collapse is far outside any tolerance.
+        assert_eq!(nav.click(&mut ui, row), MenuAction::None);
+        assert_eq!(nav.options().chat_width, 0.0, "1.0 + 0.1 wraps to 0.0");
+        assert!(
+            (drawn_px(nav.options()) - expect_px(0.0)).abs() < 1e-3,
+            "expected {}px, the HUD drew {}px",
+            expect_px(0.0),
+            drawn_px(nav.options())
+        );
+
+        // Clicks 2 and 3: 0.1 → 68px and 0.2 → 96px. `floor` makes these exact
+        // integers, so a predicate that merely checked "it went up" would pass
+        // on a wrong slope while these do not.
+        for (clicks, expected_pct, expected_px) in [(2, 0.1_f32, 68.0_f32), (3, 0.2, 96.0)] {
+            assert_eq!(nav.click(&mut ui, row), MenuAction::None);
+            let got = nav.options().chat_width;
+            assert!(
+                (got - expected_pct).abs() < 1e-6,
+                "click {clicks}: expected pct {expected_pct}, got {got}"
+            );
+            assert!(
+                (expect_px(expected_pct) - expected_px).abs() < 1e-6,
+                "the prediction itself must match vanilla's formula"
+            );
+            assert!(
+                (drawn_px(nav.options()) - expected_px).abs() < 1e-3,
+                "click {clicks}: expected a {expected_px}px box, the HUD drew {}px",
+                drawn_px(nav.options())
+            );
+        }
+
+        // The control that makes the positive assertions mean something: the row
+        // *beside* Width is `chatDelay`, which this client does not honour, so
+        // clicking it must leave the drawn box exactly where it is. Without this,
+        // "clicking Width changed the geometry" would pass on an implementation
+        // that moved the width on any click at all.
+        let before = drawn_px(nav.options());
+        let inert = settings_row(&mut nav, &mut ui, is_option("chatDelay"));
+        assert_ne!(inert, row, "premise: they are different rows");
+        assert_eq!(nav.click(&mut ui, inert), MenuAction::None);
+        assert!(
+            (drawn_px(nav.options()) - before).abs() < 1e-6,
+            "an inactive neighbour must not resize the chat box"
+        );
+        assert_eq!(nav.options_save_error(), None);
+    }
+
+    /// The anti-island control for every chat option: `app.rs` must still copy
+    /// all eight fields out of `nav.options()` into `hud_frame.chat_options`.
+    ///
+    /// The gate above drives the real widget and measures the real
+    /// `HudGeometry`, but it builds its `ChatDisplayOptions` itself — because
+    /// `app.rs` is the frame loop and a unit test cannot run it. So if that one
+    /// copy were deleted, the gate above would still pass while every chat
+    /// option silently stopped reaching the screen. That is precisely this
+    /// repo's dominant defect, and the seam is one grep wide, so it is checked
+    /// here by reading the source.
+    ///
+    /// This asserts the **field reads**, not a line number, so ordinary edits to
+    /// `app.rs` do not disturb it. If the copy legitimately moves elsewhere,
+    /// point this at the new home rather than deleting it.
+    #[test]
+    fn app_rs_still_threads_every_chat_option_into_the_hud_frame() {
+        let src = include_str!("../app.rs");
+        assert!(
+            src.contains("hud_frame.chat_options"),
+            "app.rs must still populate `hud_frame.chat_options`"
+        );
+        for field in [
+            "chat_scale",
+            "chat_width",
+            "chat_height_unfocused",
+            "chat_height_focused",
+            "chat_line_spacing",
+            "chat_opacity",
+            "chat_background_opacity",
+            "chat_colors",
+        ] {
+            assert!(
+                src.contains(&format!("chat_opts.{field}")),
+                "app.rs no longer reads `chat_opts.{field}` — the settings row for \
+                 it is now an island, and no other test in this crate can see that"
+            );
+        }
+        // The control: the detector must be able to report an absence. A field
+        // that does not exist must fail the same `contains` check, so a typo in
+        // the list above cannot make this vacuously green.
+        assert!(
+            !src.contains("chat_opts.chat_nonexistent_field"),
+            "the detector must not match a field that is not there"
+        );
+    }
+
     /// Issue #391. A **click** on the settings screen must act on the row it
     /// landed on, not on whatever `MenuKey::Enter` means there.
     ///
