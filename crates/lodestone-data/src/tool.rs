@@ -35,14 +35,38 @@
 //! items) still overrides the prototype — [`ToolPatch::Set`] — and is evaluated
 //! by exactly the same code path, so the two cannot drift.
 //!
-//! # Known gap: datapack-retagged blocks
+//! # Datapack-retagged blocks (issue #296)
 //!
-//! Block tags are *synced* to the client (`update_tags`), and this build does
-//! not decode that packet, so [`block_tag_members`] answers from the vanilla
-//! census. A datapack that moves a block between `mineable/*` tags will mine at
-//! the vanilla rate here. When `update_tags` is decoded, override this table at
-//! [`block_tag_members`] — it is the single lookup every rule match goes
-//! through.
+//! Block tags are *synced* to the client (`update_tags`), decoded in
+//! `crates/protocol/v770/src/adapter.rs` (`decode_update_tags`) for both the
+//! Configuration and Play states — vanilla sends the same wire shape in
+//! either. The decoded `minecraft:block` registry's tag map is installed here
+//! with [`set_block_tag_overrides`] and consulted by [`block_tag_members`],
+//! the single lookup every tool rule match goes through, so a server or
+//! datapack that moves a block between `mineable/*` tags mines at the
+//! server's rate rather than the vanilla census's.
+//!
+//! The override is process-wide, not per-connection: this crate is
+//! version-free and has no notion of "a connection" (see the module docs
+//! above), and — more to the point — the query surface that reads game data
+//! ([`VersionAdapter::tool_mining`](lodestone_model::VersionAdapter::tool_mining))
+//! is reached through *whichever* adapter instance a caller holds, which for
+//! `lodestone-shell`'s collision/mining code is a process-wide default
+//! resolved once (`inferred_version_data`), not the same instance that
+//! decoded the live session's packets. A global table is therefore the only
+//! way a decoded override actually reaches that caller; storing it on the
+//! packet-handling adapter instead would be correct data with no reader.
+//!
+//! Vanilla resends the *complete* non-empty tag set on every `update_tags`,
+//! never a delta (`TagNetworkSerialization.serializeTagsToNetwork` walks every
+//! registry from scratch), so [`set_block_tag_overrides`] replaces the whole
+//! table rather than merging into it, and a tag absent from a decoded update
+//! is absent for real — see that function's own doc for why lookups do not
+//! fall back to the vanilla census once an override is installed.
+
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::sync::{OnceLock, RwLock};
 
 use lodestone_model::{ItemStack, ToolBlocks, ToolMining, ToolPatch, ToolRule};
 
@@ -103,18 +127,51 @@ pub fn block_registry_id(state_id: u32) -> Option<u16> {
         .copied()
 }
 
+/// The process-wide `update_tags` override for [`block_tag_members`]
+/// (issue #296). `None` — the initial state — means no `update_tags` for the
+/// `minecraft:block` registry has been decoded yet, so every lookup answers
+/// from the vanilla census exactly as before this existed.
+static BLOCK_TAG_OVERRIDES: OnceLock<RwLock<Option<HashMap<String, Vec<u16>>>>> = OnceLock::new();
+
+fn block_tag_overrides() -> &'static RwLock<Option<HashMap<String, Vec<u16>>>> {
+    BLOCK_TAG_OVERRIDES.get_or_init(|| RwLock::new(None))
+}
+
+/// Installs `tags` (tag name, without the leading `#`, to sorted
+/// `minecraft:block` registry ids) as the complete `update_tags` override for
+/// [`block_tag_members`]'s `minecraft:block` registry lookups, replacing
+/// whatever the previous `update_tags` — or nothing — had installed.
+///
+/// Called from `crates/protocol/v770/src/adapter.rs`'s `decode_update_tags`
+/// once per decoded packet that names the `minecraft:block` registry; see the
+/// module docs for why the replacement is whole-table and process-wide.
+pub fn set_block_tag_overrides(tags: HashMap<String, Vec<u16>>) {
+    if let Ok(mut guard) = block_tag_overrides().write() {
+        *guard = Some(tags);
+    }
+}
+
 /// The member blocks of `tag` (for example `minecraft:mineable/pickaxe`) as
-/// **sorted** `minecraft:block` registry ids, or `None` if this version's census
+/// **sorted** `minecraft:block` registry ids, or `None` if this version's
+/// census — or, once one has been decoded, the server's own `update_tags` —
 /// has no such block tag.
 ///
 /// The name is written without the leading `#`, exactly as the wire and
-/// `TagKey.location()` write it.
+/// `TagKey.location()` write it. Once [`set_block_tag_overrides`] has
+/// installed a table, it answers *every* lookup — including a `None` for a
+/// tag the vanilla census has but the override does not, since vanilla only
+/// omits a tag from `update_tags` when it is genuinely empty on that server.
 #[must_use]
-pub fn block_tag_members(tag: &str) -> Option<&'static [u16]> {
+pub fn block_tag_members(tag: &str) -> Option<std::borrow::Cow<'static, [u16]>> {
+    if let Ok(guard) = block_tag_overrides().read() {
+        if let Some(overrides) = guard.as_ref() {
+            return overrides.get(tag).map(|members| Cow::Owned(members.clone()));
+        }
+    }
     generated::BLOCK_TAGS
         .binary_search_by_key(&tag, |&(name, _)| name)
         .ok()
-        .map(|index| generated::BLOCK_TAGS[index].1)
+        .map(|index| Cow::Borrowed(generated::BLOCK_TAGS[index].1))
 }
 
 /// The built-in `minecraft:tool` prototype of `item` (for example
