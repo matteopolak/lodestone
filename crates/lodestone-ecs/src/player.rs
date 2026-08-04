@@ -265,9 +265,22 @@ pub struct WasJumping(pub bool);
 
 /// Selected hotbar slot in `0..9`.
 ///
-/// Owned locally: the selection is an input the player drives (number keys,
-/// scroll wheel) and merely *echoed* to the server, so unlike health or
-/// experience there is no server-authoritative value to fold.
+/// Mostly owned locally: the usual write is the player's own input (number
+/// keys, scroll wheel — `lodestone_shell::sim::Sim::select_slot`/`cycle_slot`),
+/// which echoes the change to the server rather than waiting for it.
+///
+/// **But the server can override it too.** `ClientEvent::HeldSlotChanged`
+/// (`ClientboundSetCarriedItemPacket`, e.g. `/item`, or creative-mode pickup
+/// into a specific slot) is a second, genuinely server-authoritative writer,
+/// folded by [`crate::session::apply_local_player_state`] — this component
+/// used to say there was "no server-authoritative value to fold" for exactly
+/// this event, and that was the island: the fold was real
+/// (`lodestone_game::player_state::HudState::select_slot`) and unit-tested,
+/// and nothing fed it. The two writers do not race in practice: one runs off
+/// local input in `lodestone-shell`, the other off `NetIngest`, and there is
+/// no ordering between them because nothing needs one — a real server
+/// override always lands as its own tick's event, not concurrently with a
+/// keypress the same tick.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SelectedSlot(pub usize);
 

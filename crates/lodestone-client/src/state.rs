@@ -1147,6 +1147,83 @@ fn entity_view(entity: lodestone_ecs::ecs::world::EntityRef<'_>) -> Option<Entit
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lodestone_ecs::player::SelectedSlot;
+    use lodestone_ecs::session::{ServerDifficulty, SessionBlockDestruction};
+    use lodestone_model::Difficulty;
+
+    /// **The real path, not the fold called directly and not the `NetIngest`
+    /// schedule run by hand.** `SharedState::apply` is the exact method the
+    /// driver calls for every decoded packet, so this exercises `route()` and
+    /// the fold *together* — `lodestone_ecs::session`'s own tests push
+    /// straight onto `IngestQueue`, bypassing `handles_event` entirely, so
+    /// they could not have caught a routing regression on their own. This is
+    /// one of the three `HudState`-shaped islands `docs/event-routing.md`
+    /// found: `DifficultyChanged` reached a real, unit-tested fold
+    /// (`HudState::apply`) that nothing called.
+    #[test]
+    fn apply_routes_difficulty_changed_through_the_real_path() {
+        let state = SharedState::default();
+        {
+            let ecs = state.ecs.read();
+            assert_eq!(
+                ecs.get::<ServerDifficulty>(state.session).unwrap().0,
+                None,
+                "precondition: unreported before the first packet"
+            );
+        }
+        state.apply(&ClientEvent::DifficultyChanged {
+            difficulty: Difficulty::Hard,
+            locked: true,
+        });
+        let ecs = state.ecs.read();
+        assert_eq!(
+            ecs.get::<ServerDifficulty>(state.session).unwrap().0,
+            Some((Difficulty::Hard, true)),
+            "DifficultyChanged must reach ServerDifficulty through the real \
+             SharedState::apply path, not just through a hand-run schedule"
+        );
+    }
+
+    /// The second: `BlockDestruction` reached
+    /// `lodestone_game::mining::BlockDestructionOverlays::apply`, unit-tested
+    /// and consumed nowhere outside its own file.
+    #[test]
+    fn apply_routes_block_destruction_through_the_real_path() {
+        let state = SharedState::default();
+        let pos = BlockPos::new(4, 70, 4);
+        state.apply(&ClientEvent::BlockDestruction {
+            entity_id: 9,
+            pos,
+            progress: 6,
+        });
+        let ecs = state.ecs.read();
+        assert_eq!(
+            ecs.get::<SessionBlockDestruction>(state.session)
+                .unwrap()
+                .0
+                .stage_at(pos),
+            Some(6)
+        );
+    }
+
+    /// The third: `HeldSlotChanged` reached `HudState::select_slot`, unit-tested
+    /// and consumed nowhere. `SelectedSlot` is inserted here by hand (the real
+    /// client carries it via `spawn_local_player`, which this bare
+    /// `SharedState::default` harness does not run) to prove the write side of
+    /// the real path; `lodestone_shell::sim::Sim::selected_slot` is the
+    /// existing pixel-facing reader — `app.rs`'s hotbar highlight already
+    /// calls it, so wiring the fold is the whole fix.
+    #[test]
+    fn apply_routes_held_slot_changed_through_the_real_path() {
+        let state = SharedState::default();
+        {
+            let mut ecs = state.ecs.write();
+            ecs.entity_mut(state.session).insert(SelectedSlot(0));
+        }
+        state.apply(&ClientEvent::HeldSlotChanged { slot: 4 });
+        let ecs = state.ecs.read();
+        assert_eq!(ecs.get::<SelectedSlot>(state.session).unwrap().0, 4);
+    }
 
     /// **Stage 4's authority test, on the client side.** The `ChunkWorld`
     /// resource in the client's ECS `World`, the handle `ClientHandle::chunk_world`

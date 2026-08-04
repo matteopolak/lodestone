@@ -172,10 +172,10 @@ pub use runner::Runner;
 pub use schedules::{Extract, GameTick, NetIngest, Update};
 pub use session::{
     Abilities, ActionBarOverlay, HudEffects, Phase, RespawnCount, Riding, ServerAlive,
-    ServerDimension, ServerEntityId, ServerGameMode, SessionBossBars, SessionChat,
-    SessionHudPlugin, SessionMenus, SessionPhase, SessionPlugin, SessionScoreboard, SessionSet,
-    SessionTabList, TitleOverlay, Vitals, Xp, insert_hud_components, insert_session_components,
-    spawn_session,
+    ServerDifficulty, ServerDimension, ServerEntityId, ServerGameMode, SessionBlockDestruction,
+    SessionBossBars, SessionChat, SessionHudPlugin, SessionMenus, SessionPhase, SessionPlugin,
+    SessionScoreboard, SessionSet, SessionTabList, TitleOverlay, Vitals, Xp,
+    insert_hud_components, insert_session_components, spawn_session,
 };
 pub use sets::{ExtractSet, FrameSet, IngestSet, TickSet};
 
