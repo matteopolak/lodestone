@@ -1,17 +1,20 @@
 //! [`VersionAdapter`] implementation driving the protocol 340 join flow.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use lodestone_core::{Ctx, Decode, Encode, Reader, Writer};
+use lodestone_data::block_entity_types::block_entity_type;
 use lodestone_model::{
     AdapterError, BlockActionKind, BlockFace, ChatKind, ChatMode, ChunkPos, ClientAction,
     ClientEvent, ClientSettings, ConnectionState, Directive, DisplayedSkinParts, EntityInteraction,
     EntityMovement, GameMode, Hand, LoginProfile, MainHand, PlayerCommand, RecipeBookType,
-    ResourcePackResponseKind, Rotation, ServerAddress, TeleportFlags, Text, Vec3, VersionAdapter,
-    WorldSink,
+    ResourcePackResponseKind, Rotation, SectionPos, ServerAddress, TeleportFlags, Text, Vec3,
+    VersionAdapter, WorldSink,
 };
 use lodestone_world::{ChunkPos as WorldChunkPos, Heightmaps, LoadedChunk};
 
+use crate::canonical::{self, FallbackTally};
 use crate::entity_types;
 use crate::packet_ids::{handshaking, login, play};
 use crate::packets::chunk::{ChunkShape, MapChunk, UnloadChunk};
@@ -633,6 +636,125 @@ impl V340Adapter {
                 entity_id,
                 head_yaw: unpack_degrees(packed),
             })]);
+        }
+        if packet_id == play::clientbound::BLOCK_CHANGE {
+            // A packed pre-1.14 `position` (see `crate::packets::position`,
+            // x/y/z big-endian, y in the middle) plus the changed block's
+            // legacy composite id as a VarInt — verified against
+            // minecraft-data's 1.12.2 `packet_block_change`. Unlike 26.2's
+            // `block_update` (a real 32,366-state registry id straight off the
+            // wire), 1.12.2's value is pre-Flattening: bits `4..` are the
+            // numeric block id, the low 4 bits are metadata
+            // (`(old_block_id << 4) | meta`, the same composite `chunk.rs`
+            // already extracts per paletted section entry). `canonical::
+            // resolve_or_air` bridges it to a real 26.2 block-state id via the
+            // table built against the real 1.13.2 server jar's own
+            // `DataFixerUpper` flattening fix (see `crate::canonical`'s module
+            // docs) — not this crate's own encoder, and not a formula.
+            let mut reader = Reader::new(payload);
+            let pos: Position = Position::decode(&mut reader, CTX).map_err(dec_err)?;
+            let raw = reader.var_i32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            let raw = u16::try_from(raw)
+                .ok()
+                .filter(|&raw| raw <= 0x0FFF)
+                .ok_or_else(|| {
+                    AdapterError::Decode(format!(
+                        "block_change composite id {raw} outside the 4095-slot legacy table"
+                    ))
+                })?;
+            let old_block_id = (raw >> 4) as u8;
+            let meta = (raw & 0xF) as u8;
+            let mut tally = FallbackTally::default();
+            let state = canonical::resolve_or_air(old_block_id, meta, &mut tally);
+            let pos = pos.0;
+            world.set_block(pos.x, pos.y, pos.z, state);
+            // Writing a state is what creates/removes a block entity in
+            // vanilla (`LevelChunk.setBlockState`, no packet involved) — the
+            // same #374 reasoning `lodestone-v770`'s `BLOCK_UPDATE` arm
+            // documents.
+            world.sync_block_entity(pos.x, pos.y, pos.z, block_entity_type(state));
+            return Ok(vec![Directive::Emit(ClientEvent::SectionBlocksChanged {
+                section: SectionPos::new(pos.x >> 4, pos.y >> 4, pos.z >> 4),
+                blocks: vec![[
+                    pos.x.rem_euclid(16) as u8,
+                    pos.y.rem_euclid(16) as u8,
+                    pos.z.rem_euclid(16) as u8,
+                ]],
+            })]);
+        }
+        if packet_id == play::clientbound::MULTI_BLOCK_CHANGE {
+            // Chunk X/Z (i32 each), then a VarInt-counted array of records —
+            // verified against minecraft-data's 1.12.2
+            // `packet_multi_block_change` (identical to 1.8's shape). Each
+            // record is `horizontalPos: u8` (high nibble relative X, low
+            // nibble relative Z — minecraft-data's `protocol.json` gives the
+            // field width but not this bit order; sourced from the
+            // long-stable external wire documentation for this exact packet,
+            // not from our own encoder, and flagged here as the one field in
+            // this pass not cross-checked against either the jar or a live
+            // capture), `y: u8` (full column height, unlike 26.2's
+            // section-relative nibble), then the same legacy composite VarInt
+            // `block_change` carries. 1.12.2 has no sections on the wire —
+            // ordinary full-height columns — so one packet's records can span
+            // several of `lodestone-world`'s 16-tall sections; each is
+            // resolved and written individually, then grouped by section so
+            // the emitted `SectionBlocksChanged` events match what a single
+            // `block_change` would have produced for the same cell.
+            let mut reader = Reader::new(payload);
+            let chunk_x = reader.i32().map_err(dec_err)?;
+            let chunk_z = reader.i32().map_err(dec_err)?;
+            let count = reader.var_i32().map_err(dec_err)?;
+            let count = usize::try_from(count).map_err(|_| {
+                AdapterError::Decode(format!("negative multi_block_change record count {count}"))
+            })?;
+            // A full-height 1.12.2 column holds at most 16*16*256 = 65536
+            // cells; cap the pre-allocation so a hostile count cannot force a
+            // large speculative allocation before the truncated body is
+            // rejected by the per-record reads below.
+            let mut by_section: HashMap<i32, Vec<[u8; 3]>> =
+                HashMap::with_capacity(count.min(16));
+            let mut tally = FallbackTally::default();
+            for _ in 0..count {
+                let horizontal = reader.u8().map_err(dec_err)?;
+                let y = i32::from(reader.u8().map_err(dec_err)?);
+                let raw = reader.var_i32().map_err(dec_err)?;
+                let raw = u16::try_from(raw)
+                    .ok()
+                    .filter(|&raw| raw <= 0x0FFF)
+                    .ok_or_else(|| {
+                        AdapterError::Decode(format!(
+                            "multi_block_change composite id {raw} outside the 4095-slot \
+                             legacy table"
+                        ))
+                    })?;
+                let old_block_id = (raw >> 4) as u8;
+                let meta = (raw & 0xF) as u8;
+                let state = canonical::resolve_or_air(old_block_id, meta, &mut tally);
+                let rel_x = i32::from(horizontal >> 4);
+                let rel_z = i32::from(horizontal & 0xF);
+                let x = chunk_x * 16 + rel_x;
+                let z = chunk_z * 16 + rel_z;
+                world.set_block(x, y, z, state);
+                world.sync_block_entity(x, y, z, block_entity_type(state));
+                by_section
+                    .entry(y >> 4)
+                    .or_default()
+                    .push([rel_x as u8, y.rem_euclid(16) as u8, rel_z as u8]);
+            }
+            reader.ensure_empty().map_err(dec_err)?;
+            if by_section.is_empty() {
+                return Ok(Vec::new());
+            }
+            return Ok(by_section
+                .into_iter()
+                .map(|(section_y, blocks)| {
+                    Directive::Emit(ClientEvent::SectionBlocksChanged {
+                        section: SectionPos::new(chunk_x, section_y, chunk_z),
+                        blocks,
+                    })
+                })
+                .collect());
         }
         // Everything else in play is intentionally ignored for now.
         Ok(Vec::new())
