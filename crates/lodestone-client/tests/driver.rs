@@ -33,6 +33,7 @@ struct FakeAdapter {
     respawn_resp_id: Option<i32>,
     player_loaded_resp_id: Option<i32>,
     brand_resp_id: Option<i32>,
+    pong_resp_id: Option<i32>,
     calls: Arc<Mutex<Vec<(ConnectionState, i32)>>>,
 }
 
@@ -40,6 +41,7 @@ const KEEPALIVE_RESP_ID: i32 = 0x30;
 const CHAT_ID: i32 = 0x06;
 const RESPAWN_RESP_ID: i32 = 0x0C;
 const CHAT_ACK_ID: i32 = 0x07;
+const PONG_RESP_ID: i32 = 0x0D;
 
 fn state_code(state: ConnectionState) -> u8 {
     match state {
@@ -83,6 +85,14 @@ impl FakeAdapter {
     /// automatic brand announcement is visible on the wire.
     fn brand_to(mut self, id: i32) -> Self {
         self.brand_resp_id = Some(id);
+        self
+    }
+
+    /// Makes `PongResponse` encode to an observable packet so the driver's
+    /// automatic reply to a server `Ping` challenge is visible on the wire;
+    /// without this it stays unrepresentable (`Ok(None)`).
+    fn pong_to(mut self, id: i32) -> Self {
+        self.pong_resp_id = Some(id);
         self
     }
 
@@ -178,6 +188,15 @@ impl VersionAdapter for FakeAdapter {
             ClientAction::SendBrand { brand } => Ok(self
                 .brand_resp_id
                 .map(|id| (id, brand.clone().into_bytes()))),
+            // Observable only when a test opts in via `pong_to`; the payload
+            // carries the encode-time state plus the echoed id so a test can
+            // prove both the state it was sent under and which challenge it
+            // answers.
+            ClientAction::PongResponse { id } => Ok(self.pong_resp_id.map(|resp_id| {
+                let mut payload = vec![state_code(state)];
+                payload.extend_from_slice(&id.to_be_bytes());
+                (resp_id, payload)
+            })),
             _ => Ok(None),
         }
     }
@@ -410,6 +429,68 @@ async fn keep_alive_manual_surfaces_but_writes_nothing() {
     // No response should ever arrive.
     let nothing = tokio::time::timeout(Duration::from_millis(100), peer.read_packet()).await;
     assert!(nothing.is_err(), "expected no packet in manual mode");
+
+    drop(handle);
+}
+
+/// A server `Ping` challenge (distinct from `KeepAlive`) is answered with
+/// `ClientAction::PongResponse` echoing the same id, unconditionally — vanilla's
+/// `ClientCommonPacketListenerImpl.handlePing` has no policy gate, unlike
+/// `handleKeepAlive`'s `sendWhen`. Before the driver had this arm, the event
+/// decoded and surfaced but nothing ever answered it: an outbound island of the
+/// same shape as `ClientAction::SetFlying`.
+#[tokio::test]
+async fn ping_auto_responds_and_surfaces() {
+    const PING: i32 = 0x51;
+    let adapter = FakeAdapter::new()
+        .pong_to(PONG_RESP_ID)
+        .on(
+            ConnectionState::Handshaking,
+            PING,
+            vec![Directive::Emit(ClientEvent::Ping { id: 7 })],
+        );
+
+    let (handle, mut events, mut peer) = start(adapter, KeepAlivePolicy::Automatic);
+
+    peer.write_packet(PING, &[]).await.unwrap();
+
+    let (id, payload) = peer.read_packet().await.unwrap().unwrap();
+    assert_eq!(id, PONG_RESP_ID);
+    assert_eq!(payload[0], state_code(ConnectionState::Handshaking));
+    assert_eq!(&payload[1..], &7i32.to_be_bytes());
+
+    assert_eq!(events.recv().await, Some(ClientEvent::Ping { id: 7 }));
+
+    drop(handle);
+}
+
+/// A `Ping` reply is unconditional — there is no policy that suppresses it the
+/// way `KeepAlivePolicy::Manual` suppresses the keep-alive response, matching
+/// vanilla's `handlePing` having no equivalent gate. Without the driver's arm
+/// in `Driver::emit`, this test would see no packet at all and the read below
+/// would hang (it has no timeout, unlike the manual-keep-alive test's, so a
+/// real neuter run needs a `tokio::time::timeout` wrapped around it first).
+#[tokio::test]
+async fn ping_answered_regardless_of_keep_alive_policy() {
+    const PING: i32 = 0x51;
+    let adapter = FakeAdapter::new()
+        .pong_to(PONG_RESP_ID)
+        .on(
+            ConnectionState::Handshaking,
+            PING,
+            vec![Directive::Emit(ClientEvent::Ping { id: 13 })],
+        );
+
+    // Manual keep-alive policy must not affect the ping reply.
+    let (handle, mut events, mut peer) = start(adapter, KeepAlivePolicy::Manual);
+
+    peer.write_packet(PING, &[]).await.unwrap();
+
+    let (id, payload) = peer.read_packet().await.unwrap().unwrap();
+    assert_eq!(id, PONG_RESP_ID);
+    assert_eq!(&payload[1..], &13i32.to_be_bytes());
+
+    assert_eq!(events.recv().await, Some(ClientEvent::Ping { id: 13 }));
 
     drop(handle);
 }

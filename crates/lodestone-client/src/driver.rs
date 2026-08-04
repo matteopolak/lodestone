@@ -498,6 +498,23 @@ impl<T: Transport> Driver<T> {
                     auto_actions.push(ClientAction::ChatAck { offset });
                 }
             }
+            // Vanilla answers a server-initiated ping challenge with a `pong`
+            // unconditionally, with no user-facing policy to suppress it —
+            // `ClientCommonPacketListenerImpl.handlePing` just calls
+            // `this.send(new ServerboundPongPacket(packet.getId()))`
+            // (`ClientCommonPacketListenerImpl.java:149-152`), unlike
+            // `handleKeepAlive` a few lines above it, which goes through
+            // `sendWhen` gated on `!RenderSystem.isFrozenAtPollEvents()`. That is
+            // why this arm is unconditional where `KeepAlive` above is gated on
+            // `self.keep_alive`. Before this arm existed, the packet decoded
+            // cleanly into `ClientEvent::Ping` and reached no consumer and no
+            // `ClientAction::PongResponse` producer, so the server never saw a
+            // reply — the same outbound-island shape `ClientAction::SetFlying`
+            // had (it was applied locally and never sent, so the server kicked
+            // us with `multiplayer.disconnect.flying`).
+            ClientEvent::Ping { id } => {
+                auto_actions.push(ClientAction::PongResponse { id: *id });
+            }
             ClientEvent::Login { .. } => {
                 // Entering the world arms the client-loaded signal; the first
                 // placement teleport that follows zeroes the server's
