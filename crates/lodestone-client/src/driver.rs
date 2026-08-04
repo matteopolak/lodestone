@@ -1,11 +1,10 @@
 //! The connection driver: executes adapter directives against a [`Connection`].
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use lodestone_game::chat_ack::{LastSeenTracker, MessageSignature};
 use lodestone_model::{
-    AdapterError, ClientAction, ClientEvent, ConnectionState, Directive, LoginProfile, ResourceKey,
+    AdapterError, ClientAction, ClientEvent, ConnectionState, Directive, LoginProfile,
     ServerAddress, VersionAdapter,
 };
 use lodestone_net::{Connection, NetError, Transport};
@@ -97,15 +96,6 @@ pub(crate) struct Driver<T: Transport> {
     /// to [`Driver::execute`] on the closing delimiter. See
     /// [`Driver::absorb_bundle`].
     bundle_buffer: Vec<Directive>,
-    /// Cookies this connection has been asked to persist, keyed by
-    /// [`lodestone_model::ClientEvent::CookieStored`]'s `key` (issue #291).
-    /// Consulted, never the network, on a matching
-    /// [`lodestone_model::ClientEvent::CookieRequested`] — see
-    /// [`Driver::execute`]'s `Directive::Emit` arm, which mirrors vanilla's
-    /// own `ClientCommonPacketListenerImpl.serverCookies`: an in-memory map
-    /// with no persistence and no UI, answered immediately with whatever is
-    /// on hand (or nothing).
-    cookies: HashMap<ResourceKey, Vec<u8>>,
 }
 
 /// The client brand announced on entering Configuration, matching vanilla's
@@ -154,7 +144,6 @@ impl<T: Transport> Driver<T> {
             http: reqwest::Client::new(),
             bundling: false,
             bundle_buffer: Vec::new(),
-            cookies: HashMap::new(),
         }
     }
 
@@ -552,9 +541,6 @@ impl<T: Transport> Driver<T> {
         // can produce more than one: a keep-alive both answers the heartbeat and
         // is the tick that flushes any pending chat acknowledgement.
         let mut auto_actions: Vec<ClientAction> = Vec::new();
-        // Set by `TransferRequested` below; checked after the event is
-        // forwarded so a caller still observes it before the session ends.
-        let mut transfer: Option<SessionOutcome> = None;
 
         match &event {
             ClientEvent::KeepAlive { id } => {
@@ -637,42 +623,6 @@ impl<T: Transport> Driver<T> {
                     auto_actions.push(ClientAction::ChatAck { offset });
                 }
             }
-            // Issue #291: vanilla's own client answers a cookie request
-            // immediately from its local `serverCookies` map
-            // (`ClientCommonPacketListenerImpl.handleRequestCookie`), with no
-            // UI and no player input — `None` when nothing was ever stored
-            // for this `key`, which the wire carries as a nullable payload
-            // rather than an error. Unconditional, like `Ping`/`Pong` above,
-            // not gated on any policy: there is no reason a caller would want
-            // to leave a `cookie_request` unanswered.
-            ClientEvent::CookieRequested { key } => {
-                let payload = self.cookies.get(key).cloned();
-                auto_actions.push(ClientAction::CookieResponse {
-                    key: key.clone(),
-                    payload,
-                });
-            }
-            // The write side of the same map: `store_cookie` populates it, a
-            // later `cookie_request` reads it back. No action to send here —
-            // vanilla's `handleStoreCookie` is a plain map insert.
-            ClientEvent::CookieStored { key, payload } => {
-                self.cookies.insert(key.clone(), payload.clone());
-            }
-            // Issue #291: this used to reach no consumer at all. Vanilla
-            // (`ClientPacketListener.handleTransfer`) tears the connection
-            // down and opens a new one to `host:port`, carrying its cookie
-            // store across (`TransferState`). The driver has no generic way
-            // to open a new transport from inside itself — see
-            // `SessionOutcome::Transferred`'s own doc for why — so this ends
-            // the session with everything the caller needs to reconnect: the
-            // target address and this session's collected cookies.
-            ClientEvent::TransferRequested { host, port } => {
-                transfer = Some(SessionOutcome::Transferred {
-                    host: host.clone(),
-                    port: *port,
-                    cookies: self.cookies.clone(),
-                });
-            }
             _ => {}
         }
 
@@ -702,9 +652,6 @@ impl<T: Transport> Driver<T> {
         // here.
         self.read_model.apply(&event);
         let _ = self.events.send(event).await;
-        if let Some(outcome) = transfer {
-            return Step::Stop(Box::new(outcome));
-        }
         Step::Continue
     }
 
