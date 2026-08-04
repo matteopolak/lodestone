@@ -57,8 +57,9 @@ one `ItemEntityRegistry` as fields (plus a small `HashMap` each of wire
 metadata — uuid and canonical entity-type key — since both registries stay
 deliberately version/wire-free, the same split `SimMob` already makes for
 mobs). `MobSim::tick()` calls `self.projectiles.tick()` and
-`self.items.tick()` every server tick, so `run_mob_tick_loop` — the same
-background task `IntegratedServer::open_in_memory_with_mobs` spawns for
+`self.items.tick()` every server tick, so the server's unified tick loop
+(`tick::run_tick_loop`, issue #284 — before that, `run_mob_tick_loop`) — the
+same background task `IntegratedServer::open_in_memory_with_mobs` spawns for
 singleplayer — advances both automatically, with no new task.
 
 ```text
@@ -72,7 +73,8 @@ MobSim::snapshots() -> Vec<EntitySnapshot>                 // mobs + projectiles
 MobSim::remove_projectile(id) / remove_item(id)             // impact / pickup
 ```
 
-`run_mob_tick_loop` publishes `sim.snapshots()` (not just `sim.iter().map(SimMob::snapshot)`)
+`tick::run_tick_loop` (previously `run_mob_tick_loop`) publishes
+`sim.snapshots()` (not just `sim.iter().map(SimMob::snapshot)`)
 to `LiveMobSource`, which is the part that actually gets a projectile or
 dropped item onto the same `add_entity`/`move_entity`/`remove_entity` wire
 path mobs already proved reaches a real client — ticking the registries

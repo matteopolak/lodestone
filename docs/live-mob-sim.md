@@ -20,15 +20,29 @@ IntegratedServer::open_in_memory_with_mobs(protocol, source, world_source, mob_a
   │  diffing `LiveMobSource::snapshots()` against what the connection last sent —
   │  this diff/encode/decode/client-fold chain already existed and was already
   │  proven live (tests/entity_streaming_live.rs), just never fed by a real sim.
-  └─ spawns a second task: mobs::run_mob_tick_loop(world_source, mob_area, mob_center, mob_count, out)
+  └─ spawns a second task: tick::run_tick_loop(mob_handle, live_mobs, block_entities, clock)
        ├─ ChunkWorld::from_source(world_source, ..) — a *second*, independent
        │  snapshot of the same deterministic terrain the connection streams
        │  (same seed ⇒ identical terrain; see the function's own doc comment
        │  for why two instances rather than one shared one)
        ├─ seed_demo_mobs(..) — spawns a small fixed zombie population with
        │  RandomStroll + RandomLookAround goals, once, at startup
-       └─ loop: tick.tick().await (50ms) → sim.tick() → out.publish(snapshots)
+       └─ loop: sleep_until(next_tick_at) (20Hz) → sim.tick() + block_entities.tick_all()
+                → out.publish(snapshots), recording MSPT/TPS/overrun on `clock`
 ```
+
+**Update (issue #284/#285):** this used to be `mobs::run_mob_tick_loop`, a
+loop that ticked only the mob sim; block entities got a second, independent
+loop (`block_entities::run_block_entity_tick_loop`) spawned alongside it. Both
+functions still exist and are still unit-tested directly, but
+`open_in_memory_with_mobs` now spawns `tick::run_tick_loop` instead — one loop
+that ticks both, instrumented with MSPT/TPS/overrun accounting. See
+[`docs/server-tick-loop.md`](server-tick-loop.md) for that loop's own design
+and every reference below to `run_mob_tick_loop` describing *current*
+production wiring should be read as "now `tick::run_tick_loop`" — left
+otherwise unedited below where it is still an accurate description of that
+function's own (still-real, still-tested, just no-longer-spawned-by-default)
+behavior.
 
 `LiveMobSource` is an `Arc<Mutex<Vec<EntitySnapshot>>>` behind `EntitySource`
 — the same shape `entity_streaming_live.rs`'s test-only `SharedSnapshotSource`

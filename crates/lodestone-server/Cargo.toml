@@ -32,6 +32,11 @@ lodestone-model = { path = "../lodestone-model" }
 lodestone-data = { path = "../lodestone-data" }
 thiserror = { workspace = true }
 serde_json = { workspace = true }
+# `tracing::warn!` in `tick::run_tick_loop`'s overload path (issue #285) — the
+# same crate `lodestone-net`/`lodestone-shell` already depend on for logging,
+# not a new logging framework. Plain macros, no I/O of its own, so no
+# wasm32-specific feature split is needed the way `tokio` above has one.
+tracing = { workspace = true }
 # Client-supplied login UUID is echoed back in the login-success reply; this is
 # a normal (not dev-only) dependency because `ServerBound::LoginStart` and
 # `ServerProtocol::login_success` carry a `Uuid` in production code, not just

@@ -659,6 +659,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   geometry: a `HeaderAndFooterLayout` title, 36 px list rows with a 32×32 favicon,
   wrapped MOTD and a status column, and seven footer buttons three of which are
   inactive when there is nothing selected.
+- [The server tick clock: MSPT/TPS accounting and overrun handling](./server-tick-loop.md) —
+  `crates/lodestone-server/src/tick.rs`: [`TickClock`]/[`TickStats`] plus
+  `run_tick_loop`, the single background task that advances world state (the mob
+  simulation and every registered block entity) at vanilla's 20Hz, whether or not a
+  client is connected. It replaces two separate background loops
+  (`mobs::run_mob_tick_loop`, `block_entities::run_block_entity_tick_loop`) that used
+  to be spawned side-by-side, and adds the accounting #285 asked for: ticks-run,
+  most-recent and rolling-average tick duration (MSPT), a derived TPS figure, and an
+  overrun counter for when the loop falls behind schedule.
 - [Session and HUD state as ECS components](./session-components.md) — The
   scoreboard, tab list, boss bars, menus, session phase, vitals, experience, the
   title/action-bar overlays, the HUD effect stack, the respawn counter and the

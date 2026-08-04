@@ -314,7 +314,8 @@ impl PlayerVitals {
     /// [`attack_target`](crate::SimMob::set_attack_target) at all —
     /// `crate::mobs`'s own module doc already scopes real player-targeting
     /// AI (`NearestAttackableTargetGoal`'s population search) as a separate,
-    /// larger feature, and `run_mob_tick_loop` has no player-position feed
+    /// larger feature, and the server's unified tick loop
+    /// (`crate::tick::run_tick_loop`, issue #284) has no player-position feed
     /// into the sim to begin with (`MobSim::despawn_pass`'s own "no despawn
     /// pass" scope note names the identical missing input). Wiring that is a
     /// materially larger change than this task's "reach a live mob's health

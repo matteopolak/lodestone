@@ -11,8 +11,9 @@
 //! the driver's own doc comment on `ProjectileRegistry`/`ItemEntityRegistry`.
 //!
 //! So every test here drives [`MobSim`] instead: the struct
-//! `run_mob_tick_loop` (`lodestone-server/src/mobs.rs`) constructs once per
-//! singleplayer session and ticks every 50ms in production
+//! `MobHandle::seeded` (`lodestone-server/src/mobs.rs`) constructs once per
+//! singleplayer session and `tick::run_tick_loop` (issue #284; previously
+//! `run_mob_tick_loop`) ticks it every 50ms in production
 //! (`IntegratedServer::open_in_memory_with_mobs`, the constructor
 //! `lodestone-shell`'s `net.rs` uses to start singleplayer). `MobSim::tick`
 //! now calls `self.projectiles.tick()` / `self.items.tick()` itself — these

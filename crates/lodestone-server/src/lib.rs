@@ -38,10 +38,14 @@
 //!   / `encode_entity_update` / `encode_remove_entity`) is a separate seam a
 //!   version crate implements, but as of issue #217 something in this crate
 //!   also *drives* it in production: [`IntegratedServer::open_in_memory_with_mobs`]
-//!   spawns a background task (`mobs::run_mob_tick_loop`) that owns a live
+//!   spawns a background task (`tick::run_tick_loop`, issue #284 — before that,
+//!   `mobs::run_mob_tick_loop`) that owns a live
 //!   `MobSim` and republishes its snapshots through [`LiveMobSource`], an
 //!   [`EntitySource`] the existing `serve_connection` streaming pass already
-//!   diffs against every connection reactively.
+//!   diffs against every connection reactively. The same loop also ticks
+//!   every registered block entity and tracks MSPT/TPS/overrun accounting
+//!   (issue #285) — see the `tick` module's own doc comment for the full
+//!   before/after picture of every timer this crate had.
 //! * [`PlayerVitals`] — the server-authoritative air-supply countdown and
 //!   drowning damage (issue #267). Player-only for now (see its own module
 //!   doc comment for why `MobSim` does not yet participate); ticked from
@@ -77,8 +81,10 @@
 //!   (placing a furnace/composter/hopper/brewing-stand item inserts a fresh
 //!   entry instead of always writing stone — the doc's second named gap);
 //!   [`IntegratedServer::open_in_memory_with_mobs`] spawns
-//!   `block_entities::run_block_entity_tick_loop` alongside the existing mob
-//!   tick task, so a furnace placed in a real singleplayer session actually
+//!   `tick::run_tick_loop`, which ticks block entities from the same unified
+//!   loop as the mob sim (issue #284 — before that, a second, separate
+//!   `block_entities::run_block_entity_tick_loop` task), so a furnace placed
+//!   in a real singleplayer session actually
 //!   ticks. The doc's third named gap (container packets so a client can
 //!   *see* inside one) is not closed by this landing; see that doc for the
 //!   current state.
@@ -106,6 +112,7 @@ mod mobs;
 mod protocol;
 mod server;
 mod spawn;
+mod tick;
 mod vitals;
 mod worldgen_data;
 
@@ -139,6 +146,7 @@ pub use mob_spawn::{
 pub use mobs::{AttackOutcome, ChunkWorld, LiveMobSource, MobHandle, MobSim, SimMob};
 pub use protocol::{EntitySnapshot, ServerBound, ServerDirective, ServerProtocol};
 pub use server::{EntitySource, NoEntities, ServeSummary, ServerError, serve_connection};
+pub use tick::{TickClock, TickStats};
 pub use vitals::{DROWN_DAMAGE, EYE_HEIGHT, MAX_AIR_SUPPLY, MAX_HEALTH, PlayerVitals, VitalsTick};
 pub use worldgen_data::{overworld_chunk_source, overworld_generator};
 

@@ -859,8 +859,9 @@ pub struct AttackOutcome {
 /// outside `lodestone-entity` returned nothing — both types were fully
 /// implemented and unit-tested but never constructed anywhere a real server
 /// tick could reach, so arrows and dropped items never advanced on this
-/// project's own server. `MobSim` is the same home `run_mob_tick_loop` already
-/// ticks every server tick for mobs, so folding these two in here (rather
+/// project's own server. `MobSim` is the same home the server's unified tick
+/// loop ([`crate::tick::run_tick_loop`], issue #284) already ticks every
+/// server tick for mobs, so folding these two in here (rather
 /// than a sibling `ProjectileSim`) means [`tick`](MobSim::tick) closes the gap
 /// with no new task, and [`snapshots`](MobSim::snapshots) puts every entity
 /// kind on the same wire path mobs already proved reaches a real client.
@@ -1493,8 +1494,9 @@ impl<'w> MobSim<'w> {
     /// lowered to the wire-facing [`EntitySnapshot`] the encode seam needs.
     ///
     /// This is the merged sibling of iterating [`iter`](Self::iter) alone:
-    /// [`run_mob_tick_loop`] publishes this (not just the mobs) to
-    /// [`LiveMobSource`], which is what actually gets a spawned projectile or
+    /// [`crate::tick::run_tick_loop`] (previously [`run_mob_tick_loop`])
+    /// publishes this (not just the mobs) to [`LiveMobSource`], which is what
+    /// actually gets a spawned projectile or
     /// dropped item onto the same `add_entity`/`move_entity`/`remove_entity`
     /// wire path mobs already proved reaches a real client
     /// (`entity_streaming_live.rs`) — without this, ticking the registries
@@ -1546,8 +1548,10 @@ fn dist_sqr(a: Vec3, b: Vec3) -> f64 {
 
 /// A live [`EntitySource`] fed by a background-ticked [`MobSim`] (issue
 /// #217). [`IntegratedServer::open_in_memory_with_mobs`](crate::IntegratedServer::open_in_memory_with_mobs)
-/// constructs one alongside [`run_mob_tick_loop`], the task that owns the sim
-/// and republishes its snapshots here every tick.
+/// constructs one alongside [`crate::tick::run_tick_loop`] (issue #284; this
+/// used to be [`run_mob_tick_loop`] before the mob and block-entity tick
+/// loops were unified into one), the task that owns the sim and republishes
+/// its snapshots here every tick.
 ///
 /// Deliberately the same shape as `entity_streaming_live.rs`'s own test-only
 /// `SharedSnapshotSource` (an `Arc<Mutex<Vec<EntitySnapshot>>>` behind
@@ -1567,10 +1571,15 @@ impl EntitySource for LiveMobSource {
 }
 
 impl LiveMobSource {
-    /// Replaces the published snapshot set. Called once per tick by
-    /// [`run_mob_tick_loop`]; the next `snapshots()` call from any connection
-    /// (there may be several, e.g. open-to-LAN) sees the new set.
-    fn publish(&self, snapshots: Vec<EntitySnapshot>) {
+    /// Replaces the published snapshot set. Called once per tick — in
+    /// production by [`crate::tick::run_tick_loop`] (issue #284; previously
+    /// [`run_mob_tick_loop`], before the two background tick loops were
+    /// unified into one), and directly by `run_mob_tick_loop`'s own test. The
+    /// next `snapshots()` call from any connection (there may be several,
+    /// e.g. open-to-LAN) sees the new set. `pub(crate)`, not private: the
+    /// unified loop lives in a sibling module (`tick.rs`) and needs to call
+    /// this directly rather than through a second wrapper.
+    pub(crate) fn publish(&self, snapshots: Vec<EntitySnapshot>) {
         *self.0.lock().expect("live mob snapshot lock poisoned") = snapshots;
     }
 }
@@ -1674,9 +1683,9 @@ impl MobHandle {
 impl EntitySource for MobHandle {
     /// A `MobHandle` is a legitimate [`EntitySource`] all on its own — no
     /// separate [`LiveMobSource`] cache required — for any caller that mutates
-    /// the sim directly and does not also need a background
-    /// [`run_mob_tick_loop`] republishing it on a timer. Production
-    /// (`IntegratedServer::open_in_memory_with_mobs`) still layers
+    /// the sim directly and does not also need a background tick loop
+    /// ([`crate::tick::run_tick_loop`], issue #284) republishing it on a
+    /// timer. Production (`IntegratedServer::open_in_memory_with_mobs`) still layers
     /// [`LiveMobSource`] on top so the tick loop's own AI motion reaches the
     /// wire on its own cadence; a test that only cares about a hand-placed,
     /// unticked mob (e.g. an attack test) can use the handle directly instead.
@@ -1731,6 +1740,21 @@ fn seed_demo_mobs(sim: &mut MobSim<'_>, center_x: i32, center_z: i32, count: usi
 /// `handle` once every [`MOB_TICK_INTERVAL`], forever, republishing snapshots
 /// to `out` after every tick.
 ///
+/// # Superseded as of issue #284 — no longer what production spawns
+///
+/// [`crate::IntegratedServer::open_in_memory_with_mobs`] used to spawn this
+/// function directly, side-by-side with
+/// [`crate::block_entities::run_block_entity_tick_loop`]. As of #284 it spawns
+/// [`crate::tick::run_tick_loop`] instead, which ticks both the mob sim and
+/// every block entity from **one** loop body instrumented with MSPT/TPS/
+/// overrun accounting (issue #285) — see that module's own doc comment for
+/// why one loop replaced two. This function still exists, still does exactly
+/// what its doc says, and is still exercised by its own test below; it is
+/// simply no longer the production driver. Kept rather than deleted because
+/// its test is a real, direct regression gate on `MobSim::tick` +
+/// `LiveMobSource::publish` composing correctly in isolation from block
+/// entities.
+///
 /// # Issue #12 update: `handle` is now shared, not owned
 ///
 /// This function used to build its own `ChunkWorld`/`MobSim` locally (borrowed
@@ -1767,6 +1791,11 @@ fn seed_demo_mobs(sim: &mut MobSim<'_>, center_x: i32, center_z: i32, count: usi
 /// therefore gets no live mob sim yet, exactly the same kind of documented gap
 /// `PlayerVitals` already has on that target.
 #[cfg(not(target_arch = "wasm32"))]
+// No caller left outside this file's own `#[cfg(test)]` module since #284
+// (see the "Superseded" section above) — the lib target genuinely has none,
+// so plain `dead_code` would fire there even though the function is real and
+// still tested.
+#[allow(dead_code)]
 pub(crate) async fn run_mob_tick_loop(handle: MobHandle, out: LiveMobSource) {
     // `snapshots()`, not `sim.iter().map(SimMob::snapshot)`: the latter only
     // ever lowered mobs, so a projectile or dropped item registered on this

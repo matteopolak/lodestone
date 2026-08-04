@@ -22,8 +22,8 @@
 use lodestone_core::{Reader, State, Writer};
 use lodestone_net::{Connection, memory_pair};
 use lodestone_server::{
-    BlockEntityHandle, ChunkColumn, ChunkSource, EntitySnapshot, EntitySource, MobHandle,
-    NoEntities, ServerBound, ServerDirective, ServerProtocol, WorldgenChunkSource,
+    BlockEntityHandle, ChunkColumn, ChunkSource, EntitySnapshot, EntitySource, IntegratedServer,
+    MobHandle, NoEntities, ServerBound, ServerDirective, ServerProtocol, WorldgenChunkSource,
     serve_connection,
 };
 use lodestone_worldgen::density::{Builder, Density, NoiseParams, Resolver};
@@ -551,4 +551,74 @@ async fn integrated_server_streams_entity_lifecycle_over_memory_transport() {
     let summary = server.await.expect("join");
     assert_eq!(summary.username, "SinglePlayer");
     println!("streamed pig lifecycle: spawn -> update -> remove over memory transport");
+}
+
+/// End-to-end proof that issue #284/#285's unified tick clock is not an
+/// island: `IntegratedServer::open_in_memory_with_mobs` — the exact
+/// constructor `lodestone-shell`'s `net.rs` calls to start singleplayer — is
+/// driven through its *public* API only (no `#[path]` shortcut into
+/// `tick.rs`'s own internals), and its `tick_stats()` accessor must report
+/// real, advancing counts.
+///
+/// `#[tokio::test(start_paused = true)]` makes this deterministic rather than
+/// wall-clock-dependent: `tokio::time::advance` drives the *same* virtual
+/// clock the spawned tick task's own `sleep_until` calls read, so 5 tick
+/// periods (250ms of virtual time) must produce exactly 5 ticks — not 4 (an
+/// off-by-one), not 6 (a burst), and `overrun_count` must stay 0 since
+/// nothing here ever falls behind. Predicted and measured are compared
+/// below, not just "it changed."
+#[tokio::test(start_paused = true)]
+async fn open_in_memory_with_mobs_advances_the_unified_clock_and_reports_stats() {
+    struct EmptyWorld;
+    impl ChunkSource for EmptyWorld {
+        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            ChunkColumn::new(0, 1)
+        }
+    }
+
+    let (server, _client_io) = IntegratedServer::open_in_memory_with_mobs(
+        FakeProtocol,
+        EmptyWorld,
+        EmptyWorld,
+        (0..=0, 0..=0),
+        (0, 0),
+        0, // mob_count: irrelevant to this test, which only checks the clock
+        0, // view_radius
+    );
+
+    // Every other constructor reports `None`; this is the one that starts a
+    // clock at all (`docs/server-tick-loop.md`).
+    let before = server
+        .tick_stats()
+        .expect("open_in_memory_with_mobs must start a TickClock");
+    assert_eq!(before.tick_count, 0, "no tick period has elapsed yet");
+
+    // Let the freshly spawned tick task reach its first `Instant::now()` call
+    // before advancing — see `tick.rs`'s own test module for why this is
+    // required (a spawned task is never polled synchronously), not
+    // defensive.
+    tokio::task::yield_now().await;
+
+    const TICK_PERIOD: std::time::Duration = std::time::Duration::from_millis(50);
+    for _ in 0..5 {
+        tokio::time::advance(TICK_PERIOD).await;
+    }
+    tokio::task::yield_now().await;
+
+    let after = server.tick_stats().expect("clock persists across ticks");
+    assert_eq!(
+        after.tick_count, 5,
+        "5 real tick periods must advance the public tick_stats() count by exactly 5"
+    );
+    assert_eq!(
+        after.overrun_count, 0,
+        "a healthy run observed through the public API must not record an overrun"
+    );
+    assert!(
+        after.tps > 0.0 && after.tps <= 20.0,
+        "tps must be a real, bounded figure, got {}",
+        after.tps
+    );
+
+    server.shutdown().await;
 }

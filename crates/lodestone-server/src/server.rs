@@ -622,8 +622,9 @@ fn container_state(
 /// This is the one piece of Job 1 with no client packet driving it at all:
 /// [`open_container_screen`] covers "a player opens a menu" and
 /// [`apply_container_clicked`] covers "a player clicks in one," but a
-/// furnace's own background tick (`crate::block_entities::run_block_entity_tick_loop`,
-/// running independently of any connection) is neither — see
+/// furnace's own background tick (`crate::tick::run_tick_loop`, issue #284 —
+/// previously `crate::block_entities::run_block_entity_tick_loop`, running
+/// independently of any connection) is neither — see
 /// `docs/block-entities.md`'s own note on this. A caller (`serve_play`'s
 /// `container_sync_tick` arm) is expected to call this on its own timer,
 /// passing a fresh read of the entity's current state each time; this
@@ -1121,8 +1122,8 @@ fn apply_container_clicked(
 /// one) to carry the result to every connection tracking the target: a
 /// knocked-back mob's new position/velocity, or its removal on a killing
 /// blow, both already flow through [`MobHandle`]'s [`EntitySource`] impl once
-/// `mobs` is the same handle [`crate::mobs::run_mob_tick_loop`] ticks and
-/// publishes from. See [`MobSim::attack`](crate::MobSim::attack)'s own doc
+/// `mobs` is the same handle [`crate::tick::run_tick_loop`] (issue #284) ticks
+/// and publishes from. See [`MobSim::attack`](crate::MobSim::attack)'s own doc
 /// comment for why `attacker_pos` (not a tracked player yaw — this crate
 /// tracks no player rotation at all) stands in for
 /// [`lodestone_physics::knockback::attack_direction`]'s real facing formula.
@@ -1506,11 +1507,10 @@ where
             }
 
             _ = container_sync_tick.tick() => {
-                // The piece with no inbound packet driving it at all: a
-                // furnace's own background tick loop
-                // (`crate::block_entities::run_block_entity_tick_loop`) mutates
-                // the registry independently of any connection, so this
-                // connection needs its own timer to notice — see
+                // The piece with no inbound packet driving it at all: the
+                // server's unified tick loop (`crate::tick::run_tick_loop`,
+                // issue #284) mutates the registry independently of any
+                // connection, so this connection needs its own timer to notice — see
                 // `sync_open_container`'s own doc comment.
                 if let Some(open) = open_container.as_mut() {
                     let (slots, data) = container_state(block_entities, open.pos);
