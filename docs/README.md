@@ -138,6 +138,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   via the `--target-dir` flag, trimmed dev profiles in the root `Cargo.toml`, and a
   cleanup-on-finish policy. This doc is the record of what was measured, what was
   decided from it, and the honest limits of both.
+- [Chat](./chat.md) — The chat box: the outbound input line
+  (`crate::chat::ChatInput`), the received scrollback
+  (`lodestone_game::chat::ChatLog`, folded into legacy `§`-coded strings at read
+  time), and the HUD draw that renders both (`crate::hud::HudGeometry::build_inner`'s
+  chat block, `crates/lodestone-shell/src/hud.rs`). This doc covers the **rendering**
+  half — input caret, word wrap, and the persisted Chat Settings that shape it —
+  not the wire path (`chat.rs`'s own module docs cover composing an outbound line) or
+  the log itself (`lodestone-game/src/chat.rs`).
 - [Chunk column encoding: real block states on the wire (issue #363)](./chunk-column-encoding.md) —
   `V770ServerProtocol::encode_chunk`'s `build_world_column` turns one
   `lodestone-server` [`ChunkColumn`](../crates/lodestone-server/src/chunk.rs) — the
@@ -746,7 +754,7 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   fireball. Each is drawn as its **item model**, posed by `display.ground`, turned to
   face the camera, at the entity's position.
 - [Random ticks, scheduled ticks, and neighbour-update propagation](./tick-scheduling.md) —
-  Three new modules in `crates/lodestone-server/src/`, each a generic, vanilla-shaped
+  Five modules in `crates/lodestone-server/src/`, each a generic, vanilla-shaped
   primitive with its own test suite, wired into `tick::run_tick_loop` (issue #284):
 - [Time-of-day lighting: the day clock and `sky_darken`](./time-of-day-lighting.md) —
   The one number that makes terrain and mobs darker at night: the factor the **sky**
