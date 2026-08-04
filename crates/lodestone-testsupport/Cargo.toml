@@ -8,4 +8,20 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+lodestone-core.workspace = true
 tokio.workspace = true
+# Tier 2 (fast, synthetic) bench/test fixtures in `bench_fixtures` build an
+# ordinary `lodestone_world::ChunkColumn` -- already a normal (non-dev)
+# dependency of most consumers of this crate, so this adds no new dependency
+# edge to anything that already links `lodestone-shell`.
+lodestone-world = { workspace = true }
+# Tier 1 (real, exact, slow) terrain in `bench_fixtures::RealTerrain`, behind
+# the `worldgen` feature (default off): see that module's doc comment for why
+# `lodestone-worldgen` must never be an unconditional dependency here --
+# `lodestone-testsupport` is a *normal* dependency of `lodestone-shell`.
+lodestone-worldgen = { path = "../lodestone-worldgen", optional = true }
+serde_json = { workspace = true, optional = true }
+
+[features]
+default = []
+worldgen = ["dep:lodestone-worldgen", "dep:serde_json"]

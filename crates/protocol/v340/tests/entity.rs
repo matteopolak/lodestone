@@ -9,6 +9,7 @@
 
 use lodestone_core::{Ctx, Encode, Writer};
 use lodestone_model::{ClientEvent, ConnectionState, Directive, EntityMovement, VersionAdapter};
+use lodestone_testsupport::EntitySpawnWireFixture;
 use lodestone_v340::V340Adapter;
 use lodestone_v340::packet_ids::play;
 use lodestone_v340::packets::entity::{
@@ -17,6 +18,16 @@ use lodestone_v340::packets::entity::{
 use lodestone_world::World;
 
 const CTX: Ctx = Ctx { version: 340 };
+
+/// 1.12.2's entity-spawn wire quirks. See [`EntitySpawnWireFixture`]'s doc for
+/// why this table exists instead of a templated test body.
+const FIXTURE: EntitySpawnWireFixture = EntitySpawnWireFixture {
+    creeper_id: 50,
+    arrow_id: 60,
+    boat_id: 1,
+    object_type_id_is_byte: true,
+    metadata_terminator: Some(0xFF),
+};
 
 fn encode<T: Encode>(value: &T) -> Vec<u8> {
     let mut writer = Writer::default();
@@ -191,7 +202,7 @@ fn spawn_entity_living_resolves_mob_type_uuid_and_f64_coords() {
     let mut w = Writer::default();
     w.var_i32(42);
     w.uuid(uuid);
-    w.var_i32(50); // creeper (unified id)
+    FIXTURE.write_mob_type_id(&mut w, FIXTURE.creeper_id);
     w.f64(10.5);
     w.f64(64.0);
     w.f64(-3.0);
@@ -201,7 +212,7 @@ fn spawn_entity_living_resolves_mob_type_uuid_and_f64_coords() {
     w.i16(0);
     w.i16(0);
     w.i16(0);
-    w.bytes(&[0xFF]); // 1.13-less metadata terminator (0xff for 1.12)
+    FIXTURE.write_metadata_terminator(&mut w);
     let payload = w.into_vec();
     match dispatch(play::clientbound::SPAWN_ENTITY_LIVING, &payload).as_slice() {
         [
@@ -229,7 +240,7 @@ fn spawn_object_resolves_type_and_carries_uuid() {
     let mut w = Writer::default();
     w.var_i32(1000);
     w.uuid(uuid);
-    w.i8(60); // arrow
+    FIXTURE.write_object_type_id(&mut w, FIXTURE.arrow_id);
     w.f64(5.0);
     w.f64(65.0);
     w.f64(-8.0);
@@ -264,7 +275,7 @@ fn spawn_object_stationary_omits_velocity() {
     let mut w = Writer::default();
     w.var_i32(1001);
     w.uuid(uuid::Uuid::nil());
-    w.i8(1); // boat
+    FIXTURE.write_object_type_id(&mut w, FIXTURE.boat_id);
     w.f64(0.0);
     w.f64(0.0);
     w.f64(0.0);
@@ -301,7 +312,7 @@ fn named_entity_spawn_resolves_player_and_uuid() {
     w.f64(2.0);
     w.i8(0);
     w.i8(0);
-    w.bytes(&[0xFF]); // metadata terminator (consumed by the derived codec)
+    FIXTURE.write_metadata_terminator(&mut w);
     let payload = w.into_vec();
     match dispatch(play::clientbound::NAMED_ENTITY_SPAWN, &payload).as_slice() {
         [
@@ -327,7 +338,7 @@ fn spawn_object_unknown_type_is_a_clean_error() {
     let mut w = Writer::default();
     w.var_i32(1);
     w.uuid(uuid::Uuid::nil());
-    w.i8(120); // absent from the 1.12 object table
+    FIXTURE.write_object_type_id(&mut w, 120); // absent from the 1.12 object table
     w.f64(0.0);
     w.f64(0.0);
     w.f64(0.0);

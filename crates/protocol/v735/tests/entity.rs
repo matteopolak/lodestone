@@ -9,6 +9,7 @@
 
 use lodestone_core::{Ctx, Encode, Writer};
 use lodestone_model::{ClientEvent, ConnectionState, Directive, EntityMovement, VersionAdapter};
+use lodestone_testsupport::EntitySpawnWireFixture;
 use lodestone_v735::V735Adapter;
 use lodestone_v735::packet_ids::play;
 use lodestone_v735::packets::entity::{
@@ -17,6 +18,16 @@ use lodestone_v735::packets::entity::{
 use lodestone_world::World;
 
 const CTX: Ctx = Ctx { version: 754 };
+
+/// 1.16.5's entity-spawn wire quirks. See [`EntitySpawnWireFixture`]'s doc for
+/// why this table exists instead of a templated test body.
+const FIXTURE: EntitySpawnWireFixture = EntitySpawnWireFixture {
+    creeper_id: 12,
+    arrow_id: 2,
+    boat_id: 6,
+    object_type_id_is_byte: false,
+    metadata_terminator: None,
+};
 
 fn encode<T: Encode>(value: &T) -> Vec<u8> {
     let mut writer = Writer::default();
@@ -191,7 +202,7 @@ fn spawn_entity_living_resolves_mob_type_uuid_and_f64_coords() {
     let mut w = Writer::default();
     w.var_i32(42);
     w.uuid(uuid);
-    w.var_i32(12); // creeper (unified 1.16 id)
+    FIXTURE.write_mob_type_id(&mut w, FIXTURE.creeper_id);
     w.f64(10.5);
     w.f64(64.0);
     w.f64(-3.0);
@@ -228,7 +239,7 @@ fn spawn_object_resolves_type_and_carries_uuid() {
     let mut w = Writer::default();
     w.var_i32(1000);
     w.uuid(uuid);
-    w.var_i32(2); // arrow (unified 1.16 id)
+    FIXTURE.write_object_type_id(&mut w, FIXTURE.arrow_id);
     w.f64(5.0);
     w.f64(65.0);
     w.f64(-8.0);
@@ -263,7 +274,7 @@ fn spawn_object_stationary_omits_velocity() {
     let mut w = Writer::default();
     w.var_i32(1001);
     w.uuid(uuid::Uuid::nil());
-    w.var_i32(6); // boat (unified 1.16 id)
+    FIXTURE.write_object_type_id(&mut w, FIXTURE.boat_id);
     w.f64(0.0);
     w.f64(0.0);
     w.f64(0.0);
@@ -325,7 +336,7 @@ fn spawn_object_unknown_type_is_a_clean_error() {
     let mut w = Writer::default();
     w.var_i32(1);
     w.uuid(uuid::Uuid::nil());
-    w.var_i32(120); // absent from the 1.16 entity table (max id 107)
+    FIXTURE.write_object_type_id(&mut w, 120); // absent from the 1.16 entity table (max id 107)
     w.f64(0.0);
     w.f64(0.0);
     w.f64(0.0);
