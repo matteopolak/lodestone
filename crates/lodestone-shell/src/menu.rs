@@ -95,8 +95,10 @@ pub enum Screen {
     /// nothing equivalent to reproduce.
     Accounts,
     /// The settings screen — vanilla's whole `OptionsScreen` tree (issue #55),
-    /// eight pages of it, with every control present and the 117 this client
-    /// does not honour drawn inactive. Which page is showing lives in
+    /// nine pages of it, with every control present and the majority this
+    /// client does not honour drawn inactive (118 of 143 outside a world, 119
+    /// inside one — the root's Online button is the one row whose liveness
+    /// depends on it). Which page is showing lives in
     /// [`options::SettingsNav`], **not** here: the pages are a graph rather than
     /// screen states (Accessibility links to Controls, which the root also
     /// links to), and Escape unwinds a history stack instead of a

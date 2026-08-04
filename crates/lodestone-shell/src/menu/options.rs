@@ -16,20 +16,23 @@
 //! offers exactly three shapes — `addBig` (one 310 px control),
 //! `addSmall` (two 150 px controls, 160 px apart) and `addHeader` — so a
 //! settings screen is a **list of options**, not bespoke geometry. That is why
-//! the census here is a table ([`Entry`]/[`Cell`]) rather than 127 hand-placed
+//! the census here is a table ([`Entry`]/[`Cell`]) rather than 143 hand-placed
 //! widgets, and why adding a screen is adding a `static`.
 //!
 //! ## `active = false` is the entire disabled path
 //!
 //! There is no disabled widget type in vanilla and none here — see
 //! [`super::widget`]'s module docs. [`Cell::is_live`] is what decides it, and
-//! it answers `false` for **112 of the 135** controls this module renders (the
-//! twenty-three live ones are seven real options — `guiScale`/`bobView` from
-//! #55, plus `toggleCrouch`/`toggleSprint`/`invertMouseX`/`invertMouseY`/
-//! `mouseWheelSensitivity` from #200/#202/#203 — eight `Done` buttons and
-//! eight working nav buttons). That ratio is the point of the issue: a greyed row in
-//! vanilla's own position makes the gap between this client and vanilla
-//! *visible*, where a missing row silently changes the screen's shape.
+//! it answers `false` for **118 or 119 of the 143** controls this module
+//! renders (the twenty-four or twenty-five live ones are seven real options —
+//! `guiScale`/`bobView` from #55, plus `toggleCrouch`/`toggleSprint`/
+//! `invertMouseX`/`invertMouseY`/`mouseWheelSensitivity` from
+//! #200/#202/#203 — nine `Done` buttons and nine or eight working nav
+//! buttons, the swing being the root's Online button: live outside a world,
+//! the inactive World Options placeholder inside one — see [`online_cell`]).
+//! That ratio is the point of the issue: a greyed row in vanilla's own
+//! position makes the gap between this client and vanilla *visible*, where a
+//! missing row silently changes the screen's shape.
 //!
 //! Vanilla disables its own controls for exactly this reason — the narrator
 //! button (`OptionsSubScreen.java:43-46`), the anisotropy slider
@@ -66,7 +69,7 @@
 //!    ones** — where `AbstractWidget.nextFocusPath` skips them
 //!    (`AbstractWidget.java:152-158`), as [`super::nav`]'s `step_enabled` does
 //!    on the title and pause screens. On a screen whose *content* is the
-//!    inactive majority, skipping them would leave 112 of 135 rows unreachable
+//!    inactive majority, skipping them would leave most rows unreachable
 //!    **and unscrollable**, i.e. invisible — which defeats the whole issue. The
 //!    vanilla predicate still governs activation: Enter consults
 //!    [`Widget::takes_focus`](super::widget::Widget::takes_focus)'s `is_active`
@@ -83,7 +86,10 @@
 //! - [`super::widget`] — `Widget`, `WidgetSprites`, the grey label.
 //! - [`super::render`] — [`Origin::Settings`] resolves a [`Placement`] to a
 //!   rect; `draw_widget` draws the row.
-//! - [`crate::config`] — the two options that are real.
+//! - [`crate::config`] — the seven options that are real (see [`LiveOption`]).
+//!   Pre-existing staleness fixed in passing: this line said "the two options
+//!   that are real" since #55, unchanged through #200/#202/#203 adding five
+//!   more.
 
 use super::layout::{self, HeaderAndFooterLayout, LayoutSettings, LinearLayout};
 use super::render::{Align, MenuFrame, MenuLabel, MenuRow, Origin, Slot};
@@ -466,6 +472,24 @@ const fn unsupported(label: &'static str) -> Cell {
     }
 }
 
+/// The root's second header button — vanilla's `inWorld` fork
+/// (`OptionsScreen.java:56-66`). Outside a world it is a live link to
+/// [`SettingsPage::Online`]; inside one it is `WorldOptionsScreen`, which this
+/// client does not build, so it stays the same `no_screen` placeholder shape
+/// every other unbuilt screen uses.
+///
+/// This is the **one** place that decides both the label and the liveness —
+/// [`settings_frame`] no longer carries a second copy of this fork, because a
+/// fact declared in two places is exactly the fabrication class the module
+/// docs' departure (1) exists to avoid.
+fn online_cell(in_world: bool) -> Cell {
+    if in_world {
+        no_screen("World Options...")
+    } else {
+        nav("Online...", SettingsPage::Online)
+    }
+}
+
 const fn head(text: &'static str) -> Entry {
     Entry::Header(text)
 }
@@ -794,6 +818,39 @@ static SKIN: &[Entry] = &[
     pair(cycle("modelPart.hat", "Hat"), cycle("mainHand", "Main Hand")),
 ];
 
+/// `OnlineOptionsScreen.addOptions` (`OnlineOptionsScreen.java:85-116`), in its
+/// own call order. Every control here is decorative — see
+/// [`SettingsPage::Online`]'s doc for why — so every accessor uses [`cycle`],
+/// never [`live_cycle`], and the Xbox link uses [`unsupported`] exactly like
+/// the Accessibility Guide and Credits buttons on other pages.
+///
+/// `friendsList`/`allowFriendRequests` are not `Options.java` `OptionInstance`s
+/// at all — vanilla backs them with `PlayerSocialManager` state instead
+/// (`:89-104`) — so their `accessor` strings are synthetic, the same
+/// convention [`SKIN`] already uses for `PlayerModelPart` ids that are not
+/// `Options.java` methods either.
+///
+/// `realmsNotifications`' caption is **not** `options.realmsNotifications`
+/// ("Realms News & Invites"): the `OptionInstance` is constructed with the
+/// `.button` key (`Options.java:528-529`), whose `en_us.json` string is
+/// "News & Invites". Easy to get backwards by reading the accessor name alone.
+static ONLINE: &[Entry] = &[
+    head("Friends List"), // options.online.friends.header
+    pair(
+        cycle("friendsList", "Friends List"), // options.friendsList
+        cycle("allowFriendRequests", "Allow Requests"), // options.allowFriendRequests
+    ),
+    pair(
+        cycle("inGameNotification", "In-Game Notification"),
+        cycle("sharePresence", "Visibility"), // options.sharePresence
+    ),
+    big(unsupported("Xbox Settings...")), // options.online.xboxSettings
+    head("Servers"),                      // options.online.servers.header
+    big(cycle("allowServerListing", "Allow Server Listings")),
+    head("Realms"), // options.online.realms.header
+    big(cycle("realmsNotifications", "News & Invites")), // options.realmsNotifications.button
+];
+
 /// The root screen's ten nav buttons, in `OptionsScreen.init`'s own
 /// `helper.addChild` order (`:70-95`) — which is what fills the 2×5 grid
 /// row-major.
@@ -812,7 +869,7 @@ static ROOT_GRID: &[Cell] = &[
 
 /// One screen of the options tree.
 ///
-/// Eight of vanilla's thirteen. The five that are **not** here are absent
+/// Nine of vanilla's thirteen. The four that are **not** here are absent
 /// because each needs a *different list widget*, not because their options were
 /// skipped — and each is reachable as a present-and-inactive nav button, which
 /// is what keeps the parent screen's shape honest:
@@ -823,11 +880,15 @@ static ROOT_GRID: &[Cell] = &[
 /// | `LanguageSelectScreen` | a scrolling `ObjectSelectionList` of languages, and this client loads exactly one language table (`resources.rs`). `FontOptionsScreen`'s two options hang off it and are unreachable without it. |
 /// | `PackSelectionScreen` | two drag-between `ObjectSelectionList`s over a `PackRepository`. |
 /// | `TelemetryInfoScreen` | prose and external links, no options at all. |
-/// | `OnlineOptionsScreen` | seven Realms/Xbox controls, none of which has anything behind it here. |
 ///
 /// Building a second and third selection-list type in the same change is where
 /// this stops being one mechanism; #396 and #397 are landing that shape
 /// concurrently for the server and world lists.
+///
+/// `OnlineOptionsScreen` **was** in that table and is not any more: it needs no
+/// new list widget (it is a plain `OptionsList` screen like the other eight),
+/// so the only reason it was absent was that the root's header button was
+/// permanently inactive. See [`SettingsPage::Online`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsPage {
     /// `OptionsScreen` — the root, and the only page that is **not** an
@@ -849,6 +910,23 @@ pub enum SettingsPage {
     Accessibility,
     /// `SkinCustomizationScreen`.
     Skin,
+    /// `OnlineOptionsScreen` (`OnlineOptionsScreen.java`) — friends list,
+    /// requests, in-game notifications, presence visibility, an external Xbox
+    /// Settings link, server-listing opt-out and Realms news/invites. All
+    /// seven are **decorative**: this client has no `PlayerSocialManager`, no
+    /// Realms client and no Xbox link to send any of them to, so every control
+    /// on the page is `unsupported`/`cycle` with `live: None` — see the
+    /// [`ONLINE`] table. Only the page's own existence and its Done button are
+    /// wired.
+    ///
+    /// Reached from the root's second header button when
+    /// [`super::UiState::settings_in_world`] is `false` — vanilla's own fork
+    /// (`OptionsScreen.java:56-66`): `in_world` picks `WorldOptionsScreen`
+    /// instead, which this client does not build, so that branch stays a
+    /// `no_screen` placeholder and the button reads "World Options..." and
+    /// stays inactive, exactly as it always has. See [`controls`]'s
+    /// `Placement::Root(2)` branch and [`SettingsNav::in_world`].
+    Online,
 }
 
 impl SettingsPage {
@@ -864,6 +942,8 @@ impl SettingsPage {
             SettingsPage::Chat => "Chat Settings",
             SettingsPage::Accessibility => "Accessibility Settings",
             SettingsPage::Skin => "Skin Customization",
+            // `options.online.title` (`en_us.json`).
+            SettingsPage::Online => "Online Options",
         }
     }
 
@@ -890,6 +970,7 @@ impl SettingsPage {
             SettingsPage::Chat => CHAT,
             SettingsPage::Accessibility => ACCESSIBILITY,
             SettingsPage::Skin => SKIN,
+            SettingsPage::Online => ONLINE,
         }
     }
 
@@ -995,8 +1076,12 @@ impl Control {
 /// List cells first (top to bottom, left to right), then the footer — which is
 /// `HeaderAndFooterLayout.visitChildren`'s own order, header then contents then
 /// footer (`HeaderAndFooterLayout.java:84-89`).
+///
+/// `in_world` is only consulted on [`SettingsPage::Root`] — see
+/// [`online_cell`] — and is otherwise ignored, exactly as vanilla's `inWorld`
+/// only ever changes the one header button.
 #[must_use]
-pub fn controls(page: SettingsPage, first: usize) -> Vec<Control> {
+pub fn controls(page: SettingsPage, first: usize, in_world: bool) -> Vec<Control> {
     let mut out = Vec::new();
     if page == SettingsPage::Root {
         // 1 = the FOV slider, 2 = the Online / World Options button; the title
@@ -1007,7 +1092,7 @@ pub fn controls(page: SettingsPage, first: usize) -> Vec<Control> {
             width: SMALL_BUTTON_WIDTH,
         });
         out.push(Control {
-            cell: no_screen("Online..."),
+            cell: online_cell(in_world),
             placement: Placement::Root(2),
             width: SMALL_BUTTON_WIDTH,
         });
@@ -1070,10 +1155,13 @@ pub fn controls(page: SettingsPage, first: usize) -> Vec<Control> {
 
 /// Every control on `page`, ignoring the scroll — the census, and what the
 /// cursor steps through.
+///
+/// See [`controls`]'s doc for what `in_world` does — the same one thing, on
+/// the same one page.
 #[must_use]
-pub fn all_controls(page: SettingsPage) -> Vec<Cell> {
+pub fn all_controls(page: SettingsPage, in_world: bool) -> Vec<Cell> {
     if page == SettingsPage::Root {
-        let mut out = vec![slider("fov", "FOV"), no_screen("Online...")];
+        let mut out = vec![slider("fov", "FOV"), online_cell(in_world)];
         out.extend_from_slice(ROOT_GRID);
         out.push(done());
         return out;
@@ -1438,6 +1526,21 @@ pub struct SettingsNav {
     stack: Vec<SettingsPage>,
     cursor: usize,
     first: usize,
+    /// Vanilla's `inWorld` (`OptionsScreen.java:41-47`): whether this screen
+    /// was opened from the pause menu rather than the title —
+    /// [`super::UiState::settings_in_world`], threaded in once at
+    /// [`Self::reset`]. It governs the root's Online/World Options button's
+    /// *liveness and destination*, not only the label
+    /// [`super::render::frame_for`] used to swap on its own — see
+    /// [`online_cell`]. `MenuNav`'s two Options entry points
+    /// (`MainButton::Options`, `PauseButton::Options`) are the only writers,
+    /// and they call `reset` in the same statement that calls
+    /// [`super::UiState::open_settings`]/
+    /// [`super::UiState::open_settings_from_pause`] — so this and
+    /// `ui.settings_in_world()` cannot drift apart for as long as the screen
+    /// stays open, which is the whole lifetime this field needs to be right
+    /// for.
+    in_world: bool,
 }
 
 impl Default for SettingsNav {
@@ -1447,7 +1550,7 @@ impl Default for SettingsNav {
 }
 
 impl SettingsNav {
-    /// A fresh cursor at the root page.
+    /// A fresh cursor at the root page, outside a world.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -1455,13 +1558,17 @@ impl SettingsNav {
             stack: Vec::new(),
             cursor: 0,
             first: 0,
+            in_world: false,
         }
     }
 
-    /// Back to the root with nothing scrolled — called when the screen is
-    /// opened, so re-entering Options does not resume three pages deep.
-    pub fn reset(&mut self) {
-        *self = Self::new();
+    /// Back to the root with nothing scrolled, and [`Self::in_world`] set —
+    /// called when the screen is opened, so re-entering Options does not
+    /// resume three pages deep and always re-derives the root's Online/World
+    /// Options fork from the entry point that was actually used, rather than
+    /// carrying over whatever the previous visit left behind.
+    pub fn reset(&mut self, in_world: bool) {
+        *self = Self { in_world, ..Self::new() };
     }
 
     /// The page being shown.
@@ -1487,7 +1594,7 @@ impl SettingsNav {
     /// indexes into.
     #[must_use]
     pub fn visible(&self) -> Vec<Control> {
-        controls(self.page, self.first)
+        controls(self.page, self.first, self.in_world)
     }
 
     /// The cursor's position **within [`Self::visible`]**, i.e. the row index
@@ -1495,7 +1602,7 @@ impl SettingsNav {
     /// [`Self::scroll_to_cursor`] makes impossible in practice.
     #[must_use]
     pub fn selected_row(&self) -> Option<usize> {
-        let all = all_controls(self.page);
+        let all = all_controls(self.page, self.in_world);
         let cell = *all.get(self.cursor)?;
         let entry = entry_of_control(self.page, self.cursor);
         self.visible().iter().position(|c| {
@@ -1519,7 +1626,7 @@ impl SettingsNav {
     /// inactive row is still a cursor stop here when `step_enabled` skips one
     /// on every other screen.
     pub fn step(&mut self, forward: bool) {
-        let len = all_controls(self.page).len();
+        let len = all_controls(self.page, self.in_world).len();
         if len == 0 {
             return;
         }
@@ -1559,7 +1666,7 @@ impl SettingsNav {
     /// failure mode one screen over.
     pub fn hover_row(&mut self, row: usize) {
         let page = self.page;
-        let visible = controls(page, self.first);
+        let visible = controls(page, self.first, self.in_world);
         let Some(control) = visible.get(row).copied() else {
             return;
         };
@@ -1567,7 +1674,7 @@ impl SettingsNav {
             Placement::ListCell { entry, .. } => Some(usize::from(entry)),
             _ => None,
         };
-        let all = all_controls(page);
+        let all = all_controls(page, self.in_world);
         let found = (0..all.len())
             .find(|&i| all[i] == control.cell && entry_of_control(page, i) == entry);
         if let Some(i) = found {
@@ -1592,7 +1699,7 @@ impl SettingsNav {
 
     /// Activates whatever the cursor is on — Enter's half.
     pub fn enter(&mut self) -> SettingsOutcome {
-        let all = all_controls(self.page);
+        let all = all_controls(self.page, self.in_world);
         match all.get(self.cursor).copied() {
             Some(cell) => self.activate(cell),
             None => SettingsOutcome::None,
@@ -1670,16 +1777,19 @@ const ERROR_COLOUR: [f32; 4] = [0.92, 0.45, 0.42, 1.0];
 
 /// Builds the whole settings frame for whichever page the cursor is on.
 ///
-/// `in_world` picks vanilla's own fork in the root header: `worldOptions` when a
-/// level is loaded, `online` otherwise (`OptionsScreen.java:56-66`). Both are
-/// inactive here, so only the label differs — reproduced anyway because a
-/// screen that shows the wrong one of two mutually exclusive buttons is the
-/// kind of quiet infidelity nothing else would catch.
+/// The root header's Online/World Options fork (`OptionsScreen.java:56-66`) is
+/// **not** decided here: `nav.visible()` already carries the right label *and*
+/// the right liveness for [`super::UiState::settings_in_world`], because
+/// [`SettingsNav::in_world`] was set from the same fact when the screen was
+/// opened. This function used to carry a second, draw-only copy of that fork
+/// (`in_world: bool` swapping only the label); it was deleted because a fact
+/// declared in two places is exactly the fabrication class the module docs'
+/// departure (1) exists to avoid — a click and a label agreeing by
+/// construction rather than by two authors remembering to agree.
 #[must_use]
 pub fn settings_frame(
     nav: &SettingsNav,
     options: &crate::config::Options,
-    in_world: bool,
     save_error: Option<&str>,
 ) -> MenuFrame<'static> {
     let page = nav.page();
@@ -1688,20 +1798,12 @@ pub fn settings_frame(
 
     let mut rows: Vec<MenuRow> = visible
         .iter()
-        .map(|control| {
-            let label = match (control.placement, in_world) {
-                // The root's second header widget is the Online / World Options
-                // fork; every other cell's label is its own.
-                (Placement::Root(2), true) => "World Options...".to_string(),
-                _ => control.cell.label(options),
-            };
-            MenuRow {
-                label,
-                enabled: control.cell.is_live(),
-                slider: control.cell.is_slider(),
-                slot: Some(control.slot()),
-                ..Default::default()
-            }
+        .map(|control| MenuRow {
+            label: control.cell.label(options),
+            enabled: control.cell.is_live(),
+            slider: control.cell.is_slider(),
+            slot: Some(control.slot()),
+            ..Default::default()
         })
         .collect();
     // A frame with no rows would make `selected` meaningless and the screen
@@ -1785,7 +1887,7 @@ mod tests {
     use super::*;
 
     /// Every page, so a sweep cannot silently miss one.
-    const PAGES: [SettingsPage; 8] = [
+    const PAGES: [SettingsPage; 9] = [
         SettingsPage::Root,
         SettingsPage::Video,
         SettingsPage::Controls,
@@ -1794,7 +1896,16 @@ mod tests {
         SettingsPage::Chat,
         SettingsPage::Accessibility,
         SettingsPage::Skin,
+        SettingsPage::Online,
     ];
+
+    /// `all_controls`/`controls` need an `in_world` bool wherever the census
+    /// does not care about the root's Online/World Options fork — every page
+    /// but `Root` ignores it outright, and even on `Root` the *count* (not the
+    /// liveness) is the same either way, so `false` (the title-screen entry,
+    /// matching #55's original, still-authoritative baseline) is the one to
+    /// sweep with here.
+    const OUTSIDE_A_WORLD: bool = false;
 
     #[test]
     fn the_per_screen_control_counts_are_the_censused_ones() {
@@ -1804,7 +1915,8 @@ mod tests {
         // that drops or duplicates a control fails here and names the screen.
         //
         // Each figure counts focusable widgets including the page's own footer,
-        // which is how the census counted the root's Done.
+        // which is how the census counted the root's Done. Online's 8 is
+        // `OnlineOptionsScreen.java`'s seven controls (`:85-116`) plus its Done.
         let expected = [
             (SettingsPage::Root, 13),
             (SettingsPage::Video, 32),
@@ -1814,19 +1926,21 @@ mod tests {
             (SettingsPage::Chat, 19),
             (SettingsPage::Accessibility, 27),
             (SettingsPage::Skin, 9),
+            (SettingsPage::Online, 8),
         ];
         for (page, count) in expected {
             assert_eq!(
-                all_controls(page).len(),
+                all_controls(page, OUTSIDE_A_WORLD).len(),
                 count,
                 "{page:?} should carry {count} controls"
             );
         }
-        // 127 across the eight pages. The census's 141-excluding-keybinds
-        // covers five more screens this change does not build (see
-        // `SettingsPage`'s table), so this is not expected to reach it.
-        let total: usize = PAGES.iter().map(|&p| all_controls(p).len()).sum();
-        assert_eq!(total, 135, "13+32+10+8+17+19+27+9");
+        // 143 across the nine pages.
+        let total: usize = PAGES
+            .iter()
+            .map(|&p| all_controls(p, OUTSIDE_A_WORLD).len())
+            .sum();
+        assert_eq!(total, 143, "13+32+10+8+17+19+27+9+8");
     }
 
     #[test]
@@ -1837,14 +1951,14 @@ mod tests {
         let mut live = Vec::new();
         let mut total = 0;
         for page in PAGES {
-            for cell in all_controls(page) {
+            for cell in all_controls(page, OUTSIDE_A_WORLD) {
                 total += 1;
                 if cell.is_live() {
                     live.push((page, cell));
                 }
             }
         }
-        assert_eq!(total, 135);
+        assert_eq!(total, 143);
         // Seven *options* are live, in page order (`PAGES`) and then
         // declaration order within each page — the persisted fields of
         // `config::Options` besides `keybinds`.
@@ -1880,6 +1994,44 @@ mod tests {
         assert!(
             live_cycle("guiScale", "GUI Scale", LiveOption::GuiScale).is_live(),
             "and the same predicate must answer true for one that is"
+        );
+        // The count itself, not just the ratio's ingredients: 7 live options +
+        // 9 Done buttons (one per page, always live) + 9 working nav buttons
+        // (Skin/Sound/Video/Controls/Chat/Accessibility from the root grid,
+        // Accessibility -> Controls, Controls -> Mouse, and — the new one —
+        // the root's Online button, live outside a world). A change that adds
+        // or removes a live row anywhere must say so here.
+        assert_eq!(live.len(), 25, "outside a world: {live:?}");
+    }
+
+    /// The companion to [`the_disabled_majority_is_the_point_and_it_is_measured`]:
+    /// the same sweep, mid-session (`in_world == true`). The census (143) is
+    /// identical — `SettingsPage::Online` and its own Done exist either way —
+    /// but the live count drops by exactly one, because the root's header
+    /// button is the (unbuilt) World Options fork instead of a live link to
+    /// it. This is the test that would have failed had the Online page been
+    /// wired live in both directions.
+    #[test]
+    fn the_root_online_button_is_the_one_row_that_changes_with_in_world() {
+        let outside: Vec<Cell> = PAGES
+            .iter()
+            .flat_map(|&p| all_controls(p, false))
+            .filter(|c| c.is_live())
+            .collect();
+        let inside: Vec<Cell> = PAGES
+            .iter()
+            .flat_map(|&p| all_controls(p, true))
+            .filter(|c| c.is_live())
+            .collect();
+        assert_eq!(outside.len(), 25);
+        assert_eq!(inside.len(), 24, "one fewer: the root's Online button");
+        assert!(
+            outside.contains(&nav("Online...", SettingsPage::Online)),
+            "outside a world the root links to Online"
+        );
+        assert!(
+            !inside.contains(&nav("Online...", SettingsPage::Online)),
+            "inside a world it must not"
         );
     }
 
@@ -2013,7 +2165,7 @@ mod tests {
         let mut nav = SettingsNav::new();
         nav.page = page;
         let mut seen = std::collections::BTreeSet::new();
-        for _ in 0..all_controls(page).len() {
+        for _ in 0..all_controls(page, false).len() {
             for entry in visible_entries(page.entries(), nav.first()) {
                 seen.insert(entry);
             }
@@ -2036,7 +2188,7 @@ mod tests {
             nav.page = page;
             for first in 0..page.entries().len().max(1) {
                 nav.first = first;
-                let frame = settings_frame(&nav, &options, false, None);
+                let frame = settings_frame(&nav, &options, None);
                 let visible = nav.visible();
                 assert_eq!(
                     frame.rows.len(),
@@ -2070,7 +2222,7 @@ mod tests {
         // Scroll so the GUI Scale row is on screen.
         let entry = entry_of_control(
             SettingsPage::Video,
-            all_controls(SettingsPage::Video)
+            all_controls(SettingsPage::Video, false)
                 .iter()
                 .position(|c| matches!(c, Cell::Option(s) if s.accessor == "guiScale"))
                 .expect("Video carries guiScale"),
@@ -2104,7 +2256,7 @@ mod tests {
         let mut nav = SettingsNav::new();
         assert_eq!(nav.page(), SettingsPage::Root);
         // Root -> Video, through the grid button's own cell.
-        let video = all_controls(SettingsPage::Root)
+        let video = all_controls(SettingsPage::Root, false)
             .iter()
             .position(|c| matches!(c, Cell::Nav { page: Some(SettingsPage::Video), .. }))
             .expect("the root links to Video");
@@ -2120,7 +2272,7 @@ mod tests {
         // back to Accessibility rather than to the root that also links there.
         let mut nav = SettingsNav::new();
         nav.page = SettingsPage::Accessibility;
-        let controls_link = all_controls(SettingsPage::Accessibility)
+        let controls_link = all_controls(SettingsPage::Accessibility, false)
             .iter()
             .position(|c| matches!(c, Cell::Nav { page: Some(SettingsPage::Controls), .. }))
             .expect("Accessibility links to Controls");
@@ -2135,16 +2287,42 @@ mod tests {
         );
         // A nav button to a screen we do not build must be inert.
         let mut nav = SettingsNav::new();
-        let language = all_controls(SettingsPage::Root)
+        let language = all_controls(SettingsPage::Root, false)
             .iter()
             .position(|c| matches!(c, Cell::Nav { label: "Language...", page: None }))
             .expect("Language is present and unbuilt");
         nav.cursor = language;
         assert_eq!(nav.enter(), SettingsOutcome::None);
         assert_eq!(nav.page(), SettingsPage::Root, "and must not move");
+        // The new one: Root -> Online, live only outside a world.
+        let mut nav = SettingsNav::new();
+        assert!(!nav.in_world, "precondition: outside a world by default");
+        let online = all_controls(SettingsPage::Root, false)
+            .iter()
+            .position(|c| matches!(c, Cell::Nav { page: Some(SettingsPage::Online), .. }))
+            .expect("the root links to Online outside a world");
+        nav.cursor = online;
+        assert_eq!(nav.enter(), SettingsOutcome::None);
+        assert_eq!(nav.page(), SettingsPage::Online);
+        nav.escape();
+        assert_eq!(nav.page(), SettingsPage::Root);
+        // And with `in_world` true, that same root row is the inert World
+        // Options placeholder — the cell at index `online` is no longer a
+        // page link at all, so entering it must not move.
+        let mut nav = SettingsNav::new();
+        nav.reset(true);
+        assert!(
+            !all_controls(SettingsPage::Root, true)
+                .iter()
+                .any(|c| matches!(c, Cell::Nav { page: Some(SettingsPage::Online), .. })),
+            "inside a world, nothing on the root links to Online"
+        );
+        nav.cursor = online;
+        assert_eq!(nav.enter(), SettingsOutcome::None);
+        assert_eq!(nav.page(), SettingsPage::Root, "and must not move");
         // Done on the root closes; Done on a sub-page goes back.
         let mut nav = SettingsNav::new();
-        nav.cursor = all_controls(SettingsPage::Root).len() - 1;
+        nav.cursor = all_controls(SettingsPage::Root, false).len() - 1;
         assert_eq!(nav.enter(), SettingsOutcome::Close);
     }
 
@@ -2155,7 +2333,7 @@ mod tests {
         for page in PAGES {
             let mut nav = SettingsNav::new();
             nav.page = page;
-            for _ in 0..all_controls(page).len() * 2 {
+            for _ in 0..all_controls(page, false).len() * 2 {
                 assert!(
                     nav.selected_row().is_some(),
                     "{page:?}: cursor {} off-window at first={}",
@@ -2164,7 +2342,7 @@ mod tests {
                 );
                 nav.step(true);
             }
-            for _ in 0..all_controls(page).len() * 2 {
+            for _ in 0..all_controls(page, false).len() * 2 {
                 assert!(nav.selected_row().is_some(), "{page:?}: backwards too");
                 nav.step(false);
             }
@@ -2287,13 +2465,18 @@ mod tests {
         // and looking like a table that was never wired.
         for page in PAGES {
             for first in 0..page.entries().len().max(1) {
-                for control in controls(page, first) {
-                    let (x, y) = placement_anchor(control.placement, 480.0, 320.0);
-                    assert!(
-                        x >= 0.0 && y >= 0.0 && x + control.width <= 480.0 && y + WIDGET_H <= 320.0,
-                        "{page:?} first={first} {:?} at ({x}, {y})",
-                        control.placement
-                    );
+                for in_world in [false, true] {
+                    for control in controls(page, first, in_world) {
+                        let (x, y) = placement_anchor(control.placement, 480.0, 320.0);
+                        assert!(
+                            x >= 0.0
+                                && y >= 0.0
+                                && x + control.width <= 480.0
+                                && y + WIDGET_H <= 320.0,
+                            "{page:?} first={first} in_world={in_world} {:?} at ({x}, {y})",
+                            control.placement
+                        );
+                    }
                 }
             }
         }
@@ -2322,7 +2505,7 @@ mod tests {
         let options = crate::config::Options::default();
         let mut nav = SettingsNav::new();
         nav.page = SettingsPage::Video;
-        let frame = settings_frame(&nav, &options, false, None);
+        let frame = settings_frame(&nav, &options, None);
         // The page title plus the "Display" header.
         let texts: Vec<&str> = frame.labels.iter().map(|l| l.text.as_str()).collect();
         assert!(texts.contains(&"Video Settings"), "{texts:?}");
@@ -2330,7 +2513,7 @@ mod tests {
         // The control: scrolled past it, the header must be gone rather than
         // drawn at a stale position.
         nav.first = 7;
-        let frame = settings_frame(&nav, &options, false, None);
+        let frame = settings_frame(&nav, &options, None);
         let texts: Vec<&str> = frame.labels.iter().map(|l| l.text.as_str()).collect();
         assert!(!texts.contains(&"Display"), "{texts:?}");
         assert!(texts.contains(&"Video Settings"), "the title stays");
@@ -2338,23 +2521,30 @@ mod tests {
 
     #[test]
     fn the_root_header_button_follows_vanillas_in_world_fork() {
-        // `OptionsScreen.init`'s `if (this.inWorld)` (`:56-66`). Both are
-        // inactive, so the label is the only observable difference — which is
-        // why it is asserted rather than assumed to be untestable.
+        // `OptionsScreen.init`'s `if (this.inWorld)` (`:56-66`). Outside a
+        // world the button is now a **live** link to `SettingsPage::Online`;
+        // inside one it stays the inactive placeholder it always was. Both the
+        // label and the liveness come from `SettingsNav::in_world`, set by
+        // `reset`, so this asserts both rather than only the label the way the
+        // pre-Online version of this test did.
         let options = crate::config::Options::default();
-        let nav = SettingsNav::new();
-        let out = settings_frame(&nav, &options, false, None);
+        let mut nav = SettingsNav::new();
+        nav.reset(false);
+        let out = settings_frame(&nav, &options, None);
         assert_eq!(out.rows[1].label, "Online...");
-        let in_world = settings_frame(&nav, &options, true, None);
+        assert!(out.rows[1].enabled, "outside a world it is live");
+
+        nav.reset(true);
+        let in_world = settings_frame(&nav, &options, None);
         assert_eq!(in_world.rows[1].label, "World Options...");
-        assert!(!in_world.rows[1].enabled, "and neither is live");
+        assert!(!in_world.rows[1].enabled, "inside a world it is not");
     }
 
     #[test]
     fn a_save_failure_reaches_the_frame_rather_than_being_swallowed() {
         let options = crate::config::Options::default();
         let nav = SettingsNav::new();
-        let frame = settings_frame(&nav, &options, false, Some("could not save options.json"));
+        let frame = settings_frame(&nav, &options, Some("could not save options.json"));
         assert!(
             frame
                 .labels
@@ -2363,7 +2553,7 @@ mod tests {
             "a `vanilla` frame draws no `message`, so it has to be a label"
         );
         // The control: no error, no label.
-        let clean = settings_frame(&nav, &options, false, None);
+        let clean = settings_frame(&nav, &options, None);
         assert!(
             !clean
                 .labels
@@ -2381,9 +2571,11 @@ mod tests {
         nav.stack.push(SettingsPage::Root);
         nav.cursor = 5;
         nav.first = 4;
-        nav.reset();
+        nav.in_world = true;
+        nav.reset(false);
         assert_eq!(nav.page(), SettingsPage::Root);
         assert_eq!((nav.cursor(), nav.first()), (0, 0));
+        assert!(!nav.in_world, "reset must also re-derive in_world, not carry the old visit's over");
         assert_eq!(nav.escape(), SettingsOutcome::Close, "with an empty stack");
     }
 }

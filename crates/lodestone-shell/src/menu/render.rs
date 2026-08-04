@@ -3330,15 +3330,15 @@ pub fn frame_for<'a>(
         }
         // Vanilla's whole `OptionsScreen` tree (issue #55). This used to be two
         // hand-written rows in a centred stack with a key-hint footer; it is now
-        // eight pages of `OptionsList` geometry built from a table, with the
+        // nine pages of `OptionsList` geometry built from a table, with the
         // controls this client does not honour drawn inactive. Every decision —
         // which page, which rows are visible, which are live, where each one
-        // sits — belongs to `super::options`; this arm only supplies the three
-        // things that live outside it.
+        // sits, and — since the Online page — whether the root's header button
+        // is even a link at all — belongs to `super::options`; this arm only
+        // supplies the two things that live outside it (`nav`, `options`).
         Screen::Settings => Some(super::options::settings_frame(
             nav.settings(),
             nav.options(),
-            ui.settings_in_world(),
             nav.options_save_error(),
         )),
         // The account list (issue #66). `pump` is called here, on every

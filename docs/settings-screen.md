@@ -3,17 +3,28 @@
 ## What it is
 
 `crates/lodestone-shell/src/menu/options.rs` — vanilla's `OptionsScreen` tree as
-a **table plus arithmetic**: eight pages, **135 controls**, of which **23 work
-and 112 are present and greyed out**. Reached from the title screen's Options
-button and from the pause menu's, on `Screen::Settings`.
+a **table plus arithmetic**: nine pages, **143 controls**, of which **24 or 25
+work** (see below) **and the rest are present and greyed out**. Reached from
+the title screen's Options button and from the pause menu's, on
+`Screen::Settings`.
 
 **Updated since #55 landed:** #200/#202/#203 (`docs/input-options.md`) made five
 more Controls/Mouse-page rows live — `toggleCrouch`/`toggleSprint`/
 `invertMouseX`/`invertMouseY`/`mouseWheelSensitivity` — without adding or
-removing any row, so the 135-control census below is unchanged; only the
-live/inactive split moved. The rest of this doc's per-page tables were not
-re-audited for this update; see this doc's "What is actually live" section for
-the current authoritative list.
+removing any row, so the 135-control census that stood at the time was
+unchanged by that pass; only the live/inactive split moved.
+
+**Updated again for the Online settings page (task `task_036bd7b9`):** the
+ninth page, `SettingsPage::Online`, is now built — vanilla's
+`OnlineOptionsScreen`, 8 controls including its own Done. The census is now
+**143**, and the live count is **context-dependent for the first time**: the
+root's second header button (`Placement::Root(2)`) is a live link to Online
+when the screen was opened from the title (`!in_world`, **25** live) and the
+same inactive "World Options..." placeholder it always was when opened from
+the pause menu (`in_world`, **24** live) — see "What is actually live" below
+and [`docs/ui-framework.md`](./ui-framework.md)'s "What we persist". The rest
+of this doc's per-page tables were not re-audited for either update; see this
+doc's "What is actually live" section for the current authoritative list.
 
 This is issue #55, the settings branch of the menu-framework epic #392.
 [`ui-framework.md`](./ui-framework.md) is the plan of record;
@@ -48,7 +59,7 @@ call sites — which is why the whole tree here is `static` tables of `Entry` an
 | `Cell::Act` | `Done`, the accessibility guide link, Credits |
 | `Placement` | *where* a widget is, resolved at draw time |
 
-### The eight pages, and the five that are not here
+### The nine pages, and the four that are not here
 
 | page | controls | vanilla |
 |---|---|---|
@@ -60,11 +71,12 @@ call sites — which is why the whole tree here is `static` tables of `Entry` an
 | Controls | 10 | `controls/ControlsScreen` |
 | Skin | 9 | `SkinCustomizationScreen` |
 | Mouse | 8 | `MouseSettingsScreen` |
+| Online | 8 | `OnlineOptionsScreen`, three headers |
 
 Counts include each page's own footer, which is how #55's census counted the
-root's Done.
+root's Done. Total: **143** (`13+32+10+8+17+19+27+9+8`).
 
-Five vanilla screens are **not built**, and each is reachable as a
+Four vanilla screens are **not built**, and each is reachable as a
 present-and-inactive nav button so the parent screen's shape stays honest. The
 reason is uniform: every one of them needs a *different list widget*, not more
 options.
@@ -75,10 +87,64 @@ options.
 | `LanguageSelectScreen` | a scrolling `ObjectSelectionList` of languages, and this client loads exactly one language table. `FontOptionsScreen`'s two options hang off it and are unreachable without it. |
 | `PackSelectionScreen` | two drag-between `ObjectSelectionList`s over a `PackRepository`. |
 | `TelemetryInfoScreen` | prose and external links; no options at all. |
-| `OnlineOptionsScreen` | seven Realms/Xbox controls with nothing behind any of them. |
 
 Building a second and third selection-list type in the same change is where this
 stops being one mechanism. #396 and #397 are landing that shape concurrently.
+
+`OnlineOptionsScreen` **used to be in this table** — it is the cheap win the
+Online-settings follow-up landed: it needs no new list widget, so the only
+reason it was absent was that the root's own header button
+(`Placement::Root(2)`) was permanently inactive regardless of context. See
+"The root's Online button, and `in_world`" below.
+
+### The `OnlineOptionsScreen` page, and what is wired on it
+
+`SettingsPage::Online` (`OnlineOptionsScreen.java:85-116`): a Friends List
+header (a small pair — Friends List, Allow Requests), a second small pair
+(In-Game Notification, Visibility), a big Xbox Settings link, a Servers header
+with Allow Server Listings, and a Realms header with Realms' "News & Invites"
+(`options.realmsNotifications.button`, **not** the `options.realmsNotifications`
+string — easy to get backwards reading the accessor name alone).
+
+**Every one of those seven is decorative.** This client has no
+`PlayerSocialManager`, no Realms client and no Xbox link to send any of them
+to, so all seven are `cycle`/`unsupported` with `live: None` — the same
+`live: None` majority every other page has. Only two things about this page
+are **wired**: the page's own existence (reachable, and its Done button
+returns to the root) and the root's Online nav button that reaches it — see
+below.
+
+### The root's Online button, and `in_world`
+
+`Placement::Root(2)` is vanilla's `inWorld` fork (`OptionsScreen.java:56-66`):
+`Online...` outside a world, `World Options...` inside one. Both used to be
+permanently inactive (`no_screen`, `Cell::Nav { page: None, .. }`) — the label
+already swapped correctly (`super::render::frame_for` matched on
+`(Placement::Root(2), in_world)`), but neither branch went anywhere, which is
+what made this the cheap win: only the `!in_world` branch needed a page behind
+it.
+
+`options::online_cell(in_world: bool) -> Cell` is now the single place that
+decides both the label *and* the liveness — `nav("Online...", SettingsPage::Online)`
+outside a world, `no_screen("World Options...")` inside one (`WorldOptionsScreen`
+is not built and is out of scope here; that branch is unchanged from before).
+`settings_frame` no longer carries a second, draw-only copy of this fork: it
+used to override the label for `(Placement::Root(2), true)` independently of
+whatever cell `nav.visible()` produced, which is exactly the two-places-agree-
+by-luck shape the module docs' departure (1) warns about. Deleting it means
+the label and the click can no longer disagree.
+
+**The fact has to reach three places, and now it does through one field.**
+`SettingsNav::in_world` is set once, at `SettingsNav::reset(in_world)`, from
+[`UiState::settings_in_world`](../crates/lodestone-shell/src/menu.rs) — the
+same fact the draw path already had. `MenuNav`'s two Options entry points
+(`MainButton::Options`, `PauseButton::Options`) call `reset` in the same
+statement that calls `ui.open_settings()`/`ui.open_settings_from_pause()`, so
+the two cannot drift apart for the screen's lifetime. Before this change,
+`in_world` reached the **label** (draw) but never the **click or the
+keyboard** (`SettingsNav::activate`/`enter`/`click_row`) — the row was drawn
+correctly and did nothing either way, so the gap was invisible until something
+was actually put behind it.
 
 ### What is actually live — and a correction to the census
 
@@ -94,7 +160,21 @@ stops being one mechanism. #396 and #397 are landing that shape concurrently.
 | `invertMouseX` | Mouse | `config::Options::invert_mouse_x` |
 | `invertMouseY` | Mouse | `config::Options::invert_mouse_y` |
 
-Plus eight `Done` buttons and eight working nav buttons: 23 live, 112 inactive.
+Plus nine `Done` buttons (one per page, always live) and either nine or eight
+working nav buttons, depending on `in_world`:
+
+- **Outside a world** (opened from the title): Skin, Sound, Video, Controls,
+  Chat, Accessibility (the root grid), Accessibility → Controls, Controls →
+  Mouse, and now the root → **Online**. **25 live, 118 inactive.**
+- **Inside a world** (opened from the pause menu): the same eight, minus the
+  root's Online link (it is the inactive World Options placeholder instead).
+  **24 live, 119 inactive.**
+
+Both counts are asserted directly —
+`options::tests::the_disabled_majority_is_the_point_and_it_is_measured` (25,
+outside a world, the canonical/title-screen baseline) and
+`options::tests::the_root_online_button_is_the_one_row_that_changes_with_in_world`
+(both, and that the delta is exactly the Online row).
 
 #55's census comment and `ui-framework.md` both say **"4 of 93"**, listing
 `render_distance` and `sensitivity` alongside those two. That is wrong, and it is
@@ -208,8 +288,8 @@ This is the departure most worth revisiting: a scissor in the menu pipeline, or 
 `AbstractWidget.nextFocusPath` returns `null` when `!isActive()`
 (`AbstractWidget.java:152-158`), and `MenuNav`'s `step_enabled` skips inactive
 rows on the title and pause screens. On a screen whose *content* is the inactive
-majority, skipping them would leave 112 of 135 controls unreachable **and
-unscrollable** — i.e. invisible, which defeats the whole issue. The vanilla
+majority, skipping them would leave most of the tree's 143 controls unreachable
+**and unscrollable** — i.e. invisible, which defeats the whole issue. The vanilla
 predicate still governs *activation*: Enter on an inactive row does nothing, and
 `WidgetSprites::get(false, true)` keeps it drawing `widget/button_disabled` under
 the cursor exactly as vanilla does.
@@ -239,9 +319,14 @@ the cursor exactly as vanilla does.
 - **Escape unwinds a history stack, not a `parent()`.** The tree is a *graph*:
   Accessibility links to Controls, which the root also links to. "Where did I come
   from" is history.
-- **`SettingsNav::reset()` on every entry to the screen.** Vanilla builds a new
-  `OptionsScreen` each time, so re-entering Options must not resume three pages
-  deep. `MenuNav`'s two `PauseButton::Options`/`MainButton::Options` arms call it.
+- **`SettingsNav::reset(in_world)` on every entry to the screen.** Vanilla
+  builds a new `OptionsScreen` each time, so re-entering Options must not
+  resume three pages deep — and, since the Online page, must also re-derive
+  the root's Online/World Options fork from the entry point actually used
+  rather than carrying over the previous visit's. `MenuNav`'s two
+  `PauseButton::Options`/`MainButton::Options` arms call it with `true`/`false`
+  respectively, in the same statement that calls
+  `ui.open_settings_from_pause()`/`ui.open_settings()`.
 
 ## How it is proved
 
@@ -283,7 +368,16 @@ is claimed, a control:
 - **`every_placement_resolves_to_a_rect_on_screen`** is the anti-island assertion
   at this layer: a `Placement` whose index ran past its arranged tree resolves to
   an off-canvas sentinel, so it fails here rather than drawing nothing and looking
-  like a table that was never wired.
+  like a table that was never wired. Swept at both `in_world` values, since the
+  Online page changed which cell `Placement::Root(2)` resolves to.
+- **The root's Online/World Options fork reaches activation, not only the
+  label.** `the_root_header_button_follows_vanillas_in_world_fork` now asserts
+  `enabled` in both directions (it used to assert only the label);
+  `navigation_walks_the_tree_and_escape_unwinds_it` drives an actual `enter()`
+  into `SettingsPage::Online` outside a world and asserts the same row is inert
+  inside one; `the_root_online_button_is_the_one_row_that_changes_with_in_world`
+  is the census-level version — the live count differs by exactly one row
+  between the two contexts, named.
 
 `nav.rs` re-checks the two that cross a file boundary through the **real**
 `frame_for`, which is the path `app.rs` uses, and the four rewritten
@@ -303,9 +397,9 @@ purpose (departure 4).
 
 ## Configuration
 
-- `crates/lodestone-shell/src/config.rs` — `Options` (`options.json`): the two
-  live settings. `MIN_SCALED_HEIGHT` is public because `LIST_WINDOW_PX` is derived
-  from it.
+- `crates/lodestone-shell/src/config.rs` — `Options` (`options.json`): the
+  seven live settings (see [`LiveOption`] in `options.rs`). `MIN_SCALED_HEIGHT`
+  is public because `LIST_WINDOW_PX` is derived from it.
 - `crates/lodestone-shell/src/resources.rs` — `load_menu_gui_atlas()` supplies
   `widget/button*` and `widget/slider*`. Without a pack the rows fall back to flat
   fills, which is what the jar-less and headless paths see.
