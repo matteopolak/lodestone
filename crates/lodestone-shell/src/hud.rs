@@ -947,10 +947,21 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame) -> f32 {
 
     // XP bar (182x5), just above the hotbar: full background, then the progress
     // sprite cropped left-to-right to its filled fraction.
+    //
+    // The gap above the hotbar is vanilla's own arithmetic, not a guess:
+    // `ContextualBar.MARGIN_BOTTOM` (24) is the hotbar's 22px height plus a 2px
+    // gap, and `ContextualBar.top` is `guiScaledHeight - MARGIN_BOTTOM - HEIGHT`
+    // (`ContextualBar.java:13-14,26-28`) — i.e. the bar sits *2px* above the
+    // hotbar sprite, not 4. `hy` is already this cluster's hotbar-top in the
+    // same logical-pixel space vanilla's `guiHeight` is in, so subtracting from
+    // it (rather than restating an absolute `b.h`-based constant) is what keeps
+    // this correct if the cluster's own bottom margin ever changes — the same
+    // "derive from the expression the draw uses" rule the XP number below now
+    // follows too.
     let bar_w = 182.0;
     let bar_h = 5.0;
     if let Some((level, progress)) = frame.xp {
-        let by = hy - bar_h - 4.0;
+        let by = hy - bar_h - 2.0;
         b.sprite("hud/experience_bar_background", hx, by, bar_w, bar_h, white);
         let p = progress.clamp(0.0, 1.0);
         if p > 0.0 {
@@ -963,19 +974,52 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame) -> f32 {
                 b.push_sprite_quad(q, white);
             }
         }
-        // The level number stays coloured text (vanilla green), centred above.
+        // The level number (vanilla green), centred above the bar.
+        //
+        // Player report: "the xp bar number is too big and too high." Both
+        // were real, and both were this block:
+        //
+        // * **Too big** — `scale` was `2.0`. This function already draws in
+        //   the scale-divided logical canvas (see the doc comment atop
+        //   `sprite_vitals`), the same space the 182px-wide bar itself is laid
+        //   out in, so a ×2 on the text alone made it twice vanilla's size
+        //   relative to everything around it. Vanilla's own draw
+        //   (`ContextualBar.extractExperienceLevel`, below) never scales the
+        //   font at all.
+        // * **Too high** — `by - line_h` used a *font-metrics* gap
+        //   (`(GLYPH_H + 2) * scale`, i.e. 20px at the old scale of 2), not
+        //   vanilla's real one. `ContextualBar.extractExperienceLevel`
+        //   (`ContextualBar.java:34-40`) places the text at
+        //   `y = guiHeight - 24 - 9 - 2`, and the bar itself sits at
+        //   `guiHeight - 24 - 5`: the text's top is exactly `6` logical px
+        //   above the bar's top, full stop — not a value derived from glyph
+        //   height. Written as `by - 6.0` here for the same reason the bar
+        //   gap above is written from `hy` rather than restated: it is the one
+        //   expression that cannot drift out of sync with where the bar
+        //   itself actually landed.
+        //
+        // Vanilla also does not use its usual single-shadow text path here: it
+        // calls `graphics.text(font, str, x, y, colour, false)` — shadow
+        // `false` — **five** times: four unshadowed black copies offset ±1px
+        // on each axis (the outline), then one unshadowed copy in
+        // `0x80FF20` (`ContextualBar.java:34-40`). `Builder::text` would add
+        // its own automatic drop shadow on top of a hand-rolled outline, so
+        // this uses [`Builder::text_plain`] for all five passes, matching
+        // vanilla's `shadow = false` exactly.
         if level > 0 {
-            let scale = 2.0;
-            let line_h = (font::GLYPH_H as f32 + 2.0) * scale;
             let s = level.to_string();
-            let tw = b.text_width(&s, scale);
-            b.text(
-                &s,
-                cx - tw * 0.5,
-                by - line_h,
-                scale,
-                [0.44, 0.92, 0.20, 1.0],
-            );
+            let tw = b.text_width(&s, 1.0);
+            let tx = cx - tw * 0.5;
+            let ty = by - 6.0;
+            let black = [0.0, 0.0, 0.0, 1.0];
+            // `0x80FF20` (`ARGB.color(255, 0x80, 0xFF, 0x20)`), the literal
+            // vanilla constant `-8323296` reinterpreted as unsigned ARGB.
+            let green = [128.0 / 255.0, 1.0, 32.0 / 255.0, 1.0];
+            b.text_plain(&s, tx + 1.0, ty, 1.0, black);
+            b.text_plain(&s, tx - 1.0, ty, 1.0, black);
+            b.text_plain(&s, tx, ty + 1.0, 1.0, black);
+            b.text_plain(&s, tx, ty - 1.0, 1.0, black);
+            b.text_plain(&s, tx, ty, 1.0, green);
         }
         cluster_top = by;
     }
@@ -1255,6 +1299,37 @@ impl<'a> Builder<'a> {
             Some(f) => {
                 let (w, h) = (self.w, self.h);
                 f.draw(
+                    &mut ColourStream {
+                        verts: &mut self.verts,
+                        w,
+                        h,
+                    },
+                    s,
+                    x,
+                    y,
+                    scale,
+                    c,
+                );
+            }
+            None => self.colour().text(s, x, y, scale, c),
+        }
+    }
+
+    /// Emit a string with **no** drop shadow, the string's top-left at
+    /// `(x, y)`. `ContextualBar.extractExperienceLevel`
+    /// (`Hud.java:552-554`/`ContextualBar.java`) builds the XP level number's
+    /// outline out of four unshadowed offset copies plus one unshadowed centre
+    /// copy — passing `shadow = false` to `graphics.text` every time — so a
+    /// caller reproducing that outline must use this, not [`text`](Self::text):
+    /// `text` always adds vanilla's *automatic* 1px shadow on top of whatever
+    /// is drawn, which would layer a second, unwanted shadow under the
+    /// hand-rolled one. The fixed-advance debug font (no [`VanillaFont`]
+    /// attached) was already unshadowed, so that branch is unchanged.
+    fn text_plain(&mut self, s: &str, x: f32, y: f32, scale: f32, c: [f32; 4]) {
+        match self.font {
+            Some(f) => {
+                let (w, h) = (self.w, self.h);
+                f.draw_plain(
                     &mut ColourStream {
                         verts: &mut self.verts,
                         w,
@@ -2529,6 +2604,169 @@ mod tests {
         assert!(
             with_xp > 150,
             "the XP bar's green fill must reach pixels once experience arrives, got {with_xp}"
+        );
+    }
+
+    /// GPU gate for a live player report: "the xp bar number is too big and too
+    /// high." Both halves of that sentence are magnitude claims, not sign
+    /// claims, so this predicts vanilla's real numbers and requires the
+    /// measurement to land on them — the CLAUDE.md "magnitude species" repair,
+    /// not a "some digit painted somewhere" check.
+    ///
+    /// Runs through the **real vanilla atlas + font** (`HudRenderer::attach_gui`,
+    /// `VanillaFont::shared` via `HudRenderer::new`), because
+    /// [`xp_bar_reaches_pixels`] above only exercises the jar-less procedural
+    /// fallback and would not have caught this: the player was looking at
+    /// `sprite_vitals`, a different code path with its own (until now,
+    /// independently wrong) scale and offset.
+    ///
+    /// Two independent renders isolate each claim instead of restating the
+    /// source's own constants as the expected value:
+    ///
+    /// * **"too high"**: render the fill alone (`level: 0, progress: 1.0` — no
+    ///   digit, since the digit only draws `if level > 0`) to find the bar's own
+    ///   top row from its pixels, then render the digit alone (`level: 5,
+    ///   progress: 0.0` — no fill, since the fill only draws `if p > 0.0`) to
+    ///   find the digit's top row. The **gap** between them is what
+    ///   `ContextualBar.extractExperienceLevel` vs `ContextualBar.top`
+    ///   (`ContextualBar.java:26-28,34-40`) fixes at vanilla's `6` logical px —
+    ///   independent of wherever the cluster's own bottom margin happens to
+    ///   place the bar, so this cannot pass by coincidentally agreeing with our
+    ///   own `by`.
+    /// * **"too big"**: the digit-alone render's ink bounding box width, against
+    ///   the *real jar font's* advance for `"5"` at scale 1 (correct hypothesis)
+    ///   and at scale 2 (the old bug's hypothesis, exactly double) — both
+    ///   computed from [`VanillaFont::from_manager`], outside the code under
+    ///   test.
+    #[test]
+    #[ignore = "requires a GPU adapter and the vanilla client.jar"]
+    fn xp_level_number_is_the_right_size_and_the_right_distance_above_the_bar() {
+        use lodestone_render::{HeadlessTarget, RenderTarget};
+
+        let manager = crate::resources::vanilla_manager().expect(
+            "GPU gate opted in via --ignored but no vanilla client.jar was found; set \
+             LODESTONE_ASSETS to a pack root containing client.jar, or populate \
+             .cache/mc/<ver>/client.jar — do NOT skip, a silent pass here asserts nothing",
+        );
+        let atlas =
+            Arc::new(GuiAtlas::build(&manager).expect("build the GUI atlas from client.jar"));
+        let font = VanillaFont::from_manager(&manager).expect("build the vanilla font");
+
+        let ctx = lodestone_render::GpuContext::new_headless_blocking().expect(
+            "headless GPU test opted in via --ignored but no wgpu adapter is available; \
+             run on a host with a GPU, don't 'skip' — a silent pass here asserts nothing",
+        );
+        let device = ctx.device();
+        let queue = ctx.queue();
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        // Chosen for `calculate_gui_scale(AUTO, 480, 320) == 1` (see
+        // `hud_vitals_draw_the_real_heart_sprite`'s comment), so the logical
+        // canvas `sprite_vitals` lays out into is the physical target 1:1 and no
+        // scale multiplication enters the pixel math below.
+        let (w, h) = (480u32, 320u32);
+        let mut target = HeadlessTarget::new(device, w, h, format);
+        let stats = DebugStats::default();
+
+        let mut hud = HudRenderer::new(device, format);
+        hud.attach_gui(device, queue, format, atlas);
+        assert!(
+            hud.font_attached(),
+            "this gate measures vanilla font metrics; the fixed-advance fallback \
+             would make every width prediction below meaningless"
+        );
+
+        const BG: u8 = 40;
+        let x0 = (w as f32 * 0.20) as u32;
+        let x1 = (w as f32 * 0.80) as u32;
+        let y0 = (h as f32 * 0.50) as u32;
+
+        // Bounding box of green-dominant pixels in the scan band, or `None` if
+        // nothing painted there.
+        let mut render_bbox = |xp: Option<(i32, f32)>| -> Option<(u32, u32, u32, u32)> {
+            let frame = target.acquire().expect("headless acquire");
+            clear_view(device, queue, frame.view(), [BG, BG, BG]);
+            let hud_frame = HudFrame {
+                show_debug: false,
+                crosshair: false,
+                xp,
+                hotbar: None,
+                health: None,
+                food: None,
+                ..HudFrame::new(&stats)
+            };
+            hud.render(device, queue, frame.view(), &hud_frame, w, h);
+            let pixels = target.read_texels(device, queue);
+            let (mut min_x, mut max_x, mut min_y, mut max_y) = (u32::MAX, 0u32, u32::MAX, 0u32);
+            let mut found = false;
+            for y in y0..h {
+                for x in x0..x1 {
+                    let i = ((y * w + x) * 4) as usize;
+                    let (r, g, b) = (
+                        u32::from(pixels[i]),
+                        u32::from(pixels[i + 1]),
+                        u32::from(pixels[i + 2]),
+                    );
+                    if g > r + 40 && g > b + 40 && g > u32::from(BG) {
+                        found = true;
+                        min_x = min_x.min(x);
+                        max_x = max_x.max(x);
+                        min_y = min_y.min(y);
+                        max_y = max_y.max(y);
+                    }
+                }
+            }
+            found.then_some((min_x, max_x, min_y, max_y))
+        };
+
+        // Fill alone: no digit (`level: 0`), full bar (`progress: 1.0`).
+        let bar = render_bbox(Some((0, 1.0))).expect("a full XP bar must paint green pixels");
+        // Digit alone: no fill (`progress: 0.0`), a single glyph (`level: 5`).
+        let digit =
+            render_bbox(Some((5, 0.0))).expect("the level digit must paint green pixels");
+        // Negative control: neither renders without server experience.
+        let none = render_bbox(None);
+
+        let (bar_x0, bar_x1, bar_y0, bar_y1) = bar;
+        let (digit_x0, digit_x1, digit_y0, digit_y1) = digit;
+        let digit_width = digit_x1 - digit_x0 + 1;
+        let gap = bar_y0 as i32 - digit_y0 as i32;
+
+        let w1 = font.width("5", 1.0);
+        let w2 = font.width("5", 2.0);
+
+        eprintln!("=== xp level-number magnitude gate ===");
+        eprintln!("bar bbox    = x[{bar_x0}..{bar_x1}] y[{bar_y0}..{bar_y1}]");
+        eprintln!("digit bbox  = x[{digit_x0}..{digit_x1}] y[{digit_y0}..{digit_y1}]");
+        eprintln!("digit_width = {digit_width}, gap(bar_top - digit_top) = {gap}");
+        eprintln!("real font width('5'): scale1={w1:.1} scale2={w2:.1}");
+
+        assert!(
+            none.is_none(),
+            "without server experience neither the bar nor the digit may paint, got {none:?}"
+        );
+
+        // "too high": vanilla's real gap is exactly 6 logical px
+        // (`ContextualBar.java:26-28` bar top, `:34-40` text y). The old bug's
+        // `line_h` was `(GLYPH_H + 2) * 2 == 18`, three times too far — a wide
+        // enough margin that a few px of font-glyph internal padding cannot
+        // produce a false pass.
+        assert!(
+            (4..=10).contains(&gap),
+            "the level digit must sit ~6 logical px above the bar's top row \
+             (vanilla `ContextualBar`), got a gap of {gap} — bar_top={bar_y0} digit_top={digit_y0}"
+        );
+
+        // "too big": the digit's ink must match the real font's scale-1 advance,
+        // not scale-2's (which is exactly double).
+        assert!(
+            (digit_width as f32) < w2 - 1.0,
+            "the level digit is as wide as scale 2 predicts ({w2:.1}px) — the old \
+             `let scale = 2.0;` bug is back, got digit_width={digit_width}"
+        );
+        assert!(
+            (digit_width as f32) <= w1 + 2.0,
+            "the level digit is wider than scale 1's real font advance ({w1:.1}px) \
+             allows, got digit_width={digit_width}"
         );
     }
 
