@@ -75,3 +75,53 @@ flight** until the tiers are genuinely exhausted.
   next agent's `git commit` to ship it under their message); `git status --short` for a tree someone
   broke; and `docker ps`, since the live oracles die with Docker and agents then waste time treating an
   unreachable oracle as evidence.
+
+---
+
+## The cadence, and the goal
+
+**The goal is zero open issues.** Dispatch continuously until the tracker is genuinely empty, and treat
+every issue as needing its lifecycle closed out — not just its code written.
+
+**Set a recurring 30-minute dispatch check** (`CronCreate`, `13,43 * * * *`). Pick off-marks like `:13`
+and `:43` rather than `:00`/`:30`: every user who asks for "every 30 minutes" gets `*/30`, so those two
+minutes are when the whole fleet hits the API at once. This is separate from the 5-hour usage-window
+check above and does a different job — that one is about quota, this one is about never going quiet.
+Session-only, expires after 7 days.
+
+**Probe tool health before resuming or dispatching anything.** Run a trivial `echo` through Bash. If it
+comes back blocked with a classifier error, **Sonnet is down** — the Bash safety classifier runs on it,
+so a blocked `echo` is the cheapest reliable signal that Sonnet-backed agents will fail too. Wait rather
+than dispatching into an outage; a retry during one just burns the attempt. Measured here: seven agents
+dropped on transient 529s within a minute, Bash went unusable at the same moment, and everything came
+back together.
+
+**Resume dropped agents from their transcripts — do not re-spawn them.** `SendMessage` to a failed agent
+replays its context, and its in-flight work is already on disk; a fresh spawn duplicates the work and
+risks clobbering what the first one wrote. Include in the resume message everything that changed while it
+was down: HEAD moved, the tree went red, a file freed, another agent's finding that changes its order of
+work. Retry the whole fleet in one sweep once the probe is clean.
+
+**Slow new feature work when architecture would pay more.** Landing modularity, throughput and
+performance improvements ahead of the next feature batch is wanted, not a detour. The four choke-point
+files serialise nearly all parallel work, so decomposing them raises the ceiling on everything else.
+
+**Fable 5 plans architecture; Opus/Sonnet implement it.** Dispatch Fable to design before anyone builds,
+and dispatch it read-only over core subsystems on its own merits — it does not need a specific bug to
+justify a review. Brief it explicitly as read-only, require it to **state what it did not examine** and to
+rank recommendations by payoff ÷ effort so each is directly dispatchable, then verify with
+`git status --short` that it wrote nothing: a review agent that edits is indistinguishable from an
+implementing one after the fact.
+
+Its first review paid for itself in a way no implementing agent had managed across a whole session on the
+same crate, and the finding was **perishable**: the ore-feature engine's parity had been verified against
+a JVM oracle whose own header admits it does not model ore spill from neighbouring chunks, so the oracle
+shared the simplification it was validating. Composing on top of that would have calibrated a wrong
+4-block edge band on every chunk into the accepted baseline, and no gate in the tree could see it. It also
+declined to fabricate a benchmark when the tool classifier was down, using the committed sha-tagged bench
+record instead and stating that provenance. **Order matters for findings like that — get the review in
+before the implementation, not after.**
+
+**Batch by file cluster, not by theme.** Co-location is what decides whether two issues can be two agents
+or must be one. Five small issues in one crate is a good batch; two issues in different crates is two
+agents. Label issues by affected cluster so this is mechanical rather than re-derived each time.
