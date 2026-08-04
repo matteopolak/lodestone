@@ -1,19 +1,34 @@
-# The underwater, fire and pumpkin screen overlays
+# The screen overlays: underwater, fire, pumpkin, freeze, spyglass, confusion, portal
 
 ## What it is
 
-Three full-screen post-hand-pass overlays, issues #108, #112 and #185: a
-blue-ish tint plus a scrolling `misc/underwater.png` texture when the
-camera's eye is submerged, a looping flame texture across the bottom of the
-screen while the local player is on fire, and a static full-screen
-`misc/pumpkinblur.png` vignette while a carved pumpkin is worn in the helmet
-slot. Underwater and fire come from one vanilla class,
-`ScreenEffectRenderer.submit` (`.cache/mc/26.2/client-src/net/minecraft/
-client/renderer/ScreenEffectRenderer.java:55-83`); the pumpkin overlay is
-vanilla's *different* mechanism (see its own section below), but shares the
-identical "textured, alpha-blended, screen-space quad after the hand pass"
-shape closely enough that it landed in the same pass rather than inventing a
-second pipeline: `lodestone_render::ScreenEffectRenderer`.
+Seven full-screen (or near-full-screen) post-hand-pass effects, issues #108,
+#112, #185, #139, #154, #144 and #149: a blue-ish tint plus a scrolling
+`misc/underwater.png` texture when the camera's eye is submerged, a looping
+flame texture across the bottom of the screen while the local player is on
+fire, a static full-screen `misc/pumpkinblur.png` vignette while a carved
+pumpkin is worn in the helmet slot, a `misc/powder_snow_outline.png`
+vignette that ramps in with `Entity.getPercentFrozen()` while freezing in
+powder snow, a `misc/spyglass_scope.png` lens with four black letterbox bars
+while scoping with a spyglass, a green-tinted `misc/nausea.png` "confusion"
+overlay while the Nausea effect is active, and an animated
+`block/nether_portal.png` swirl while near a nether/end portal (portal takes
+priority over confusion when both are active). Underwater and fire come from
+one vanilla class, `ScreenEffectRenderer.submit`
+(`.cache/mc/26.2/client-src/net/minecraft/client/renderer/
+ScreenEffectRenderer.java:55-83`); pumpkin/freeze/spyglass/confusion/portal
+are all vanilla's *different* mechanism, `Hud.extractCameraOverlays`
+(`Hud.java:269-309` — see the pumpkin section below for why it shares this
+pipeline anyway) but share the identical "textured, alpha-blended,
+screen-space quad after the hand pass" shape closely enough that all seven
+landed in one pass rather than inventing a second pipeline:
+`lodestone_render::ScreenEffectRenderer`.
+
+Confusion/portal additionally drive a **world-projection warp** — see
+"The nausea/portal projection warp" section below — which is not a
+screen-space quad at all and lives in `camera.rs`, not `screen_effects.rs`.
+Spyglass additionally has an **FOV-zoom** component not yet wired anywhere in
+this codebase — see its own section for exactly what and where.
 
 ## How it works
 
@@ -77,7 +92,21 @@ drew. Vanilla runs both at once when submerged (short water fog *and* the
 tinted overlay); nothing here changes `fog.rs`, and this pass does not read
 `FogSettings` at all.
 
-### Not added here: a "hurt flash" (issue #98)
+### Closed: a "hurt flash" and "screen shake" (issue #98)
+
+**Issue #98 is closed.** What survives of it: the per-entity hurt/death red
+overlay below is the real vanilla mechanism and it shipped; the full-screen
+tint the issue's title asked for does not exist in vanilla at all (confirmed
+twice, independently, in two different sessions); "screen shake" is not a
+real vanilla mechanic under any name (`grep -rn "[Ss]hake"` across
+`client-src` finds only an unrelated item-wobble in `ItemInHandRenderer.java`
+— no camera reference anywhere). The issue was retitled to stop naming two
+effects that were never both real, and closed rather than left open on an
+unbuilt, non-vanilla ask with no code dependency on anything else in the
+tracker. If explosion camera shake is still wanted, it needs a **fresh**
+issue scoped explicitly as new game-feel work, not vanilla parity — nothing
+here builds it speculatively. The rest of this section is kept as the
+historical record of *why*.
 
 Issue #98 asked for a full-screen red tint on taking damage, framed as
 plausibly belonging in this pass — this file's own module doc, and the fact
@@ -200,6 +229,186 @@ future gate audit finds vanilla *does* show camera overlays to a spectator
 wearing a pumpkin somewhere else in the call chain, that is the one deviation
 to revisit here.
 
+### Freeze (issue #139): the mechanic is real, borrowed, and coordinated
+
+Vanilla's freeze vignette is the `player.getTicksFrozen() > 0` branch of
+`Hud.extractCameraOverlays` (`Hud.java:293-295`):
+`extractTextureOverlay(POWDER_SNOW_OUTLINE_LOCATION, player.getPercentFrozen())`
+— exactly pumpkin's static-quad shape, but with a *variable* alpha
+(`player.getPercentFrozen()`, `0.0..=1.0`) instead of pumpkin's fixed `1.0`.
+`freeze_overlay_triangles(percent)` in `screen_effects.rs` is that: same
+UVs/positions as `pumpkin_overlay_triangles`, tint `[1,1,1,percent]`.
+
+**The underlying mechanic (issue #212) is not this issue's own work, and was
+not duplicated here.** `lodestone_physics::player::PlayerState::frozen_ticks`/
+`percent_frozen()`/`is_freezing()` (`crates/lodestone-physics/src/player.rs:431-568`)
+already exist, already tick (`update_freezing`, called from `tick` at
+`player.rs:2783`), and are already reachable from the shell with **no new
+`Sim` accessor** — `Sim::player()` already returns the physics crate's
+`PlayerState` by value (`sim.rs:1792`), so `self.sim.player().percent_frozen()`
+is a real, tested input today, not a stub. This also answers issue #139's own
+first scope checkbox ("determine whether the freezing state is
+server-authoritative or client-computed"): it is **client-computed**, the
+same swept-collision-per-tick shape as `fall_distance`/sprinting/every other
+field on `PlayerState` — vanilla's own `LivingEntity.aiStep` runs identically
+on every client (including the local player's own prediction) and on the
+server, not just server-side-and-synced, so this is not a gap, it is the
+correct port of how vanilla itself computes it.
+
+**Not first-person-gated** — see "Draw order and gating" below for why this
+differs from pumpkin/spyglass and how `RenderState::render_inner` reflects
+it.
+
+### Spyglass (issue #154): a dedicated method, not the generic `camera_overlay` table
+
+**Answering the open question the briefing asked to settle: no, this is not
+a two-line addition to the generic `camera_overlay` table pumpkin uses.**
+`Hud.extractCameraOverlays` branches on `player.isScoping()` *before* it ever
+reaches that per-slot loop (`Hud.java:277-291`):
+
+```java
+if (player.isScoping()) {
+    this.extractSpyglassOverlay(graphics, this.scopeScale);
+} else {
+    // the generic camera_overlay per-slot loop pumpkin uses
+}
+```
+
+`extractSpyglassOverlay` (`Hud.java:1033-1048`) is its own method with its
+own geometry: a centred `spyglass_scope.png` lens sized by a scale factor,
+surrounded by **four separate opaque-black fills** (`graphics.fill`, not a
+texture) covering whatever the lens does not. `spyglass_lens_triangles`/
+`spyglass_letterbox_triangles` transcribe exactly that:
+
+- `spyglass_lens_half_extent(aspect)` derives the lens's NDC half-extent
+  algebraically from `Hud`'s own `srcWidth = srcHeight = min(guiWidth,
+  guiHeight)` / `ratio = min(...) * scale` — the smaller screen dimension
+  always gets half-extent `SPYGLASS_SCALE = 1.125` (vanilla's settled
+  `Hud.scopeScale` lerp target, `Hud.java:276`; the few-frame ease-in ramp
+  toward it is dropped as a deliberate simplification, same spirit as the
+  fire overlay's placement), the larger one is compressed by `aspect`. On a
+  landscape screen this overflows the lens past the top/bottom of NDC —
+  intentional, matching vanilla (no top/bottom bars in landscape).
+- The four bars are drawn with the pipeline's own procedural 1x1 opaque-white
+  texture (`ScreenEffectRenderer`'s `white_bind_group`), tinted pure black
+  (`LETTERBOX_TINT`), rather than a second pipeline or a loaded asset —
+  multiplying any texel by a zero-RGB tint is black regardless of what is
+  sampled.
+
+**The FOV-zoom half is real, tested, and unwired — the vignette above is only
+half of #154.** `AbstractClientPlayer.getFieldOfViewModifier`
+(`AbstractClientPlayer.java:92-114`) returns `0.1F` outright (a 10x zoom,
+overriding every other FOV modifier) when `firstPerson && isScoping()`.
+`lodestone_render::spyglass_fov_modifier(scoping: bool) -> f32` in
+`camera.rs` models exactly that (`0.1` scoping, `1.0` otherwise) and is unit
+tested, but **nothing in this codebase multiplies `Camera::fov_y_degrees` by
+it yet**: that value is assigned in `crates/lodestone-shell/src/
+camera_rig.rs` (`FOV_Y_DEGREES`/per-frame construction), a file outside this
+change's ownership (see `CLAUDE.md`'s file-ownership section — it is also
+outside the brokered set, unlike `app.rs`/`sim.rs`, since it is another
+agent's active territory). Whoever owns `camera_rig.rs` needs one
+multiplication: `camera.fov_y_degrees *= spyglass_fov_modifier(scoping)` (or
+vanilla's own smoothed `Camera.fovModifier` lerp, if that ever gets built for
+sprint/flying too) composed with whatever else already produces
+`fov_y_degrees` there — not overwriting it, per issue #154's own scope note
+about this exact trap.
+
+**`scoping`'s input is real, not stubbed**, once the two-line broker patch to
+`sim.rs` lands (see "The spyglass flag's route to the shell" below):
+`Player.isScoping()` is `isUsingItem() && getUseItem().is(Items.SPYGLASS)`
+(`Player.java:1936-1938`), and both halves already exist here —
+`Sim`'s own `UsingItem` ECS resource (armed by `start_use`/cleared by
+`end_use`, `sim.rs`) for the first half, and the already-computed `held`
+`ResourceLocation` in `app.rs`'s `redraw()` (used for
+`set_main_hand_source`) for the second. Issues #54/#57 (held-item pose,
+bow/crossbow draw) are what this depended on and both are closed, so nothing
+here is blocked on missing state — only on the two-line `sim.rs` accessor
+`Sim::using_item` did not have before this change.
+
+### Confusion and portal (issues #144, #149): one screen-space pair, one shared projection warp
+
+Vanilla ties nausea and portal together in **two** places, and this port
+keeps them together in the same two places rather than treating them as
+unrelated features that happen to look similar:
+
+1. **The screen-space overlay**, mutually exclusive, portal winning
+   (`Hud.java:297-308`):
+   ```java
+   if (portalIntensity > 0.0F) {
+       this.extractPortalOverlay(graphics, portalIntensity);
+   } else if (nauseaIntensity > 0.0F) {
+       // screenEffectScale < 1.0 check, then extractConfusionOverlay
+   }
+   ```
+   `confusion_overlay_triangles(strength)` transcribes `extractConfusionOverlay`
+   (`Hud.java:1109-1132`): the quad is scaled about the screen centre by
+   `size = 2.0 - strength` (vanilla's `Mth.lerp(strength, 2.0F, 1.0F)`,
+   always `>= 1.0` for valid `strength`, so it always at least covers the
+   full screen — the rasterizer clips the rest, the same free-clip
+   [`spyglass_lens_triangles`] relies on), tinted a green-biased
+   `(0.2, 0.4, 0.2) * strength` at alpha `1.0`. `portal_overlay_triangles`/
+   `portal_overlay_alpha` transcribe `extractPortalOverlay`
+   (`Hud.java:1097-1107`): a full-screen quad sampling the **same
+   32-frame-strip shape** as the fire overlay (`nether_portal.png` is
+   `16x512`, `{"animation": {}}`, identical to `fire_1.png` — `fire_frame_count`
+   applies unchanged), tinted white at `alpha^4 * 0.8 + 0.2` below `1.0`
+   (vanilla's own floor-curve, never fully transparent).
+
+2. **The world-projection "spinning" warp**
+   (`GameRenderer.renderLevel`, `.cache/mc/26.2/client-src/net/minecraft/
+   client/renderer/GameRenderer.java:543-552`), which is **not** screen-space
+   geometry at all — it rotates and shears the *world's own projection
+   matrix* before every world-space draw call that frame, which is why
+   `crate::camera::nausea_portal_warp` lives in `camera.rs`, not
+   `screen_effects.rs`. This answers #144's own briefing question ("a
+   projection-matrix effect, establish where it belongs before writing it"):
+   it belongs on `Camera`, specifically as a post-multiply on
+   `view_projection()` (`Camera::view_projection_warped`), because
+   `RenderState::render_inner` already rewrites **one** shared `view_proj`
+   matrix at the top of the function into every world-space uniform
+   (sections, the model shared camera buffer, the outline pass, debug lines)
+   — injecting the warp there reaches everything vanilla's own
+   `RenderSystem.setProjectionMatrix` call reaches (the whole world pass) and
+   nothing it does not (the HUD/GUI and this crate's own overlay pipeline
+   read no camera matrix at all), with a single call-site change. See
+   `camera.rs`'s own doc on `nausea_portal_warp`/`view_projection_warped` for
+   the transcribed formula and the determinant/fixed-axis tests that pin it
+   down without a screenshot.
+
+   Vanilla accumulates the warp's spin angle as a per-tick integral
+   (`GameRenderer.tick`, lines 261-270) that only advances while either
+   intensity is positive. This crate's `RenderState::render_inner` takes
+   `&self`, not `&mut self` — there is nowhere to store that integral, and
+   every other "how far has this animation progressed" input in this pass
+   (e.g. fire's `tick`) is threaded in from outside rather than accumulated
+   internally. `spinning_effect_angle_degrees(tick, portal_intensity,
+   nausea_intensity)` is the deliberate substitute: a **pure function of the
+   current game tick** at vanilla's own blended per-tick speed
+   (`(portal*20 + nausea*7) / (portal+nausea)`), which reaches the identical
+   steady-state rotation *rate* the instant either effect is active, just at
+   a different absolute phase than vanilla's own freeze-on-deactivate
+   accumulator — imperceptible for a continuously looping spin with no fixed
+   start reference. Documented as a simplification, not silently taken.
+
+**Neither intensity has a live producer yet, and that is a real, honestly
+reported gap — not a stub.** `ScreenEffects::nausea_intensity`/
+`portal_intensity` default to `0.0`, at which `view_projection_warped` is
+*provably* identical to plain `view_projection`
+(`view_projection_warped_matches_plain_view_projection_when_inactive`), so
+every existing caller is unaffected. But unlike freeze (#139, whose mechanic
+already existed in `lodestone-physics`) or spyglass (#154, whose mechanic
+already existed via `UsingItem`/held-item), **no potion-effect-duration
+tracker and no nether-portal-proximity tracker exist anywhere in this
+codebase** to compute vanilla's `getEffectBlendFactor(NAUSEA, ...)` or
+`Entity.portalEffectIntensity`. Both live in `lodestone-ecs`/
+`lodestone-physics`, outside this change's ownership, and neither is
+currently claimed by another agent the way #212 (freezing) was. The render
+mechanism — geometry, pipeline, projection warp, gating, mutual exclusion —
+is real, tested (including two GPU-gated pixel gates and eight unit tests
+across `camera.rs`/`screen_effects.rs`) and wired all the way to
+`RenderState::render_inner`; it is simply never told the truth yet, the same
+shape `on_fire` was in before issue #112 closed it.
+
 ### Draw order and gating
 
 `GameRenderer.java:568-577`: the hand pass, then
@@ -211,16 +420,40 @@ draws afterward, in a separate pass in `app.rs`, so the ordering matches.
 HUD proper, not this pass — see above for why it landed here anyway.)
 
 Gating mirrors `ScreenEffectRenderer.submit`'s
-`isFirstPerson && !isSleeping && !isSpectator`:
-[`ScreenEffects::any_active`] checks first-person (`!stats.third_person_body_drawn`
-— reusing the existing signal the hand pass already computes, rather than a
-second "am I first person" input) and not-spectator, now across all three
-flags (`eye_in_water || on_fire || wearing_pumpkin`). There is no "sleeping"
-conjunct: this crate has no sleeping state yet, and its absence can only be a
-false *negative* miss (a sleeping player who should not see the overlay but
-does), never a false positive that hides a working feature — see
-`spectator_suppresses_both_overlays`/`spectator_suppresses_pumpkin_too` and
-the `any_active` unit tests in `crates/lodestone-shell/src/gpu/screen_effects.rs`.
+`isFirstPerson && !isSleeping && !isSpectator` — but as of freeze/confusion/
+portal, **not with one gate**. `Hud.extractCameraOverlays` itself has two
+groups, checked directly against the jar rather than assumed: pumpkin/
+spyglass sit inside its `if (getCameraType().isFirstPerson())` block
+(`Hud.java:277-291`), while freeze (`Hud.java:293-295`) and confusion/portal
+(`Hud.java:297-308`) are **siblings** of that block, not nested in it — they
+draw in third person too. `ScreenEffects::any_active` folds both groups into
+one bool (the outer short-circuit `render_inner` checks before opening any
+pass), but exposes each group separately —
+[`ScreenEffects::first_person_group_active`] (`eye_in_water || on_fire ||
+wearing_pumpkin || scoping`, gated on first-person **and** not-spectator) and
+[`ScreenEffects::camera_agnostic_group_active`] (`freeze_percent > 0.0 ||
+nausea_intensity > 0.0 || portal_intensity > 0.0`, gated on not-spectator
+only) — and `render_inner` re-checks each group at its own dispatch site
+rather than trusting the outer `any_active` alone, precisely because a
+freeze-only frame in third person must not also fire an eye-in-water flag
+left set from a stale earlier value. There is no "sleeping" conjunct
+anywhere: this crate has no sleeping state yet, and its absence can only be a
+false *negative* miss (a sleeping player who should not see an overlay but
+does), never a false positive that hides a working feature.
+`!spectator` on the camera-agnostic group is this codebase's own convention,
+not a vanilla literal — `Hud.java` has no explicit spectator check anywhere
+in `extractCameraOverlays`, for *any* of the seven effects — but nothing
+here has reason to be the first exception to "nothing about my own body
+renders in spectator". See `spectator_suppresses_both_overlays`/
+`spectator_suppresses_the_camera_agnostic_group_too`/
+`freeze_confusion_and_portal_survive_third_person_unlike_the_others` in
+`crates/lodestone-shell/tests/screen_overlay_pixels.rs`, and the `any_active`/
+`first_person_group_active`/`camera_agnostic_group_active` unit tests in
+`crates/lodestone-shell/src/gpu/screen_effects.rs`.
+
+Portal/confusion mutual exclusion (`Hud.java:300-302`'s `if`/`else if`) is
+reproduced as an `if`/`else if` in `render_inner`'s own dispatch, not two
+independent `if`s — see `stats.confusion_overlay_drawn`'s doc.
 
 ## The on-fire flag's route to the shell (closed, issue #112)
 
@@ -302,55 +535,115 @@ No change needed in `lodestone-shell/src/gpu.rs`, `gpu/screen_effects.rs`, or
 `lodestone-render` — the render half of this feature does not know or care
 where `on_fire` came from.
 
-## The pumpkin flag's route to the shell (issue #185, `app.rs` patch pending)
+## The pumpkin flag's route to the shell (closed, issue #185)
 
-`ScreenEffects::wearing_pumpkin`, `stats.pumpkin_overlay_drawn`,
+**Closed — stale "patch pending" heading corrected.** `app.rs`'s `redraw()`
+already computes `wearing_pumpkin` from `player_menu.player_native(39)` and
+feeds it into the `screen_effects` literal (`app.rs:2323-2333` as of this
+writing). `ScreenEffects::wearing_pumpkin`, `stats.pumpkin_overlay_drawn`,
 `ScreenEffectRenderer::draw_pumpkin`, `pumpkin_overlay_triangles`, and
 `load_pumpkin_overlay_texture` are all real and wired end to end through
 `RenderState::render_inner` — proved by the pipeline-level GPU gate above.
-The one remaining step is **exactly the same shape** as the on-fire route
-just above: `app.rs` is off-limits to a rendering-focused change (see
-`CLAUDE.md`'s file-ownership section) and needs the following patch applied
-by whoever owns it, landed *with* this feature's commit so it is not an
-island:
 
-**`crates/lodestone-shell/src/app.rs`**, in `redraw()`, immediately after the
-existing `spectator` computation and before the `screen_effects` construction
-(around line 2309 as of this writing — re-locate by the `let screen_effects =
-crate::gpu::ScreenEffects {` line, since concurrent edits move line numbers):
+## The freeze/spyglass/confusion/portal flags' route to the shell (issues #139, #144, #149, #154 — `app.rs`/`sim.rs` patches pending)
+
+All four render mechanisms (geometry, pipeline, `ScreenEffects` fields,
+`render_inner` dispatch, stats counters) are real and wired end to end,
+proved by the pipeline-level GPU gate above — the pixel-producing half is
+done. What is not yet landed is the **input** half for three of the four,
+since `app.rs`/`sim.rs` are outside this change's ownership (`CLAUDE.md`'s
+file-ownership section). Freeze's input needs no `sim.rs` change at all —
+`Sim::player()` already returns `lodestone_physics::player::PlayerState` by
+value, and `percent_frozen()` is already public on it.
+
+**`crates/lodestone-shell/src/sim.rs`**, next to `Self::player`
+(`sim.rs:1792`, immediately after its closing brace):
 
 ```rust
-// The pumpkin overlay's per-frame input (issue #185). Native inventory
-// index 39 is the head armour slot (`Sim::third_person_body_state`'s own
-// `ARMOUR_NATIVE_SLOTS` table), and `player_menu` is already in scope
-// above (hoisted for the hotbar snapshot), so this costs no second `Menu`
-// clone.
-let wearing_pumpkin = player_menu
-    .player_native(39)
-    .and_then(|st| ResourceLocation::parse(&st.item().to_string()).ok())
-    .is_some_and(|loc| loc.namespace() == "minecraft" && loc.path() == "carved_pumpkin");
+/// Whether the local player currently has an item "in use" — the
+/// right-mouse-held input state `UsingItem` mirrors (armed by `start_use`,
+/// cleared by `end_use`), not a re-derivation of vanilla's own
+/// `LivingEntity.isUsingItem()` tick counter. Exists so a caller can derive
+/// `Player.isScoping()` (`isUsingItem() && getUseItem().is(Items.SPYGLASS)`,
+/// `Player.java:1936-1938`) without reaching into the ECS resource directly
+/// — see issue #154.
+#[must_use]
+pub fn using_item(&self) -> bool {
+    self.read(|w| w.resource::<UsingItem>().0)
+}
+```
+
+`UsingItem` is already imported in `sim.rs` (`use ... PlacementPredictor,
+RayTarget, UsingItem;`), so no new `use` line is needed.
+
+**`crates/lodestone-shell/src/app.rs`**, in `redraw()`. First, capture the
+selected hotbar item for the spyglass check **before** `held` is moved into
+`set_main_hand_source` (immediately after the existing `let held = ...`
+computation, around `app.rs:2121-2124`):
+
+```rust
+// The spyglass overlay's held-item half (issue #154) — `held` is about to
+// move into `set_main_hand_source` below, so this is captured first rather
+// than re-reading `player_menu` a second time.
+let held_for_scoping = held.clone();
+```
+
+Then, at the `screen_effects` construction site (`app.rs:2328` as of this
+writing — re-locate by the `let screen_effects = crate::gpu::ScreenEffects {`
+line, since concurrent edits move line numbers), replace the literal:
+
+```rust
+// The freeze overlay's per-frame input (issue #139). `PlayerState::
+// percent_frozen` is real, tested physics state (`update_freezing`, issue
+// #212, `lodestone-physics`) -- not a stub.
+let freeze_percent = self.sim.player().percent_frozen();
+
+// The spyglass overlay's per-frame input (issue #154). `Player.isScoping()`
+// is `isUsingItem() && getUseItem().is(Items.SPYGLASS)`.
+let scoping = self.sim.using_item()
+    && held_for_scoping
+        .as_ref()
+        .is_some_and(|loc| loc.namespace() == "minecraft" && loc.path() == "spyglass");
+
 let screen_effects = crate::gpu::ScreenEffects {
     eye_in_water: self.sim.player().eye_in_water,
     on_fire,
     spectator,
     tick,
     wearing_pumpkin,
+    freeze_percent,
+    scoping,
+    // Issues #144/#149: the render mechanism (geometry, pipeline, the
+    // shared projection warp) is real and tested -- see this doc's
+    // "Confusion and portal" section -- but no potion-effect-duration
+    // tracker or nether-portal-proximity tracker exists anywhere in this
+    // codebase yet to compute these, and neither is `lodestone-ecs`/
+    // `lodestone-physics` work this change owns. `0.0` is the honest
+    // current answer, not a placeholder pretending to work -- exactly
+    // `on_fire`'s pre-#112 shape.
+    nausea_intensity: 0.0,
+    portal_intensity: 0.0,
 };
 ```
 
-i.e. the only change to the existing `screen_effects` literal is one new
-field, `wearing_pumpkin,`, fed by the four lines above it.
-`lodestone_assets::ResourceLocation` is already imported in `app.rs` (used at
-line 2091 for the hotbar snapshot's own item lookup), so no new `use` is
-needed. `player_menu` is already bound a few dozen lines earlier for the
-hotbar records — this reuses it rather than calling `self.sim.player_menu()`
-a second time.
+i.e. three new fields fed by real input (`freeze_percent`, `scoping`) and two
+left at an honestly-reported `0.0` pending `lodestone-ecs`/`lodestone-physics`
+work outside this change. `lodestone_assets::ResourceLocation` is already
+imported (used for `wearing_pumpkin`'s own lookup a few lines above), so
+`held_for_scoping`'s `.namespace()`/`.path()` calls need no new `use`.
+
+**Spyglass's FOV-zoom half (also #154) is a separate, third file:**
+`crates/lodestone-shell/src/camera_rig.rs`, wherever `Camera { fov_y_degrees:
+..., .. }` is assembled per frame (`FOV_Y_DEGREES` today, `camera_rig.rs:724`).
+That file is not brokered through this doc's patches — it is another agent's
+active territory — but the composition it needs is one multiplication:
+`fov_y_degrees *= lodestone_render::spyglass_fov_modifier(scoping)`, composed
+with (not overwriting) whatever else already produces `fov_y_degrees` there.
+See this doc's "Spyglass" section above for the full citation.
 
 **No change needed in `lodestone-shell/src/gpu.rs`, `gpu/screen_effects.rs`,
-`gpu/stats.rs`, or `lodestone-render`/`lodestone-assets`** for this patch —
-all of that already landed with this doc update; `app.rs` is the only
-outstanding piece, and it is a strict four-line addition plus one new struct
-field, not a restructure.
+`gpu/stats.rs`, or `lodestone-render`/`lodestone-assets`** for any of the four
+— all of that already landed with this doc update.
 
 ## A session-scoped flag needs an explicit reset (issue #390)
 
@@ -422,10 +715,28 @@ nothing looks wrong until a player dies burning).
   exercise every feature — left alone deliberately, not missed.
 - **Frame count is read from the texture, not hardcoded.** `fire_frame_count`
   is `image.height / 16`, computed once at `ScreenEffectRenderer::new` and
-  cached (`ScreenEffectRenderer::fire_frame_count()`). A resource pack with a
-  differently-sized `fire_1.png` still animates correctly; it would only
-  break if a pack used a non-16px-wide strip, which vanilla's own asset
-  pipeline does not support either.
+  cached (`ScreenEffectRenderer::fire_frame_count()`/`portal_frame_count()`).
+  A resource pack with a differently-sized `fire_1.png`/`nether_portal.png`
+  still animates correctly; it would only break if a pack used a
+  non-16px-wide strip, which vanilla's own asset pipeline does not support
+  either.
+- **The letterbox bars' texture is procedural, not loaded.** `white_bind_group`
+  is a 1x1 opaque-white texture built at `ScreenEffectRenderer::new` with no
+  backing asset — see `spyglass_letterbox_triangles`'s doc for why a flat
+  colour fill needs no real texture content. If a future overlay needs
+  another flat fill, reuse this bind group rather than adding a second
+  procedural texture.
+- **Two independent gate groups, not one.** Freeze/confusion/portal are
+  **not** first-person-gated, unlike every overlay before them — see "Draw
+  order and gating" above. Adding a new overlay means deciding which group it
+  belongs to by checking the jar (`Hud.extractCameraOverlays`'s nesting), not
+  by assuming it follows the existing five.
+- **The nausea/portal projection warp has its own home, `camera.rs`, not
+  this file.** A future change to the warp's formula
+  (`nausea_portal_warp`/`spinning_effect_angle_degrees`) touches `camera.rs`
+  and its one call site in `RenderState::render_inner` (`let view_proj =
+  camera.view_projection_warped(...)`) — nothing in `screen_effects.rs`
+  needs to change for it.
 
 ## Configuration
 
@@ -439,28 +750,50 @@ installed, not a startup failure.
 ## Dependencies
 
 - `lodestone-assets::screen_effects` — `load_underwater_texture`/
-  `load_fire_texture`/`fire_frame_count`/`load_pumpkin_overlay_texture`, the
-  same "plain unatlased `Image`" loader shape `sky::load_cloud_texture` uses,
-  and for the same reason: each texture's own addressing (4×4 tiling with
-  wraparound for the underwater texture; independent-frame-slice, no
-  wraparound for the fire strip; a single static image for the pumpkin
-  overlay) would conflict with an atlas's per-sprite padding.
+  `load_fire_texture`/`fire_frame_count`/`load_pumpkin_overlay_texture`/
+  `load_freeze_overlay_texture`/`load_spyglass_scope_texture`/
+  `load_nausea_overlay_texture`/`load_portal_overlay_texture`, the same
+  "plain unatlased `Image`" loader shape `sky::load_cloud_texture` uses, and
+  for the same reason: each texture's own addressing (4×4 tiling with
+  wraparound for underwater; independent-frame-slice, no wraparound for
+  fire/portal; a single static image for pumpkin/freeze/spyglass/nausea)
+  would conflict with an atlas's per-sprite padding.
 - `lodestone-render::screen_effects` — the pure geometry
   (`underwater_overlay_quad`/`triangles`, `fire_overlay_triangles`,
-  `pumpkin_overlay_triangles`, `underwater_brightness`) and the GPU-owning
-  `ScreenEffectRenderer` (`draw_underwater`/`draw_fire`/`draw_pumpkin`).
+  `pumpkin_overlay_triangles`, `freeze_overlay_triangles`,
+  `spyglass_lens_triangles`/`spyglass_letterbox_triangles`/
+  `spyglass_lens_half_extent`, `confusion_overlay_triangles`,
+  `portal_overlay_triangles`/`portal_overlay_alpha`, `underwater_brightness`)
+  and the GPU-owning `ScreenEffectRenderer` (`draw_underwater`/`draw_fire`/
+  `draw_pumpkin`/`draw_freeze`/`draw_spyglass`/`draw_confusion`/
+  `draw_portal`).
+- `lodestone-render::camera` — `nausea_portal_warp`/
+  `spinning_effect_angle_degrees`/`Camera::view_projection_warped` (issues
+  #144/#149's shared world-projection warp) and `spyglass_fov_modifier`
+  (issue #154's FOV-zoom half, not yet wired to any live `Camera` — see the
+  "Spyglass" section above).
 - `lodestone-shell::gpu` — `RenderState::screen_effects`,
   `install_screen_effects`/`has_screen_effects`, the draw calls inside
-  `render_inner` (including `stats.pumpkin_overlay_drawn`), and
+  `render_inner` (including `stats.pumpkin_overlay_drawn`/
+  `spyglass_overlay_drawn`/`freeze_overlay_drawn`/`confusion_overlay_drawn`/
+  `portal_overlay_drawn`, and the `view_projection_warped` call that replaces
+  plain `view_projection` at the top of `render_inner`), and
   `gpu::screen_effects::ScreenEffects` (the per-frame argument type,
-  including `wearing_pumpkin`).
+  including `wearing_pumpkin`/`freeze_percent`/`scoping`/`nausea_intensity`/
+  `portal_intensity`, and the `first_person_group_active`/
+  `camera_agnostic_group_active` split).
 - `lodestone-shell::resources::load_screen_effects` — the `client.jar` IO,
-  mirroring `load_sky` exactly; `ScreenEffectRenderer::new` loads all three
-  textures (underwater, fire, pumpkin) in one call, so there is nothing
-  pumpkin-specific to add here.
+  mirroring `load_sky` exactly; `ScreenEffectRenderer::new` loads every
+  texture in one call, so there is nothing per-overlay to add here.
+- `lodestone-shell::sim` — `Sim::player().percent_frozen()` (already public,
+  no patch needed, issue #139) and `Sim::using_item()` (issue #154, patch
+  pending — see "The freeze/spyglass/confusion/portal flags' route to the
+  shell").
+- `lodestone-physics::player` — `PlayerState::frozen_ticks`/`percent_frozen`/
+  `is_freezing` (issue #212's mechanic, consumed not duplicated here).
 - `lodestone-shell::app::redraw` — computes `wearing_pumpkin` from the
-  already-in-scope `player_menu`'s native slot 39 (head), the same source
-  `Sim::third_person_body_state` reads for armour rendering.
+  already-in-scope `player_menu`'s native slot 39 (head, landed), and (patch
+  pending) `freeze_percent`/`scoping` the same way.
 
 ## The gates, and what they printed
 
@@ -469,38 +802,59 @@ Both are `#[ignore]`d GPU gates (no GPU on CI); run with `--ignored
 predicted.
 
 **Pipeline level** (`cargo test -p lodestone-render --test
-screen_effects_pipeline_gpu -- --ignored --nocapture`) — proves the pass
+screen_effects_pipeline_gpu -- --ignored --nocapture`) — proves each pass
 paints pixels at all, via a synthetic in-memory pack, independent of the
-shell. All 4 tests pass, including the two added for the pumpkin overlay:
+shell. All 8 tests pass, four added for freeze/spyglass/confusion/portal:
 
 | test | result |
 |---|---|
 | `control_an_untouched_target_reads_back_as_black` | pass (negative control) |
 | `underwater_overlay_paints_the_whole_frame` | pass |
-| `fire_overlay_paints_only_the_bottom_strip` | pass, with an explicit top/bottom row-band split (not a frame average) |
-| `pumpkin_overlay_paints_the_whole_frame_at_full_strength` | pass — full-frame coverage **and** a predicted magnitude: an opaque, untinted `(40,200,40)` source over black should read back with average green > 150 (the shader's gamma round-trip is a no-op at tint `[1,1,1,1]`), not merely "some green appeared" |
+| `fire_overlay_paints_only_the_bottom_strip` | pass, explicit top/bottom row-band split |
+| `pumpkin_overlay_paints_the_whole_frame_at_full_strength` | pass, magnitude: opaque untinted `(40,200,40)` source → avg green > 150 |
+| `freeze_overlay_paints_the_whole_frame_at_the_predicted_half_alpha` | pass, magnitude: `percent=0.5` over a light-blue `(200,230,255)` source predicts a half-blended readback, not the full source colour (wrong-alpha-1.0) or near-black (wrong-alpha-0.0), plus a channel-order check (blue > red, matching the source) |
+| `spyglass_overlay_paints_a_grey_lens_surrounded_by_black_bars` | pass, **location**, not average: screen centre (inside the lens) is non-black, far-left edge at mid-height (inside a letterbox bar at 16:9) is pure black |
+| `confusion_overlay_paints_the_whole_frame_with_a_green_biased_tint` | pass, magnitude: green channel > 1.3x red/blue at `strength=1.0`, matching the tint's own `0.4`-vs-`0.2` ratio |
+| `portal_overlay_paints_the_whole_frame_at_full_intensity` | pass, frame-selection (32-frame strip) **and** magnitude: opaque magenta `(200,40,200)` source at full intensity → avg red/blue > 130, avg green < 80 |
+
+Every pipeline-level GPU test above ran clean on this machine (`8 passed; 0
+failed`), captured directly from `cargo test`'s own exit status, not read off
+a filtered pipeline.
+
+**Camera-side (no GPU needed)**: `cargo test -p lodestone-render --lib
+camera::` — 22 tests, including the warp/FOV-modifier additions:
+`nausea_portal_warp_is_identity_at_zero_or_negative_intensity`,
+`nausea_portal_warp_at_max_intensity_matches_hand_computed_skew` (determinant
+check against a hand-derived `skew^2 = 0.629378`, since a rotation has
+determinant 1 and cannot change it), `nausea_portal_warp_angle_zero_is_a_pure_x_axis_scale`,
+`nausea_portal_warp_preserves_the_rotation_axis` (a vector along the warp's
+own rotation axis must be fixed by it — an algebraic check, no screenshot
+needed), `view_projection_warped_matches_plain_view_projection_when_inactive`/
+`_differs_when_active`, `spinning_effect_angle_uses_vanillas_blended_speed`
+(20/tick portal-only, 7/tick nausea-only, 13.5/tick blended — vanilla's own
+constants), `spyglass_fov_modifier_is_a_tenth_while_scoping`. All pass.
 
 **Shell level** (`cargo test -p lodestone-shell --test screen_overlay_pixels
 -- --ignored --nocapture`) — proves `RenderState::render_inner` actually
 checks `self.screen_effects`/`ScreenEffects`, through the real
-`render_with_effects` path, with executed negative controls. **A
-`pumpkin_overlay_reaches_the_screen_through_render_with_effects` test and a
-`spectator_suppresses_pumpkin_too` assertion were added here**, but neither
-has been run yet as of this writing: `lodestone-shell` does not currently
-compile, for two reasons unrelated to this change —
-`crates/lodestone-shell/src/collision.rs`'s `is_solid_face` has drifted from
-the `lodestone_physics` trait's signature (5 params vs. 6, someone else's
-concurrent edit), and several `EntityDraw`/`EntitySnapshot` construction
-sites are missing a `creeper_swelling`/`creeper_swell_dir` field another
-agent is mid-adding — **plus** this change's own `app.rs` gap: the
-`wearing_pumpkin` field literally does not exist in `redraw()`'s
-`ScreenEffects` construction until the broker patch below lands (see "The
-patch, as applied" for the pumpkin version). Re-run the shell-level gate once
-both are resolved; the pipeline-level gate above already proves the pass
-itself is correct independent of the shell.
+`render_with_effects` path, with executed negative controls, including a new
+`freeze_confusion_and_portal_survive_third_person_unlike_the_others` control
+(installs a third-person body source, then asserts freeze/portal still draw
+while underwater/fire/pumpkin/spyglass do not, and portal wins over
+confusion when both are positive). **Not run as of this writing** —
+`lodestone-shell` does not currently compile, for two reasons neither of
+which is this change: `app.rs`'s `screen_effects` literal is missing the four
+new fields until the broker patch above lands (this change's own gap, patch
+provided, not applied by this change since `app.rs` is outside its
+ownership), and (unrelated, another agent's in-flight work as of this
+writing) `crates/lodestone-shell/src/net.rs:1801` constructs `EntitySnapshot`
+without the `equipment_dye` field `crates/lodestone-shell/src/entities.rs`
+just added, in an uncommitted concurrent edit. Re-run the shell-level gate
+once both land; the pipeline-level and camera-level gates above already prove
+every new pass and its projection warp are correct independent of the shell.
 
-The **historical** underwater/fire numbers below (pre-pumpkin) are kept as
-the last known-good shell-level run:
+The **historical** underwater/fire/pumpkin numbers below (pre this change)
+are kept as the last known-good shell-level run:
 
 ```text
 === underwater overlay pixel gate (through RenderState::render_with_effects) ===
@@ -529,6 +883,11 @@ draw (not just installation), and control B proves an uninstalled pass never
 draws regardless of the flag.
 
 **What these gates do not, and cannot, prove**: that production ever passes
-`on_fire: true`. `app.rs` always passes `false` — see "What does not reach
-the shell yet" above. The gates prove the mechanism; the mechanism is simply
-never told the truth yet.
+non-default values for `freeze_percent`/`scoping`/`nausea_intensity`/
+`portal_intensity`. Two of the four (`freeze_percent`, `scoping`) have a real
+patch waiting to be applied; two (`nausea_intensity`, `portal_intensity`)
+have no producer anywhere in this codebase yet — see "The freeze/spyglass/
+confusion/portal flags' route to the shell" above. The gates prove the
+mechanism; three-quarters of the mechanism is one merge away from being told
+the truth, one-quarter needs new `lodestone-ecs`/`lodestone-physics` work
+first.

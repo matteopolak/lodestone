@@ -124,7 +124,10 @@ pub use blocks_json::{BlocksJsonError, BlocksJsonRegistry};
 // world with no error on the one platform that hit this path.
 #[cfg(not(target_arch = "wasm32"))]
 pub use blocks_json::blocks_json_registry;
-pub use camera::{Camera, Frustum, Intersection, Plane};
+pub use camera::{
+    Camera, Frustum, Intersection, Plane, nausea_portal_warp, spinning_effect_angle_degrees,
+    spyglass_fov_modifier,
+};
 pub use caps::{Backend, GpuCapabilities};
 pub use device::{GpuContext, GpuError};
 pub use driver::{InstanceTable, WorldMesher};

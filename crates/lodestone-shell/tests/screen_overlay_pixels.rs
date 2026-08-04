@@ -81,6 +81,22 @@ fn manager() -> ResourceManager {
         "assets/minecraft/textures/misc/pumpkinblur.png".to_string(),
         png(16, 16, [40, 200, 40, 255]),
     );
+    src.insert(
+        "assets/minecraft/textures/misc/powder_snow_outline.png".to_string(),
+        png(256, 256, [200, 230, 255, 255]),
+    );
+    src.insert(
+        "assets/minecraft/textures/misc/spyglass_scope.png".to_string(),
+        png(256, 256, [180, 180, 180, 255]),
+    );
+    src.insert(
+        "assets/minecraft/textures/misc/nausea.png".to_string(),
+        png(256, 256, [255, 255, 255, 255]),
+    );
+    src.insert(
+        "assets/minecraft/textures/block/nether_portal.png".to_string(),
+        png(16, 16 * 32, [200, 40, 200, 255]),
+    );
     ResourceManager::new(vec![Box::new(src)])
 }
 
@@ -372,14 +388,24 @@ fn spectator_suppresses_both_overlays() {
             spectator: true,
             tick: 0,
             wearing_pumpkin: true,
+            freeze_percent: 1.0,
+            scoping: true,
+            nausea_intensity: 1.0,
+            portal_intensity: 1.0,
         },
     );
 
     eprintln!("=== spectator control ===");
     eprintln!(
-        "spectator=true, eye_in_water=true, on_fire=true, wearing_pumpkin=true: \
-         underwater_overlay_drawn={}, fire_overlay_drawn={}, pumpkin_overlay_drawn={}",
-        stats.underwater_overlay_drawn, stats.fire_overlay_drawn, stats.pumpkin_overlay_drawn
+        "spectator=true, every flag set: underwater={}, fire={}, pumpkin={}, spyglass={}, \
+         freeze={}, confusion={}, portal={}",
+        stats.underwater_overlay_drawn,
+        stats.fire_overlay_drawn,
+        stats.pumpkin_overlay_drawn,
+        stats.spyglass_overlay_drawn,
+        stats.freeze_overlay_drawn,
+        stats.confusion_overlay_drawn,
+        stats.portal_overlay_drawn
     );
 
     assert!(
@@ -394,6 +420,108 @@ fn spectator_suppresses_both_overlays() {
         !stats.pumpkin_overlay_drawn,
         "a spectator must not draw the pumpkin overlay even with wearing_pumpkin=true"
     );
+    assert!(
+        !stats.spyglass_overlay_drawn,
+        "a spectator must not draw the spyglass overlay even with scoping=true"
+    );
+    assert!(
+        !stats.freeze_overlay_drawn,
+        "a spectator must not draw the freeze overlay even with freeze_percent=1.0 -- this \
+         codebase's own spectator convention, not a vanilla literal (see ScreenEffects::any_active's doc)"
+    );
+    assert!(
+        !stats.confusion_overlay_drawn,
+        "a spectator must not draw the confusion overlay even with nausea_intensity=1.0"
+    );
+    assert!(
+        !stats.portal_overlay_drawn,
+        "a spectator must not draw the portal overlay even with portal_intensity=1.0"
+    );
+}
+
+/// Freeze/confusion/portal are **not** first-person-gated in vanilla
+/// (`Hud.java:293-308` are siblings of the `isFirstPerson` block) — unlike
+/// every overlay above. This is the control that proves it: third person
+/// (`body_state` installed) must still draw them.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn freeze_confusion_and_portal_survive_third_person_unlike_the_others() {
+    let ctx = ctx();
+    let (device, queue) = (ctx.device(), ctx.queue());
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    let cam = camera();
+
+    let mut render = RenderState::new(device, queue, format, W, H, None);
+    render.install_screen_effects(
+        ScreenEffectRenderer::new(device, queue, format, &manager()).expect("build over synthetic pack"),
+    );
+    // Force third person the same way other gates in this codebase do:
+    // install a third-person body source so `stats.third_person_body_drawn`
+    // is true, which is what `RenderState::render_inner` reads as
+    // `!first_person`. Content doesn't matter for this control — only that a
+    // body is installed at all.
+    render.set_third_person_body_source(|| {
+        Some(lodestone::gpu::ThirdPersonBodyState {
+            feet: glam::Vec3::new(0.0, 70.0, 0.0),
+            body_yaw_deg: 0.0,
+            anim: lodestone_render::AnimInput::default(),
+            scale: 1.0,
+            slim: false,
+            equipment: Vec::new(),
+        })
+    });
+    let frame = target.acquire().expect("acquire");
+    let stats = render.render_with_effects(
+        device,
+        queue,
+        frame.view(),
+        &cam,
+        None,
+        &[],
+        ScreenEffects {
+            eye_in_water: true,
+            on_fire: true,
+            wearing_pumpkin: true,
+            scoping: true,
+            freeze_percent: 1.0,
+            nausea_intensity: 1.0,
+            portal_intensity: 1.0,
+            spectator: false,
+            tick: 0,
+        },
+    );
+
+    eprintln!("=== third-person split control ===");
+    eprintln!(
+        "third_person_body_drawn={}: underwater={}, fire={}, pumpkin={}, spyglass={}, \
+         freeze={}, confusion={}, portal={}",
+        stats.third_person_body_drawn,
+        stats.underwater_overlay_drawn,
+        stats.fire_overlay_drawn,
+        stats.pumpkin_overlay_drawn,
+        stats.spyglass_overlay_drawn,
+        stats.freeze_overlay_drawn,
+        stats.confusion_overlay_drawn,
+        stats.portal_overlay_drawn
+    );
+
+    assert!(stats.third_person_body_drawn, "control setup: third-person body must actually be installed");
+    assert!(!stats.underwater_overlay_drawn, "underwater is first-person-only");
+    assert!(!stats.fire_overlay_drawn, "fire is first-person-only");
+    assert!(!stats.pumpkin_overlay_drawn, "pumpkin is first-person-only");
+    assert!(!stats.spyglass_overlay_drawn, "spyglass is first-person-only");
+    assert!(
+        stats.freeze_overlay_drawn,
+        "freeze must draw in third person too -- Hud.java:293-295 is not nested in isFirstPerson"
+    );
+    // Portal takes priority over confusion when both are positive (both are
+    // 1.0 above), matching Hud.java:300-302's if/else if.
+    assert!(
+        stats.portal_overlay_drawn,
+        "portal must draw in third person too, and win priority over confusion"
+    );
+    assert!(!stats.confusion_overlay_drawn, "confusion must lose to portal when both are positive");
 }
 
 /// The pumpkin overlay (issue #185) covers the full NDC screen like the

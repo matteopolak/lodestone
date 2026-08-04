@@ -119,6 +119,23 @@ pub struct RenderStats {
     /// as [`underwater_overlay_drawn`](Self::underwater_overlay_drawn), keyed
     /// on `ScreenEffects::wearing_pumpkin` instead.
     pub pumpkin_overlay_drawn: bool,
+    /// Whether the spyglass overlay (issue #154) drew this frame — same
+    /// first-person/spectator gating as
+    /// [`pumpkin_overlay_drawn`](Self::pumpkin_overlay_drawn), keyed on
+    /// `ScreenEffects::scoping`.
+    pub spyglass_overlay_drawn: bool,
+    /// Whether the freeze overlay (issue #139) drew this frame — **not**
+    /// first-person-gated (see `ScreenEffects::any_active`'s doc), keyed on
+    /// `ScreenEffects::freeze_percent > 0.0`.
+    pub freeze_overlay_drawn: bool,
+    /// Whether the confusion overlay (issue #144) drew this frame — not
+    /// first-person-gated, keyed on `ScreenEffects::nausea_intensity > 0.0`
+    /// **and** `ScreenEffects::portal_intensity <= 0.0` (portal takes
+    /// priority — `Hud.java:300-302`).
+    pub confusion_overlay_drawn: bool,
+    /// Whether the portal overlay (issue #149) drew this frame — not
+    /// first-person-gated, keyed on `ScreenEffects::portal_intensity > 0.0`.
+    pub portal_overlay_drawn: bool,
     /// Block-entity rigs drawn this frame (issue #23) — chests today.
     ///
     /// Its own counter, not folded into `entities_drawn`, for the reason
