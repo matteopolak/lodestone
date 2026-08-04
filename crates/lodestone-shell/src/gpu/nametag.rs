@@ -711,6 +711,9 @@ mod tests {
             item_use: None,
             // Not a creeper: only a creeper ever swells.
             creeper_swelling: 0.0,
+            // Not on fire: these literals exist to position a nametag, not to
+            // draw the entity, so no flame billboard is wanted (issue #434).
+            on_fire: false,
         };
         // A raster is required to reach the distance check at all in
         // `prepare`, but `push_entity_quads` itself only needs one to lay
@@ -770,6 +773,9 @@ mod tests {
             item_use: None,
             // Not a creeper: only a creeper ever swells.
             creeper_swelling: 0.0,
+            // Not on fire: these literals exist to position a nametag, not to
+            // draw the entity, so no flame billboard is wanted (issue #434).
+            on_fire: false,
         };
         push_entity_quads(
             &raster,
@@ -850,6 +856,9 @@ mod tests {
             item_use: None,
             // Not a creeper: only a creeper ever swells.
             creeper_swelling: 0.0,
+            // Not on fire: these literals exist to position a nametag, not to
+            // draw the entity, so no flame billboard is wanted (issue #434).
+            on_fire: false,
         };
         push_entity_quads(
             &raster,

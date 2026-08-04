@@ -3545,6 +3545,8 @@ mod tests {
             item_use: None,
             // Not a creeper: only a creeper ever swells.
             creeper_swelling: 0.0,
+            // No flame overlay from this construction site (issue #434).
+            on_fire: false,
         };
 
         let instance = models
@@ -4321,6 +4323,8 @@ mod tests {
                 item_use: None,
                 // Not a creeper: only a creeper ever swells.
                 creeper_swelling: 0.0,
+            // No flame overlay from this construction site (issue #434).
+            on_fire: false,
             },
             // A second pig behind the camera so frustum culling has something
             // real to remove — the anti-vacuity guard on the cull path.
@@ -4344,6 +4348,8 @@ mod tests {
                 item_use: None,
                 // Not a creeper: only a creeper ever swells.
                 creeper_swelling: 0.0,
+            // No flame overlay from this construction site (issue #434).
+            on_fire: false,
             },
         ];
 
@@ -4520,6 +4526,8 @@ mod tests {
             item_use: None,
             // Not a creeper: only a creeper ever swells.
             creeper_swelling: 0.0,
+            // No flame overlay from this construction site (issue #434).
+            on_fire: false,
         }];
 
         // Fraction of a mob's bright pixels whose *hue direction* is far from the
