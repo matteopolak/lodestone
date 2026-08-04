@@ -635,6 +635,13 @@ pub fn upload_instances_tinted(
 /// behaviour: both existing callers pass `blend: None, depth_write: true`,
 /// exactly what this function hardcoded before — zero behaviour change for
 /// either.
+///
+/// `fragment_entry` was added in step C, for the same reason: every existing
+/// caller (`Self::new`, `armour_pipeline`) passes `"fs_main"`, the literal
+/// entry point this function hardcoded before, so this is zero behaviour
+/// change for mobs and armour. Only [`EntityPipeline::banner_layer_pipeline`]
+/// passes `"fs_main_no_cutout"` — see that function's doc for why a mask
+/// layer needs the fragment shader itself to change, not just pipeline state.
 fn build_entity_pipeline(
     device: &wgpu::Device,
     color_format: wgpu::TextureFormat,
@@ -644,6 +651,7 @@ fn build_entity_pipeline(
     depth_compare: wgpu::CompareFunction,
     blend: Option<wgpu::BlendState>,
     depth_write: bool,
+    fragment_entry: &str,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(&format!("{label}-shader")),
@@ -668,7 +676,7 @@ fn build_entity_pipeline(
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader,
-            entry_point: Some("fs_main"),
+            entry_point: Some(fragment_entry),
             targets: &[Some(wgpu::ColorTargetState {
                 format: color_format,
                 blend,
@@ -774,6 +782,7 @@ impl EntityPipeline {
             wgpu::CompareFunction::LessEqual,
             None,
             true,
+            "fs_main",
         );
 
         EntityPipeline {
@@ -834,6 +843,7 @@ impl EntityPipeline {
             wgpu::CompareFunction::LessEqual,
             None,
             true,
+            "fs_main",
         )
     }
 
@@ -868,12 +878,14 @@ impl EntityPipeline {
     /// `LessEqual` — already accounted for above, not a separate flip to
     /// apply on top.
     ///
-    /// The shader's alpha-cutout `discard` (`entity.wgsl`) is unconditional
-    /// today and vanilla's banner draw has none, so a mask layer with
-    /// antialiased/partial-alpha edges would lose those texels here rather
-    /// than blending them — a fidelity gap tracked, not fixed, by this pass;
-    /// see `docs/banner-shield-patterns.md`'s step-B note on the deferred
-    /// `fs_main_no_cutout` entry point.
+    /// **Step C, landed**: this now binds `entity.wgsl`'s `fs_main_no_cutout`
+    /// entry point rather than `fs_main`. The alpha-cutout `discard` in
+    /// `fs_main` is unconditional and vanilla's banner draw has none, so a
+    /// mask layer's antialiased/partial-alpha edge texels would have been
+    /// lost here rather than blended — this is the shader-side half of
+    /// matching `RenderPipelines.BANNER_PATTERN`; the pipeline-state half
+    /// (blend/depth-write, below) is step B. See `entity.wgsl`'s own comment
+    /// on `fs_main_no_cutout` and `docs/banner-shield-patterns.md`.
     #[must_use]
     pub fn banner_layer_pipeline(
         &self,
@@ -889,6 +901,7 @@ impl EntityPipeline {
             wgpu::CompareFunction::LessEqual,
             Some(wgpu::BlendState::ALPHA_BLENDING),
             false,
+            "fs_main_no_cutout",
         )
     }
 
