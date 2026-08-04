@@ -687,6 +687,36 @@ through `mesh_simple`, whose `ao` is corner-occlusion only, while `face_shade`'s
 live in `mesh_models`, which is what live terrain uses. **The change was verified against the one
 scene in the tree that structurally cannot exercise it.**
 
+**A second instance, and it is worse, because the test is end-to-end and looks unimpeachable.**
+`c4ad474` added four `ServerBound` variants with four fully-written `apply_*` consumers and updated
+only **two** decode arms. Issue #425 later found two of the strandings and missed the other two. One
+of those was `CLIENT_COMMAND`, so `apply_client_command`'s `PERFORM_RESPAWN` was unreachable — and
+per *Live-server hazards* below, **a dead player is held on the death screen and sent no chunks**, so
+any player who died entered a permanent silent chunk blackout with keep-alives still flowing, and the
+one packet that would have recovered it was the discarded one. The other was
+`SET_CREATIVE_MODE_SLOT`: every creative inventory write from a real client, decoded field by field
+and thrown away.
+
+`serve_play.rs::creative_mode_slot_write_lands_in_the_real_inventory` is a genuine end-to-end test
+over a real transport through a full login/join — and it runs against **`FakeProtocol`, which has its
+own decode arms on invented packet ids 50/51**. So it proved dispatch and consumer against the one
+`ServerProtocol` in the tree that structurally *cannot* exercise the production decoder. Nothing about
+the test reads wrong; "end-to-end over a real transport" is exactly what you would ask for.
+
+So the audit question is not "is this test integration-level?" but **"which implementation does this
+test's transport actually resolve to, and is it the one production uses?"** A test double that is
+*complete enough to pass* is the most dangerous kind. `serverbound_wiring.rs` now gates the class
+structurally — every `ServerBound` variant must be constructed in non-test code — and it failed at
+pristine `HEAD` naming exactly `["ClientCommand", "CreativeModeSlotSet"]`.
+
+Two riders. That gate's own first draft was **half-vacuous**: a *comment* mentioning
+`CreativeModeSlotSet` masked one of the two islands, so it now blanks comments, literals and
+`#[cfg(test)]` modules before scanning — and it is lifetime-aware by lookahead rather than by the
+toggle that silently broke three scanners here (see *Re-verify* above). And the stale claim ran the
+**opposite** way from what everyone assumed: all five serverbound issues said "0/N decoded" when the
+real figure was **60/69 decoded and 17/69 connected**. Decode was nearly finished; connectedness was
+the whole gap. Check which axis is actually short before staffing a decode sweep.
+
 Audit questions: *does any server-side counter accumulate past this gate's lifetime?* and *does the
 input actually contain the structure the code under test exists to handle?*
 
