@@ -56,11 +56,15 @@
 //! leave gravity blocks as an island until that edit lands, this module's
 //! settle step runs **synchronously**, inside the very
 //! `NeighborPropagator::propagate` call the triggering mutation already
-//! makes (see `crate::random_tick`'s `propagate_and_settle_gravity`) — an
-//! immediate settle instead of vanilla's 2-tick delay. Once a future
-//! landing wires this module into `block_ticks` (the queue already exists,
-//! empty, in `tick.rs`) the delay becomes real with no change to the
-//! predicates below.
+//! makes (see `crate::random_tick`'s `propagate_and_react` — renamed from
+//! `propagate_and_settle_gravity` when issue #314's redstone family became
+//! this call site's second reaction) — an immediate settle instead of
+//! vanilla's 2-tick delay. `block_ticks` is no longer empty as of #314: it
+//! now has real producers (redstone torches/repeaters/comparators/observers
+//! — see `crate::redstone_torch`/`crate::redstone_diode`/
+//! `crate::redstone_observer`), but gravity's own settle still runs
+//! synchronously rather than through that queue; nothing about #314's
+//! landing required touching this module.
 //!
 //! # What actually triggers this today
 //!

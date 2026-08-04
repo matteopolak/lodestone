@@ -114,6 +114,58 @@ impl Direction {
         };
         BlockPos::new(pos.x + dx, pos.y + dy, pos.z + dz)
     }
+
+    /// Vanilla's `Direction.getOpposite()` (`Direction.java:175-177`, backed
+    /// by each variant's own `oppositeIndex` field —
+    /// `Direction.java:33-38`): down/up, north/south, west/east each pair off.
+    /// Needed by issue #314-#322's redstone family (e.g. an observer's pulse
+    /// travels out the face opposite the one it watches).
+    #[must_use]
+    pub fn opposite(self) -> Direction {
+        match self {
+            Direction::Down => Direction::Up,
+            Direction::Up => Direction::Down,
+            Direction::North => Direction::South,
+            Direction::South => Direction::North,
+            Direction::West => Direction::East,
+            Direction::East => Direction::West,
+        }
+    }
+
+    /// Vanilla's `Direction.getClockWise()` (`Direction.java:195-203`) — the
+    /// default (Y-axis) rotation used by every `HorizontalDirectionalBlock`,
+    /// including repeaters/comparators reading their side inputs
+    /// (`DiodeBlock.getAlternateSignal`, `DiodeBlock.java:127`). Defined only
+    /// for the four horizontal directions, matching the jar's own
+    /// `IllegalStateException` on `DOWN`/`UP` — callers here only ever pass a
+    /// diode's `FACING`, which is always horizontal, so `Down`/`Up` are
+    /// unreachable in practice; returning `self` for them (rather than
+    /// panicking) keeps this a total function since nothing depends on the
+    /// jar's defensive exception firing.
+    #[must_use]
+    pub fn clockwise(self) -> Direction {
+        match self {
+            Direction::North => Direction::East,
+            Direction::East => Direction::South,
+            Direction::South => Direction::West,
+            Direction::West => Direction::North,
+            other => other,
+        }
+    }
+
+    /// Vanilla's `Direction.getCounterClockWise()` (`Direction.java:245-253`)
+    /// — see [`clockwise`](Self::clockwise)'s doc comment for the same
+    /// horizontal-only scope note.
+    #[must_use]
+    pub fn counterclockwise(self) -> Direction {
+        match self {
+            Direction::North => Direction::West,
+            Direction::West => Direction::South,
+            Direction::South => Direction::East,
+            Direction::East => Direction::North,
+            other => other,
+        }
+    }
 }
 
 /// Vanilla's own fan-out order, verbatim from `NeighborUpdater.java:18`:
@@ -267,12 +319,65 @@ impl NeighborPropagator {
     }
 }
 
+/// All six directions — vanilla's `Direction.values()`
+/// (`Direction.java:33-38`'s own declaration order: down, up, north, south,
+/// west, east). Distinct from [`UPDATE_ORDER`] on purpose: this is the order
+/// `SignalGetter.getBestNeighborSignal` (`SignalGetter.java:11,90-105`) and a
+/// handful of other jar loops iterate in — see `crate::redstone`'s own
+/// module doc for why that particular order is irrelevant there (every use
+/// is a commutative `max`, not a notify cascade), unlike [`UPDATE_ORDER`]
+/// where the order *is* the observable behaviour.
+pub const ALL_DIRECTIONS: [Direction; 6] = [
+    Direction::Down,
+    Direction::Up,
+    Direction::North,
+    Direction::South,
+    Direction::West,
+    Direction::East,
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn pos(x: i32, y: i32, z: i32) -> BlockPos {
         BlockPos::new(x, y, z)
+    }
+
+    /// `getOpposite()` pins direct from `Direction.java`'s own
+    /// `oppositeIndex` field (`:33-38`): down/up, north/south, west/east.
+    #[test]
+    fn opposite_pairs_match_the_jar_field() {
+        assert_eq!(Direction::Down.opposite(), Direction::Up);
+        assert_eq!(Direction::Up.opposite(), Direction::Down);
+        assert_eq!(Direction::North.opposite(), Direction::South);
+        assert_eq!(Direction::South.opposite(), Direction::North);
+        assert_eq!(Direction::West.opposite(), Direction::East);
+        assert_eq!(Direction::East.opposite(), Direction::West);
+    }
+
+    /// `getClockWise()`/`getCounterClockWise()` (`Direction.java:195-203,245-253`):
+    /// a full clockwise loop returns to the start, and going one step
+    /// clockwise then one step counter-clockwise is a no-op — a magnitude
+    /// check (the whole cycle), not just "it changed".
+    #[test]
+    fn clockwise_cycles_through_all_four_horizontal_directions_and_back() {
+        let mut d = Direction::North;
+        let mut seen = vec![d];
+        for _ in 0..3 {
+            d = d.clockwise();
+            seen.push(d);
+        }
+        assert_eq!(seen, vec![Direction::North, Direction::East, Direction::South, Direction::West]);
+        assert_eq!(d.clockwise(), Direction::North, "the cycle must close");
+    }
+
+    #[test]
+    fn clockwise_and_counterclockwise_are_inverses() {
+        for d in [Direction::North, Direction::East, Direction::South, Direction::West] {
+            assert_eq!(d.clockwise().counterclockwise(), d);
+            assert_eq!(d.counterclockwise().clockwise(), d);
+        }
     }
 
     /// The plain fan-out, no cascades: six calls in exactly `UPDATE_ORDER`.

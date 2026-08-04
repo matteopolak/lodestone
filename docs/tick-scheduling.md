@@ -158,9 +158,11 @@ one of `crate::random_tick`'s own mutations happens to be adjacent to an
 unsupported gravity block, not on every block change in the world — the far
 more common vanilla trigger (a player mining the block below a sand column)
 is `server.rs`'s block-break handling, which does not call `propagate` yet
-and was off-limits to this task. `redstone`/#314-#322 is the next consumer
-of this exact call site and inherits the depth-first ordering guarantee
-unchanged.
+and was off-limits to this task. **As of #314/#315/#317, redstone dust,
+torches, repeaters, comparators, and observers are real consumers of this
+exact call site** — see [`docs/redstone.md`](./redstone.md) — inheriting the
+depth-first ordering guarantee unchanged. Pistons (#316) and the remaining
+redstone children (#318-#322) have not landed.
 
 ## What actually reaches a client today
 
@@ -198,10 +200,13 @@ changes"), here is exactly what does and does not:
   random-tick mutations landing next to an unsupported gravity block. See
   `crate::gravity_tick`'s module doc for that scope note in full, including
   the two named deviations (no `FallingBlockEntity`, no 2-tick delay).
-- **The scheduled-tick queues still have no production producer.** Stated in
-  `tick.rs`'s own doc comment, not hidden: the queues drain (proving order)
-  every tick; nothing in this crate calls `ScheduledTickQueue::schedule` yet.
-  Fluid flow (#309) and fire (#312) are the next candidates.
+- **The block-tick queue has real producers as of #314/#315/#317** — redstone
+  torches/repeaters/comparators/observers schedule delayed rechecks into it
+  from `propagate_and_react`, and `tick::run_tick_loop`'s drain dispatches
+  each one to its own family's `run_scheduled_tick`. See
+  [`docs/redstone.md`](./redstone.md). The **fluid**-tick queue is still an
+  acknowledged island — nothing calls `schedule` on it. Fluid flow (#309) and
+  fire (#312) are its next candidates.
 - **`tick_area` is a small, fixed chunk range** — the same
   `(cx_range, cz_range)` `open_in_memory_with_mobs` already threads through
   as `mob_area`, reused rather than adding a second "which chunks are
@@ -234,29 +239,33 @@ changes"), here is exactly what does and does not:
   itself triggers — do **not** call `propagate` recursively from inside
   `notify`; the propagator's own stack already handles cascading, and a
   second nested call would double-count `max_chained`.
-  `RandomTickScheduler::tick_randomly_ticking_block`'s own call (`propagate_and_settle_gravity`,
-  `random_tick.rs`) is the worked example: it is called once per mutated
-  position, with a `notify` closure that checks `crate::gravity_tick`'s
-  predicates and, on a settle, returns a single `Direction::Down`
-  re-notification of the vacated position's old neighbour above it — that
-  one extra `Notification` is what makes a stacked column of gravity blocks
-  collapse one at a time within the *same* `propagate` call, rather than
-  needing a second call per block in the stack.
-- **Adding another neighbour-update reaction (e.g. redstone, #314-#322)**:
-  extend `propagate_and_settle_gravity`'s `notify` closure (or split it into
-  a per-reaction dispatch once a second real reaction exists, the same
-  "don't generalize before a second case" reasoning `is_randomly_ticking`'s
-  own history already gives) — the call site, the depth-first ordering, and
-  the cross-chunk-neighbour limitation below are all already handled; only
-  the reaction itself is new work.
-- **The cross-chunk-neighbour gap is real and applies to gravity too**: a
-  neighbour notification landing outside the ticked column's 16×16 footprint
-  is silently skipped (`propagate_and_settle_gravity`'s own bounds check) —
-  the identical limitation `tick_grass_block`'s own spread already accepts,
-  for the identical reason (`tick_chunk` has no neighbouring-column access).
-  A gravity block one block-column away from the mutation that should have
-  triggered it will not fall until a real per-tick multi-column cache exists
-  (see "widening `tick_area`" below).
+  `RandomTickScheduler::tick_randomly_ticking_block`'s own call
+  (`propagate_and_react`, `random_tick.rs` — renamed from
+  `propagate_and_settle_gravity` once redstone, #314, became a second real
+  reaction; see [`docs/redstone.md`](./redstone.md)) is the worked example:
+  it is called once per mutated position, with a `notify` closure that
+  dispatches to whichever reaction's predicates match (gravity settle first,
+  then dust/torch/diode/observer) and, on a settle, returns a single
+  `Direction::Down` re-notification of the vacated position's old neighbour
+  above it — that one extra `Notification` is what makes a stacked column of
+  gravity blocks collapse one at a time within the *same* `propagate` call,
+  rather than needing a second call per block in the stack.
+- **Adding another neighbour-update reaction**: extend `propagate_and_react`'s
+  `notify` closure dispatch (the same function gravity/redstone both already
+  extend, per the "don't generalize before a second case" reasoning
+  `is_randomly_ticking`'s own history already gives, now exercised a second
+  time going from one reaction to four) — the call site, the depth-first
+  ordering, and the cross-chunk-neighbour limitation below are all already
+  handled; only the reaction itself is new work.
+- **The cross-chunk-neighbour gap is real and applies to gravity and
+  redstone alike**: a neighbour notification landing outside the ticked
+  column's 16×16 footprint is silently skipped (`propagate_and_react`'s own
+  bounds check) — the identical limitation `tick_grass_block`'s own spread
+  already accepts, for the identical reason (`tick_chunk` has no
+  neighbouring-column access). A gravity block, or a redstone wire/diode,
+  one block-column away from the mutation that should have triggered it
+  will not react until a real per-tick multi-column cache exists (see
+  "widening `tick_area`" below).
 - **Widening `tick_area` beyond a handful of chunks**: add a real per-tick
   column cache first (`OverworldChunkSource`'s `edits` map only helps
   already-edited columns); this landing deliberately did not build one,

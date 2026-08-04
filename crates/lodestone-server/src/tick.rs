@@ -53,7 +53,8 @@ use crate::block_entities::{BlockEntityHandle, BlockEntityRegistry};
 use crate::chunk::ChunkSource;
 use crate::mobs::{Detonation, LiveMobSource, MobHandle, MobSim};
 use crate::random_tick::{DEFAULT_RANDOM_TICK_SPEED, RandomTickScheduler};
-use crate::scheduled_tick::ScheduledTickQueue;
+use crate::scheduled_tick::{ScheduledTickQueue, TickPriority};
+use lodestone_model::BlockPos;
 
 /// Vanilla's tick period at normal (non-sprinting) speed — 20 TPS, matching
 /// `server.rs`'s own private `MILLIS_PER_TICK` and every one of the six
@@ -544,11 +545,81 @@ pub(crate) async fn run_tick_loop<W>(
         // (rather than iterating a live queue) is what keeps a tick
         // scheduled *by* one of these callbacks out of this same pass — see
         // `ScheduledTickQueue::drain_due`'s own doc comment.
-        for _due in block_ticks.drain_due(game_tick, MAX_SCHEDULED_TICKS_PER_TICK) {
-            // No block-tick behaviour is modeled yet — see this function's
-            // doc comment. Draining (not just checking `is_empty`) still
-            // proves the order and the "not this pass" invariant hold for
-            // whatever a future producer schedules.
+        //
+        // Issue #314/#315/#317: `block_ticks` now has real producers —
+        // redstone torches/repeaters/comparators/observers schedule into it
+        // from `crate::random_tick::propagate_and_react` whenever a
+        // neighbour notification finds one of them out of steady state (see
+        // that function's own doc comment). This drain is where the delayed
+        // flip actually happens: `redstone::TICK_TORCH`/`TICK_REPEATER`/
+        // `TICK_COMPARATOR`/`TICK_OBSERVER` each dispatch to their own
+        // family's `run_scheduled_tick`, and any resulting mutation is
+        // re-propagated through the same `propagate_and_react` call site a
+        // random tick would use, so a chain reaction (a repeater flipping
+        // and feeding a further torch) resolves depth-first within this one
+        // drain, exactly like vanilla's `LevelTicks::runCollectedTicks`
+        // invoking its callback once per due entry, in `DRAIN_ORDER`.
+        for due in block_ticks.drain_due(game_tick, MAX_SCHEDULED_TICKS_PER_TICK) {
+            let (x, y, z) = due.pos;
+            let cx = x.div_euclid(16);
+            let cz = z.div_euclid(16);
+            let min_x = cx * 16;
+            let min_z = cz * 16;
+            let lx = x - min_x;
+            let lz = z - min_z;
+            let mut column = world.column(cx, cz);
+            if y < column.min_y || y >= column.min_y + column.height {
+                continue;
+            }
+            let state = column.block_state(lx, y, lz).to_string();
+
+            let new_state = if due.kind == crate::redstone::TICK_TORCH {
+                let has_signal = crate::redstone_torch::has_neighbor_signal(&crate::redstone::make_lookup(&column, min_x, min_z), BlockPos::new(x, y, z), &state);
+                crate::redstone_torch::run_scheduled_tick(&state, has_signal)
+            } else if due.kind == crate::redstone::TICK_REPEATER {
+                let facing = crate::redstone::diode_facing(&state);
+                let should_on =
+                    crate::redstone_diode::repeater_should_turn_on(&crate::redstone::make_lookup(&column, min_x, min_z), BlockPos::new(x, y, z), facing);
+                match crate::redstone_diode::run_scheduled_tick(&state, should_on) {
+                    crate::redstone_diode::RepeaterTickOutcome::TurnedOff(s) => Some(s),
+                    crate::redstone_diode::RepeaterTickOutcome::TurnedOn { new_state, reschedule } => {
+                        if reschedule {
+                            let delay = crate::redstone_diode::repeater_delay(&new_state);
+                            block_ticks.schedule((x, y, z), crate::redstone::TICK_REPEATER.to_string(), game_tick + u64::from(delay), TickPriority::VeryHigh);
+                        }
+                        Some(new_state)
+                    }
+                    crate::redstone_diode::RepeaterTickOutcome::Locked | crate::redstone_diode::RepeaterTickOutcome::NoChange => None,
+                }
+            } else if due.kind == crate::redstone::TICK_COMPARATOR {
+                let facing = crate::redstone::diode_facing(&state);
+                let input = crate::redstone::input_signal(&crate::redstone::make_lookup(&column, min_x, min_z), BlockPos::new(x, y, z), facing);
+                let side = crate::redstone::alternate_signal(&crate::redstone::make_lookup(&column, min_x, min_z), BlockPos::new(x, y, z), facing, false);
+                crate::redstone_diode::run_scheduled_comparator_tick(&state, input, side)
+            } else if due.kind == crate::redstone::TICK_OBSERVER {
+                let (new_state, reschedule) = crate::redstone_observer::run_scheduled_tick(&state);
+                if reschedule {
+                    block_ticks.schedule((x, y, z), crate::redstone::TICK_OBSERVER.to_string(), game_tick + 2, TickPriority::Normal);
+                }
+                Some(new_state)
+            } else {
+                // No other block-tick behaviour is modeled — see this
+                // function's own doc comment.
+                None
+            };
+
+            if let Some(new_state) = new_state {
+                if new_state != state {
+                    column.set_block(lx, y, lz, &new_state);
+                    world.set_block(x, y, z, &new_state);
+                    block_tick_out.publish(x, y, z, new_state);
+                }
+                for event in crate::random_tick::propagate_and_react(&mut column, min_x, min_z, x, y, z, &mut block_ticks, game_tick) {
+                    let (ex, ey, ez) = event.pos;
+                    world.set_block(ex, ey, ez, &event.to);
+                    block_tick_out.publish(ex, ey, ez, event.to);
+                }
+            }
         }
         for _due in fluid_ticks.drain_due(game_tick, MAX_SCHEDULED_TICKS_PER_TICK) {
             // Same acknowledgement as above, for fluid ticks.
@@ -560,7 +631,7 @@ pub(crate) async fn run_tick_loop<W>(
         for cz in tick_cz_range.clone() {
             for cx in tick_cx_range.clone() {
                 let mut column = world.column(cx, cz);
-                let events = random_ticks.tick_chunk(&mut column, cx, cz, DEFAULT_RANDOM_TICK_SPEED);
+                let events = random_ticks.tick_chunk(&mut column, cx, cz, DEFAULT_RANDOM_TICK_SPEED, &mut block_ticks, game_tick);
                 for event in events {
                     let (x, y, z) = event.pos;
                     world.set_block(x, y, z, &event.to);

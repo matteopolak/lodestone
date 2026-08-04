@@ -125,7 +125,13 @@
 use crate::gravity_tick;
 use crate::growth_tick;
 use crate::mob_spawn::SpawnRng;
-use crate::neighbor_update::{Direction, NeighborPropagator, Notification};
+use crate::neighbor_update::{Direction, NeighborPropagator, Notification, UPDATE_ORDER};
+use crate::redstone;
+use crate::redstone_diode;
+use crate::redstone_observer;
+use crate::redstone_torch;
+use crate::redstone_wire;
+use crate::scheduled_tick::{ScheduledTickQueue, TickPriority};
 use lodestone_model::BlockPos;
 
 /// Vanilla's own default for the `random_tick_speed` gamerule
@@ -320,12 +326,21 @@ impl RandomTickScheduler {
     /// function's caller (`tick::run_tick_loop`) needed zero changes to gain
     /// the new families: it already forwards whatever `tick_chunk` hands
     /// back, generically, one block-state string at a time.
+    ///
+    /// `block_ticks`/`current_tick` (issue #314's own extension of this call
+    /// site) are threaded through to [`propagate_and_react`] so a mutation
+    /// adjacent to a redstone torch/repeater/comparator/observer can
+    /// schedule a delayed recheck — see that function's own doc comment.
+    /// `tick::run_tick_loop` (the real caller) passes its own persistent
+    /// `block_ticks` queue and `game_tick` counter; nothing here owns either.
     pub fn tick_chunk(
         &mut self,
         column: &mut crate::chunk::ChunkColumn,
         cx: i32,
         cz: i32,
         tick_speed: u32,
+        block_ticks: &mut ScheduledTickQueue<String>,
+        current_tick: u64,
     ) -> Vec<RandomTickEvent> {
         let mut events = Vec::new();
         if tick_speed == 0 {
@@ -345,7 +360,17 @@ impl RandomTickScheduler {
                     if !is_randomly_ticking(&state) {
                         continue;
                     }
-                    events.extend(self.tick_randomly_ticking_block(column, min_x, min_z, x, y, z, &state));
+                    events.extend(self.tick_randomly_ticking_block(
+                        column,
+                        min_x,
+                        min_z,
+                        x,
+                        y,
+                        z,
+                        &state,
+                        block_ticks,
+                        current_tick,
+                    ));
                 }
             }
             section_min_y += 16;
@@ -360,6 +385,7 @@ impl RandomTickScheduler {
     /// ignorant of which families exist, exactly like vanilla's single
     /// `blockState.randomTick(...)` virtual call fanning out to whichever
     /// `Block` subclass is actually at that position.
+    #[allow(clippy::too_many_arguments)]
     fn tick_randomly_ticking_block(
         &mut self,
         column: &mut crate::chunk::ChunkColumn,
@@ -369,6 +395,8 @@ impl RandomTickScheduler {
         y: i32,
         z: i32,
         state: &str,
+        block_ticks: &mut ScheduledTickQueue<String>,
+        current_tick: u64,
     ) -> Vec<RandomTickEvent> {
         let base = base_name(state);
         let mut events = if base == GRASS_BLOCK {
@@ -383,15 +411,16 @@ impl RandomTickScheduler {
             Vec::new()
         };
 
-        // Issue #311: every mutation above notifies its six neighbours,
+        // Issue #311/#314: every mutation above notifies its six neighbours,
         // mirroring vanilla's own `setBlockAndUpdate` (this is
         // `NeighborPropagator`'s first real production call — see
-        // `crate::gravity_tick`'s module doc). The one reaction modeled
-        // today is a gravity block settling once its support disappears;
-        // future block families (redstone, #314) extend the same call site.
+        // `crate::gravity_tick`'s module doc). Two reactions are modeled
+        // today: a gravity block settling once its support disappears, and
+        // the redstone family (#314/#315/#317) recomputing dust power or
+        // scheduling a torch/diode/observer recheck.
         let mutated: Vec<(i32, i32, i32)> = events.iter().map(|e| e.pos).collect();
         for (ex, ey, ez) in mutated {
-            events.extend(propagate_and_settle_gravity(column, min_x, min_z, ex, ey, ez));
+            events.extend(propagate_and_react(column, min_x, min_z, ex, ey, ez, block_ticks, current_tick));
         }
         events
     }
@@ -624,23 +653,50 @@ fn settle_gravity_at(
 }
 
 /// Notifies the six neighbours of a just-mutated position `(x, y, z)` via
-/// `NeighborPropagator` (issue #308's own primitive, gaining its first real
-/// caller here) and settles any neighbour that is an unsupported gravity
-/// block. A settled block's *old* position is re-notified from directly
-/// above (`Direction::Down`, i.e. "the position above the vacated cell") so
-/// a stacked column of gravity blocks collapses one at a time, depth-first —
-/// exactly the cascade shape `NeighborPropagator::propagate` exists to
-/// provide (see `neighbor_update.rs`'s own doc comment). Neighbours outside
-/// this column's 16×16 footprint are skipped — the same cross-chunk
-/// limitation `tick_grass_block`'s own spread already accepts (`tick_chunk`
-/// has no neighbouring-column access).
-fn propagate_and_settle_gravity(
+/// `NeighborPropagator` (issue #308's own primitive) and dispatches every
+/// reaction this crate models to a neighbour notification:
+///
+/// 1. **Gravity (#311)** — settles any neighbour that is an unsupported
+///    gravity block; a settled block's *old* position is re-notified from
+///    directly above so a stacked column collapses one at a time,
+///    depth-first. Unchanged from the #311 landing.
+/// 2. **Redstone dust (#314)** — recomputes the neighbour's target power
+///    strength (`crate::redstone_wire::calculate_target_strength`); if it
+///    changed, writes the new power and cascades the SAME six-direction
+///    fan-out from the wire's own position, mirroring
+///    `RedStoneWireBlock.updatePowerStrength`'s own `level.updateNeighborsAt`
+///    calls on `pos` and its six neighbours (`DefaultRedstoneWireEvaluator.java:27-37`)
+///    — **named deviation**: vanilla additionally fans out from each of
+///    those six neighbours' own positions too (a second layer, for
+///    diagonal/over-a-step corner cases), collected through a `HashSet`
+///    whose iteration order vanilla itself does not guarantee. This landing
+///    implements the first layer only (the wire's own position), which is
+///    the deterministic, load-bearing part — a straight or right-angled run
+///    of dust updates correctly; a diagonal-over-conductor corner update may
+///    lag by one extra notification round versus vanilla. See
+///    `crate::redstone_wire`'s own module doc for what the read side already
+///    covers (the diagonal *read* is exact; only the eager re-notify is
+///    narrower).
+/// 3. **Redstone torches/repeaters/comparators/observers (#314/#315/#317)**
+///    — schedule a delayed recheck into `block_ticks` when the neighbour's
+///    steady-state condition disagrees with its current state (torch:
+///    `LIT == hasSignal`; diode: `POWERED != shouldTurnOn`; observer: the
+///    notification travelled from its watched face and it isn't already
+///    outputting) — see each family's own module for the exact per-block
+///    citation. No immediate mutation happens here: the flip itself runs
+///    when `block_ticks` drains, in `tick::run_tick_loop`.
+///
+/// Neighbours outside this column's 16×16 footprint are skipped — the same
+/// cross-chunk limitation `tick_grass_block`'s own spread already accepts.
+pub(crate) fn propagate_and_react(
     column: &mut crate::chunk::ChunkColumn,
     min_x: i32,
     min_z: i32,
     x: i32,
     y: i32,
     z: i32,
+    block_ticks: &mut ScheduledTickQueue<String>,
+    current_tick: u64,
 ) -> Vec<RandomTickEvent> {
     let mut events = Vec::new();
     let propagator = NeighborPropagator::default();
@@ -650,15 +706,115 @@ fn propagate_and_settle_gravity(
         if !(0..16).contains(&tlx) || !(0..16).contains(&tlz) {
             return Vec::new();
         }
-        let settled = settle_gravity_at(column, min_x, min_z, n.pos.x, n.pos.y, n.pos.z);
-        if settled.is_empty() {
+        if n.pos.y < column.min_y || n.pos.y >= column.min_y + column.height {
             return Vec::new();
         }
-        events.extend(settled);
-        vec![Notification {
-            pos: BlockPos::new(n.pos.x, n.pos.y + 1, n.pos.z),
-            from: Direction::Down,
-        }]
+
+        // 1. Gravity (#311) — first, matching the existing precedent.
+        let settled = settle_gravity_at(column, min_x, min_z, n.pos.x, n.pos.y, n.pos.z);
+        if !settled.is_empty() {
+            events.extend(settled);
+            return vec![Notification { pos: BlockPos::new(n.pos.x, n.pos.y + 1, n.pos.z), from: Direction::Down }];
+        }
+
+        let state = column.block_state(tlx, n.pos.y, tlz).to_string();
+
+        // 2. Redstone dust (#314).
+        if redstone::is_wire(&state) {
+            let new_power = redstone_wire::calculate_target_strength(&redstone::make_lookup(column, min_x, min_z), n.pos);
+            let old_power = redstone::wire_power(&state);
+            if new_power != old_power {
+                let new_state = redstone_wire::set_power(new_power);
+                column.set_block(tlx, n.pos.y, tlz, &new_state);
+                events.push(RandomTickEvent { pos: (n.pos.x, n.pos.y, n.pos.z), from: state, to: new_state });
+                return UPDATE_ORDER.iter().map(|d| Notification { pos: d.relative(n.pos), from: *d }).collect();
+            }
+            return Vec::new();
+        }
+
+        // 3a. Redstone torches (#314).
+        if redstone::is_torch(&state) {
+            let has_signal = redstone_torch::has_neighbor_signal(&redstone::make_lookup(column, min_x, min_z), n.pos, &state);
+            if redstone_torch::should_schedule_check(&state, has_signal)
+                && !block_ticks.has_scheduled((n.pos.x, n.pos.y, n.pos.z), &redstone::TICK_TORCH.to_string())
+            {
+                block_ticks.schedule(
+                    (n.pos.x, n.pos.y, n.pos.z),
+                    redstone::TICK_TORCH.to_string(),
+                    current_tick + 2,
+                    TickPriority::Normal,
+                );
+            }
+            return Vec::new();
+        }
+
+        // 3b. Repeaters (#315).
+        if redstone::is_repeater(&state) {
+            let facing = redstone::diode_facing(&state);
+            let recomputed_lock = redstone_diode::recompute_locked(&redstone::make_lookup(column, min_x, min_z), n.pos, &state);
+            if let Some(new_state) = recomputed_lock {
+                column.set_block(tlx, n.pos.y, tlz, &new_state);
+                events.push(RandomTickEvent { pos: (n.pos.x, n.pos.y, n.pos.z), from: state, to: new_state });
+            }
+            let state_now = column.block_state(tlx, n.pos.y, tlz).to_string();
+            let should_on = redstone_diode::repeater_should_turn_on(&redstone::make_lookup(column, min_x, min_z), n.pos, facing);
+            if redstone_diode::should_schedule_repeater_check(&state_now, should_on)
+                && !block_ticks.has_scheduled((n.pos.x, n.pos.y, n.pos.z), &redstone::TICK_REPEATER.to_string())
+            {
+                let priority = redstone_diode::repeater_schedule_priority(
+                    &redstone::make_lookup(column, min_x, min_z),
+                    n.pos,
+                    facing,
+                    redstone::diode_powered(&state_now),
+                );
+                let delay = redstone_diode::repeater_delay(&state_now);
+                block_ticks.schedule(
+                    (n.pos.x, n.pos.y, n.pos.z),
+                    redstone::TICK_REPEATER.to_string(),
+                    current_tick + u64::from(delay),
+                    priority,
+                );
+            }
+            return Vec::new();
+        }
+
+        // 3c. Comparators (#315).
+        if redstone::is_comparator(&state) {
+            let facing = redstone::diode_facing(&state);
+            let input = redstone::input_signal(&redstone::make_lookup(column, min_x, min_z), n.pos, facing);
+            let side = redstone::alternate_signal(&redstone::make_lookup(column, min_x, min_z), n.pos, facing, false);
+            if redstone_diode::should_schedule_comparator_check(&state, input, side)
+                && !block_ticks.has_scheduled((n.pos.x, n.pos.y, n.pos.z), &redstone::TICK_COMPARATOR.to_string())
+            {
+                let priority = redstone_diode::comparator_schedule_priority(&redstone::make_lookup(column, min_x, min_z), n.pos, facing);
+                block_ticks.schedule(
+                    (n.pos.x, n.pos.y, n.pos.z),
+                    redstone::TICK_COMPARATOR.to_string(),
+                    current_tick + 2,
+                    priority,
+                );
+            }
+            return Vec::new();
+        }
+
+        // 3d. Observers (#317).
+        if redstone::is_observer(&state) {
+            let watch = redstone_observer::watch_direction(&state);
+            if n.from == watch
+                && redstone_observer::should_start_signal(&state)
+                && !block_ticks.has_scheduled((n.pos.x, n.pos.y, n.pos.z), &redstone::TICK_OBSERVER.to_string())
+            {
+                block_ticks.schedule(
+                    (n.pos.x, n.pos.y, n.pos.z),
+                    redstone::TICK_OBSERVER.to_string(),
+                    current_tick + 2,
+                    TickPriority::Normal,
+                );
+            }
+            return Vec::new();
+        }
+
+        Vec::new()
     });
     events
 }
@@ -750,7 +906,8 @@ mod tests {
             }
         }
         let mut scheduler = RandomTickScheduler::new(12345, 0);
-        let events = scheduler.tick_chunk(&mut column, 0, 0, 5);
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        let events = scheduler.tick_chunk(&mut column, 0, 0, 5, &mut block_ticks, 0);
         assert!(events.is_empty());
 
         // An ineligible SECTION draws zero — confirmed by the position LCG
@@ -791,7 +948,8 @@ mod tests {
         column.set_block(0, 0, 0, GRASS_BLOCK);
 
         let mut scheduler = RandomTickScheduler::new(12345, 0);
-        scheduler.tick_chunk(&mut column, 0, 0, 5);
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        scheduler.tick_chunk(&mut column, 0, 0, 5, &mut block_ticks, 0);
 
         let mut expected_state = 12345i32;
         for _ in 0..5 {
@@ -864,6 +1022,7 @@ mod tests {
         assert_eq!(column.block_state(3, 5, 3), GRASS_BLOCK);
 
         let mut scheduler = RandomTickScheduler::new(1, 1);
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         // `tick_speed = 200` and 3000 calls: the position pick lands on
         // (3, 5, 3) with probability 200/4096 per call, so the expected hit
         // count here is ~146 — comfortably certain (P(zero hits) ~ e^-146)
@@ -873,7 +1032,7 @@ mod tests {
         // hits it.
         let mut converted = false;
         for _ in 0..3000 {
-            let events = scheduler.tick_chunk(&mut column, 0, 0, 200);
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0);
             if events.iter().any(|e| e.pos == (3, 5, 3) && e.to == DIRT_BLOCK) {
                 converted = true;
                 break;
@@ -893,8 +1052,9 @@ mod tests {
         column.set_block(3, 5, 3, GRASS_BLOCK);
         // Above is air by construction (ChunkColumn::new is all-air).
         let mut scheduler = RandomTickScheduler::new(1, 1);
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         for _ in 0..500 {
-            let events = scheduler.tick_chunk(&mut column, 0, 0, 8);
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 8, &mut block_ticks, 0);
             assert!(
                 !events.iter().any(|e| e.to == DIRT_BLOCK),
                 "an air-exposed grass block must never die to dirt"
@@ -911,6 +1071,7 @@ mod tests {
         column.set_block(5, 5, 5, GRASS_BLOCK);
         column.set_block(6, 5, 5, DIRT_BLOCK); // one step east, also air-exposed above
         let mut scheduler = RandomTickScheduler::new(2, 2);
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         // Two independent random events must both happen: the position pick
         // must land on the grass block (`tick_speed = 200` / 4096 chance per
         // call), AND one of its 4 spread attempts must draw the exact
@@ -921,7 +1082,7 @@ mod tests {
         // (P(zero) ~ 3e-6).
         let mut spread = false;
         for _ in 0..3000 {
-            let events = scheduler.tick_chunk(&mut column, 0, 0, 200);
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0);
             if events.iter().any(|e| e.pos == (6, 5, 5) && e.to == GRASS_BLOCK) {
                 spread = true;
                 break;
@@ -941,9 +1102,10 @@ mod tests {
             column.set_block(1, 1, 1, GRASS_BLOCK);
             column.set_block(2, 1, 1, "minecraft:stone");
             let mut scheduler = RandomTickScheduler::new(555, 555);
+            let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
             let mut all = Vec::new();
             for _ in 0..50 {
-                all.extend(scheduler.tick_chunk(&mut column, 0, 0, 8));
+                all.extend(scheduler.tick_chunk(&mut column, 0, 0, 8, &mut block_ticks, 0));
             }
             all
         }
@@ -973,9 +1135,10 @@ mod tests {
         column.set_block(4, 5, 4, "minecraft:wheat[age=0]");
         // Above is air by construction (ChunkColumn::new is all-air).
         let mut scheduler = RandomTickScheduler::new(21, 21);
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         let mut grew = false;
         for _ in 0..3000 {
-            let events = scheduler.tick_chunk(&mut column, 0, 0, 200);
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0);
             if events.iter().any(|e| e.pos == (4, 5, 4) && e.to == "minecraft:wheat[age=1]") {
                 grew = true;
                 break;
@@ -993,8 +1156,9 @@ mod tests {
         let mut column = ChunkColumn::new(0, 16);
         column.set_block(4, 5, 4, "minecraft:wheat[age=7]");
         let mut scheduler = RandomTickScheduler::new(21, 21);
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         for _ in 0..500 {
-            let events = scheduler.tick_chunk(&mut column, 0, 0, 8);
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 8, &mut block_ticks, 0);
             assert!(events.is_empty(), "a max-age crop must never be selected for a random tick at all");
         }
         assert_eq!(column.block_state(4, 5, 4), "minecraft:wheat[age=7]");
@@ -1009,8 +1173,9 @@ mod tests {
         column.set_block(4, 5, 4, "minecraft:wheat[age=0]");
         column.set_block(4, 6, 4, "minecraft:stone"); // covers it
         let mut scheduler = RandomTickScheduler::new(21, 21);
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         for _ in 0..500 {
-            let events = scheduler.tick_chunk(&mut column, 0, 0, 8);
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 8, &mut block_ticks, 0);
             assert!(events.is_empty(), "a covered wheat crop must never grow (or draw at all)");
         }
         assert_eq!(column.block_state(4, 5, 4), "minecraft:wheat[age=0]");
@@ -1022,9 +1187,10 @@ mod tests {
         let mut column = ChunkColumn::new(0, 16);
         column.set_block(2, 5, 2, "minecraft:oak_sapling[stage=0]");
         let mut scheduler = RandomTickScheduler::new(9, 9);
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         let mut advanced = false;
         for _ in 0..3000 {
-            let events = scheduler.tick_chunk(&mut column, 0, 0, 200);
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0);
             if events.iter().any(|e| e.pos == (2, 5, 2) && e.to == "minecraft:oak_sapling[stage=1]") {
                 advanced = true;
                 break;
@@ -1044,8 +1210,9 @@ mod tests {
         let mut column = ChunkColumn::new(0, 16);
         column.set_block(2, 5, 2, "minecraft:oak_sapling[stage=1]");
         let mut scheduler = RandomTickScheduler::new(9, 9);
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         for _ in 0..3000 {
-            let events = scheduler.tick_chunk(&mut column, 0, 0, 200);
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0);
             assert!(events.is_empty(), "a stage-1 sapling must never mutate — no tree feature exists");
         }
         assert_eq!(column.block_state(2, 5, 2), "minecraft:oak_sapling[stage=1]");
@@ -1060,9 +1227,10 @@ mod tests {
         let mut column = ChunkColumn::new(0, 16);
         column.set_block(6, 5, 6, "minecraft:oak_leaves[distance=7,persistent=false]");
         let mut scheduler = RandomTickScheduler::new(4, 4);
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         let mut decayed = false;
         for _ in 0..3000 {
-            let events = scheduler.tick_chunk(&mut column, 0, 0, 200);
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0);
             if events.iter().any(|e| e.pos == (6, 5, 6) && e.to == "minecraft:air") {
                 decayed = true;
                 break;
@@ -1080,8 +1248,9 @@ mod tests {
         let mut column = ChunkColumn::new(0, 16);
         column.set_block(6, 5, 6, "minecraft:oak_leaves[distance=7,persistent=true]");
         let mut scheduler = RandomTickScheduler::new(4, 4);
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         for _ in 0..500 {
-            let events = scheduler.tick_chunk(&mut column, 0, 0, 8);
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 8, &mut block_ticks, 0);
             assert!(events.is_empty(), "a persistent leaf must never be selected for a random tick");
         }
         assert_eq!(column.block_state(6, 5, 6), "minecraft:oak_leaves[distance=7,persistent=true]");
@@ -1094,8 +1263,9 @@ mod tests {
         let mut column = ChunkColumn::new(0, 16);
         column.set_block(6, 5, 6, "minecraft:oak_leaves[distance=3,persistent=false]");
         let mut scheduler = RandomTickScheduler::new(4, 4);
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         for _ in 0..500 {
-            let events = scheduler.tick_chunk(&mut column, 0, 0, 8);
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 8, &mut block_ticks, 0);
             assert!(events.is_empty(), "a leaf within range of a log must never be selected for a random tick");
         }
         assert_eq!(column.block_state(6, 5, 6), "minecraft:oak_leaves[distance=3,persistent=false]");
@@ -1120,9 +1290,10 @@ mod tests {
         column.set_block(5, 6, 5, "minecraft:stone"); // covers the grass: dies to dirt
         column.set_block(6, 5, 5, "minecraft:sand"); // east neighbour, unsupported (air below by default)
         let mut scheduler = RandomTickScheduler::new(1, 1);
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         let mut settled = false;
         for _ in 0..3000 {
-            let events = scheduler.tick_chunk(&mut column, 0, 0, 200);
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0);
             if events.iter().any(|e| e.pos == (6, 0, 5) && e.to == "minecraft:sand") {
                 settled = true;
                 break;
@@ -1145,8 +1316,9 @@ mod tests {
         column.set_block(6, 5, 5, "minecraft:sand");
         column.set_block(6, 4, 5, "minecraft:stone"); // real support
         let mut scheduler = RandomTickScheduler::new(1, 1);
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         for _ in 0..3000 {
-            scheduler.tick_chunk(&mut column, 0, 0, 200);
+            scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0);
         }
         assert_eq!(column.block_state(6, 5, 5), "minecraft:sand", "a supported sand block must never fall");
     }
@@ -1168,9 +1340,10 @@ mod tests {
         column.set_block(6, 5, 5, "minecraft:sand"); // bottom of the stack, unsupported
         column.set_block(6, 6, 5, "minecraft:gravel"); // resting on top of the sand above
         let mut scheduler = RandomTickScheduler::new(1, 1);
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         let mut both_settled = false;
         for _ in 0..3000 {
-            scheduler.tick_chunk(&mut column, 0, 0, 200);
+            scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0);
             if column.block_state(6, 0, 5) == "minecraft:sand" && column.block_state(6, 1, 5) == "minecraft:gravel" {
                 both_settled = true;
                 break;
