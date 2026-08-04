@@ -11,9 +11,9 @@
 use lodestone_core::{Ctx, Decode, Reader};
 use lodestone_model::{
     AdapterError, BlockActionKind, BlockFace, BlockPos, ChatMode, ClientAction, ClientSettings,
-    ConnectionState, ContainerClickType, DisplayedSkinParts, EntityInteraction, Hand, ItemStack,
-    MainHand, ParticleStatus, PlayerCommand, PlayerInput, ResourceKey, ResourcePackResponseKind,
-    Rotation, Vec3, Vec3f, VersionAdapter,
+    ConnectionState, ContainerClickType, DisplayedSkinParts, EntityInteraction, GameMode, Hand,
+    ItemStack, MainHand, ParticleStatus, PlayerCommand, PlayerInput, ResourceKey,
+    ResourcePackResponseKind, Rotation, Vec3, Vec3f, VersionAdapter,
 };
 use lodestone_v735::V735Adapter;
 use lodestone_v735::packet_ids::play;
@@ -236,7 +236,7 @@ fn clearing_creative_slot_sends_empty_but_setting_needs_registry() {
 
 #[test]
 fn actions_absent_from_1_16_fail_loudly() {
-    let cases: [ClientAction; 3] = [
+    let cases: [ClientAction; 11] = [
         ClientAction::Stab,
         ClientAction::SetPlayerInput(PlayerInput::EMPTY),
         ClientAction::ContainerClick {
@@ -247,6 +247,35 @@ fn actions_absent_from_1_16_fail_loudly() {
             click_type: ContainerClickType::Pickup,
             changed_slots: Vec::new(),
             carried_item: None,
+        },
+        // Continuous spectator-follow needs a target uuid; 1.16.5's
+        // `spectate` packet has one, but SpectatorAction only carries a
+        // network entity id with no registry to resolve it (use
+        // TeleportToEntity instead).
+        ClientAction::SpectatorAction {
+            target_entity_id: None,
+        },
+        ClientAction::ChatAck { offset: 0 },
+        ClientAction::SelectBundleItem {
+            slot_id: 0,
+            selected_item_index: -1,
+        },
+        ClientAction::SetContainerSlotState {
+            slot_id: 0,
+            container_id: 0,
+            new_state: false,
+        },
+        // Both need a namespaced recipe-id string this stateless adapter has
+        // no registry to resolve the model's numeric display index into.
+        ClientAction::RecipeBookSeenRecipe { recipe: 0 },
+        ClientAction::PlaceRecipe {
+            container_id: 0,
+            recipe: 0,
+            use_max_items: false,
+        },
+        ClientAction::PingRequest { time: 0 },
+        ClientAction::ChangeGameMode {
+            mode: GameMode::Survival,
         },
     ];
     for action in cases {

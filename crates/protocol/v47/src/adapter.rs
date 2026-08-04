@@ -20,9 +20,9 @@ use crate::packets::entity::{
     SpawnEntityLiving, SpawnObject,
 };
 use crate::packets::game::{
-    BlockDig, BlockPlace, ClientboundChat, ClientboundPositionLook, EntityAction, JoinGame,
-    KickDisconnect, PlaySetCompression, ServerboundChat, ServerboundPositionLook, UseEntity,
-    UseEntityAt,
+    BlockDig, BlockPlace, ClientCommand, ClientboundChat, ClientboundPositionLook, EntityAction,
+    JoinGame, KickDisconnect, PlaySetCompression, ServerboundChat, ServerboundPositionLook,
+    Spectate, UseEntity, UseEntityAt,
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{EncryptionRequest, LoginDisconnect, LoginSuccess, SetCompression};
@@ -1073,6 +1073,54 @@ impl VersionAdapter for V47Adapter {
             )),
             ClientAction::MoveVehicle { .. } => Err(AdapterError::Unsupported(
                 "protocol 47 move vehicle encoding is not yet implemented".to_owned(),
+            )),
+
+            // Leaving the death screen. `client_command` action `0` =
+            // perform respawn, a stable ordinal across every generation
+            // checked (1.8, 1.12.2, 1.16.2/.4/.5 all encode it as a lone
+            // varint action id per minecraft-data's protocol.json).
+            ClientAction::Respawn => {
+                let body = ClientCommand { action: 0 };
+                Ok(Some((play::serverbound::CLIENT_COMMAND, encode_body(&body)?)))
+            }
+            // Clicking a name in the tab list while spectating. 1.8's
+            // `spectate` packet carries the target's uuid directly, which the
+            // model already supplies, so no entity registry is needed.
+            ClientAction::TeleportToEntity { target } => {
+                let body = Spectate { target: *target };
+                Ok(Some((play::serverbound::SPECTATE, encode_body(&body)?)))
+            }
+            // The continuous spectator-follow action carries only a network
+            // entity id, but 1.8's wire packet is the same uuid-keyed
+            // `spectate` packet as `TeleportToEntity` above. A stateless
+            // adapter has no id->uuid registry to bridge the two.
+            ClientAction::SpectatorAction { .. } => Err(AdapterError::Unsupported(
+                "protocol 47's spectate packet needs a target uuid; SpectatorAction carries \
+                 only a network entity id with no registry to resolve it into one (use \
+                 TeleportToEntity instead, which already carries the uuid)"
+                    .to_owned(),
+            )),
+            ClientAction::ChatAck { .. } => Err(AdapterError::Unsupported(
+                "protocol 47 predates signed/acknowledged chat (added in 1.19)".to_owned(),
+            )),
+            ClientAction::SelectBundleItem { .. } => Err(AdapterError::Unsupported(
+                "protocol 47 predates bundles (added in 1.21.2)".to_owned(),
+            )),
+            ClientAction::SetContainerSlotState { .. } => Err(AdapterError::Unsupported(
+                "protocol 47 predates the crafter block (added in 1.21)".to_owned(),
+            )),
+            ClientAction::SetRecipeBookSettings { .. }
+            | ClientAction::RecipeBookSeenRecipe { .. }
+            | ClientAction::PlaceRecipe { .. } => Err(AdapterError::Unsupported(
+                "protocol 47 predates the recipe book (added in 1.12)".to_owned(),
+            )),
+            ClientAction::PingRequest { .. } => Err(AdapterError::Unsupported(
+                "protocol 47 has no play-state ping request packet".to_owned(),
+            )),
+            ClientAction::ChangeGameMode { .. } => Err(AdapterError::Unsupported(
+                "protocol 47 has no dedicated change_game_mode packet; a debug-menu game-mode \
+                 switch in this era goes through the /gamemode chat command instead"
+                    .to_owned(),
             )),
 
             _ => Ok(None),

@@ -10,15 +10,16 @@
 use lodestone_core::{Ctx, Decode, Encode, Reader, Writer};
 use lodestone_model::{
     BlockPos, ChatKind, ClientAction, ClientEvent, ConnectionState, Directive, GameMode,
-    LoginProfile, Rotation, ServerAddress, Vec3, VersionAdapter,
+    LoginProfile, RecipeBookType, Rotation, ServerAddress, Vec3, VersionAdapter,
 };
 use lodestone_v735::V735Adapter;
 use lodestone_v735::packet_ids::{handshaking, login, play};
 use lodestone_v735::packets::common::{KeepAliveRequest, KeepAliveResponse};
 use lodestone_v735::packets::game::{
-    ClientboundChat, ClientboundPositionLook, JoinGame, KickDisconnect, Respawn,
-    ServerboundArmAnimation, ServerboundChat, ServerboundFlying, ServerboundLook,
-    ServerboundPosition, ServerboundPositionLook, SpawnPosition, TeleportConfirm, UpdateHealth,
+    ClientCommand, ClientboundChat, ClientboundPositionLook, JoinGame, KickDisconnect,
+    RecipeBook, Respawn, ServerboundArmAnimation, ServerboundChat, ServerboundFlying,
+    ServerboundLook, ServerboundPosition, ServerboundPositionLook, Spectate, SpawnPosition,
+    TeleportConfirm, UpdateHealth,
 };
 use lodestone_v735::packets::handshake::SetProtocol;
 use lodestone_v735::packets::login::{
@@ -757,6 +758,69 @@ fn encode_swing_arm_selects_hand() {
         .expect("some");
     let swing: ServerboundArmAnimation = decode(&body);
     assert_eq!(swing.hand, 1);
+}
+
+#[test]
+fn encode_respawn_is_client_command_action_zero() {
+    let adapter = V735Adapter::new();
+    let (id, body) = adapter
+        .encode_action(ConnectionState::Play, &ClientAction::Respawn)
+        .expect("encode")
+        .expect("some");
+    assert_eq!(id, play::serverbound::CLIENT_COMMAND);
+    // Hand-built: a lone varint `0`, one byte since it fits under 128 — per
+    // minecraft-data's 1.16.2 protocol.json `packet_client_command`.
+    assert_eq!(body, vec![0]);
+    let decoded: ClientCommand = decode(&body);
+    assert_eq!(decoded.action, 0);
+}
+
+#[test]
+fn encode_teleport_to_entity_is_spectate_with_the_uuid() {
+    let adapter = V735Adapter::new();
+    let target = Uuid::parse_str("069a79f4-44e9-4726-a5be-fca90e38aaf5").expect("uuid");
+    let (id, body) = adapter
+        .encode_action(ConnectionState::Play, &ClientAction::TeleportToEntity { target })
+        .expect("encode")
+        .expect("some");
+    assert_eq!(id, play::serverbound::SPECTATE);
+    // Hand-built: the raw 16-byte uuid, big-endian per minecraft-data's
+    // `packet_spectate` (`{ target: UUID }`) — no length prefix.
+    assert_eq!(body, target.as_bytes());
+    let decoded: Spectate = decode(&body);
+    assert_eq!(decoded.target, target);
+}
+
+#[test]
+fn encode_set_recipe_book_settings_covers_all_four_books() {
+    let adapter = V735Adapter::new();
+    // Per minecraft-data's 1.16.2 protocol.json `packet_recipe_book`: varint
+    // book id, then the open flag and filter flag. All four books exist by
+    // 1.16.5, unlike 1.12.2 which has only the crafting one.
+    for (book_type, ordinal) in [
+        (RecipeBookType::Crafting, 0u8),
+        (RecipeBookType::Furnace, 1),
+        (RecipeBookType::BlastFurnace, 2),
+        (RecipeBookType::Smoker, 3),
+    ] {
+        let (id, body) = adapter
+            .encode_action(
+                ConnectionState::Play,
+                &ClientAction::SetRecipeBookSettings {
+                    book_type,
+                    open: true,
+                    filtering: false,
+                },
+            )
+            .expect("encode")
+            .expect("some");
+        assert_eq!(id, play::serverbound::RECIPE_BOOK);
+        assert_eq!(body, vec![ordinal, 1, 0]);
+        let decoded: RecipeBook = decode(&body);
+        assert_eq!(decoded.book_id, i32::from(ordinal));
+        assert!(decoded.book_open);
+        assert!(!decoded.filter_active);
+    }
 }
 
 #[test]

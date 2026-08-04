@@ -12,6 +12,7 @@ lodestone-core = { workspace = true }
 lodestone-macros = { workspace = true }
 lodestone-model = { workspace = true }
 lodestone-world = { workspace = true }
+uuid = { workspace = true }
 
 [features]
 # Enables the white-box live chunk-decode test, which drives a real 1.8.9 join
@@ -41,7 +42,6 @@ live-entity = []
 live-interaction = []
 
 [dev-dependencies]
-uuid = { workspace = true }
 lodestone-net = { workspace = true }
 lodestone-testsupport = { workspace = true }
 tokio = { workspace = true }

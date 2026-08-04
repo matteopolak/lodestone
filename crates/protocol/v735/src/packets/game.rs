@@ -483,3 +483,47 @@ pub struct EntityAction {
     #[mc(varint)]
     pub jump_boost: i32,
 }
+
+/// Serverbound `client_command` packet.
+///
+/// Wire layout: a single varint action id (`0` = perform respawn); same
+/// shape at 1.8 and 1.12.2 per minecraft-data's `protocol.json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:client_command", state = Play, bound = Server)]
+pub struct ClientCommand {
+    /// Action id (`0` = perform respawn).
+    #[mc(varint)]
+    pub action: i32,
+}
+
+/// Serverbound `spectate` packet — teleport to (or, while already
+/// spectating, follow) another entity by uuid. Sent when a spectator clicks a
+/// name in the tab list or player/team overlay.
+///
+/// Wire layout: a single 128-bit uuid; unchanged from 1.8 through 1.16.2 per
+/// minecraft-data's `protocol.json` (`packet_spectate`: `{ target: UUID }`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:spectate", state = Play, bound = Server)]
+pub struct Spectate {
+    /// Uuid of the entity to spectate/teleport to.
+    pub target: Uuid,
+}
+
+/// Serverbound `recipe_book` packet — toggle a recipe book's open/filtering
+/// state.
+///
+/// Wire layout: varint book id (`RecipeBookType` ordinal: `0` crafting, `1`
+/// furnace, `2` blast furnace, `3` smoker — all four exist by 1.16, unlike
+/// 1.12.2 which has only the crafting book), then the open flag and filter
+/// flag. Per minecraft-data's 1.16.2 `protocol.json` (`packet_recipe_book`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:recipe_book", state = Play, bound = Server)]
+pub struct RecipeBook {
+    /// `RecipeBookType` ordinal.
+    #[mc(varint)]
+    pub book_id: i32,
+    /// Whether the book is open.
+    pub book_open: bool,
+    /// Whether the "only craftable" filter is active.
+    pub filter_active: bool,
+}

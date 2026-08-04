@@ -15,9 +15,10 @@ use lodestone_v340::V340Adapter;
 use lodestone_v340::packet_ids::{handshaking, login, play};
 use lodestone_v340::packets::common::{KeepAliveRequest, KeepAliveResponse};
 use lodestone_v340::packets::game::{
-    ClientboundChat, ClientboundPositionLook, JoinGame, KickDisconnect, Respawn,
+    ClientCommand, ClientboundChat, ClientboundPositionLook, JoinGame, KickDisconnect, Respawn,
     ServerboundArmAnimation, ServerboundChat, ServerboundFlying, ServerboundLook,
-    ServerboundPosition, ServerboundPositionLook, SpawnPosition, TeleportConfirm, UpdateHealth,
+    ServerboundPosition, ServerboundPositionLook, Spectate, SpawnPosition, TeleportConfirm,
+    UpdateHealth,
 };
 use lodestone_v340::packets::handshake::SetProtocol;
 use lodestone_v340::packets::login::{
@@ -27,6 +28,7 @@ use lodestone_v340::packets::login::{
 use lodestone_v340::packets::position::{Position, pack_position, unpack_position};
 use lodestone_v340::packets::status::{StatusPing, StatusPong, StatusRequest, StatusResponse};
 use lodestone_world::World;
+use uuid::Uuid;
 
 const CTX: Ctx = Ctx { version: 340 };
 const PROFILE_UUID: &str = "069a79f4-44e9-4726-a5be-fca90e38aaf5";
@@ -676,6 +678,37 @@ fn encode_swing_arm_selects_hand() {
         .expect("some");
     let swing: ServerboundArmAnimation = decode(&body);
     assert_eq!(swing.hand, 1);
+}
+
+#[test]
+fn encode_respawn_is_client_command_action_zero() {
+    let adapter = V340Adapter::new();
+    let (id, body) = adapter
+        .encode_action(ConnectionState::Play, &ClientAction::Respawn)
+        .expect("encode")
+        .expect("some");
+    assert_eq!(id, play::serverbound::CLIENT_COMMAND);
+    // Hand-built: a lone varint `0`, one byte since it fits under 128 — per
+    // minecraft-data's 1.12.2 protocol.json `packet_client_command`.
+    assert_eq!(body, vec![0]);
+    let decoded: ClientCommand = decode(&body);
+    assert_eq!(decoded.action, 0);
+}
+
+#[test]
+fn encode_teleport_to_entity_is_spectate_with_the_uuid() {
+    let adapter = V340Adapter::new();
+    let target = Uuid::parse_str("069a79f4-44e9-4726-a5be-fca90e38aaf5").expect("uuid");
+    let (id, body) = adapter
+        .encode_action(ConnectionState::Play, &ClientAction::TeleportToEntity { target })
+        .expect("encode")
+        .expect("some");
+    assert_eq!(id, play::serverbound::SPECTATE);
+    // Hand-built: the raw 16-byte uuid, big-endian per minecraft-data's
+    // `packet_spectate` (`{ target: UUID }`) — no length prefix.
+    assert_eq!(body, target.as_bytes());
+    let decoded: Spectate = decode(&body);
+    assert_eq!(decoded.target, target);
 }
 
 #[test]
