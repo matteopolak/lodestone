@@ -25,7 +25,7 @@
 use super::*;
 
 impl Sim {
-    /// Fold this frame's entity snapshots into the render-side component set, so
+    /// Fold this frame's entity state into the render-side component set, so
     /// [`entity_draws`](Self::entity_draws) yields smooth per-frame transforms.
     /// No live connection means no entities.
     ///
@@ -37,15 +37,14 @@ impl Sim {
     /// `Extract`. Those three schedule runs are now the frame's own, so all this
     /// does is the fold. The item collision it used to pass by argument is the
     /// [`crate::entities::ItemCollision`] resource the tick loop inserts.
+    ///
+    /// # `EntitySnapshot` deletion (issue #36)
+    ///
+    /// [`crate::entities::fold_entities`] reads the ingest components directly
+    /// inside its own write guard — there is no separate snapshot read to
+    /// resolve ahead of it any more, so this is a single `self.write` call.
     pub(crate) fn fold_entities(&mut self) {
-        let snapshots = self
-            .net
-            .as_ref()
-            .map_or_else(Vec::new, NetClient::entity_snapshots);
-        // `entity_snapshots` reads this same `World` through `ClientHandle`, so it
-        // is resolved to an owned `Vec` *before* the guard below is taken. Doing it
-        // the other way round is `EcsHandle`'s rule 1 and deadlocks.
-        self.write(|w| crate::entities::fold_entity_snapshots(w, &snapshots));
+        self.write(crate::entities::fold_entities);
     }
 
     pub(crate) fn poll_net(&mut self) {

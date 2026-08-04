@@ -5072,32 +5072,27 @@ fn closing_a_server_menu_clears_it_locally_without_waiting_for_the_server() {
 }
 
 /// screen.
+///
+/// Issue #36: there is no `EntitySnapshot` to hand `fold_entities` any more —
+/// the ingest components it now reads directly are spawned through the real
+/// `ClientEvent::EntitySpawned` -> `IngestQueue` -> `NetIngest` path (the
+/// [`ingest`] helper), then `Sim::fold_entities` folds them, exactly like a
+/// live session's `Sim::step` does.
 #[test]
 fn end_session_clears_the_entity_tracks() {
-    use crate::entities::EntitySnapshot;
-
     let mut sim = Sim::with_demo_world(test_config());
-    let snap = EntitySnapshot {
-        id: 7,
-        type_path: "pig".into(),
-        feet: glam::Vec3::new(1.0, 64.0, 1.0),
-        scale: 1.0,
-        yaw: 0.0,
-        head_yaw: 0.0,
-        pitch: 0.0,
-        item: lodestone_model::Reported::Unreported,
-        velocity: None,
-        on_ground: true,
-        equipment: Vec::new(),
-        equipment_dye: Vec::new(),
-        variant: None,
-        count: 1,
-        // `EntitySnapshot::name_tag` (issue #100) — irrelevant to this
-        // gate, which only checks that `end_session` prunes tracks.
-        name_tag: None,
-        creeper_swell_dir: None,
-    };
-    sim.write(|w| crate::entities::fold_entity_snapshots(w, &[snap]));
+    ingest(
+        &mut sim,
+        lodestone_client::ClientEvent::EntitySpawned {
+            entity_id: 7,
+            uuid: None,
+            entity_type: "minecraft:pig".parse().expect("valid entity type key"),
+            pos: lodestone_model::Vec3::new(1.0, 64.0, 1.0),
+            rotation: Rotation::new(0.0, 0.0),
+            velocity: None,
+        },
+    );
+    sim.fold_entities();
     assert_eq!(
         sim.read(crate::entities::tracked_entity_count),
         1,

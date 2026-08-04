@@ -91,15 +91,15 @@
 //! ```
 
 use bevy_ecs::world::World;
-use lodestone::entities::{
-    EntityDraw, EntityInterpPlugin, EntitySnapshot, extracted_entity_draws, fold_entity_snapshots,
-};
+use lodestone::entities::{EntityDraw, EntityInterpPlugin, extracted_entity_draws, fold_entities};
 use lodestone::gpu::RenderState;
 use lodestone_ecs::app::App;
 use lodestone_ecs::ingest::{IngestPlugin, IngestQueue};
 use lodestone_ecs::{Extract, GameTick, NetIngest};
 use lodestone_model::event::EquipmentSlot;
-use lodestone_model::{ClientEvent, EntityMetadataUpdate, Reported, Rotation, Vec3 as ModelVec3};
+use lodestone_model::{
+    ClientEvent, EntityEquipment, EntityMetadataUpdate, ItemStack, Rotation, Vec3 as ModelVec3,
+};
 use lodestone_render::{ArmPose, Camera, GpuContext, HeadlessTarget, RenderTarget};
 
 const W: u32 = 320;
@@ -165,38 +165,30 @@ fn world_with_bow_carrying_mobs(feet: glam::Vec3) -> World {
                 rotation: Rotation::new(BODY_YAW, 0.0),
                 velocity: None,
             });
+        // The bow, through the real `SET_EQUIPMENT` ingest path (issue #36:
+        // there is no `EntitySnapshot` any more to hand this to directly —
+        // `resolve_entity_facts` reads the `Equipment` component ingest wrote,
+        // so the fixture has to write it the same way ingest does).
+        world
+            .resource_mut::<IngestQueue>()
+            .push(ClientEvent::EntityEquipmentUpdated {
+                entity_id: id,
+                equipment: vec![EntityEquipment {
+                    slot: EquipmentSlot::MainHand,
+                    item: Some(ItemStack::new(
+                        "minecraft:bow".parse().expect("valid item key"),
+                        1,
+                    )),
+                }],
+            });
         world.run_schedule(NetIngest);
     }
 
-    let snapshot = |id: i32, type_path: &str| EntitySnapshot {
-        id,
-        type_path: type_path.into(),
-        feet,
-        yaw: BODY_YAW,
-        head_yaw: BODY_YAW,
-        pitch: 0.0,
-        scale: 1.0,
-        item: Reported::Unreported,
-        velocity: None,
-        on_ground: true,
-        equipment: vec![(
-            EquipmentSlot::MainHand,
-            Some("minecraft:bow".parse().expect("valid item key")),
-        )],
-        equipment_dye: Vec::new(),
-        variant: None,
-        count: 1,
-        name_tag: None,
-        creeper_swell_dir: None,
-    };
-    fold_entity_snapshots(
-        &mut world,
-        &[
-            snapshot(1, "skeleton"),
-            snapshot(2, "skeleton"),
-            snapshot(3, "zombie"),
-        ],
-    );
+    // Issue #36: the fold now reads `EntityKind`/`Position`/`Rotation`/
+    // `HeadYaw`/`Equipment` directly off the ingest entities just spawned
+    // above, rather than a hand-built `EntitySnapshot` — same as
+    // `Sim::fold_entities` does live.
+    fold_entities(&mut world);
     world
 }
 

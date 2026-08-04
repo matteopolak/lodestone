@@ -76,7 +76,7 @@ fn server_sent_chat_reaches_the_display_log_with_colour() {
     let mut in_world = false;
     while Instant::now() < ready_deadline {
         let _ = net.poll();
-        if !net.loaded_chunks().is_empty() || !net.entity_snapshots().is_empty() {
+        if !net.loaded_chunks().is_empty() || !net.entities().is_empty() {
             in_world = true;
             break;
         }
