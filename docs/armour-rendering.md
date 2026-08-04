@@ -52,13 +52,15 @@ mapping cannot be derived).
 ## What does not
 
 * **Trims.** Designed, not landed — see "Trims" below.
-* **A stack's actual dye colour.** The render-side formula
-  (`armour_layer_tint_with_dye`) landed and is hermetically tested, but
-  nothing upstream feeds it a real value yet, so the undyed default still
-  draws in practice — see "Dye" below.
 * **Baby armour meshes**, **enchantment glint**, **`Body`/`Saddle` (animal)
   armour**, **elytra**, **skull/pumpkin heads**. Each is a different vanilla
   layer with its own model; see "Deliberately out of scope".
+
+**A stack's actual dye colour now draws** — this list previously carried it
+as a gap ("nothing upstream feeds it a real value yet"); that was true when
+written and closed as of `64cfdcb` (see "Dye" below for the full three-hop
+chain). The undyed default (`colorWhenUndyed`) is still what draws for a
+genuinely undyed piece, which is correct, not a residual gap.
 
 ## How it works
 
@@ -277,7 +279,11 @@ has RGB `0`, `dyeColor != 0` is false, and the ternary falls through to
 `dyed_color_zero_reads_as_undyed` so a future "fix" that special-cases black
 does not quietly diverge from the game it ports.
 
-Three hops separated this from a real value reaching it. **Two are closed:**
+Three hops separated this from a real value reaching it. **All three are now
+closed** (`64cfdcb`) — this section previously said hop 2's `net.rs` half was
+"not yet landed", which was stale by the time an unrelated pass re-checked it
+directly against the working tree rather than trusting the note: real dye
+colours draw today, end to end.
 
 1. **Closed.** `crates/protocol/v770/src/adapter.rs::read_component_patch` now
    decodes `minecraft:dyed_color` (registry id 44, `DyedItemColor.STREAM_CODEC`
@@ -288,19 +294,23 @@ Three hops separated this from a real value reaching it. **Two are closed:**
    `crates/protocol/v770/tests/container_inventory.rs`) — the expected rgb is a
    literal chosen to prove the fixed-width read, not round-tripped through our
    own encoder.
-2. **Additive, not the wide-tuple shape originally sketched here.** Widening
-   `EntitySnapshot::equipment`/`EntityDraw::equipment` to a 3-tuple would have
-   touched every existing call site that destructures them (several in
-   `gpu.rs` alone) for no reason — nothing about item *identity* needed to
-   change. Instead `EntitySnapshot::equipment_dye: Vec<(EquipmentSlot, u32)>`
-   and `EntityDraw::equipment_dye` (same shape) ride *alongside* `equipment`,
-   entities.rs-side plumbing (`RenderEquipmentDye` component, folded in
-   `spawn_track`/`update_track`, read in `extract_entity_draws`) is done. The
-   one remaining piece is `net.rs::entity_snapshot` populating
-   `equipment_dye` from `view.equipment`'s `ItemStack.components.dyed_color`
-   — a brokered-file patch, not yet landed as of this writing; the exact diff
-   is in the commit message of whichever commit lands this doc update.
-3. **Closed** (once hop 2's net.rs half lands). `crates/lodestone-shell/src/
+2. **Closed.** Additive, not the wide-tuple shape originally sketched here.
+   Widening `EntitySnapshot::equipment`/`EntityDraw::equipment` to a 3-tuple
+   would have touched every existing call site that destructures them
+   (several in `gpu.rs` alone) for no reason — nothing about item *identity*
+   needed to change. Instead `EntitySnapshot::equipment_dye:
+   Vec<(EquipmentSlot, u32)>` and `EntityDraw::equipment_dye` (same shape)
+   ride *alongside* `equipment`; entities.rs-side plumbing
+   (`RenderEquipmentDye` component, folded in `spawn_track`/`update_track`,
+   read in `extract_entity_draws`) landed together with `net.rs::
+   entity_snapshot` populating `equipment_dye` from `view.equipment`'s
+   `ItemStack.components.dyed_color` (`net.rs`, narrowed the same way
+   `equipment` itself is: a slot only carries a dye if its item is present
+   *and* its `ResourceLocation` validates — a slot `equipment` dropped can
+   never emit a dye for an item the renderer was never told about). Pinned by
+   `entity_snapshot_carries_equipment_dye_through` (`net.rs`'s own test
+   module).
+3. **Closed.** `crates/lodestone-shell/src/
    gpu.rs`'s `prepare_armour` now looks up the current slot's dye in
    `draw.equipment_dye` and calls
    `armour_layer_tint_with_dye(layer, dye)`. `armour_layer_tint` is kept as
@@ -424,19 +434,17 @@ mob.
 
 ## Wiring still needed (outside this change's files)
 
-**The local player's own armour in third person landed in `22dc0ee`** — see
-"What draws today" above. This section previously described it as
-outstanding; that was stale by the time it was re-read for this pass, per
-`CLAUDE.md`'s note that the written record is the most common source of
-stale claims in this repo. The only item still open:
-
-1. **Real dye colours** — `Dyeable.colorWhenUndyed` draws until this lands,
-   which is correct for an undyed piece and wrong for a dyed one. See "Dye"
-   above for the current state: the protocol decode and the render/gpu.rs
-   sides are closed, `entities.rs`'s additive `equipment_dye` plumbing is
-   done, and the one remaining piece is a one-line brokered patch to
-   `crates/lodestone-shell/src/net.rs::entity_snapshot` (populate
-   `equipment_dye` from `view.equipment`'s `ItemStack.components.dyed_color`).
+**Both items this section used to list are closed.** The local player's own
+armour in third person landed in `22dc0ee` (see "What draws today" above),
+and real dye colours landed in `64cfdcb` (see "Dye" above for the full
+three-hop chain: protocol decode, `entities.rs`'s additive `equipment_dye`
+plumbing, and `net.rs::entity_snapshot` populating it from
+`view.equipment`'s `ItemStack.components.dyed_color` — all three closed, not
+one still pending). This section previously described the dye hop as a
+one-line brokered patch "not yet landed as of this writing"; a later pass
+re-read `net.rs` directly rather than trusting that note and found the patch
+already present. **Nothing is open here anymore** — see "Trims" below for
+what remains in this doc's scope.
 
 ## Trims: designed, not landed, and why
 
@@ -566,9 +574,17 @@ real baked vertices and `ArmourSlot::Chest::inflation()` — plus an exact
 `cargo test -p lodestone-shell --test armour_pixels -- --ignored --nocapture`.
 This closes what an earlier revision of this doc called "the honest gap".
 
-**Still not covered:** dye and trims have no pixel gate, because neither
-reaches a pixel yet (see "What does not" above) — a gate over an unimplemented
-feature would be vacuous by construction.
+**Still not covered:** trims have no pixel gate, because the feature itself
+does not reach a pixel yet (see "Trims" below) — a gate over an
+unimplemented feature would be vacuous by construction. **Dye is different
+from this note's previous wording**: dye now reaches real pixels (see "Dye"
+above), and has hermetic coverage
+(`entity_snapshot_carries_equipment_dye_through` in `net.rs`, plus
+`armour_layer_tint_with_dye`'s own tests in `lodestone-render`'s `entity`
+module) but no dedicated *pixel* gate proving a dyed piece renders a
+different colour than an undyed one through the real GPU path — filed as a
+follow-up rather than built here, since `armour_pixels.rs` (the file a dye
+pixel gate would naturally extend) is another agent's in-flight work.
 
 ## Dependencies
 
