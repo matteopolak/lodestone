@@ -50,9 +50,9 @@ impl Sim {
 
     pub(crate) fn poll_net(&mut self) {
         // Collect owned updates first so the immutable borrow of `self.net`
-        // ends before the loop — the sound arms need `&mut self.audio` and (for
-        // entity sounds) a fresh read of `self.net` for positions, neither of
-        // which can coexist with a borrow held across the loop.
+        // ends before the loop — the sound arms need a `self.audio_mut` guard
+        // and (for entity sounds) a fresh read of `self.net` for positions,
+        // neither of which can coexist with a borrow held across the loop.
         // Adopt the client's chunk store the first frame a handle exists — this
         // is where the process comes to have exactly one `lodestone_world::World`
         // (`docs/chunk-world-resource.md`). Idempotent and a pointer compare
@@ -330,10 +330,12 @@ impl Sim {
                     pitch,
                     seed,
                 } => {
-                    if let Some(audio) = &mut self.audio {
-                        let pos = glam::Vec3::new(pos.x as f32, pos.y as f32, pos.z as f32);
-                        audio.play_sound(&name, category, pos, volume, pitch, seed);
-                    }
+                    self.audio_mut(|audio| {
+                        if let Some(audio) = audio {
+                            let pos = glam::Vec3::new(pos.x as f32, pos.y as f32, pos.z as f32);
+                            audio.play_sound(&name, category, pos, volume, pitch, seed);
+                        }
+                    });
                 }
                 NetUpdate::EntitySound {
                     name,
@@ -346,9 +348,11 @@ impl Sim {
                     // Resolve the entity's live position *before* borrowing the
                     // audio engine mutably (disjoint, sequential borrows).
                     let pos = self.entity_sound_position(entity_id);
-                    if let Some(audio) = &mut self.audio {
-                        audio.play_entity_sound(&name, category, pos, volume, pitch, seed);
-                    }
+                    self.audio_mut(|audio| {
+                        if let Some(audio) = audio {
+                            audio.play_entity_sound(&name, category, pos, volume, pitch, seed);
+                        }
+                    });
                 }
                 // Only the local player's effects are folded: they feed both the
                 // physics view ([`PlayerState::effects`]) and the display view
