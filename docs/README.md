@@ -799,6 +799,26 @@ and several of these caught the *brief* being wrong rather than the code.
   looks like a 1,124-line Java port and is actually a **data dump**, because the JSON
   is a two-line preset pointer and the real table is a runtime registry object. §5
   argues for stopping after vegetation rather than building structures.
+- [Worldgen parity harness](./worldgen-parity.md) — the shared chunk-for-chunk
+  comparator every worldgen phase should measure against, instead of each one
+  improvising its own oracle. A real vanilla 26.2 JVM dump (`ComposedChunkOracle.java`,
+  using the **real** `MultiNoiseBiomeSource` rather than a fixed biome, so composition
+  is genuinely under test), diffed block-for-block at two pipeline points, reporting a
+  bounding box and per-section counts rather than a percentage.
+
+  **Measured parity at seed 42**: 94.77% / 95.01% against post-surface, 91.65% /
+  94.66% against post-carve. More useful than the numbers is *where* the gap is — the
+  breakdown tool attributes chunk (0,0)'s carve gap almost entirely to `water→stone`
+  (2,780 positions: vanilla's flooded caves, carvers not composed yet, #295), and
+  (-120,-120)'s to `terracotta→*`, which is a live demonstration of the badlands
+  exclusion already documented in `biome.rs`'s `usable_overworld_table`. A separate,
+  honestly-labelled bucket is representation-only: our fluid palette never carries the
+  `level` property vanilla always writes.
+
+  Its controls are the part worth copying: one mutates a single block and asserts the
+  diff catches exactly that one at exactly that location, and one self-diffs to prove
+  the loop visits all 98,304 cells and reports a true zero — because "0 blocks differ"
+  is also what an empty comparison prints.
 - [Combat scope](./research/combat-scope.md) — the mechanic-by-mechanic diff against
   the jar that found `ReleaseUseItem` had no producer, so bow and shield could not
   fire at all.
