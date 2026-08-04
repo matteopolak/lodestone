@@ -290,6 +290,78 @@ impl Goal for MeleeAttackGoal {
     }
 }
 
+/// Swells toward detonation near its target, or backs off and shrinks
+/// otherwise.
+///
+/// Vanilla `SwellGoal` (flag MOVE, `requiresUpdateEveryTick`); `Creeper.java:66`
+/// registers it at priority 2 — one below `MeleeAttackGoal`'s own priority 4 —
+/// so once eligible it preempts melee on their shared MOVE flag through
+/// [`GoalSelector`]'s ordinary priority preemption, no special case needed. A
+/// creeper keeps *both* goals (`Creeper.java:65-74` also registers
+/// `MeleeAttackGoal` at priority 4); this is "alongside", not "instead of".
+///
+/// `can_use` (`SwellGoal.java:18-21`): eligible while already swelling
+/// (`mob.swell_dir() > 0` — true whenever [`is_ignited`](MobController::is_ignited)
+/// forced it, even with no target at all) or while a target exists within
+/// `distanceToSqr < 9.0` (3 blocks). `tick` (`SwellGoal.java:40-52`): while a
+/// target remains, sets the direction to shrink (`-1`) once `distanceToSqr >
+/// 49.0` (7 blocks), otherwise to climb (`1`); with no target, always shrinks.
+///
+/// Vanilla's `tick` also drops the fuse on lost line of sight
+/// (`SwellGoal.java:44`, `!hasLineOfSight`); this seam has no raycast
+/// primitive (see [`MobController`]'s own doc comment on why movement/
+/// perception specifics are delegated to the host), so that check is
+/// deliberately omitted — the same disclosed simplification
+/// [`MeleeAttackGoal`]'s own doc comment already makes for its reach check.
+/// Distance alone is sufficient to close the bug this goal exists to fix
+/// (creepers never priming near a player).
+#[derive(Debug, Default)]
+pub struct SwellGoal;
+
+impl SwellGoal {
+    /// Vanilla's proximity-squared threshold that starts the fuse
+    /// (`SwellGoal.java:20`, `distanceToSqr(target) < 9.0` — 3 blocks).
+    const START_RANGE_SQR: f64 = 9.0;
+    /// Vanilla's retreat-squared threshold that reverses it
+    /// (`SwellGoal.java:42`, `distanceToSqr(target) > 49.0` — 7 blocks).
+    const STOP_RANGE_SQR: f64 = 49.0;
+
+    /// Creates the goal.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Goal for SwellGoal {
+    fn flags(&self) -> FlagSet {
+        FlagSet::of(&[Flag::Move])
+    }
+
+    fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        if mob.swell_dir() > 0 {
+            return true;
+        }
+        match mob.attack_target() {
+            Some(t) => distance_sqr(t, mob.position()) < Self::START_RANGE_SQR,
+            None => false,
+        }
+    }
+
+    fn start(&mut self, mob: &mut dyn MobController) {
+        mob.stop_navigation();
+    }
+
+    fn tick(&mut self, mob: &mut dyn MobController) {
+        match mob.attack_target() {
+            Some(t) if distance_sqr(t, mob.position()) <= Self::STOP_RANGE_SQR => {
+                mob.set_swell_dir(1);
+            }
+            _ => mob.set_swell_dir(-1),
+        }
+    }
+}
+
 /// Flees from a nearby avoided entity.
 ///
 /// Vanilla `AvoidEntityGoal` (flag MOVE), simplified to: when a threat is close,
@@ -745,6 +817,9 @@ mod tests {
         jumped: u32,
         attacked: u32,
         move_calls: u32,
+        swell_dir: i32,
+        ignited: bool,
+        stopped_navigation: u32,
     }
     impl MobController for ScriptMob {
         fn next_f32(&mut self) -> f32 {
@@ -772,7 +847,9 @@ mod tests {
         fn navigation_done(&self) -> bool {
             self.nav_done
         }
-        fn stop_navigation(&mut self) {}
+        fn stop_navigation(&mut self) {
+            self.stopped_navigation += 1;
+        }
         fn set_jumping(&mut self, j: bool) {
             if j {
                 self.jumped += 1;
@@ -839,6 +916,15 @@ mod tests {
         fn random_stroll_target(&mut self) -> Option<Vec3> {
             self.stroll
         }
+        fn is_ignited(&self) -> bool {
+            self.ignited
+        }
+        fn swell_dir(&self) -> i32 {
+            self.swell_dir
+        }
+        fn set_swell_dir(&mut self, dir: i32) {
+            self.swell_dir = dir;
+        }
     }
 
     #[test]
@@ -883,6 +969,100 @@ mod tests {
         goal.start(&mut mob);
         goal.tick(&mut mob);
         assert_eq!(mob.attacked, 1);
+    }
+
+    #[test]
+    fn swell_starts_and_climbs_within_three_blocks() {
+        let mut goal = SwellGoal::new();
+        let mut mob = ScriptMob {
+            pos: Vec3::new(0.0, 64.0, 0.0),
+            attack: Some(Vec3::new(2.0, 64.0, 0.0)), // distSqr 4 < 9
+            ..Default::default()
+        };
+        assert!(goal.can_use(&mut mob));
+        goal.start(&mut mob);
+        assert_eq!(mob.stopped_navigation, 1);
+        goal.tick(&mut mob);
+        assert_eq!(mob.swell_dir, 1);
+    }
+
+    #[test]
+    fn swell_does_not_start_beyond_three_blocks() {
+        // Negative control: a target well outside the 3-block proximity gate,
+        // and no swell already in progress, must not make the goal eligible —
+        // proving `can_use` actually gates on distance rather than firing
+        // unconditionally whenever a target exists at all.
+        let mut goal = SwellGoal::new();
+        let mut mob = ScriptMob {
+            pos: Vec3::new(0.0, 64.0, 0.0),
+            attack: Some(Vec3::new(10.0, 64.0, 0.0)), // distSqr 100 > 9
+            swell_dir: -1,
+            ..Default::default()
+        };
+        assert!(!goal.can_use(&mut mob));
+    }
+
+    #[test]
+    fn swell_keeps_climbing_past_three_blocks_once_started() {
+        // Vanilla's hysteresis: once already swelling, `can_use` (which also
+        // serves as the default `can_continue_to_use`) stays eligible from
+        // `swell_dir() > 0` alone, regardless of the 3-block start gate — the
+        // 7-block *stop* gate is a separate, wider threshold checked in `tick`.
+        let mut goal = SwellGoal::new();
+        let mut mob = ScriptMob {
+            pos: Vec3::new(0.0, 64.0, 0.0),
+            attack: Some(Vec3::new(6.0, 64.0, 0.0)), // distSqr 36: >9, <=49
+            swell_dir: 1,
+            ..Default::default()
+        };
+        assert!(goal.can_use(&mut mob));
+        goal.tick(&mut mob);
+        assert_eq!(mob.swell_dir, 1); // still within the 7-block stop range
+    }
+
+    #[test]
+    fn swell_reverses_beyond_seven_blocks() {
+        let mut goal = SwellGoal::new();
+        let mut mob = ScriptMob {
+            pos: Vec3::new(0.0, 64.0, 0.0),
+            attack: Some(Vec3::new(8.0, 64.0, 0.0)), // distSqr 64 > 49
+            swell_dir: 1,
+            ..Default::default()
+        };
+        goal.tick(&mut mob);
+        assert_eq!(mob.swell_dir, -1);
+    }
+
+    #[test]
+    fn swell_reverses_and_stops_once_the_target_is_lost() {
+        let mut goal = SwellGoal::new();
+        let mut mob = ScriptMob {
+            pos: Vec3::new(0.0, 64.0, 0.0),
+            attack: None,
+            swell_dir: 1,
+            ..Default::default()
+        };
+        goal.tick(&mut mob);
+        assert_eq!(mob.swell_dir, -1);
+        // The next scheduler tick re-checks `can_use` (the default
+        // `can_continue_to_use`): direction is now `-1` and there is still no
+        // target, so the goal stops running.
+        assert!(!goal.can_use(&mut mob));
+    }
+
+    #[test]
+    fn swell_fires_from_ignition_alone_with_no_target() {
+        // An ignited creeper forces `swell_dir` to `1` every tick from the
+        // entity's own unconditional integration (`NavigatingMob::advance`),
+        // independent of any goal target — `can_use`'s first branch must see
+        // that and start the goal even though `attack_target()` is `None`.
+        let mut goal = SwellGoal::new();
+        let mut mob = ScriptMob {
+            attack: None,
+            swell_dir: 1,
+            ..Default::default()
+        };
+        assert!(goal.can_use(&mut mob));
     }
 
     #[test]
