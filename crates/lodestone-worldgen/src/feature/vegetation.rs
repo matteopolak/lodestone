@@ -1137,6 +1137,17 @@ fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value) -> Configu
 #[derive(Debug)]
 pub struct VegGrid {
     blocks: HashMap<(i32, i32, i32), String>,
+    /// Positions actually written by `set_if_in_bounds`, in write order —
+    /// a `Vec`, not a re-iterated `HashMap`, specifically so a caller
+    /// folding this back into a dense grid (`OverworldGenerator`'s
+    /// vegetation stage) has a *deterministic* order to replay, the same
+    /// discipline `docs/worldgen-parity.md`'s "Performance" section
+    /// describes fixing for `surface_diff` (point lookups inside a fixed
+    /// loop, never a raw `HashMap` iteration) — here achieved even more
+    /// directly, since insertion order into a `Vec` carries no ambiguity to
+    /// begin with. Lets the fold-back touch only the (typically small)
+    /// written subset instead of rewriting all `16 × height × 16` cells.
+    dirty: Vec<(i32, i32, i32)>,
     min_y: i32,
     height: i32,
 }
@@ -1146,9 +1157,26 @@ impl VegGrid {
     pub fn new(min_y: i32, height: i32) -> Self {
         Self {
             blocks: HashMap::new(),
+            dirty: Vec::new(),
             min_y,
             height,
         }
+    }
+
+    /// Positions written by `set_if_in_bounds` since construction, in write
+    /// order, each paired with the state currently at that position (i.e.
+    /// the *final* state if the same cell was written more than once, not
+    /// an intermediate one) — what a caller should fold back into a wider
+    /// grid.
+    pub fn dirty_cells(&self) -> impl Iterator<Item = (i32, i32, i32, &str)> {
+        self.dirty.iter().map(|&(x, y, z)| {
+            (
+                x,
+                y,
+                z,
+                self.blocks.get(&(x, y, z)).map_or("minecraft:air", String::as_str),
+            )
+        })
     }
 
     fn in_bounds(x: i32, z: i32) -> bool {
@@ -1188,6 +1216,7 @@ impl VegGrid {
     pub fn set_if_in_bounds(&mut self, x: i32, y: i32, z: i32, state: String) -> bool {
         if Self::in_bounds(x, z) && y >= self.min_y && y < self.min_y + self.height {
             self.blocks.insert((x, y, z), state);
+            self.dirty.push((x, y, z));
             true
         } else {
             false
@@ -1542,6 +1571,26 @@ mod tests {
         assert!(!grid.set_if_in_bounds(16, 70, 5, "minecraft:oak_log".to_string()));
         assert!(grid.set_if_in_bounds(0, 70, 5, "minecraft:oak_log".to_string()));
         assert!(grid.set_if_in_bounds(15, 70, 5, "minecraft:oak_log".to_string()));
+    }
+
+    #[test]
+    fn dirty_cells_only_reports_in_bounds_writes_in_write_order() {
+        let mut grid = VegGrid::new(-64, 384);
+        assert!(!grid.set_if_in_bounds(-1, 70, 5, "minecraft:oak_log".to_string()));
+        assert!(grid.set_if_in_bounds(3, 70, 5, "minecraft:oak_log".to_string()));
+        assert!(grid.set_if_in_bounds(4, 71, 5, "minecraft:oak_leaves".to_string()));
+        let cells: Vec<(i32, i32, i32, String)> = grid
+            .dirty_cells()
+            .map(|(x, y, z, s)| (x, y, z, s.to_string()))
+            .collect();
+        assert_eq!(
+            cells,
+            vec![
+                (3, 70, 5, "minecraft:oak_log".to_string()),
+                (4, 71, 5, "minecraft:oak_leaves".to_string()),
+            ],
+            "the out-of-bounds attempt must not appear, and order must match write order"
+        );
     }
 
     #[test]
