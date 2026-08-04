@@ -97,13 +97,15 @@ pub use banner_pattern::{
 };
 pub use block::{BlockPipeline, CameraUniform, DEPTH_FORMAT, DepthBuffer, GpuMesh};
 pub use block_entity::{
-    BlockEntityBatch, BlockEntityCullStats, BlockEntityFrame, BlockEntityInstance, BlockEntityMesh,
+    BELL, BELL_TEXTURE_STEM, BellShakeDirection, BellSpawn, BlockEntityBatch,
+    BlockEntityCullStats, BlockEntityFrame, BlockEntityInstance, BlockEntityMesh,
     BlockEntityModelSet, CHEST_LEFT, CHEST_MATERIALS, CHEST_RIGHT, CHEST_SINGLE, ChestHalf,
     ChestMaterial, ChestSpawn, SKULL_HUMANOID, SKULL_MOB, SKULL_TYPES, SkullOrientation,
-    SkullSpawn, SkullType, block_entity_placement_matrix, block_entity_texture_stems,
-    chest_lid_openness, chest_lid_x_rot, chest_material_with_season, chest_texture_stem,
-    chest_texture_stems, horizontal_facing_yaw, plan_block_entities, skull_ground_placement_matrix,
-    skull_texture_stem, skull_texture_stems, skull_wall_placement_matrix,
+    SkullSpawn, SkullType, bell_shake_angle, bell_texture_stems, block_entity_placement_matrix,
+    block_entity_texture_stems, chest_lid_openness, chest_lid_x_rot, chest_material_with_season,
+    chest_texture_stem, chest_texture_stems, horizontal_facing_yaw, plan_block_entities,
+    skull_ground_placement_matrix, skull_texture_stem, skull_texture_stems,
+    skull_wall_placement_matrix,
 };
 pub use block_models::{
     BlockModels, BlockModelsError, CRACK_STAGE_COUNT, FluidCell, FluidKind, FluidSprites,
