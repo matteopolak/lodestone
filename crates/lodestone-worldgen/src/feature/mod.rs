@@ -468,10 +468,24 @@ pub fn parse_placements(placed: &Value) -> Vec<Placement> {
 }
 
 /// The mutable block field the ore stage reads and writes, over the whole
-/// driven 3×3 neighbourhood. Keyed by `(local_x, y, local_z)`, centre-relative,
-/// with `local_x, local_z ∈ [`[`REGION_MIN`]`,`[`REGION_MAX`]`)` and `y` absolute.
-/// See [`OreInput::region_local`] for why this is wider than one chunk.
-pub type RegionGrid = HashMap<(i32, i32, i32), String>;
+/// driven 3×3 neighbourhood. Addressed by `(local_x, y, local_z)`,
+/// centre-relative, with `local_x, local_z ∈ [`[`REGION_MIN`]`,`[`REGION_MAX`]`)`
+/// and `y` absolute. See [`OreInput::region_local`] for why this is wider
+/// than one chunk.
+///
+/// A [`crate::dense_grid::DenseBlockGrid`] (issue #106's ore-composition
+/// perf pass), not a `HashMap<(i32,i32,i32), String>` — this was, per
+/// `crate::overworld`'s own module doc "Performance" section, "the one
+/// remaining `HashMap<(i32,i32,i32), String>` in the hot path", left there
+/// deliberately by issue #295's Job 2 as further work. `stitch_region`
+/// (`crate::overworld::OverworldGenerator`) populates one of these for all 9
+/// source chunks in the driven neighbourhood on every single `column()`
+/// call, so every cell used to cost a fresh heap-allocated `String` even
+/// though real terrain repeats a small palette overwhelmingly — a
+/// `DenseBlockGrid` interns each distinct state once and stores a `u16`
+/// per cell instead. See `crate::overworld`'s module doc for the measured
+/// before/after.
+pub type RegionGrid = crate::dense_grid::DenseBlockGrid;
 
 /// Centre-relative local coordinate lower/upper (exclusive) bound the 3×3
 /// driver ([`apply_ore_step_3x3`]) reads and writes over: one 16-wide band
@@ -959,8 +973,7 @@ fn try_place_ore<R: RandomSource>(
     // has to happen so later reads (isAdjacentToAir, a later source's own
     // placement) see it, exactly as vanilla's real, shared block field would.
     let (lx, lz) = input.region_local(x, z);
-    let key = (lx, y, lz);
-    let current = working.get(&key).map_or("minecraft:air", String::as_str);
+    let current = working.get(lx, y, lz);
     let base = current.split('[').next().unwrap_or(current).to_string();
     for target in &config.targets {
         let matches = match &target.target {
@@ -977,7 +990,7 @@ fn try_place_ore<R: RandomSource>(
         let place = should_skip_air_check(random, config.discard_chance_on_air_exposure)
             || !is_adjacent_to_air(input, working, x, y, z);
         if place {
-            working.insert(key, target.state.clone());
+            working.set(lx, y, lz, &target.state);
             return;
         }
         // canPlaceOre returned false; vanilla continues to the next target.
@@ -1022,9 +1035,7 @@ fn block_at<'a>(input: &OreInput<'_>, working: &'a RegionGrid, x: i32, y: i32, z
         return "minecraft:air";
     }
     let (lx, lz) = input.region_local(x, z);
-    working
-        .get(&(lx, y, lz))
-        .map_or("minecraft:air", String::as_str)
+    working.get(lx, y, lz)
 }
 
 fn is_air(base: &str) -> bool {

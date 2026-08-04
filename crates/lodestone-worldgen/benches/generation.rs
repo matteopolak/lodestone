@@ -258,5 +258,80 @@ fn bench_linearity_check(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_column_throughput, bench_stage_split, bench_linearity_check);
+/// Issue #106's before/after: the ore-composition 3×3 driver's per-chunk cost
+/// over a sweep large enough to exercise `pre_ore_cache` the same way a real
+/// server view does (adjacent chunks share 8 of their 9 driven neighbours).
+/// `tests/support/worldgen_data/biome/plains.json` carries plains' real
+/// `UNDERGROUND_ORES` step (the same fixture `tests/feature_parity.rs` proves
+/// matches the real JVM, per that test's own header), so this sweep actually
+/// exercises `OverworldGenerator::ore_stage`/`stitch_region` — a resolver with
+/// no ore data at all would make `ore_stage` an early-return no-op and this
+/// bench would measure nothing relevant.
+///
+/// A 12×12 (144-chunk) patch specifically because `crate::overworld`'s own
+/// module doc "Performance" section already has a historical number at this
+/// exact size (`lodestone_server::worldgen_data::tests
+/// ::served_columns_never_carry_an_unported_badlands_variant`, debug profile,
+/// ~700.57s) to be comparable *in shape* against, even though that number
+/// used the embedded server data (real biome variety) rather than this
+/// crate's single-biome fixture and a different (debug, `cargo test`)
+/// profile — see this bench's own `support::record` scene string, which
+/// names both, so a reader never conflates the two numbers.
+fn bench_ore_composition_sweep(c: &mut Criterion) {
+    let generator = make_generator(SEED);
+    let coords: Vec<(i32, i32)> = (0..12).flat_map(|cz| (0..12).map(move |cx| (cx, cz))).collect();
+
+    // Warm up (first pass through the patch primes `pre_ore_cache` for the
+    // interior chunks the timed pass below will find as cache hits).
+    for &(cx, cz) in coords.iter().take(4) {
+        black_box(generator.column(cx, cz));
+    }
+
+    let scene = format!("seed={SEED} patch=12x12(144 chunks) ores=real_plains_fixture");
+    let n = coords.len();
+    let mut per_chunk_us: Vec<f64> = Vec::with_capacity(n);
+    let t_total = Instant::now();
+    for &(cx, cz) in &coords {
+        let t = Instant::now();
+        black_box(generator.column(cx, cz));
+        per_chunk_us.push(t.elapsed().as_secs_f64() * 1e6);
+    }
+    let total_s = t_total.elapsed().as_secs_f64();
+    per_chunk_us.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = per_chunk_us[n / 2];
+    println!(
+        "worldgen ore-composition sweep: {n} chunks in {total_s:.3}s, median {median:.1}us/chunk (scene={scene:?})"
+    );
+    support::record(support::Record {
+        bench: "generation",
+        metric: "ore_composition_column_median_us",
+        scene: &scene,
+        value: median,
+        unit: "us",
+    });
+    support::record(support::Record {
+        bench: "generation",
+        metric: "ore_composition_sweep_total_s",
+        scene: &scene,
+        value: total_s,
+        unit: "s",
+    });
+
+    let mut idx = 0usize;
+    c.bench_function("worldgen/ore_composition_column", |b| {
+        b.iter(|| {
+            let (cx, cz) = coords[idx % coords.len()];
+            idx += 1;
+            black_box(generator.column(black_box(cx), black_box(cz)))
+        })
+    });
+}
+
+criterion_group!(
+    benches,
+    bench_column_throughput,
+    bench_stage_split,
+    bench_linearity_check,
+    bench_ore_composition_sweep
+);
 criterion_main!(benches);
