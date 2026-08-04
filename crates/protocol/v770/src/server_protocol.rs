@@ -61,10 +61,12 @@ use crate::packets::common::KeepAlive;
 use crate::packets::configuration::FinishConfiguration;
 use crate::packets::entity::{pack_degrees, write_lp_vec3};
 use crate::packets::game::{
-    Attack, ChangeDifficultyClientbound, ChangeDifficultyServerbound, GameLogin, GameRuleEntry,
-    GameRuleValues, GlobalPos, LockDifficulty, MOVE_FLAG_ON_GROUND, MovePlayerPos,
-    MovePlayerPosRot, PlayerAction, SetCarriedItem, SetDefaultSpawnPosition, SetGameRule,
-    SetHealth, UseItemOn,
+    AcceptTeleportation, Attack, ChangeDifficultyClientbound, ChangeDifficultyServerbound,
+    ClientTickEnd, GameLogin, GameRuleEntry, GameRuleValues, GlobalPos, LockDifficulty,
+    MOVE_FLAG_ON_GROUND, MovePlayerPos, MovePlayerPosRot, MovePlayerRot, MovePlayerStatusOnly,
+    MoveVehicle, PaddleBoat, PlayerAction, PlayerLoaded, SERVERBOUND_ABILITY_FLAG_FLYING,
+    ServerboundPlayerAbilities, SetCarriedItem, SetDefaultSpawnPosition, SetGameRule, SetHealth,
+    UseItemOn,
 };
 use crate::packets::handshake::Intention;
 use crate::packets::login::{LoginFinished, LoginHello};
@@ -1189,6 +1191,57 @@ impl ServerProtocol for V770ServerProtocol {
                     }
                     _ => ServerBound::Ignored,
                 }
+            }
+
+            // Issue #262 (movement/player-state), remaining 8 of 11 — see
+            // `ServerBound::PlayerMoved`'s doc comment for why the two
+            // sibling movement packets without a position (`MOVE_PLAYER_ROT`,
+            // `MOVE_PLAYER_STATUS_ONLY`) stay `Ignored` by design. Every
+            // wire layout below is checked directly against
+            // `.cache/mc/26.2/src`'s `ServerboundMovePlayerPacket`/
+            // `ServerboundPlayerAbilitiesPacket`/`ServerboundMoveVehiclePacket`/
+            // etc. — not merely `decode(encode(x))` against this crate's own
+            // client encoder, which already sends every one of these
+            // (`crate::adapter`). All eight still decode to `Ignored`: none
+            // has an existing `ServerBound` variant to lift into, and
+            // `lodestone-server` (issue #284's tick-loop work, out of this
+            // crate's reach) has no flight/load-timeout/tick-alignment/
+            // teleport-confirmation/vehicle/boat model yet for any of them.
+            State::Play if packet_id == play::serverbound::MOVE_PLAYER_ROT => {
+                let _ = decode_full::<MovePlayerRot>(payload);
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::MOVE_PLAYER_STATUS_ONLY => {
+                let _ = decode_full::<MovePlayerStatusOnly>(payload);
+                ServerBound::Ignored
+            }
+            // `SERVERBOUND_ABILITY_FLAG_FLYING` is decoded so the value is
+            // ready the moment a consumer exists; the flag itself is the one
+            // vanilla actually reads server-side (`Abilities.flying` echo).
+            State::Play if packet_id == play::serverbound::PLAYER_ABILITIES => {
+                let _ = decode_full::<ServerboundPlayerAbilities>(payload)
+                    .map(|p| p.flags & SERVERBOUND_ABILITY_FLAG_FLYING != 0);
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::PLAYER_LOADED => {
+                let _ = decode_full::<PlayerLoaded>(payload);
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::ACCEPT_TELEPORTATION => {
+                let _ = decode_full::<AcceptTeleportation>(payload);
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::CLIENT_TICK_END => {
+                let _ = decode_full::<ClientTickEnd>(payload);
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::MOVE_VEHICLE => {
+                let _ = decode_full::<MoveVehicle>(payload);
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::PADDLE_BOAT => {
+                let _ = decode_full::<PaddleBoat>(payload);
+                ServerBound::Ignored
             }
             _ => ServerBound::Ignored,
         }
