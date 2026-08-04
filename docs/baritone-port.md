@@ -28,8 +28,20 @@ and is visible on its own.
 >
 > Two other gaps this document lists are also closed: **`maybeBackOffFromEdge`** is fully modelled
 > with golden traces (see [`edge-back-off.md`](./edge-back-off.md)), and the pathfinding search
-> itself exists and is callable (`lodestone-entity/src/pathfinding`). What is still missing is a
-> *consumer* — the `lodestone-autopilot` shell.
+> itself exists and is callable (`lodestone-entity/src/pathfinding` — the *mob* search this document's
+> §3.4 says explicitly not to extend, not `lodestone-nav`, which came later still).
+>
+> **Further update, this pass:** the analog movement-intent seam §3.7 and §7.2 call "the blocker" and
+> "the most consequential gap" respectively is **also closed** (`0d82ab4`) — see §3.7 and §7 below,
+> both corrected. `crates/plugins/lodestone-autopilot` — the *consumer* this box used to say was still
+> missing — now exists: a real bevy plugin wrapping `lodestone-nav`'s M1 (`Walk`-only) search, proven
+> by a hermetic test that drives a real `GameTick` schedule and asserts the local player arrives at a
+> commanded block (`crates/plugins/lodestone-autopilot/tests/drives_to_goal.rs`). What is missing now
+> is narrower and structural rather than a capability gap: nothing in the shipped client's `App`
+> registers it yet (`lodestone-shell::sim::Sim::new`'s `add_plugins` call does not name it), so it is
+> an island in `CLAUDE.md`'s specific sense — built, tested, and reaching zero players until that one
+> line is added by whoever owns `sim.rs`. See [`docs/autonomous-navigation.md`](./autonomous-navigation.md)
+> for the plugin as it stands today and exactly what that registration needs.
 >
 > The original text is kept below because the *reasoning* about why executability matters more than
 > search quality is still the right frame. Only the measurements are stale.
@@ -620,16 +632,59 @@ The ingress side has what a navigator must observe: `TeleportPlayer`, `HealthCha
 
 ### 3.7 What is genuinely missing
 
-1. A live `CollisionView` that answers more than three questions (§3.2) — **the blocker**.
-2. A `VersionAdapter` route to collision shapes, path types and block properties (§7.5).
-3. A bulk "colliders overlapping this AABB" query.
-4. `maybeBackOffFromEdge` (§3.1 — likely a desync source, prerequisite for M5).
-5. An **analog** movement-intent injection point. `Sim::physics_tick` is private and `Sim.input` is
+**This list is from the document's original draft and three of its seven items have since closed —
+re-verified directly against the tree rather than assumed, while auditing `docs/plugin-api.md` for
+issue #180 and building `crates/plugins/lodestone-autopilot` (this document's own §9 M1). The
+correction box at the top of this document already flags item 1; the other two closures were not
+previously recorded here at all, which is its own small instance of the exact staleness pattern
+`CLAUDE.md` warns is this repo's most common written-record defect — fixing a claim in one place does
+not fix every restatement of it.**
+
+1. ~~A live `CollisionView` that answers more than three questions (§3.2) — **the blocker**.~~
+   **Closed** — see the correction box at the top of this document: all twelve `CollisionView` methods
+   are backed by real per-block-state data today.
+2. A `VersionAdapter` route to collision shapes, path types and block properties (§7.5) — **partly
+   closed**. Collision shapes, outline/interaction and block-name lookup exist
+   (`VersionAdapter::block_collision`/`block_outline`/`block_interaction`/`block_name`); block-physics
+   constants exist as `lodestone_model::block_physics` (`24af787`, name-keyed, deliberately not a
+   `VersionAdapter` method — see `docs/plugin-api.md` §"how to change it"). **`PathType` per state is
+   still genuinely open** — re-verified: `lodestone_model::PathTypeRegistry` exists, nothing in
+   `crates/lodestone-data` constructs one from v770 data. Not on the critical path for M1 (`Walk` has
+   no need of `PathType`) but real for whichever milestone needs it.
+3. A bulk "colliders overlapping this AABB" query — **closed for the search's own world view**:
+   `lodestone_nav::view::{SnapshotView, GridView}::colliders_in` exists and is tested against agreement
+   with the per-cell path (`lodestone-nav/src/view.rs`'s `the_bulk_query_agrees_with_the_per_cell_path`).
+   Whether the live shell's own `CollisionView` implementation gains the same bulk method is a separate,
+   unverified-for-this-pass question — this item was about the search's needs specifically, and those
+   are met.
+4. `maybeBackOffFromEdge` (§3.1 — likely a desync source, prerequisite for M5) — **closed**: fully
+   modelled with golden traces, see [`edge-back-off.md`](./edge-back-off.md) and §3.1's own gap table
+   below, corrected earlier than this item was (a good example of the exact staleness this note is
+   about — this list simply had not been brought into agreement with §3.1 until this pass). Not on M1's
+   critical path either way (M1 has no sneak-adjacent movement).
+5. ~~An **analog** movement-intent injection point. `Sim::physics_tick` is private and `Sim.input` is
    `lodestone_controller::InputState`, which collapses to ±1.0 axes and carries its own 7-tick
-   double-tap sprint latch. Good enough to demo, not to steer.
-6. A world-space debug-geometry channel. There is a single-box block-outline pipeline in `gpu.rs`
-   and nothing general.
-7. `tool_mining` wired into break-time math (an existing island).
+   double-tap sprint latch. Good enough to demo, not to steer.~~ **Closed in `0d82ab4`, and this was the
+   most consequential stale claim in this document going into this pass** — it is the exact thing §9's
+   M1 milestone is gated on. `crates/lodestone-ecs/src/player.rs` now has `MovementIntent(pub
+   MovementInput)` where `MovementInput { forward: f32, strafe: f32, … }` (`lodestone_physics`) is
+   genuinely analog, not clamped anywhere between the component and the integrator: `player_physics`
+   (`TickSet::Physics`) reads it and passes it straight into `tick_among_entities`, the same call human
+   input's write reaches. `LookIntent { yaw: f32, pitch: f32 }`, distinct from the camera, exists
+   alongside it and is applied before `MovementInput`'s axes are resolved against yaw. Neither goes
+   through `Sim::physics_tick` or `Sim.input`/`InputState` at all — `TickSet::Intent` is the injection
+   point instead, and it is public plugin API (`docs/plugin-api.md`). §7.2 below (part of this
+   document's own original design) already specified almost exactly this shape before it existed; see
+   §7.2's own note. `crates/plugins/lodestone-autopilot`'s `drive_plan` system is a real plugin writing
+   both components every tick, proven by a hermetic test that ticks a real `GameTick` schedule and
+   asserts arrival (`crates/plugins/lodestone-autopilot/tests/drives_to_goal.rs`).
+6. ~~A world-space debug-geometry channel. There is a single-box block-outline pipeline in `gpu.rs`
+   and nothing general.~~ **Closed** — `ExtractSet::Debug` and `lodestone_ecs::player::DebugLines`
+   exist, wired to a real line-list renderer distinct from the single-box outline pipeline (see
+   `docs/plugin-api.md`'s "four concrete gaps" §3 for the full account). A navigator plugin can draw
+   its planned route today.
+7. `tool_mining` wired into break-time math (an existing island) — **still open**, unrelated to this
+   pass; not re-checked.
 
 ---
 
@@ -1480,6 +1535,25 @@ Additional gates worth having:
 The deliverable that matters most for `docs/bevy-migration.md`, because several items are things the
 current plan does not yet provide.
 
+> **STATUS (superseded, like §3.2's box above).** Every subsection below was written as a
+> requirement-plus-gap pair against the tree as it stood when this document was first drafted. Five of
+> the seven have since closed — re-verified directly against the tree while auditing
+> `docs/plugin-api.md` for issue #180 and building `crates/plugins/lodestone-autopilot` (§9's M1):
+>
+> | § | requirement | status |
+> |---|---|---|
+> | 7.1 | `TickSet::Intent` ordering anchor | **closed**, `0d82ab4` — `sets.rs`'s `TickSet` is `Input, Intent, Physics, Predict, Animate, Send` |
+> | 7.2 | Analog `MovementIntent` + separate `LookIntent` | **closed**, `0d82ab4` — see §3.7 item 5 above, corrected |
+> | 7.3 | Chunk world as a resource, batched snapshot reads | **closed** — `lodestone_ecs::ChunkWorld` (Stage 4); `lodestone-autopilot` reads it via `Res<ChunkWorld>` |
+> | 7.4 | Local player physics state as components | **closed** — Stage 2, `crates/lodestone-ecs/src/player.rs`'s `PhysicsState` and friends |
+> | 7.5 | Version data: collision/outline/interaction/block-name/block-physics through the seam | **mostly closed** — see §3.7 item 2 above, corrected. `PathType` per state is the one piece still open |
+> | 7.6 | World-space debug geometry in `Extract` | **closed** — `ExtractSet::Debug` + `DebugLines`, see §3.7 item 6 above |
+> | 7.7 | A written policy on plugin-owned threads | **not re-checked for this pass** |
+>
+> The requirement/gap prose in each subsection is kept below as the historical record of what was
+> asked for and why — several of the closures matched the requirement almost exactly (7.1's anchor
+> name, 7.2's component shapes), which is worth knowing precedes reading them as still-open asks.
+
 ### 7.1 An ordering anchor for automation-supplied movement intent
 
 `TickSet` today is `Input → Physics → Predict → Animate → Send`
@@ -1650,6 +1724,18 @@ executor with corridor, drift and stall budgets, one search dispatch (no segment
   the correction counter is flat throughout**. Negative control: the same run with
   `collide_against_live_world = false` must show the correction burst.
 - **Needs:** Stage 2, Stage 4, and M0.
+- **Status, this pass:** the search core, the executor (`AutopilotGoal` resource in, `MovementIntent`
+  / `LookIntent` out via `WalkDrive`), and a hermetic gate proving arrival through the real physics
+  seam all exist (`crates/plugins/lodestone-autopilot`). **Not yet built: the `#goto` chat command**
+  (this milestone's stated observable) and the live-oracle gate this milestone's own bullet asks for —
+  both need a route from chat/command input to `AutopilotGoal`, which is `lodestone-shell` territory
+  this change did not touch, and registering the plugin into the shipped client's `App` in the first
+  place (see the correction box near the top of this document and `docs/autonomous-navigation.md`).
+  So M0's own precondition is also still open: this plugin's `SnapshotView` already reads real
+  per-state facts through `VersionAdapter`/`AdapterCensus`, but `LiveCollision` (the *player's own*
+  collision, a separate seam — §3.2) has not been re-verified for this pass to still answer only three
+  of twelve questions or to have gained the rest; M0 is a different piece of work from what this pass
+  did.
 
 ### M2 — real terrain
 

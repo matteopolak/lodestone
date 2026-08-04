@@ -1,0 +1,45 @@
+# The bevy plugin half of `docs/baritone-port.md`: worker orchestration (M1: a
+# synchronous per-tick search step, see `lib.rs`), the per-tick closed-loop
+# executor that turns a `lodestone-nav` `Plan` into `MovementIntent`/`LookIntent`,
+# and (future milestones) chat commands and a debug overlay.
+#
+# **Licence.** LGPL-3.0-or-later, its own `LICENSE` file, matching `lodestone-nav`
+# per `docs/baritone-port.md` §1.2 point 2 and `crates/plugins/README.md`.
+[package]
+name = "lodestone-autopilot"
+version.workspace = true
+edition.workspace = true
+license = "LGPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[dependencies]
+# The search core this plugin drives: `(snapshot, start, goal, policy, budget) ->
+# plan`, plus `WalkDrive` — "given a plan edge and a `PlayerState`, what keys do I
+# press this tick". Never modified here, only called.
+lodestone-nav = { workspace = true }
+# The plugin ABI: `TickSet`, `ChunkWorld`, `MovementIntent`/`LookIntent`,
+# `VersionData`. Re-exports `bevy_app`/`bevy_ecs` as `lodestone_ecs::{app, ecs}`
+# so this crate's own code never names either directly (`docs/plugin-api.md`).
+lodestone-ecs = { workspace = true }
+# `BlockPos`, `VersionAdapter` (through `VersionData`'s public field, for the
+# `AdapterCensus` `lodestone-nav` needs).
+lodestone-model = { workspace = true }
+# `PhysicsProfile::mc_1_21()`, the profile the cost/drive model is simulated
+# against.
+lodestone-physics = { workspace = true }
+# `lodestone_nav::SnapshotView::build` takes a `&lodestone_world::World`
+# directly (the type `ChunkWorld::read()` guards), so `drive::seed_search`
+# needs the type in scope even though this crate never constructs a `World`
+# itself outside tests.
+lodestone-world = { workspace = true }
+# Direct, in addition to `lodestone-ecs`'s re-export: bevy's derive macros
+# (`#[derive(Resource)]` below) emit absolute `bevy_ecs::` paths and therefore
+# need the crate name in scope in *this* crate, not just reachable through
+# `lodestone_ecs::ecs`. `lodestone-controller/Cargo.toml` documents the same
+# requirement for the same reason. Same `[workspace.dependencies]` pin as
+# `lodestone-ecs` builds against, so there is only ever one `bevy_ecs` in the
+# graph.
+bevy_ecs = { workspace = true }
+bevy_app = { workspace = true }

@@ -2406,6 +2406,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "lodestone-autopilot"
+version = "0.1.0"
+dependencies = [
+ "bevy_app",
+ "bevy_ecs",
+ "lodestone-ecs",
+ "lodestone-model",
+ "lodestone-nav",
+ "lodestone-physics",
+ "lodestone-world",
+]
+
+[[package]]
 name = "lodestone-client"
 version = "0.1.0"
 dependencies = [
