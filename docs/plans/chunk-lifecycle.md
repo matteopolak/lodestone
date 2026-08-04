@@ -84,10 +84,17 @@ path today. `docs/server-ecs.md`'s Dependencies section already sanctions promot
 
 **`run_tick_loop` has no extension point.** `tick.rs:478` is `pub(crate) async fn` taking 8 fixed
 concrete parameters (`:479-486`) with a hardcoded straight-line body — no callback list, no
-trait-object collection, no schedule. Its only caller is `open_in_memory_with_mobs`;
-`IntegratedServer::bind` (`integrated.rs:365`) never spawns it, so **LAN worlds have no world tick at
-all** (filed separately by the orchestrator; every unit below that adds per-tick work inherits the
-same gap and must not pretend otherwise).
+trait-object collection, no schedule.
+
+**CORRECTED 2026-08-04 — the LAN half of this entry is fixed and no longer applies.** It read:
+*"Its only caller is `open_in_memory_with_mobs`; `IntegratedServer::bind` (`integrated.rs:365`) never
+spawns it, so LAN worlds have no world tick at all."* That was true when written and was filed as
+**#439, now closed**. `bind` spawns exactly one loop per world, outside the accept loop, gated by
+`crates/lodestone-server/tests/lan_world_tick.rs` — whose load-bearing assertion is a *ratio*
+(0-connection versus 2-connection tick rate) because the failure mode to fear is one loop **per
+connection**, not zero. So units below that add per-tick work do **not** inherit a
+singleplayer-only gap; they do inherit LAN's fixed `LAN_TICK_RADIUS = 2` tick area, which is what
+this plan's ticket system replaces. See [`docs/server-tick-loop.md`](../server-tick-loop.md).
 
 **Redstone work is in flight in `tick.rs` and `random_tick.rs` right now** (~2,081 lines across five
 untracked files, `tick.rs` +85, `random_tick.rs` +255). That is not migration work and must not be
@@ -352,13 +359,33 @@ in `chunk.rs` beside `generate_columns_parallel`: an `async fn` that wraps the e
 in `tokio::task::spawn_blocking` and `.await`s it. Replace both call sites (`server.rs:715`,
 `server.rs:307`).
 
-**The signature change is the entire cost, and it is unavoidable.** `spawn_blocking` requires a
-`'static` closure. `serve_connection` takes `source: &S` (`server.rs:654` region) and
-`ViewTracker::build_batch`/`recenter` take `&S` (`:290`, `:330`). These must become `Arc<S>`.
-`integrated.rs:299` already holds `Arc::new(source)` and merely re-borrows it at `:314` (`&*conn_source`),
-so the multi-connection path is a one-line change; `open_in_memory` (`integrated.rs:150`) moves the
-source in by value and needs an `Arc::new`. `serve_connection` is publicly re-exported
-(`lib.rs:165`), so this is a **public API change** — that is the broker item.
+**CORRECTED 2026-08-04 — this paragraph's central claim was wrong, and #293 landed without it.**
+It read: *"The signature change is the entire cost, and it is unavoidable… `serve_connection` is
+publicly re-exported (`lib.rs:165`), so this is a **public API change** — that is the broker item."*
+
+The `'static` requirement is real; the conclusion that it forces a public signature change is not.
+`server.rs` gained a private `SourceRef<'a, S>` enum — `Borrowed(&'a S)` / `Shared(&'a Arc<S>)` —
+threaded through the private dispatch chain, so both shapes share one `serve_connection_inner` body
+with no duplication. Two consequences the plan did not anticipate:
+
+- **`mod server` is private (`lib.rs:123`) and `lib.rs:165` re-exports only the *name*
+  `serve_connection`, not any type.** So the new `serve_connection_shared` /
+  `serve_connection_with_mob_events_shared` entry points are `pub(crate)`, and #293 required **no
+  `lib.rs` patch and no public API change at all**. The brokered choke point was never touched, and
+  no `crates/protocol/v770/tests/*` call site changed. The only public-surface change is a widened
+  bound (`S: ChunkSource` → `+ 'static`), which every real implementor already satisfied.
+- **The `Borrowed` arm turned out to be an asset, not debt.** It is #293's permanent negative control
+  — `chunk.rs`'s gate drives the blocking path as its second arm and requires it to starve a timer
+  task completely (measured: 0 ticks versus 21 over the same ~280 ms).
+
+The `Arc` plumbing in `integrated.rs` is as the plan described: `:311` was already
+`Arc::clone(&source)` and only needed `&conn_source` instead of `&*conn_source`, while
+`open_in_memory_with_entities` needed an `Arc::new`.
+
+The plan's `block_in_place` rejection was **correct and is confirmed empirically** rather than from
+the docs: on a `new_current_thread` runtime it panics with `can call blocking only when running on
+the multi-threaded runtime`, while `spawn_blocking` returns `Ok` and lets a 10 ms timer task tick 25
+times during a 300 ms blocking call (0 times inline).
 
 **Reject `tokio::task::block_in_place`**, which needs no signature change and looks cheaper. It
 **panics on a current-thread runtime**, and the production runtime is current-thread
@@ -729,9 +756,10 @@ U3 (#289a) ──→ U4 (#289b) ──→ U5 (#289c)      U5 is mandatory, not p
   an island. Treat U3–U5 as one deliverable with three commits.
 - **#281 blocks nothing here.** See the verdict below.
 - **No bevy-migration phase blocks anything here.** See "Where the store lives".
-- **LAN (`IntegratedServer::bind`, `integrated.rs:365`) spawns no tick loop**, so every unit that
-  adds per-tick work is singleplayer-only until that is fixed. Not a blocker; it *is* a thing to
-  state in each unit's doc comment rather than discover later.
+- ~~**LAN (`IntegratedServer::bind`, `integrated.rs:365`) spawns no tick loop**, so every unit that
+  adds per-tick work is singleplayer-only until that is fixed.~~ **Fixed — #439 is closed.** `bind`
+  now spawns exactly one loop per world. Per-tick work added by the units below reaches LAN as well
+  as singleplayer.
 
 ### #293 vs #281: not a dependency, in either direction
 

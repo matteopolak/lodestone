@@ -9,6 +9,7 @@
 //! `TcpStream` client (open-to-LAN).
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
@@ -18,7 +19,10 @@ use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStac
 use lodestone_net::{Connection, NetError, Transport};
 
 use crate::block_entities::{BlockEntity, BlockEntityHandle, block_entity_for_item};
-use crate::chunk::{AIR, ChunkSource, STONE, generate_columns_parallel, is_air_or_fluid, is_water};
+use crate::chunk::{
+    AIR, ChunkColumn, ChunkSource, STONE, generate_columns_offloaded, generate_columns_parallel,
+    is_air_or_fluid, is_water,
+};
 use crate::fall::FallTracker;
 use crate::inventory::{ContainerMenuSlot, PlayerInventory, container_menu_slot};
 use crate::mobs::MobHandle;
@@ -206,6 +210,82 @@ impl EntityStreamer {
     }
 }
 
+/// How a connection reaches its terrain, and the whole of issue #293's
+/// blocking-vs-offloaded fork in one place.
+///
+/// Chunk generation is CPU-bound and synchronous, so it has to be moved off
+/// the async runtime's core thread — see
+/// [`generate_columns_offloaded`](crate::chunk::generate_columns_offloaded)
+/// for the measurement and for why `spawn_blocking` rather than
+/// `block_in_place`. `spawn_blocking` needs a `'static` closure, which a
+/// `&S` cannot provide. That normally forces `serve_connection`'s `source`
+/// parameter from `&S` to `Arc<S>` — and *that* would break every
+/// `crates/protocol/v770/tests/*` call site, which are off-limits (the same
+/// constraint that already produced three differently-named
+/// `serve_connection*` wrappers in this file rather than one changed
+/// signature).
+///
+/// This enum is how both shapes share one body instead:
+///
+/// | arm | generation | who uses it |
+/// |---|---|---|
+/// | [`Shared`](Self::Shared) | offloaded, never blocks the runtime | every production caller in [`crate::integrated`] |
+/// | [`Borrowed`](Self::Borrowed) | blocking, today's behaviour | `&S`-shaped test call sites |
+///
+/// The `Borrowed` arm is deliberately kept rather than deleted: it is the
+/// **permanent negative control** for #293's gate. A test can drive the exact
+/// same `serve_connection` body down the blocking path and watch the world
+/// tick stall, which is what proves the `Shared` arm's non-stall assertion is
+/// measuring something. A control that only exists as a temporary neuter
+/// cannot be re-run later.
+///
+/// `Copy` (hand-written, because `#[derive(Copy)]` would demand `S: Copy`)
+/// so it threads through the dispatch chain exactly as cheaply as the `&S`
+/// it replaces.
+#[derive(Debug)]
+pub(crate) enum SourceRef<'a, S> {
+    /// A plain borrow. Generation blocks the calling thread.
+    Borrowed(&'a S),
+    /// A shared handle. Generation is offloaded to the blocking pool.
+    Shared(&'a Arc<S>),
+}
+
+impl<S> Clone for SourceRef<'_, S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<S> Copy for SourceRef<'_, S> {}
+
+impl<'a, S: ChunkSource + 'static> SourceRef<'a, S> {
+    /// The underlying source, for the read/write paths that never generate a
+    /// whole batch (`block_state`, `set_block`) and so have nothing to
+    /// offload.
+    fn get(self) -> &'a S {
+        match self {
+            Self::Borrowed(source) => source,
+            Self::Shared(source) => &**source,
+        }
+    }
+
+    /// Generates every column in `coords`, in `coords` order — off the core
+    /// thread on the [`Shared`](Self::Shared) arm, on it for
+    /// [`Borrowed`](Self::Borrowed).
+    ///
+    /// The ordering guarantee is the same one
+    /// [`generate_columns_parallel`] documents, and it is load-bearing for
+    /// the wire: both arms hand back a `Vec` aligned index-for-index with
+    /// `coords`, so which arm a caller is on cannot change the emitted byte
+    /// sequence.
+    async fn generate(self, coords: Vec<(i32, i32)>) -> Vec<ChunkColumn> {
+        match self {
+            Self::Shared(source) => generate_columns_offloaded(Arc::clone(source), coords).await,
+            Self::Borrowed(source) => generate_columns_parallel(source, &coords),
+        }
+    }
+}
+
 /// Per-connection view-streaming bookkeeping: which chunk columns has this
 /// connection been sent, and around which chunk column.
 ///
@@ -287,10 +367,15 @@ impl ViewTracker {
     /// there is nothing new. Shared by [`recenter`](Self::recenter) and
     /// [`set_view_radius`](Self::set_view_radius) so both diff against
     /// `self.loaded` identically.
-    fn build_batch<P, S>(&self, proto: &P, source: &S, next: &HashSet<(i32, i32)>) -> Vec<ServerDirective>
+    async fn build_batch<P, S>(
+        &self,
+        proto: &P,
+        source: SourceRef<'_, S>,
+        next: &HashSet<(i32, i32)>,
+    ) -> Vec<ServerDirective>
     where
         P: ServerProtocol,
-        S: ChunkSource,
+        S: ChunkSource + 'static,
     {
         // Sorted rather than left in `HashSet::difference`'s hash-iteration
         // order: that order already varies run-to-run (`RandomState` reseeds
@@ -304,7 +389,7 @@ impl ViewTracker {
             return Vec::new();
         }
         let mut batch = vec![proto.begin_chunk_batch()];
-        let columns = generate_columns_parallel(source, &added);
+        let columns = source.generate(added.clone()).await;
         for (&(x, z), column) in added.iter().zip(columns.iter()) {
             batch.push(proto.encode_chunk(x, z, column));
         }
@@ -327,10 +412,16 @@ impl ViewTracker {
     /// is already implied here), then every column that left the window is
     /// forgotten, then every column that entered it is sent as one chunk
     /// batch.
-    fn recenter<P, S>(&mut self, proto: &P, source: &S, cx: i32, cz: i32) -> ViewUpdate
+    async fn recenter<P, S>(
+        &mut self,
+        proto: &P,
+        source: SourceRef<'_, S>,
+        cx: i32,
+        cz: i32,
+    ) -> ViewUpdate
     where
         P: ServerProtocol,
-        S: ChunkSource,
+        S: ChunkSource + 'static,
     {
         if (cx, cz) == self.center {
             return ViewUpdate::default();
@@ -342,7 +433,7 @@ impl ViewTracker {
         for &(x, z) in self.loaded.difference(&next) {
             immediate.push(proto.encode_forget_chunk(x, z));
         }
-        let batch = self.build_batch(proto, source, &next);
+        let batch = self.build_batch(proto, source, &next).await;
 
         self.center = (cx, cz);
         self.loaded = next;
@@ -358,10 +449,15 @@ impl ViewTracker {
     /// the guard here is `radius` itself already matching, so a settings
     /// packet that does not actually change the distance is correctly a
     /// no-op.
-    fn set_view_radius<P, S>(&mut self, proto: &P, source: &S, radius: i32) -> ViewUpdate
+    async fn set_view_radius<P, S>(
+        &mut self,
+        proto: &P,
+        source: SourceRef<'_, S>,
+        radius: i32,
+    ) -> ViewUpdate
     where
         P: ServerProtocol,
-        S: ChunkSource,
+        S: ChunkSource + 'static,
     {
         if radius == self.radius {
             return ViewUpdate::default();
@@ -372,7 +468,7 @@ impl ViewTracker {
         for &(x, z) in self.loaded.difference(&next) {
             immediate.push(proto.encode_forget_chunk(x, z));
         }
-        let batch = self.build_batch(proto, source, &next);
+        let batch = self.build_batch(proto, source, &next).await;
 
         self.radius = radius;
         self.loaded = next;
@@ -538,7 +634,7 @@ pub async fn serve_connection<T, P, S, E>(
 where
     T: Transport,
     P: ServerProtocol,
-    S: ChunkSource,
+    S: ChunkSource + 'static,
     E: EntitySource,
 {
     serve_connection_with_block_ticks(
@@ -550,6 +646,98 @@ where
         block_entities,
         mobs,
         &BlockTickFeed::default(),
+    )
+    .await
+}
+
+/// [`serve_connection`], but generating chunks **off** the async runtime's
+/// core thread (issue #293).
+///
+/// Identical behaviour and identical wire bytes; the only difference is that
+/// the `Arc<S>` this takes can be moved into a `spawn_blocking` closure, so a
+/// join burst or a view recentre no longer stalls every other task in the
+/// process — including [`crate::tick::run_tick_loop`], which on the shell's
+/// current-thread runtime shares the connection task's one thread. See
+/// [`SourceRef`] for why two entry points exist rather than one changed
+/// signature: `&S` cannot satisfy `spawn_blocking`'s `'static` bound, and
+/// changing [`serve_connection`]'s own signature would break every
+/// off-limits `crates/protocol/v770/tests/*` call site.
+///
+/// `pub(crate)`, not `pub`: `mod server` is private, so this crate's public
+/// surface is whatever `lib.rs` re-exports, and this deliberately is not
+/// re-exported. Nothing outside the crate needs it — the shell reaches the
+/// server through [`crate::IntegratedServer`] — so #293 costs **no public API
+/// change at all**, which is why it needed no `lib.rs` patch.
+///
+/// # Errors
+///
+/// As [`serve_connection`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn serve_connection_shared<T, P, S, E>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &Arc<S>,
+    entities: &E,
+    view_radius: i32,
+    block_entities: &BlockEntityHandle,
+    mobs: &MobHandle,
+) -> Result<ServeSummary, ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource + 'static,
+    E: EntitySource,
+{
+    serve_connection_inner(
+        conn,
+        proto,
+        SourceRef::Shared(source),
+        entities,
+        view_radius,
+        block_entities,
+        mobs,
+        &BlockTickFeed::default(),
+        &ExplosionFeed::default(),
+    )
+    .await
+}
+
+/// [`serve_connection_with_mob_events`], but generating chunks off the core
+/// thread (issue #293) — the [`serve_connection_shared`] treatment applied to
+/// the feed-carrying entry point, which is what
+/// [`crate::IntegratedServer::open_in_memory_with_mobs`] (singleplayer) uses.
+///
+/// # Errors
+///
+/// As [`serve_connection`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn serve_connection_with_mob_events_shared<T, P, S, E>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &Arc<S>,
+    entities: &E,
+    view_radius: i32,
+    block_entities: &BlockEntityHandle,
+    mobs: &MobHandle,
+    block_ticks: &BlockTickFeed,
+    explosions: &ExplosionFeed,
+) -> Result<ServeSummary, ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource + 'static,
+    E: EntitySource,
+{
+    serve_connection_inner(
+        conn,
+        proto,
+        SourceRef::Shared(source),
+        entities,
+        view_radius,
+        block_entities,
+        mobs,
+        block_ticks,
+        explosions,
     )
     .await
 }
@@ -581,13 +769,13 @@ pub async fn serve_connection_with_block_ticks<T, P, S, E>(
 where
     T: Transport,
     P: ServerProtocol,
-    S: ChunkSource,
+    S: ChunkSource + 'static,
     E: EntitySource,
 {
     serve_connection_inner(
         conn,
         proto,
-        source,
+        SourceRef::Borrowed(source),
         entities,
         view_radius,
         block_entities,
@@ -607,6 +795,18 @@ where
 /// [`crate::IntegratedServer::open_in_memory_with_mobs`], the only
 /// constructor that spawns a [`MobSim`]-driven tick loop capable of
 /// producing a detonation in the first place.
+///
+/// # Currently unused, and deliberately kept
+///
+/// Issue #293 moved both production callers (`crate::integrated`) to
+/// [`serve_connection_with_mob_events_shared`], so nothing calls this today —
+/// and because `mod server` is private and `lib.rs` does not re-export it,
+/// nothing outside the crate can. It is retained rather than deleted because it
+/// is the borrow-shaped twin of the `_shared` entry point: the one way to drive
+/// the *feed-carrying* path down [`SourceRef::Borrowed`], i.e. #293's negative
+/// control with block ticks and explosions attached. Delete it only together
+/// with that control.
+#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 pub async fn serve_connection_with_mob_events<T, P, S, E>(
     conn: &mut Connection<T>,
@@ -622,13 +822,13 @@ pub async fn serve_connection_with_mob_events<T, P, S, E>(
 where
     T: Transport,
     P: ServerProtocol,
-    S: ChunkSource,
+    S: ChunkSource + 'static,
     E: EntitySource,
 {
     serve_connection_inner(
         conn,
         proto,
-        source,
+        SourceRef::Borrowed(source),
         entities,
         view_radius,
         block_entities,
@@ -645,11 +845,16 @@ where
 /// instead of adding `explosions` directly to
 /// [`serve_connection_with_block_ticks`]'s own signature (it would break
 /// every off-limits `crates/protocol/v770/tests/*` call site).
+///
+/// Now also shared by [`serve_connection_shared`] and
+/// [`serve_connection_with_mob_events_shared`], which differ from the three
+/// above only in the [`SourceRef`] arm they pass — that is the whole reason
+/// issue #293's fix needed no second copy of this body.
 #[allow(clippy::too_many_arguments)]
 async fn serve_connection_inner<T, P, S, E>(
     conn: &mut Connection<T>,
     proto: &P,
-    source: &S,
+    source: SourceRef<'_, S>,
     entities: &E,
     view_radius: i32,
     block_entities: &BlockEntityHandle,
@@ -660,7 +865,7 @@ async fn serve_connection_inner<T, P, S, E>(
 where
     T: Transport,
     P: ServerProtocol,
-    S: ChunkSource,
+    S: ChunkSource + 'static,
     E: EntitySource,
 {
     let mut state = State::Handshaking;
@@ -709,10 +914,15 @@ where
                 // the emitted byte sequence independent of thread scheduling
                 // — see that function's doc comment for why the fan-out
                 // cannot desync per-chunk RNG-derived content either.
+                //
+                // Issue #293: on the `SourceRef::Shared` arm the whole fan-out
+                // *also* runs off this runtime's core thread, so this burst —
+                // the largest single generation batch a session performs — no
+                // longer holds up `run_tick_loop`. See `SourceRef`.
                 let coords: Vec<(i32, i32)> = (-view_radius..=view_radius)
                     .flat_map(|cz| (-view_radius..=view_radius).map(move |cx| (cx, cz)))
                     .collect();
-                let columns = generate_columns_parallel(source, &coords);
+                let columns = source.generate(coords.clone()).await;
                 let mut batch_size = 0;
                 for (&(cx, cz), column) in coords.iter().zip(columns.iter()) {
                     apply(conn, &mut state, proto.encode_chunk(cx, cz, column)).await?;
@@ -1533,7 +1743,7 @@ fn apply_attack(mobs: &MobHandle, player_pos: Option<(f64, f64, f64)>, sprinting
 async fn dispatch_play_packet<T, P, S>(
     conn: &mut Connection<T>,
     proto: &P,
-    source: &S,
+    source: SourceRef<'_, S>,
     view_radius: i32,
     state: &mut State,
     view: &mut ViewTracker,
@@ -1558,7 +1768,7 @@ async fn dispatch_play_packet<T, P, S>(
 where
     T: Transport,
     P: ServerProtocol,
-    S: ChunkSource,
+    S: ChunkSource + 'static,
 {
     match proto.decode(*state, packet_id, payload) {
         ServerBound::KeepAlive { id } => {
@@ -1574,7 +1784,7 @@ where
             // `SectionPos.blockToSectionCoord` (an arithmetic right shift).
             let cx = (x / 16.0).floor() as i32;
             let cz = (z / 16.0).floor() as i32;
-            let update = view.recenter(proto, source, cx, cz);
+            let update = view.recenter(proto, source, cx, cz).await;
             send_view_update(conn, state, update, awaiting_chunk_batch_ack, pending_chunk_batches).await?;
 
             if let Some(raw) = fall.on_player_moved(y, on_ground)
@@ -1592,7 +1802,10 @@ where
             apply_block_action(
                 conn,
                 proto,
-                source,
+                // `.get()`: a break/place touches one block through
+                // `block_state`/`set_block`, with no batch to offload — see
+                // `SourceRef::get`.
+                source.get(),
                 state,
                 pending_break,
                 block_entities,
@@ -1611,7 +1824,8 @@ where
             apply_use_item_on(
                 conn,
                 proto,
-                source,
+                // `.get()`: single-block read/write, nothing to offload.
+                source.get(),
                 state,
                 pos,
                 face,
@@ -1683,7 +1897,7 @@ where
             // on the upper bound only guards `clamp`'s own `min <= max`
             // invariant against a caller passing a negative `view_radius`.
             let requested = i32::from(view_distance).clamp(0, view_radius.max(0));
-            let update = view.set_view_radius(proto, source, requested);
+            let update = view.set_view_radius(proto, source, requested).await;
             send_view_update(conn, state, update, awaiting_chunk_batch_ack, pending_chunk_batches).await?;
         }
         ServerBound::ChunkBatchAcknowledged { .. } => {
@@ -1755,7 +1969,7 @@ fn ticks_since(start: tokio::time::Instant) -> i64 {
 async fn serve_play<T, P, S, E>(
     conn: &mut Connection<T>,
     proto: &P,
-    source: &S,
+    source: SourceRef<'_, S>,
     entities: &E,
     view_radius: i32,
     mut state: State,
@@ -1771,7 +1985,7 @@ async fn serve_play<T, P, S, E>(
 where
     T: Transport,
     P: ServerProtocol,
-    S: ChunkSource,
+    S: ChunkSource + 'static,
     E: EntitySource,
 {
     let mut pending_keep_alive: Option<i64> = None;
@@ -1888,7 +2102,7 @@ where
                 // than guess a spawn position this version-free crate does
                 // not otherwise track (see `crate::vitals`'s module docs).
                 if let Some((x, y, z)) = player_pos {
-                    let eye_state = source.block_state(
+                    let eye_state = source.get().block_state(
                         x.floor() as i32,
                         (y + EYE_HEIGHT).floor() as i32,
                         z.floor() as i32,
@@ -1961,7 +2175,7 @@ where
 async fn serve_play<T, P, S, E>(
     conn: &mut Connection<T>,
     proto: &P,
-    source: &S,
+    source: SourceRef<'_, S>,
     entities: &E,
     view_radius: i32,
     mut state: State,
@@ -1985,7 +2199,7 @@ async fn serve_play<T, P, S, E>(
 where
     T: Transport,
     P: ServerProtocol,
-    S: ChunkSource,
+    S: ChunkSource + 'static,
     E: EntitySource,
 {
     let mut pending_keep_alive: Option<i64> = None;
