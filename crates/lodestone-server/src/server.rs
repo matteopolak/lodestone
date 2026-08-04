@@ -23,6 +23,7 @@ use crate::fall::FallTracker;
 use crate::inventory::{ContainerMenuSlot, PlayerInventory, container_menu_slot};
 use crate::mobs::MobHandle;
 use crate::protocol::{EntitySnapshot, ServerBound, ServerDirective, ServerProtocol};
+use crate::tick::BlockTickFeed;
 use crate::vitals::{EYE_HEIGHT, PlayerVitals};
 
 /// Server-initiated keep-alive interval, and the width of the window in
@@ -389,6 +390,15 @@ async fn apply<T: Transport>(
 /// [`ServerError::ClosedBeforeLogin`] if the client hangs up before it ever
 /// reaches [`ServerBound::LoginStart`], or whatever [`serve_play`] returns
 /// once [`State::Play`] is reached.
+///
+/// Forwards to [`serve_connection_with_block_ticks`] with a fresh,
+/// permanently-empty [`BlockTickFeed`] — this is the compatibility shape
+/// kept for every caller outside this crate (`crates/protocol/v770/tests/*`
+/// call this directly and are off-limits for this issue's file-ownership
+/// split — see issues #307/#308's own task brief), none of which need to
+/// observe a world-tick-driven block change. A caller that does (today:
+/// only [`crate::IntegratedServer::open_in_memory_with_mobs`]) calls
+/// [`serve_connection_with_block_ticks`] instead.
 #[allow(clippy::too_many_arguments)]
 pub async fn serve_connection<T, P, S, E>(
     conn: &mut Connection<T>,
@@ -398,6 +408,41 @@ pub async fn serve_connection<T, P, S, E>(
     view_radius: i32,
     block_entities: &BlockEntityHandle,
     mobs: &MobHandle,
+) -> Result<ServeSummary, ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource,
+    E: EntitySource,
+{
+    serve_connection_with_block_ticks(
+        conn,
+        proto,
+        source,
+        entities,
+        view_radius,
+        block_entities,
+        mobs,
+        &BlockTickFeed::default(),
+    )
+    .await
+}
+
+/// Like [`serve_connection`], but also forwards every change published on
+/// `block_ticks` (issues #307/#308: the world tick loop's random ticks) to
+/// this connection, through the same `container_sync_tick` timer arm inside
+/// [`serve_play`] that already forwards block-entity registry changes with
+/// no packet driving them — see that arm's own doc comment.
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_connection_with_block_ticks<T, P, S, E>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &S,
+    entities: &E,
+    view_radius: i32,
+    block_entities: &BlockEntityHandle,
+    mobs: &MobHandle,
+    block_ticks: &BlockTickFeed,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -496,6 +541,7 @@ where
                     chunks_sent,
                     block_entities,
                     mobs,
+                    block_ticks,
                 )
                 .await;
             }
@@ -1380,6 +1426,7 @@ async fn serve_play<T, P, S, E>(
     chunks_sent: usize,
     block_entities: &BlockEntityHandle,
     mobs: &MobHandle,
+    block_ticks: &BlockTickFeed,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -1520,6 +1567,18 @@ where
                         apply(conn, &mut state, directive).await?;
                     }
                 }
+                // Issues #307/#308: the world tick loop's random ticks (grass
+                // ↔ dirt, `crate::random_tick`) mutate the shared `ChunkSource`
+                // independently of this connection too — same shape as the
+                // block-entity registry above, so it rides the same timer
+                // rather than adding a seventh one (CLAUDE.md's own caution
+                // about growing the timer table). `BlockTickFeed::drain_all`
+                // is single-consumer (see that type's doc comment); this is
+                // the one connection that owns it for
+                // `open_in_memory_with_mobs`.
+                for (x, y, z, block_state) in block_ticks.drain_all() {
+                    apply(conn, &mut state, proto.encode_block_update(x, y, z, &block_state)).await?;
+                }
             }
         }
     }
@@ -1545,6 +1604,13 @@ async fn serve_play<T, P, S, E>(
     chunks_sent: usize,
     block_entities: &BlockEntityHandle,
     mobs: &MobHandle,
+    // Same gap as `vitals`/`container_sync` below: forwarding a random tick's
+    // block change with no packet driving it needs `container_sync_tick`, a
+    // `tokio::time::interval` this target has none of (see this function's
+    // own doc comment). Accepted for signature parity with the native
+    // definition (`serve_connection` calls whichever compiles for the
+    // target) and never read here — a real, documented gap, not a silent one.
+    _block_ticks: &BlockTickFeed,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,

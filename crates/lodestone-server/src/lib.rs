@@ -111,6 +111,7 @@ mod mob_spawn;
 mod mobs;
 mod neighbor_update;
 mod protocol;
+mod random_tick;
 mod scheduled_tick;
 mod server;
 mod spawn;
@@ -148,9 +149,14 @@ pub use mob_spawn::{
 pub use mobs::{AttackOutcome, ChunkWorld, LiveMobSource, MobHandle, MobSim, SimMob};
 pub use neighbor_update::{Direction, NeighborPropagator, Notification, UPDATE_ORDER};
 pub use protocol::{EntitySnapshot, ServerBound, ServerDirective, ServerProtocol};
+pub use random_tick::{
+    DEFAULT_RANDOM_TICK_SPEED, GrassOutcome, RandomTickEvent, RandomTickScheduler,
+    can_propagate_onto, grass_random_tick, is_air_variant, is_randomly_ticking,
+    next_random_tick_pos,
+};
 pub use scheduled_tick::{ScheduledTick, ScheduledTickQueue, TickPriority};
 pub use server::{EntitySource, NoEntities, ServeSummary, ServerError, serve_connection};
-pub use tick::{TickClock, TickStats};
+pub use tick::{BlockTickFeed, TickClock, TickStats};
 pub use vitals::{DROWN_DAMAGE, EYE_HEIGHT, MAX_AIR_SUPPLY, MAX_HEALTH, PlayerVitals, VitalsTick};
 pub use worldgen_data::{overworld_chunk_source, overworld_generator};
 

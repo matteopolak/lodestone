@@ -46,9 +46,9 @@ use crate::block_entities::BlockEntityHandle;
 use crate::chunk::ChunkSource;
 use crate::mobs::{LiveMobSource, MobHandle};
 use crate::protocol::ServerProtocol;
-use crate::server::{EntitySource, NoEntities, serve_connection};
+use crate::server::{EntitySource, NoEntities, serve_connection, serve_connection_with_block_ticks};
 use crate::spawn::{Task, spawn};
-use crate::tick::{TickClock, TickStats};
+use crate::tick::{BlockTickFeed, TickClock, TickStats};
 // `run_tick_loop` (like `open_in_memory_with_mobs`, its one caller) is
 // `#[cfg(not(target_arch = "wasm32"))]`-gated in `tick.rs` — this import must
 // carry the identical `cfg`, or it is an unresolved-import hard error on
@@ -252,6 +252,12 @@ impl IntegratedServer {
         // off of (issue #284; before that, a separate
         // `run_block_entity_tick_loop`).
         let block_entities = BlockEntityHandle::default();
+        // Issues #307/#308: shared with the tick task the same way
+        // `block_entities` is, above — see [`BlockTickFeed`]'s own doc
+        // comment for why this is safe with exactly one connection (this
+        // constructor's own shape) and would need a per-connection cursor
+        // for a multi-connection server.
+        let block_tick_feed = BlockTickFeed::default();
         // Issue #12: built *synchronously*, here, before the tick task spawns —
         // not inside `run_mob_tick_loop`'s own future the way the pre-handle
         // version built its `ChunkWorld`/`MobSim` — so the exact same handle
@@ -260,6 +266,11 @@ impl IntegratedServer {
         // and the tick-loop task (which ticks and republishes it). See
         // `MobHandle`'s own doc comment for why this is `'static`-safe.
         let (cx_range, cz_range) = mob_area;
+        // Issues #307/#308: the same small fixed region `mob_area` already
+        // names, reused rather than adding a second range parameter — see
+        // `tick::run_tick_loop`'s own doc comment for why this crate has no
+        // general "loaded chunks" registry to draw a wider one from yet.
+        let tick_area = (cx_range.clone(), cz_range.clone());
         let (center_x, center_z) = mob_center;
         let mob_handle = MobHandle::seeded(
             &world_source,
@@ -270,22 +281,52 @@ impl IntegratedServer {
             mob_count,
         );
 
+        // Issues #307/#308: `source` is now shared between the connection
+        // task (which serves it over the wire — chunk generation, and every
+        // player-driven `set_block`) and the tick task (which random-ticks
+        // it) — the same object, not two independent instances, which is
+        // exactly what makes a random tick's mutation visible to the client
+        // this server actually serves rather than to an unwatched second
+        // copy. Contrast `world_source: M` right above, which stays
+        // deliberately unshared (see this function's own doc comment on
+        // that parameter) — that one backs *mob pathing*, which never needs
+        // to agree with what the client was sent, only with itself.
+        let source = Arc::new(source);
         let conn_signal = shutdown.clone();
         let conn_entities = live_mobs.clone();
         let conn_block_entities = block_entities.clone();
         let conn_mobs = mob_handle.clone();
+        let conn_source = Arc::clone(&source);
+        let conn_block_ticks = block_tick_feed.clone();
         let task = spawn(async move {
             let mut conn = Connection::new(server_end);
             tokio::select! {
                 _ = conn_signal.notified() => {}
-                _ = serve_connection(&mut conn, &protocol, &source, &conn_entities, view_radius, &conn_block_entities, &conn_mobs) => {}
+                _ = serve_connection_with_block_ticks(
+                    &mut conn,
+                    &protocol,
+                    &*conn_source,
+                    &conn_entities,
+                    view_radius,
+                    &conn_block_entities,
+                    &conn_mobs,
+                    &conn_block_ticks,
+                ) => {}
             }
         });
 
         let clock = Arc::new(TickClock::new());
         let tick_task = spawn_tick_task(
             &shutdown,
-            run_tick_loop(mob_handle, live_mobs, block_entities, Arc::clone(&clock)),
+            run_tick_loop(
+                mob_handle,
+                live_mobs,
+                block_entities,
+                Arc::clone(&clock),
+                Arc::clone(&source),
+                block_tick_feed,
+                tick_area,
+            ),
         );
 
         (

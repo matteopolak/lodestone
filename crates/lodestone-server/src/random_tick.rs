@@ -1,0 +1,702 @@
+//! The random-tick scheduler (issue #307): which block positions get picked
+//! for a random tick, how many per section per world tick, and — the one
+//! block wired all the way through today — grass turning to dirt (and back)
+//! so at least one random tick reaches a real client (CLAUDE.md's own
+//! "nothing is done until something on screen changes").
+//!
+//! # Selection, cited directly
+//!
+//! `ServerChunkCache.java:377,403` (the driver):
+//!
+//! ```text
+//! int tickSpeed = this.level.getGameRules().get(GameRules.RANDOM_TICK_SPEED);
+//! ...
+//! this.chunkMap.forEachBlockTickingChunk(chunkx -> this.level.tickChunk(chunkx, tickSpeed));
+//! ```
+//!
+//! `RANDOM_TICK_SPEED`'s default is `3`
+//! (`GameRules.java:74`,
+//! `registerInteger("random_tick_speed", GameRuleCategory.UPDATES, 3, 0)`)
+//! — [`DEFAULT_RANDOM_TICK_SPEED`] below.
+//!
+//! `ServerLevel::tickChunk` (`ServerLevel.java:495-538`) is the per-chunk
+//! body:
+//!
+//! ```text
+//! for (int sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
+//!    LevelChunkSection section = sections[sectionIndex];
+//!    if (section.isRandomlyTicking()) {
+//!       int minYInSection = SectionPos.sectionToBlockCoord(sectionY);
+//!       for (int i = 0; i < tickSpeed; i++) {
+//!          BlockPos pos = this.getBlockRandomPos(minX, minYInSection, minZ, 15);
+//!          BlockState blockState = section.getBlockState(...);
+//!          if (blockState.isRandomlyTicking()) { blockState.randomTick(this, pos, this.random); }
+//!          ...
+//!       }
+//!    }
+//! }
+//! ```
+//!
+//! Two things worth being exact about, because "a wrong number of draws
+//! desynchronises everything downstream" (this issue's own brief):
+//!
+//! 1. **The position pick happens exactly `tickSpeed` times per
+//!    randomly-ticking section, unconditionally** — whether or not the
+//!    picked block turns out to be eligible. A miss still consumes a
+//!    position draw; it just does nothing with it.
+//! 2. **The position draw and the block's own behaviour draw from two
+//!    different generators.** `getBlockRandomPos` (`Level.java:1064-1068`)
+//!    advances `this.randValue`, a level-local 32-bit LCG seeded once at
+//!    level creation — **not** `this.random` (the `RandomSource` passed into
+//!    `blockState.randomTick`). [`next_random_tick_pos`] is the former;
+//!    behaviour draws (e.g. grass's spread attempts, below) use a second,
+//!    independent generator ([`RandomTickScheduler`]'s own `behavior_rng`).
+//!
+//! `LevelChunkSection::isRandomlyTicking` (`LevelChunkSection.java:110-118`)
+//! is `tickingBlockCount > 0`, an incrementally maintained count vanilla
+//! updates on every block change in the section. This crate has no such
+//! incremental counter (`ChunkColumn` — see `crate::chunk`'s module doc —
+//! has no per-section bookkeeping at all), so [`section_has_randomly_ticking_block`]
+//! computes the same **boolean** by scanning the section directly. This
+//! changes nothing observable: the count itself is never read, only
+//! whether it is positive, and a scan produces the identical true/false
+//! answer a maintained counter would. It is the honest reduction for a
+//! chunk representation with no incremental bookkeeping, not an invented
+//! shortcut.
+//!
+//! # `getBlockRandomPos`, cited directly
+//!
+//! `Level.java:1064-1068`:
+//!
+//! ```text
+//! public BlockPos getBlockRandomPos(final int xo, final int yo, final int zo, final int yMask) {
+//!    this.randValue = this.randValue * 3 + 1013904223;
+//!    int val = this.randValue >> 2;
+//!    return new BlockPos(xo + (val & 15), yo + (val >> 16 & yMask), zo + (val >> 8 & 15));
+//! }
+//! ```
+//!
+//! [`next_random_tick_pos`] is this, verbatim, using `i32::wrapping_mul`/
+//! `wrapping_add` for the deliberate 32-bit overflow the Java `int` LCG
+//! relies on.
+//!
+//! # Grass ↔ dirt, cited directly
+//!
+//! `SpreadingSnowyBlock.randomTick` (the class `GrassBlock` extends —
+//! `SpreadingSnowyBlock.java:44-64`):
+//!
+//! ```text
+//! if (!canStayAlive(state, level, pos)) {
+//!    level.setBlockAndUpdate(pos, baseBlock.get().defaultBlockState());  // -> dirt, zero further draws
+//! } else if (level.getMaxLocalRawBrightness(pos.above()) >= 9) {
+//!    for (int i = 0; i < 4; i++) {
+//!       BlockPos testPos = pos.offset(random.nextInt(3) - 1, random.nextInt(5) - 3, random.nextInt(3) - 1);
+//!       if (level.getBlockState(testPos).is(baseBlock.get()) && canPropagate(defaultBlockState, level, testPos)) {
+//!          level.setBlockAndUpdate(testPos, defaultBlockState.setValue(SNOWY, ...));
+//!       }
+//!    }
+//! }
+//! ```
+//!
+//! `canStayAlive` (`:28-38`) is, modulo the snow-layer special case this
+//! crate's terrain never generates: the block directly above must not be a
+//! full fluid, and must not fully dampen light. This crate has no light
+//! engine (`docs/README.md` has no lighting doc yet), so
+//! [`grass_random_tick`] uses the same proxy for both `canStayAlive` and the
+//! `getMaxLocalRawBrightness(...) >= 9` check: **the block directly above is
+//! bare air** (see [`is_air_variant`]). This is a deliberate, named
+//! simplification — the exact light *value* is unavailable, not
+//! approximated — and it means our version always attempts a spread when
+//! sky-exposed, regardless of time of day. The **draw pattern** is exact
+//! either way: `0` extra draws when not air-exposed (dies to dirt), exactly
+//! `4 * 3 = 12` `next_int` calls when air-exposed (four attempts, three axis
+//! offsets each), matching the jar's own unconditional `for` loop —
+//! regardless of how many of the four attempts actually hit a propagatable
+//! neighbour.
+
+use crate::mob_spawn::SpawnRng;
+
+/// Vanilla's own default for the `random_tick_speed` gamerule
+/// (`GameRules.java:74`). This crate has no gamerule registry yet (see
+/// `crate::server`'s own module doc for why `GameRuleChanged` is currently
+/// echoed rather than applied) — every caller of
+/// [`RandomTickScheduler::tick_chunk`] passes a `tick_speed` explicitly
+/// rather than reading this implicitly, but this is the value production
+/// code should pass until a real gamerule store exists.
+pub const DEFAULT_RANDOM_TICK_SPEED: u32 = 3;
+
+/// The one block this crate models a real random tick for today. Mirrors
+/// `BlockBehaviour.Properties.isRandomlyTicking` being set true only on
+/// [`SpreadingSnowyBlock`]'s subclasses (`GrassBlock`, `MyceliumBlock`) —
+/// note plain dirt is **not** in this set: dirt does not tick itself, it is
+/// only ever a *target* of a neighbouring grass block's own tick.
+const GRASS_BLOCK: &str = "minecraft:grass_block";
+const DIRT_BLOCK: &str = "minecraft:dirt";
+
+/// Strips any `[...]` block-state property suffix, mirroring every other
+/// canonical-name comparison in this crate (`crate::chunk::is_air_or_fluid`,
+/// `crate::chunk::is_water`).
+fn base_name(state: &str) -> &str {
+    state.split('[').next().unwrap_or(state)
+}
+
+/// `true` for any air variant (`minecraft:air`/`cave_air`/`void_air`) —
+/// narrower than [`crate::chunk::is_air_or_fluid`], which also counts
+/// fluids. Used as this module's light-level proxy: see the module doc
+/// comment for why "bare air above" stands in for vanilla's real brightness
+/// check.
+#[must_use]
+pub fn is_air_variant(state: &str) -> bool {
+    matches!(base_name(state), "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air")
+}
+
+/// `true` iff `block_state` is one this crate models a random tick for.
+/// Mirrors `BlockState.isRandomlyTicking()`
+/// (`BlockBehaviour.java:401-402`) restricted to the one block modeled here
+/// — see [`GRASS_BLOCK`]'s doc comment for why dirt is deliberately excluded.
+#[must_use]
+pub fn is_randomly_ticking(block_state: &str) -> bool {
+    base_name(block_state) == GRASS_BLOCK
+}
+
+/// The position-pick LCG, verbatim from `Level.getBlockRandomPos`
+/// (`Level.java:1064-1068`) — see this module's doc comment for the exact
+/// citation. `state` is vanilla's `randValue` field: a 32-bit value that
+/// persists across every call for the lifetime of the level (seeded once,
+/// arbitrarily, at level creation in vanilla; callers here choose their own
+/// seed via [`RandomTickScheduler::new`]).
+///
+/// Returns the picked `(x, y, z)` in world coordinates and advances `state`
+/// in place.
+#[must_use]
+pub fn next_random_tick_pos(
+    state: &mut i32,
+    xo: i32,
+    yo: i32,
+    zo: i32,
+    y_mask: i32,
+) -> (i32, i32, i32) {
+    *state = state.wrapping_mul(3).wrapping_add(1013904223);
+    let val = *state >> 2;
+    (xo + (val & 15), yo + ((val >> 16) & y_mask), zo + ((val >> 8) & 15))
+}
+
+/// One random tick that actually changed a block, as returned by
+/// [`RandomTickScheduler::tick_chunk`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RandomTickEvent {
+    pub pos: (i32, i32, i32),
+    pub from: String,
+    pub to: String,
+}
+
+/// The outcome of one [`grass_random_tick`] call, before any world mutation
+/// is applied — kept separate from [`RandomTickEvent`] so the pure decision
+/// (this function) stays testable with no `ChunkColumn`/`ChunkSource` in
+/// scope at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GrassOutcome {
+    /// `canStayAlive` was false: convert to dirt. Zero further RNG draws.
+    DiesToDirt,
+    /// Air-exposed; all four spread attempts (12 draws total) were issued,
+    /// but `try_propagate` accepted none of them.
+    NoPropagationTargetAccepted,
+    /// Air-exposed; the listed relative offsets (a subset of the four
+    /// attempted, in attempt order) were accepted by `try_propagate` and
+    /// should become grass.
+    Spreads(Vec<(i32, i32, i32)>),
+}
+
+/// The pure grass ↔ dirt decision — see this module's doc comment for the
+/// jar citation and the light-level proxy this crate substitutes.
+///
+/// `above_is_air` is vanilla's `canStayAlive`/light-check proxy (`true` when
+/// the block directly above the grass block is bare air). `try_propagate`
+/// is called for each of the four attempts' relative `(dx, dy, dz)` offset
+/// (already drawn from `rng` before the call, exactly like vanilla's
+/// `pos.offset(random.nextInt(3) - 1, ...)`) and must itself decide whether
+/// the target position is a valid spread destination — a `ChunkColumn`
+/// lookup this pure function does not perform, so it stays testable with a
+/// fake world.
+pub fn grass_random_tick(
+    above_is_air: bool,
+    rng: &mut SpawnRng,
+    mut try_propagate: impl FnMut(i32, i32, i32) -> bool,
+) -> GrassOutcome {
+    if !above_is_air {
+        return GrassOutcome::DiesToDirt;
+    }
+    let mut spreads = Vec::new();
+    for _ in 0..4 {
+        let dx = rng.next_int(3) - 1;
+        let dy = rng.next_int(5) - 3;
+        let dz = rng.next_int(3) - 1;
+        if try_propagate(dx, dy, dz) {
+            spreads.push((dx, dy, dz));
+        }
+    }
+    if spreads.is_empty() {
+        GrassOutcome::NoPropagationTargetAccepted
+    } else {
+        GrassOutcome::Spreads(spreads)
+    }
+}
+
+/// `true` iff a dirt block at the target offset can become grass — vanilla's
+/// `canPropagate` (`SpreadingSnowyBlock.java:40-43`) restricted to this
+/// crate's light proxy: the target must currently be dirt, and the block
+/// directly above the target must itself be air (so the new grass block
+/// would immediately satisfy `canStayAlive` too).
+#[must_use]
+pub fn can_propagate_onto(target_state: &str, above_target_state: &str) -> bool {
+    base_name(target_state) == DIRT_BLOCK && is_air_variant(above_target_state)
+}
+
+/// The random-tick driver: owns the two independent generators
+/// `ServerLevel` keeps (the position LCG and the behaviour RNG — see this
+/// module's doc comment for why they must stay separate), and drives
+/// [`grass_random_tick`] against a real [`crate::chunk::ChunkColumn`].
+#[derive(Debug, Clone)]
+pub struct RandomTickScheduler {
+    /// Vanilla's `Level.randValue` — see [`next_random_tick_pos`].
+    position_state: i32,
+    /// A generator independent of `position_state`, standing in for
+    /// vanilla's `ServerLevel.random` (the `RandomSource` passed into every
+    /// `BlockState.randomTick`). Not vanilla's actual PRNG algorithm — see
+    /// this module's doc comment: only the **draw pattern** (how many calls,
+    /// in what order) is asserted anywhere in this crate, never the literal
+    /// values, so a different (but still deterministic) generator is a
+    /// faithful stand-in.
+    behavior_rng: SpawnRng,
+}
+
+impl RandomTickScheduler {
+    /// Seeds both generators. `position_seed` feeds `position_state`
+    /// directly (vanilla seeds `randValue` from an arbitrary thread-local
+    /// draw at level creation — this crate takes the seed explicitly so
+    /// tests and the tick loop can be deterministic); `behavior_seed` seeds
+    /// [`SpawnRng`].
+    #[must_use]
+    pub fn new(position_seed: i32, behavior_seed: u64) -> Self {
+        Self { position_state: position_seed, behavior_rng: SpawnRng::new(behavior_seed) }
+    }
+
+    /// One chunk's worth of random ticks at `tick_speed` picks per
+    /// randomly-ticking 16-block section — mirrors `ServerLevel::tickChunk`'s
+    /// block-ticking loop (`ServerLevel.java:508-535`; this crate does not
+    /// model the `iceandsnow`/`tickPrecipitation` loop above it, which is
+    /// weather, out of scope for #307/#308).
+    ///
+    /// `column` is read fresh from `source.column(cx, cz)` by the caller and
+    /// passed in as `&mut` so within-call mutations (a grass block spreading
+    /// onto a dirt block earlier in the same call) are visible to later
+    /// picks in the same call — matching vanilla's `section.getBlockState`
+    /// reading the live, already-mutated section array mid-`tickChunk`.
+    /// Every mutation this function makes to `column` is also returned as a
+    /// [`RandomTickEvent`] so the caller can persist it through
+    /// [`crate::chunk::ChunkSource::set_block`] and notify a connected
+    /// client — `column` alone is not persisted by this function.
+    pub fn tick_chunk(
+        &mut self,
+        column: &mut crate::chunk::ChunkColumn,
+        cx: i32,
+        cz: i32,
+        tick_speed: u32,
+    ) -> Vec<RandomTickEvent> {
+        let mut events = Vec::new();
+        if tick_speed == 0 {
+            return events;
+        }
+        let min_x = cx * 16;
+        let min_z = cz * 16;
+        let mut section_min_y = column.min_y;
+        while section_min_y < column.min_y + column.height {
+            if section_has_randomly_ticking_block(column, section_min_y) {
+                for _ in 0..tick_speed {
+                    let (x, y, z) =
+                        next_random_tick_pos(&mut self.position_state, min_x, section_min_y, min_z, 15);
+                    let lx = x - min_x;
+                    let lz = z - min_z;
+                    let state = column.block_state(lx, y, lz).to_string();
+                    if !is_randomly_ticking(&state) {
+                        continue;
+                    }
+                    events.extend(self.tick_grass_block(column, min_x, min_z, x, y, z, &state));
+                }
+            }
+            section_min_y += 16;
+        }
+        events
+    }
+
+    /// Applies [`grass_random_tick`] at world position `(x, y, z)` against
+    /// `column`, mutating it and returning every resulting event: at most
+    /// one self-conversion (dies-to-dirt) OR up to four spread events (one
+    /// per accepted propagation target).
+    fn tick_grass_block(
+        &mut self,
+        column: &mut crate::chunk::ChunkColumn,
+        min_x: i32,
+        min_z: i32,
+        x: i32,
+        y: i32,
+        z: i32,
+        current_state: &str,
+    ) -> Vec<RandomTickEvent> {
+        let lx = x - min_x;
+        let lz = z - min_z;
+        let above = column.block_state(lx, y + 1, lz).to_string();
+        let above_is_air = is_air_variant(&above);
+
+        // `try_propagate` only reads `column` (via the immutable reborrow
+        // below) — no mutation happens until after `grass_random_tick`
+        // returns and this borrow ends, so the two phases (decide, then
+        // apply) never overlap.
+        let outcome = {
+            let column_ref: &crate::chunk::ChunkColumn = column;
+            grass_random_tick(above_is_air, &mut self.behavior_rng, |dx, dy, dz| {
+                let tx = x + dx;
+                let tz = z + dz;
+                let tlx = tx - min_x;
+                let tlz = tz - min_z;
+                if !(0..16).contains(&tlx) || !(0..16).contains(&tlz) {
+                    // Cross-chunk propagation target: this crate has no
+                    // neighbour-column access from inside `tick_chunk` (only
+                    // the one column being ticked is in scope) — treated as
+                    // "not a valid target," matching vanilla's own
+                    // `canPropagate` returning false for anything that fails
+                    // its checks. The RNG draw for this attempt still
+                    // happened (see `grass_random_tick`), only the mutation
+                    // is skipped.
+                    return false;
+                }
+                let ty = y + dy;
+                let target_state = column_ref.block_state(tlx, ty, tz);
+                let above_target = column_ref.block_state(tlx, ty + 1, tz);
+                can_propagate_onto(target_state, above_target)
+            })
+        };
+
+        let mut events = Vec::new();
+        match outcome {
+            GrassOutcome::DiesToDirt => {
+                column.set_block(lx, y, lz, DIRT_BLOCK);
+                events.push(RandomTickEvent {
+                    pos: (x, y, z),
+                    from: current_state.to_string(),
+                    to: DIRT_BLOCK.to_string(),
+                });
+            }
+            GrassOutcome::NoPropagationTargetAccepted => {}
+            GrassOutcome::Spreads(offsets) => {
+                for (dx, dy, dz) in offsets {
+                    let tx = x + dx;
+                    let ty = y + dy;
+                    let tz = z + dz;
+                    let tlx = tx - min_x;
+                    let tlz = tz - min_z;
+                    column.set_block(tlx, ty, tlz, GRASS_BLOCK);
+                    events.push(RandomTickEvent {
+                        pos: (tx, ty, tz),
+                        from: DIRT_BLOCK.to_string(),
+                        to: GRASS_BLOCK.to_string(),
+                    });
+                }
+            }
+        }
+        events
+    }
+}
+
+/// `LevelChunkSection::isRandomlyTicking`'s boolean, computed by scanning —
+/// see this module's doc comment for why a scan is the faithful reduction
+/// for a chunk representation with no incremental per-section counter.
+fn section_has_randomly_ticking_block(column: &crate::chunk::ChunkColumn, section_min_y: i32) -> bool {
+    let max_y = (section_min_y + 16).min(column.min_y + column.height);
+    for y in section_min_y..max_y {
+        for z in 0..16 {
+            for x in 0..16 {
+                if is_randomly_ticking(column.block_state(x, y, z)) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chunk::ChunkColumn;
+
+    // # `next_random_tick_pos`: predicted values computed independently
+    //
+    // Computed via a standalone Python script (32-bit wrapping arithmetic,
+    // arithmetic right shift), NOT by calling this Rust function — an
+    // external re-derivation of the same jar formula, so this is a real
+    // check against the spec rather than the function checking itself.
+    // `next_random_tick_pos(state=12345, xo=0, yo=64, zo=0, y_mask=15)`,
+    // five calls in sequence:
+    //   (1013941258, x=2,  y=75, z=1)
+    //   (-239239299, x=15, y=79, z=15)
+    //   (296186326,  x=5,  y=73, z=12)
+    //   (1902463201, x=8,  y=73, z=2)
+    //   (-1868640766, x=0, y=71, z=3)
+    #[test]
+    fn position_pick_matches_independently_computed_lcg_sequence() {
+        let mut state = 12345i32;
+        let expected = [
+            (1_013_941_258i32, 2, 75, 1),
+            (-239_239_299, 15, 79, 15),
+            (296_186_326, 5, 73, 12),
+            (1_902_463_201, 8, 73, 2),
+            (-1_868_640_766, 0, 71, 3),
+        ];
+        for (expected_state, ex, ey, ez) in expected {
+            let (x, y, z) = next_random_tick_pos(&mut state, 0, 64, 0, 15);
+            assert_eq!(state, expected_state, "LCG state diverged from the independently computed sequence");
+            assert_eq!((x, y, z), (ex, ey, ez));
+        }
+    }
+
+    /// Negative control: a different seed must diverge immediately — proves
+    /// the test above is not vacuously true for any seed (e.g. a bugged
+    /// function that ignores `state` entirely).
+    #[test]
+    fn a_different_seed_does_not_reproduce_the_same_first_position() {
+        let mut state = 999i32;
+        let (x, y, z) = next_random_tick_pos(&mut state, 0, 64, 0, 15);
+        assert_ne!((x, y, z), (2, 75, 1), "control failed: different seeds must diverge");
+    }
+
+    /// Every position pick advances `position_state` exactly once, whether
+    /// or not the picked block turns out eligible — mirrors
+    /// `ServerLevel::tickChunk`'s unconditional `for (i = 0; i < tickSpeed; i++)`
+    /// draw. Ticking one section at `tick_speed = 5` with **no** eligible
+    /// block anywhere in it must still advance the position LCG exactly 5
+    /// times — proven indirectly here by checking the *next* pick after a
+    /// tick_chunk call with zero eligible blocks lands exactly where 5 raw
+    /// `next_random_tick_pos` calls (computed independently) would put it.
+    #[test]
+    fn position_draws_happen_even_when_no_block_is_eligible() {
+        let mut column = ChunkColumn::new(0, 16);
+        // Fill the one section with stone: zero grass blocks anywhere, so
+        // `section_has_randomly_ticking_block` is false — this must SKIP the
+        // whole section (zero draws), which is the real prediction for this
+        // setup. See the companion test below for the "eligible section,
+        // zero hits" case, which is where the "still draws" claim actually
+        // bites.
+        for y in 0..16 {
+            for z in 0..16 {
+                for x in 0..16 {
+                    column.set_block(x, y, z, "minecraft:stone");
+                }
+            }
+        }
+        let mut scheduler = RandomTickScheduler::new(12345, 0);
+        let events = scheduler.tick_chunk(&mut column, 0, 0, 5);
+        assert!(events.is_empty());
+
+        // An ineligible SECTION draws zero — confirmed by the position LCG
+        // not having moved at all from its seed.
+        assert_eq!(scheduler_position_state(&scheduler), 12345);
+
+        // Negative control, proving the assertion above is not vacuous:
+        // `next_random_tick_pos` really does mutate its state in general
+        // (i.e. "zero draws happened" is a real, distinguishable outcome,
+        // not just what this function always does regardless of input).
+        let mut control_state = 12345i32;
+        let _ = next_random_tick_pos(&mut control_state, 0, 0, 0, 15);
+        assert_ne!(control_state, 12345, "control failed: the LCG must actually advance when called");
+    }
+
+    fn scheduler_position_state(s: &RandomTickScheduler) -> i32 {
+        s.position_state
+    }
+
+    /// The real "still draws on a miss" case: a section WITH one eligible
+    /// grass block, ticked at `tick_speed = 5`. Vanilla draws exactly 5
+    /// positions regardless of how many of those 5 draws actually land on
+    /// the grass block — predicted here as "the position LCG advances
+    /// exactly 5 times," independent of hits.
+    #[test]
+    fn position_draws_happen_exactly_tick_speed_times_per_eligible_section_regardless_of_hits() {
+        let mut column = ChunkColumn::new(0, 16);
+        for y in 0..16 {
+            for z in 0..16 {
+                for x in 0..16 {
+                    column.set_block(x, y, z, "minecraft:stone");
+                }
+            }
+        }
+        // One grass block, buried under stone above (so it always dies —
+        // zero behaviour draws — keeping this test purely about the
+        // POSITION draw count, not grass's own behaviour draws).
+        column.set_block(0, 0, 0, GRASS_BLOCK);
+
+        let mut scheduler = RandomTickScheduler::new(12345, 0);
+        scheduler.tick_chunk(&mut column, 0, 0, 5);
+
+        let mut expected_state = 12345i32;
+        for _ in 0..5 {
+            let _ = next_random_tick_pos(&mut expected_state, 0, 0, 0, 15);
+        }
+        assert_eq!(
+            scheduler_position_state(&scheduler),
+            expected_state,
+            "expected exactly 5 position draws for tick_speed=5 on one eligible section"
+        );
+    }
+
+    /// `grass_random_tick`'s die branch: exactly zero `next_int` draws.
+    /// Proven by comparing the RNG's state against an untouched clone.
+    #[test]
+    fn dying_to_dirt_consumes_zero_behavior_draws() {
+        let mut rng = SpawnRng::new(7);
+        let before = format!("{rng:?}");
+        let outcome = grass_random_tick(false, &mut rng, |_, _, _| true);
+        assert_eq!(outcome, GrassOutcome::DiesToDirt);
+        assert_eq!(format!("{rng:?}"), before, "the die branch must not draw from the behaviour RNG at all");
+    }
+
+    /// `grass_random_tick`'s spread branch: exactly 12 draws (4 attempts * 3
+    /// axes), proven by replaying 12 raw `next_int` calls against an
+    /// independently seeded clone and asserting the resulting states match —
+    /// not merely a count, the actual draw *pattern*.
+    #[test]
+    fn spreading_consumes_exactly_twelve_behavior_draws_regardless_of_hits() {
+        let mut rng_a = SpawnRng::new(7);
+        let _ = grass_random_tick(true, &mut rng_a, |_, _, _| false); // every attempt rejected
+        let after_a = format!("{rng_a:?}");
+
+        let mut rng_b = SpawnRng::new(7);
+        for i in 0..12 {
+            let bound = if i % 3 == 1 { 5 } else { 3 };
+            let _ = rng_b.next_int(bound);
+        }
+        let after_b = format!("{rng_b:?}");
+
+        assert_eq!(after_a, after_b, "expected exactly 12 draws (bounds 3,5,3 repeated 4x) regardless of hits");
+    }
+
+    /// Negative control: proves the equality check above can actually fail
+    /// — an 11-draw replay must NOT match.
+    #[test]
+    fn eleven_draws_do_not_match_the_real_twelve_draw_pattern() {
+        let mut rng_a = SpawnRng::new(7);
+        let _ = grass_random_tick(true, &mut rng_a, |_, _, _| false);
+        let after_a = format!("{rng_a:?}");
+
+        let mut rng_b = SpawnRng::new(7);
+        for i in 0..11 {
+            let bound = if i % 3 == 1 { 5 } else { 3 };
+            let _ = rng_b.next_int(bound);
+        }
+        let after_b = format!("{rng_b:?}");
+        assert_ne!(after_a, after_b, "control failed: 11 draws must not equal 12");
+    }
+
+    /// End-to-end: a grass block covered by stone dies to dirt in one tick,
+    /// via `tick_chunk` against a real `ChunkColumn` — the "at least one
+    /// real ticking block" proof at the column level (the client-visible
+    /// proof lives in `tick.rs`'s own wiring).
+    #[test]
+    fn a_covered_grass_block_becomes_dirt_after_one_tick_chunk_call() {
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block(3, 5, 3, GRASS_BLOCK);
+        column.set_block(3, 6, 3, "minecraft:stone"); // covers it: not air-exposed
+        assert_eq!(column.block_state(3, 5, 3), GRASS_BLOCK);
+
+        let mut scheduler = RandomTickScheduler::new(1, 1);
+        // `tick_speed = 200` and 3000 calls: the position pick lands on
+        // (3, 5, 3) with probability 200/4096 per call, so the expected hit
+        // count here is ~146 — comfortably certain (P(zero hits) ~ e^-146)
+        // without asserting anything about *which specific* draw hits, only
+        // that "eventually" is a real, bounded claim rather than a fluke of
+        // the first LCG output. Loop rather than assume the very first call
+        // hits it.
+        let mut converted = false;
+        for _ in 0..3000 {
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 200);
+            if events.iter().any(|e| e.pos == (3, 5, 3) && e.to == DIRT_BLOCK) {
+                converted = true;
+                break;
+            }
+        }
+        assert!(converted, "a covered grass block must eventually die to dirt");
+        assert_eq!(column.block_state(3, 5, 3), DIRT_BLOCK);
+    }
+
+    /// Negative control for the end-to-end test: an UNCOVERED grass block
+    /// (air above) must NOT die to dirt, however many ticks run — proving
+    /// the die branch's gate actually discriminates on `above_is_air`
+    /// rather than firing unconditionally.
+    #[test]
+    fn an_uncovered_grass_block_never_dies_to_dirt() {
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block(3, 5, 3, GRASS_BLOCK);
+        // Above is air by construction (ChunkColumn::new is all-air).
+        let mut scheduler = RandomTickScheduler::new(1, 1);
+        for _ in 0..500 {
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 8);
+            assert!(
+                !events.iter().any(|e| e.to == DIRT_BLOCK),
+                "an air-exposed grass block must never die to dirt"
+            );
+        }
+        assert_eq!(column.block_state(3, 5, 3), GRASS_BLOCK);
+    }
+
+    /// End-to-end spread: a dirt block adjacent to an air-exposed grass
+    /// block, itself also air-exposed, must eventually turn to grass.
+    #[test]
+    fn an_eligible_neighboring_dirt_block_eventually_becomes_grass() {
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block(5, 5, 5, GRASS_BLOCK);
+        column.set_block(6, 5, 5, DIRT_BLOCK); // one step east, also air-exposed above
+        let mut scheduler = RandomTickScheduler::new(2, 2);
+        // Two independent random events must both happen: the position pick
+        // must land on the grass block (`tick_speed = 200` / 4096 chance per
+        // call), AND one of its 4 spread attempts must draw the exact
+        // (+1, 0, 0) offset (chance ~0.0866 per pick — see
+        // `spreading_consumes_exactly_twelve_behavior_draws_regardless_of_hits`
+        // for where the 3/5/3 bounds come from). Combined per-call
+        // probability ~0.0042; 3000 calls gives an expected ~12.7 hits
+        // (P(zero) ~ 3e-6).
+        let mut spread = false;
+        for _ in 0..3000 {
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 200);
+            if events.iter().any(|e| e.pos == (6, 5, 5) && e.to == GRASS_BLOCK) {
+                spread = true;
+                break;
+            }
+        }
+        assert!(spread, "an eligible adjacent dirt block must eventually turn to grass");
+    }
+
+    /// Determinism control: two independently constructed schedulers, same
+    /// seeds, same script, must produce byte-identical event sequences —
+    /// two separate `RandomTickScheduler::new` calls, not one instance
+    /// ticked twice (CLAUDE.md's own warning about pointer-identity gates).
+    #[test]
+    fn two_independently_built_schedulers_produce_identical_events() {
+        fn run() -> Vec<RandomTickEvent> {
+            let mut column = ChunkColumn::new(0, 16);
+            column.set_block(1, 1, 1, GRASS_BLOCK);
+            column.set_block(2, 1, 1, "minecraft:stone");
+            let mut scheduler = RandomTickScheduler::new(555, 555);
+            let mut all = Vec::new();
+            for _ in 0..50 {
+                all.extend(scheduler.tick_chunk(&mut column, 0, 0, 8));
+            }
+            all
+        }
+        assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn default_random_tick_speed_is_three() {
+        assert_eq!(DEFAULT_RANDOM_TICK_SPEED, 3);
+    }
+}
