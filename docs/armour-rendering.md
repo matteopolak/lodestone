@@ -13,9 +13,11 @@ Landed across:
 | file | what it owns |
 | --- | --- |
 | `crates/lodestone-assets/src/equipment.rs` | the two inflations, the four slot meshes, the item→asset table, texture paths, the undyed-leather colour |
-| `crates/lodestone-render/src/entity.rs` | `ArmourMesh`/`ArmourModelSet`, `attach`, `armour_layers`, `wearer_carries_armour` |
+| `crates/lodestone-render/src/entity.rs` | `ArmourMesh`/`ArmourModelSet`, `attach`, `armour_layers`, `wearer_carries_armour`, `armour_layer_tint`/`armour_layer_tint_with_dye` |
 | `crates/lodestone-render/src/entity_pipeline.rs` | the per-instance tint attribute, `EntityPipeline::armour_pipeline` |
 | `crates/lodestone-shell/src/gpu.rs` | sheet loading, `prepare_armour`, the draw, `RenderStats::armour_layers_drawn` |
+| `crates/lodestone-shell/src/sim.rs` | `Sim::third_person_body_state` — the local player's own equipment, including its four armour slots |
+| `crates/lodestone-shell/tests/armour_pixels.rs` | the pixel gate — real render path, analytic lower bound, negative control |
 
 Companion to [`entity-rendering.md`](./entity-rendering.md) (the mob pipeline this
 layers over) and [`item-prototypes.md`](./item-prototypes.md) (why the item→asset
@@ -33,12 +35,27 @@ mapping cannot be derived).
   `SET_EQUIPMENT` → `EntityView::equipment` → `net.rs::entity_snapshot` →
   `EntitySnapshot` → `entities.rs::occupied_equipment` → `EntityDraw::equipment`
   already carried all eight slots; only `MainHand`/`OffHand` were being consumed.
+* **The local player's own armour in third person.** Landed in `22dc0ee`
+  (`Sim::third_person_body_state`, `crates/lodestone-shell/src/sim.rs`) —
+  this doc previously listed it under "Wiring still needed" and that line was
+  stale; `ARMOUR_NATIVE_SLOTS` there already reads native indices
+  `39/38/37/36` into `EquipmentSlot::{Head,Chest,Legs,Feet}` and
+  `ThirdPersonBodyState::into_draw` copies them into `EntityDraw::equipment`
+  verbatim, exactly as originally planned. Remote players needed nothing new
+  — they are ordinary tracked entities.
+* **A pixel gate.** Landed alongside the wiring above, in
+  `crates/lodestone-shell/tests/armour_pixels.rs`
+  (`a_fully_armoured_zombie_draws_more_silhouette_than_a_bare_one`) — see
+  "Gates" below. That file is owned by another agent's in-flight work; read
+  it, do not edit it here.
 
 ## What does not
 
 * **Trims.** Designed, not landed — see "Trims" below.
-* **A stack's actual dye colour.** See "Dye" below; the undyed default draws.
-* **The local player's own armour in third person.** See "Wiring still needed".
+* **A stack's actual dye colour.** The render-side formula
+  (`armour_layer_tint_with_dye`) landed and is hermetically tested, but
+  nothing upstream feeds it a real value yet, so the undyed default still
+  draws in practice — see "Dye" below.
 * **Baby armour meshes**, **enchantment glint**, **`Body`/`Saddle` (animal)
   armour**, **elytra**, **skull/pumpkin heads**. Each is a different vanilla
   layer with its own model; see "Deliberately out of scope".
@@ -221,6 +238,63 @@ sheet is **near-greyscale**: 589 of `humanoid/leather.png`'s 660 opaque texels
 are exactly grey, measured against the real PNG. A port that skips the tint
 renders leather armour as pale iron.
 
+**The real-dye rule, and the render side of it landed.**
+`armour_layer_tint_with_dye(layer, dyed_color: Option<u32>)`
+(`crates/lodestone-render/src/entity.rs`) transcribes
+`EquipmentLayerRenderer.getColorForLayer` exactly:
+
+```java
+// EquipmentLayerRenderer.java:113-121
+private static int getColorForLayer(Layer layer, int dyeColor) {
+   Optional<Dyeable> dyeable = layer.dyeable();
+   if (dyeable.isPresent()) {
+      int colorWhenUndyed = dyeable.get().colorWhenUndyed().map(ARGB::opaque).orElse(0);
+      return dyeColor != 0 ? dyeColor : colorWhenUndyed;
+   } else {
+      return -1;
+   }
+}
+```
+
+where `dyeColor` is:
+
+```java
+// DyedItemColor.java:27-30
+public static int getOrDefault(final ItemStack itemStack, final int defaultColor) {
+   DyedItemColor color = itemStack.get(DataComponents.DYED_COLOR);
+   return color != null ? ARGB.opaque(color.rgb()) : defaultColor;
+}
+```
+
+called as `DyedItemColor.getOrDefault(itemStack, 0)` — so "component absent"
+and "default `0`" are the same input to `getColorForLayer`, and the function
+does not distinguish them.
+
+**A leather piece dyed pure black reads as undyed**, and this is vanilla's own
+behaviour: `ARGB.opaque` only forces the alpha byte, so a `0x000000` dye still
+has RGB `0`, `dyeColor != 0` is false, and the ternary falls through to
+`colorWhenUndyed` exactly as if no dye were applied at all. Pinned by
+`dyed_color_zero_reads_as_undyed` so a future "fix" that special-cases black
+does not quietly diverge from the game it ports.
+
+Three hops still separate this from a real value reaching it, none of them in
+this pass's file ownership:
+
+1. `crates/protocol/v770` does not decode `minecraft:dyed_color` into
+   `ItemComponents` — it is in the generated `data_component_types` table but
+   the patch reader does not model it.
+2. `crates/lodestone-shell/src/net.rs::entity_snapshot` narrows a stack to its
+   `ResourceLocation` and drops components (its own doc comment says so).
+   `EntitySnapshot::equipment` needs an `Option<u32>` dye alongside the id,
+   which means the same widening in `entities.rs`'s
+   `RenderEquipment`/`occupied_equipment` and `EntityDraw::equipment`.
+3. `crates/lodestone-shell/src/gpu.rs`'s `prepare_armour` calls the
+   zero-argument `armour_layer_tint(layer)` today
+   (`gpu.rs:2480`); once hop 2 lands, that one call site becomes
+   `armour_layer_tint_with_dye(layer, dye)`. `armour_layer_tint` is kept as a
+   `None`-dye convenience wrapper specifically so this is a one-line change
+   whenever someone can make it, rather than a signature break.
+
 The tint rides the **instance buffer** as a packed `0x00RRGGBB` word at shader
 location 9, not a bind group — the model shader is at wgpu's 4-group floor and a
 fifth group compiles on an M5 (8 groups) while crashing at startup on any
@@ -326,26 +400,16 @@ mob.
 
 ## Wiring still needed (outside this change's files)
 
-Each of these is a small, exactly-specified edit in a file held by another agent.
-Named so nothing has to be re-derived.
+**The local player's own armour in third person landed in `22dc0ee`** — see
+"What draws today" above. This section previously described it as
+outstanding; that was stale by the time it was re-read for this pass, per
+`CLAUDE.md`'s note that the written record is the most common source of
+stale claims in this repo. The only item still open:
 
-1. **The local player's own armour in third person** — zero pixels until this
-   lands. `crates/lodestone-shell/src/sim.rs`,
-   `Sim::third_person_body_state`, already resolves `MainHand` (selected hotbar
-   slot) and `OffHand` (native inventory index `40`) into
-   `ThirdPersonBodyState::equipment`. Add the four armour slots from the same
-   `lodestone_game::menu` slot table, reading the **native** indices, which are
-   `39`/`38`/`37`/`36` for head/chest/legs/feet (menu slots `5..=8`, in that
-   order — the native indices run *backwards*, feet-first, and `Menu::player`
-   spells the pairing out at `crates/lodestone-game/src/menu.rs:130-136`). Emit
-   them as `(EquipmentSlot::Head, id)` and so on. **Nothing
-   else changes**: `into_draw` copies `equipment` verbatim, `render_inner` folds
-   the body into the same `entities` slice `prepare_armour` reads, and the body
-   resolves to `player_wide`, which is `AnimFamily::Humanoid`. Remote players
-   already work, because a remote player is an ordinary tracked entity.
-
-2. **Real dye colours** — `Dyeable.colorWhenUndyed` draws until this lands, which
-   is correct for an undyed piece and wrong for a dyed one. Three hops:
+1. **Real dye colours** — `Dyeable.colorWhenUndyed` draws until this lands,
+   which is correct for an undyed piece and wrong for a dyed one. The render
+   side is done (`armour_layer_tint_with_dye`, see "Dye" above); three hops
+   remain, none owned by this pass:
    * `crates/protocol/v770` decodes `minecraft:dyed_color` (it is in the
      generated `data_component_types` table but the patch reader does not model
      it) into `ItemComponents`.
@@ -355,16 +419,19 @@ Named so nothing has to be re-derived.
      `Option<u32>` dye alongside the id, which means the same widening in
      `entities.rs`'s `RenderEquipment`/`occupied_equipment` and
      `EntityDraw::equipment`.
-   * `prepare_armour` then passes it to a two-argument
-     `armour_layer_tint(layer, dye)` — vanilla's rule is
-     `dyeColor != 0 ? dyeColor : colorWhenUndyed`
-     (`EquipmentLayerRenderer.getColorForLayer`). That is the only change needed
+   * `crates/lodestone-shell/src/gpu.rs`'s `prepare_armour` swaps its
+     `armour_layer_tint(layer)` call (`gpu.rs:2480`) for
+     `armour_layer_tint_with_dye(layer, dye)`. That is the only change needed
      on the render side; the tint already reaches the shader per instance.
 
 ## Trims: designed, not landed, and why
 
-Deliberately deferred. What it would take, so the next pass does not have to
-re-read the client:
+Deliberately deferred — the blockers are the same off-limits files item 2's
+wiring needs (`crates/protocol/v770` for the component, `gpu.rs`/
+`entity_pipeline.rs` for a third pipeline) plus an atlas-stitching capability
+this crate does not have yet, so a partial landing would cost more to review
+than the current honest absence. What it would take, so the next pass does not
+have to re-read the client:
 
 * **Input does not exist.** `minecraft:trim` is an `ArmorTrim` record
   (pattern + material holders); nothing in `crates/protocol/v770` decodes it, and
@@ -375,12 +442,51 @@ re-read the client:
   write** — plus `LayeringTransform.VIEW_OFFSET_Z_LAYERING`. Under `[0,1]` depth
   that is `CompareFunction::Equal` with `depth_write_enabled: false`; it is a
   third pipeline, not a variant of the two that exist.
-* **A stitched trim atlas.** `EquipmentLayerRenderer.TrimSpriteKey.spriteId` is
-  `trim.layerAssetId(layerType.trimAssetPrefix(), equipmentAssetId)`, i.e.
-  `trims/entity/<layer_type>/<pattern>_<material asset>` — a **per-armour-material
-  permutation** of every trim pattern, resolved through
-  `MaterialAssetGroup`'s per-base-material overrides (which is why gold trim on
-  gold armour looks different from gold trim on iron). Those are sprites in the
+* **A stitched trim atlas, and the material palette is per-*wearer*-material,
+  not global.** `ArmorTrim.layerAssetId`:
+
+  ```java
+  // ArmorTrim.java:41-44
+  public Identifier layerAssetId(final String layerAssetPrefix, final ResourceKey<EquipmentAsset> equipmentAsset) {
+     MaterialAssetGroup.AssetInfo materialAsset = this.material().value().assets().assetId(equipmentAsset);
+     return this.pattern().value().assetId().withPath(patternPath -> layerAssetPrefix + "/" + patternPath + "_" + materialAsset.suffix());
+  }
+  ```
+
+  called with `layerAssetPrefix = layerType.trimAssetPrefix()` = `"trims/entity/" + id`
+  (`EquipmentClientInfo.java:140-142`, e.g. `trims/entity/humanoid`), so the
+  final path is `trims/entity/<layer_type>/<pattern>_<material suffix>`. The
+  interesting part is `assetId(equipmentAsset)`:
+
+  ```java
+  // MaterialAssetGroup.java:56-58
+  public MaterialAssetGroup.AssetInfo assetId(final ResourceKey<EquipmentAsset> equipmentAssetId) {
+     return this.overrides.getOrDefault(equipmentAssetId, this.base);
+  }
+  ```
+
+  — the trim **material**'s own `MaterialAssetGroup` looks up an override keyed
+  by the **wearer's armour** `equipmentAsset`, falling back to its plain
+  `suffix` otherwise. Only five of the eleven trim materials declare any
+  override at all, and each declares exactly one — itself:
+
+  ```java
+  // MaterialAssetGroup.java:37-43
+  IRON = create("iron", Map.of(EquipmentAssets.IRON, "iron_darker"));
+  NETHERITE = create("netherite", Map.of(EquipmentAssets.NETHERITE, "netherite_darker"));
+  COPPER = create("copper", Map.of(EquipmentAssets.COPPER, "copper_darker"));
+  GOLD = create("gold", Map.of(EquipmentAssets.GOLD, "gold_darker"));
+  DIAMOND = create("diamond", Map.of(EquipmentAssets.DIAMOND, "diamond_darker"));
+  ```
+
+  So a **diamond**-material trim on a **diamond** chestplate resolves to the
+  `..._diamond_darker` sprite, but the same diamond trim on an iron chestplate
+  (or any other material) resolves to plain `..._diamond` — the override only
+  fires when the trim material matches the piece it decorates, for these five
+  materials (`quartz`/`redstone`/`emerald`/`lapis`/`amethyst`/`resin` never
+  override). Picking the sprite from the trim material alone, ignoring the
+  wearer's own armour material, is exactly the plausible-looking-but-wrong
+  colour `CLAUDE.md` warns this task about. Those sprites live in the
   `armor_trims` texture atlas, so this needs an atlas stitch this crate does not
   do yet, plus `TrimPattern.decal()` to choose between two sheet variants.
 
@@ -407,7 +513,7 @@ and nothing draws.
 
 ## Gates
 
-Hermetic, per this pass's remit (no pixel or live gates):
+Hermetic:
 
 * `lodestone-assets` `equipment` module (11 tests) — the two inflations, the
   `-0.1` leg override on baked geometry, leggings-inside-chestplate, per-slot
@@ -419,7 +525,12 @@ Hermetic, per this pass's remit (no pixel or live gates):
   lookup would have succeeded; every armour matrix is a positive-determinant
   wearer matrix whose composition with a **real camera's** `view_projection`
   inherits that camera's sign (derived, not asserted); layer resolution across
-  slots and non-armour items; leather-only tint.
+  slots and non-armour items; leather-only tint; and, for
+  `armour_layer_tint_with_dye`, a real dye reaching the dyeable base layer but
+  not the non-dyeable overlay, absent-dye falling back to
+  `colorWhenUndyed` (and agreeing with the zero-argument wrapper), the
+  `dyed_color == 0` reads-as-undyed quirk, and a non-dyeable layer ignoring a
+  present dye.
 * `lodestone-render` `entity_pipeline` — the instance record is 72 bytes with the
   tint at location 9, and an untinted instance is white rather than zero.
 * `lodestone-shell` `gpu` — `only_the_four_humanoid_slots_map_to_armour`; a fully
@@ -430,12 +541,20 @@ Hermetic, per this pass's remit (no pixel or live gates):
   out of the real jar at 64×32. Run it with
   `cargo test -p lodestone-shell --lib every_humanoid_armour_sheet -- --ignored`.
 
-**Not covered, and the honest gap:** nothing asserts armour *pixels*. The
-`prepare_armour` → draw hop is verified only by construction (it is called
-unconditionally next to `prepare_entities`, and its batches are drawn
-unconditionally after the mob batches). A screen-rect coverage gate over an
-armoured mob, with a bare mob as the negative control, is the thing that would
-close it — see `CLAUDE.md` on islands.
+**Pixels are covered too, `#[ignore]`d**, in
+`crates/lodestone-shell/tests/armour_pixels.rs`:
+`a_fully_armoured_zombie_draws_more_silhouette_than_a_bare_one` drives the real
+`RenderState::render` path (not a closed unit-test loop) and measures the
+non-sky pixel delta between an armoured zombie and a bare negative control
+against an analytically-projected lower bound derived from the chest part's
+real baked vertices and `ArmourSlot::Chest::inflation()` — plus an exact
+`armour_layers_drawn` count (4 on the subject, 0 on the control). Run it with
+`cargo test -p lodestone-shell --test armour_pixels -- --ignored --nocapture`.
+This closes what an earlier revision of this doc called "the honest gap".
+
+**Still not covered:** dye and trims have no pixel gate, because neither
+reaches a pixel yet (see "What does not" above) — a gate over an unimplemented
+feature would be vacuous by construction.
 
 ## Dependencies
 
@@ -456,6 +575,6 @@ close it — see `CLAUDE.md` on islands.
 * [`entity-rendering.md`](./entity-rendering.md) — the mob pipeline this layers
   over.
 * [`third-person-player-body.md`](./third-person-player-body.md) — the local
-  player's avatar, which needs item 1 above to wear armour.
+  player's avatar, which now wears armour (see "What draws today" above).
 * [`item-prototypes.md`](./item-prototypes.md) — why `assetId` cannot be derived
   from the wire, and the `Body`-is-not-`Chest` rule on the census side.
