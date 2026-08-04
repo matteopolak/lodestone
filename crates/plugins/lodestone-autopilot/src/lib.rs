@@ -46,6 +46,7 @@
 //! ambiguity for `ambiguity_detection: LogLevel::Error` to catch, because the
 //! order is explicit rather than inferred.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use lodestone_ecs::app::{App, Plugin};
@@ -57,7 +58,9 @@ use lodestone_ecs::{
     ChunkWorld, GameTick, LocalPlayer, LookIntent, MovementIntent, TickSet, VersionData,
 };
 use lodestone_model::BlockPos;
-use lodestone_nav::{AdapterCensus, Budget, FactsTable, NavPolicy, Outcome, Plan, Progress, Search};
+use lodestone_nav::{
+    AdapterCensus, Budget, FactsTable, NavPolicy, Outcome, Plan, Progress, Search, witness,
+};
 use lodestone_physics::MovementInput;
 
 pub mod drive;
@@ -69,6 +72,27 @@ pub use drive::compute_plan;
 /// short-range demo use case does not need that much, and a smaller snapshot
 /// is a smaller [`SnapshotView::build`] copy every time the goal changes).
 pub const SNAPSHOT_RADIUS: i32 = 8;
+
+/// How many upcoming edges the look-ahead check inspects, every tick, while a
+/// plan is being driven (`docs/baritone-port.md` §4.5/§2.3's "verify a small
+/// window of upcoming edges... so a hazard is detected before you are
+/// standing next to it"). Checked unconditionally rather than only "when a
+/// new edge starts": the check itself only ever samples a handful of cells
+/// (this many edges' stencils, a few dozen cells at most —
+/// `MoveKind::stencil`'s own doc comment bounds each at "≤ ~20"), so running
+/// it every tick is cheap enough that tracking "did the edge index just
+/// change" would add complexity without buying anything.
+const LOOKAHEAD_EDGES: usize = 3;
+
+/// Ticks between full re-samples of the *rest* of the active plan's witness
+/// set — `docs/baritone-port.md` §4.5's witness-set invalidation proper, for
+/// the part of the route beyond the look-ahead window (a player breaking a
+/// block fifty edges ahead, say). Rate-limited because, unlike the window
+/// check, this one is `O(remaining plan)`; bounded by one segment's own
+/// snapshot radius (segmentation never lets a single [`Plan`] grow past
+/// that — see this crate's docs on why prefix trimming is not needed here),
+/// but still not something to pay every tick.
+const WITNESS_SWEEP_INTERVAL_TICKS: u32 = 20;
 
 /// The plugin's public control surface: set a goal to start walking there, or
 /// `None` to stand down and hand control back to whatever last held
@@ -157,6 +181,18 @@ struct AutopilotState {
     /// alongside `continuation_plan` so splicing it in also correctly updates
     /// [`Self::reached_goal`].
     continuation_reached_goal: bool,
+    /// Every witnessed cell of `plan`, sampled the instant it was adopted —
+    /// `docs/baritone-port.md` §4.5's witness set, plus the value it read at
+    /// commit time so a later re-sample can diff against it
+    /// (`lodestone_nav::witness`). Empty exactly when `plan` is `None`.
+    witness_baseline: HashMap<u64, u32>,
+    /// The same baseline for `continuation_plan`, carried alongside it so
+    /// splicing (`drive_plan`) swaps both atomically — the spliced-in plan's
+    /// own witnesses, not the plan it replaced.
+    continuation_witness_baseline: HashMap<u64, u32>,
+    /// Ticks since the last full [`WITNESS_SWEEP_INTERVAL_TICKS`] re-sample of
+    /// `plan`'s remaining witness set. Reset whenever `plan` changes.
+    ticks_since_witness_sweep: u32,
 }
 
 /// (Re)start or resume the search toward [`AutopilotGoal`].
@@ -192,7 +228,47 @@ fn plan_route(
         return;
     };
 
-    if state.for_goal != Some(target) {
+    // Witness-set invalidation (`docs/baritone-port.md` §4.5) plus the
+    // look-ahead window (§4.5/§2.3): before doing anything else this tick,
+    // check whether the terrain the *active* plan's legality depended on has
+    // changed since it was committed. Two checks, two cadences:
+    //
+    // - every tick, a cheap look-ahead over the next `LOOKAHEAD_EDGES` edges
+    //   — catches a hazard forming just ahead before the body ever reaches
+    //   it;
+    // - rate-limited (`WITNESS_SWEEP_INTERVAL_TICKS`), a full sweep of the
+    //   rest of the plan's own witness set — catches a change further down
+    //   the route that the window has not reached yet.
+    //
+    // A hit forces `need_fresh` below exactly as a goal change does: discard
+    // the continuation and replan from the live position, per §4.9's "never
+    // execute a plan you already know is stale."
+    let mut invalidated_at = None;
+    if state.for_goal == Some(target)
+        && let Some(plan) = state.plan.as_ref()
+        && !state.witness_baseline.is_empty()
+    {
+        let world = chunk_world.read();
+        let window = plan.witnesses_in_range(state.edge..state.edge.saturating_add(LOOKAHEAD_EDGES));
+        invalidated_at = window.iter().find_map(|key| {
+            let &recorded = state.witness_baseline.get(key)?;
+            let node = lodestone_nav::NavNode::unpack(*key)?;
+            let live = witness::point_state(&world, node.x, node.y, node.z);
+            (live != Some(recorded)).then_some((node.x, node.y, node.z))
+        });
+
+        if invalidated_at.is_none() {
+            state.ticks_since_witness_sweep = state.ticks_since_witness_sweep.saturating_add(1);
+            if state.ticks_since_witness_sweep >= WITNESS_SWEEP_INTERVAL_TICKS {
+                state.ticks_since_witness_sweep = 0;
+                invalidated_at = witness::first_change(&world, &state.witness_baseline);
+            }
+        }
+    }
+
+    let need_fresh = state.for_goal != Some(target) || invalidated_at.is_some();
+
+    if need_fresh {
         *state = AutopilotState {
             for_goal: Some(target),
             ..AutopilotState::default()
@@ -233,6 +309,7 @@ fn plan_route(
                 state.plan = state.search.take().and_then(|s| s.best_plan());
                 state.edge = 0;
                 state.reached_goal = true;
+                sample_witness_baseline(&mut state, &chunk_world);
                 *status = if state.plan.is_some() {
                     AutopilotStatus::Driving
                 } else {
@@ -252,6 +329,7 @@ fn plan_route(
                 state.plan = state.search.take().and_then(|s| s.best_plan());
                 state.edge = 0;
                 state.reached_goal = false;
+                sample_witness_baseline(&mut state, &chunk_world);
                 *status = if state.plan.is_some() {
                     AutopilotStatus::Driving
                 } else {
@@ -297,6 +375,8 @@ fn plan_route(
             Progress::Done(outcome) => {
                 let reached = outcome == Outcome::Reached;
                 if let Some(plan) = state.continuation_search.take().and_then(|s| s.best_plan()) {
+                    let world = chunk_world.read();
+                    state.continuation_witness_baseline = witness::sample(&world, &plan.witnesses());
                     state.continuation_plan = Some(plan);
                     state.continuation_reached_goal = reached;
                 }
@@ -312,6 +392,22 @@ fn plan_route(
             }
         }
     }
+}
+
+/// Snapshot `state.plan`'s witness set into `state.witness_baseline`, or
+/// clear it when `state.plan` is `None` — the shared tail of both search-done
+/// branches above, factored out so the two stay in lockstep (a baseline for
+/// the wrong plan, or none at all, would make [`plan_route`]'s invalidation
+/// check either blind or spuriously trip on the very first tick).
+fn sample_witness_baseline(state: &mut AutopilotState, chunk_world: &ChunkWorld) {
+    state.ticks_since_witness_sweep = 0;
+    let Some(plan) = state.plan.as_ref() else {
+        state.witness_baseline = HashMap::new();
+        return;
+    };
+    let witnesses = plan.witnesses();
+    let world = chunk_world.read();
+    state.witness_baseline = witness::sample(&world, &witnesses);
 }
 
 /// Turn the current plan edge into this tick's [`MovementIntent`]/[`LookIntent`],
@@ -347,12 +443,23 @@ fn drive_plan(
             state.reached_goal = state.continuation_reached_goal;
             state.plan = Some(next);
             state.edge = 0;
+            // The spliced-in plan's own witnesses, not the plan it replaced —
+            // otherwise the very next invalidation check would compare live
+            // terrain against a baseline for cells the new plan never reads.
+            state.witness_baseline = std::mem::take(&mut state.continuation_witness_baseline);
+            state.ticks_since_witness_sweep = 0;
             // No intent this tick; the spliced plan's first edge drives from
             // the next one, exactly as a freshly-adopted plan would.
             return;
         }
         if state.reached_goal {
             state.plan = None;
+            // Keep `witness_baseline`'s "empty exactly when `plan` is `None`"
+            // invariant (`AutopilotState`'s own doc comment) — otherwise a
+            // stale baseline from the just-finished plan would sit here doing
+            // nothing until the next goal, harmless today only because every
+            // invalidation check is gated on `state.plan` being `Some` first.
+            state.witness_baseline = HashMap::new();
             commands.entity(entity).remove::<LookIntent>();
             *status = AutopilotStatus::Arrived;
         } else {

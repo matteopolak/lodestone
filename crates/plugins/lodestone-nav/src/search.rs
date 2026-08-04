@@ -1020,6 +1020,124 @@ mod tests {
         assert!(state.on_ground, "expected to have settled on the real platform");
     }
 
+    /// The `Drop` counterpart of `the_planned_cost_matches_what_executing_the_plan_costs`
+    /// — the same real-physics replay, over a plan whose only way across is a
+    /// genuine two-cell fall (`fall_step`'s `n > 1` branch, gated by
+    /// `NavPolicy::max_fall_blocks`). `Walk`, `WalkDiagonal` and `Climb` all
+    /// have this "planned cost equals executed cost" gate already; `Drop` did
+    /// not — nothing before this replayed a `Drop` edge through the real
+    /// integrator end to end, only `graph::tests`' own fixture-level legality
+    /// checks (`a_two_cell_drop_onto_solid_ground_is_a_legal_drop_of_two`),
+    /// which cannot see whether `WalkDrive::arrived`'s same-height straddle
+    /// fix (`docs/autonomous-navigation.md`'s "a synthetic `Drop` of 2 cells
+    /// and one of 6 both 'completed' in identically 4.93 ticks") actually
+    /// holds once physics, not a hand-picked `to_surface`, decides when the
+    /// edge is done.
+    #[test]
+    fn the_planned_cost_matches_what_executing_a_drop_plan_costs() {
+        use crate::drive::WalkDrive;
+        use lodestone_physics::{PlayerState, Vec3d};
+
+        let facts = Arc::new(FactsTable::build(&FixtureCensus));
+        let mut grid = GridView::new(facts, AIR, -64, 320, Some((-8, -8, 8, 8)));
+        // A platform at y = 0 (top 1.0) for x <= 2, and — starting at x = 3 —
+        // real ground two cells lower, at y = -2 (top -1.0), with nothing in
+        // between: the only way from one to the other is a genuine two-cell
+        // `Drop`, never a `Descend` or a `Walk`.
+        grid.fill(-8, 0, -8, 2, 0, 8, STONE);
+        grid.fill(3, -2, -8, 8, -2, 8, STONE);
+        let view = Arc::new(grid);
+
+        let mut s = search(
+            view.clone(),
+            Box::new(AtBlock { x: 6, y: -1, z: 0 }),
+            NavPolicy::default(),
+        );
+        assert_eq!(s.run(Budget { nodes: 1_000 }), Outcome::Reached);
+        let plan = s.best_plan().expect("a plan");
+        assert!(
+            plan.edges().iter().any(|e| matches!(e.kind, MoveKind::Drop(_, 2))),
+            "expected a Drop(_, 2) edge in the plan: {:?}",
+            plan.edges()
+        );
+
+        let profile = PhysicsProfile::mc_1_21();
+        let mut state = PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0);
+        state.on_ground = true;
+        let mut actual = 0u32;
+        for (i, edge) in plan.edges().iter().enumerate() {
+            let drive = WalkDrive {
+                cell: [edge.to.x, edge.to.y, edge.to.z],
+                surface: edge.to_surface,
+                brake: i + 1 == plan.len(),
+                sprint: false,
+                steer: true,
+                jump: false,
+            };
+            let mut edge_ticks = 0;
+            while !drive.done(&state) && edge_ticks < 60 {
+                let step = drive.tick(&state);
+                state.yaw = step.yaw;
+                state = state.with_movement_speed(f64::from(profile.base_movement_speed));
+                lodestone_physics::tick(&mut state, step.input, view.as_ref(), &profile);
+                edge_ticks += 1;
+                actual += 1;
+            }
+            assert!(edge_ticks < 60, "edge {i} ({:?}) never completed", edge.kind);
+        }
+
+        let planned = plan.total_cost().as_f64();
+        let error = f64::from(actual) - planned;
+        assert!(
+            error.abs() < 24.0,
+            "planned {planned:.1} ticks, executed {actual} ({error:+.1})"
+        );
+        assert_eq!(state.position.x.floor() as i32, 6);
+        assert!(
+            (state.position.y - -1.0).abs() < 0.15,
+            "expected to have settled on the lower landing (surface -1.0), got {}",
+            state.position.y
+        );
+        assert!(state.on_ground, "expected to have settled after the drop, not still falling");
+    }
+
+    /// The unreachable control `fall_step`'s legality rule needs at the
+    /// *search* level, not only `graph::tests`': a drop whose real height
+    /// exceeds `NavPolicy::max_fall_blocks` (default 3.0, vanilla's own
+    /// zero-damage `SAFE_FALL_DISTANCE`) must never be taken — and here it is
+    /// the *only* way across, a wall of illegally deep drop the whole width
+    /// of the snapshot, so a search that silently ignored the cap would still
+    /// report `Reached`.
+    #[test]
+    fn a_drop_deeper_than_max_fall_blocks_has_no_route_across_it() {
+        let facts = Arc::new(FactsTable::build(&FixtureCensus));
+        let mut grid = GridView::new(facts, AIR, -64, 320, Some((-8, -8, 8, 8)));
+        grid.fill(-8, 0, -8, 2, 0, 8, STONE);
+        // A four-cell drop: delta 4.0, over `NavPolicy::default().max_fall_blocks` (3.0).
+        grid.fill(3, -4, -8, 8, -4, 8, STONE);
+        let view = Arc::new(grid);
+
+        let mut s = search(
+            view,
+            Box::new(AtBlock { x: 6, y: -3, z: 0 }),
+            NavPolicy::default(),
+        );
+        let outcome = s.run(Budget { nodes: 5_000 });
+        assert_ne!(
+            outcome,
+            Outcome::Reached,
+            "the goal sits past a drop deeper than max_fall_blocks allows"
+        );
+        if let Some(plan) = s.best_plan() {
+            assert!(
+                plan.edges().iter().all(|e| !matches!(e.kind, MoveKind::Drop(_, _))),
+                "no Drop edge should exist in any partial when every drop across \
+                 this cliff exceeds max_fall_blocks: {:?}",
+                plan.edges()
+            );
+        }
+    }
+
     /// The surface a step is costed against is the block the **feet rest on**, which
     /// for a partial block is the destination cell itself and not the cell below it.
     ///

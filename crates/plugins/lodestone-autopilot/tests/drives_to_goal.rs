@@ -404,6 +404,101 @@ fn a_goal_with_no_reachable_progress_at_all_is_reported_as_a_search_failure() {
     }
 }
 
+/// The invalidation control (`docs/baritone-port.md` §4.5): a committed plan
+/// depends on the terrain it was searched against staying what it was. Break
+/// a block the plan's own witness set covers, well ahead of the player, and
+/// the plugin must notice and replan — not walk the stale route into a column
+/// that no longer has a floor.
+///
+/// # What would fail without the fix
+///
+/// Absent witness-set invalidation, `plan_route` never re-examines a plan
+/// once it is adopted: `AutopilotStatus` would go straight from `Driving` to
+/// `Arrived` with no further `Planning` in between, and the executed path
+/// would stay exactly the original straight line along `z = 0` — this
+/// fixture's [`FlatFloor`] physics seam is a hardcoded flat plane independent
+/// of [`ChunkWorld`], so nothing in the *executor* would even notice the
+/// missing support; only the *planner* re-checking its own witnesses can.
+/// This test asserts both of the specific things invalidation must produce:
+/// a fresh `Planning` after the break, and a route that actually diverges
+/// from the straight line to go around the hole — not merely "arrived
+/// eventually", which a bug that ignored the break entirely would also
+/// satisfy (`FlatFloor` never stops the player, break or no break).
+#[test]
+fn a_block_broken_under_a_committed_plan_forces_a_replan_around_it() {
+    let (mut app, entity) = app_on_flat_floor(6);
+    app.insert_resource(AutopilotGoal(Some(BlockPos::new(10, 1, 0))));
+
+    // A handful of ticks: the trivial search over open flat ground finishes
+    // in one `Budget::PER_TICK` step, so this is comfortably past `Driving`
+    // and comfortably short of `x = 8` (walk speed ~0.216 blocks/tick, so
+    // ~10 ticks covers ~2.2 blocks).
+    run_ticks(&mut app, 10);
+    let mid = position(&app, entity);
+    assert_eq!(
+        *app.world().resource::<AutopilotStatus>(),
+        AutopilotStatus::Driving,
+        "test premise: should already be driving the first plan"
+    );
+    assert!(
+        mid.x < 6.0,
+        "test premise: should not be anywhere near the break yet, mid={mid:?}"
+    );
+
+    // Break the support the plan's own witness set covers for standing at
+    // (8, 1, 0) — `flat_chunk_world`'s floor is a single layer at `y = 0`
+    // with nothing below (the column's own `min_y` is `0`), so this leaves
+    // that column with no standable surface at all: not a shorter step, a
+    // genuine hole a straight walk can no longer cross.
+    app.world()
+        .resource::<ChunkWorld>()
+        .write()
+        .set_block(8, 0, 0, AIR);
+
+    // Not `AutopilotStatus::Planning`: on this trivial, open-flat-ground
+    // search, `plan_route`'s `Planning` write and its own
+    // `search.step`-to-`Reached` overwrite both happen inside the *same*
+    // system call, so a status sampled only once per tick (as every other
+    // test in this file does) can never observe it — proven true even for
+    // the very first plan, before any invalidation exists to blame. The
+    // decisive, externally observable signal that a genuinely *different*
+    // plan was adopted is the executed path itself.
+    let mut saw_a_reroute_around_the_hole = false;
+    for _ in 0..600 {
+        run_ticks(&mut app, 1);
+        let p = position(&app, entity);
+        if (p.x - 8.0).abs() < 0.6 && (p.z - 0.5).abs() > 0.6 {
+            saw_a_reroute_around_the_hole = true;
+        }
+    }
+
+    // The decisive assertion: a straight-line plan (what would keep executing
+    // without invalidation, since `FlatFloor`'s physics never stops the
+    // player regardless of what `ChunkWorld` says) cannot produce a `z`
+    // reading this far from `0.5` while `x` is near the break — only a
+    // genuinely different, re-planned route can. Absent the fix, this loop
+    // would run 600 ticks of straight-line `z = 0.5` walking and this would
+    // stay `false` throughout.
+    assert!(
+        saw_a_reroute_around_the_hole,
+        "expected the executed path to actually diverge from the original z=0 \
+         line while crossing x=8, proving a genuinely different plan was driven, \
+         not just the same stale one re-labelled"
+    );
+
+    let end = position(&app, entity);
+    assert!(
+        (end.x - 10.5).abs() < 0.6 && (end.z - 0.5).abs() < 0.6,
+        "expected the player to still have arrived near block (10, 1, 0) via the \
+         detour, end={end:?}"
+    );
+    assert_eq!(
+        *app.world().resource::<AutopilotStatus>(),
+        AutopilotStatus::Arrived,
+        "the plugin's own status resource must agree that it arrived"
+    );
+}
+
 /// # Genuine collision, not a flat plane
 ///
 /// Every test above builds its world from [`FixtureAdapter`]/[`FlatFloor`]: two
@@ -905,6 +1000,220 @@ mod real_collision {
             *app.world().resource::<AutopilotStatus>(),
             AutopilotStatus::Arrived,
             "the plugin's own status resource must agree that it arrived"
+        );
+    }
+
+    // --- M2: Drop over real, jar-derived collision ---
+    //
+    // The slab gate above strengthens M1's `Walk`; the `StepUp` gate above
+    // strengthens the ascent half of M2. Neither exercises `fall_step`'s
+    // `n > 1` branch at all — `Drop` was the one M2 kind with no real-collision
+    // gate (`docs/autonomous-navigation.md` records this as a named residual).
+    // `lodestone_nav::graph::tests::a_two_cell_drop_onto_solid_ground_is_a_legal_drop_of_two`
+    // and `search::tests::the_planned_cost_matches_what_executing_a_drop_plan_costs`
+    // prove the legality rule and the simulated cost against `FixtureCensus`;
+    // this closes the same "world" species of vacuous test for `Drop` that the
+    // other three gates already closed for their own kinds — real
+    // `minecraft:stone`, through the real `VersionAdapter`/`AdapterCensus`/
+    // `FactsTable` chain, driven through the real `TickSet::Intent -> Physics`
+    // pipeline.
+
+    /// World `x` at which the real platform (`y` in `0..=2`, top `3.0`) ends
+    /// and real ground two cells lower (top `1.0`) begins — a genuine cliff
+    /// edge, not a floating block, so the only way across is falling the two
+    /// full cells the height difference demands. Landing is on `minecraft:stone`,
+    /// never a slab, matching `fall_step`'s own "slabs are excluded as `Drop`
+    /// landings" rule.
+    const DROP_X: i32 = 3;
+
+    fn dropped_floor_state_at(x: i32, y: i32, stone: u32, air: u32) -> u32 {
+        let solid = if x < DROP_X { (0..=2).contains(&y) } else { y == 0 };
+        if solid { stone } else { air }
+    }
+
+    fn dropped_chunk_world(radius: i32, stone: u32, air: u32) -> ChunkWorld {
+        let mut world = World::new();
+        let block_kind = PaletteKind::block_states();
+        let biome_kind = PaletteKind::biomes();
+        const SECTION_COUNT: usize = 4;
+
+        for cx in -radius..=radius {
+            for cz in -radius..=radius {
+                let mut column = ChunkColumn::new(0, SECTION_COUNT, block_kind, biome_kind, air, 0);
+                for lx in 0..16i32 {
+                    for lz in 0..16i32 {
+                        let wx = cx * 16 + lx;
+                        for y in 0..=2i32 {
+                            column.set_block(
+                                lx as usize,
+                                y,
+                                lz as usize,
+                                dropped_floor_state_at(wx, y, stone, air),
+                            );
+                        }
+                    }
+                }
+                let light = ColumnLight::new(SECTION_COUNT);
+                let chunk = LoadedChunk::new(column, light, Heightmaps::default(), Vec::new());
+                world.load(ChunkPos::new(cx, cz), chunk);
+            }
+        }
+
+        ChunkWorld::new(world)
+    }
+
+    /// The physics-side seam for the drop scene — independent code from
+    /// [`dropped_chunk_world`], same reasoning as [`RealFloorCollision`]/
+    /// [`SteppedFloorCollision`].
+    #[derive(Debug)]
+    struct DroppedFloorCollision {
+        stone: u32,
+        air: u32,
+    }
+
+    impl CollisionView for DroppedFloorCollision {
+        fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<lodestone_physics::Aabb>) {
+            if !(0..=2).contains(&y) {
+                return;
+            }
+            let state = dropped_floor_state_at(x, y, self.stone, self.air);
+            let Some(boxes) = lodestone_data::collision_shapes::collision_boxes(state) else {
+                return;
+            };
+            for b in boxes {
+                out.push(lodestone_physics::Aabb {
+                    min_x: f64::from(x) + f64::from(b.min[0]),
+                    min_y: f64::from(y) + f64::from(b.min[1]),
+                    min_z: f64::from(z) + f64::from(b.min[2]),
+                    max_x: f64::from(x) + f64::from(b.max[0]),
+                    max_y: f64::from(y) + f64::from(b.max[1]),
+                    max_z: f64::from(z) + f64::from(b.max[2]),
+                });
+            }
+        }
+    }
+
+    impl CollisionSource for DroppedFloorCollision {
+        fn with_view(&self, f: &mut dyn FnMut(&dyn CollisionView)) {
+            f(self);
+        }
+    }
+
+    /// A goal past a real two-cell drop is reached — through real per-state
+    /// collision, the real search (`fall_step`'s `n > 1` `Drop`
+    /// classification, gated on `NavPolicy::max_fall_blocks`), the real
+    /// simulated cost (plain gravity, no jump input), and the real
+    /// `TickSet::Intent -> Physics` pipeline. A regression specific to `Drop`
+    /// — the slab-exclusion rule refusing every landing, say, or a
+    /// hazard-in-the-fall-path check tripping on ordinary air — could ship
+    /// with every other real-collision gate here green, which is the whole
+    /// reason this one exists separately.
+    #[test]
+    fn a_goal_past_a_real_two_cell_drop_is_reached_by_falling() {
+        let stone = real_state_id("minecraft:stone");
+        let air = real_state_id("minecraft:air");
+        let stone_top = lodestone_data::collision_shapes::collision_boxes(stone)
+            .and_then(|b| b.iter().map(|b| b.max[1]).reduce(f32::max))
+            .expect("stone has a real collision shape");
+        assert!(
+            (stone_top - 1.0).abs() < 1e-4,
+            "test premise: real minecraft:stone must be a full-height cube, got top={stone_top}"
+        );
+
+        let mut app = App::new();
+        app.add_plugins((lodestone_ecs::CorePlugin, LocalPlayerPlugin, AutopilotPlugin));
+        app.insert_resource(PlayerCollision::View(Arc::new(DroppedFloorCollision { stone, air })));
+        app.insert_resource(dropped_chunk_world(4, stone, air));
+        app.insert_resource(VersionData(Some(Box::new(RealDataAdapter))));
+        let entity = spawn_local_player(app.world_mut(), PlayerState::at(Vec3d::new(0.5, 3.0, 0.5), 0.0));
+
+        let start = position(&app, entity);
+        app.insert_resource(AutopilotGoal(Some(BlockPos::new(6, 1, 0))));
+
+        let mut saw_the_fall = false;
+        for _ in 0..400 {
+            run_ticks(&mut app, 1);
+            let p = position(&app, entity);
+            if p.x > f64::from(DROP_X) && p.y < 2.0 {
+                saw_the_fall = true;
+            }
+        }
+
+        assert!(
+            saw_the_fall,
+            "expected the player to actually fall past the platform edge, \
+             never observed y<2.0 past x={DROP_X}"
+        );
+
+        let end = position(&app, entity);
+        assert!(
+            (end.x - start.x).abs() > 3.0,
+            "expected real horizontal progress toward the goal, start={start:?} end={end:?}"
+        );
+        assert!(
+            (end.x - 6.5).abs() < 0.6 && (end.z - 0.5).abs() < 0.6,
+            "expected the player to have arrived near block (6, 1, 0), end={end:?}"
+        );
+        assert!(
+            (end.y - 1.0).abs() < 0.15,
+            "expected the player resting on the low floor (surface 1.0) past the drop, end={end:?}"
+        );
+        assert_eq!(
+            *app.world().resource::<AutopilotStatus>(),
+            AutopilotStatus::Arrived,
+            "the plugin's own status resource must agree that it arrived"
+        );
+    }
+
+    /// The unreachable control this repo's evidence standards ask for: a
+    /// drop whose real height exceeds `NavPolicy::max_fall_blocks` sits
+    /// between the player and the goal, with nothing else nearby to detour
+    /// through — real per-state collision, real search, watched to fail
+    /// rather than merely asserted to.
+    #[test]
+    fn a_real_drop_deeper_than_max_fall_blocks_cannot_reach_a_goal_past_it() {
+        let stone = real_state_id("minecraft:stone");
+        let air = real_state_id("minecraft:air");
+
+        // Same shape as `dropped_floor_state_at`, but the far side sits four
+        // cells down (delta 4.0) rather than two — past
+        // `NavPolicy::default().max_fall_blocks` (3.0) — and the world is
+        // narrow enough (`radius = 1`) that there is no way around the cliff
+        // within the loaded snapshot, only across it.
+        let mut world = World::new();
+        let block_kind = PaletteKind::block_states();
+        let biome_kind = PaletteKind::biomes();
+        const SECTION_COUNT: usize = 4;
+        for cx in -1..=1i32 {
+            for cz in -1..=1i32 {
+                let mut column = ChunkColumn::new(-16, SECTION_COUNT, block_kind, biome_kind, air, 0);
+                for lx in 0..16i32 {
+                    for lz in 0..16i32 {
+                        let wx = cx * 16 + lx;
+                        for y in [0, -4] {
+                            let solid = (wx < DROP_X && y == 0) || (wx >= DROP_X && y == -4);
+                            column.set_block(lx as usize, y, lz as usize, if solid { stone } else { air });
+                        }
+                    }
+                }
+                let light = ColumnLight::new(SECTION_COUNT);
+                let chunk = LoadedChunk::new(column, light, Heightmaps::default(), Vec::new());
+                world.load(ChunkPos::new(cx, cz), chunk);
+            }
+        }
+
+        let plan = lodestone_autopilot::compute_plan(
+            &world,
+            Vec3d::new(0.5, 1.0, 0.5),
+            BlockPos::new(6, -3, 0),
+            Arc::new(lodestone_nav::FactsTable::build(&lodestone_nav::AdapterCensus(&RealDataAdapter))),
+            1,
+            lodestone_nav::NavPolicy::default(),
+            10_000,
+        );
+        assert!(
+            plan.is_none(),
+            "a real four-cell drop exceeds max_fall_blocks (3.0) and must refuse the goal past it: {plan:?}"
         );
     }
 

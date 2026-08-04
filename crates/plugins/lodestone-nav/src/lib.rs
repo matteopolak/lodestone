@@ -43,6 +43,7 @@
 //! | [`plan`] | a validated plan and its witness set |
 //! | [`search`] | the resumable, budgeted, weighted A\* |
 //! | [`policy`] | the knobs, captured by value into each search |
+//! | [`witness`] | diffing a plan's witness set against the live world |
 //!
 //! # Milestone
 //!
@@ -68,6 +69,7 @@ pub mod policy;
 pub mod search;
 pub mod ticks;
 pub mod view;
+pub mod witness;
 
 pub use cost::{EntryRel, SpeedClass, SurfaceClass, Template, TemplateKey, TemplateTable};
 pub use drive::{DriveTick, WalkDrive, axes_for_world_dir, yaw_towards};
@@ -82,3 +84,4 @@ pub use policy::NavPolicy;
 pub use search::{Budget, Outcome, Progress, Search, SearchStats};
 pub use ticks::Ticks;
 pub use view::{GridView, NavView, SnapshotView};
+pub use witness::{first_change, point_state, sample as sample_witnesses};
