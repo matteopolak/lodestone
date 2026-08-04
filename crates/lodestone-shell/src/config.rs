@@ -58,6 +58,21 @@ pub const MIN_SCALED_HEIGHT: u32 = 240;
 /// doing anything unsafe or even visible.
 pub const MAX_MANUAL_GUI_SCALE: u32 = 8;
 
+/// Vanilla's `mouseWheelSensitivity` slider bounds (issue #203):
+/// `logMouse(-200)` and `logMouse(100)`, i.e. `10^(-200/100)` and
+/// `10^(100/100)` (`Options.java:480-482`, `:1195-1196`).
+pub const MIN_MOUSE_WHEEL_SENSITIVITY: f32 = 0.01;
+/// See [`MIN_MOUSE_WHEEL_SENSITIVITY`].
+pub const MAX_MOUSE_WHEEL_SENSITIVITY: f32 = 10.0;
+/// The step one settings-row click moves `mouse_wheel_sensitivity` by.
+///
+/// Not vanilla's own granularity — the slider drags continuously through 300
+/// log-mapped integer steps, which is meaningless translated to "one click".
+/// Chosen so the whole `0.01..=10.0` range takes a reasonable number of
+/// clicks to traverse rather than either one click (a de facto on/off switch)
+/// or hundreds.
+pub const MOUSE_WHEEL_SENSITIVITY_STEP: f32 = 0.25;
+
 /// Reproduces `Window.calculateScale(maxScale, enforceUnicode)`
 /// (`.cache/mc/26.2/client-src/com/mojang/blaze3d/platform/Window.java:445-463`)
 /// exactly, **minus** the legacy `enforceUnicode` even-scale rounding:
@@ -115,7 +130,12 @@ pub fn calculate_gui_scale(desired: u32, framebuffer_width: u32, framebuffer_hei
 /// back. Add fields here as more settings need to persist, following
 /// [`crate::menu::servers::ServerList`]'s rule that a missing or corrupt file
 /// is the default, never an error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// **Not `Eq`** since #203 added `mouse_wheel_sensitivity: f32` — `f32` has no
+/// `Eq` impl (`NaN != NaN`), so the struct can no longer derive it. Nothing
+/// depended on `Options: Eq` before this (checked: no `HashSet`/`BTreeMap`
+/// keyed on it), only `PartialEq`, which every test here already uses.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Options {
     /// The user's chosen `gui_scale`: [`AUTO_GUI_SCALE`] or an explicit
     /// ceiling. This is fed to [`calculate_gui_scale`] against the live
@@ -140,6 +160,26 @@ pub struct Options {
     ///
     /// Default **on**, matching vanilla. See `docs/view-bobbing.md`.
     pub view_bobbing: bool,
+    /// Vanilla's `key.sneak` toggle option (`Options::toggleCrouch`,
+    /// `Options.java:603-610`, issue #202): sneak is hold-to-activate when
+    /// `false` (vanilla's own default) and press-to-toggle when `true`. Fed to
+    /// [`lodestone_controller::InputState::set_toggle_modes`].
+    pub toggle_sneak: bool,
+    /// As [`Self::toggle_sneak`], for `key.sprint`/`Options::toggleSprint`
+    /// (`Options.java:611-618`).
+    pub toggle_sprint: bool,
+    /// Vanilla's `options.invertMouseX` (`Options.java:524`), default `false`.
+    /// Fed to [`lodestone_controller::apply_look_inverted`].
+    pub invert_mouse_x: bool,
+    /// Vanilla's `options.invertMouseY` (`Options.java:525`), default `false`.
+    pub invert_mouse_y: bool,
+    /// Vanilla's `options.mouseWheelSensitivity` (`Options.java:476-484`): a
+    /// multiplier on the raw scroll delta before it reaches slot selection
+    /// (`MouseHandler.java:190-191`). Default `1.0` — vanilla's own default is
+    /// `logMouse(0) == 10^(0/100) == 1.0` (`Options.java:1195-1196`), i.e. no
+    /// scaling, which is why `1.0` (not `0.0`) is what an absent/corrupt key
+    /// degrades to.
+    pub mouse_wheel_sensitivity: f32,
 }
 
 impl Default for Options {
@@ -148,6 +188,11 @@ impl Default for Options {
             gui_scale: AUTO_GUI_SCALE,
             keybinds: Keybinds::new(),
             view_bobbing: true,
+            toggle_sneak: false,
+            toggle_sprint: false,
+            invert_mouse_x: false,
+            invert_mouse_y: false,
+            mouse_wheel_sensitivity: 1.0,
         }
     }
 }
@@ -192,10 +237,44 @@ impl Options {
             .get("view_bobbing")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true);
+        // Absent or malformed is `false` for both — vanilla's own default is
+        // hold mode, so a mangled file must not silently switch a player onto
+        // toggle mode they never asked for.
+        let toggle_sneak = obj
+            .get("toggle_sneak")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let toggle_sprint = obj
+            .get("toggle_sprint")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let invert_mouse_x = obj
+            .get("invert_mouse_x")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let invert_mouse_y = obj
+            .get("invert_mouse_y")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        // Degrades to `1.0` (no scaling), not `0.0` — a `0.0` multiplier would
+        // silently disable the scroll wheel entirely for anyone whose file
+        // got mangled, which is a far worse failure than "sensitivity reset
+        // to the default".
+        let mouse_wheel_sensitivity = obj
+            .get("mouse_wheel_sensitivity")
+            .and_then(serde_json::Value::as_f64)
+            .map(|v| v as f32)
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(1.0);
         Self {
             gui_scale,
             keybinds,
             view_bobbing,
+            toggle_sneak,
+            toggle_sprint,
+            invert_mouse_x,
+            invert_mouse_y,
+            mouse_wheel_sensitivity,
         }
     }
 
@@ -230,6 +309,24 @@ impl Options {
         // `keybinds`: an untouched install has no key for it.
         if !self.view_bobbing {
             obj.insert("view_bobbing".into(), false.into());
+        }
+        if self.toggle_sneak {
+            obj.insert("toggle_sneak".into(), true.into());
+        }
+        if self.toggle_sprint {
+            obj.insert("toggle_sprint".into(), true.into());
+        }
+        if self.invert_mouse_x {
+            obj.insert("invert_mouse_x".into(), true.into());
+        }
+        if self.invert_mouse_y {
+            obj.insert("invert_mouse_y".into(), true.into());
+        }
+        if (self.mouse_wheel_sensitivity - 1.0).abs() > f32::EPSILON {
+            obj.insert(
+                "mouse_wheel_sensitivity".into(),
+                (self.mouse_wheel_sensitivity as f64).into(),
+            );
         }
         let text = serde_json::to_string_pretty(&serde_json::Value::Object(obj))
             .unwrap_or_else(|_| "{}".to_string());
@@ -662,6 +759,96 @@ mod tests {
                 "view_bobbing: {bad} must degrade to ON, not OFF"
             );
             assert_eq!(loaded.gui_scale, 5, "gui_scale must survive {bad}");
+        }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    // -- toggle sneak/sprint, mouse invert/sensitivity (issues #202/#203) ---
+
+    #[test]
+    fn toggle_and_invert_default_off_and_write_no_key_when_untouched() {
+        let path = temp_options_path("toggle-invert-defaults");
+        assert!(!Options::default().toggle_sneak);
+        assert!(!Options::default().toggle_sprint);
+        assert!(!Options::default().invert_mouse_x);
+        assert!(!Options::default().invert_mouse_y);
+
+        Options::default().save_to(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        for key in ["toggle_sneak", "toggle_sprint", "invert_mouse_x", "invert_mouse_y"] {
+            assert!(!text.contains(key), "the default writes no {key} key: {text}");
+        }
+        assert_eq!(Options::load_from(&path), Options::default());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn toggle_and_invert_round_trip_and_degrade_to_off() {
+        let path = temp_options_path("toggle-invert-roundtrip");
+        let on = Options {
+            toggle_sneak: true,
+            toggle_sprint: true,
+            invert_mouse_x: true,
+            invert_mouse_y: true,
+            ..Options::default()
+        };
+        on.save_to(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        for key in ["toggle_sneak", "toggle_sprint", "invert_mouse_x", "invert_mouse_y"] {
+            assert!(text.contains(key), "an explicit `true` must be written: {text}");
+        }
+        assert_eq!(Options::load_from(&path), on);
+
+        // A malformed value must degrade to `false` (vanilla's own default),
+        // never silently flip a player onto a mode they never chose.
+        for bad in ["\"true\"", "1", "null", "[]"] {
+            std::fs::write(
+                &path,
+                format!(
+                    "{{\"toggle_sneak\": {bad}, \"toggle_sprint\": {bad}, \
+                      \"invert_mouse_x\": {bad}, \"invert_mouse_y\": {bad}}}"
+                ),
+            )
+            .unwrap();
+            let loaded = Options::load_from(&path);
+            assert!(!loaded.toggle_sneak, "toggle_sneak: {bad} must degrade to OFF");
+            assert!(!loaded.toggle_sprint, "toggle_sprint: {bad} must degrade to OFF");
+            assert!(!loaded.invert_mouse_x, "invert_mouse_x: {bad} must degrade to OFF");
+            assert!(!loaded.invert_mouse_y, "invert_mouse_y: {bad} must degrade to OFF");
+        }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn mouse_wheel_sensitivity_defaults_to_one_and_degrades_to_one() {
+        let path = temp_options_path("wheel-sensitivity");
+        assert_eq!(Options::default().mouse_wheel_sensitivity, 1.0);
+
+        Options::default().save_to(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("mouse_wheel_sensitivity"),
+            "the default (1.0, no scaling) writes no key: {text}"
+        );
+
+        let custom = Options {
+            mouse_wheel_sensitivity: 2.5,
+            ..Options::default()
+        };
+        custom.save_to(&path).unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("mouse_wheel_sensitivity"));
+        assert_eq!(Options::load_from(&path).mouse_wheel_sensitivity, 2.5);
+
+        // Zero, negative and non-finite must all degrade to 1.0 — a 0.0
+        // multiplier would silently disable the scroll wheel entirely, which
+        // is a far worse failure than "the setting reset to default".
+        for bad in ["0", "-3.0", "\"nan\"", "null"] {
+            std::fs::write(&path, format!("{{\"mouse_wheel_sensitivity\": {bad}}}")).unwrap();
+            assert_eq!(
+                Options::load_from(&path).mouse_wheel_sensitivity,
+                1.0,
+                "mouse_wheel_sensitivity: {bad} must degrade to 1.0"
+            );
         }
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
