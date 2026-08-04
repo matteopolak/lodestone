@@ -277,10 +277,16 @@ impl FocusChildren for CreateWorldWidgets {
 }
 
 /// What one key or click did to the screen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreateWorldOutcome {
     Handled,
     Cancel,
+    /// Pressing Create — carries the [`WorldCreationConfig`] the player
+    /// collected, for `menu/nav.rs`'s `apply_create_world` to hand to
+    /// `MenuAction::Singleplayer` (issue #190). Not `Copy` any more:
+    /// `WorldCreationConfig` carries a `String` (the world name and the
+    /// typed seed text), which `Handled`/`Cancel` never needed.
+    Create(WorldCreationConfig),
 }
 
 /// This screen's live state: its widgets, its focus, and the config they
@@ -396,7 +402,7 @@ impl CreateWorldNav {
             CREATE_ROW => {
                 self.config.name = self.widgets.name.value().to_string();
                 self.config.seed = self.widgets.seed.value().to_string();
-                CreateWorldOutcome::Handled
+                CreateWorldOutcome::Create(self.config.clone())
             }
             CANCEL_ROW => CreateWorldOutcome::Cancel,
             _ => CreateWorldOutcome::Handled,
@@ -660,7 +666,12 @@ mod tests {
         for ch in "42".chars() {
             nav.handle_key(MenuKey::Char(ch));
         }
-        assert_eq!(nav.click_row(CREATE_ROW), CreateWorldOutcome::Handled);
+        let outcome = nav.click_row(CREATE_ROW);
+        let CreateWorldOutcome::Create(config) = outcome else {
+            panic!("expected CreateWorldOutcome::Create, got {outcome:?}");
+        };
+        assert_eq!(config.name, "Overworld");
+        assert_eq!(config.seed, "42");
         assert_eq!(nav.config().name, "Overworld");
         assert_eq!(nav.config().seed, "42");
     }

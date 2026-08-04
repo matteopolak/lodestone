@@ -78,16 +78,19 @@ pub enum MenuAction {
     /// Enter the singleplayer world: start the integrated server in-process and
     /// connect to it (issue #287).
     ///
-    /// Produced by [`Screen::WorldSelect`]'s **Play Selected World** button,
-    /// which is the only producer — the title screen's Singleplayer button opens
-    /// the world list rather than launching, which is vanilla's own wiring
-    /// (#397). `app.rs`'s arm calls `begin_singleplayer`.
+    /// Two producers: [`Screen::WorldSelect`]'s **Play Selected World** button
+    /// (`None` — the bundled world's own seed) and, since issue #190,
+    /// [`Screen::CreateWorld`]'s **Create** button (`Some(config)` — the
+    /// collected [`crate::menu::create_world::WorldCreationConfig`], whose
+    /// `seed` field `app.rs`'s `resolve_launch_seed` resolves ahead of the
+    /// bundled world's). `app.rs`'s arm calls `begin_singleplayer`, which
+    /// takes the same `Option` this variant carries.
     ///
     /// Between #397 and #287 this variant had **no producer at all** and was
     /// kept as the seam the integrated server would land on. It is worth naming
     /// because "the variant exists and is matched" was true throughout and is
     /// exactly what an island looks like from the inside.
-    Singleplayer,
+    Singleplayer(Option<crate::menu::create_world::WorldCreationConfig>),
     /// Connect to this server (the app opens the session and shows Connecting).
     Connect(ServerEntry),
     /// Shut the game down cleanly.
@@ -2019,7 +2022,7 @@ impl MenuNav {
             // list until then, because a launch that fails (no version family
             // compiled in) has to be able to show its error over a screen the
             // player recognises rather than over a blank one.
-            WorldSelectOutcome::Play => MenuAction::Singleplayer,
+            WorldSelectOutcome::Play => MenuAction::Singleplayer(None),
             // Issue #190.
             WorldSelectOutcome::CreateWorld => {
                 self.create_world = crate::menu::create_world::CreateWorldNav::new();
@@ -2041,15 +2044,26 @@ impl MenuNav {
 
     /// What a [`crate::menu::create_world::CreateWorldOutcome`] means at the
     /// `UiState` level.
+    ///
+    /// `Create` (issue #190's queued patch): the screen is left *by the app*,
+    /// not here — mirroring [`Self::apply_world_select`]'s `Play` arm above,
+    /// for the identical reason: `begin_singleplayer` must stay able to show
+    /// a launch failure over a screen the player recognises rather than over
+    /// a screen that has already navigated away.
     fn apply_create_world(
         &mut self,
         ui: &mut UiState,
         outcome: crate::menu::create_world::CreateWorldOutcome,
     ) -> MenuAction {
-        if outcome == crate::menu::create_world::CreateWorldOutcome::Cancel {
-            ui.close_create_world();
+        use crate::menu::create_world::CreateWorldOutcome;
+        match outcome {
+            CreateWorldOutcome::Handled => MenuAction::None,
+            CreateWorldOutcome::Cancel => {
+                ui.close_create_world();
+                MenuAction::None
+            }
+            CreateWorldOutcome::Create(config) => MenuAction::Singleplayer(Some(config)),
         }
-        MenuAction::None
     }
 
     /// The settings tree (issue #55). Up/Down move the cursor, Enter activates
@@ -3622,6 +3636,77 @@ mod tests {
         );
     }
 
+    /// **The gap issue #15's capture patch (`a6da3f6`) existed to close**:
+    /// a key with *no printable text* — an F-key, here, per that commit's own
+    /// choice of `F1` over `F5` so a currently-unbound key is exercised —
+    /// must be bindable end to end, not just started.
+    ///
+    /// The test above already proves this shape for a printable key
+    /// (`KeyF`); it proves nothing about `menu_key_for`'s no-text drop
+    /// because a printable key never reaches that branch. `app.rs::
+    /// capture_key_for_forwards_a_function_key` proves the physical-key
+    /// half (`capture_key_for(F1) == Some(CaptureKey::Bind(F1))`) but reads
+    /// no persisted string — this is the missing other half, driven with
+    /// `Binding::Key(KeyCode::F1)`, exactly what `app.rs`'s
+    /// `Some(CaptureKey::Bind(code)) => self.nav.capture_binding(Binding::
+    /// Key(code))` arm forwards verbatim for any `KeyCode`, F1 included.
+    ///
+    /// Asserts vanilla's own persisted spelling (`key.keyboard.f1`,
+    /// `keybinds.rs`'s own `KEY_NAMES` table) directly out of the file on
+    /// disk, not `Binding::name()` called a second time — the same file a
+    /// restart reads back.
+    #[test]
+    fn a_key_with_no_printable_text_binds_end_to_end_with_vanillas_real_name() {
+        use crate::keybinds::{Binding, InputAction};
+        use crate::menu::key_binds::KeyControl;
+        use winit::keyboard::KeyCode;
+
+        let (mut nav, path) = self::nav("key-binds-capture-f1");
+        let mut ui = UiState::new();
+        ui.open_settings();
+        let options_path = path.parent().unwrap().join("options.json");
+
+        open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::Controls);
+        open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::KeyBinds);
+        let bind_row = key_binds_row(&mut nav, &mut ui, |c| {
+            *c == KeyControl::Bind(InputAction::Forward)
+        });
+        nav.click(&mut ui, bind_row);
+        assert!(nav.awaiting_key_capture());
+
+        // The exact call `app.rs`'s forwarding arm makes for `PhysicalKey::
+        // Code(KeyCode::F1)` — no printable `text`, which is what
+        // `menu_key_for` alone would have silently dropped before `a6da3f6`.
+        nav.capture_binding(Binding::Key(KeyCode::F1));
+        assert!(!nav.awaiting_key_capture(), "the capture is consumed");
+        assert_eq!(
+            nav.options().keybinds.binding(InputAction::Forward),
+            Binding::Key(KeyCode::F1)
+        );
+
+        let raw = std::fs::read_to_string(&options_path).expect("options.json must exist");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("must be valid JSON");
+        let persisted_name = value
+            .get("keybinds")
+            .and_then(|k| k.get(InputAction::Forward.name()))
+            .and_then(serde_json::Value::as_str)
+            .expect("key.forward must be a persisted string");
+        assert_eq!(
+            persisted_name, "key.keyboard.f1",
+            "an F-key must persist under vanilla's own InputConstants spelling, \
+             not a winit debug name or a dropped/blank binding"
+        );
+
+        // Reloading from disk must reproduce the same binding — the round
+        // trip a restart performs, not just the in-memory `Keybinds`.
+        let reloaded = crate::config::Options::load_from(&options_path);
+        assert_eq!(
+            reloaded.keybinds.binding(InputAction::Forward),
+            Binding::Key(KeyCode::F1),
+            "the persisted name must parse back to the same binding on load"
+        );
+    }
+
     /// Escape while capturing cancels the capture and leaves the binding
     /// exactly as it was — vanilla's own `keyPressed` sets `UNKNOWN`
     /// unconditionally on Escape while capturing (`KeyBindsScreen.java:73-74`);
@@ -3970,6 +4055,89 @@ mod tests {
         assert!(!ui.quit_requested(), "Back is not a quit");
     }
 
+    /// **Pressing Create reaches the app with the typed seed** (issue #190's
+    /// queued patch).
+    ///
+    /// Before this, `apply_create_world` returned `MenuAction::None`
+    /// unconditionally — pressing Create updated `CreateWorldNav`'s own
+    /// in-memory config and nothing else happened, the same "collected but
+    /// read nowhere" shape `MenuAction::Singleplayer` itself was in between
+    /// #397 and #287 (see that variant's doc). This drives the real screen
+    /// flow — open World Creation, focus the Seed field the same way a click
+    /// would, type a seed, click Create — and checks the *action* the app
+    /// receives, not `CreateWorldNav::config()` a second time (already
+    /// covered by `create_world.rs`'s own
+    /// `create_carries_the_typed_name_and_seed`).
+    ///
+    /// The screen must **not** change here, mirroring Play Selected World
+    /// immediately below: `begin_singleplayer` is what moves to
+    /// `Screen::Connecting`.
+    #[test]
+    fn creating_a_world_asks_the_app_to_start_singleplayer_with_the_typed_seed() {
+        use crate::menu::create_world::{CREATE_ROW, SEED_FIELD};
+        use crate::menu::world_select::WorldSelectButton as B;
+
+        let (mut nav, _) = self::nav("create-world-seed");
+        let mut ui = UiState::new();
+        nav.key(&mut ui, MenuKey::Enter);
+        assert_eq!(ui.screen(), Screen::WorldSelect, "premise");
+        assert_eq!(nav.click(&mut ui, B::Create.row()), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::CreateWorld, "premise: World Creation is open");
+
+        assert_eq!(
+            nav.click(&mut ui, SEED_FIELD),
+            MenuAction::None,
+            "focusing the Seed field must not itself produce an action"
+        );
+        type_str(&mut nav, &mut ui, "777");
+
+        let action = nav.click(&mut ui, CREATE_ROW);
+        let MenuAction::Singleplayer(Some(config)) = action else {
+            panic!("expected MenuAction::Singleplayer(Some(config)), got {action:?}");
+        };
+        assert_eq!(config.seed, "777", "the typed seed must reach the action's payload");
+        assert_eq!(
+            ui.screen(),
+            Screen::CreateWorld,
+            "the nav layer must not leave the screen; begin_singleplayer does that"
+        );
+    }
+
+    /// **An untouched Seed field reaches the app as an empty string, not a
+    /// sentinel** (issue #190's queued patch, the random-seed half).
+    ///
+    /// `app.rs::parse_seed` already proves empty text resolves to a fresh
+    /// random `i64` (`empty_seed_is_random_not_a_fixed_fallback`) rather than
+    /// zero or a panic — that half of the contract lives with `parse_seed`
+    /// and is not re-derived here. What is this layer's job, and unproven
+    /// before this test, is that the screen hands `parse_seed` the *empty*
+    /// string it actually collected rather than some default numeral: a
+    /// `WorldCreationConfig::default()` with a `"0"` seed would compile,
+    /// look plausible, and turn every "random" world into the same one.
+    #[test]
+    fn an_empty_seed_field_reaches_the_action_as_empty_text_not_a_default_number() {
+        use crate::menu::create_world::CREATE_ROW;
+        use crate::menu::world_select::WorldSelectButton as B;
+
+        let (mut nav, _) = self::nav("create-world-empty-seed");
+        let mut ui = UiState::new();
+        nav.key(&mut ui, MenuKey::Enter);
+        assert_eq!(nav.click(&mut ui, B::Create.row()), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::CreateWorld, "premise: World Creation is open");
+
+        // No click into the Seed field, no typing — Create is pressed with
+        // the field exactly as `CreateWorldNav::new` left it.
+        let action = nav.click(&mut ui, CREATE_ROW);
+        let MenuAction::Singleplayer(Some(config)) = action else {
+            panic!("expected MenuAction::Singleplayer(Some(config)), got {action:?}");
+        };
+        assert_eq!(
+            config.seed, "",
+            "an untouched Seed field must reach the action as an empty string, matching \
+             parse_seed's own random-means-empty branch, not \"0\" or any other default"
+        );
+    }
+
     /// **Play Selected World reaches the app** (issue #287).
     ///
     /// This is the link that turns `MenuAction::Singleplayer` from a variant
@@ -3993,7 +4161,7 @@ mod tests {
 
         assert_eq!(
             nav.click(&mut ui, B::Play.row()),
-            MenuAction::Singleplayer,
+            MenuAction::Singleplayer(None),
             "Play Selected World must ask the app to launch"
         );
         assert_eq!(
@@ -4010,7 +4178,7 @@ mod tests {
         nav.key(&mut ui, MenuKey::Enter);
         nav.key(&mut ui, MenuKey::Tab);
         assert_eq!(nav.world_select().focused_row(), Some(B::Play.row()));
-        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::Singleplayer);
+        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::Singleplayer(None));
     }
 
     /// Typing on the world list goes into the search box, and Escape leaves.
