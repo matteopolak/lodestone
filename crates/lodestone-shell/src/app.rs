@@ -181,6 +181,26 @@ fn hud_follows_world(screen: crate::menu::Screen) -> bool {
     )
 }
 
+/// Vanilla's `ScrollWheelHandler.onMouseScroll` (issue #203): folds a
+/// sensitivity-scaled, possibly-fractional scroll offset into a whole number
+/// of hotbar slots, carrying the remainder in `accum` across calls so a
+/// `mouseWheelSensitivity` below 1.0 does not silently drop sub-notch scroll.
+///
+/// `accum` resets to zero on a direction reversal
+/// (`Math.signum(scaledYOffset) != Math.signum(this.accumulatedScrollY)`,
+/// `ScrollWheelHandler.java:14-16`) rather than fighting the new direction with
+/// old carry — one hard flick back should not need to "pay off" the previous
+/// direction's fractional debt first.
+fn accumulate_scroll(accum: &mut f64, scaled: f64) -> i32 {
+    if *accum != 0.0 && scaled.signum() != accum.signum() {
+        *accum = 0.0;
+    }
+    *accum += scaled;
+    let whole = accum.trunc();
+    *accum -= whole;
+    whole as i32
+}
+
 /// Which input surface owns the keyboard this instant.
 ///
 /// The four flags [`resolve_key`] needs, read off [`crate::menu::UiState`] at
@@ -1163,6 +1183,17 @@ struct WindowApp {
     /// (`Screen.hasControlDown()`/`Minecraft.hasControlDown()`), which is a
     /// modifier read at drop time, not a `KeyMapping` of its own.
     ctrl_held: bool,
+    /// Fractional carry for the hotbar mouse-wheel scroll (issue #203), so a
+    /// `mouseWheelSensitivity` below 1.0 does not lose sub-notch scroll and
+    /// above 1.0 can cross more than one slot per notch. Mirrors vanilla's
+    /// `ScrollWheelHandler.accumulatedScrollY`: each event adds
+    /// `dy * sensitivity`, [`accumulate_scroll`] truncates off the whole
+    /// slots and keeps the remainder, and a direction reversal drops
+    /// whatever was carried in the old direction rather than fighting it.
+    /// Not persisted — vanilla's own accumulator does not survive a restart
+    /// either, being a field on a `MouseHandler` that is rebuilt with the
+    /// window.
+    scroll_accum: f64,
     /// When the left button last pressed on the container screen, for
     /// [`DOUBLE_CLICK_WINDOW`]-based double-click detection.
     last_menu_click: Option<Instant>,
@@ -1244,6 +1275,7 @@ impl WindowApp {
             menu_input: MenuInput::new(),
             shift_held: false,
             ctrl_held: false,
+            scroll_accum: 0.0,
             last_menu_click: None,
             fps_ema: 0.0,
             last_log: Instant::now(),
@@ -1990,6 +2022,16 @@ impl WindowApp {
         // itself, once per `RedrawRequested`, by calling `update()` directly
         // — no internal timer, so packet ingest is never gated on frame rate.
         self.ecs.update();
+        // Issues #202/#203: pushed down before `step`, not after like View
+        // Bobbing below — `step` is what actually reads them this call
+        // (`apply_mouse`'s look-inversion, and the toggle-mode push into
+        // `InputState` for every catch-up tick this call runs), so pushing
+        // them post-step would apply this frame's option change one frame
+        // late.
+        self.sim
+            .set_mouse_invert(self.nav.invert_mouse_x(), self.nav.invert_mouse_y());
+        self.sim
+            .set_toggle_modes(self.nav.toggle_sneak(), self.nav.toggle_sprint());
         self.sim.step(dt);
         if !step.render {
             // Unfocused (throttled to ~30 fps) or occluded: skip presenting
@@ -3080,16 +3122,52 @@ impl ApplicationHandler for WindowApp {
                 }
             }
             // Scroll cycles the hotbar (down = right, like vanilla) only
-            // during active play; menus and the chat prompt ignore it.
+            // during active play; menus and the chat prompt ignore it. The
+            // step is scaled by `mouseWheelSensitivity` (issue #203) through
+            // the same fractional accumulator vanilla's `ScrollWheelHandler`
+            // uses, so sensitivity below 1.0 can take more than one notch to
+            // move a slot and sensitivity above 1.0 can cross several in one
+            // notch — not just a threshold on the existing ±1 step.
             WindowEvent::MouseWheel { delta, .. } if self.ui.accepts_gameplay_input() => {
                 let dy = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => y,
-                    winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => f64::from(y),
+                    winit::event::MouseScrollDelta::PixelDelta(p) => p.y,
                 };
-                if dy > 0.0 {
-                    self.sim.cycle_slot(-1);
+                let scaled = dy * f64::from(self.nav.mouse_wheel_sensitivity());
+                let step = accumulate_scroll(&mut self.scroll_accum, scaled);
+                if step != 0 {
+                    self.sim.cycle_slot(-step);
+                }
+            }
+            // The multiplayer server list (issue #402): one notch moves one
+            // row, matching this pipeline's row-quantized scroll model (see
+            // `docs/server-list.md`'s scrolling section on why a fractional
+            // row has no meaning here) — deliberately not run through
+            // `accumulate_scroll`, which exists only for the hotbar's
+            // sub-notch case. Needs the *real* canvas height, which this
+            // handler has via `RenderTarget::size` and `gui_scale`, unlike
+            // keyboard scroll-into-view which uses the canvas-independent
+            // window estimate (see `MenuNav::scroll_server_list`'s doc).
+            WindowEvent::MouseWheel { delta, .. }
+                if self.ui.screen() == crate::menu::Screen::ServerList =>
+            {
+                let dy = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => f64::from(y),
+                    winit::event::MouseScrollDelta::PixelDelta(p) => p.y,
+                };
+                let rows = if dy > 0.0 {
+                    -1
                 } else if dy < 0.0 {
-                    self.sim.cycle_slot(1);
+                    1
+                } else {
+                    0
+                };
+                if rows != 0
+                    && let Some((fb_w, fb_h)) = self.target.as_ref().map(RenderTarget::size)
+                {
+                    let (_, canvas_h) =
+                        crate::menu::render::logical_canvas(self.nav.gui_scale(), fb_w, fb_h);
+                    self.nav.scroll_server_list(rows, canvas_h);
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -3460,6 +3538,71 @@ mod tests {
         let before = sim.tick_count();
         sim.step(dt);
         sim.tick_count() - before
+    }
+
+    /// Issue #203: at the vanilla default sensitivity (`1.0`), one wheel
+    /// notch (`LineDelta` magnitude `1.0`) must move exactly one hotbar slot
+    /// — the pre-#203 behaviour — so the sensitivity feature is provably a
+    /// pure addition, not a regression of the common case.
+    #[test]
+    fn accumulate_scroll_moves_one_slot_per_notch_at_default_sensitivity() {
+        let mut accum = 0.0;
+        assert_eq!(accumulate_scroll(&mut accum, 1.0 * 1.0), 1);
+        assert_eq!(accum, 0.0, "a whole-notch scroll must leave no carry");
+        assert_eq!(accumulate_scroll(&mut accum, -1.0 * 1.0), -1);
+    }
+
+    /// A sensitivity below 1.0 must take more than one notch to move a slot
+    /// — the exact scaled amount, not merely "less than at 1.0". At `0.25`,
+    /// four notches of `1.0` each accumulate to exactly one slot, with the
+    /// third notch still producing zero.
+    #[test]
+    fn accumulate_scroll_carries_a_fractional_remainder_at_low_sensitivity() {
+        let mut accum = 0.0;
+        let scaled = 1.0 * 0.25_f64;
+        assert_eq!(accumulate_scroll(&mut accum, scaled), 0);
+        assert_eq!(accumulate_scroll(&mut accum, scaled), 0);
+        assert_eq!(accumulate_scroll(&mut accum, scaled), 0);
+        assert!(
+            (accum - 0.75).abs() < 1e-12,
+            "three quarter-notches must carry exactly 0.75, not round or clamp: got {accum}"
+        );
+        assert_eq!(
+            accumulate_scroll(&mut accum, scaled),
+            1,
+            "the fourth quarter-notch must complete the first slot"
+        );
+        assert!(accum.abs() < 1e-12, "the completed slot must consume the whole carry");
+    }
+
+    /// A sensitivity above 1.0 must cross more than one slot per notch —
+    /// the exact scaled amount again, not a threshold on the existing ±1
+    /// step. At `10.0`, one notch is 10 whole slots with no carry.
+    #[test]
+    fn accumulate_scroll_moves_several_slots_per_notch_at_high_sensitivity() {
+        let mut accum = 0.0;
+        assert_eq!(accumulate_scroll(&mut accum, 1.0 * 10.0), 10);
+        assert_eq!(accum, 0.0);
+    }
+
+    /// A direction reversal must drop the old carry rather than fight it
+    /// (`ScrollWheelHandler.java:14-16`): three-quarters of a slot built up
+    /// scrolling one way must not partially cancel a fresh scroll the other
+    /// way, or a player flicking back and forth would see scroll amounts
+    /// depend on unrelated history.
+    #[test]
+    fn accumulate_scroll_resets_the_carry_on_direction_reversal() {
+        let mut accum = 0.0;
+        assert_eq!(accumulate_scroll(&mut accum, 0.75), 0);
+        assert!((accum - 0.75).abs() < 1e-12);
+        // Reversed direction: a naive `accum += scaled` would land at
+        // `0.75 - 0.25 = 0.5`, still short of a slot. The reset makes this
+        // scroll's own `-0.25` the entire story.
+        assert_eq!(accumulate_scroll(&mut accum, -0.25), 0);
+        assert!(
+            (accum - -0.25).abs() < 1e-12,
+            "the old positive carry must be discarded, not partially offset: got {accum}"
+        );
     }
 
     /// Issue #61: the hotbar belongs to the world, not to active play.
