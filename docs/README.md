@@ -818,6 +818,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   values computed, fewer times — verified bit-identical against the existing
   JVM-oracle parity tests (`tests/surface_parity.rs`, `tests/overworld_gen.rs`), not a
   new algorithm.
+- [Vegetal decoration: grass, flowers and trees](./worldgen-vegetation.md) —
+  `crates/lodestone-worldgen/src/feature/vegetation.rs` is the engine that places
+  grass, flowers and trees (oak, birch, spruce, plus spruce's own `pine` sibling)
+  during world generation — issue #406, epic #404's Phase 3. It is wired into
+  `OverworldGenerator::column` as the last composed stage, `VEGETAL_DECORATION`, right
+  after #295's ore-feature stage.
 
 ---
 

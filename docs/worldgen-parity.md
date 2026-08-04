@@ -346,9 +346,26 @@ passes reliably again.
 
 ## What could not be isolated, and why
 
-- **Vegetation features**: not composed into `ComposedChunkOracle.java` and
-  not built anywhere in this crate's Rust (epic #404 Phase 3). No isolated
-  oracle for it exists yet in `scripts/worldgen-oracle/` either.
+- **Vegetation features**: engine built and composed (issue #406,
+  `crate::feature::vegetation`, wired into `OverworldGenerator::column` as
+  `Self::vegetation_stage`) — grass, flowers, and oak/birch/spruce/pine
+  trees. **Still not composed into `ComposedChunkOracle.java`, and no
+  isolated oracle for it exists yet in `scripts/worldgen-oracle/` either** —
+  that half of the sentence remains true after #406 lands. Every count this
+  module's own tests assert is derived from the embedded placement-modifier
+  JSON itself (an internal-consistency check), not a live-vanilla parity
+  number — see `crate::feature::vegetation`'s own module doc "Scope"
+  section, which states this plainly rather than letting a green test suite
+  imply more than it proves. Two structural things composing this stage did
+  *not* replicate, named rather than hidden: it is **single-chunk only**
+  (unlike the ore stage's real 3×3 `blockStateWriteRadius(1)` driver, so a
+  tree/patch that would spill across a chunk boundary in vanilla simply
+  doesn't in this engine yet), and several trunk/foliage/feature kinds this
+  engine doesn't implement (fancy/giant trunks, `FallenTreeFeature`, most
+  non-vegetation `simple_block` placements) degrade to a silent no-op rather
+  than a panic, so e.g. oak's `fancy_oak` branch (~33% of attempts) and every
+  jungle/dark-oak/acacia tree currently place nothing. See that module's doc
+  for the full, named list.
 - **Ore features (composition into `OverworldGenerator::column`)**: **now
   composed** (`crate::feature::apply_ore_step_3x3_per_source`, the real
   vanilla 3×3 driver, per-source biome resolution). What still can't be
