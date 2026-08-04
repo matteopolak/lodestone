@@ -6,6 +6,7 @@
 //! column stays within the paletted-storage budget rather than the naive
 //! `2 bytes * 98304` layout.
 
+use lodestone_testsupport::bench_fixtures::synthetic_overworld_column;
 use lodestone_world::{
     ChunkColumn, ColumnLight, LightData, LightProperties, NibbleArray, Neighbourhood, PaletteKind,
     compute_column_light, compute_column_light_with_neighbours,
@@ -110,26 +111,10 @@ fn measure_dense_varied_column() {
 fn measure_realistic_terrain_column() {
     // A more life-like column: solid stone below the surface (single-valued or
     // tiny palette per section), a shallow varied surface band, air above.
-    let mut col = modern_column();
-    let stone = 1u32;
-
-    // Fill y = -64..40 with stone (full sections become single-valued).
-    for y in -64..40 {
-        for z in 0..16 {
-            for x in 0..16 {
-                col.set_block(x, y, z, stone);
-            }
-        }
-    }
-    // A varied surface band y = 40..48 with a handful of block types.
-    for y in 40..48 {
-        for z in 0..16 {
-            for x in 0..16 {
-                let id = 1 + ((x + z + (y as usize)) % 6) as u32;
-                col.set_block(x, y, z, id);
-            }
-        }
-    }
+    // Issue #80's shared Tier 2 fixture (`seed = 0` reproduces this file's own
+    // former hand-rolled duplicate byte for byte -- see
+    // `bench_fixtures::synthetic_column`'s doc comment).
+    let col = synthetic_overworld_column(0);
 
     let bytes = col.heap_bytes();
     println!(
@@ -261,30 +246,6 @@ impl LightProperties for TimingProps {
     }
 }
 
-/// A life-like full-height column: stone below the surface, a varied surface
-/// band, air above — the same shape as `measure_realistic_terrain_column`, which
-/// is what a player standing in the world actually holds.
-fn realistic_terrain_column() -> ChunkColumn {
-    let mut col = modern_column();
-    let stone = 1u32;
-    for y in -64..40 {
-        for z in 0..16 {
-            for x in 0..16 {
-                col.set_block(x, y, z, stone);
-            }
-        }
-    }
-    for y in 40..48 {
-        for z in 0..16 {
-            for x in 0..16 {
-                let id = 1 + ((x + z + (y as usize)) % 6) as u32;
-                col.set_block(x, y, z, id);
-            }
-        }
-    }
-    col
-}
-
 /// Puts a real number on the from-zero light recompute that a single block
 /// update currently triggers. Correct-by-construction removal recomputes the
 /// whole column; this measures whether that is cheap enough to leave deferred or
@@ -292,7 +253,7 @@ fn realistic_terrain_column() -> ChunkColumn {
 /// number is a decision, one without is a worry.
 #[test]
 fn measure_light_recompute_cost() {
-    let col = realistic_terrain_column();
+    let col = synthetic_overworld_column(0);
     let props = TimingProps;
 
     // Warm up (allocator, caches) then time a batch and report per-call.
@@ -336,8 +297,8 @@ fn measure_light_recompute_cost() {
 /// deferred behind the same interface.
 #[test]
 fn measure_neighbour_light_cost() {
-    let center = realistic_terrain_column();
-    let n = realistic_terrain_column();
+    let center = synthetic_overworld_column(0);
+    let n = synthetic_overworld_column(0);
     let props = TimingProps;
     let hood = Neighbourhood::new(&center)
         .with(-1, 0, &n)
