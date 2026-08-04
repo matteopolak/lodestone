@@ -1,0 +1,214 @@
+# CI for lodestone. See docs/ci.md for the full rationale, what is
+# intentionally NOT run here (the 219 `#[ignore]`d live/GPU/jar-dependent
+# tests), and how to reproduce any of these jobs locally.
+#
+# Four of the five jobs below are exactly CLAUDE.md's "Build and test" health
+# checks, one per job so a failure names itself instead of hiding behind three
+# green jobs and one red one:
+#
+#   cargo check --workspace --all-targets
+#   cargo check --workspace --all-features --all-targets --exclude lodestone-allocbench
+#   cargo check -p lodestone-shell --no-default-features
+#   cargo test --workspace --no-fail-fast
+#
+# The fifth (xtask-structural-checks) runs cargo xtask's own dependency-graph
+# checks (check-isolation, check-deletable) — cheap, and CLAUDE.md-adjacent
+# but not one of the four literal commands above.
+#
+# Do not "simplify" the --exclude on the all-features job away: lodestone-allocbench
+# has a deliberate compile_error!() when more than one allocator feature is on
+# (each installs its own #[global_allocator]), so plain --all-features
+# structurally cannot pass for that one crate. Excluding it is not a workaround.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # No incremental cache to preserve — every job is a from-cache-or-fresh CI
+  # build, and incremental compilation only adds bookkeeping overhead here.
+  CARGO_INCREMENTAL: 0
+  # Debug info is dead weight in CI: nothing here symbolizes a crash dump, and
+  # the workspace's own measurement (docs/ci.md) is a lodestone-shell debug
+  # test binary reaching 3.7 GB RSS. Turning off DWARF emission for dev/test
+  # profiles shrinks both link time and binary size without touching
+  # optimization level or debug_assertions (semantics are unchanged).
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  # The dev machine's `.cargo/config.toml` is gaining a repo-wide, unconditional
+  # `build.rustc-wrapper = "…/sccache"` line, so every job here MUST make a real
+  # `sccache` binary available before its first `cargo` invocation (mozilla-actions
+  # /sccache-action below) — a config-level wrapper pointing at a missing binary is
+  # a hard error, not a slow fallback. Setting RUSTC_WRAPPER here is also what makes
+  # this repeatable regardless of what path `.cargo/config.toml` hardcodes: cargo's
+  # config precedence has an environment variable win over a config-file value, so
+  # this always resolves through PATH to whatever the action just installed. See
+  # docs/ci.md's "A pending coordination point: sccache" for the escape hatch
+  # (RUSTC_WRAPPER: "") if a future job or runner genuinely can't run the action.
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+
+# A new push to the same branch/PR supersedes the old one — no point finishing
+# a check run against a commit nobody will look at.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-default:
+    name: "check: --workspace --all-targets"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system audio dev headers (alsa-sys build dependency)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: check-default
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - run: cargo check --workspace --all-targets
+
+  check-all-features:
+    name: "check: --all-features (allocbench excluded)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system audio dev headers (alsa-sys build dependency)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: check-all-features
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - run: cargo check --workspace --all-features --all-targets --exclude lodestone-allocbench
+
+  check-shell-no-default:
+    name: "check: lodestone-shell --no-default-features (version seam)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system audio dev headers (alsa-sys build dependency)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: check-shell-no-default
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - run: cargo check -p lodestone-shell --no-default-features
+
+  xtask-structural-checks:
+    name: "xtask: check-isolation / check-deletable"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No apt step here: xtask's own dependency graph (anyhow, serde_json,
+      # sha1, zip, tempfile) never touches lodestone-sound/alsa-sys.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: xtask-structural
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - run: cargo run -p xtask -- check-isolation
+      - name: check-deletable (every version family)
+        run: |
+          set -eu
+          for family in v47 v340 v735 v770; do
+            echo "::group::check-deletable $family"
+            cargo run -p xtask -- check-deletable "$family"
+            echo "::endgroup::"
+          done
+
+  test:
+    name: "test: --workspace --no-fail-fast"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system audio dev headers (alsa-sys build dependency)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-workspace
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      # The full suite. `.cache/` and `vendor/` are gitignored (no vanilla jar,
+      # no minecraft-data checkout on a runner) and there is no GPU adapter, so
+      # this intentionally does NOT run everything: 219 tests are #[ignore]d
+      # for exactly that reason (live oracle, GPU adapter, or vanilla jar) and
+      # do not execute here at all. See docs/ci.md for the inventory and how
+      # to run them yourself. --no-fail-fast is not optional: plain `cargo
+      # test` stops at the first failing test *binary*, so a later crate's
+      # break is invisible — CLAUDE.md records this having hidden 3 failing
+      # binaries / 14 failing tests behind one earlier, unrelated failure.
+      - name: cargo test --workspace --no-fail-fast
+        run: cargo test --workspace --no-fail-fast
+      # A small, known set of NON-ignored tests intentionally self-skip (with a
+      # loud eprintln!, not silently) when .cache/ or vendor/ is absent, per
+      # their own doc comments — they anchor against a *committed* dump/table
+      # either way, so a missing jar/minecraft-data checkout degrades their
+      # coverage rather than failing the build. cargo test hides that eprintln
+      # on a pass, so re-run just these by name with --nocapture and count the
+      # "skipping" lines into the job summary — this is visibility, not a
+      # weaker check: the tests above already ran (and passed) as part of the
+      # full suite. See docs/ci.md for why each one is safe to self-skip here.
+      - name: Surface self-skipped jar/vendor-dependent tests
+        if: always()
+        run: |
+          set -eu
+          : > /tmp/skip-report.txt
+          # Fully-qualified with --exact: several of these names are
+          # substrings of each other (e.g. codegen_is_deterministic is a
+          # substring of registry_codegen_is_deterministic_and_standalone_rust)
+          # so a plain substring filter would double-run and double-count.
+          xtask_tests=(
+            "tests::packet_id_check_accepts_pristine_and_rejects_corrupted_file"
+            "tests::parses_real_packet_report_counts"
+            "tests::generated_identifiers_are_unique_per_state_and_bound"
+            "tests::generated_lookup_helpers_round_trip"
+            "tests::codegen_is_deterministic"
+            "tests::parses_real_registry_report_counts_for_dispatch_blockers"
+            "tests::registry_codegen_is_deterministic_and_standalone_rust"
+            "tests::parses_real_minecraft_data_report_for_protocol_47"
+          )
+          for name in "${xtask_tests[@]}"; do
+            cargo test -p xtask -- "$name" --exact --nocapture 2>&1 | tee -a /tmp/skip-report.txt
+          done
+          data_tests=(
+            "block_registry_order_agrees_with_mojangs_registries_report"
+            "block_tag_membership_agrees_with_the_vanilla_datapack"
+            "dump_agrees_with_mojangs_own_components_report"
+          )
+          for name in "${data_tests[@]}"; do
+            cargo test -p lodestone-data --test tools -- "$name" --exact --nocapture 2>&1 | tee -a /tmp/skip-report.txt
+          done
+          count=$(grep -c "^skipping" /tmp/skip-report.txt || true)
+          {
+            echo "### Self-skipped jar/vendor-dependent tests"
+            echo
+            echo "These 11 non-ignored tests anchor against a committed dump and only"
+            echo "self-skip (loudly) when \`.cache/\` or \`vendor/\` is absent, which is"
+            echo "always true on this runner. See \`docs/ci.md\`."
+            echo
+            echo "**$count / 11 self-skipped** (expected: 11 on a runner with no jar/vendor checkout)"
+            echo
+            echo '```'
+            grep "^skipping" /tmp/skip-report.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "$count tests self-skipped (see step summary)"
+          if [ "$count" -ne 11 ]; then
+            echo "::warning::expected exactly 11 self-skipped tests, saw $count — either the runner unexpectedly has .cache/vendor, or one of these tests stopped self-skipping (which would mean it now needs attention, not that it silently started failing: the workspace test run above already exited 0)."
+          fi
