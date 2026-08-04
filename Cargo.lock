@@ -2411,6 +2411,7 @@ version = "0.1.0"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
+ "lodestone-data",
  "lodestone-ecs",
  "lodestone-model",
  "lodestone-nav",
@@ -2661,6 +2662,7 @@ dependencies = [
  "glam 0.33.2",
  "lodestone-assets",
  "lodestone-auth",
+ "lodestone-autopilot",
  "lodestone-client",
  "lodestone-controller",
  "lodestone-data",
@@ -2711,6 +2713,10 @@ dependencies = [
 name = "lodestone-testsupport"
 version = "0.1.0"
 dependencies = [
+ "lodestone-core",
+ "lodestone-world",
+ "lodestone-worldgen",
+ "serde_json",
  "tokio",
 ]
 
@@ -2791,6 +2797,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "lodestone-core",
+ "lodestone-testsupport",
  "lodestone-worldgen",
  "serde_json",
  "thiserror 2.0.19",
