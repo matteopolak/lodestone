@@ -9,8 +9,17 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   measured 2,618 states the old shape-derived `blocksMotion` got wrong.
 - [Collision shapes](./collision-shapes.md) — the per-block-state collision census
   reaching the physics engine, why `blocks_motion` moved from a geometry
-  approximation to a dumped census of its own, `fluid_at` reporting a real
-  per-state level now, and the `is_solid_face` approximation that remains.
+  approximation to a dumped census of its own, and `fluid_at` reporting a real
+  per-state level now. (`is_solid_face`'s approximation is **fixed** — #216.)
+- [Climbing and freezing](./climbing-and-freezing.md) — scaffolding's sneak-hold
+  exception versus a ladder, powder-snow freezing, and the swept-segment sweep both
+  use (#210, #212, #216). Also why the sneak-to-fall-through collision toggle is a
+  deliberate gap: it needs a descending/approach context `collision_boxes` has no
+  way to express.
+- [Riptide and firework boost](./riptide-and-firework-boost.md) — the trident launch
+  and elytra glide-boost impulses, landed physics-only pending their item and entity
+  triggers (#208, #206), each verified against a trig identity rather than a
+  recorded trace.
 - [Entity tick drivers](./entity-tick-drivers.md) — `ProjectileRegistry` and
   `ItemEntityRegistry`, the per-tick seam that turned `projectile.rs` and
   `item_entity.rs`'s lifecycle half from islands into driven code (#211, #215), plus
@@ -760,3 +769,37 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   (a broken shader used to reach `main` with every `cargo check` green), the
   measured truth that a `"` in a WGSL *comment* is now simply inert, and the five
   byte-identical duplicates left unmerged on purpose.
+
+---
+
+## Plans and research
+
+Longer-form artifacts that are not per-subsystem docs: a phased plan, and read-only
+diagnoses produced before the corresponding fix was written. They live here because a
+diagnosis is worth keeping *after* the fix lands — CLAUDE.md's standing claim is that
+the record of confidently-held false beliefs is the most valuable thing in this repo,
+and several of these caught the *brief* being wrong rather than the code.
+
+- [World generation plan](./worldgen-plan.md) — the phased plan behind epic
+  [#404](https://github.com/matteopolak/lodestone/issues/404). Opens with a correction
+  worth reading first: worldgen is **not** absent, `crates/lodestone-worldgen` is
+  ~9.4k lines and its shape stage is 98304/98304 bit-exact against the JVM. The
+  highest-value finding is in §2 — the overworld's ~700-entry multi-noise biome table
+  looks like a 1,124-line Java port and is actually a **data dump**, because the JSON
+  is a two-line preset pointer and the real table is a runtime registry object. §5
+  argues for stopping after vegetation rather than building structures.
+- [Combat scope](./research/combat-scope.md) — the mechanic-by-mechanic diff against
+  the jar that found `ReleaseUseItem` had no producer, so bow and shield could not
+  fire at all.
+- [Cross-model plant lighting](./research/cross-model-light.md) — why a plant beside a
+  solid block went dark, including the falsifiable prediction (all four cross quads
+  bake north/south, so east/west neighbours cannot matter) that held.
+- [Fog and the night shadow](./research/fog-and-night-shadow.md) — both reports turned
+  out to be *hue*, not brightness or distance. Note its midnight keyframe
+  transcription (`#0D0D16`) was itself wrong; `as8BitChannel` floors, so it is
+  `#0C0C16`, caught by the implementer's own gate.
+- [View bobbing and distant water](./research/bobbing-and-water.md) — neither was the
+  reported cause: bobbing was a menu-dispatch bug, and the blocky water was the
+  singleplayer chunk-stream ring missing its buffer.
+- [Container titles](./research/container-titles.md) — three of four reported claims
+  were already fixed and pixel-gated; only nine per-screen title anchors were real.
