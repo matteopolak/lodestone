@@ -1496,6 +1496,83 @@ impl FocusSet {
     }
 }
 
+/// `MouseHandler.DOUBLE_CLICK_THRESHOLD_MS` (`MouseHandler.java:34`): the exact
+/// wire vanilla checks with `currentTime - lastClick.time() < 250L` —
+/// **strict** less-than, so a click exactly 250 ms after the last one is not a
+/// double.
+pub const DOUBLE_CLICK_THRESHOLD_MS: u64 = 250;
+
+/// `MouseHandler.onButton`'s double-click detector (`MouseHandler.java:96-100`),
+/// pulled out as a reusable primitive rather than re-derived per screen.
+///
+/// ## Why this exists here and not in `container.rs` or `widget.rs`
+///
+/// Vanilla's own detector is not a widget method at all — `AbstractSelectionList`
+/// and `EditBox` both just *receive* an already-computed `doubleClick: bool` on
+/// `mouseClicked`/`onClick`; the clock and the 250 ms comparison live one layer
+/// up, in `MouseHandler`, and every consumer downstream is a plain `if
+/// (doubleClick)`. That is the shape this type copies: one small, clock-fed
+/// tracker that any screen's click handler can hold, rather than a per-screen
+/// reimplementation of the same subtraction. `container.rs` already has its own
+/// double-click handling for slot clicks (see `docs/container-clicks.md`) and is
+/// owned by another agent right now — this is the primitive for everywhere
+/// *else* a double-click means something (the server list today; a world-select
+/// row tomorrow), not a replacement for that one.
+///
+/// ## What is intentionally simplified
+///
+/// Vanilla's real predicate is
+/// `lastClick != null && currentTime - lastClick.time() < 250 &&
+/// lastClick.screen() == screen && lastClickButton == event.button()`
+/// (`MouseHandler.java:96-100`) — same **screen instance** and same **button**,
+/// not just "recently". [`DoubleClickTracker::click`] folds "same screen" and
+/// "same button" into a single caller-supplied `target: T` — the row/id being
+/// clicked — because every consumer here already only feeds it clicks that
+/// landed on a left-clickable row of one screen; a target mismatch (a different
+/// row, or a click that missed the list entirely) is exactly what a screen
+/// change or a button change would also invalidate in vanilla. If a future
+/// caller needs the button distinguished too, fold it into `T` — e.g.
+/// `(usize, MouseButton)` — rather than growing this type's arity.
+///
+/// `lastClick` is only *armed* by vanilla when `screen.mouseClicked` returns
+/// `true`, i.e. the click was consumed. This type has no notion of "consumed" —
+/// every call to [`Self::click`] arms it — so a caller must only call it for
+/// clicks that actually hit something, the same discipline
+/// [`FocusSet::mouse_clicked`] already asks of its own caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DoubleClickTracker<T> {
+    /// The last click this tracker saw, or `None` before the first one.
+    last: Option<(T, u64)>,
+}
+
+impl<T: Copy + PartialEq> DoubleClickTracker<T> {
+    /// A tracker with no prior click.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { last: None }
+    }
+
+    /// One click on `target` at `now_ms` (a monotonic millisecond clock the
+    /// caller owns — see [`super::edit_box::EditBox::show_cursor`] for the same
+    /// "caller supplies the clock" shape). Returns whether this click, paired
+    /// with the previous one, is a double-click.
+    ///
+    /// Always records `(target, now_ms)` as the new "last click", double or
+    /// not — matching `MouseHandler`'s own unconditional re-arm on every
+    /// consumed click. This is what lets a fast triple-click report a double on
+    /// clicks 2-and-3 as well as clicks 1-and-2, exactly as vanilla's pairwise
+    /// comparison does.
+    pub fn click(&mut self, now_ms: u64, target: T) -> bool {
+        let is_double = matches!(
+            self.last,
+            Some((last_target, last_ms))
+                if last_target == target && now_ms.saturating_sub(last_ms) < DOUBLE_CLICK_THRESHOLD_MS
+        );
+        self.last = Some((target, now_ms));
+        is_double
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2095,5 +2172,89 @@ mod tests {
              smuggling it through `keyPressed` would make Ctrl+A's key code and \
              the letter 'a' the same event"
         );
+    }
+
+    #[test]
+    fn the_double_click_threshold_matches_mousehandlers_own_250ms() {
+        // `MouseHandler.java:34`, transcribed rather than picked.
+        assert_eq!(DOUBLE_CLICK_THRESHOLD_MS, 250);
+    }
+
+    #[test]
+    fn two_clicks_on_the_same_row_inside_the_threshold_double() {
+        let mut t: DoubleClickTracker<usize> = DoubleClickTracker::new();
+        assert!(!t.click(0, 3), "there is no previous click to pair with");
+        assert!(
+            t.click(100, 3),
+            "100 ms after the first click on the same row must double, \
+             predicted true (100 < 250)"
+        );
+    }
+
+    #[test]
+    fn two_clicks_slower_than_the_threshold_do_not_double() {
+        // The coordinator's requested control: run it, watch it fail to
+        // double. 300 ms is on the wrong side of `MouseHandler.java`'s strict
+        // `< 250L`, so the predicted value is `false`, not "some smaller
+        // truthiness" — a wrong hypothesis here would be `true` if the
+        // threshold were mistakenly read as `<=` or padded upward.
+        let mut t: DoubleClickTracker<usize> = DoubleClickTracker::new();
+        assert!(!t.click(0, 3));
+        assert!(
+            !t.click(300, 3),
+            "300 ms is slower than the 250 ms threshold — predicted false, \
+             this must not join"
+        );
+        // And the *next* click, now only 50 ms after the miss, doubles against
+        // that miss rather than staying stuck refusing forever.
+        assert!(t.click(350, 3));
+    }
+
+    #[test]
+    fn the_boundary_is_strictly_less_than_not_less_or_equal() {
+        // `currentTime - lastClick.time() < 250L` (`MouseHandler.java:98`) is
+        // strict. A click exactly at the boundary must not double — the wrong
+        // hypothesis (`<=`) would report `true` here instead.
+        let mut t: DoubleClickTracker<usize> = DoubleClickTracker::new();
+        assert!(!t.click(0, 3));
+        assert!(
+            !t.click(250, 3),
+            "250 ms is the threshold itself, not inside it — vanilla's `<` \
+             excludes it"
+        );
+        let mut t2: DoubleClickTracker<usize> = DoubleClickTracker::new();
+        assert!(!t2.click(0, 3));
+        assert!(t2.click(249, 3), "249 ms is inside the window");
+    }
+
+    #[test]
+    fn a_different_target_does_not_double_even_inside_the_threshold() {
+        // Stands in for vanilla's `lastClick.screen() == screen` /
+        // `lastClickButton == event.button()` guards — see the type's own
+        // doc on why those are folded into `target` here. The control: the
+        // same two clicks *do* double when the target is held fixed, so this
+        // failure is really about the target comparison and not some other
+        // reason the pair failed to double.
+        let mut a: DoubleClickTracker<usize> = DoubleClickTracker::new();
+        assert!(!a.click(0, 1));
+        assert!(
+            !a.click(50, 2),
+            "row 2, 50 ms later, must not double against row 1's click"
+        );
+
+        let mut control: DoubleClickTracker<usize> = DoubleClickTracker::new();
+        assert!(!control.click(0, 1));
+        assert!(control.click(50, 1), "the control: same row does double");
+    }
+
+    #[test]
+    fn a_fast_triple_click_doubles_on_both_adjacent_pairs() {
+        // Vanilla re-arms `lastClick` on every consumed click, not just the
+        // first of a pair, so clicks (1,2) and (2,3) are each their own
+        // comparison — see the type's own doc.
+        let mut t: DoubleClickTracker<usize> = DoubleClickTracker::new();
+        assert!(!t.click(0, 7));
+        assert!(t.click(80, 7), "pair (1,2)");
+        assert!(t.click(150, 7), "pair (2,3), 70 ms after the double");
     }
 }
