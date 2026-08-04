@@ -43,8 +43,18 @@ use crate::vertex::PackedVertex;
 /// Depth format used by the block pass.
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
-/// Camera data for the block shader: `view_proj` and the world-space origin of
-/// the section being drawn (added to the section-local vertex position).
+/// `view_proj` plus the world-space origin of the section being drawn, in one
+/// non-dynamic uniform.
+///
+/// **No longer the block shader's own group-0 layout** — issue #76 split that
+/// into [`shared_camera_buffer`] (per frame) plus a dynamic-offset
+/// [`SectionOriginUniform`](crate::model_pipeline::SectionOriginUniform) (per
+/// section, written once at upload), because holding both in one struct forced a
+/// whole-struct `queue.write_buffer` per section per frame just to re-aim the
+/// camera. Kept because it is still the first 80 bytes of
+/// [`ModelCameraUniform`](crate::model_pipeline::ModelCameraUniform), which the
+/// crack-overlay pipeline uses (one mesh, one origin, so the split buys it
+/// nothing).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct CameraUniform {
@@ -187,18 +197,53 @@ impl BlockPipeline {
             source: wgpu::ShaderSource::Wgsl(BLOCK_WGSL.into()),
         });
 
+        // Two bindings inside group 0 — the shared per-frame camera + fog, and
+        // the per-section origin behind a dynamic offset. A second *binding*,
+        // not a fifth bind *group*: this pipeline still spends exactly two
+        // (camera + atlas), well under wgpu's portable `max_bind_groups` floor
+        // of 4.
+        //
+        // This is issue #76: the packed path used to hold `view_proj` **and**
+        // the origin in one non-dynamic uniform, which forced a whole-struct
+        // `queue.write_buffer` per section per frame just to re-aim the camera —
+        // the shape issue #75 measured at 52.9% of main-thread CPU on the model
+        // path. The origin is constant for a section's lifetime, so it belongs
+        // behind a dynamic offset written once at upload. See
+        // `docs/section-camera-uniform.md`.
         let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("lodestone-camera-bgl"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    // `VERTEX` only, for now: the struct carries `model.wgsl`'s
+                    // fog lanes so the two layouts are one type, but this
+                    // shader's fragment stage does not read them yet. Issue
+                    // #400 is the follow-on that does, and widens this to
+                    // `VERTEX_FRAGMENT`.
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    // The origin only ever feeds `world = position + origin.xyz`
+                    // in the vertex stage.
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: true,
+                        min_binding_size: wgpu::BufferSize::new(
+                            core::mem::size_of::<crate::model_pipeline::SectionOriginUniform>()
+                                as u64,
+                        ),
+                    },
+                    count: None,
+                },
+            ],
         });
 
         let atlas_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -291,20 +336,50 @@ impl BlockPipeline {
         }
     }
 
-    /// Create the camera bind group from an existing uniform buffer.
+    /// Create the group-0 bind group from the shared per-frame buffer (binding
+    /// 0: view-projection + fog, built with [`shared_camera_buffer`]) and an
+    /// origin buffer (binding 1, dynamic offset).
+    ///
+    /// `origin_buffer` may be a single
+    /// [`SectionOriginUniform`](crate::model_pipeline::SectionOriginUniform)
+    /// slot (one-off draws, a test's synthetic section) or a large arena backing
+    /// many sections at different offsets — the *window* bound here is always
+    /// one `SectionOriginUniform` (16 bytes). A caller addressing many sections
+    /// through one arena builds this bind group **once** and picks a section by
+    /// the dynamic offset passed to `set_bind_group`, never by rebuilding the
+    /// bind group. That is the whole point of issue #76: one bind group and one
+    /// per-frame write for the whole packed table, however many sections are
+    /// resident.
+    ///
+    /// This is the same shape (and the same two backing types) as
+    /// [`ModelPipeline::camera_bind_group`](crate::ModelPipeline::camera_bind_group).
     #[must_use]
     pub fn camera_bind_group(
         &self,
         device: &wgpu::Device,
-        camera_buffer: &wgpu::Buffer,
+        shared_buffer: &wgpu::Buffer,
+        origin_buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("lodestone-camera-bg"),
             layout: &self.camera_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: shared_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: origin_buffer,
+                        offset: 0,
+                        size: wgpu::BufferSize::new(
+                            core::mem::size_of::<crate::model_pipeline::SectionOriginUniform>()
+                                as u64,
+                        ),
+                    }),
+                },
+            ],
         })
     }
 
@@ -353,12 +428,34 @@ pub fn sprite_uv_buffer(device: &wgpu::Device, rects: &[[f32; 4]]) -> wgpu::Buff
     })
 }
 
-/// Build the camera uniform buffer.
+/// Build the packed path's **shared** group-0 buffer (binding 0): this frame's
+/// view-projection plus its fog block, written **once per frame** however many
+/// sections are resident. Rewrite it with
+/// [`update_model_shared_camera_buffer`](crate::update_model_shared_camera_buffer),
+/// which takes any buffer of this layout.
+///
+/// The contents are a [`ModelSharedCameraUniform`](crate::ModelSharedCameraUniform)
+/// — deliberately the *same* type the model/fluid pipelines use rather than a
+/// twin. Two structurally identical fog uniforms is exactly the drift this
+/// crate's shaders warn about ("entities and terrain disagree about what time it
+/// is"); only the buffer label differs, so a capture names the path it came
+/// from.
+///
+/// Replaces the old `camera_buffer(device, CameraUniform)`, whose single
+/// non-dynamic `{ view_proj, section_origin }` uniform is what forced a
+/// whole-struct write per section per frame — issue #76.
 #[must_use]
-pub fn camera_buffer(device: &wgpu::Device, uniform: CameraUniform) -> wgpu::Buffer {
+pub fn shared_camera_buffer(
+    device: &wgpu::Device,
+    view_proj: [[f32; 4]; 4],
+    fog: crate::fog::FogUniform,
+) -> wgpu::Buffer {
     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("lodestone-camera-uniform"),
-        contents: bytemuck::bytes_of(&uniform),
+        label: Some("lodestone-packed-shared-camera-uniform"),
+        contents: bytemuck::bytes_of(&crate::model_pipeline::ModelSharedCameraUniform {
+            view_proj,
+            fog,
+        }),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     })
 }

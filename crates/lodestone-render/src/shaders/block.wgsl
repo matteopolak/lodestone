@@ -1,10 +1,33 @@
 
+// The **shared** half of the packed path's group-0 uniform (binding 0):
+// view-projection plus this frame's fog, identical for every section drawn this
+// frame. Byte-for-byte `model.wgsl`'s own `Camera` and the same 112-byte
+// `ModelSharedCameraUniform` behind it — one type, one layout, so the packed and
+// model paths structurally cannot disagree about fog or the clock.
+//
+// This used to be `{ view_proj, section_origin }` written **per section, per
+// frame** — the exact shape issue #75 profiled at ~4000 `queue.write_buffer`
+// calls/frame and 52.9% of main-thread CPU on the model path. #75 fixed the
+// model path and deliberately left this one (issue #76): the origin is constant
+// for a section's life, so it moved to binding 1 behind a dynamic offset and is
+// written once, at upload. See `docs/section-camera-uniform.md`.
 struct Camera {
     view_proj: mat4x4<f32>,
+    fog_eye: vec4<f32>,
+    fog_color_start: vec4<f32>,
+    fog_end_enabled: vec4<f32>,
+};
+
+// A section's world-space origin, bound at group 0 binding 1 with a dynamic
+// offset: one physically resident arena of these serves every packed section, so
+// re-aiming the camera (binding 0, above) never touches this one. Identical to
+// `model.wgsl`'s `Origin`, and backed by the same `SectionOriginUniform`.
+struct Origin {
     section_origin: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(1) var<uniform> origin: Origin;
 @group(1) @binding(0) var atlas_tex: texture_2d<f32>;
 @group(1) @binding(1) var atlas_smp: sampler;
 @group(1) @binding(2) var<storage, read> sprite_uv: array<vec4<f32>>;
@@ -39,7 +62,7 @@ fn vs_main(@location(0) packed: vec3<u32>) -> VsOut {
     let sky = f32((w2 >> 8u) & 255u) / 255.0;
     let block = f32((w2 >> 16u) & 255u) / 255.0;
 
-    let world = vec3<f32>(x, y, z) + camera.section_origin.xyz;
+    let world = vec3<f32>(x, y, z) + origin.section_origin.xyz;
 
     // AO already carries vanilla's 0.4..1.0 range; light lifts a dark floor so
     // unlit faces are dim rather than black.

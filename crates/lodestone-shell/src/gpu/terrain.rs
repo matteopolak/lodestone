@@ -14,13 +14,22 @@ use lodestone_render::{
 
 use crate::mesher::SectionKey;
 
+/// One uploaded packed full-cube section (the demo/headless path).
+///
+/// Carries **no camera buffer or bind group of its own** since issue #76:
+/// `RenderState::packed_cam_bind_group` is shared by every packed section, and
+/// `origin_alloc` is only this section's *slot* within
+/// `RenderState::packed_origin_arena` — its offset is what selects this
+/// section's origin at draw time via `set_bind_group`'s dynamic offset. Exactly
+/// [`ModelSectionGpu`]'s shape, for exactly the reason
+/// `docs/section-camera-uniform.md` gives.
 #[derive(Debug)]
 pub(super) struct SectionGpu {
     pub(super) mesh: GpuMesh,
     pub(super) quad_count: usize,
-    pub(super) origin: [f32; 3],
-    pub(super) cam_buffer: wgpu::Buffer,
-    pub(super) cam_bind_group: wgpu::BindGroup,
+    /// This section's slot in `RenderState::packed_origin_arena`, written once
+    /// at upload and freed when the section is removed or remeshed away.
+    pub(super) origin_alloc: ArenaAllocation,
 }
 
 /// One uploaded section of wide baked-model geometry (the vanilla path). Mirrors
@@ -51,6 +60,17 @@ pub(super) struct ModelSectionGpu {
 /// Generous fixed capacity for [`SectionOriginArena`]; see that type's doc for
 /// the sizing rationale.
 pub(super) const MODEL_ORIGIN_ARENA_SLOTS: u64 = 131_072;
+
+/// Capacity for the **packed** path's own [`SectionOriginArena`] (issue #76).
+///
+/// Two orders of magnitude smaller than [`MODEL_ORIGIN_ARENA_SLOTS`] on purpose:
+/// the packed pipeline only ever holds the offline demo world, whose extent is
+/// capped by `sim.rs`'s `MAX_WORLD_RADIUS = 6` at roughly 4056 sections. 8192
+/// slots is a clean power of two comfortably above that, and costs 2 MiB at the
+/// 256 B dynamic-offset stride rather than the model arena's 32 MiB — which
+/// matters because this arena is allocated on **every** run, live play included,
+/// where the packed table stays empty.
+pub(super) const PACKED_ORIGIN_ARENA_SLOTS: u64 = 8_192;
 
 /// Shared GPU storage for every live model section's world origin (group 0
 /// binding 1 of the model/fluid pipelines), addressed by a dynamic offset at
@@ -87,7 +107,16 @@ pub(super) struct SectionOriginArena {
 }
 
 impl SectionOriginArena {
-    pub(super) fn new(device: &wgpu::Device, queue: &wgpu::Queue, capacity_slots: u64) -> Self {
+    /// `label` names the backing buffer so a GPU capture distinguishes the model
+    /// path's arena from the packed path's — the two are separate instances with
+    /// very different capacities ([`MODEL_ORIGIN_ARENA_SLOTS`] vs
+    /// [`PACKED_ORIGIN_ARENA_SLOTS`]).
+    pub(super) fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        label: &str,
+        capacity_slots: u64,
+    ) -> Self {
         // wgpu requires a dynamic uniform-buffer offset to be a multiple of
         // this device limit (typically 256 B; never below `ArenaBuffer`'s own
         // floor), so every slot is padded out to it — checking the *limit*,
@@ -97,7 +126,7 @@ impl SectionOriginArena {
             (device.limits().min_uniform_buffer_offset_alignment as u64).max(ArenaBuffer::MIN_ALIGN);
         let mut arena = ArenaBuffer::new(
             device,
-            "lodestone-model-section-origin-arena",
+            label,
             capacity_slots * stride,
             stride,
             wgpu::BufferUsages::UNIFORM,

@@ -2,13 +2,21 @@
 
 ## What it is
 
-The group-0 camera binding the model/fluid terrain pipelines
-([`ModelPipeline`](../crates/lodestone-render/src/model_pipeline.rs)) read from,
-split into a **shared** per-frame half (view-projection + fog) and a
-**per-section** half (world origin) that lives in one physically resident
+The group-0 camera binding **every** terrain pipeline reads from — the
+model/fluid pair
+([`ModelPipeline`](../crates/lodestone-render/src/model_pipeline.rs)) and the
+packed full-cube path
+([`BlockPipeline`](../crates/lodestone-render/src/block.rs)) — split into a
+**shared** per-frame half (view-projection + fog) and a **per-section** half
+(world origin) that lives in one physically resident
 [`ArenaBuffer`](../crates/lodestone-render/src/arena.rs) and is addressed by a
 dynamic offset at draw time, instead of one small buffer + one bind group per
-section. This is the fix for issue #75.
+section.
+
+Issue #75 did this for the model/fluid path, where the cost was measured. Issue
+#76 did it for the packed path, which #75 deliberately skipped — see
+[the packed/demo path caught up](#the-packeddemo-path-caught-up--issue-76) for
+why that was defensible then and worth finishing now.
 
 ## How it works
 
@@ -90,16 +98,59 @@ still points at the shared arena.
 - **`EntityPipeline`** already drew every entity through one shared camera
   buffer and per-instance vertex data — it was never the one-buffer-per-entity
   shape this fix addresses. Untouched.
-- **The packed/demo-world path** (`BlockPipeline`, `RenderState::sections`)
-  still gives every section its own camera buffer, rewritten every frame. It is
-  the same shape the model path used to have, but the demo world's section count
-  is bounded by `MAX_WORLD_RADIUS` (6, in `lodestone-shell/src/sim.rs`) — a few
-  thousand sections at most — and it never runs in live play, so it was not the
-  measured cost and is out of this fix's scope.
 - **`lodestone-render/src/{section_arena.rs,arena.rs}`**'s existing
   `SectionArena`/`ArenaBuffer` types were not modified; `ArenaBuffer` is reused
   as-is for the new origin arena (it already suballocates equal-size regions out
   of one GPU buffer with a free list — exactly what a slot arena needs).
+
+### The packed/demo path caught up — issue #76
+
+`BlockPipeline` / `RenderState::sections` was deliberately left with the old
+shape by #75: one camera buffer and one bind group per section, the whole
+80-byte `CameraUniform` rewritten every frame just to re-aim the camera. That
+was defensible rather than merely unfinished — the packed table only ever holds
+the offline demo world, capped by `MAX_WORLD_RADIUS` (6, in
+`lodestone-shell/src/sim.rs`) at roughly 4056 sections, and never runs in live
+play, so it was not the measured cost.
+
+Issue #76 applied the same shape to it, and the *reason* it is worth doing is
+not the demo world's frame time:
+
+- **`--headless` and every demo-world gate get faster** — a developer-experience
+  win, not a player-facing one.
+- **It is the prerequisite for issue #400.** That issue needs fog and a
+  `sky_darken` lane to reach `block.wgsl`, and the only place to put them is the
+  group-0 camera uniform. Adding them to the *old* per-section uniform would
+  have walked straight back into #75's write loop with a 112-byte struct instead
+  of an 80-byte one. So the perf fix had to land first.
+
+Concretely, the packed path now mirrors the model path term for term:
+
+| | model path (#75) | packed path (#76) |
+|---|---|---|
+| binding 0 | `ModelSharedCameraUniform` | **the same type**, via `block::shared_camera_buffer` |
+| binding 1 | `SectionOriginUniform`, dynamic | **the same type**, dynamic |
+| arena | `SectionOriginArena`, `MODEL_ORIGIN_ARENA_SLOTS` = 131072 (32 MiB) | `SectionOriginArena`, `PACKED_ORIGIN_ARENA_SLOTS` = 8192 (2 MiB) |
+| writes per frame | 1 | 1 |
+| bind groups | 1 | 1 |
+
+The camera uniform is the *same Rust type*, not a twin, deliberately: two
+structurally identical fog uniforms is exactly the drift this crate's shaders
+already warn about ("entities and terrain disagree about what time it is"). Only
+the buffer label differs (`lodestone-packed-shared-camera-uniform`), so a GPU
+capture still names the path it came from. Same for the arena, which gained a
+`label` parameter for the same reason.
+
+Two asymmetries worth knowing:
+
+- **The packed arena is allocated on every run**, live play included, where the
+  packed table stays permanently empty. 2 MiB for a second construction path
+  avoided is the trade; that is why its capacity is 8192 slots and not the model
+  arena's 131072.
+- **`BlockPipeline`'s binding 0 is `VERTEX`-visible only**, where
+  `ModelPipeline`'s is `VERTEX_FRAGMENT`. The struct carries the fog lanes so the
+  two layouts are one type, but `block.wgsl`'s fragment stage does not read them
+  yet — issue #400 is the follow-on that does, and widens the visibility.
 
 ## How to change it
 
@@ -113,8 +164,15 @@ still points at the shared arena.
   `SectionOriginUniform`'s Rust layout, update both WGSL structs' field order and
   padding to match — a silent mismatch shows up as geometry in the wrong place,
   not a validation error.
-- **The arena and its capacity** live in `gpu.rs` as `SectionOriginArena` and
-  `MODEL_ORIGIN_ARENA_SLOTS`. Capacity is a **fixed ceiling, not a growable one**
+- **The packed path's half lives in `block.rs`** (`camera_layout`,
+  `BlockPipeline::camera_bind_group(device, shared_buffer, origin_buffer)`,
+  `block::shared_camera_buffer`) and `block.wgsl`'s `Camera`/`Origin` structs.
+  There is **no `block::camera_buffer` any more** — a caller that wants the old
+  one-buffer shape wants `shared_camera_buffer` plus a `section_origin_buffer`.
+- **The arena and its capacity** live in `gpu/terrain.rs` as `SectionOriginArena`
+  and `MODEL_ORIGIN_ARENA_SLOTS` / `PACKED_ORIGIN_ARENA_SLOTS`. `new` takes a
+  `label` so the two instances are distinguishable in a capture. Capacity is a
+  **fixed ceiling, not a growable one**
   — see that type's doc comment for the sizing margin. If a render-distance
   increase ever pushes past it, `SectionOriginArena::alloc` returns `None` and
   `RenderState::upload_section` logs a warning and drops that one section's

@@ -266,9 +266,9 @@ fn per_draw_strategy_with_arena_buffers() {
 #[test]
 #[ignore = "requires a GPU adapter"]
 fn block_pass_renders_a_textured_cube() {
-    use lodestone_render::block::{camera_buffer, sprite_uv_buffer};
+    use lodestone_render::block::{shared_camera_buffer, sprite_uv_buffer};
     use lodestone_render::{
-        BlockPipeline, Camera, CameraUniform, Cell, DepthBuffer, GpuAtlas, GpuMesh,
+        BlockPipeline, Camera, Cell, DepthBuffer, GpuAtlas, GpuMesh,
         SectionNeighborhood, SectionView, SpriteId, mesh_simple,
     };
 
@@ -320,10 +320,17 @@ fn block_pass_renders_a_textured_cube() {
         near: 0.05,
         far: 100.0,
     };
-    let cam_buf = camera_buffer(device, CameraUniform::new(&camera, [0.0, 0.0, 0.0]));
+    let cam_buf = shared_camera_buffer(
+        device,
+        camera.view_projection().to_cols_array_2d(),
+        lodestone_render::fog::FogUniform::disabled(),
+    );
+    // The packed path's group-0 binding 1 (issue #76): one origin slot, at zero
+    // — this scene's geometry is already section-local to the origin.
+    let origin_buf = lodestone_render::section_origin_buffer(device, [0.0, 0.0, 0.0]);
 
     let pipeline = BlockPipeline::new(device, format);
-    let cam_bg = pipeline.camera_bind_group(device, &cam_buf);
+    let cam_bg = pipeline.camera_bind_group(device, &cam_buf, &origin_buf);
     let atlas_bg = pipeline.atlas_bind_group(device, &atlas, &uv);
     let depth = DepthBuffer::new(device, w, h);
 
@@ -360,7 +367,7 @@ fn block_pass_renders_a_textured_cube() {
             multiview_mask: None,
         });
         pass.set_pipeline(&pipeline.pipeline);
-        pass.set_bind_group(0, &cam_bg, &[]);
+        pass.set_bind_group(0, &cam_bg, &[0]);
         pass.set_bind_group(1, &atlas_bg, &[]);
         pass.set_vertex_buffer(0, gpu_mesh.vertices.slice(..));
         pass.set_index_buffer(gpu_mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
@@ -403,9 +410,9 @@ fn block_pass_renders_a_textured_cube() {
 #[test]
 #[ignore = "requires a GPU adapter"]
 fn greedy_merged_quad_stays_within_its_sprite() {
-    use lodestone_render::block::{camera_buffer, sprite_uv_buffer};
+    use lodestone_render::block::{shared_camera_buffer, sprite_uv_buffer};
     use lodestone_render::{
-        BlockPipeline, Camera, CameraUniform, Cell, DepthBuffer, GpuAtlas, GpuMesh,
+        BlockPipeline, Camera, Cell, DepthBuffer, GpuAtlas, GpuMesh,
         SectionNeighborhood, SectionView, SpriteId, mesh_greedy,
     };
 
@@ -461,10 +468,17 @@ fn greedy_merged_quad_stays_within_its_sprite() {
         near: 0.05,
         far: 100.0,
     };
-    let cam_buf = camera_buffer(device, CameraUniform::new(&camera, [0.0, 0.0, 0.0]));
+    let cam_buf = shared_camera_buffer(
+        device,
+        camera.view_projection().to_cols_array_2d(),
+        lodestone_render::fog::FogUniform::disabled(),
+    );
+    // The packed path's group-0 binding 1 (issue #76): one origin slot, at zero
+    // — this scene's geometry is already section-local to the origin.
+    let origin_buf = lodestone_render::section_origin_buffer(device, [0.0, 0.0, 0.0]);
 
     let pipeline = BlockPipeline::new(device, format);
-    let cam_bg = pipeline.camera_bind_group(device, &cam_buf);
+    let cam_bg = pipeline.camera_bind_group(device, &cam_buf, &origin_buf);
     let atlas_bg = pipeline.atlas_bind_group(device, &atlas, &uv);
     let depth = DepthBuffer::new(device, w, h);
 
@@ -501,7 +515,7 @@ fn greedy_merged_quad_stays_within_its_sprite() {
             multiview_mask: None,
         });
         pass.set_pipeline(&pipeline.pipeline);
-        pass.set_bind_group(0, &cam_bg, &[]);
+        pass.set_bind_group(0, &cam_bg, &[0]);
         pass.set_bind_group(1, &atlas_bg, &[]);
         pass.set_vertex_buffer(0, gpu_mesh.vertices.slice(..));
         pass.set_index_buffer(gpu_mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
@@ -562,10 +576,10 @@ fn greedy_merged_quad_stays_within_its_sprite() {
 #[test]
 #[ignore = "requires a GPU adapter"]
 fn real_chunk_section_renders_terrain() {
-    use lodestone_render::block::{camera_buffer, sprite_uv_buffer};
+    use lodestone_render::block::{shared_camera_buffer, sprite_uv_buffer};
     use lodestone_render::vertex::vram_bytes;
     use lodestone_render::{
-        BlockClassifier, BlockPipeline, Camera, CameraUniform, Cell, ChunkSectionView, DepthBuffer,
+        BlockClassifier, BlockPipeline, Camera, Cell, ChunkSectionView, DepthBuffer,
         GpuAtlas, GpuMesh, SectionNeighborhood, SectionView, SpriteId, UniformLight, mesh_greedy,
     };
     use lodestone_world::{ChunkSection, PaletteKind};
@@ -672,10 +686,17 @@ fn real_chunk_section_renders_terrain() {
         near: 0.05,
         far: Camera::far_for_render_distance(32, 0),
     };
-    let cam_buf = camera_buffer(device, CameraUniform::new(&camera, [0.0, 0.0, 0.0]));
+    let cam_buf = shared_camera_buffer(
+        device,
+        camera.view_projection().to_cols_array_2d(),
+        lodestone_render::fog::FogUniform::disabled(),
+    );
+    // The packed path's group-0 binding 1 (issue #76): one origin slot, at zero
+    // — this scene's geometry is already section-local to the origin.
+    let origin_buf = lodestone_render::section_origin_buffer(device, [0.0, 0.0, 0.0]);
 
     let pipeline = BlockPipeline::new(device, format);
-    let cam_bg = pipeline.camera_bind_group(device, &cam_buf);
+    let cam_bg = pipeline.camera_bind_group(device, &cam_buf, &origin_buf);
     let atlas_bg = pipeline.atlas_bind_group(device, &atlas, &uv);
     let depth = DepthBuffer::new(device, w, h);
 
@@ -713,7 +734,7 @@ fn real_chunk_section_renders_terrain() {
             multiview_mask: None,
         });
         pass.set_pipeline(&pipeline.pipeline);
-        pass.set_bind_group(0, &cam_bg, &[]);
+        pass.set_bind_group(0, &cam_bg, &[0]);
         pass.set_bind_group(1, &atlas_bg, &[]);
         pass.set_vertex_buffer(0, gpu_mesh.vertices.slice(..));
         pass.set_index_buffer(gpu_mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
@@ -756,10 +777,10 @@ fn real_chunk_section_renders_terrain() {
 #[test]
 #[ignore = "requires a GPU adapter"]
 fn translucent_quads_blend_in_sorted_order() {
-    use lodestone_render::block::{camera_buffer, sprite_uv_buffer};
+    use lodestone_render::block::{shared_camera_buffer, sprite_uv_buffer};
     use lodestone_render::vertex::VertexFields;
     use lodestone_render::{
-        BlockPipeline, Camera, CameraUniform, DepthBuffer, Face, GpuAtlas, GpuMesh, Mesh,
+        BlockPipeline, Camera, DepthBuffer, Face, GpuAtlas, GpuMesh, Mesh,
         PackedVertex, RenderLayer, TranslucentMesh,
     };
 
@@ -807,9 +828,16 @@ fn translucent_quads_blend_in_sorted_order() {
         near: 0.05,
         far: 100.0,
     };
-    let cam_buf = camera_buffer(device, CameraUniform::new(&camera, [0.0, 0.0, 0.0]));
+    let cam_buf = shared_camera_buffer(
+        device,
+        camera.view_projection().to_cols_array_2d(),
+        lodestone_render::fog::FogUniform::disabled(),
+    );
+    // The packed path's group-0 binding 1 (issue #76): one origin slot, at zero
+    // — this scene's geometry is already section-local to the origin.
+    let origin_buf = lodestone_render::section_origin_buffer(device, [0.0, 0.0, 0.0]);
     let pipeline = BlockPipeline::for_layer(device, format, RenderLayer::Translucent);
-    let cam_bg = pipeline.camera_bind_group(device, &cam_buf);
+    let cam_bg = pipeline.camera_bind_group(device, &cam_buf, &origin_buf);
     let atlas_bg = pipeline.atlas_bind_group(device, &atlas, &uv);
 
     let mut render_centre = |indices: Vec<u32>| -> [u8; 4] {
@@ -847,7 +875,7 @@ fn translucent_quads_blend_in_sorted_order() {
                 multiview_mask: None,
             });
             pass.set_pipeline(&pipeline.pipeline);
-            pass.set_bind_group(0, &cam_bg, &[]);
+            pass.set_bind_group(0, &cam_bg, &[0]);
             pass.set_bind_group(1, &atlas_bg, &[]);
             pass.set_vertex_buffer(0, gpu_mesh.vertices.slice(..));
             pass.set_index_buffer(gpu_mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
