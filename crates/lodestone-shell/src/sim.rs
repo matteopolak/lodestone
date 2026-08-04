@@ -1772,6 +1772,19 @@ impl Sim {
         self.vitals().food
     }
 
+    /// Server-reported food saturation — the hidden reserve that drains before
+    /// `food` does — or `None` before the first `set_health`.
+    ///
+    /// Read by the HUD's hunger wobble (issue #30): vanilla shakes the hunger
+    /// row only while saturation is exhausted (`Hud.java:977-979`), so without
+    /// this the animation is computed correctly and never fires on a live
+    /// server. `Vitals::saturation` was already populated; only the accessor
+    /// and `app.rs`'s one assignment were missing.
+    #[must_use]
+    pub fn saturation(&self) -> Option<f32> {
+        self.vitals().saturation
+    }
+
     /// Server-reported air supply in ticks (`0..=300`), or `None` before the
     /// first entity-metadata update naming the local player arrives (see
     /// [`Vitals::air`]'s doc for why this rides a different event family than
