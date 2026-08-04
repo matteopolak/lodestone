@@ -708,6 +708,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `GAME_EVENT` codes — `START_RAINING` (1), `STOP_RAINING` (2), `RAIN_LEVEL_CHANGE`
   (7), `THUNDER_LEVEL_CHANGE` (8) — and the client turns two scalars in `0.0..=1.0`
   into:
+- [World Creation screen](./world-creation-screen.md) — `Screen::CreateWorld` (issue
+  #190): vanilla's `CreateWorldScreen`, reached from the world list's "Create New
+  World" button (`crates/lodestone-shell/src/menu/world_select.rs`'s
+  `WorldSelectButton::Create`, now live — issue #397 left it present-and-disabled
+  deliberately for this issue). Collects a world name, seed, game mode, difficulty,
+  and three toggles (generate structures, bonus chest, allow cheats).
 - [World select, with creation disabled](./world-select.md) — `Screen::WorldSelect`
   — vanilla's `SelectWorldScreen`, reached from the title screen's **Singleplayer**
   button. A title, a search field, a world list, and six footer buttons: Play Selected

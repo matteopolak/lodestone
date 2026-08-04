@@ -2055,6 +2055,7 @@ pub fn owns_frame(screen: super::Screen) -> bool {
             | Screen::Credits
             | Screen::Social
             | Screen::Statistics
+            | Screen::CreateWorld
     )
 }
 
@@ -3505,6 +3506,10 @@ pub fn frame_for<'a>(
             nav.stats(),
             &super::stats::StatsSnapshot::default(),
         )),
+        // World Creation (issue #190) — see `super::create_world`'s own doc
+        // for why this is one flat hand-placed list rather than vanilla's
+        // three tabs.
+        Screen::CreateWorld => Some(super::create_world::frame(nav.create_world())),
         _ => None,
     };
     // Stamped on every screen (not read back out of `nav` per-screen above) so
@@ -5445,6 +5450,10 @@ mod tests {
                     ui.enter_dev_world();
                     ui.pause();
                     ui.open_statistics_from_pause();
+                }
+                Screen::CreateWorld => {
+                    ui.open_world_select();
+                    ui.open_create_world();
                 }
             }
             assert_eq!(ui.screen(), screen, "failed to reach {screen:?}");
@@ -8598,18 +8607,23 @@ mod tests {
                 "Back",
             ]
         );
-        // Four disabled, two enabled — #397's headline with #287's launch on top.
-        // Create New World is *present* and inactive, which is what makes the
-        // footer's shape vanilla's; Play is active because the list has a world.
+        // Three disabled, three enabled — #397's headline, with #287's launch
+        // and #190's screen both live on top. Edit/Delete/Re-Create are
+        // *present* and inactive, which is what makes the footer's shape
+        // vanilla's; Play is active because the list has a world and Create
+        // is active because issue #190 built the screen behind it.
         let enabled: Vec<&str> = f.rows[1..]
             .iter()
             .filter(|r| r.enabled)
             .map(|r| r.label.as_str())
             .collect();
-        assert_eq!(enabled, vec!["Play Selected World", "Back"]);
+        assert_eq!(
+            enabled,
+            vec!["Play Selected World", "Create New World", "Back"]
+        );
         assert!(
-            !f.rows[WorldSelectButton::Create.row()].enabled,
-            "Create New World must be present and disabled (issue #190)"
+            !f.rows[WorldSelectButton::Edit.row()].enabled,
+            "Edit must be present and disabled"
         );
 
         // Every row's rect is the slot the layout placed it in, through the same
@@ -8732,7 +8746,9 @@ mod tests {
         assert_eq!(grey, widget::INACTIVE_LABEL);
 
         for (button, want, name) in [
-            (B::Create, grey, "disabled"),
+            // Issue #190 made Create live; Edit is still present-and-disabled
+            // and takes over as the disabled example here.
+            (B::Edit, grey, "disabled"),
             (B::Back, widget::ACTIVE_LABEL, "enabled"),
         ] {
             let row = frame.rows[button.row()].clone();
@@ -8888,26 +8904,26 @@ mod tests {
 
         // A **disabled** hovered button still draws the disabled sprite —
         // `WidgetSprites`' three-argument collapse, the single rule a hand-rolled
-        // highlight gets wrong.
-        let create = frame.rows[B::Create.row()].clone();
-        let mut f = frame_with(vec![create], 99);
+        // highlight gets wrong. Edit, not Create (issue #190 made Create live).
+        let edit = frame.rows[B::Edit.row()].clone();
+        let mut f = frame_with(vec![edit], 99);
         f.vanilla = true;
         f.hovered = Some(0);
         let sprite = build(&f, Some(&atlas), None, V_W, V_H).sprite;
         let (off_min, off_max) = sprite_uv_bounds(&atlas, widget::BUTTON_SPRITES.disabled);
         assert!(
             all_uvs_within(&sprite, off_min, off_max),
-            "a hovered DISABLED Create New World must still sample widget/button_disabled"
+            "a hovered DISABLED Edit must still sample widget/button_disabled"
         );
 
         // And the click that hover would have preceded does nothing on it, which
         // is the other half of "present but disabled".
         let before = ui.screen();
         assert_eq!(
-            nav.click(&mut ui, B::Create.row()),
+            nav.click(&mut ui, B::Edit.row()),
             crate::menu::nav::MenuAction::None
         );
-        assert_eq!(ui.screen(), before, "clicking Create must not open anything");
+        assert_eq!(ui.screen(), before, "clicking Edit must not open anything");
     }
 
     /// The search box draws as a **text field**, not as a button — a slotted row
