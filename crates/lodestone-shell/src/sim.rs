@@ -2981,29 +2981,39 @@ impl Sim {
         })
     }
 
-    /// The crack-overlay stage another player is showing at `pos`, if any
-    /// (issue #410). Reads [`SessionBlockDestruction`], folded from
-    /// `ClientEvent::BlockDestruction` by
-    /// `lodestone_ecs::session::apply_block_destruction`.
+    /// Every crack overlay to draw this frame (issue #410): the local
+    /// player's own dig via [`Self::crack_target`], plus one
+    /// [`crate::gpu::CrackTarget`] for every *other* player's active overlay
+    /// in [`SessionBlockDestruction`], folded from `ClientEvent::BlockDestruction`
+    /// by `lodestone_ecs::session::apply_block_destruction`.
     ///
-    /// This is a single-position probe, not an enumeration: `stage_at` is the
-    /// only read `lodestone_game::mining::BlockDestructionOverlays` exposes
-    /// today, so a caller must already know which position to ask about. The
-    /// real per-frame render loop needs the opposite shape — every currently
-    /// active overlay, with no position known in advance — which needs a small
-    /// additive accessor on `BlockDestructionOverlays` itself
-    /// (`lodestone-game`, out of this pass's file ownership); see the #410
-    /// report for the exact patch. This accessor is still real and still used
-    /// today wherever a specific block position is already in hand (e.g. a
-    /// block being drawn by the terrain/block-entity passes that could show a
-    /// crack overlay on top of it).
+    /// This is the accessor the #410 report's own gate (`gathers_local_plus_
+    /// every_other_players_overlay` in `gpu/outline.rs`) proved the pipeline
+    /// side of but that nothing in production called: `crate::gpu::
+    /// gather_crack_targets` and `BlockDestructionOverlays::iter` both landed
+    /// closing the issue, but the issue closed with only the local target
+    /// ever reaching `app.rs`'s `cracks` vec — this is the missing hop.
+    ///
+    /// `overlays` is cloned out of the read guard before resolving each
+    /// position's state id: `resolve` below takes `self.net`/`self.
+    /// block_at_world` reads of its own, and holding the `SessionBlockDestruction`
+    /// guard across those is the same nested-lock hazard [`Self::fold_entities`]'s
+    /// doc warns about for entity snapshots.
     #[must_use]
-    pub fn block_destruction_stage_at(&self, pos: lodestone_model::math::BlockPos) -> Option<u8> {
-        self.read(|w| {
+    pub fn crack_targets(&self) -> Vec<crate::gpu::CrackTarget> {
+        let overlays = self.read(|w| {
             w.get::<SessionBlockDestruction>(self.local)
                 .expect("the local player always carries SessionBlockDestruction")
                 .0
-                .stage_at(pos)
+                .clone()
+        });
+        let is_live = self.is_live();
+        crate::gpu::gather_crack_targets(self.crack_target(), overlays.iter(), |pos| {
+            if is_live {
+                self.net.as_ref()?.block_at(pos)
+            } else {
+                Some(self.block_at_world([pos.x, pos.y, pos.z]))
+            }
         })
     }
 
