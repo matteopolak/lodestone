@@ -58,6 +58,7 @@ use lodestone_ecs::{
 };
 use lodestone_model::BlockPos;
 use lodestone_nav::{AdapterCensus, Budget, FactsTable, NavPolicy, Outcome, Plan, Progress, Search};
+use lodestone_physics::MovementInput;
 
 pub mod drive;
 
@@ -141,6 +142,21 @@ struct AutopilotState {
     search: Option<Search>,
     plan: Option<Plan>,
     edge: usize,
+    /// Whether `plan`'s own search outcome was [`Outcome::Reached`] — if so
+    /// `plan` already ends inside the goal and no continuation will ever be
+    /// dispatched for it (`docs/baritone-port.md` §4.9: segmentation exists
+    /// for the goal-missing partial case, not the already-arrived one).
+    reached_goal: bool,
+    /// A search for the *next* segment, dispatched once `plan`'s remaining
+    /// cost drops below [`NavPolicy::replan_lead_ticks`] — see [`plan_route`]'s
+    /// segmentation block.
+    continuation_search: Option<Search>,
+    /// The next segment, ready to splice in the moment `plan` runs out.
+    continuation_plan: Option<Plan>,
+    /// Whether *that* segment's own search reached the goal — carried
+    /// alongside `continuation_plan` so splicing it in also correctly updates
+    /// [`Self::reached_goal`].
+    continuation_reached_goal: bool,
 }
 
 /// (Re)start or resume the search toward [`AutopilotGoal`].
@@ -216,6 +232,7 @@ fn plan_route(
             Progress::Done(Outcome::Reached) => {
                 state.plan = state.search.take().and_then(|s| s.best_plan());
                 state.edge = 0;
+                state.reached_goal = true;
                 *status = if state.plan.is_some() {
                     AutopilotStatus::Driving
                 } else {
@@ -226,9 +243,72 @@ fn plan_route(
                     AutopilotStatus::Failed(FailReason::Search(Outcome::Reached))
                 };
             }
+            Progress::Done(outcome @ (Outcome::BudgetExhausted | Outcome::WorldExhausted)) => {
+                // A partial plan that does not yet reach the goal is still a
+                // real plan to drive — segmentation's whole premise
+                // (`docs/baritone-port.md` §4.9) is that "ran out of snapshot"
+                // is progress, not failure, as long as a continuation picks up
+                // from where this one ends.
+                state.plan = state.search.take().and_then(|s| s.best_plan());
+                state.edge = 0;
+                state.reached_goal = false;
+                *status = if state.plan.is_some() {
+                    AutopilotStatus::Driving
+                } else {
+                    AutopilotStatus::Failed(FailReason::Search(outcome))
+                };
+            }
             Progress::Done(outcome) => {
                 state.search = None;
                 *status = AutopilotStatus::Failed(FailReason::Search(outcome));
+            }
+        }
+    }
+
+    // Segmentation (`docs/baritone-port.md` §4.9): once the active plan's
+    // remaining cost — excluding the edge currently executing, so one long
+    // edge cannot suppress this forever — drops below `replan_lead_ticks`,
+    // plan the next segment *now*, while still walking. This is what makes a
+    // journey longer than one `SnapshotView` possible at all: without it the
+    // bot always stops dead the moment a plan that never reached the goal
+    // runs out.
+    if !state.reached_goal
+        && state.continuation_search.is_none()
+        && state.continuation_plan.is_none()
+        && let Some(plan) = state.plan.as_ref()
+        && plan.remaining_cost_after(state.edge).as_f64() < f64::from(NavPolicy::default().replan_lead_ticks)
+    {
+        let terminal = plan.terminal();
+        if let Some(adapter) = version.0.as_deref() {
+            let facts = Arc::new(FactsTable::build(&AdapterCensus(adapter)));
+            let world = chunk_world.read();
+            // `None` here just means the terminal node's own column has not
+            // loaded yet — normal while walking toward a snapshot's edge, and
+            // worth trying again next tick rather than treating as failure
+            // (`drive::continuation_search`'s own doc comment).
+            state.continuation_search =
+                drive::continuation_search(&world, terminal, target, facts, SNAPSHOT_RADIUS, NavPolicy::default());
+        }
+    }
+
+    if let Some(search) = state.continuation_search.as_mut() {
+        match search.step(Budget::PER_TICK) {
+            Progress::Working => {}
+            Progress::Done(outcome) => {
+                let reached = outcome == Outcome::Reached;
+                if let Some(plan) = state.continuation_search.take().and_then(|s| s.best_plan()) {
+                    state.continuation_plan = Some(plan);
+                    state.continuation_reached_goal = reached;
+                }
+                // A continuation with no usable plan (a genuine `Failed`, or
+                // `Reached`/`BudgetExhausted`/`WorldExhausted` with no partial
+                // clearing `min_progress`) is simply not retried this tick:
+                // `continuation_search` is already cleared by `take()` above,
+                // so the dispatch block will fire again next tick. This has no
+                // rate limit yet (`min_replan_interval_ticks` is declared but
+                // not wired to this path) — acceptable for M2's "medium
+                // journeys work" bar, and worth revisiting if a goal that is
+                // genuinely unreachable past the snapshot edge is found to spin.
             }
         }
     }
@@ -255,11 +335,32 @@ fn drive_plan(
         return;
     };
     let Some(edge) = plan.edges().get(state.edge).copied() else {
-        // The plan is exhausted: hand rotation back to mouse-look and let
-        // `plan_route` decide what happens next (a fresh goal, or nothing).
-        state.plan = None;
-        commands.entity(entity).remove::<LookIntent>();
-        *status = AutopilotStatus::Arrived;
+        // The plan is exhausted. If a continuation is ready, splice it in and
+        // keep driving with no visible stutter: concatenation is valid by
+        // construction, since the continuation started at exactly this plan's
+        // terminal node (`docs/baritone-port.md` §4.9 — "the new plan
+        // therefore begins exactly where the old one ends"). Otherwise: the
+        // goal really is reached, or stand still and wait rather than mis-
+        // splicing or guessing (§4.9: "a visible pause is strictly better than
+        // executing a guess").
+        if let Some(next) = state.continuation_plan.take() {
+            state.reached_goal = state.continuation_reached_goal;
+            state.plan = Some(next);
+            state.edge = 0;
+            // No intent this tick; the spliced plan's first edge drives from
+            // the next one, exactly as a freshly-adopted plan would.
+            return;
+        }
+        if state.reached_goal {
+            state.plan = None;
+            commands.entity(entity).remove::<LookIntent>();
+            *status = AutopilotStatus::Arrived;
+        } else {
+            // Waiting for a continuation that has not arrived yet: hold
+            // still rather than drift on whatever the last edge's script
+            // last wrote.
+            intent.0 = MovementInput::NONE;
+        }
         return;
     };
 
