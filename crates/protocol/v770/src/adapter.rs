@@ -16,7 +16,8 @@ use lodestone_model::{
     EntityBaseDimensions,
     EntityEquipment,
     EntityFacts,
-    EntityInteraction, EntityMovement, EquipmentSlot, GameMode, Hand, ItemComponents,
+    EntityInteraction, EntityMetadataUpdate, EntityMovement, EntityVariant, EquipmentSlot,
+    GameMode, Hand, ItemComponents,
     ItemEnchantment, ItemPrototype, ItemStack, ItemTool, LoginProfile,
     LookAnchor, MainHand, NumberFormat, ObjectiveMode, ObjectiveRenderType, PackedMessageSignature,
     ParticleStatus, PlayerCommand, PlayerInput, PlayerListEntry, PlayerLookAtEntity,
@@ -66,7 +67,7 @@ use crate::packets::login::{
     LoginFinished,
 };
 use crate::packets::metadata::{
-    TrackedEntity, metadata_class, read_entity_metadata, read_update_attributes,
+    MetadataClass, TrackedEntity, metadata_class, read_entity_metadata, read_update_attributes,
 };
 use crate::packets::player_info::{PlayerInfoRemove, PlayerInfoUpdate};
 use crate::packets::registry::{ClientRegistries, DimensionType, RegistryData};
@@ -1820,7 +1821,7 @@ fn handle_add_entity(
         map.insert(entity_id, tracked);
     }
 
-    Ok(vec![
+    let mut directives = vec![
         Directive::Emit(ClientEvent::EntitySpawned {
             entity_id,
             uuid: Some(uuid),
@@ -1833,7 +1834,43 @@ fn handle_add_entity(
             entity_id,
             head_yaw: unpack_degrees(head_yaw),
         }),
-    ])
+    ];
+
+    // Vanilla's `SynchedEntityData` only ever puts a field on the wire when it
+    // differs from the accessor's own default (`DataItem.isSetToDefault`,
+    // `SynchedEntityData.getNonDefaultValues` — the only source `ServerEntity`
+    // ever feeds a spawn's initial `set_entity_data`; see
+    // `Sheep.defineSynchedData`: `entityData.define(DATA_WOOL_ID, (byte)0)`).
+    // A naturally white, unsheared sheep (colour ordinal 0, sheared bit unset —
+    // exactly byte `0`) therefore never puts index 18 on the wire at all, not
+    // just at spawn: `read_entity_metadata` never sees the byte, `variant` stays
+    // `None`, and every consumer keyed on `Some(EntityVariant::Dyed { .. })`
+    // (`entities::sheep_wool`) draws no wool. A dyed or sheared sheep works
+    // today because *that* state is non-default and is always on the wire.
+    //
+    // The fix is synthesizing the vanilla default here, once, as an ordinary
+    // `EntityMetadataUpdated` event through the exact same channel a real
+    // `set_entity_data` uses — so every downstream consumer (the ECS fold, the
+    // shell snapshot) needs no special case for "unreported": a real
+    // `set_entity_data` naming index 18 (dye, shear) is decoded afterward in
+    // packet order and overwrites this default exactly as it would overwrite
+    // any other synthesized-then-corrected value. Only sheep gets this: horse's
+    // default variant is deferred (see `docs/entity-rendering.md`'s variant
+    // census) rather than guessed at without the same wire confirmation.
+    if tracked.class == Some(MetadataClass::Sheep) {
+        directives.push(Directive::Emit(ClientEvent::EntityMetadataUpdated {
+            entity_id,
+            metadata: EntityMetadataUpdate {
+                variant: Some(EntityVariant::Dyed {
+                    color: 0,
+                    sheared: false,
+                }),
+                ..EntityMetadataUpdate::default()
+            },
+        }));
+    }
+
+    Ok(directives)
 }
 
 /// Decodes `remove_entities` (a VarInt-length list of VarInt ids) into a removal

@@ -499,3 +499,55 @@ fn woolly_sheep_differs_from_sheared_and_the_dye_tint_reaches_the_shader() {
          {avg_channel_delta:.1} — too small to be the tint multiply actually engaging"
     );
 }
+
+/// Render-side half of the "white sheep render with no wool" fix.
+///
+/// The decode seam (`crates/protocol/v770/src/adapter.rs`'s
+/// `handle_add_entity`, see `sheep_wool_default.rs` in that crate's own
+/// tests) now synthesizes `EntityVariant::Dyed { color: 0, sheared: false }`
+/// for a sheep spawn that carries no wool byte on the wire at all — vanilla's
+/// own accessor default (`Sheep.defineSynchedData`:
+/// `entityData.define(DATA_WOOL_ID, (byte)0)`). This crate cannot see that
+/// decode seam (`lodestone-render` depends on neither `lodestone-v770` nor
+/// the shell's snapshot fold), so what belongs here is the other half of the
+/// chain the fix depends on: that colour ordinal `0` is a real, visible wool
+/// colour at the asset/render layer, not a sentinel for "nothing to draw".
+/// If it silently mapped to a transparent or absent texture, defaulting to
+/// it would reproduce the exact "no wool" bug in a different guise —
+/// `sheep_wool_tint(0)` would need to differ from *itself* to catch that,
+/// which is exactly assertion 1 below, restricted to the one colour the fix
+/// actually picks.
+#[test]
+#[ignore = "requires a GPU adapter; run explicitly to prove the decode seam's default colour reaches pixels"]
+fn the_synthesized_default_wool_colour_renders_visibly() {
+    let Some(gpu) = setup() else {
+        panic!(
+            "sheep_wool_pixels: no GPU adapter. This test is #[ignore]d, so running it is an \
+             explicit request for the full GPU path — run it on a machine with an adapter."
+        );
+    };
+    let models = EntityModelSet::load();
+
+    // Exactly the value `handle_add_entity` synthesizes: ordinal 0.
+    let default_wool = sheep_wool_tint(0);
+
+    let sheared = render_sheep(&gpu, &models, None);
+    let woolly_default = render_sheep(&gpu, &models, Some(default_wool));
+
+    let wool_mask = diff_mask(&sheared, &woolly_default);
+    let wool_px = wool_mask.iter().filter(|d| **d).count();
+    let total_px = (W * H) as usize;
+    println!("=== SYNTHESIZED-DEFAULT WOOL COLOUR GATE ===");
+    println!("sheared vs woolly (synthesized default) : {wool_px} px differ / {total_px} total");
+    assert!(
+        wool_px >= 500,
+        "a sheep rendered with the decode seam's synthesized default colour (ordinal 0) is only \
+         {wool_px} px different from a bare, wool-less sheep — the default the fix picks is not \
+         actually reaching visible pixels, which would silently reproduce the reported bug"
+    );
+    assert!(
+        wool_px < total_px / 2,
+        "the synthesized-default wool render changed {wool_px} of {total_px} px — more than half \
+         the frame, not a localised wool layer"
+    );
+}
