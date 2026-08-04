@@ -1,0 +1,192 @@
+# v770 serverbound `play` packet wiring, and why decoding is not the bar
+
+## What it is
+
+The measured state of protocol 776's **serverbound** `play` packets on the hosting side —
+what `V770ServerProtocol::decode` understands, what actually reaches a consumer in
+`lodestone-server`, and why those two numbers differ by more than 3×. This is the record
+for GitHub issues #262, #264, #266, #268 and #270, whose bodies all framed the gap as a
+decode gap. **That framing is stale**: decode is nearly complete and connectedness is the
+real bar.
+
+## Measured state
+
+Never hand-count this — run `cargo xtask connectedness` (`CLAUDE.md` records four
+hand-derived coverage numbers that were wrong in four different ways).
+
+| axis | measured | meaning |
+|---|---|---|
+| serverbound **decoded** | **60/69** | `decode` has a real arm and reads the wire |
+| serverbound **connected** | **17/69** | that arm produces a `ServerBound` variant a consumer acts on |
+| decodes-to-`Ignored`-only | **43** | examined, understood, reaching nothing |
+| never examined | **9** | no arm at all |
+
+The nine with no arm at all: `CHAT`, `CHAT_ACK`, `CHAT_COMMAND`, `CHAT_COMMAND_SIGNED`,
+`CHAT_SESSION_UPDATE`, `COMMAND_SUGGESTION` (the whole chat/command family — issue #271,
+which additionally needs signature verification that does not exist anywhere in the tree),
+plus `COOKIE_RESPONSE`, `DEBUG_SUBSCRIPTION_REQUEST` and `TEST_INSTANCE_BLOCK_ACTION`.
+Each of the last three is deliberately undecoded for a reason stated at the wildcard arm in
+`crates/protocol/v770/src/server_protocol.rs` — no encoder to cross-check against, no
+VarInt id table to resolve a registry-keyed set, and no codec support for a nested
+`Optional<ResourceKey>`/`Vec3i`/`Rotation` composite, respectively.
+
+## The defect this doc exists to prevent
+
+`ServerBound` is declared in `crates/lodestone-server/src/protocol.rs`. The arms that
+construct it are in `crates/protocol/v770/src/server_protocol.rs`, **a different crate**.
+Nothing in the type system joins them. So a variant can be:
+
+- declared on the enum,
+- matched by `dispatch_play_packet`,
+- given a fully-written `apply_*` consumer with a doc comment citing vanilla line numbers,
+- covered by an end-to-end test that drives a real transport through a full login,
+
+and still be **constructed by no decode arm at all** — in which case the packet is silently
+discarded on the wire forever, and everything above stays green.
+
+This has happened twice, both from one commit. `c4ad474` wired **four** consumers and
+updated only **two** decode arms. Issue #425 later found `ClientInformationChanged` and
+`ChunkBatchAcknowledged`; `CreativeModeSlotSet` and `ClientCommand`, from the same commit,
+stayed dead longer still. Costs, both user-visible:
+
+- **Creative inventory**: every `set_creative_mode_slot` a real client sent was dropped.
+- **Respawn**: `apply_client_command`'s `PERFORM_RESPAWN` path was unreachable, so a player
+  who died could never leave the death screen. Per `CLAUDE.md`'s live-server hazards a dead
+  player is held there and is sent **no chunks** — so the connection became a permanent,
+  silent chunk blackout with keep-alives and entity movement still flowing perfectly.
+
+### Why the existing tests all passed
+
+This is the sharpest island instance in the repo, and it is worth studying because none of
+the three tests covering these packets was badly written:
+
+| test | what it proved | why it could not fail |
+|---|---|---|
+| `v770/tests/interaction_actions.rs::set_creative_mode_slot_with_item_is_byte_exact` | the **client encoder** is byte-exact | encode side only |
+| `v770/tests/death_respawn.rs::client_command_perform_respawn_is_single_zero_byte` | same, for `client_command` | encode side only |
+| `lodestone-server/tests/serve_play.rs::creative_mode_slot_write_lands_in_the_real_inventory` | dispatch **and** consumer, end-to-end over a real transport through a full login/join | it runs against **`FakeProtocol`**, a test `ServerProtocol` with its own decode arms and invented packet ids (`50`/`51`, `serve_play.rs:173-190`) |
+
+The third is the instructive one. It is a genuine end-to-end test, and it is an instance of
+`CLAUDE.md`'s ***world* species** of vacuous test — the flaw is in the input data, not the
+assertions, and cannot be found by reading the test: it was pointed at the one
+`ServerProtocol` implementation in the tree that structurally cannot exercise the
+production decoder. Compare the recorded colour-fix case verified against `--headless`,
+which renders through a different mesher than live terrain.
+
+**So: a `FakeProtocol` test proves dispatch and consumer, never decode.** Any packet whose
+only end-to-end coverage runs through `FakeProtocol` still needs a `V770ServerProtocol`
+decode assertion, or it is unverified on the wire.
+
+## The gate
+
+`crates/protocol/v770/tests/serverbound_wiring.rs` closes the class structurally:
+**every variant declared on `ServerBound` must be constructed somewhere in
+`server_protocol.rs`'s non-test code.** No allowlist — the lifecycle variants are built by
+the handshake/login/config arms and `Ignored` by the wildcard, so the rule is total.
+
+Two of its scoping decisions are load-bearing, and its own first draft had neither, which
+made it **half-vacuous** — the same failure it exists to catch:
+
+- **Comments must be blanked.** `server_protocol.rs:1446` contained the prose
+  ``// it up is "add a `ServerBound::CreativeModeSlotSet { slot,`` — and the draft gate
+  reported only `ClientCommand`, silently missing one of the two live islands. One comment
+  was the whole difference between finding both and finding half.
+- **`#[cfg(test)]` modules must be blanked.** Otherwise a test assertion
+  (`assert_eq!(decoded, ServerBound::Foo { .. })`) counts as a construction and a broken arm
+  is masked by its own test.
+
+Scoping to `fn decode`'s body instead was tried and is **too narrow**: it reported
+`ContainerClicked` stranded when it is correctly wired, because several arms delegate to a
+helper that returns `ServerBound` rather than constructing inline.
+
+The stripper is lifetime-aware by **lookahead**, not by a toggle, because `CLAUDE.md`
+records that all three of this repo's pre-existing source scanners were silently broken for
+months by a `'` opening a lifetime and never closing — which disabled comment detection for
+the rest of every affected file and surfaced only as an unrelated UTF-8 panic.
+`the_stripper_survives_a_lifetime_before_a_comment` fails if it is reduced to a toggle.
+
+**Observed control**: run against pristine `HEAD` in an isolated worktree, the gate fails
+naming exactly `["ClientCommand", "CreativeModeSlotSet"]` — no false positives, no misses —
+while its three self-controls pass.
+
+### What it does not measure
+
+Reachability of the **consumer**, only of the constructor. A variant that decodes and lands
+in `dispatch_play_packet`'s no-op group is still stranded, and this gate is silent about it.
+`cargo xtask connectedness` reports that half, as `decodes-to-Ignored-only`. The two
+instruments are complements: `connectedness` cannot see a missing constructor because it
+does not know a consumer exists; this gate cannot see a missing consumer.
+
+## Why 43 packets stay `Ignored`, and what would consume them
+
+Each is decoded — the wire shape is verified and the bytes are consumed — but has no
+consumer because the **subsystem** does not exist. Decoding was still worth doing: it moves
+a packet from "never examined" to "examined, no consumer", which `connectedness` tracks
+separately, and it means the wire work is not the blocker when the subsystem lands.
+
+| family | packets | missing subsystem / what would consume it |
+|---|---|---|
+| movement remainder | `MOVE_PLAYER_ROT`, `MOVE_PLAYER_STATUS_ONLY` | `FallTracker` sees `on_ground` only via `PlayerMoved`, so a landing arriving on a rotation-only or status-only sample is missed — a gap `ServerBound::PlayerMoved`'s own doc comment already discloses. Smallest real next step in this family: a `ServerBound` ground-state variant feeding `FallTracker`. |
+| flight / load / tick / teleport / vehicle | `PLAYER_ABILITIES`, `PLAYER_LOADED`, `CLIENT_TICK_END`, `ACCEPT_TELEPORTATION`, `MOVE_VEHICLE`, `PADDLE_BOAT` | no flight model, no client-load timeout, no tick alignment, no teleport-confirmation tracking, no vehicle entities. `ACCEPT_TELEPORTATION` becomes meaningful once the server tracks outstanding teleport ids and ignores movement until confirmed, as vanilla does. |
+| interaction / combat remainder | `INTERACT`, `SWING`, `USE_ITEM`, `PLAYER_COMMAND`, `SPECTATOR_ACTION`, `TELEPORT_TO_ENTITY` | no entity-interaction model (taming/feeding/mounting), and no multi-player entity broadcast — `SWING` and `PLAYER_COMMAND`'s sneak/sprint pose exist to be *shown to other players*, and this server serves one connection's view. |
+| container remainder | `CONTAINER_BUTTON_CLICK`, `CONTAINER_SLOT_STATE_CHANGED`, `PLACE_RECIPE`, `RECIPE_BOOK_*`, `SELECT_TRADE`, `SET_BEACON`, `EDIT_BOOK`, `SIGN_UPDATE`, `RENAME_ITEM`, `PICK_ITEM_FROM_*`, `BUNDLE_ITEM_SELECTED` | `PlayerInventory` models window 0's 41 native slots and nothing else: no recipe book, beacon, anvil, bundle, book or trade state. `SIGN_UPDATE` is miscategorised in #266 — sign text belongs to `lodestone-world`, not the inventory. |
+| world/block admin | `SET_COMMAND_BLOCK`, `SET_COMMAND_MINECART`, `SET_JIGSAW_BLOCK`, `JIGSAW_GENERATE`, `SET_STRUCTURE_BLOCK`, `SET_TEST_BLOCK`, `CUSTOM_CLICK_ACTION`, `CHANGE_GAME_MODE` | no command blocks, no jigsaw generation, no structure blocks, no game-test framework, no game-mode model. **And no permission model of any kind** — `server.rs:1206` records that every connection is treated as the singleplayer owner, so vanilla's op checks on this entire family have nothing to mirror. Do not half-build that; see below. |
+| lifecycle remainder | `PING_REQUEST`, `PONG`, `CUSTOM_PAYLOAD`, `RESOURCE_PACK`, `SEEN_ADVANCEMENTS`, `ENTITY_TAG_QUERY`, `BLOCK_ENTITY_TAG_QUERY`, `CONFIGURATION_ACKNOWLEDGED` | `PING_REQUEST` is the cheapest genuinely-wireable one left: vanilla answers it with a clientbound `pong_response` echoing the same value, needing no new subsystem — only a `ServerProtocol` encode method. The rest need an advancement model, an NBT query responder, a resource-pack push to respond *to*, and a mid-session reconfigure this server never initiates. |
+
+### The permission model is the blocker, and it should stay one
+
+There is **no op system and no permission model anywhere** in `lodestone-server`
+(`server.rs:1206`); every connection is the singleplayer owner. `CHANGE_DIFFICULTY`,
+`LOCK_DIFFICULTY` and `SET_GAME_RULE` are already wired *with that omission disclosed on
+each consumer's doc comment*, which is the right shape — the alternative is a fake
+permission check that reads as security and is not. Anything in the world/block-admin family
+should decode and say so rather than grow a half-built permission subsystem underneath it.
+
+### `apply_container_clicked` trusts the client, deliberately and visibly
+
+`server.rs:1424` applies the client's own predicted per-slot diff rather than re-running
+vanilla's `AbstractContainerMenu.doClick` state machine server-side. That is a real
+limitation, disclosed on the function's own doc comment, and **wiring more container packets
+must not quietly entrench it** — a server-authoritative `doClick` is the correct eventual
+shape, and `docs/container-clicks.md` is the best available specification for it, since our
+client already predicts against that same machine.
+
+## How to change it
+
+- **Adding a `ServerBound` variant** makes `serverbound_wiring.rs` fail until a decode arm
+  constructs it. Fix the arm; do not add an exemption.
+- **Adding a decode arm** that lifts a packet out of `Ignored` needs three edits, in
+  different crates: the variant (`lodestone-server/src/protocol.rs`), the arm
+  (`v770/src/server_protocol.rs`), and a `dispatch_play_packet` arm plus consumer
+  (`lodestone-server/src/server.rs`). Missing the third leaves the variant stranded, which
+  `connectedness` reports; missing the second leaves the consumer dead, which
+  `serverbound_wiring.rs` reports.
+- **Expected values must come from outside our code.** `decode(encode(x)) == x` is satisfied
+  by two symmetric misunderstandings and has already cost real work here. Use
+  `.cache/mc/26.2/src`'s decompiled `STREAM_CODEC` (names are real in 26.2),
+  `generated/reports/registries.json` for numeric ids, or captured client bytes. The gates
+  for the two packets fixed here take their bytes from
+  `ServerboundSetCreativeModeSlotPacket.java`, `ServerboundClientCommandPacket.java`,
+  `ByteBufCodecs.java:81` (`SHORT` is big-endian), `FriendlyByteBuf.java:472` (`writeEnum`
+  is a VarInt ordinal) and the registry report's `minecraft:cobblestone = 62`.
+- **A capture from a real vanilla client is still the strongest evidence and we have none.**
+  Every gate here is hand-decoded from decompiled source, which `CLAUDE.md` accepts, but a
+  real client's bytes would be better and no harness exists to collect them — the live
+  oracles are *servers*. Building a serverbound capture harness would raise the evidence
+  floor for this whole axis.
+
+## Configuration
+
+None. No feature flags gate any of this; `V770ServerProtocol` is the only `ServerProtocol`
+implementation, so `v770` is the only family that can host (see
+`lodestone-registry`'s `Family`/`ServerFamily` split).
+
+## Dependencies
+
+- `crates/protocol/v770/src/server_protocol.rs` — the decode arms.
+- `crates/lodestone-server/src/protocol.rs` — the `ServerBound` enum and the
+  `ServerProtocol` trait.
+- `crates/lodestone-server/src/server.rs` — `dispatch_play_packet` and the `apply_*`
+  consumers.
+- `cargo xtask connectedness` — the decoded/connected measurement.
+- `.cache/mc/26.2/{src,generated/reports}` — the outside-our-code evidence source.

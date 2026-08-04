@@ -1456,25 +1456,37 @@ impl ServerProtocol for V770ServerProtocol {
                 let _ = decode_full::<ContainerSlotStateChanged>(payload);
                 ServerBound::Ignored
             }
-            // `ServerboundSetCreativeModeSlotPacket`: big-endian `i16` slot,
-            // then an [`read_optional_item_stack`] item — see that helper's
-            // doc comment for why it is not the same shape as
-            // [`read_hashed_stack`].
+            // `ServerboundSetCreativeModeSlotPacket`: big-endian `i16` slot
+            // (`ByteBufCodecs.SHORT`), then an [`read_optional_item_stack`]
+            // item (`ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC`) — see that
+            // helper's doc comment for why it is not the same shape as
+            // [`read_hashed_stack`]. Field order and both codecs read
+            // straight off `ServerboundSetCreativeModeSlotPacket.java`'s
+            // `STREAM_CODEC` composite, not off our own encoder.
+            //
+            // This lifts into [`ServerBound::CreativeModeSlotSet`], whose
+            // consumer (`apply_creative_mode_slot_set`) writes through
+            // `PlayerInventory::apply_menu_slot_change`. Vanilla's own
+            // `validSlot`/`drop` split (`ServerGamePacketListenerImpl.java:2035`,
+            // `1..=45` accepted, `< 0` meaning "drop into the world") is left
+            // to that consumer rather than filtered here, so the variant
+            // carries the raw wire slot — see its doc comment.
             State::Play if packet_id == play::serverbound::SET_CREATIVE_MODE_SLOT => {
                 let mut r = Reader::new(payload);
                 // Qualified as `self::` (not a bare call) so
                 // `cargo xtask connectedness`'s delegate-following classifier
                 // doesn't try to recurse into a helper that returns
-                // `Option<Option<ItemStack>>`, not `ServerBound`, and
-                // misreport this arm as unclassified instead of the
-                // `Ignored` it always produces below.
-                let decoded = (|| -> Option<()> {
-                    let _slot = r.i16().ok()?;
-                    let _item = self::read_optional_item_stack(&mut r)?;
-                    r.ensure_empty().ok()
+                // `Option<Option<ItemStack>>` rather than `ServerBound`.
+                let decoded = (|| -> Option<(i16, Option<ItemStack>)> {
+                    let slot = r.i16().ok()?;
+                    let item = self::read_optional_item_stack(&mut r)?;
+                    r.ensure_empty().ok()?;
+                    Some((slot, item))
                 })();
-                let _ = decoded;
-                ServerBound::Ignored
+                match decoded {
+                    Some((slot, item)) => ServerBound::CreativeModeSlotSet { slot, item },
+                    None => ServerBound::Ignored,
+                }
             }
             State::Play if packet_id == play::serverbound::PLACE_RECIPE => {
                 let _ = decode_full::<PlaceRecipe>(payload);
@@ -1688,9 +1700,31 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
+            // `ServerboundClientCommandPacket`: a single `readEnum` VarInt
+            // ordinal over `Action { PERFORM_RESPAWN, REQUEST_STATS,
+            // REQUEST_GAMERULE_VALUES }` —
+            // `ServerboundClientCommandPacket.java`'s whole body, read
+            // straight off the decompiled source rather than off our own
+            // encoder. The ordinal is passed through unmapped; its consumer
+            // (`apply_client_command`) mirrors
+            // `ServerGamePacketListenerImpl::handleClientCommand`, including
+            // the `getHealth() > 0.0F → return` respawn guard at that file's
+            // line 1898, and treats `REQUEST_STATS` as a documented no-op.
+            //
+            // This arm returned `Ignored` while that consumer already
+            // existed, so respawn was unreachable — the same dead-variant
+            // shape issue #425 found for `CLIENT_INFORMATION` and
+            // `CHUNK_BATCH_RECEIVED`, and from the same commit (`c4ad474`),
+            // which wired four consumers while only two decode arms were
+            // ever updated.
+            // `tests/serverbound_wiring.rs`'s
+            // `every_serverbound_variant_is_constructed_by_decode` now fails
+            // if any `ServerBound` variant stops being constructed here.
             State::Play if packet_id == play::serverbound::CLIENT_COMMAND => {
-                let _ = decode_full::<ClientCommand>(payload);
-                ServerBound::Ignored
+                match decode_full::<ClientCommand>(payload) {
+                    Some(p) => ServerBound::ClientCommand { action: p.action },
+                    None => ServerBound::Ignored,
+                }
             }
             State::Play if packet_id == play::serverbound::CHUNK_BATCH_RECEIVED => {
                 match decode_full::<ChunkBatchReceived>(payload) {
@@ -2748,6 +2782,161 @@ mod inventory_decode_tests {
         let body = encode(&SetCarriedItem { slot: 9 });
         let decoded = proto.decode(State::Play, play::serverbound::SET_CARRIED_ITEM, &body);
         assert_eq!(decoded, ServerBound::Ignored);
+    }
+
+    // ---- `SET_CREATIVE_MODE_SLOT` / `CLIENT_COMMAND`, the two variants that
+    // had consumers but no constructor.
+    //
+    // Every byte below is hand-derived from sources **outside this crate**, so
+    // no `decode(encode(x))` symmetry can satisfy them:
+    //
+    // - `ServerboundSetCreativeModeSlotPacket.java`'s `STREAM_CODEC`:
+    //   `ByteBufCodecs.SHORT` then `ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC`.
+    //   `ByteBufCodecs.SHORT` is `ByteBuf::writeShort`, i.e. big-endian `i16`
+    //   (`ByteBufCodecs.java:81`).
+    // - `ServerboundClientCommandPacket.java`'s whole body is one
+    //   `writeEnum`, and `FriendlyByteBuf::writeEnum` is
+    //   `writeVarInt(value.ordinal())` (`FriendlyByteBuf.java:472`), over
+    //   `Action { PERFORM_RESPAWN, REQUEST_STATS, REQUEST_GAMERULE_VALUES }`.
+    // - `minecraft:cobblestone`'s item protocol id `62` is read from Mojang's
+    //   own `generated/reports/registries.json`, the authoritative generator
+    //   output — not from our registry tables.
+    // - The menu-slot number `36` is `InventoryMenu`'s first hotbar slot,
+    //   which vanilla's own handler accepts as `validSlot`
+    //   (`ServerGamePacketListenerImpl.java:2035`, `1..=45`) and writes via
+    //   `player.inventoryMenu.getSlot(36)` (line 2038).
+
+    /// A creative-mode palette write of a full stack into the first hotbar
+    /// slot, decoded from bytes laid out by hand against vanilla's own
+    /// `STREAM_CODEC` (see the block comment above for every byte's source).
+    ///
+    /// This arm returned [`ServerBound::Ignored`] until issue #266's wiring
+    /// pass, while `apply_creative_mode_slot_set` and
+    /// `ServerBound::CreativeModeSlotSet` had both already existed since
+    /// `c4ad474` — so a real client's entire creative inventory was silently
+    /// discarded. `tests/serverbound_wiring.rs` now gates that class
+    /// structurally; this gates the wire layout.
+    #[test]
+    fn decode_set_creative_mode_slot_from_hand_built_vanilla_bytes() {
+        let proto = V770ServerProtocol;
+        let body = [
+            0x00, 0x24, // ByteBufCodecs.SHORT: big-endian i16 36
+            0x40, // optional-stack count, VarInt 64
+            0x3E, // item id, VarInt 62 = minecraft:cobblestone
+            0x00, // added components, VarInt 0
+            0x00, // removed components, VarInt 0
+        ];
+        let decoded = proto.decode(State::Play, play::serverbound::SET_CREATIVE_MODE_SLOT, &body);
+        assert_eq!(
+            decoded,
+            ServerBound::CreativeModeSlotSet {
+                slot: 36,
+                item: Some(stack("minecraft:cobblestone", 64)),
+            }
+        );
+    }
+
+    /// The clear-a-slot case: `ItemStack.createOptionalStreamCodec` uses a
+    /// `count` of zero as the absence marker rather than a leading presence
+    /// bool (see [`read_optional_item_stack`]'s doc comment), so an empty
+    /// write is three bytes with no item id at all. A decoder that expected a
+    /// bool prefix here would read the `0x00` count as "absent" and then
+    /// choke on `ensure_empty`, or read a spurious id — this pins the real
+    /// shape.
+    #[test]
+    fn decode_set_creative_mode_slot_clears_a_slot_with_a_zero_count() {
+        let proto = V770ServerProtocol;
+        let body = [0x00, 0x2D, 0x00]; // slot 45 (off-hand), count 0 = empty
+        let decoded = proto.decode(State::Play, play::serverbound::SET_CREATIVE_MODE_SLOT, &body);
+        assert_eq!(decoded, ServerBound::CreativeModeSlotSet { slot: 45, item: None });
+    }
+
+    /// Vanilla's `slotNum() < 0` "drop into the world" case, which this crate
+    /// has no model for. The variant must still carry the raw negative slot
+    /// rather than the decoder swallowing the packet, because the decision to
+    /// drop it belongs to the consumer — `apply_creative_mode_slot_set`
+    /// no-ops on any slot `player_menu_native_index` does not recognise, and
+    /// its doc comment says so.
+    ///
+    /// `-1` as big-endian `i16` is `0xFF 0xFF`.
+    #[test]
+    fn decode_set_creative_mode_slot_preserves_vanillas_negative_drop_slot() {
+        let proto = V770ServerProtocol;
+        let body = [0xFF, 0xFF, 0x01, 0x3E, 0x00, 0x00];
+        let decoded = proto.decode(State::Play, play::serverbound::SET_CREATIVE_MODE_SLOT, &body);
+        assert_eq!(
+            decoded,
+            ServerBound::CreativeModeSlotSet {
+                slot: -1,
+                item: Some(stack("minecraft:cobblestone", 1)),
+            }
+        );
+    }
+
+    /// Control for the three gates above: the detector must reject a payload
+    /// with a trailing byte rather than accepting a prefix.
+    ///
+    /// Without this, a decoder that stopped reading early would satisfy every
+    /// positive assertion above while misaligning any future field, and the
+    /// `ensure_empty` in the arm would be unproven. Observed to fail when
+    /// `ensure_empty` is removed from the arm.
+    #[test]
+    fn decode_set_creative_mode_slot_rejects_a_trailing_byte() {
+        let proto = V770ServerProtocol;
+        let body = [0x00, 0x24, 0x40, 0x3E, 0x00, 0x00, 0x99];
+        let decoded = proto.decode(State::Play, play::serverbound::SET_CREATIVE_MODE_SLOT, &body);
+        assert_eq!(
+            decoded,
+            ServerBound::Ignored,
+            "a trailing byte must fail the whole decode; if this passes, the positive gates \
+             above prove nothing about field alignment"
+        );
+    }
+
+    /// `PERFORM_RESPAWN`, ordinal `0` — the packet a real client sends when
+    /// the player clicks **Respawn** on the death screen.
+    ///
+    /// This arm returned [`ServerBound::Ignored`] until issue #270's wiring
+    /// pass, while `apply_client_command`'s respawn path already existed, so
+    /// the button did nothing on a `lodestone` server. That is not a cosmetic
+    /// gap: per `CLAUDE.md`'s live-server hazards a dead player is held on the
+    /// death screen and is sent **no chunks**, so the connection became a
+    /// permanent silent chunk blackout with keep-alives still flowing.
+    #[test]
+    fn decode_client_command_perform_respawn_from_hand_built_vanilla_bytes() {
+        let proto = V770ServerProtocol;
+        let decoded = proto.decode(State::Play, play::serverbound::CLIENT_COMMAND, &[0x00]);
+        assert_eq!(decoded, ServerBound::ClientCommand { action: 0 });
+    }
+
+    /// `REQUEST_GAMERULE_VALUES`, ordinal `2`. The ordinal is passed through
+    /// unmapped, so this also proves the arm does not collapse distinct
+    /// actions onto one value — a decoder that hardcoded `action: 0` would
+    /// pass the respawn gate above and fail here.
+    #[test]
+    fn decode_client_command_distinguishes_the_gamerule_request_ordinal() {
+        let proto = V770ServerProtocol;
+        let decoded = proto.decode(State::Play, play::serverbound::CLIENT_COMMAND, &[0x02]);
+        assert_eq!(decoded, ServerBound::ClientCommand { action: 2 });
+        // `REQUEST_STATS`, ordinal 1 — decoded and passed through even though
+        // the consumer documents it as a no-op (no stats model in this crate).
+        let decoded = proto.decode(State::Play, play::serverbound::CLIENT_COMMAND, &[0x01]);
+        assert_eq!(decoded, ServerBound::ClientCommand { action: 1 });
+    }
+
+    /// Control: an empty `client_command` body carries no ordinal at all and
+    /// must not decode to a plausible-looking `action: 0`, which would make
+    /// the respawn gate above satisfiable by a decoder that read nothing.
+    #[test]
+    fn decode_client_command_rejects_an_empty_body() {
+        let proto = V770ServerProtocol;
+        let decoded = proto.decode(State::Play, play::serverbound::CLIENT_COMMAND, &[]);
+        assert_eq!(
+            decoded,
+            ServerBound::Ignored,
+            "an empty body must not produce `action: 0`; if it does, the respawn gate is \
+             satisfied by a decoder that never reads the wire"
+        );
     }
 
     /// The real client's `ContainerClick` encoder (a hotbar-swap style
