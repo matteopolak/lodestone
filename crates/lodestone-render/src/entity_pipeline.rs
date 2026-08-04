@@ -1303,6 +1303,80 @@ impl EntityPipeline {
         )
     }
 
+    /// A fifth render pipeline over this pipeline's own bind-group layouts,
+    /// for a `decal: true` armour-trim pattern (issue #17's trims — see
+    /// `docs/armour-rendering.md`'s "Trims" section for the full design).
+    ///
+    /// Reuses [`Self::camera_layout`]/[`Self::texture_layout`] exactly like
+    /// [`armour_pipeline`](Self::armour_pipeline)/
+    /// [`banner_layer_pipeline`](Self::banner_layer_pipeline)/
+    /// [`flame_pipeline`](Self::flame_pipeline): a trim decal needs its own
+    /// *texture* (the baked `armor_trims` sprite for the wearer's
+    /// `(pattern, material)` pair — `lodestone_assets::trim::TrimAtlas`),
+    /// bound as a fresh [`wgpu::BindGroup`] over this same layout, never a
+    /// third bind-group *slot* — the entity shader still spends exactly two
+    /// groups, nowhere near `CLAUDE.md`'s 4-bind-group floor.
+    ///
+    /// # Why a *third* depth mode, and why it is almost never selected
+    ///
+    /// `TrimPattern.decal()` (`ArmorTrim.java` → `Sheets.armorTrimsSheet`)
+    /// forks the render type vanilla submits a trim through:
+    ///
+    /// | `decal` | vanilla pipeline | this engine |
+    /// |---|---|---|
+    /// | `false` | `ARMOR_CUTOUT_NO_CULL` — `ENTITY_SNIPPET`'s own default | [`armour_pipeline`](Self::armour_pipeline) (identical: no override) |
+    /// | `true` | `ARMOR_DECAL_CUTOUT_NO_CULL` — `CompareOp.EQUAL, writeDepth=false` | **here** |
+    ///
+    /// (`RenderPipelines.java:203-219`, read directly from
+    /// `.cache/mc/26.2/client-src`). `CompareOp.EQUAL` has no "direction" to
+    /// flip under this engine's `[0,1]` DirectX-style depth — unlike
+    /// `GREATER_THAN_OR_EQUAL`/`LessEqual` elsewhere in this file, equality
+    /// is its own mirror image, so `CompareFunction::Equal` is not a
+    /// translation, it is the same predicate. `depth_write_enabled: false`
+    /// carries over unchanged for the same reason.
+    ///
+    /// **Every one of 26.2's 18 trim patterns has `"decal": false`**
+    /// (`lodestone_assets::trim::TRIM_PATTERNS`, checked directly against
+    /// every `data/minecraft/trim_pattern/*.json` in `client.jar` — see that
+    /// module's doc comment). So in practice every real trim today draws
+    /// through [`armour_pipeline`](Self::armour_pipeline), and this pipeline
+    /// is exercised by no vanilla content — it still has to exist, because
+    /// `decal` is genuine per-pattern registry data (a resource pack, or a
+    /// future vanilla release, can set it), and `Sheets.armorTrimsSheet`'s
+    /// fork is a real one, not a simplification this engine is free to
+    /// collapse to "always the cutout pipeline".
+    ///
+    /// `blend: None` (cutout, not translucent) matches vanilla's
+    /// `ALPHA_CUTOUT 0.1F` shader define on both trim pipelines — the trim
+    /// atlas sprites are not measured to be strictly binary alpha the way the
+    /// nine humanoid armour sheets are (`docs/armour-rendering.md`'s
+    /// `hat`-shell note), so this keeps the shared `fs_main`'s existing `0.5`
+    /// cutout rather than asserting a threshold this crate has not verified
+    /// against the real trim sprites; a future pass that needs the faithful
+    /// `0.1` should add a dedicated fragment entry the way
+    /// [`flame_pipeline`](Self::flame_pipeline) did for its own threshold,
+    /// not change `fs_main` for every existing caller.
+    #[must_use]
+    pub fn trim_decal_pipeline(
+        &self,
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
+        build_entity_pipeline(
+            device,
+            color_format,
+            &self.camera_layout,
+            &self.texture_layout,
+            "lodestone-entity-trim-decal",
+            wgpu::CompareFunction::Equal,
+            None,
+            false,
+            "vs_main",
+            "fs_main",
+            EntityInstanceRaw::instance_layout(),
+        )
+    }
+
     /// Build the group-0 uniform buffer for the entity pass with fog
     /// **disabled**. `view_proj` is taken from the camera; `section_origin` is
     /// unused (zero) because an entity's world position lives in its instance
