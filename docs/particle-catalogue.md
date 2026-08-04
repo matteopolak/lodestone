@@ -124,13 +124,64 @@ second, narrower one; flagged rather than special-cased, per the brief for this 
 stream codec reads no further bytes — there is no payload to decode, so nothing here is
 blocked on the shared `ParticleOptions` codec. `crates/protocol/v770/src/adapter.rs`'s
 `decode_explode` already distinguishes the two registry ids (29/30) for exactly this reason.
-What is still missing is the *render* side: nothing calls `Particles::spawn_one` for either
-name, so the `explosionParticle` field is recognised only to stay byte-aligned, never spawned
-— an unbuilt `emit::`/`Behaviour` and dispatch arm, the same shape as any other unwired type
-in this catalogue, not a decoder gap. (The real blocker in the `explode` packet is
-`blockParticles`, a `WeightedList<ExplosionParticleInfo>` whose *entries* do each carry a real
-particle-options payload — typically a block state for the flying debris — which is not
-decoded at all and is the accurate target for issue #26's blocker.)
+(The real blocker in the `explode` packet is `blockParticles`, a
+`WeightedList<ExplosionParticleInfo>` whose *entries* do each carry a real particle-options
+payload — typically a block state for the flying debris — which is not decoded at all and is
+the accurate target for issue #26's blocker.)
+
+**Built, issue #416.** `explosion_emitter` (`ParticleTypes.EXPLOSION_EMITTER`, the id
+`decode_explode` actually sees on the wire — see below) and `explosion` (`EXPLOSION`) both now
+have a `Behaviour`, an `emit::` function and a `spawn_one` dispatch arm:
+
+- `Behaviour::HugeExplosionSeed` — `HugeExplosionSeedParticle`, a `NoRenderParticle`: it draws
+  no quad at all (excluded explicitly in `ParticleEngine::extract`, since `Behaviour::layer()`
+  has no "not drawn" value), and its `tick()` is a full override with no `super.tick()` call —
+  over its hardcoded 8-tick life it spawns **six** `Behaviour::HugeExplosion` follow-ups per
+  tick, jittered `±4` blocks per axis, at a `size` that grows `0/8 → 7/8` across those ticks.
+  Because a particle's own `tick()` cannot call `ParticleEngine::add` (the engine's tick loop
+  already holds `self.particles` borrowed), `Particle::tick_huge_explosion_seed` *returns* its
+  spawn requests as `(x, y, z, size)` tuples, and `ParticleEngine::tick` turns them into real
+  particles only after the loop (and the borrow) ends.
+- `Behaviour::HugeExplosion` — `HugeExplosionParticle`: ordinary physics (vanilla's constructor
+  touches none of gravity/friction/collision), `lifetime = 6 + nextInt(4)`, a grey tint
+  (`nextFloat()*0.6+0.4`, one draw for all three channels), full-bright
+  (`getLightCoords` hardcodes `15728880` = `FULL_BRIGHT`), opaque, animating through the new
+  `Sheet::Explosion` (`explosion_0`..`explosion_15`, **16** frames — the one sheet in this
+  crate that isn't 8, confirmed against the jar's own `particles/explosion.json` texture list
+  rather than assumed). `quadSize = 2.0 * (1.0 - size*0.5)`.
+- `spawn_one`'s two new arms live in `crates/lodestone-shell/src/particles.rs`. `explosion`
+  reuses `xa` as the constructor's `size` parameter, the same repurposing `sweep_attack`'s own
+  arm already does for its `size`; `explosion_emitter` ignores every positional argument, since
+  `HugeExplosionSeedParticle`'s constructor reads none.
+- Verification follows this doc's own convention: `lodestone-particle/src/emit.rs` has exact
+  predicted-value tests transcribed from the two Java classes (lifetime ranges, the
+  `2.0 - size` quad-size formula at its two extremes, the jitter box, full-bright), plus a
+  `NoRenderParticle` exclusion test with a positive control (a sibling `crit` particle in the
+  same engine *does* extract a quad) proving the exclusion is deliberate, not a broken
+  extractor. `lodestone-shell/src/particles.rs` has the same dispatch-reachability shape
+  #182/#178 established, **except** `explosion_emitter` is deliberately *not* in the shared
+  loop that asserts `drawn == 1` for every newly-wired kind — it is dispatch-reachable but
+  produces zero quads on its own by design, so it gets its own test
+  (`explosion_emitter_reaches_pixels_only_after_a_tick`) that dispatches, asserts `drawn == 0`,
+  ticks once, and *then* asserts `drawn == 6`. `sheet_particle_resolves_against_the_real_particle_atlas`
+  now also emits a `huge_explosion` particle and passed with `unresolved: 0` against the real
+  26.2 `client.jar`, and `report.missing_textures.is_empty()` in that same test independently
+  confirms all sixteen real `explosion_N.png` files exist (the atlas builder loads every sprite
+  the jar's own `explosion.json` declares, not merely the one frame any single particle here
+  happens to sample).
+- **Still not wired to the real wire path.** `decode_explode`
+  (`crates/protocol/v770/src/adapter.rs`) recognises `explosionParticle`'s registry id only to
+  stay byte-aligned and returns a single `Directive::Emit(ClientEvent::Sound { .. })` — it
+  never also emits a `ClientEvent::Particles` directive the way `decode_full::<LevelParticles>`'s
+  `LEVEL_PARTICLES` handler does. That decode is outside `lodestone-particle`'s and
+  `lodestone-shell/src/particles.rs`'s ownership (it lives in the protocol crate); the render
+  Behaviour this section describes is the half that was actually missing per this issue's own
+  framing, and it is what's built. The exact follow-up: `decode_explode` should push a second
+  `Directive::Emit(ClientEvent::Particles { particle: parse_key("explosion_emitter", "particle")?,
+  long_distance: false, pos: Vec3 { x, y, z }, offset: Vec3f::ZERO, max_speed: 0.0, count: 1 })`
+  alongside its existing `Sound` directive — `net.rs`/`sim.rs` need no new arm at all, since
+  `ClientEvent::Particles` already forwards generically into `Particles::spawn_particles` (see
+  "The dispatch is reachable independently of any specific gameplay trigger" above).
 
 **#178 (ambient/environmental): not started this pass.** Every type on its checklist needs
 either a bespoke `Behaviour` (`portal`, `soul`, `end_rod`, `gust`, `sonic_boom` each have a
@@ -176,7 +227,9 @@ transcribed vanilla constant, documented inline with its Java source line.
 - `Particles::spawn_one`/`spawn_particles` (`crates/lodestone-shell/src/particles.rs`) — the
   dispatch this pass extended.
 - No protocol or ECS changes. The `ParticleOptions` decoder that `dust`/`sculk_charge`/
-  `explosion`/`firework` are blocked on does not exist yet anywhere in the workspace.
+  `firework` are blocked on does not exist yet anywhere in the workspace — `explosion`/
+  `explosion_emitter` are **not** in that list (see "Built, issue #416" above); they never
+  needed the decoder, only the render `Behaviour` this pass added.
 
 ## How to change it
 
@@ -187,10 +240,12 @@ transcribed vanilla constant, documented inline with its Java source line.
   `instant_effect` both use `spell_N`, not `witch_N`; `angry_villager` uses `angry.png`, a
   single frame, not `angry_villager.png`). Add a `Sheet`/`Behaviour` variant only if the tick
   shape is genuinely new; several types share one class and can share a `Behaviour`.
-- Before touching `dust`, `sculk_charge`, `explosion`, `explosion_emitter`, or `firework`:
-  build the shared `ParticleOptions` decoder first (protocol-side, brokered — not
-  `lodestone-particle`'s to build alone). Special-casing one of these without it just
-  produces a second narrow decoder to reconcile later.
+- Before touching `dust`, `sculk_charge`, or `firework`: build the shared `ParticleOptions`
+  decoder first (protocol-side, brokered — not `lodestone-particle`'s to build alone).
+  Special-casing one of these without it just produces a second narrow decoder to reconcile
+  later. `explosion`/`explosion_emitter` looked like they belonged on this list too, and did
+  not — see "Built, issue #416" above for how that was checked before being ruled out, not
+  assumed.
 - Before touching `portal`, `soul`, `end_rod`, `gust`, or `sonic_boom`: each needs its own
   bespoke `Behaviour` (see "What's still open" above for why `PortalParticle` in particular
   is not a `move_by`-based particle at all). Read the Java class's `tick()`/`getQuadSize()`/

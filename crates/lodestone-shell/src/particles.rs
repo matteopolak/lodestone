@@ -466,6 +466,30 @@ impl Particles {
             "happy_villager" => emit::happy_villager(&mut self.engine, x, y, z, xa, ya, za),
             "witch" => emit::witch(&mut self.engine, x, y, z, xa, ya, za),
             "totem_of_undying" => emit::totem_of_undying(&mut self.engine, x, y, z, xa, ya, za),
+            // `ParticleTypes.EXPLOSION_EMITTER`/`EXPLOSION` (issue #416).
+            // Correction the doc for these two carried until this pass: they
+            // are **not** blocked on the shared `ParticleOptions` decoder
+            // (`docs/particle-catalogue.md`'s "explosion_emitter"/"explosion"
+            // section) — both are argument-less `SimpleParticleType`s, and
+            // `decode_explode` already recognises their registry ids. What
+            // was missing was exactly this arm plus the `Sheet`/`Behaviour`
+            // pair in `lodestone_particle`, not a decoder.
+            //
+            // `explosion_emitter` (the seed vanilla's own `explode` packet
+            // actually names — `Level.java:593,619,645`) ignores every
+            // positional argument here: `HugeExplosionSeedParticle`'s
+            // constructor reads none. `explosion` reuses `xa` as the
+            // constructor's `size` parameter, the same repurposing
+            // `sweep_attack` above already does for its own `size`.
+            "explosion_emitter" => emit::explosion_emitter(&mut self.engine, x, y, z),
+            "explosion" => {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "narrowing back to the f32 the wire value started as"
+                )]
+                let size = xa as f32;
+                emit::huge_explosion(&mut self.engine, x, y, z, size);
+            }
             other => tracing::debug!(
                 target: "particles",
                 "no emitter wired for particle type {other:?}; dropped"
@@ -995,6 +1019,7 @@ mod tests {
             ((Sheet::Glint, 0u16), rect),
             ((Sheet::Spell, 0u16), rect),
             ((Sheet::Glitter, 0u16), rect),
+            ((Sheet::Explosion, 0u16), rect),
         ]));
         p
     }
@@ -1043,6 +1068,19 @@ mod tests {
             ("happy_villager", [0.0, 0.0, 0.0]),
             ("witch", [0.0, 0.0, 0.0]),
             ("totem_of_undying", [0.0, 0.2, 0.0]),
+            // `explosion` (issue #416). `count > 0` (every case in this loop
+            // uses `count == 1`) draws velocity from `gaussian() * max_speed`
+            // with `max_speed == 0.0`, so `xa` (this dispatch arm's `size`
+            // parameter) is always exactly `0.0` here regardless of `offset`
+            // — reachability is what this loop proves, not a specific
+            // `size`; `huge_explosion_matches_the_exact_vanilla_formulas` in
+            // `lodestone-particle` already pins the formula itself.
+            // `explosion_emitter` is deliberately not in this shared loop: it
+            // is a `NoRenderParticle` that produces zero quads on its own
+            // (see `explosion_emitter_reaches_pixels_only_after_a_tick`
+            // below), so it would fail this loop's `drawn == 1` assertion for
+            // a reason that has nothing to do with dispatch being broken.
+            ("explosion", [0.0, 0.0, 0.0]),
         ];
         for &(kind, offset) in cases {
             let mut p = resolvable();
@@ -1070,12 +1108,64 @@ mod tests {
     #[test]
     fn a_near_miss_kind_still_falls_into_the_catch_all() {
         let mut p = resolvable();
-        for kind in ["sweep", "note_block", "heartbeat", "totem"] {
+        for kind in ["sweep", "note_block", "heartbeat", "totem", "explosions", "explode"] {
             p.spawn_particles(kind, [0.0, 64.0, 0.0], [0.0; 3], 0.0, 3);
         }
         assert!(
             p.engine.particles().is_empty(),
             "a near-miss kind must not match any of the new dispatch arms"
+        );
+    }
+
+    /// `explosion_emitter` (issue #416) is the one dispatch-reachable kind in
+    /// this module that is invisible on its own — `HugeExplosionSeedParticle`
+    /// is a `NoRenderParticle`, so `frame.drawn` must stay `0` immediately
+    /// after dispatch even though the seed *is* live in the engine. Only
+    /// after a real tick (`Particles::tick`, the same call `sim.rs`'s frame
+    /// loop makes) does it seed its six `explosion` follow-ups, which must
+    /// then resolve and draw. This is the reachability proof for a kind
+    /// whose own particle produces zero pixels by design — `frame.drawn == 0`
+    /// right after dispatch is the *correct* value, not evidence dispatch is
+    /// broken, which is exactly why `every_newly_wired_kind_reaches_its_
+    /// emitter_through_the_generic_dispatch` above excludes it rather than
+    /// asserting the wrong thing.
+    #[test]
+    fn explosion_emitter_reaches_pixels_only_after_a_tick() {
+        struct NoCollision;
+        impl CollisionView for NoCollision {
+            fn collision_boxes(&self, _x: i32, _y: i32, _z: i32, _out: &mut Vec<lodestone_physics::Aabb>) {}
+        }
+
+        let mut p = resolvable();
+        p.spawn_particles("explosion_emitter", [0.5, 65.0, 0.5], [0.0; 3], 0.0, 1);
+        assert_eq!(
+            p.engine.particles().len(),
+            1,
+            "explosion_emitter must reach the dispatch and spawn its one seed particle"
+        );
+
+        let before = p.extract(&Camera::default(), 0.0, &|_, _, _| {
+            Some(lodestone_particle::FULL_BRIGHT)
+        });
+        assert_eq!(
+            before.drawn, 0,
+            "the seed is a NoRenderParticle and must draw nothing on its own, \
+             before any tick has run its spawn schedule"
+        );
+
+        p.tick(&NoCollision);
+        let after = p.extract(&Camera::default(), 0.0, &|_, _, _| {
+            Some(lodestone_particle::FULL_BRIGHT)
+        });
+        assert_eq!(
+            after.drawn, 6,
+            "one seed tick must produce six drawable HugeExplosion follow-ups \
+             through the real Particles::tick path, not a direct emit:: call"
+        );
+        assert_eq!(after.unresolved, 0, "explosion must resolve against Sheet::Explosion");
+        assert_eq!(
+            after.sheet_drawn, 6,
+            "every follow-up must address the particle sheet, not the block atlas"
         );
     }
 
@@ -1583,8 +1673,14 @@ mod tests {
         emit::happy_villager(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.0, 0.0);
         emit::witch(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.0, 0.0);
         emit::totem_of_undying(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.2, 0.0);
+        // `explosion` (issue #416): `Sheet::Explosion` is `explosion_0`
+        // through `explosion_15` — the one sheet in this whole list with a
+        // 16-frame stem rather than the usual 8, so this is also the proof
+        // that `frame_count()`'s per-frame `explosion_N` naming resolves
+        // every one of those sixteen files, not just frame 0.
+        emit::huge_explosion(p.engine_mut(), 0.5, 65.0, 0.5, 0.0);
         let alive = p.engine.particles().len();
-        assert!(alive >= 10, "all ten emitters must have added a particle");
+        assert!(alive >= 11, "all eleven emitters must have added a particle");
 
         let frame = p.extract(&Camera::default(), 0.0, &|_, _, _| {
             Some(lodestone_particle::FULL_BRIGHT)
