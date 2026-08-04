@@ -1029,12 +1029,6 @@ impl NetClient {
         Arc::clone(&self.sky_default)
     }
 
-    /// This frame's weather, read directly. Clear until the first `GAME_EVENT`.
-    #[must_use]
-    pub fn weather(&self) -> WeatherSnapshot {
-        self.weather.snapshot()
-    }
-
     /// A server-less client used only in tests: no thread, no connection. It
     /// captures every [`send_action`](Self::send_action) on the returned
     /// receiver so the outbound path can be asserted without a live server.
