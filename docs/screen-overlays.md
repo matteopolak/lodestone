@@ -819,34 +819,43 @@ checks `self.screen_effects`/`ScreenEffects`, through the real
 `freeze_confusion_and_portal_survive_third_person_unlike_the_others` control
 (installs a third-person body source, then asserts freeze/portal still draw
 while underwater/fire/pumpkin/spyglass do not, and portal wins over
-confusion when both are positive). **Not run as of this writing** —
-`lodestone-shell` does not currently compile, for two reasons neither of
-which is this change: `app.rs`'s `screen_effects` literal is missing the four
-new fields until the broker patch above lands (this change's own gap, patch
-provided, not applied by this change since `app.rs` is outside its
-ownership), and (unrelated, another agent's in-flight work as of this
-writing) `crates/lodestone-shell/src/net.rs:1801` constructs `EntitySnapshot`
-without the `equipment_dye` field `crates/lodestone-shell/src/entities.rs`
-just added, in an uncommitted concurrent edit. Re-run the shell-level gate
-once both land; the pipeline-level and camera-level gates above already prove
-every new pass and its projection warp are correct independent of the shell.
-
-The **historical** underwater/fire/pumpkin numbers below (pre this change)
-are kept as the last known-good shell-level run:
+confusion when both are positive). **Now run, on this machine's real
+adapter, once `gpu.rs`'s wiring and `app.rs`'s field upgrade both landed**
+— all 5 tests pass in 60.52s:
 
 ```text
-=== underwater overlay pixel gate (through RenderState::render_with_effects) ===
-eye_in_water=true: underwater_overlay_drawn=true, differs from dry control by 100.0%
-control A (installed, eye_in_water=false): underwater_overlay_drawn=false
-control B (not installed, eye_in_water=true): underwater_overlay_drawn=false, differs from wet by 100.0%
+=== spectator control ===
+spectator=true, every flag set: underwater=false, fire=false, pumpkin=false, spyglass=false, freeze=false, confusion=false, portal=false
+
+=== third-person split control ===
+third_person_body_drawn=true: underwater=false, fire=false, pumpkin=false, spyglass=false, freeze=true, confusion=false, portal=true
 
 === fire overlay pixel gate (through RenderState::render_with_effects) ===
 on_fire=true: fire_overlay_drawn=true, top rows differ 0.6%, bottom rows differ 100.0%
 control (installed, on_fire=false): fire_overlay_drawn=false
 
-=== spectator control ===
-spectator=true, eye_in_water=true, on_fire=true: underwater_overlay_drawn=false, fire_overlay_drawn=false
+=== underwater overlay pixel gate (through RenderState::render_with_effects) ===
+eye_in_water=true: underwater_overlay_drawn=true, differs from dry control by 100.0%
+control A (installed, eye_in_water=false): underwater_overlay_drawn=false
+control B (not installed, eye_in_water=true): underwater_overlay_drawn=false, differs from wet by 100.0%
+
+=== pumpkin overlay pixel gate (through RenderState::render_with_effects) ===
+wearing_pumpkin=true: pumpkin_overlay_drawn=true, differs from bare control by 100.0%
+control A (installed, wearing_pumpkin=false): pumpkin_overlay_drawn=false
+control B (not installed, wearing_pumpkin=true): pumpkin_overlay_drawn=false, differs from worn by 100.0%
 ```
+
+The third-person split control is the one that actually exercises the new
+`gpu.rs` dispatch, not just the pipeline: with a third-person body source
+installed, `underwater`/`fire`/`pumpkin`/`spyglass` (the first-person-only
+group) correctly stay `false` while `freeze`/`portal` (the camera-agnostic
+group) still draw — proving `first_person_group_active`/
+`camera_agnostic_group_active` are wired to the right gate, not merged into
+one check that would have hidden this. Spyglass and confusion themselves
+have no dedicated shell-level pixel test yet (`scoping` has no live input to
+drive one, and `nausea_intensity`/`portal_intensity` share portal's fixture
+in the third-person control above); the pipeline-level gate below already
+proves their geometry independent of the shell.
 
 The fire gate's `top rows differ 0.6%` (not exactly `0.0%`) is the strip's
 own top edge landing on a partial pixel row (`FIRE_STRIP_TOP = -0.3` does not
