@@ -239,6 +239,16 @@ impl TabList {
                 }
                 true
             }
+            // The header/footer text, from `ClientboundTabListPacket`. This was
+            // a genuine island: `header`/`footer` have existed on this struct
+            // and been read downstream by `hud.rs`'s snapshot since before this
+            // arm existed, but nothing ever fed them outside of a test directly
+            // mutating the fields — no fold ran for the event that carries them.
+            ClientEvent::TabListChanged { header, footer } => {
+                self.header = Some(header.clone());
+                self.footer = Some(footer.clone());
+                true
+            }
             _ => false,
         }
     }
@@ -384,5 +394,38 @@ mod fold_tests {
             id: uid(1),
             action: m::BossAction::Remove,
         }));
+    }
+
+    /// `TabListChanged` sets header/footer through the fold — previously this
+    /// was reachable only by a test poking the fields directly (see
+    /// `hud_snapshot.rs`/`tests/tablist.rs`), because nothing fed the event
+    /// through `apply` at all.
+    #[test]
+    fn tab_list_changed_sets_header_and_footer() {
+        let mut tabs = TabList::new();
+        assert!(tabs.apply(&ClientEvent::TabListChanged {
+            header: Text::literal("Welcome"),
+            footer: Text::literal("Bye"),
+        }));
+        assert_eq!(tabs.header, Some(Text::literal("Welcome")));
+        assert_eq!(tabs.footer, Some(Text::literal("Bye")));
+    }
+
+    /// A later `TabListChanged` replaces, not merges — vanilla's
+    /// `ClientboundTabListPacket` always carries both fields, never a partial
+    /// update (unlike `PlayerListUpdate`'s per-field `Option`s).
+    #[test]
+    fn tab_list_changed_replaces_previous_header_and_footer() {
+        let mut tabs = TabList::new();
+        tabs.apply(&ClientEvent::TabListChanged {
+            header: Text::literal("First"),
+            footer: Text::literal("First footer"),
+        });
+        tabs.apply(&ClientEvent::TabListChanged {
+            header: Text::literal("Second"),
+            footer: Text::literal("Second footer"),
+        });
+        assert_eq!(tabs.header, Some(Text::literal("Second")));
+        assert_eq!(tabs.footer, Some(Text::literal("Second footer")));
     }
 }
