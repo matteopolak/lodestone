@@ -272,9 +272,9 @@ async fn lan_bind_runs_exactly_one_world_tick_loop() {
     // Zero players is deliberate: a tick loop that only ran while someone was
     // connected would still be wrong (hoppers near spawn must keep moving), and
     // it would also mean the count below was really measuring connection work.
-    // 1.5 s rather than a few hundred ms: at the ≈4 TPS an unoptimised build
-    // achieves (see below) a shorter window yields counts of 2-3, and a ratio
-    // computed from those is noise.
+    // 1.5 s rather than a few hundred ms: on a loaded machine the loop manages
+    // under 3 TPS (see the table below), so a shorter window yields counts of
+    // 2-3 and a ratio computed from those is noise.
     let window = Duration::from_millis(1500);
     let (solo_delta, solo_elapsed) = probe_delta_over(&probe, window).await;
     let end_stats = server
@@ -299,14 +299,20 @@ async fn lan_bind_runs_exactly_one_world_tick_loop() {
     // rate is a property of the build profile and the machine, not of #439.
     // Measured on the same machine, same code, 5×5 tick area:
     //
-    // | profile | probe visits / s | nominal |
+    // | run | probe visits / s | nominal |
     // |---|---|---|
-    // | unoptimised (`cargo test`) | **2.66** | 20 |
-    // | `--release` | **19.29** | 20 |
+    // | shared checkout, unoptimised, ~4 concurrent agents building | **2.66** | 20 |
+    // | shared checkout, `--release` | **19.29** | 20 |
+    // | isolated worktree, **unoptimised**, machine idle | **19.29** | 20 |
     //
-    // So LAN does reach vanilla's 20 TPS in a real build, and an absolute-rate
-    // assertion here would be a debug-vs-release flake that says nothing about
-    // the loop count.
+    // **The dominant variable is machine load, not the build profile** — a
+    // correction worth keeping, because the first two rows alone say
+    // "debug is 7× slower" and that inference is wrong. The third row is the
+    // same unoptimised build as the first, on an idle machine, matching release
+    // exactly. So LAN does reach vanilla's 20 TPS, and an absolute-rate
+    // assertion here would be a load flake that says nothing about the loop
+    // count — which is why the comparison below is a ratio between two windows
+    // measured moments apart under whatever conditions happen to hold.
     let nominal = (solo_elapsed.as_millis() / TICK_PERIOD_MILLIS) as u64;
     eprintln!(
         "solo: {solo_delta} probe visits over {solo_elapsed:?} \

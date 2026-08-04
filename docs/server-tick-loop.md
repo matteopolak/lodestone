@@ -323,12 +323,27 @@ Observed, `--release`:
 
 The 3.11 is 1 world loop + 2 connection loops, exactly as predicted.
 
-**The achieved rate is a build-profile property, not a #439 one.** Because
-`run_tick_loop` re-generates every column in its area from the source on *every*
-tick (the documented #289 gap), the same code measured **2.66** probe visits/s
-unoptimised and **19.29** under `--release`. The gate deliberately does not
-assert an absolute rate; doing so would be a debug-vs-release flake that says
-nothing about the loop count.
+**The achieved rate is an environment property, not a #439 one — and the
+first version of this note blamed the wrong variable.** Because `run_tick_loop`
+re-generates every column in its area from the source on *every* tick (the
+documented #289 gap), it is sensitive to whatever else the machine is doing:
+
+| run | probe visits/s | nominal |
+|---|---|---|
+| shared checkout, unoptimised, ~4 concurrent agents building | 2.66 | 20 |
+| shared checkout, `--release` | 19.29 | 20 |
+| isolated worktree, **unoptimised**, machine idle | **19.29** | 20 |
+
+This doc briefly said the gap was debug-versus-release, on the strength of the
+first two rows. The third row — the *same* unoptimised build on an idle machine,
+matching release exactly — shows the dominant variable is **concurrent machine
+load**. Two observations at two different moments, and the difference attributed
+to the wrong cause; the isolated-worktree re-run is what caught it, which is a
+second reason to do that run beyond confirming the commit is green.
+
+The gate therefore asserts no absolute rate. Its comparison is a ratio between
+two windows measured moments apart under whatever conditions hold, which is
+immune to both variables.
 
 **LAN's tick area is a fixed constant, `integrated::LAN_TICK_RADIUS = 2`**
 (a 5×5 chunk square around the origin), because this crate still has no
