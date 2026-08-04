@@ -1418,6 +1418,19 @@ impl Sim {
             // `ControllerPlugin` because it asserts that plugin is present rather
             // than adding it itself — `add_systems` does not deduplicate.
             InteractPlugin,
+            // Autonomous navigation (`docs/autonomous-navigation.md`, issue #38):
+            // the M1 walk-only plugin. Registration order relative to the rest of
+            // this tuple does not matter — its two systems are chained
+            // `.after(TickSet::Intent).before(TickSet::Physics)` internally,
+            // rather than `.in_set(TickSet::Intent)`, specifically so it never has
+            // to be ordered against `compute_movement_intent` by name (see that
+            // doc's "Why `.after(TickSet::Intent)`" section) — but that is a claim
+            // about the plugin's own `.add_systems` calls, not proof this call
+            // site actually reaches them, which is exactly the shape of bug
+            // `CLAUDE.md`'s island rule warns about. Adds no systems that fire
+            // without an `AutopilotGoal` set, so this is inert for every session
+            // until something (a chat command, not yet built) sets one.
+            lodestone_autopilot::AutopilotPlugin,
         ));
         let mut ecs = std::mem::take(app.world_mut());
         ecs.insert_resource(Profile(PhysicsProfile::mc_1_21()));
