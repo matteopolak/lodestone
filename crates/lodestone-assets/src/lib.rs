@@ -141,7 +141,8 @@ pub use model::{
 pub use particle_atlas::{ParticleAtlas, ParticleAtlasReport};
 pub use profile::AssetProfile;
 pub use screen_effects::{
-    FIRE_FRAME_SIZE, fire_frame_count, load_fire_texture, load_underwater_texture,
+    FIRE_FRAME_SIZE, fire_frame_count, load_fire_texture, load_pumpkin_overlay_texture,
+    load_underwater_texture,
 };
 pub use sky::{CelestialAtlas, MOON_PHASE_NAMES, SUN_SPRITE_PATH, load_cloud_texture};
 #[cfg(not(target_arch = "wasm32"))]

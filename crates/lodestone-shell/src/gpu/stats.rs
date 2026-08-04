@@ -115,6 +115,10 @@ pub struct RenderStats {
     /// [`underwater_overlay_drawn`](Self::underwater_overlay_drawn), keyed on
     /// `ScreenEffects::on_fire` instead.
     pub fire_overlay_drawn: bool,
+    /// Whether the pumpkin overlay (issue #185) drew this frame — same gating
+    /// as [`underwater_overlay_drawn`](Self::underwater_overlay_drawn), keyed
+    /// on `ScreenEffects::wearing_pumpkin` instead.
+    pub pumpkin_overlay_drawn: bool,
     /// Block-entity rigs drawn this frame (issue #23) — chests today.
     ///
     /// Its own counter, not folded into `entities_drawn`, for the reason

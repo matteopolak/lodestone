@@ -63,7 +63,7 @@ use wgpu::util::DeviceExt;
 
 use lodestone_assets::{
     ResourceManager, ScreenEffectAssetError, fire_frame_count, load_fire_texture,
-    load_underwater_texture,
+    load_pumpkin_overlay_texture, load_underwater_texture,
 };
 
 // ---------------------------------------------------------------------------
@@ -204,6 +204,30 @@ pub fn fire_overlay_triangles(
         out[(i * 6) as usize..(i * 6 + 6) as usize].copy_from_slice(&tris);
     }
     out
+}
+
+/// The pumpkin overlay's vertex tint — opaque white, i.e. no multiply at all
+/// (`ARGB.white(1.0F)` in `Hud.extractTextureOverlay`, called with
+/// `alpha = 1.0F` for every equippable camera overlay). The vignette shape
+/// itself comes entirely from `pumpkinblur.png`'s own alpha channel; unlike
+/// the underwater/fire overlays this pass contributes no colour multiply of
+/// its own, gamma or otherwise.
+pub const PUMPKIN_TINT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+
+/// Builds the pumpkin overlay's one static, full-screen NDC quad. Unlike the
+/// underwater overlay this does not scroll with look direction and does not
+/// tile — vanilla's `extractTextureOverlay` blits the texture once at
+/// `(0, 0, guiWidth, guiHeight)` with UV `(0,0)-(1,1)`, no animation, no
+/// per-frame recompute. Built once and never re-uploaded past construction.
+#[must_use]
+pub fn pumpkin_overlay_triangles() -> [ScreenOverlayVertex; 6] {
+    let q = [
+        vertex([-1.0, -1.0], [0.0, 1.0], PUMPKIN_TINT),
+        vertex([1.0, -1.0], [1.0, 1.0], PUMPKIN_TINT),
+        vertex([1.0, 1.0], [1.0, 0.0], PUMPKIN_TINT),
+        vertex([-1.0, 1.0], [0.0, 0.0], PUMPKIN_TINT),
+    ];
+    [q[0], q[1], q[2], q[2], q[3], q[0]]
 }
 
 // ---------------------------------------------------------------------------
@@ -387,9 +411,11 @@ pub struct ScreenEffectRenderer {
     pipeline: wgpu::RenderPipeline,
     underwater_bind_group: wgpu::BindGroup,
     fire_bind_group: wgpu::BindGroup,
+    pumpkin_bind_group: wgpu::BindGroup,
     fire_frame_count: u32,
     underwater_vbuf: wgpu::Buffer,
     fire_vbuf: wgpu::Buffer,
+    pumpkin_vbuf: wgpu::Buffer,
 }
 
 impl ScreenEffectRenderer {
@@ -407,6 +433,7 @@ impl ScreenEffectRenderer {
     ) -> Result<Self, ScreenEffectAssetError> {
         let underwater_image = load_underwater_texture(manager)?;
         let fire_image = load_fire_texture(manager)?;
+        let pumpkin_image = load_pumpkin_overlay_texture(manager)?;
         let fire_frame_count = fire_frame_count(&fire_image);
 
         let layout = texture_bind_group_layout(device, "lodestone-screen-effect-tex-bgl");
@@ -452,20 +479,43 @@ impl ScreenEffectRenderer {
             &fire_sampler,
         );
 
+        // Nearest, clamp: a single static image, no tiling or scroll — same
+        // reasoning as the fire strip's sampler, minus the animation.
+        let (pumpkin_view, pumpkin_sampler) = upload_plain_texture(
+            device,
+            queue,
+            "lodestone-pumpkin-overlay-texture",
+            pumpkin_image.width,
+            pumpkin_image.height,
+            &pumpkin_image.rgba,
+            wgpu::AddressMode::ClampToEdge,
+            wgpu::FilterMode::Linear,
+        );
+        let pumpkin_bind_group = texture_bind_group(
+            device,
+            &layout,
+            "lodestone-pumpkin-overlay-texture-bg",
+            &pumpkin_view,
+            &pumpkin_sampler,
+        );
+
         let underwater_vbuf = vertex_buffer(
             device,
             "lodestone-underwater-vbuf",
             &underwater_overlay_triangles(0.0, 0.0, 0xFF),
         );
         let fire_vbuf = vertex_buffer(device, "lodestone-fire-vbuf", &fire_overlay_triangles(0, fire_frame_count));
+        let pumpkin_vbuf = vertex_buffer(device, "lodestone-pumpkin-vbuf", &pumpkin_overlay_triangles());
 
         Ok(Self {
             pipeline,
             underwater_bind_group,
             fire_bind_group,
+            pumpkin_bind_group,
             fire_frame_count,
             underwater_vbuf,
             fire_vbuf,
+            pumpkin_vbuf,
         })
     }
 
@@ -549,6 +599,37 @@ impl ScreenEffectRenderer {
         pass.set_bind_group(0, &self.fire_bind_group, &[]);
         pass.set_vertex_buffer(0, self.fire_vbuf.slice(..));
         pass.draw(0..verts.len() as u32, 0..1);
+    }
+
+    /// Draws the pumpkin overlay (issue #185) as its own `Load` render pass,
+    /// for the reasons on [`Self::draw_underwater`]. Static geometry — the
+    /// vertex buffer was written once at [`Self::new`] and never changes, so
+    /// unlike the other two draws this has no per-frame `write_buffer`.
+    pub fn draw_pumpkin(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("lodestone-pumpkin-overlay-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.pumpkin_bind_group, &[]);
+        pass.set_vertex_buffer(0, self.pumpkin_vbuf.slice(..));
+        pass.draw(0..6, 0..1);
     }
 }
 
@@ -694,6 +775,40 @@ mod tests {
         let wrapped = fire_overlay_triangles(32, 32);
         let first = fire_overlay_triangles(0, 32);
         assert_eq!(wrapped, first, "frame 32 of a 32-frame strip is frame 0 again");
+    }
+
+    #[test]
+    fn pumpkin_overlay_covers_the_full_ndc_screen() {
+        let tris = pumpkin_overlay_triangles();
+        let xs: Vec<f32> = tris.iter().map(|v| v.position[0]).collect();
+        let ys: Vec<f32> = tris.iter().map(|v| v.position[1]).collect();
+        assert_eq!(xs.iter().cloned().fold(f32::INFINITY, f32::min), -1.0);
+        assert_eq!(xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max), 1.0);
+        assert_eq!(ys.iter().cloned().fold(f32::INFINITY, f32::min), -1.0);
+        assert_eq!(ys.iter().cloned().fold(f32::NEG_INFINITY, f32::max), 1.0);
+    }
+
+    #[test]
+    fn pumpkin_overlay_is_untinted_and_opaque() {
+        // `Hud.extractTextureOverlay` is called with `alpha = 1.0F` and no
+        // colour multiply for an equippable camera overlay -- the vignette
+        // shape comes entirely from the texture's own alpha channel.
+        for v in pumpkin_overlay_triangles() {
+            assert_eq!(v.color, [1.0, 1.0, 1.0, 1.0]);
+        }
+    }
+
+    #[test]
+    fn pumpkin_overlay_uv_spans_the_whole_texture_once() {
+        // No tiling, no scroll: UV must be exactly the unit square, unlike
+        // underwater's 4x scroll-shifted tiling.
+        let tris = pumpkin_overlay_triangles();
+        let us: Vec<f32> = tris.iter().map(|v| v.uv[0]).collect();
+        let vs: Vec<f32> = tris.iter().map(|v| v.uv[1]).collect();
+        assert_eq!(us.iter().cloned().fold(f32::INFINITY, f32::min), 0.0);
+        assert_eq!(us.iter().cloned().fold(f32::NEG_INFINITY, f32::max), 1.0);
+        assert_eq!(vs.iter().cloned().fold(f32::INFINITY, f32::min), 0.0);
+        assert_eq!(vs.iter().cloned().fold(f32::NEG_INFINITY, f32::max), 1.0);
     }
 
     #[test]

@@ -35,6 +35,7 @@
 pub mod air_bubbles;
 pub mod anim;
 pub mod arena;
+pub mod banner_pattern;
 pub mod block;
 pub mod block_entity;
 pub mod block_models;
@@ -90,6 +91,10 @@ pub use air_bubbles::{
 };
 pub use anim::{AnimFrame, AnimSample, AnimSlotUniform, AnimUniform, SpriteAnimation};
 pub use arena::{ArenaAllocation, ArenaBuffer, ArenaError};
+pub use banner_pattern::{
+    DyeColor, MAX_PATTERN_LAYERS, PatternLayer, StoredPatternLayer, banner_pattern_layers,
+    shield_pattern_layers,
+};
 pub use block::{BlockPipeline, CameraUniform, DEPTH_FORMAT, DepthBuffer, GpuMesh};
 pub use block_entity::{
     BlockEntityBatch, BlockEntityCullStats, BlockEntityFrame, BlockEntityInstance, BlockEntityMesh,

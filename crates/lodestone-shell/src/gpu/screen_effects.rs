@@ -38,17 +38,36 @@ pub struct ScreenEffects {
     /// (`tick % ScreenEffectRenderer::fire_frame_count`). The same tick
     /// already passed to `RenderState::update_animation` for the block atlas.
     pub tick: u64,
+    /// Whether the local player's helmet slot holds a carved pumpkin (issue
+    /// #185). Vanilla derives this generically from *any* equipped item's
+    /// `minecraft:equippable.camera_overlay` component
+    /// (`Hud.extractCameraOverlays`,
+    /// `.cache/mc/26.2/client-src/net/minecraft/client/gui/Hud.java:269-291`)
+    /// — carved pumpkin is simply the only item that currently ships with the
+    /// field set, so this is named for the one concrete case rather than
+    /// modelling the general per-item lookup table that has exactly one
+    /// entry today.
+    pub wearing_pumpkin: bool,
 }
 
 impl ScreenEffects {
-    /// Whether either overlay should draw this frame, gated the way vanilla
-    /// gates both (`isFirstPerson && !isSleeping && !isSpectator`). This
-    /// crate has no "sleeping" concept yet, so that conjunct is omitted
-    /// (never a false negative today: an unmodelled state cannot suppress a
-    /// draw it never influences) — see `docs/screen-overlays.md`.
+    /// Whether any overlay should draw this frame, gated the way vanilla
+    /// gates both underwater/fire (`isFirstPerson && !isSleeping &&
+    /// !isSpectator`) — this crate has no "sleeping" concept yet, so that
+    /// conjunct is omitted (never a false negative today: an unmodelled
+    /// state cannot suppress a draw it never influences) — see
+    /// `docs/screen-overlays.md`. The pumpkin overlay is folded into the same
+    /// gate: vanilla's `extractCameraOverlays` is also first-person-only
+    /// (`getCameraType().isFirstPerson()`), and this codebase's convention
+    /// for spectator is "nothing about my own body renders" (the same reason
+    /// `eye_in_water`/`on_fire` are gated on `!spectator` here even though
+    /// vanilla's own `ScreenEffectRenderer.submit` is the one that spells out
+    /// that particular conjunct).
     #[must_use]
     pub fn any_active(&self, first_person: bool) -> bool {
-        first_person && !self.spectator && (self.eye_in_water || self.on_fire)
+        first_person
+            && !self.spectator
+            && (self.eye_in_water || self.on_fire || self.wearing_pumpkin)
     }
 }
 
@@ -69,6 +88,17 @@ mod tests {
             on_fire: true,
             spectator: true,
             tick: 0,
+            wearing_pumpkin: false,
+        };
+        assert!(!fx.any_active(true));
+    }
+
+    #[test]
+    fn spectator_suppresses_pumpkin_too() {
+        let fx = ScreenEffects {
+            wearing_pumpkin: true,
+            spectator: true,
+            ..ScreenEffects::default()
         };
         assert!(!fx.any_active(true));
     }
@@ -80,8 +110,27 @@ mod tests {
             on_fire: true,
             spectator: false,
             tick: 0,
+            wearing_pumpkin: false,
         };
         assert!(!fx.any_active(false));
+    }
+
+    #[test]
+    fn third_person_suppresses_pumpkin_too() {
+        let fx = ScreenEffects {
+            wearing_pumpkin: true,
+            ..ScreenEffects::default()
+        };
+        assert!(!fx.any_active(false));
+    }
+
+    #[test]
+    fn first_person_wearing_pumpkin_activates() {
+        let fx = ScreenEffects {
+            wearing_pumpkin: true,
+            ..ScreenEffects::default()
+        };
+        assert!(fx.any_active(true));
     }
 
     #[test]
