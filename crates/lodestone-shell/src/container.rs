@@ -188,6 +188,14 @@ pub struct ContainerFrame<'a> {
     /// caller unchanged. See [`with_drag`](Self::with_drag) for what it draws and
     /// why the counts cannot disagree with the release.
     pub drag: Option<(i32, &'a [usize])>,
+    /// The wire `menu_type` from `OPEN_SCREEN` (`OpenMenuSnapshot::menu_type`),
+    /// when this frame is a server-opened container.
+    ///
+    /// `None` on the player inventory screen — which involves no packet — and on
+    /// every caller that predates this field; both keep [`label_layout`]'s own
+    /// anchor. Read only by [`menu_type_title_anchor`], for the nine real screens
+    /// whose title anchor vanilla overrides.
+    pub menu_type: Option<&'a lodestone_model::ResourceKey>,
 }
 
 impl<'a> ContainerFrame<'a> {
@@ -203,6 +211,7 @@ impl<'a> ContainerFrame<'a> {
             cursor: None,
             recipe_book: None,
             drag: None,
+            menu_type: None,
         }
     }
 
@@ -216,6 +225,7 @@ impl<'a> ContainerFrame<'a> {
             cursor: None,
             recipe_book: None,
             drag: None,
+            menu_type: None,
         }
     }
 
@@ -242,6 +252,15 @@ impl<'a> ContainerFrame<'a> {
     /// `container_set_slot` remains the only thing that ever fills the result
     /// slot for real; see `docs/crafting.md`'s "who computes the result slot".
     #[must_use]
+    /// Attach the server's own `menu_type`, so [`menu_type_title_anchor`] can
+    /// correct the title anchor for the screens [`label_layout`] does not model.
+    /// `None` (the default) keeps the existing anchor.
+    #[must_use]
+    pub fn with_menu_type(mut self, menu_type: Option<&'a lodestone_model::ResourceKey>) -> Self {
+        self.menu_type = menu_type;
+        self
+    }
+
     pub fn with_recipe_book(mut self, book: Option<&'a RecipeBook>) -> Self {
         self.recipe_book = book;
         self
@@ -376,12 +395,20 @@ pub struct LabelLayout {
 /// constructors — so this is the same expression the panel art is blitted with,
 /// not a parallel one that can drift.
 ///
-/// Not modelled: `AbstractFurnaceScreen.java:39` centres its title
-/// (`(imageWidth - font.width(title)) / 2`), which is the only vanilla anchor
-/// that depends on the *text*. There is no furnace [`MenuKind`] yet — a furnace
-/// arrives here as a `Generic` and gets `x = 8`. When one is added, that branch
-/// needs the measured title width and therefore the font, which this function
-/// deliberately does not take.
+/// The nine screens whose anchors vanilla overrides away from these two are
+/// **not** handled here, and deliberately so: they need the wire `menu_type` and
+/// (for the centred ones) the measured title width, neither of which this
+/// function takes. [`menu_type_title_anchor`] carries them and overrides this
+/// function's result at the one call site in `build_inner`.
+///
+/// This paragraph used to say the centred furnace title was simply "not
+/// modelled", waiting on a furnace `MenuKind`. That framing was wrong in a way
+/// worth recording: a furnace does not need a `MenuKind` at all — the anchor
+/// keys off `menu_type`, which the server already sends and
+/// `OpenMenuSnapshot::menu_type` already carries. Growing `MenuKind` for it
+/// would have been the expensive way round, and is constrained against anyway
+/// (`lodestone-game/src/menus.rs`: `MenuKind` is matched exhaustively in
+/// [`slot_layout`]).
 #[must_use]
 pub fn label_layout(menu: &Menu, layout: &SlotLayout) -> LabelLayout {
     match menu.kind() {
@@ -395,6 +422,84 @@ pub fn label_layout(menu: &Menu, layout: &SlotLayout) -> LabelLayout {
             title_y: 6.0,
             inventory: Some([8.0, layout.height - 94.0]),
         },
+    }
+}
+
+/// Vanilla's `titleLabelX`/`titleLabelY` for the menu types whose real screen
+/// overrides them away from [`label_layout`]'s two anchors — the screens that
+/// function's doc comment names as unmodelled.
+///
+/// Read from `.cache/mc/26.2/client-src/net/minecraft/client/gui/screens/inventory/`,
+/// and each line below was re-read from the decompile rather than taken from a
+/// summary:
+///
+/// | wire `menu_type` | screen | `titleLabelX` | `titleLabelY` | source |
+/// |---|---|---|---|---|
+/// | `furnace` / `blast_furnace` / `smoker` | `AbstractFurnaceScreen` subclasses | centred | `6` | `AbstractFurnaceScreen.java:39` |
+/// | `brewing_stand` | `BrewingStandScreen` | centred | `6` | `BrewingStandScreen.java:25` |
+/// | `generic_3x3` | `DispenserScreen` (dispenser **and** dropper) | centred | `6` | `DispenserScreen.java:20` |
+/// | `crafter_3x3` | `CrafterScreen` | centred | `6` | `CrafterScreen.java:33` |
+/// | `anvil` | `AnvilScreen` | `60` | `6` | `AnvilScreen.java:30` |
+/// | `loom` | `LoomScreen` | `8` | `4` | `LoomScreen.java:68` (`titleLabelY -= 2`) |
+/// | `stonecutter` | `StonecutterScreen` | `8` | `5` | `StonecutterScreen.java:45` (`titleLabelY--`) |
+/// | `cartography_table` | `CartographyTableScreen` | `8` | `4` | `CartographyTableScreen.java:29` (`titleLabelY -= 2`) |
+///
+/// Note the last three are expressed in vanilla as *decrements of the inherited
+/// `titleLabelY`*, not as absolute values. They are resolved to absolutes here
+/// because the inherited value is `6` in all three cases; if `label_layout`'s
+/// `title_y` ever stops being `6` for a `Generic`, these three become wrong and
+/// nothing would say so — which is why it is written down rather than left to be
+/// inferred from the table.
+///
+/// "Centred" is vanilla's `(imageWidth - font.width(title)) / 2`, **integer**
+/// division in Java (`titleLabelX` is an `int`), so it truncates toward zero;
+/// matched with `.floor()`, which agrees for every real title because they are
+/// all narrower than the panel and the numerator is therefore non-negative.
+/// `layout.width` is used rather than a literal `176.0` because it already *is*
+/// vanilla's `imageWidth` for every type in the table.
+///
+/// A `None` return means "no override" and the caller keeps [`label_layout`]'s
+/// anchor. Every other server-openable type genuinely matches `(8, 6)` in
+/// vanilla too — `grindstone`, `hopper`, `shulker_box`, `enchantment` and every
+/// `generic_9x*` have no override at all — so they are absent from this table
+/// rather than listed as no-ops, and `crafting` is absent because
+/// `label_layout`'s own `craft_layout()` branch already places it at `29`.
+///
+/// **`beacon` and `merchant` are excluded on purpose.** Both draw at a different
+/// `imageWidth` (230 and 276) with their own background art, and
+/// `MerchantScreen.extractLabels` composes trade-level text into the title
+/// rather than merely moving the anchor (`MerchantScreen.java:85-98`). Neither
+/// has a case in [`background_kind`] or [`slot_layout`], so an anchor alone would
+/// place correct text over a still-wrong-shaped panel. They belong with their
+/// own layout work.
+#[must_use]
+pub fn menu_type_title_anchor(
+    menu_type: Option<&lodestone_model::ResourceKey>,
+    layout: &SlotLayout,
+    title: &str,
+    font: Option<&VanillaFont>,
+) -> Option<[f32; 2]> {
+    let key = menu_type?;
+    if key.namespace() != "minecraft" {
+        return None;
+    }
+    if matches!(
+        key.path(),
+        "furnace" | "blast_furnace" | "smoker" | "brewing_stand" | "generic_3x3" | "crafter_3x3"
+    ) {
+        // A jar-less run has no font to measure with. Falling back to a width of
+        // zero centres the *anchor* rather than the text, which is visibly wrong
+        // — but it is the same degradation the labels already take on that path
+        // (they draw in the fixed-advance debug font), so it is consistent rather
+        // than a new divergence.
+        let text_width = font.map_or(0.0, |f| f.width(title, 1.0));
+        return Some([((layout.width - text_width) / 2.0).floor(), 6.0]);
+    }
+    match key.path() {
+        "anvil" => Some([60.0, 6.0]),
+        "loom" | "cartography_table" => Some([8.0, 4.0]),
+        "stonecutter" => Some([8.0, 5.0]),
+        _ => None,
     }
 }
 
@@ -921,7 +1026,22 @@ impl ContainerGeometry {
         //
         // `label_layout` supplies the anchors; `titleLabelY` is 6, not 7, and
         // `titleLabelX` is not always 8.
+        //
+        // `menu_type_title_anchor` then corrects the nine real screens
+        // `label_layout` structurally cannot (it sees no `menu_type` and no font):
+        // the furnace family, brewing stand, dispenser/dropper, crafter, anvil,
+        // loom, stonecutter and cartography table. A `None` — no `menu_type`
+        // attached, or one it does not know — leaves `label_layout`'s anchor
+        // exactly as it was, which is what keeps every existing caller unchanged.
         let labels = label_layout(menu, &layout);
+        let labels = match menu_type_title_anchor(frame.menu_type, &layout, frame.title, font) {
+            Some([title_x, title_y]) => LabelLayout {
+                title_x,
+                title_y,
+                ..labels
+            },
+            None => labels,
+        };
         let label_colour = if bg_quads.is_some() {
             [64.0 / 255.0, 64.0 / 255.0, 64.0 / 255.0, 1.0]
         } else {
@@ -3840,6 +3960,148 @@ mod tests {
         }
         let manager = ResourceManager::new(vec![Box::new(src) as Box<dyn ResourceSource>]);
         ContainerBackground::build(&manager).expect("synthetic background builds")
+    }
+
+    // ---------------------------------------------------------------------
+    // Title anchors for the screens `label_layout` does not model.
+    //
+    // These live here rather than in `tests/container_labels.rs` (where the
+    // investigation's spec put them) because `menu_type_title_anchor` is pure
+    // arithmetic over a `SlotLayout`: it needs neither a GPU nor the jar, so
+    // gating them behind `#[ignore]` alongside that file's pixel gates would
+    // make them run never instead of always. The font-dependent one degrades to
+    // a skip on a jar-less run, which is the only reason it could not be
+    // unconditional.
+    // ---------------------------------------------------------------------
+
+    /// `AnvilScreen.java:30` fixes `titleLabelX = 60` — a literal typed from the
+    /// decompile, so the expected value originates entirely outside this crate
+    /// and needs no font.
+    #[test]
+    fn an_anvil_titles_at_vanillas_fixed_sixty_not_the_usual_eight() {
+        let menu = Menu::generic(3);
+        let layout = slot_layout(&menu);
+        assert_eq!(
+            menu_type_title_anchor(
+                Some(&"minecraft:anvil".parse().unwrap()),
+                &layout,
+                "Repair & Name",
+                None,
+            ),
+            Some([60.0, 6.0]),
+        );
+        // The three decrement-style screens, resolved to absolutes. Each is
+        // `titleLabelY -= n` off an inherited 6 in vanilla, so a wrong *base*
+        // would move all three together — which is why all three are asserted
+        // rather than one standing in for the family.
+        for (path, want) in [
+            ("loom", [8.0, 4.0]),
+            ("stonecutter", [8.0, 5.0]),
+            ("cartography_table", [8.0, 4.0]),
+        ] {
+            let key: lodestone_model::ResourceKey =
+                format!("minecraft:{path}").parse().unwrap();
+            assert_eq!(
+                menu_type_title_anchor(Some(&key), &layout, "T", None),
+                Some(want),
+                "{path}"
+            );
+        }
+    }
+
+    /// The centred family, `(imageWidth - font.width(title)) / 2` floored
+    /// (`AbstractFurnaceScreen.java:39`). Reusing this crate's own
+    /// `VanillaFont::width` is not circular: the glyph metrics are validated by
+    /// the font's own gates, so what this pins is the **centring arithmetic**.
+    ///
+    /// The magnitude matters, not just the sign — a centred anchor and
+    /// `label_layout`'s `8.0` are both "a number", so the test additionally
+    /// asserts the two *differ*, which is the thing a no-op implementation would
+    /// fail.
+    #[test]
+    fn the_furnace_family_centres_its_title_and_a_hopper_is_left_alone() {
+        let Some(font) = VanillaFont::shared() else {
+            return; // jar-less: nothing to measure against
+        };
+        let menu = Menu::generic(3);
+        let layout = slot_layout(&menu);
+        for path in [
+            "furnace",
+            "blast_furnace",
+            "smoker",
+            "brewing_stand",
+            "generic_3x3",
+            "crafter_3x3",
+        ] {
+            let key: lodestone_model::ResourceKey =
+                format!("minecraft:{path}").parse().unwrap();
+            let title = "Blast Furnace";
+            let want = ((layout.width - font.width(title, 1.0)) / 2.0).floor();
+            assert_eq!(
+                menu_type_title_anchor(Some(&key), &layout, title, Some(&font)),
+                Some([want, 6.0]),
+                "{path} must centre"
+            );
+            assert_ne!(
+                want, 8.0,
+                "if the centred anchor happened to equal label_layout's own 8.0, \
+                 this whole test would pass against a no-op override"
+            );
+        }
+
+        // -- controls -------------------------------------------------------
+        // A type vanilla does not override must fall through, or this function
+        // would be claiming every screen rather than the nine that moved.
+        for path in ["hopper", "grindstone", "shulker_box", "generic_9x3", "crafting"] {
+            let key: lodestone_model::ResourceKey =
+                format!("minecraft:{path}").parse().unwrap();
+            assert_eq!(
+                menu_type_title_anchor(Some(&key), &layout, "T", Some(&font)),
+                None,
+                "{path} already matches label_layout's (8,6) in vanilla"
+            );
+        }
+        assert_eq!(
+            menu_type_title_anchor(None, &layout, "T", Some(&font)),
+            None,
+            "no menu_type at all is the player inventory screen and every \
+             pre-existing caller"
+        );
+        // A non-vanilla namespace must not be matched on `path` alone.
+        let modded: lodestone_model::ResourceKey = "mymod:furnace".parse().unwrap();
+        assert_eq!(
+            menu_type_title_anchor(Some(&modded), &layout, "T", Some(&font)),
+            None,
+        );
+    }
+
+    /// The override reaches the **draw**, not just the helper — otherwise
+    /// `menu_type_title_anchor` is an island. Measured through
+    /// `ContainerGeometry`: attaching a furnace `menu_type` must move the title
+    /// ink, and attaching a hopper's must not.
+    #[test]
+    fn the_menu_type_anchor_reaches_build_inner_and_moves_the_title() {
+        let menu = Menu::generic(3);
+        let title = "Blast Furnace";
+        let geo = |menu_type: Option<&lodestone_model::ResourceKey>| {
+            let frame = ContainerFrame::new(Some(&menu), title).with_menu_type(menu_type);
+            ContainerGeometry::build(&frame, VIEW.0, VIEW.1).verts
+        };
+        let furnace: lodestone_model::ResourceKey = "minecraft:furnace".parse().unwrap();
+        let hopper: lodestone_model::ResourceKey = "minecraft:hopper".parse().unwrap();
+        let plain = geo(None);
+        assert_ne!(
+            geo(Some(&furnace)),
+            plain,
+            "a furnace menu_type must change the geometry — if this passes, \
+             `menu_type_title_anchor` is computing an anchor nothing consumes"
+        );
+        assert_eq!(
+            geo(Some(&hopper)),
+            plain,
+            "control: a hopper has no override, so the geometry must be identical \
+             — otherwise the test above would pass for any menu_type at all"
+        );
     }
 
     // ---------------------------------------------------------------------
