@@ -5,6 +5,7 @@
 //!
 //! | module | what it owns |
 //! |---|---|
+//! | [`command_block`] | the command block edit screen (issue #47) |
 //! | [`nav`] | selection, the add/edit form, what a keypress means |
 //! | [`options`] | the whole settings tree, unsupported controls disabled |
 //! | [`render`] | layout + a self-contained GPU pipeline |
@@ -38,6 +39,7 @@
 //! doing nothing.
 
 pub mod accounts;
+pub mod command_block;
 pub mod create_world;
 pub mod edit_box;
 pub mod focus;
@@ -132,6 +134,25 @@ pub enum Screen {
     /// A container or the player inventory is open over the world: pointer
     /// released and gameplay input frozen while the world keeps rendering.
     Container,
+    /// The command block edit screen (issue #47): vanilla's
+    /// `CommandBlockEditScreen` — pointer released and gameplay input frozen
+    /// over the still-rendering world, the same shape as [`Screen::Chat`] and
+    /// [`Screen::Container`] (vanilla's own `isInGameUi() == true`). Opened by
+    /// [`open_command_block`](Self::open_command_block) with the block's
+    /// current NBT (command, mode, conditional, redstone, track-output,
+    /// previous output); closed by
+    /// [`close_command_block`](Self::close_command_block), either from the
+    /// screen's own Done (which sends [`command_block::CommandBlockState::
+    /// to_action`]) or Cancel/Escape (which does not).
+    ///
+    /// **Nothing yet calls [`open_command_block`](Self::open_command_block)**:
+    /// there is no command-block-entity NBT decode anywhere in this
+    /// workspace, so there is no real right-click trigger for it — see
+    /// [`command_block`]'s module doc and
+    /// [#436](https://github.com/matteopolak/lodestone/issues/436). The
+    /// screen itself, its layout and its (currently tree-less, honestly
+    /// degraded) tab-completion are real and unit-tested.
+    CommandBlockEdit,
     /// Paused overlay: pointer released, player input frozen. The world behind
     /// keeps rendering and — on a live server — keeps ticking; pausing is a
     /// *local* UI state, not a world stop. Reachable from [`Screen::Playing`]
@@ -263,7 +284,7 @@ impl Screen {
     /// residue is real; it is stated rather than papered over. If a third
     /// consumer ever needs this, a derive is the fix, not another hand-written
     /// list.
-    pub const ALL: [Screen; 17] = [
+    pub const ALL: [Screen; 18] = [
         Screen::MainMenu,
         Screen::ServerList,
         Screen::ServerEdit,
@@ -274,6 +295,7 @@ impl Screen {
         Screen::Playing,
         Screen::Chat,
         Screen::Container,
+        Screen::CommandBlockEdit,
         Screen::Paused,
         Screen::Death,
         Screen::Error,
@@ -376,6 +398,13 @@ impl UiState {
     #[must_use]
     pub fn is_container_open(&self) -> bool {
         self.screen == Screen::Container
+    }
+
+    /// Whether the command block edit screen (issue #47) is open over the
+    /// world.
+    #[must_use]
+    pub fn is_command_block_open(&self) -> bool {
+        self.screen == Screen::CommandBlockEdit
     }
 
     /// Whether a session is currently being established.
@@ -519,6 +548,7 @@ impl UiState {
                     | Screen::Playing
                     | Screen::Chat
                     | Screen::Container
+                    | Screen::CommandBlockEdit
                     | Screen::Paused
                     | Screen::Death
                     | Screen::Error
@@ -757,6 +787,32 @@ impl UiState {
         }
     }
 
+    /// Open the command block edit screen (issue #47) over the world. Only
+    /// from [`Screen::Playing`], matching [`open_chat`](Self::open_chat)/
+    /// [`open_container`](Self::open_container)'s own guard.
+    ///
+    /// This method only moves the screen — the actual widget state (the
+    /// command field, the mode/conditional/redstone toggles, the previous
+    /// output) is [`nav::MenuNav`]'s to build and hold, the same split
+    /// [`nav::EditForm`] already makes for [`Screen::ServerEdit`]. See
+    /// [`command_block`]'s module doc for why nothing in this workspace calls
+    /// this yet.
+    pub fn open_command_block(&mut self) {
+        if self.screen == Screen::Playing {
+            self.screen = Screen::CommandBlockEdit;
+        }
+    }
+
+    /// Close the command block edit screen back to the world, whether Done or
+    /// Cancel (or Escape) triggered it — matching [`close_chat`](Self::close_chat)'s
+    /// own "either way" phrasing, since which one happened decided *whether a
+    /// packet was sent*, not which screen comes next.
+    pub fn close_command_block(&mut self) {
+        if self.screen == Screen::CommandBlockEdit {
+            self.screen = Screen::Playing;
+        }
+    }
+
     /// Escape, interpreted by screen:
     /// - Playing → Paused, Paused → Playing
     /// - Chat → Playing (cancel the line)
@@ -778,6 +834,12 @@ impl UiState {
             Screen::Playing => self.screen = Screen::Paused,
             Screen::Paused => self.screen = Screen::Playing,
             Screen::Chat | Screen::Container => self.screen = Screen::Playing,
+            // Escape cancels the edit without sending — matches Chat/Container
+            // immediately above; `MenuNav`'s own click handler is what routes
+            // Cancel to the same place, and Done routes here too (it calls
+            // `close_command_block` directly rather than through `on_escape`,
+            // but both land on `Screen::Playing`).
+            Screen::CommandBlockEdit => self.close_command_block(),
             Screen::Error => self.dismiss_error(),
             Screen::ServerEdit => self.screen = Screen::ServerList,
             Screen::ServerList => self.screen = Screen::MainMenu,
@@ -832,7 +894,7 @@ impl UiState {
     pub fn pause(&mut self) {
         if matches!(
             self.screen,
-            Screen::Playing | Screen::Chat | Screen::Container
+            Screen::Playing | Screen::Chat | Screen::Container | Screen::CommandBlockEdit
         ) {
             self.screen = Screen::Paused;
         }
@@ -883,7 +945,11 @@ impl UiState {
     pub fn show_credits(&mut self) {
         if matches!(
             self.screen,
-            Screen::Playing | Screen::Chat | Screen::Container | Screen::Paused
+            Screen::Playing
+                | Screen::Chat
+                | Screen::Container
+                | Screen::CommandBlockEdit
+                | Screen::Paused
         ) {
             self.screen = Screen::Credits;
         }
@@ -906,7 +972,11 @@ impl UiState {
     pub fn die(&mut self, message: Option<String>) {
         if matches!(
             self.screen,
-            Screen::Playing | Screen::Chat | Screen::Container | Screen::Paused
+            Screen::Playing
+                | Screen::Chat
+                | Screen::Container
+                | Screen::CommandBlockEdit
+                | Screen::Paused
         ) {
             self.death_message = message;
             self.screen = Screen::Death;

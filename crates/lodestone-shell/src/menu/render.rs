@@ -55,11 +55,14 @@
 use std::sync::Arc;
 
 use lodestone_assets::Image;
+use lodestone_model::command_tree::CommandTree;
 use lodestone_render::{GpuAtlas, GuiAtlas, GuiSpriteQuad};
 
+use crate::chat::Completion;
 use crate::hud::VanillaFont;
 use crate::hud::glyph_rows;
 use crate::hud::item_icon::{ColourStream, push_sprite_quad};
+use crate::menu::command_block;
 use crate::menu::edit_box::{self, EditBox};
 use crate::menu::layout;
 use crate::menu::nav::{MainButton, PauseButton};
@@ -409,7 +412,11 @@ fn rgba_mosaic(rgba: &[u8], width: usize, height: usize) -> Option<FaviconMosaic
 /// normalised alignments. Keeping them as named origins is what lets one `Slot`
 /// be resolved against any canvas size — which the layout has to be, because the
 /// logical canvas is only known at draw time (see [`logical_canvas`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// No longer `Eq`: `Origin::CommandBlockSuggestion` (issue #47) carries two
+// `f32`s, which cannot implement `Eq`. Nothing here relied on `Origin: Eq`
+// specifically — `Slot`, which wraps an `Origin`, was already `PartialEq`
+// only (never `Eq`) before this variant existed.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Origin {
     /// `(w / 2, 0)` — the top of the screen, for the logo band and the pause
     /// screen's title. `this.width` is `int` everywhere vanilla anchors off it
@@ -517,6 +524,37 @@ pub enum Origin {
     /// [`Origin::Settings`]`(`[`super::options::Placement::Footer`]`)`
     /// directly, same as [`Origin::Telemetry`].
     Packs(super::packs::PacksPlacement),
+    /// The command block edit screen's Done/Cancel row (issue #47):
+    /// `(floor(w/2), floor(h/4) + 132)` —
+    /// `AbstractCommandBlockEditScreen.java:71,74`'s
+    /// `this.height / 4 + 120 + 12` for `y`, the same `width/2` x-anchor as
+    /// every other widget on that screen ([`Origin::ScreenTop`]). Not folded
+    /// into [`Origin::TitleTop`] (`floor(h/4) + 48`): the two screens' extra
+    /// offsets (`0` vs `+84`) are unrelated constants that happen to share a
+    /// `floor(h/4)` term, and giving `TitleTop` a second use would make a
+    /// future change to the title screen's `+48` silently move this screen's
+    /// buttons too.
+    CommandBlockFooter,
+    /// One row of the command block screen's tab-completion popup (issue
+    /// #47): vanilla's `CommandSuggestions.SuggestionsList` — see
+    /// [`command_block_frame`]'s own doc for why `dx`/`popup_w` are computed
+    /// there rather than carried as a fixed offset like every other row on
+    /// this screen.
+    ///
+    /// `dx` is the **unclamped** desired offset from [`Origin::ScreenTop`]'s
+    /// anchor (the command box's own `text_x`, plus the fixed advance of
+    /// everything before the completed word); `popup_w` is the widest
+    /// candidate's measured width. Both are needed to reproduce vanilla's own
+    /// clamp (`CommandSuggestions.showSuggestions`: `Mth.clamp(x, 0,
+    /// input.getScreenX(0) + innerWidth - maxSuggestionWidth)`), which is an
+    /// **absolute-screen** bound this variant's `anchor` is the only place
+    /// that knows `width` in order to express.
+    CommandBlockSuggestion {
+        /// See this variant's own doc.
+        dx: f32,
+        /// See this variant's own doc.
+        popup_w: f32,
+    },
 }
 
 impl Origin {
@@ -557,6 +595,31 @@ impl Origin {
                 super::telemetry::placement_anchor(placement, width, height)
             }
             Origin::Packs(placement) => super::packs::placement_anchor(placement, width, height),
+            Origin::CommandBlockFooter => {
+                ((width * 0.5).floor(), (height / 4.0).floor() + 132.0)
+            }
+            Origin::CommandBlockSuggestion { dx, popup_w } => {
+                let cx = (width * 0.5).floor();
+                // `input.getScreenX(0) + innerWidth - maxSuggestionWidth`:
+                // the command box's left text edge (`cx + COMMAND_DX +
+                // BORDER_INSET`) plus its inner width (`COMMAND_W - 2 *
+                // BORDER_INSET`), minus the popup's own width. `.max(0.0)`
+                // guards the same inverted-clamp case vanilla's `Mth.clamp`
+                // handles by construction and `f32::clamp` panics on.
+                let upper = (cx
+                    + super::command_block::COMMAND_DX
+                    + super::edit_box::BORDER_INSET
+                    + (super::command_block::COMMAND_W - 2.0 * super::edit_box::BORDER_INSET)
+                    - popup_w)
+                    .max(0.0);
+                (
+                    (cx + dx).clamp(0.0, upper),
+                    // `y - (bordered ? 1 : 0)`, `y == 72` (not anchored to
+                    // bottom) — `CommandSuggestions.showSuggestions`/
+                    // `SuggestionsList`'s constructor.
+                    71.0,
+                )
+            }
         }
     }
 }
@@ -2297,6 +2360,230 @@ pub fn death_frame(nav: &super::nav::MenuNav, message: Option<&str>) -> MenuFram
             .collect(),
         selected: nav.death_index(),
         gui_scale: nav.gui_scale(),
+        overlay: true,
+        vanilla: true,
+        labels,
+        ..Default::default()
+    }
+}
+
+/// Builds the command block edit screen's overlay frame (issue #47): vanilla's
+/// `CommandBlockEditScreen` — see [`super::command_block`]'s module doc for
+/// the full geometry citation and the two named islands (no tree ever reaches
+/// this client yet; nothing yet opens this screen from a real interaction).
+///
+/// Like [`pause_frame`]/[`death_frame`], not gated by [`owns_frame`]: the
+/// world keeps rendering (and, on a live server, ticking) behind it, matching
+/// vanilla's own `isInGameUi() == true`
+/// (`AbstractCommandBlockEditScreen.java:123-126`).
+///
+/// `tree` is threaded through purely so this function is testable against a
+/// real completion list — every production caller passes `None` today (see
+/// [`super::command_block`]'s module doc), and `None` here draws no suggestion
+/// popup at all rather than a fabricated one.
+#[must_use]
+pub fn command_block_frame(
+    state: &command_block::CommandBlockState,
+    tree: Option<&CommandTree>,
+) -> MenuFrame<'static> {
+    use command_block::{CommandBlockRow, COMMAND_BLOCK_ROWS, PREVIOUS_OUTPUT_ROW};
+
+    let dim = widget::argb_to_rgba(widget::INACTIVE_MESSAGE_ARGB);
+    let mut labels = vec![
+        MenuLabel {
+            text: command_block::TITLE_TEXT.to_string(),
+            origin: Origin::ScreenTop,
+            dx: 0.0,
+            dy: command_block::TITLE_Y,
+            align: Align::Centre,
+            colour: LABEL,
+            scale: 1.0,
+        },
+        MenuLabel {
+            text: command_block::COMMAND_LABEL_TEXT.to_string(),
+            origin: Origin::ScreenTop,
+            dx: command_block::COMMAND_LABEL_DX,
+            dy: command_block::COMMAND_LABEL_Y,
+            align: Align::Left,
+            colour: dim,
+            scale: 1.0,
+        },
+    ];
+    // Vanilla's own guard is `!previousEdit.getValue().isEmpty()`
+    // (`AbstractCommandBlockEditScreen.java:159`), which a freshly
+    // `setValue("-")`-ed box always passes — see
+    // `CommandBlockState::previous_output_text`'s own doc.
+    if !state.previous_output_text().is_empty() {
+        labels.push(MenuLabel {
+            text: command_block::PREVIOUS_LABEL_TEXT.to_string(),
+            origin: Origin::ScreenTop,
+            dx: command_block::PREVIOUS_LABEL_DX,
+            dy: command_block::PREVIOUS_LABEL_Y,
+            align: Align::Left,
+            colour: dim,
+            scale: 1.0,
+        });
+    }
+
+    let slot = |dx: f32, dy: f32, w: f32, h: f32| {
+        Some(Slot {
+            origin: Origin::ScreenTop,
+            dx,
+            dy,
+            w,
+            h,
+        })
+    };
+
+    let mut rows: Vec<MenuRow> = COMMAND_BLOCK_ROWS
+        .iter()
+        .map(|row| match row {
+            CommandBlockRow::Command => MenuRow {
+                field: true,
+                edit: Some(state.command.clone()),
+                slot: slot(
+                    command_block::COMMAND_DX,
+                    command_block::COMMAND_Y,
+                    command_block::COMMAND_W,
+                    command_block::COMMAND_H,
+                ),
+                ..Default::default()
+            },
+            CommandBlockRow::TrackOutput => MenuRow {
+                label: command_block::track_output_label(state.track_output).to_string(),
+                enabled: true,
+                slot: slot(
+                    command_block::OUTPUT_DX,
+                    command_block::PREVIOUS_Y,
+                    command_block::OUTPUT_W,
+                    command_block::OUTPUT_H,
+                ),
+                ..Default::default()
+            },
+            CommandBlockRow::Mode => MenuRow {
+                label: command_block::mode_label(state.mode).to_string(),
+                enabled: true,
+                slot: slot(
+                    command_block::MODE_DX,
+                    command_block::EXTRA_ROW_Y,
+                    command_block::EXTRA_ROW_W,
+                    command_block::EXTRA_ROW_H,
+                ),
+                ..Default::default()
+            },
+            CommandBlockRow::Conditional => MenuRow {
+                label: command_block::conditional_label(state.conditional).to_string(),
+                enabled: true,
+                slot: slot(
+                    command_block::CONDITIONAL_DX,
+                    command_block::EXTRA_ROW_Y,
+                    command_block::EXTRA_ROW_W,
+                    command_block::EXTRA_ROW_H,
+                ),
+                ..Default::default()
+            },
+            CommandBlockRow::Automatic => MenuRow {
+                label: command_block::automatic_label(state.automatic).to_string(),
+                enabled: true,
+                slot: slot(
+                    command_block::AUTOEXEC_DX,
+                    command_block::EXTRA_ROW_Y,
+                    command_block::EXTRA_ROW_W,
+                    command_block::EXTRA_ROW_H,
+                ),
+                ..Default::default()
+            },
+            CommandBlockRow::Done => MenuRow {
+                label: "Done".to_string(),
+                enabled: true,
+                slot: Some(Slot {
+                    origin: Origin::CommandBlockFooter,
+                    dx: command_block::DONE_DX,
+                    dy: 0.0,
+                    w: command_block::FOOTER_W,
+                    h: command_block::FOOTER_H,
+                }),
+                ..Default::default()
+            },
+            CommandBlockRow::Cancel => MenuRow {
+                label: "Cancel".to_string(),
+                enabled: true,
+                slot: Some(Slot {
+                    origin: Origin::CommandBlockFooter,
+                    dx: command_block::CANCEL_DX,
+                    dy: 0.0,
+                    w: command_block::FOOTER_W,
+                    h: command_block::FOOTER_H,
+                }),
+                ..Default::default()
+            },
+        })
+        .collect();
+    debug_assert_eq!(rows.len(), PREVIOUS_OUTPUT_ROW);
+
+    // Row 7: the read-only previous-output field — never a click target, see
+    // `command_block`'s module doc on why it takes no keyboard focus either.
+    let mut previous = EditBox::new(
+        0.0,
+        0.0,
+        command_block::PREVIOUS_W,
+        command_block::PREVIOUS_H,
+        "Previous Output",
+    );
+    previous.is_editable = false;
+    previous.set_value(state.previous_output_text());
+    rows.push(MenuRow {
+        field: true,
+        edit: Some(previous),
+        slot: slot(
+            command_block::PREVIOUS_DX,
+            command_block::PREVIOUS_Y,
+            command_block::PREVIOUS_W,
+            command_block::PREVIOUS_H,
+        ),
+        ..Default::default()
+    });
+
+    // The suggestion popup (vanilla's `CommandSuggestions.SuggestionsList`) —
+    // appended past every real control, so its row indices never collide with
+    // `COMMAND_BLOCK_ROWS`'s. Only ever non-empty in a test today; see this
+    // function's own doc on why `tree` is always `None` in production.
+    if let Completion::Local { start, candidates } = state.completions(tree) {
+        let popup_w = candidates
+            .iter()
+            .map(|c| state.command.measure(&c.text))
+            .fold(0.0_f32, f32::max);
+        // `getScreenX(range.start)`: the box's own text-x plus the fixed
+        // advance of everything before `start` — `displayPos` is ignored,
+        // matching a short, unscrolled command (see `command_block`'s module
+        // doc on the fixed-advance approximation `EditBox` already makes
+        // everywhere).
+        let unclamped_dx = command_block::COMMAND_DX
+            + edit_box::BORDER_INSET
+            + state.command.advance * start as f32;
+        for (i, candidate) in candidates.iter().enumerate() {
+            rows.push(MenuRow {
+                label: candidate.text.clone(),
+                enabled: true,
+                slot: Some(Slot {
+                    origin: Origin::CommandBlockSuggestion {
+                        dx: unclamped_dx,
+                        popup_w,
+                    },
+                    dx: 0.0,
+                    dy: 12.0 * i as f32,
+                    w: popup_w + 1.0,
+                    h: 12.0,
+                }),
+                ..Default::default()
+            });
+        }
+    }
+
+    MenuFrame {
+        rows,
+        selected: usize::MAX,
+        hovered: state.hovered,
         overlay: true,
         vanilla: true,
         labels,
@@ -4684,7 +4971,16 @@ fn draw_edit_box(b: &mut Quads<'_>, edit: &EditBox, x: f32, y: f32, w: f32, h: f
         }
     }
 
-    let state = edit.draw_state(None);
+    // Measure with the exact font `b.text` is about to draw with —
+    // `Quads::text_width` makes the same jar-attached-vs-fallback choice
+    // `Quads::text` does. Using `edit.draw_state(None)` (this box's own fixed
+    // `MENU_TEXT_ADVANCE`) here was the "cursor gap grows while typing"
+    // report: it placed the caret a fixed 6 px per character right of
+    // `before`, while the glyphs drawn below (when a real `VanillaFont` is
+    // attached) are mostly narrower than that — see `edit_box.rs`'s module
+    // docs for the measured cause.
+    let font_measure = |s: &str| b.text_width(s, EDIT_TEXT_SCALE);
+    let state = edit.draw_state_with(None, Some(&font_measure));
     let colour = edit.text_colour();
     let glyph_h = GLYPH_H as f32 * EDIT_TEXT_SCALE;
 
@@ -5450,6 +5746,10 @@ mod tests {
                 Screen::Container => {
                     ui.enter_dev_world();
                     ui.open_container();
+                }
+                Screen::CommandBlockEdit => {
+                    ui.enter_dev_world();
+                    ui.open_command_block();
                 }
                 Screen::Paused => {
                     ui.enter_dev_world();
