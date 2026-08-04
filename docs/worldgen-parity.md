@@ -362,24 +362,42 @@ passes reliably again.
   `KNOWN_VEGETATION_GAPS` table, both directions (new undeclared gap, or a
   declared gap that got fixed and needs pruning).
 
-  **Single-chunk only — measured, not assumed.** Unlike the ore stage's real
-  3×3 `blockStateWriteRadius(1)` driver, a tree/patch that would spill
-  across a chunk boundary in vanilla simply doesn't in this engine. The
-  oracle measured this directly (two plains chunks, seed 42): a real
-  vanilla centre chunk's vegetation content is **not** fully captured by
-  the centre's own single-chunk pass — `(-120,-120)`: 25/32 = 78.1%,
-  `(5,5)`: 48/61 = 78.7%. Both land in a tight band around **~78%**, i.e. a
-  consistent **~21-22% undercount** from cross-chunk spill alone, not the
-  "small, rare edge case" a reader might otherwise assume. See
-  `tests/vegetation_parity.rs::single_chunk_only_undercounts_real_vanilla_centre_content`.
+  **Cross-chunk spill (issue #427): closed, measured 0 residual.** Unlike
+  before, `OverworldGenerator::vegetation_stage` now runs the real vanilla
+  3×3 `blockStateWriteRadius(1)` driver
+  (`crate::feature::vegetation::apply_vegetal_decoration_step_3x3_per_source`,
+  the same shape `crate::feature::apply_ore_step_3x3_per_source` already
+  established for ores), not a centre-chunk-only pass. The oracle originally
+  measured the *old* single-chunk-only engine directly against its own
+  `FULL3X3` mode (two plains chunks, seed 42): a real vanilla centre chunk's
+  vegetation content was **not** fully captured by the centre's own
+  single-chunk pass alone — `(-120,-120)`: 25/32 = 78.1%, `(5,5)`: 48/61 =
+  78.7%, a consistent **~21-22% undercount**, not the "small, rare edge
+  case" a reader might otherwise assume (still true of the single-source
+  *primitive*, `apply_vegetal_decoration_step`, which the module keeps for
+  the `LODESTONE_VEG_SINGLE_SOURCE_DEBUG=1` toggle — see
+  `tests/vegetation_parity.rs::single_chunk_only_undercounts_real_vanilla_centre_content`).
+  With the 3×3 driver wired into production, the SAME two fixtures'
+  centre-window match against the oracle's `FULL3X3` pass is now **exact**:
+  30/30 and 57/57 (32 and 61 minus the named `glow_lichen` gap) — see
+  `tests/vegetation_parity.rs::our_engine_matches_jvm_full3x3_pass`.
+  `OverworldGenerator::vegetation_stage`'s 8-neighbour cost is memoised via
+  a new `Self::post_ore_cache` (mirroring `Self::pre_ore_cache`'s own FIFO
+  shape) so a sweep does not pay the real ore-placement RNG walk twice for
+  every chunk that appears as both a sweep's own centre and some other
+  chunk's neighbour.
 
   Several trunk/foliage/feature kinds this engine doesn't implement (fancy/
-  giant trunks — oak's `fancy_oak` branch and every jungle/dark-oak/acacia/
+  giant trunks — oak's `fancy_oak` branch and every jungle/dark-oak/
   mangrove/cherry tree — plus `FallenTreeFeature`, and non-vegetation
   features never in #406's scope to begin with: glow lichen/kelp/seagrass/
-  coral/bamboo/vines/mushroom rings/cave-only features) degrade to a silent
-  no-op rather than a panic — see `KNOWN_VEGETATION_GAPS` above for the
-  exact, current, per-biome list, and the module's own doc for why.
+  coral/bamboo/vines/mushroom rings/cave-only features) still degrade to a
+  silent no-op rather than a panic — see `KNOWN_VEGETATION_GAPS` above for
+  the exact, current, per-biome list, and the module's own doc for why.
+  **Acacia (savanna) is issue #428's addition and is no longer in that
+  list** — `TrunkPlacerCfg::Forking`/`FoliagePlacerCfg::Acacia`, a real port
+  of `ForkingTrunkPlacer`/`AcaciaFoliagePlacer`, verified against two real
+  savanna oracle fixtures below.
 
 ### The vegetation oracle
 
@@ -398,20 +416,54 @@ identical baseline:
   spill.
 
 Both passes dump every changed cell over the whole driven `-16..32` region,
-plus the centre's own post-ore terrain (`base.*`, run-length-encoded) so
-the Rust side can seed `VegGrid` from an identical starting point and run
-the real, production `apply_vegetal_decoration_step` — not a
-reimplementation — via `tests/vegetation_parity.rs`.
+plus the **whole region's** own post-ore terrain (`base.*`, run-length
+-encoded, widened from centre-only in issue #427 — see
+`dumpRegionBaseline`'s own doc comment) so the Rust side can seed
+`VegGrid`/`VegGrid::with_footprint` from an identical starting point and
+run the real, production `apply_vegetal_decoration_step`/
+`apply_vegetal_decoration_step_3x3_per_source` — not a reimplementation —
+via `tests/vegetation_parity.rs`.
 
 **What it does not model** (see the oracle's own header comment for the
 full list): no biome variety (single `FixedBiomeSource`, matching every
 isolated oracle in this directory except `ComposedChunkOracle.java`); no
 decoration steps before `UNDERGROUND_ORES` (lakes/springs); `SINGLE`
 mode's own *reads* still see the real, unclamped neighbourhood (only
-*writes* are chunk-scoped), which is narrower than `VegGrid`'s own
-approximation (every read clamps to the local chunk) — a real, small,
-named discrepancy between the oracle's `SINGLE` mode and this engine's own
-behaviour, not measured to matter at either fixture chunk.
+*writes* are chunk-scoped), which is narrower than the single-source
+primitive `VegGrid::new`'s own approximation (every read clamps to the
+local chunk) — a real, small, named discrepancy between the oracle's
+`SINGLE` mode and that primitive's own behaviour, not measured to matter at
+either plains fixture chunk. Production no longer uses that primitive
+(see #427 above), so this narrowing is now a debug-toggle-only concern.
+
+**A second real bug this oracle had, found while adding issue #428's
+savanna fixtures — every tree, in every biome, silently never placed a
+single block.** `VegetationOracle.java`'s `WorldGenLevel` proxy had no case
+for `isStateAtPosition`/`isFluidAtPosition` (both ABSTRACT on
+`LevelSimulatedReader`, no default body to fall back to), so every call
+fell through to the proxy's catch-all, which force-returns `false` for an
+unrecognised boolean-returning method. `TreeFeature.validTreePos`
+(`TreeFeature.java:52-54`) — the gate both `TrunkPlacer.placeLog` and
+`FoliagePlacer.tryPlaceLeaf` require before writing anything — is defined
+as exactly one such call, so it always evaluated `false`. The two committed
+plains fixtures showing zero `oak_log` anywhere looked like plausible bad
+luck (plains' own `trees_plains` rolls zero attempts ~95% of the time);
+the same zero recurring at real, known-savanna coordinates whose
+`trees_savanna` placement *never* rolls zero attempts (`weighted_list{1: 9,
+2: 1}`) is not explainable by chance, and pointed at the oracle itself.
+Fixed by adding both cases, routed through the same `chunkAt`-backed
+`getBlockState`/`getFluidState` the proxy's other cases already use.
+Confirmed harmless to the two existing plains fixtures (re-ran both before
+and after the fix and diffed byte-for-byte: zero change — those two chunks
+genuinely never rolled a tree, independent of this bug); savanna went from
+zero tree content anywhere in a 48×48 region, at every coordinate tried,
+to real `acacia_log`/`acacia_leaves`/`oak_log`/`oak_leaves` immediately.
+This means every pre-#428 "matches bit-for-bit" claim in this section
+validated grass/flowers/glow_lichen against a real JVM but never actually
+exercised straight-trunk placement against one — CLAUDE.md's "world"
+vacuous-test species (the flaw was in what the oracle's own mechanism
+could produce, not in any assertion), caught only because savanna's much
+higher tree rate turned "maybe bad luck" into "structurally impossible".
 
 **A real bug this oracle found, not by inspection — by a JVM diff.**
 Before this oracle existed, `crate::feature::vegetation::try_parse_int_provider`
@@ -442,15 +494,72 @@ no internal check would ever have caught it.
 Regenerate with:
 ```bash
 bash scripts/worldgen-oracle/run.sh VegetationOracle "minecraft:plains <cx> <cz> 42"
+bash scripts/worldgen-oracle/run.sh VegetationOracle "minecraft:savanna <cx> <cz> 42"
 ```
-writing the two fixtures at `crates/lodestone-worldgen/tests/support/
+writing the plains pair at `crates/lodestone-worldgen/tests/support/
 vegetation_plains_land_jvm.txt` (`-120 -120`) and `vegetation_plains_chunk5_5_jvm.txt`
-(`5 5`). `crates/lodestone-worldgen/tests/support/worldgen_data/{configured_feature,
-placed_feature}` were extended to the full 226/262-file sets (copied verbatim
-from `crates/lodestone-server/assets/worldgen/`, same provenance) — the
-prior ore-only subset didn't carry a single vegetation placed/configured
-feature, so `compose::build_biome_vegetation` resolved an empty list against
-it and this test would have measured nothing.
+(`5 5`), and the savanna pair (issue #428) at `vegetation_savanna_chunk20_neg5_jvm.txt`
+(`20 -5`) and `vegetation_savanna_neg30_15_jvm.txt` (`-30 15`) — picked from a
+scan of several coordinates specifically because they contain real acacia
+*and* oak content (most savanna coordinates tried during that scan did not,
+before the `isStateAtPosition` fix above). `crates/lodestone-worldgen/tests/
+support/worldgen_data/{configured_feature,placed_feature}` were extended to
+the full 226/262-file sets (copied verbatim from
+`crates/lodestone-server/assets/worldgen/`, same provenance) — the prior
+ore-only subset didn't carry a single vegetation placed/configured feature,
+so `compose::build_biome_vegetation` resolved an empty list against it and
+this test would have measured nothing; `worldgen_data/biome/savanna.json`
+was added alongside the savanna fixtures for the same reason (only
+`plains.json` existed before).
+
+### Leaf decay distance (`TreeFeature.updateLeaves`, issue #428)
+
+Every leaf state this engine's own `configured_feature` JSON authors (e.g.
+`"distance": "7"`) is the *undecayed* default — real vanilla recomputes
+each placed leaf's `distance` property immediately after a tree's own
+trunk, foliage and decorators are all placed, via a multi-source BFS from
+that ONE tree's own logs (`crate::feature::vegetation::update_leaf_distances`,
+ported from `TreeFeature.updateLeaves`). This was invisible before issue
+#428 for the same reason the `isStateAtPosition` bug above was: with no
+tree ever actually placing a block, this post-process had nothing to
+correct. Two things worth keeping from porting it:
+
+- **The BFS must be scoped to the tree's own bounding box**
+  (`trunks ∪ foliage ∪ decorations`, matching vanilla's own
+  `BoundingBox.encapsulatingPositions` call), not the whole grid. A first
+  version let the BFS wander anywhere in the grid and measured *closer*
+  distances than the oracle wherever it found a gap between two adjacent
+  canopies that vanilla's own per-tree-scoped BFS cannot see through.
+- **A literal port of Java's `Set`-backed bucket queue hangs.** Java's
+  `toCheck` buckets are `Set`s, guarded by a separately-tracked "filled"
+  bitset checked at both enqueue and dequeue time; translating the buckets
+  as plain `VecDeque`s with no de-duplication lets a log and an adjacent
+  leaf re-discover each other forever (a log always reports distance `0`,
+  so nothing stops it being re-enqueued). Fixed with one `visited: HashSet`
+  marked at first discovery — a standard, provably-equivalent formulation
+  for a uniform-edge-weight multi-source BFS drained bucket-by-bucket, not
+  a shortcut that changes any final value.
+
+**Two named, measured, bounded residuals remain** (not resolved, per
+CLAUDE.md's instruction to report rather than silently widen a bound —
+see `tests/vegetation_parity.rs::assert_matches_full3x3`'s own doc
+comment for the full investigation each one received):
+
+1. `vegetation_savanna_chunk20_neg5_jvm.txt`: 11 of 185 centre cells (one
+   oak tree straddling the centre/east-neighbour boundary) carry a
+   `distance` value exactly 1 lower than the oracle's. Ruled out: too-wide
+   BFS scope (already fixed above and re-measured), interference from
+   another tree's own bbox (none overlaps), and a terrain-dependent
+   trunk-log placement failure (`f.base` at the affected column is plain
+   `air`). Mechanism not found.
+2. `vegetation_savanna_neg30_15_jvm.txt`: 1 of 116 centre cells
+   (`(14,84,1)`, expected `short_grass`) is written nowhere by this
+   engine. The adjacent cell `(14,84,0)`, with identical `f.base` terrain,
+   matches. Mechanism not found.
+
+Both are 0% at the two plains fixtures — this is specific to savanna's
+higher tree/vegetation density in these two fixtures, not a property of
+every tree or every biome.
 - **Ore features (composition into `OverworldGenerator::column`)**: **now
   composed** (`crate::feature::apply_ore_step_3x3_per_source`, the real
   vanilla 3×3 driver, per-source biome resolution). What still can't be
