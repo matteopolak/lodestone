@@ -2380,6 +2380,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lodestone-anvil"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "lodestone-core",
+ "lz4_flex",
+ "thiserror 2.0.19",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "lodestone-assets"
 version = "0.1.0"
 dependencies = [
@@ -2874,6 +2885,12 @@ name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
+
+[[package]]
+name = "lz4_flex"
+version = "0.11.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
 
 [[package]]
 name = "mach2"
@@ -6184,6 +6201,12 @@ dependencies = [
  "tempfile",
  "zip",
 ]
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aee1b19627c7c60102ab80d3a9cbe18de90bfe03bfa6c3715447681f0e8c8af6"
 
 [[package]]
 name = "yoke"
