@@ -256,6 +256,11 @@ impl ThirdPersonBodyState {
             item_use: None,
             // Not a creeper: only a creeper ever swells.
             creeper_swelling: 0.0,
+            // The local player's own body cannot report `on_fire` either, for
+            // the same reason `hurt` above cannot: no ingest entity, hence no
+            // `EntityFlags` to read (issue #434). `false` by construction, not
+            // by omission.
+            on_fire: false,
         }
     }
 }

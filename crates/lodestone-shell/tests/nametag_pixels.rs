@@ -139,6 +139,7 @@ fn base_draw(id: i32, type_path: &str, feet: glam::Vec3, scale: f32) -> EntityDr
         name_tag: None,
         item_use: None,
         creeper_swelling: 0.0,
+        on_fire: false,
     }
 }
 
