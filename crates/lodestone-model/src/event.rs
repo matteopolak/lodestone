@@ -2359,19 +2359,50 @@ pub fn route(event: &ClientEvent) -> Route {
         // the event is a notification with nothing left to do.
         ClientEvent::ChunkUnloaded { .. } => CLIENT,
 
+        // ---- world-level admin state, folded by `session` ---------------------
+        //
+        // All nine of these were in the island block below. They are `session`
+        // rather than `ingest` because none is per-entity: they are scalars scoped
+        // to the world this session is connected to, which is the same category
+        // `DimensionTypeChanged` and `AbilitiesChanged` fall into — and both of
+        // those cost work by being guessed as `ingest` first.
+        //
+        // `TabListChanged` is the one that needed no new fold at all:
+        // `lodestone_game::tablist::TabList::apply` has had a header/footer arm
+        // and `session::apply_tab_list` has been registered since before this
+        // routing fix, so the event was decoded, folded-capable, and simply never
+        // asked for. The other eight got folds in the same commit as this flag,
+        // per the instruction in the block below.
+        ClientEvent::TabListChanged { .. } => SESSION,
+        // `lodestone_game::worldborder::WorldBorder` via `apply_world_border`.
+        // The largest single cluster in `docs/event-routing.md`'s island list.
+        ClientEvent::WorldBorderCenterChanged { .. }
+        | ClientEvent::WorldBorderSizeLerping { .. }
+        | ClientEvent::WorldBorderSizeChanged { .. }
+        | ClientEvent::WorldBorderWarningDelayChanged { .. }
+        | ClientEvent::WorldBorderWarningDistanceChanged { .. }
+        | ClientEvent::WorldBorderInitialized { .. } => SESSION,
+        // `lodestone_game::levelstate::SpawnPoint` via `apply_spawn_point` — the
+        // compass target every legacy family's packet doc names.
+        ClientEvent::SpawnPositionChanged { .. } => SESSION,
+        // `lodestone_game::levelstate::GameRuleValues` via `apply_game_rules`.
+        // Note this is *not* #327's typed registry, which is server-side and
+        // unbuilt.
+        ClientEvent::GameRulesChanged { .. } => SESSION,
+
         // ---- claimed by nothing ---------------------------------------------
         //
         // Decoded and tested, consumed nowhere. Each line here is a candidate
         // island; `docs/event-routing.md` records which of these are simply
         // ahead of a consumer. The three that had a fold sitting unwired behind
         // them (`BlockDestruction`, `HeldSlotChanged`, `DifficultyChanged`) were
-        // fixed above and are no longer in this list.
+        // fixed above and are no longer in this list, and neither are the nine
+        // world-level scalars in the block immediately above.
         //
         // Do not "fix" one by flipping a flag: the flag only says who is *asked*,
         // and a router that is asked but has no system for the event drops it just
         // as silently. Write the system, then the flag, in one commit.
         ClientEvent::Ping { .. }
-        | ClientEvent::SpawnPositionChanged { .. }
         | ClientEvent::BlockChangedAck { .. }
         | ClientEvent::ChunkCacheCenterChanged { .. }
         | ClientEvent::ChunkCacheRadiusChanged { .. }
@@ -2384,20 +2415,12 @@ pub fn route(event: &ClientEvent) -> Route {
         | ClientEvent::CameraSet { .. }
         | ClientEvent::BookOpened { .. }
         | ClientEvent::SoundStopped { .. }
-        | ClientEvent::TabListChanged { .. }
-        | ClientEvent::WorldBorderCenterChanged { .. }
-        | ClientEvent::WorldBorderSizeLerping { .. }
-        | ClientEvent::WorldBorderSizeChanged { .. }
-        | ClientEvent::WorldBorderWarningDelayChanged { .. }
-        | ClientEvent::WorldBorderWarningDistanceChanged { .. }
-        | ClientEvent::WorldBorderInitialized { .. }
         | ClientEvent::PlayerCombatEntered
         | ClientEvent::PlayerCombatEnded { .. }
         | ClientEvent::SignEditorOpened { .. }
         | ClientEvent::AdvancementsTabSelected { .. }
         | ClientEvent::ProjectilePowerChanged { .. }
         | ClientEvent::MountScreenOpened { .. }
-        | ClientEvent::GameRulesChanged { .. }
         | ClientEvent::TransferRequested { .. }
         | ClientEvent::CookieRequested { .. }
         | ClientEvent::CookieStored { .. }
@@ -2467,6 +2490,119 @@ mod route_tests {
             catch_all_lines("        ClientEvent::Ping { .. } => Route::NOWHERE,\n").is_empty(),
             "the detector must not read an ordinary struct pattern as a wildcard"
         );
+    }
+
+    /// `docs/event-routing.md`'s island count must match this file's source.
+    ///
+    /// # Why this gate exists
+    ///
+    /// The island fraction has been wrong in the written record **twice**, and both
+    /// times in the way `CLAUDE.md` §2 describes: true when written, stale later,
+    /// and nothing about it looks wrong on inspection. The doc said "38 of 98" —
+    /// numerator right, **denominator stale**, because variants had been added
+    /// since. A dispatch briefing quoted "41 of 98", wrong in both halves. A
+    /// reviewer cannot tell either from a wrong one by reading it.
+    ///
+    /// So the number is derived here instead of remembered, and the doc has to
+    /// agree. This is the same shape as `docs/README.md`'s generator gate: prose is
+    /// allowed to describe, but a *count* is mechanical and belongs to whatever can
+    /// recompute it.
+    ///
+    /// # What it does not prove
+    ///
+    /// Only that the doc's arithmetic matches the source. It says nothing about
+    /// whether any particular variant is routed *correctly* — a variant folded by
+    /// the wrong router is not an island and this gate is blind to it. That is
+    /// `handles_event`'s coverage table, and
+    /// `lodestone_client::state`'s `apply_routes_*_through_the_real_path` gates.
+    #[test]
+    fn the_island_count_in_the_docs_matches_this_source() {
+        let (islands, total) = island_and_total_counts();
+
+        // Exhaustiveness is a compile-time guarantee, but only for the *arms*.
+        // Asserting the two counts agree turns it into evidence a reader can see,
+        // and catches a variant named twice.
+        assert_eq!(
+            total, 103,
+            "the `ClientEvent` variant count changed. That is fine and expected — \
+             update `docs/event-routing.md` and this number together, which is the \
+             whole point of this gate firing."
+        );
+
+        let doc = include_str!("../../../docs/event-routing.md");
+        let expected = format!("**{islands} of {total}**");
+        assert!(
+            doc.contains(&expected),
+            "`docs/event-routing.md` must state the island fraction as `{expected}`. \
+             Counted from this file: {islands} arms whose right-hand side is exactly \
+             `Route::NOWHERE`, out of {total} variants. If you just wired a variant, \
+             this is the doc line to update."
+        );
+
+        // The control: the detector must actually be able to disagree. A count it
+        // cannot get wrong is not evidence of anything.
+        assert!(
+            !doc.contains(&format!("**{} of {total}**", islands + 1)),
+            "detector control: the doc must not also contain an off-by-one fraction, \
+             or `contains` would pass regardless of the real count"
+        );
+    }
+
+    /// `(islands, total)` derived from [`route`]'s own source.
+    ///
+    /// An island is an arm whose right-hand side is **exactly** `Route::NOWHERE`.
+    /// The distinction from `..Route::NOWHERE` is load-bearing: that spelling is a
+    /// struct-update spread inside an arm that sets other flags, appears five times
+    /// in `route`, and counting it would report five routed variants as stranded.
+    /// Comment lines are stripped first, because the explanatory comments in
+    /// `route` name variants too.
+    fn island_and_total_counts() -> (usize, usize) {
+        let source = include_str!("event.rs");
+        let body = source
+            .split_once("pub fn route(event: &ClientEvent) -> Route {")
+            .expect("route() must exist in this file")
+            .1;
+        let body = body
+            .split_once("\n#[cfg(test)]")
+            .map_or(body, |(before, _)| before);
+        let code: String = body
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mut all = std::collections::BTreeSet::new();
+        let mut islands = std::collections::BTreeSet::new();
+        let chunks: Vec<&str> = code.split("=>").collect();
+        for (i, chunk) in chunks.iter().enumerate() {
+            let named = variant_names(chunk);
+            all.extend(named.iter().cloned());
+            // The right-hand side is the *start* of the following chunk.
+            let is_island = chunks
+                .get(i + 1)
+                .is_some_and(|rhs| rhs.trim_start().starts_with("Route::NOWHERE"));
+            if is_island {
+                islands.extend(named);
+            }
+        }
+        (islands.len(), all.len())
+    }
+
+    /// `ClientEvent::Foo` occurrences in `chunk`, as bare variant names.
+    fn variant_names(chunk: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = chunk;
+        while let Some(at) = rest.find("ClientEvent::") {
+            rest = &rest[at + "ClientEvent::".len()..];
+            let end = rest
+                .find(|c: char| !c.is_alphanumeric() && c != '_')
+                .unwrap_or(rest.len());
+            if end > 0 {
+                out.push(rest[..end].to_owned());
+            }
+            rest = &rest[end..];
+        }
+        out
     }
 
     /// Lines that would make [`route`]'s match exhaustive by accident.

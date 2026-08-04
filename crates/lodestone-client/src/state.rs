@@ -1208,7 +1208,10 @@ fn entity_view(entity: lodestone_ecs::ecs::world::EntityRef<'_>) -> Option<Entit
 mod tests {
     use super::*;
     use lodestone_ecs::player::SelectedSlot;
-    use lodestone_ecs::session::{ServerDifficulty, SessionBlockDestruction};
+    use lodestone_ecs::session::{
+        ServerDifficulty, SessionBlockDestruction, SessionGameRules, SessionSpawnPoint,
+        SessionTabList, SessionWorldBorder,
+    };
     use lodestone_model::Difficulty;
 
     /// **The real path, not the fold called directly and not the `NetIngest`
@@ -1283,6 +1286,263 @@ mod tests {
         state.apply(&ClientEvent::HeldSlotChanged { slot: 4 });
         let ecs = state.ecs.read();
         assert_eq!(ecs.get::<SelectedSlot>(state.session).unwrap().0, 4);
+    }
+
+    // ---- the nine world-level admin variants, through the real path ---------
+    //
+    // These are the same shape as the three gates above and exist for the same
+    // reason: `lodestone_ecs::session`'s own tests push straight onto
+    // `IngestQueue`, so they prove a *fold* runs and say nothing about whether
+    // `route()` sends the event to that fold. Only `SharedState::apply` joins the
+    // two halves, and a `Route::NOWHERE` regression is invisible to every test in
+    // `lodestone-ecs`.
+    //
+    // **Verified by an observed control, not a described one.**
+    // `ClientEvent::WorldBorderCenterChanged` was reverted to `Route::NOWHERE` and
+    // both suites re-run. Measured, rather than predicted:
+    //
+    // | suite | result under the neuter |
+    // |---|---|
+    // | `lodestone-client --lib` | 17 passed, **1 failed** — `apply_routes_every_world_border_variant_through_the_real_path`, and nothing else |
+    // | `lodestone-ecs --lib` | 149 passed, **1 failed** — `handles_event_covers_exactly_the_session_claimed_variants` |
+    //
+    // Two things worth keeping from that. First, the detector works and it is
+    // specific: one arm broken, exactly one gate here failed, and it named the
+    // right variant. Second — and this is the part a prediction would have got
+    // wrong — the `lodestone-ecs` **fold** tests
+    // (`world_border_family_reaches_the_fold_through_the_real_schedule` and its
+    // four siblings) all stayed **green**, because they push onto `IngestQueue`
+    // directly and never consult `route()`. What caught it over there was the
+    // routing-claim *table*, a different test entirely. So the fold tests really
+    // are blind to this class, which is the whole argument for the gates below;
+    // there are two independent detectors, and neither is the one you would guess.
+
+    /// `TabListChanged` is the cheapest of the nine and the clearest instance of
+    /// the class: `lodestone_game::tablist::TabList::apply` has had a
+    /// header/footer arm, and `session::apply_tab_list` has been registered, since
+    /// before this routing fix. The event decoded, a tested fold sat waiting, and
+    /// `route()` never asked. Nothing but the flag changed for this variant.
+    #[test]
+    fn apply_routes_tab_list_header_and_footer_through_the_real_path() {
+        let state = SharedState::default();
+        {
+            let ecs = state.ecs.read();
+            assert_eq!(
+                ecs.get::<SessionTabList>(state.session).unwrap().0.header,
+                None,
+                "precondition: no header before the first packet"
+            );
+        }
+        state.apply(&ClientEvent::TabListChanged {
+            header: lodestone_model::text::Text::literal("HDR"),
+            footer: lodestone_model::text::Text::literal("FTR"),
+        });
+        let ecs = state.ecs.read();
+        let list = &ecs.get::<SessionTabList>(state.session).unwrap().0;
+        assert_eq!(
+            list.header.as_ref().map(lodestone_model::text::Text::to_plain_string),
+            Some("HDR".to_owned()),
+            "TabListChanged must reach SessionTabList through the real path"
+        );
+        assert_eq!(
+            list.footer.as_ref().map(lodestone_model::text::Text::to_plain_string),
+            Some("FTR".to_owned())
+        );
+    }
+
+    /// All six world-border variants in one gate, each asserted on a field the
+    /// others do not write, so a single missing `route()` arm cannot hide behind
+    /// its five siblings.
+    #[test]
+    fn apply_routes_every_world_border_variant_through_the_real_path() {
+        let state = SharedState::default();
+        {
+            let ecs = state.ecs.read();
+            assert!(
+                !ecs.get::<SessionWorldBorder>(state.session)
+                    .unwrap()
+                    .0
+                    .initialized,
+                "precondition: uninitialised border"
+            );
+        }
+
+        // 1. Initialized — the join/respawn packet, which sets everything.
+        state.apply(&ClientEvent::WorldBorderInitialized {
+            x: 12.0,
+            z: 34.0,
+            old_size: 256.0,
+            new_size: 256.0,
+            lerp_time_ms: 0,
+            absolute_max_size: 29_999_984,
+            warning_blocks: 11,
+            warning_time: 22,
+        });
+        {
+            let ecs = state.ecs.read();
+            let b = ecs.get::<SessionWorldBorder>(state.session).unwrap().0;
+            assert!(b.initialized, "WorldBorderInitialized");
+            assert!((b.center_x - 12.0).abs() < f64::EPSILON);
+            assert_eq!(b.warning_blocks, 11);
+            assert_eq!(b.warning_time, 22);
+        }
+
+        // 2-5. Each incremental variant, on a distinct field.
+        state.apply(&ClientEvent::WorldBorderCenterChanged { x: -7.0, z: 8.0 });
+        state.apply(&ClientEvent::WorldBorderSizeChanged { size: 48.0 });
+        state.apply(&ClientEvent::WorldBorderWarningDistanceChanged { warning_blocks: 2 });
+        state.apply(&ClientEvent::WorldBorderWarningDelayChanged { warning_time: 3 });
+        {
+            let ecs = state.ecs.read();
+            let b = ecs.get::<SessionWorldBorder>(state.session).unwrap().0;
+            assert!(
+                (b.center_x + 7.0).abs() < f64::EPSILON,
+                "WorldBorderCenterChanged did not reach the fold"
+            );
+            assert!(
+                (b.target_size() - 48.0).abs() < f64::EPSILON,
+                "WorldBorderSizeChanged did not reach the fold"
+            );
+            assert_eq!(
+                b.warning_blocks, 2,
+                "WorldBorderWarningDistanceChanged did not reach the fold"
+            );
+            assert_eq!(
+                b.warning_time, 3,
+                "WorldBorderWarningDelayChanged did not reach the fold"
+            );
+        }
+
+        // 6. SizeLerping, distinguished from SizeChanged by producing a *moving*
+        // extent rather than a static one — so this arm cannot be satisfied by
+        // the `SizeChanged` arm above.
+        state.apply(&ClientEvent::WorldBorderSizeLerping {
+            old_size: 48.0,
+            new_size: 96.0,
+            lerp_time_ms: 2_000,
+        });
+        let ecs = state.ecs.read();
+        let b = ecs.get::<SessionWorldBorder>(state.session).unwrap().0;
+        assert!(
+            b.is_resizing(),
+            "WorldBorderSizeLerping must produce a moving extent, not a static one"
+        );
+        assert!((b.target_size() - 96.0).abs() < f64::EPSILON);
+    }
+
+    /// `SpawnPositionChanged` — the compass target. `lodestone_render::item_render`
+    /// lists `minecraft:compass` among the item-model range properties that are
+    /// *deliberately unsourced* "because the datum genuinely is not decoded". It
+    /// was decoded; it reached nothing. This is the fold that makes it sourceable.
+    #[test]
+    fn apply_routes_spawn_position_through_the_real_path() {
+        let state = SharedState::default();
+        {
+            let ecs = state.ecs.read();
+            assert!(
+                !ecs.get::<SessionSpawnPoint>(state.session)
+                    .unwrap()
+                    .0
+                    .is_reported(),
+                "precondition: no spawn reported, so the assert below is not vacuous"
+            );
+        }
+        state.apply(&ClientEvent::SpawnPositionChanged {
+            dimension: "minecraft:overworld".parse().unwrap(),
+            pos: BlockPos::new(256, 63, -1024),
+            angle: 45.0,
+            pitch: 0.0,
+        });
+        let ecs = state.ecs.read();
+        let sp = &ecs.get::<SessionSpawnPoint>(state.session).unwrap().0;
+        assert!(sp.is_reported());
+        assert_eq!(
+            sp.pos(),
+            Some(BlockPos::new(256, 63, -1024)),
+            "SpawnPositionChanged must reach SessionSpawnPoint through the real path"
+        );
+    }
+
+    /// `GameRulesChanged`. Note the last assertion: absence must stay
+    /// distinguishable from `false` even after a successful fold, because vanilla's
+    /// `GAME_RULE_VALUES` is request/response rather than broadcast, so a rule the
+    /// server never reported is the normal case and not a `false`.
+    #[test]
+    fn apply_routes_game_rules_through_the_real_path() {
+        let state = SharedState::default();
+        {
+            let ecs = state.ecs.read();
+            assert!(
+                ecs.get::<SessionGameRules>(state.session)
+                    .unwrap()
+                    .0
+                    .is_empty(),
+                "precondition: no rules reported"
+            );
+        }
+        state.apply(&ClientEvent::GameRulesChanged {
+            values: vec![
+                (
+                    "minecraft:immediate_respawn".parse().unwrap(),
+                    "true".to_owned(),
+                ),
+                (
+                    "minecraft:players_sleeping_percentage".parse().unwrap(),
+                    "50".to_owned(),
+                ),
+            ],
+        });
+        let ecs = state.ecs.read();
+        let rules = &ecs.get::<SessionGameRules>(state.session).unwrap().0;
+        assert_eq!(
+            rules.immediate_respawn(),
+            Some(true),
+            "GameRulesChanged must reach SessionGameRules through the real path"
+        );
+        assert_eq!(rules.players_sleeping_percentage(), Some(50));
+        assert_eq!(
+            rules.bool_rule("minecraft:keep_inventory"),
+            None,
+            "an unreported rule must not read as false"
+        );
+    }
+
+    /// The negative control for the whole block above, and the reason it is not
+    /// merely decorative: it pins that `SharedState::apply` really does consult
+    /// `route()` rather than folding everything it is handed.
+    ///
+    /// `SimulationDistanceChanged` is a *deliberately* stranded world-scalar
+    /// event — the same shape and the same subsystem family as the nine above,
+    /// still `Route::NOWHERE`. If it were to start mutating any of the three new
+    /// components, the folds would be matching too broadly.
+    #[test]
+    fn a_still_stranded_world_scalar_reaches_none_of_the_new_components() {
+        let state = SharedState::default();
+        assert!(
+            lodestone_model::event::route(&ClientEvent::SimulationDistanceChanged {
+                distance: 12
+            })
+            .is_island(),
+            "premise: this control is only meaningful while the variant is still an island"
+        );
+        state.apply(&ClientEvent::SimulationDistanceChanged { distance: 12 });
+        let ecs = state.ecs.read();
+        let b = ecs.get::<SessionWorldBorder>(state.session).unwrap().0;
+        assert!(!b.initialized, "border must be untouched");
+        assert!(
+            !ecs.get::<SessionSpawnPoint>(state.session)
+                .unwrap()
+                .0
+                .is_reported(),
+            "spawn must be untouched"
+        );
+        assert!(
+            ecs.get::<SessionGameRules>(state.session)
+                .unwrap()
+                .0
+                .is_empty(),
+            "rules must be untouched"
+        );
     }
 
     /// **Stage 4's authority test, on the client side.** The `ChunkWorld`

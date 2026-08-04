@@ -143,17 +143,69 @@ reviewable commit, not as a drive-by while landing something else.
 
 ## Islands: variants this table found reaching nothing
 
-38 of 98 variants are `Route::NOWHERE`. Most are simply decoded ahead of a consumer,
-which is a normal state for a from-scratch client.
+**29 of 103** variants are `Route::NOWHERE`. Most are simply decoded ahead of a
+consumer, which is a normal state for a from-scratch client.
 
-**Three were different — a fold existed, was unit-tested, and nothing fed it.**
-That shape is fixed as of this writing:
+> **On these two numbers, because both have been wrong in the record.** This line
+> read "38 of 98" until the world-state sweep below, and the numerator was right
+> while the **denominator was stale** — variants had been added since it was
+> written, so the fraction understated the total and nothing flagged it. A
+> dispatch briefing in the same session quoted "41 of 98", which was wrong in
+> both halves.
+>
+> Count them, do not carry them forward. Both figures are mechanical from
+> `route()`'s own source: the denominator is the `ClientEvent` variant count
+> (which equals the number of variants `route()` names, since the match is
+> exhaustive with no catch-all — that equality is itself worth asserting), and the
+> numerator is the variants whose arm's right-hand side is exactly
+> `Route::NOWHERE`. Note the distinction from `..Route::NOWHERE`, which is a
+> struct-update spread inside an arm that sets other flags and is *not* an island.
+
+**Twelve variants were different — a fold existed or was cheap, and nothing fed
+it.** Three were found by the original pass; the world-state sweep (epic #340)
+found nine more. All twelve are fixed:
 
 | variant | the fold that used to never run | now routed to | fixed by |
 |---|---|---|---|
 | `BlockDestruction` | `lodestone_game::mining::BlockDestructionOverlays::apply` — other players' crack overlay. No caller outside its own file and tests. | `session` → `lodestone_ecs::session::SessionBlockDestruction`, folded by `apply_block_destruction` | the routing commit that closed this table's own note |
 | `HeldSlotChanged` | `lodestone_game::player_state::HudState::apply`'s `select_slot` arm — server-driven hotbar selection (`/item`, creative). No caller outside its own file and tests. | `session` → `crate::player::SelectedSlot`, folded by `apply_local_player_state` | same |
 | `DifficultyChanged` | the same `HudState::apply`. | `session` → `lodestone_ecs::session::ServerDifficulty`, folded by `apply_local_player_state` | same |
+| `TabListChanged` | `lodestone_game::tablist::TabList::apply`'s header/footer arm — **and** `session::apply_tab_list` was already registered. Nothing changed but the flag. | `session` → `SessionTabList` | the world-state sweep |
+| the six `WorldBorder*` | none — new `lodestone_game::worldborder::WorldBorder` | `session` → `SessionWorldBorder`, folded by `apply_world_border` | same |
+| `SpawnPositionChanged` | none — new `lodestone_game::levelstate::SpawnPoint` | `session` → `SessionSpawnPoint`, folded by `apply_spawn_point` | same |
+| `GameRulesChanged` | none — new `lodestone_game::levelstate::GameRuleValues` | `session` → `SessionGameRules`, folded by `apply_game_rules` | same |
+
+### The world-state sweep's nine, and what the router fork cost
+
+All nine are `session`, and the rule of thumb held without exception: **none is
+per-entity**, so none is `ingest`. They are scalars scoped to the world this
+session is connected to — the same category as `DimensionTypeChanged` and
+`AbilitiesChanged`, both of which cost work by being guessed as `ingest` first.
+
+`TabListChanged` is the cheapest instance of this whole defect class that the repo
+has produced: the fold arm existed, the system was registered, the event decoded
+correctly and was unit-tested, and `route()` simply never asked. A one-line flag
+change made it work. Nothing else in the tree needed touching.
+
+**The world border needs a clock, and picking the wrong one is a live trap.**
+`apply_world_border` reads `FrameClock`, not `WorldTime`. `WorldTime` is the
+*server's* clock and the server can freeze it with the `advance_time` game rule —
+a frozen clock must not freeze a border animation. `FrameClock::secs` is monotonic
+wall time, the same clock the chat fade reads. The fold itself takes no clock (that
+would fork the `apply(&ClientEvent) -> bool` convention every aggregate uses); it
+records the resize unstamped and the *system* stamps it, idempotently, so a later
+border packet cannot restart an interpolation already in flight.
+
+**On `GameRulesChanged`, two things that are easy to get backwards.** It is *not*
+issue #327's typed registry — that is a server-side 59-rule table and is unbuilt;
+this is a client-side raw-string table with typed accessors. And vanilla's
+`GAME_RULE_VALUES` is **request/response, not broadcast** (its only send site is
+`sendGameRuleValues()`, reachable solely via
+`ServerboundClientCommandPacket.REQUEST_GAMERULE_VALUES`), so nothing pushes rule
+changes to clients, an unreported rule is the *normal* case, and every accessor
+returns `Option`. A caller that treats `None` as `false` erases exactly that
+distinction — which is why the fold keeps them apart and a test asserts it at both
+ends.
 
 `HudState` was superseded by the `lodestone-ecs` session components (see
 `session.rs`'s note on `Vitals`: `HudState` has no "unreported" bit, so Stage 3 did
@@ -206,27 +258,54 @@ Both were tracked as separate follow-up issues (#410, #411), closed as follows:
   split into `gather_crack_targets`) and `app.rs`'s one-line call site are the
   brokered choke-point patch that lands alongside this doc update.
 
-The remaining 35, listed for the record and not as a defect claim:
+The remaining **29**, listed for the record and not as a defect claim:
 
-`Ping`, `SpawnPositionChanged`, `BlockChangedAck`, `ChunkCacheCenterChanged`,
-`ChunkCacheRadiusChanged`, `SimulationDistanceChanged`, `EntityStatus`,
-`EntityLeashed`, `VehicleMoved`, `ItemCooldown`, `PlayerRotationSet`, `CameraSet`,
-`BookOpened`, `SoundStopped`, `TabListChanged`, the six `WorldBorder*`,
+`Ping`, `BlockChangedAck`, `ChunkCacheCenterChanged`, `ChunkCacheRadiusChanged`,
+`SimulationDistanceChanged`, `EntityStatus`, `EntityLeashed`, `VehicleMoved`,
+`ItemCooldown`, `PlayerRotationSet`, `CameraSet`, `BookOpened`, `SoundStopped`,
 `PlayerCombatEntered`, `PlayerCombatEnded`, `SignEditorOpened`,
 `AdvancementsTabSelected`, `ProjectilePowerChanged`, `MountScreenOpened`,
-`GameRulesChanged`, `TransferRequested`, `CookieRequested`, `CookieStored`,
-`ResourcePackPushed`, `ResourcePackPopped`, `CustomPayload`, `ServerDataReceived`,
-`PongReceived`, `ChatMessageDeleted`, `PlayerLookAt`.
+`TransferRequested`, `CookieRequested`, `CookieStored`, `ResourcePackPushed`,
+`ResourcePackPopped`, `CustomPayload`, `ServerDataReceived`, `PongReceived`,
+`ChatMessageDeleted`, `PlayerLookAt`.
 
-Two of those are worth a second look by whoever owns the relevant subsystem, and are
+One of those is worth a second look by whoever owns the relevant subsystem, and is
 flagged rather than changed here:
 
 * **`Ping`** is a clientbound ping the vanilla client answers with `pong`. Nothing
   consumes it and no `ClientAction` producer exists, which is the *outbound* island
   shape `ClientAction::SetFlying` had. `PongReceived` is likewise unconsumed.
-* **`TabListChanged`** carries the tab list header and footer. `SessionTabList`
-  folds the player rows but this event reaches nothing, so a server's header/footer
-  cannot render.
+
+`SimulationDistanceChanged` is deliberately left stranded and is now doing a second
+job: it is the **negative control** for the world-state folds
+(`lodestone_client::state`'s
+`a_still_stranded_world_scalar_reaches_none_of_the_new_components`). It is the same
+shape and subsystem family as the nine that were wired, so if any of those folds
+started matching too broadly it would be the first to be caught. That gate asserts
+`route(&SimulationDistanceChanged).is_island()` as an explicit **premise check**
+before relying on it — so whoever eventually wires this variant gets a clear failure
+naming the control rather than a silently vacuous one.
+
+### What "wired" does and does not mean here
+
+**Routing is not drawing, and four of the nine reach no pixels yet.** What they now
+have is a folded, tested, resettable component that a renderer can read — which is
+the half that was missing. Specifically still outstanding, all brokered because they
+live in choke-point files:
+
+* **Tab-list header/footer** need a `hud.rs`/`app.rs` change to draw above and below
+  `hud_frame.players`. Note a stale comment in `tablist.rs` claims header/footer are
+  "read downstream by `hud.rs`'s snapshot" — grepped, and **no reader exists**. The
+  comment was true of an earlier design.
+* **The world border** needs its warning overlay and the border wall itself
+  (`docs/plans/world-state.md` §B2).
+* **The compass** — `lodestone_render::item_render` lists `minecraft:compass` among
+  range properties "deliberately unsourced because the datum genuinely is not
+  decoded". It *was* decoded; it reached nothing. `SessionSpawnPoint` is now the
+  source, and a test at `item_render.rs:942` currently pins the property at `0.0`
+  with "must be unset" — that pin is what to change.
+* **Game rules** have no client consumer yet; `immediate_respawn` (skip the death
+  screen) is the most visible candidate.
 
 ## What this table does **not** do
 
