@@ -1327,11 +1327,60 @@ fn goto_chat_command_drives_the_player_toward_the_goal_over_real_ticks() {
     // -- Unreachable control: same corridor, sealed by a full-height wall
     // between spawn and the goal. M1 supports no breaking, so a sealed
     // corridor is a genuine, not contrived, "no path" case. --
+    //
+    // A lone forward wall used to be enough on its own, back when the only
+    // move kind was flat walking. It stopped being enough once
+    // `lodestone-nav` grew StepUp/Descend/Drop (M2): `test_config()` is
+    // `Mode::Headless`, which builds `Sim` on `worldgen::generate`'s real
+    // terrain (`Sim::build`), and that terrain surrounds this hand-carved
+    // corridor on every side. The forward wall only ever sealed the 3-wide
+    // dx=-1..=1 slice; a bot that can step up or drop a block can leave the
+    // corridor sideways into the *undisturbed* natural terrain next to it —
+    // which the wall never touched — walk around outside, and re-enter past
+    // the plug. So this now boxes the corridor in explicit stone on every
+    // side (floor, ceiling, both side walls, both tunnel-mouth end caps —
+    // otherwise the same escape is available through either open end — all
+    // six blocks taller than the one-block riser StepUp allows) rather than
+    // sealing only the one face the straight-line path crosses, which makes
+    // the control's premise hold regardless of what shape the surrounding
+    // real terrain happens to be or which move kinds the autopilot has.
+    //
+    // First attempt at this fix sealed the sides and ceiling but left the
+    // tunnel's own mouths (dz=-1 and dz=6, where `flat_corridor`'s carved air
+    // meets the *undisturbed* terrain beyond) open — measured: the bot still
+    // closed to 1.98 blocks of the goal (needed `> start_dist - 1.0 = 4.0`)
+    // by walking out one mouth, around the box outside, and back in the
+    // other. The end caps below are what actually finishes the seal.
     let mut sim = Sim::new(test_config());
     let feet_y = sim.player().position.y.floor() as i32;
     flat_corridor(&mut sim, feet_y);
+    for dz in -1..=6 {
+        // Side walls, well above anything a jump/step/drop could clear.
+        for dy in -1..=5 {
+            sim.set_block_world([-2, feet_y + dy, dz], id::STONE);
+            sim.set_block_world([2, feet_y + dy, dz], id::STONE);
+        }
+        // Ceiling, closing off the ledge `flat_corridor` left open above.
+        for dx in -1..=1 {
+            sim.set_block_world([dx, feet_y + 3, dz], id::STONE);
+            sim.set_block_world([dx, feet_y + 4, dz], id::STONE);
+            sim.set_block_world([dx, feet_y + 5, dz], id::STONE);
+        }
+    }
+    // End caps at both tunnel mouths (one column past each end of the
+    // corridor `flat_corridor` carved), spanning the full width of the box
+    // including the side walls, so the enclosure has no opening left at all.
+    for dz in [-2, 7] {
+        for dx in -2..=2 {
+            for dy in -1..=5 {
+                sim.set_block_world([dx, feet_y + dy, dz], id::STONE);
+            }
+        }
+    }
+    // The plug that actually blocks the straight-line path — same as before,
+    // just extended to the same height as the box around it.
     for dx in -1..=1 {
-        for dy in -1..=2 {
+        for dy in -1..=5 {
             sim.set_block_world([dx, feet_y + dy, 2], id::STONE);
         }
     }
