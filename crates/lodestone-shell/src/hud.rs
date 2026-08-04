@@ -297,6 +297,22 @@ pub struct HudFrame<'a> {
     /// The action-bar message `(text, alpha)`, drawn just above the hotbar
     /// cluster with a fade. `None` when nothing is showing.
     pub action_bar: Option<(String, f32)>,
+    /// The held-item name highlight `(name, alpha)` — a `§`-coded, already-
+    /// styled string (see `lodestone_game::item::styled_hover_name`) and the
+    /// opacity from `lodestone_game::player_state::HeldItemHighlight::alpha`.
+    /// `None`/`alpha <= 0.0` draws nothing. Unlike [`Self::action_bar`] and
+    /// [`Self::title`], the *timer* this alpha comes from is not
+    /// server-driven — it is a purely client-side reaction to the selected
+    /// hotbar item's identity changing (issue #126), so a caller populates
+    /// this from whatever owns that timer each frame rather than from a
+    /// decoded packet.
+    ///
+    /// **Known gap**: vanilla shifts this label down 14px when
+    /// `!canHurtPlayer()` (creative/spectator, no health/hunger row to clear)
+    /// — see the draw site in [`HudGeometry::build_inner`]. No game-mode
+    /// signal reaches [`HudFrame`] yet, so only the survival position draws;
+    /// creative/spectator gets the survival Y for now.
+    pub held_item: Option<(String, f32)>,
     /// `(recipes, tags)` loaded into the local recipe corpus (see
     /// `crate::resources::load_recipe_book`), appended to the debug overlay as
     /// one extra line when `Some`. `None` before the corpus has loaded or on a
@@ -338,6 +354,7 @@ impl<'a> HudFrame<'a> {
             xp: None,
             title: None,
             action_bar: None,
+            held_item: None,
             recipe_stats: None,
             attack_cooldown: None,
         }
@@ -761,6 +778,26 @@ impl HudGeometry {
                 [1.0, 1.0, 1.0],
                 *alpha,
             );
+        }
+
+        // Held-item name (issue #126): the selected hotbar item's styled name,
+        // above the hotbar, fading with a server-independent client timer.
+        // Unlike the action bar and title, vanilla draws this **unscaled**
+        // (`Hud.java:632-645`, a plain `graphics.textWithBackdrop` call, no
+        // ×2) — the same "vanilla's own draw never scales the font" lesson
+        // the XP level number's fix (issue #256) already established two
+        // blocks up in [`sprite_vitals`]. Using `scale` here would repeat
+        // that exact defect on a second piece of HUD text.
+        if let Some((name, alpha)) = frame.held_item.as_ref().filter(|(_, a)| *a > 0.0) {
+            let tw = b.legacy_width(name, 1.0);
+            let x = (b.w - tw) * 0.5;
+            // `Hud.java:634,636`: `y = guiHeight - 59`, `+14` when
+            // `!canHurtPlayer()` (creative/spectator hide the health/hunger
+            // row). No game-mode signal reaches this frame yet — see
+            // [`HudFrame::held_item`]'s doc for the gap — so only the
+            // survival position is modelled.
+            let y = b.h - 59.0;
+            b.text_legacy(name, x, y, 1.0, [1.0, 1.0, 1.0], *alpha);
         }
 
         // Title / subtitle: a large centred overlay mid-screen, fading with the
@@ -1354,9 +1391,14 @@ impl<'a> Builder<'a> {
 
     /// Emit a string carrying legacy `§` colour/format codes as coloured runs.
     /// Colour codes (`§0`..=`§f`) recolour the following text; `§r` resets to
-    /// `base`; format codes (`§k`/`l`/`m`/`n`/`o`) are consumed but not styled
-    /// (neither font has bold/italic variants). Each code pair is
-    /// **zero-width**, matching vanilla's "`§` codes are 2 chars / 0 width", so
+    /// `base`. With a [`VanillaFont`] attached, the five format codes
+    /// (`§k`/`l`/`m`/`n`/`o`) draw real bold/italic/underline/strikethrough/
+    /// obfuscated geometry (issue #117; see `hud/vanilla_font.rs`'s module
+    /// docs). Without one — the fixed-advance debug font — they fall back to
+    /// the pre-#117 behaviour: consumed, not styled, since that font has no
+    /// styled glyph variants at all. Each code pair is **zero-width** either
+    /// way (beyond whatever geometry the style itself adds, e.g. bold's `+1`
+    /// advance), matching vanilla's "`§` codes are 2 chars / 0 width", so
     /// coloured and plain text of the same visible length line up exactly.
     /// `alpha` scales every run for the fade-out.
     fn text_legacy(&mut self, s: &str, x: f32, y: f32, scale: f32, base: [f32; 3], alpha: f32) {

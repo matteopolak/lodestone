@@ -435,6 +435,89 @@ pub fn normalize(stack: ItemStack) -> Option<ItemStack> {
     if stack.is_empty() { None } else { Some(stack) }
 }
 
+/// `stack`'s hover name, `§`-coded and forced **italic** when it carries a
+/// custom name — the exact text/style the held-item name highlight
+/// ([`crate::player_state::HeldItemHighlight`], issue #126) draws, and, once
+/// an item tooltip lands, what its title line would reuse.
+///
+/// Mirrors `Hud.extractSelectedItemName`
+/// (`Hud.java:625-648` in the 26.2 client):
+///
+/// ```java
+/// MutableComponent str = Component.empty().append(this.lastToolHighlight.getHoverName())
+///     .withStyle(this.lastToolHighlight.getRarity().color());
+/// if (this.lastToolHighlight.has(DataComponents.CUSTOM_NAME)) {
+///     str.withStyle(ChatFormatting.ITALIC);
+/// }
+/// ```
+///
+/// Two narrower gaps than #117's, both because the data does not exist in
+/// this build yet rather than because the draw side drops it:
+///
+/// * **No rarity colour.** `ItemStack` here carries no rarity data (no
+///   `minecraft:rarity` component, and no per-item default-rarity table), so
+///   every name draws in the caller's base colour (white) instead of
+///   vanilla's common/uncommon/rare/epic tint. The overwhelming majority of
+///   items are common (white) anyway, so this is right far more often than
+///   wrong.
+/// * **No `item.minecraft.*` translation table wired to this call.** There is
+///   no existing "resolve an item's display name" path anywhere in this tree
+///   (checked before writing this — the issue's claim that one exists to
+///   reuse was stale). [`base_display_name`] does the best available
+///   approximation: try `item.minecraft.<path>`, then `block.minecraft.<path>`
+///   (vanilla's own two `descriptionId` families — `Item.java:634-645`, a
+///   plain `Item` defaults to the former, a `BlockItem` to the latter, and
+///   this build has no per-item classification of which is which), then a
+///   humanised fallback so an unresolvable id still reads as words rather
+///   than a raw snake_case key.
+#[must_use]
+pub fn styled_hover_name(stack: &ItemStack, translate: &dyn Fn(&str) -> Option<String>) -> String {
+    let custom = match stack.components().get_str(CUSTOM_NAME_COMPONENT) {
+        Some(ComponentValue::Text(text)) => Some(text.clone()),
+        _ => None,
+    };
+    let hover = custom
+        .clone()
+        .unwrap_or_else(|| Text::literal(base_display_name(stack.item(), translate)));
+    let mut root = Text::literal(String::new());
+    if custom.is_some() {
+        root.style.italic = Some(true);
+    }
+    root.extra.push(hover);
+    root.to_legacy_string()
+}
+
+/// The best-effort plain display name for `item` with no custom-name
+/// override — see [`styled_hover_name`]'s docs for exactly what this
+/// approximates and why.
+#[must_use]
+pub fn base_display_name(item: &Identifier, translate: &dyn Fn(&str) -> Option<String>) -> String {
+    let path = item.path();
+    if let Some(name) = translate(&format!("item.minecraft.{path}")) {
+        return name;
+    }
+    if let Some(name) = translate(&format!("block.minecraft.{path}")) {
+        return name;
+    }
+    humanize_path(path)
+}
+
+/// `"diamond_sword"` -> `"Diamond Sword"`: the last-resort fallback when
+/// neither translation key resolves.
+fn humanize_path(path: &str) -> String {
+    path.split(['_', '/'])
+        .filter(|w| !w.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -544,5 +627,61 @@ mod tests {
                 lodestone_model::ItemEnchantment { id: 9, level: 4 }
             ]))
         );
+    }
+
+    fn no_translation(_: &str) -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn plain_item_resolves_via_the_item_translation_key() {
+        let stack = ItemStack::new(id("minecraft:diamond_sword"), 1);
+        let translate = |key: &str| {
+            (key == "item.minecraft.diamond_sword").then(|| "Diamond Sword".to_owned())
+        };
+        assert_eq!(styled_hover_name(&stack, &translate), "Diamond Sword");
+    }
+
+    #[test]
+    fn block_item_falls_back_to_the_block_translation_key() {
+        let stack = ItemStack::new(id("minecraft:stone"), 1);
+        let translate =
+            |key: &str| (key == "block.minecraft.stone").then(|| "Stone".to_owned());
+        assert_eq!(styled_hover_name(&stack, &translate), "Stone");
+    }
+
+    #[test]
+    fn unresolvable_id_humanises_to_title_case() {
+        let stack = ItemStack::new(id("minecraft:totally_unknown_item"), 1);
+        assert_eq!(
+            styled_hover_name(&stack, &no_translation),
+            "Totally Unknown Item"
+        );
+    }
+
+    #[test]
+    fn custom_named_item_is_forced_italic_and_keeps_its_own_text() {
+        let mut stack = ItemStack::new(id("minecraft:diamond_sword"), 1);
+        let key: Identifier = CUSTOM_NAME_COMPONENT.parse().unwrap();
+        stack
+            .components_mut()
+            .insert(key, ComponentValue::Text(Text::literal("Excalibur")));
+        // `§o` is vanilla's italic legacy code — forced on by
+        // `has(DataComponents.CUSTOM_NAME)`, not carried by the custom name
+        // text itself (which here is a bare literal with no style).
+        assert_eq!(
+            styled_hover_name(&stack, &no_translation),
+            "§oExcalibur"
+        );
+    }
+
+    #[test]
+    fn plain_item_is_never_forced_italic() {
+        let stack = ItemStack::new(id("minecraft:diamond_sword"), 1);
+        let translate = |key: &str| {
+            (key == "item.minecraft.diamond_sword").then(|| "Diamond Sword".to_owned())
+        };
+        let name = styled_hover_name(&stack, &translate);
+        assert!(!name.contains('\u{a7}'), "no format codes expected: {name}");
     }
 }
