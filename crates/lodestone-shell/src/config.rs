@@ -180,6 +180,42 @@ pub struct Options {
     /// scaling, which is why `1.0` (not `0.0`) is what an absent/corrupt key
     /// degrades to.
     pub mouse_wheel_sensitivity: f32,
+    /// Vanilla's `options.chat.scale` (`Options.java:363-370`), `0.0..=1.0`,
+    /// default `1.0`. Read by [`crate::hud::ChatDisplayOptions::scale`] as a
+    /// pose-scale multiplier on the chat log and input line.
+    pub chat_scale: f32,
+    /// Vanilla's `options.chat.width` (`Options.java:371-378`), `0.0..=1.0`,
+    /// default `1.0`. Fed through `ChatComponent.getWidth`
+    /// (`ChatComponent.java:416-420`, reproduced as
+    /// `crate::hud::chat_width_px`) to size the chat box.
+    pub chat_width: f32,
+    /// Vanilla's `options.chat.height.unfocused` (`Options.java:379-386`),
+    /// `0.0..=1.0`, default `ChatComponent.defaultUnfocusedPct()` =
+    /// `70.0/160.0` (`ChatComponent.java:428-432`) — how tall the scrollback
+    /// is while the chat box is **closed**.
+    pub chat_height_unfocused: f32,
+    /// As [`Self::chat_height_unfocused`], while the chat box is **open**
+    /// (`options.chat.height.focused`, `Options.java:387-394`). Default `1.0`.
+    pub chat_height_focused: f32,
+    /// Vanilla's `options.chat.line_spacing` (`Options.java:292-294`),
+    /// `0.0..=1.0`, default `0.0`. Extra fraction of a line's height inserted
+    /// between chat rows (`ChatComponent.java:154`).
+    pub chat_line_spacing: f32,
+    /// Vanilla's `options.chat.opacity` (`Options.java:284-291`), `0.0..=1.0`,
+    /// default `1.0`. Chat **text** alpha is `chat_opacity * 0.9 + 0.1`
+    /// (`ChatComponent.java:149`) — never fully transparent, matching vanilla.
+    pub chat_opacity: f32,
+    /// Vanilla's `options.accessibility.text_background_opacity`
+    /// (`Options.java:305-312`), `0.0..=1.0`, default `0.5`. Vanilla shares
+    /// this one knob between chat and several other translucent panels; this
+    /// client only has a consumer for the chat background so far
+    /// (`ChatComponent.java:150,167`), hence the chat-scoped name here.
+    pub chat_background_opacity: f32,
+    /// Vanilla's `options.chat.color` (`Options.java:508`), default `true`.
+    /// `false` strips every legacy `§` code before drawing a scrollback line
+    /// (`ComponentRenderUtils.stripColor`, `ComponentRenderUtils.java:21`) —
+    /// it does not affect the input line, which never carries codes.
+    pub chat_colors: bool,
 }
 
 impl Default for Options {
@@ -193,6 +229,14 @@ impl Default for Options {
             invert_mouse_x: false,
             invert_mouse_y: false,
             mouse_wheel_sensitivity: 1.0,
+            chat_scale: 1.0,
+            chat_width: 1.0,
+            chat_height_unfocused: 70.0 / 160.0,
+            chat_height_focused: 1.0,
+            chat_line_spacing: 0.0,
+            chat_opacity: 1.0,
+            chat_background_opacity: 0.5,
+            chat_colors: true,
         }
     }
 }
@@ -266,6 +310,31 @@ impl Options {
             .map(|v| v as f32)
             .filter(|v| v.is_finite() && *v > 0.0)
             .unwrap_or(1.0);
+        // The five `0.0..=1.0` chat sliders all degrade the same way: a
+        // missing, non-finite, or out-of-range value falls back to the
+        // vanilla default rather than propagating a value the draw site would
+        // have to re-clamp (and risk forgetting to).
+        let unit = |key: &str, default: f32| -> f32 {
+            obj.get(key)
+                .and_then(serde_json::Value::as_f64)
+                .map(|v| v as f32)
+                .filter(|v| v.is_finite() && (0.0..=1.0).contains(v))
+                .unwrap_or(default)
+        };
+        let chat_scale = unit("chat_scale", 1.0);
+        let chat_width = unit("chat_width", 1.0);
+        let chat_height_unfocused = unit("chat_height_unfocused", 70.0 / 160.0);
+        let chat_height_focused = unit("chat_height_focused", 1.0);
+        let chat_line_spacing = unit("chat_line_spacing", 0.0);
+        let chat_opacity = unit("chat_opacity", 1.0);
+        let chat_background_opacity = unit("chat_background_opacity", 0.5);
+        // Absent or malformed is **on** — vanilla's own default — same rule as
+        // `view_bobbing`: a mangled file must not silently strip every
+        // colour code from chat.
+        let chat_colors = obj
+            .get("chat_colors")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
         Self {
             gui_scale,
             keybinds,
@@ -275,6 +344,14 @@ impl Options {
             invert_mouse_x,
             invert_mouse_y,
             mouse_wheel_sensitivity,
+            chat_scale,
+            chat_width,
+            chat_height_unfocused,
+            chat_height_focused,
+            chat_line_spacing,
+            chat_opacity,
+            chat_background_opacity,
+            chat_colors,
         }
     }
 
@@ -327,6 +404,38 @@ impl Options {
                 "mouse_wheel_sensitivity".into(),
                 (self.mouse_wheel_sensitivity as f64).into(),
             );
+        }
+        let default = Self::default();
+        let mut put_unit = |key: &'static str, value: f32, default: f32| {
+            if (value - default).abs() > f32::EPSILON {
+                obj.insert(key.into(), (value as f64).into());
+            }
+        };
+        put_unit("chat_scale", self.chat_scale, default.chat_scale);
+        put_unit("chat_width", self.chat_width, default.chat_width);
+        put_unit(
+            "chat_height_unfocused",
+            self.chat_height_unfocused,
+            default.chat_height_unfocused,
+        );
+        put_unit(
+            "chat_height_focused",
+            self.chat_height_focused,
+            default.chat_height_focused,
+        );
+        put_unit(
+            "chat_line_spacing",
+            self.chat_line_spacing,
+            default.chat_line_spacing,
+        );
+        put_unit("chat_opacity", self.chat_opacity, default.chat_opacity);
+        put_unit(
+            "chat_background_opacity",
+            self.chat_background_opacity,
+            default.chat_background_opacity,
+        );
+        if !self.chat_colors {
+            obj.insert("chat_colors".into(), false.into());
         }
         let text = serde_json::to_string_pretty(&serde_json::Value::Object(obj))
             .unwrap_or_else(|_| "{}".to_string());
@@ -942,6 +1051,110 @@ mod tests {
                 1.0,
                 "mouse_wheel_sensitivity: {bad} must degrade to 1.0"
             );
+        }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    // -- chat display options (issue: player report on "chat options ...
+    // size, etc.") -----------------------------------------------------------
+
+    #[test]
+    fn chat_options_default_to_vanillas_own_defaults() {
+        let d = Options::default();
+        assert_eq!(d.chat_scale, 1.0);
+        assert_eq!(d.chat_width, 1.0);
+        assert_eq!(d.chat_height_unfocused, 70.0 / 160.0);
+        assert_eq!(d.chat_height_focused, 1.0);
+        assert_eq!(d.chat_line_spacing, 0.0);
+        assert_eq!(d.chat_opacity, 1.0);
+        assert_eq!(d.chat_background_opacity, 0.5);
+        assert!(d.chat_colors);
+    }
+
+    #[test]
+    fn chat_options_untouched_write_no_keys_and_round_trip_when_changed() {
+        let path = temp_options_path("chat-options-roundtrip");
+        Options::default().save_to(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        for key in [
+            "chat_scale",
+            "chat_width",
+            "chat_height_unfocused",
+            "chat_height_focused",
+            "chat_line_spacing",
+            "chat_opacity",
+            "chat_background_opacity",
+            "chat_colors",
+        ] {
+            assert!(!text.contains(key), "the default writes no {key} key: {text}");
+        }
+
+        let custom = Options {
+            chat_scale: 0.5,
+            chat_width: 0.25,
+            chat_height_unfocused: 0.1,
+            chat_height_focused: 0.75,
+            chat_line_spacing: 0.4,
+            chat_opacity: 0.3,
+            chat_background_opacity: 0.9,
+            chat_colors: false,
+            ..Options::default()
+        };
+        custom.save_to(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        for key in [
+            "chat_scale",
+            "chat_width",
+            "chat_height_unfocused",
+            "chat_height_focused",
+            "chat_line_spacing",
+            "chat_opacity",
+            "chat_background_opacity",
+            "chat_colors",
+        ] {
+            assert!(text.contains(key), "a changed {key} must be written: {text}");
+        }
+        assert_eq!(Options::load_from(&path), custom);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn chat_options_degrade_to_defaults_on_bad_values() {
+        let path = temp_options_path("chat-options-corrupt");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for bad in ["\"nope\"", "-1.0", "2.0", "null", "[]"] {
+            std::fs::write(
+                &path,
+                format!(
+                    "{{\"chat_scale\": {bad}, \"chat_width\": {bad}, \
+                      \"chat_height_unfocused\": {bad}, \"chat_height_focused\": {bad}, \
+                      \"chat_line_spacing\": {bad}, \"chat_opacity\": {bad}, \
+                      \"chat_background_opacity\": {bad}, \"chat_colors\": {bad}}}"
+                ),
+            )
+            .unwrap();
+            let loaded = Options::load_from(&path);
+            let d = Options::default();
+            assert_eq!(loaded.chat_scale, d.chat_scale, "chat_scale: {bad}");
+            assert_eq!(loaded.chat_width, d.chat_width, "chat_width: {bad}");
+            assert_eq!(
+                loaded.chat_height_unfocused, d.chat_height_unfocused,
+                "chat_height_unfocused: {bad}"
+            );
+            assert_eq!(
+                loaded.chat_height_focused, d.chat_height_focused,
+                "chat_height_focused: {bad}"
+            );
+            assert_eq!(
+                loaded.chat_line_spacing, d.chat_line_spacing,
+                "chat_line_spacing: {bad}"
+            );
+            assert_eq!(loaded.chat_opacity, d.chat_opacity, "chat_opacity: {bad}");
+            assert_eq!(
+                loaded.chat_background_opacity, d.chat_background_opacity,
+                "chat_background_opacity: {bad}"
+            );
+            assert!(loaded.chat_colors, "chat_colors: {bad} must degrade to ON");
         }
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
