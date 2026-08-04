@@ -143,8 +143,9 @@ pub use item_render::{
     UNITS_PER_BLOCK, display_matrix, gui_item_pose, gui_ortho,
 };
 pub use light::{
-    BRIGHTNESS_FACTOR, apply_brightness_option, brightness, light_term, light_term_from_levels,
-    not_gamma,
+    BLOCK_FACTOR, BLOCK_LIGHT_TINT, BRIGHTNESS_FACTOR, apply_brightness_option, brightness,
+    light_color, light_color_from_levels, light_term, light_term_from_levels, not_gamma,
+    not_gamma_vec3, sky_light_color_from_darken,
 };
 #[doc(no_inline)]
 pub use lodestone_assets::fluid::FluidState;

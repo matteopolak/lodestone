@@ -36,7 +36,7 @@ struct Origin {
 // literally would render all sky-lit terrain pure black. Vanilla's real range is
 // [0.24, 1.0], so 0.0 is never legitimate.
 //
-// Only the sky half is scaled -- see `lightmap_term` below.
+// Only the sky half is scaled -- see `lightmap_color` below.
 fn sky_darken() -> f32 {
     let raw = camera.fog_end_enabled.z;
     return select(raw, 1.0, raw <= 0.0);
@@ -58,14 +58,20 @@ fn light_brightness(level: f32) -> f32 {
     return level / (4.0 - 3.0 * level);
 }
 
-// Vanilla's `notGamma`, specialised to a grey value. `lightmap.fsh` scales an
-// RGB triple by `maxScaled / maxComponent`; with all three components equal that
-// collapses to `1 - (1 - c)^4`, with no division (so `c == 0` is 0 rather than
-// vanilla's 0/0). Grey is right while the overworld's `SKY_LIGHT_COLOR` is white
-// and its `AMBIENT_LIGHT_COLOR` black.
-fn not_gamma_grey(c: f32) -> f32 {
-    let inverted = 1.0 - c;
-    return 1.0 - inverted * inverted * inverted * inverted;
+// Vanilla's real `notGamma` (`lightmap.fsh:24-29`): scale the whole triple by
+// `maxScaled / maxComponent` where `maxScaled = 1 - (1 - maxComponent)^4`.
+// Guards the `0.0 / 0.0` at pure black. Mirrors `crate::light::not_gamma_vec3`
+// exactly -- see that function's doc for why a grey specialisation (the
+// pre-N1 `not_gamma_grey`) is only exact while every input already happens to
+// be grey.
+fn not_gamma_vec3(c: vec3<f32>) -> vec3<f32> {
+    let max_component = max(c.r, max(c.g, c.b));
+    if (max_component <= 0.0) {
+        return vec3<f32>(0.0, 0.0, 0.0);
+    }
+    let inv = 1.0 - max_component;
+    let max_scaled = 1.0 - inv * inv * inv * inv;
+    return c * (max_scaled / max_component);
 }
 
 // `Options.gamma`'s default (0.5, `Options.java:900`), which `lightmap.fsh`
@@ -78,26 +84,59 @@ const BRIGHTNESS_FACTOR: f32 = 0.5;
 // black. `lightmap.fsh` seeds its accumulator with it (`color =
 // max(AmbientColor, nightVisionColor)`) before adding either light half, so an
 // unlit surface is not pure black in vanilla: it reads 0.0935 after the
-// `not_gamma` mix. Grey, so it stays a scalar here; the Nether's 0x302821 and
-// the End's 0x3F473F are not, and are part of the per-dimension colour pass.
+// `not_gamma` mix. Grey, so it stays a scalar constant here; the Nether's
+// 0x302821 and the End's 0x3F473F are not, and are part of the per-dimension
+// colour pass.
 const AMBIENT_LIGHT: f32 = 0.039215688;
 
-// One lightmap texel, as a scalar: `lightmap.fsh`'s whole main(), minus the
-// ambient colour (black in the overworld) and with `max` still standing in for
-// vanilla's additive sky+block combine (#383's third divergence -- doing it
-// faithfully needs a vec3, because `BLOCK_LIGHT_TINT` is not white).
+// Vanilla's warm torch tint, `EnvironmentAttributes.BLOCK_LIGHT_TINT`
+// (`0xFFFFD88C`), and its `BlockFactor` (`blockLightFlicker + 1.4`, flicker
+// not modelled -- see `crate::light`'s doc). Mirrors `crate::light::
+// BLOCK_LIGHT_TINT`/`BLOCK_FACTOR`.
+const BLOCK_LIGHT_TINT: vec3<f32> = vec3<f32>(1.0, 216.0 / 255.0, 140.0 / 255.0);
+const BLOCK_FACTOR: f32 = 1.4;
+
+// Vanilla's `SKY_LIGHT_COLOR` timeline track, recovered from `sky_darken()`
+// instead of the raw tick -- see `crate::light::sky_light_color_from_darken`'s
+// doc for the full derivation and the JVM-oracle verification. `SKY_LIGHT_COLOR`
+// and `SKY_LIGHT_FACTOR` share identical keyframe ticks with no easing, so
+// `t = clamp((1 - sky_darken) / 0.76, 0, 1)` recovers the same interpolation
+// parameter, and `lerp_byte` is `Mth.lerpInt`'s floor -- a `round` here is off
+// by one byte on roughly half of all ticks.
+fn lerp_byte(t: f32, byte_from: f32, byte_to: f32) -> f32 {
+    return (byte_from + floor(t * (byte_to - byte_from))) / 255.0;
+}
+
+fn sky_light_color() -> vec3<f32> {
+    let t = clamp((1.0 - sky_darken()) / 0.76, 0.0, 1.0);
+    return vec3<f32>(lerp_byte(t, 255.0, 122.0), lerp_byte(t, 255.0, 122.0), lerp_byte(t, 255.0, 255.0));
+}
+
+// `lightmap.fsh:31-33`'s parabolic block-tint mix factor: `0.0` at
+// `level = 0.5`, `1.0` at both ends.
+fn parabolic_mix_factor(level: f32) -> f32 {
+    let x = 2.0 * level - 1.0;
+    return x * x;
+}
+
+// One lightmap texel, as the real three-channel value: `lightmap.fsh`'s whole
+// main(). Mirrors `crate::light::light_color_from_levels` exactly -- see that
+// function's doc for the full derivation, in order. The sky/block combine is
+// **additive**, not `max` (the pre-N2 model's approximation): vanilla adds
+// both halves, with block light amplified by `BLOCK_FACTOR` and tinted warm.
 //
-// The curve is applied to the raw *level* and `sky_darken` multiplies the
-// result, which is the order `lightmap.fsh` uses:
-//
-//     float sky_brightness = get_brightness(sky_level) * lightmapInfo.SkyFactor;
-//
-// Only the sky half is scaled. Block light is a torch: it does not dim at dusk.
-fn lightmap_term(sky_level: f32, block_level: f32) -> f32 {
-    let sky = light_brightness(sky_level) * sky_darken();
-    let block = light_brightness(block_level);
-    let c = clamp(AMBIENT_LIGHT + max(sky, block), 0.0, 1.0);
-    return mix(c, not_gamma_grey(c), BRIGHTNESS_FACTOR);
+// Only the sky half is scaled by `sky_darken()`. Block light is a torch: it
+// does not dim at dusk.
+fn lightmap_color(sky_level: f32, block_level: f32) -> vec3<f32> {
+    let sky_brightness = light_brightness(sky_level) * sky_darken();
+    let block_brightness = light_brightness(block_level) * BLOCK_FACTOR;
+    let block_mix = 0.9 * parabolic_mix_factor(block_level);
+    let block_light_color = mix(BLOCK_LIGHT_TINT, vec3<f32>(1.0, 1.0, 1.0), block_mix);
+    var color = vec3<f32>(AMBIENT_LIGHT, AMBIENT_LIGHT, AMBIENT_LIGHT)
+        + sky_light_color() * sky_brightness
+        + block_light_color * block_brightness;
+    color = clamp(color, vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(1.0, 1.0, 1.0));
+    return mix(color, not_gamma_vec3(color), BRIGHTNESS_FACTOR);
 }
 
 // The default (plains) tint palette. A quad's tint byte indexes this; slot 255
@@ -172,7 +211,7 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
-    @location(1) shade: f32,
+    @location(1) shade: vec3<f32>,
     @location(2) @interpolate(flat) tint_idx: u32,
     @location(3) @interpolate(flat) anim_idx: u32,
     @location(4) world: vec3<f32>,
@@ -194,7 +233,7 @@ fn vs_main(
     var out: VsOut;
     out.clip = camera.view_proj * vec4<f32>(world, 1.0);
     out.uv = uv;
-    out.shade = ao * lightmap_term(sky, block);
+    out.shade = vec3<f32>(ao, ao, ao) * lightmap_color(sky, block);
     out.tint_idx = packed.y;
     out.anim_idx = packed.z;
     out.world = world;

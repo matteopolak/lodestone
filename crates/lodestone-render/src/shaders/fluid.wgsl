@@ -24,7 +24,7 @@ struct Origin {
 // literally would render all sky-lit water pure black. Vanilla's real range is
 // [0.24, 1.0], so 0.0 is never legitimate.
 //
-// Only the sky half is scaled -- see `lightmap_term` below.
+// Only the sky half is scaled -- see `lightmap_color` below.
 fn sky_darken() -> f32 {
     let raw = camera.fog_end_enabled.z;
     return select(raw, 1.0, raw <= 0.0);
@@ -39,9 +39,16 @@ fn light_brightness(level: f32) -> f32 {
     return level / (4.0 - 3.0 * level);
 }
 
-fn not_gamma_grey(c: f32) -> f32 {
-    let inverted = 1.0 - c;
-    return 1.0 - inverted * inverted * inverted * inverted;
+// Vanilla's real `notGamma` -- see the model shader's `not_gamma_vec3` for the
+// full derivation. Byte-for-byte the same function.
+fn not_gamma_vec3(c: vec3<f32>) -> vec3<f32> {
+    let max_component = max(c.r, max(c.g, c.b));
+    if (max_component <= 0.0) {
+        return vec3<f32>(0.0, 0.0, 0.0);
+    }
+    let inv = 1.0 - max_component;
+    let max_scaled = 1.0 - inv * inv * inv * inv;
+    return c * (max_scaled / max_component);
 }
 
 const BRIGHTNESS_FACTOR: f32 = 0.5;
@@ -51,11 +58,36 @@ const BRIGHTNESS_FACTOR: f32 = 0.5;
 // what an unlit surface looks like.
 const AMBIENT_LIGHT: f32 = 0.039215688;
 
-fn lightmap_term(sky_level: f32, block_level: f32) -> f32 {
-    let sky = light_brightness(sky_level) * sky_darken();
-    let block = light_brightness(block_level);
-    let c = clamp(AMBIENT_LIGHT + max(sky, block), 0.0, 1.0);
-    return mix(c, not_gamma_grey(c), BRIGHTNESS_FACTOR);
+// Byte-for-byte the model shader's `lightmap_color`/`sky_light_color`/
+// `parabolic_mix_factor`/`lerp_byte` -- see that shader's comments and
+// `crate::light::light_color_from_levels` for the full derivation.
+const BLOCK_LIGHT_TINT: vec3<f32> = vec3<f32>(1.0, 216.0 / 255.0, 140.0 / 255.0);
+const BLOCK_FACTOR: f32 = 1.4;
+
+fn lerp_byte(t: f32, byte_from: f32, byte_to: f32) -> f32 {
+    return (byte_from + floor(t * (byte_to - byte_from))) / 255.0;
+}
+
+fn sky_light_color() -> vec3<f32> {
+    let t = clamp((1.0 - sky_darken()) / 0.76, 0.0, 1.0);
+    return vec3<f32>(lerp_byte(t, 255.0, 122.0), lerp_byte(t, 255.0, 122.0), lerp_byte(t, 255.0, 255.0));
+}
+
+fn parabolic_mix_factor(level: f32) -> f32 {
+    let x = 2.0 * level - 1.0;
+    return x * x;
+}
+
+fn lightmap_color(sky_level: f32, block_level: f32) -> vec3<f32> {
+    let sky_brightness = light_brightness(sky_level) * sky_darken();
+    let block_brightness = light_brightness(block_level) * BLOCK_FACTOR;
+    let block_mix = 0.9 * parabolic_mix_factor(block_level);
+    let block_light_color = mix(BLOCK_LIGHT_TINT, vec3<f32>(1.0, 1.0, 1.0), block_mix);
+    var color = vec3<f32>(AMBIENT_LIGHT, AMBIENT_LIGHT, AMBIENT_LIGHT)
+        + sky_light_color() * sky_brightness
+        + block_light_color * block_brightness;
+    color = clamp(color, vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(1.0, 1.0, 1.0));
+    return mix(color, not_gamma_vec3(color), BRIGHTNESS_FACTOR);
 }
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -114,7 +146,7 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
-    @location(1) shade: f32,
+    @location(1) shade: vec3<f32>,
     @location(2) tinted: f32,
     @location(3) @interpolate(flat) anim_idx: u32,
     @location(4) world: vec3<f32>,
@@ -137,7 +169,7 @@ fn vs_main(
     var out: VsOut;
     out.clip = camera.view_proj * vec4<f32>(world, 1.0);
     out.uv = uv;
-    out.shade = ao * lightmap_term(sky, block);
+    out.shade = vec3<f32>(ao, ao, ao) * lightmap_color(sky, block);
     out.tinted = select(0.0, 1.0, tint_idx != 255u);
     out.anim_idx = packed.z;
     out.world = world;
