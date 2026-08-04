@@ -732,6 +732,29 @@ pub fn build_camera(
     }
 }
 
+/// Applies the spyglass FOV-zoom modifier (issue #154) to an already-built
+/// camera — `AbstractClientPlayer.getFieldOfViewModifier`
+/// (`AbstractClientPlayer.java:92-114`) returns `0.1F` outright (overriding
+/// every other FOV modifier) when `firstPerson && isScoping()`, and
+/// [`lodestone_render::spyglass_fov_modifier`] is the tested pure function
+/// for that.
+///
+/// Deliberately **not** folded into [`build_camera`] itself: `build_camera`'s
+/// only production call site is `Sim::camera` in `sim.rs`, which is outside
+/// this file's ownership (`CLAUDE.md`'s file-ownership section) — adding a
+/// required `scoping` parameter there is a patch for whoever owns that file
+/// to apply, not something to force through here. This function is the
+/// composable half: `apply_spyglass_fov(build_camera(...), scoping)`, or
+/// equivalently `camera.fov_y_degrees *= spyglass_fov_modifier(scoping)`
+/// inline, composed with (never overwriting) whatever else already produces
+/// `fov_y_degrees`. See `docs/screen-overlays.md`'s "Spyglass" section for
+/// the full citation.
+#[must_use]
+pub fn apply_spyglass_fov(mut camera: Camera, scoping: bool) -> Camera {
+    camera.fov_y_degrees *= lodestone_render::spyglass_fov_modifier(scoping);
+    camera
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1315,6 +1338,44 @@ mod tests {
         let state = PlayerState::at(Vec3d::ZERO, 0.0);
         let cam = build_camera(&state, PLAYER_EYE_HEIGHT, 0.0, 8);
         assert_eq!(cam.aspect, 1.0);
+    }
+
+    // --- apply_spyglass_fov: issue #154's FOV-zoom half. ---
+
+    #[test]
+    fn apply_spyglass_fov_is_a_tenth_while_scoping() {
+        let state = PlayerState::at(Vec3d::ZERO, 0.0);
+        let cam = build_camera(&state, PLAYER_EYE_HEIGHT, 16.0 / 9.0, 8);
+        let zoomed = apply_spyglass_fov(cam, true);
+        assert!(
+            (zoomed.fov_y_degrees - cam.fov_y_degrees * 0.1).abs() < 1e-6,
+            "AbstractClientPlayer.getFieldOfViewModifier returns 0.1F outright while scoping: \
+             expected {}, got {}",
+            cam.fov_y_degrees * 0.1,
+            zoomed.fov_y_degrees
+        );
+    }
+
+    #[test]
+    fn apply_spyglass_fov_is_unchanged_while_not_scoping() {
+        let state = PlayerState::at(Vec3d::ZERO, 0.0);
+        let cam = build_camera(&state, PLAYER_EYE_HEIGHT, 16.0 / 9.0, 8);
+        let unzoomed = apply_spyglass_fov(cam, false);
+        assert_eq!(unzoomed.fov_y_degrees, cam.fov_y_degrees);
+    }
+
+    #[test]
+    fn apply_spyglass_fov_composes_rather_than_overwrites() {
+        // A camera whose fov_y_degrees already differs from the module
+        // default (e.g. a future sprint-FOV or settings-driven value) must
+        // still be scaled relative to *its own* value, not reset to some
+        // absolute spyglass constant — this is the "composed with, not
+        // overwriting" property `docs/screen-overlays.md` calls out.
+        let state = PlayerState::at(Vec3d::ZERO, 0.0);
+        let mut cam = build_camera(&state, PLAYER_EYE_HEIGHT, 16.0 / 9.0, 8);
+        cam.fov_y_degrees = 90.0;
+        let zoomed = apply_spyglass_fov(cam, true);
+        assert!((zoomed.fov_y_degrees - 9.0).abs() < 1e-6);
     }
 
     /// A fixed set of full-block collision boxes, keyed by block position —
