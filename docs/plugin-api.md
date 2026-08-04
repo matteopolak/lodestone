@@ -5,11 +5,13 @@
 The surface a third-party bevy plugin uses to do everything native Lodestone code can do — read
 world/entity/player state, write intent, order systems against internal ones, and observe events —
 specified against `docs/bevy-migration.md`'s six-stage plan. This is a specification, not an
-implementation: Stages 0–3 are landed (`crates/lodestone-ecs`, `415138f`, `8be6544`, `beae37c`,
-`b2baf02`); Stages 4–6 are not. (Stages 2 and 3 landed after this document's first draft — see
-"Two items below that landed after this document was written" for what that changed and, just as
-important, what it did not.) Read this before building any of them — several requirements below are
-things a stage must
+implementation: Stages 0–4 are landed (`crates/lodestone-ecs`, `415138f`, `8be6544`, `beae37c`,
+`b2baf02`, and the chunk-world resource of Stage 4 — see the stage-map table below for its commit);
+Stages 5–6 are not. (Stages 2, 3 and 4 each landed after this document's first draft — see "Correction:
+Stages 2 and 3 landed after the paragraphs above were written" below for what changed and, just as
+important, what it did not; Stage 4's own landing is recorded in the stage-map table rather than a
+second correction section, since by then it was one row, not three paragraphs of prose.) Read this
+before building any of them — several requirements below are things a stage must
 deliver, and finding that out at Baritone time (`docs/baritone-port.md`) would mean reopening
 finished stages.
 
@@ -91,8 +93,9 @@ assumed from the stage numbering:
   calling `lodestone_physics` (the integrator itself stayed a plain library, per
   §8). See [`docs/local-player-components.md`](./local-player-components.md).
   `MovementIntent` existing means the second gap item below ("no `MovementIntent`
-  or `LookIntent` component exists") is now half true, not fully true — see that
-  item for the precise remaining half.
+  or `LookIntent` component exists") was half true when this correction was
+  first written — **it is now fully closed**, `LookIntent` included; see that
+  item, updated below, rather than this bullet.
 - **The sanctioned egress exists, as a resource rather than a message.**
   `player.rs`'s `ActionQueue(pub Vec<ClientAction>)` is `app.init_resource`'d
   (`player.rs:530`) and drained every tick by the driver
@@ -109,10 +112,13 @@ assumed from the stage numbering:
   with the `ambiguity_detection: LogLevel::Error` gate `docs/bevy-migration.md`
   §Stage 3 asked for (`session.rs:681`). See
   [`docs/session-components.md`](./session-components.md).
-- **What is still genuinely missing, unchanged:** `RawPacket`/raw-event
-  observation (`grep -rn RawPacket crates` is still empty) and `LookIntent` (see
-  the second gap item below). The chunk world is still off-ECS (Stage 4, in
-  progress elsewhere as of this writing).
+- **What is still genuinely missing:** `RawPacket`/raw-event observation
+  (`grep -rn RawPacket crates` is still empty — re-verified for this pass, not
+  assumed). `LookIntent` and the chunk world (Stage 4) were the other two items
+  this bullet used to list as open; both landed since — `LookIntent` in `0d82ab4`
+  (see the second gap item below, corrected) and the chunk world as
+  [`lodestone_ecs::ChunkWorld`](../crates/lodestone-ecs/src/chunks.rs) (see the
+  stage-map table further down, also corrected).
 
 This correction is deliberately narrow — full paragraph-by-paragraph rewrites of
 the material above, and of the stage-map table further down, are a larger pass
@@ -156,25 +162,45 @@ users dropping a `.so`/`.wasm` file into a folder, this tier does not deliver th
 `docs/baritone-port.md` §7 named four gaps as prerequisites for a Baritone-class plugin. All four were
 re-checked directly against the tree for this document, not assumed from the plan.
 
-**1. `TickSet::Intent` ordering anchor — still missing.**
-`crates/lodestone-ecs/src/sets.rs` currently defines `TickSet` as exactly `Input, Physics, Predict,
-Animate, Send` — five variants, no `Intent`. Two systems both writing movement intent inside
-`TickSet::Input` (human input, plus a hypothetical navigator) is an ordering ambiguity, and
-`docs/bevy-migration.md`'s Stage 3 intends `ScheduleBuildSettings { ambiguity_detection:
-LogLevel::Error }` in tests — so this is not a style nit, it is something that will fail a build the
-day two writers exist. **Unaddressed by `67ff7c3`**, which touched only collision/item/armour data,
-not `lodestone-ecs`.
+**1. `TickSet::Intent` ordering anchor — closed in `0d82ab4`.**
+This paragraph originally reported `TickSet` as exactly `Input, Physics, Predict, Animate, Send` —
+five variants, no `Intent` — which would have made two systems writing movement intent inside
+`TickSet::Input` (human input, plus a hypothetical navigator) an unresolvable ordering ambiguity under
+`docs/bevy-migration.md` Stage 3's `ScheduleBuildSettings { ambiguity_detection: LogLevel::Error }`.
+**Re-verified directly against `crates/lodestone-ecs/src/sets.rs` for this pass: `TickSet` is now six
+variants, `Input, Intent, Physics, Predict, Animate, Send`.** `Intent` carries a doc comment naming
+exactly this ambiguity-detection rationale, and its own contract test
+(`lodestone_controller::ecs::exactly_one_system_writes_movement_intent`) pins "exactly one system
+writes `MovementIntent` inside the set; a plugin composes with `.in_set(TickSet::Intent).after(...)`,
+or overrides wholesale with `.after(TickSet::Intent)`" — the second form is what
+[`crates/plugins/lodestone-autopilot`](../crates/plugins/lodestone-autopilot) uses (see its crate docs)
+and is now the first real plugin exercising this anchor.
 
-**2. Analog `MovementIntent`, plus a `LookIntent` distinct from the camera — still missing.**
-No `MovementIntent` or `LookIntent` component exists anywhere in `crates/lodestone-ecs/src/` today
-(`grep -rn "MovementIntent\|LookIntent" crates/lodestone-ecs` is empty) — expected, since these are
-Stage 2 deliverables and Stage 2 has not landed. The gap `docs/baritone-port.md` §7.2 describes is
-confirmed current: `crates/lodestone-controller/src/input.rs:45-46` defines
-`InputState { forward: bool, … }` — digital, not analog — and `Sim::physics_tick`
-(`crates/lodestone-shell/src/sim.rs:1385`) is a private method, so nothing outside `lodestone-shell`
-can drive it even off-ECS. A plugin steering a bot (§2.2(1) and §2.3 of `docs/baritone-port.md`
-explain why overshoot correction needs sub-integer forward/strafe) has no route to analog input at
-all today.
+**2. Analog `MovementIntent`, plus a `LookIntent` distinct from the camera — closed in `0d82ab4`.**
+This paragraph originally reported no `MovementIntent` or `LookIntent` component anywhere in
+`crates/lodestone-ecs/src/`, and `crates/lodestone-controller/src/input.rs`'s digital-only
+`InputState` as the only route in even off-ECS. **Re-verified directly against the tree for this
+pass, both closed:**
+
+- `crates/lodestone-ecs/src/player.rs` defines `MovementIntent(pub MovementInput)`, where
+  `MovementInput { forward: f32, strafe: f32, jump: bool, sneak: bool, sprint: bool }`
+  (`lodestone_physics::player::MovementInput`) — genuinely analog, not clamped to `±1.0` anywhere
+  between the component and the integrator: `player_physics` (`TickSet::Physics`) reads
+  `let intent = intent.0;` and passes it straight into `tick_among_entities`, the same call human
+  input's `MovementIntent` write reaches. A plugin system writing `f32` values here gets the identical
+  precision a human's analog stick would (`docs/keybindings.md`'s #219 gamepad-deferral note names the
+  same seam for that reason).
+- `crates/lodestone-ecs/src/player.rs` also defines `LookIntent { yaw: f32, pitch: f32 }`, distinct
+  from the camera by design (its own doc comment walks through why), applied by `apply_look_intent`
+  in `TickSet::Intent` before `TickSet::Physics` reads yaw to resolve `MovementInput`'s axes — and
+  absent by default, so inserting/removing it is the whole "claim rotation / hand it back" protocol,
+  with no handshake needed.
+
+`lodestone_nav::WalkDrive::tick(&PlayerState) -> DriveTick { input: MovementInput, yaw: f32 }` is
+built for exactly this pair, and `crates/plugins/lodestone-autopilot`'s `drive_plan` system writes both
+components from it every tick — this is no longer a specification, it is exercised by a hermetic test
+(`crates/plugins/lodestone-autopilot/tests/drives_to_goal.rs`) that ticks a real `GameTick` schedule
+and asserts the local player's `PhysicsState` arrives at a commanded block.
 
 **3. A world-space debug-geometry channel in `Extract` — closed.** This gap is stale as of a later
 pass; re-verified directly against the tree rather than assumed from this paragraph's own age.
@@ -234,7 +260,7 @@ other:
 | loading | compiled into the binary, `add_plugins` | loaded at runtime |
 | filesystem / network | unrestricted | denied unless a capability is granted |
 | stability | pinned to `bevy_ecs` 0.19's API; breaks on bevy bumps | Lodestone's own ABI, versioned by Lodestone |
-| exists today | Stages 0–3 (entity, local-player and session/HUD read/write, plus the `ActionQueue` egress); chunk world and beyond not started | not started — no crate, no design doc yet |
+| exists today | Stages 0–4 (entity, local-player and session/HUD read/write, the `ActionQueue` egress, and the chunk world as `lodestone_ecs::ChunkWorld`); Stage 5 (`Sim` deletion) and Stage 6 not started | not started — no crate, no design doc yet |
 
 **What the WASM boundary costs, concretely, using the pathfinder as the stress case.**
 `docs/baritone-port.md` §4 is unambiguous that `lodestone-nav`'s search runs on a dedicated OS thread
@@ -274,33 +300,39 @@ cheaper substitute for the other is the mistake `docs/bevy-migration.md` warns a
 | `NetIngest`/`GameTick`/`Update`/`Extract` schedules and their current sets | Stage 0 | **done** |
 | `WorldTime` resource | Stage 0 | **done** |
 | local player position/velocity/on-ground/collision as components | Stage 2 | **done** — landed as `beae37c`, after this row was written; see the correction note above and [`docs/local-player-components.md`](./local-player-components.md) |
-| `MovementIntent` (analog), `LookIntent` | Stage 2 | **`MovementIntent` done, `LookIntent` still missing** — landed partly with `beae37c`; see the correction note above. `LookIntent` distinct from the camera is unaffected by this and remains a real gap |
-| `TickSet::Intent` ordering anchor | Stage 2 (recommended) | **gap — re-verified against `crates/lodestone-ecs/src/sets.rs` directly: `TickSet` is still exactly `Input, Physics, Predict, Animate, Send`, no `Intent` variant** |
+| `MovementIntent` (analog), `LookIntent` | Stage 2 | **done, both** — closed in `0d82ab4`; see the "four concrete gaps" section above, updated |
+| `TickSet::Intent` ordering anchor | Stage 2 (recommended) | **done** — closed in `0d82ab4`; `crates/lodestone-ecs/src/sets.rs`'s `TickSet` is now `Input, Intent, Physics, Predict, Animate, Send`, and `crates/plugins/lodestone-autopilot` is a real plugin ordered against it |
 | health/hunger/effects/inventory/tab-list/scoreboard as components | Stage 3 | **done** — landed as `b2baf02`, after this row was written; see the correction note above and [`docs/session-components.md`](./session-components.md) |
 | exactly-one-writer ambiguity gate (`ambiguity_detection: Error`) | Stage 3 | **done** — `crates/lodestone-ecs/src/session.rs:681` |
-| chunk world as a `Resource` with batched snapshot reads | Stage 4 | not started |
+| chunk world as a `Resource` with batched snapshot reads | Stage 4 | **done** — `lodestone_ecs::ChunkWorld` (`crates/lodestone-ecs/src/chunks.rs`), a `Clone`-able handle over one shared `lodestone_world::World`; `crates/plugins/lodestone-autopilot` reads it via `Res<ChunkWorld>` to snapshot a `lodestone_nav::SnapshotView` for search |
 | `SendAction` message / `MessageWriter<SendAction>` egress | unassigned | **closed under a different shape** — `player.rs`'s `ActionQueue(Vec<ClientAction>)` resource landed with Stage 2 and is reachable from a plugin system via `ResMut<ActionQueue>`; see the correction note above. Not a bevy `Message`, so the ordering/observability a `MessageWriter` gives for free is still absent — recorded here as a design question, not a completeness gap |
 | raw-packet observation (`RawPacket` message) | unassigned | **gap — re-verified: `grep -rn RawPacket crates` is still empty** |
-| `Sim` deleted; plugin no longer reaches into shell internals | Stage 5 | not started |
+| `Sim` deleted; plugin no longer reaches into shell internals | Stage 5 | not started — `lodestone-shell/src/sim.rs` still exists and still owns plugin registration (`Sim::new`'s `app.add_plugins((...))`), which is why a third-party plugin cannot self-register into the shipped client today: it has to be added to that call by whoever owns `sim.rs` |
 | async bot tier / headless plugin host | Stage 6 | not started |
-| world-space debug-geometry `Extract` channel | unassigned | **gap — re-verified against `crates/lodestone-ecs/src/sets.rs` directly: `ExtractSet` is still exactly `Terrain, Entities, Hud`, no debug/overlay set** |
+| world-space debug-geometry `Extract` channel | unassigned | **done** — see gap 3 above; this row was left stale (still saying "gap") for a time after gap 3 itself was marked closed, which is its own small instance of `CLAUDE.md`'s "staleness is the most common defect" rule: fixing one paragraph does not fix every other paragraph that restates the same fact |
 | block physics constants (friction/speed/jump/bounce/stuck/climbable) reachable without depending on `lodestone-shell` | unassigned | **closed in `24af787`** — `lodestone_model::block_physics(&str) -> BlockPhysics`; see §3 above |
 | `PathType` per state through the seam | unassigned | **gap — `docs/baritone-port.md` §3.3 named this in the original document; still true today** |
 
 **The gap list, restated as the single most useful output of this document:** at the time this table
 was first written, four items had **no stage that claims them** at all in `docs/bevy-migration.md`'s
-§7. One of those four — the block-physics constants — closed in `24af787`, as a stage-independent fix
-exactly as recommended below, not by acquiring a stage. The other three remain open and re-verified
-current, directly against `crates/lodestone-ecs/src/sets.rs` for the two ordering-anchor gaps: the
-`TickSet::Intent` anchor, the `SendAction`/`RawPacket` messages (though `SendAction`'s underlying
-capability now exists in a different shape — a plain resource, not a message — via `ActionQueue`, per
-the correction note above), and the `Extract` debug-geometry channel. Each is small in isolation (an
-enum variant, a message type, a `Vec` resource drained per frame). None is *hard* — the risk is
-exactly the one `CLAUDE.md` names as the dominant defect class here: a stage lands, its authority test
-passes, and one of these is quietly never added because no stage's checklist named it. **Recommendation
-(unchanged for the three still open):** fold the `TickSet::Intent` anchor into whatever stage adds
-`LookIntent`, and fold the debug-geometry channel into Stage 4 or 5 (it wants the chunk-world resource
-to be useful for anything spatial).
+§7 — the block-physics constants, the `TickSet::Intent` anchor, the `SendAction`/`RawPacket` messages,
+and the `Extract` debug-geometry channel. **Three of the four are closed as of this pass**: the
+block-physics constants in `24af787`, and both the `TickSet::Intent` anchor and the debug-geometry
+channel in `0d82ab4` (the latter's row above sat stale for a time even after the "four concrete gaps"
+section itself was updated — a small, self-contained instance of the exact staleness pattern
+`CLAUDE.md` warns is this repo's most common written-record defect). **Only the fourth remains open**,
+and even it is narrower than it was: `SendAction`'s underlying capability exists today, in a different
+shape — a plain resource, not a message — via `ActionQueue` (see the correction note above), so what
+is actually still missing is `RawPacket` (raw-event observation) and the design question of whether
+`ActionQueue` should still become a bevy `Message` for the ordering/observability that gives for free.
+Neither was ever *hard* — the risk was always the one `CLAUDE.md` names as the dominant defect class
+here: a stage lands, its authority test passes, and a small unassigned piece is quietly never added
+because no stage's checklist named it. That risk has now materialised on the documentation side
+instead, twice: two of these three closures shipped in one commit (`0d82ab4`, 2026-07-29) whose own
+message named this document by name as what it was closing, and this document was not updated for six
+days until issue #180 forced a pass (this one) — the fix landing is not the same event as the record
+catching up to it, and closing a gap in the tree does not automatically close it in a doc that was
+written when it was open.
 
 ### Two Stage-1 constraints that shape the API, both verified rather than assumed
 
@@ -355,6 +387,18 @@ is not.
   *consumption* of the new adapter methods for the player's own movement. It does not mean the
   adapter methods themselves cover the same six properties; §3 above exists because those are two
   different claims that are easy to conflate.
+- **A plugin crate that derives `Resource`/`Component` needs `bevy_ecs` as a direct dependency, not
+  only `lodestone-ecs`.** This is not obvious from "re-exported so plugin authors never have to match
+  `bevy_app`'s version by hand" (this document's own §"The surface" above) — that line is true for
+  every *type* a plugin names, but bevy's derive macros expand to absolute `bevy_ecs::…` paths, which
+  only resolve if the crate being compiled has `bevy_ecs` in its own dependency graph under that exact
+  name. `lodestone-controller/Cargo.toml` already documents this for an engine crate; measured again
+  while building `crates/plugins/lodestone-autopilot` for this pass — `cargo check` failed with
+  `cannot find module or crate 'bevy_ecs'` pointing *at* a `#[derive(Resource)]` line until `bevy_ecs`
+  and `bevy_app` were added as direct dependencies, pinned to the same `[workspace.dependencies]`
+  entry `lodestone-ecs` itself builds against so there is still only one `bevy_ecs` in the graph. Any
+  plugin that only reads/writes existing components and resources through `Query`/`Res`/`ResMut` never
+  hits this; it is specifically deriving a *new* `Resource` or `Component` type that does.
 
 ## Configuration
 
@@ -374,11 +418,47 @@ setup), and, if a WASM host is built, its manifest/capability-declaration format
   the open question is only whether `lodestone-ecs` itself is in its scope, not whether the tool exists.
 - A native plugin crate depends on `lodestone-ecs` (for the schedules/sets/components/resources) and,
   if it needs version data unavailable through the seam, may additionally depend on a version crate
-  directly (legal — a plugin is a leaf crate — at the cost of version-locking itself, per §3).
+  directly (legal — a plugin is a leaf crate — at the cost of version-locking itself, per §3). If it
+  derives its own `Resource`/`Component` types, it also needs `bevy_ecs` (and `bevy_app`, if it derives
+  `Plugin`-adjacent types or names `App`/`Plugin` itself) as a **direct** dependency — see the "how to
+  change it" bullet above; `crates/plugins/lodestone-autopilot/Cargo.toml` is a real example of the
+  resulting manifest shape.
 - `cargo xtask check-connected` is the island detector for this surface, same as for the rest of the
   migration: `lodestone-ecs` is deliberately **not** allowlisted, so a stage that lands a component set
   with no consumer shows up as red rather than silently shipping an island (`CLAUDE.md`'s rule 1;
-  `crates/lodestone-ecs/src/lib.rs`'s own doc comment says the same).
+  `crates/lodestone-ecs/src/lib.rs`'s own doc comment says the same). As of this pass there is a real
+  consumer for the intent seam specifically: `crates/plugins/lodestone-autopilot`, which is not itself
+  reachable from the shipped binary yet (`lodestone-shell::sim::Sim::new` does not register it — see
+  `docs/autonomous-navigation.md`), so `check-connected` going red for *this* crate until that
+  registration lands is the detector working as designed, not a regression to chase.
+
+## Ordering-anchor changelog
+
+Issue #170 asks for "a short `CHANGELOG`-style section... that every PR touching one of \[the
+ordering-anchor\] enums is expected to update" — the enforcement mechanism this document's own "how to
+change it" section describes only in prose ("additions are fine, renames need a deprecation window").
+This section is that changelog. **Every PR that adds, renames or removes a `TickSet`/`IngestSet`/
+`FrameSet`/`ExtractSet` variant should add an entry here**, oldest first:
+
+| commit | change | why |
+|---|---|---|
+| `415138f` (Stage 0) | `IngestSet`, `TickSet`, `FrameSet`, `ExtractSet` all land with their original variant sets — `TickSet` as `Input, Physics, Predict, Animate, Send`, `ExtractSet` as `Terrain, Entities, Hud` | baseline |
+| `0d82ab4` | `TickSet` gains `Intent`, between `Input` and `Physics` | give automation-supplied movement intent (a plugin, or a future navigator) a named ordering anchor distinct from raw human input, so two writers of `MovementIntent` become an explicit, checkable order instead of an `ambiguity_detection: Error` build failure — see `sets.rs`'s own doc comment on `TickSet::Intent` |
+| `0d82ab4` | `ExtractSet` gains `Debug`, between `Entities` and `Hud` | a world-space debug-geometry channel (`DebugLines`) a plugin can push planned routes/probes into, ordered with the other world-space extracts before the screen-space `Hud` one |
+
+**On `#[non_exhaustive]` (issue #170's other proposed mechanism):** re-checked for this pass —
+`grep -rn "match.*\(TickSet\|IngestSet\|FrameSet\|ExtractSet\)" crates/` finds **zero** matches
+anywhere in the tree. These enums are consumed exclusively as `bevy_ecs::schedule::SystemSet` labels
+(`.in_set(...)`, `.after(...)`, `.before(...)`), never pattern-matched, which is the intended usage
+this document's "anchors are sets, not system functions" policy is built around. `#[non_exhaustive]`'s
+actual protection — forcing a wildcard arm in an exhaustive external `match` — therefore guards
+against a usage pattern that does not occur in this codebase and that a plugin author following the
+documented idiom would have no reason to reach for. It also does **not** protect against the
+breaking change that actually matters here (renaming or removing a variant, which no attribute
+prevents — only review discipline and this changelog do). Given that, `#[non_exhaustive]` is cheap
+and not harmful, but its value is narrower than issue #170's framing suggests; see the issue for the
+disposition and the patch (outside this document's own file ownership — `sets.rs` is
+`crates/lodestone-ecs/`, a different agent's cluster as of this writing).
 
 ## See also
 
@@ -390,3 +470,8 @@ setup), and, if a WASM host is built, its manifest/capability-declaration format
 - [`docs/baritone-port.md`](./baritone-port.md) — the concrete plugin this API is being sized against;
   its §7 is the requirements list this document verifies and closes gaps against, and its §3.2/§3.3
   are the source of the `block_facts` finding in §3 above.
+- [`docs/autonomous-navigation.md`](./autonomous-navigation.md) — `crates/plugins/lodestone-autopilot`
+  as it exists today: what it does (M1, walk-only), how it uses the seams this document specifies
+  (`ChunkWorld`, `VersionData`, `TickSet::Intent`, `MovementIntent`/`LookIntent`), and the one thing
+  outside its own ownership that stops it reaching the shipped client — registration in
+  `Sim::new`.

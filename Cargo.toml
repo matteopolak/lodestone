@@ -12,14 +12,6 @@ members = [
     "crates/protocol/*",
     "xtask",
 ]
-# `crates/plugins/lodestone-autopilot` is excluded because it is not a crate yet:
-# it holds only a `LICENSE`. Its manifest and source were destroyed by a stray
-# `git clean` (see the repo-hazards note in `CLAUDE.md`) before the plugin shell
-# that wraps `lodestone-nav` was written. Without the exclude the
-# `crates/plugins/*` glob makes the **whole workspace fail to load**, so every
-# `cargo` invocation dies on a manifest error and reports nothing about any other
-# crate. Delete this line in the same change that gives it a manifest.
-exclude = ["crates/plugins/lodestone-autopilot"]
 # So `cargo run --release` from the repo root launches the game.
 #
 # Without this, a bare `cargo run` in a virtual workspace fails ("could not
