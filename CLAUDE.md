@@ -279,6 +279,20 @@ Oracles (not part of repo state — recreate them):
   `stash@{0}: autostash` entry holding a full-tree snapshot, left in place deliberately as someone
   else's safety net: **do not `stash drop` or `stash pop` it.** If you need to move to a newer commit,
   do it in a throwaway `git worktree add --detach`, which touches nothing here.
+- **Never `git commit --amend`.** It rewrites a commit that other agents have already built on, and in
+  a shared checkout the thing it sweeps up is not yours. Measured: an agent amended its own `#299`
+  commit and thereby absorbed **another agent's staged-but-uncommitted `feat(chat)` work** into it.
+  The content survived — verified byte-identical in `HEAD` afterwards — but the other agent's commit
+  is now **orphaned**, so the change set has no commit describing it and a reviewer reading the
+  history is misled about what `#299` contains. The same agent then ran a bare `git reset`, which
+  unstaged several other agents' in-progress work.
+
+  Both are the shared-index hazards already in this file, reached by a route the file did not name.
+  **The fix is the same as everywhere else: pathspec-form commits from the start**
+  (`git commit -m "…" -- <paths>`), which ignore the index entirely, so there is never a reason to
+  amend. If your last commit was wrong, **land a follow-up commit** — a second commit is cheap and
+  honest; rewriting shared history is neither, and `git push --force` to fix the amend would be worse
+  still.
 - **`GIT_INDEX_FILE` + `commit-tree` is the escape hatch, and it has its own trap: a stale tree.**
   When you need partial-file granularity that a pathspec commit cannot express, build the commit in a
   **private** index so the shared one is never touched. But the ref compare-and-swap in
