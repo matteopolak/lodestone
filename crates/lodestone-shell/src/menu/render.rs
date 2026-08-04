@@ -74,6 +74,21 @@ const GLYPH_H: usize = 7;
 
 /// Render scale for ordinary menu text (each font pixel becomes N×N screen px).
 const TEXT_SCALE: f32 = 2.0;
+/// Render scale for an `EditBox`'s own text — **not** [`TEXT_SCALE`].
+///
+/// A player report caught `draw_edit_box` as the one vanilla-positioned
+/// widget still drawing at [`TEXT_SCALE`] while its row siblings (the
+/// Done/Cancel buttons on the same `ManageServerScreen`, via [`draw_widget`])
+/// draw at `1.0`. Measured against the jar: vanilla's `Font.lineHeight` is
+/// `9` (`Font.java:33`) inside `EditBox`'s 20 px box (`EditBox.java:61-63`),
+/// a `0.45` ratio; `GLYPH_H(7) * TEXT_SCALE(2.0) = 14` in the same 20 px box
+/// is `0.70` — exactly double. `GLYPH_H(7) * EDIT_TEXT_SCALE(1.0) = 7` is the
+/// same ratio `draw_widget`'s buttons already use.
+///
+/// Paired with `edit_box.rs`'s `MENU_TEXT_ADVANCE` (`12.0 → 6.0`, i.e.
+/// `(GLYPH_W + 1) * EDIT_TEXT_SCALE`) — the two must land in the same commit
+/// or the caret advance disagrees with the glyphs it is stepping over.
+const EDIT_TEXT_SCALE: f32 = 1.0;
 /// Render scale for the small second line of a row (MOTD, address).
 const SMALL_SCALE: f32 = 1.0;
 /// Render scale for the screen title.
@@ -4626,13 +4641,17 @@ fn draw_widget(
 ///
 /// ## Two deliberate departures from the jar
 ///
-/// - **The caret and the selection are 14 px tall, not 11.** Vanilla's are
-///   `9`/`9 + 1` because its font is 9 px; this shell draws menu text at
-///   [`TEXT_SCALE`] `2.0`, so a glyph is `GLYPH_H * 2 = 14` tall and an 11 px
-///   caret would sit visibly short of the text it marks. The *horizontal*
-///   arithmetic is already in scale-2 units inside the widget (see
-///   `edit_box::MENU_TEXT_ADVANCE`); this is the vertical half of the same
-///   consistency.
+/// - **The caret and the selection used to be 14 px tall, not 11.** This
+///   bullet used to justify that against [`TEXT_SCALE`] `2.0` — but a player
+///   report (2026-08-04) caught that this function was the *only* thing on a
+///   vanilla-positioned screen still drawing at that scale, against
+///   `9`-tall vanilla glyphs (`Font.java:33`) in a 20 px box: a 0.70 fill
+///   ratio where every sibling widget (`draw_widget`'s buttons, at `1.0`)
+///   sits at 0.45. Fixed by [`EDIT_TEXT_SCALE`] `1.0`, so a glyph is
+///   `GLYPH_H * 1 = 7` tall — see that constant's own doc. The *horizontal*
+///   arithmetic in the widget (`edit_box::MENU_TEXT_ADVANCE`) has to move in
+///   lockstep or the caret advance disagrees with the glyphs it steps over;
+///   that half is `edit_box.rs`'s, not this function's.
 /// - **The append caret is a bar, not an `_` glyph.** `extractAppendCursor`
 ///   draws the underscore character (`TextCursorUtils.java:16-18`), and the
 ///   jar-less fallback font here has no guaranteed `_`. Drawing a baseline bar
@@ -4667,7 +4686,7 @@ fn draw_edit_box(b: &mut Quads<'_>, edit: &EditBox, x: f32, y: f32, w: f32, h: f
 
     let state = edit.draw_state(None);
     let colour = edit.text_colour();
-    let glyph_h = GLYPH_H as f32 * TEXT_SCALE;
+    let glyph_h = GLYPH_H as f32 * EDIT_TEXT_SCALE;
 
     // Selection first, so the glyphs land on top of it. Vanilla inverts the text
     // under the block (`graphics.textHighlight(.., invertHighlightedTextColor)`);
@@ -4680,22 +4699,22 @@ fn draw_edit_box(b: &mut Quads<'_>, edit: &EditBox, x: f32, y: f32, w: f32, h: f
         }
     }
     if !state.before.is_empty() {
-        b.text(&state.before, state.before_x, state.text_y, TEXT_SCALE, colour);
+        b.text(&state.before, state.before_x, state.text_y, EDIT_TEXT_SCALE, colour);
     }
     if !state.after.is_empty() {
-        b.text(&state.after, state.after_x, state.text_y, TEXT_SCALE, colour);
+        b.text(&state.after, state.after_x, state.text_y, EDIT_TEXT_SCALE, colour);
     }
     if state.show_cursor {
         if state.insert_cursor {
-            // `extractInsertCursor`: a 1 px bar, widened to `TEXT_SCALE` here for
-            // the same reason the height is scaled.
-            b.rect(state.cursor_x, state.text_y, TEXT_SCALE, glyph_h, colour);
+            // `extractInsertCursor`: a 1 px bar, widened to `EDIT_TEXT_SCALE`
+            // here for the same reason the height is scaled.
+            b.rect(state.cursor_x, state.text_y, EDIT_TEXT_SCALE, glyph_h, colour);
         } else {
             b.rect(
                 state.cursor_x,
-                state.text_y + glyph_h - TEXT_SCALE,
+                state.text_y + glyph_h - EDIT_TEXT_SCALE,
                 edit.advance,
-                TEXT_SCALE,
+                EDIT_TEXT_SCALE,
                 colour,
             );
         }
@@ -4707,10 +4726,10 @@ fn draw_edit_box(b: &mut Quads<'_>, edit: &EditBox, x: f32, y: f32, w: f32, h: f
         if state.before.is_empty() && state.after.is_empty() && !edit.widget.focused {
             let room = (w - 2.0 * edit_box::BORDER_INSET).max(0.0);
             b.text(
-                clip(hint, room, TEXT_SCALE),
+                clip(hint, room, EDIT_TEXT_SCALE),
                 state.before_x,
                 state.text_y,
-                TEXT_SCALE,
+                EDIT_TEXT_SCALE,
                 colour,
             );
         }
@@ -6456,7 +6475,11 @@ mod tests {
                 probe.text_x(),
                 probe.text_y(),
                 probe.inner_width(),
-                GLYPH_H as f32 * TEXT_SCALE,
+                // `draw_edit_box` draws at `EDIT_TEXT_SCALE`, not the
+                // ordinary-row `TEXT_SCALE` — see that constant's doc for the
+                // player report this measurement band would otherwise have
+                // missed by 2×.
+                GLYPH_H as f32 * EDIT_TEXT_SCALE,
             )
         };
 
@@ -6516,7 +6539,11 @@ mod tests {
             state.cursor_x + probe.advance
         );
         assert!(
-            y1 - y0 >= GLYPH_H as f32 * TEXT_SCALE - 6.0,
+            // Margin kept proportional after the `EDIT_TEXT_SCALE` fix: the
+            // blank-caret premise above requires under 4 px, so this bound
+            // (5 px, i.e. `7 - 2`) still separates "just the caret bar" from
+            // "a full line of glyphs" at the new, smaller scale.
+            y1 - y0 >= GLYPH_H as f32 * EDIT_TEXT_SCALE - 2.0,
             "a full line of glyphs must be present, not just the caret bar: the \
              band's vertical extent is only {}",
             y1 - y0
@@ -9063,7 +9090,7 @@ mod tests {
         // So: measure the text on an **unfocused** clone — no outline, no caret,
         // nothing in the box but glyphs — and use the focused draw as the control
         // that this band really can see ink at the box's edge.
-        let band = (fx, state.text_y, fw, GLYPH_H as f32 * TEXT_SCALE);
+        let band = (fx, state.text_y, fw, GLYPH_H as f32 * EDIT_TEXT_SCALE);
         let mut unfocused = row.clone();
         if let Some(e) = unfocused.edit.as_mut() {
             e.widget.focused = false;
