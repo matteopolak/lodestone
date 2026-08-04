@@ -195,6 +195,19 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   Issues #72 (left-click only swung when a dig started), #12 (attacking entities,
   taking knockback), and #121 (the crosshair cooldown reticle). Covers three things
   from the original change, plus the ticker/indicator pair added afterward:
+- [Command tree](./command-tree.md) — `crates/lodestone-command` is a standalone,
+  **ECS-free, version-free** library for Brigadier-style command trees:
+  root/literal/argument nodes with redirects and an `executable` flag, parsers and
+  completion-suggesters for Brigadier's primitive argument types, and a registry for a
+  plugin to add its own. It depends on nothing else in this workspace and nothing else
+  in this workspace depends on it yet — see "Why this is a sanctioned island" below.
+- [Commands](./commands.md) — The client's half of vanilla's Brigadier command UX
+  (issue #46): a decode target for the server's whole command tree, and the
+  tab-completion / syntax-highlighting engine that walks it against the chat box's
+  input line. This covers **joining** a vanilla server and typing against its tree,
+  not hosting one — the server-side dispatcher is issue #48, and a plugin's own
+  command registration is issue #118; both are explicitly out of scope here and
+  designed to share an argument-type library with this work rather than duplicate it.
 - [Container clicks](./container-clicks.md) — The client-side predictor for what a
   mouse click on an open container screen does — vanilla
   `AbstractContainerMenu.doClick`, reimplemented version-free. It runs locally the
@@ -373,6 +386,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   (issue #126) — vanilla's `Hud.extractSelectedItemName` (`Hud.java:625-648` in the
   26.2 client). It fades in **instantly** (no ramp-up) and holds at full opacity, then
   fades out over its last half-second.
+- [HUD vitals animations](./hud-animations.md) — Three cosmetic, client-side-only
+  animations on the survival vitals cluster, ported from vanilla's `Hud` class
+  (`.cache/mc/26.2/client-src/net/minecraft/client/gui/Hud.java`): the heart row
+  flashes and jitters around a health change, the hunger row wobbles while saturation
+  is empty, and a hotbar item "pops" (squashes then settles) when a stack lands in a
+  slot. Issue #30.
 - [Sprint food gate, toggle sneak/sprint, and mouse feel](./input-options.md) —
   Three small, related fixes to `lodestone-controller`'s input model and the settings
   screen's mouse/controls pages:
@@ -668,6 +687,21 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   a connection asks for a burst of terrain: `serve_connection`'s initial `view_radius`
   join, and `ViewTracker::recenter`'s "chunks that entered the view" diff (both in
   `crates/lodestone-server/src/server.rs`).
+- [The server's own `bevy_ecs::World`](./server-ecs.md) — The architectural
+  decision, and the design it produced, to link `lodestone-ecs` into
+  `lodestone-server` so that server-side plugins get the same five-clause intent
+  doctrine [`docs/plugin-api.md`](./plugin-api.md) already gives client-side plugins
+  — one system per machine, always-observable refusal, lifecycle-encodes-verb-shape
+  — instead of a second, hand-rolled plugin idiom. This reverses
+  [`docs/server-tick-loop.md`](./server-tick-loop.md)'s recommendation not to link
+  `lodestone-ecs` into the server (see that doc's own "Recommendation reversed"
+  section for why each of its three original reasons no longer blocks). Filed as issue
+  [#433](https://github.com/matteopolak/lodestone/issues/433); this document is the
+  decision record and the design five queued implementation phases build against —
+  **nothing in `crates/lodestone-server/` implements this yet**. Where this document
+  describes behaviour, it is describing the design, not shipped code; where it cites
+  `crates/lodestone-ecs/` today, that code already exists and this document is
+  reporting it directly.
 - [Server-authoritative inventory (issue #408)](./server-inventory.md) —
   `lodestone-server`'s model for a player's own inventory, and the decode + consumer
   that lets `SET_CARRIED_ITEM` and `CONTAINER_CLICK` actually change server state.
