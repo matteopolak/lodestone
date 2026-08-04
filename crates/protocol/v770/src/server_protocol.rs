@@ -53,7 +53,8 @@ use uuid::Uuid;
 
 use lodestone_data::block_states::{block_name, properties};
 use lodestone_data::entity_types::entity_type_id;
-use lodestone_data::items::item_name;
+use lodestone_data::items::{item_id, item_name};
+use lodestone_data::menus::menu_id;
 use crate::packet_ids::{configuration, handshaking, login, play};
 use crate::packets::chunk::ChunkShape;
 use crate::packets::common::KeepAlive;
@@ -621,6 +622,117 @@ fn encode_system_chat(message: &str, overlay: bool) -> Vec<u8> {
     w.into_vec()
 }
 
+/// Writes one `ItemStack.OPTIONAL_STREAM_CODEC` value (used by both
+/// `container_set_content`'s list/carried entries and `container_set_slot`'s
+/// single item): a VarInt count (`<= 0` is the empty stack), then, only if
+/// non-empty, the item registry id as a VarInt and an empty
+/// `DataComponentPatch` (VarInt `0` added, VarInt `0` removed).
+///
+/// This is the clientbound twin of `crate::adapter::write_optional_item_stack`
+/// (the serverbound `set_creative_mode_slot` encoder), restated here rather
+/// than imported: that function is private to its own module, and
+/// `adapter.rs` is presently owned by another agent extracting shared
+/// plumbing (see this crate's own repo-hazard notes) — not a good time to add
+/// a new `pub(crate)` export to it. Both directions genuinely share the same
+/// wire shape (`ItemStack.OPTIONAL_STREAM_CODEC` is the same stream codec
+/// constant either way), so this restatement is the same "no existing struct
+/// to derive `Encode` from" situation `encode_system_chat` is already in, not
+/// a new inconsistency. An item whose canonical key has no entry in the
+/// generated registry table (should not happen for anything this crate's own
+/// block-entity/inventory models can produce) degrades to writing an empty
+/// stack rather than panicking or corrupting the rest of the packet.
+fn write_optional_item_stack(w: &mut Writer, item: Option<&ItemStack>) {
+    match item.filter(|stack| stack.count > 0) {
+        None => w.var_i32(0),
+        Some(stack) => match item_id(&stack.item.to_string()) {
+            Some(id) => {
+                w.var_i32(i32::try_from(stack.count).unwrap_or(i32::MAX));
+                w.var_i32(id);
+                w.var_i32(0); // added components
+                w.var_i32(0); // removed components
+            }
+            None => w.var_i32(0),
+        },
+    }
+}
+
+/// Hand-written encoder for the clientbound `open_screen` packet
+/// (`ClientboundOpenScreenPacket`), which has no existing struct because it
+/// is currently only ever *decoded* (see `V770Adapter::decode_open_screen`,
+/// the exact mirror of this wire layout). Wire layout: VarInt container id
+/// (`ByteBufCodecs.CONTAINER_ID`), VarInt `minecraft:menu` registry id
+/// (`ByteBufCodecs.registry(Registries.MENU)` — a plain, non-holder registry
+/// id, the same as `decode_open_screen`'s own `menu_name` lookup), then the
+/// title as a network-form NBT text component — the identical plain-string
+/// shape [`encode_system_chat`] already writes.
+fn encode_open_screen_body(window_id: i32, menu_registry_id: i32, title: &str) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.var_i32(window_id);
+    w.var_i32(menu_registry_id);
+    let component = Nbt::Compound(vec![("text".to_owned(), Nbt::String(title.to_owned()))]);
+    write_network_nbt(&mut w, &component).expect("plain string NBT component always encodes");
+    w.into_vec()
+}
+
+/// Hand-written encoder for the clientbound `container_set_content` packet
+/// (`ClientboundContainerSetContentPacket`), which has no existing struct
+/// because it is currently only ever *decoded* (see
+/// `V770Adapter::handle_play`'s `CONTAINER_SET_CONTENT` arm, the exact mirror
+/// of this wire layout). Wire layout: VarInt container id, VarInt state id,
+/// then `ItemStack.OPTIONAL_LIST_STREAM_CODEC` (a VarInt count followed by
+/// that many [`write_optional_item_stack`] entries), then the carried/cursor
+/// stack as one more [`write_optional_item_stack`].
+fn encode_container_content_body(
+    window_id: i32,
+    state_id: i32,
+    items: &[Option<ItemStack>],
+    carried: Option<&ItemStack>,
+) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.var_i32(window_id);
+    w.var_i32(state_id);
+    w.var_i32(i32::try_from(items.len()).unwrap_or(i32::MAX));
+    for item in items {
+        write_optional_item_stack(&mut w, item.as_ref());
+    }
+    write_optional_item_stack(&mut w, carried);
+    w.into_vec()
+}
+
+/// Hand-written encoder for the clientbound `container_set_slot` packet
+/// (`ClientboundContainerSetSlotPacket`), mirroring the decode side exactly
+/// (`V770Adapter::handle_play`'s `CONTAINER_SET_SLOT` arm): VarInt container
+/// id, VarInt state id, big-endian `short` slot, then one
+/// [`write_optional_item_stack`].
+fn encode_container_slot_body(
+    window_id: i32,
+    state_id: i32,
+    slot: i32,
+    item: Option<&ItemStack>,
+) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.var_i32(window_id);
+    w.var_i32(state_id);
+    w.i16(slot as i16);
+    write_optional_item_stack(&mut w, item);
+    w.into_vec()
+}
+
+/// Hand-written encoder for the clientbound `container_set_data` packet
+/// (`ClientboundContainerSetDataPacket`), mirroring the decode side exactly
+/// (`V770Adapter::handle_play`'s `CONTAINER_SET_DATA` arm): VarInt container
+/// id, then the property index and its value as two big-endian `short`s
+/// (`FriendlyByteBuf.writeContainerId` for the first field only — `id`/
+/// `value` are plain `writeShort` calls, `ClientboundContainerSetDataPacket
+/// .java:29-31`).
+fn encode_container_data_body(window_id: i32, property: i32, value: i32) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.var_i32(window_id);
+    w.i16(property as i16);
+    w.i16(value as i16);
+    w.into_vec()
+}
+
 /// Hand-written encoder for the clientbound `add_entity` packet, which has no
 /// existing struct because it is currently only ever *decoded* (see
 /// `V770Adapter::handle_add_entity`, the exact mirror of this wire layout).
@@ -1037,6 +1149,21 @@ impl ServerProtocol for V770ServerProtocol {
             State::Play if packet_id == play::serverbound::CONTAINER_CLICK => {
                 decode_container_click(payload).unwrap_or(ServerBound::Ignored)
             }
+            // `ServerboundContainerClosePacket`: a single VarInt container id
+            // (`FriendlyByteBuf.writeContainerId`, the same plain-VarInt
+            // `ByteBufCodecs.CONTAINER_ID` codec `decode_container_click`
+            // already reads for its own window id). No existing struct to
+            // decode through — this is the smallest possible packet, so a
+            // hand-written read is simpler than adding a one-field struct.
+            State::Play if packet_id == play::serverbound::CONTAINER_CLOSE => {
+                let mut r = Reader::new(payload);
+                match r.var_i32() {
+                    Ok(window_id) if r.ensure_empty().is_ok() => {
+                        ServerBound::ContainerClosed { window_id }
+                    }
+                    _ => ServerBound::Ignored,
+                }
+            }
             _ => ServerBound::Ignored,
         }
     }
@@ -1322,6 +1449,58 @@ impl ServerProtocol for V770ServerProtocol {
                     .collect(),
             },
         )
+    }
+
+    /// See [`ServerProtocol::encode_open_screen`]'s trait doc comment and
+    /// `crate::server`'s consumer (`lodestone-server`) for when this is
+    /// called. `menu` with no entry in [`lodestone_data::menus`]'s generated
+    /// table (should not happen for any of the menu names
+    /// `crate::block_entities::BlockEntity::menu_name` can produce) emits
+    /// nothing rather than a packet carrying a made-up registry id.
+    fn encode_open_screen(&self, window_id: i32, menu: &str, title: &str) -> ServerDirective {
+        match menu_id(menu) {
+            Some(id) => ServerDirective::Send {
+                packet_id: play::clientbound::OPEN_SCREEN,
+                payload: encode_open_screen_body(window_id, id, title),
+            },
+            None => ServerDirective::None,
+        }
+    }
+
+    /// See [`ServerProtocol::encode_container_content`]'s trait doc comment.
+    fn encode_container_content(
+        &self,
+        window_id: i32,
+        state_id: i32,
+        items: &[Option<ItemStack>],
+        carried: Option<&ItemStack>,
+    ) -> ServerDirective {
+        ServerDirective::Send {
+            packet_id: play::clientbound::CONTAINER_SET_CONTENT,
+            payload: encode_container_content_body(window_id, state_id, items, carried),
+        }
+    }
+
+    /// See [`ServerProtocol::encode_container_slot`]'s trait doc comment.
+    fn encode_container_slot(
+        &self,
+        window_id: i32,
+        state_id: i32,
+        slot: i32,
+        item: Option<&ItemStack>,
+    ) -> ServerDirective {
+        ServerDirective::Send {
+            packet_id: play::clientbound::CONTAINER_SET_SLOT,
+            payload: encode_container_slot_body(window_id, state_id, slot, item),
+        }
+    }
+
+    /// See [`ServerProtocol::encode_container_data`]'s trait doc comment.
+    fn encode_container_data(&self, window_id: i32, property: i32, value: i32) -> ServerDirective {
+        ServerDirective::Send {
+            packet_id: play::clientbound::CONTAINER_SET_DATA,
+            payload: encode_container_data_body(window_id, property, value),
+        }
     }
 }
 

@@ -85,6 +85,103 @@ impl BlockEntity {
         }
     }
 
+    /// The vanilla `minecraft:*` menu identifier this entity's container
+    /// screen opens as, or `None` if it has no menu screen at all.
+    ///
+    /// Two of the four kinds answer `None`, for two different reasons —
+    /// stated here rather than left to be discovered by a missing
+    /// `open_screen`:
+    /// * **[`Composter`] has no vanilla menu at all.** `ComposterBlock`'s own
+    ///   `useItemOn`/`useWithoutItem` add or empty one item per click
+    ///   directly against the block entity — there is no `AbstractContainerMenu`
+    ///   subclass for it anywhere in `.cache/mc/26.2/src/net/minecraft/world/inventory/`,
+    ///   unlike every other block entity here. A right-click on a composter is
+    ///   therefore never a "screen" question at all; it needs its own
+    ///   serverbound handling, not this module's.
+    /// * **[`BrewingStand`] has a real vanilla menu (`BrewingStandMenu`,
+    ///   5 slots: 3 potion bottles + ingredient + fuel) but this crate cannot
+    ///   open it yet**, because its slots are not [`ItemStack`]s —
+    ///   `docs/block-entities.md`'s second named gap: "the brewing stand's
+    ///   `Bottle` is not a real `ItemStack`" (no potion-contents component
+    ///   anywhere in `lodestone_model::ItemComponents`). Every wire encoder
+    ///   this module feeds ([`container_slots`](Self::container_slots),
+    ///   [`CONTAINER_SET_CONTENT`]) speaks `Option<ItemStack>` only, so a
+    ///   brewing stand has nothing valid to put in that list — opening one
+    ///   would need either a real potion-contents model or a second,
+    ///   bottle-shaped wire path this crate does not have. Real, deliberate
+    ///   scope cut, not an oversight.
+    #[must_use]
+    pub fn menu_name(&self) -> Option<&'static str> {
+        match self {
+            BlockEntity::Furnace(f) => Some(match f.kind() {
+                FurnaceKind::Furnace => "minecraft:furnace",
+                FurnaceKind::Smoker => "minecraft:smoker",
+                FurnaceKind::BlastFurnace => "minecraft:blast_furnace",
+            }),
+            BlockEntity::Hopper(_) => Some("minecraft:hopper"),
+            BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) => None,
+        }
+    }
+
+    /// This entity's own container slots, in vanilla menu order — the
+    /// furnace's `[input, fuel, output]` (`AbstractFurnaceMenu.java:63-65`,
+    /// `INGREDIENT_SLOT`/`FUEL_SLOT`/`RESULT_SLOT` = `0`/`1`/`2`) or the
+    /// hopper's 5 flat slots (`HopperMenu.java:23-24`). Empty for a variant
+    /// with [`menu_name`](Self::menu_name) `None` — nothing should ever call
+    /// this for one, but an empty list is the honest answer if something
+    /// does, not a panic.
+    #[must_use]
+    pub fn container_slots(&self) -> Vec<Option<ItemStack>> {
+        match self {
+            BlockEntity::Furnace(f) => vec![f.input().cloned(), f.fuel().cloned(), f.output().cloned()],
+            BlockEntity::Hopper(h) => h.slots().to_vec(),
+            BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) => Vec::new(),
+        }
+    }
+
+    /// Writes one container slot by its position in
+    /// [`container_slots`](Self::container_slots)'s own ordering — the
+    /// counterpart a `container_click` consumer needs to apply the client's
+    /// predicted diff verbatim (`docs/server-inventory.md`'s established
+    /// scope: this crate applies the click's own diff rather than re-running
+    /// vanilla's `doClick` state machine server-side). An out-of-range
+    /// `slot` is a silent no-op, matching `PlayerInventory::set_native`'s own
+    /// convention for the identical "malformed index" case.
+    pub fn set_container_slot(&mut self, slot: usize, item: Option<ItemStack>) {
+        match self {
+            BlockEntity::Furnace(f) => match slot {
+                0 => f.set_input(item),
+                1 => f.set_fuel(item),
+                2 => f.set_output(item),
+                _ => {}
+            },
+            BlockEntity::Hopper(h) => {
+                if slot < h.slots().len() {
+                    h.set_slot(slot, item);
+                }
+            }
+            BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) => {}
+        }
+    }
+
+    /// This entity's menu-local `container_set_data` properties, in vanilla
+    /// property-index order — the furnace's four burn/cook timers
+    /// (`Furnace::container_data`'s own doc comment cites
+    /// `AbstractFurnaceBlockEntity`'s `ContainerData` at `:66-104`). Empty for
+    /// every other kind: the hopper's `HopperMenu` has no `ContainerData` at
+    /// all (`HopperMenu.java` never calls `addDataSlots`), and composter/
+    /// brewing-stand are excluded for the same reasons
+    /// [`menu_name`](Self::menu_name) gives.
+    #[must_use]
+    pub fn data_properties(&self) -> Vec<i32> {
+        match self {
+            BlockEntity::Furnace(f) => (0..4).map(|i| f.container_data(i)).collect(),
+            BlockEntity::Hopper(_) | BlockEntity::Composter(_) | BlockEntity::BrewingStand(_) => {
+                Vec::new()
+            }
+        }
+    }
+
     /// Advances this entity by exactly one tick, for every variant *except*
     /// [`Hopper`] — a hopper's tick needs its two adjacent registry entries,
     /// which only [`BlockEntityRegistry::tick_hopper`] (holding `&mut self`
@@ -353,6 +450,74 @@ mod tests {
             block_entity_for_item("minecraft:stone").is_none(),
             "a plain block must not resolve to a block entity"
         );
+    }
+
+    /// A furnace's menu identity/slots/data round trip through the generic
+    /// [`BlockEntity`] accessors exactly as [`Furnace`]'s own API reports
+    /// them — the wiring layer (`crate::server`) never reads a [`Furnace`]
+    /// directly, so this is the control that the indirection is faithful.
+    #[test]
+    fn furnace_menu_accessors_mirror_the_furnace_directly() {
+        let mut furnace = Furnace::new(FurnaceKind::Furnace);
+        furnace.set_input(Some(stack("minecraft:iron_ore", 1)));
+        furnace.set_fuel(Some(stack("minecraft:coal", 1)));
+        let mut entity = BlockEntity::Furnace(furnace);
+
+        assert_eq!(entity.menu_name(), Some("minecraft:furnace"));
+        assert_eq!(
+            entity.container_slots(),
+            vec![Some(stack("minecraft:iron_ore", 1)), Some(stack("minecraft:coal", 1)), None]
+        );
+        // Furnace::container_data(0..3) for a freshly set, not-yet-ticked
+        // furnace: unlit (0), no lit-duration recorded yet (0), no cook
+        // progress (0), but `set_input` already computed the recipe's total
+        // cook time (200 for iron ore, matching `furnace.rs`'s own
+        // `DEFAULT_COOK_TIME`/recipe-table citation) into index 3.
+        assert_eq!(entity.data_properties(), vec![0, 0, 0, 200]);
+
+        entity.set_container_slot(2, Some(stack("minecraft:iron_ingot", 1)));
+        assert_eq!(entity.container_slots()[2], Some(stack("minecraft:iron_ingot", 1)));
+
+        let smoker = BlockEntity::Furnace(Furnace::new(FurnaceKind::Smoker));
+        assert_eq!(smoker.menu_name(), Some("minecraft:smoker"));
+        let blast = BlockEntity::Furnace(Furnace::new(FurnaceKind::BlastFurnace));
+        assert_eq!(blast.menu_name(), Some("minecraft:blast_furnace"));
+    }
+
+    /// A hopper's 5 flat slots round-trip through the same generic
+    /// accessors, and it has no menu-local data properties at all — the
+    /// control that `data_properties` genuinely varies by kind rather than
+    /// always answering the furnace's 4.
+    #[test]
+    fn hopper_menu_accessors_mirror_the_hopper_directly() {
+        let mut hopper = Hopper::new();
+        hopper.set_slot(0, Some(stack("minecraft:diamond", 3)));
+        let mut entity = BlockEntity::Hopper(hopper);
+
+        assert_eq!(entity.menu_name(), Some("minecraft:hopper"));
+        assert_eq!(entity.container_slots().len(), 5);
+        assert_eq!(entity.container_slots()[0], Some(stack("minecraft:diamond", 3)));
+        assert!(entity.data_properties().is_empty());
+
+        entity.set_container_slot(1, Some(stack("minecraft:emerald", 1)));
+        assert_eq!(entity.container_slots()[1], Some(stack("minecraft:emerald", 1)));
+    }
+
+    /// **Control**: composter and brewing stand have no menu at all
+    /// (see [`BlockEntity::menu_name`]'s own doc comment for why each is
+    /// excluded, for two different reasons) — proving the generic accessors
+    /// answer "nothing to open" rather than silently fabricating a menu.
+    #[test]
+    fn composter_and_brewing_stand_have_no_menu() {
+        let composter = BlockEntity::Composter(Composter::new());
+        assert_eq!(composter.menu_name(), None);
+        assert!(composter.container_slots().is_empty());
+        assert!(composter.data_properties().is_empty());
+
+        let brewing = BlockEntity::BrewingStand(BrewingStand::new());
+        assert_eq!(brewing.menu_name(), None);
+        assert!(brewing.container_slots().is_empty());
+        assert!(brewing.data_properties().is_empty());
     }
 
     #[test]

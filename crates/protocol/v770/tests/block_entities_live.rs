@@ -26,7 +26,7 @@ use lodestone_data::block_states::{block_name, properties};
 use lodestone_model::{BlockFace, ClientAction, ContainerClickType, ContainerSlotChange, ItemStack, Vec3f};
 use lodestone_net::{Connection, memory_pair};
 use lodestone_server::{
-    BlockEntity, BlockEntityHandle, ChunkColumn, ChunkSource, FurnaceKind, NoEntities,
+    BlockEntity, BlockEntityHandle, ChunkColumn, ChunkSource, Furnace, FurnaceKind, NoEntities,
     serve_connection,
 };
 use lodestone_v770::{V770ServerProtocol, adapter};
@@ -369,5 +369,282 @@ async fn placing_with_an_empty_hand_still_falls_back_to_stone_and_registers_noth
     assert!(
         block_entities.with(|reg| reg.is_empty()),
         "a stone placement must not register any block entity"
+    );
+}
+
+/// A real client opens a **placed** furnace's screen (`OPEN_SCREEN` +
+/// `CONTAINER_SET_CONTENT` + `CONTAINER_SET_DATA`) and loads it with fuel and
+/// an ingredient via a real `CONTAINER_CLICK` — closing `docs/block-entities.md`'s
+/// third and last named gap. The placement test above deliberately left this
+/// open ("nobody can *see* inside a placed furnace... no way to load fuel/
+/// ingredient into one at all"); this is the test that closes it, the same
+/// way the placement test closed gaps 1 and 2.
+#[tokio::test]
+async fn real_client_opens_a_placed_furnace_and_loads_it_via_container_click() {
+    let view_radius = 0;
+    let (client_io, server_io) = memory_pair();
+    let block_entities = BlockEntityHandle::default();
+    let server_block_entities = block_entities.clone();
+
+    let server_task = tokio::spawn(async move {
+        let mut conn = Connection::new(server_io);
+        serve_connection(
+            &mut conn,
+            &V770ServerProtocol,
+            &AirSource::default(),
+            &NoEntities,
+            view_radius,
+            &server_block_entities,
+        )
+        .await
+    });
+
+    let (mut handle, _events) = ClientBuilder::new(
+        address(),
+        profile("FurnaceOpener"),
+        Box::new(adapter()),
+    )
+    .connect_with(client_io);
+
+    handle
+        .wait_for_spawn(Duration::from_secs(30))
+        .await
+        .expect("client never spawned");
+    handle
+        .wait_for_chunks(1, Duration::from_secs(30))
+        .await
+        .expect("initial column never arrived");
+
+    // Place a furnace at `target_pos`, identical to the placement test above.
+    handle
+        .send_action(ClientAction::ContainerClick {
+            window_id: 0,
+            state_id: 1,
+            slot: 36,
+            button: 0,
+            click_type: ContainerClickType::Pickup,
+            changed_slots: vec![ContainerSlotChange {
+                slot: 36,
+                item: Some(stack("minecraft:furnace", 1)),
+            }],
+            carried_item: None,
+        })
+        .expect("client still connected");
+
+    let target_pos = BlockPos::new(3, 5, 3);
+    let furnace_id = resolve_state("minecraft:furnace");
+
+    handle
+        .send_action(ClientAction::UseItemOn {
+            hand: Hand::Main,
+            pos: target_pos,
+            face: BlockFace::Up,
+            cursor: Vec3f::new(0.5, 0.0, 0.5),
+            inside_block: false,
+            sequence: 1,
+        })
+        .expect("send use item on (place)");
+    handle
+        .wait_for(Duration::from_secs(30), |h| {
+            h.block_at(target_pos) == Some(furnace_id)
+        })
+        .await
+        .expect("placement confirmation never arrived");
+
+    // Right-click the *placed* furnace itself: `apply_use_item_on`'s new
+    // branch must recognise the existing block entity's menu and open its
+    // screen rather than attempt another placement (nothing about
+    // `target_pos`'s block state changes here at all).
+    handle
+        .send_action(ClientAction::UseItemOn {
+            hand: Hand::Main,
+            pos: target_pos,
+            face: BlockFace::Up,
+            cursor: Vec3f::new(0.5, 0.0, 0.5),
+            inside_block: false,
+            sequence: 2,
+        })
+        .expect("send use item on (open)");
+
+    handle
+        .wait_for(Duration::from_secs(30), |h| h.open_menu().is_some())
+        .await
+        .expect("furnace screen never opened");
+
+    let opened = handle.open_menu().expect("just waited for Some");
+    assert_eq!(
+        opened.menu_type.to_string(),
+        "minecraft:furnace",
+        "the real client must have decoded OPEN_SCREEN's menu id back to minecraft:furnace"
+    );
+    assert_eq!(
+        opened.menu.slot_count(),
+        3 + 36,
+        "a furnace's own 3 slots plus the standard 27-main + 9-hotbar player tail \
+         (CONTAINER_SET_CONTENT's item count is what sizes the client's menu)"
+    );
+
+    // Load one iron ore (ingredient, furnace menu slot 0) and one coal
+    // (fuel, slot 1) via a real `CONTAINER_CLICK` against the window the
+    // server just opened — the same "conjure the exact predicted diff"
+    // convention the placement test above already uses for the furnace item
+    // itself; there is no "mine ore, collect coal" flow in this test's
+    // scope, only the wire path from a client's predicted diff through to
+    // the server's own block entity.
+    handle
+        .send_action(ClientAction::ContainerClick {
+            window_id: opened.window_id,
+            state_id: 1,
+            slot: 0,
+            button: 0,
+            click_type: ContainerClickType::Pickup,
+            changed_slots: vec![
+                ContainerSlotChange {
+                    slot: 0,
+                    item: Some(stack("minecraft:iron_ore", 1)),
+                },
+                ContainerSlotChange {
+                    slot: 1,
+                    item: Some(stack("minecraft:coal", 1)),
+                },
+            ],
+            carried_item: None,
+        })
+        .expect("client still connected");
+
+    // Poll the *server's own* registry, not the client's reconciled menu:
+    // `apply_container_clicked` applies the click's diff directly with no
+    // confirmation packet sent back (`docs/server-inventory.md`'s
+    // established scope, which this landing extends unchanged to non-zero
+    // windows), so the server is the authority to observe here.
+    let loaded = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let ready = block_entities.with(|reg| match reg.get(target_pos) {
+                Some(BlockEntity::Furnace(f)) => {
+                    f.input().map(|s| s.item.to_string()) == Some("minecraft:iron_ore".to_string())
+                        && f.fuel().map(|s| s.item.to_string()) == Some("minecraft:coal".to_string())
+                }
+                _ => false,
+            });
+            if ready {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        loaded.is_ok(),
+        "the furnace's own input/fuel slots never reflected the real client's container click"
+    );
+
+    let (input, fuel) = block_entities.with(|reg| match reg.get(target_pos) {
+        Some(BlockEntity::Furnace(f)) => (f.input().cloned(), f.fuel().cloned()),
+        _ => (None, None),
+    });
+    assert_eq!(input, Some(stack("minecraft:iron_ore", 1)));
+    assert_eq!(fuel, Some(stack("minecraft:coal", 1)));
+
+    handle.shutdown();
+    let _ = handle.join().await;
+
+    let _summary = tokio::time::timeout(Duration::from_secs(10), server_task)
+        .await
+        .expect("serve_connection task did not finish in time")
+        .expect("serve_connection task panicked")
+        .expect("serve_connection returned an error");
+}
+
+/// **Control**: right-clicking a placed furnace must not spawn a *second*
+/// block entity or overwrite the existing one with a fresh, empty one — the
+/// "open, don't place" branch must be a real fork, not a no-op that happens
+/// to leave the earlier entry alone by coincidence.
+#[tokio::test]
+async fn opening_a_furnace_does_not_reset_its_already_loaded_contents() {
+    let view_radius = 0;
+    let (client_io, server_io) = memory_pair();
+    let block_entities = BlockEntityHandle::default();
+    let server_block_entities = block_entities.clone();
+    let target_pos = BlockPos::new(2, 4, 2);
+    server_block_entities.with(|reg| {
+        let mut furnace = Furnace::new(FurnaceKind::Furnace);
+        furnace.set_input(Some(stack("minecraft:iron_ore", 1)));
+        reg.insert(target_pos, BlockEntity::Furnace(furnace));
+    });
+
+    let server_task = tokio::spawn(async move {
+        let mut conn = Connection::new(server_io);
+        serve_connection(
+            &mut conn,
+            &V770ServerProtocol,
+            &AirSource::default(),
+            &NoEntities,
+            view_radius,
+            &server_block_entities,
+        )
+        .await
+    });
+
+    let (mut handle, _events) = ClientBuilder::new(
+        address(),
+        profile("FurnaceReopener"),
+        Box::new(adapter()),
+    )
+    .connect_with(client_io);
+
+    handle
+        .wait_for_spawn(Duration::from_secs(30))
+        .await
+        .expect("client never spawned");
+    handle
+        .wait_for_chunks(1, Duration::from_secs(30))
+        .await
+        .expect("initial column never arrived");
+
+    handle
+        .send_action(ClientAction::UseItemOn {
+            hand: Hand::Main,
+            pos: target_pos,
+            face: BlockFace::Up,
+            cursor: Vec3f::new(0.5, 0.0, 0.5),
+            inside_block: false,
+            sequence: 1,
+        })
+        .expect("send use item on (open)");
+    handle
+        .wait_for(Duration::from_secs(30), |h| h.open_menu().is_some())
+        .await
+        .expect("furnace screen never opened");
+
+    let opened = handle.open_menu().expect("just waited for Some");
+    assert_eq!(
+        opened.menu.slot_item(0).map(|item| item.item().to_string()),
+        Some("minecraft:iron_ore".to_string()),
+        "CONTAINER_SET_CONTENT must report the furnace's real, already-loaded \
+         input slot, not an empty freshly-placed one"
+    );
+
+    handle.shutdown();
+    let _ = handle.join().await;
+
+    let _summary = tokio::time::timeout(Duration::from_secs(10), server_task)
+        .await
+        .expect("serve_connection task did not finish in time")
+        .expect("serve_connection task panicked")
+        .expect("serve_connection returned an error");
+
+    let input = block_entities.with(|reg| match reg.get(target_pos) {
+        Some(BlockEntity::Furnace(f)) => f.input().cloned(),
+        _ => None,
+    });
+    assert_eq!(
+        input,
+        Some(stack("minecraft:iron_ore", 1)),
+        "opening the furnace must not have reset its input slot"
+    );
+    assert_eq!(
+        block_entities.with(|reg| reg.len()),
+        1,
+        "opening must not have inserted a second block entity at the same position"
     );
 }

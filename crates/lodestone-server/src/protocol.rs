@@ -235,6 +235,17 @@ pub enum ServerBound {
         /// already established here).
         carried_item: Option<ItemStack>,
     },
+    /// The client closed a container screen (`ServerboundContainerClosePacket`).
+    /// `window_id` is the id the client had open — vanilla's
+    /// `ServerPlayer::doCloseContainer` compares this against nothing at all
+    /// (it just closes whatever `containerMenu` currently is); this crate's
+    /// consumer instead compares it against the connection's own tracked open
+    /// window before clearing it, so a stale close for an already-replaced
+    /// window cannot clobber a newer one. See `crate::server`'s consumer.
+    ContainerClosed {
+        /// The window id the client reports closing.
+        window_id: i32,
+    },
     /// A packet the loop does not need to act on (chunk-batch
     /// acknowledgements, teleport confirmations, look-only or status-only
     /// movement). The loop ignores these but stays connected.
@@ -497,6 +508,73 @@ pub trait ServerProtocol: Send + Sync {
         let _ = entries;
         ServerDirective::None
     }
+
+    /// Opens a container's screen on the client (vanilla
+    /// `ClientboundOpenScreenPacket`, sent by `ServerPlayer::openMenu`).
+    /// `window_id` is the container id every subsequent `container_click`/
+    /// `container_close` for this window will carry (vanilla's
+    /// `nextContainerCounter`: `1..=100`, wrapping — see `crate::server`'s
+    /// consumer for why this crate mirrors that exact scheme rather than a
+    /// plain counter). `menu` is the vanilla `minecraft:*` menu identifier
+    /// (e.g. `"minecraft:furnace"`); `title` is the screen's display name
+    /// (this crate sends a plain literal string rather than vanilla's
+    /// translatable `container.furnace`-style component — cosmetic only, see
+    /// `crate::server`'s consumer for the fixed title table). The default
+    /// emits nothing, so a protocol without container support need not
+    /// override it.
+    fn encode_open_screen(&self, window_id: i32, menu: &str, title: &str) -> ServerDirective {
+        let _ = (window_id, menu, title);
+        ServerDirective::None
+    }
+
+    /// Encodes the clientbound `container_set_content` packet: every slot in
+    /// `items`, in vanilla menu order (the container's own slots first, then
+    /// the player's standard 27-main + 9-hotbar inventory rows every such
+    /// menu appends — never armour/off-hand, which only the player's own
+    /// window `0` exposes), plus the cursor/carried stack. `state_id` is
+    /// vanilla's `AbstractContainerMenu.stateId` at the time of the send —
+    /// this crate does not validate a click's echoed value against it (see
+    /// `docs/server-inventory.md`'s existing scope note for window `0`,
+    /// which now applies identically to any other window). The default
+    /// emits nothing.
+    fn encode_container_content(
+        &self,
+        window_id: i32,
+        state_id: i32,
+        items: &[Option<ItemStack>],
+        carried: Option<&ItemStack>,
+    ) -> ServerDirective {
+        let _ = (window_id, state_id, items, carried);
+        ServerDirective::None
+    }
+
+    /// Encodes the clientbound `container_set_slot` packet for exactly one
+    /// changed slot (vanilla `ClientboundContainerSetSlotPacket`), in the
+    /// same menu-slot numbering [`encode_container_content`](Self::encode_container_content)
+    /// uses. The default emits nothing.
+    fn encode_container_slot(
+        &self,
+        window_id: i32,
+        state_id: i32,
+        slot: i32,
+        item: Option<&ItemStack>,
+    ) -> ServerDirective {
+        let _ = (window_id, state_id, slot, item);
+        ServerDirective::None
+    }
+
+    /// Encodes the clientbound `container_set_data` packet for one changed
+    /// menu-local property (vanilla's `ContainerData`, e.g. a furnace's four
+    /// burn/cook timers — see `crate::furnace::Furnace::container_data`'s own
+    /// doc comment for the index table this feeds). Unlike a slot change,
+    /// vanilla does not bump the container's `stateId` for a data change
+    /// (`AbstractContainerMenu::broadcastChanges` calls `setData` directly,
+    /// never `incrementStateId`), so this carries no `state_id` parameter at
+    /// all. The default emits nothing.
+    fn encode_container_data(&self, window_id: i32, property: i32, value: i32) -> ServerDirective {
+        let _ = (window_id, property, value);
+        ServerDirective::None
+    }
 }
 
 /// Forwards every method to the boxed implementor, so a **trait object** can be
@@ -610,6 +688,34 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
     fn encode_game_rule_values(&self, entries: &[(String, String)]) -> ServerDirective {
         (**self).encode_game_rule_values(entries)
     }
+
+    fn encode_open_screen(&self, window_id: i32, menu: &str, title: &str) -> ServerDirective {
+        (**self).encode_open_screen(window_id, menu, title)
+    }
+
+    fn encode_container_content(
+        &self,
+        window_id: i32,
+        state_id: i32,
+        items: &[Option<ItemStack>],
+        carried: Option<&ItemStack>,
+    ) -> ServerDirective {
+        (**self).encode_container_content(window_id, state_id, items, carried)
+    }
+
+    fn encode_container_slot(
+        &self,
+        window_id: i32,
+        state_id: i32,
+        slot: i32,
+        item: Option<&ItemStack>,
+    ) -> ServerDirective {
+        (**self).encode_container_slot(window_id, state_id, slot, item)
+    }
+
+    fn encode_container_data(&self, window_id: i32, property: i32, value: i32) -> ServerDirective {
+        (**self).encode_container_data(window_id, property, value)
+    }
 }
 
 #[cfg(test)]
@@ -698,6 +804,30 @@ mod tests {
         }
         fn encode_game_rule_values(&self, entries: &[(String, String)]) -> ServerDirective {
             send(entries.len() as i32)
+        }
+        fn encode_open_screen(&self, window_id: i32, _menu: &str, _title: &str) -> ServerDirective {
+            send(300 + window_id)
+        }
+        fn encode_container_content(
+            &self,
+            window_id: i32,
+            state_id: i32,
+            items: &[Option<ItemStack>],
+            _carried: Option<&ItemStack>,
+        ) -> ServerDirective {
+            send(400 + window_id * 10 + state_id + items.len() as i32)
+        }
+        fn encode_container_slot(
+            &self,
+            window_id: i32,
+            state_id: i32,
+            slot: i32,
+            _item: Option<&ItemStack>,
+        ) -> ServerDirective {
+            send(500 + window_id * 100 + state_id * 10 + slot)
+        }
+        fn encode_container_data(&self, window_id: i32, property: i32, value: i32) -> ServerDirective {
+            send(600 + window_id * 100 + property * 10 + value)
         }
     }
 
@@ -789,6 +919,26 @@ mod tests {
             boxed.encode_game_rule_values(&rules),
             direct.encode_game_rule_values(&rules)
         );
+        assert_eq!(
+            boxed.encode_open_screen(7, "minecraft:furnace", "Furnace"),
+            direct.encode_open_screen(7, "minecraft:furnace", "Furnace")
+        );
+        let items = [None, Some(ItemStack::new(
+            ResourceKey::new("minecraft", "coal").expect("static key is valid"),
+            1,
+        ))];
+        assert_eq!(
+            boxed.encode_container_content(7, 1, &items, None),
+            direct.encode_container_content(7, 1, &items, None)
+        );
+        assert_eq!(
+            boxed.encode_container_slot(7, 1, 2, items[1].as_ref()),
+            direct.encode_container_slot(7, 1, 2, items[1].as_ref())
+        );
+        assert_eq!(
+            boxed.encode_container_data(7, 0, 42),
+            direct.encode_container_data(7, 0, 42)
+        );
 
         // -- control ---------------------------------------------------------
         // Every assertion above compares two answers, so it would also pass if
@@ -802,5 +952,21 @@ mod tests {
             ServerDirective::None
         );
         assert_ne!(direct.encode_game_rule_values(&rules), ServerDirective::None);
+        assert_ne!(
+            direct.encode_open_screen(7, "minecraft:furnace", "Furnace"),
+            ServerDirective::None
+        );
+        assert_ne!(
+            direct.encode_container_content(7, 1, &items, None),
+            ServerDirective::None
+        );
+        assert_ne!(
+            direct.encode_container_slot(7, 1, 2, items[1].as_ref()),
+            ServerDirective::None
+        );
+        assert_ne!(
+            direct.encode_container_data(7, 0, 42),
+            ServerDirective::None
+        );
     }
 }

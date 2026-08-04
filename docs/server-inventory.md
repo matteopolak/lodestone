@@ -109,11 +109,16 @@ actual point of running it server-side at all) is real future work.
   restated (not imported) from `lodestone-game`'s `menu.rs`; a change to one
   without the other is exactly the desync this doc comment exists to
   prevent — restate deliberately, don't share the dependency.
-- **A new window (a real chest, furnace, etc.)** — `apply_container_clicked`
-  currently drops anything but `window_id == 0`. This needs an
-  open-container model (issue #266's other packets, #250/#251/#252) before
-  a non-zero window has anywhere to land; do not special-case a window id
-  without one.
+- **A new window (a real chest, furnace, etc.)** — **partially done**: a
+  furnace or hopper (see `docs/block-entities.md`'s "gap 3 is closed too"
+  update) now has somewhere for a non-zero window to land, via
+  `crate::server::OpenContainer`/`sync_open_container` and
+  `crate::inventory::container_menu_slot`. There is still no real chest
+  block entity at all in this crate, and the brewing stand/composter remain
+  unopenable for the reasons that doc gives — extending this to a new
+  container kind means giving it a [`BlockEntity`](crate::block_entities::BlockEntity)
+  variant with a real `menu_name`/`container_slots`/`data_properties`, not
+  touching this file.
 - **Server-authoritative `doClick`** — would replace `apply_container_clicked`
   applying the client's diff with actually running `click.rs`'s verb table
   (or a server-side port of it) against `PlayerInventory`, and diffing its

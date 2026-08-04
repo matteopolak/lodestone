@@ -13,13 +13,13 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use lodestone_core::State;
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Difficulty};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack};
 use lodestone_net::{Connection, NetError, Transport};
 
-use crate::block_entities::{BlockEntityHandle, block_entity_for_item};
+use crate::block_entities::{BlockEntity, BlockEntityHandle, block_entity_for_item};
 use crate::chunk::{AIR, ChunkSource, STONE, is_air_or_fluid, is_water};
 use crate::fall::FallTracker;
-use crate::inventory::PlayerInventory;
+use crate::inventory::{ContainerMenuSlot, PlayerInventory, container_menu_slot};
 use crate::protocol::{EntitySnapshot, ServerBound, ServerDirective, ServerProtocol};
 use crate::vitals::{EYE_HEIGHT, PlayerVitals};
 
@@ -456,6 +456,7 @@ where
             | ServerBound::GameRuleChanged { .. }
             | ServerBound::CarriedItemChanged { .. }
             | ServerBound::ContainerClicked { .. }
+            | ServerBound::ContainerClosed { .. }
             | ServerBound::Ignored => {}
         }
     }
@@ -485,6 +486,213 @@ fn relative(pos: BlockPos, face: BlockFace) -> BlockPos {
     BlockPos::new(pos.x + dx, pos.y + dy, pos.z + dz)
 }
 
+/// Cadence of the periodic open-container sync ([`sync_open_container`]) —
+/// the piece that answers `docs/block-entities.md`'s own design question,
+/// "a furnace mutates its own container without a client click": nothing
+/// about that mutation is a response to any inbound packet, so a connection
+/// with a window open needs its own timer polling the block entity, exactly
+/// like [`VITALS_TICK_INTERVAL`] polls submersion. Matches the background
+/// tick loop's own cadence (`block_entities.rs`'s `BLOCK_ENTITY_TICK_INTERVAL`)
+/// so a change is visible within one real tick of it happening, not only the
+/// next time the client happens to send a packet.
+#[cfg(not(target_arch = "wasm32"))]
+const CONTAINER_SYNC_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Which block-entity container (if any) this connection currently has open:
+/// the container id the client will echo back in every `container_click`/
+/// `container_close` for it, the world position it targets, and how many of
+/// its own slots ([`BlockEntity::container_slots`]) precede the standard
+/// player-inventory tail in that menu's slot numbering (see
+/// `crate::inventory::container_menu_slot`, the click-side consumer of this
+/// same number).
+#[derive(Debug, Clone, Copy)]
+struct OpenContainer {
+    window_id: i32,
+    pos: BlockPos,
+    container_size: usize,
+    /// Vanilla's `AbstractContainerMenu.stateId`, wrapping at `32767`
+    /// (`AbstractContainerMenu::incrementStateId`). Bumped by every content/
+    /// slot send (this struct's own [`next_state_id`](Self::next_state_id)),
+    /// never by a `container_set_data` send — vanilla's `broadcastChanges`
+    /// does not touch `stateId` for a data-only change either. This crate
+    /// does not validate a click's echoed value against it (see
+    /// `docs/server-inventory.md`'s existing scope note for window `0`,
+    /// which applies identically here) — it exists so a real client
+    /// observes vanilla's own incrementing behaviour rather than a
+    /// suspicious constant.
+    state_id: i32,
+}
+
+impl OpenContainer {
+    /// Bumps and returns the next state id, matching
+    /// `AbstractContainerMenu::incrementStateId`'s exact wrap.
+    fn next_state_id(&mut self) -> i32 {
+        self.state_id = (self.state_id + 1) & 32767;
+        self.state_id
+    }
+}
+
+/// Per-connection bookkeeping for [`OpenContainer`]'s periodic sync
+/// ([`sync_open_container`]): the container slots and menu-data properties
+/// last pushed to the client, so a background mutation (a furnace's own
+/// tick, not any click) can be diffed and only the changed entries re-sent —
+/// the same shape [`EntityStreamer`] already established for entity spawn/
+/// update/remove.
+#[derive(Debug, Default, Clone)]
+struct ContainerSync {
+    slots: Vec<Option<ItemStack>>,
+    data: Vec<i32>,
+}
+
+/// Diffs `current_slots`/`current_data` (freshly read off the block entity at
+/// `open.pos`) against what [`ContainerSync`] last pushed to this
+/// connection, returning the directives that bring the client back in sync —
+/// only the entries that actually changed, each via
+/// [`ServerProtocol::encode_container_slot`]/[`encode_container_data`](ServerProtocol::encode_container_data).
+///
+/// This is the one piece of Job 1 with no client packet driving it at all:
+/// [`open_container_screen`] covers "a player opens a menu" and
+/// [`apply_container_clicked`] covers "a player clicks in one," but a
+/// furnace's own background tick (`crate::block_entities::run_block_entity_tick_loop`,
+/// running independently of any connection) is neither — see
+/// `docs/block-entities.md`'s own note on this. A caller (`serve_play`'s
+/// `container_sync_tick` arm) is expected to call this on its own timer,
+/// passing a fresh read of the entity's current state each time; this
+/// function does no I/O and no locking itself; a plain `#[test]` can drive
+/// it directly with no `Connection`/tokio runtime at all.
+fn sync_open_container<P: ServerProtocol>(
+    proto: &P,
+    open: &mut OpenContainer,
+    sync: &mut ContainerSync,
+    current_slots: Vec<Option<ItemStack>>,
+    current_data: Vec<i32>,
+) -> Vec<ServerDirective> {
+    let mut directives = Vec::new();
+    for (index, (new, old)) in current_slots.iter().zip(sync.slots.iter()).enumerate() {
+        if new != old {
+            let state_id = open.next_state_id();
+            directives.push(proto.encode_container_slot(
+                open.window_id,
+                state_id,
+                index as i32,
+                new.as_ref(),
+            ));
+        }
+    }
+    for (index, (new, old)) in current_data.iter().zip(sync.data.iter()).enumerate() {
+        if new != old {
+            directives.push(proto.encode_container_data(open.window_id, index as i32, *new));
+        }
+    }
+    sync.slots = current_slots;
+    sync.data = current_data;
+    directives
+}
+
+/// Vanilla's own per-menu display name is a translatable component
+/// (`container.furnace`, `container.hopper`, resolved client-side from the
+/// current language); [`ServerProtocol::encode_open_screen`] only ever
+/// writes a **literal** string component (see that trait method's own doc
+/// comment for why), so this is the literal English text substituted in its
+/// place — cosmetic only, never read by any gameplay logic on either side.
+fn container_title(menu: &str) -> &'static str {
+    match menu {
+        "minecraft:furnace" => "Furnace",
+        "minecraft:smoker" => "Smoker",
+        "minecraft:blast_furnace" => "Blast Furnace",
+        "minecraft:hopper" => "Hopper",
+        _ => "Container",
+    }
+}
+
+/// Opens a block-entity's container screen for this connection, mirroring
+/// vanilla's `ServerPlayer::openMenu` end to end: a fresh container id
+/// (`nextContainerCounter`: `1..=100`, wrapping — `ServerPlayer.java:1329-1331`),
+/// an `open_screen` send, then an immediate full `container_set_content`
+/// plus every `container_set_data` property (`initMenu`'s `addSlotListener`
+/// triggers `broadcastFullState` the instant the menu is constructed,
+/// `ServerPlayer.java:1343-1356`).
+///
+/// `pos` must already hold a [`BlockEntity`] whose [`BlockEntity::menu_name`]
+/// is `Some` — the caller ([`apply_use_item_on`]) checks this before calling
+/// in. The `container_set_content` item list is this entity's own
+/// [`BlockEntity::container_slots`] followed by the player's standard 27
+/// main-storage + 9 hotbar slots (never armour/off-hand — see
+/// `crate::inventory::ContainerMenuSlot`'s doc comment), with no
+/// cursor/carried stack (this crate's [`PlayerInventory`] tracks no cursor
+/// field at all — `docs/server-inventory.md`'s existing scope note, which
+/// applies identically to any window).
+#[allow(clippy::too_many_arguments)]
+async fn open_container_screen<T, P>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    state: &mut State,
+    block_entities: &BlockEntityHandle,
+    inventory: &PlayerInventory,
+    pos: BlockPos,
+    menu: &'static str,
+    next_window_id: &mut i32,
+    open_container: &mut Option<OpenContainer>,
+    container_sync: &mut ContainerSync,
+) -> Result<(), ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+{
+    *next_window_id = *next_window_id % 100 + 1;
+    let window_id = *next_window_id;
+
+    let (own_slots, data) = block_entities.with(|reg| match reg.get(pos) {
+        Some(entity) => (entity.container_slots(), entity.data_properties()),
+        None => (Vec::new(), Vec::new()),
+    });
+
+    apply(
+        conn,
+        state,
+        proto.encode_open_screen(window_id, menu, container_title(menu)),
+    )
+    .await?;
+
+    let mut items = own_slots.clone();
+    for native in 9..=35 {
+        items.push(inventory.native(native).cloned());
+    }
+    for native in 0..=8 {
+        items.push(inventory.native(native).cloned());
+    }
+
+    let mut opened = OpenContainer {
+        window_id,
+        pos,
+        container_size: own_slots.len(),
+        state_id: 0,
+    };
+    let state_id = opened.next_state_id();
+    apply(
+        conn,
+        state,
+        proto.encode_container_content(window_id, state_id, &items, None),
+    )
+    .await?;
+
+    for (index, value) in data.iter().enumerate() {
+        apply(
+            conn,
+            state,
+            proto.encode_container_data(window_id, index as i32, *value),
+        )
+        .await?;
+    }
+
+    *open_container = Some(opened);
+    *container_sync = ContainerSync {
+        slots: own_slots,
+        data,
+    };
+    Ok(())
+}
+
 /// Applies one block-breaking phase, mirroring
 /// `ServerPlayerGameMode.handleBlockBreakAction`'s three destroy ordinals —
 /// simplified per this crate's documented scope (`docs/block-edit.md`): no
@@ -499,12 +707,29 @@ fn relative(pos: BlockPos, face: BlockFace) -> BlockPos {
 /// `AbortDestroy` does not, and what makes a `StopDestroy` for a position
 /// nobody started a no-op, mirroring vanilla's own
 /// `pos.equals(this.destroyPos)` guard (`ServerPlayerGameMode.java:217`).
+///
+/// **Also removes a broken position's [`BlockEntity`], if any, from the
+/// registry** — `docs/block-entities.md`'s own note that only placement
+/// wrote into the registry ("once block breaking learns to consult this
+/// registry" was future work) now matters for correctness, not just
+/// tidiness: a real screen can be open against one, and leaving a dangling
+/// entry would let a stale `container_click` keep mutating a container
+/// backing a block that no longer exists. If the connection's own
+/// [`OpenContainer`] pointed at the broken position, it is cleared too —
+/// this crate does not send a `container_close` to force the client's UI
+/// shut in that case (a real, documented gap, not attempted here; vanilla's
+/// own equivalent is `AbstractContainerMenu::stillValid` polling, which this
+/// crate does not model).
+#[allow(clippy::too_many_arguments)]
 async fn apply_block_action<T, P, S>(
     conn: &mut Connection<T>,
     proto: &P,
     source: &S,
     state: &mut State,
     pending_break: &mut Option<BlockPos>,
+    block_entities: &BlockEntityHandle,
+    open_container: &mut Option<OpenContainer>,
+    container_sync: &mut ContainerSync,
     action: BlockActionKind,
     pos: BlockPos,
 ) -> Result<(), ServerError>
@@ -526,6 +751,13 @@ where
             if *pending_break == Some(pos) {
                 *pending_break = None;
                 source.set_block(pos.x, pos.y, pos.z, AIR);
+                block_entities.with(|reg| {
+                    reg.remove(pos);
+                });
+                if open_container.as_ref().is_some_and(|open| open.pos == pos) {
+                    *open_container = None;
+                    *container_sync = ContainerSync::default();
+                }
                 let directive = proto.encode_block_update(pos.x, pos.y, pos.z, AIR);
                 apply(conn, state, directive).await?;
             }
@@ -563,6 +795,19 @@ where
 /// sends both regardless of whether the placement succeeded — this doubles
 /// as the correction for a client that predicted a placement the server
 /// rejected.
+///
+/// **Right-clicking a block that already has an *openable* container opens
+/// its screen instead of attempting a placement at all** — the closing half
+/// of `docs/block-entities.md`'s gap 3. Mirrors vanilla's own order:
+/// `ServerGamePacketListenerImpl.handleUseItemOn` runs the clicked block's
+/// own `useItemOn`/`useWithoutItem` (which is what opens a furnace/hopper's
+/// menu) **before** any `BlockPlaceContext` placement logic, and a block
+/// that opens a menu never falls through to placement. See
+/// [`BlockEntity::menu_name`]'s own doc comment for why a composter or
+/// brewing stand at `pos` does *not* take this branch (each for a different
+/// reason) and instead falls through to the placement logic below exactly
+/// as before this change.
+#[allow(clippy::too_many_arguments)]
 async fn apply_use_item_on<T, P, S>(
     conn: &mut Connection<T>,
     proto: &P,
@@ -572,12 +817,32 @@ async fn apply_use_item_on<T, P, S>(
     face: BlockFace,
     inventory: &PlayerInventory,
     block_entities: &BlockEntityHandle,
+    next_window_id: &mut i32,
+    open_container: &mut Option<OpenContainer>,
+    container_sync: &mut ContainerSync,
 ) -> Result<(), ServerError>
 where
     T: Transport,
     P: ServerProtocol,
     S: ChunkSource,
 {
+    let existing_menu = block_entities.with(|reg| reg.get(pos).and_then(BlockEntity::menu_name));
+    if let Some(menu) = existing_menu {
+        return open_container_screen(
+            conn,
+            proto,
+            state,
+            block_entities,
+            inventory,
+            pos,
+            menu,
+            next_window_id,
+            open_container,
+            container_sync,
+        )
+        .await;
+    }
+
     let neighbour = relative(pos, face);
     let clicked = source.block_state(pos.x, pos.y, pos.z);
     let target = if is_air_or_fluid(&clicked) { pos } else { neighbour };
@@ -715,12 +980,17 @@ fn apply_carried_item_changed(inventory: &mut PlayerInventory, slot: u8) {
 ///
 /// **Scope, stated plainly**: this does not re-run vanilla's `doClick` state
 /// machine server-side. It applies the client's own predicted diff
-/// (`changed_slots`) directly into [`PlayerInventory`], and only for
-/// `window_id == 0` (the player's own inventory) — any other window is
-/// decoded but dropped here, since this crate has no open-container model to
-/// apply into yet (issue #266's other 15 packets, and #250-#252's
-/// hopper/furnace/brewing-stand features, are what would give a non-zero
-/// window somewhere to land).
+/// (`changed_slots`) directly, either into [`PlayerInventory`] (`window_id
+/// == 0`, the player's own inventory) or into the block entity backing the
+/// connection's currently [`OpenContainer`] (any other window, split by
+/// `crate::inventory::container_menu_slot` into "the block entity's own
+/// slot" vs. "the player's standard inventory tail" — see that function's
+/// own doc comment for the layout).
+///
+/// A click against a non-zero `window_id` that does not match the
+/// connection's own tracked [`OpenContainer`] (a stale click for a window
+/// that has since closed or been replaced) is decoded but dropped, not
+/// misapplied to whatever happens to be open now.
 ///
 /// This is a deliberate scope cut, not an oversight, and it is *exactly*
 /// consistent with today's actual desync risk: `docs/container-clicks.md`
@@ -739,14 +1009,37 @@ fn apply_carried_item_changed(inventory: &mut PlayerInventory, slot: u8) {
 /// `crate::inventory`'s module doc comment.
 fn apply_container_clicked(
     inventory: &mut PlayerInventory,
+    block_entities: &BlockEntityHandle,
+    open_container: Option<&OpenContainer>,
     window_id: i32,
-    changed_slots: Vec<(i32, Option<lodestone_model::ItemStack>)>,
+    changed_slots: Vec<(i32, Option<ItemStack>)>,
 ) {
-    if window_id != 0 {
+    if window_id == 0 {
+        for (menu_slot, item) in changed_slots {
+            inventory.apply_menu_slot_change(menu_slot, item);
+        }
+        return;
+    }
+    let Some(open) = open_container else {
+        return;
+    };
+    if open.window_id != window_id {
         return;
     }
     for (menu_slot, item) in changed_slots {
-        inventory.apply_menu_slot_change(menu_slot, item);
+        match container_menu_slot(open.container_size, menu_slot) {
+            Some(ContainerMenuSlot::Own(index)) => {
+                block_entities.with(|reg| {
+                    if let Some(entity) = reg.get_mut(open.pos) {
+                        entity.set_container_slot(index, item.clone());
+                    }
+                });
+            }
+            Some(ContainerMenuSlot::Player(native)) => {
+                inventory.set_native(native, item);
+            }
+            None => {}
+        }
     }
 }
 
@@ -780,6 +1073,9 @@ async fn dispatch_play_packet<T, P, S>(
     admin: &mut WorldAdminState,
     inventory: &mut PlayerInventory,
     block_entities: &BlockEntityHandle,
+    open_container: &mut Option<OpenContainer>,
+    container_sync: &mut ContainerSync,
+    next_window_id: &mut i32,
     packet_id: i32,
     payload: &[u8],
 ) -> Result<(), ServerError>
@@ -818,15 +1114,39 @@ where
             face: _,
             sequence: _,
         } => {
-            apply_block_action(conn, proto, source, state, pending_break, action, pos).await?;
+            apply_block_action(
+                conn,
+                proto,
+                source,
+                state,
+                pending_break,
+                block_entities,
+                open_container,
+                container_sync,
+                action,
+                pos,
+            )
+            .await?;
         }
         ServerBound::UseItemOn {
             pos,
             face,
             sequence: _,
         } => {
-            apply_use_item_on(conn, proto, source, state, pos, face, inventory, block_entities)
-                .await?;
+            apply_use_item_on(
+                conn,
+                proto,
+                source,
+                state,
+                pos,
+                face,
+                inventory,
+                block_entities,
+                next_window_id,
+                open_container,
+                container_sync,
+            )
+            .await?;
         }
         ServerBound::DifficultyChanged { difficulty } => {
             admin.difficulty = difficulty;
@@ -848,7 +1168,19 @@ where
             changed_slots,
             carried_item: _,
         } => {
-            apply_container_clicked(inventory, window_id, changed_slots);
+            apply_container_clicked(
+                inventory,
+                block_entities,
+                open_container.as_ref(),
+                window_id,
+                changed_slots,
+            );
+        }
+        ServerBound::ContainerClosed { window_id } => {
+            if open_container.as_ref().is_some_and(|open| open.window_id == window_id) {
+                *open_container = None;
+                *container_sync = ContainerSync::default();
+            }
         }
         ServerBound::Handshake { .. }
         | ServerBound::LoginStart { .. }
@@ -933,6 +1265,12 @@ where
     let mut fall = FallTracker::default();
     let mut admin = WorldAdminState::default();
     let mut inventory = PlayerInventory::default();
+    let mut open_container: Option<OpenContainer> = None;
+    let mut container_sync = ContainerSync::default();
+    // Vanilla's `ServerPlayer::nextContainerCounter` starts at `0` and the
+    // very first open bumps it to `1` before use (`ServerPlayer.java:1330,
+    // 1343`) — see [`open_container_screen`]'s own `% 100 + 1` wrap.
+    let mut next_window_id: i32 = 0;
     let mut keep_alive_tick = tokio::time::interval_at(
         tokio::time::Instant::now() + KEEP_ALIVE_INTERVAL,
         KEEP_ALIVE_INTERVAL,
@@ -953,6 +1291,14 @@ where
     let mut vitals_tick = tokio::time::interval_at(
         tokio::time::Instant::now() + VITALS_TICK_INTERVAL,
         VITALS_TICK_INTERVAL,
+    );
+    // Same reasoning again: anchored one interval out so the first sync
+    // does not fire in the same instant as join (there is nothing open yet
+    // at join, so this is cosmetic here, but consistent with every other
+    // timer in this function).
+    let mut container_sync_tick = tokio::time::interval_at(
+        tokio::time::Instant::now() + CONTAINER_SYNC_INTERVAL,
+        CONTAINER_SYNC_INTERVAL,
     );
     let play_start = tokio::time::Instant::now();
     let mut next_keep_alive_id: i64 = 0;
@@ -978,6 +1324,9 @@ where
                     &mut admin,
                     &mut inventory,
                     block_entities,
+                    &mut open_container,
+                    &mut container_sync,
+                    &mut next_window_id,
                     packet_id,
                     &payload,
                 )
@@ -1018,6 +1367,26 @@ where
                     }
                     if outcome.damage.is_some() {
                         apply(conn, &mut state, proto.encode_set_health(vitals.health())).await?;
+                    }
+                }
+            }
+
+            _ = container_sync_tick.tick() => {
+                // The piece with no inbound packet driving it at all: a
+                // furnace's own background tick loop
+                // (`crate::block_entities::run_block_entity_tick_loop`) mutates
+                // the registry independently of any connection, so this
+                // connection needs its own timer to notice — see
+                // `sync_open_container`'s own doc comment.
+                if let Some(open) = open_container.as_mut() {
+                    let (slots, data) = block_entities.with(|reg| match reg.get(open.pos) {
+                        Some(entity) => (entity.container_slots(), entity.data_properties()),
+                        None => (Vec::new(), Vec::new()),
+                    });
+                    for directive in
+                        sync_open_container(proto, open, &mut container_sync, slots, data)
+                    {
+                        apply(conn, &mut state, directive).await?;
                     }
                 }
             }
@@ -1068,6 +1437,17 @@ where
     let mut fall = FallTracker::default();
     let mut admin = WorldAdminState::default();
     let mut inventory = PlayerInventory::default();
+    // Same gap as `vitals` above, for the same reason: `sync_open_container`
+    // (the piece that pushes a furnace's own background-tick mutation to an
+    // open window with no packet driving it) only ever runs off
+    // `container_sync_tick`, a `tokio::time::interval` the native loop's
+    // `serve_play` owns and this target has none of. A window can still be
+    // *opened* and *clicked into* here (both packet-driven, and both go
+    // through the shared `dispatch_play_packet` call below identically to
+    // native) — only the no-click background sync is missing on `wasm32`.
+    let mut open_container: Option<OpenContainer> = None;
+    let mut container_sync = ContainerSync::default();
+    let mut next_window_id: i32 = 0;
 
     while let Some((packet_id, payload)) = conn.read_packet().await? {
         dispatch_play_packet(
@@ -1085,6 +1465,9 @@ where
             &mut admin,
             &mut inventory,
             block_entities,
+            &mut open_container,
+            &mut container_sync,
+            &mut next_window_id,
             packet_id,
             &payload,
         )
@@ -1100,6 +1483,7 @@ where
 mod tests {
     use super::*;
     use crate::chunk::ChunkColumn;
+    use crate::furnace::{Furnace, FurnaceKind};
     use lodestone_model::{Rotation, Vec3};
     use uuid::Uuid;
 
@@ -1229,5 +1613,249 @@ mod tests {
         let out = s.sync(&TagProto, &[snap(10, 0.0), snap(20, 0.0)]); // 20 back
         assert_eq!(out.len(), 1);
         assert_eq!(sent(&out[0]), (ADD, [20u8].as_slice()));
+    }
+
+    // -- container screens (Job 1: OPEN_SCREEN/CONTAINER_SET_CONTENT/SLOT/DATA) --
+
+    fn stack(item: &str, count: u32) -> ItemStack {
+        ItemStack::new(item.parse().expect("valid resource key"), count)
+    }
+
+    const SLOT: i32 = 20;
+    const DATA: i32 = 21;
+
+    /// A protocol double whose container encoders tag each directive with a
+    /// distinct packet id, `window_id`, and `state_id`/`property` — enough
+    /// for [`sync_open_container`]'s tests to read the diff *decisions* back
+    /// off the returned directives without needing the real `lodestone-v770`
+    /// wire encoding. Every other method is unreachable from these tests.
+    struct ContainerTagProto;
+
+    impl ServerProtocol for ContainerTagProto {
+        fn decode(&self, _s: State, _id: i32, _p: &[u8]) -> ServerBound {
+            unimplemented!()
+        }
+        fn login_success(&self, _u: &str, _uuid: Uuid) -> Vec<ServerDirective> {
+            unimplemented!()
+        }
+        fn begin_configuration(&self) -> Vec<ServerDirective> {
+            unimplemented!()
+        }
+        fn begin_play(&self, _r: i32) -> Vec<ServerDirective> {
+            unimplemented!()
+        }
+        fn begin_chunk_batch(&self) -> ServerDirective {
+            unimplemented!()
+        }
+        fn encode_chunk(&self, _cx: i32, _cz: i32, _c: &ChunkColumn) -> ServerDirective {
+            unimplemented!()
+        }
+        fn end_chunk_batch(&self, _n: i32) -> ServerDirective {
+            unimplemented!()
+        }
+        fn encode_container_slot(
+            &self,
+            window_id: i32,
+            state_id: i32,
+            slot: i32,
+            item: Option<&ItemStack>,
+        ) -> ServerDirective {
+            ServerDirective::Send {
+                packet_id: SLOT,
+                payload: vec![
+                    window_id as u8,
+                    state_id as u8,
+                    slot as u8,
+                    item.map_or(0, |s| s.count as u8),
+                ],
+            }
+        }
+        fn encode_container_data(&self, window_id: i32, property: i32, value: i32) -> ServerDirective {
+            ServerDirective::Send {
+                packet_id: DATA,
+                payload: vec![window_id as u8, property as u8, value as u8],
+            }
+        }
+    }
+
+    fn open(pos: BlockPos, container_size: usize) -> OpenContainer {
+        OpenContainer {
+            window_id: 7,
+            pos,
+            container_size,
+            state_id: 0,
+        }
+    }
+
+    #[test]
+    fn sync_open_container_emits_nothing_when_nothing_changed() {
+        let mut o = open(BlockPos::new(0, 0, 0), 3);
+        let mut sync = ContainerSync {
+            slots: vec![Some(stack("minecraft:coal", 1)), None, None],
+            data: vec![10, 20],
+        };
+        let out = sync_open_container(
+            &ContainerTagProto,
+            &mut o,
+            &mut sync,
+            vec![Some(stack("minecraft:coal", 1)), None, None],
+            vec![10, 20],
+        );
+        assert!(out.is_empty(), "unchanged container must not re-send: {out:?}");
+    }
+
+    /// The exact scenario this function exists for: a furnace's own
+    /// background tick lights it (data property 0 changes) and later
+    /// produces an ingot (slot 2 changes) — no click involved at all.
+    #[test]
+    fn sync_open_container_emits_only_the_changed_slot_and_data_entries() {
+        let mut o = open(BlockPos::new(0, 0, 0), 3);
+        let mut sync = ContainerSync {
+            slots: vec![Some(stack("minecraft:iron_ore", 1)), Some(stack("minecraft:coal", 1)), None],
+            data: vec![0, 0, 0, 200],
+        };
+        let out = sync_open_container(
+            &ContainerTagProto,
+            &mut o,
+            &mut sync,
+            vec![None, Some(stack("minecraft:coal", 1)), Some(stack("minecraft:iron_ingot", 1))],
+            // Only index 0 (`lit_time_remaining`) changes here — index 1
+            // (`lit_total_time`) is deliberately held constant so this
+            // fixture isolates "exactly one data property changed" rather
+            // than also exercising two simultaneous data changes (a real
+            // ignition tick does change both at once, but that is not what
+            // this particular test is asserting).
+            vec![190, 0, 0, 200],
+        );
+        // Slot 0 (iron ore consumed) and slot 2 (ingot produced) changed;
+        // slot 1 (fuel) did not.
+        let ServerDirective::Send { packet_id, payload } = &out[0] else {
+            panic!("expected Send");
+        };
+        assert_eq!(*packet_id, SLOT);
+        assert_eq!(payload[2], 0, "slot index 0 changed first");
+        let ServerDirective::Send { packet_id, payload } = &out[1] else {
+            panic!("expected Send");
+        };
+        assert_eq!(*packet_id, SLOT);
+        assert_eq!(payload[2], 2, "slot index 2 changed second");
+        // Data property 0 (lit_time_remaining) changed.
+        let ServerDirective::Send { packet_id, payload } = &out[2] else {
+            panic!("expected Send");
+        };
+        assert_eq!(*packet_id, DATA);
+        assert_eq!(payload[1], 0, "property index 0 changed");
+        assert_eq!(out.len(), 3);
+        // The sync's own bookkeeping must now hold the new values, so the
+        // *next* call diffs against these, not the stale ones.
+        assert_eq!(sync.slots[2], Some(stack("minecraft:iron_ingot", 1)));
+        assert_eq!(sync.data[0], 190);
+    }
+
+    /// **Control**: every slot/data send must bump `state_id` (vanilla's
+    /// `incrementStateId`), and a data-only change must bump it **zero**
+    /// times — proving the two encoders are not accidentally sharing one
+    /// counter increment.
+    #[test]
+    fn sync_open_container_bumps_state_id_only_for_slot_sends() {
+        let mut o = open(BlockPos::new(0, 0, 0), 1);
+        let mut sync = ContainerSync {
+            slots: vec![None],
+            data: vec![0],
+        };
+        assert_eq!(o.state_id, 0);
+        let _ = sync_open_container(
+            &ContainerTagProto,
+            &mut o,
+            &mut sync,
+            vec![None],
+            vec![1], // data-only change
+        );
+        assert_eq!(o.state_id, 0, "a data-only change must not bump state_id");
+
+        let _ = sync_open_container(
+            &ContainerTagProto,
+            &mut o,
+            &mut sync,
+            vec![Some(stack("minecraft:coal", 1))], // slot change
+            vec![1],
+        );
+        assert_eq!(o.state_id, 1, "a slot change must bump state_id exactly once");
+    }
+
+    #[test]
+    fn container_clicked_against_window_zero_applies_to_player_inventory() {
+        let mut inventory = PlayerInventory::new();
+        let block_entities = BlockEntityHandle::new();
+        apply_container_clicked(
+            &mut inventory,
+            &block_entities,
+            None,
+            0,
+            vec![(9, Some(stack("minecraft:stone", 1)))],
+        );
+        assert_eq!(inventory.native(9), Some(&stack("minecraft:stone", 1)));
+    }
+
+    /// A click against the connection's *open* non-zero window splits by
+    /// [`container_menu_slot`]: a low menu index lands in the block entity's
+    /// own slot, a higher one lands in the player's standard inventory tail
+    /// — both through the *same* click, proving the split is real rather
+    /// than one arm being untested.
+    #[test]
+    fn container_clicked_against_an_open_window_splits_own_slot_from_player_tail() {
+        let mut inventory = PlayerInventory::new();
+        let block_entities = BlockEntityHandle::new();
+        let pos = BlockPos::new(1, 2, 3);
+        block_entities.with(|reg| {
+            reg.insert(pos, BlockEntity::Furnace(Furnace::new(FurnaceKind::Furnace)));
+        });
+        let open = open(pos, 3);
+
+        apply_container_clicked(
+            &mut inventory,
+            &block_entities,
+            Some(&open),
+            7,
+            vec![
+                (1, Some(stack("minecraft:coal", 1))),  // furnace's own fuel slot
+                (3, Some(stack("minecraft:stone", 1))), // menu slot 3 -> player native 9
+            ],
+        );
+
+        let furnace_fuel = block_entities.with(|reg| match reg.get(pos) {
+            Some(BlockEntity::Furnace(f)) => f.fuel().cloned(),
+            _ => None,
+        });
+        assert_eq!(furnace_fuel, Some(stack("minecraft:coal", 1)));
+        assert_eq!(inventory.native(9), Some(&stack("minecraft:stone", 1)));
+    }
+
+    /// **Control**: a click carrying the *wrong* (stale) window id must not
+    /// mutate anything — the guard that stops a click for an already-closed
+    /// or already-replaced window from landing on whatever is open now.
+    #[test]
+    fn container_clicked_against_a_stale_window_id_is_dropped() {
+        let mut inventory = PlayerInventory::new();
+        let block_entities = BlockEntityHandle::new();
+        let pos = BlockPos::new(1, 2, 3);
+        block_entities.with(|reg| {
+            reg.insert(pos, BlockEntity::Furnace(Furnace::new(FurnaceKind::Furnace)));
+        });
+        let open = open(pos, 3); // window_id 7
+
+        apply_container_clicked(
+            &mut inventory,
+            &block_entities,
+            Some(&open),
+            8, // stale/mismatched window id
+            vec![(0, Some(stack("minecraft:coal", 1)))],
+        );
+
+        let furnace_input = block_entities.with(|reg| match reg.get(pos) {
+            Some(BlockEntity::Furnace(f)) => f.input().cloned(),
+            _ => None,
+        });
+        assert_eq!(furnace_input, None, "a stale window id must not mutate the block entity");
     }
 }
