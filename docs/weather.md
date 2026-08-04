@@ -126,9 +126,15 @@ pins both hypotheses.
 
 Reaching pixels from the wire, end to end:
 
-* **Rain droplets.** Angled camera-relative quads, 441 columns at the default radius,
-  density scaled by the rain level, depth-tested against terrain, alpha-blended, no
-  depth write.
+* **Rain and snow droplets, correctly chosen per column.** Angled camera-relative
+  quads, 441 columns at the default radius, density scaled by the rain level,
+  depth-tested against terrain, alpha-blended, no depth write. `ShellWeatherProbe::
+  precipitation` (`app.rs`) resolves the standing biome per column (`ClientHandle::
+  section_at` + `ChunkSection::biome_at_block`) and looks its climate up in
+  `net::BiomeClimateCell`, folded from `ClientEvent::BiomeClimates` at `Login`
+  exactly as `WeatherCell` folds `WeatherChanged`; vanilla's own threshold decides
+  the split (`Biome.java:176`, height-adjusted temperature `>= 0.15` is rain, below
+  is snow). See "Snow: closed" below for the exact hop and its live gate.
 * **Sky, horizon, terrain fog and the below-horizon clear colour**, darkened by both
   rain and thunder — one composition, so the four can never disagree.
 * **The lightmap**, via the existing `sky_darken` lane, so terrain, mobs *and* the
@@ -140,15 +146,14 @@ Not reaching pixels, each for a named reason:
 
 | gap | blocker |
 |---|---|
-| **Snow** | The decode is closed (see below); `ShellWeatherProbe::precipitation` still hard-codes `Rain` — a prepared, unapplied patch, not yet landed. |
 | **Rain ambience** | `Sim`'s `ShellAudio` is private with no public play method. |
 | **Lightning bolt geometry** | The bolt's own model; deferred (see "Deferred"). |
 | **Rain splash particles** | `ClientLevel.tickWeatherEffects`' `ParticleTypes.RAIN`; needs the per-column heightmap below. |
 | **Per-column terrain height and `canSeeSky`** | No `column_height` accessor on `ClientHandle`. |
 
-### Snow: the biome lane, precisely
+### Snow: closed
 
-**Decode: closed as of the #25/#26 biome-climate-lane session.** Biome **holder ids**
+**Both halves are closed.** Biome **holder ids**
 reach the client two ways — the initial `level_chunk_with_light`'s per-section biome
 container, and, since that session, a live update via `chunks_biomes`
 (`World::merge_biomes`, `crates/lodestone-world/src/world.rs`) — and
@@ -173,20 +178,29 @@ Mojang's own `worldgen/biome/*.json` files in
 `crates/protocol/v770/tests/live_registry_data.rs::biome_climates_from_a_real_server_match_mojangs_own_biome_files`,
 measured 66/66 biomes resolved and matching on the creative oracle).
 
-**Not yet closed: the probe.** `ShellWeatherProbe::precipitation`
-(`crates/lodestone-shell/src/app.rs`) still returns `Rain` unconditionally — `app.rs` was
-under active edit by another agent for the whole #25/#26 session (five other patches
-already queued against it), so the wiring was written up as a patch rather than applied.
-The remaining shape: a `BiomeClimateCell` in `net.rs` (mirroring `WeatherCell`, folded
-from `BiomeClimates` in `forward`'s arm), and `ShellWeatherProbe::precipitation` reading
-the block's biome via `ClientHandle::section_at(pos, section_index)` +
-`ChunkSection::biome_at_block` (no new `ClientHandle` method needed — `section_at`
-already hands back a full section), looking that biome's climate up in the cell, and
-calling `height_adjusted_temperature` then `precipitation_for_temperature` — both
-already implemented and unit-tested in `lodestone-render`'s `weather.rs`, unchanged by
-this session. `RenderState::weather_rain_columns()` is exposed next to
-`weather_columns()` for exactly this: the day the two stop being equal is the day snow
-started working.
+**The probe: closed.** `ShellWeatherProbe::precipitation` (`crates/lodestone-shell/src/app.rs`)
+no longer hard-codes `Rain`. `net::BiomeClimateCell` mirrors `WeatherCell` — a `Mutex<Vec<..>>`,
+not lock-free atomics, since the whole table replaces once per `Login` rather than changing
+per-tick — and is folded by `net::forward`'s `BiomeClimates` arm exactly where `WeatherChanged`
+folds into `WeatherCell`. `ShellWeatherProbe::biome_precipitation` reads the block's biome via
+`ClientHandle::section_at(pos, section_index)` + `ChunkSection::biome_at_block`, looks that
+biome's climate up in the cell, and calls `height_adjusted_temperature` then
+`precipitation_for_temperature` — both already implemented and unit-tested in
+`lodestone-render`'s `weather.rs`, unchanged by this patch. Every unresolved hop (world not
+loaded, section elided, climate table still empty, or the biome's own fields unresolved) falls
+back to `Rain`, matching `sky_visible`'s own "absent data reads as open sky" rule.
+
+Gated three ways: `net::tests::forward_folds_biome_climates_into_the_cell_without_using_the_channel`
+(the fold, hermetic), `net::tests::a_real_frozen_biome_crosses_vanillas_own_rain_snow_threshold_and_a_dry_one_does_not`
+(vanilla's own `0.15` threshold — `Biome.java:176` — against real frozen_peaks/desert values
+copied from `.cache/mc/26.2/src/data/minecraft/worldgen/biome/`, hermetic), and
+`app::tests::live_precipitation_matches_vanillas_own_threshold_for_real_biomes` (`#[ignore]`d,
+against the survival oracle: connects through `ClientBuilder` directly, captures the real
+`ClientEvent::BiomeClimates` off the raw stream, and cross-checks `ShellWeatherProbe::
+precipitation` at real loaded columns against an independently-derived expectation — not a
+call to `lodestone_render::weather`, to avoid the `decode(encode(x)) == x` trap. Measured live:
+spawn biome 40 (temperature 0.8) answers `Rain`; biome 52 (temperature 0.2, height-adjusted to
+~0.12) answers `Snow` — both branches genuinely reached in one run).
 
 <details><summary>Original plan (superseded by the field-vs-variant finding above)</summary>
 
