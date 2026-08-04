@@ -6,7 +6,7 @@ use lodestone_core::{Ctx, Decode, Encode, Reader, Writer};
 use lodestone_model::{
     AdapterError, BlockActionKind, BlockFace, ChatKind, ChatMode, ChunkPos, ClientAction,
     ClientEvent, ClientSettings, ConnectionState, Directive, DisplayedSkinParts, EntityInteraction,
-    EntityMovement, GameMode, Hand, LoginProfile, MainHand, PlayerCommand,
+    EntityMovement, GameMode, Hand, LoginProfile, MainHand, PlayerCommand, RecipeBookType,
     ResourcePackResponseKind, Rotation, ServerAddress, TeleportFlags, Text, Vec3, VersionAdapter,
     WorldSink,
 };
@@ -21,9 +21,9 @@ use crate::packets::entity::{
     NamedEntitySpawn, RelEntityMove, SpawnEntityLiving, SpawnObject,
 };
 use crate::packets::game::{
-    BlockDig, BlockPlace, ClientboundChat, ClientboundPositionLook, EntityAction, JoinGame,
-    KickDisconnect, ServerboundArmAnimation, ServerboundChat, ServerboundPositionLook,
-    TeleportConfirm, UseEntity, UseEntityAt, UseEntityInteract,
+    BlockDig, BlockPlace, ClientCommand, ClientboundChat, ClientboundPositionLook, EntityAction,
+    JoinGame, KickDisconnect, ServerboundArmAnimation, ServerboundChat, ServerboundPositionLook,
+    Spectate, TeleportConfirm, UseEntity, UseEntityAt, UseEntityInteract,
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{EncryptionRequest, LoginDisconnect, LoginSuccess, SetCompression};
@@ -114,6 +114,24 @@ fn encode_body<T: Encode>(packet: &T) -> Result<Vec<u8>, AdapterError> {
         .encode(&mut writer, CTX)
         .map_err(|err| AdapterError::Encode(err.to_string()))?;
     Ok(writer.into_vec())
+}
+
+/// Encodes the serverbound `crafting_book_data` packet body for the
+/// "settings changed" variant (`type` = `1`): a leading varint discriminant,
+/// then the open flag and filter flag.
+///
+/// 1.12.2 folds two unrelated recipe-book actions into one packet via a
+/// varint `type` switch (`0` = displayed-recipe id, `1` = settings changed;
+/// minecraft-data's `packet_crafting_book_data`), so this can't be a plain
+/// derived struct the way [`ClientCommand`]/[`Spectate`] are. `type` = `0`
+/// (recipe seen) is not encoded here — see the adapter's
+/// `RecipeBookSeenRecipe` arm for why.
+fn encode_crafting_book_settings(open: bool, filtering: bool) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.var_i32(1);
+    w.bool(open);
+    w.bool(filtering);
+    w.into_vec()
 }
 
 /// Decodes a packet body from raw bytes.
@@ -1008,6 +1026,81 @@ impl VersionAdapter for V340Adapter {
             )),
             ClientAction::MoveVehicle { .. } => Err(AdapterError::Unsupported(
                 "protocol 340 move vehicle encoding is not yet implemented".to_owned(),
+            )),
+
+            // Leaving the death screen. `client_command` action `0` =
+            // perform respawn, a stable ordinal across every generation
+            // checked (1.8, 1.12.2, 1.16.2/.4/.5 all encode it as a lone
+            // varint action id per minecraft-data's protocol.json).
+            ClientAction::Respawn => {
+                let body = ClientCommand { action: 0 };
+                Ok(Some((play::serverbound::CLIENT_COMMAND, encode_body(&body)?)))
+            }
+            // Clicking a name in the tab list while spectating. 1.12.2's
+            // `spectate` packet carries the target's uuid directly, which the
+            // model already supplies, so no entity registry is needed.
+            ClientAction::TeleportToEntity { target } => {
+                let body = Spectate { target: *target };
+                Ok(Some((play::serverbound::SPECTATE, encode_body(&body)?)))
+            }
+            // The continuous spectator-follow action carries only a network
+            // entity id, but 1.12.2's wire packet is the same uuid-keyed
+            // `spectate` packet as `TeleportToEntity` above. A stateless
+            // adapter has no id->uuid registry to bridge the two.
+            ClientAction::SpectatorAction { .. } => Err(AdapterError::Unsupported(
+                "protocol 340's spectate packet needs a target uuid; SpectatorAction carries \
+                 only a network entity id with no registry to resolve it into one (use \
+                 TeleportToEntity instead, which already carries the uuid)"
+                    .to_owned(),
+            )),
+            ClientAction::ChatAck { .. } => Err(AdapterError::Unsupported(
+                "protocol 340 predates signed/acknowledged chat (added in 1.19)".to_owned(),
+            )),
+            ClientAction::SelectBundleItem { .. } => Err(AdapterError::Unsupported(
+                "protocol 340 predates bundles (added in 1.21.2)".to_owned(),
+            )),
+            ClientAction::SetContainerSlotState { .. } => Err(AdapterError::Unsupported(
+                "protocol 340 predates the crafter block (added in 1.21)".to_owned(),
+            )),
+            // 1.12.2 has only the crafting-table recipe book; the
+            // furnace/blast-furnace/smoker books arrived in 1.13. A
+            // non-crafting book type has no wire form to encode into.
+            ClientAction::SetRecipeBookSettings {
+                book_type,
+                open,
+                filtering,
+            } => {
+                if *book_type != RecipeBookType::Crafting {
+                    return Err(AdapterError::Unsupported(
+                        "protocol 340 predates furnace/blast furnace/smoker recipe books \
+                         (added in 1.13)"
+                            .to_owned(),
+                    ));
+                }
+                Ok(Some((
+                    play::serverbound::CRAFTING_BOOK_DATA,
+                    encode_crafting_book_settings(*open, *filtering),
+                )))
+            }
+            // Both packets identify a recipe by 1.12.2's legacy recipe
+            // registry id (`craft_recipe_request`: varint; `crafting_book_data`
+            // type 0: i32), which this stateless adapter has no registry to
+            // resolve the model's display index into safely.
+            ClientAction::RecipeBookSeenRecipe { .. } | ClientAction::PlaceRecipe { .. } => {
+                Err(AdapterError::Unsupported(
+                    "protocol 340's recipe-book recipe identity needs a legacy recipe registry \
+                     this adapter does not have; the model's display index cannot be safely \
+                     forwarded without one"
+                        .to_owned(),
+                ))
+            }
+            ClientAction::PingRequest { .. } => Err(AdapterError::Unsupported(
+                "protocol 340 has no play-state ping request packet".to_owned(),
+            )),
+            ClientAction::ChangeGameMode { .. } => Err(AdapterError::Unsupported(
+                "protocol 340 has no dedicated change_game_mode packet; a debug-menu game-mode \
+                 switch in this era goes through the /gamemode chat command instead"
+                    .to_owned(),
             )),
 
             _ => Ok(None),

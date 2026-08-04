@@ -398,3 +398,224 @@ async fn pump(
         }
     }
 }
+
+/// Game-port default for the RCON-based tests below, matching
+/// `scripts/live-oracles/legacy-1.12.sh` (`GAME_PORT=25568`) and
+/// `live_chunk.rs`'s `server_port()`. Deliberately a distinct helper from
+/// this file's own `server_port()` (default `25569`, actually that script's
+/// *RCON* port) rather than fixing it in place — that default is relied on by
+/// the pre-existing console-FIFO test above and changing shared test code is
+/// out of scope for this addition.
+fn live_game_port() -> u16 {
+    std::env::var("LODESTONE_V340_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(25568)
+}
+
+fn rcon_port() -> u16 {
+    std::env::var("LODESTONE_V340_RCON_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(25569)
+}
+
+fn rcon_password() -> String {
+    std::env::var("LODESTONE_V340_RCON_PASSWORD").unwrap_or_else(|_| "lodestone".into())
+}
+
+/// Joins the live server through the real login flow, servicing directives
+/// (including the mandatory teleport_confirm) until `Play` is reached.
+async fn join(adapter: &V340Adapter, username: &str) -> (Connection<TcpStream>, ConnectionState) {
+    let port = live_game_port();
+    let server = ServerAddress {
+        host: "127.0.0.1".into(),
+        port,
+    };
+    let profile = LoginProfile {
+        username: username.to_owned(),
+        uuid: Uuid::new_v4(),
+    };
+    let mut conn = Connection::connect(("127.0.0.1", port))
+        .await
+        .expect("connect to live 1.12.2 server (is lodestone-legacy-1-12 up on :25568?)");
+    let mut state = ConnectionState::Handshaking;
+    for directive in adapter.begin_login(&profile, &server).expect("begin login") {
+        apply(&mut conn, &mut state, directive).await;
+    }
+    let mut world = lodestone_world::World::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while state != ConnectionState::Play && Instant::now() < deadline {
+        let read = tokio::time::timeout(Duration::from_secs(5), conn.read_packet()).await;
+        let (packet_id, payload) = match read {
+            Err(_) => continue,
+            Ok(Ok(Some(p))) => p,
+            Ok(Ok(None)) => panic!("connection closed before reaching Play"),
+            Ok(Err(err)) => panic!("read error: {err}"),
+        };
+        if let Ok(directives) = adapter.handle_packet(&mut world, state, packet_id, &payload) {
+            for directive in directives {
+                apply(&mut conn, &mut state, directive).await;
+            }
+        }
+    }
+    assert_eq!(state, ConnectionState::Play, "never reached Play");
+    (conn, state)
+}
+
+/// Proves `ClientAction::Respawn` (#345/#349/#353's `client_command` action
+/// `0`) is accepted by a real 1.12.2 server, using the same before/after
+/// server-computed read-back discipline as the break/place oracle above.
+///
+/// A killed player is held on the death screen — vanilla sends no further
+/// chunks and does not auto-respawn — until the client sends
+/// `client_command` action `0` (CLAUDE.md's live-server hazards). A
+/// `scoreboard` `health` objective gives an RCON-readable oracle for that
+/// transition: `0` while dead, `20` once our encoded respawn packet is
+/// accepted and the server resets the player.
+#[tokio::test]
+#[ignore = "requires a live 1.12.2 server with RCON on 127.0.0.1:25569"]
+async fn respawn_leaves_the_death_screen_on_live_1_12_server() {
+    let username = unique_username();
+    let adapter = V340Adapter::new();
+    let (mut conn, mut state) = join(&adapter, &username).await;
+    let mut world = lodestone_world::World::new();
+
+    let mut rcon = lodestone_testsupport::RconClient::connect(
+        ("127.0.0.1", rcon_port()),
+        &rcon_password(),
+    )
+    .expect("connect RCON (is lodestone-legacy-1-12 up on :25569?)");
+    // Idempotent: a second run reuses the objective if it already exists.
+    let _ = rcon.command("scoreboard objectives add hp health");
+
+    // 1.12.2's `/scoreboard` has no `get` subcommand (that arrived later);
+    // `players list <player>` is the read here, formatted roughly
+    // `Player <p> has N score(s): hp: <value> (health)`.
+    let health = |rcon: &mut lodestone_testsupport::RconClient| -> Option<i64> {
+        let resp = rcon
+            .command(&format!("scoreboard players list {username}"))
+            .expect("rcon scoreboard list");
+        let after_hp = resp.split("hp:").nth(1)?;
+        after_hp.split_whitespace().next()?.parse::<i64>().ok()
+    };
+
+    // The server logs "logged in"/"joined the game" a moment after our own
+    // client observes Play (§12.18's tick-lag trap applies to `kill`'s
+    // player-entity lookup too, not only freshly summoned entities), so
+    // `kill` is retried rather than sent once.
+    let kill_deadline = Instant::now() + Duration::from_secs(10);
+    let mut killed = false;
+    while Instant::now() < kill_deadline {
+        let resp = rcon.cmd(&format!("kill {username}"));
+        if !resp.contains("cannot be found") {
+            killed = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    assert!(killed, "RCON's /kill never found {username} within 10s of joining");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut dead = false;
+    while Instant::now() < deadline {
+        if health(&mut rcon) == Some(0) {
+            dead = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    assert!(
+        dead,
+        "RCON never reported {username}'s health as 0 after /kill — the control that makes the \
+         later 'back to 20' assertion meaningful never fired"
+    );
+    eprintln!("KILL confirmed: {username} health is 0");
+
+    // Service the connection (it will have received a death-related
+    // clientbound state) briefly before sending our respawn.
+    pump(&adapter, &mut conn, &mut state, &mut world, Duration::from_millis(500)).await;
+
+    send_action(&adapter, &mut conn, &ClientAction::Respawn).await;
+    pump(&adapter, &mut conn, &mut state, &mut world, Duration::from_millis(500)).await;
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut respawned = false;
+    while Instant::now() < deadline {
+        if health(&mut rcon) == Some(20) {
+            respawned = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    assert!(
+        respawned,
+        "the server never reset {username}'s health to 20 after our encoded \
+         ClientAction::Respawn (client_command action 0) — the real server did not accept it"
+    );
+    eprintln!("RESPAWN confirmed: server reset {username} to full health after our packet");
+}
+
+/// Proves `ClientAction::TeleportToEntity` (uuid-keyed `spectate`) and
+/// `ClientAction::SetRecipeBookSettings` (`crafting_book_data` type 1) are
+/// well-formed enough for a real 1.12.2 server to accept without kicking the
+/// connection — the strongest oracle available for actions with no
+/// externally observable server-side effect to read back (an unresolved
+/// spectate target is a documented silent no-op, and recipe-book state is
+/// pure client-preference bookkeeping the server does not expose over RCON).
+/// A malformed packet on a real server is not silently ignored: vanilla logs
+/// and disconnects with "Failed to decode packet id", so surviving several
+/// keep-alive round-trips after sending both is a genuine acceptance signal.
+#[tokio::test]
+#[ignore = "requires a live 1.12.2 server on 127.0.0.1:25568"]
+async fn teleport_to_entity_and_recipe_book_settings_are_accepted_by_live_1_12_server() {
+    let username = unique_username();
+    let adapter = V340Adapter::new();
+    let (mut conn, mut state) = join(&adapter, &username).await;
+    let mut world = lodestone_world::World::new();
+
+    send_action(
+        &adapter,
+        &mut conn,
+        &ClientAction::TeleportToEntity {
+            target: Uuid::new_v4(),
+        },
+    )
+    .await;
+    pump(&adapter, &mut conn, &mut state, &mut world, Duration::from_millis(500)).await;
+    assert_eq!(
+        state,
+        ConnectionState::Play,
+        "server dropped the connection after TeleportToEntity — malformed spectate packet"
+    );
+
+    send_action(
+        &adapter,
+        &mut conn,
+        &ClientAction::SetRecipeBookSettings {
+            book_type: lodestone_model::RecipeBookType::Crafting,
+            open: true,
+            filtering: false,
+        },
+    )
+    .await;
+    pump(&adapter, &mut conn, &mut state, &mut world, Duration::from_millis(500)).await;
+    assert_eq!(
+        state,
+        ConnectionState::Play,
+        "server dropped the connection after SetRecipeBookSettings — malformed \
+         crafting_book_data packet"
+    );
+
+    // A final keep-alive round-trip proves the connection is genuinely still
+    // alive and serviced, not merely un-torn-down.
+    send_action(&adapter, &mut conn, &ClientAction::SendChat {
+        text: "still here".to_owned(),
+    })
+    .await;
+    pump(&adapter, &mut conn, &mut state, &mut world, Duration::from_millis(500)).await;
+    assert_eq!(state, ConnectionState::Play);
+    eprintln!(
+        "ACCEPTED: {username}'s connection survived TeleportToEntity + SetRecipeBookSettings"
+    );
+}

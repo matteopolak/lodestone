@@ -10,9 +10,9 @@
 use lodestone_core::{Ctx, Decode, Reader};
 use lodestone_model::{
     AdapterError, BlockActionKind, BlockFace, BlockPos, ChatMode, ClientAction, ClientSettings,
-    ConnectionState, ContainerClickType, DisplayedSkinParts, EntityInteraction, Hand, ItemStack,
-    MainHand, ParticleStatus, PlayerCommand, PlayerInput, ResourceKey, ResourcePackResponseKind,
-    Rotation, Vec3, Vec3f, VersionAdapter,
+    ConnectionState, ContainerClickType, DisplayedSkinParts, EntityInteraction, GameMode, Hand,
+    ItemStack, MainHand, ParticleStatus, PlayerCommand, PlayerInput, RecipeBookType, ResourceKey,
+    ResourcePackResponseKind, Rotation, Vec3, Vec3f, VersionAdapter,
 };
 use lodestone_v340::V340Adapter;
 use lodestone_v340::packet_ids::play;
@@ -237,7 +237,7 @@ fn clearing_creative_slot_sends_empty_but_setting_needs_registry() {
 
 #[test]
 fn actions_absent_from_1_12_fail_loudly() {
-    let cases: [ClientAction; 3] = [
+    let cases: [ClientAction; 12] = [
         ClientAction::Stab,
         ClientAction::SetPlayerInput(PlayerInput::EMPTY),
         ClientAction::ContainerClick {
@@ -249,6 +249,40 @@ fn actions_absent_from_1_12_fail_loudly() {
             changed_slots: Vec::new(),
             carried_item: None,
         },
+        // Continuous spectator-follow needs a target uuid; 1.12.2's
+        // `spectate` packet has one, but SpectatorAction only carries a
+        // network entity id with no registry to resolve it (use
+        // TeleportToEntity instead).
+        ClientAction::SpectatorAction {
+            target_entity_id: None,
+        },
+        ClientAction::ChatAck { offset: 0 },
+        ClientAction::SelectBundleItem {
+            slot_id: 0,
+            selected_item_index: -1,
+        },
+        ClientAction::SetContainerSlotState {
+            slot_id: 0,
+            container_id: 0,
+            new_state: false,
+        },
+        // 1.12.2 has only the crafting-table recipe book; furnace/blast
+        // furnace/smoker books arrived in 1.13.
+        ClientAction::SetRecipeBookSettings {
+            book_type: RecipeBookType::Furnace,
+            open: false,
+            filtering: false,
+        },
+        ClientAction::RecipeBookSeenRecipe { recipe: 0 },
+        ClientAction::PlaceRecipe {
+            container_id: 0,
+            recipe: 0,
+            use_max_items: false,
+        },
+        ClientAction::PingRequest { time: 0 },
+        ClientAction::ChangeGameMode {
+            mode: GameMode::Survival,
+        },
     ];
     for action in cases {
         assert!(
@@ -256,6 +290,20 @@ fn actions_absent_from_1_12_fail_loudly() {
             "{action:?} must be Unsupported"
         );
     }
+}
+
+#[test]
+fn encode_set_recipe_book_settings_encodes_the_crafting_book_only() {
+    // 1.12.2 folds this into `crafting_book_data` type=1: a leading varint
+    // `1`, then the open flag and filter flag, per minecraft-data's
+    // `packet_crafting_book_data`.
+    let (id, body) = encode(&ClientAction::SetRecipeBookSettings {
+        book_type: RecipeBookType::Crafting,
+        open: true,
+        filtering: false,
+    });
+    assert_eq!(id, play::serverbound::CRAFTING_BOOK_DATA);
+    assert_eq!(body, vec![1, 1, 0]);
 }
 
 #[test]

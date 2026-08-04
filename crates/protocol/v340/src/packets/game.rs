@@ -1,6 +1,7 @@
 //! Play-state packets for protocol 340.
 
 use lodestone_macros::{Decode, Encode, Packet};
+use uuid::Uuid;
 
 use crate::packets::position::Position;
 
@@ -417,4 +418,29 @@ pub struct EntityAction {
     /// Jump boost for the ride-jump action, otherwise `0`.
     #[mc(varint)]
     pub jump_boost: i32,
+}
+
+/// Serverbound `client_command` packet.
+///
+/// Wire layout: a single varint action id (`0` = perform respawn); same
+/// shape at 1.8 and 1.16.2/.4/.5 per minecraft-data's `protocol.json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:client_command", state = Play, bound = Server)]
+pub struct ClientCommand {
+    /// Action id (`0` = perform respawn).
+    #[mc(varint)]
+    pub action: i32,
+}
+
+/// Serverbound `spectate` packet — teleport to (or, while already
+/// spectating, follow) another entity by uuid. Sent when a spectator clicks a
+/// name in the tab list or player/team overlay.
+///
+/// Wire layout: a single 128-bit uuid; unchanged from 1.8 through 1.16.2 per
+/// minecraft-data's `protocol.json` (`packet_spectate`: `{ target: UUID }`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:spectate", state = Play, bound = Server)]
+pub struct Spectate {
+    /// Uuid of the entity to spectate/teleport to.
+    pub target: Uuid,
 }
