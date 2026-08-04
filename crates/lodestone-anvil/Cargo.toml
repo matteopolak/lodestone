@@ -1,0 +1,36 @@
+[package]
+name = "lodestone-anvil"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# NBT reader/writer (`read_named_nbt`/`write_named_nbt`) — both the region-file
+# chunk payload and `level.dat` use the classic named-root NBT form, and that
+# codec already exists here with extensive round-trip coverage. See
+# `docs/world-persistence.md`.
+lodestone-core = { workspace = true }
+# `.mca` chunk payloads are zlib- ("deflate", scheme id 2) or gzip- (scheme id
+# 1) compressed; `level.dat` is always gzip. Already a workspace dependency
+# (root `Cargo.toml`), reused rather than duplicated.
+flate2 = { workspace = true }
+thiserror = { workspace = true }
+# Not a workspace dependency — added directly here rather than editing the
+# root manifest's `[workspace.dependencies]` table, which is out of scope for
+# this crate. Raw LZ4 block (de)compression for the `region-file-compression:
+# lz4` scheme (id 4). Pure Rust, no C toolchain.
+lz4_flex = { version = "0.11", default-features = false, features = ["std"] }
+# XXHash32, for the checksum in lz4-java's `LZ4BlockOutputStream` framing that
+# wraps each LZ4 block in `.mca` files written with `region-file-compression:
+# lz4` — see `src/lz4_block.rs` for the byte layout, reverse-engineered from
+# `at.yawk.lz4:lz4-java:1.10.1`'s own class-file constant pool (the fork this
+# repo's 26.2 server ships, package `net.jpountz.lz4`).
+xxhash-rust = { version = "0.8", default-features = false, features = [
+    "xxh32",
+] }
+
+[dev-dependencies]
