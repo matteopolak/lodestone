@@ -299,7 +299,7 @@ creeper/creeper, player/wide/steve}`), no new asset family. `block_entity_textur
 loader (`gpu/block_entities.rs`) both need to iterate the *combined* list, not just chest's, or a
 skull draws every frame with no bind group.
 
-### Skull's status: built, not yet wired — an island by construction, not by omission
+### Skull's status: wired, and proven with real pixels
 
 Everything CPU-side is in place and tested against the real 26.2 state table: `SkullType` resolution,
 both placements, `BlockEntityModelSet::resolve_skull`, and the shell's `skull_spawn`/`skull_spawns`
@@ -308,17 +308,32 @@ over block-entity type, so a second scan was never needed). `plan_block_entities
 needed **zero changes**: `chests_and_skulls_batch_independently_in_one_frame` proves a chest and a
 skull batch correctly in the same frame through the existing generic path.
 
-**What is missing is the wiring into `crates/lodestone-shell/src/gpu.rs`** —
-`RenderState::block_entity_source` and `prepare_block_entities` are still chest-only
-(`BlockEntitySource(Fn(Vec3) -> Vec<ChestSpawn>)`, one hardcoded `resolve_chest` call), and `gpu.rs`
-plus `gpu/*.rs` were another agent's live uncommitted work for the whole of this session, so that file
-could not be touched here. A prepared patch (new `SkullSource` alongside `BlockEntitySource`, a second
-`resolve_skull` pass merged into the same `instances` vec before `plan_block_entities`, plus the two
-one-line `sim.rs`/`app.rs` install calls mirroring the existing chest ones) was handed to the session
-owner rather than applied blind. Until that lands, this is a real island by the letter of `CLAUDE.md`
-rule 1 — the difference from the nine confirmed instances there is that this one is disclosed rather
-than discovered later, and the reason it exists (a file another agent held) is recorded here so
-whoever applies the patch does not have to re-derive it.
+**The `gpu.rs` wiring landed too** — `RenderState` now carries a `SkullSource` alongside
+`BlockEntitySource`, and `prepare_block_entities` resolves and batches both families in the same
+`instances` vec before `plan_block_entities`. `gpu.rs`/`gpu/*.rs` were another agent's live work for
+most of this session, so the five-file patch (`gpu/sources.rs`, `gpu/block_entities.rs`, `gpu.rs`,
+`sim.rs`, `app.rs`) was handed to the session orchestrator rather than applied here directly — and,
+before that landed, hand-verified end to end in an isolated `git worktree add --detach` (touching
+nothing in the shared checkout) with a real GPU adapter, so "this will work once wired" was a checked
+claim rather than a hope by the time it was handed over.
+
+`crates/lodestone-shell/tests/skull_block_entity_pixels.rs` is the resulting pixel gate — same shape
+as `chest_block_entity_pixels.rs`: coverage measured *inside the skull's own projected screen rect*
+(from the real baked vertices through the real `part_transforms`), failure output prints a bounding
+box rather than a percentage, and a dedicated test locates the unconditional first-person arm and
+asserts it is disjoint from the skull's rect before trusting the sibling gates' clean-control premise.
+Measured green, both in the isolated worktree and against the real wiring once it reached the shared
+checkout:
+
+| gate | measurement |
+|---|---|
+| skull draws | rect `x136..184 y96..144` (2304 px); fill **88.1%**; changed bbox `x137..182 y97..142`, entirely inside |
+| wall vs floor placement | floor rect `x136..184 y96..144`, wall rect `x134..186 y68..120` — distinct, and the frames differ by 3762 px |
+| arm is elsewhere | arm bbox `x247..319 y169..239`, disjoint from the skull rect |
+
+```bash
+cargo test -p lodestone-shell --test skull_block_entity_pixels -- --ignored --nocapture
+```
 
 ## How to change it
 
