@@ -1546,6 +1546,87 @@ fn decode_damage_event(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     })])
 }
 
+/// The `minecraft:block` registry's wire key
+/// (`Registries.BLOCK = createRegistryKey("block")`), matching the
+/// `minecraft:worldgen/biome` precedent in `packets/registry.rs`'s
+/// `ClientRegistries::BIOME` — the registry's own resource key, not a name we
+/// invent.
+const BLOCK_REGISTRY_KEY: &str = "minecraft:block";
+
+/// Decodes `update_tags` (issue #296), shared by the Configuration and Play
+/// states — `ClientboundUpdateTagsPacket` is a `ClientCommonPacketListener`
+/// packet with one wire shape used in both
+/// (`.cache/mc/26.2/src/net/minecraft/network/protocol/common/ClientboundUpdateTagsPacket.java`):
+///
+/// ```text
+/// VarInt registry_count
+/// registry_count * {
+///     String registry_key           // e.g. "minecraft:block"
+///     VarInt tag_count
+///     tag_count * {
+///         String tag_name           // without the leading '#'
+///         VarInt id_count
+///         id_count * VarInt element_id
+///     }
+/// }
+/// ```
+///
+/// (`FriendlyByteBuf::readMap`/`TagNetworkSerialization.NetworkPayload::read`/
+/// `readIntIdList`.) Every registry's tags are consumed to stay byte-aligned
+/// through the whole packet — including ones this crate has no census for,
+/// e.g. `minecraft:item` (see `lodestone-data`'s `tool.rs` module docs: there
+/// is no `ITEM_TAGS` table today, so nothing consumes an item-tag override
+/// yet) — but only the `minecraft:block` registry's decoded table is
+/// installed anywhere, via [`lodestone_data::tool::set_block_tag_overrides`].
+/// Vanilla always sends the complete non-empty tag set per registry, never a
+/// delta, so a decoded `minecraft:block` entry replaces the whole override
+/// table; a packet that does not mention `minecraft:block` at all leaves
+/// whatever was installed before untouched.
+fn decode_update_tags(payload: &[u8]) -> Result<(), AdapterError> {
+    let mut reader = Reader::new(payload);
+    let registry_count = reader.var_i32().map_err(dec_err)?;
+    let registry_count = usize::try_from(registry_count)
+        .map_err(|_| AdapterError::Decode(format!("invalid registry count {registry_count}")))?;
+    for _ in 0..registry_count {
+        let registry_key = reader.string(32767).map_err(dec_err)?;
+        let is_block_registry = registry_key == BLOCK_REGISTRY_KEY;
+        let tag_count = reader.var_i32().map_err(dec_err)?;
+        let tag_count = usize::try_from(tag_count)
+            .map_err(|_| AdapterError::Decode(format!("invalid tag count {tag_count}")))?;
+        let mut block_tags = is_block_registry.then(HashMap::new);
+        for _ in 0..tag_count {
+            let tag_name = reader.string(32767).map_err(dec_err)?;
+            let id_count = reader.var_i32().map_err(dec_err)?;
+            let id_count = usize::try_from(id_count)
+                .map_err(|_| AdapterError::Decode(format!("invalid tag id count {id_count}")))?;
+            // Read every id as `i32` regardless of registry, to stay
+            // byte-aligned through registries this crate does not model
+            // (`minecraft:item` and friends); only the block registry's ids
+            // are ever narrowed to `u16` (`block_tag_members`'s key space),
+            // and a raw id too large for that (never observed in a real
+            // registry, which tops out in the low thousands) is dropped from
+            // that one tag rather than failing the whole packet.
+            let mut raw_ids = Vec::with_capacity(id_count.min(4096));
+            for _ in 0..id_count {
+                raw_ids.push(reader.var_i32().map_err(dec_err)?);
+            }
+            if let Some(map) = block_tags.as_mut() {
+                let mut ids: Vec<u16> = raw_ids
+                    .into_iter()
+                    .filter_map(|raw| u16::try_from(raw).ok())
+                    .collect();
+                ids.sort_unstable();
+                map.insert(tag_name, ids);
+            }
+        }
+        if let Some(map) = block_tags {
+            lodestone_data::tool::set_block_tag_overrides(map);
+        }
+    }
+    reader.ensure_empty().map_err(dec_err)?;
+    Ok(())
+}
+
 /// Builds a [`Directive::Send`] from a packet id and an encodable body.
 fn send<T: Encode>(packet_id: i32, packet: &T) -> Result<Directive, AdapterError> {
     Ok(Directive::Send {
@@ -2380,6 +2461,15 @@ impl V770Adapter {
         if packet_id == configuration::clientbound::PING {
             let ping: Pong = decode_body(payload)?;
             return Ok(vec![Directive::Emit(ClientEvent::Ping { id: ping.id })]);
+        }
+        if packet_id == configuration::clientbound::UPDATE_TAGS {
+            // Issue #296: block/item tags were always hardcoded from the
+            // vanilla census; this installs the server's own `minecraft:block`
+            // tag set as an override — see `decode_update_tags`'s own doc for
+            // the wire shape and `lodestone_data::tool`'s module docs for why
+            // the override is process-wide.
+            decode_update_tags(payload)?;
+            return Ok(Vec::new());
         }
         if packet_id == configuration::clientbound::CODE_OF_CONDUCT {
             return Ok(vec![send(
@@ -4058,6 +4148,14 @@ impl V770Adapter {
                 target: Vec3 { x, y, z },
                 at_entity,
             })]);
+        }
+        if packet_id == play::clientbound::UPDATE_TAGS {
+            // Same wire shape and override as the Configuration-state arm
+            // (issue #296) — vanilla can resend tags in Play too (e.g. a
+            // reload), and `ClientCommonPacketListener::handleUpdateTags` is
+            // shared by both states in the decompiled source.
+            decode_update_tags(payload)?;
+            return Ok(Vec::new());
         }
         if packet_id == play::clientbound::BUNDLE_DELIMITER {
             // No fields: `ClientboundBundleDelimiterPacket` extends
