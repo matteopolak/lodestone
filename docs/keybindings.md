@@ -127,8 +127,17 @@ A table entry, not a structural change. Four places, all in `keybinds.rs`:
 **Step 4 is not optional.** An action with no consumer is a Controls-menu row
 that does nothing — the island defect of `CLAUDE.md` §1. Only actions this client
 actually dispatches are in the table today, which is why vanilla mappings we do
-not implement (`key.pickItem`, `key.screenshot`) are absent rather than listed
-and dead.
+not implement (`key.advancements`, `key.fullscreen`, …) are absent rather than
+listed and dead.
+
+**There is a fifth place, easy to miss because it lives outside `keybinds.rs`
+entirely: `action_caption` in `crates/lodestone-shell/src/menu/key_binds.rs`.**
+It is a second exhaustive `match` over `InputAction` — the Controls-menu row
+label — and the compiler enforces it exactly as hard as the three arms step 3
+names, just from a different file. Adding a variant here and forgetting that
+match is not a silent island (it will not compile), but it means "the compiler
+demands all three" above undercounts by one match arm that happens to sit in a
+sibling module.
 
 If the new action is a movement one, also add it to `movement()` so it reaches
 `lodestone-controller`.
@@ -218,16 +227,119 @@ See `docs/combat.md`'s "The drop key (`Q`)" for the vanilla-source detail
 (the `hoveredSlot.hasItem()` gate, why it is `else if` not two `if`s, why
 `PickItem` is not creative-gated at this layer) and the live-gate story.
 
+### One action, two mechanisms: `key.pickItem` (issue #16)
+
+Same shape again, and the container half was *already wired* before this
+variant existed at all — the one genuine novelty vanilla's own source adds is
+that the no-screen half branches on **what the crosshair is over**, not on a
+fixed packet.
+
+| context | mechanism | our route |
+|---|---|---|
+| screen open, slot hovered | container click, `ClickType.CLONE` (`AbstractContainerScreen.java:495-501`, `MenuKey::PickItem` → `Click::clone_slot`) | `KeyOutcome::ContainerPickItem` → `MenuInput::key_pressed` |
+| no screen, crosshair on a block | `ServerboundPickItemFromBlockPacket` (`Minecraft.pickBlockOrEntity`, `Minecraft.java:2342-2354`) | `KeyOutcome::PickItem { ctrl }` → `ClientAction::PickItemFromBlock { pos, include_data: ctrl }` |
+| no screen, crosshair on an entity | `ServerboundPickItemFromEntityPacket` | `KeyOutcome::PickItem { ctrl }` → `ClientAction::PickItemFromEntity { entity_id, include_data: ctrl }` |
+| no screen, crosshair on nothing | nothing sent | `KeyOutcome::PickItem { ctrl }` resolves to a no-op inside `Sim` |
+
+**Default binding is a mouse button, not a key** — `Options.java:669` declares
+`keyPickItem` as `Type.MOUSE` button `2` (middle-click), category `GAMEPLAY`,
+the same reason `Attack`/`Use` default to mouse buttons rather than keys. The
+container half of middle-click was already live before this issue, through
+`crate::app::menu_button_for`'s `MouseButton::Middle → MenuButton::Pick`
+mapping — the only genuinely new plumbing is the *keyboard-rebind* form (both
+in and out of a container) and the entire no-screen gameplay form.
+
+**`include_data` is vanilla's `hasControlDown()`**, read off the same tracked
+`ctrl_held` field `key.drop`'s `ctrl` already established — one boolean, two
+completely different meanings depending which of the two `ClientAction`
+variants it rides on (a block's block-entity data vs. an entity's own data),
+matching `Minecraft.pickBlockOrEntity`'s single `includeData` local passed to
+either branch of its own switch.
+
+**Target resolution reuses the attack/use raycast, not a new one.** Vanilla's
+`pickBlockOrEntity` reads `this.hitResult`, the same field `startAttack` and
+`startUseItem` already read — so the gameplay half is "whatever `Sim` already
+tracks as the current entity/block target", not a second ray cast. `case
+ENTITY` still wins over `case BLOCK` for the identical reason
+[`Self::begin_attack`]'s own doc gives (the entity ray target is already the
+nearer of the two picks).
+
+**Both `ClientAction` variants, and the container-key arm, were already built
+and tested with zero producer** before this issue closed the gap — the same
+"verb built, no caller" shape `key.drop` was in, confirmed against the tree
+rather than assumed: `PickItemFromBlock`/`PickItemFromEntity` are encoded and
+byte-exact tested in all four protocol families (`v770`'s own encoder, `v47`/
+`v340`/`v735` all `AdapterError::Unsupported` — pre-`v770` versions have no
+such packet), and `MenuKey::PickItem => Click::clone_slot` in `container.rs`
+already had a passing test
+(`the_pick_block_key_clones_even_in_survival_where_the_mouse_does_not`) with
+no `app.rs` call site reaching it.
+
+### Screenshot: `key.screenshot`, the one verb with no packet (issue #16)
+
+**The odd one out.** Every other action in this table ends at a
+`ClientAction` or a container `Click` — something that leaves the client.
+`key.screenshot` ends at a file: vanilla's `Screenshot.grab`
+(`Screenshot.java:37-70`) copies the main render target's colour texture to a
+CPU buffer and writes it as a PNG, entirely locally, to
+`<gameDirectory>/screenshots/`.
+
+| | vanilla | this client |
+|---|---|---|
+| default binding | `Options.java:675`, GLFW keysym `291` = F2, category `MISC` | `InputAction::Screenshot`, `Binding::Key(KeyCode::F2)` |
+| file location | `<gameDirectory>/screenshots/` | `screenshots/`, relative to the process's working directory (this client has no separate "game directory" concept yet) |
+| filename | `Util.getFilenameFormattedDateTime()` (`yyyy-MM-dd_HH.mm.ss`) + `_2`, `_3`, … on a same-second collision, `.png` (`Screenshot.getFile`, `:136-148`) | same scheme — never overwrites an existing file |
+| format | PNG, straight from the render target's own colour data | PNG via the `png` crate (already a `lodestone-shell` dependency; see `container.rs`/`menu/render.rs` for existing encode call sites in this same crate) |
+| capture point | `RenderSystem`'s `copyTextureToBuffer` against `GameRenderer.mainRenderTarget()`, mapped and walked into a `NativeImage` | the same `copy_texture_to_buffer` → `map_async(MapMode::Read)` idiom this repo already uses for pixel-gate readback (`lodestone_render::HeadlessTarget::read_texels`, `crates/lodestone-render/src/target.rs`) — applied to the **window** target instead of a headless one |
+
+**Not modelled: the Control-held panorama variant.**
+`Minecraft.handleGlobalKeyPress` passes `controlDown` to `Screenshot.grab`,
+which only takes the four-angle `panorama_0..3.png` branch when
+`SharedConstants.DEBUG_PANORAMA_SCREENSHOT` is also true — a developer-only
+flag vanilla ships `false` in every release build, so a normal player's
+Ctrl+F2 is byte-identical to a plain F2. `InputAction::Screenshot` carries no
+`ctrl` payload for this reason.
+
+**Not modelled: `handleGlobalKeyPress`'s screen-independence.** Vanilla checks
+`keyScreenshot` *outside* `Screen.keyPressed` (`Minecraft.java:2224-2234`), so
+a screenshot can be taken from the pause menu or an open inventory — the same
+category as `key.fullscreen` and `key.friends`, which share that call site.
+This client's `resolve_key` swallows every key behind `gate.menu`/
+`gate.chat_open`/`gate.container_open` before any action-specific arm runs, so
+`key.screenshot` — like `key.debug.overlay` before it — does not fire from
+behind a menu here. Fixing both together, if ever wanted, is one change:
+hoist both arms above the early-return gates.
+
+**Why this verb is brokered further than the other three.** Pick-item, drop
+and swap-offhand all bottom out in something `Sim`/`net.rs` already knows how
+to send. A screenshot needs the live window target's actual surface texture
+and format at the moment a frame is acquired but before it is presented —
+state that lives in `gpu.rs`'s `redraw()`, not in `Sim`. The recommended shape
+is a `pending_screenshot: bool` flag on `WindowApp` (mirroring `ctrl_held`),
+set by `KeyOutcome::Screenshot`'s dispatch arm and drained once per frame in
+`redraw()` right after `target.acquire()` succeeds and before the frame is
+handed to the renderer — copying the acquired frame's texture out is exactly
+`HeadlessTarget::read_texels`'s pattern, just against `AcquiredFrame`'s
+texture instead of `HeadlessTarget`'s. Whether the window surface's texture
+already carries `wgpu::TextureUsages::COPY_SRC` (`HeadlessTarget::USAGE`
+requires it explicitly; a swapchain surface's configured usage is a separate,
+unverified question) is the one open risk in this plan and needs checking
+against `gpu.rs`'s surface configuration before the capture call, not assumed
+from the headless target's own flags.
+
 ### Wiring the Controls menu — fully landed
 
 Issue #15 landed. `crates/lodestone-shell/src/menu/key_binds.rs` is the screen;
 `SettingsPage::KeyBinds` (`crates/lodestone-shell/src/menu/options.rs`) is
 where it slots into the settings tree, reached from the Controls page's own
 "Key Binds..." button. Per-row Reset, the footer's Reset Keys, viewing every
-one of the 27 actions grouped by category in vanilla's registration order
-(`Category::SORT_ORDER`, not `InputAction::ALL`'s declaration order — see that
-module's own tests for the trap), and starting a rebind are all wired and
-persist immediately, the same eager-persistence rule every other live row in
+one of `InputAction::ALL`'s actions (29 as of issue #16's `PickItem`/
+`Screenshot`; check `InputAction::ALL`'s own length rather than trusting this
+number, which has already gone stale twice) grouped by category in vanilla's
+registration order (`Category::SORT_ORDER`, not `InputAction::ALL`'s
+declaration order — see that module's own tests for the trap), and starting a
+rebind are all wired and persist immediately, the same eager-persistence rule
+every other live row in
 this tree follows.
 
 What this section used to sketch as three methods to add landed almost
