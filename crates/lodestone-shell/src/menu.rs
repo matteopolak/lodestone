@@ -48,6 +48,7 @@ pub mod panorama;
 pub mod render;
 pub mod servers;
 pub mod social;
+pub mod stats;
 pub mod status;
 pub mod widget;
 pub mod world_select;
@@ -200,6 +201,19 @@ pub enum Screen {
     /// inactive regardless of session kind: it needs secure chat signing,
     /// which does not exist here (see [`social`]'s module docs).
     Social,
+    /// The Statistics screen (issue #188): vanilla's `StatsScreen`. Reached
+    /// from the pause menu's Statistics button
+    /// ([`nav::PauseButton::Statistics`], now live); Escape or the screen's
+    /// own Done button returns to [`Screen::Paused`].
+    ///
+    /// Only the General tab (vanilla's 77 fixed stats) is a real list; Items
+    /// and Mobs are present-and-inactive, which is not an approximation —
+    /// see [`stats`]'s module docs for why vanilla's own screen would show
+    /// exactly that given the same (zero) data. Every value on every tab
+    /// reads zero: nothing in this workspace decodes the statistics packet,
+    /// so [`stats::StatsSnapshot::default`] is not a placeholder, it is the
+    /// only data that has ever existed here.
+    Statistics,
 }
 
 impl Screen {
@@ -225,7 +239,7 @@ impl Screen {
     /// residue is real; it is stated rather than papered over. If a third
     /// consumer ever needs this, a derive is the fix, not another hand-written
     /// list.
-    pub const ALL: [Screen; 15] = [
+    pub const ALL: [Screen; 16] = [
         Screen::MainMenu,
         Screen::ServerList,
         Screen::ServerEdit,
@@ -241,6 +255,7 @@ impl Screen {
         Screen::Error,
         Screen::Credits,
         Screen::Social,
+        Screen::Statistics,
     ];
 }
 
@@ -487,6 +502,8 @@ impl UiState {
                     // silently strand the player on a screen backed by a
                     // session that no longer exists.
                     | Screen::Social
+                    // Same reasoning, for Statistics (#188).
+                    | Screen::Statistics
             )
         {
             self.death_message = None;
@@ -645,6 +662,24 @@ impl UiState {
         }
     }
 
+    /// Open the Statistics screen (issue #188) from the pause menu's
+    /// Statistics button. Only from [`Screen::Paused`] — same reasoning as
+    /// [`Self::open_social_from_pause`]: vanilla has no title-screen entry
+    /// point, there being no session to have accrued any stats in before one
+    /// exists.
+    pub fn open_statistics_from_pause(&mut self) {
+        if self.screen == Screen::Paused {
+            self.screen = Screen::Statistics;
+        }
+    }
+
+    /// Back to the pause menu from Statistics.
+    pub fn close_statistics(&mut self) {
+        if self.screen == Screen::Statistics {
+            self.screen = Screen::Paused;
+        }
+    }
+
     // -- input-driven transitions ----------------------------------------
 
     /// Open the chat box over the world. Only from [`Screen::Playing`]; opening
@@ -740,6 +775,8 @@ impl UiState {
             // like every ordinary sub-screen (unlike `Screen::Credits`, this
             // one has a real "back", the pause menu it was opened from).
             Screen::Social => self.close_social(),
+            // Same reasoning as `Screen::Social` immediately above.
+            Screen::Statistics => self.close_statistics(),
         }
     }
 

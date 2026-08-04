@@ -649,6 +649,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   machine's speakers, and the two things that keep it quiet: a **missing sample
   corpus** and a **missing environment variable**. The mixing engine was already built
   and correct; this doc is mostly about everything either side of it.
+- [Statistics screen](./statistics-screen.md) — `Screen::Statistics` (issue #188):
+  vanilla's `StatsScreen`, reached from the pause menu's Statistics button
+  (`crates/lodestone-shell/src/menu/nav.rs`'s `PauseButton::Statistics`, now live).
+  Only the **General** tab (vanilla's 77 fixed stats — time, distance, damage,
+  counters) is a real scrollable list; **Items** and **Mobs** are
+  present-and-inactive.
 - [Swimming](./swimming.md) — The water-movement port: how the client integrates a
   swimming player, and — the actual defect this work started from — why
   sprint-swimming didn't work even though the client believed it was sprinting the

@@ -2054,6 +2054,7 @@ pub fn owns_frame(screen: super::Screen) -> bool {
             | Screen::Error
             | Screen::Credits
             | Screen::Social
+            | Screen::Statistics
     )
 }
 
@@ -3496,6 +3497,14 @@ pub fn frame_for<'a>(
         // Social Interactions (#189) — see `super::social::frame`'s own doc
         // for the singleplayer/multiplayer fork.
         Screen::Social => Some(super::social::frame(nav.social(), ui.kind())),
+        // Statistics (#188) — `StatsSnapshot::default()` is not a
+        // placeholder, it is the only data that has ever existed: see
+        // `super::stats`'s module docs on why nothing decodes the packet
+        // that would populate one yet.
+        Screen::Statistics => Some(super::stats::frame(
+            nav.stats(),
+            &super::stats::StatsSnapshot::default(),
+        )),
         _ => None,
     };
     // Stamped on every screen (not read back out of `nav` per-screen above) so
@@ -5432,6 +5441,11 @@ mod tests {
                     ui.pause();
                     ui.open_social_from_pause();
                 }
+                Screen::Statistics => {
+                    ui.enter_dev_world();
+                    ui.pause();
+                    ui.open_statistics_from_pause();
+                }
             }
             assert_eq!(ui.screen(), screen, "failed to reach {screen:?}");
             reached += 1;
@@ -7272,11 +7286,11 @@ mod tests {
         assert_eq!(f.rows[7].label, PauseButton::Options.label());
         assert_eq!(f.rows[8].label, PauseButton::QuitToTitle.label());
         assert_eq!(f.selected, 8, "selection follows the nav's pause_index");
-        // Four are live: the three with actions, plus Player Reporting since
-        // issue #189 built the screen behind it (see `PauseButton::enabled`'s
-        // own doc — the Report control *inside* that screen is still gated,
-        // but the screen itself needs nothing this button's liveness used to
-        // stand in for).
+        // Five are live: the three with actions, plus Statistics and Player
+        // Reporting since issues #188/#189 built the screens behind them
+        // (see `PauseButton::enabled`'s own doc for each — what each screen
+        // shows is honest-but-limited, not what made the button liveness
+        // conditional).
         let live: Vec<&str> = f
             .rows
             .iter()
@@ -7285,7 +7299,13 @@ mod tests {
             .collect();
         assert_eq!(
             live,
-            vec!["Back to Game", "Player Reporting", "Options...", "Disconnect"]
+            vec![
+                "Back to Game",
+                "Statistics",
+                "Player Reporting",
+                "Options...",
+                "Disconnect"
+            ]
         );
         // The four icon buttons carry a sprite instead of a label.
         assert_eq!(f.rows.iter().filter(|r| r.icon.is_some()).count(), 4);
