@@ -58,26 +58,38 @@
 //! Revisiting this is the natural first step of Phase 2, once caves exist to
 //! carry `dripstone_caves`/`lush_caves`/`deep_dark` into.
 //!
-//! # Three biomes this port cannot surface yet
+//! # Three biomes this port could not surface, until now
 //!
 //! `minecraft:badlands`, `minecraft:eroded_badlands` and
 //! `minecraft:wooded_badlands` all reach `SurfaceRules.Bandlands` in the
 //! overworld surface rule tree (confirmed by walking the JSON: both
 //! `bandlands` nodes sit under a `condition{biome_is:[badlands,
 //! eroded_badlands, wooded_badlands]}` guard, nothing else). Vanilla's
-//! `Bandlands` rule delegates to `SurfaceSystem.getBand`, a genuinely
-//! unported subsystem (its own noises — `clay_bands_offset`,
-//! `badlands_pillar`, `badlands_pillar_roof`, `badlands_surface` — and a
-//! banded-terracotta-column generator, `SurfaceSystem.java:332`+). Before
-//! this module existed those three biomes were unreachable (the world ran
-//! under a single fixed `minecraft:plains`), so `surface::Rule::Bandlands`'s
-//! panic was dead code; now that biomes vary for real, reaching it would
-//! crash chunk generation the moment a player's world contains badlands.
-//! [`usable_overworld_table`] excludes exactly these three from the
-//! searchable table, so the nearest-neighbour search falls back to the
-//! next-closest *supported* biome instead of ever selecting one that would
-//! panic — a deliberate, documented Phase 1 gap (porting `getBand` is natural
-//! future work, not attempted here), not a silent wrong answer.
+//! `Bandlands` rule delegates to `SurfaceSystem.getBand` — **now ported**
+//! (`crate::surface`'s `Rule::Bandlands`/`BandBlocks`/`generate_bands`, issue
+//! #295's carried-over gap): its own noise (`clay_bands_offset`) and the
+//! banded-terracotta-column generator (`SurfaceSystem.java:332+`,
+//! `generateBands`/`makeBands`/`getBand`) are reproduced from the documented
+//! algorithm, checked against the running server.
+//!
+//! Before this module existed those three biomes were unreachable (the world
+//! ran under a single fixed `minecraft:plains`), so `Rule::Bandlands`'s old
+//! panic was dead code; once real biome variety landed, reaching it would
+//! have crashed chunk generation the moment a player's world contained
+//! badlands, so [`usable_overworld_table`] excluded exactly these three from
+//! the searchable table as a deliberate, documented Phase 1 gap. That
+//! exclusion is now removed — [`usable_overworld_table`] is a pass-through —
+//! so the nearest-neighbour search can select any of the three again.
+//! [`UNSUPPORTED_SURFACE_BIOMES`] itself is kept (not deleted): it is a
+//! public item another crate imports by name (see its own doc comment).
+//!
+//! **Not ported by this increment**: `SurfaceSystem.erodedBadlandsExtension`
+//! (the separate stone-pillar height extension unconditionally applied to
+//! every `eroded_badlands` column, unrelated to `getBand`'s terracotta
+//! banding) and `frozenOceanExtension` (a different biome pair entirely).
+//! Neither is reachable through `Rule::Bandlands`, and un-filtering the
+//! three names above does not require either — see
+//! `docs/worldgen-parity.md` for what was and wasn't measured here.
 
 use std::collections::HashMap;
 
@@ -85,9 +97,16 @@ use serde_json::Value;
 
 use crate::density::{Builder, Context, Density};
 
-/// Overworld biomes this port cannot render the surface of yet — see the
-/// module doc's "Three biomes this port cannot surface yet" section.
-/// [`usable_overworld_table`] filters these out of the searchable table.
+/// The three biomes [`usable_overworld_table`] used to exclude before
+/// `SurfaceSystem.getBand` was ported — see the module doc's "Three biomes
+/// this port could not surface, until now" section. The name is now a
+/// historical artifact, not a current filter: kept (rather than deleted or
+/// renamed) because `lodestone_server::worldgen_data`'s
+/// `served_columns_never_carry_an_unported_badlands_variant` test imports it
+/// by this name, and that crate is outside this session's edit scope (see
+/// this crate's own `CLAUDE.md` file-ownership note) — that test's own
+/// premise is now stale and needs an update in its owning crate, not
+/// something fixable from here.
 pub const UNSUPPORTED_SURFACE_BIOMES: [&str; 3] = [
     "minecraft:badlands",
     "minecraft:eroded_badlands",
@@ -238,24 +257,17 @@ pub fn parse_table(value: &Value) -> Vec<BiomeParameterPoint> {
         .collect()
 }
 
-/// Drops [`UNSUPPORTED_SURFACE_BIOMES`] from a parsed table — see the module
-/// doc's "Three biomes this port cannot surface yet" section. Called once,
-/// at generator construction, not per lookup.
-///
-/// # Panics
-/// Panics if the filtered table is empty (would make [`nearest_biome`] panic
-/// on every call).
+/// Used to drop [`UNSUPPORTED_SURFACE_BIOMES`] from a parsed table before
+/// `SurfaceSystem.getBand` was ported (`crate::surface::Rule::Bandlands`) —
+/// see the module doc's "Three biomes this port could not surface, until
+/// now" section. Now a pass-through: every biome in the parsed table,
+/// including the three formerly-excluded badlands variants, is searchable.
+/// Kept as a named function (not inlined away at call sites) so
+/// [`crate::overworld::OverworldGenerator::new`] doesn't need to change, and
+/// so a future exclusion has an obvious place to live again.
 #[must_use]
 pub fn usable_overworld_table(table: Vec<BiomeParameterPoint>) -> Vec<BiomeParameterPoint> {
-    let filtered: Vec<_> = table
-        .into_iter()
-        .filter(|p| !UNSUPPORTED_SURFACE_BIOMES.contains(&p.biome.as_str()))
-        .collect();
-    assert!(
-        !filtered.is_empty(),
-        "biome parameter table is empty after excluding unsupported surface biomes"
-    );
-    filtered
+    table
 }
 
 /// Parses the embedded per-biome `temperature` map (`{"minecraft:plains":
@@ -438,26 +450,41 @@ mod tests {
         assert_eq!(table[1].params[6], Parameter { min: 7, max: 7 }, "offset");
     }
 
+    /// `usable_overworld_table` used to filter `UNSUPPORTED_SURFACE_BIOMES`
+    /// out because `SurfaceSystem.getBand` (`crate::surface::Rule::Bandlands`)
+    /// was unported and would panic if a column ever resolved to one of the
+    /// three. Now that `getBand` is ported, the exclusion is gone — this test
+    /// used to assert the *old* filtering behaviour (named
+    /// `usable_table_excludes_the_three_unported_badlands_variants`); it now
+    /// asserts the opposite, as a real control rather than a renamed no-op:
+    /// badlands entering the table must actually change what the nearest
+    /// search returns, not merely survive being present in a `Vec`.
     #[test]
-    fn usable_table_excludes_the_three_unported_badlands_variants() {
+    fn usable_table_no_longer_excludes_the_three_formerly_unported_badlands_variants() {
         let json: Value = serde_json::from_str(
             r#"[[-10000,10000,-10000,10000,-10000,10000,-10000,10000,-10000,10000,-10000,10000,0,"minecraft:badlands"],
                 [-10000,10000,-10000,10000,-10000,10000,-10000,10000,-10000,10000,-10000,10000,0,"minecraft:plains"]]"#,
         )
         .unwrap();
         let table = usable_overworld_table(parse_table(&json));
-        assert_eq!(table.len(), 1);
-        assert_eq!(table[0].biome, "minecraft:plains");
-        // The nearest search over the filtered table can never return
-        // badlands, no matter the target — this is the control: run it and
-        // watch it actually avoid the excluded entry rather than merely
-        // asserting the table doesn't contain the string.
+        assert_eq!(table.len(), 2, "usable_overworld_table must no longer drop any row");
+        assert!(
+            table.iter().any(|p| p.biome == "minecraft:badlands"),
+            "badlands must survive usable_overworld_table now that getBand is ported"
+        );
+        // The control: with only two rows sharing identical climate spans but
+        // different biome names, `nearest_biome` breaks the tie by table
+        // order (first element wins ties in `fitness`'s strict `<`
+        // comparison — see `nearest_biome`'s own loop). Since `parse_table`
+        // preserves JSON row order and badlands is row 0 here, every target
+        // must resolve to badlands — proving the search can actually select
+        // it, not just that it's present in the `Vec`.
         for target in [
             [-10000, -10000, -10000, -10000, -10000, -10000, 0],
             [10000, 10000, 10000, 10000, 10000, 10000, 0],
             [0, 0, 0, 0, 0, 0, 0],
         ] {
-            assert_eq!(nearest_biome(&table, &target), "minecraft:plains");
+            assert_eq!(nearest_biome(&table, &target), "minecraft:badlands");
         }
     }
 

@@ -71,6 +71,23 @@ pub fn ceil(v: f64) -> i32 {
     v.ceil() as i32
 }
 
+/// `Math.round(double)` = `(long) Math.floor(v + 0.5)` for any value this
+/// engine's noise stack actually produces (the JLS's true definition only
+/// diverges from that formula within `0.5` of `Long.MAX_VALUE`/`MIN_VALUE`,
+/// never reached by a noise sample scaled by a handful of units). **Not**
+/// [`f64::round`] — Rust rounds half *away from zero*
+/// (`(-0.5_f64).round() == -1.0`), vanilla rounds half *up*
+/// (`Math.round(-0.5) == 0`), and this repo has no existing helper for the
+/// difference (`SurfaceSystem.getBand`'s `clayBandsOffsetNoise` rounding is
+/// this crate's first use of `Math.round`). The two formulas agree
+/// everywhere except exactly on a `.5` boundary, which a continuous noise
+/// sample hits with probability zero in practice — reproduced anyway,
+/// because "practically never" is not "provably never".
+#[must_use]
+pub fn round(v: f64) -> i32 {
+    floor(v + 0.5)
+}
+
 /// `Mth.smoothstep(x)` = `x^3 (x (6x - 15) + 10)` (the quintic fade).
 #[must_use]
 pub fn smoothstep(x: f64) -> f64 {

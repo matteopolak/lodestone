@@ -74,16 +74,34 @@ existed — nothing new needed on the wire-format side).
   slope times the 2-block error) at the same point — both caught only by comparing against
   `BiomeOracle sample`'s raw quantized target, not by "a biome came back so it must be right." See
   `OverworldGenerator::biome_stage`'s doc comment for the exact before/after numbers.
-- **Three biomes can't reach the surface here yet.** `minecraft:badlands`/`eroded_badlands`/
-  `wooded_badlands` all hit `SurfaceRules.Bandlands` (confirmed by walking the JSON: both occurrences
-  sit under a `condition{biome_is:[…those three…]}` guard, nothing else), which delegates to
-  `SurfaceSystem.getBand` — a genuinely unported subsystem (its own noises, plus a banded-terracotta
-  column generator). Before this issue, that rule was unreachable dead code (fixed biome = plains);
-  now that biomes vary for real, reaching it would **crash chunk generation** the moment a player's
-  world contains badlands. `biome::usable_overworld_table` filters these three out of the searchable
-  table so the nearest-neighbour search falls back to the next-closest *supported* biome instead —
-  a deliberate, documented gap, not a silent wrong answer. Porting `getBand` lifts this restriction;
-  it hasn't been attempted here.
+- **Three biomes could not reach the surface here — `getBand` is now ported, and they can.**
+  `minecraft:badlands`/`eroded_badlands`/`wooded_badlands` all hit `SurfaceRules.Bandlands`
+  (confirmed by walking the JSON: both occurrences sit under a `condition{biome_is:[…those
+  three…]}` guard, nothing else), which delegates to `SurfaceSystem.getBand`. Before this issue,
+  that rule was unreachable dead code (fixed biome = plains); once biomes varied for real, reaching
+  it would have **crashed chunk generation** the moment a player's world contained badlands, so
+  `biome::usable_overworld_table` filtered these three out of the searchable table and the
+  nearest-neighbour search fell back to the next-closest *supported* biome instead — a deliberate,
+  documented gap, not a silent wrong answer.
+
+  `getBand` is now ported: `surface/mod.rs`'s `Rule::Bandlands`/`BandBlocks` carries the 192-entry
+  clay-band table (`generate_bands`/`make_bands`, vanilla's own `SurfaceSystem.generateBands`/
+  `makeBands`, built once per world seed from `noiseRandom.fromHashOf("minecraft:clay_bands")`) and
+  the `minecraft:clay_bands_offset` noise, and `getBand` itself
+  (`(y + offset + 192) % 192`-indexed) needs `Math.round`'s half-up semantics, not Rust's
+  half-away-from-zero `f64::round` — see `math::round`'s own doc comment for why a bespoke helper
+  was worth adding for this one call site. `biome::usable_overworld_table` is now a pass-through
+  (the exclusion is gone, not narrowed), so all three biomes are searchable again.
+  `UNSUPPORTED_SURFACE_BIOMES` itself is unchanged and still exported — `lodestone_server`'s
+  `worldgen_data::tests::served_columns_never_carry_an_unported_badlands_variant` imports it by
+  name, and its own premise (that these three names can never appear in a served column) is now
+  stale; that test lives outside this crate and needs its owning agent to update it.
+
+  **Not ported alongside `getBand`**: `SurfaceSystem.erodedBadlandsExtension` (a separate,
+  unconditional stone-pillar height extension for `eroded_badlands` columns, nothing to do with
+  terracotta banding) and `frozenOceanExtension` (a different biome pair). Neither blocks
+  `Rule::Bandlands` and neither was needed to close the ore/surface gap
+  `docs/worldgen-parity.md` measured for chunk `(-120,-120)`.
 - **`cold_enough_to_snow` ignores the per-block height adjustment and `temperature_modifier`.**
   `biome::cold_enough_to_snow` is `declared temperature < 0.15`, matching vanilla's
   `warmEnoughToRain` threshold but not `Biome.getHeightAdjustedTemperature`'s noise + `(y - seaLevel

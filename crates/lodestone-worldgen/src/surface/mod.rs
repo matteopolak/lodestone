@@ -31,7 +31,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use crate::density::{Builder, Context as DfContext, Density};
-use crate::math::{floor, lerp2, map};
+use crate::math::{floor, lerp2, map, random_between_inclusive, round};
 use crate::noise::NormalNoise;
 use crate::rng::{PositionalRandomFactory, RandomSource, XoroshiroPositionalFactory};
 
@@ -94,10 +94,136 @@ enum Rule {
     Sequence(Vec<Rule>),
     /// Runs `then` only when `cond` holds.
     Condition(Cond, Box<Rule>),
-    /// Badlands clay-band rule — only reachable inside badlands biomes, which
-    /// this build does not exercise. Reaching it is a bug, so it panics loudly
-    /// rather than silently mismatching.
-    Bandlands,
+    /// Badlands/eroded_badlands/wooded_badlands' banded-terracotta rule
+    /// (`SurfaceRules.bandlands()` — `context.system::getBand`, issue #405's
+    /// carried-over gap, closed here). Unconditional and parameterless in
+    /// vanilla's own DSL (`SurfaceRules.Bandlands` is a zero-field enum
+    /// singleton), so the [`BandBlocks`] payload is built once at parse time
+    /// from the generator's own seed, not from anything in the JSON node —
+    /// see [`RuleParser::bandlands`].
+    Bandlands(Box<BandBlocks>),
+}
+
+/// `SurfaceSystem.getBand`'s own state: the 192-entry clay-band table plus
+/// the noise that perturbs which entry a given `y` lands on.
+///
+/// Built once per world seed ([`RuleParser::bandlands`]), not per column or
+/// per block — matching vanilla, where `SurfaceSystem.clayBands` is an
+/// instance field generated once in the constructor
+/// (`SurfaceSystem.generateBands`), never touched again after `new
+/// SurfaceSystem(...)` returns.
+struct BandBlocks {
+    /// `SurfaceSystem.clayBands` — always exactly
+    /// [`CLAY_BANDS_LEN`] entries long, each already the full canonical
+    /// block string (these seven blocks carry no properties at 26.2 — see
+    /// [`generate_bands`]'s doc comment — so no [`BlockCanon`] lookup is
+    /// needed, unlike every other [`Rule::Block`] result state).
+    clay_bands: Vec<String>,
+    /// `SurfaceSystem.clayBandsOffsetNoise` (`minecraft:clay_bands_offset`).
+    offset_noise: NormalNoise,
+}
+
+/// `SurfaceSystem.clayBands.length` — vanilla's own hardcoded table size
+/// (`SurfaceSystem.generateBands`'s `new BlockState[192]`), not derived from
+/// anything version-supplied.
+const CLAY_BANDS_LEN: usize = 192;
+
+impl BandBlocks {
+    /// `SurfaceSystem.getBand(worldX, y, worldZ)`. Never returns `None` —
+    /// vanilla's own `Bandlands` rule (`context.system::getBand`) is a bare
+    /// `SurfaceRule` function reference with no condition wrapped around it,
+    /// so every call that reaches [`Rule::Bandlands`] gets a real block back.
+    fn get_band(&self, world_x: i32, y: i32, world_z: i32) -> String {
+        let offset = round(
+            self.offset_noise
+                .get_value(f64::from(world_x), 0.0, f64::from(world_z))
+                * 4.0,
+        );
+        let len = CLAY_BANDS_LEN as i32;
+        // `y` ranges over this engine's own `min_y..min_y+gen_depth` (as low
+        // as vanilla's `-64`) and `offset` is a noise sample scaled by 4, so
+        // `y + offset + len` is always positive in practice — matching why
+        // vanilla adds `clayBands.length` here at all (`SurfaceSystem.java`'s
+        // own `% this.clayBands.length` line) rather than needing a true
+        // Euclidean modulo.
+        let index = (y + offset + len) % len;
+        self.clay_bands[index as usize].clone()
+    }
+}
+
+/// `SurfaceSystem.generateBands(RandomSource)` — the one-time table build.
+/// `random` must be `noiseRandom.fromHashOf("minecraft:clay_bands")`
+/// ([`RuleParser::bandlands`]), matching vanilla's own derivation exactly
+/// (a *positional* factory's `from_hash_of`, not any per-block draw).
+///
+/// The seven result blocks (`minecraft:terracotta` and six
+/// `minecraft:*_terracotta` dye variants) are hardcoded here rather than
+/// routed through [`BlockCanon`]/[`canonical_from_block_json`] because
+/// `SurfaceRules.bandlands()`'s JSON node carries no `result_state` at all
+/// (it is `{"type": "minecraft:bandlands"}`, nothing else — vanilla's own
+/// `SurfaceRules.Bandlands` enum has zero fields), so
+/// [`identity_canon`](crate::surface::identity_canon)'s walk of the
+/// `surface_rule` tree never sees these block names and has no key for them.
+/// Confirmed property-less at 26.2 by `docs/worldgen-parity.md`'s own
+/// measured oracle output, which names them bare (`orange_terracotta`, not
+/// `orange_terracotta[...]`) in the pre-#295 badlands gap breakdown.
+fn generate_bands<R: RandomSource>(random: &mut R) -> Vec<String> {
+    let mut clay_bands = vec!["minecraft:terracotta".to_string(); CLAY_BANDS_LEN];
+
+    // `for (int i = 0; i < clayBands.length; i++) { i += random.nextInt(5) + 1; ... }`
+    // — the for-loop's own `i++` still fires every iteration *in addition to*
+    // the body's `i +=`, so each step advances `i` by `nextInt(5) + 2`, not
+    // `+ 1`. Translated as an explicit `while` with both increments spelled
+    // out so that trap can't silently drop the `+ 1` a naive `for i in ...`
+    // rewrite would.
+    let len = CLAY_BANDS_LEN as i32;
+    let mut i: i32 = 0;
+    while i < len {
+        i += random.next_int_bounded(5) + 1;
+        if i < len {
+            clay_bands[i as usize] = "minecraft:orange_terracotta".to_string();
+        }
+        i += 1;
+    }
+
+    make_bands(random, &mut clay_bands, 1, "minecraft:yellow_terracotta");
+    make_bands(random, &mut clay_bands, 2, "minecraft:brown_terracotta");
+    make_bands(random, &mut clay_bands, 1, "minecraft:red_terracotta");
+
+    let white_band_count = random_between_inclusive(random, 9, 15);
+    let mut placed = 0;
+    let mut start: i32 = 0;
+    while placed < white_band_count && start < len {
+        clay_bands[start as usize] = "minecraft:white_terracotta".to_string();
+        if start - 1 > 0 && random.next_bool() {
+            clay_bands[(start - 1) as usize] = "minecraft:light_gray_terracotta".to_string();
+        }
+        if start + 1 < len && random.next_bool() {
+            clay_bands[(start + 1) as usize] = "minecraft:light_gray_terracotta".to_string();
+        }
+        placed += 1;
+        start += random.next_int_bounded(16) + 4;
+    }
+
+    clay_bands
+}
+
+/// `SurfaceSystem.makeBands` — scatters `bandCount` runs of `state`, each
+/// `baseWidth..baseWidth+3` entries wide, at independently random starts.
+/// Plain `for` loops in the original (no self-modifying index), so this is a
+/// direct, non-tricky translation unlike [`generate_bands`]'s first loop.
+fn make_bands<R: RandomSource>(random: &mut R, clay_bands: &mut [String], base_width: i32, state: &str) {
+    let band_count = random_between_inclusive(random, 6, 15);
+    let len = clay_bands.len() as i32;
+    for _ in 0..band_count {
+        let width = base_width + random.next_int_bounded(3);
+        let start = random.next_int_bounded(len);
+        let mut p = 0;
+        while start + p < len && p < width {
+            clay_bands[(start + p) as usize] = state.to_string();
+            p += 1;
+        }
+    }
 }
 
 /// Per-column / per-Y scan state mirroring `SurfaceRules.Context`.
@@ -455,9 +581,7 @@ impl SurfaceSystem {
                     None
                 }
             }
-            Rule::Bandlands => {
-                panic!("bandlands surface rule reached for a non-badlands biome — unsupported")
-            }
+            Rule::Bandlands(bands) => Some(bands.get_band(ctx.block_x, ctx.block_y, ctx.block_z)),
         }
     }
 
@@ -610,8 +734,29 @@ impl RuleParser<'_, '_> {
                 self.cond(&node["if_true"]),
                 Box::new(self.rule(&node["then_run"])),
             ),
-            "bandlands" => Rule::Bandlands,
+            "bandlands" => Rule::Bandlands(Box::new(self.bandlands())),
             other => panic!("unhandled surface rule type: minecraft:{other}"),
+        }
+    }
+
+    /// Builds [`BandBlocks`] for a `"minecraft:bandlands"` rule node — once
+    /// per occurrence of that node in the `surface_rule` tree at parse time
+    /// (there is exactly one in vanilla's real `overworld.json`), matching
+    /// `SurfaceSystem`'s constructor calling `generateBands` exactly once
+    /// per world. `self.builder.positional_factory()` is the same `master`
+    /// factory [`SurfaceSystem::new`] itself stores (`RandomState.random`,
+    /// i.e. vanilla's `noiseRandom`) — see this module's own `master` field
+    /// doc for why that identity holds.
+    fn bandlands(&self) -> BandBlocks {
+        let offset_noise = self.builder.noise("minecraft:clay_bands_offset");
+        let mut random = self
+            .builder
+            .positional_factory()
+            .from_hash_of("minecraft:clay_bands");
+        let clay_bands = generate_bands(&mut random);
+        BandBlocks {
+            clay_bands,
+            offset_noise,
         }
     }
 
