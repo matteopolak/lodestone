@@ -38,7 +38,8 @@ use serde_json::Value;
 
 use crate::density::{Builder, Context as DfContext, Density, NoiseChunkSampler};
 use crate::math::{clamp, clamped_map, floor, map};
-use crate::rng::{PositionalRandomFactory, RandomSource, XoroshiroPositionalFactory};
+use crate::rng::{PositionalRandomFactory, RandomSource};
+pub use crate::rng::XoroshiroPositionalFactory;
 
 const CELL_WIDTH: i32 = 4;
 const CELL_HEIGHT: i32 = 8;
@@ -215,16 +216,86 @@ impl AquiferSystem {
         let positional = aquifer_src.fork_positional();
 
         let slots = builder.slot_count();
-        let final_density =
-            NoiseChunkSampler::new(final_density_node, slots, CELL_WIDTH, CELL_HEIGHT);
-        let erosion = NoiseChunkSampler::new(erosion_node, slots, CELL_WIDTH, CELL_HEIGHT);
-        let depth = NoiseChunkSampler::new(depth_node, slots, CELL_WIDTH, CELL_HEIGHT);
 
+        Self::from_parts(
+            final_density_node,
+            erosion_node,
+            depth_node,
+            barrier,
+            floodedness,
+            spread,
+            lava,
+            prelim,
+            positional,
+            sea_level,
+            min_y,
+            height,
+            chunk_x,
+            chunk_z,
+            slots,
+        )
+    }
+
+    /// Same construction as [`Self::new`], but from already-built density
+    /// trees and positional factory instead of a `Resolver`-backed
+    /// [`Builder`]. Exists so a caller that must keep the trees around across
+    /// many chunks (e.g. [`crate::overworld::OverworldGenerator`], which is
+    /// built once per world seed and cannot hold a borrowed `Builder`/
+    /// `Resolver` for its own lifetime) can build the eight router outputs
+    /// once and construct a fresh per-chunk [`AquiferSystem`] — matching
+    /// vanilla's own per-chunk `NoiseChunk` — by cloning the trees rather than
+    /// re-resolving JSON every chunk.
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn from_parts(
+        final_density_node: Density,
+        erosion_node: Density,
+        depth_node: Density,
+        barrier: Density,
+        floodedness: Density,
+        spread: Density,
+        lava: Density,
+        prelim: Density,
+        positional: XoroshiroPositionalFactory,
+        sea_level: i32,
+        min_y: i32,
+        height: i32,
+        chunk_x: i32,
+        chunk_z: i32,
+        slots: usize,
+    ) -> Self {
         // Grid bounds, verbatim from NoiseBasedAquifer's constructor.
         let min_block_x = chunk_x * 16;
         let max_block_x = min_block_x + 15;
         let min_block_z = chunk_z * 16;
         let max_block_z = min_block_z + 15;
+
+        // `final_density` is only ever queried by `Self::block_at`, which
+        // every caller in this crate (this module's own doc-tested contract,
+        // `aquifer_parity`'s whole-chunk sweep, and
+        // `crate::overworld::OverworldGenerator`'s fill/carve stages) calls
+        // exclusively at exact `(min_block_x..=max_block_x, min_y..min_y+height-1,
+        // min_block_z..=max_block_z)` positions — the same "known, small query
+        // region" contract `NoiseChunkSampler::new_bounded` documents for the
+        // shape stage's own `DenseShape`. Swapping this one sampler to the
+        // dense/bounded cache avoids a `HashMap`-backed `CornerCache` on the
+        // single hottest per-block call in the composed pipeline (issue #295
+        // architecture review). `erosion`/`depth` stay on the hashed
+        // `new` — they're queried from `is_deep_dark_region` at aquifer-grid
+        // locations that legitimately range outside this chunk's own bounds
+        // (the padded grid-cell search `Self::compute_aquifer_fluid` walks),
+        // so bounding them would violate `new_bounded`'s contract.
+        let final_density = NoiseChunkSampler::new_bounded(
+            final_density_node,
+            slots,
+            CELL_WIDTH,
+            CELL_HEIGHT,
+            (min_block_x, max_block_x),
+            (min_y, min_y + height - 1),
+            (min_block_z, max_block_z),
+        );
+        let erosion = NoiseChunkSampler::new(erosion_node, slots, CELL_WIDTH, CELL_HEIGHT);
+        let depth = NoiseChunkSampler::new(depth_node, slots, CELL_WIDTH, CELL_HEIGHT);
 
         let min_grid_x = grid_x(min_block_x + -5);
         let max_grid_x = grid_x(max_block_x + -5) + 1;

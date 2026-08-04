@@ -55,28 +55,90 @@ fn base(name: &str) -> &str {
     name.split('[').next().unwrap_or(name)
 }
 
-fn make_generator() -> OverworldGenerator {
+fn make_resolver_and_settings() -> (FsResolver, Value) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/worldgen_data");
     let resolver = FsResolver { root: root.clone() };
     let settings: Value = serde_json::from_str(
         &std::fs::read_to_string(root.join("noise_settings/overworld.json")).unwrap(),
     )
     .unwrap();
+    (resolver, settings)
+}
+
+fn make_generator() -> OverworldGenerator {
+    let (resolver, settings) = make_resolver_and_settings();
     // Avoid dropping `settings` before the borrow ends by building inline.
     OverworldGenerator::new(SEED, &settings, &resolver, "minecraft:plains", false)
 }
 
-/// Every block's solidity in the composed output must match the verified
-/// interpolated-density field: surface rules only *recolour* solid blocks
-/// (stone → grass/dirt/sand/gravel) and fluids fill non-solid space, so
-/// "not air and not fluid" must equal "density > 0" for all 98304 blocks.
+/// Every block's solidity in the composed output must match the **real
+/// aquifer's own** solid/non-solid decision (issue #295) — not raw
+/// `density > 0` any more. Before #295 composed the real aquifer, shape
+/// solidity *was* exactly `density > 0` (the sea-level fluid approximation
+/// never overrode it), which is what this test originally asserted against
+/// the isolated `density_chunk_jvm.txt` fixture. `aquifer_parity` already
+/// proves `AquiferSystem::block_at` bit-exact against the JVM for this same
+/// chunk/seed; this test's job is narrower — proving *composition* preserved
+/// that decision — so it re-derives the expectation from a freshly built
+/// `AquiferSystem` (same seed/settings/resolver) rather than the stale
+/// density-only fixture, which the real aquifer's barrier pressure can now
+/// legitimately disagree with (a barrier can seal a `density <= 0` cell back
+/// into `Stone`, or the reverse) — that disagreement was the concrete failure
+/// observed once the real aquifer was composed here, which is exactly what
+/// this rewritten assertion is checking is *not* a composition bug.
 #[test]
-fn composed_shape_matches_verified_density_field() {
-    let generator = make_generator();
+fn composed_shape_matches_fresh_aquifer_solid_decision() {
+    let (resolver, settings) = make_resolver_and_settings();
+    let generator = OverworldGenerator::new(SEED, &settings, &resolver, "minecraft:plains", false);
     let col = generator.column(0, 0);
+
+    let builder = lodestone_worldgen::density::Builder::new(SEED, &resolver);
+    let aquifer = lodestone_worldgen::aquifer::AquiferSystem::new(&settings, &builder, 0, 0);
 
     let mut checked = 0usize;
     let mut solid_cells = 0usize;
+    for x in 0..16i32 {
+        for z in 0..16i32 {
+            for y in generator.min_y()..generator.min_y() + generator.height() {
+                let state = col.block_state(x as usize, y, z as usize);
+                let b = base(state);
+                let gen_solid = b != "minecraft:air" && b != "minecraft:water" && b != "minecraft:lava";
+                let expected_solid = matches!(
+                    aquifer.block_at(x, y, z),
+                    lodestone_worldgen::aquifer::BlockKind::Stone
+                );
+
+                assert_eq!(
+                    gen_solid, expected_solid,
+                    "solidity mismatch at ({x},{y},{z}): generated {state:?} (solid={gen_solid}) \
+                     vs fresh AquiferSystem::block_at (solid={expected_solid})"
+                );
+                checked += 1;
+                if expected_solid {
+                    solid_cells += 1;
+                }
+            }
+        }
+    }
+
+    assert_eq!(checked, 16 * 16 * 384, "did not check the whole chunk");
+    assert!(
+        solid_cells > 1000,
+        "vacuous: only {solid_cells} solid cells in the reference field"
+    );
+}
+
+/// Companion control: the pre-#295 premise ("solid == density > 0") must now
+/// actually be *false* somewhere in this chunk — otherwise the rewrite above
+/// would be proving nothing new over the original assertion. Uses the same
+/// `density_chunk_jvm.txt` fixture the original test compared against.
+#[test]
+fn real_aquifer_solid_decision_disagrees_with_raw_density_at_least_once() {
+    let (resolver, settings) = make_resolver_and_settings();
+    let builder = lodestone_worldgen::density::Builder::new(SEED, &resolver);
+    let aquifer = lodestone_worldgen::aquifer::AquiferSystem::new(&settings, &builder, 0, 0);
+
+    let mut disagreements = 0usize;
     for line in DENSITY_FIXTURE.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -88,27 +150,19 @@ fn composed_shape_matches_verified_density_field() {
         let y: i32 = it.next().unwrap().parse().unwrap();
         let z: i32 = it.next().unwrap().parse().unwrap();
         let density = f64::from_bits(u64::from_str_radix(bits, 16).unwrap());
-        let expected_solid = density > 0.0;
-
-        let state = col.block_state(x as usize, y, z as usize);
-        let b = base(state);
-        let gen_solid = b != "minecraft:air" && b != "minecraft:water" && b != "minecraft:lava";
-
-        assert_eq!(
-            gen_solid, expected_solid,
-            "solidity mismatch at ({x},{y},{z}): generated {state:?} (solid={gen_solid}) \
-             vs density {density} (solid={expected_solid})"
+        let density_solid = density > 0.0;
+        let aquifer_solid = matches!(
+            aquifer.block_at(x, y, z),
+            lodestone_worldgen::aquifer::BlockKind::Stone
         );
-        checked += 1;
-        if expected_solid {
-            solid_cells += 1;
+        if density_solid != aquifer_solid {
+            disagreements += 1;
         }
     }
-
-    assert_eq!(checked, 16 * 16 * 384, "did not check the whole chunk");
     assert!(
-        solid_cells > 1000,
-        "vacuous: only {solid_cells} solid cells in the reference field"
+        disagreements > 0,
+        "expected the real aquifer to disagree with raw density>0 at least once in this chunk \
+         (otherwise the dedicated aquifer-decision test above is equivalent to the old, retired one)"
     );
 }
 

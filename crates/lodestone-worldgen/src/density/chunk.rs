@@ -282,10 +282,14 @@ impl NoiseChunkSampler {
     /// A query outside the declared bounds trips a `debug_assert!` in
     /// [`DenseShape::index`] in debug builds; in release builds it would
     /// silently alias a different cell, so this constructor is for callers
-    /// (like [`crate::overworld::OverworldGenerator::shape_stage`]) with a
-    /// known, small query region — not a drop-in replacement for [`new`](Self::new)
-    /// everywhere: `crate::aquifer`'s samplers query scattered, not
-    /// exhaustively-bounded, positions and keep using `new`.
+    /// with a known, small query region — not a drop-in replacement for
+    /// [`new`](Self::new) everywhere. `crate::aquifer::AquiferSystem`'s
+    /// `erosion`/`depth` samplers query scattered, not exhaustively-bounded,
+    /// positions (`is_deep_dark_region`'s padded grid-cell search legitimately
+    /// reaches outside the current chunk) and keep using `new`; its
+    /// `final_density` sampler is only ever queried at exact chunk-bounded
+    /// positions (every caller goes through `block_at`/`carve_substance`) and
+    /// does use this constructor (issue #295's performance pass).
     #[must_use]
     pub fn new_bounded(
         root: Density,

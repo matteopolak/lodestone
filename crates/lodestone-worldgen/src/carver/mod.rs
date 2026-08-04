@@ -795,6 +795,17 @@ impl CarveObserver for NoObserver {
 /// `NoiseBasedChunkGenerator.applyCarvers`: drive every carver over the 17×17
 /// source-chunk neighbourhood of the centre chunk, seeding a positional RNG per
 /// source chunk × carver and writing carved blocks into `grid`.
+///
+/// `carvers_for_source(source_x, source_z)` resolves the carver list to run
+/// for one source chunk. Vanilla's own `carverBiome` resolution
+/// (`NoiseBasedChunkGenerator.applyCarvers`) samples that source chunk's
+/// biome (at its own quart corner, `y = 0` — **not** the biome's surface
+/// height; carver selection is a different question from surface material)
+/// and reads *that* biome's `carvers` list, so the list — and its order,
+/// which the `index` used for `setLargeFeatureSeed` depends on — can differ
+/// per source chunk. A caller with a single fixed biome for the whole
+/// neighbourhood (every isolated fixture test in this crate) can ignore the
+/// arguments and return the same list every time.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_carvers<O: CarveObserver>(
     seed: i64,
@@ -802,7 +813,7 @@ pub fn apply_carvers<O: CarveObserver>(
     chunk_z: i32,
     min_gen_y: i32,
     gen_depth: i32,
-    carvers: &[CarverConfig],
+    carvers_for_source: &dyn Fn(i32, i32) -> Vec<CarverConfig>,
     grid: &mut CarveGrid,
     aquifer: &AquiferSystem,
     replaceable: &HashSet<String>,
@@ -830,6 +841,7 @@ pub fn apply_carvers<O: CarveObserver>(
         for dz in -NEIGHBOURHOOD_RANGE..=NEIGHBOURHOOD_RANGE {
             let source_x = chunk_x + dx;
             let source_z = chunk_z + dz;
+            let carvers = carvers_for_source(source_x, source_z);
             for (index, carver) in carvers.iter().enumerate() {
                 random.set_large_feature_seed(seed + index as i64, source_x, source_z);
                 let started = random.next_float() <= carver.probability();
