@@ -244,6 +244,199 @@ mod tests {
         }
     }
 
+    /// The exact, named vegetal-decoration gap surface for every biome
+    /// reachable via the real overworld biome-parameter table (issue #406's
+    /// "loud, not silent" gate). Each entry is `(biome, sorted deduped
+    /// reasons)`, where a reason is a
+    /// `lodestone_worldgen::feature::vegetation::ConfiguredFeature::Unsupported`
+    /// string that biome's `VEGETAL_DECORATION` step actually reaches —
+    /// `multiface_growth` (glow lichen, `MultifaceGrowthFeature` — never in
+    /// #406's scope, present in nearly every biome), `fallen_tree`
+    /// (`FallenTreeFeature`), `tree: unsupported trunk/foliage/size/provider`
+    /// (fancy/giant trunks — oak's `fancy_oak` branch and every
+    /// jungle/dark-oak/acacia/mangrove/cherry tree, none of which parse a
+    /// `TreeConfig` this engine implements), plus a long tail of features
+    /// #406 never claimed (`kelp`/`seagrass`/coral/`bamboo`/`vines`/
+    /// `huge_*_mushroom`/cave-only `lush_caves` features). Measured by
+    /// running every reachable biome through
+    /// `lodestone_worldgen::compose::build_biome_vegetation` +
+    /// `vegetation::collect_unsupported` once, by hand, and transcribing the
+    /// result — see [`vegetation_placer_gaps_are_named_not_silent`] below.
+    ///
+    /// **A floor, not a ceiling.** [`vegetation_gap_mismatches`] fails loudly
+    /// in BOTH directions: a biome producing a reason NOT listed here (a new
+    /// silent gap — the exact failure mode this gate exists to catch) or a
+    /// listed biome/reason no longer occurring (this table gone stale after
+    /// a fix landed — prune the entry, don't leave it). Before cacti/sugar
+    /// cane (`BlockColumnFeature`) landed, `minecraft:desert`'s own entry
+    /// here would have needed `"block_column: unsupported layer/direction
+    /// /predicate"` in addition to `multiface_growth` — this table's job is
+    /// to force that kind of entry to be written down, not to auto-shrink.
+    const KNOWN_VEGETATION_GAPS: &[(&str, &[&str])] = &[
+        ("minecraft:badlands", &["multiface_growth"]),
+        ("minecraft:bamboo_jungle", &["bamboo", "multiface_growth", "tree: unsupported trunk/foliage/size/provider", "vines"]),
+        ("minecraft:beach", &["multiface_growth"]),
+        ("minecraft:birch_forest", &["fallen_tree", "multiface_growth"]),
+        ("minecraft:cherry_grove", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:cold_ocean", &["kelp", "multiface_growth", "seagrass", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:dark_forest", &["fallen_tree", "huge_brown_mushroom", "huge_red_mushroom", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:deep_cold_ocean", &["kelp", "multiface_growth", "seagrass", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:deep_dark", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:deep_frozen_ocean", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:deep_lukewarm_ocean", &["kelp", "multiface_growth", "seagrass", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:deep_ocean", &["kelp", "multiface_growth", "seagrass", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:desert", &["multiface_growth"]),
+        ("minecraft:dripstone_caves", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:eroded_badlands", &["multiface_growth"]),
+        ("minecraft:flower_forest", &["fallen_tree", "multiface_growth", "simple_block: unsupported to_place", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:forest", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:frozen_ocean", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:frozen_peaks", &["multiface_growth"]),
+        ("minecraft:frozen_river", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:grove", &["multiface_growth"]),
+        ("minecraft:ice_spikes", &["fallen_tree", "multiface_growth"]),
+        ("minecraft:jagged_peaks", &["multiface_growth"]),
+        ("minecraft:jungle", &["bamboo", "fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider", "vines"]),
+        ("minecraft:lukewarm_ocean", &["kelp", "multiface_growth", "seagrass", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:lush_caves", &["block_column: unsupported layer/direction/predicate", "multiface_growth", "random_boolean_selector", "root_system", "vegetation_patch", "vines"]),
+        ("minecraft:mangrove_swamp", &["multiface_growth", "seagrass", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:meadow", &["multiface_growth", "simple_block: unsupported to_place", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:mushroom_fields", &["multiface_growth", "random_boolean_selector"]),
+        ("minecraft:ocean", &["kelp", "multiface_growth", "seagrass", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:old_growth_birch_forest", &["fallen_tree", "multiface_growth"]),
+        ("minecraft:old_growth_pine_taiga", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:old_growth_spruce_taiga", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:pale_garden", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider", "vegetation_patch"]),
+        ("minecraft:plains", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:river", &["multiface_growth", "seagrass", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:savanna", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:savanna_plateau", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:snowy_beach", &["multiface_growth"]),
+        ("minecraft:snowy_plains", &["fallen_tree", "multiface_growth"]),
+        ("minecraft:snowy_slopes", &["multiface_growth"]),
+        ("minecraft:snowy_taiga", &["fallen_tree", "multiface_growth"]),
+        ("minecraft:sparse_jungle", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider", "vines"]),
+        ("minecraft:stony_peaks", &["multiface_growth"]),
+        ("minecraft:stony_shore", &["multiface_growth"]),
+        ("minecraft:sulfur_caves", &["multiface_growth"]),
+        ("minecraft:sunflower_plains", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:swamp", &["multiface_growth", "seagrass"]),
+        ("minecraft:taiga", &["fallen_tree", "multiface_growth"]),
+        ("minecraft:warm_ocean", &["coral_claw", "coral_mushroom", "coral_tree", "multiface_growth", "sea_pickle", "seagrass", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:windswept_forest", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:windswept_gravelly_hills", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:windswept_hills", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:windswept_savanna", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:wooded_badlands", &["fallen_tree", "multiface_growth"]),
+    ];
+
+    /// Diffs a measured `biome -> sorted, deduped reasons` map against
+    /// [`KNOWN_VEGETATION_GAPS`], both directions. Standalone (no
+    /// `EmbeddedResolver` needed) specifically so
+    /// [`vegetation_gap_mismatches_fires_on_an_undeclared_gap`] can exercise
+    /// it with a synthetic map — CLAUDE.md's "absence assertions need a
+    /// control proving the detector fires."
+    fn vegetation_gap_mismatches(actual: &std::collections::BTreeMap<String, Vec<String>>) -> Vec<String> {
+        let known: std::collections::BTreeMap<&str, &[&str]> =
+            KNOWN_VEGETATION_GAPS.iter().copied().collect();
+        let mut mismatches = Vec::new();
+        for (biome, reasons) in actual {
+            let expected: &[&str] = known.get(biome.as_str()).copied().unwrap_or(&[]);
+            if reasons.iter().map(String::as_str).ne(expected.iter().copied()) {
+                mismatches.push(format!(
+                    "{biome}: KNOWN_VEGETATION_GAPS says {expected:?}, measured {reasons:?}"
+                ));
+            }
+        }
+        for biome in known.keys() {
+            if !actual.contains_key(*biome) {
+                mismatches.push(format!(
+                    "{biome}: listed in KNOWN_VEGETATION_GAPS but no longer a reachable overworld biome"
+                ));
+            }
+        }
+        mismatches
+    }
+
+    /// Measures the real gap surface once (via `EmbeddedResolver`, the same
+    /// data the bundled generator serves) and asserts it matches
+    /// [`KNOWN_VEGETATION_GAPS`] exactly, in both directions. This is the
+    /// issue #406 gate: a biome whose declared `VEGETAL_DECORATION` step
+    /// includes a placer this crate doesn't implement, and which isn't
+    /// already named above, now fails a required check instead of quietly
+    /// generating a biome with fewer trees than vanilla.
+    #[test]
+    fn vegetation_placer_gaps_are_named_not_silent() {
+        use std::collections::BTreeMap;
+        let table = lodestone_worldgen::biome::parse_table(&EmbeddedResolver.biome_parameters());
+        let table = lodestone_worldgen::biome::usable_overworld_table(table);
+        let mut names: Vec<String> = table.into_iter().map(|p| p.biome).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert!(
+            names.len() >= 50,
+            "expected the real ~55-biome reachable overworld set, got {}",
+            names.len()
+        );
+
+        let mut actual: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for biome in names {
+            let list = lodestone_worldgen::compose::build_biome_vegetation(&EmbeddedResolver, &biome);
+            let mut reasons: Vec<String> = list
+                .iter()
+                .flat_map(|(_, placed)| lodestone_worldgen::feature::vegetation::collect_unsupported(placed))
+                .collect();
+            reasons.sort();
+            reasons.dedup();
+            actual.insert(biome, reasons);
+        }
+
+        let mismatches = vegetation_gap_mismatches(&actual);
+        assert!(
+            mismatches.is_empty(),
+            "vegetation placer gap surface drifted from KNOWN_VEGETATION_GAPS — either a NEW \
+             silent gap appeared (implement the placer or add it here, named) or a listed gap \
+             was fixed (prune the entry):\n{}",
+            mismatches.join("\n")
+        );
+    }
+
+    /// Control for the gate above: an unsupported reason for a biome that
+    /// ISN'T in [`KNOWN_VEGETATION_GAPS]` at all (`minecraft:desert` here,
+    /// deliberately given a reason it doesn't really have) must be caught,
+    /// proving [`vegetation_gap_mismatches`] actually fires rather than
+    /// vacuously passing because nothing in-scope ever changes.
+    #[test]
+    fn vegetation_gap_mismatches_fires_on_an_undeclared_gap() {
+        let mut actual = std::collections::BTreeMap::new();
+        actual.insert(
+            "minecraft:desert".to_string(),
+            vec!["brand_new_unimplemented_placer".to_string(), "multiface_growth".to_string()],
+        );
+        let mismatches = vegetation_gap_mismatches(&actual);
+        assert!(
+            mismatches.iter().any(|m| m.contains("minecraft:desert") && m.contains("brand_new_unimplemented_placer")),
+            "an undeclared new gap must be caught: {mismatches:?}"
+        );
+    }
+
+    /// Second half of the same control: a biome/reason pair that's listed
+    /// but no longer measured (i.e. the gap got fixed) must ALSO be caught —
+    /// this is what keeps `KNOWN_VEGETATION_GAPS` from silently going stale
+    /// in the direction that hides a real improvement.
+    #[test]
+    fn vegetation_gap_mismatches_fires_on_a_gap_that_was_fixed() {
+        let mut actual = std::collections::BTreeMap::new();
+        // `minecraft:desert`'s real entry is `["multiface_growth"]`; report
+        // it as fully clean instead, simulating "multiface_growth got fixed".
+        actual.insert("minecraft:desert".to_string(), Vec::<String>::new());
+        let mismatches = vegetation_gap_mismatches(&actual);
+        assert!(
+            mismatches.iter().any(|m| m.contains("minecraft:desert")),
+            "a listed gap that no longer measures must be caught: {mismatches:?}"
+        );
+    }
+
     #[test]
     fn generator_builds_and_produces_real_terrain() {
         let generator = overworld_generator(42);

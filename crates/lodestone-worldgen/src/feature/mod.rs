@@ -128,6 +128,11 @@ pub enum IntProvider {
     /// affect the *distribution*, but does affect [`WeightedList::sample`]'s
     /// draw semantics, which walks the list in order — see that fn's doc).
     WeightedList(Vec<(i32, i32)>),
+    /// `net.minecraft.util.valueproviders.BiasedToBottomInt` — used by
+    /// `cactus`/`sugar_cane`'s `BlockColumnFeature` layer heights (issue
+    /// #406's cacti/sugar-cane increment). Additive: nothing before that
+    /// increment constructs this variant.
+    BiasedToBottom { min: i32, max: i32 },
 }
 
 impl IntProvider {
@@ -179,6 +184,14 @@ impl IntProvider {
                     .map(|(v, w)| f64::from(*v) * f64::from(*w) / total as f64)
                     .sum()
             }
+            // `BiasedToBottomInt.sample` is `min + nextInt(nextInt(n)+1)`
+            // with `n = max-min+1`. Closed form: `Y = nextInt(nextInt(n))`
+            // (0-based) has `E[Y] = (n-1)/4` (for fixed `Z ~ Uniform[0,n-1]`,
+            // `E[Y|Z] = Z/2`, so `E[Y] = E[Z]/2 = ((n-1)/2)/2`).
+            IntProvider::BiasedToBottom { min, max } => {
+                let n = f64::from(max - min + 1);
+                f64::from(*min) + (n - 1.0) / 4.0
+            }
         }
     }
 
@@ -203,6 +216,13 @@ impl IntProvider {
                     }
                 }
                 entries.last().map_or(0, |(v, _)| *v)
+            }
+            // `BiasedToBottomInt.sample`: `minInclusive + nextInt(nextInt(maxInclusive
+            // - minInclusive + 1) + 1)` — two nested, dependent draws, not one.
+            IntProvider::BiasedToBottom { min, max } => {
+                let n = *max - *min + 1;
+                let inner = random.next_int_bounded(n);
+                min + random.next_int_bounded(inner + 1)
             }
         }
     }
