@@ -144,6 +144,21 @@ use crate::entities::{EntitySnapshot, NameTag};
 /// completes, same as `NetClient`'s own reads.
 pub type SharedHandle = Arc<OnceLock<Arc<ClientHandle>>>;
 
+/// The connecting session's local player UUID, published as soon as the
+/// [`LoginProfile`] is built — before the handshake even starts, not just
+/// before login completes like [`SharedHandle`]. Same "publish once, read
+/// many, no lock contention" shape.
+///
+/// This exists because nothing between here and `lodestone-client` carries a
+/// name→identity answer at all: `lodestone_client::state`'s own docs say the
+/// id→name *registry* mapping is "deliberately outside this crate", and that
+/// crate's `ClientHandle` has no uuid accessor either — the identity only ever
+/// existed as a local variable inside [`run`]. Issue #189's Social
+/// Interactions roster needs it to exclude the local player
+/// (`crate::menu::social::entries_from_tablist`'s `exclude` parameter), which
+/// is the first consumer that made the gap visible.
+pub type SharedLocalUuid = Arc<OnceLock<uuid::Uuid>>;
+
 /// The world's weather, published lock-free by the net thread and read once per
 /// frame by the render thread.
 ///
@@ -676,6 +691,9 @@ pub struct NetClient {
     /// It lives here only because `NetClient` is where a per-session shared cell
     /// is already handed out at connect time. See [`SkyDefaultCell`].
     sky_default: SharedSkyDefault,
+    /// The local player's UUID, published by the net thread as soon as the
+    /// connecting profile is known. See [`SharedLocalUuid`].
+    local_uuid: SharedLocalUuid,
     /// The driver's `World` and session entity, for a **loopback** client that has
     /// no `ClientBuilder` to hand them to.
     ///
@@ -886,6 +904,8 @@ impl NetClient {
         let weather_thread = Arc::clone(&weather);
         let biome_climates: SharedBiomeClimates = Arc::new(BiomeClimateCell::default());
         let biome_climates_thread = Arc::clone(&biome_climates);
+        let local_uuid: SharedLocalUuid = Arc::new(OnceLock::new());
+        let local_uuid_thread = Arc::clone(&local_uuid);
 
         let thread = std::thread::Builder::new()
             .name("lodestone-net".into())
@@ -899,6 +919,7 @@ impl NetClient {
                     handle_thread,
                     weather_thread,
                     biome_climates_thread,
+                    local_uuid_thread,
                     session,
                 )
             })
@@ -913,6 +934,7 @@ impl NetClient {
             weather,
             biome_climates,
             sky_default: Arc::new(SkyDefaultCell::default()),
+            local_uuid,
             #[cfg(test)]
             session: None,
         }
@@ -1101,6 +1123,19 @@ impl NetClient {
         Arc::clone(&self.handle)
     }
 
+    /// The local player's UUID, or `None` in the short window between thread
+    /// spawn and the connecting [`LoginProfile`] being built (a handful of
+    /// instructions — see [`SharedLocalUuid`]) or for a loopback client built
+    /// with [`Self::loopback_with_feed`], which has no `LoginProfile` at all.
+    ///
+    /// Issue #189: this is the identity `crate::menu::social::
+    /// entries_from_tablist` needs to exclude the local player from the
+    /// Social Interactions roster.
+    #[must_use]
+    pub fn local_uuid(&self) -> Option<uuid::Uuid> {
+        self.local_uuid.get().copied()
+    }
+
     /// Clone out the `Arc`-backed weather cell, for the same reason
     /// [`shared_handle`](Self::shared_handle) exists: `crate::app` builds a
     /// `'static` per-frame closure at connect time, and this `NetClient` is moved
@@ -1145,6 +1180,7 @@ impl NetClient {
             weather: Arc::new(WeatherCell::default()),
             biome_climates: Arc::new(BiomeClimateCell::default()),
             sky_default: Arc::new(SkyDefaultCell::default()),
+            local_uuid: Arc::new(OnceLock::new()),
             // Bound by `Sim::attach_net`; a loopback with no `Sim` folds nothing.
             session: None,
         };
@@ -1197,6 +1233,7 @@ impl NetClient {
             weather: Arc::new(WeatherCell::default()),
             biome_climates: Arc::new(BiomeClimateCell::default()),
             sky_default: Arc::new(SkyDefaultCell::default()),
+            local_uuid: Arc::new(OnceLock::new()),
             // Bound by `Sim::attach_net`; a loopback with no `Sim` folds nothing.
             session: None,
         };
@@ -1299,6 +1336,7 @@ fn run(
     shared_handle: SharedHandle,
     weather: SharedWeather,
     biome_climates: SharedBiomeClimates,
+    local_uuid: SharedLocalUuid,
     session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -1421,6 +1459,11 @@ fn run(
                 uuid: uuid::Uuid::new_v4(),
             },
         };
+        // Published immediately, not after login: issue #189's roster refresh
+        // needs the identity to exclude as soon as a session exists, and there
+        // is nothing fallible between here and the value itself (unlike
+        // `shared_handle`, which waits on a real handshake).
+        let _ = local_uuid.set(profile.uuid);
 
         // §4.1(c): fold into the driver's `World` when we were given one. The
         // builder installs no plugins and spawns no entity — the shell's `App`
@@ -2039,6 +2082,29 @@ mod tests {
         // right away should simply be empty (non-blocking).
         let client = NetClient::connect("127.0.0.1".into(), 1, 776, None);
         let _ = client.poll();
+    }
+
+    /// Issue #189's other half of the social-roster seam: `local_uuid` must be
+    /// published even when the connection itself never succeeds, because
+    /// [`LoginProfile`] — and the `local_uuid.set(..)` right after it — is
+    /// built *before* `run` ever attempts to dial (see `run`'s own comment at
+    /// that call). A dead port (the same one
+    /// [`poll_is_empty_before_any_events`] uses) proves this without needing
+    /// a real server: if the publish depended on a successful handshake, this
+    /// would time out.
+    #[test]
+    fn local_uuid_is_published_before_the_connection_even_resolves() {
+        let client = NetClient::connect("127.0.0.1".into(), 1, 776, None);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut uuid = None;
+        while std::time::Instant::now() < deadline && uuid.is_none() {
+            uuid = client.local_uuid();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            uuid.is_some(),
+            "local_uuid must publish regardless of whether the dial ever succeeds"
+        );
     }
 
     /// The vitals events must **not** cross this channel any more.
