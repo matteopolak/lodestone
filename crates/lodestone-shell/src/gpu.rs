@@ -252,6 +252,13 @@ pub struct RenderState {
     /// a caller that never installs a main-hand source sees exactly the pre-#366
     /// behaviour.
     equip: first_person::HeldItemEquip,
+    /// Vanilla bobs the hand with a *second, independent* application of
+    /// `bobView` — `GameRenderer.renderItemInHand` seeds a fresh `PoseStack`
+    /// with the **unbobbed** inverted model-view and re-applies the bob to that
+    /// (`GameRenderer.java:333-362`), rather than inheriting the world's already
+    /// bobbed matrix. Unset reads as `BobFrame::default`, i.e. the pre-existing
+    /// unbobbed hand, so headless tests are unaffected.
+    hand_bob: first_person::HandBobSource,
     outline_shape: OutlineShapeSource,
     /// The sky pass (disc/sun/moon/stars/clouds), built once the vanilla
     /// celestial atlas and cloud texture are available. `None` — no
@@ -549,6 +556,8 @@ impl RenderState {
             // the first `set_main_hand_source` seeds rather than animating from a
             // dipped hand. See `HeldItemEquip::last`.
             equip: first_person::HeldItemEquip::default(),
+            // Unbobbed until the shell installs a source; see `HandBobSource`.
+            hand_bob: first_person::HandBobSource::default(),
             outline_shape: OutlineShapeSource::default(),
             // No sky until the shell installs one; see `install_sky`.
             sky: None,
