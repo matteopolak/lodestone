@@ -69,6 +69,7 @@
 
 use glam::{Mat4, Vec3};
 
+use crate::cloud_mesh::{CloudCells, CloudFace, CloudFaceDir, CloudRelativePos, FLAG_INSIDE_FACE, FLAG_USE_TOP_COLOR};
 use crate::fog::multiply_gamma;
 
 // ---------------------------------------------------------------------------
@@ -911,6 +912,261 @@ pub fn cloud_plane_geometry(
     (positions, uvs)
 }
 
+// ---------------------------------------------------------------------------
+// FANCY clouds (issue #403) — real extruded geometry, built on
+// `crate::cloud_mesh`'s pure face enumeration.
+// ---------------------------------------------------------------------------
+
+/// Vanilla's `CloudStatus` (`net.minecraft.client.CloudStatus`), minus `OFF` —
+/// this client has no persisted graphics options yet (`#403`'s "Making the
+/// option live"), so there is nowhere for a player to have chosen `OFF`, and
+/// [`SkyRenderer::render`](crate::sky_pipeline::SkyRenderer::render) always
+/// draws one of the other two. Vanilla's own default is `FANCY`
+/// (`Options.java:189`), which is what [`SkyFrame::new`] uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CloudStatus {
+    /// A single alpha-tested quad ([`cloud_plane_geometry`]).
+    Fast,
+    /// Real extruded per-cell geometry ([`fancy_cloud_geometry`]).
+    #[default]
+    Fancy,
+}
+
+/// Vertical thickness of the FANCY cloud layer, in blocks
+/// (`CloudRenderer.render`'s `relativeTopY = relativeBottomY + 4.0F`,
+/// `CloudRenderer.java:147`).
+pub const CLOUD_FANCY_THICKNESS: f32 = 4.0;
+
+/// Ring radius, in cells, that [`fancy_cloud_geometry`] builds around the
+/// camera every frame.
+///
+/// Vanilla's own radius is `ceil(cloudRange * 16 / 12)`, where `cloudRange` is
+/// a **persisted, player-configurable** option (`Options.java` default
+/// `128` chunks — 2048 blocks). This client has no persisted graphics options
+/// yet (`#403`'s "Making the option live" — only 2 of 93 survive a restart),
+/// and a vanilla-scale radius would rebuild tens of thousands of faces from
+/// scratch every frame, a different cost class from everything else this
+/// module rebuilds per frame (today's largest, the star field, is ~1500 quads
+/// — see [`build_star_field`]). `16` cells (192 blocks) is a deliberate,
+/// bounded simplification in the same spirit as [`CLOUD_PLANE_HALF_EXTENT`]'s
+/// fixed 768-block FAST extent: real geometry, close to the camera, at a cost
+/// this module's existing per-frame-rebuild convention can absorb. Revisit
+/// once `cloudRange` is wired to a real config value — and once rebuilds are
+/// gated on the camera crossing a cell, which is what `cloud_mesh`'s own
+/// module doc already asks for and this does not yet do.
+pub const CLOUD_FANCY_RADIUS_CELLS: i32 = 16;
+
+/// Upper bound on the faces [`crate::cloud_mesh::extruded_faces`] can return
+/// for a given `radius_cells`, from vanilla's own
+/// `CloudRenderer.getSizeForCloudDistance`: `((r+1)*2)^2/2` cells in the disc,
+/// each worth at most 4 un-flagged side/top/bottom faces, plus 54 for the
+/// worst case of the interior 3x3 neighbourhood (9 cells * 6 flagged faces).
+/// Sized once, at pipeline construction, so the vertex/index buffers never
+/// need to grow.
+#[must_use]
+pub const fn cloud_fancy_max_faces(radius_cells: i32) -> u32 {
+    let r = radius_cells as u32;
+    let max_cells = (r + 1) * 2 * (r + 1) * 2 / 2;
+    max_cells * 4 + 54
+}
+
+/// Vanilla's cloud sampling position, wrapped into one texture period and
+/// split into a texel cell plus an in-cell offset
+/// (`CloudRenderer.render`, `CloudRenderer.java:157-167`). Shared by `FAST`
+/// and `FANCY` in vanilla — the mesh differs, this math does not — but
+/// [`cloud_plane_geometry`]'s FAST quad uses a different, continuous UV
+/// instead (see its own doc), so today only [`fancy_cloud_geometry`] calls
+/// this.
+///
+/// Two divergences from the Java, both already shipped in
+/// [`cloud_plane_geometry`] and kept here for the same reason — agreement
+/// between the two modes matters more than a formula this client does not
+/// otherwise use:
+/// - vanilla scrolls by `gameTime` (monotonic world-age ticks) plus
+///   `partialTicks`; this client has neither wired to the sky pass and
+///   scrolls by `time_of_day` instead, exactly as `cloud_plane_geometry`
+///   already does.
+/// - `partialTicks` (sub-tick interpolation) is not modelled anywhere in this
+///   module.
+///
+/// The `+ 3.96` on `cloud_z` is vanilla's own constant
+/// (`CloudRenderer.java:159`, undocumented there too) — kept byte-for-byte
+/// because it is a real, shipped asymmetry between the X and Z sampling axes,
+/// not a typo to "fix".
+///
+/// Returns `(cell_x, cell_z, x_in_cell, z_in_cell)`: **absolute** cell
+/// coordinates (not camera-relative — [`crate::cloud_mesh::extruded_faces`]
+/// wants the centre cell in the same absolute space the texture is indexed
+/// in) and the two in-cell offsets in blocks, each in `[0, CLOUD_CELL_BLOCKS)`.
+#[must_use]
+pub fn cloud_cell_and_offset(
+    camera_pos: [f32; 3],
+    time_of_day: i64,
+    texture_width_texels: u32,
+    texture_height_texels: u32,
+) -> (i32, i32, f32, f32) {
+    let period_ticks = i64::from(texture_width_texels.max(1)) * 400;
+    let wrapped_ticks = time_of_day.rem_euclid(period_ticks.max(1));
+    let scroll_x = wrapped_ticks as f64 * f64::from(CLOUD_SCROLL_BLOCKS_PER_TICK);
+
+    let mut cloud_x = f64::from(camera_pos[0]) + scroll_x;
+    let mut cloud_z = f64::from(camera_pos[2]) + 3.96;
+
+    let tex_w_blocks = f64::from(CLOUD_CELL_BLOCKS) * f64::from(texture_width_texels.max(1));
+    let tex_h_blocks = f64::from(CLOUD_CELL_BLOCKS) * f64::from(texture_height_texels.max(1));
+    cloud_x -= (cloud_x / tex_w_blocks).floor() * tex_w_blocks;
+    cloud_z -= (cloud_z / tex_h_blocks).floor() * tex_h_blocks;
+
+    let cell_x = (cloud_x / f64::from(CLOUD_CELL_BLOCKS)).floor();
+    let cell_z = (cloud_z / f64::from(CLOUD_CELL_BLOCKS)).floor();
+    let x_in_cell = (cloud_x - cell_x * f64::from(CLOUD_CELL_BLOCKS)) as f32;
+    let z_in_cell = (cloud_z - cell_z * f64::from(CLOUD_CELL_BLOCKS)) as f32;
+    (cell_x as i32, cell_z as i32, x_in_cell, z_in_cell)
+}
+
+/// Which side of the FANCY cloud layer the camera is on, from its world Y
+/// alone (`CloudRenderer.render`'s `relativeTopY`/`relativeBottomY` branch,
+/// `CloudRenderer.java:146-155`).
+#[must_use]
+pub fn cloud_relative_pos_for_camera_y(camera_y: f32) -> CloudRelativePos {
+    let relative_bottom_y = CLOUD_HEIGHT - camera_y;
+    let relative_top_y = relative_bottom_y + CLOUD_FANCY_THICKNESS;
+    if relative_top_y < 0.0 {
+        CloudRelativePos::AboveClouds
+    } else if relative_bottom_y > 0.0 {
+        CloudRelativePos::BelowClouds
+    } else {
+        CloudRelativePos::InsideClouds
+    }
+}
+
+/// Unit-cube corner offsets per face, straight from
+/// `rendertype_clouds.vsh`'s `vertices` array — in [`CloudFaceDir`] order
+/// (`Down, Up, North, South, West, East`, which is also vanilla's
+/// `Direction.get3DDataValue()` order, so this table needs no re-indexing).
+const CLOUD_FACE_UNIT_VERTICES: [[[f32; 3]; 4]; 6] = [
+    // Down
+    [[1.0, 0.0, 0.0], [1.0, 0.0, 1.0], [0.0, 0.0, 1.0], [0.0, 0.0, 0.0]],
+    // Up
+    [[0.0, 1.0, 0.0], [0.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 0.0]],
+    // North
+    [[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0], [1.0, 0.0, 0.0]],
+    // South
+    [[1.0, 0.0, 1.0], [1.0, 1.0, 1.0], [0.0, 1.0, 1.0], [0.0, 0.0, 1.0]],
+    // West
+    [[0.0, 0.0, 1.0], [0.0, 1.0, 1.0], [0.0, 1.0, 0.0], [0.0, 0.0, 0.0]],
+    // East
+    [[1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [1.0, 1.0, 1.0], [1.0, 0.0, 1.0]],
+];
+
+/// Per-face shade multiplier, straight from `rendertype_clouds.vsh`'s
+/// `faceColors` — same order as [`CLOUD_FACE_UNIT_VERTICES`].
+const CLOUD_FACE_SHADE: [[f32; 4]; 6] = [
+    [0.7, 0.7, 0.7, 1.0], // Down
+    [1.0, 1.0, 1.0, 1.0], // Up
+    [0.8, 0.8, 0.8, 1.0], // North
+    [0.8, 0.8, 0.8, 1.0], // South
+    [0.9, 0.9, 0.9, 1.0], // West
+    [0.9, 0.9, 0.9, 1.0], // East
+];
+
+/// Expands one [`CloudFace`] into four camera-relative vertex positions and a
+/// baked RGBA colour per vertex — `rendertype_clouds.vsh`'s `main`, run once
+/// per frame on the CPU instead of once per vertex off a texel-fetch buffer,
+/// matching every other pass in this module (see the module docs on why
+/// CPU-side rebuilding is the right tradeoff here).
+///
+/// `tint` is the frame's resolved `CLOUD_COLOR` (white, alpha 0.8, darkened at
+/// night by [`cloud_color_for_time_of_day`]) — vanilla's `CloudColor` uniform.
+/// `fog_end_blocks` fades alpha to zero using the same spherical-distance ramp
+/// as `rendertype_clouds.fsh` (`vertexDistance = length(pos)`, valid because
+/// `pos` is already camera-relative); pass `0.0` to disable it
+/// ([`crate::fog::fog_factor`]'s degenerate-range rule).
+///
+/// The winding flip for [`FLAG_INSIDE_FACE`] faces (`3 - quadVertex` instead
+/// of `quadVertex`) is vanilla's own — without it, the faces built to be seen
+/// from *inside* the cell the camera is standing in would wind away from it.
+#[must_use]
+pub fn cloud_face_vertices(
+    face: &CloudFace,
+    x_in_cell: f32,
+    z_in_cell: f32,
+    relative_bottom_y: f32,
+    tint: [f32; 4],
+    fog_end_blocks: f32,
+) -> ([[f32; 3]; 4], [[f32; 4]; 4]) {
+    let dir_index = face.dir as usize;
+    let inside = face.flags & FLAG_INSIDE_FACE != 0;
+    let use_top_color = face.flags & FLAG_USE_TOP_COLOR != 0;
+
+    let cell_origin = [
+        face.cell_x as f32 * CLOUD_CELL_BLOCKS - x_in_cell,
+        relative_bottom_y,
+        face.cell_z as f32 * CLOUD_CELL_BLOCKS - z_in_cell,
+    ];
+    let cell_size = [CLOUD_CELL_BLOCKS, CLOUD_FANCY_THICKNESS, CLOUD_CELL_BLOCKS];
+
+    let shade = if use_top_color {
+        CLOUD_FACE_SHADE[CloudFaceDir::Up as usize]
+    } else {
+        CLOUD_FACE_SHADE[dir_index]
+    };
+    let base_color = [shade[0] * tint[0], shade[1] * tint[1], shade[2] * tint[2], shade[3] * tint[3]];
+
+    let mut positions = [[0.0f32; 3]; 4];
+    let mut colors = [[0.0f32; 4]; 4];
+    for i in 0..4 {
+        let src = if inside { 3 - i } else { i };
+        let unit = CLOUD_FACE_UNIT_VERTICES[dir_index][src];
+        let pos = [
+            unit[0] * cell_size[0] + cell_origin[0],
+            unit[1] * cell_size[1] + cell_origin[1],
+            unit[2] * cell_size[2] + cell_origin[2],
+        ];
+        let dist = (pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2]).sqrt();
+        let fog = crate::fog::fog_factor(dist, 0.0, fog_end_blocks);
+        positions[i] = pos;
+        colors[i] = [base_color[0], base_color[1], base_color[2], base_color[3] * (1.0 - fog)];
+    }
+    (positions, colors)
+}
+
+/// Builds this frame's full FANCY cloud vertex list: every extruded face
+/// within [`CLOUD_FANCY_RADIUS_CELLS`] of the camera's cell
+/// (`crate::cloud_mesh::extruded_faces`), each expanded to four
+/// `(position, colour)` vertices via [`cloud_face_vertices`]. Vanilla's own
+/// `buildMesh` ring order, so early entries are front-to-back-ish (see
+/// `cloud_mesh`'s doc) — friendly to the translucent blend this pass draws
+/// with, given this module's sky pass has no depth buffer to sort against
+/// (see `sky_pipeline`'s module docs).
+///
+/// `[f32; 3]`/`[f32; 4]` pairs rather than a `CloudFaceVertex` GPU type, so
+/// this stays in the GPU-free half of the sky subsystem — `sky_pipeline.rs`
+/// does the `bytemuck` packing.
+#[must_use]
+pub fn fancy_cloud_geometry(
+    cells: &CloudCells,
+    camera_pos: [f32; 3],
+    time_of_day: i64,
+    tint: [f32; 4],
+) -> Vec<([f32; 3], [f32; 4])> {
+    let (tex_w, tex_h) = cells.dimensions();
+    let (cell_x, cell_z, x_in_cell, z_in_cell) = cloud_cell_and_offset(camera_pos, time_of_day, tex_w, tex_h);
+    let relative_pos = cloud_relative_pos_for_camera_y(camera_pos[1]);
+    let relative_bottom_y = CLOUD_HEIGHT - camera_pos[1];
+    let fog_end_blocks = CLOUD_FANCY_RADIUS_CELLS as f32 * CLOUD_CELL_BLOCKS;
+
+    let faces = crate::cloud_mesh::extruded_faces(cells, cell_x, cell_z, CLOUD_FANCY_RADIUS_CELLS, relative_pos);
+    let mut verts = Vec::with_capacity(faces.len() * 4);
+    for face in &faces {
+        let (positions, colors) = cloud_face_vertices(face, x_in_cell, z_in_cell, relative_bottom_y, tint, fog_end_blocks);
+        for i in 0..4 {
+            verts.push((positions[i], colors[i]));
+        }
+    }
+    verts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1294,5 +1550,192 @@ mod tests {
     #[test]
     fn quad_indices_are_two_ccw_triangles() {
         assert_eq!(quad_indices(), [0, 1, 2, 2, 3, 0]);
+    }
+
+    // -----------------------------------------------------------------------
+    // FANCY clouds
+    // -----------------------------------------------------------------------
+
+    /// Hand-derived from `CloudRenderer.java:157-167`: camera at the origin,
+    /// tick 0 (no scroll), so `cloudX = 0`, `cloudZ = 0 + 3.96`. Both are
+    /// already inside `[0, 12)` for a 16x16 texture (192-block period), so
+    /// wrapping is a no-op and `cellX = floor(0/12) = 0`,
+    /// `cellZ = floor(3.96/12) = 0`.
+    #[test]
+    fn cloud_cell_and_offset_at_the_origin_with_no_scroll() {
+        let (cell_x, cell_z, x_in_cell, z_in_cell) = cloud_cell_and_offset([0.0, 70.0, 0.0], 0, 16, 16);
+        assert_eq!((cell_x, cell_z), (0, 0));
+        assert!((x_in_cell - 0.0).abs() < 1e-4, "x_in_cell = {x_in_cell}");
+        assert!((z_in_cell - 3.96).abs() < 1e-4, "z_in_cell = {z_in_cell}");
+    }
+
+    /// One tick scrolls `X` by `CLOUD_SCROLL_BLOCKS_PER_TICK` exactly, and
+    /// leaves `Z` untouched (vanilla only ever scrolls clouds along X).
+    #[test]
+    fn cloud_cell_and_offset_scrolls_x_by_the_per_tick_rate() {
+        let (_, _, x0, z0) = cloud_cell_and_offset([0.0, 70.0, 0.0], 0, 16, 16);
+        let (_, _, x1, z1) = cloud_cell_and_offset([0.0, 70.0, 0.0], 1, 16, 16);
+        assert!((x1 - x0 - CLOUD_SCROLL_BLOCKS_PER_TICK).abs() < 1e-5, "x0={x0} x1={x1}");
+        assert!((z1 - z0).abs() < 1e-6, "z must not move: z0={z0} z1={z1}");
+    }
+
+    /// Crossing exactly one cell boundary (400 ticks at the per-tick rate is
+    /// vanilla's own `TICKS_PER_CELL`, and `400 * 0.030000001 ≈ 12.0000004`,
+    /// one `CLOUD_CELL_BLOCKS`) must increment `cell_x` and wrap `x_in_cell`
+    /// back near zero, not accumulate past `CLOUD_CELL_BLOCKS`.
+    #[test]
+    fn cloud_cell_and_offset_advances_the_cell_after_one_cell_width_of_scroll() {
+        let (cell_x, _, x_in_cell, _) = cloud_cell_and_offset([0.0, 70.0, 0.0], 400, 16, 16);
+        assert_eq!(cell_x, 1, "400 ticks of scroll is one whole cell");
+        assert!(x_in_cell < CLOUD_CELL_BLOCKS, "x_in_cell must stay inside the cell: {x_in_cell}");
+        assert!(x_in_cell >= 0.0, "x_in_cell must not go negative: {x_in_cell}");
+    }
+
+    /// The texture period wraps the sampling position, so a camera many
+    /// texture-widths away resolves to the same in-cell offset as one at the
+    /// origin — the control that a naive (non-wrapping) implementation would
+    /// fail, since it would instead report a huge `cell_x`.
+    #[test]
+    fn cloud_cell_and_offset_wraps_at_the_texture_period() {
+        let tex_w_blocks = CLOUD_CELL_BLOCKS * 16.0;
+        let (cell_x_near, _, x_near, _) = cloud_cell_and_offset([5.0, 70.0, 0.0], 0, 16, 16);
+        let (cell_x_far, _, x_far, _) = cloud_cell_and_offset([5.0 + tex_w_blocks * 3.0, 70.0, 0.0], 0, 16, 16);
+        assert_eq!(cell_x_near, cell_x_far, "three whole periods away must land on the same cell");
+        assert!((x_near - x_far).abs() < 1e-3);
+    }
+
+    /// The three-way split follows `relativeTopY`/`relativeBottomY` exactly:
+    /// above the 4-block-thick layer, below it, or straddling it.
+    #[test]
+    fn cloud_relative_pos_follows_the_layer_thickness() {
+        // A camera above the layer height is *above* the clouds.
+        assert_eq!(cloud_relative_pos_for_camera_y(CLOUD_HEIGHT + 10.0), CloudRelativePos::AboveClouds);
+        // A camera below the layer height is *below* the clouds.
+        assert_eq!(cloud_relative_pos_for_camera_y(CLOUD_HEIGHT - 10.0), CloudRelativePos::BelowClouds);
+        assert_eq!(cloud_relative_pos_for_camera_y(CLOUD_HEIGHT + 1.0), CloudRelativePos::InsideClouds);
+        // Exactly at relativeTopY == 0 (camera CLOUD_FANCY_THICKNESS below the
+        // bottom) is still "inside" in vanilla — the branch is `< 0.0`, not `<= 0.0`.
+        assert_eq!(
+            cloud_relative_pos_for_camera_y(CLOUD_HEIGHT + CLOUD_FANCY_THICKNESS),
+            CloudRelativePos::InsideClouds
+        );
+    }
+
+    /// The `UP` face of a cell at the camera's own cell, offset by a known
+    /// `relative_bottom_y`, must land exactly on the unit-cube-times-cell-size
+    /// box `rendertype_clouds.vsh` describes, with vanilla's `1.0` top-face
+    /// shade times the tint.
+    #[test]
+    fn cloud_face_vertices_places_the_up_face_on_the_cell_box() {
+        let face = CloudFace {
+            cell_x: 0,
+            cell_z: 0,
+            dir: CloudFaceDir::Up,
+            flags: 0,
+        };
+        let tint = [1.0, 1.0, 1.0, 0.8];
+        let (positions, colors) = cloud_face_vertices(&face, 0.0, 0.0, 10.0, tint, 0.0);
+        for p in positions {
+            assert!((p[1] - (10.0 + CLOUD_FANCY_THICKNESS)).abs() < 1e-4, "top face must sit at the layer's top: {p:?}");
+            assert!(p[0] >= 0.0 && p[0] <= CLOUD_CELL_BLOCKS, "{p:?}");
+            assert!(p[2] >= 0.0 && p[2] <= CLOUD_CELL_BLOCKS, "{p:?}");
+        }
+        for c in colors {
+            assert!((c[0] - 1.0).abs() < 1e-4 && (c[3] - 0.8).abs() < 1e-4, "{c:?}");
+        }
+    }
+
+    /// `FLAG_USE_TOP_COLOR` on a `DOWN` face (vanilla's `FAST`-mode flag,
+    /// reused for a FANCY cell that should read as a cloud top rather than an
+    /// underside) must use the `UP` shade (`1.0`), not `DOWN`'s (`0.7`).
+    #[test]
+    fn cloud_face_vertices_use_top_color_flag_overrides_the_down_shade() {
+        let down = CloudFace {
+            cell_x: 0,
+            cell_z: 0,
+            dir: CloudFaceDir::Down,
+            flags: 0,
+        };
+        let flagged = CloudFace { flags: FLAG_USE_TOP_COLOR, ..down };
+        let tint = [1.0, 1.0, 1.0, 1.0];
+        let (_, plain_colors) = cloud_face_vertices(&down, 0.0, 0.0, 0.0, tint, 0.0);
+        let (_, flagged_colors) = cloud_face_vertices(&flagged, 0.0, 0.0, 0.0, tint, 0.0);
+        assert!((plain_colors[0][0] - 0.7).abs() < 1e-4, "{:?}", plain_colors[0]);
+        assert!((flagged_colors[0][0] - 1.0).abs() < 1e-4, "{:?}", flagged_colors[0]);
+    }
+
+    /// `FLAG_INSIDE_FACE` reverses the quad's vertex order (vanilla's
+    /// `isInsideFace ? 3 - quadVertex : quadVertex`) — the winding flip that
+    /// keeps interior faces from turning away from a camera standing inside
+    /// the cell.
+    #[test]
+    fn cloud_face_vertices_inside_flag_reverses_winding() {
+        let face = CloudFace {
+            cell_x: 2,
+            cell_z: -1,
+            dir: CloudFaceDir::North,
+            flags: 0,
+        };
+        let inside = CloudFace { flags: FLAG_INSIDE_FACE, ..face };
+        let tint = [1.0, 1.0, 1.0, 1.0];
+        let (plain_pos, _) = cloud_face_vertices(&face, 0.0, 0.0, 0.0, tint, 0.0);
+        let (inside_pos, _) = cloud_face_vertices(&inside, 0.0, 0.0, 0.0, tint, 0.0);
+        for i in 0..4 {
+            assert_eq!(inside_pos[i], plain_pos[3 - i], "vertex {i} must be the reverse-order one");
+        }
+    }
+
+    /// `fog_end_blocks = 0.0` disables the fade entirely
+    /// ([`crate::fog::fog_factor`]'s degenerate-range rule); a real end
+    /// distance must reduce alpha for a far-away face, and the executed
+    /// control proves the fade actually engages rather than merely existing.
+    #[test]
+    fn cloud_face_vertices_fog_end_fades_alpha_and_zero_disables_it() {
+        let far_face = CloudFace {
+            cell_x: 15,
+            cell_z: 15,
+            dir: CloudFaceDir::Up,
+            flags: 0,
+        };
+        let tint = [1.0, 1.0, 1.0, 0.8];
+        let (_, no_fog) = cloud_face_vertices(&far_face, 0.0, 0.0, 10.0, tint, 0.0);
+        let (_, with_fog) = cloud_face_vertices(&far_face, 0.0, 0.0, 10.0, tint, 50.0);
+        for c in no_fog {
+            assert!((c[3] - 0.8).abs() < 1e-4, "fog_end 0.0 must not touch alpha: {c:?}");
+        }
+        assert!(
+            with_fog.iter().any(|c| c[3] < 0.79),
+            "a face far past a real fog_end must have reduced alpha: {with_fog:?}"
+        );
+    }
+
+    /// End-to-end smoke test over the composed pipeline: a single filled
+    /// texel near the camera's cell must produce a non-empty, `%4 == 0`
+    /// vertex list (whole quads only), and every vertex's colour must carry
+    /// the tint's alpha as its ceiling (shade multipliers are all `<= 1.0`
+    /// and fog only ever reduces alpha further).
+    #[test]
+    fn fancy_cloud_geometry_produces_whole_quads_for_a_filled_cell() {
+        let mut rgba = vec![0u8; 16 * 16 * 4];
+        let i = (8 + 8 * 16) * 4;
+        rgba[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
+        let cells = CloudCells::from_rgba(16, 16, &rgba);
+        let tint = [1.0, 1.0, 1.0, 0.8];
+        let verts = fancy_cloud_geometry(&cells, [96.0, CLOUD_HEIGHT, 96.0], 0, tint);
+        assert!(!verts.is_empty(), "a filled cell near the camera must produce faces");
+        assert_eq!(verts.len() % 4, 0, "faces are whole quads: {}", verts.len());
+        for (_, color) in &verts {
+            assert!(color[3] <= tint[3] + 1e-4, "alpha must never exceed the tint: {color:?}");
+        }
+    }
+
+    /// A degenerate/empty texture must produce no geometry at all — the
+    /// negative control for the smoke test above, so "always produces
+    /// something" cannot be mistaken for "produces the *right* thing".
+    #[test]
+    fn fancy_cloud_geometry_is_empty_for_an_empty_texture() {
+        let cells = CloudCells::from_rgba(16, 16, &vec![0u8; 16 * 16 * 4]);
+        let verts = fancy_cloud_geometry(&cells, [96.0, CLOUD_HEIGHT, 96.0], 0, [1.0, 1.0, 1.0, 0.8]);
+        assert!(verts.is_empty(), "an all-transparent texture must yield no faces: {} verts", verts.len());
     }
 }

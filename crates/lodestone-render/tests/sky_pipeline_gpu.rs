@@ -163,7 +163,21 @@ fn sky_pass_paints_the_whole_frame() {
         &mut encoder,
         frame.view(),
         &camera,
-        &lodestone_render::SkyFrame::new(18_000, [0.24, 0.46, 0.83]),
+        // `.with_cloud_status(Fast)`: this gate's ">50% non-black" threshold was
+        // set against FAST's near-unbounded quad (`CLOUD_PLANE_HALF_EXTENT` =
+        // 768 blocks, alpha-tested every pixel with no radial cutoff). FANCY
+        // (issue #403's default — see `CloudStatus`'s doc) only builds real
+        // geometry within `CLOUD_FANCY_RADIUS_CELLS` (192 blocks) of the
+        // camera, a deliberately bounded per-frame-CPU-rebuild cost — at this
+        // steep upward pitch that mesh subtends far less of the frame than
+        // FAST's quad does, and the disc itself paints solid **black** at
+        // midnight (`night_sky_is_black_but_night_fog_is_not`), so this
+        // specific camera/time combination is not a fair coverage test of
+        // FANCY. `fancy_clouds_paint_real_pixels_near_the_camera` below is the
+        // dedicated anti-island proof for FANCY; this one keeps proving what
+        // it was written for — that all four passes paint, not just the disc.
+        &lodestone_render::SkyFrame::new(18_000, [0.24, 0.46, 0.83])
+            .with_cloud_status(lodestone_render::CloudStatus::Fast),
         // Deliberately black, *not* `SkyFrame::clear_color`: this gate's whole
         // metric is "did anything paint here", and the shipped clear (the fog
         // colour) satisfies it for free. See `SkyRenderer::render`'s doc.
@@ -936,7 +950,15 @@ fn real_jar_clouds_are_not_black_fringed() {
         &mut encoder,
         frame.view(),
         &camera,
-        &lodestone_render::SkyFrame::new(6_000, DAY_SKY),
+        // `.with_cloud_status(Fast)`: this gate is specifically about the FAST
+        // alpha-tested quad's fringe artifact (issue #372's fix), so it must
+        // stay pinned to FAST regardless of `SkyFrame::new`'s own default —
+        // see `crate::sky::CloudStatus`'s doc for why that default is now
+        // `Fancy` (issue #403). A FANCY 3D mesh has real screen-space gaps
+        // between faces that `fringe_fraction` would misclassify as this
+        // gate's fringe, which is a different defect entirely.
+        &lodestone_render::SkyFrame::new(6_000, DAY_SKY)
+            .with_cloud_status(lodestone_render::CloudStatus::Fast),
         // Black, not the shipped fog-coloured clear: `fringe_fraction` classifies
         // pixels against `background`/`full_color`, and a third colour under the
         // quad would be scored as a fringe.
@@ -984,5 +1006,119 @@ fn real_jar_clouds_are_not_black_fringed() {
          {:.1}% fringe, so this gate's detector would not actually have caught the \
          regression",
         control_fringe * 100.0
+    );
+}
+
+/// **Anti-island proof for FANCY clouds (issue #403).** `cloud_mesh.rs` landed
+/// as `dc8a028` with 11 hermetic tests and zero consumers, disclosed as
+/// unwired at the time. `sky.rs`'s `fancy_cloud_geometry`/`cloud_face_vertices`
+/// and this crate's own unit tests prove the *math*, but every one of them is
+/// GPU-free and cannot see a wrong bind group, an untouched vertex layout, or
+/// a draw call that never runs — exactly the class of defect `CLAUDE.md`'s
+/// rule 1 exists to catch. This is the gate that proves the wiring reaches
+/// the framebuffer.
+///
+/// Camera sits at `CLOUD_HEIGHT` itself, looking straight up
+/// (`Camera::forward` at `yaw = 0, pitch = -90` is `(0, 1, 0)`, same as
+/// `real_jar_sun_is_not_solid_black`'s doc). The mesh always builds the
+/// interior 3x3 cells around the camera's own cell with every face flagged
+/// `FLAG_INSIDE_FACE` when any of those nine cells is filled
+/// (`cloud_mesh::push_extruded_cell`), so this only needs the real
+/// `clouds.png` to have *a* filled cell near the origin — true of the shipped
+/// asset without hunting for a specific coordinate (most of the 256x256
+/// texture is filled; a fully-transparent origin would make this gate flaky,
+/// which the executed control below would catch by both readings coming back
+/// near-zero).
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn fancy_clouds_paint_real_pixels_near_the_camera() {
+    let Some(ctx) = ctx() else {
+        panic!(
+            "no GPU adapter available — a missing GPU is a failure, never a skip \
+             (this repo's own convention, see e.g. dropped_item_pixels.rs)"
+        );
+    };
+    let manager = real_jar_manager().expect(
+        "no client.jar under .cache/mc/<version>/ — fetch it first; a missing jar is a \
+         failure, never a skip",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    const W: u32 = 128;
+    const H: u32 = 128;
+
+    let camera = Camera {
+        position: glam::Vec3::new(0.0, lodestone_render::CLOUD_HEIGHT, 0.0),
+        yaw: 0.0,
+        pitch: -90.0,
+        fov_y_degrees: 90.0,
+        aspect: W as f32 / H as f32,
+        near: 0.05,
+        far: 512.0,
+    };
+
+    let sky =
+        SkyRenderer::new(device, queue, format, &manager).expect("build sky renderer over the real jar");
+
+    // ---- Subject: FANCY, explicit (not relying on the default, so this test
+    // keeps failing if that default is ever reverted). ----
+    let mut subject_target = HeadlessTarget::new(device, W, H, format);
+    let subject_frame = subject_target.acquire().expect("headless acquire (subject)");
+    let mut subject_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("fancy-clouds-subject"),
+    });
+    sky.render(
+        device,
+        queue,
+        &mut subject_encoder,
+        subject_frame.view(),
+        &camera,
+        &lodestone_render::SkyFrame::new(6_000, DAY_SKY).with_cloud_status(lodestone_render::CloudStatus::Fancy),
+        wgpu::Color::BLACK,
+    );
+    queue.submit(std::iter::once(subject_encoder.finish()));
+    let subject_pixels = subject_target.read_texels(device, queue);
+    let subject_frac = non_black_fraction(&subject_pixels);
+
+    // ---- Control, EXECUTED: same camera and scene, FAST clouds. Not a
+    // FAST-vs-FANCY comparison — it proves this camera/texture combination is
+    // *capable* of painting non-black pixels at all, so a subject failure
+    // cannot be laid at the scene's door instead of FANCY's wiring.
+    let mut control_target = HeadlessTarget::new(device, W, H, format);
+    let control_frame = control_target.acquire().expect("headless acquire (control)");
+    let mut control_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("fancy-clouds-control"),
+    });
+    sky.render(
+        device,
+        queue,
+        &mut control_encoder,
+        control_frame.view(),
+        &camera,
+        &lodestone_render::SkyFrame::new(6_000, DAY_SKY).with_cloud_status(lodestone_render::CloudStatus::Fast),
+        wgpu::Color::BLACK,
+    );
+    queue.submit(std::iter::once(control_encoder.finish()));
+    let control_pixels = control_target.read_texels(device, queue);
+    let control_frac = non_black_fraction(&control_pixels);
+
+    eprintln!("=== fancy cloud anti-island gate ===");
+    eprintln!("subject (FANCY, looking straight up from inside the layer): {:.1}% non-black", subject_frac * 100.0);
+    eprintln!("control (FAST, same camera): {:.1}% non-black", control_frac * 100.0);
+
+    assert!(
+        subject_frac > 0.05,
+        "FANCY clouds painted essentially nothing ({:.1}%) looking straight up from inside \
+         the real cloud layer — the mesh, pipeline, bind group, or draw call is not reaching \
+         the framebuffer",
+        subject_frac * 100.0
+    );
+    assert!(
+        control_frac > 0.05,
+        "control failed to fail: FAST painted nothing either ({:.1}%) from the same camera \
+         and real texture, so this scene cannot distinguish a broken FANCY draw from an \
+         empty one — the camera/texture setup needs to change, not the assertion",
+        control_frac * 100.0
     );
 }

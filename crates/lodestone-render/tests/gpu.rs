@@ -516,8 +516,21 @@ fn greedy_merged_quad_stays_within_its_sprite() {
     };
     // Sample a horizontal sweep across the middle of the face. Every face pixel
     // must read the red sprite (its own); none may bleed into the blue neighbour.
-    // Absolute brightness is irrelevant here — the exposed face samples the empty
-    // neighbour's zero light, so red arrives dim — what matters is red vs blue.
+    //
+    // Absolute brightness is *mostly* irrelevant here — the exposed face samples
+    // the empty neighbour's zero light, so red arrives dim — but the floor below
+    // is not an arbitrary "dim is fine" number, because issue #400 fixed exactly
+    // this shader's shade multiply to run in gamma space rather than linear. This
+    // scene's shade is `ao(1.0) * light_term(0.2 floor, zero sky/block light)` —
+    // no neighbours (`SectionNeighborhood::centre_only`), so corners are
+    // unoccluded and the light sits at the mesher's zero-light floor — and the
+    // sprite's red channel is a pure 255 (linear 1.0), an sRGB fixed point, so
+    // `linear_to_srgb` is a no-op on the texel and the whole effect is
+    // `srgb_to_linear(0.2) ≈ 0.0331`, byte **8**. Before the fix, `tex.rgb *
+    // shade` multiplied in linear light and wrote back byte 51 (`0.2 * 255`,
+    // rounded) — measurably brighter, the washed-out direction `CLAUDE.md`
+    // warns about. Measured on this machine at exactly 8; `4..=14` keeps margin
+    // either side without drifting back to the old (wrong) 51.
     let mut face_samples = 0usize;
     for sx in (8..w - 8).step_by(4) {
         let p = at(sx, h / 2);
@@ -527,8 +540,10 @@ fn greedy_merged_quad_stays_within_its_sprite() {
         }
         face_samples += 1;
         assert!(
-            p[0] > 20 && p[0] > p[2] * 4,
-            "face pixel at x={sx} sampled the wrong sprite (bled into blue): {p:?}"
+            (5..=14).contains(&p[0]) && p[0] > p[2] * 4,
+            "face pixel at x={sx} sampled the wrong sprite (bled into blue), or the packed \
+             shader's gamma-space shade multiply (issue #400) regressed: {p:?}, expected \
+             red in 5..=14"
         );
     }
     assert!(

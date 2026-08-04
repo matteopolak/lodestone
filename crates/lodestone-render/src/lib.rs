@@ -67,6 +67,7 @@ pub mod scene;
 pub mod screen_effects;
 pub mod section;
 pub mod section_arena;
+pub mod sign;
 pub mod sky;
 pub mod sky_pipeline;
 pub mod strategy;
@@ -173,14 +174,20 @@ pub use screen_effects::{
 };
 pub use section::{Cell, Face, SECTION_SIZE, SectionNeighborhood, SectionView, SpriteId, Surface};
 pub use section_arena::{INDEX_SIZE, SectionArena, draw_region_for};
+pub use sign::{
+    SignOrientation, SignSpawn, TEXT_LINE_HEIGHT, dye_text_color_rgb, sign_side_color,
+    sign_text_transform,
+};
 pub use sky::{
-    CLOUD_CELL_BLOCKS, CLOUD_HEIGHT, CLOUD_SCROLL_BLOCKS_PER_TICK, DAY_PERIOD_TICKS, MOON_HEIGHT,
-    MOON_SIZE, SKY_DISC_RADIUS, SKY_FOG_END_DISTANCE, STAR_COUNT, STAR_DISTANCE, STAR_FIELD_SEED,
-    SUN_HEIGHT, SUN_SIZE, SUNRISE_FAN_BOW, SUNRISE_FAN_HEIGHT, SUNRISE_FAN_RADIUS,
-    SUNRISE_FAN_VERTICES, SUNRISE_MIN_ALPHA, SUNRISE_STEPS, build_star_field,
-    celestial_angle_for_time_of_day, celestial_quad_positions, celestial_quad_uvs,
-    celestial_rotation_matrix, cloud_color_for_time_of_day, cloud_color_multiplier_for_time_of_day,
-    cloud_plane_geometry, fog_color_for_time_of_day, fog_color_multiplier_for_time_of_day,
+    CLOUD_CELL_BLOCKS, CLOUD_FANCY_RADIUS_CELLS, CLOUD_FANCY_THICKNESS, CLOUD_HEIGHT,
+    CLOUD_SCROLL_BLOCKS_PER_TICK, CloudStatus, DAY_PERIOD_TICKS, MOON_HEIGHT, MOON_SIZE,
+    SKY_DISC_RADIUS, SKY_FOG_END_DISTANCE, STAR_COUNT, STAR_DISTANCE, STAR_FIELD_SEED, SUN_HEIGHT,
+    SUN_SIZE, SUNRISE_FAN_BOW, SUNRISE_FAN_HEIGHT, SUNRISE_FAN_RADIUS, SUNRISE_FAN_VERTICES,
+    SUNRISE_MIN_ALPHA, SUNRISE_STEPS, build_star_field, celestial_angle_for_time_of_day,
+    celestial_quad_positions, celestial_quad_uvs, celestial_rotation_matrix, cloud_cell_and_offset,
+    cloud_color_for_time_of_day, cloud_color_multiplier_for_time_of_day, cloud_face_vertices,
+    cloud_fancy_max_faces, cloud_plane_geometry, cloud_relative_pos_for_camera_y,
+    fancy_cloud_geometry, fog_color_for_time_of_day, fog_color_multiplier_for_time_of_day,
     moon_phase_index_for_time_of_day, quad_indices, sky_color_for_time_of_day,
     sky_color_multiplier_for_time_of_day, sky_disc_indices, sky_disc_positions,
     sky_fog_end_for_render_distance, sky_fog_end_for_render_distance_blocks,
@@ -188,9 +195,9 @@ pub use sky::{
     sunrise_fan_transform, sunrise_fan_vertex_alphas, sunrise_sunset_color_for_time_of_day,
 };
 pub use sky_pipeline::{
-    CelestialPipeline, CelestialVertex, CloudPipeline, CloudVertex, SkyDiscPipeline,
-    SkyDiscVertex, SkyFrame, SkyRenderer, SkyVertex, StarPipeline, StarVertex, SunrisePipeline,
-    SunriseVertex,
+    CelestialPipeline, CelestialVertex, CloudPipeline, CloudVertex, FancyCloudPipeline,
+    SkyDiscPipeline, SkyDiscVertex, SkyFrame, SkyRenderer, SkyVertex, StarPipeline, StarVertex,
+    SunrisePipeline, SunriseVertex,
 };
 pub use strategy::{
     DrawRegion, DrawStrategy, MdiCount, MdiZeroInstance, PerDraw, StrategyError, StrategyKind,
