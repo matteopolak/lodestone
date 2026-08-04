@@ -29,6 +29,10 @@
 //!   *not* on [`collision::CollisionView`]: that trait answers block geometry, and
 //!   entity data is a caller-owned per-tick snapshot rather than a repeatable
 //!   spatial query.
+//! * [`knockback`] — [`knockback::knockback_impulse`], the melee attack
+//!   knockback velocity mechanic (`LivingEntity.knockback`). Distinct from
+//!   [`push`]'s always-on crowd nudge and from an explosion's radial knockback
+//!   (`lodestone_entity::explosion`) — three different formulas, none shared.
 //!
 //! The crate has no runtime dependencies; the sine table is generated once and
 //! checked in as [`sin_table`].
@@ -41,6 +45,7 @@ pub mod entity;
 pub mod fluid;
 pub mod fluid_state;
 pub mod geometry;
+pub mod knockback;
 pub mod mth;
 pub mod player;
 pub mod pose;
@@ -56,6 +61,7 @@ pub use entity::{
 pub use fluid::{FluidCell, FluidKind, HorizontalDir, apply_fluid_push, get_flow};
 pub use fluid_state::{FluidState, compute_fluid_state};
 pub use geometry::{Aabb, Axis, Vec3d};
+pub use knockback::{attack_direction, knockback_impulse};
 pub use player::{
     EdgeBackOff, MovementInput, PlayerState, StatusEffects, apply_firework_boost, apply_riptide,
     input_vector, player_flying_speed, tick, tick_air, tick_among_entities, tick_elytra,
