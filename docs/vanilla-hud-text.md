@@ -105,12 +105,35 @@ site was converted from the free `text_w` to `b.text_width`.
   correct and every *width* wrong satisfies `assert_eq!` on the source string, on the
   glyph count, on the vertex count, and on "did text draw". The defect is a property
   of the geometry *between* glyphs. Never replace these with content assertions.
+- **`VanillaFont::draw` always adds vanilla's automatic 1px shadow — do not use it
+  for a hand-rolled outline.** A live player report on the XP bar's level number
+  ("too big and too high") traced to `hud::sprite_vitals` drawing that digit at
+  `scale = 2.0` with a `text()`/`draw()` call, when vanilla's own
+  `ContextualBar.extractExperienceLevel` (`ContextualBar.java:34-40`) draws it at
+  scale 1, **five** times with `shadow = false` on every call: four ±1px-offset
+  black copies (the outline) then one green copy — not vanilla's usual
+  single-shadow text. `VanillaFont::draw_plain` / `Builder::text_plain` exist for
+  exactly this: the unshadowed pass `AbstractContainerScreen.java:190-191`'s
+  container labels also use. Reaching for `text()` for a hand-rolled outline
+  layers an unwanted extra shadow under it.
+- **A HUD row's y-offset from its neighbour is not a font-metrics quantity.**
+  The same XP fix: the level number used to sit `(GLYPH_H + 2) * scale` above the
+  bar — a value from font metrics that has nothing to do with vanilla's real
+  gap, which is a flat `6` logical px fixed by `ContextualBar`'s own two
+  constants (`top = guiHeight - 24 - 5`, text `y = guiHeight - 24 - 9 - 2`).
+  Get the real vanilla offset from the decompile and derive it from the
+  sibling element's own on-screen position (`by - 6.0`, not a restated
+  constant) — the same "moving anchor" rule as the rest of this HUD cluster
+  (see `CLAUDE.md`).
 
 ## Verification
 
 ```bash
 cargo test -p lodestone-assets --test vanilla_font_metrics -- --ignored --nocapture
 cargo test -p lodestone-shell  --test vanilla_font_pixels  -- --ignored --nocapture
+cargo test -p lodestone-shell --lib \
+  hud::tests::xp_level_number_is_the_right_size_and_the_right_distance_above_the_bar \
+  -- --ignored --nocapture
 ```
 
 Both fail closed: a missing jar is a failure, not a skip. The pixel gate asserts
