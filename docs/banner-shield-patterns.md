@@ -86,17 +86,39 @@ built speculatively:
    this task's file ownership assigns to the cost-screens agent, not here.
    **This prerequisite does not block the block-entity consumer** — see
    below.
-2. **No banner/shield mesh.** Vanilla's flag mesh (`BannerFlagModel`) has
-   per-vertex cloth-wave animation this codebase has never ported, and
-   building it is explicitly issue #23's scope — the issue that owns this
+2. **No banner/shield mesh.** Building it is explicitly issue #23's scope — the issue that owns this
    one says so directly: "the in-world banner block entity rendering itself
    is #23's scope... land the shared compositing function here and have
    #23's banner work consume it." This doc and module are that hand-off
-   point. **Still true**: this session built the bell body/rim instead (a
-   single static box vs. an animated cloth mesh with a base layer plus up to
-   16 further tinted layers — a materially larger effort, and correctly
-   triaged as lower value for the "player survives an hour" bar than closing
-   a total hole is), so the mesh remains unbuilt.
+   point. **Still true**: this session built the bell body/rim instead, so the
+   mesh remains unbuilt.
+
+   **Corrected, because the old wording overstated this by a lot.** This entry
+   used to claim `BannerFlagModel` needs "per-vertex cloth-wave animation this
+   codebase has never ported". That is wrong for 26.2. `BannerFlagModel.setupAnim`
+   is a **single per-part rotation** —
+   `flag.xRot = (-0.0125 + 0.01 * cos(2π * phase)) * π` — mechanically identical
+   to the chest lid and the bell body, both of which `BlockEntityMesh`'s
+   `part_transforms` overrides already handle. The flag is **one box**
+   (`addBox(-10, 0, -2, 20, 40, 1)` on a 64×64 sheet) and the stand is a `pole`
+   plus a `bar` (`BannerModel.createBodyLayer`). Phase is per-position:
+   `(floorMod(x*7 + y*9 + z*13 + gameTime, 100) + partialTick) / 100`
+   (`BannerRenderer.java:93`).
+
+   So the mesh is ordinary. **The real remaining constraint is the one
+   per-instance tint does not solve**: vanilla's `RenderPipelines.BANNER_PATTERN`
+   (`RenderPipelines.java:311-318`) draws the flag opaque and then each mask layer
+   with **translucent blend, depth write off, no alpha cutout**, at equal depth.
+   Our `EntityPipeline` is `blend: None`, `depth_write: true`, and its shader
+   discards below alpha 0.5 — so the layers need a third pipeline variant. And
+   because translucent depth-write-off draws are **order-dependent**, they cannot
+   ride `plan_block_entities`' `(model, texture)` batching: two banners whose
+   layers use the same two sprites in opposite orders could not both be right.
+   Vanilla dodges this by stitching every pattern into one atlas and preserving
+   submission order. **Do not build atlas stitching for this.** Send the opaque
+   flag/pole/bar through the existing batcher and the tinted layers through a
+   small separate ordered draw list — banners are rare, and a handful of extra
+   draw calls costs nothing.
 
 Shield's first-person hand and third-person held item (this issue's other
 named scope) are blocked on the same two prerequisites — there is no shield
