@@ -438,6 +438,55 @@ several `worldgen_data::tests::*`) are individually CPU-heavy, and a GitHub
 runner's core count and clock speed — and how warm its `sccache`/`rust-cache`
 state is — will shift every number here run to run.
 
+### The just-recipe conversion's first CI run (`30946172105`)
+
+Item 3 of the `just` design (#432) landed: the four health-check jobs now
+install a pinned `just` (`extractions/setup-just`, commit SHA, not a floating
+tag) and run `just check`/`check-all`/`check-seam`/`test` instead of a
+hand-copied `cargo` line. Read from the run itself, not assumed:
+
+| job | result | time |
+|---|---|---|
+| `check: just check` | ✅ pass | 1m9s |
+| `check: just check-all (allocbench excluded)` | ✅ pass | 1m24s |
+| `check: just check-seam (version seam)` | ✅ pass | 58s |
+| `xtask: check-isolation / check-deletable` | ❌ **fail** — pre-existing, unrelated | 22s |
+| `test: just test` | ❌ **fail** — pre-existing, unrelated | 10m45s |
+
+Confirmed from the job logs, not inferred: the `just test` step's own printed
+command line was `cargo test --workspace --no-fail-fast  --target-dir
+target` — no `-j` (the flag was empty, as it should be with `LODESTONE_JOBS`
+unset) and the plain default `target` dir (no `LODESTONE_TARGET_DIR` reached
+the runner). The env block logged immediately above that line lists only the
+pre-existing `CARGO_TERM_COLOR`/`CARGO_INCREMENTAL`/`CARGO_PROFILE_*_DEBUG`/
+`SCCACHE_*`/`RUSTC_WRAPPER` vars this workflow already set — no
+`CARGO_TARGET_DIR` anywhere. The conversion itself changed nothing about what
+ran.
+
+**Both failures are pre-existing and unrelated to this conversion — verified
+by reproducing each at committed HEAD in an isolated `git worktree`, before
+either failure could be blamed on `just`, `extractions/setup-just`, or this
+file's edits:**
+
+- `xtask-structural-checks` (a job this change did not touch — it still calls
+  raw `cargo run -p xtask` directly, see "How it works" above) failed on
+  `check-isolation`: `lodestone-fuzz` depends directly on all four version
+  crates (`lodestone-v47`/`v340`/`v735`/`v770`), which is exactly the
+  shared-crate-depends-on-a-version-crate violation that check exists to
+  catch. Real, and not caused by anything in this change.
+- `test` failed on a single test, `measure_light_recompute_cost`
+  (`crates/lodestone-world/tests/memory.rs:286`), a wall-clock-bound
+  performance assertion (`column light recompute unexpectedly slow: 54.899
+  ms`) — the same species of timing-sensitive test as the
+  `sim::tests::extract_particles_…` flake logged above. It failed identically
+  in a clean worktree at committed HEAD *before* this file was edited, so it
+  is pre-existing, not a regression from the `just` conversion. The two
+  chunk-streaming tests that were flagged as known-red elsewhere in this
+  session (`dig_and_place_persist_through_forget_and_reload`,
+  `real_client_view_follows_player_across_chunk_boundaries`) both **passed**
+  in this run — that claim of red has gone stale; whoever owns them should
+  re-check before assuming it still holds.
+
 ## How to extend it
 
 - **Add a check**: add a job, following the existing pattern (checkout →
