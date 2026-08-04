@@ -94,6 +94,14 @@ pub enum Sheet {
     Angry,
     /// `particle/glint` — `SuspendedTownParticle.HappyVillagerProvider`.
     Glint,
+    /// `particle/explosion_0` … `explosion_15` — `HugeExplosionParticle`
+    /// (`ParticleTypes.EXPLOSION`). Sixteen frames, confirmed against
+    /// `assets/minecraft/particles/explosion.json`'s own texture list rather
+    /// than assumed from the registry name — the doc's own warning about not
+    /// assuming a sheet stem matches the registry name holds here too, it
+    /// just happens both to be "explosion" *and* to need its own frame count
+    /// (16, not the 8 every other multi-frame sheet in this enum uses).
+    Explosion,
 }
 
 impl Sheet {
@@ -102,6 +110,7 @@ impl Sheet {
     #[must_use]
     pub const fn frame_count(self) -> u16 {
         match self {
+            Self::Explosion => 16,
             Self::Generic | Self::Effect | Self::Glitter | Self::SweepAttack | Self::Spell => 8,
             Self::Splash => 4,
             Self::CriticalHit
@@ -133,6 +142,7 @@ impl Sheet {
             Self::Spell => "spell",
             Self::Angry => "angry",
             Self::Glint => "glint",
+            Self::Explosion => "explosion",
         }
     }
 
@@ -178,6 +188,7 @@ impl Sheet {
             Self::Spell,
             Self::Angry,
             Self::Glint,
+            Self::Explosion,
         ]
     }
 
@@ -294,6 +305,22 @@ pub enum Behaviour {
     /// `SpellParticle` — witch/potion effect motes. Translucent, animates
     /// through its sheet every tick with no fade.
     Spell,
+    /// `HugeExplosionSeedParticle` (`ParticleTypes.EXPLOSION_EMITTER`) — a
+    /// `NoRenderParticle`: never drawn, and its `tick()` is a full override
+    /// that calls neither `super.tick()` nor `move()`. Instead it spawns six
+    /// [`Self::HugeExplosion`] particles per tick for its 8-tick life, at a
+    /// jittered offset with a `size` that grows from `0` to `7/8`. See
+    /// [`Particle::tick_huge_explosion_seed`]. Excluded from
+    /// [`ParticleEngine::extract`] explicitly, since `layer()` has no "not
+    /// drawn at all" value to return.
+    HugeExplosionSeed,
+    /// `HugeExplosionParticle` (`ParticleTypes.EXPLOSION`) — the visible
+    /// shockwave puff a seed spawns. Ordinary physics (no override on
+    /// `move`/gravity/friction — vanilla's constructor never touches them),
+    /// full-bright (`getLightCoords` hardcodes `15728880`, `FULL_BRIGHT`),
+    /// opaque, and animates through [`Sheet::Explosion`] every tick via the
+    /// same `setSpriteFromAge` call [`Self::AshSmoke`]/[`Self::Spell`] use.
+    HugeExplosion,
 }
 
 impl Behaviour {
@@ -301,7 +328,11 @@ impl Behaviour {
     const fn animated_sheet(self, sprite: SpriteSource) -> Option<Sheet> {
         match (self, sprite) {
             (
-                Self::AshSmoke | Self::SimpleAnimated { .. } | Self::SweepAttack | Self::Spell,
+                Self::AshSmoke
+                | Self::SimpleAnimated { .. }
+                | Self::SweepAttack
+                | Self::Spell
+                | Self::HugeExplosion,
                 SpriteSource::Sheet { sheet, .. },
             ) => Some(sheet),
             _ => None,
@@ -309,6 +340,13 @@ impl Behaviour {
     }
 
     /// `getLayer()`.
+    ///
+    /// [`Self::HugeExplosionSeed`] is never actually asked this — it is
+    /// excluded from [`ParticleEngine::extract`] before `layer()` would be
+    /// consulted, since a `NoRenderParticle` has no vanilla `Layer` at all —
+    /// but the match must still be exhaustive, so it takes the harmless
+    /// `Opaque` bucket rather than a wildcard arm that could silently swallow
+    /// a real future variant.
     #[must_use]
     pub const fn layer(self) -> Layer {
         match self {
@@ -323,7 +361,9 @@ impl Behaviour {
             | Self::SweepAttack
             | Self::Note
             | Self::Heart
-            | Self::Suspended => Layer::Opaque,
+            | Self::Suspended
+            | Self::HugeExplosionSeed
+            | Self::HugeExplosion => Layer::Opaque,
         }
     }
 }
@@ -626,15 +666,37 @@ impl Particle {
     ///
     /// `view` supplies block geometry for collision; a particle with
     /// `has_physics == false` never touches it.
-    pub fn tick(&mut self, view: &dyn CollisionView) {
+    ///
+    /// Returns any `(x, y, z, size)` follow-up spawns this tick produced —
+    /// empty for every behaviour except [`Behaviour::HugeExplosionSeed`],
+    /// which is the one particle in this crate whose own `tick()` creates
+    /// more particles. Returning them rather than spawning directly is what
+    /// lets [`ParticleEngine::tick`] do it: a `for p in &mut self.particles`
+    /// loop already holds `self.particles` mutably borrowed, so a particle
+    /// cannot push a sibling into that same `Vec` from inside its own `tick`.
+    pub fn tick(&mut self, view: &dyn CollisionView) -> Vec<(f64, f64, f64, f32)> {
         match self.behaviour {
-            Behaviour::WaterDrop => self.tick_water_drop(view),
-            Behaviour::Bubble => self.tick_bubble(view),
-            Behaviour::SweepAttack => self.tick_sweep_attack(),
-            Behaviour::Suspended => self.tick_suspended(),
+            Behaviour::WaterDrop => {
+                self.tick_water_drop(view);
+                Vec::new()
+            }
+            Behaviour::Bubble => {
+                self.tick_bubble(view);
+                Vec::new()
+            }
+            Behaviour::SweepAttack => {
+                self.tick_sweep_attack();
+                Vec::new()
+            }
+            Behaviour::Suspended => {
+                self.tick_suspended();
+                Vec::new()
+            }
+            Behaviour::HugeExplosionSeed => self.tick_huge_explosion_seed(),
             _ => {
                 self.tick_base(view);
                 self.tick_overrides();
+                Vec::new()
             }
         }
     }
@@ -677,7 +739,9 @@ impl Particle {
                 self.colour[1] *= 0.96;
                 self.colour[2] *= 0.9;
             }
-            Behaviour::AshSmoke | Behaviour::Spell => self.set_sprite_from_age(),
+            Behaviour::AshSmoke | Behaviour::Spell | Behaviour::HugeExplosion => {
+                self.set_sprite_from_age();
+            }
             Behaviour::SimpleAnimated { fade } => {
                 self.set_sprite_from_age();
                 let half = self.lifetime / 2;
@@ -823,13 +887,73 @@ impl Particle {
         self.zd *= damp;
     }
 
+    /// `HugeExplosionSeedParticle.tick()` — a full override, like
+    /// [`Self::tick_sweep_attack`]/[`Self::tick_suspended`]: no `super.tick()`,
+    /// no `move()`, just a fixed schedule of follow-up spawns.
+    ///
+    /// Java:
+    /// ```text
+    /// for (i = 0; i < 6; i++) {
+    ///     xx = x + (nextDouble() - nextDouble()) * 4.0;   // ditto yy, zz
+    ///     level.addParticle(EXPLOSION, xx, yy, zz, (float)age / lifetime, 0.0, 0.0);
+    /// }
+    /// age++;
+    /// if (age == lifetime) remove();
+    /// ```
+    /// `size` is read *before* `age` is incremented, so the six spawns on a
+    /// given tick all share one `size` and the sequence over the particle's
+    /// 8-tick life is `0/8, 1/8, …, 7/8` — it never reaches `8/8`, since the
+    /// particle removes itself the moment `age` *becomes* `lifetime` rather
+    /// than after one more tick past it.
+    ///
+    /// Returns the six `(x, y, z, size)` requests for
+    /// [`ParticleEngine::tick`] to turn into real [`Behaviour::HugeExplosion`]
+    /// particles — see that function's own doc for why a spawn cannot happen
+    /// directly here.
+    fn tick_huge_explosion_seed(&mut self) -> Vec<(f64, f64, f64, f32)> {
+        self.xo = self.x;
+        self.yo = self.y;
+        self.zo = self.z;
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "age and lifetime are tiny (age < 8); this mirrors Java's int-to-float \
+                      promotion in `(float) this.age / this.lifetime`"
+        )]
+        let size = self.age as f32 / self.lifetime as f32;
+        let mut rng = self.tick_rng();
+        let mut spawns = Vec::with_capacity(6);
+        for _ in 0..6 {
+            let jitter = |r: &mut JavaRandom| (r.next_double() - r.next_double()) * 4.0;
+            let xx = self.x + jitter(&mut rng);
+            let yy = self.y + jitter(&mut rng);
+            let zz = self.z + jitter(&mut rng);
+            spawns.push((xx, yy, zz, size));
+        }
+        self.age += 1;
+        if self.age == self.lifetime {
+            self.remove();
+        }
+        spawns
+    }
+
+    /// A deterministic per-tick [`JavaRandom`], derived from the particle's
+    /// own state rather than a shared engine stream — see [`Self::rng_probe`]
+    /// (its sole pre-existing caller) for why that is an acceptable stand-in
+    /// for vanilla's per-particle `random`: particle-burst randomness is not
+    /// parity-critical (module docs), only reproducible, and both callers of
+    /// this need *several* draws in one tick, which `rng_probe`'s single
+    /// `next_float()` cannot give them.
+    fn tick_rng(&self) -> JavaRandom {
+        let age_bits = u64::from(self.age.unsigned_abs());
+        let seed = (self.x.to_bits() ^ self.z.to_bits() ^ age_bits).cast_signed();
+        JavaRandom::new(seed)
+    }
+
     /// A stand-in for the per-particle `random` in the two behaviours that draw
     /// during `tick`. Derived from the particle's own state so it stays
     /// deterministic without threading the engine RNG through every call.
     fn rng_probe(&self) -> f32 {
-        let age_bits = u64::from(self.age.unsigned_abs());
-        let seed = (self.x.to_bits() ^ self.z.to_bits() ^ age_bits).cast_signed();
-        JavaRandom::new(seed).next_float()
+        self.tick_rng().next_float()
     }
 
     /// `move(double, double, double)`.
@@ -1027,11 +1151,23 @@ impl ParticleEngine {
     }
 
     /// Advances every particle one tick and sweeps the dead ones.
+    ///
+    /// [`Behaviour::HugeExplosionSeed`] is the one particle in this crate
+    /// that spawns more particles from inside its own `tick()`
+    /// (`HugeExplosionSeedParticle.tick()`'s `level.addParticle(EXPLOSION,
+    /// …)` calls). [`Particle::tick`] cannot call [`Self::add`] itself — the
+    /// loop below already holds `self.particles` mutably borrowed — so it
+    /// returns its spawn requests instead, and they are turned into real
+    /// particles only once the loop (and the borrow) has ended.
     pub fn tick(&mut self, view: &dyn CollisionView) {
+        let mut spawns: Vec<(f64, f64, f64, f32)> = Vec::new();
         for p in &mut self.particles {
-            p.tick(view);
+            spawns.extend(p.tick(view));
         }
         self.particles.retain(Particle::is_alive);
+        for (x, y, z, size) in spawns {
+            emit::huge_explosion(self, x, y, z, size);
+        }
     }
 
     /// Extracts camera-relative quads for rendering.
@@ -1050,6 +1186,14 @@ impl ParticleEngine {
         out.reserve(self.particles.len());
         let t = f64::from(partial_tick);
         for p in &self.particles {
+            // `HugeExplosionSeedParticle` is a `NoRenderParticle` — vanilla
+            // never gives it a quad at all, and `Behaviour::layer()` has no
+            // "not drawn" value to return, so the exclusion lives here
+            // instead, at the one place that turns a live particle into a
+            // drawable quad.
+            if matches!(p.behaviour, Behaviour::HugeExplosionSeed) {
+                continue;
+            }
             let x = p.xo + (p.x - p.xo) * t - camera.x;
             let y = p.yo + (p.y - p.yo) * t - camera.y;
             let z = p.zo + (p.z - p.zo) * t - camera.z;
@@ -1058,8 +1202,11 @@ impl ParticleEngine {
                 // unconditionally — spell and note particles are self-lit.
                 // `AttackSweepParticle.getLightCoords` overrides to the same
                 // constant explicitly (`15728880`), independently of
-                // `SimpleAnimatedParticle`.
-                Behaviour::SimpleAnimated { .. } | Behaviour::SweepAttack => FULL_BRIGHT,
+                // `SimpleAnimatedParticle`. `HugeExplosionParticle.
+                // getLightCoords` overrides to the identical constant too.
+                Behaviour::SimpleAnimated { .. } | Behaviour::SweepAttack | Behaviour::HugeExplosion => {
+                    FULL_BRIGHT
+                }
                 _ => {
                     let (bx, by, bz) = block_containing(p.x, p.y, p.z);
                     light(bx, by, bz).unwrap_or(UNLOADED_LIGHT)
