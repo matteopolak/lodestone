@@ -20,8 +20,8 @@
 //! [`EntityInterpolator`] is the driver for those schedules and nothing else: it
 //! owns the `World`, runs the schedules in order, and hands out the extracted
 //! [`EntityDraw`] list. One piece of the fold is still deliberately **not** a
-//! system — [`fold_snapshots`], whose input is a borrowed
-//! `&[EntitySnapshot]` slice `sim.rs` owns; read its own docs before moving it.
+//! system — [`fold_entities`], which is called by hand from `sim.rs` rather
+//! than scheduled; read its own docs before moving it.
 //! [`tick_item_physics`] used to be blocked on the same `'static`-resource
 //! problem, until [`lodestone_ecs::player::CollisionSource`] gave the
 //! collision borrow somewhere `'static` to live — see that system's docs.
@@ -68,11 +68,11 @@
 //! it per frame would make swing speed depend on frame rate.
 //!
 //! This module is deliberately GPU-free, so the interpolation is unit-testable
-//! without a device or a server: the sim converts each
-//! [`EntityView`](lodestone_client::EntityView) into an [`EntitySnapshot`]
-//! (version-free, `glam`-only aside from the physics dependency below) and
-//! feeds those in. The output is a flat list of [`EntityDraw`]s — type path,
-//! feet position, body yaw and scale — that the renderer resolves into
+//! without a device or a server: [`fold_entities`] reads
+//! [`lodestone_ecs::entity`]'s ingest components straight out of the shared
+//! `World` (via [`resolve_entity_facts`]) and folds them into the render
+//! component set above. The output is a flat list of [`EntityDraw`]s — type
+//! path, feet position, body yaw and scale — that the renderer resolves into
 //! instanced draws.
 //!
 //! # Why dropped items get their own physics, not just an ease
@@ -106,7 +106,7 @@
 //! arrives) resets the simulated position/velocity to the authoritative value
 //! rather than fighting it. While the last-known snapshot reports the item at
 //! rest on the ground, the simulation is paused rather than resimulated
-//! needlessly — see [`EntitySnapshot::on_ground`].
+//! needlessly — see [`EntityFacts::on_ground`].
 //!
 //! # Collision: falling through the floor between corrections
 //!
@@ -140,7 +140,7 @@ use glam::Vec3;
 use lodestone_assets::ResourceLocation;
 use lodestone_ecs::app::{App, Plugin};
 use lodestone_ecs::entity::{
-    AttackSwing, EntityIndex, HurtTime, ItemUse, MinecraftEntityId, MobState,
+    AttackSwing, EntityFlags, EntityIndex, HurtTime, ItemUse, MinecraftEntityId, MobState,
 };
 use lodestone_ecs::player::{
     CollisionSource, LocalPlayer, PhysicsState, PlayerCollision, Profile,
@@ -328,27 +328,15 @@ const POS_EPS: f32 = 1.0e-4;
 /// to body yaw, head yaw and pitch alike.
 const YAW_EPS: f32 = 1.0e-2;
 
-/// A version-free entity snapshot as reported by the client for one tick. Built
-/// by the sim from an [`EntityView`](lodestone_client::EntityView); carries only
-/// what the renderer needs, in glam types, so this module needs no client or
-/// model dependency.
-///
-/// # Slated for deletion
-///
-/// `docs/bevy-migration.md` Stage 1 deletes this type: it is the second of the
-/// three entity-pose copies (`EntityView` → `EntitySnapshot` → the render
-/// components), and once ingest writes the render components directly there is
-/// nothing left for it to carry. It survives today only because its producer
-/// lives in `net.rs` and its consumer in `sim.rs` — see [`fold_snapshots`].
 /// A resolved nametag (issue #100): the plain text to draw above the entity,
 /// plus whether the depth-see-through pass applies.
 ///
-/// Resolved once, at the `net::entity_snapshot` boundary — a player's tag
-/// from the tab list, every other entity's from its `CUSTOM_NAME`/
-/// `CUSTOM_NAME_VISIBLE` metadata — so [`EntitySnapshot`], [`EntityDraw`] and
+/// Resolved once, inside [`resolve_entity_facts`] — a player's tag from the
+/// tab list, every other entity's from its `CUSTOM_NAME`/
+/// `CUSTOM_NAME_VISIBLE` metadata — so [`EntityFacts`], [`EntityDraw`] and
 /// the nametag pass never need to know the two rules differ. See
-/// `crate::net::entity_snapshot`'s doc for the exact vanilla predicates
-/// (jar file:line) and `docs/entity-nametags.md`.
+/// [`resolve_entity_facts`]'s doc for the exact vanilla predicates (jar
+/// file:line) and `docs/entity-nametags.md`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NameTag {
     /// The plain string to draw (already flattened through
@@ -364,40 +352,59 @@ pub struct NameTag {
     pub see_through: bool,
 }
 
+/// The ingest-side facts [`fold_entities`] needs for one server entity id, as
+/// of this frame — resolved fresh each fold by [`resolve_entity_facts`], never
+/// stored.
+///
+/// # Replaces `EntitySnapshot` (issue #36)
+///
+/// This module used to receive a `Vec<EntitySnapshot>` built by
+/// `net::entity_snapshot` from a *separate, already-released* read of the
+/// client's entity table (`NetClient::entity_snapshots`), because that read and
+/// this fold used to look like two different `World`s. They are not: since
+/// §4.1(c) (`docs/entity-components.md`), `lodestone_ecs::ingest`'s components
+/// and this module's render components live in the **one** `World`
+/// `crate::sim::Sim` owns, so resolving to an owned `Vec` before taking the
+/// write guard here was a redundant round trip through a public type — read
+/// `docs/entity-components.md`'s "Update, and it changes the plan" for why the
+/// schedule reorder that issue's title implies is a separate, larger change
+/// this deletion does **not** need. `EntityFacts` is private and exists only
+/// as this fold's own scratch space: nothing outside this module ever sees or
+/// builds one, which is the whole point.
 #[derive(Debug, Clone, PartialEq)]
-pub struct EntitySnapshot {
+struct EntityFacts {
     /// The server-assigned entity id (interpolation key).
-    pub id: i32,
+    id: i32,
     /// The entity type's canonical path (e.g. `"pig"`), for model resolution.
-    pub type_path: String,
+    type_path: String,
     /// Feet position in world space.
-    pub feet: Vec3,
+    feet: Vec3,
     /// Body yaw in degrees.
-    pub yaw: f32,
+    yaw: f32,
     /// Head yaw in degrees (absolute). Tracked separately from the body: a
     /// walking mob keeps its body facing its movement while its head turns to
     /// track a target, so this is never derived from `yaw`.
-    pub head_yaw: f32,
+    head_yaw: f32,
     /// Head pitch in degrees (look up/down).
-    pub pitch: f32,
-    /// Uniform render scale (baby mobs are drawn smaller).
-    pub scale: f32,
+    pitch: f32,
+    /// Uniform render scale (baby mobs are drawn smaller), derived from
+    /// [`lodestone_ecs::entity::Baby`] in [`resolve_entity_facts`].
+    scale: f32,
     /// Which item a dropped item (or other item-displaying entity) is showing.
     ///
-    /// Exactly the shape the read-model's own field is: [`Reported::Unreported`]
-    /// is "the server has never reported a stack for this entity",
-    /// [`Reported::Reported(None)`](Reported::Reported) is an explicitly
-    /// *empty* stack. `Unreported` therefore means "unknown", and
-    /// [`fold_snapshots`] leaves any previously recorded stack alone rather than
+    /// Exactly the shape [`lodestone_ecs::entity::DisplayItem`]'s own field is:
+    /// [`Reported::Unreported`] is "the server has never reported a stack for
+    /// this entity", [`Reported::Reported(None)`](Reported::Reported) is an
+    /// explicitly *empty* stack. `Unreported` therefore means "unknown", and
+    /// [`fold_entities`] leaves any previously recorded stack alone rather than
     /// clearing it — a drop names itself once and then goes quiet, so treating
     /// silence as "empty" would blank it a frame later.
     ///
-    /// This is a [`ResourceLocation`], not a model `ItemStack`: `EntitySnapshot`
-    /// is deliberately model-free, and the renderer only ever needs the item
-    /// *id* to pick a model. The stack's `count` and data components are dropped
-    /// at the boundary that builds this (`net::entity_snapshot`) — see the note
-    /// there, since count is visible in vanilla.
-    pub item: Reported<ResourceLocation>,
+    /// This is a [`ResourceLocation`], not a model `ItemStack`: the stack's
+    /// `count` and data components are narrowed away in
+    /// [`resolve_entity_facts`] — see the note there, since count is visible in
+    /// vanilla and carried separately as [`Self::count`].
+    item: Reported<ResourceLocation>,
     /// The entity's last-reported velocity in blocks per tick
     /// (`set_entity_motion`/`add_entity`), when the server has ever sent one.
     ///
@@ -405,33 +412,33 @@ pub struct EntitySnapshot {
     /// ballistic simulation from — see the module docs on why a dropped item
     /// needs real physics rather than a position ease. `None` is "never
     /// reported", not "zero"; a zero velocity is reported as `Some(Vec3::ZERO)`.
-    pub velocity: Option<Vec3>,
+    velocity: Option<Vec3>,
     /// Whether the server last reported this entity resting on the ground
     /// (`on_ground` on `add_entity`/`teleport_entity`/`move_entity`).
     ///
     /// [`tick_item_physics`] pauses its simulation while this is `true`, because
     /// a resting item does not need resimulating.
-    pub on_ground: bool,
+    on_ground: bool,
     /// What this entity is wearing and holding, keyed by slot, as
     /// `SET_EQUIPMENT` last reported it.
     ///
     /// The inner `Option` is the *slot's* nesting, not the field's: a slot
     /// **absent** from this list is "the server has never mentioned it", while a
     /// slot present with `None` is an explicit "this slot is empty". That is
-    /// [`EntityView::equipment`](lodestone_client::EntityView::equipment)'s
-    /// contract preserved verbatim, and it is why this is a list of pairs rather
-    /// than a fixed-size array of `Option`s.
+    /// [`lodestone_ecs::entity::Equipment`]'s contract preserved verbatim, and
+    /// it is why this is a list of pairs rather than a fixed-size array of
+    /// `Option`s.
     ///
     /// The whole list is *accumulated server-side of this type*
     /// (`lodestone_ecs::ingest`'s `apply_entity_equipment` merges each update
-    /// into the `Equipment` component and never clears), so every snapshot
-    /// carries the complete current set and [`fold_snapshots`] replaces its
+    /// into the `Equipment` component and never clears), so every fold
+    /// carries the complete current set and [`fold_entities`] replaces its
     /// record wholesale — unlike [`Self::item`], which arrives once and must
     /// never be cleared by silence.
     ///
     /// Armour slots reach a pixel too — `RenderState`'s `prepare_armour` walks
     /// `ArmourSlot::ALL` against this same list.
-    pub equipment: Vec<(EquipmentSlot, Option<ResourceLocation>)>,
+    equipment: Vec<(EquipmentSlot, Option<ResourceLocation>)>,
     /// Per-slot `minecraft:dyed_color`, alongside [`Self::equipment`] rather
     /// than folded into it — see `docs/armour-rendering.md`'s "hop 2" for why
     /// this is additive rather than a wider tuple: [`Self::equipment`]'s shape
@@ -446,38 +453,38 @@ pub struct EntitySnapshot {
     /// there is no information lost by not distinguishing "never reported"
     /// from "reported, and it was zero" the way [`Self::equipment`] does for
     /// item identity.
-    pub equipment_dye: Vec<(EquipmentSlot, u32)>,
+    equipment_dye: Vec<(EquipmentSlot, u32)>,
     /// The entity's decoded cosmetic variant (sheep dye/shear, villager type,
     /// horse markings, …), as last reported.
     ///
-    /// Exactly [`EntityView::variant`](lodestone_client::EntityView::variant)'s
-    /// own contract, copied through verbatim like [`Self::equipment`]: `None`
-    /// means the server has never reported an override, which is a different
-    /// state from a known-but-default variant. There is no "explicitly
-    /// cleared" state to preserve here — vanilla never un-reports a variant —
-    /// so unlike [`Self::item`] this needs no [`Reported`] wrapper.
+    /// Exactly [`lodestone_ecs::entity::Variant`]'s own contract, copied
+    /// through verbatim like [`Self::equipment`]: `None` means the server has
+    /// never reported an override, which is a different state from a
+    /// known-but-default variant. There is no "explicitly cleared" state to
+    /// preserve here — vanilla never un-reports a variant — so unlike
+    /// [`Self::item`] this needs no [`Reported`] wrapper.
     ///
     /// Only [`EntityVariant::Dyed`] reaches a pixel today, and only when
     /// [`Self::type_path`] is `"sheep"` — see [`EntityDraw::wool`] and
     /// `docs/entity-rendering.md`'s "Render layers: sheep wool" section.
-    pub variant: Option<EntityVariant>,
+    variant: Option<EntityVariant>,
     /// How many items the stack named by [`Self::item`] represents, as last
     /// reported. Meaningless when [`Self::item`] is [`Reported::Unreported`]
     /// or an explicit empty stack; `1` in both of those cases, and whenever
     /// [`Self::type_path`] is not [`ITEM_ENTITY_TYPE_PATH`].
     ///
-    /// This was dropped at the `net::entity_snapshot` boundary along with the
-    /// rest of the stack's data components; unlike those, it changes *how
-    /// many* copies vanilla draws rather than how one looks
+    /// Narrowed from `DisplayItem`'s full `ItemStack::count` in
+    /// [`resolve_entity_facts`]; unlike the data components dropped there, it
+    /// changes *how many* copies vanilla draws rather than how one looks
     /// (`ItemClusterRenderState::getRenderedAmount`: 1 copy at count ≤ 1, then
-    /// 2, 3, 4, 5 as the count passes 1, 16, 32 and 48), so restoring it needed
-    /// only this plain `u32` — see [`EntityDraw::count`] for where the
-    /// multi-copy draw itself still needs wiring.
-    pub count: u32,
+    /// 2, 3, 4, 5 as the count passes 1, 16, 32 and 48) — see
+    /// [`EntityDraw::count`] for where the multi-copy draw itself still needs
+    /// wiring.
+    count: u32,
     /// This entity's resolved nametag (issue #100), or `None` when nothing
     /// should draw above it — a mob with no visible custom name, or a player
     /// entity with no matching tab-list entry. See [`NameTag`].
-    pub name_tag: Option<NameTag>,
+    name_tag: Option<NameTag>,
     /// A creeper's synced fuse direction (`Creeper.DATA_SWELL_DIR`), as last
     /// reported — meaningless when [`Self::type_path`] is not `"creeper"`.
     ///
@@ -485,13 +492,12 @@ pub struct EntitySnapshot {
     /// [`Self::variant`]'s own contract: [`spawn_track`] seeds a fresh
     /// creeper's [`CreeperFuse`] from vanilla's own idle default
     /// ([`CreeperFuse::IDLE`]) rather than treating `None` as zero, and
-    /// [`update_track`] only overwrites the direction when a snapshot
-    /// actually carries one — silence must not reset a mid-fuse creeper back
-    /// to idle.
-    pub creeper_swell_dir: Option<i32>,
+    /// [`update_track`] only overwrites the direction when a fold actually
+    /// carries one — silence must not reset a mid-fuse creeper back to idle.
+    creeper_swell_dir: Option<i32>,
 }
 
-/// A sheep's decoded wool state, narrowed from [`EntitySnapshot::variant`] for
+/// A sheep's decoded wool state, narrowed from [`EntityFacts::variant`] for
 /// [`EntityDraw::wool`].
 ///
 /// Kept as its own small type rather than passing [`EntityVariant`] straight
@@ -584,8 +590,8 @@ pub struct EntityDraw {
     /// sent; treat it as an unordered set.
     pub equipment: Vec<(EquipmentSlot, ResourceLocation)>,
     /// Per-slot `minecraft:dyed_color`, mirroring
-    /// [`EntitySnapshot::equipment_dye`] narrowed the same way `equipment`
-    /// narrows [`EntitySnapshot::equipment`] — see that field's doc for why
+    /// [`EntityFacts::equipment_dye`] narrowed the same way `equipment`
+    /// narrows [`EntityFacts::equipment`] — see that field's doc for why
     /// this is additive rather than folded into `equipment`'s own tuple.
     pub equipment_dye: Vec<(EquipmentSlot, u32)>,
     /// This entity's wool state, when [`Self::type_path`] is `"sheep"` and a
@@ -640,14 +646,14 @@ pub struct EntityDraw {
     /// [`lodestone_render::EntityInstanceRaw::with_hurt_overlay`]).
     ///
     /// Read off [`lodestone_ecs::entity::HurtTime`] through [`EntityIndex`] in
-    /// [`extract_entity_draws`], **not** folded through [`EntitySnapshot`] —
-    /// exactly like [`Self::anim`]'s `attack_anim`, and for the same two
-    /// reasons: the component lives on the *ingest* entity rather than the
-    /// render one, and `EntitySnapshot` is the copy `docs/bevy-migration.md`
-    /// Stage 1 deletes. `docs/combat.md`'s original patch spec called for an
-    /// `EntitySnapshot::hurt` field instead; that would have added a third
-    /// hop and rippled through ~15 struct literals for a value the extract
-    /// system can already reach directly.
+    /// [`extract_entity_draws`], **not** folded through [`EntityFacts`] —
+    /// exactly like [`Self::anim`]'s `attack_anim`, and for the same reason:
+    /// the component lives on the *ingest* entity rather than the render one.
+    /// `docs/combat.md`'s original patch spec called for an
+    /// `EntitySnapshot::hurt` field (`EntitySnapshot` was the boundary type
+    /// issue #36 deleted); that would have added a third hop and rippled
+    /// through ~15 struct literals for a value the extract system can already
+    /// reach directly.
     ///
     /// `deathTime` has no component on this side of the wire — vanilla's death
     /// animation is not decoded — so today this is `hurtTime > 0` alone. That
@@ -690,19 +696,46 @@ pub struct EntityDraw {
     /// the white-flash overlay — see those two functions' docs for why one
     /// swelling value is enough to drive both.
     pub creeper_swelling: f32,
+    /// Whether this entity's shared-flags byte reports bit `0x01` — vanilla's
+    /// `displayFireAnimation()` gate, `Entity.isOnFire() && !isSpectator()`
+    /// (`.cache/mc/26.2/client-src/net/minecraft/world/entity/Entity.java:
+    /// 2666-2668,3255-3256`). Issue #434, player report: "mobs dont show
+    /// flames yet".
+    ///
+    /// Read off [`lodestone_ecs::entity::EntityFlags`] through [`EntityIndex`]
+    /// in [`extract_entity_draws`], bridged the **same way** [`Self::hurt`]
+    /// and [`Self::item_use`] already are — `false` for an entity that has
+    /// never reported the shared-flags byte at all (`EntityFlags` absent),
+    /// which is the correct default: an entity metadata has never described
+    /// cannot be known to be on fire.
+    ///
+    /// This deliberately does **not** re-check vanilla's `!isSpectator()`
+    /// half of the gate: a remote entity's game mode is not tracked on this
+    /// side of the wire, and the server should never set bit `0x01` on a
+    /// spectator's own metadata in the first place (spectators are otherwise
+    /// invisible to other clients).
+    ///
+    /// **Not** the first-person full-screen fire overlay
+    /// (`gpu/screen_effects.rs`'s `Vitals::on_fire`, via `ingest.rs`'s
+    /// `apply_local_player_on_fire`) — that is a different byte read for a
+    /// different, local-player-only purpose, and this field must never feed
+    /// it. See `docs/entity-rendering.md`'s "Mob fire" section.
+    pub on_fire: bool,
 }
 
 // ---------------------------------------------------------------------------
 // The render-side component set
 // ---------------------------------------------------------------------------
 
-/// The entity type's canonical path, as the snapshot reported it.
+/// The entity type's canonical path, as [`resolve_entity_facts`] reported it.
 ///
-/// Distinct from `lodestone_ecs::entity::EntityKind` (a `ResourceKey`) only
-/// because [`EntitySnapshot`] speaks the bare path string that
-/// `lodestone-render`'s model set is keyed by. When `EntitySnapshot` dies these
-/// two collapse into one component; until then this is the render vocabulary and
-/// `EntityKind` is the network one.
+/// Distinct from `lodestone_ecs::entity::EntityKind` (a `ResourceKey`) because
+/// this is the bare path string `lodestone-render`'s model set is keyed by,
+/// while `EntityKind` is the network vocabulary. `EntitySnapshot` (issue #36)
+/// is gone, but collapsing these two into one component is a separate,
+/// larger change nothing here requires — `RenderKind` still exists
+/// specifically so this module needs no `ResourceKey`-shaped lookup on every
+/// extract.
 #[derive(Component, Debug, Clone, PartialEq, Eq)]
 pub struct RenderKind(pub String);
 
@@ -796,7 +829,7 @@ pub struct ItemPhysics {
 const CREEPER_MAX_SWELL_TICKS: i32 = 30;
 
 /// A creeper's fuse, integrated **client-side** one tick at a time from the
-/// synced [`EntitySnapshot::creeper_swell_dir`] — exactly what vanilla's own
+/// synced [`EntityFacts::creeper_swell_dir`] — exactly what vanilla's own
 /// client does (`Creeper.java:139`, `this.swell += swellDir`), because only
 /// the *direction* is ever on the wire, never the counter itself. See
 /// [`lodestone_render::entity_anim::pose_swelling`]'s doc for the full
@@ -843,7 +876,7 @@ pub fn tick_creeper_fuse(mut fuses: Query<&mut CreeperFuse>) {
     }
 }
 
-/// The occupied equipment slots, narrowed from [`EntitySnapshot::equipment`].
+/// The occupied equipment slots, narrowed from [`EntityFacts::equipment`].
 ///
 /// A component rather than a side table (as [`ItemStacks`] is) precisely
 /// *because* it is replaced wholesale every poll: there is no "reported once,
@@ -854,13 +887,13 @@ pub fn tick_creeper_fuse(mut fuses: Query<&mut CreeperFuse>) {
 pub struct RenderEquipment(pub Vec<(EquipmentSlot, ResourceLocation)>);
 
 /// Per-slot `minecraft:dyed_color`, narrowed from
-/// [`EntitySnapshot::equipment_dye`] — a separate component from
+/// [`EntityFacts::equipment_dye`] — a separate component from
 /// [`RenderEquipment`] rather than a wider tuple inside it, for the same
 /// reason the snapshot field is additive; see that field's doc.
 #[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
 pub struct RenderEquipmentDye(pub Vec<(EquipmentSlot, u32)>);
 
-/// This entity's sheep-wool state, narrowed from [`EntitySnapshot::variant`] by
+/// This entity's sheep-wool state, narrowed from [`EntityFacts::variant`] by
 /// [`sheep_wool`].
 ///
 /// A component for the same reason [`RenderEquipment`] is one rather than a
@@ -871,7 +904,7 @@ pub struct RenderEquipmentDye(pub Vec<(EquipmentSlot, u32)>);
 pub struct RenderWool(pub Option<SheepWool>);
 
 /// This entity's resolved nametag (issue #100), narrowed from
-/// [`EntitySnapshot::name_tag`].
+/// [`EntityFacts::name_tag`].
 ///
 /// A component for the same reason [`RenderEquipment`]/[`RenderWool`] are:
 /// replaced wholesale every poll (a player's tab-list name can change, a
@@ -986,7 +1019,7 @@ const REMOTE_COLLECTOR_EYE_HEIGHT: f32 = lodestone_physics::player::DEFAULT_EYE_
 /// snapshot.
 ///
 /// That is also why this is a resource rather than a component: by the time
-/// `fold_snapshots` next runs, the server has stopped reporting the item and the
+/// `fold_entities` next runs, the server has stopped reporting the item and the
 /// render track is pruned. An animation hung off the track would be despawned
 /// with it, one frame in.
 #[derive(Debug, Clone, PartialEq)]
@@ -1071,7 +1104,7 @@ fn pickup_progress(life: f32, partial_tick: f32) -> f32 {
 /// worse than drawing none, and "no animation" is exactly the pre-#365
 /// behaviour rather than a new failure.
 ///
-/// **Must be called before the frame's `fold_snapshots`.** `Sim::poll_net` runs
+/// **Must be called before the frame's `fold_entities`.** `Sim::poll_net` runs
 /// ahead of `Sim::fold_entities`, so the track the server has stopped reporting
 /// is still present here and gone one call later — that ordering is the whole
 /// reason this is a function called from `poll_net` rather than a system.
@@ -1187,6 +1220,10 @@ pub fn extract_pickup_draws(
             item_use: None,
             // An item entity is never a creeper.
             creeper_swelling: 0.0,
+            // A pickup-flight animation is synthetic (issue #98's own item, not
+            // a tracked entity with `EntityFlags`) and vanishes in 3 ticks — not
+            // worth threading a real flag lookup through for.
+            on_fire: false,
         });
     }
 }
@@ -1517,20 +1554,27 @@ pub fn extract_entity_draws(
     // apply_entity_animation` resolves `EntityAnimation` through `EntityIndex`),
     // not on the render entity this query's tuple is drawn from — `entity_id`
     // is the only key the two families share, so `index` is the bridge. See
-    // `render_anim`'s doc for why this is not folded through `EntitySnapshot`
+    // `render_anim`'s doc for why this is not folded through `EntityFacts`
     // like every other field here.
     index: Res<EntityIndex>,
     swings: Query<&AttackSwing>,
     // `HurtTime` lives on the ingest entity too (`apply_entity_damaged` /
     // `apply_entity_hurt_animation` resolve it through the same `EntityIndex`),
     // so it is bridged the same way `AttackSwing` is rather than folded through
-    // `EntitySnapshot` — see `EntityDraw::hurt`.
+    // `EntityFacts` — see `EntityDraw::hurt`.
     hurts: Query<&HurtTime>,
     // `ItemUse` lives on the ingest entity too (`apply_entity_item_use` resolves
     // the living-flags byte through the same `EntityIndex`), bridged the same way
     // `AttackSwing` and `HurtTime` are. It is what turns a metadata bit into a bow
     // draw — see `arm_pose_for` and issue #57.
     item_uses: Query<&ItemUse>,
+    // `EntityFlags` lives on the ingest entity too
+    // (`apply_entity_metadata` inserts it from the *shared*-flags byte —
+    // index 0, not the living-flags byte `MobState`/`ItemUse` read — through
+    // the same `EntityIndex`), bridged the same way. It is what turns bit
+    // `0x01` into the mob-fire billboard — see `EntityDraw::on_fire` and
+    // issue #434.
+    flags: Query<&EntityFlags>,
     // `MobState` lives on the ingest entity too (`apply_entity_metadata` folds the
     // *mob* flags byte into it), bridged the same way. It is what turns
     // `Mob.isAggressive()` into a drawn bow and into a zombie's raised arms — see
@@ -1614,6 +1658,13 @@ pub fn extract_entity_draws(
             let new = fuse.swell as f32;
             (old + (new - old) * partial_tick) / (CREEPER_MAX_SWELL_TICKS as f32 - 2.0)
         });
+        // Bit `0x01` of the shared-flags byte. `false` for an entity that has
+        // never reported the byte at all (`EntityFlags` absent, like
+        // `HurtTime`/`AttackSwing`) — see `EntityDraw::on_fire`.
+        let on_fire = index
+            .get(id.0)
+            .and_then(|entity| flags.get(entity).ok())
+            .is_some_and(|flags| flags.0 & 0x01 != 0);
         out.0.push(EntityDraw {
             id: id.0,
             type_path: kind.0.clone(),
@@ -1641,6 +1692,7 @@ pub fn extract_entity_draws(
             hurt,
             item_use,
             creeper_swelling,
+            on_fire,
         });
     }
 }
@@ -1709,7 +1761,7 @@ pub fn tick_item_physics(
 /// re-anchored) snapshot. A missing velocity seeds zero — gravity still applies
 /// to it, it just has nothing to arc with, which is exactly the discriminating
 /// behaviour the hermetic tests below pin.
-fn new_item_physics(snap: &EntitySnapshot) -> ItemPhysics {
+fn new_item_physics(snap: &EntityFacts) -> ItemPhysics {
     let mut sim = ItemMotion::new(
         to_model_vec3(snap.feet),
         snap.velocity.map(to_model_vec3).unwrap_or_default(),
@@ -1722,57 +1774,240 @@ fn new_item_physics(snap: &EntitySnapshot) -> ItemPhysics {
     }
 }
 
-/// Fold this frame's [`EntitySnapshot`]s into the component set: spawn tracks
+/// Resolves the [`EntityFacts`] a live ingest entity carries, exactly the
+/// narrowing `net::entity_snapshot` used to do against an
+/// [`EntityView`](lodestone_client::EntityView) — now read straight off
+/// [`lodestone_ecs::entity`]'s components, since [`fold_entities`] already
+/// holds this same `World`'s write guard. Mirrors
+/// `lodestone_client::state::entity_view`'s component reads field for field;
+/// see that function if the two ever need to be compared.
+///
+/// Returns `None` when the entity is missing the four components every
+/// networked entity carries ([`MinecraftEntityId`] is read by the caller,
+/// which is why it is not repeated here) — [`EntityKind`], [`Position`],
+/// [`Rotation`], [`HeadYaw`] — the same defensive shape
+/// `lodestone_client::state::entity_view` uses, in case a caller ever hands
+/// this a non-networked entity.
+fn resolve_entity_facts(
+    id: i32,
+    entity: bevy_ecs::world::EntityRef<'_>,
+    tab_list: &lodestone_game::tablist::TabList,
+) -> Option<EntityFacts> {
+    use lodestone_ecs::entity::{
+        Baby, CreeperSwellDir, CustomName, CustomNameVisible, DisplayItem, EntityFlags,
+        EntityKind, EntityUuid, Equipment, HeadYaw, OnGround, Position, Rotation, Variant,
+        Velocity,
+    };
+
+    let type_key = entity.get::<EntityKind>()?.0.clone();
+    let position = entity.get::<Position>()?.0;
+    let rotation = entity.get::<Rotation>()?.0;
+    let head_yaw = entity.get::<HeadYaw>()?.0;
+
+    let scale = if entity.get::<Baby>().is_some_and(|baby| baby.0) {
+        0.5
+    } else {
+        1.0
+    };
+
+    // Borrowed, ahead of the by-value `item` match below, for the same reason
+    // `net::entity_snapshot` read `count` first: it only exists on the wire's
+    // `ItemStack`, which the match consumes converting the key. `1` is the
+    // neutral default for every case with no stack to count.
+    let display_item = entity
+        .get::<DisplayItem>()
+        .map_or(Reported::Unreported, |item| Reported::Reported(item.0.clone()));
+    let count = match &display_item {
+        Reported::Reported(Some(stack)) => stack.count,
+        _ => 1,
+    };
+    // A failed conversion must collapse to `Unreported` ("nothing reported"),
+    // never to `Reported(None)`, which downstream reads as the server
+    // clearing the stack.
+    let item = match display_item {
+        Reported::Unreported => Reported::Unreported,
+        Reported::Reported(None) => Reported::Reported(None),
+        Reported::Reported(Some(stack)) => {
+            match ResourceLocation::new(stack.item.namespace(), stack.item.path()) {
+                Ok(id) => Reported::Reported(Some(id)),
+                Err(_) => Reported::Unreported,
+            }
+        }
+    };
+
+    // `Equipment` is the *accumulated* per-slot state (`apply_entity_equipment`
+    // merges each update into it and never clears), so every fold carries the
+    // complete current set and the consumer can replace wholesale. Nesting is
+    // preserved exactly: a slot **absent** is "never mentioned", present with
+    // `None` is an explicit "this slot is empty" — collapsing the two would
+    // make an armourless mob indistinguishable from one whose armour the
+    // server confirmed gone.
+    let raw_equipment = entity
+        .get::<Equipment>()
+        .map(|equipment| equipment.0.clone())
+        .unwrap_or_default();
+    // A key that fails `ResourceLocation` validation drops the whole *entry*
+    // rather than degrading to `Some(slot, None)` — same rule as `item`
+    // above: a malformed id must read as "not reported", never as the server
+    // clearing the slot.
+    let equipment = raw_equipment
+        .iter()
+        .filter_map(|eq| match &eq.item {
+            None => Some((eq.slot, None)),
+            Some(stack) => ResourceLocation::new(stack.item.namespace(), stack.item.path())
+                .ok()
+                .map(|id| (eq.slot, Some(id))),
+        })
+        .collect();
+    // Narrowed the same way `equipment` is: a slot only carries a dye if its
+    // item is present *and* its id validates. Emitting a dye for a slot
+    // `equipment` dropped would describe a tint on an item the renderer was
+    // never told about.
+    let equipment_dye = raw_equipment
+        .iter()
+        .filter_map(|eq| {
+            let stack = eq.item.as_ref()?;
+            ResourceLocation::new(stack.item.namespace(), stack.item.path()).ok()?;
+            Some((eq.slot, stack.components.dyed_color?))
+        })
+        .collect();
+
+    // Nametag resolution (issue #100). Two entirely different rules, per the
+    // real 26.2 client — see the historical `net::entity_snapshot` doc this
+    // was ported from for the exact vanilla predicates (jar file:line):
+    // a player's tag is always its tab-list display name, unconditionally;
+    // every other entity's tag is its custom name, gated on
+    // `CUSTOM_NAME_VISIBLE`.
+    let is_player = type_key.path() == "player";
+    let uuid = entity.get::<EntityUuid>().map(|uuid| uuid.0);
+    let flags = entity.get::<EntityFlags>().map(|f| f.0);
+    let custom_name = entity
+        .get::<CustomName>()
+        .map_or(Reported::Unreported, |name| Reported::Reported(name.0.clone()));
+    let custom_name_visible = entity.get::<CustomNameVisible>().map(|visible| visible.0);
+    let name_tag = if is_player {
+        uuid.and_then(|id| tab_list.get(&id))
+            .map(|entry| entry.effective_name().to_plain_string())
+            .filter(|name| !name.is_empty())
+    } else {
+        match &custom_name {
+            Reported::Reported(Some(name))
+                if custom_name_visible == Some(true) && !name.is_empty() =>
+            {
+                Some(name.clone())
+            }
+            _ => None,
+        }
+    }
+    .map(|text| NameTag {
+        text,
+        // `Entity.isDiscrete()`'s shift-key bit (`0x02`) — unknown (no
+        // metadata yet) defaults open, matching every other not-yet-reported
+        // boolean here.
+        see_through: flags.map_or(true, |f| f & 0x02 == 0),
+    });
+
+    Some(EntityFacts {
+        id,
+        type_path: type_key.path().to_string(),
+        feet: to_glam_vec3(position),
+        yaw: rotation.yaw,
+        head_yaw,
+        pitch: rotation.pitch,
+        scale,
+        item,
+        velocity: entity.get::<Velocity>().map(|v| to_glam_vec3(v.0)),
+        on_ground: entity.get::<OnGround>().is_some_and(|grounded| grounded.0),
+        equipment,
+        equipment_dye,
+        variant: entity.get::<Variant>().map(|variant| variant.0.clone()),
+        count,
+        name_tag,
+        creeper_swell_dir: entity.get::<CreeperSwellDir>().map(|dir| dir.0),
+    })
+}
+
+/// Fold this frame's entity state into the render component set: spawn tracks
 /// for newly-seen entities, re-anchor eases for ones that moved or turned, and
-/// prune everything the report no longer mentions.
+/// prune everything [`EntityIndex`] no longer mentions.
 ///
-/// # Why this is not a `NetIngest` system either
+/// # Replaces `fold_snapshots` + `net::entity_snapshots` (issue #36)
 ///
-/// Two reasons, both of which the plan expects to disappear together with
-/// [`EntitySnapshot`]:
+/// This used to take a `&[EntitySnapshot]` `sim.rs` built by calling
+/// `NetClient::entity_snapshots()` — a *separate* read of the same `World`
+/// this fold then took a write guard on, resolved to an owned `Vec` first only
+/// to obey the no-reentrancy rule. Since §4.1(c) put ingest's components and
+/// this module's render components in the one `World` `Sim` owns, that was a
+/// redundant round trip: [`resolve_entity_facts`] below reads the ingest
+/// components directly, inside this function's own write guard, at exactly
+/// the position in the frame the fold already ran. That changes nothing about
+/// *when* an ease begins — every numeric expectation the ~25 tests below pin
+/// (clocks → ticks → fold, not the plan's `NetIngest` → `GameTick`) survives
+/// unchanged, only each test's setup moves from building an `EntitySnapshot`
+/// to spawning the ingest components directly. See
+/// `docs/entity-components.md`'s "Update, and it changes the plan" for why
+/// the schedule reorder issue #36's title implies is a separate change this
+/// one does not need.
 ///
-/// 1. **Its input is a borrowed slice from `sim.rs`.** The same `'static`
-///    problem [`tick_item_physics`] used to have — but there is no
-///    `CollisionSource`-shaped fix available here, because the borrow is a
-///    `Vec` the caller owns, not a view an owned adapter could rebuild on
-///    demand. The real fix is ingest writing these components directly
-///    instead of round-tripping through that `Vec`.
-/// 2. **It runs *after* the tick loop, not before it.** The plan's schedule
-///    order is `NetIngest` → `GameTick`; this module's order is clocks →
-///    ticks → fold, and every numeric expectation in the ~25 tests below is
-///    written against it. Reordering is a behaviour change, not a refactor, so
-///    it belongs in the change that also deletes `EntitySnapshot`.
-fn fold_snapshots(world: &mut World, snapshots: &[EntitySnapshot]) {
-    for snap in snapshots {
+/// Skips any id [`EntityIndex`] maps to a [`LocalPlayer`] — the same filter
+/// `lodestone_client::state::SharedState::entities` applies, written out
+/// explicitly rather than left to fall out of the local player missing
+/// [`EntityKind`]/[`Position`]/[`Rotation`]/[`HeadYaw`] (it would also be
+/// excluded today by [`resolve_entity_facts`] returning `None` for it, which
+/// is exactly the kind of accidental invariant that breaks silently the first
+/// time someone adds one of those components to the local player for an
+/// unrelated reason).
+pub fn fold_entities(world: &mut World) {
+    let tab_list = world
+        .query_filtered::<&lodestone_ecs::SessionTabList, With<LocalPlayer>>()
+        .iter(world)
+        .next()
+        .map(|list| list.0.clone())
+        .unwrap_or_default();
+
+    let tracked: Vec<(i32, Entity)> = world.resource::<EntityIndex>().iter().collect();
+    let mut seen: HashSet<i32> = HashSet::with_capacity(tracked.len());
+
+    for (id, ingest_entity) in tracked {
+        let Ok(entity_ref) = world.get_entity(ingest_entity) else {
+            continue;
+        };
+        if entity_ref.contains::<LocalPlayer>() {
+            continue;
+        }
+        let Some(facts) = resolve_entity_facts(id, entity_ref, &tab_list) else {
+            continue;
+        };
+        seen.insert(id);
+
         // Fold the reported identity first, so a drop is never drawn for a frame
-        // as a placeholder before its item lands. `Unreported` is "this snapshot
+        // as a placeholder before its item lands. `Unreported` is "this fold
         // does not know", which must not clear what an earlier one established;
         // only an explicit empty stack clears.
-        match &snap.item {
+        match &facts.item {
             Reported::Reported(Some(item)) => {
                 world.resource_mut::<ItemStacks>().0.insert(
-                    snap.id,
+                    facts.id,
                     TrackedStack {
                         id: item.clone(),
-                        count: snap.count,
+                        count: facts.count,
                     },
                 );
             }
             Reported::Reported(None) => {
-                world.resource_mut::<ItemStacks>().0.remove(&snap.id);
+                world.resource_mut::<ItemStacks>().0.remove(&facts.id);
             }
             Reported::Unreported => {}
         }
 
-        match world.resource::<TrackIndex>().0.get(&snap.id).copied() {
-            None => spawn_track(world, snap),
-            Some(entity) => update_track(world, entity, snap),
+        match world.resource::<TrackIndex>().0.get(&facts.id).copied() {
+            None => spawn_track(world, &facts),
+            Some(entity) => update_track(world, entity, &facts),
         }
     }
 
     // Drop tracks for entities no longer reported — and the item stacks recorded
     // against them, or a long session leaks one entry per drop.
-    let seen: HashSet<i32> = snapshots.iter().map(|s| s.id).collect();
     let stale: Vec<(i32, Entity)> = world
         .resource::<TrackIndex>()
         .0
@@ -1793,7 +2028,7 @@ fn fold_snapshots(world: &mut World, snapshots: &[EntitySnapshot]) {
 /// A newly seen entity is drawn at rest at its reported pose: both ends of the
 /// ease are the same, and the clock starts *finished* so nothing eases from
 /// nowhere.
-fn spawn_track(world: &mut World, snap: &EntitySnapshot) {
+fn spawn_track(world: &mut World, snap: &EntityFacts) {
     let is_item = snap.type_path == ITEM_ENTITY_TYPE_PATH;
     let is_creeper = snap.type_path == "creeper";
     let mut entity = world.spawn((
@@ -1844,7 +2079,7 @@ fn spawn_track(world: &mut World, snap: &EntitySnapshot) {
 /// interpolation *from the current render pose*, so the mob never jumps. A
 /// snapshot that matches the current target only lets the existing ease run to
 /// completion.
-fn update_track(world: &mut World, entity: Entity, snap: &EntitySnapshot) {
+fn update_track(world: &mut World, entity: Entity, snap: &EntityFacts) {
     let Ok(mut entity) = world.get_entity_mut(entity) else {
         return;
     };
@@ -1884,7 +2119,7 @@ fn update_track(world: &mut World, entity: Entity, snap: &EntitySnapshot) {
     // direction can flip while it stands still (backing away from a player it
     // was swelling toward). Only overwritten when *reported* — `None` means
     // this packet did not mention it, which must never reset a mid-fuse
-    // creeper back to idle. See `EntitySnapshot::creeper_swell_dir`.
+    // creeper back to idle. See `EntityFacts::creeper_swell_dir`.
     if let Some(dir) = snap.creeper_swell_dir
         && let Some(mut fuse) = entity.get_mut::<CreeperFuse>()
     {
@@ -1969,17 +2204,15 @@ fn update_track(world: &mut World, entity: Entity, snap: &EntitySnapshot) {
 /// because of a `World` boundary — §4.1(c) removed that, and the shell's one
 /// `App` now installs both. It stays separate because the *entities* are still
 /// separate: `IngestPlugin` folds the server's report onto one entity per mob and
-/// this plugin's [`fold_snapshots`] spawns a second, render-side entity per mob
-/// keyed by [`TrackIndex`], with [`EntitySnapshot`] the sanctioned intermediate
-/// between them.
+/// this plugin's [`fold_entities`] spawns a second, render-side entity per mob
+/// keyed by [`TrackIndex`], reading [`resolve_entity_facts`] as the bridge
+/// between them (issue #36 deleted the `EntitySnapshot` type that used to
+/// carry that bridge across a `Vec`).
 ///
-/// Collapsing *that* is Stage 1's remaining debt, and §4.1(c) has removed one of
-/// its two stated blockers: [`fold_snapshots`]'s "its input is a borrowed slice
-/// from `sim.rs`" no longer holds, since the components it would read are now in
-/// the same `World`. The other blocker stands — ingest runs in `NetIngest`, which
-/// the plan orders *before* `GameTick`, while this module's order is clocks →
-/// ticks → fold and every numeric expectation in the ~25 tests below is written
-/// against it.
+/// Collapsing the two entities into one remains a separate, larger change —
+/// ingest runs in `NetIngest`, which the plan orders *before* `GameTick`,
+/// while this module's order is clocks → ticks → fold and every numeric
+/// expectation in the ~25 tests below is written against it.
 #[derive(Debug, Default)]
 pub struct EntityInterpPlugin;
 
@@ -2055,13 +2288,6 @@ pub fn reset_entity_tracks(world: &mut World) {
     world.resource_mut::<PickupAnimations>().0.clear();
 }
 
-/// Fold this frame's snapshots into the render-side component set — the free
-/// function behind [`EntityInterpolator::update_with_view`]'s third step, for a
-/// driver that owns the `World` itself.
-pub fn fold_entity_snapshots(world: &mut World, snapshots: &[EntitySnapshot]) {
-    fold_snapshots(world, snapshots);
-}
-
 /// What [`extract_entity_draws`] produced on the last `Extract` run.
 #[must_use]
 pub fn extracted_entity_draws(world: &World) -> Vec<EntityDraw> {
@@ -2078,7 +2304,7 @@ pub fn tracked_entity_count(world: &World) -> usize {
 /// owns. See [`EntityInterpolator::set_item_stack`] for the live chain.
 ///
 /// Sets the stack count to `1` — the neutral value for a caller that only
-/// knows identity. [`fold_snapshots`] does not go through this function; it
+/// knows identity. [`fold_entities`] does not go through this function; it
 /// writes [`TrackedStack`] directly so it can carry the real reported count.
 pub fn set_item_stack_in(world: &mut World, entity_id: i32, item: ResourceLocation) {
     world
@@ -2163,13 +2389,13 @@ impl EntityInterpolator {
     ///
     /// # Where the live path calls this
     ///
-    /// [`fold_snapshots`] does, from [`EntitySnapshot::item`], for every
-    /// snapshot that carries a stack — the full live chain is `ITEM_STACK`
-    /// metadata (index 8) → `EntityMetadataUpdate::item` →
-    /// `lodestone_ecs::entity::DisplayItem` → `EntityView::item` →
-    /// `net::entity_snapshot` → here. It stays a public setter because it is
-    /// also the direct seam for tests and for any caller that learns an item's
-    /// identity outside the snapshot stream.
+    /// [`fold_entities`] does, from [`EntityFacts::item`], for every entity
+    /// that carries a stack — the full live chain is `ITEM_STACK` metadata
+    /// (index 8) → `EntityMetadataUpdate::item` →
+    /// `lodestone_ecs::entity::DisplayItem` → [`resolve_entity_facts`] → here.
+    /// It stays a public setter because it is also the direct seam for tests
+    /// and for any caller that learns an item's identity outside the ingest
+    /// component set.
     ///
     /// An item entity with no entry here draws nothing, which is also what
     /// vanilla does with an empty stack (`ItemEntityRenderer.submit` returns
@@ -2185,9 +2411,9 @@ impl EntityInterpolator {
     /// Same as [`Self::set_item_stack`], carrying a real stack size through to
     /// [`EntityDraw::count`].
     ///
-    /// [`fold_snapshots`] calls this (via the same path as
+    /// [`fold_entities`] calls this (via the same path as
     /// [`Self::set_item_stack`]'s doc comment describes) with
-    /// [`EntitySnapshot::count`], which `net::entity_snapshot` reads straight
+    /// [`EntityFacts::count`], which [`resolve_entity_facts`] reads straight
     /// off the wire's `ItemStack::count` — no model dependency needed to widen
     /// this far, per `docs/dropped-items.md`.
     pub fn set_item_stack_with_count(&mut self, entity_id: i32, item: ResourceLocation, count: u32) {
@@ -2217,7 +2443,7 @@ impl EntityInterpolator {
 
     /// The stack count recorded for `entity_id`, if any item is recorded at
     /// all. `1` is the neutral default set by [`Self::set_item_stack`]; only
-    /// [`Self::set_item_stack_with_count`] and the live [`fold_snapshots`]
+    /// [`Self::set_item_stack_with_count`] and the live [`fold_entities`]
     /// chain ever record anything else.
     #[must_use]
     pub fn item_count(&self, entity_id: i32) -> Option<u32> {
@@ -2237,31 +2463,36 @@ impl EntityInterpolator {
     /// [`Self::update_with_view`] with a real [`CollisionSource`], so a
     /// dropped item's fall actually stops at a floor — see that method's docs
     /// and the module docs on why an item needs its own physics at all.
-    pub fn update(&mut self, snapshots: &[EntitySnapshot], dt: f32) {
+    pub fn update(&mut self, dt: f32) {
         self.update_with_view(
-            snapshots,
             dt,
             PlayerCollision::View(Arc::new(OpenAir)),
             &PhysicsProfile::mc_1_21(),
         );
     }
 
-    /// Advance every track by `dt` seconds, then fold in this frame's snapshots.
+    /// Advance every track by `dt` seconds, then fold this frame's ingest
+    /// entity state.
     ///
     /// The order is load-bearing and is what the tests below are written
     /// against:
     ///
     /// 1. [`Update`] → [`advance_interp_clocks`]: every ease clock and age moves
-    ///    on, so a snapshot that resets `t` this frame anchors from the pose
+    ///    on, so a fold that resets `t` this frame anchors from the pose
     ///    that was actually on screen.
     /// 2. per 20 Hz tick: [`GameTick`] → [`tick_item_physics`] (`TickSet::Physics`)
     ///    then [`tick_walk_animation`] (`TickSet::Animate`). Both run on a fixed
     ///    clock, not per frame.
-    /// 3. [`fold_snapshots`]: this frame's report, then the prune.
+    /// 3. [`fold_entities`]: this frame's ingest state, then the prune.
     /// 4. [`Extract`] → [`extract_entity_draws`], so [`Self::draws`] is a plain
     ///    read.
     ///
-    /// Entities absent from `snapshots` are dropped (despawned/out of range).
+    /// Entities [`EntityIndex`] no longer maps are dropped (despawned/out of
+    /// range) — a caller drives this by adding/removing ingest entities and
+    /// their `EntityIndex` mapping on [`Self::world_mut`] before calling this,
+    /// the same way [`crate::sim::Sim::fold_entities`] does against the live
+    /// `World` (issue #36 deleted the `&[EntitySnapshot]` parameter this used
+    /// to take; see [`fold_entities`]'s own doc for why).
     ///
     /// `collision`/`profile` feed only [`tick_item_physics`] (every other
     /// entity is a pure position ease and never touches either); they are
@@ -2274,7 +2505,6 @@ impl EntityInterpolator {
     /// this method existed.
     pub fn update_with_view(
         &mut self,
-        snapshots: &[EntitySnapshot],
         dt: f32,
         collision: PlayerCollision,
         profile: &PhysicsProfile,
@@ -2310,7 +2540,7 @@ impl EntityInterpolator {
             .resource_mut::<lodestone_ecs::FrameClock>()
             .end_frame();
 
-        fold_snapshots(&mut self.world, snapshots);
+        fold_entities(&mut self.world);
 
         self.world.run_schedule(Extract);
     }
@@ -2359,6 +2589,128 @@ fn lerp_angle(a: f32, b: f32, t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lodestone_ecs::entity::{
+        CreeperSwellDir, DisplayItem, Equipment, EntityKind, HeadYaw, OnGround, Position,
+        Rotation, Variant, Velocity,
+    };
+
+    /// Test-only ingest builder replacing the deleted `EntitySnapshot` (issue
+    /// #36): same field shape, but [`Self::apply`] spawns (or upserts) the
+    /// real [`lodestone_ecs::entity`] components and registers the mapping in
+    /// [`EntityIndex`], the same pattern
+    /// `a_swinging_attack_swing_reaches_the_extracted_anim` already uses for a
+    /// bare `AttackSwing`, generalised to every field the deleted type used to
+    /// carry. This drives [`resolve_entity_facts`]'s real derivation rather
+    /// than bypassing it, so these tests still exercise the code
+    /// `fold_entities` runs live.
+    ///
+    /// A field left at `Reported::Unreported` / `None` / empty is simply never
+    /// inserted, matching "the server has never mentioned this" — the same
+    /// contract [`resolve_entity_facts`] reads back out. `.apply()` never
+    /// *removes* a component, only inserts/overwrites, because no test here
+    /// needs a reported field to revert to unreported.
+    #[derive(Debug, Clone)]
+    struct IngestSnap {
+        id: i32,
+        type_path: String,
+        feet: Vec3,
+        yaw: f32,
+        head_yaw: f32,
+        pitch: f32,
+        item: Reported<ResourceLocation>,
+        count: u32,
+        velocity: Option<Vec3>,
+        on_ground: bool,
+        equipment: Vec<(EquipmentSlot, Option<ResourceLocation>)>,
+        variant: Option<EntityVariant>,
+        creeper_swell_dir: Option<i32>,
+    }
+
+    impl IngestSnap {
+        /// Spawns (first call for this id) or reuses (later calls, same
+        /// pattern a real `SET_EQUIPMENT`/`move_entity` update would hit) the
+        /// ingest entity `self.id` maps to, and inserts every component
+        /// `self` reports.
+        fn apply(&self, world: &mut World) {
+            let entity = match world.resource::<EntityIndex>().get(self.id) {
+                Some(existing) => existing,
+                None => {
+                    let entity = world.spawn(MinecraftEntityId(self.id)).id();
+                    world.resource_mut::<EntityIndex>().insert(self.id, entity);
+                    entity
+                }
+            };
+            let mut e = world.entity_mut(entity);
+            e.insert((
+                EntityKind(self.type_path.parse().expect("valid type key")),
+                Position(to_model_vec3(self.feet)),
+                Rotation(lodestone_model::Rotation {
+                    yaw: self.yaw,
+                    pitch: self.pitch,
+                }),
+                HeadYaw(self.head_yaw),
+                OnGround(self.on_ground),
+                Equipment(
+                    self.equipment
+                        .iter()
+                        .map(|(slot, item)| lodestone_model::EntityEquipment {
+                            slot: *slot,
+                            item: item
+                                .as_ref()
+                                .map(|loc| lodestone_model::ItemStack::new(resource_key(loc), 1)),
+                        })
+                        .collect(),
+                ),
+            ));
+            match &self.item {
+                Reported::Unreported => {}
+                Reported::Reported(item) => {
+                    e.insert(DisplayItem(
+                        item.as_ref()
+                            .map(|loc| lodestone_model::ItemStack::new(resource_key(loc), self.count)),
+                    ));
+                }
+            }
+            if let Some(v) = self.velocity {
+                e.insert(Velocity(to_model_vec3(v)));
+            }
+            if let Some(variant) = &self.variant {
+                e.insert(Variant(variant.clone()));
+            }
+            if let Some(dir) = self.creeper_swell_dir {
+                e.insert(CreeperSwellDir(dir));
+            }
+        }
+    }
+
+    /// A [`ResourceLocation`] and a [`lodestone_model::ResourceKey`] are the
+    /// same namespace/path pair from two different crates — this is a field
+    /// copy, the test-side mirror of [`resolve_entity_facts`]'s own conversion
+    /// the other way.
+    fn resource_key(loc: &ResourceLocation) -> lodestone_model::ResourceKey {
+        lodestone_model::ResourceKey::new(loc.namespace(), loc.path())
+            .expect("a valid ResourceLocation is always a valid ResourceKey")
+    }
+
+    /// Forgets `id`: removes it from [`EntityIndex`] and despawns the ingest
+    /// entity it mapped to, so the next [`fold_entities`] treats it exactly
+    /// like a server that has stopped reporting it — the test-side stand-in
+    /// for "omitted from this frame's snapshots" now that there is no
+    /// snapshot list to omit an entry from.
+    fn forget(world: &mut World, id: i32) {
+        if let Some(entity) = world.resource_mut::<EntityIndex>().remove(id) {
+            world.despawn(entity);
+        }
+    }
+
+    /// [`forget`] every currently-tracked id — the test-side stand-in for the
+    /// old `interp.update(&[], dt)` ("nothing was reported this frame").
+    fn forget_all(world: &mut World) {
+        let ids: Vec<i32> = world.resource::<EntityIndex>().iter().map(|(id, _)| id).collect();
+        for id in ids {
+            forget(world, id);
+        }
+    }
 
     /// A bow in the main hand, the shape [`arm_pose_for`] reads.
     fn bow_in_main_hand() -> Vec<(EquipmentSlot, ResourceLocation)> {
@@ -2458,29 +2810,26 @@ mod tests {
         );
     }
 
-    fn snap(id: i32, feet: Vec3, yaw: f32) -> EntitySnapshot {
-        EntitySnapshot {
+    fn snap(id: i32, feet: Vec3, yaw: f32) -> IngestSnap {
+        IngestSnap {
             id,
             type_path: "pig".into(),
             feet,
             yaw,
             head_yaw: yaw,
             pitch: 0.0,
-            scale: 1.0,
             item: Reported::Unreported,
+            count: 1,
             velocity: None,
             on_ground: false,
             equipment: Vec::new(),
-            equipment_dye: Vec::new(),
             variant: None,
-            count: 1,
-            name_tag: None,
             creeper_swell_dir: None,
         }
     }
 
-    fn creeper_snap(id: i32, swell_dir: Option<i32>) -> EntitySnapshot {
-        EntitySnapshot {
+    fn creeper_snap(id: i32, swell_dir: Option<i32>) -> IngestSnap {
+        IngestSnap {
             type_path: "creeper".into(),
             creeper_swell_dir: swell_dir,
             ..snap(id, Vec3::ZERO, 0.0)
@@ -2505,7 +2854,8 @@ mod tests {
     #[test]
     fn a_swinging_attack_swing_reaches_the_extracted_anim() {
         let mut interp = EntityInterpolator::new();
-        interp.update(&[snap(1, Vec3::ZERO, 0.0)], INTERP_WINDOW);
+        (snap(1, Vec3::ZERO, 0.0)).apply(interp.world_mut());
+        interp.update(INTERP_WINDOW);
         assert_eq!(
             interp.draws()[0].anim.attack_anim,
             0.0,
@@ -2526,7 +2876,8 @@ mod tests {
             .resource_mut::<EntityIndex>()
             .insert(1, ingest_entity);
 
-        interp.update(&[snap(1, Vec3::ZERO, 0.0)], 0.0);
+        (snap(1, Vec3::ZERO, 0.0)).apply(interp.world_mut());
+        interp.update(0.0);
         let attack_anim = interp.draws()[0].anim.attack_anim;
         assert!(
             attack_anim > 0.1,
@@ -2549,7 +2900,8 @@ mod tests {
     #[test]
     fn a_ticking_hurt_time_reaches_the_extracted_draw_and_expires() {
         let mut interp = EntityInterpolator::new();
-        interp.update(&[snap(1, Vec3::ZERO, 0.0)], INTERP_WINDOW);
+        (snap(1, Vec3::ZERO, 0.0)).apply(interp.world_mut());
+        interp.update(INTERP_WINDOW);
         assert!(
             !interp.draws()[0].hurt,
             "no HurtTime yet: no overlay, the negative control"
@@ -2561,7 +2913,8 @@ mod tests {
             .world_mut()
             .resource_mut::<EntityIndex>()
             .insert(1, ingest_entity);
-        interp.update(&[snap(1, Vec3::ZERO, 0.0)], 0.0);
+        (snap(1, Vec3::ZERO, 0.0)).apply(interp.world_mut());
+        interp.update(0.0);
         assert!(
             interp.draws()[0].hurt,
             "a live HurtTime must reach EntityDraw::hurt — this is issue #98's island"
@@ -2573,15 +2926,85 @@ mod tests {
             .world_mut()
             .get_mut::<HurtTime>(ingest_entity)
             .expect("HurtTime was just inserted") = HurtTime(0);
-        interp.update(&[snap(1, Vec3::ZERO, 0.0)], 0.0);
+        (snap(1, Vec3::ZERO, 0.0)).apply(interp.world_mut());
+        interp.update(0.0);
         assert!(
             !interp.draws()[0].hurt,
             "HurtTime(0) is an expired countdown, not an absent one — the overlay must clear"
         );
     }
 
+    /// Issue #434's render-side half, the same shape as the hurt-time test
+    /// above: [`extract_entity_draws`] must read [`EntityFlags`] through
+    /// [`EntityIndex`] and land bit `0x01` on [`EntityDraw::on_fire`] —
+    /// player report "mobs dont show flames yet".
+    ///
+    /// The negative control is asserted with `assert_eq!`, not merely
+    /// `assert!(!…)`: `on_fire` must be **bit-identical** `false` when the
+    /// byte is absent or has the bit clear, not just falsy by some looser
+    /// comparison — an option-like boolean gated only in the `true` direction
+    /// has already been a real defect in this codebase (`CLAUDE.md`'s
+    /// evidence-standards section).
+    #[test]
+    fn an_entity_flags_bit_reaches_the_extracted_draw_as_on_fire() {
+        let mut interp = EntityInterpolator::new();
+        (snap(1, Vec3::ZERO, 0.0)).apply(interp.world_mut());
+        interp.update(INTERP_WINDOW);
+        assert_eq!(
+            interp.draws()[0].on_fire,
+            false,
+            "no EntityFlags yet: no flame, the negative control"
+        );
+
+        // Exactly what `lodestone_ecs::ingest::apply_entity_metadata` inserts
+        // from a shared-flags byte with only the crouch bit (0x02) set — the
+        // control for "any EntityFlags at all" vs. "bit 0x01 specifically".
+        let ingest_entity = interp.world_mut().spawn(EntityFlags(0x02)).id();
+        interp
+            .world_mut()
+            .resource_mut::<EntityIndex>()
+            .insert(1, ingest_entity);
+        (snap(1, Vec3::ZERO, 0.0)).apply(interp.world_mut());
+        interp.update(0.0);
+        assert_eq!(
+            interp.draws()[0].on_fire,
+            false,
+            "EntityFlags present but bit 0x01 clear must still read false, \
+             not merely truthy-flags"
+        );
+
+        // Now set bit 0x01 (on fire) alongside the still-set crouch bit —
+        // proving this reads the specific bit, not "flags != 0".
+        *interp
+            .world_mut()
+            .get_mut::<EntityFlags>(ingest_entity)
+            .expect("EntityFlags was just inserted") = EntityFlags(0x03);
+        (snap(1, Vec3::ZERO, 0.0)).apply(interp.world_mut());
+        interp.update(0.0);
+        assert_eq!(
+            interp.draws()[0].on_fire,
+            true,
+            "a live EntityFlags with bit 0x01 set must reach EntityDraw::on_fire \
+             — this is issue #434's extraction half"
+        );
+
+        // Clearing bit 0x01 again (crouch bit left set) must clear on_fire —
+        // proves this is read fresh each snapshot, not latched once true.
+        *interp
+            .world_mut()
+            .get_mut::<EntityFlags>(ingest_entity)
+            .expect("EntityFlags was just inserted") = EntityFlags(0x02);
+        (snap(1, Vec3::ZERO, 0.0)).apply(interp.world_mut());
+        interp.update(0.0);
+        assert_eq!(
+            interp.draws()[0].on_fire,
+            false,
+            "clearing bit 0x01 must clear on_fire, not leave it latched"
+        );
+    }
+
     /// The full creeper-swell chain this pass wired, exercised end to end
-    /// through the public `update` seam — `EntitySnapshot::creeper_swell_dir`
+    /// through the public `update` seam — `CreeperSwellDir`
     /// → `spawn_track`'s `CreeperFuse` insert → `tick_creeper_fuse` (driven by
     /// real 20 Hz ticks inside `update`, not hand-poked) →
     /// `EntityDraw::creeper_swelling`. Live player report: "the creeper ...
@@ -2594,7 +3017,8 @@ mod tests {
         // A non-creeper must read exactly 0.0, always — the default every
         // other entity type gets, at zero cost (no `CreeperFuse` component at
         // all; see `EntityDraw::creeper_swelling`'s doc).
-        interp.update(&[snap(1, Vec3::ZERO, 0.0)], 1.0);
+        (snap(1, Vec3::ZERO, 0.0)).apply(interp.world_mut());
+        interp.update(1.0);
         assert_eq!(
             interp.draws()[0].creeper_swelling,
             0.0,
@@ -2604,7 +3028,8 @@ mod tests {
         // A freshly spawned creeper whose first snapshot has not yet reported
         // a fuse direction: seeded from vanilla's own idle default (`-1`), so
         // it must read 0.0 too, the same as before this feature existed.
-        interp.update(&[creeper_snap(2, None)], 0.0);
+        (creeper_snap(2, None)).apply(interp.world_mut());
+        interp.update(0.0);
         let draw_for = |interp: &EntityInterpolator, id: i32| -> EntityDraw {
             interp
                 .draws()
@@ -2624,8 +3049,10 @@ mod tests {
         // starting with the *next* call's ticks. Folding it alone first, then
         // ticking a full second in a follow-up call, is what actually exercises
         // `tick_creeper_fuse` at `swell_dir = 1`.
-        interp.update(&[creeper_snap(2, Some(1))], 0.0);
-        interp.update(&[creeper_snap(2, Some(1))], 1.0);
+        (creeper_snap(2, Some(1))).apply(interp.world_mut());
+        interp.update(0.0);
+        (creeper_snap(2, Some(1))).apply(interp.world_mut());
+        interp.update(1.0);
         let swelling = draw_for(&interp, 2).creeper_swelling;
         assert!(
             swelling > 0.0,
@@ -2646,8 +3073,10 @@ mod tests {
         // And backing off (`swell_dir = -1`) must bring it back down, proving
         // the direction is actually read each update rather than latched once.
         // Same fold-then-tick shape as above.
-        interp.update(&[creeper_snap(2, Some(-1))], 0.0);
-        interp.update(&[creeper_snap(2, Some(-1))], 2.0);
+        (creeper_snap(2, Some(-1))).apply(interp.world_mut());
+        interp.update(0.0);
+        (creeper_snap(2, Some(-1))).apply(interp.world_mut());
+        interp.update(2.0);
         let receded = draw_for(&interp, 2).creeper_swelling;
         assert!(
             receded < swelling,
@@ -2658,7 +3087,8 @@ mod tests {
     #[test]
     fn a_new_entity_is_drawn_at_its_reported_pose() {
         let mut interp = EntityInterpolator::new();
-        interp.update(&[snap(1, Vec3::new(3.0, 64.0, -2.0), 90.0)], 0.016);
+        (snap(1, Vec3::new(3.0, 64.0, -2.0), 90.0)).apply(interp.world_mut());
+        interp.update(0.016);
         let draws = interp.draws();
         assert_eq!(draws.len(), 1);
         assert_eq!(draws[0].feet, Vec3::new(3.0, 64.0, -2.0));
@@ -2669,10 +3099,12 @@ mod tests {
     fn movement_interpolates_rather_than_snapping() {
         let mut interp = EntityInterpolator::new();
         // Establish the entity at the origin, its ease already complete.
-        interp.update(&[snap(1, Vec3::ZERO, 0.0)], INTERP_WINDOW);
+        (snap(1, Vec3::ZERO, 0.0)).apply(interp.world_mut());
+        interp.update(INTERP_WINDOW);
         // A new position arrives 4 blocks along +X.
         let target = Vec3::new(4.0, 0.0, 0.0);
-        interp.update(&[snap(1, target, 0.0)], 0.0);
+        (snap(1, target, 0.0)).apply(interp.world_mut());
+        interp.update(0.0);
 
         // At t≈0 the mob must still be at (near) the old pose — NOT snapped to
         // the target. This is the anti-vacuity guard: a renderer that ignored
@@ -2685,7 +3117,8 @@ mod tests {
 
         // Half the window later it must be strictly between old and new — a snap
         // (jump straight to 4) or a freeze (stuck at 0) both fail this.
-        interp.update(&[snap(1, target, 0.0)], INTERP_WINDOW / 2.0);
+        (snap(1, target, 0.0)).apply(interp.world_mut());
+        interp.update(INTERP_WINDOW / 2.0);
         let xm = interp.draws()[0].feet.x;
         assert!(
             xm > 0.5 && xm < 3.5,
@@ -2693,7 +3126,8 @@ mod tests {
         );
 
         // A full window after the snapshot it reaches the target.
-        interp.update(&[snap(1, target, 0.0)], INTERP_WINDOW);
+        (snap(1, target, 0.0)).apply(interp.world_mut());
+        interp.update(INTERP_WINDOW);
         let xf = interp.draws()[0].feet.x;
         assert!(
             (xf - 4.0).abs() < 1.0e-3,
@@ -2709,9 +3143,11 @@ mod tests {
         // With vanilla's three-tick window it must still be advancing a full tick
         // after the last packet. This is the regression guard on INTERP_STEPS.
         let mut interp = EntityInterpolator::new();
-        interp.update(&[snap(1, Vec3::ZERO, 0.0)], INTERP_WINDOW);
+        (snap(1, Vec3::ZERO, 0.0)).apply(interp.world_mut());
+        interp.update(INTERP_WINDOW);
         // One packet: the mob steps one block. No further packets arrive.
-        interp.update(&[snap(1, Vec3::new(1.0, 0.0, 0.0), 0.0)], 0.0);
+        (snap(1, Vec3::new(1.0, 0.0, 0.0), 0.0)).apply(interp.world_mut());
+        interp.update(0.0);
 
         // Sample the drawn x each render frame for the next three ticks at 60 fps
         // and require it to keep increasing well past the first tick — a one-tick
@@ -2721,7 +3157,8 @@ mod tests {
         let mut advanced_after_one_tick = false;
         let mut elapsed = 0.0;
         while elapsed < INTERP_WINDOW - 1.0e-4 {
-            interp.update(&[snap(1, Vec3::new(1.0, 0.0, 0.0), 0.0)], frame);
+            (snap(1, Vec3::new(1.0, 0.0, 0.0), 0.0)).apply(interp.world_mut());
+            interp.update(frame);
             elapsed += frame;
             let x = interp.draws()[0].feet.x;
             assert!(
@@ -2746,10 +3183,13 @@ mod tests {
     #[test]
     fn a_despawned_entity_stops_being_drawn() {
         let mut interp = EntityInterpolator::new();
-        interp.update(&[snap(1, Vec3::ZERO, 0.0), snap(2, Vec3::X, 0.0)], 0.016);
+        (snap(1, Vec3::ZERO, 0.0)).apply(interp.world_mut());
+        (snap(2, Vec3::X, 0.0)).apply(interp.world_mut());
+        interp.update(0.016);
         assert_eq!(interp.len(), 2);
         // Entity 2 vanishes from the report.
-        interp.update(&[snap(1, Vec3::ZERO, 0.0)], 0.016);
+        (snap(1, Vec3::ZERO, 0.0)).apply(interp.world_mut());
+        interp.update(0.016);
         let draws = interp.draws();
         assert_eq!(draws.len(), 1, "the despawned entity must be gone");
     }
@@ -2757,10 +3197,13 @@ mod tests {
     #[test]
     fn yaw_interpolates_along_the_shortest_arc_across_the_wrap() {
         let mut interp = EntityInterpolator::new();
-        interp.update(&[snap(1, Vec3::ZERO, 350.0)], INTERP_WINDOW);
+        (snap(1, Vec3::ZERO, 350.0)).apply(interp.world_mut());
+        interp.update(INTERP_WINDOW);
         // Turn to 10°: the short way is +20° through 360/0, not −340° through 180.
-        interp.update(&[snap(1, Vec3::ZERO, 10.0)], 0.0);
-        interp.update(&[snap(1, Vec3::ZERO, 10.0)], INTERP_WINDOW / 2.0);
+        (snap(1, Vec3::ZERO, 10.0)).apply(interp.world_mut());
+        interp.update(0.0);
+        (snap(1, Vec3::ZERO, 10.0)).apply(interp.world_mut());
+        interp.update(INTERP_WINDOW / 2.0);
         let y = interp.draws()[0].yaw;
         // Halfway along the +20° arc from 350° is 360° ≡ 0°. Reject the long-way
         // answer (~180°), which is what naive linear lerp would give.
@@ -2777,11 +3220,14 @@ mod tests {
         let mut interp = EntityInterpolator::new();
         let mut s = snap(1, Vec3::ZERO, 0.0);
         s.head_yaw = 350.0;
-        interp.update(std::slice::from_ref(&s), INTERP_WINDOW);
+        s.apply(interp.world_mut());
+        interp.update(INTERP_WINDOW);
         // Head turns to 10° (short arc +20° through 0), body stays at 0.
         s.head_yaw = 10.0;
-        interp.update(std::slice::from_ref(&s), 0.0);
-        interp.update(std::slice::from_ref(&s), INTERP_WINDOW / 2.0);
+        s.apply(interp.world_mut());
+        interp.update(0.0);
+        s.apply(interp.world_mut());
+        interp.update(INTERP_WINDOW / 2.0);
         let d = &interp.draws()[0];
         assert!(
             d.yaw.abs() < 1.0e-3,
@@ -2799,12 +3245,14 @@ mod tests {
     fn walk_at(v: f32, ticks: usize) -> (f32, f32) {
         let mut interp = EntityInterpolator::new();
         let mut pos = Vec3::ZERO;
-        interp.update(&[snap(1, pos, 0.0)], INTERP_WINDOW);
+        (snap(1, pos, 0.0)).apply(interp.world_mut());
+        interp.update(INTERP_WINDOW);
         let mut phase_at_mark = 0.0;
         let mark = ticks.saturating_sub(10);
         for i in 0..ticks {
             pos.x += v;
-            interp.update(&[snap(1, pos, 0.0)], TICK);
+            (snap(1, pos, 0.0)).apply(interp.world_mut());
+            interp.update(TICK);
             if i == mark {
                 phase_at_mark = interp.draws()[0].anim.limb_swing;
             }
@@ -2868,15 +3316,18 @@ mod tests {
     fn a_mob_that_stops_walking_decays_to_standing() {
         let mut interp = EntityInterpolator::new();
         let mut pos = Vec3::ZERO;
-        interp.update(&[snap(1, pos, 0.0)], INTERP_WINDOW);
+        (snap(1, pos, 0.0)).apply(interp.world_mut());
+        interp.update(INTERP_WINDOW);
         for _ in 0..40 {
             pos.x += 0.1;
-            interp.update(&[snap(1, pos, 0.0)], TICK);
+            (snap(1, pos, 0.0)).apply(interp.world_mut());
+            interp.update(TICK);
         }
         assert!(interp.draws()[0].anim.limb_swing_amount > 0.2, "was walking");
         // The mob stops: same position reported for two seconds.
         for _ in 0..40 {
-            interp.update(&[snap(1, pos, 0.0)], TICK);
+            (snap(1, pos, 0.0)).apply(interp.world_mut());
+            interp.update(TICK);
         }
         let amount = interp.draws()[0].anim.limb_swing_amount;
         assert!(
@@ -2890,10 +3341,13 @@ mod tests {
         let mut interp = EntityInterpolator::new();
         let mut s = snap(1, Vec3::ZERO, 0.0);
         s.pitch = -30.0;
-        interp.update(std::slice::from_ref(&s), INTERP_WINDOW);
+        s.apply(interp.world_mut());
+        interp.update(INTERP_WINDOW);
         s.pitch = 30.0;
-        interp.update(std::slice::from_ref(&s), 0.0);
-        interp.update(std::slice::from_ref(&s), INTERP_WINDOW / 2.0);
+        s.apply(interp.world_mut());
+        interp.update(0.0);
+        s.apply(interp.world_mut());
+        interp.update(INTERP_WINDOW / 2.0);
         let p = interp.draws()[0].pitch;
         assert!(p.abs() < 1.0, "half the window from -30 to 30 is ~0, was {p}");
     }
@@ -2919,7 +3373,8 @@ mod tests {
             (EquipmentSlot::Head, None),
         ];
         let mut interp = EntityInterpolator::new();
-        interp.update(std::slice::from_ref(&s), 0.016);
+        s.apply(interp.world_mut());
+        interp.update(0.016);
         let draws = interp.draws();
         assert_eq!(draws.len(), 1);
         let eq = &draws[0].equipment;
@@ -2941,12 +3396,14 @@ mod tests {
         // common case for a `/give`-style test and for any mob standing still.
         let mut s = snap(1, Vec3::new(4.0, 64.0, 4.0), 90.0);
         let mut interp = EntityInterpolator::new();
-        interp.update(std::slice::from_ref(&s), 0.016);
+        s.apply(interp.world_mut());
+        interp.update(0.016);
         assert!(interp.draws()[0].equipment.is_empty());
 
         // Identical pose, new equipment.
         s.equipment = vec![(EquipmentSlot::MainHand, Some(sword()))];
-        interp.update(std::slice::from_ref(&s), 0.016);
+        s.apply(interp.world_mut());
+        interp.update(0.016);
         assert_eq!(
             interp.draws()[0].equipment,
             vec![(EquipmentSlot::MainHand, sword())],
@@ -2957,7 +3414,8 @@ mod tests {
         // moving. This is safe precisely because `EntityView::equipment` is the
         // accumulated set, never a delta.
         s.equipment = vec![(EquipmentSlot::MainHand, None)];
-        interp.update(std::slice::from_ref(&s), 0.016);
+        s.apply(interp.world_mut());
+        interp.update(0.016);
         assert!(
             interp.draws()[0].equipment.is_empty(),
             "an explicit clear must disarm the mob"
@@ -2969,9 +3427,11 @@ mod tests {
         let mut s = snap(1, Vec3::ZERO, 0.0);
         s.equipment = vec![(EquipmentSlot::MainHand, Some(sword()))];
         let mut interp = EntityInterpolator::new();
-        interp.update(std::slice::from_ref(&s), 0.016);
+        s.apply(interp.world_mut());
+        interp.update(0.016);
         assert_eq!(interp.draws()[0].equipment.len(), 1);
-        interp.update(&[], 0.016);
+        forget_all(interp.world_mut());
+        interp.update(0.016);
         assert!(interp.is_empty(), "the track itself must be pruned");
         assert!(interp.draws().is_empty());
     }
@@ -3037,7 +3497,9 @@ mod tests {
         pig.variant = Some(dyed);
 
         let mut interp = EntityInterpolator::new();
-        interp.update(&[sheep, pig], 0.016);
+        (sheep).apply(interp.world_mut());
+        (pig).apply(interp.world_mut());
+        interp.update(0.016);
         let draws = interp.draws();
         let sheep_draw = draws.iter().find(|d| d.id == 1).expect("sheep tracked");
         let pig_draw = draws.iter().find(|d| d.id == 2).expect("pig tracked");
@@ -3066,7 +3528,8 @@ mod tests {
             sheared: false,
         });
         let mut interp = EntityInterpolator::new();
-        interp.update(std::slice::from_ref(&s), 0.016);
+        s.apply(interp.world_mut());
+        interp.update(0.016);
         assert_eq!(interp.draws()[0].wool.map(|w| w.sheared), Some(false));
 
         // Identical pose, freshly sheared.
@@ -3074,7 +3537,8 @@ mod tests {
             color: 3,
             sheared: true,
         });
-        interp.update(std::slice::from_ref(&s), 0.016);
+        s.apply(interp.world_mut());
+        interp.update(0.016);
         assert_eq!(
             interp.draws()[0].wool.map(|w| w.sheared),
             Some(true),
@@ -3086,30 +3550,27 @@ mod tests {
 
     /// An item entity whose stack the server has not (yet) reported, and
     /// which has never reported a velocity — the pre-physics fallback path.
-    fn item_snap(id: i32, feet: Vec3) -> EntitySnapshot {
-        EntitySnapshot {
+    fn item_snap(id: i32, feet: Vec3) -> IngestSnap {
+        IngestSnap {
             id,
             type_path: ITEM_ENTITY_TYPE_PATH.into(),
             feet,
             yaw: 0.0,
             head_yaw: 0.0,
             pitch: 0.0,
-            scale: 1.0,
             item: Reported::Unreported,
+            count: 1,
             velocity: None,
             on_ground: false,
             equipment: Vec::new(),
-            equipment_dye: Vec::new(),
             variant: None,
-            count: 1,
-            name_tag: None,
             creeper_swell_dir: None,
         }
     }
 
     /// The same, carrying a reported stack, as the live path builds it.
-    fn item_snap_with(id: i32, feet: Vec3, item: Option<ResourceLocation>) -> EntitySnapshot {
-        EntitySnapshot {
+    fn item_snap_with(id: i32, feet: Vec3, item: Option<ResourceLocation>) -> IngestSnap {
+        IngestSnap {
             item: Reported::Reported(item),
             ..item_snap(id, feet)
         }
@@ -3123,8 +3584,8 @@ mod tests {
         feet: Vec3,
         velocity: Option<Vec3>,
         on_ground: bool,
-    ) -> EntitySnapshot {
-        EntitySnapshot {
+    ) -> IngestSnap {
+        IngestSnap {
             velocity,
             on_ground,
             ..item_snap(id, feet)
@@ -3141,7 +3602,8 @@ mod tests {
         // tracked and interpolated like any other, but nothing knows what it is,
         // so the renderer draws nothing — vanilla's own empty-stack behaviour.
         let mut interp = EntityInterpolator::new();
-        interp.update(&[item_snap(9, Vec3::new(1.0, 64.0, 2.0))], 0.016);
+        (item_snap(9, Vec3::new(1.0, 64.0, 2.0))).apply(interp.world_mut());
+        interp.update(0.016);
         let draws = interp.draws();
         assert_eq!(draws.len(), 1, "an item entity must still be tracked");
         assert_eq!(draws[0].type_path, ITEM_ENTITY_TYPE_PATH);
@@ -3153,13 +3615,14 @@ mod tests {
     fn a_reported_stack_reaches_the_draw() {
         let mut interp = EntityInterpolator::new();
         interp.set_item_stack(9, stone());
-        interp.update(&[item_snap(9, Vec3::new(1.0, 64.0, 2.0))], 0.016);
+        (item_snap(9, Vec3::new(1.0, 64.0, 2.0))).apply(interp.world_mut());
+        interp.update(0.016);
         assert_eq!(interp.draws()[0].item, Some(stone()));
     }
 
     /// The stack count's own hop across the same boundary velocity/equipment
-    /// crossed before it: `EntitySnapshot::count` -> `TrackedStack` ->
-    /// `EntityDraw::count`, via `fold_snapshots` — the live path
+    /// crossed before it: `EntityFacts::count` -> `TrackedStack` ->
+    /// `EntityDraw::count`, via `fold_entities` — the live path
     /// `net::entity_snapshot` feeds, not the setter.
     #[test]
     fn item_count_reaches_the_draw() {
@@ -3167,12 +3630,14 @@ mod tests {
 
         // No stack reported at all: the neutral default, so a consumer that
         // multiplies by count never draws zero copies of nothing.
-        interp.update(&[item_snap(9, Vec3::new(1.0, 64.0, 2.0))], 0.016);
+        (item_snap(9, Vec3::new(1.0, 64.0, 2.0))).apply(interp.world_mut());
+        interp.update(0.016);
         assert_eq!(interp.draws()[0].count, 1);
 
         let mut with_count = item_snap_with(9, Vec3::new(1.0, 64.0, 2.0), Some(stone()));
         with_count.count = 64;
-        interp.update(std::slice::from_ref(&with_count), 0.016);
+        with_count.apply(interp.world_mut());
+        interp.update(0.016);
         assert_eq!(interp.draws()[0].item, Some(stone()));
         assert_eq!(interp.draws()[0].count, 64);
     }
@@ -3198,10 +3663,9 @@ mod tests {
         // the first one's model.
         let mut interp = EntityInterpolator::new();
         interp.set_item_stack(9, stone());
-        interp.update(
-            &[item_snap(9, Vec3::ZERO), item_snap(10, Vec3::X)],
-            0.016,
-        );
+        (item_snap(9, Vec3::ZERO)).apply(interp.world_mut());
+        (item_snap(10, Vec3::X)).apply(interp.world_mut());
+        interp.update(0.016);
         let draws = interp.draws();
         let with = draws.iter().filter(|d| d.item.is_some()).count();
         assert_eq!(with, 1, "only entity 9 was told what it is carrying");
@@ -3219,7 +3683,8 @@ mod tests {
         // one drop's identity leaking onto the mob that inherits its id.
         let mut interp = EntityInterpolator::new();
         interp.set_item_stack(1, stone());
-        interp.update(&[snap(1, Vec3::ZERO, 0.0)], 0.016);
+        (snap(1, Vec3::ZERO, 0.0)).apply(interp.world_mut());
+        interp.update(0.016);
         assert_eq!(interp.draws()[0].item, None);
     }
 
@@ -3230,9 +3695,11 @@ mod tests {
         // table that only grows is a real leak, not a theoretical one.
         let mut interp = EntityInterpolator::new();
         interp.set_item_stack(9, stone());
-        interp.update(&[item_snap(9, Vec3::ZERO)], 0.016);
+        (item_snap(9, Vec3::ZERO)).apply(interp.world_mut());
+        interp.update(0.016);
         assert!(interp.item_stack(9).is_some());
-        interp.update(&[], 0.016);
+        forget_all(interp.world_mut());
+        interp.update(0.016);
         assert!(
             interp.item_stack(9).is_none(),
             "the stack must be pruned with the track it belonged to"
@@ -3244,19 +3711,22 @@ mod tests {
         // The live wiring: nothing calls `set_item_stack` by hand any more, the
         // identity rides the snapshot from the metadata decode.
         let mut interp = EntityInterpolator::new();
-        interp.update(&[item_snap_with(9, Vec3::ZERO, Some(stone()))], 0.016);
+        (item_snap_with(9, Vec3::ZERO, Some(stone()))).apply(interp.world_mut());
+        interp.update(0.016);
         assert_eq!(interp.draws()[0].item, Some(stone()));
     }
 
     #[test]
     fn a_snapshot_silent_about_the_item_keeps_the_known_one() {
-        // The regression this rules out is the whole reason `EntitySnapshot`'s
-        // item is nested: a drop reports its stack once at spawn and is silent
+        // The regression this rules out is the whole reason `EntityFacts::item`
+        // is nested: a drop reports its stack once at spawn and is silent
         // in every later metadata packet. Reading that silence as "empty" makes
         // the drop flicker into a placeholder one frame after it appeared.
         let mut interp = EntityInterpolator::new();
-        interp.update(&[item_snap_with(9, Vec3::ZERO, Some(stone()))], 0.016);
-        interp.update(&[item_snap(9, Vec3::ZERO)], 0.016);
+        (item_snap_with(9, Vec3::ZERO, Some(stone()))).apply(interp.world_mut());
+        interp.update(0.016);
+        (item_snap(9, Vec3::ZERO)).apply(interp.world_mut());
+        interp.update(0.016);
         assert_eq!(
             interp.draws()[0].item,
             Some(stone()),
@@ -3269,8 +3739,10 @@ mod tests {
         // The other half of the nesting: `Some(None)` is the server saying the
         // stack is empty, which vanilla draws as nothing.
         let mut interp = EntityInterpolator::new();
-        interp.update(&[item_snap_with(9, Vec3::ZERO, Some(stone()))], 0.016);
-        interp.update(&[item_snap_with(9, Vec3::ZERO, None)], 0.016);
+        (item_snap_with(9, Vec3::ZERO, Some(stone()))).apply(interp.world_mut());
+        interp.update(0.016);
+        (item_snap_with(9, Vec3::ZERO, None)).apply(interp.world_mut());
+        interp.update(0.016);
         assert_eq!(interp.draws()[0].item, None);
     }
 
@@ -3279,9 +3751,11 @@ mod tests {
         // The bob and spin are driven by `anim.age_ticks`, so an item whose age
         // never advanced would hang motionless in the air.
         let mut interp = EntityInterpolator::new();
-        interp.update(&[item_snap(9, Vec3::ZERO)], 0.0);
+        (item_snap(9, Vec3::ZERO)).apply(interp.world_mut());
+        interp.update(0.0);
         let first = interp.draws()[0].anim.age_ticks;
-        interp.update(&[item_snap(9, Vec3::ZERO)], 0.5);
+        (item_snap(9, Vec3::ZERO)).apply(interp.world_mut());
+        interp.update(0.5);
         let later = interp.draws()[0].anim.age_ticks;
         assert!(
             later > first + 9.0,
@@ -3311,16 +3785,15 @@ mod tests {
         let mut interp = EntityInterpolator::new();
         let spawn = Vec3::new(10.0, 64.0, -5.0);
         let vel = Vec3::new(0.08, 0.2, 0.0);
-        interp.update(
-            &[item_snap_moving(9, spawn, Some(vel), false)],
-            0.0,
-        );
+        (item_snap_moving(9, spawn, Some(vel), false)).apply(interp.world_mut());
+        interp.update(0.0);
 
         let mut max_y = interp.draws()[0].feet.y;
         // 40 ticks (2s) of real flight time with no further server packet —
         // matching the ~1/s correction cadence, this window has none at all.
         for _ in 0..40 {
-            interp.update(&[item_snap_moving(9, spawn, Some(vel), false)], TICK);
+            (item_snap_moving(9, spawn, Some(vel), false)).apply(interp.world_mut());
+            interp.update(TICK);
             max_y = max_y.max(interp.draws()[0].feet.y);
         }
         let final_feet = interp.draws()[0].feet;
@@ -3347,11 +3820,13 @@ mod tests {
         // that can't fail proves nothing.
         let mut interp = EntityInterpolator::new();
         let spawn = Vec3::new(0.0, 64.0, 0.0);
-        interp.update(&[item_snap_moving(9, spawn, None, false)], 0.0);
+        (item_snap_moving(9, spawn, None, false)).apply(interp.world_mut());
+        interp.update(0.0);
 
         let mut max_y = interp.draws()[0].feet.y;
         for _ in 0..40 {
-            interp.update(&[item_snap_moving(9, spawn, None, false)], TICK);
+            (item_snap_moving(9, spawn, None, false)).apply(interp.world_mut());
+            interp.update(TICK);
             max_y = max_y.max(interp.draws()[0].feet.y);
         }
         assert!(
@@ -3371,19 +3846,23 @@ mod tests {
         // reported position, not a snap.
         let mut interp = EntityInterpolator::new();
         let spawn = Vec3::new(0.0, 64.0, 0.0);
-        interp.update(&[item_snap_moving(9, spawn, None, false)], INTERP_WINDOW);
+        (item_snap_moving(9, spawn, None, false)).apply(interp.world_mut());
+        interp.update(INTERP_WINDOW);
 
         let mut max_y = interp.draws()[0].feet.y;
         for _ in 0..16 {
-            interp.update(&[item_snap_moving(9, spawn, None, false)], TICK);
+            (item_snap_moving(9, spawn, None, false)).apply(interp.world_mut());
+            interp.update(TICK);
             max_y = max_y.max(interp.draws()[0].feet.y);
         }
         // The one late correction a real server would send once the item has
         // fallen under its own (server-side) gravity for about a second.
         let landed = Vec3::new(0.3, 63.2, 0.0);
-        interp.update(&[item_snap_moving(9, landed, None, true)], TICK);
+        (item_snap_moving(9, landed, None, true)).apply(interp.world_mut());
+        interp.update(TICK);
         for _ in 0..10 {
-            interp.update(&[item_snap_moving(9, landed, None, true)], TICK);
+            (item_snap_moving(9, landed, None, true)).apply(interp.world_mut());
+            interp.update(TICK);
             max_y = max_y.max(interp.draws()[0].feet.y);
         }
         assert!(
@@ -3405,15 +3884,11 @@ mod tests {
         // for the airborne, collision-aware case this is deliberately not.
         let mut interp = EntityInterpolator::new();
         let resting = Vec3::new(2.0, 63.0, 4.0);
-        interp.update(
-            &[item_snap_moving(9, resting, Some(Vec3::ZERO), true)],
-            INTERP_WINDOW,
-        );
+        (item_snap_moving(9, resting, Some(Vec3::ZERO), true)).apply(interp.world_mut());
+        interp.update(INTERP_WINDOW);
         for _ in 0..40 {
-            interp.update(
-                &[item_snap_moving(9, resting, Some(Vec3::ZERO), true)],
-                TICK,
-            );
+            (item_snap_moving(9, resting, Some(Vec3::ZERO), true)).apply(interp.world_mut());
+            interp.update(TICK);
         }
         let feet = interp.draws()[0].feet;
         assert!(
@@ -3480,8 +3955,8 @@ mod tests {
         // — no further snapshot arrives for the rest of the test, matching
         // `updateInterval(20)`'s roughly-one-correction-per-second reality.
         let vel = Vec3::new(0.02, 0.2, 0.0);
+        item_snap_moving(9, spawn, Some(vel), false).apply(interp.world_mut());
         interp.update_with_view(
-            &[item_snap_moving(9, spawn, Some(vel), false)],
             0.0,
             PlayerCollision::View(Arc::clone(&floor)),
             &profile,
@@ -3497,8 +3972,8 @@ mod tests {
         // put is exactly what lets the physics-driven `curr` keep moving
         // without a spurious "server moved it" re-anchor each frame.
         for _ in 0..40 {
+            item_snap_moving(9, spawn, Some(vel), false).apply(interp.world_mut());
             interp.update_with_view(
-                &[item_snap_moving(9, spawn, Some(vel), false)],
                 TICK,
                 PlayerCollision::View(Arc::clone(&floor)),
                 &profile,
@@ -3530,9 +4005,11 @@ mod tests {
         let mut interp = EntityInterpolator::new();
         let spawn = Vec3::new(0.5, 66.0, 0.5);
         let vel = Vec3::new(0.02, 0.2, 0.0);
-        interp.update(&[item_snap_moving(9, spawn, Some(vel), false)], 0.0);
+        (item_snap_moving(9, spawn, Some(vel), false)).apply(interp.world_mut());
+        interp.update(0.0);
         for _ in 0..40 {
-            interp.update(&[item_snap_moving(9, spawn, Some(vel), false)], TICK);
+            (item_snap_moving(9, spawn, Some(vel), false)).apply(interp.world_mut());
+            interp.update(TICK);
         }
         let final_y = interp.draws()[0].feet.y;
         assert!(
@@ -3572,7 +4049,7 @@ mod tests {
     /// consumes, at the position vanilla's own constants predict.
     ///
     /// The item is dropped from the second poll's snapshot list, exactly as the
-    /// server drops it after `take_item_entity`: `fold_snapshots` despawns its track
+    /// server drops it after `take_item_entity`: `fold_entities` despawns its track
     /// and prunes its `ItemStacks` entry, so a draw that still appears afterwards can
     /// only have come from the animation.
     ///
@@ -3593,20 +4070,17 @@ mod tests {
         const ITEM: i32 = 1;
         let collector_feet = Vec3::new(4.0, 0.0, 0.0);
         let mut interp = EntityInterpolator::new();
-        interp.update(
-            &[
-                item_snap_with(ITEM, Vec3::ZERO, Some(stone())),
-                snap(COLLECTOR, collector_feet, 0.0),
-            ],
-            0.0,
-        );
+        (item_snap_with(ITEM, Vec3::ZERO, Some(stone()))).apply(interp.world_mut());
+        (snap(COLLECTOR, collector_feet, 0.0)).apply(interp.world_mut());
+        interp.update(0.0);
         assert!(
             begin_item_pickup(interp.world_mut(), ITEM, COLLECTOR),
             "the item was tracked with a reported stack, so a pickup must start"
         );
 
         // One tick, with the item gone from the server's report.
-        interp.update(&[snap(COLLECTOR, collector_feet, 0.0)], TICK);
+        (snap(COLLECTOR, collector_feet, 0.0)).apply(interp.world_mut());
+        interp.update(TICK);
 
         let draws = interp.draws();
         let flying: Vec<&EntityDraw> = draws
@@ -3659,14 +4133,11 @@ mod tests {
         const ITEM: i32 = 1;
         let collector_feet = Vec3::new(4.0, 0.0, 0.0);
         let mut interp = EntityInterpolator::new();
-        interp.update(
-            &[
-                item_snap_with(ITEM, Vec3::ZERO, Some(stone())),
-                snap(COLLECTOR, collector_feet, 0.0),
-            ],
-            0.0,
-        );
-        interp.update(&[snap(COLLECTOR, collector_feet, 0.0)], TICK);
+        (item_snap_with(ITEM, Vec3::ZERO, Some(stone()))).apply(interp.world_mut());
+        (snap(COLLECTOR, collector_feet, 0.0)).apply(interp.world_mut());
+        interp.update(0.0);
+        (snap(COLLECTOR, collector_feet, 0.0)).apply(interp.world_mut());
+        interp.update(TICK);
         assert!(
             !interp
                 .draws()
@@ -3687,18 +4158,15 @@ mod tests {
         const ITEM: i32 = 1;
         let collector_feet = Vec3::new(4.0, 0.0, 0.0);
         let mut interp = EntityInterpolator::new();
-        interp.update(
-            &[
-                item_snap_with(ITEM, Vec3::ZERO, Some(stone())),
-                snap(COLLECTOR, collector_feet, 0.0),
-            ],
-            0.0,
-        );
+        (item_snap_with(ITEM, Vec3::ZERO, Some(stone()))).apply(interp.world_mut());
+        (snap(COLLECTOR, collector_feet, 0.0)).apply(interp.world_mut());
+        interp.update(0.0);
         assert!(begin_item_pickup(interp.world_mut(), ITEM, COLLECTOR));
 
         let mut drawn = Vec::new();
         for _ in 0..5 {
-            interp.update(&[snap(COLLECTOR, collector_feet, 0.0)], TICK);
+            (snap(COLLECTOR, collector_feet, 0.0)).apply(interp.world_mut());
+            interp.update(TICK);
             drawn.push(
                 interp
                     .draws()
@@ -3726,7 +4194,8 @@ mod tests {
     #[test]
     fn a_pickup_for_an_unknown_or_stackless_item_starts_nothing() {
         let mut interp = EntityInterpolator::new();
-        interp.update(&[item_snap(7, Vec3::ZERO)], 0.0);
+        (item_snap(7, Vec3::ZERO)).apply(interp.world_mut());
+        interp.update(0.0);
         assert!(
             !begin_item_pickup(interp.world_mut(), 7, 2),
             "a tracked item with no reported stack has no model to fly"
@@ -3749,9 +4218,11 @@ mod tests {
     #[test]
     fn a_pickup_with_no_resolvable_collector_draws_nothing_and_still_expires() {
         let mut interp = EntityInterpolator::new();
-        interp.update(&[item_snap_with(1, Vec3::ZERO, Some(stone()))], 0.0);
+        (item_snap_with(1, Vec3::ZERO, Some(stone()))).apply(interp.world_mut());
+        interp.update(0.0);
         assert!(begin_item_pickup(interp.world_mut(), 1, 4242));
-        interp.update(&[], TICK);
+        forget_all(interp.world_mut());
+        interp.update(TICK);
         assert!(
             !interp
                 .draws()
@@ -3760,7 +4231,8 @@ mod tests {
             "an unresolvable collector must draw nothing rather than aim at the origin"
         );
         for _ in 0..3 {
-            interp.update(&[], TICK);
+            forget_all(interp.world_mut());
+            interp.update(TICK);
         }
         assert!(
             interp.world().resource::<PickupAnimations>().is_empty(),
