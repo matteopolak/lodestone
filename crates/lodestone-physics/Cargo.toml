@@ -9,3 +9,29 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+
+[dev-dependencies]
+# `docs/roadmap/benchmarks.md`: pure in-memory, no-GPU benches use criterion
+# for its statistically-robust sampling and free local `--baseline` diffing.
+# `default-features = false` + only `cargo_bench_support`: the default feature
+# set pulls in `plotters` (HTML report charts) and `rayon`, neither of which
+# this crate's benches need — matching every other crate in the harness.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+# `benches/support.rs`'s JSONL recording (issue #78 epic harness, fifth copy).
+serde_json = { workspace = true }
+
+[[bench]]
+name = "movement_integration"
+harness = false
+
+[[bench]]
+name = "collision_sweep"
+harness = false
+
+[[bench]]
+name = "pose_fit_gate"
+harness = false
+
+[[bench]]
+name = "crowd_push"
+harness = false
