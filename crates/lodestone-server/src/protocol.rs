@@ -281,9 +281,81 @@ pub enum ServerBound {
         /// Whether the client reports itself as sprinting this tick.
         sprint: bool,
     },
-    /// A packet the loop does not need to act on (chunk-batch
-    /// acknowledgements, teleport confirmations, look-only or status-only
-    /// movement). The loop ignores these but stays connected.
+    /// A creative-mode inventory slot write predicted locally by the client
+    /// (`ServerboundSetCreativeModeSlotPacket`, issue #266). Uses the exact
+    /// same menu-slot numbering [`ContainerClicked`](Self::ContainerClicked)
+    /// does — see
+    /// [`PlayerInventory::apply_menu_slot_change`](crate::inventory::PlayerInventory::apply_menu_slot_change)'s
+    /// own doc comment for the table — because vanilla's
+    /// `handleSetCreativeModeSlot` writes through the identical
+    /// `player.inventoryMenu.getSlot(slotNum)` indexing
+    /// (`ServerGamePacketListenerImpl.java:2038`). This crate has no
+    /// creative-mode/game-mode model to gate on (`hasInfiniteMaterials()` in
+    /// vanilla), matching the permission-check omission
+    /// [`DifficultyChanged`](Self::DifficultyChanged)'s own doc comment
+    /// already documents for this crate's singleplayer-only shape.
+    CreativeModeSlotSet {
+        /// Wire slot index. Vanilla only ever writes for `1..=45`
+        /// (`validSlot`, `ServerGamePacketListenerImpl.java:2035`); `0`
+        /// (crafting output) and negative values (vanilla's "drop into the
+        /// world" case, `packet.slotNum() < 0`) are decoded but never
+        /// recognised by
+        /// [`apply_menu_slot_change`](crate::inventory::PlayerInventory::apply_menu_slot_change) —
+        /// this crate has no world-drop model, the same scope cut
+        /// [`BlockAction`](Self::BlockAction)'s own doc comment already
+        /// makes for the item-drop action ordinals.
+        slot: i16,
+        /// The item now in that slot, or `None` to clear it.
+        item: Option<ItemStack>,
+    },
+    /// The client sent a `client_command`
+    /// (`ServerboundClientCommandPacket`, issue #270). `action` is vanilla's
+    /// `Action` ordinal, straight off the wire: `0` = perform respawn, `1` =
+    /// request stats (no stats model exists in this crate — see
+    /// `crate::server`'s consumer), `2` = request current game-rule values
+    /// (mirrors `sendGameRuleValues`, answered from the same
+    /// [`WorldAdminState`](crate::server) issue #268 already built).
+    ClientCommand {
+        /// Action ordinal, straight off the wire.
+        action: i32,
+    },
+    /// The client changed a setting after joining
+    /// (`ServerboundClientInformationPacket`, issue #270). Most fields are
+    /// cosmetic (locale, chat visibility, skin parts, main hand) and this
+    /// crate has nothing that reads any of them; `view_distance` is the one
+    /// exception — the "server should honour view distance at minimum" case
+    /// this issue's own decode-arm comment flags. Matches
+    /// [`PlayerInput`](Self::PlayerInput)'s "decode what the loop needs, not
+    /// the whole packet" convention.
+    ClientInformationChanged {
+        /// Requested render distance in chunks. Vanilla only ever sends
+        /// `2..=32`; `crate::server`'s consumer clamps against the server's
+        /// own configured view radius either way, so an out-of-range value
+        /// degrades rather than misbehaves.
+        view_distance: i8,
+    },
+    /// The client acknowledged one chunk batch
+    /// (`ServerboundChunkBatchReceivedPacket`, issue #270) — vanilla's
+    /// `PlayerChunkSender` flow control, which allows at most one
+    /// unacknowledged batch in flight at a time
+    /// (`ServerProtocol`'s own trait doc comment already states this
+    /// contract for the *initial* join batch; this variant is what lets
+    /// `crate::server` honour it for every later view-streaming batch too,
+    /// closing the gap this issue's body names: "the server ... never reads
+    /// this reply at all").
+    ChunkBatchAcknowledged {
+        /// The client's requested chunks-per-tick delivery rate. Decoded for
+        /// parity with the wire packet but not yet used to pace *within* a
+        /// batch — see `crate::server`'s consumer for the one invariant this
+        /// crate does enforce (never starting a second batch before the
+        /// first is acked) and this field's own future scope.
+        desired_chunks_per_tick: f32,
+    },
+    /// A packet the loop does not need to act on (teleport confirmations,
+    /// look-only or status-only movement, and several other decoded-but-
+    /// unmodelled families — see `crates/protocol/v770/src/server_protocol.rs`'s
+    /// own arm comments for exactly which). The loop ignores these but stays
+    /// connected.
     Ignored,
 }
 

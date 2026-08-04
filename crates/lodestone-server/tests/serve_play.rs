@@ -35,7 +35,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use lodestone_core::{Reader, State, Writer};
-use lodestone_model::Difficulty;
+use lodestone_model::{Difficulty, ItemStack};
 use lodestone_net::{Connection, NetError, memory_pair};
 use lodestone_server::{
     BlockEntityHandle, ChunkColumn, ChunkSource, MobHandle, NoEntities, ServerBound,
@@ -66,6 +66,14 @@ const AIR_SUPPLY_S2C: i32 = 46;
 const SET_HEALTH_S2C: i32 = 47;
 const CHANGE_DIFFICULTY_C2S: i32 = 48;
 const CHANGE_DIFFICULTY_S2C: i32 = 49;
+// Issue #270's four newly-connected packets (creative-slot writes reuse
+// #266's existing `PlayerInventory`/`apply_menu_slot_change` path and so need
+// no new wire id of their own beyond the slot write itself).
+const SET_CREATIVE_MODE_SLOT_C2S: i32 = 50;
+const CLIENT_COMMAND_C2S: i32 = 51;
+const CLIENT_INFORMATION_C2S: i32 = 52;
+const CHUNK_BATCH_RECEIVED_C2S: i32 = 53;
+const GAME_RULE_VALUES_S2C: i32 = 54;
 
 /// A [`ChunkSource`] that hands out an all-air column instantly — these
 /// tests are about packet scheduling, not terrain, so real worldgen would
@@ -158,6 +166,39 @@ impl ServerProtocol for FakeProtocol {
                     _ => Difficulty::Hard,
                 };
                 ServerBound::DifficultyChanged { difficulty }
+            }
+            // Issue #266/#270: minimal stand-in wire formats for the four
+            // newly-connected packets — same "test scheduling, not wire
+            // fidelity" rationale as `CHANGE_DIFFICULTY_C2S` above.
+            State::Play if packet_id == SET_CREATIVE_MODE_SLOT_C2S => {
+                let mut r = Reader::new(payload);
+                let slot = r.i16().expect("slot");
+                let item = if r.bool().expect("present") {
+                    let key = r.string(64).expect("item key");
+                    let count = r.var_i32().expect("count");
+                    Some(ItemStack::new(key.parse().expect("valid resource key"), count as u32))
+                } else {
+                    None
+                };
+                ServerBound::CreativeModeSlotSet { slot, item }
+            }
+            State::Play if packet_id == CLIENT_COMMAND_C2S => {
+                let mut r = Reader::new(payload);
+                ServerBound::ClientCommand {
+                    action: r.var_i32().expect("action"),
+                }
+            }
+            State::Play if packet_id == CLIENT_INFORMATION_C2S => {
+                let mut r = Reader::new(payload);
+                ServerBound::ClientInformationChanged {
+                    view_distance: r.i8().expect("view distance"),
+                }
+            }
+            State::Play if packet_id == CHUNK_BATCH_RECEIVED_C2S => {
+                let mut r = Reader::new(payload);
+                ServerBound::ChunkBatchAcknowledged {
+                    desired_chunks_per_tick: r.f32().expect("desired rate"),
+                }
             }
             _ => ServerBound::Ignored,
         }
@@ -283,6 +324,19 @@ impl ServerProtocol for FakeProtocol {
             payload: w.as_slice().to_vec(),
         }
     }
+
+    /// Issue #270's `REQUEST_GAMERULE_VALUES` confirmation — encodes only the
+    /// entry count (the tests below only need to distinguish "a reply
+    /// arrived, with N entries" from "no reply", not round-trip the actual
+    /// key/value strings).
+    fn encode_game_rule_values(&self, entries: &[(String, String)]) -> ServerDirective {
+        let mut w = Writer::default();
+        w.var_i32(entries.len() as i32);
+        ServerDirective::Send {
+            packet_id: GAME_RULE_VALUES_S2C,
+            payload: w.as_slice().to_vec(),
+        }
+    }
 }
 
 /// Drives the client side of handshake → login → configuration → the
@@ -380,6 +434,57 @@ async fn send_player_moved(client: &mut Connection<DuplexStream>, x: f64, y: f64
         .write_packet(PLAYER_MOVED_C2S, w.as_slice())
         .await
         .expect("send move");
+}
+
+/// Sends a `SET_CREATIVE_MODE_SLOT`-equivalent write. `item` mirrors the real
+/// packet's `None` = clear-the-slot case.
+async fn send_creative_slot(client: &mut Connection<DuplexStream>, slot: i16, item: Option<&ItemStack>) {
+    let mut w = Writer::default();
+    w.i16(slot);
+    w.bool(item.is_some());
+    if let Some(item) = item {
+        w.string(&item.item.to_string());
+        w.var_i32(item.count as i32);
+    }
+    client
+        .write_packet(SET_CREATIVE_MODE_SLOT_C2S, w.as_slice())
+        .await
+        .expect("send creative slot");
+}
+
+/// Sends a `CLIENT_COMMAND`-equivalent request (`0` = respawn, `2` = request
+/// current game-rule values — the two ordinals issue #270's consumer acts on).
+async fn send_client_command(client: &mut Connection<DuplexStream>, action: i32) {
+    let mut w = Writer::default();
+    w.var_i32(action);
+    client
+        .write_packet(CLIENT_COMMAND_C2S, w.as_slice())
+        .await
+        .expect("send client command");
+}
+
+/// Sends a `CLIENT_INFORMATION`-equivalent settings change carrying only the
+/// one field this crate's consumer reads.
+async fn send_client_information(client: &mut Connection<DuplexStream>, view_distance: i8) {
+    let mut w = Writer::default();
+    w.i8(view_distance);
+    client
+        .write_packet(CLIENT_INFORMATION_C2S, w.as_slice())
+        .await
+        .expect("send client information");
+}
+
+/// Sends a `CHUNK_BATCH_RECEIVED`-equivalent acknowledgement — the flow-
+/// control gate every one of the recentring tests below now has to satisfy to
+/// see a *second* batch, matching vanilla's real "one batch in flight" wire
+/// contract (see `ViewTracker`/`send_view_update`'s own doc comments).
+async fn send_chunk_batch_received(client: &mut Connection<DuplexStream>, desired_chunks_per_tick: f32) {
+    let mut w = Writer::default();
+    w.f32(desired_chunks_per_tick);
+    client
+        .write_packet(CHUNK_BATCH_RECEIVED_C2S, w.as_slice())
+        .await
+        .expect("send chunk batch received");
 }
 
 /// The square `[-r, r]²` chunk window around `(cx, cz)` — the same shape
@@ -604,6 +709,15 @@ async fn player_moved_streams_view_across_several_chunk_boundaries() {
     let mut client = Connection::new(client_end);
     drive_login_and_join(&mut client, "Walker", 9).await;
 
+    // Issue #270's chunk-batch flow-control gate (`ServerBound::
+    // ChunkBatchAcknowledged`) now holds a *second* batch until the first is
+    // acknowledged — see `chunk_batch_is_held_until_acknowledged_then_flushed`
+    // below for a test of that gate itself. This test is about the view diff
+    // shape, not flow control, so it acks promptly after every batch,
+    // exactly like a real client's automatic reply does — without this ack
+    // the jump/shift batches below would be silently queued instead of sent.
+    send_chunk_batch_received(&mut client, 10.0).await;
+
     // Same-chunk movement: must touch nothing, matching vanilla's own guard
     // (`ChunkMap::updateChunkTracking` only recomputes the view when the 2D
     // chunk position actually changes).
@@ -622,6 +736,7 @@ async fn player_moved_streams_view_across_several_chunk_boundaries() {
     assert_eq!(center, Some((10, 0)));
     assert_eq!(forgotten, square(0, 0, view_radius));
     assert_eq!(added, square(10, 0, view_radius));
+    send_chunk_batch_received(&mut client, 10.0).await;
 
     // One more chunk to the right: a partial diff. Exactly the trailing
     // (x = 9) column leaves, exactly the new (x = 12) column enters, and the
@@ -649,6 +764,32 @@ async fn player_moved_streams_view_across_several_chunk_boundaries() {
 /// [`AIR_SUPPLY_S2C`] value seen along the way (in order) and discarding
 /// anything else (keep-alive, time-sync noise interleaved by the same
 /// `tokio::select!` loop). Returns `(air_values, health_after)`.
+/// Reads packets, discarding anything whose id is not `target_id`, until one
+/// matches — the same "skip keep-alive/time-sync noise" tolerance
+/// [`read_until_health_update`] already establishes, generalised to any
+/// single target id. Needed because the two-directive respawn confirmation
+/// (`SET_HEALTH_S2C` then `AIR_SUPPLY_S2C`) can have a stray periodic
+/// broadcast queued immediately ahead of it: `tokio::select!` may pick the
+/// drowning tick that reaches exactly `0.0` health and the 1-second
+/// time-sync tick as *separate* loop iterations at the same virtual instant,
+/// so a `SET_TIME_S2C` the server already queued before the client ever
+/// sends the respawn command can still be sitting unread in the pipe —
+/// asserting on the very next packet without skipping past it is exactly the
+/// kind of interleaving-noise race `read_until_health_update`'s own doc
+/// comment already accounts for.
+async fn read_until(client: &mut Connection<DuplexStream>, target_id: i32) -> Vec<u8> {
+    loop {
+        let (id, payload) = client
+            .read_packet_timeout(Duration::from_secs(5))
+            .await
+            .expect("read")
+            .expect("packet");
+        if id == target_id {
+            return payload;
+        }
+    }
+}
+
 async fn read_until_health_update(client: &mut Connection<DuplexStream>) -> (Vec<i32>, f32) {
     let mut air_values = Vec::new();
     loop {
@@ -825,6 +966,312 @@ async fn difficulty_change_is_confirmed_back_to_the_connection() {
     assert!(
         !r.bool().expect("locked"),
         "difficulty was never locked in this test"
+    );
+
+    drop(client);
+    let _ = server.await.unwrap();
+}
+
+/// **The flow-control gate itself** (issue #270's real fix): a second chunk
+/// batch must not be sent while the first is still unacknowledged — it is
+/// queued instead — and must flush the moment the acknowledgement arrives.
+/// Before this landing, `crate::server` started a fresh batch on every
+/// `recenter` regardless of any outstanding ack (the issue's own "never reads
+/// this reply" gap); this is the test that would fail against that old
+/// behaviour, since nothing would ever be queued at all.
+#[tokio::test(start_paused = true)]
+async fn chunk_batch_is_held_until_acknowledged_then_flushed() {
+    let view_radius = 1; // 3x3 = 9 columns
+    let (client_end, server_end) = memory_pair();
+    let source = AirSource;
+
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(
+            &mut conn,
+            &FakeProtocol,
+            &source,
+            &NoEntities,
+            view_radius,
+            &BlockEntityHandle::default(),
+            &MobHandle::default(),
+        )
+        .await
+    });
+
+    let mut client = Connection::new(client_end);
+    // Deliberately does NOT ack the initial join batch — that unacknowledged
+    // batch is exactly what should gate the next one.
+    drive_login_and_join(&mut client, "Queued", 9).await;
+
+    send_player_moved(&mut client, 160.0, 64.0, 0.0).await;
+    let held = drain_available(&mut client).await;
+    let (center, forgotten, added) = split_view_directives(&held);
+    assert_eq!(center, Some((10, 0)), "the cache-center update is never gated");
+    assert_eq!(forgotten, square(0, 0, view_radius), "forgets are never gated either");
+    assert!(
+        added.is_empty(),
+        "the new columns must be queued, not sent, while the join batch is unacknowledged: {added:?}"
+    );
+
+    // Acknowledge the (still-outstanding) join batch. This is also the
+    // signal that flushes the queued jump batch.
+    send_chunk_batch_received(&mut client, 10.0).await;
+    let flushed = drain_available(&mut client).await;
+    let (center2, forgotten2, added2) = split_view_directives(&flushed);
+    assert!(center2.is_none(), "the cache-center update already went out; must not repeat");
+    assert!(forgotten2.is_empty(), "the forgets already went out; must not repeat");
+    assert_eq!(
+        added2,
+        square(10, 0, view_radius),
+        "acknowledging must flush exactly the queued batch"
+    );
+
+    drop(client);
+    let _ = server.await.unwrap();
+}
+
+/// Issue #266's actual consumer for `SET_CREATIVE_MODE_SLOT`: a write to menu
+/// slot 9 (main storage — native index 9 too, see
+/// `PlayerInventory::apply_menu_slot_change`'s own table) must land in the
+/// real `PlayerInventory` the connection closes with, not just decode
+/// cleanly. No confirmation packet is expected either — see
+/// `ServerBound::CreativeModeSlotSet`'s own doc comment for why (vanilla's
+/// `handleSetCreativeModeSlot` sends none either, once the shift into
+/// `AbstractContainerMenu::setRemoteSlot`/`broadcastChanges` is accounted
+/// for — the client already predicted this write locally).
+#[tokio::test(start_paused = true)]
+async fn creative_mode_slot_write_lands_in_the_real_inventory() {
+    let (client_end, server_end) = memory_pair();
+    let source = AirSource;
+
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(&mut conn, &FakeProtocol, &source, &NoEntities, 0, &BlockEntityHandle::default(), &MobHandle::default())
+            .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "Creator", 1).await;
+
+    let stack = ItemStack::new("minecraft:diamond_block".parse().expect("valid resource key"), 12);
+    send_creative_slot(&mut client, 9, Some(&stack)).await;
+    let stray = drain_available(&mut client).await;
+    assert!(
+        stray.is_empty(),
+        "a creative-slot write must not itself produce a reply: {stray:?}"
+    );
+
+    drop(client);
+    let summary = server.await.unwrap().expect("clean close");
+    assert_eq!(
+        summary.inventory.native(9),
+        Some(&stack),
+        "menu slot 9 (main storage) must land at native index 9"
+    );
+}
+
+/// **Control**: menu slot 0 (the crafting-result slot) has no native index
+/// at all — `PlayerInventory::apply_menu_slot_change`'s own table drops it,
+/// exactly as it already does for a real `CONTAINER_CLICK`. Proves the
+/// creative-slot consumer really does route through that table rather than
+/// writing every wire slot verbatim into some parallel array.
+#[tokio::test(start_paused = true)]
+async fn creative_mode_slot_write_to_the_crafting_output_is_dropped() {
+    let (client_end, server_end) = memory_pair();
+    let source = AirSource;
+
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(&mut conn, &FakeProtocol, &source, &NoEntities, 0, &BlockEntityHandle::default(), &MobHandle::default())
+            .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "Crafter", 1).await;
+
+    let stack = ItemStack::new("minecraft:diamond_block".parse().expect("valid resource key"), 1);
+    send_creative_slot(&mut client, 0, Some(&stack)).await;
+    let _ = drain_available(&mut client).await;
+
+    drop(client);
+    let summary = server.await.unwrap().expect("clean close");
+    for i in 0..lodestone_server::PLAYER_NATIVE_SIZE {
+        assert!(
+            summary.inventory.native(i).is_none(),
+            "slot 0 must not land anywhere in the native inventory, but native {i} is occupied"
+        );
+    }
+}
+
+/// Issue #270's `PERFORM_RESPAWN` consumer: once a player has actually died
+/// (drowned to exactly `0.0` health, the same cadence
+/// `submerged_player_loses_air_and_takes_drowning_damage_on_vanilla_cadence`
+/// pins — 10 hits of 2.0 damage from 20.0, at tick 320 then every 20 ticks
+/// after), a respawn request must refill both health and air on the real
+/// connection, matching `PlayerVitals::respawn`'s own unit test.
+#[tokio::test(start_paused = true)]
+async fn respawn_after_death_refills_health_and_air() {
+    let (client_end, server_end) = memory_pair();
+    let source = WaterSource;
+
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(&mut conn, &FakeProtocol, &source, &NoEntities, 0, &BlockEntityHandle::default(), &MobHandle::default())
+            .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "Drowned", 1).await;
+    send_player_moved(&mut client, 8.0, 8.0, 8.0).await;
+
+    // Drive the exact same cadence the drowning test above pins, until
+    // health actually reaches zero (10 hits of 2.0 from 20.0).
+    let health_after_death = loop {
+        let (_air, health) = read_until_health_update(&mut client).await;
+        if health <= 0.0 {
+            break health;
+        }
+    };
+    assert_eq!(health_after_death, 0.0, "expected exactly 10 hits to reach 0.0 health");
+
+    send_client_command(&mut client, 0).await; // PERFORM_RESPAWN
+
+    let payload = read_until(&mut client, SET_HEALTH_S2C).await;
+    let mut r = Reader::new(&payload);
+    assert_eq!(r.f32().expect("health"), 20.0, "respawn must restore full health");
+
+    let payload2 = read_until(&mut client, AIR_SUPPLY_S2C).await;
+    let mut r2 = Reader::new(&payload2);
+    assert_eq!(r2.var_i32().expect("air"), 300, "respawn must restore full air");
+
+    drop(client);
+    let _ = server.await.unwrap();
+}
+
+/// **Control**: a respawn request from a player who is not dead must be a
+/// no-op, mirroring vanilla's own `getHealth() > 0.0F` early return — proof
+/// the health/air refill above is gated on death, not unconditional.
+#[tokio::test(start_paused = true)]
+async fn respawn_request_while_alive_is_a_no_op() {
+    let (client_end, server_end) = memory_pair();
+    let source = AirSource;
+
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(&mut conn, &FakeProtocol, &source, &NoEntities, 0, &BlockEntityHandle::default(), &MobHandle::default())
+            .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "Alive", 1).await;
+
+    send_client_command(&mut client, 0).await;
+    let stray: Vec<_> = drain_available(&mut client)
+        .await
+        .into_iter()
+        .filter(|(id, _)| *id == SET_HEALTH_S2C || *id == AIR_SUPPLY_S2C)
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "a live player's respawn request must produce no health/air packet: {stray:?}"
+    );
+
+    drop(client);
+    let _ = server.await.unwrap();
+}
+
+/// Issue #270's other `client_command` ordinal: requesting current game-rule
+/// values must reply — even with zero rules ever set — proving
+/// `apply_client_command` actually calls through to
+/// `ServerProtocol::encode_game_rule_values` rather than only doing so when
+/// there happens to be something to report.
+#[tokio::test(start_paused = true)]
+async fn request_game_rule_values_replies_even_with_no_rules_set() {
+    let (client_end, server_end) = memory_pair();
+    let source = AirSource;
+
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(&mut conn, &FakeProtocol, &source, &NoEntities, 0, &BlockEntityHandle::default(), &MobHandle::default())
+            .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "Curious", 1).await;
+
+    send_client_command(&mut client, 2).await; // REQUEST_GAMERULE_VALUES
+
+    let (id, payload) = client
+        .read_packet_timeout(Duration::from_secs(5))
+        .await
+        .expect("read")
+        .expect("game rule values reply");
+    assert_eq!(id, GAME_RULE_VALUES_S2C);
+    let mut r = Reader::new(&payload);
+    assert_eq!(r.var_i32().expect("entry count"), 0, "no game rule was ever set");
+
+    drop(client);
+    let _ = server.await.unwrap();
+}
+
+/// Issue #270's `CLIENT_INFORMATION` consumer: a settings change mid-session
+/// must resize the streamed view around the connection's own tracked
+/// center — shrinking forgets exactly the outer ring, and growing back
+/// (clamped at the server's own configured cap, not the client's raw
+/// request) re-sends exactly that same ring.
+#[tokio::test(start_paused = true)]
+async fn client_information_view_distance_resizes_the_streamed_view() {
+    let view_radius = 2; // 5x5 = 25 columns — this connection's configured cap
+    let (client_end, server_end) = memory_pair();
+    let source = AirSource;
+
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(
+            &mut conn,
+            &FakeProtocol,
+            &source,
+            &NoEntities,
+            view_radius,
+            &BlockEntityHandle::default(),
+            &MobHandle::default(),
+        )
+        .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "Settings", 25).await;
+    // Clear the join batch's own outstanding ack first — this test is about
+    // the resize diff, not the flow-control gate (see
+    // `chunk_batch_is_held_until_acknowledged_then_flushed` for that).
+    send_chunk_batch_received(&mut client, 10.0).await;
+
+    let full = square(0, 0, 2);
+    let inner = square(0, 0, 1);
+    let ring: HashSet<(i32, i32)> = full.difference(&inner).copied().collect();
+    assert_eq!(ring.len(), 16, "sanity: the 5x5 minus 3x3 ring is 16 columns");
+
+    // Shrink to 1: never gated at all (there is nothing to add, only
+    // forgets — see `send_view_update`'s own doc comment for why forgets
+    // bypass the ack gate entirely).
+    send_client_information(&mut client, 1).await;
+    let shrunk = drain_available(&mut client).await;
+    let (center, forgotten, added) = split_view_directives(&shrunk);
+    assert!(center.is_none(), "a settings change never moves the tracked center");
+    assert_eq!(forgotten, ring, "shrinking must forget exactly the outer ring");
+    assert!(added.is_empty(), "shrinking must never add a column");
+
+    // Grow back past the server's own cap (10 requested, 2 configured) —
+    // must clamp to the cap, not the raw requested value.
+    send_client_information(&mut client, 10).await;
+    let grown = drain_available(&mut client).await;
+    let (center2, forgotten2, added2) = split_view_directives(&grown);
+    assert!(center2.is_none());
+    assert!(forgotten2.is_empty(), "growing must never forget a column");
+    assert_eq!(
+        added2, ring,
+        "clamped growth must re-send exactly the same ring, not the raw requested radius"
     );
 
     drop(client);
