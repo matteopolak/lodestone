@@ -28,12 +28,28 @@ protocol connectedness (denominators from each family play::{clientbound,serverb
 v47  clientbound decoded 17/74; emits 17/74; decoded-but-stranded 0; serverbound encoded 17/26; examined 17 arm(s); serverbound decode: not applicable (no src/server_protocol.rs — family does not implement ServerProtocol, so it cannot host)
 v340  clientbound decoded 16/80; emits 16/80; decoded-but-stranded 0; serverbound encoded 20/33; examined 16 arm(s); serverbound decode: not applicable (no src/server_protocol.rs — family does not implement ServerProtocol, so it cannot host)
 v735  clientbound decoded 17/92; emits 17/92; decoded-but-stranded 0; serverbound encoded 21/48; examined 17 arm(s); serverbound decode: not applicable (no src/server_protocol.rs — family does not implement ServerProtocol, so it cannot host)
-v770  clientbound decoded 111/141; emits 110/141; decoded-but-stranded 0; serverbound encoded 53/69; examined 111 arm(s); serverbound decoded 13/69, connected 13/69; examined 13 arm(s)
+v770  clientbound decoded 111/141; emits 110/141; decoded-but-stranded 0; serverbound encoded 53/69; examined 111 arm(s); serverbound decoded 60/69, connected 13/69; examined 60 arm(s); decodes-to-Ignored-only 47
 ```
 
-Re-measured 2026-08-04. **Use this command, never a hand count** — a hand-derived figure
-for this exact domain has been wrong four times in four different ways, and the tool
-itself has now been wrong twice (see below).
+Re-measured 2026-08-04, after landing decode arms for issues #262/#264/#266/#268/#270 (this
+session). **Use this command, never a hand count** — a hand-derived figure for this exact
+domain has been wrong four times in four different ways, and the tool itself has now been
+wrong twice (see below), including a third instance caught and fixed in this same pass: two
+arms (`SET_CREATIVE_MODE_SLOT`/`SET_BEACON`, #266) called a local helper function as a bare
+call, which the classifier follows to check for a `ServerBound` reference — the helpers
+return `Option<Option<T>>`, not `ServerBound`, so it reported both arms `UNCLASSIFIED`
+(exit code 1) despite their own bodies having a literal, unconditional `ServerBound::Ignored`
+the classifier never got to check. Fixed by qualifying both calls as `self::…`, which the
+classifier's own `receiver_call` exclusion already treats as "not a delegate" — see `c5a5d9d`.
+
+**`connected` stayed at 13/69 through all five issues.** Every one of the 47 new arms decodes
+cleanly and deterministically to `ServerBound::Ignored` — none has an existing `ServerBound`
+variant to lift into, and `crates/lodestone-server` is currently owned by a concurrent
+random-tick/scheduled-tick-queue agent, so no new variants or consumers could be added in the
+same pass. See each issue's own tracker comment for which packets are flagged as the
+cheapest real next step (`SET_CREATIVE_MODE_SLOT` writes into the exact slot space #408's
+`PlayerInventory` already models; `CLIENT_INFORMATION`/`CLIENT_COMMAND`/`CHUNK_BATCH_RECEIVED`
+are #270's).
 
 `v47`/`v340`/`v735` were **never measured before today** — `xtask`'s connectedness scanner
 had a hard `if family != "v770" { continue; }` while its own header claimed to take
@@ -76,12 +92,20 @@ belongs in one place (the `cargo xtask connectedness` header above, re-run on de
 rather than repeated by hand in prose that immediately starts rotting. **Do not hand-copy
 the decoded-packet list into this doc again** — run the command.
 
-The remaining ~55 of 69 `play::serverbound` packets have no decode arm at all as of this
-writing — that gap is real and is exactly what issues #262/#264/#266/#268/#270 below
-still track (their titles' `(0/…)` counts predate this landing and are stale in the
-other direction now; the per-issue counts were never wired to the automated figure,
-which is its own small argument for pointing them at `cargo xtask connectedness` output
-instead of a title that has to be hand-edited every time an arm lands).
+Only 9 of 69 `play::serverbound` packets have no decode arm at all as of this writing —
+`CHAT_ACK`/`CHAT_COMMAND`/`CHAT_COMMAND_SIGNED`/`CHAT`/`CHAT_SESSION_UPDATE`/
+`COMMAND_SUGGESTION`/`COOKIE_RESPONSE`/`DEBUG_SUBSCRIPTION_REQUEST`/
+`TEST_INSTANCE_BLOCK_ACTION` — the first six belong to chat/commands (issue #271 and #48,
+not this cluster), and the last three are each deliberately deferred with a reason in
+their own decode arm's doc comment (no client encoder to cross-check against and no cookie
+ever set; a registry-keyed dev-only F3 subscription with no id table here; a nested codec
+this crate has no type for). Issues #262/#264/#266/#268/#270 below are now **fully decoded**
+(their titles' `(0/…)` counts are stale in the other direction) but still mostly
+**unconnected** — 13/69 total, unchanged by this pass, since `lodestone-server` is
+off-limits to the protocol crate right now. See each issue's own comment thread for the
+per-family decoded/connected split; the per-issue counts are still not wired to the
+automated figure, which only measures the protocol-crate half of "connected" (decode →
+real `ServerBound` variant) and does not know which issue a given packet id belongs to.
 
 ### Decoded-but-stranded: `CHUNK_BATCH_START`, and why it isn't actually a defect
 
@@ -121,18 +145,21 @@ Being a server is a different axis, not a further step along the client axis, an
 starts from much further back than the client does. The **client's** login/configuration
 handshake, encryption (verified against a real vanilla server), and compression are all
 real and working. The **server's** equivalent is, for encryption and compression,
-entirely absent, and for the play-state serverbound decode, completely zero — not
-"partial," not "the easy packets are done." Every one of the issues below was found by
-direct inspection of `crates/protocol/v770/src/server_protocol.rs` and
-`crates/lodestone-server/src/`, not by extrapolation.
+entirely absent. Play-state serverbound decode **used to be** completely zero when this
+section was written; as of this pass it is 60/69 decoded (see "Measured coverage" above)
+but still mostly unconnected — 13/69 — since decoding a packet and having a real
+`ServerBound` variant/`lodestone-server` consumer for it are two different, still-mostly-
+unmet bars. Every one of the issues below was found by direct inspection of
+`crates/protocol/v770/src/server_protocol.rs` and `crates/lodestone-server/src/`, not by
+extrapolation.
 
 | issue | title | note |
 |---|---|---|
-| [#262](https://github.com/matteopolak/lodestone/issues/262) | Server-side decode: movement and player-state (0/11) | |
-| [#264](https://github.com/matteopolak/lodestone/issues/264) | Server-side decode: entity actions, combat, interaction (0/9) | |
-| [#266](https://github.com/matteopolak/lodestone/issues/266) | Server-side decode: inventory and container (0/16) | cross-check against `docs/container-clicks.md`'s documented click machine |
-| [#268](https://github.com/matteopolak/lodestone/issues/268) | Server-side decode: world/block-admin (0/13) | lowest priority of the five decode issues — creative/admin only |
-| [#270](https://github.com/matteopolak/lodestone/issues/270) | Server-side decode: connection-lifecycle and system | includes the real chunk-batch flow-control gap |
+| [#262](https://github.com/matteopolak/lodestone/issues/262) | Server-side decode: movement and player-state (0/11) | **decoded 11/11, connected 3/11** — remaining 8 need new `ServerBound` variants, `lodestone-server` is off-limits right now |
+| [#264](https://github.com/matteopolak/lodestone/issues/264) | Server-side decode: entity actions, combat, interaction (0/9) | **decoded 9/9, connected 3/9** — same blocker |
+| [#266](https://github.com/matteopolak/lodestone/issues/266) | Server-side decode: inventory and container (0/16) | **decoded 17/16, connected 3/16** — cross-checked against `docs/container-clicks.md`; `SET_CREATIVE_MODE_SLOT` is the cheapest next win (writes into #408's `PlayerInventory` window 0) |
+| [#268](https://github.com/matteopolak/lodestone/issues/268) | Server-side decode: world/block-admin (0/13) | **decoded 12/13, connected 3/13** — lowest priority of the five; `TEST_INSTANCE_BLOCK_ACTION` deliberately left undecoded (nested codec this crate has no type for) |
+| [#270](https://github.com/matteopolak/lodestone/issues/270) | Server-side decode: connection-lifecycle and system | **decoded 11/13, connected 1/13** — includes the real chunk-batch flow-control gap; `COOKIE_RESPONSE`/`DEBUG_SUBSCRIPTION_REQUEST` deliberately left undecoded |
 | [#271](https://github.com/matteopolak/lodestone/issues/271) | Server-side chat: no decode, no verification, no secure-profile enforcement | pairs with #283 (client-side signing) |
 | [#273](https://github.com/matteopolak/lodestone/issues/273) | Server-side login has no encryption or compression | client-side crypto is proven; this is the mirror |
 | [#275](https://github.com/matteopolak/lodestone/issues/275) | Server sends no registries/known-packs/tags during configuration | pairs with #288 (client-side ingestion) — one wire format, ideally |
