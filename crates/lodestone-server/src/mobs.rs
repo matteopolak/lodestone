@@ -68,7 +68,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use lodestone_data::{block_states, collision_shapes, path_types};
-use lodestone_entity::ai::goals::{RandomLookAroundGoal, RandomStrollGoal};
+use lodestone_entity::ai::goals::{FollowParentGoal, RandomLookAroundGoal, RandomStrollGoal};
 use lodestone_entity::ai::{Goal, GoalSelector, MobController, NavigatingMob};
 use lodestone_entity::attribute::default_attributes;
 use lodestone_entity::explosion::Aabb as ExplosionAabb;
@@ -835,7 +835,64 @@ impl<'w> MobSim<'w> {
     /// `Vec`. A mob whose health reaches `0.0` is removed at the end of the
     /// tick that killed it (vanilla's immediate death removal).
     pub fn tick(&mut self) {
+        // Refresh each mob's breeding-partner and parent candidates for this tick,
+        // before any goal runs. `lodestone-entity`'s `NavigatingMob` has no notion
+        // of a *population* — its own doc comments on
+        // `MobController::find_love_partner`/`parent_position` say so — so this is
+        // the host-side population search those seams ask for: vanilla's
+        // `BreedGoal.getFreePartner` (`BreedGoal.java:62-76`, 8-block range) and
+        // `FollowParentGoal.canUse` (`FollowParentGoal.java:8`, 8-block scan).
+        //
+        // **Simplification, stated rather than hidden:** this re-picks the nearest
+        // candidate fresh every tick instead of persisting vanilla's held
+        // `BreedGoal.partner` identity, so three or more equally-close in-love
+        // animals of one species can thrash between candidates rather than
+        // committing. Fixing it needs a persisted `love_partner_id` on `SimMob`;
+        // left as follow-up to keep this reviewable.
+        const PARTNER_RANGE_SQR: f64 = 8.0 * 8.0;
+        let snapshot: Vec<(i32, ResourceKey, Vec3, bool, bool)> = self
+            .mobs
+            .iter()
+            .map(|m| {
+                (
+                    m.id,
+                    m.entity_type.clone(),
+                    m.position(),
+                    m.mob.is_in_love(),
+                    m.mob.is_baby(),
+                )
+            })
+            .collect();
+        for m in &mut self.mobs {
+            let pos = m.position();
+            if m.mob.is_in_love() {
+                let partner = snapshot
+                    .iter()
+                    .filter(|(oid, ot, _, in_love, _)| {
+                        *oid != m.id && *ot == m.entity_type && *in_love
+                    })
+                    .map(|(_, _, p, ..)| (*p, dist_sqr(pos, *p)))
+                    .filter(|(_, d)| *d <= PARTNER_RANGE_SQR)
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+                    .map(|(p, _)| p);
+                m.mob.set_love_partner_candidate(partner);
+            }
+            if m.mob.is_baby() {
+                let parent = snapshot
+                    .iter()
+                    .filter(|(oid, ot, _, _, baby)| {
+                        *oid != m.id && *ot == m.entity_type && !*baby
+                    })
+                    .map(|(_, _, p, ..)| (*p, dist_sqr(pos, *p)))
+                    .filter(|(_, d)| *d <= PARTNER_RANGE_SQR)
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+                    .map(|(p, _)| p);
+                m.mob.set_parent_candidate(parent);
+            }
+        }
+
         let mut hits: Vec<(Option<i32>, f32)> = Vec::new();
+        let mut bred: Vec<(i32, ResourceKey, MobCategory, Vec3)> = Vec::new();
         for m in &mut self.mobs {
             // Vanilla ages `invulnerableTime`/`hurtTime` every tick regardless
             // of whether the mob was hit this tick.
@@ -845,6 +902,9 @@ impl<'w> MobSim<'w> {
             if !m.mob.take_new_attacks().is_empty() {
                 hits.push((m.attack_target_id, m.attack_damage));
             }
+            if m.mob.take_bred() {
+                bred.push((m.id, m.entity_type.clone(), m.category, m.position()));
+            }
         }
         for (target_id, raw_damage) in hits {
             if let Some(target_id) = target_id
@@ -853,6 +913,66 @@ impl<'w> MobSim<'w> {
                 target.apply_damage(raw_damage, DamageFlags::default());
             }
         }
+
+        // Resolve breeding. `NavigatingMob::breed()` only signals "this mob wants a
+        // child now" — it knows neither its partner's identity nor how to create an
+        // entity, which is why the pairing lives here. Pair same-species mobs that
+        // bred this tick and are inside the goal's own completion range
+        // (`distanceToSqr(partner) < 9.0`, `BreedGoal.java:57`) and spawn exactly one
+        // child per pair, matching `Animal::finalizeSpawnChildFromBreeding`
+        // (`Animal.java:220-233`): both parents take the 6000-tick cooldown
+        // (`PARENT_AGE_AFTER_BREEDING`, `Animal.java:225-226`) and the child spawns a
+        // baby (`BABY_START_AGE`, `AgeableMob.java:31`) at the **first** parent's
+        // position — vanilla's `offspring.snapTo(this.getX()…)` at `Animal.java:214`,
+        // not a midpoint.
+        //
+        // No XP orb, stat or advancement: `MobSim` has no experience-orb entity type
+        // and no stats plumbing. An explicit scope cut, not a silent one.
+        const BREED_COMPLETE_RANGE_SQR: f64 = 9.0;
+        let mut claimed: Vec<i32> = Vec::new();
+        let mut spawns: Vec<(ResourceKey, MobCategory, Vec3)> = Vec::new();
+        for i in 0..bred.len() {
+            let (id_a, type_a, category_a, pos_a) = bred[i].clone();
+            if claimed.contains(&id_a) {
+                continue;
+            }
+            let partner = bred[i + 1..].iter().find(|(id_b, type_b, _, pos_b)| {
+                !claimed.contains(id_b)
+                    && *type_b == type_a
+                    && dist_sqr(pos_a, *pos_b) < BREED_COMPLETE_RANGE_SQR
+            });
+            if let Some((id_b, ..)) = partner {
+                let id_b = *id_b;
+                claimed.push(id_a);
+                claimed.push(id_b);
+                spawns.push((type_a.clone(), category_a, pos_a));
+                for parent_id in [id_a, id_b] {
+                    if let Some(parent) = self.mobs.iter_mut().find(|m| m.id == parent_id) {
+                        parent
+                            .mob
+                            .set_age(lodestone_entity::ai::PARENT_AGE_AFTER_BREEDING);
+                    }
+                }
+            }
+        }
+        for (entity_type, category, pos) in spawns {
+            let shape = self
+                .mobs
+                .iter()
+                .find(|m| m.entity_type == entity_type)
+                .map_or(MobShape::land(0.6, 1.95), |m| m.shape().clone());
+            let child = self.spawn(pos, shape, 0.2, 400);
+            child
+                .set_entity_type(entity_type)
+                .set_category(category)
+                .set_persistent(category.is_persistent());
+            child.mob.set_age(lodestone_entity::ai::BABY_START_AGE);
+            child
+                .add_goal(0, Box::new(FollowParentGoal::new(1.0)))
+                .add_goal(1, Box::new(RandomStrollGoal::new(0.2)))
+                .add_goal(2, Box::new(RandomLookAroundGoal::new()));
+        }
+
         self.mobs.retain(|m| m.health > 0.0);
         self.tick_count += 1;
     }
