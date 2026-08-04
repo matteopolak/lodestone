@@ -1638,6 +1638,14 @@ impl MenuNav {
                 ui.dismiss_error();
                 MenuAction::None
             }
+            // The credits/end-poem screen (#192) — also exactly one
+            // affordance, its own arm for the same reason `Screen::Error`'s
+            // is: routing through the catch-all below would call
+            // `UiState::on_escape` on Escape, which is the wrong exit (this
+            // screen leaves through `quit_to_title`, matching
+            // `PauseButton::QuitToTitle`/`DeathButton::TitleScreen`, not
+            // through the ordinary menu-stack unwind).
+            Screen::Credits => self.key_credits(ui, key),
             // Escape is the only menu key that means anything on the world and
             // loading screens, and `UiState` already owns it.
             _ => {
@@ -2156,6 +2164,27 @@ impl MenuNav {
                     MenuAction::QuitToTitle
                 }
             },
+            _ => MenuAction::None,
+        }
+    }
+
+    /// The credits/end-poem screen (issue #192). One control (Done), no
+    /// cursor to move — Up/Down are no-ops, matching [`DeathButton`]'s own
+    /// "nothing else to select" screens when they have only one live row, and
+    /// unlike vanilla's real `WinScreen`, which dismisses on **any** key. That
+    /// "any key" behaviour is a deliberate simplification: every other screen
+    /// in this tree distinguishes Enter/Escape from navigation, and this one
+    /// stays consistent with that rather than adding the one exception — see
+    /// [`super::render::credits_frame`]'s module doc for the fuller reasoning
+    /// (this screen's content is a short placeholder, not vanilla's real
+    /// auto-scrolling poem, so there is no long scroll a stray keypress needs
+    /// to skip past).
+    fn key_credits(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        match key {
+            MenuKey::Enter | MenuKey::Escape => {
+                ui.quit_to_title();
+                MenuAction::QuitToTitle
+            }
             _ => MenuAction::None,
         }
     }
@@ -4110,6 +4139,61 @@ mod tests {
         assert_eq!(nav.key(&mut ui, MenuKey::Escape), MenuAction::None);
         assert_eq!(ui.screen(), Screen::Death);
         assert!(!ui.quit_requested());
+    }
+
+    // -- the credits/end-poem screen (#192) ------------------------------------
+
+    fn on_credits(nav_tag: &str) -> (MenuNav, UiState) {
+        let (nav, _) = nav(nav_tag);
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.show_credits();
+        assert_eq!(
+            ui.screen(),
+            Screen::Credits,
+            "test setup did not reach Credits"
+        );
+        (nav, ui)
+    }
+
+    #[test]
+    fn enter_on_credits_leaves_for_the_main_menu() {
+        let (mut nav, mut ui) = on_credits("credits-enter");
+        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::QuitToTitle);
+        assert_eq!(ui.screen(), Screen::MainMenu);
+    }
+
+    #[test]
+    fn escape_also_leaves_the_credits_screen() {
+        // Unlike `Screen::Death` above, this screen has nothing to cancel
+        // back out of — Escape and Enter mean the same thing, matching every
+        // *other* present-and-final screen in this tree (`Screen::Error`'s
+        // own `Escape | Enter` arm is the direct precedent).
+        let (mut nav, mut ui) = on_credits("credits-escape");
+        assert_eq!(nav.key(&mut ui, MenuKey::Escape), MenuAction::QuitToTitle);
+        assert_eq!(ui.screen(), Screen::MainMenu);
+    }
+
+    #[test]
+    fn up_and_down_do_nothing_on_the_credits_screen() {
+        // One control, no cursor to move — see `key_credits`'s own doc for
+        // why this does not chase vanilla's "any key" dismissal.
+        let (mut nav, mut ui) = on_credits("credits-updown");
+        assert_eq!(nav.key(&mut ui, MenuKey::Up), MenuAction::None);
+        assert_eq!(nav.key(&mut ui, MenuKey::Down), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::Credits, "still on the screen");
+    }
+
+    #[test]
+    fn a_click_on_the_only_row_dismisses_it_through_the_generic_hover_then_enter_path() {
+        // Credits has no explicit arm in `MenuNav::click` — it relies on the
+        // generic `hover` (a no-op here) then `key(Enter)` fallback, and this
+        // is the test that would fail if that fallback ever stopped covering
+        // it (e.g. a future screen-specific `click` arm added above it by
+        // mistake).
+        let (mut nav, mut ui) = on_credits("credits-click");
+        assert_eq!(nav.click(&mut ui, 0), MenuAction::QuitToTitle);
+        assert_eq!(ui.screen(), Screen::MainMenu);
     }
 
     // -- the multiplayer list's footer and row actions (#396) -----------------

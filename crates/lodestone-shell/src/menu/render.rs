@@ -2045,6 +2045,7 @@ pub fn owns_frame(screen: super::Screen) -> bool {
             | Screen::Settings
             | Screen::Accounts
             | Screen::Error
+            | Screen::Credits
     )
 }
 
@@ -2330,6 +2331,96 @@ fn error_frame(reason: Option<&str>) -> MenuFrame<'static> {
             w: ERROR_NOTICE_W,
             bottom: ERROR_BUTTON_BOTTOM_MARGIN + WIDGET_H,
             colour: FG_BAD,
+        }),
+        ..Default::default()
+    }
+}
+
+// -- the credits/end-poem screen (issue #192) ---------------------------------
+//
+// **Not vanilla geometry.** `WinScreen.java` draws no widgets at all: it is a
+// full-height scrolling column of text (the end poem, then a real Mojang
+// employee credits roll) advanced by an elapsed-time tick every frame, with
+// **any** keypress skipping straight to the end of the scroll
+// (`WinScreen.java`'s own `keyPressed`/`mouseClicked` overrides). Two things
+// rule out a faithful port here rather than a scope cut:
+//
+// 1. **No time source reaches this pipeline.** [`frame_for`] is a pure
+//    function of [`super::UiState`]/[`super::nav::MenuNav`] with no elapsed-time
+//    parameter — every other timed effect in this menu (`panorama.rs`'s
+//    background) is advanced from *outside* this frame-building code, by
+//    whatever owns the render loop each real frame. Wiring a tick in here
+//    would be a `MenuNav` field plus an `app.rs` call every frame, the same
+//    shape as the queued patches this batch of work already defers — and it
+//    buys nothing without point 2.
+// 2. **The content itself is not this project's to reproduce.** The real end
+//    poem is Julian Gough's text, commissioned by Mojang, and the real
+//    credits roll names actual Mojang employees — reproducing either here
+//    would be copying a copyrighted creative work wholesale in one case and
+//    fabricating attribution to real people in the other (this project's own
+//    contributors did not write Mojang's game). `version_line`'s "Minecraft
+//    26.2 (Lodestone …)" a few lines up in this file already drew this same
+//    line once: naming this project rather than borrowing vanilla's.
+//
+// So this screen is a short, honestly-Lodestone-authored placeholder: it
+// proves the screen/session-teardown mechanism (issue #192's own scope is
+// "the scrolling text screen itself" plus "the trigger", and the trigger is
+// out of this crate's ownership for this batch — see [`super::Screen::Credits`]'s
+// doc) without inventing scroll geometry that has no elapsed-time input to
+// drive it, or copying text that is not this project's to copy. If a real
+// jar-asset extraction pipeline for `texts/end.txt`-equivalent content ever
+// lands (see `docs/ui-framework.md`'s asset-sourcing precedent for textures/
+// sounds/lang, all loaded from the user's own legitimately-owned files rather
+// than transliterated into source), this is the function to point at it —
+// nothing about [`super::Screen::Credits`]'s wiring below depends on the text
+// being a placeholder.
+const CREDITS_BUTTON_W: f32 = 200.0;
+const CREDITS_BUTTON_BOTTOM_MARGIN: f32 = WIDGET_H + 20.0;
+const CREDITS_TITLE_Y: f32 = 40.0;
+const CREDITS_NOTICE_W: f32 = crate::config::MIN_SCALED_WIDTH as f32 - 50.0;
+
+/// `gui.stats`-style short line — not a vanilla string (there is no vanilla
+/// equivalent that fits this screen's honest scope), see the module doc above.
+const CREDITS_TITLE: &str = "The End?";
+const CREDITS_BODY: &str = "Thanks for playing Lodestone.\n\nThis screen stands in for vanilla's end poem and credits roll, which this project does not reproduce (see docs/ui-framework.md).";
+
+/// Builds the credits/end-poem frame. Same shape as [`error_frame`]: one
+/// full-width Done button anchored from [`Origin::ScreenBottom`], a title at
+/// [`Origin::ScreenTop`], a wrapped body via [`MenuNotice`].
+#[must_use]
+fn credits_frame() -> MenuFrame<'static> {
+    MenuFrame {
+        rows: vec![MenuRow {
+            label: "Done".to_string(),
+            enabled: true,
+            slot: Some(Slot {
+                origin: Origin::ScreenBottom,
+                dx: -(CREDITS_BUTTON_W * 0.5),
+                dy: -CREDITS_BUTTON_BOTTOM_MARGIN,
+                w: CREDITS_BUTTON_W,
+                h: WIDGET_H,
+            }),
+            ..Default::default()
+        }],
+        selected: 0,
+        vanilla: true,
+        labels: vec![MenuLabel {
+            text: CREDITS_TITLE.to_string(),
+            origin: Origin::ScreenTop,
+            dx: 0.0,
+            dy: CREDITS_TITLE_Y,
+            align: Align::Centre,
+            colour: LABEL,
+            scale: 1.0,
+        }],
+        notice: Some(MenuNotice {
+            text: CREDITS_BODY.to_string(),
+            origin: Origin::ScreenTop,
+            dx: -(CREDITS_NOTICE_W * 0.5),
+            dy: CREDITS_TITLE_Y + LINE_H * 3.0,
+            w: CREDITS_NOTICE_W,
+            bottom: CREDITS_BUTTON_BOTTOM_MARGIN + WIDGET_H,
+            colour: LABEL,
         }),
         ..Default::default()
     }
@@ -3390,6 +3481,10 @@ pub fn frame_for<'a>(
         // screen and landing as one spike at login. See `error_frame` for the
         // vanilla `DisconnectedScreen` this now reproduces.
         Screen::Error => Some(error_frame(ui.error())),
+        // The credits/end-poem screen (#192) — see `credits_frame`'s own doc
+        // for why its content is a short placeholder rather than vanilla's
+        // real auto-scrolling poem.
+        Screen::Credits => Some(credits_frame()),
         _ => None,
     };
     // Stamped on every screen (not read back out of `nav` per-screen above) so
@@ -5317,6 +5412,10 @@ mod tests {
                     ui.begin(SessionKind::Multiplayer);
                     ui.session_failed("connection refused");
                 }
+                Screen::Credits => {
+                    ui.enter_dev_world();
+                    ui.show_credits();
+                }
             }
             assert_eq!(ui.screen(), screen, "failed to reach {screen:?}");
             reached += 1;
@@ -5357,6 +5456,37 @@ mod tests {
             "the loop skipped a screen it was handed"
         );
         let _ = &mut nav;
+    }
+
+    /// Issue #192's own frame: one enabled row (Done), a title label, and a
+    /// non-empty body notice, all resolving on-canvas — the same shape
+    /// `error_frame`'s callers already get for free through the sweep above,
+    /// spelled out here because `credits_frame` takes no arguments (unlike
+    /// `error_frame`, which the sweep exercises through `ui.error()`) and so
+    /// is otherwise only reached indirectly.
+    #[test]
+    fn credits_frame_has_one_live_row_a_title_and_a_body() {
+        let f = credits_frame();
+        assert_eq!(f.rows.len(), 1, "one control: Done");
+        assert!(f.rows[0].enabled);
+        assert_eq!(f.rows[0].label, "Done");
+        assert_eq!(f.selected, 0);
+        assert!(f.vanilla, "laid out the same way error_frame is");
+        assert!(!f.labels.is_empty(), "a title label must be present");
+        assert!(
+            f.notice.as_ref().is_some_and(|n| !n.text.is_empty()),
+            "a body notice must be present and non-empty"
+        );
+        let (w, h) = (1280.0, 720.0);
+        assert!(
+            !geometry(&f, w, h).is_empty(),
+            "the frame must draw something"
+        );
+        let (rx, ry, rw, rh) = f.rows[0].slot.unwrap().resolve(w, h);
+        assert!(
+            rx >= 0.0 && ry >= 0.0 && rx + rw <= w && ry + rh <= h,
+            "the Done button must resolve on-canvas: ({rx}, {ry}) {rw}x{rh}"
+        );
     }
 
     #[test]
