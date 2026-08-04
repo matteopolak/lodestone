@@ -108,12 +108,12 @@ pub fn adapter() -> V340Adapter {
 }
 
 /// Encodes a packet body into a fresh byte buffer.
+///
+/// Thin wrapper over the version-free [`lodestone_core::encode_body`], which
+/// returns a stringified error because `AdapterError` lives in
+/// `lodestone-model` and `lodestone-core` cannot depend on it.
 fn encode_body<T: Encode>(packet: &T) -> Result<Vec<u8>, AdapterError> {
-    let mut writer = Writer::default();
-    packet
-        .encode(&mut writer, CTX)
-        .map_err(|err| AdapterError::Encode(err.to_string()))?;
-    Ok(writer.into_vec())
+    lodestone_core::encode_body(packet, CTX).map_err(AdapterError::Encode)
 }
 
 /// Encodes the serverbound `crafting_book_data` packet body for the
@@ -136,8 +136,7 @@ fn encode_crafting_book_settings(open: bool, filtering: bool) -> Vec<u8> {
 
 /// Decodes a packet body from raw bytes.
 fn decode_body<T: Decode>(payload: &[u8]) -> Result<T, AdapterError> {
-    let mut reader = Reader::new(payload);
-    T::decode(&mut reader, CTX).map_err(|err| AdapterError::Decode(err.to_string()))
+    lodestone_core::decode_body(payload, CTX).map_err(AdapterError::Decode)
 }
 
 /// Like [`decode_body`] but additionally requires the payload to be fully
@@ -147,12 +146,7 @@ fn decode_body<T: Decode>(payload: &[u8]) -> Result<T, AdapterError> {
 /// tail unread (metadata terminators, fields we don't model yet) keep using the
 /// lenient [`decode_body`].
 fn decode_body_exact<T: Decode>(payload: &[u8]) -> Result<T, AdapterError> {
-    let mut reader = Reader::new(payload);
-    let body = T::decode(&mut reader, CTX).map_err(|err| AdapterError::Decode(err.to_string()))?;
-    reader
-        .ensure_empty()
-        .map_err(|err| AdapterError::Decode(err.to_string()))?;
-    Ok(body)
+    lodestone_core::decode_body_exact(payload, CTX).map_err(AdapterError::Decode)
 }
 
 /// Builds a [`Directive::Send`] from a packet id and an encodable body.
@@ -228,8 +222,11 @@ const MOVE_DELTA_SCALE: f64 = 4096.0;
 const VELOCITY_SCALE: f64 = 8000.0;
 
 /// Converts a signed-byte angle to degrees (256 steps per full circle).
+///
+/// Delegates to the version-free [`lodestone_core::unpack_degrees`], which has
+/// the same formula and is used identically by v47 and v735.
 fn unpack_degrees(packed: i8) -> f32 {
-    f32::from(packed) * 360.0 / 256.0
+    lodestone_core::unpack_degrees(packed)
 }
 
 /// Maps a canonical [`BlockFace`] to its numeric ordinal

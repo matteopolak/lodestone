@@ -491,18 +491,17 @@ pub fn adapter() -> V770Adapter {
 }
 
 /// Encodes a packet body into a fresh byte buffer.
+///
+/// Thin wrapper over the version-free [`lodestone_core::encode_body`], which
+/// returns a stringified error because `AdapterError` lives in
+/// `lodestone-model` and `lodestone-core` cannot depend on it.
 fn encode_body<T: Encode>(packet: &T) -> Result<Vec<u8>, AdapterError> {
-    let mut writer = Writer::default();
-    packet
-        .encode(&mut writer, CTX)
-        .map_err(|err| AdapterError::Encode(err.to_string()))?;
-    Ok(writer.into_vec())
+    lodestone_core::encode_body(packet, CTX).map_err(AdapterError::Encode)
 }
 
 /// Decodes a packet body from raw bytes.
 fn decode_body<T: Decode>(payload: &[u8]) -> Result<T, AdapterError> {
-    let mut reader = Reader::new(payload);
-    T::decode(&mut reader, CTX).map_err(|err| AdapterError::Decode(err.to_string()))
+    lodestone_core::decode_body(payload, CTX).map_err(AdapterError::Decode)
 }
 
 /// Decodes a packet body and asserts the payload was consumed to the last byte.
