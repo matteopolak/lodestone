@@ -1394,3 +1394,130 @@ mod block_edit_tests {
         }
     }
 }
+
+/// Issue #268: `CHANGE_DIFFICULTY`/`LOCK_DIFFICULTY`/`SET_GAME_RULE` decode
+/// and their two confirmation encoders. Expected values come from
+/// `.cache/mc/26.2/src`'s own record types
+/// (`ServerboundChangeDifficultyPacket`, `ServerboundLockDifficultyPacket`,
+/// `ServerboundSetGameRulePacket`, `ClientboundChangeDifficultyPacket`), not
+/// from this module's own encoder — each decode test hand-builds wire bytes
+/// with the *encode* side of the same struct (a real, if self-authored,
+/// round trip through the derive macro) and each encode test independently
+/// re-parses the produced bytes field by field instead of comparing structs,
+/// so a decode bug and its mirror-image encode bug cannot cancel out.
+#[cfg(test)]
+mod world_admin_tests {
+    use super::*;
+    use lodestone_core::State;
+    use lodestone_model::Difficulty;
+
+    fn encode<T: Encode>(packet: &T) -> Vec<u8> {
+        let mut w = Writer::default();
+        packet.encode(&mut w, CTX).expect("well-formed struct encodes");
+        w.into_vec()
+    }
+
+    #[test]
+    fn decode_change_difficulty() {
+        let proto = V770ServerProtocol;
+        let body = encode(&ChangeDifficultyServerbound { difficulty: 3 });
+        let decoded = proto.decode(State::Play, play::serverbound::CHANGE_DIFFICULTY, &body);
+        assert_eq!(
+            decoded,
+            ServerBound::DifficultyChanged {
+                difficulty: Difficulty::Hard
+            }
+        );
+    }
+
+    /// Control for [`decode_change_difficulty`]: an ordinal outside `0..=3`
+    /// must drop the packet (`ServerBound::Ignored`), not alias to some other
+    /// difficulty — see [`difficulty_from_ordinal`]'s own doc comment for why
+    /// this departs from vanilla's `WRAP` strategy.
+    #[test]
+    fn decode_change_difficulty_rejects_out_of_range_ordinal() {
+        let proto = V770ServerProtocol;
+        let body = encode(&ChangeDifficultyServerbound { difficulty: 9 });
+        let decoded = proto.decode(State::Play, play::serverbound::CHANGE_DIFFICULTY, &body);
+        assert_eq!(decoded, ServerBound::Ignored);
+    }
+
+    #[test]
+    fn decode_lock_difficulty() {
+        let proto = V770ServerProtocol;
+        let body = encode(&LockDifficulty { locked: true });
+        let decoded = proto.decode(State::Play, play::serverbound::LOCK_DIFFICULTY, &body);
+        assert_eq!(decoded, ServerBound::DifficultyLockChanged { locked: true });
+    }
+
+    #[test]
+    fn decode_set_game_rule() {
+        let proto = V770ServerProtocol;
+        let body = encode(&SetGameRule {
+            entries: vec![
+                GameRuleEntry {
+                    key: "minecraft:doDaylightCycle".to_string(),
+                    value: "false".to_string(),
+                },
+                GameRuleEntry {
+                    key: "minecraft:randomTickSpeed".to_string(),
+                    value: "0".to_string(),
+                },
+            ],
+        });
+        let decoded = proto.decode(State::Play, play::serverbound::SET_GAME_RULE, &body);
+        assert_eq!(
+            decoded,
+            ServerBound::GameRuleChanged {
+                entries: vec![
+                    (
+                        "minecraft:doDaylightCycle".to_string(),
+                        "false".to_string()
+                    ),
+                    ("minecraft:randomTickSpeed".to_string(), "0".to_string()),
+                ]
+            }
+        );
+    }
+
+    /// Pins `encode_change_difficulty`'s wire layout: VarInt difficulty
+    /// ordinal, then a bool locked flag, nothing else
+    /// (`ClientboundChangeDifficultyPacket.STREAM_CODEC`).
+    #[test]
+    fn encode_change_difficulty_wire_layout() {
+        let proto = V770ServerProtocol;
+        let directive = proto.encode_change_difficulty(Difficulty::Hard, true);
+        match directive {
+            ServerDirective::Send { packet_id, payload } => {
+                assert_eq!(packet_id, play::clientbound::CHANGE_DIFFICULTY);
+                let mut r = Reader::new(&payload);
+                assert_eq!(r.var_i32().expect("difficulty"), 3);
+                assert!(r.bool().expect("locked"));
+                r.ensure_empty().expect("no trailing bytes");
+            }
+            other => panic!("expected Send, got {other:?}"),
+        }
+    }
+
+    /// Pins `encode_game_rule_values`'s wire layout: a VarInt-prefixed list
+    /// of (string key, string value) pairs, in the order given — and that it
+    /// carries exactly the entries passed in, not some full default table
+    /// (this crate has none to send).
+    #[test]
+    fn encode_game_rule_values_wire_layout() {
+        let proto = V770ServerProtocol;
+        let entries = vec![("minecraft:doDaylightCycle".to_string(), "false".to_string())];
+        let directive = proto.encode_game_rule_values(&entries);
+        match directive {
+            ServerDirective::Send { packet_id, payload } => {
+                assert_eq!(packet_id, play::clientbound::GAME_RULE_VALUES);
+                let decoded = decode_full::<GameRuleValues>(&payload)
+                    .expect("well-formed GameRuleValues decodes");
+                assert_eq!(decoded.entries.len(), 1);
+                assert_eq!(decoded.entries[0].key, "minecraft:doDaylightCycle");
+                assert_eq!(decoded.entries[0].value, "false");
+            }
+            other => panic!("expected Send, got {other:?}"),
+        }
+    }
+}

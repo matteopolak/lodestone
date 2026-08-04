@@ -35,6 +35,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use lodestone_core::{Reader, State, Writer};
+use lodestone_model::Difficulty;
 use lodestone_net::{Connection, NetError, memory_pair};
 use lodestone_server::{
     ChunkColumn, ChunkSource, NoEntities, ServerBound, ServerDirective, ServerError,
@@ -63,6 +64,8 @@ const SET_CHUNK_CACHE_CENTER_S2C: i32 = 44;
 const FORGET_LEVEL_CHUNK_S2C: i32 = 45;
 const AIR_SUPPLY_S2C: i32 = 46;
 const SET_HEALTH_S2C: i32 = 47;
+const CHANGE_DIFFICULTY_C2S: i32 = 48;
+const CHANGE_DIFFICULTY_S2C: i32 = 49;
 
 /// A [`ChunkSource`] that hands out an all-air column instantly — these
 /// tests are about packet scheduling, not terrain, so real worldgen would
@@ -139,6 +142,22 @@ impl ServerProtocol for FakeProtocol {
                     // producing a multi-tick accumulated fall).
                     on_ground: true,
                 }
+            }
+            // Issue #268: a minimal stand-in wire format for the
+            // difficulty round trip — a single byte ordinal, matching the
+            // real protocol's semantics (0..=3) but not its VarInt framing,
+            // since this file's whole point is testing `lodestone-server`'s
+            // own scheduling/consumer logic, not wire fidelity (that lives
+            // in `crates/protocol/v770/src/server_protocol.rs`'s own tests).
+            State::Play if packet_id == CHANGE_DIFFICULTY_C2S => {
+                let mut r = Reader::new(payload);
+                let difficulty = match r.u8().expect("difficulty ordinal") {
+                    0 => Difficulty::Peaceful,
+                    1 => Difficulty::Easy,
+                    2 => Difficulty::Normal,
+                    _ => Difficulty::Hard,
+                };
+                ServerBound::DifficultyChanged { difficulty }
             }
             _ => ServerBound::Ignored,
         }
@@ -246,6 +265,21 @@ impl ServerProtocol for FakeProtocol {
         w.f32(health);
         ServerDirective::Send {
             packet_id: SET_HEALTH_S2C,
+            payload: w.as_slice().to_vec(),
+        }
+    }
+
+    fn encode_change_difficulty(&self, difficulty: Difficulty, locked: bool) -> ServerDirective {
+        let mut w = Writer::default();
+        w.u8(match difficulty {
+            Difficulty::Peaceful => 0,
+            Difficulty::Easy => 1,
+            Difficulty::Normal => 2,
+            Difficulty::Hard => 3,
+        });
+        w.bool(locked);
+        ServerDirective::Send {
+            packet_id: CHANGE_DIFFICULTY_S2C,
             payload: w.as_slice().to_vec(),
         }
     }
@@ -731,6 +765,51 @@ async fn dry_player_keeps_full_air_and_takes_no_damage() {
     assert!(
         stray.is_empty(),
         "a dry player must never receive an air-supply or health update: {stray:?}"
+    );
+
+    drop(client);
+    let _ = server.await.unwrap();
+}
+
+/// Issue #268's actual consumer, exercised through the real scheduling loop
+/// (`dispatch_play_packet`/`apply_difficulty_change`) rather than just at the
+/// `V770ServerProtocol` decode/encode layer (which
+/// `crates/protocol/v770/src/server_protocol.rs`'s own `world_admin_tests`
+/// already pins). A `ServerBound::DifficultyChanged` sent over a real
+/// connection must produce exactly one confirmation back, carrying the
+/// requested difficulty — proof `WorldAdminState` is real, connected state
+/// and not a struct nothing calls into.
+#[tokio::test(start_paused = true)]
+async fn difficulty_change_is_confirmed_back_to_the_connection() {
+    let (client_end, server_end) = memory_pair();
+    let source = AirSource;
+
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(&mut conn, &FakeProtocol, &source, &NoEntities, 0).await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "Op", 1).await;
+
+    let mut w = Writer::default();
+    w.u8(3); // Hard
+    client
+        .write_packet(CHANGE_DIFFICULTY_C2S, w.as_slice())
+        .await
+        .expect("send change_difficulty");
+
+    let (id, payload) = client
+        .read_packet_timeout(Duration::from_secs(5))
+        .await
+        .expect("read")
+        .expect("confirmation packet");
+    assert_eq!(id, CHANGE_DIFFICULTY_S2C);
+    let mut r = Reader::new(&payload);
+    assert_eq!(r.u8().expect("difficulty"), 3, "confirmed difficulty must be Hard");
+    assert!(
+        !r.bool().expect("locked"),
+        "difficulty was never locked in this test"
     );
 
     drop(client);
