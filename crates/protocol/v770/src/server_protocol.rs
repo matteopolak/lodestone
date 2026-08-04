@@ -58,8 +58,8 @@ use crate::packets::common::KeepAlive;
 use crate::packets::configuration::FinishConfiguration;
 use crate::packets::entity::{pack_degrees, write_lp_vec3};
 use crate::packets::game::{
-    GameLogin, GlobalPos, MovePlayerPos, MovePlayerPosRot, PlayerAction, SetDefaultSpawnPosition,
-    SetHealth, UseItemOn,
+    GameLogin, GlobalPos, MOVE_FLAG_ON_GROUND, MovePlayerPos, MovePlayerPosRot, PlayerAction,
+    SetDefaultSpawnPosition, SetHealth, UseItemOn,
 };
 use crate::packets::handshake::Intention;
 use crate::packets::login::{LoginFinished, LoginHello};
@@ -676,15 +676,16 @@ impl ServerProtocol for V770ServerProtocol {
                 }
             }
             // Only the two movement packets that carry a position matter to
-            // the loop (view streaming needs x/z, nothing else); rotation-only
-            // and status-only movement stay `Ignored` — see
-            // `ServerBound::PlayerMoved`'s doc comment.
+            // the loop (view streaming needs x/z, fall damage needs y/
+            // on_ground); rotation-only and status-only movement stay
+            // `Ignored` — see `ServerBound::PlayerMoved`'s doc comment.
             State::Play if packet_id == play::serverbound::MOVE_PLAYER_POS => {
                 match decode_full::<MovePlayerPos>(payload) {
                     Some(m) => ServerBound::PlayerMoved {
                         x: m.x,
                         y: m.y,
                         z: m.z,
+                        on_ground: m.flags & MOVE_FLAG_ON_GROUND != 0,
                     },
                     None => ServerBound::Ignored,
                 }
@@ -695,6 +696,7 @@ impl ServerProtocol for V770ServerProtocol {
                         x: m.x,
                         y: m.y,
                         z: m.z,
+                        on_ground: m.flags & MOVE_FLAG_ON_GROUND != 0,
                     },
                     None => ServerBound::Ignored,
                 }

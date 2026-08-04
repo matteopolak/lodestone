@@ -89,12 +89,13 @@
 //!   fire against real terrain; omitted rather than dead code.
 //! * **Invulnerability i-frames** (vanilla's `invulnerableTime`, ticked
 //!   elsewhere in `LivingEntity.baseTick` and consulted by `hurtServer`).
-//!   Nothing else damages the player yet in this crate (no melee, no fall
-//!   damage, no explosions reaching a player) for i-frames to matter
-//!   against, and the drowning cadence above is already governed by the
-//!   `shouldTakeDrowningDamage` reset, not by how fast repeated hits could
-//!   land. Deferred, not forgotten — a second damage source landing in the
-//!   same tick window as drowning would currently double-apply.
+//!   [`crate::fall::FallTracker`] (issue #265) is now a second damage source
+//!   reaching the player (no melee or explosions yet) and
+//!   [`PlayerVitals::apply_fall_damage`] does not consult a `HurtCooldown` —
+//!   still deferred, so a fall landing in the same window as a drowning hit
+//!   would currently double-apply, exactly the gap this note already
+//!   flagged. Not forgotten, just still nothing to gate against anything
+//!   *else* yet.
 //! * **Non-player entities.** `Entity` carries air supply too (mobs can
 //!   drown), but [`MobSim`](crate::MobSim) has no health-vs-submersion tick
 //!   at all right now and streams no metadata to a client (see its own
@@ -243,6 +244,38 @@ impl PlayerVitals {
 
         out
     }
+
+    /// Applies `raw` points (already vanilla's `floor(...)` value — see
+    /// [`crate::fall::FallTracker::on_player_moved`]) of fall damage through
+    /// the real reduction pipeline
+    /// ([`lodestone_entity::apply_reductions`]), matching
+    /// `LivingEntity.actuallyHurt`'s stage order. Fall damage is tagged
+    /// `bypasses_armor` (`.cache/mc/26.2/src/data/minecraft/tags/
+    /// damage_type/bypasses_armor.json` lists `minecraft:fall`), so armour
+    /// never reduces it here regardless of what `Defenses::default()`
+    /// carries; Resistance and enchantment protection are correctly `None`/
+    /// `0.0` because this crate tracks no potion effects or equipped items
+    /// for the player yet (see this module's own doc comment for the same
+    /// gap already noted for drowning) — not a placeholder, an accurate
+    /// statement of what currently reduces it (nothing).
+    ///
+    /// Returns `Some(damage_dealt)` if the hit landed (a dead player is a
+    /// no-op, mirroring [`tick`](Self::tick)'s own guard), `None` otherwise.
+    pub fn apply_fall_damage(&mut self, raw: f32) -> Option<f32> {
+        if self.health <= 0.0 {
+            return None;
+        }
+        let outcome = lodestone_entity::apply_reductions(
+            raw,
+            &lodestone_entity::Defenses::default(),
+            lodestone_entity::DamageFlags {
+                bypasses_armor: true,
+                ..Default::default()
+            },
+        );
+        self.health = (self.health - outcome.to_health).max(0.0);
+        Some(outcome.to_health)
+    }
 }
 
 #[cfg(test)]
@@ -367,6 +400,45 @@ mod tests {
         assert_eq!(v.health(), 0.0, "expected exactly 10 hits to exhaust 20.0 health");
         let out = v.tick(true);
         assert!(out.is_empty(), "a dead player's vitals must not still tick: {out:?}");
+        assert_eq!(v.health(), 0.0);
+    }
+
+    /// A fall-damage hit reduces health by exactly the raw value passed in —
+    /// armour is bypassed (fall is `bypasses_armor`) and this crate tracks no
+    /// other reduction source for the player, so with `Defenses::default()`
+    /// the reduction pipeline is a pass-through. This is the **magnitude**
+    /// check: a wrong wiring that accidentally left `bypasses_armor: false`
+    /// would still show *some* reduction (a sign change) but land on the
+    /// wrong number for any nonzero armour default — there is none here, so
+    /// this instead pins the exact expected value directly.
+    #[test]
+    fn fall_damage_reaches_health_unreduced_with_no_armour_tracked() {
+        let mut v = PlayerVitals::default();
+        let dealt = v.apply_fall_damage(7.0);
+        assert_eq!(dealt, Some(7.0));
+        assert_eq!(v.health(), MAX_HEALTH - 7.0);
+    }
+
+    /// Fall damage floors health at `0.0`, never going negative, mirroring
+    /// [`tick`](PlayerVitals::tick)'s own drowning-damage clamp.
+    #[test]
+    fn fall_damage_floors_health_at_zero() {
+        let mut v = PlayerVitals::default();
+        let dealt = v.apply_fall_damage(999.0);
+        assert_eq!(dealt, Some(999.0), "the full raw amount was applied");
+        assert_eq!(v.health(), 0.0);
+    }
+
+    /// **Control**: a dead player's vitals must not take further fall
+    /// damage, exactly like [`dead_vitals_do_not_tick`] proves for drowning —
+    /// the same `health <= 0.0` guard applies to both damage sources.
+    #[test]
+    fn dead_player_takes_no_further_fall_damage() {
+        let mut v = PlayerVitals::default();
+        v.apply_fall_damage(999.0);
+        assert_eq!(v.health(), 0.0);
+        let dealt = v.apply_fall_damage(5.0);
+        assert_eq!(dealt, None, "a dead player must not take more damage");
         assert_eq!(v.health(), 0.0);
     }
 }

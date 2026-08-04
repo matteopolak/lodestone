@@ -17,6 +17,7 @@ use lodestone_model::{BlockActionKind, BlockFace, BlockPos};
 use lodestone_net::{Connection, NetError, Transport};
 
 use crate::chunk::{AIR, ChunkSource, STONE, is_air_or_fluid, is_water};
+use crate::fall::FallTracker;
 use crate::protocol::{EntitySnapshot, ServerBound, ServerDirective, ServerProtocol};
 use crate::vitals::{EYE_HEIGHT, PlayerVitals};
 
@@ -562,11 +563,11 @@ where
 /// (clearing it, so the next keep-alive tick does not mistake a live client
 /// for a dead one), streams the view when the player's chunk column changed,
 /// tracks the player's latest position for [`PlayerVitals`]' submersion test,
-/// or applies a block break/placement (see [`apply_block_action`]/
-/// [`apply_use_item_on`]). Every other packet decodes to
-/// [`ServerBound::Ignored`] in `State::Play` under the current protocols (no
-/// further state transitions are modeled — no respawn/dimension change yet)
-/// and is a no-op here.
+/// feeds [`FallTracker`] and applies any resulting fall damage, or applies a
+/// block break/placement (see [`apply_block_action`]/[`apply_use_item_on`]).
+/// Every other packet decodes to [`ServerBound::Ignored`] in `State::Play`
+/// under the current protocols (no further state transitions are modeled —
+/// no respawn/dimension change yet) and is a no-op here.
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_play_packet<T, P, S>(
     conn: &mut Connection<T>,
@@ -578,6 +579,8 @@ async fn dispatch_play_packet<T, P, S>(
     pending_keep_alive: &mut Option<i64>,
     pending_break: &mut Option<BlockPos>,
     player_pos: &mut Option<(f64, f64, f64)>,
+    fall: &mut FallTracker,
+    vitals: &mut PlayerVitals,
     packet_id: i32,
     payload: &[u8],
 ) -> Result<(), ServerError>
@@ -592,7 +595,7 @@ where
                 *pending_keep_alive = None;
             }
         }
-        ServerBound::PlayerMoved { x, y, z } => {
+        ServerBound::PlayerMoved { x, y, z, on_ground } => {
             *player_pos = Some((x, y, z));
 
             // Chunk coordinate = floor(block / 16), not truncating division —
@@ -602,6 +605,12 @@ where
             let cz = (z / 16.0).floor() as i32;
             for directive in view.recenter(proto, source, cx, cz, view_radius) {
                 apply(conn, state, directive).await?;
+            }
+
+            if let Some(raw) = fall.on_player_moved(y, on_ground)
+                && vitals.apply_fall_damage(raw as f32).is_some()
+            {
+                apply(conn, state, proto.encode_set_health(vitals.health())).await?;
             }
         }
         ServerBound::BlockAction {
@@ -698,6 +707,7 @@ where
     let mut pending_break: Option<BlockPos> = None;
     let mut player_pos: Option<(f64, f64, f64)> = None;
     let mut vitals = PlayerVitals::default();
+    let mut fall = FallTracker::default();
     let mut keep_alive_tick = tokio::time::interval_at(
         tokio::time::Instant::now() + KEEP_ALIVE_INTERVAL,
         KEEP_ALIVE_INTERVAL,
@@ -738,6 +748,8 @@ where
                     &mut pending_keep_alive,
                     &mut pending_break,
                     &mut player_pos,
+                    &mut fall,
+                    &mut vitals,
                     packet_id,
                     &payload,
                 )
@@ -812,14 +824,19 @@ where
 {
     let mut pending_keep_alive: Option<i64> = None;
     let mut pending_break: Option<BlockPos> = None;
-    // Tracked for parity with the native loop's `dispatch_play_packet` calls
-    // (shared function, shared signature), but never ticked here: like
-    // keep-alive and time-of-day above, `PlayerVitals` needs a timer
-    // independent of inbound packets, and `tokio::time` has none on
-    // `wasm32`. Drowning simply does not happen in a `wasm32`-served session
-    // today — a real, documented gap, not a silent one (see this function's
-    // own doc comment).
+    // `player_pos`/`vitals` are tracked for parity with the native loop's
+    // `dispatch_play_packet` calls (shared function, shared signature), but
+    // `vitals` is only ever *ticked* by the native loop's timer, which
+    // `tokio::time` has none of on `wasm32`. Drowning simply does not happen
+    // in a `wasm32`-served session today — a real, documented gap, not a
+    // silent one (see this function's own doc comment). Fall damage
+    // (`FallTracker`) is different: it is driven purely by inbound
+    // `PlayerMoved` packets, not a timer, so it works identically here —
+    // `vitals` still needs to exist as somewhere for `apply_fall_damage` to
+    // carry health, even though nothing else fills it in on this target.
     let mut player_pos: Option<(f64, f64, f64)> = None;
+    let mut vitals = PlayerVitals::default();
+    let mut fall = FallTracker::default();
 
     while let Some((packet_id, payload)) = conn.read_packet().await? {
         dispatch_play_packet(
@@ -832,6 +849,8 @@ where
             &mut pending_keep_alive,
             &mut pending_break,
             &mut player_pos,
+            &mut fall,
+            &mut vitals,
             packet_id,
             &payload,
         )
