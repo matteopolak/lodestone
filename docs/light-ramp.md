@@ -150,11 +150,28 @@ either colour lands. Tracked as [#383]'s third divergence.
 * **Change all four copies together.** WGSL has no `#include`, and this crate's
   convention is to duplicate small helpers (`srgb_to_linear` is already three-way
   duplicated). The four are `light.rs`, `model.wgsl`, `entity.wgsl`, `fluid.wgsl`.
-* **`block.wgsl` is deliberately not one of them.** It is the packed full-cube path,
-  reached only by the demo world (no `client.jar`) and the headless gates —
-  `mesher.rs` emits `SectionGeometry::Packed` only when `classifier.models()` is
-  `None`. It has neither this curve nor `sky_darken` nor fog, and it multiplies shade
-  in *linear* space. That is [#400], not this.
+* **`block.wgsl` is deliberately not one of them, and it is now only *partly* behind.**
+  It is the packed full-cube path, reached only by the demo world (no `client.jar`) and
+  the headless gates — `mesher.rs` emits `SectionGeometry::Packed` only when
+  `classifier.models()` is `None`. [#400] listed three divergences and **all three are
+  now closed**: the gamma-space shade multiply (`a80a095`), then `sky_darken` and fog
+  (issue #400 proper, on top of #76's shared-camera split, which is what gave the fog
+  lanes somewhere to arrive).
+
+  What it still does **not** have is *this curve*. `block.wgsl` keeps the simple
+  `0.2 + 0.8 * max(sky * sky_darken(), block)` ramp rather than the full `lightmap.fsh`
+  port, so the two paths still disagree between the endpoints — deliberately, since the
+  packed path meshes full cubes for a demo world and closing that gap was never part of
+  #400. **So `block.wgsl` is the one shader where "it has the clock" and "it has the
+  curve" are different questions.** Do not read `sky_darken()`'s presence there as
+  evidence the ramp was unified.
+
+  The gate is `lodestone-render/tests/packed_night_fog_pixels.rs`, which predicts a
+  mid-grey `128` texel at **128** at noon and **50** at midnight, against the two wrong
+  hypotheses **128** (no `sky_darken` at all) and **82** (the pre-`a80a095`
+  linear-space multiply). Note #400's own body states 82 as the *correct* midnight
+  value; that was true when written and is now stale by one commit, so asserting the
+  issue's number would fail against correct code.
 * **Gates must not call `lodestone_render::light`.** Per `CLAUDE.md`, an expected
   value has to originate outside the code under test. Every gate writes
   `level / (4 - 3 * level)` and `1 - (1 - c)^4` out again by hand. A gate that

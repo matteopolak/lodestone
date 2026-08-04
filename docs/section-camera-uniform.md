@@ -147,10 +147,12 @@ Two asymmetries worth knowing:
   packed table stays permanently empty. 2 MiB for a second construction path
   avoided is the trade; that is why its capacity is 8192 slots and not the model
   arena's 131072.
-- **`BlockPipeline`'s binding 0 is `VERTEX`-visible only**, where
-  `ModelPipeline`'s is `VERTEX_FRAGMENT`. The struct carries the fog lanes so the
-  two layouts are one type, but `block.wgsl`'s fragment stage does not read them
-  yet — issue #400 is the follow-on that does, and widens the visibility.
+- **`BlockPipeline`'s binding 0 was `VERTEX`-visible only** between #76 and #400:
+  the struct carried the fog lanes before `block.wgsl`'s fragment stage read
+  them. Issue #400 landed the reads and widened it to `VERTEX_FRAGMENT`, so the
+  two pipelines' camera groups are now identical in layout *and* visibility. The
+  one remaining difference is the light ramp inside the shaders, not the
+  binding — see `docs/light-ramp.md`.
 
 ## How to change it
 

@@ -32,6 +32,44 @@ struct Origin {
 @group(1) @binding(1) var atlas_smp: sampler;
 @group(1) @binding(2) var<storage, read> sprite_uv: array<vec4<f32>>;
 
+// The factor the *sky* half of the light term is scaled by, so packed terrain
+// darkens at night. Rides `fog_end_enabled.z`, the same spare lane `model.wgsl`
+// and `entity.wgsl` use, so the packed path, live terrain and mobs cannot
+// disagree about what time it is.
+//
+// `0.0` is the `not wired yet` sentinel and reads as full daylight: every caller
+// builds this uniform from a `FogUniform` that zeroes the lane, and taking 0.0
+// literally would render all sky-lit terrain pure black. Vanilla's real range is
+// [0.24, 1.0], so 0.0 is never legitimate.
+//
+// Only the sky half is scaled -- block light is a torch and does not dim at dusk.
+// Issue #400's first divergence: this path had no such term at all, so the demo
+// world and every headless gate rendered at a fixed permanent noon.
+fn sky_darken() -> f32 {
+    let raw = camera.fog_end_enabled.z;
+    return select(raw, 1.0, raw <= 0.0);
+}
+
+// Byte-for-byte `model.wgsl`'s `linear_fog`/`fog_amount` -- WGSL has no include,
+// so the two copies change together or terrain fogs at two different rates
+// depending on which mesher produced it. Vanilla's `total_fog_value`
+// (`fog.glsl:49-53`): the `max` of two independent linear ramps over two
+// different distance metrics from `rel = world - eye`.
+fn linear_fog(dist: f32, start: f32, end: f32) -> f32 {
+    if (end <= start) {
+        return 0.0;
+    }
+    return clamp((dist - start) / (end - start), 0.0, 1.0);
+}
+
+fn fog_amount(rel: vec3<f32>) -> f32 {
+    let sph = length(rel);
+    let cyl = max(length(rel.xz), abs(rel.y));
+    let env = linear_fog(sph, camera.fog_eye.w, camera.fog_end_enabled.w);
+    let rd = linear_fog(cyl, camera.fog_color_start.w, camera.fog_end_enabled.x);
+    return max(env, rd) * camera.fog_end_enabled.y;
+}
+
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     // Tile coordinate, running 0..w / 0..h across a greedy-merged quad (0..1 for
@@ -41,6 +79,10 @@ struct VsOut {
     // The sprite's atlas sub-rect (min.xy, size.zw). Constant across the quad, so
     // interpolate it flat to avoid drift and let the fragment stage do the wrap.
     @location(2) @interpolate(flat) rect: vec4<f32>,
+    // World position, for the fragment stage's per-fragment fog distance. Issue
+    // #400's second divergence: this path had no fog lanes at all, so nothing ever
+    // faded with distance.
+    @location(3) world: vec3<f32>,
 };
 
 @vertex
@@ -66,13 +108,23 @@ fn vs_main(@location(0) packed: vec3<u32>) -> VsOut {
 
     // AO already carries vanilla's 0.4..1.0 range; light lifts a dark floor so
     // unlit faces are dim rather than black.
-    let light_term = 0.2 + 0.8 * max(sky, block);
+    //
+    // `sky * sky_darken()`, not a bare `sky`: `model.wgsl:121` scales the sky half
+    // by the clock before the `max`, and this path did not (issue #400). At
+    // midnight `sky_darken` is 0.24, so a fully sky-lit face goes from
+    // `0.2 + 0.8*1.00 = 1.000` to `0.2 + 0.8*0.24 = 0.392`.
+    //
+    // This is still the simple `0.2 + 0.8*l` ramp rather than `model.wgsl`'s full
+    // `lightmap.fsh` port -- the packed path meshes full cubes for the demo world
+    // and closing that second gap is not part of #400.
+    let light_term = 0.2 + 0.8 * max(sky * sky_darken(), block);
 
     var out: VsOut;
     out.clip = camera.view_proj * vec4<f32>(world, 1.0);
     out.tile = vec2<f32>(tu, tv);
     out.shade = ao * light_term;
     out.rect = sprite_uv[sprite];
+    out.world = world;
     return out;
 }
 
@@ -117,5 +169,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let tex = textureSampleGrad(atlas_tex, atlas_smp, uv, ddx, ddy);
     // Gamma-space shade multiply, see the doc above `linear_to_srgb`.
     let lit_srgb = linear_to_srgb(tex.rgb) * in.shade;
-    return vec4<f32>(srgb_to_linear(lit_srgb), tex.a);
+    // Fade toward the fog colour by view distance, in **gamma** space, folded into
+    // the same transfer round-trip -- byte-for-byte `model.wgsl:320-322`. Terrain
+    // meshed by either mesher must fog on the same curve, or a demo-world block
+    // fades at a different rate from the live-world block beside it.
+    let amount = fog_amount(in.world - camera.fog_eye.xyz);
+    let fogged_srgb = mix(lit_srgb, linear_to_srgb(camera.fog_color_start.rgb), amount);
+    return vec4<f32>(srgb_to_linear(fogged_srgb), tex.a);
 }
