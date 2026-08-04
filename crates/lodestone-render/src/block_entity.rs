@@ -80,6 +80,7 @@ use lodestone_assets::entity::{EntityModelDef, PartPose, bake_entity_parts};
 
 use crate::camera::Frustum;
 use crate::entity::{ENTITY_FULLBRIGHT, PartRange, push_part_quads};
+use crate::entity_pipeline::InstanceTint;
 use crate::models::ModelVertex;
 
 /// Model name of a single chest, keying both the mesh set and the shell's
@@ -813,6 +814,7 @@ impl BlockEntityModelSet {
             aabb_min,
             aabb_max,
             light: spawn.light,
+            tint: [255, 255, 255],
         })
     }
 
@@ -847,6 +849,7 @@ impl BlockEntityModelSet {
             aabb_min,
             aabb_max,
             light: spawn.light,
+            tint: [255, 255, 255],
         })
     }
 
@@ -887,6 +890,7 @@ impl BlockEntityModelSet {
             aabb_min,
             aabb_max,
             light: spawn.light,
+            tint: [255, 255, 255],
         })
     }
 }
@@ -1032,6 +1036,17 @@ pub struct BlockEntityInstance {
     pub aabb_max: Vec3,
     /// Packed sky/block light.
     pub light: u8,
+    /// Gamma-space `[r, g, b]` multiplied into the texel — `[255, 255, 255]`
+    /// (`entity_pipeline::NO_TINT`'s rgb half) for "leave the texel alone".
+    ///
+    /// Per-instance tint already exists end to end for entities (sheep wool,
+    /// dyed armour, the hurt overlay, the creeper flash all go through
+    /// [`crate::entity_pipeline::EntityInstanceRaw::tint`]/[`InstanceTint`]) —
+    /// this is that same plumbing reaching block entities. Every resolver in
+    /// this module passes `[255, 255, 255]` today (no block-entity type here
+    /// is tinted yet); a future banner base-colour or shulker-box dye reads
+    /// this field instead of widening the pipeline.
+    pub tint: [u8; 3],
 }
 
 /// One draw batch: every instance sharing a model **and** a texture.
@@ -1052,6 +1067,14 @@ pub struct BlockEntityBatch {
     pub parts: Vec<Vec<Mat4>>,
     /// Packed light per instance.
     pub lights: Vec<u32>,
+    /// Per-instance tint, lockstep with [`lights`](Self::lights) — every part
+    /// of one instance shares its tint, so this lives once per instance
+    /// rather than once per `parts` slot. Fed to
+    /// [`crate::entity_pipeline::upload_instances_tinted`] the same way
+    /// entity draws already are; a short/missing entry falls back to
+    /// [`InstanceTint::NONE`], matching that function's own lockstep-fallback
+    /// contract for `lights`.
+    pub tints: Vec<InstanceTint>,
 }
 
 impl BlockEntityBatch {
@@ -1105,6 +1128,7 @@ pub fn plan_block_entities(
         {
             Some(batch) => {
                 batch.lights.push(u32::from(inst.light));
+                batch.tints.push(InstanceTint::rgb(inst.tint));
                 for (slot, m) in batch.parts.iter_mut().zip(&inst.part_transforms) {
                     slot.push(*m);
                 }
@@ -1114,6 +1138,7 @@ pub fn plan_block_entities(
                 texture: inst.texture,
                 parts: inst.part_transforms.iter().map(|m| vec![*m]).collect(),
                 lights: vec![u32::from(inst.light)],
+                tints: vec![InstanceTint::rgb(inst.tint)],
             }),
         }
     }
