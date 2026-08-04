@@ -124,15 +124,29 @@ sprinting to vary it), the two derived thresholds are:
 2000ms/15000ms, so a future change to the tick period (there is currently no
 reason to make one) keeps the same vanilla-derived relationship.
 
-The key behavior, and the one CLAUDE.md's brief specifically asked to
-*verify rather than assume*: when the loop is more than 2 seconds behind
-schedule, it does **not** run the missed ticks to catch up. It logs a
-rate-limited warning and jumps `next_tick_at` forward by however many tick
-periods it was behind — the world tick body still runs **exactly once** per
-loop iteration, both before and after that adjustment. The backlog is
-forgiven, never replayed. [`TickClock::record_tick`] is only ever called once
-per *real* iteration, so `tick_count` reflects ticks actually run, never
-`wall_clock_elapsed / 50ms`.
+**Vanilla catches up — just not indefinitely**, and the one thing CLAUDE.md's
+brief specifically asked to *verify rather than assume* ("does not try to
+catch up indefinitely") is the "not indefinitely" half, not a claim that no
+catch-up happens at all. `nextTickTimeNanos += thisTickNanos` runs
+*unconditionally*, every iteration, whether or not the server is behind
+(`MinecraftServer.java:752`), and `waitUntilNextTick`/`haveTime`
+(`:846-863`) does not park at all once real time has already reached
+`nextTickTimeNanos`. So while only mildly behind, iterations run back-to-back
+at full speed with zero artificial delay between them — that *is* the
+catch-up, and `run_tick_loop` gets it for free from `tokio::time::sleep_until`
+resolving immediately for an already-past deadline; no separate code path
+was needed for it.
+
+The forgiveness branch is not that mechanism — it is what happens once
+catching up the normal way would take too long. When the loop is more than 2
+seconds behind schedule, it gives up on that remaining backlog specifically:
+it logs a rate-limited warning and jumps `next_tick_at` forward by however
+many tick periods it was behind — the world tick body still runs **exactly
+once** per loop iteration, both before and after that adjustment, and that
+one backlog is forgiven rather than replayed (smaller backlogs are still
+replayed by the back-to-back iterations above). [`TickClock::record_tick`] is
+only ever called once per *real* iteration, so `tick_count` reflects ticks
+actually run, never `wall_clock_elapsed / 50ms`.
 
 ### One subtlety found while re-deriving vanilla's own behavior
 
