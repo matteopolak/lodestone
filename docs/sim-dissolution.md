@@ -1,5 +1,34 @@
 # Dissolving `Sim`
 
+> **A separate, purely mechanical split happened alongside this work and is
+> not part of it.** `sim.rs` had grown to 10,337 lines, 4,610 of them (45%)
+> the inline `mod tests` — one of the most contended files in the repo (69
+> commit-touches in 30 days) and a recorded clobber site. The test module
+> moved verbatim into `crates/lodestone-shell/src/sim/tests.rs` behind
+> `#[cfg(test)] mod tests;` in `sim.rs` — the same pattern `gpu.rs`+`gpu/`,
+> `menu.rs`+`menu/` and `hud.rs`+`hud/` already use, and the same one
+> `lodestone-model/src/lib.rs`'s own `mod tests;` → `tests.rs` already
+> proves at crate scope. No rename to `mod.rs` was needed; Rust resolves
+> `mod tests;` inside `src/sim.rs` to `src/sim/tests.rs` on its own.
+>
+> The move dedents the body by one level (4 spaces), matching
+> `lodestone-model/src/tests.rs`'s own convention — verified lossless by
+> re-indenting the extracted body and diffing it byte-for-byte against the
+> original before writing anything. Test count and content are unchanged;
+> only the file boundary moved. This halves the contended file in one
+> commit, with a diff shape of one small insertion (`mod tests;`) and one
+> large, pure deletion in `sim.rs`, plus a new, previously-uncontended file
+> — deliberately the safest available shape, since a large deletion in a
+> shared file is the one change pattern that most resembles this repo's
+> recorded clobber incidents.
+>
+> The placement-prediction block (`PlacementFacts`, `BlockStates`,
+> `state_for_placement`, `predicted_placement_state`, `write_predicted_block`
+> and the orientation/face/axis/half helpers, `sim.rs:349-954`ish) is the
+> next-most-isolated seam — pure functions with zero `Sim` state — and is a
+> candidate for a `sim/placement.rs` split later. Not done in this pass; see
+> the session that did this split for whether it had room to continue.
+
 ## What it is
 
 `lodestone_shell::sim::Sim` is the shell's god object: the non-graphical game state
