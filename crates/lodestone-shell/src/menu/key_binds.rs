@@ -36,7 +36,7 @@
 //! ## Wired vs. decorative
 //!
 //! - **Wired**: reaching this page (Controls → Key Binds → Escape/Done
-//!   back), viewing every one of the 27 actions grouped by category in
+//!   back), viewing every one of the 29 actions grouped by category in
 //!   vanilla's registration order, per-row Reset (`Keybinds::reset` +
 //!   persist), and Reset Keys (`Keybinds::reset_all` + persist). None of
 //!   these needs anything this crate cannot reach on its own.
@@ -813,7 +813,7 @@ mod tests {
     use crate::keybinds::Binding;
 
     /// The census: 6 categories (Creative/Spectator have no actions — see the
-    /// module docs), 27 actions, 35 rows total.
+    /// module docs), 29 actions, 35 rows total.
     #[test]
     fn six_categories_carry_all_twenty_seven_actions() {
         let rows = all_rows();
@@ -846,8 +846,14 @@ mod tests {
                 Row::Category(_) => None,
             })
             .collect();
-        assert_eq!(actions.len(), 27, "every InputAction, once each");
-        assert_eq!(rows.len(), 6 + 27);
+        // 29 since issue #16 added Pick Block and Take Screenshot. Vanilla puts
+        // them in Gameplay and Misc respectively (`Options.java:669,675`), both
+        // categories that were already non-empty — so the *category* list above
+        // is unchanged and only the action count moves. Deriving this from
+        // `InputAction::ALL.len()` would make the assertion vacuous: it would
+        // then agree with itself no matter which actions the screen forgot.
+        assert_eq!(actions.len(), 29, "every InputAction, once each");
+        assert_eq!(rows.len(), 6 + 29);
         // The control: Creative and Spectator genuinely have zero actions —
         // if they ever gain one, this must start failing until the six above
         // does too, which is what proves the category list is not hand-typed
@@ -865,7 +871,7 @@ mod tests {
     /// (TogglePerspective/Pause), then Debug — Gameplay and Inventory both
     /// come *before* Multiplayer there, where `SORT_ORDER` puts Multiplayer
     /// *before* both. Walking `ALL` directly instead of `SORT_ORDER` would
-    /// pass every other test in this file (same 27 actions, same 6 non-empty
+    /// pass every other test in this file (same 29 actions, same 6 non-empty
     /// categories) and still render the Controls-menu categories in the wrong
     /// relative order — this is the one assertion that would catch it.
     #[test]
@@ -900,7 +906,7 @@ mod tests {
     #[test]
     fn every_control_has_a_row_and_every_row_but_the_footer_scrolls_into_view() {
         let all = all_controls();
-        assert_eq!(all.len(), 27 * 2 + 2, "27 binds, 27 resets, ResetAll, Done");
+        assert_eq!(all.len(), 29 * 2 + 2, "29 binds, 29 resets, ResetAll, Done");
         for &control in &all {
             match control {
                 KeyControl::Bind(a) | KeyControl::Reset(a) => {
