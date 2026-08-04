@@ -256,9 +256,16 @@ a tracked entity and the next extract puts it on screen.
   components. The two "no apex" controls correctly keep passing when nothing
   moves; they are controls for the apex assertion, not for physics existing.
 
-### Widened, not deleted (issue #47), and why
+### Widened, not deleted (issue #36), and why
 
-Issue #47 proposes deleting `EntitySnapshot` outright now that entity state
+**This section said "issue #47" in three places and that was wrong** — GitHub #47
+is "Command block edit screen". The deletion is tracked by **#36**, "Stage 1b:
+delete `EntitySnapshot` and reorder the schedule". A reader following the old
+number landed somewhere unrelated. Note also that
+`crates/lodestone-server/src/protocol.rs:30` has an **unrelated homonym**
+`EntitySnapshot`; the deletion must not touch it.
+
+Issue #36 proposes deleting `EntitySnapshot` outright now that entity state
 lives in one component set, reordering the schedule to `NetIngest` → `GameTick`
 → `Update` → `Extract` so ingest writes the render components directly. That
 was weighed against simply widening `EntitySnapshot`/`EntityDraw` by three
@@ -294,7 +301,27 @@ Net: deletion is very likely still the better end state — collapsing
 `RenderKind`/`EntityKind` and the three-copy pipeline this doc's intro
 describes is real debt — but it is a separate, larger, schedule-reordering
 change with its own verification burden, not something to fold into a
-three-field widening. #47 stays open.
+three-field widening. #36 stays open.
+
+**Update, and it changes the plan.** A later architecture review found the
+deletion does **not** require the schedule reorder, and that coupling the two
+was the mistake. `EntitySnapshot` exists only to ferry data between two reads of
+the *same* `World` — `fold_entities` resolves `entity_snapshots()` *before*
+taking the write guard purely to obey the no-reentrancy rule. Reading the
+components directly **inside** the fold's existing write guard, at the fold's
+existing position in the frame, changes nothing about when an ease begins, so
+the ~25 order-pinning tests survive unchanged and only their *setup* moves.
+
+Writing at ingest time is what would break it, for two reasons worth recording:
+ingest runs one schedule per event on the net thread, so re-anchoring would
+happen per packet instead of once per frame, restarting the `INTERP_WINDOW` ease
+under bursts; and `update_track` derives the new `InterpFrom` from the currently
+*drawn* pose, which is only correct at a fixed point after
+`advance_interp_clocks`, so an ingest-time write races the frame.
+
+The precedent is already in production: `extract_entity_draws` bridges four
+ingest components to render output via `EntityIndex`, in the same `World`, at
+frame time. The new fold is that pattern applied to the rest.
 
 ## Configuration
 
