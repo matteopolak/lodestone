@@ -39,8 +39,8 @@ use lodestone_render::{
     },
     fog::{FogSettings, FogUniform},
     model_anim_buffer, model_camera_buffer, model_shared_camera_buffer, plan_block_entities,
-    plan_entities, update_model_anim_buffer, update_model_shared_camera_buffer, upload_instances,
-    upload_instances_tinted,
+    plan_entities, spinning_effect_angle_degrees, update_model_anim_buffer,
+    update_model_shared_camera_buffer, upload_instances, upload_instances_tinted,
     vertex::vram_bytes,
 };
 
@@ -1455,7 +1455,26 @@ impl RenderState {
         crack: Option<CrackTarget>,
         screen_effects: ScreenEffects,
     ) -> RenderStats {
-        let view_proj = camera.view_projection().to_cols_array_2d();
+        // Issues #144/#149's shared world-projection "spinning" warp — see
+        // `Camera::view_projection_warped`'s doc for why injecting it here,
+        // at the single upstream source every world-space uniform below is
+        // rewritten from, reaches the same scope vanilla's own
+        // `RenderSystem.setProjectionMatrix` call in `GameRenderer.
+        // renderLevel` does (the whole world pass) without a second call
+        // site. `nausea_intensity`/`portal_intensity` default to `0.0`
+        // (no live producer yet — see `docs/screen-overlays.md`), at which
+        // `view_projection_warped` is provably identical to plain
+        // `view_projection` (`view_projection_warped_matches_plain_view_projection_when_inactive`),
+        // so this is a no-op for every caller today.
+        let warp_intensity = screen_effects.portal_intensity.max(screen_effects.nausea_intensity);
+        let warp_angle_degrees = spinning_effect_angle_degrees(
+            screen_effects.tick,
+            screen_effects.portal_intensity,
+            screen_effects.nausea_intensity,
+        );
+        let view_proj = camera
+            .view_projection_warped(warp_intensity, warp_angle_degrees)
+            .to_cols_array_2d();
 
         // Rewrite each section's uniform with the current view-projection.
         for section in self.sections.values() {
@@ -2006,34 +2025,61 @@ impl RenderState {
             self.draw_first_person_hand(&mut encoder, view, hand, &mut stats);
         }
 
-        // The underwater/fire screen overlays (issues #108, #112): their own
-        // `Load` passes (see `ScreenEffectRenderer::draw_underwater`/`draw_fire`'s
-        // doc — they must not erase the world/hand just drawn), run last,
-        // matching vanilla's own order (`GameRenderer.java:568-577`: the hand,
-        // then `screenEffectRenderer.submit`, then the HUD/feature renderers —
-        // this shell's HUD draws in a later, separate pass in `app.rs`). Gated
-        // on first-person and not spectator, matching vanilla's
-        // `isFirstPerson && !isSpectator` (`ScreenEffectRenderer.submit`); this
-        // crate has no "sleeping" state yet, so that conjunct is omitted — see
-        // `ScreenEffects::any_active`'s doc.
+        // The screen overlays (issues #108, #112, #185, #139, #154, #144,
+        // #149): their own `Load` passes (see
+        // `ScreenEffectRenderer::draw_underwater`'s doc — they must not erase
+        // the world/hand just drawn), run last, matching vanilla's own order
+        // (`GameRenderer.java:568-577`: the hand, then
+        // `screenEffectRenderer.submit`/`Hud.extractCameraOverlays`, then the
+        // HUD/feature renderers — this shell's HUD draws in a later, separate
+        // pass in `app.rs`).
+        //
+        // Two independent gate groups, not one — see
+        // `ScreenEffects::any_active`'s doc for why: underwater/fire/pumpkin/
+        // spyglass are first-person-only in vanilla, freeze/confusion/portal
+        // are not (`Hud.java:293-308` are siblings of the `isFirstPerson`
+        // block, not nested in it), so each group re-checks its own
+        // applicability here rather than relying on the outer `any_active`
+        // short-circuit alone — that call only proves *something* should
+        // draw, not that a first-person-only flag is safe to act on in third
+        // person.
         if let Some(fx) = &self.screen_effects {
             let first_person = !stats.third_person_body_drawn;
             if screen_effects.any_active(first_person) {
-                if screen_effects.eye_in_water {
-                    let light = self.entity_light.sample(camera.position);
-                    fx.draw_underwater(queue, &mut encoder, view, camera.yaw, camera.pitch, light);
-                    stats.underwater_overlay_drawn = true;
+                if screen_effects.first_person_group_active(first_person) {
+                    if screen_effects.eye_in_water {
+                        let light = self.entity_light.sample(camera.position);
+                        fx.draw_underwater(queue, &mut encoder, view, camera.yaw, camera.pitch, light);
+                        stats.underwater_overlay_drawn = true;
+                    }
+                    if screen_effects.on_fire {
+                        fx.draw_fire(queue, &mut encoder, view, screen_effects.tick);
+                        stats.fire_overlay_drawn = true;
+                    }
+                    if screen_effects.wearing_pumpkin {
+                        fx.draw_pumpkin(&mut encoder, view);
+                        stats.pumpkin_overlay_drawn = true;
+                    }
+                    if screen_effects.scoping {
+                        fx.draw_spyglass(queue, &mut encoder, view, camera.aspect);
+                        stats.spyglass_overlay_drawn = true;
+                    }
                 }
-                if screen_effects.on_fire {
-                    fx.draw_fire(queue, &mut encoder, view, screen_effects.tick);
-                    stats.fire_overlay_drawn = true;
-                }
-                // The fourth overlay (issue #185). Same `Load` pass and the same
-                // first-person/not-spectator gate as the two above; no queue write
-                // because the pumpkin sprite needs no per-frame uniform.
-                if screen_effects.wearing_pumpkin {
-                    fx.draw_pumpkin(&mut encoder, view);
-                    stats.pumpkin_overlay_drawn = true;
+                if screen_effects.camera_agnostic_group_active() {
+                    if screen_effects.freeze_percent > 0.0 {
+                        fx.draw_freeze(queue, &mut encoder, view, screen_effects.freeze_percent);
+                        stats.freeze_overlay_drawn = true;
+                    }
+                    // Portal takes priority over confusion when both are
+                    // positive — `Hud.java:300-302`'s own `if`/`else if`.
+                    if screen_effects.portal_intensity > 0.0 {
+                        let frame = (screen_effects.tick % u64::from(fx.portal_frame_count())) as u32;
+                        fx.draw_portal(queue, &mut encoder, view, frame, screen_effects.portal_intensity);
+                        stats.portal_overlay_drawn = true;
+                    } else if screen_effects.nausea_intensity > 0.0 {
+                        fx.draw_confusion(queue, &mut encoder, view, screen_effects.nausea_intensity);
+                        stats.confusion_overlay_drawn = true;
+                    }
                 }
             }
         }
@@ -3296,6 +3342,7 @@ mod tests {
                     Rl::parse("minecraft:diamond_horse_armor").unwrap(),
                 ),
             ],
+            equipment_dye: Vec::new(),
             feet: Vec3::new(4.0, 70.0, -2.0),
             yaw: 41.0,
             head_yaw: 0.0,
@@ -4085,6 +4132,7 @@ mod tests {
                 scale: 1.0,
                 anim: lodestone_render::AnimInput::REST,
                 equipment: Vec::new(),
+                equipment_dye: Vec::new(),
                 wool: None,
                 count: 1,
                 name_tag: None,
@@ -4106,6 +4154,7 @@ mod tests {
                 scale: 1.0,
                 anim: lodestone_render::AnimInput::REST,
                 equipment: Vec::new(),
+                equipment_dye: Vec::new(),
                 wool: None,
                 count: 1,
                 name_tag: None,
@@ -4280,6 +4329,7 @@ mod tests {
             scale: 1.0,
             anim: lodestone_render::AnimInput::REST,
             equipment: Vec::new(),
+            equipment_dye: Vec::new(),
             wool: None,
             count: 1,
             name_tag: None,
