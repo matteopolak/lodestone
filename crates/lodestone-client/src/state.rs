@@ -230,6 +230,15 @@ pub struct EntityView {
     /// different state from a known-but-plain variant. Do not treat `None` as
     /// "unknown".
     pub variant: Option<EntityVariant>,
+    /// A creeper's fuse direction (`Creeper.DATA_SWELL_DIR`), once reported —
+    /// `-1` while idle or backing off, `1` while counting up to detonation.
+    /// **Absent** until the first report, like [`baby`](Self::baby) — which for
+    /// an idle, never-approached creeper is forever, since the protocol adapter
+    /// synthesises vanilla's own idle default at spawn rather than this field
+    /// ever reading a fabricated value. `lodestone-shell::entities`'
+    /// `CreeperFuse`/white-flash-overlay chain is the sole consumer; see
+    /// `docs/entity-rendering.md`'s "Creeper swell" section.
+    pub creeper_swell_dir: Option<i32>,
     /// The entity's attributes, keyed by canonical id, as last reported by
     /// `update_attributes`. Later snapshots for the same attribute replace
     /// earlier ones.
@@ -1109,6 +1118,9 @@ fn entity_view(entity: lodestone_ecs::ecs::world::EntityRef<'_>) -> Option<Entit
         variant: entity
             .get::<ecs_entity::Variant>()
             .map(|variant| variant.0.clone()),
+        creeper_swell_dir: entity
+            .get::<ecs_entity::CreeperSwellDir>()
+            .map(|dir| dir.0),
         attributes: entity
             .get::<ecs_entity::Attributes>()
             .map(|attributes| attributes.0.clone())

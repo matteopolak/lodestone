@@ -48,9 +48,10 @@ use lodestone_model::{AnimationAction, ClientEvent, EntityMovement, Reported};
 use lodestone_physics::Vec3d;
 
 use crate::entity::{
-    Attributes, AttackSwing, Baby, CustomName, CustomNameVisible, DisplayItem, EntityFlags,
-    EntityIndex, EntityKind, EntityUuid, Equipment, HeadYaw, Health, HurtTime, MinecraftEntityId,
-    MobState, OnGround, Passengers, Pose, Position, Rotation, Variant, Vehicle, Velocity,
+    Attributes, AttackSwing, Baby, CreeperSwellDir, CustomName, CustomNameVisible, DisplayItem,
+    EntityFlags, EntityIndex, EntityKind, EntityUuid, Equipment, HeadYaw, Health, HurtTime,
+    MinecraftEntityId, MobState, OnGround, Passengers, Pose, Position, Rotation, Variant, Vehicle,
+    Velocity,
 };
 use crate::player::{LocalPlayer, PhysicsState};
 use crate::schedules::{GameTick, NetIngest};
@@ -762,6 +763,15 @@ pub fn apply_entity_metadata(
         }
         if let Some(baby) = metadata.baby {
             entity.insert(Baby(baby));
+        }
+        // The creeper fuse direction (`Creeper.DATA_SWELL_DIR`), the last hop of
+        // the chain `docs/entity-rendering.md`'s "Creeper swell" section left
+        // for this crate: `lodestone-shell::entities`' `CreeperFuse`/
+        // `tick_creeper_fuse`/white-flash-overlay path is fully wired and reads
+        // only `EntitySnapshot::creeper_swell_dir`, downstream of
+        // `CreeperSwellDir` via `lodestone_client::state::entity_view`.
+        if let Some(dir) = metadata.creeper_swell_dir {
+            entity.insert(CreeperSwellDir(dir));
         }
         // The *mob* flags byte (issue #379) — a different byte at a different
         // index from the living-entity one [`apply_entity_item_use`] folds, and
@@ -1556,6 +1566,100 @@ mod tests {
             Some(&MobState { aggressive: true }),
             "a health-only update cleared the aggressive latch — a skeleton would drop its \
              draw every time it took damage"
+        );
+    }
+
+    /// The same routing check as
+    /// [`the_metadata_event_carrying_mob_flags_is_claimed_by_this_module`], for
+    /// the creeper swell direction. Rides the same `EntityMetadataUpdated`
+    /// event, so no new `handles_event` arm was needed — asserted anyway per
+    /// CLAUDE.md's own router-trap warning: "no change required" is exactly
+    /// the state in which a later narrowing of the switch silently deletes a
+    /// feature.
+    #[test]
+    fn the_metadata_event_carrying_creeper_swell_dir_is_claimed_by_this_module() {
+        let event = metadata(
+            EntityMetadataUpdate {
+                creeper_swell_dir: Some(1),
+                ..EntityMetadataUpdate::default()
+            },
+            7,
+        );
+        assert!(
+            handles_event(&event),
+            "creeper_swell_dir rides `EntityMetadataUpdated`; if this module stops \
+             claiming it, `apply_entity_metadata` never folds `CreeperSwellDir` in \
+             production and every creeper stays motionless while its fuse burns"
+        );
+    }
+
+    /// End-to-end through the **real schedule**: a spawn, then a metadata packet
+    /// carrying the creeper swell direction, produces a
+    /// [`crate::entity::CreeperSwellDir`] — the last hop
+    /// `docs/entity-rendering.md`'s "Creeper swell" section left open.
+    /// Mirrors [`mob_flags_fold_into_mob_state`] above: absent until first
+    /// reported, updates on report, and a metadata packet silent about the
+    /// field must leave the component alone.
+    #[test]
+    fn creeper_swell_dir_fold_into_creeper_swell_dir_component() {
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(21, "minecraft:creeper"));
+        assert!(
+            entity_for(&world, 21).get::<CreeperSwellDir>().is_none(),
+            "absent until the first packet mentions it, like MobState and ItemUse"
+        );
+
+        feed(
+            &mut world,
+            metadata(
+                EntityMetadataUpdate {
+                    creeper_swell_dir: Some(1),
+                    ..EntityMetadataUpdate::default()
+                },
+                21,
+            ),
+        );
+        assert_eq!(
+            entity_for(&world, 21).get::<CreeperSwellDir>(),
+            Some(&CreeperSwellDir(1)),
+            "a positive swell direction must reach the component unchanged"
+        );
+
+        feed(
+            &mut world,
+            metadata(
+                EntityMetadataUpdate {
+                    creeper_swell_dir: Some(-1),
+                    ..EntityMetadataUpdate::default()
+                },
+                21,
+            ),
+        );
+        assert_eq!(
+            entity_for(&world, 21).get::<CreeperSwellDir>(),
+            Some(&CreeperSwellDir(-1)),
+            "backing off must overwrite the previous direction, not merge with it"
+        );
+
+        // A metadata packet silent about the field (a health-only update, the
+        // common case) must leave the last-reported direction alone — the same
+        // "incremental, not a fresh snapshot" contract every other optional
+        // metadata field here has.
+        feed(
+            &mut world,
+            metadata(
+                EntityMetadataUpdate {
+                    health: Some(20.0),
+                    ..EntityMetadataUpdate::default()
+                },
+                21,
+            ),
+        );
+        assert_eq!(
+            entity_for(&world, 21).get::<CreeperSwellDir>(),
+            Some(&CreeperSwellDir(-1)),
+            "a health-only update cleared the swell direction — a creeper mid-fuse would \
+             freeze on screen every time it took damage"
         );
     }
 
