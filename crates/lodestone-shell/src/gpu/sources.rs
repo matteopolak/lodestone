@@ -435,3 +435,32 @@ impl std::fmt::Debug for BlockEntitySource {
             .finish()
     }
 }
+
+/// Where this frame's skull/head block entities come from — same shape as
+/// [`BlockEntitySource`], kept as an independent source rather than folded into
+/// its closure's return type because chests and skulls are gathered by different
+/// functions (`crate::block_entities::{chest_spawns, skull_spawns}`) with no
+/// shared per-frame state: a skull has no lid-style animation clock, so it needs
+/// no partial-tick capture.
+#[derive(Default)]
+pub struct SkullSource(
+    #[allow(clippy::type_complexity)]
+    pub(super)  Option<Box<dyn Fn(glam::Vec3) -> Vec<lodestone_render::SkullSpawn> + Send + Sync>>,
+);
+
+impl SkullSource {
+    /// This frame's skulls, or none when unset — the same "unset means draw
+    /// nothing" convention [`BlockEntitySource`] uses.
+    #[must_use]
+    pub(super) fn skulls(&self, eye: glam::Vec3) -> Vec<lodestone_render::SkullSpawn> {
+        self.0.as_ref().map(|f| f(eye)).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for SkullSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("SkullSource")
+            .field(&if self.0.is_some() { "set" } else { "empty" })
+            .finish()
+    }
+}

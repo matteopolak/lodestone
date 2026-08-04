@@ -54,7 +54,7 @@ use std::collections::HashMap;
 
 use lodestone_render::{
     BlockEntityModelSet, CameraUniform, EntityCameraUniform, EntityPipeline, GpuEntityModel,
-    chest_texture_stems, entity_camera_buffer, fog::FogUniform,
+    block_entity_texture_stems, entity_camera_buffer, fog::FogUniform,
 };
 
 /// GPU resources for the block-entity pass: one uploaded mesh per model, one
@@ -108,7 +108,7 @@ impl BlockEntityRenderer {
 
         let real = crate::resources::load_block_entity_textures();
         let mut textures = HashMap::new();
-        for stem in chest_texture_stems() {
+        for stem in block_entity_texture_stems() {
             let Some(img) = real.get(stem) else {
                 // Fail-open and *silent at draw time*: the warning was already
                 // logged by the loader, and a chest with no sheet draws nothing

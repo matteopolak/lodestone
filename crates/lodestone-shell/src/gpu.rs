@@ -68,7 +68,7 @@ pub use outline::CrackTarget;
 pub use screen_effects::ScreenEffects;
 pub use sources::{
     BlockEntitySource, EntityLightSource, HandSwingSource, MainHandSource, OutlineShapeSource,
-    SkyDarkenSource, ThirdPersonBodySource, ThirdPersonBodyState,
+    SkullSource, SkyDarkenSource, ThirdPersonBodySource, ThirdPersonBodyState,
 };
 pub use stats::RenderStats;
 
@@ -274,6 +274,10 @@ pub struct RenderState {
     /// world in via [`RenderState::set_block_entity_source`] — the same
     /// "unset means draw nothing" convention every other source here uses.
     block_entity_source: BlockEntitySource,
+    /// Where this frame's skulls and heads come from. Same "unset means draw
+    /// nothing" convention as [`Self::block_entity_source`], and a separate
+    /// field for the reason [`SkullSource`] documents.
+    skull_source: SkullSource,
     /// The rain/snow pass, built once `textures/environment/{rain,snow}.png` are
     /// available. `None` — no `client.jar`, a headless test, or simply before
     /// [`RenderState::install_weather`] runs — draws no precipitation, the same
@@ -498,6 +502,7 @@ impl RenderState {
             // No chests until the shell installs a world source; see
             // `set_block_entity_source`.
             block_entity_source: BlockEntitySource::default(),
+            skull_source: SkullSource::default(),
             // No rain/snow droplets until the shell installs the two environment
             // textures; see `install_weather`.
             weather: None,
@@ -1030,6 +1035,20 @@ impl RenderState {
         f: impl Fn(Vec3) -> Vec<lodestone_render::ChestSpawn> + Send + Sync + 'static,
     ) {
         self.block_entity_source = BlockEntitySource(Some(Box::new(f)));
+    }
+
+    /// Install the source for this frame's skulls and heads — the skull
+    /// equivalent of [`set_block_entity_source`](Self::set_block_entity_source).
+    ///
+    /// A second field rather than a second return value on the chest closure:
+    /// the two gathers are independent functions with no shared per-frame state,
+    /// and a skull needs no partial tick because none of the ported types
+    /// animate. See [`SkullSource`].
+    pub fn set_skull_source(
+        &mut self,
+        f: impl Fn(Vec3) -> Vec<lodestone_render::SkullSpawn> + Send + Sync + 'static,
+    ) {
+        self.skull_source = SkullSource(Some(Box::new(f)));
     }
 
     /// Install the source for the targeted block's outline shape.
@@ -2734,7 +2753,11 @@ impl RenderState {
 
         let eye = camera.position;
         let chests = self.block_entity_source.chests(eye);
-        if chests.is_empty() {
+        let skulls = self.skull_source.skulls(eye);
+        // Both, not either: an early return on `chests.is_empty()` alone would
+        // make a skull in an otherwise chestless room draw nothing, which is
+        // exactly how this pass would have grown a second island.
+        if chests.is_empty() && skulls.is_empty() {
             return Vec::new();
         }
 
@@ -2756,10 +2779,18 @@ impl RenderState {
             ),
         );
 
-        let instances: Vec<_> = chests
+        let mut instances: Vec<_> = chests
             .iter()
             .filter_map(|spawn| self.block_entities.models.resolve_chest(spawn))
             .collect();
+        // Appended into the same list rather than planned separately: a chest and
+        // a skull batch independently inside one `plan_block_entities` call, so
+        // frustum culling and the batch split are shared for free.
+        instances.extend(
+            skulls
+                .iter()
+                .filter_map(|spawn| self.block_entities.models.resolve_skull(spawn)),
+        );
 
         let frame = plan_block_entities(&instances, &camera.frustum());
         stats.block_entities_drawn = frame.stats.drawn;
