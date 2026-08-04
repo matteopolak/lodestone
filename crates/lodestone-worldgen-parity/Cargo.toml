@@ -1,0 +1,28 @@
+[package]
+name = "lodestone-worldgen-parity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Chunk-for-chunk parity harness: compares lodestone-worldgen's composed output against a real vanilla 26.2 JVM oracle dump, block-for-block, per stage."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+lodestone-worldgen = { path = "../lodestone-worldgen" }
+# The bundled singleplayer generator (`overworld_generator`) — the exact
+# generator the integrated server serves over the wire today. Depending on it
+# rather than re-embedding a second copy of the 26.2 worldgen data means this
+# harness always measures what actually ships, not a hand-picked subset.
+lodestone-server = { path = "../lodestone-server" }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "compare"
+path = "src/bin/compare.rs"
+
+[[bin]]
+name = "regen"
+path = "src/bin/regen.rs"
