@@ -130,14 +130,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Bubble columns](./bubble-columns.md) — The vertical impulse a `bubble_column`
   block applies to the player: soul sand pushes you up (an elevator), a magma block
   drags you down (a drain). Issue #199.
-- [Build caching (`sccache`) and multi-agent build contention](./build-caching.md) —
-  A measured evaluation of `sccache` (Mozilla's compiler cache) for this repo's
-  specific problem: up to eleven agents building concurrently in one shared checkout
-  on a 10-core / 16 GB machine. Verdict, numbers, the adoption playbook, and the traps
-  found on the way. `sccache 0.17.0` is installed at `/opt/homebrew/bin/sccache`
-  (Homebrew). **It is deliberately not yet active in `.cargo/config.toml`** — a
-  commented, ready-to-flip block is there; read "How to turn it on repo-wide" below
-  before uncommenting it.
+- [Build caching (`sccache`), dev profiles, and multi-agent build contention](./build-caching.md) —
+  The measured design for how up to eleven agents build concurrently in one shared
+  checkout on a 10-core / 16 GB machine: a repo-level `sccache` compiler-cache wrapper
+  (**active in `.cargo/config.toml` since 2026-08-04**), per-agent private target dirs
+  via the `--target-dir` flag, trimmed dev profiles in the root `Cargo.toml`, and a
+  cleanup-on-finish policy. This doc is the record of what was measured, what was
+  decided from it, and the honest limits of both.
 - [Chunk column encoding: real block states on the wire (issue #363)](./chunk-column-encoding.md) —
   `V770ServerProtocol::encode_chunk`'s `build_world_column` turns one
   `lodestone-server` [`ChunkColumn`](../crates/lodestone-server/src/chunk.rs) — the

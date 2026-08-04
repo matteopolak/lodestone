@@ -1,187 +1,204 @@
-# Build caching (`sccache`) and multi-agent build contention
+# Build caching (`sccache`), dev profiles, and multi-agent build contention
 
 ## What it is
 
-A measured evaluation of `sccache` (Mozilla's compiler cache) for this repo's
-specific problem: up to eleven agents building concurrently in one shared
-checkout on a 10-core / 16 GB machine. Verdict, numbers, the adoption playbook,
-and the traps found on the way. `sccache 0.17.0` is installed at
-`/opt/homebrew/bin/sccache` (Homebrew). **It is deliberately not yet active in
-`.cargo/config.toml`** — a commented, ready-to-flip block is there; read
-"How to turn it on repo-wide" below before uncommenting it.
+The measured design for how up to eleven agents build concurrently in one
+shared checkout on a 10-core / 16 GB machine: a repo-level `sccache`
+compiler-cache wrapper (**active in `.cargo/config.toml` since 2026-08-04**),
+per-agent private target dirs via the `--target-dir` flag, trimmed dev
+profiles in the root `Cargo.toml`, and a cleanup-on-finish policy. This doc
+is the record of what was measured, what was decided from it, and the honest
+limits of both.
 
 All numbers were measured 2026-08-04 on the dev machine (M-series, 10 cores,
-16 GB), mostly during a coordinated freeze with load averages stated inline.
-`docs/worldgen-surface-perf.md` documents a >10% spread on this machine with
-loaded outliers reaching 3×; treat every wall-clock figure accordingly. The
-`sccache --show-stats` hit/miss counts are load-independent and are the
-numbers to trust.
+16 GB), the decisive ones on a cleared box (load ~3–15, stated per
+experiment; `docs/worldgen-surface-perf.md` documents 3× wall-clock outliers
+under load, and a leg measured mid-stampede at load 93 reproduced exactly
+that). `sccache --show-stats` hit/miss counts are load-independent and are
+the numbers to trust over any wall time.
 
-## The verdict, in order of what actually matters
+## The design, in one block
 
-1. **The dominant cost of concurrent builds is cargo's exclusive lock on
-   `target/`, and sccache does not touch it.** All agents share one
-   `target/`; cargo serialises concurrent builds on
-   `Blocking waiting for file lock on build directory`. Observed during the
-   load-91 incident and after: a `cargo test -p lodestone-v770` at **42m35s
-   elapsed, 0.0% CPU** (pure lock-wait, killed with owner clearance), three
-   runs at ~15 min zero CPU, and a five-crate `cargo check -p
-   lodestone-server --lib` taking **10m44s** that opens with the lock-wait
-   line. The exact wait-vs-compile split *within* one contended build was not
-   instrumented, but 0% CPU over 42 minutes is that split for the worst victim.
-2. **sccache's real value here is making private (per-agent / worktree)
-   target dirs affordable**, which is the thing that dodges the lock. A cold
-   private build of the `lodestone-render` subtree (95 units): **36.4s / 32.4s
-   user CPU** with no cache vs **16.4s / 8.1s user** with a warm cache
-   (86.5% hits) — 2.2× wall, **4× less CPU**, back-to-back at load 5–8.
-   CPU is the scarce currency on a 10-core box with eleven builders; wall
-   ratios on an idle machine understate the contended benefit.
-3. **It does roughly nothing for the warm shared-`target/` loop** — cargo
-   already reuses those artifacts — **and nothing for the edit-check loop**
-   (see incremental, below). It is a cold-build accelerator, and this repo
-   manufactures cold builds constantly: `CLAUDE.md`-mandated detached-worktree
-   re-verification, post-incident cleans (the 13 GiB stale-path rebuild),
-   fingerprint stampedes, CI.
+Every agent brief carries this:
 
-## Measured facts (the ones decisions rest on)
+```
+Build in a PRIVATE target dir, never the repo's `target/`:
 
-### The graph is ~87% cacheable, and the proc-macro fear is misplaced
+1. Choose your dir once at task start: /tmp/lt-<issue>-<4 random chars>
+   (example: /tmp/lt-427-k3f9). Write the literal path in every command —
+   shell variables do not survive between tool calls.
+2. Add `--target-dir` and `-j 4` to EVERY cargo command:
 
-Resolved graph (all-features): 593 packages — 560 registry deps, 33 workspace
-members; 37 proc-macro crates (ours: `lodestone-macros`), 91 with build
-scripts (ours: `lodestone-server`). On a real `cargo check --workspace`
-(~790 rustc invocations), sccache classified **107 non-cacheable**:
+   cargo check --workspace --all-targets -j 4 --target-dir /tmp/lt-427-k3f9
+   cargo test -p <crate> --no-fail-fast -j 4 --target-dir /tmp/lt-427-k3f9
 
-| reason | count | what it is |
-|---|---|---|
-| `crate-type` | 68 | proc-macro dylibs and build-script *executables* |
-| `incremental` | 31 | workspace crates (compiled incrementally) |
-| `missing input` / other | 8 | misc |
+   - The --target-dir FLAG form is mandatory. NEVER export CARGO_TARGET_DIR
+     as an env var: sccache hashes CARGO_* env vars into its cache keys, and
+     the env-var form measured 0% cache hits where the flag form measured
+     78-94%.
+   - -j 4 bounds rustc parallelism. Without the shared-target lock there is
+     no accidental admission control left, and the machine is 10 cores and
+     16 GB shared by everyone.
+3. sccache is active via .cargo/config.toml — set nothing. Cold dep
+   compiles hit the shared cache automatically.
+4. Before finishing, delete your dir — and only yours, by its literal name:
 
-Everything else — 682 units, including every crate that merely *uses*
-`lodestone-macros`/serde-derive, the compiled output of build-script crates,
-and the C code in `aws-lc-sys` etc. (C/C++ hit rate 99.6%) — is cacheable.
-Warm-cache re-run: **94.28% hits (643/682)**. "sccache can't cache proc
-macros" is true only of the 37 macro crates' own tiny dylib compiles.
+   rm -rf /tmp/lt-427-k3f9
 
-### Incremental compilation is NOT lost
+   Never glob /tmp/lt-*.
 
-sccache marks incremental compiles non-cacheable and passes them through to
-real rustc unchanged; cargo only compiles *workspace* crates incrementally and
-registry deps are never incremental. So the trade the internet warns about
-mostly doesn't exist at default settings: deps get cached, workspace crates
-keep incremental. Measured edit-loop (append comment to
-`lodestone-render/src/lib.rs`, `cargo check -p lodestone-render`, private
-worktree): wrapper 0.76/0.36/0.42s vs no wrapper 0.50/0.36/0.35s — parity
-within noise, ~0.2s first-call server-spawn overhead. No-op workspace check:
-0.31s vs 0.29s. Do not set `CARGO_INCREMENTAL=0`; nothing here needs it.
-
-### The `CARGO_TARGET_DIR` env var silently poisons every cache key
-
-sccache hashes `CARGO_*` environment variables into the compile key.
-Measured: byte-identical rebuild with `CARGO_TARGET_DIR` set to a different
-path → **0% hits**; same rebuild using the `--target-dir` *flag* → **78%
-hits** (all registry deps; misses were the workspace-path-dependent units);
-identical rerun, same path → 100%. **Always use `--target-dir <dir>`, never
-the env var**, for private build dirs, or every agent gets a private cache
-that shares nothing. Registry deps hit across *different* checkouts and
-worktrees because their sources live at one stable path
-(`~/.cargo/registry`); workspace crates re-key per checkout path (and are
-incremental anyway).
-
-### Turning the wrapper on/off invalidates every fingerprint
-
-Cargo hashes the wrapper into each unit's fingerprint. Measured: a green
-no-wrapper target dir immediately recompiles from `libc` up when the same
-command runs with `RUSTC_WRAPPER` set. Consequences:
-
-- Landing (or reverting) `build.rustc-wrapper` in `.cargo/config.toml` forces
-  **one full rebuild of the shared 54 GiB `target/` for every agent at once**.
-  It must be scheduled, not slipped in.
-- Never ad-hoc-run the wrapper against the shared `target/` — you flip
-  everyone's fingerprints twice (on and back off). Private `--target-dir`
-  only, until the repo-wide flip.
-
-### Costs
-
-- First-ever (cold-cache) build pays ~**+25%** wall for cache writes
-  (24.9s → 31.2s on the workspace-check workload).
-- Disk: one check-mode config cached = **129 MB** compressed. `SCCACHE_CACHE_SIZE`
-  is set to **20G** in the commented block: enough for check+build+test modes
-  across the three health-check feature configs with LRU headroom, and small
-  against the ~99 GiB free (the 54 GiB shared `target/` is the actual disk
-  problem). Default location `~/Library/Caches/Mozilla.sccache`.
-
-## How to use it today (opt-in, safe now)
-
-For exactly the builds that are currently painful — detached-worktree
-verification, or a single-crate check while the shared `target/` lock is held
-by someone else:
-
-```bash
-RUSTC_WRAPPER=/opt/homebrew/bin/sccache \
-  cargo check -p <crate> --target-dir /tmp/<unique-private-dir>
+The `cargo xtask` alias has no --target-dir; use the expanded form:
+   cargo run -q -p xtask -j 4 --target-dir /tmp/lt-427-k3f9 -- docs-index --check
 ```
 
-`RUSTC_WRAPPER` as an env var is safe (it is not a `CARGO_*` var and is not
-hashed into keys). `--target-dir` as a flag is required (see above). The
-first agent to do this per graph pays the +25% priming; everyone after gets
-the 2–4×. This never touches the shared `target/` or anyone's fingerprints.
-The old worktree scar — `CARGO_TARGET_DIR` pointed at the *shared* target
-from a throwaway worktree, baking dead paths into build-script output (435
-phantom errors, 13 GiB rebuild) — does not apply: private dir, flag form,
-and the worktree dies with its own target dir.
+Why each piece is shaped that way is the rest of this doc.
 
-## How to turn it on repo-wide (the playbook)
+## Why: the lock, not the compiler, was the bottleneck
 
-Uncommenting the block in `.cargo/config.toml` is correct only inside a
-coordinated quiet window, because of the fingerprint stampede:
+All agents used to share one `target/`; cargo serialises concurrent builds on
+an exclusive build-dir lock (`Blocking waiting for file lock on build
+directory`). Observed on one day: a `cargo test -p lodestone-v770` at
+**42m35s elapsed, 0.0% CPU** — pure lock-wait; two more cargos blocked 11 and
+18 minutes at 0.0% CPU; a five-crate check taking 10m44s. sccache does not
+touch the lock. **Private target dirs dodge it; sccache is what makes them
+affordable**, because the dependency graph then comes from cache instead of
+being recompiled per agent.
 
-1. Freeze agent builds (orchestrator).
-2. Uncomment the `[build] rustc-wrapper` + `[env]` block in
-   `.cargo/config.toml`.
-3. Prime: run the three health checks from *Build and test* in `CLAUDE.md`
-   once each. This is the stampede, absorbed while nobody is waiting; the
-   cache warms for all three feature configs.
-4. **CI**: `docs/ci.md` §"A pending coordination point" — the workflow
-   assumes no wrapper. A runner without the binary hard-errors on every
-   `cargo` call. Either install sccache in the workflow (e.g.
-   `mozilla/sccache-action`, complementary to `Swatinem/rust-cache`) or
-   override the wrapper off in the workflow env before this lands. Do not
-   land the flip without the CI owner.
-5. Thaw.
+## Measured: sccache
 
-## What was NOT measured (route around at your peril)
+- Graph (all-features): 593 packages — 560 registry deps, 33 workspace
+  members; 37 proc-macro crates (ours: `lodestone-macros`), 91 build-script
+  crates (ours: `lodestone-server`).
+- ~87% of rustc invocations are cacheable; warm workspace-check hit rate
+  **94.28%** (643/682). Non-cacheable: 68 `crate-type` (proc-macro dylibs +
+  build-script executables — every *user* of `lodestone-macros` caches
+  fine), 31 `incremental` (workspace crates), 8 misc. C/C++ inside
+  `aws-lc-sys` etc. hit 99.6%.
+- Cold worktree render-subtree check: **36.4s / 32.4s-user uncached vs
+  16.4s / 8.1s-user warm** (86.5% hits) — 2.2× wall, 4× less CPU.
+- Build-mode warm restore of a render-tests dir: **28.6s** wall, vs 39.1s
+  cold-uncached under the same profile; priming overhead in build mode was
+  ~zero (38.7s vs 39.1s).
+- Edit-check loop: **parity** (wrapper 0.76/0.36/0.42s vs none
+  0.50/0.36/0.35s). Workspace crates compile incrementally; sccache marks
+  them non-cacheable and passes them through, so incremental compilation is
+  NOT lost. Do not set `CARGO_INCREMENTAL=0`.
+- **Trap 1 (env var):** `CARGO_TARGET_DIR` as an env var → 0% hits on
+  byte-identical rebuilds. The `--target-dir` flag → 78–94%. sccache hashes
+  `CARGO_*` env vars into keys; registry deps otherwise share across
+  checkouts/worktrees because their sources live at one stable path.
+- **Trap 2 (flip cost):** cargo hashes the wrapper into every fingerprint —
+  adding or removing `rustc-wrapper` forces a full rebuild per target dir
+  (verified: a green dir recompiled from `libc` up). The 2026-08-04 flip was
+  free only because the 59 GB shared `target/` was being wiped anyway.
+- Wrapper legs make `/usr/bin/time`'s user-time meaningless: rustc work
+  moves into the sccache daemon, outside the measured process tree. Compare
+  wall, or the daemon's own stats.
 
-- A green full-workspace A/B: the tree had a broken `lodestone-shell` lib
-  mid-edit, so the three workspace-check legs each fail-fast-truncated at the
-  same point (~350 units started). The legs are mutually comparable but
-  understate full-graph absolutes.
-- Build-mode (codegen) hit rates and cache size at scale — check-mode only.
-- Steady-state throughput with N agents on private dirs (the memory question:
-  private dirs bypass the lock's accidental admission control; if several
-  agents cold-build simultaneously, cap with `-j` per invocation. With Docker
-  down (~7 GB reclaimed) a repo-wide `[build] jobs` cap is *not* recommended;
-  revisit at ~`jobs = 6` if the oracles return and memory pressure resumes).
-- `[profile.dev] debug = "line-tables-only"`: likely the biggest unmeasured
-  win for the *other* half of the pain (54 GiB target, multi-GB debug test
-  binaries, link time). It is also a full-stampede change, so if adopted it
-  should land in the same quiet window as the wrapper flip, one stampede for
-  both. Not landed here because it is unmeasured.
+## Measured: dev profiles (landed in root `Cargo.toml`)
+
+Render-tests build (`cargo test -p lodestone-render --no-run`, 214-unit
+subtree, cold private dirs, wrapperless, back-to-back):
+
+| profile | wall | user CPU | dir size |
+|---|---|---|---|
+| previous (debug=2 everywhere) | 28.0s | 124.5s | 2,263 MB |
+| + `debug="line-tables-only"`, deps `debug=false` | 24.5s | 103.6s | 1,605 MB |
+| + deps `opt-level=1` (landed set) | 39.1s | 214.7s | 1,233 MB |
+
+Runtime, prebuilt binaries, same box:
+
+- Render suite (633 tests): **29.5s → 21.2s (1.39×)** from the deps knobs.
+- Worldgen suite: 11.4s → 4.1s.
+- **The 144-chunk sweep** —
+  `worldgen_data::tests::served_columns_never_carry_an_unported_badlands_variant`
+  (`crates/lodestone-server/src/worldgen_data.rs`, a 12×12 chunk loop, the
+  strongest worldgen gate in the repo): **203.42s → 27.16s (7.5×)**, and an
+  isolation leg (`opt-level=2` on `lodestone-worldgen` alone, nothing else)
+  measured **27.13s** — the entire win is that one line. Two days earlier
+  this gate was 700.57s; memoisation (`6509a97`) plus this profile puts it
+  at 27s, i.e. runnable on a whim.
+- Deps `opt-level=1` costs 2.07× CPU on a *cold* dep compile — paid once
+  machine-wide, then served from cache (warm restore = 28.6s, the same wall
+  as the old profile's cold build).
+- `split-debuginfo = "unpacked"` was considered and dropped: measured as
+  already the macOS dev default (`cargo build -v` shows it with no config).
+- `debug-assertions` untouched everywhere — correctness gates depend on it —
+  and `opt-level` does not interact with it.
+
+**Honest limit 1: `opt-level = 2` makes `lodestone-worldgen`'s own
+incremental edit loop slower per edit.** Not measured. If you are iterating
+*inside* the crate and it bites, override locally:
+`--config 'profile.dev.package.lodestone-worldgen.opt-level=0'` — that
+changes only your invocation, nobody else's keys.
+
+## Disk math and the agent ceiling
+
+- Free after the 59 GB shared-`target/` wipe: **153 GiB**.
+- Measured per-agent dirs (landed profile): worldgen 420 MB, render-tests
+  1,233 MB, server+worldgen 1,275 MB. Ten typical agents ≈ 13 GB — trivial.
+- **Honest limit 2: a full-workspace `--all-targets` dir was NOT measured**
+  under the new profile. Estimate: ~11 GB (the 59 GB dir was weeks of
+  multi-config accretion; one old-profile config ≈ 20 GB × the measured
+  0.545 size ratio). Rule of thumb: keep full-workspace dirs to **~5
+  concurrent**; scoped `-p`-cluster dirs need no rationing.
+- sccache cache: 94–129 MB measured per config/mode pair; `SCCACHE_CACHE_SIZE
+  = "10G"` is >3× headroom over the ~1–3 GB estimated steady state.
+- **The binding constraint is memory at test runtime, not disk, and nothing
+  in this design touches it.** A `lodestone-shell` test binary was killed at
+  **4,823 MB RSS** the same day this landed (free memory ~102 MB, compressor
+  5.6 GB) — that is test content, not debuginfo. Bounding concurrent *test
+  execution*, not just compilation, is the open problem.
+
+## Cleanup-on-finish, not a slot pool
+
+A pool of reusable per-slot dirs was considered and rejected: its entire
+per-task saving is the warm restore, measured at ~29s wall for a
+render-scale dir. Against that, a pool costs slot coordination, permanent
+disk, and staleness accretion — the 59 GB shared dir is what accretion looks
+like. Agents keep one dir across all steps of a task and delete it at the
+end. Orphans are visible to the orchestrator as `ls -d /tmp/lt-*` (audit by
+listing; never clean by glob — an active agent's dir looks identical to an
+orphan).
+
+## CI
+
+The config-level wrapper means **every builder needs the `sccache` binary**,
+CI runners included — a missing binary is a hard error on every cargo call.
+CI satisfies this with **`mozilla-actions/sccache-action@v0.0.11`** (exact
+org: `mozilla-actions`), which is complementary to `Swatinem/rust-cache`
+(one caches compilation units, the other `~/.cargo` and `target/`). The
+escape hatch for any environment without the binary, verified working:
+`RUSTC_WRAPPER=""` in the environment cleanly overrides the config and
+disables the wrapper. See `docs/ci.md` for the workflow itself.
 
 ## Configuration
 
-- `.cargo/config.toml` — commented `[build] rustc-wrapper` +
-  `[env] SCCACHE_CACHE_SIZE = "20G"` block (the flip switch).
+- `.cargo/config.toml` — `[build] rustc-wrapper = "/opt/homebrew/bin/sccache"`,
+  `[env] SCCACHE_CACHE_SIZE = "10G"` (applies on server start; does not
+  override a pre-existing env var).
+- Root `Cargo.toml` — `[profile.dev]` and the two package-override sections;
+  comments there carry the per-knob numbers.
 - `SCCACHE_DIR` — unset; defaults to `~/Library/Caches/Mozilla.sccache`.
 - `sccache --show-stats` / `--zero-stats` — the only trustworthy hit-rate
   instrument; never infer cache behavior from wall time.
 
+## What was NOT measured (route around at your peril)
+
+- Full-workspace `--all-targets` dir size under the new profile (estimate
+  above), and N-agent steady-state throughput on private dirs.
+- Deps `opt-level=1` runtime effect outside the render/worldgen suites (the
+  1.39× is one data point; shell/server suites are plausible but unmeasured).
+- Worldgen's incremental edit-loop cost at `opt-level=2` (limit 1 above).
+- Test-runtime RSS (limit 2 above) — unaddressed by design.
+- A bare `touch` no longer dirties cargo 1.95 (content-hash freshness) —
+  relevant when constructing edit-loop experiments; a `touch`-based A/B
+  measures a no-op.
+
 ## Dependencies
 
-- `/opt/homebrew/bin/sccache` 0.17.0 (Homebrew; `brew upgrade sccache` is the
-  owner's call — a version change re-keys nothing but changes behavior).
-- Interacts with: `docs/ci.md` (CI must be coordinated before the flip),
-  `CLAUDE.md` *Build and test* (health checks are the priming workload),
-  cargo 1.95's content-hash freshness (a bare `touch` no longer dirties a
-  crate — relevant when constructing edit-loop experiments).
+- `/opt/homebrew/bin/sccache` 0.17.0 (Homebrew) locally;
+  `mozilla-actions/sccache-action@v0.0.11` in CI.
+- Interacts with: `docs/ci.md`, `CLAUDE.md` *Build and test* (the three
+  health checks are the cache-priming workload), cargo 1.95 content-hash
+  freshness.
