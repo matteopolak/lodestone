@@ -46,12 +46,14 @@ pub mod language;
 pub mod layout;
 pub mod nav;
 pub mod options;
+pub mod packs;
 pub mod panorama;
 pub mod render;
 pub mod servers;
 pub mod social;
 pub mod stats;
 pub mod status;
+pub mod telemetry;
 pub mod widget;
 pub mod world_select;
 
