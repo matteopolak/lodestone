@@ -273,19 +273,27 @@ list, not atlas stitching.
 - **The jar ships individual sprite PNGs, not a pre-built atlas** — settled by
   listing `client.jar` directly rather than assuming, per a reviewer flag on
   this doc. `assets/minecraft/textures/entity/banner/*.png` holds one PNG per
-  pattern asset id (`base.png`, `creeper.png`, `cross.png`, … ~40 files) plus
-  `banner_base.png`; the shield family is the parallel `entity/shield/*.png`
-  set. `assets/minecraft/atlases/banner_patterns.json` is not a second, competing
-  source — it is a *directory-source* atlas descriptor (`{"sources": [{"type":
-  "minecraft:directory", "prefix": "entity/banner/", "source": "entity/banner"}]}`)
-  telling vanilla's own runtime stitcher to combine every PNG under that
-  directory into one GPU atlas texture, the same "stitch many individual
-  sprites at startup" shape this codebase's own vanilla block-atlas loader
-  already implements — not a format to parse for compositing math. A future
-  loader should load the individual pattern PNGs by asset id (mirroring
+  pattern asset id (`base.png`, `creeper.png`, `cross.png`, … 43 files,
+  measured — see "Steps D–F: landed" below) plus `banner_base.png` (44
+  total); the shield family is the parallel `entity/shield/*.png` set, not
+  yet loaded (no shield mesh exists to consume it — see the "Consumers"
+  section below). `assets/minecraft/atlases/banner_patterns.json` is not a
+  second, competing source — it is a *directory-source* atlas descriptor
+  (`{"sources": [{"type": "minecraft:directory", "prefix": "entity/banner/",
+  "source": "entity/banner"}]}`) telling vanilla's own runtime stitcher to
+  combine every PNG under that directory into one GPU atlas texture, the
+  same "stitch many individual sprites at startup" shape this codebase's own
+  vanilla block-atlas loader already implements — not a format to parse for
+  compositing math. **Landed**:
+  [`lodestone_assets::banner_pattern_atlas::BannerPatternAtlas`](../crates/lodestone-assets/src/banner_pattern_atlas.rs)
+  loads the individual pattern PNGs by asset id, resolving the real sprite
+  list through that same descriptor rather than a hand-transcribed filename
+  list (mirroring
   [`chest_texture_stems`](../crates/lodestone-render/src/block_entity.rs)/
-  `skull_texture_stems`'s stem-list-plus-loader shape), not attempt to read or
-  rebuild vanilla's atlas file.
+  `skull_texture_stems`'s stem-list-plus-loader shape, one `Image` per
+  pattern id rather than a stitched sheet) — not a read or rebuild of
+  vanilla's atlas file. See "Steps D–F: landed" below for the measured
+  counts and the pixel gate this unblocked.
 
 ## Configuration
 
@@ -349,8 +357,15 @@ rule, and every claim in the original handoff held up.
   through the **real** `EntityPipeline::banner_layer_pipeline`, with
   directly-constructed 1×1 solid-colour fallback textures standing in for
   real pattern-mask sprites (the real banner-pattern atlas — see "The jar
-  ships individual sprite PNGs" above — is still not built; nothing in this
-  pass claims otherwise). Two tests: submission order decides the visible
+  ships individual sprite PNGs" above — was still not built at the time;
+  nothing in that pass claimed otherwise). **A later pass added a third
+  test**, `real_creeper_pattern_reaches_pixels_with_its_real_alpha_shape_
+  not_a_uniform_rectangle`, once the real `BannerPatternAtlas` landed — see
+  "The jar ships individual sprite PNGs" above for the measured counts and
+  what that test proves that the two fallback-texture tests below
+  structurally could not (a real, spatially-varying mask actually reaching
+  the screen, not just a decoded blob). Two *original* tests: submission
+  order decides the visible
   colour at full alpha (and each survivor is byte-identical to that colour
   drawn alone — the coincident-depth gate's own anti-vacuity shape); and a
   partial-alpha layer's composite moves monotonically from the layer beneath
@@ -383,9 +398,8 @@ alpha should expect its *effective* coverage in the final image to run
 ahead of its raw stored byte, and should re-measure on their own machine
 rather than trust either backend-implied number above.
 
-**Still not built, on purpose — this is now squarely issue #23's remaining
-scope, not #174's.** Everything above is real, pixel-verified render
-plumbing with no game-state producer wired to it yet:
+**The real pattern-mask atlas is landed; the shell installer and NBT gather
+are not — both squarely issue #23's remaining scope, not #174's.**
 
 1. **No shell installer.** `RenderState` has no `set_banner_source`
    (`crates/lodestone-shell/src/gpu.rs`) — the exact shape
@@ -405,17 +419,33 @@ plumbing with no game-state producer wired to it yet:
    work at all — it is a direct NBT parse, the same shape
    `lodestone_world::sign_text::SignText::parse` already is for a sign.
    Nothing in this pass built that parse.
-3. **No real pattern-mask atlas.** `entity/banner/*.png` (~40 files) is
-   still unloaded; the pixel gate's fallback textures are explicitly not a
-   substitute — see "The jar ships individual sprite PNGs" above for the
-   loader shape to follow (stem-list-plus-loader, mirroring
-   `chest_texture_stems`/`skull_texture_stems`).
+3. **Landed. `lodestone_assets::banner_pattern_atlas::BannerPatternAtlas`**
+   loads every real `entity/banner/*.png` mask, discovered through the real
+   `atlases/banner_patterns.json` directory-source descriptor (resolved via
+   the existing `AtlasDefinition`/`AtlasSource::resolve` machinery — the same
+   "ask the thing that actually enumerates it" rule the panorama fix
+   established, not a hand-transcribed filename list). Measured directly
+   against the real 26.2 jar: **44** real PNGs under `entity/banner/`
+   (`banner_base.png`, the plain cloth texture, excluded — not a pattern
+   mask) and **43** pattern masks matching all 43
+   `data/minecraft/banner_pattern/*.json` registry entries exactly, both
+   directions. `banner_pattern_layer_pixels.rs`'s
+   `real_creeper_pattern_reaches_pixels_with_its_real_alpha_shape_not_a_
+   uniform_rectangle` swaps the real `base`/`creeper` masks in for two of the
+   fallback textures and proves the real, spatially-varying alpha actually
+   reaches pixels (a hole where alpha is `0`, full coverage where it is
+   `255`, a genuine partial blend where it is `191` — creeper.png's real
+   measured antialiased-edge value), with the same texture bound as a
+   uniform "control" producing **zero** holes (`hole=0, full=2592` exactly,
+   verified failing). This is individually addressable `Image`s per pattern
+   id, **not** a stitched GPU atlas — the "do not build atlas stitching for
+   this" decision below is unaffected; see that section before assuming this
+   changes the calculus.
 
-None of these three block the other two — the shell installer and the mesh
-work with a hand-built `BannerSpawn` (a hermetic pixel gate for the real
-end-to-end shell path could exist today, using the same fallback-texture
-trick this doc's own gate does, before the atlas lands), and the atlas is
-pure `lodestone-assets` work independent of either.
+The shell installer and the mesh work with a hand-built `BannerSpawn` (a
+hermetic pixel gate for the real end-to-end shell path could exist today,
+using the same fallback-texture trick this doc's own gate does for the two
+layers the real atlas does not cover) and neither blocks the other.
 
 ### The two model classes, decompiled directly
 
@@ -533,19 +563,21 @@ counts as entry 0), each reusing the flag part's own transform (masks paint
 over the flag, not the pole/bar).
 
 Real mask sprites need the banner-pattern atlas
-(`assets/minecraft/textures/entity/banner/*.png`, ~40 files — "The jar
-ships individual sprite PNGs" above has the loader shape to follow) —
-still not built; see "Steps D–F: landed" above. The pixel gate that landed
-instead injects a directly-constructed 1×1 solid-colour texture per layer
-(the same "an unresolved sheet particle draws nothing rather than garbage"
-shape `RenderState::install_particle_sheet_atlas`'s fallback uses one crate
-over) and asserts (a) the blend is genuinely translucent — a partial-alpha
-composite moves monotonically between the two layers' own tints as alpha
-rises, landing far from what the *ordinary* opaque pipeline would produce
-instead, not merely "some pixels changed" — and (b) two layers submitted in
-opposite orders produce different composited colour where they overlap,
-the concrete, measurable form of "these draws are order-dependent" this
-doc argued from the start. See `banner_pattern_layer_pixels.rs`'s own doc
+(`assets/minecraft/textures/entity/banner/*.png`, 43 real pattern masks —
+"The jar ships individual sprite PNGs" above has the loader shape) — **now
+landed** as `BannerPatternAtlas`; see "Steps D–F: landed" above. Step F's
+*original* pixel gate injects a directly-constructed 1×1 solid-colour
+texture per layer instead (the same "an unresolved sheet particle draws
+nothing rather than garbage" shape `RenderState::install_particle_sheet_atlas`'s
+fallback uses one crate over) and asserts (a) the blend is genuinely
+translucent — a partial-alpha composite moves monotonically between the
+two layers' own tints as alpha rises, landing far from what the *ordinary*
+opaque pipeline would produce instead, not merely "some pixels changed" —
+and (b) two layers submitted in opposite orders produce different
+composited colour where they overlap, the concrete, measurable form of
+"these draws are order-dependent" this doc argued from the start. A later
+pass's third test swaps in the real atlas for two of the layers instead —
+see "Steps D–F: landed" above. See `banner_pattern_layer_pixels.rs`'s own doc
 comment for why the original plan (predict an exact composited byte from
 the textbook `ALPHA_BLENDING` formula) had to change: this backend's
 effective blend alpha is measurably not the raw fragment alpha byte.

@@ -87,7 +87,10 @@
 //! cargo test -p lodestone-render --test banner_pattern_layer_pixels -- --ignored --nocapture
 //! ```
 
+mod gate_harness;
+
 use glam::Vec3;
+use lodestone_assets::{BannerPatternAtlas, Image, ResourceManager, ResourceSource, ZipSource};
 use lodestone_render::block::DepthBuffer;
 use lodestone_render::block_entity::{BANNER_FLAG, BannerSpawn, BlockEntityModelSet};
 use lodestone_render::camera::Camera;
@@ -222,6 +225,25 @@ struct Layer {
 /// flag instance transform from [`BlockEntityModelSet::resolve_banner`].
 /// Returns the RGBA readback.
 fn render(gpu: &Gpu, layers: &[Layer]) -> Vec<u8> {
+    let textures: Vec<(wgpu::TextureView, wgpu::Sampler)> = layers
+        .iter()
+        .map(|layer| solid_texture(&gpu.device, &gpu.queue, layer.alpha))
+        .collect();
+    let tints: Vec<[u8; 3]> = layers.iter().map(|layer| layer.tint).collect();
+    render_tinted_textures(gpu, &tints, &textures)
+}
+
+/// [`render`], generalised to accept any per-layer texture rather than only
+/// [`solid_texture`]'s synthetic fallback — what [`render`] itself and
+/// [`render_real`] (real jar sprites) both delegate to, so the two share
+/// every line of pipeline/pass/readback plumbing and can only differ in how
+/// the bound texture was produced.
+fn render_tinted_textures(
+    gpu: &Gpu,
+    tints: &[[u8; 3]],
+    textures: &[(wgpu::TextureView, wgpu::Sampler)],
+) -> Vec<u8> {
+    assert_eq!(tints.len(), textures.len(), "one tint per texture");
     let device = &gpu.device;
     let queue = &gpu.queue;
     let camera = camera();
@@ -255,18 +277,13 @@ fn render(gpu: &Gpu, layers: &[Layer]) -> Vec<u8> {
         buf: wgpu::Buffer,
         tex_bg: wgpu::BindGroup,
     }
-    let draws: Vec<Draw> = layers
+    let draws: Vec<Draw> = tints
         .iter()
-        .map(|layer| {
-            let buf = upload_instances_tinted(
-                device,
-                &[flag_transform],
-                &[light],
-                &[InstanceTint::rgb(layer.tint)],
-            )
-            .expect("one instance is non-empty");
-            let (view, sampler) = solid_texture(device, queue, layer.alpha);
-            let tex_bg = ep.texture_bind_group(device, &view, &sampler);
+        .zip(textures)
+        .map(|(tint, (view, sampler))| {
+            let buf = upload_instances_tinted(device, &[flag_transform], &[light], &[InstanceTint::rgb(*tint)])
+                .expect("one instance is non-empty");
+            let tex_bg = ep.texture_bind_group(device, view, sampler);
             Draw { buf, tex_bg }
         })
         .collect();
@@ -347,6 +364,83 @@ fn render(gpu: &Gpu, layers: &[Layer]) -> Vec<u8> {
     out
 }
 
+/// The real 26.2 `client.jar`, opened once per call — mirrors
+/// `entity_variant_pixels.rs`'s own `jar()` helper in this crate. Fails
+/// closed: this file's real-sprite tests are `#[ignore]`d, so a missing jar
+/// is an environment failure, never a silent skip.
+fn jar_manager() -> ResourceManager {
+    let path = gate_harness::require_client_jar();
+    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let zip = ZipSource::from_bytes(bytes).unwrap_or_else(|e| panic!("open jar: {e}"));
+    ResourceManager::new(vec![Box::new(zip) as Box<dyn ResourceSource>])
+}
+
+/// The real banner-pattern atlas (`lodestone_assets::BannerPatternAtlas`,
+/// issue #174's remaining gap, now closed on the `lodestone-assets` side —
+/// see `docs/banner-shield-patterns.md`), loaded from the real jar. Fails
+/// closed for the same reason as [`jar_manager`].
+fn real_atlas() -> BannerPatternAtlas {
+    let manager = jar_manager();
+    let (atlas, report) = BannerPatternAtlas::load_reported(&manager)
+        .unwrap_or_else(|e| panic!("load the real banner-pattern atlas: {e}"));
+    assert!(
+        report.missing_textures.is_empty() && report.decode_errors.is_empty(),
+        "real jar produced a lossy atlas: missing={:?} decode_errors={:?}",
+        report.missing_textures,
+        report.decode_errors,
+    );
+    atlas
+}
+
+/// Uploads a real decoded pattern-mask [`Image`] as the layer's sampled
+/// texture — the real-sprite counterpart of [`solid_texture`]. Same format
+/// and filter mode as the fallback (`Rgba8UnormSrgb`, `Nearest`,
+/// `ClampToEdge`): the real PNGs are the same kind of near-white
+/// mask-plus-coverage art the fallback stands in for (see
+/// `docs/banner-shield-patterns.md`'s "The jar ships individual sprite
+/// PNGs" section), so nothing about how the sampler is configured needs to
+/// change, only what bytes it samples.
+fn real_texture(device: &wgpu::Device, queue: &wgpu::Queue, img: &Image) -> (wgpu::TextureView, wgpu::Sampler) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("banner-layer-real-mask"),
+        size: wgpu::Extent3d { width: img.width, height: img.height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo { texture: &texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+        &img.rgba,
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(img.width * 4), rows_per_image: Some(img.height) },
+        wgpu::Extent3d { width: img.width, height: img.height, depth_or_array_layers: 1 },
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("banner-layer-real-sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Nearest,
+        min_filter: wgpu::FilterMode::Nearest,
+        ..Default::default()
+    });
+    (view, sampler)
+}
+
+/// [`render`]/[`render_tinted_textures`], but binding **real** decoded
+/// pattern-mask sprites instead of [`solid_texture`]'s synthetic fallback —
+/// `layers[i]` is `(tint, sprite)`.
+fn render_real(gpu: &Gpu, layers: &[([u8; 3], &Image)]) -> Vec<u8> {
+    let textures: Vec<(wgpu::TextureView, wgpu::Sampler)> = layers
+        .iter()
+        .map(|(_, img)| real_texture(&gpu.device, &gpu.queue, img))
+        .collect();
+    let tints: Vec<[u8; 3]> = layers.iter().map(|(tint, _)| *tint).collect();
+    render_tinted_textures(gpu, &tints, &textures)
+}
+
 fn px(pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
     let i = ((y * W + x) * 4) as usize;
     [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
@@ -359,6 +453,24 @@ fn bbox(pixels: &[u8], pred: impl Fn([u8; 4]) -> bool) -> Option<(u32, u32, u32,
     for y in 0..H {
         for x in 0..W {
             if pred(px(pixels, x, y)) {
+                found = Some(match found {
+                    None => (x, y, x, y),
+                    Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                });
+            }
+        }
+    }
+    found
+}
+
+/// The bounding box of pixels where `a` and `b` differ — the two-frame
+/// counterpart of [`bbox`]'s single-predicate form, for comparing two full
+/// renders rather than one render against a constant.
+fn diff_bbox(a: &[u8], b: &[u8]) -> Option<(u32, u32, u32, u32)> {
+    let mut found: Option<(u32, u32, u32, u32)> = None;
+    for y in 0..H {
+        for x in 0..W {
+            if px(a, x, y) != px(b, x, y) {
                 found = Some(match found {
                     None => (x, y, x, y),
                     Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
@@ -556,4 +668,162 @@ fn two_full_alpha_layers_composite_by_submission_order_not_by_colour() {
              at ({x},{y}) — order-dependence is the whole property under test"
         );
     }
+}
+
+/// Per-pixel classification of `composite` against two anchors within a
+/// screen-space `region`: `dst` (the layer beneath, i.e. what an
+/// untouched/zero-coverage texel looks like) and `src` (the same layer's
+/// own colour at full coverage). Shared by the real-sprite test below and
+/// its uniform-texture control, so both read the region the same way.
+#[derive(Debug)]
+struct RegionCounts {
+    /// Byte-identical to `dst` — zero coverage reached this pixel exactly
+    /// (no margin needed: alpha `0` draws nothing at all).
+    hole: usize,
+    /// Clearly closer to `src` than to `dst` (see the margin in
+    /// [`classify_region`]) — full coverage reached this pixel.
+    full: usize,
+    /// Neither of the above — a genuine partial blend.
+    partial: usize,
+    /// `region`'s pixel count, for computing fractions if needed.
+    total: usize,
+}
+
+fn classify_region(composite: &[u8], dst: &[u8], src: &[u8], region: (u32, u32, u32, u32)) -> RegionCounts {
+    let (x0, y0, x1, y1) = region;
+    let mut counts = RegionCounts { hole: 0, full: 0, partial: 0, total: 0 };
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let c = px(composite, x, y);
+            let d = px(dst, x, y);
+            let s = px(src, x, y);
+            counts.total += 1;
+            if c == d {
+                counts.hole += 1;
+            } else if manhattan_rgb(c, s) < 40 {
+                // Measured, not guessed: a 12-point sweep in this file's own
+                // module doc found this backend's alpha->mix curve pushes a
+                // raw-255 (fully covered) texel to within ~21-26 of `src`
+                // (real texture RGB is not pure white -- creeper.png's
+                // opaque interior is ~0.88-0.96 gray -- so it is not
+                // byte-identical to the solid-fallback `src`, just close),
+                // while a raw-191 (antialiased-edge) texel measured ~60-68
+                // away -- a clean, wide gap this threshold sits inside.
+                counts.full += 1;
+            } else {
+                counts.partial += 1;
+            }
+        }
+    }
+    counts
+}
+
+/// **Item 1's "re-gate against real sprites" step.** Every other test in
+/// this file binds [`solid_texture`]'s directly-constructed 1×1 fallback —
+/// deliberately, per this file's own module doc, to isolate the *pipeline*
+/// (translucency, order-dependence) from the *sprite content*. This test
+/// swaps in the real `entity/banner/{base,creeper}.png` masks (via the real
+/// [`BannerPatternAtlas`], `lodestone-assets`) and proves the real,
+/// spatially-varying alpha data they carry actually reaches the screen —
+/// the island question `CLAUDE.md`'s own top rule asks of every subsystem:
+/// a correctly *loaded* atlas that nothing ever samples differently is
+/// indistinguishable, at this test's old coverage, from no atlas at all.
+///
+/// Three claims, and a control proving each is falsifiable:
+/// - **A hole exists.** `creeper.png`'s real zero-alpha background must
+///   leave some pixel *exactly* equal to the render beneath it — no margin
+///   needed, since zero coverage draws nothing.
+/// - **Full coverage exists.** `creeper.png`'s real fully-opaque interior
+///   must land clearly closer to the pattern's own colour than to the
+///   layer beneath, by a wide relative margin robust to the real texture's
+///   own not-quite-white RGB (see [`classify_region`]'s doc).
+/// - **A genuine partial blend exists.** `creeper.png` is real-measured to
+///   carry a third alpha value (`191`, its antialiased edge — see
+///   `lodestone-assets`' `real_jar.rs`), so some pixel must land in neither
+///   bucket above.
+///
+/// **The control, executed:** rebinding `base.png` — verified spatially
+/// uniform (fully opaque) across this exact region in `lodestone-assets`'
+/// own real-jar census — as the second layer instead of `creeper.png`. A
+/// uniform texture can produce `full` pixels but structurally cannot
+/// produce a `hole`: there is no zero-alpha region for it to reveal. If
+/// `hole > 0` still fired on this control, the detector would be finding
+/// holes that are an artifact of the render pipeline (a coincident-depth
+/// quirk, a rasterisation gap at the mesh's own edges) rather than real
+/// alpha data — this is exactly the kind of thing a control has to prove
+/// would fail, not merely be described as failing.
+#[test]
+#[ignore = "requires a GPU adapter and a fetched vanilla client.jar"]
+fn real_creeper_pattern_reaches_pixels_with_its_real_alpha_shape_not_a_uniform_rectangle() {
+    let Some(gpu) = setup() else {
+        panic!("no GPU adapter — do not run this gate on a machine without one");
+    };
+
+    let atlas = real_atlas();
+    let base_img = atlas.base().expect("base mask must be in the real atlas");
+    let creeper_img = atlas.get("creeper").expect("creeper pattern must be in the real atlas");
+
+    // Ground truth silhouette: a flat, fully-opaque fallback layer touches
+    // exactly the flag's real screen footprint. `render(&gpu, &[])` (zero
+    // layers) gives the exact clear-colour bytes with no hardcoded constant.
+    let clear_only = render(&gpu, &[]);
+    let clear_px = px(&clear_only, 0, 0);
+    let flag_red_only = render(&gpu, &[Layer { tint: RED, alpha: 255 }]);
+    let flag_bbox =
+        bbox(&flag_red_only, |p| p != clear_px).expect("the flat fallback layer must touch some pixels");
+
+    let blue_alone = render(&gpu, &[Layer { tint: BLUE, alpha: 255 }]);
+
+    let real_base_only = render_real(&gpu, &[(RED, base_img)]);
+    let real_base_bbox = bbox(&real_base_only, |p| p != clear_px);
+    assert_eq!(
+        real_base_bbox,
+        Some(flag_bbox),
+        "the real base.png mask should be opaque across the whole flag silhouette, exactly \
+         like the flat fallback -- got {real_base_bbox:?} vs flag silhouette {flag_bbox:?}"
+    );
+
+    let real_base_plus_creeper = render_real(&gpu, &[(RED, base_img), (BLUE, creeper_img)]);
+    assert!(
+        diff_bbox(&real_base_plus_creeper, &real_base_only).is_some(),
+        "binding the real creeper.png as a second layer changed nothing -- the real atlas \
+         reached the pipeline but not the screen (an island)"
+    );
+
+    let real_counts = classify_region(&real_base_plus_creeper, &real_base_only, &blue_alone, flag_bbox);
+    assert!(
+        real_counts.hole > 0,
+        "expected some pixels within the flag silhouette to show zero creeper coverage \
+         (== the base-only render exactly) -- creeper.png's real alpha=0 background never \
+         reached the screen; counts={real_counts:?}"
+    );
+    assert!(
+        real_counts.full > 0,
+        "expected some pixels to show full creeper coverage (clearly closer to blue-alone \
+         than to base-only) -- creeper.png's real alpha=255 interior never reached the \
+         screen; counts={real_counts:?}"
+    );
+    assert!(
+        real_counts.partial > 0,
+        "expected some pixels to show a genuine partial blend (neither a hole nor full \
+         coverage) -- creeper.png's real alpha=191 antialiased edge (measured directly \
+         against the real PNG, see lodestone-assets' real_jar.rs) never reached the \
+         screen; counts={real_counts:?}"
+    );
+    eprintln!(
+        "real creeper pattern over flag_bbox {flag_bbox:?}: hole={} full={} partial={} \
+         (total={})",
+        real_counts.hole, real_counts.full, real_counts.partial, real_counts.total
+    );
+
+    // The control: a spatially uniform second layer must produce zero holes.
+    let uniform_control = render_real(&gpu, &[(RED, base_img), (BLUE, base_img)]);
+    let control_counts = classify_region(&uniform_control, &real_base_only, &blue_alone, flag_bbox);
+    eprintln!("uniform (base-as-second-layer) control over the same region: {control_counts:?}");
+    assert_eq!(
+        control_counts.hole,
+        0,
+        "control failed to fail: a spatially uniform second layer produced a 'hole' pixel, \
+         which should be structurally impossible -- counts={control_counts:?}"
+    );
 }
