@@ -60,6 +60,61 @@ cheapest real next step (`SET_CREATIVE_MODE_SLOT` writes into the exact slot spa
 `PlayerInventory` already models; `CLIENT_INFORMATION`/`CLIENT_COMMAND`/`CHUNK_BATCH_RECEIVED`
 are #270's).
 
+### Four client-completeness gaps closed: #299, #296, #291, #301 (2026-08-04)
+
+A same-day pass closed the four client-side (not server-side) gaps this doc's own
+["What was already filed"](#what-was-already-filed) table pointed at:
+
+- **#299 — `BUNDLE_DELIMITER` had no decode arm.** Measured first, per the issue's own
+  instruction: before any fix, the packet fell through the play-state catch-all to
+  `Ok(Vec::new())` — a silent no-op that never mis-framed anything, because every real
+  packet is independently length-framed by the transport regardless of bundling. The
+  actual gap was atomicity, not framing: vanilla groups the packets between two
+  delimiters into one atomic apply, and this client had no equivalent. Now decodes to
+  `Directive::BundleDelimiter`, and `lodestone-client`'s driver (`Driver::absorb_bundle`)
+  buffers directives between an opening and closing delimiter, releasing them to
+  `execute()` as one batch on the close.
+- **#296 — `update_tags` was never decoded.** Decoded in both Configuration and Play
+  (one wire shape, `ClientCommonPacketListener` handles both); the `minecraft:block`
+  registry's tags are installed as a process-wide override in
+  `lodestone_data::tool::set_block_tag_overrides`, consulted by `block_tag_members` —
+  process-wide rather than per-connection because `lodestone-shell`'s collision/mining
+  code resolves its `VersionAdapter` once from the compiled family
+  (`inferred_version_data`), a different instance than the one that decoded the live
+  session's packets.
+- **#291 — cookies and transfers were dead ends.** Added `ClientAction::CookieResponse`
+  (Login/Configuration/Play, one wire shape) and an in-memory cookie store on the driver
+  mirroring vanilla's own `ClientCommonPacketListenerImpl.serverCookies`. `transfer` now
+  ends the session with `SessionOutcome::Transferred { host, port, cookies }` rather than
+  reaching nothing — short of a silent reconnect, since the driver has no generic way to
+  open a new transport from inside itself (native TCP and wasm32 are different
+  `ClientBuilder::connect`/`connect_with` entry points).
+- **#301 — custom payload/plugin channels had no registry.** Filled the two remaining
+  decode gaps (`custom_payload` in Configuration, `custom_query` in Login — the latter
+  answered unconditionally with no payload, matching vanilla's own reference client
+  exactly), added `ClientAction::SendCustomPayload` for the general case `SendBrand` is
+  vanilla's one built-in instance of, and added `lodestone_client::ChannelRegistry` — the
+  per-channel handler dispatch layer the issue's own partial-progress note said was still
+  missing. Server-side `custom_payload` handling remains entirely absent;
+  `lodestone-server` was off-limits this pass.
+
+Measured before this pass: `v770 clientbound decoded 111/141; serverbound encoded 53/69`.
+After: `112/141` → `113/141` clientbound decoded (`+2`: `BUNDLE_DELIMITER`, `UPDATE_TAGS` —
+the `112` mid-session reading briefly overlapped with unrelated concurrent work, see the
+note on the code block above), `54/69` serverbound encoded (`+1`: `COOKIE_RESPONSE`).
+`connected` is unaffected (still `13/69`) — none of these four reach
+`crates/lodestone-server`, which was off-limits.
+
+`UPDATE_TAGS` needed a small `cargo xtask connectedness` fix to classify at all: it
+delegates to a helper returning `Result<(), AdapterError>` (a side effect on a global
+table, not a directive to produce), which the classifier's delegate-follow couldn't
+match to any recognized outlet, and a followed delegate's own `DecodedButStranded`
+verdict is discarded rather than propagated to the caller. Extended the existing
+`PROTOCOL_INTERNAL_CLIENTBOUND` allowlist (previously only consulted for
+`DecodedButStranded`) to also cover `Unclassified`, and added `UPDATE_TAGS` to it —
+same shape as `CHUNK_BATCH_START`, decoded on purpose with nothing to observe at its
+own edge.
+
 ### Consumer landed, decode arm still off-limits (2026-08-04)
 
 A follow-up pass this same day built real `lodestone-server` consumers for four of the
