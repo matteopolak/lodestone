@@ -215,12 +215,13 @@ impl BlockPipeline {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    // `VERTEX` only, for now: the struct carries `model.wgsl`'s
-                    // fog lanes so the two layouts are one type, but this
-                    // shader's fragment stage does not read them yet. Issue
-                    // #400 is the follow-on that does, and widens this to
-                    // `VERTEX_FRAGMENT`.
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    // Vertex reads the view-projection and the sky-darken lane;
+                    // fragment reads the fog block (eye, colour, range), so both
+                    // stages bind it — the same visibility `ModelPipeline`'s own
+                    // camera group uses. This was `VERTEX` only between issues
+                    // #76 and #400: the struct carried the fog lanes before the
+                    // shader read them.
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,

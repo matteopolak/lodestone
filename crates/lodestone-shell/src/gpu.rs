@@ -1577,6 +1577,12 @@ impl RenderState {
             .view_projection_warped(warp_intensity, warp_angle_degrees)
             .to_cols_array_2d();
 
+        // This frame's fog **and** its `sky_darken` lane, hoisted above both
+        // terrain paths so they physically cannot disagree (issue #400). It used
+        // to be computed inside the `if let Some(model)` below, which is why the
+        // packed path had no way to reach it.
+        let fog = self.fog_with_clock(camera.position);
+
         // The packed sections' shared camera buffer: **one** write, not one per
         // section. Until issue #76 this was a `queue.write_buffer` per resident
         // packed section, every frame, rewriting the whole 80-byte uniform just
@@ -1586,14 +1592,14 @@ impl RenderState {
         // written once, at upload (`upload_packed_section`), and selected at draw
         // time by a dynamic offset.
         //
-        // Fog is `disabled()` for now, which is what this path has always had —
-        // the packed shader does not read the lanes yet. Issue #400 is the
-        // follow-on that makes it fade with distance and darken at night.
+        // Carries the real fog since issue #400: the same `FogUniform` the model
+        // path gets, so the demo world and every headless gate now fade with
+        // distance and darken at night instead of rendering at a permanent noon.
         update_model_shared_camera_buffer(
             queue,
             &self.packed_shared_cam_buffer,
             view_proj,
-            FogUniform::disabled(),
+            fog,
         );
 
         // The model sections' (live vanilla path) shared camera+fog buffer:
@@ -1607,8 +1613,6 @@ impl RenderState {
         // per frame (up to ~4000/frame at the `sections=3880` measured in
         // issue #75's profile); see the module doc.
         if let Some(model) = &self.model {
-            let eye = camera.position;
-            let fog = self.fog_with_clock(eye);
             update_model_shared_camera_buffer(queue, &model.shared_cam_buffer, view_proj, fog);
         }
 
