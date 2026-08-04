@@ -73,10 +73,27 @@ const CHEST: [i32; 3] = [0, 0, 4];
 /// against a sky-blue clear, so the real separation is far above it.
 const NON_SKY: i32 = 60;
 
-/// Every chest sheet the jar ships, per `chest_texture_stems()`: 7 materials × 3
-/// halves + 1 half-independent ender sheet. Asserted so a *silently* jar-less run
-/// cannot pass this gate by drawing nothing.
-const EXPECTED_SHEETS: usize = 22;
+/// Every block-entity sheet the loader asks the jar for. Asserted so a *silently*
+/// jar-less run cannot pass this gate by drawing nothing.
+///
+/// **Derived, not a literal.** This was `22` — chests only — and went stale the
+/// moment the skull renderer added its own sheets to the same loader, failing a
+/// gate that had nothing to do with skulls. The loader iterates
+/// `block_entity_texture_stems()`, so asking that same function is the only way the
+/// number cannot drift again; hardcoding it restates a constant the draw already
+/// owns, which is the mistake CLAUDE.md warns about.
+///
+/// `MIN_SHEETS` keeps the original property the literal was there for: a derived
+/// count alone would still pass if the stem list *shrank* to nothing, so the floor
+/// catches a corpus that lost entries while the equality catches one that failed to
+/// decode them.
+fn expected_sheets() -> usize {
+    lodestone_render::block_entity::block_entity_texture_stems().len()
+}
+
+/// The chest-only corpus size, as a floor. Any future renderer only adds sheets, so
+/// dropping below this means the stem list itself regressed.
+const MIN_SHEETS: usize = 22;
 
 fn sky_bytes() -> [u8; 3] {
     SKY_COLOR.map(|c| (c * 255.0).round() as u8)
@@ -312,9 +329,15 @@ fn a_chest_draws_in_its_own_screen_rect_where_no_block_model_could() {
     // --- The sheets really loaded. -------------------------------------------
     // Without this a jar-less run draws nothing and every "the chest is absent"
     // assertion below would still be satisfiable by a broken renderer.
+    let expected = expected_sheets();
+    assert!(
+        expected >= MIN_SHEETS,
+        "the block-entity stem list itself regressed: {expected} stems, floor is \
+         {MIN_SHEETS} (the chest-only corpus). Renderers only add sheets."
+    );
     assert_eq!(
-        subject_stats.block_entity_sheets_loaded, EXPECTED_SHEETS,
-        "expected all {EXPECTED_SHEETS} chest sheets from client.jar; a short count \
+        subject_stats.block_entity_sheets_loaded, expected,
+        "expected all {expected} block-entity sheets from client.jar; a short count \
          means the pack is missing or a stem is misspelled, and this gate cannot \
          distinguish that from a broken pass"
     );
@@ -444,7 +467,8 @@ fn opening_the_lid_paints_above_the_closed_chests_silhouette() {
     assert_eq!(closed_stats.block_entities_drawn, 1);
     assert_eq!(open_stats.block_entities_drawn, 1);
     assert_eq!(
-        closed_stats.block_entity_sheets_loaded, EXPECTED_SHEETS,
+        closed_stats.block_entity_sheets_loaded,
+        expected_sheets(),
         "the vanilla pack must be present for this gate to mean anything"
     );
 

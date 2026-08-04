@@ -95,9 +95,15 @@ const CHEST: [i32; 3] = [0, 0, 4];
 /// Manhattan RGB distance above which a pixel counts as "not the clear colour".
 const NON_SKY: i32 = 60;
 
-/// Every chest sheet the jar ships: 7 materials × 3 halves + 1 ender sheet.
-/// Asserted so a silently jar-less run cannot pass by drawing nothing.
-const EXPECTED_SHEETS: usize = 22;
+/// Every block-entity sheet the loader asks the jar for, so a silently jar-less run
+/// cannot pass by drawing nothing.
+///
+/// **Derived, not a literal** — see `chest_block_entity_pixels.rs`'s copy for why.
+/// This was `22` (chests only) and went stale the moment the skull renderer added
+/// sheets to the same loader, failing a chest gate for a skull's reason.
+fn expected_sheets() -> usize {
+    lodestone_render::block_entity::block_entity_texture_stems().len()
+}
 
 fn sky_bytes() -> [u8; 3] {
     SKY_COLOR.map(|c| (c * 255.0).round() as u8)
@@ -440,8 +446,9 @@ fn a_chest_set_by_a_block_update_reaches_pixels_and_stops_when_removed() {
     // The vanilla pack really loaded; without this every "absent" assertion is
     // satisfiable by a renderer that draws nothing at all.
     assert_eq!(
-        subject_stats.block_entity_sheets_loaded, EXPECTED_SHEETS,
-        "expected all {EXPECTED_SHEETS} chest sheets from client.jar"
+        subject_stats.block_entity_sheets_loaded,
+        expected_sheets(),
+        "expected every block-entity sheet from client.jar"
     );
     assert_eq!(subject_stats.block_entities_drawn, 1);
     assert_eq!(subject_stats.block_entities_culled, 0);
@@ -648,8 +655,9 @@ fn a_locally_predicted_chest_reaches_pixels_with_no_server_packet() {
     let (updated_px, _) = shoot(updated_spawns);
 
     assert_eq!(
-        predicted_stats.block_entity_sheets_loaded, EXPECTED_SHEETS,
-        "expected all {EXPECTED_SHEETS} chest sheets from client.jar"
+        predicted_stats.block_entity_sheets_loaded,
+        expected_sheets(),
+        "expected every block-entity sheet from client.jar"
     );
     assert_eq!(predicted_stats.block_entities_drawn, 1);
     assert_eq!(unpredicted_stats.block_entities_drawn, 0);
@@ -823,8 +831,9 @@ fn a_refused_placement_loses_the_predicted_block_entity() {
     // before the correction. Without this, "no chest is drawn afterwards" is
     // satisfiable by never having drawn one.
     assert_eq!(
-        predicted_stats.block_entity_sheets_loaded, EXPECTED_SHEETS,
-        "expected all {EXPECTED_SHEETS} chest sheets from client.jar — without them \
+        predicted_stats.block_entity_sheets_loaded,
+        expected_sheets(),
+        "expected every block-entity sheet from client.jar — without them \
          'no chest drew' is satisfied by a renderer that cannot draw one"
     );
     assert_eq!(predicted_stats.block_entities_drawn, 1);
