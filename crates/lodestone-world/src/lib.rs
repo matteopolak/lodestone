@@ -84,6 +84,7 @@ mod light;
 mod lighting;
 mod packed;
 mod section;
+mod sign_text;
 mod world;
 
 pub use block_entity::BlockEntity;
@@ -98,6 +99,7 @@ pub use lighting::{
 };
 pub use packed::PackedArray;
 pub use section::ChunkSection;
+pub use sign_text::{SignDyeColor, SignSide, SignText};
 pub use world::{
     BlockEntitySync, ChunkPos, ColumnPatch, LightPatch, LoadedChunk, World, WorldSink,
 };

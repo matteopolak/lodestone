@@ -11,9 +11,12 @@ workspace = true
 [dependencies]
 lodestone-core = { workspace = true }
 thiserror = { workspace = true }
+# `sign_text`'s message lines arrive as JSON-encoded text-component strings
+# (see that module's doc) — a real dependency, promoted from the dev-only
+# entry this crate's tests/benches used to be the sole user of.
+serde_json = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 # Path dev-dependency, test-only: `tests/pool_footprint.rs` (issue #362) needs
 # real, JVM-verified overworld terrain rather than hand-built uniform sections
 # to measure the chunk-memory-pool question honestly. `lodestone-worldgen` has
