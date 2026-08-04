@@ -5,7 +5,7 @@
 //! and `docs/arm-swing-animation.md`.
 use lodestone_assets::ResourceLocation;
 use lodestone_render::{
-    Camera, CameraUniform, EntityCameraUniform, GpuEntityModel, GpuModelMesh,
+    Camera, CameraUniform, EntityCameraUniform, GpuEntityModel, GpuModelMesh, ItemStateContext,
     entity::{
         Arm, first_person_arm_parts, first_person_arm_pose_with_equip, first_person_item_mesh,
         hand_projection, hand_transform, model_for_type,
@@ -363,13 +363,34 @@ impl RenderState {
         // what makes a swap look like the new item dropping out of frame and coming
         // back, and it is the natural mistake: `main_hand` is right there and reads
         // like the answer.
+        // `firstperson_righthand`, resolved rather than assumed. This is the pass
+        // the `display_context` branch exists for: 26 of 26.2's items name a
+        // *different model* in the hand than in the inventory slot, and baking one
+        // form per item drew `item/spyglass`'s flat sprite here instead of
+        // `item/spyglass_in_hand`'s 3-D tube — and then posed it with
+        // `item/generated`'s `firstperson_righthand` rather than the in-hand
+        // model's, because `ItemIcon::display` is the first drawable part's map.
+        //
+        // `using` is `false`: the local player's using-item state has no fold on
+        // this side yet (see `docs/item-variants.md` — it needs a `Vitals`-shaped
+        // session component and a `PlayerSnapshot` line in `sim.rs`), so *our own*
+        // bow still draws slack while a remote player's and a mob's do not.
+        // `ARM.display_slot(true)` — the same expression `hand_transform` below
+        // reads the pose from, so the resolved variant and its transform cannot
+        // disagree about which slot this pass is.
+        let hand_ctx = ItemStateContext::new(ARM.display_slot(true));
         if let Some(item) = self.equip.visible()
             && let Some(model) = self.model.as_ref()
-            && let Some(geometry) = model.items.get(item)
+            && let Some(geometry) = model.items.get(item).and_then(|v| v.resolve(&hand_ctx))
         {
             // `true`: the *first-person* hand slot. `false` here reads
             // `thirdperson_righthand`, a different rotation and scale, and puts
             // the item at a plausible-but-wrong angle rather than off screen.
+            //
+            // `geometry.display` is now the **resolved variant's** map, so this
+            // reads `item/spyglass_in_hand`'s own transforms — which declare no
+            // `firstperson_righthand` at all, i.e. vanilla poses it with the
+            // identity, not with `item/generated`'s `[0, -90, 25]` / 0.68.
             let transform = hand_transform(&geometry.display, ARM, true);
             let mesh = first_person_item_mesh(
                 &geometry.quads,

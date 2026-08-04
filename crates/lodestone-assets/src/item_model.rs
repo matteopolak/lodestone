@@ -183,6 +183,28 @@ impl ItemModel {
         out
     }
 
+    /// Every output the tree can produce across **every** branch, in tree order
+    /// (duplicates preserved).
+    ///
+    /// The context-free union of [`Self::resolve`]: whatever context is supplied,
+    /// `resolve`'s result is a subsequence of this. That is the property a
+    /// *baker* needs — it must build geometry for every form a stack could take
+    /// before it knows which one any given frame will ask for, and for a flat
+    /// `builtin/generated` variant that means seeding its `layerN` sprites into
+    /// the atlas *before the atlas is stitched*.
+    ///
+    /// Distinct from [`Self::model_refs`], which throws the tint list away and so
+    /// cannot round-trip through [`crate::icon::ItemIconBuilder::part_for_model`];
+    /// and from [`Self::special_renderers`], which keeps only the `special`
+    /// nodes. This keeps both kinds, in the one type [`Self::resolve`] speaks, so
+    /// a caller can run the same classification over a variant it discovered as
+    /// over one a context chose.
+    pub fn outputs(&self) -> Vec<ItemModelOutput<'_>> {
+        let mut out = Vec::new();
+        collect_outputs(&self.root, &mut out);
+        out
+    }
+
     /// Resolves the tree for a concrete stack, returning the output(s) to render.
     /// A `composite` yields several; `empty`/unknown yields none. Pure over the
     /// tree (data) and the context (runtime state).
@@ -448,6 +470,45 @@ fn collect_specials<'a>(node: &'a ItemModelNode, out: &mut Vec<(&'a ResourceLoca
             }
         }
         ItemModelNode::Model { .. } | ItemModelNode::Empty | ItemModelNode::Other { .. } => {}
+    }
+}
+
+/// [`ItemModel::outputs`]'s walker: every branch, not the chosen one.
+///
+/// Deliberately shaped as a near-copy of [`resolve_node`] rather than sharing
+/// code with it through an "all branches" context. An `ItemPropertyContext` that
+/// claimed to take every branch cannot exist — `condition` returns one `bool` —
+/// so the alternative was a second trait, for no gain over eight arms.
+fn collect_outputs<'a>(node: &'a ItemModelNode, out: &mut Vec<ItemModelOutput<'a>>) {
+    match node {
+        ItemModelNode::Model { model, tints } => out.push(ItemModelOutput::Model { model, tints }),
+        ItemModelNode::Special { base, kind } => out.push(ItemModelOutput::Special { base, kind }),
+        ItemModelNode::Composite { models } => {
+            models.iter().for_each(|m| collect_outputs(m, out));
+        }
+        ItemModelNode::Condition {
+            on_true, on_false, ..
+        } => {
+            collect_outputs(on_true, out);
+            collect_outputs(on_false, out);
+        }
+        ItemModelNode::Select {
+            cases, fallback, ..
+        } => {
+            cases.iter().for_each(|c| collect_outputs(&c.model, out));
+            if let Some(f) = fallback {
+                collect_outputs(f, out);
+            }
+        }
+        ItemModelNode::RangeDispatch {
+            entries, fallback, ..
+        } => {
+            entries.iter().for_each(|e| collect_outputs(&e.model, out));
+            if let Some(f) = fallback {
+                collect_outputs(f, out);
+            }
+        }
+        ItemModelNode::Empty | ItemModelNode::Other { .. } => {}
     }
 }
 

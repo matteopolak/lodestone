@@ -129,6 +129,7 @@ fn a_woolly_sheep_draws_more_silhouette_than_a_sheared_one() {
         }),
         count: 1,
         name_tag: None,
+        item_use: None,
     };
     // The negative control: identical in every respect except shear state —
     // the briefing's own suggested pair.

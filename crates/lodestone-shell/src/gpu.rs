@@ -22,12 +22,13 @@
 use std::collections::HashMap;
 
 use lodestone_assets::ResourceLocation;
+use lodestone_assets::DisplaySlot;
 use lodestone_assets::entity_models::sheep_wool_tint;
 use lodestone_assets::equipment::{ArmourLayerType, ArmourSlot};
 use lodestone_render::{
     BlockAtlas, BlockPipeline, Camera, CameraUniform, DepthBuffer, ENTITY_FULLBRIGHT,
-    EntityCameraUniform, GpuAtlas, GpuMesh, GpuModelMesh, InstanceTint, ItemGeometry, Mesh,
-    ModelMesh, ModelPipeline, SpriteAnimation,
+    EntityCameraUniform, GpuAtlas, GpuMesh, GpuModelMesh, InstanceTint, ItemStateContext,
+    ItemVariants, Mesh, ModelMesh, ModelPipeline, SpriteAnimation,
     block::{camera_buffer, sprite_uv_buffer},
     crack_pipeline::{CrackPipeline, GpuCrackMesh},
     crack_resolver::CrackResolver,
@@ -373,9 +374,14 @@ impl RenderState {
             // Dropped items: snapshot the baked item geometry while `models` is
             // still in scope. The pass's camera bind group is built below,
             // shared with every section (see `origin_arena`).
-            let items: HashMap<ResourceLocation, ItemGeometry> = models
-                .items()
-                .map(|(id, geometry)| (id.clone(), geometry.clone()))
+            //
+            // `item_forms_iter`, not `items()`: the latter yields only the
+            // *inventory* form, and this snapshot feeds the world, the hand and
+            // every mob's hand as well. Taking the flattened one here is precisely
+            // the bug the variant axis exists to fix.
+            let items: HashMap<ResourceLocation, ItemVariants> = models
+                .item_forms_iter()
+                .map(|(id, variants)| (id.clone(), variants.clone()))
                 .collect();
             // The shared per-frame half of the section camera (view_proj +
             // fog) and the per-section origin arena (issue #75 — see the
@@ -1973,7 +1979,18 @@ impl RenderState {
             // No stack reported (today: all of them — see
             // `EntityInterpolator::set_item_stack`) or a sprite-only item with
             // no 3-D geometry: draw nothing rather than a stand-in.
-            let Some(geometry) = draw.item.as_ref().and_then(|id| model.items.get(id)) else {
+            //
+            // `DisplaySlot::Ground` is the context vanilla's
+            // `ItemEntityRenderer.extractRenderState` resolves in, and it is a real
+            // branch: `spyglass`, `trident` and the spears list `ground` alongside
+            // `gui` in their `display_context` case, so a drop must resolve there
+            // rather than inherit whatever the inventory picked.
+            let Some(geometry) = draw
+                .item
+                .as_ref()
+                .and_then(|id| model.items.get(id))
+                .and_then(|v| v.resolve(&ItemStateContext::new(DisplaySlot::Ground)))
+            else {
                 continue;
             };
             // A drop is at most a quarter-block across, so a cheap point-in-
@@ -2046,13 +2063,19 @@ impl RenderState {
         // The wire's stack first, the registration's default second. `and_then`
         // rather than `or_else` on the geometry lookup: an id that resolves to no
         // baked geometry should fall through to the default too, not draw nothing.
+        //
+        // `Ground`, as the drop pass: `extractRenderState` resolves a projectile's
+        // item in `ItemDisplayContext.GROUND` too, which is the same reason the
+        // pose below is `ground_transform` and not a projectile-specific one.
+        let ctx = ItemStateContext::new(DisplaySlot::Ground);
         let geometry = draw
             .item
             .as_ref()
             .and_then(|id| model.items.get(id))
+            .and_then(|v| v.resolve(&ctx))
             .or_else(|| {
                 let id: lodestone_assets::ResourceLocation = thrown.item.parse().ok()?;
-                model.items.get(&id)
+                model.items.get(&id)?.resolve(&ctx)
             });
         let Some(geometry) = geometry else {
             return;
@@ -2163,7 +2186,26 @@ impl RenderState {
                 // mesh at all. See this method's docs.
                 _ => continue,
             };
-            let Some(geometry) = model.items.get(id) else {
+            // Which variant this hand draws. Three things decide it, and all three
+            // are live here:
+            //
+            // * the display context — `thirdperson_{left,right}hand`, which is what
+            //   makes a mob's spyglass the 3-D tube rather than the flat sprite;
+            // * whether this entity is using an item at all;
+            // * **and which hand it is using.** Vanilla's `using_item` is
+            //   `owner.isUsingItem() && owner.getUseItem() == itemStack`, so a
+            //   skeleton drawing a bow in its main hand must not also draw its
+            //   off-hand item mid-use. `ItemUse::off_hand` is exactly that test,
+            //   and dropping it is the mistake that would bend both items.
+            let using = draw
+                .item_use
+                .is_some_and(|use_| use_.using && use_.off_hand == arm.is_left());
+            // `arm.display_slot(false)` — the *same* expression `hand_transform`
+            // below reads the pose from, so the variant and the transform cannot
+            // disagree about which hand this is.
+            let ctx = ItemStateContext::new(arm.display_slot(false))
+                .with_use(using, draw.item_use.map_or(0, |use_| use_.ticks));
+            let Some(geometry) = model.items.get(id).and_then(|v| v.resolve(&ctx)) else {
                 continue;
             };
             // Prefer the dedicated hand transform over `part_transforms[arm]`.
@@ -3018,6 +3060,7 @@ mod tests {
             wool: None,
             count: 1,
             name_tag: None,
+            item_use: None,
         };
 
         let instance = models
@@ -3789,6 +3832,7 @@ mod tests {
                 wool: None,
                 count: 1,
                 name_tag: None,
+                item_use: None,
             },
             // A second pig behind the camera so frustum culling has something
             // real to remove — the anti-vacuity guard on the cull path.
@@ -3807,6 +3851,7 @@ mod tests {
                 wool: None,
                 count: 1,
                 name_tag: None,
+                item_use: None,
             },
         ];
 
@@ -3978,6 +4023,7 @@ mod tests {
             wool: None,
             count: 1,
             name_tag: None,
+            item_use: None,
         }];
 
         // Fraction of a mob's bright pixels whose *hue direction* is far from the

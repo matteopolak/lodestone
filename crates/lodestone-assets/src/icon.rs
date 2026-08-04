@@ -49,6 +49,15 @@
 //! those items. [`GuiItemContext`] is [`DefaultItemContext`] plus
 //! `minecraft:display_context -> "gui"`, and is what an inventory/GUI-slot
 //! resolution (e.g. [`crate::item_atlas::ItemAtlas`]) should use instead.
+//!
+//! **But pinning the GUI context is only right for a GUI slot**, and this module
+//! used to be resolved once, at load, under that pin — so the *inventory* form
+//! was the only form baked, and a spyglass in the hand drew the flat sprite
+//! rather than `item/spyglass_in_hand`. [`DisplayContextItemContext`] answers the
+//! same property for any of vanilla's nine contexts, and
+//! [`ItemIconBuilder::definition`] / [`ItemModel::outputs`] /
+//! [`ItemIconBuilder::part_for_model`] together let a baker enumerate and build
+//! *every* form up front instead of one. See `docs/item-variants.md`.
 
 use crate::error::IconError;
 use crate::item::LAYER_NAMES;
@@ -175,9 +184,58 @@ impl ItemPropertyContext for DefaultItemContext {
     }
 }
 
+/// The `select` property naming which of vanilla's nine drawing contexts is
+/// being rendered — `ItemDisplayContext`, whose serialised names are exactly
+/// [`DisplaySlot::json_name`]'s (verified against
+/// `net/minecraft/world/item/ItemDisplayContext.java`, whose `NONE` is the only
+/// value with no `DisplaySlot`).
+pub const DISPLAY_CONTEXT_PROPERTY: &str = "minecraft:display_context";
+
+/// [`DefaultItemContext`] plus one honest answer for
+/// [`DISPLAY_CONTEXT_PROPERTY`]: the drawing context this pass is in.
+///
+/// The **static** half of item variant selection, and the half that needs no
+/// game state at all. 26 of 26.2's items branch on nothing else, and resolving
+/// them under a pinned `"gui"` is why a spyglass in the hand drew the flat
+/// inventory sprite instead of `item/spyglass_in_hand`'s tube: the branch is not
+/// "which stack is this", it is "which pass am I".
+///
+/// Prefer this over [`GuiItemContext`] anywhere the answer is not literally an
+/// inventory slot — a dropped item is [`DisplaySlot::Ground`], a mob's hand is
+/// [`DisplaySlot::ThirdPersonRightHand`], our own is
+/// [`DisplaySlot::FirstPersonRightHand`], and each of those resolves to a
+/// genuinely different model for those items.
+///
+/// It answers no `condition` and no other `select`, so a state-dependent item
+/// (a drawn bow) still flattens to its `on_false` form here — that needs live
+/// state, which this type deliberately does not pretend to have.
+#[derive(Debug, Clone, Copy)]
+pub struct DisplayContextItemContext(pub DisplaySlot);
+
+impl ItemPropertyContext for DisplayContextItemContext {
+    fn condition(&self, property: &str, component: Option<&str>) -> bool {
+        DefaultItemContext.condition(property, component)
+    }
+    fn select(&self, property: &str) -> Option<String> {
+        if property == DISPLAY_CONTEXT_PROPERTY {
+            Some(self.0.json_name().to_string())
+        } else {
+            DefaultItemContext.select(property)
+        }
+    }
+    fn range(&self, property: &str) -> f32 {
+        DefaultItemContext.range(property)
+    }
+}
+
 /// The [`ItemPropertyContext`] for the inventory/GUI slot appearance
 /// specifically: identical to [`DefaultItemContext`] except that
 /// `minecraft:display_context` resolves to `"gui"`.
+///
+/// Exactly [`DisplayContextItemContext`]`(DisplaySlot::Gui)`, kept as its own
+/// name because the GUI slot is the one context a *baker* has to single out: it
+/// is the form [`crate::item_atlas::ItemAtlas`] stitches and the fallback every
+/// other context degrades to.
 ///
 /// A handful of 26.2 items (`spyglass`, `trident`, the spears, every bundle)
 /// branch on `minecraft:display_context` at the top of their definition tree,
@@ -196,11 +254,7 @@ impl ItemPropertyContext for GuiItemContext {
         DefaultItemContext.condition(property, component)
     }
     fn select(&self, property: &str) -> Option<String> {
-        if property == "minecraft:display_context" {
-            Some("gui".to_string())
-        } else {
-            DefaultItemContext.select(property)
-        }
+        DisplayContextItemContext(DisplaySlot::Gui).select(property)
     }
     fn range(&self, property: &str) -> f32 {
         DefaultItemContext.range(property)
@@ -248,11 +302,44 @@ impl<'a> ItemIconBuilder<'a> {
         item: &ResourceLocation,
         ctx: &impl ItemPropertyContext,
     ) -> Result<ItemIcon, IconError> {
+        let def = self.definition(item)?;
+        self.icon_of(&def, ctx)
+    }
+
+    /// Reads and parses `items/<id>.json` — the selector tree, without resolving
+    /// it against any context.
+    ///
+    /// A caller that needs *every* form an item can take (a baker seeding an
+    /// atlas, a renderer re-resolving per frame) wants the tree itself, not one
+    /// context's answer: [`ItemModel::outputs`] enumerates the variants and
+    /// [`Self::part_for_model`] classifies each. Handing the tree out is also
+    /// what stops the definition being parsed once per context — resolution is
+    /// pure, so one parse serves every frame.
+    ///
+    /// # Errors
+    ///
+    /// [`IconError::DefinitionMissing`] if no `items/<id>.json` exists, or
+    /// [`IconError::Definition`] if it does not parse.
+    pub fn definition(&self, item: &ResourceLocation) -> Result<ItemModel, IconError> {
         let bytes = self
             .manager
             .read_asset(item, "items", "json")
             .ok_or_else(|| IconError::DefinitionMissing(item.to_string()))?;
-        let def = ItemModel::parse(&bytes)?;
+        Ok(ItemModel::parse(&bytes)?)
+    }
+
+    /// [`Self::icon_with`] over an already-parsed definition, so a caller holding
+    /// one from [`Self::definition`] does not re-read and re-parse the JSON to
+    /// resolve a second context.
+    ///
+    /// # Errors
+    ///
+    /// [`IconError::Model`] if a model the chosen branch names fails to resolve.
+    pub fn icon_of(
+        &self,
+        def: &ItemModel,
+        ctx: &impl ItemPropertyContext,
+    ) -> Result<ItemIcon, IconError> {
         let mut parts = Vec::new();
         // The **first** drawable part's display map wins; see `ItemIcon::display`
         // for why the icon carries one map rather than one per part. A part that
@@ -280,8 +367,13 @@ impl<'a> ItemIconBuilder<'a> {
     /// The display map is returned even for an `IconPart::Special`, whose `base`
     /// is a real model — a shield's in-hand transform is authored there even
     /// though the geometry comes from a block-entity renderer we do not have.
+    ///
+    /// Public because a *variant* baker walks [`ItemModel::outputs`] rather than
+    /// [`ItemModel::resolve`], and so needs the same classification without going
+    /// through [`Self::icon_of`] — which would collapse the tree back to one form,
+    /// the very thing the variant axis exists to stop.
     #[allow(clippy::type_complexity)]
-    fn part_for(
+    pub fn part_for(
         &self,
         output: ItemModelOutput<'_>,
     ) -> Result<(Option<IconPart>, Option<DisplayTransforms>), IconError> {
@@ -300,14 +392,22 @@ impl<'a> ItemIconBuilder<'a> {
                     display,
                 ))
             }
-            ItemModelOutput::Model { model, tints } => self.classify_model(model, tints),
+            ItemModelOutput::Model { model, tints } => self.part_for_model(model, tints),
         }
     }
 
     /// Resolves a model reference and classifies it into a [`IconPart`] plus the
     /// model's `display` transforms.
+    ///
+    /// Public for the same reason [`Self::part_for`] is, and it is the entry point
+    /// a variant baker actually wants: the `display` map that comes back is
+    /// **this model's**, not the icon's first-drawable-part map. That distinction
+    /// is the held-item transform bug — `item/bow_pulling_1` and
+    /// `item/spyglass_in_hand` each author their own `firstperson_righthand`, and
+    /// an [`ItemIcon`] resolved in the GUI context reports `item/generated`'s
+    /// instead.
     #[allow(clippy::type_complexity)]
-    fn classify_model(
+    pub fn part_for_model(
         &self,
         model: &ResourceLocation,
         tints: &[TintSource],

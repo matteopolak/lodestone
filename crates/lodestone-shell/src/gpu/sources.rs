@@ -237,6 +237,15 @@ impl ThirdPersonBodyState {
             // own body) — a deliberate gap, not an oversight; see
             // `docs/entity-nametags.md`.
             name_tag: None,
+            // **The one place a variant is still flattened**, and the reason our
+            // own bow draws slack while every remote player's and every mob's
+            // does not. `ItemUse` is an *ingest* component and the local player
+            // has no ingest entity, so this needs a session-level fold of the
+            // same shape as `Vitals` — see `docs/item-variants.md` for the exact
+            // three lines. `None` rather than a guess: the resolver then takes
+            // `on_false` and draws the resting model, which is what shipped
+            // before the variant axis existed.
+            item_use: None,
         }
     }
 }
