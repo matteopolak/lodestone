@@ -170,6 +170,42 @@ impl Sim {
         self.read(|w| w.resource::<EntityRayTarget>().0)
     }
 
+    /// `key.pickItem` — vanilla's `Minecraft.pickBlockOrEntity`
+    /// (`Minecraft.java:2342-2354`), middle-click by default
+    /// (`Options.java:669`). `include_data` is vanilla's `hasControlDown()`.
+    ///
+    /// Entity wins over block, for the same reason [`Self::begin_attack_live`]
+    /// already gives: [`EntityRayTarget`] is resolved as the *nearer* pick, so
+    /// preferring it here matches what the crosshair is actually on rather than
+    /// re-deciding the priority.
+    ///
+    /// Two distinct actions rather than one with an enum, because 26.2 splits
+    /// them on the wire — `PickItemFromBlock` carries a packed `BlockPos`,
+    /// `PickItemFromEntity` a VarInt entity id (see the v770 adapter's own
+    /// arms). Both encoders existed with **zero producers** before this method,
+    /// the same outbound-island shape `ClientAction::SetFlying` was caught in.
+    ///
+    /// Sent directly rather than through [`ActionQueue`], like the attack and
+    /// use paths: that queue drains inside the tick loop, and this is a discrete
+    /// click, not a per-tick one. No game-mode gate — vanilla's pick works in
+    /// every mode, spectator included.
+    pub fn pick_block_or_entity(&mut self, include_data: bool) {
+        if let Some(entity_id) = self.entity_target() {
+            if let Some(net) = &self.net {
+                net.send_action(ClientAction::PickItemFromEntity {
+                    entity_id,
+                    include_data,
+                });
+            }
+            return;
+        }
+        let Some(hit) = self.target() else { return };
+        let pos = BlockPos::new(hit.block[0], hit.block[1], hit.block[2]);
+        if let Some(net) = &self.net {
+            net.send_action(ClientAction::PickItemFromBlock { pos, include_data });
+        }
+    }
+
     /// Send the serverbound attack for `entity_id` — vanilla's
     /// `MultiPlayerGameMode.attack`'s outbound half. Lowers to
     /// `ClientAction::InteractEntity { interaction: EntityInteraction::Attack,

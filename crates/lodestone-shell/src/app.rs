@@ -328,6 +328,17 @@ pub(crate) enum KeyOutcome {
     /// carries no slot, only which of `ClientAction::DropSelectedItem`/
     /// `DropSelectedItemStack` `ctrl` selects.
     Drop { ctrl: bool },
+    /// `key.pickItem` pressed with **no screen open** — vanilla's
+    /// `Minecraft.pickBlockOrEntity` (`Minecraft.java:2342-2354`). `ctrl` is
+    /// `hasControlDown()`, forwarded as `include_data` on whichever
+    /// `ClientAction` fires, exactly the same carry-it-here split
+    /// [`Self::Drop`] makes.
+    PickItem { ctrl: bool },
+    /// `key.pickItem` pressed with a container screen open — `ClickType::CLONE`
+    /// against the hovered slot (`AbstractContainerScreen.java:495-501`). No
+    /// payload: unlike [`Self::ContainerDrop`], this click has no
+    /// modifier-selected variant.
+    ContainerPickItem,
     /// Begin (`true`) or end (`false`) a dig.
     Attack(bool),
     /// Press (`true`) or release (`false`) the use/place button.
@@ -431,6 +442,14 @@ pub(crate) fn resolve_key(
             })
         } else if let Some(slot) = hotbar_slot_for(binds, code) {
             Some(KeyOutcome::ContainerSwap { button: slot as i32 })
+        } else if binds.is(InputAction::PickItem, code) {
+            // Before the `Drop` arm below, matching vanilla's own
+            // `keyPickItem`-then-`keyDrop` order in
+            // `AbstractContainerScreen.keyPressed` (`:495-501`). The
+            // hovered-slot gate lives in `MenuInput::key_pressed`, so a miss
+            // resolves here and produces zero clicks downstream, exactly as the
+            // `Drop` arm's own comment describes.
+            Some(KeyOutcome::ContainerPickItem)
         } else if binds.is(InputAction::Drop, code) {
             // Vanilla checks this *after* `checkHotbarKeyPressed` returns,
             // not folded into it — `AbstractContainerScreen.java:494-500` is
@@ -498,6 +517,12 @@ pub(crate) fn resolve_key(
         // As above: dormant under the default mouse binding. Both edges
         // matter here too, not just on press — see `KeyOutcome::Use`'s docs.
         Some(KeyOutcome::Use(pressed))
+    } else if binds.is(InputAction::PickItem, code) && pressed && gate.gameplay {
+        // Press-only: vanilla's `pickBlockOrEntity` is a one-shot, unlike
+        // attack/use whose release edge also matters. Reachable by keyboard only
+        // once `key.pickItem` is rebound off its default middle mouse button;
+        // the mouse path in the button handler is what fires out of the box.
+        Some(KeyOutcome::PickItem { ctrl })
     } else if let Some(action) = movement_action_for(binds, code)
         && gate.gameplay
     {
@@ -1912,6 +1937,32 @@ impl WindowApp {
             creative: false,
         };
         for click in self.menu_input.key_pressed(hit, ContainerMenuKey::Drop { ctrl }, ctx, &menu) {
+            self.send_menu_click(click);
+        }
+    }
+
+    /// `key.pickItem` pressed with a container screen open — `ClickType::CLONE`
+    /// against the hovered slot (`AbstractContainerScreen.java:495-501`).
+    ///
+    /// Identical in shape to [`Self::send_container_drop`] except that there is
+    /// no modifier variant to carry: vanilla's clone click has no `ctrl` form.
+    /// The same `creative: false` gap applies — no game-mode plumbing exists on
+    /// `Sim` yet, which matters more here than for drop, because vanilla's clone
+    /// click is *creative-only*; until that lands this resolves and then produces
+    /// no clicks, which is the honest degradation rather than a fabricated one.
+    fn send_container_pick_item(&self) {
+        let (Some(menu), Some((w, h))) = (
+            self.active_container_menu(),
+            self.target.as_ref().map(RenderTarget::size),
+        ) else {
+            return;
+        };
+        let hit = hit_test_with_scale(&menu, self.nav.gui_scale(), w, h, self.cursor.0, self.cursor.1);
+        let ctx = MenuContext {
+            cursor_loaded: menu.carried().is_some(),
+            creative: false,
+        };
+        for click in self.menu_input.key_pressed(hit, ContainerMenuKey::PickItem, ctx, &menu) {
             self.send_menu_click(click);
         }
     }
@@ -3376,6 +3427,14 @@ impl ApplicationHandler for WindowApp {
                         (Some(InputAction::Use), ElementState::Released) => {
                             self.sim.end_use();
                         }
+                        // Middle-click by default (`Options.java:669` binds
+                        // `key.pickItem` to `Type.MOUSE, 2`), so unlike
+                        // attack/use this is the *primary* route rather than the
+                        // rebound one. Press-only: `pickBlockOrEntity` is a
+                        // one-shot with no release edge.
+                        (Some(InputAction::PickItem), ElementState::Pressed) => {
+                            self.sim.pick_block_or_entity(self.ctrl_held);
+                        }
                         // A movement action bound to a mouse button still drives
                         // the controller, on both edges.
                         (Some(action), _) => {
@@ -3592,7 +3651,9 @@ impl ApplicationHandler for WindowApp {
                     Some(KeyOutcome::ContainerDrop { ctrl }) => {
                         self.send_container_drop(ctrl);
                     }
+                    Some(KeyOutcome::ContainerPickItem) => self.send_container_pick_item(),
                     Some(KeyOutcome::Drop { ctrl }) => self.send_drop_selected(ctrl),
+                    Some(KeyOutcome::PickItem { ctrl }) => self.sim.pick_block_or_entity(ctrl),
                     // The *other* off-hand route (#385): no screen, no slot, a
                     // bare `ServerboundPlayerAction`. Sent straight through
                     // `NetClient` rather than queued into `ActionQueue`, which is
