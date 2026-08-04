@@ -260,6 +260,38 @@ outlive the call.
 
 ## How to change it
 
+### Gotcha 0 — `build_sprite_pipeline` is a code dedup, not a resource one
+
+`item_icon::build_sprite_pipeline` builds the four `wgpu` objects a textured
+sprite pass needs — bind-group layout, pipeline layout, render pipeline, bind
+group — plus the dynamic vertex buffer, from a shader source, a
+`wgpu::TextureFormat` and a `&Atlas`. It exists because that construction used
+to be hand-copied in three places: `HudRenderer::attach_gui`,
+`MenuRenderer::attach_gui` and `IconRenderer::attach_items` itself (the latter
+already serving both `HudRenderer::attach_items` and
+`ContainerRenderer::attach_items`, which delegate to it and never duplicated
+this code). Each of those three now calls the shared function instead of
+repeating ~90 lines of descriptors apiece.
+
+**It does not share a bind-group layout, pipeline or bind group *instance*
+across those three call sites, and never did.** `wgpu` does not deduplicate
+structurally-equal layouts (see `docs/armour-rendering.md`'s note on the
+armour pipeline), and before this function existed each of the three sites
+independently built its own layout/pipeline/bind group — verified by reading
+each site's code before moving it. `build_sprite_pipeline` is called three
+times and allocates fresh `wgpu` objects on every call, exactly as the three
+call sites did before, so nothing that depended on object identity changed.
+If a future caller ever needs to *share* one pipeline across screens (not just
+share the code that builds it), that is a different, larger change than this
+one and needs its own identity audit.
+
+One cosmetic difference: the pre-refactor `attach_gui` sites gave each
+`wgpu` object its own suffixed debug label (`"hud-sprite-bgl"`,
+`"hud-sprite-pipeline"`, …); `build_sprite_pipeline` reuses one `label` for
+all of them, matching the convention `IconRenderer::attach_items`'s
+pre-existing `label` parameter already used for its own two callers. Labels
+are debugger-only and invisible to every pixel gate in this crate.
+
 ### Gotcha 1 — do not add a fifth bind group
 
 The model shader declares exactly four: camera (0), atlas (1), palette (2),

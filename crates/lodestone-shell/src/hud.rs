@@ -299,6 +299,22 @@ pub struct HudFrame<'a> {
     pub chat: &'a [(&'a str, f32)],
     /// The in-progress chat input line, `Some` only while the chat box is open.
     pub chat_input: Option<&'a str>,
+    /// Whether the input line's blinking append-caret is in its "on" phase
+    /// this frame; only meaningful while `chat_input` is `Some`. Vanilla
+    /// blinks it every 300ms (`TextCursorUtils.CURSOR_BLINK_INTERVAL_MS`,
+    /// `.cache/mc/26.2/client-src/net/minecraft/client/gui/components/TextCursorUtils.java:9,20-22`,
+    /// `isCursorVisible(millis) == (millis / 300) % 2 == 0`) — the caller
+    /// computes this from a wall clock with that same formula so this pure
+    /// geometry module owns no clock of its own. Defaults to always-visible
+    /// (see [`HudFrame::new`]) so every pre-existing test keeps drawing a
+    /// caret without having to know about blinking.
+    pub chat_caret_visible: bool,
+    /// The persisted Chat Settings values that shape the scrollback/input
+    /// draw — see [`ChatDisplayOptions`]. Defaults to vanilla's own defaults
+    /// (see [`HudFrame::new`]), so a caller that never sets this renders
+    /// exactly as the fields alone would suggest, not as some other implicit
+    /// baseline.
+    pub chat_options: ChatDisplayOptions,
     /// Formatted player-list rows, `Some` only while the tab overlay is held.
     pub players: Option<&'a [String]>,
     /// The scoreboard sidebar to draw on the right edge, `Some` when displayed.
@@ -393,6 +409,8 @@ impl<'a> HudFrame<'a> {
             crosshair: true,
             chat: &[],
             chat_input: None,
+            chat_caret_visible: true,
+            chat_options: ChatDisplayOptions::default(),
             players: None,
             sidebar: None,
             boss_bars: &[],
@@ -409,6 +427,93 @@ impl<'a> HudFrame<'a> {
             attack_cooldown: None,
         }
     }
+}
+
+/// Vanilla's Chat Settings (plus one Accessibility-screen field it shares)
+/// values that shape how the scrollback and input line draw —
+/// `net.minecraft.client.Options`'s `chat*` fields
+/// (`.cache/mc/26.2/client-src/net/minecraft/client/Options.java:271-404,508`).
+/// `Copy` for the same reason [`crate::config::Options`] is: cheap to read
+/// once per frame with no borrow to fight.
+///
+/// Deliberately **not** every vanilla chat option: `chatVisibility` (System/
+/// Hidden filtering), `chatColors`' link-adjacent siblings `chatLinks`/
+/// `chatLinksPrompt`, and `chatDelay` all live upstream of this draw layer —
+/// the first needs a per-line message-source tag `ChatLog::recent` currently
+/// flattens away, the other three need click/rate-limit plumbing this HUD has
+/// none of. Landing an option field with no reader is the exact defect this
+/// repo's own `CLAUDE.md` calls the dominant one, so those stay out until
+/// something upstream can actually consume them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ChatDisplayOptions {
+    /// `options.chat.scale` (`Options.java:363-370`), `0.0..=1.0`. A
+    /// pose-scale multiplier layered on top of this HUD's own fixed 2×
+    /// legibility factor — see the draw site in [`HudGeometry::build_inner`]
+    /// for how the two combine.
+    pub scale: f32,
+    /// `options.chat.width` (`Options.java:371-378`), `0.0..=1.0`. Fed
+    /// through [`chat_width_px`] (vanilla's `ChatComponent.getWidth`,
+    /// `ChatComponent.java:416-420`) to size the chat box.
+    pub width_pct: f32,
+    /// `options.chat.height.unfocused` (`Options.java:379-386`), `0.0..=1.0`
+    /// — box height while the chat box is **closed**.
+    pub height_pct_unfocused: f32,
+    /// `options.chat.height.focused` (`Options.java:387-394`), `0.0..=1.0` —
+    /// box height while the chat box is **open**.
+    pub height_pct_focused: f32,
+    /// `options.chat.line_spacing` (`Options.java:292-294`), `0.0..=1.0`:
+    /// extra fraction of a line's height inserted between chat rows
+    /// (`ChatComponent.java:154`, `entryHeight = messageHeight * (spacing +
+    /// 1.0)`).
+    pub line_spacing: f32,
+    /// `options.chat.opacity` (`Options.java:284-291`), `0.0..=1.0`. Text
+    /// alpha is `text_opacity * 0.9 + 0.1` (`ChatComponent.java:149`) — never
+    /// fully transparent, matching vanilla.
+    pub text_opacity: f32,
+    /// `options.accessibility.text_background_opacity` (`Options.java:305-312`),
+    /// `0.0..=1.0`. Used directly as the per-line background fill alpha
+    /// (`ChatComponent.java:150,167`).
+    pub background_opacity: f32,
+    /// `options.chat.color` (`Options.java:508`). `false` strips every
+    /// legacy `§` code before drawing a scrollback line
+    /// (`ComponentRenderUtils.stripColor`, `ComponentRenderUtils.java:21`) —
+    /// it never touches the input line, which cannot carry codes
+    /// ([`crate::chat::ChatInput::push_char`] filters `§` on the way in).
+    pub colors: bool,
+}
+
+impl Default for ChatDisplayOptions {
+    fn default() -> Self {
+        Self {
+            scale: 1.0,
+            width_pct: 1.0,
+            height_pct_unfocused: 70.0 / 160.0,
+            height_pct_focused: 1.0,
+            line_spacing: 0.0,
+            text_opacity: 1.0,
+            background_opacity: 0.5,
+            colors: true,
+        }
+    }
+}
+
+/// Vanilla's `ChatComponent.getWidth` (`ChatComponent.java:416-420`): maps the
+/// `0.0..=1.0` `chatWidth` option onto `40.0..=320.0` **screen** pixels — the
+/// same logical-canvas unit [`crate::menu::render::logical_canvas`] returns
+/// (see [`HudGeometry::build_inner`]'s own doc on why that canvas *is*
+/// vanilla's `guiScaledWidth`/`Height`), so this is directly comparable to
+/// `Builder::w` with no further conversion.
+#[must_use]
+pub fn chat_width_px(pct: f32) -> f32 {
+    (pct * 280.0 + 40.0).floor()
+}
+
+/// As [`chat_width_px`], vanilla's `ChatComponent.getHeight`
+/// (`ChatComponent.java:422-426`): maps `0.0..=1.0` onto `20.0..=180.0` screen
+/// pixels.
+#[must_use]
+pub fn chat_height_px(pct: f32) -> f32 {
+    (pct * 160.0 + 20.0).floor()
 }
 
 /// Builds the HUD vertex stream (positions in NDC, RGBA per vertex) for a given
@@ -582,25 +687,94 @@ impl HudGeometry {
         // received log stacked above it. Received lines carry legacy `§` colour
         // codes (rendered as coloured runs) and fade out with age like vanilla
         // once the box is closed; while it's open, the full history stays lit.
+        //
+        // `opts` is [`ChatDisplayOptions`] — see that type for the vanilla
+        // field each knob reproduces. `chat_pose_scale` folds this HUD's own
+        // fixed 2× legibility factor (`scale`, defined above — shared with the
+        // debug overlay) together with the `chatScale` option exactly the way
+        // vanilla layers its own pose scale on top of the font's native size
+        // (`pose.scale(scale, scale)`, `ChatComponent.java:161`): at the
+        // default `opts.scale == 1.0` this is byte-identical to the pre-options
+        // behaviour, so an untouched install looks exactly as it did before
+        // these fields existed.
         let chat_open = frame.chat_input.is_some();
-        let input_y = b.h - margin - glyph_h * scale;
+        let opts = frame.chat_options;
+        let chat_pose_scale = scale * opts.scale.max(0.0);
+        // Vanilla's unscaled per-line stride is 9px
+        // (`ChatComponent.MESSAGE_BOTTOM_TO_MESSAGE_TOP`/`messageHeight`,
+        // `ChatComponent.java:151,154`); `glyph_h + 2.0` is this HUD's own 5×7
+        // analogue. `entryHeight = messageHeight * (lineSpacing + 1.0)`
+        // (`ChatComponent.java:154`) is computed *before* the pose scale is
+        // applied, so line-spacing multiplies the base stride and
+        // `chat_pose_scale` multiplies the whole result, matching that order.
+        let chat_line_h = (glyph_h + 2.0) * (1.0 + opts.line_spacing.max(0.0)) * chat_pose_scale;
+        // `chat_width_px`/`chat_height_px` are vanilla's own
+        // `ChatComponent.getWidth`/`getHeight` formulas, in the same
+        // logical-canvas pixel unit as `b.w`/`b.h` (see their doc comments),
+        // so no further conversion is needed to compare them against `b.w`.
+        let chat_box_w = chat_width_px(opts.width_pct.clamp(0.0, 1.0)).min(b.w);
+        let chat_height_pct = if chat_open {
+            opts.height_pct_focused
+        } else {
+            opts.height_pct_unfocused
+        };
+        let chat_box_h = chat_height_px(chat_height_pct.clamp(0.0, 1.0));
+        // `textOpacity = chatOpacity * 0.9 + 0.1` (`ChatComponent.java:149`) —
+        // never fully transparent even at `chatOpacity == 0.0`.
+        let chat_text_opacity = opts.text_opacity.clamp(0.0, 1.0).mul_add(0.9, 0.1);
+        let chat_bg_opacity = opts.background_opacity.clamp(0.0, 1.0);
+        let input_y = b.h - margin - glyph_h * chat_pose_scale;
         if let Some(input) = frame.chat_input {
             // A translucent strip so text stays legible over bright terrain.
-            b.rect_px(0.0, input_y - 3.0, b.w * 0.6, line_h, [0.0, 0.0, 0.0, 0.55]);
-            // A trailing underscore stands in for a caret (no blink). The typed
-            // line is always plain (input filters `§`), so a flat draw is right.
+            // Vanilla's real `EditBox` has no equivalent knob of its own; this
+            // reuses `chat_bg_opacity` rather than inventing an unread
+            // constant, since it is the same "background behind chat text"
+            // concept as the scrollback rows just below.
+            b.rect_px(
+                0.0,
+                input_y - 3.0,
+                chat_box_w,
+                chat_line_h,
+                [0.0, 0.0, 0.0, chat_bg_opacity],
+            );
+            // No leading `>` — vanilla's `ChatScreen`/`EditBox` draws no
+            // prompt glyph at all, just the typed text and a caret. A
+            // trailing underscore stands in for vanilla's append-caret
+            // (`TextCursorUtils.extractAppendCursor`,
+            // `TextCursorUtils.java:15-17`, drawn because the shell's
+            // `ChatInput` only ever edits at the end of the line, vanilla's
+            // "cursor at end" case); `chat_caret_visible` blinks it at
+            // vanilla's real 300ms rate (see [`HudFrame::chat_caret_visible`]).
+            // The typed line itself is always plain (input filters `§`), so a
+            // flat, non-legacy draw is right, and at **full** opacity — vanilla
+            // never multiplies the input `EditBox`'s own text by `chatOpacity`,
+            // which only governs the scrollback below.
+            let caret = if frame.chat_caret_visible { "_" } else { "" };
             b.text(
-                &format!("> {input}_"),
+                &format!("{input}{caret}"),
                 margin,
                 input_y,
-                scale,
+                chat_pose_scale,
                 [1.0, 1.0, 1.0, 1.0],
             );
         }
         let chat_bottom = if chat_open { input_y } else { b.h - margin };
-        // Show more history while actively typing than during play.
-        let max_lines = if chat_open { 18 } else { 10 };
-        for (i, (line, age)) in frame.chat.iter().rev().take(max_lines).enumerate() {
+        // How many visual rows fit the configured box height — vanilla's
+        // `ChatComponent.getLinesPerPage` (`ChatComponent.java:434-436`,
+        // `height / lineHeight`), derived from the same `chat_box_h`/
+        // `chat_line_h` the draw below actually uses, not a restated
+        // constant.
+        let max_visual_rows = (chat_box_h / chat_line_h).floor().max(1.0) as usize;
+        let mut row_i = 0usize;
+        // Each logical entry can wrap into several visual rows, all sharing
+        // that entry's age/alpha. Vanilla stacks a wrapped message's *last*
+        // split line nearest the bottom edge and its earlier lines above it
+        // (`ChatComponent.addMessageToDisplayQueue`'s per-line `addFirst`,
+        // `ChatComponent.java:288-297`, combined with `forEachLine`'s
+        // `lineIndex → chatBottom - lineIndex * entryHeight`,
+        // `ChatComponent.java:164-168`) — reversing each entry's own wrapped
+        // rows before stacking reproduces that order.
+        'entries: for (line, age) in frame.chat.iter().rev() {
             // While open, every line is fully lit; while closed, lines fade over
             // their last two seconds of a ten-second life and then disappear.
             let alpha = if chat_open {
@@ -613,18 +787,38 @@ impl HudGeometry {
                 // older still, so there is nothing more to draw.
                 break;
             }
-            let y = chat_bottom - (i as f32 + 1.0) * line_h;
-            if y < margin {
-                break;
+            // `options.chat.color == false` strips every legacy code before
+            // wrapping/drawing (`ComponentRenderUtils.stripColor`) rather than
+            // just ignoring them while drawing, matching vanilla.
+            let stripped = if opts.colors { None } else { Some(strip_legacy(line)) };
+            let display: &str = stripped.as_deref().unwrap_or(line);
+            let mut sub_rows = b.wrap_legacy(display, chat_box_w, chat_pose_scale);
+            sub_rows.reverse();
+            for sub in sub_rows {
+                if row_i >= max_visual_rows {
+                    break 'entries;
+                }
+                let y = chat_bottom - (row_i as f32 + 1.0) * chat_line_h;
+                if y < margin {
+                    break 'entries;
+                }
+                b.rect_px(
+                    0.0,
+                    y - 1.0,
+                    chat_box_w,
+                    chat_line_h,
+                    [0.0, 0.0, 0.0, chat_bg_opacity * alpha],
+                );
+                b.text_legacy(
+                    &sub,
+                    margin,
+                    y,
+                    chat_pose_scale,
+                    [0.92, 0.94, 1.0],
+                    alpha * chat_text_opacity,
+                );
+                row_i += 1;
             }
-            b.rect_px(
-                0.0,
-                y - 1.0,
-                b.w * 0.6,
-                line_h,
-                [0.0, 0.0, 0.0, 0.4 * alpha],
-            );
-            b.text_legacy(line, margin, y, scale, [0.92, 0.94, 1.0], alpha);
         }
 
         // Crosshair: a white plus at the centre.
@@ -1206,6 +1400,88 @@ fn strip_legacy(s: &str) -> String {
     out
 }
 
+/// Greedy word-wrap of a legacy `§`-coded line into rows that each fit
+/// `max_width_px`, measured by calling `measure` on each candidate row.
+/// [`Builder::wrap_legacy`] binds `measure` to real vanilla proportional
+/// glyph advances (when a [`VanillaFont`] is attached) or the fixed 5×7
+/// advance otherwise — this free function takes the measure as a parameter
+/// precisely so its wrap *decisions* can be tested against a hand-specified
+/// width table with no `Builder`, atlas, or jar involved.
+///
+/// Mirrors vanilla's own reflow in shape (`GuiMessage.splitLines`, invoked
+/// from `ChatComponent.addMessageToDisplayQueue`, `ChatComponent.java:284-285`):
+/// break on a space when the next word would overflow, and hard-break a
+/// single word that alone exceeds the width so nothing can escape the box. A
+/// `§` colour/format code seen before a break is carried onto the
+/// continuation line, because a code resets formatting to just itself
+/// (`lodestone-model/src/text.rs:626-644`) — tracking only the single most
+/// recent one is therefore sufficient to keep the colour continuous across
+/// the wrap.
+///
+/// Never returns an empty vector: an empty `s` yields one empty row, and a
+/// `max_width_px <= 0.0` (or a line that already fits) is returned as a
+/// single unwrapped row rather than looping forever trying to shrink it.
+fn wrap_legacy_with(measure: impl Fn(&str) -> f32, s: &str, max_width_px: f32) -> Vec<String> {
+    if max_width_px <= 0.0 || measure(s) <= max_width_px {
+        return vec![s.to_string()];
+    }
+    let mut rows = Vec::new();
+    let mut current = String::new();
+    let mut pending_code: Option<String> = None;
+    for word in s.split(' ') {
+        // The last `§`+selector pair inside this word, if any — what a
+        // continuation line started *after* this word must be seeded with to
+        // keep reading the same colour.
+        let mut word_pending = pending_code.clone();
+        let mut chars = word.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\u{00a7}' {
+                if let Some(code) = chars.next() {
+                    word_pending = Some(format!("\u{00a7}{code}"));
+                }
+            }
+        }
+
+        let candidate = if current.is_empty() {
+            word.to_string()
+        } else {
+            format!("{current} {word}")
+        };
+        if measure(&candidate) <= max_width_px {
+            current = candidate;
+            pending_code = word_pending;
+            continue;
+        }
+        if !current.is_empty() {
+            rows.push(std::mem::take(&mut current));
+            if let Some(code) = &pending_code {
+                current.push_str(code);
+            }
+        }
+        let seeded = format!("{current}{word}");
+        if measure(&seeded) <= max_width_px {
+            current = seeded;
+        } else {
+            // The word alone overflows even a fresh line: hard-break it
+            // character by character. `§`/selector characters are
+            // zero-width, so they never trigger a break by themselves.
+            for ch in word.chars() {
+                let attempt = format!("{current}{ch}");
+                if !current.is_empty() && measure(&attempt) > max_width_px {
+                    rows.push(std::mem::take(&mut current));
+                    if let Some(code) = &pending_code {
+                        current.push_str(code);
+                    }
+                }
+                current.push(ch);
+            }
+        }
+        pending_code = word_pending;
+    }
+    rows.push(current);
+    rows
+}
+
 /// The RGB of one of the sixteen legacy `§` colour codes (`0`..=`9`, `a`..=`f`),
 /// or `None` for a format/reset code. These are the standard Minecraft chat
 /// foreground colours; the shell paints them locally, which is a rendering
@@ -1298,6 +1574,34 @@ impl<'a> Builder<'a> {
             Some(f) => f.legacy_width(s, scale),
             None => item_icon::text_w(&strip_legacy(s), scale),
         }
+    }
+
+    /// Greedy word-wrap of a legacy `§`-coded line into rows that each fit
+    /// `max_width_px` at `scale`, measured with whichever metrics
+    /// [`Builder::legacy_width`] reports — real vanilla proportional glyph
+    /// advances when a [`VanillaFont`] is attached, the fixed 5×7 advance
+    /// otherwise. Mirrors vanilla's own reflow in shape (`GuiMessage.splitLines`,
+    /// invoked from `ChatComponent.addMessageToDisplayQueue`,
+    /// `ChatComponent.java:284-285`): break on a space when the next word
+    /// would overflow, and hard-break a single word that alone exceeds the
+    /// width so nothing can escape the box. A `§` colour/format code seen
+    /// before a break is carried onto the continuation line, because a code
+    /// resets formatting to just itself
+    /// (`lodestone-model/src/text.rs:626-644`) — tracking only the single
+    /// most recent one is therefore sufficient to keep the colour continuous
+    /// across the wrap.
+    ///
+    /// Never returns an empty vector: an empty `s` yields one empty row, and a
+    /// `max_width_px <= 0.0` (or a line that already fits) is returned as a
+    /// single unwrapped row rather than looping forever trying to shrink it.
+    ///
+    /// A thin wrapper over [`wrap_legacy_with`] bound to this `Builder`'s own
+    /// [`Builder::legacy_width`] — see that function for the algorithm. Kept
+    /// separate so the wrap logic itself can be unit-tested against an
+    /// injected width table (real proportional advances) without needing a
+    /// GPU, an atlas, or a loaded jar.
+    fn wrap_legacy(&self, s: &str, max_width_px: f32, scale: f32) -> Vec<String> {
+        wrap_legacy_with(|t| self.legacy_width(t, scale), s, max_width_px)
     }
 
     /// Draw one hotbar slot's icon into the `size`×`size` rect at `(x, y)`: the
@@ -1645,113 +1949,22 @@ impl HudRenderer {
         color_format: wgpu::TextureFormat,
         atlas: Arc<GuiAtlas>,
     ) {
-        let gpu = GpuAtlas::from_atlas(device, queue, atlas.atlas());
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("hud-sprite-shader"),
-            source: wgpu::ShaderSource::Wgsl(HUD_SPRITE_WGSL.into()),
-        });
-        let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("hud-sprite-bgl"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("hud-sprite-layout"),
-            bind_group_layouts: &[Some(&bind_layout)],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("hud-sprite-pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: (SPRITE_FLOATS_PER_VERTEX * 4) as wgpu::BufferAddress,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 8,
-                            shader_location: 1,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x4,
-                            offset: 16,
-                            shader_location: 2,
-                        },
-                    ],
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: color_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("hud-sprite-bg"),
-            layout: &bind_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&gpu.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&gpu.sampler),
-                },
-            ],
-        });
-        let capacity_floats = 4096;
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("hud-sprite-verts"),
-            size: (capacity_floats * 4) as wgpu::BufferAddress,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let sp = item_icon::build_sprite_pipeline(
+            device,
+            queue,
+            atlas.atlas(),
+            HUD_SPRITE_WGSL,
+            color_format,
+            4096,
+            "hud-sprite",
+        );
         self.gui = Some(GuiHud {
             atlas,
-            gpu,
-            pipeline,
-            bind_group,
-            buffer,
-            capacity_floats,
+            gpu: sp.gpu,
+            pipeline: sp.pipeline,
+            bind_group: sp.bind_group,
+            buffer: sp.buffer,
+            capacity_floats: sp.capacity_floats,
         });
     }
 
@@ -2216,6 +2429,393 @@ mod tests {
         };
         let with_chat = HudGeometry::build(&frame, 640, 480).vertex_count();
         assert!(with_chat > base, "chat log + input line must add geometry");
+    }
+
+    /// Regression gate for the player report's third defect: `hud.rs` used to
+    /// draw `format!("> {input}_")` unconditionally, so a `>` prompt appeared
+    /// that vanilla's own `ChatScreen`/`EditBox` never draws. An empty input
+    /// with the caret off must therefore draw *nothing* beyond its background
+    /// strip, and turning the caret on must add exactly one `_` glyph — a
+    /// negative control (caret off) plus a positive one (caret on) rather than
+    /// eyeballing a vertex-count increase.
+    #[test]
+    fn no_stray_prompt_prefix_and_caret_blinks() {
+        let stats = DebugStats::default();
+        let caret_off = HudGeometry::build(
+            &HudFrame {
+                crosshair: false,
+                show_debug: false,
+                chat_input: Some(""),
+                chat_caret_visible: false,
+                ..HudFrame::new(&stats)
+            },
+            640,
+            480,
+        );
+        // Only the input row's own translucent background rect (one quad =
+        // 6 vertices) may be here — no `>` , no space, nothing.
+        assert_eq!(
+            caret_off.vertex_count(),
+            6,
+            "an empty input with the caret off must draw only its background strip"
+        );
+
+        let caret_on = HudGeometry::build(
+            &HudFrame {
+                crosshair: false,
+                show_debug: false,
+                chat_input: Some(""),
+                chat_caret_visible: true,
+                ..HudFrame::new(&stats)
+            },
+            640,
+            480,
+        );
+        // `_`'s bitmap (`font::glyph_rows('_')`) lights only its bottom row's
+        // 5 bits — exactly 5 quads = 30 vertices, not a guess.
+        assert_eq!(
+            caret_on.vertex_count(),
+            caret_off.vertex_count() + 30,
+            "chat_caret_visible must toggle exactly one `_` glyph (5 lit pixels)"
+        );
+    }
+
+    /// Predicts the exact geometry of a hard-wrapped chat line from first
+    /// principles (box width, the fixed fallback font's per-char advance, and
+    /// `a`'s own lit-pixel count), rather than merely asserting "it wrapped" —
+    /// CLAUDE.md's *magnitude* species of vacuous test is a predicate that
+    /// would pass for any wrap width; this one would fail for a wrong one.
+    #[test]
+    fn a_long_line_with_no_spaces_hard_wraps_at_the_predicted_row_count() {
+        let stats = DebugStats::default();
+        let line = "a".repeat(30);
+        let chat = [(line.as_str(), 0.0_f32)];
+        let geo = HudGeometry::build(
+            &HudFrame {
+                crosshair: false,
+                show_debug: false,
+                chat: &chat,
+                ..HudFrame::new(&stats)
+            },
+            640,
+            480,
+        );
+        // The default chat box is `chat_width_px(1.0) == 320`px wide (capped
+        // at `b.w == 640`, so uncapped here). With no `VanillaFont` attached,
+        // `Builder::legacy_width` falls back to `item_icon::text_w`:
+        // `(GLYPH_W + 1) * scale` per char (`hud/item_icon.rs:616-618`), and
+        // the chat pose scale defaults to `scale(2.0) * chat_options.scale
+        // (1.0) == 2.0`, so each `a` costs `6 * 2.0 == 12`px. `floor(320 /
+        // 12) == 26` fit the first row; the remaining `30 - 26 == 4` spill to
+        // a second — two rows, not one, and not three.
+        //
+        // `a`'s bitmap (`font::glyph_rows('a')`) lights `0+0+3+1+4+2+4 == 14`
+        // pixels; each lit pixel is one quad (`ColourStream::glyph`,
+        // `hud/item_icon.rs:580-599`) of 6 vertices, so all 30 `a`s cost
+        // `30 * 14 * 6 == 2520` vertices regardless of how they are split
+        // across rows — the row *count* shows up only in the background
+        // strips, one 6-vertex rect each.
+        assert_eq!(
+            geo.vertex_count(),
+            2520 + 2 * 6,
+            "expected exactly two wrapped rows' worth of geometry (one row would be \
+             2520 + 6, three would be 2520 + 18)"
+        );
+    }
+
+    /// Direct, GPU-free gate on [`wrap_legacy_with`]'s wrap *decision*, using a
+    /// hand-specified width table rather than the fixed 5×7 fallback — the
+    /// fallback is itself fixed-advance, so it cannot exercise the
+    /// variable-width case the real vanilla font (attached only when a jar is
+    /// present) actually draws with. `i`/`W`'s widths below are vanilla's own,
+    /// documented at `hud/vanilla_font.rs:9` ("`i` is 2 px wide … `W` and `M`
+    /// are 6"); the competing "flat character count" hypothesis uses this
+    /// shell's own real fixed-advance constant (`(GLYPH_W + 1) * 1.0 == 6`,
+    /// `hud/font.rs:20`,`hud/item_icon.rs:616-618`) rather than an invented
+    /// number, so both sides of the comparison are real, citable code.
+    #[test]
+    fn wrap_uses_real_per_glyph_widths_not_a_flat_character_count() {
+        let real_width = |s: &str| -> f32 {
+            s.chars()
+                .map(|c| match c {
+                    'i' => 2.0,
+                    'W' => 6.0,
+                    _ => 0.0,
+                })
+                .sum()
+        };
+        let flat_count_width = |s: &str| -> f32 { s.chars().count() as f32 * 6.0 };
+
+        // Five narrow glyphs then five wide ones, no spaces, so the wrap is a
+        // pure hard-break character-index decision with no word-boundary
+        // logic muddying which hypothesis "wins".
+        let s = "iiiiiWWWWW";
+        let max_width_px = 20.0;
+
+        // Real cumulative widths: 2,4,6,8,10 (the five `i`s), then 16, 22 …
+        // for the `W`s — the largest prefix at or under 20px is "iiiiiW"
+        // (16px); the next `W` would make 22px.
+        let real_rows = wrap_legacy_with(real_width, s, max_width_px);
+        assert_eq!(
+            real_rows.first().map(String::as_str),
+            Some("iiiiiW"),
+            "real per-glyph widths must break after the 6th character: {real_rows:?}"
+        );
+
+        // The flat hypothesis charges every character 6px regardless of
+        // glyph, so only `floor(20 / 6) == 3` fit before the 4th overflows —
+        // three characters, not six.
+        let flat_rows = wrap_legacy_with(flat_count_width, s, max_width_px);
+        assert_eq!(
+            flat_rows.first().map(String::as_str),
+            Some("iii"),
+            "a flat character-count hypothesis must break after the 3rd character: {flat_rows:?}"
+        );
+
+        let real_break = real_rows[0].chars().count();
+        let flat_break = flat_rows[0].chars().count();
+        assert_eq!(real_break, 6, "predicted real-width break index");
+        assert_eq!(flat_break, 3, "predicted flat character-count break index");
+        assert_eq!(
+            real_break - flat_break,
+            3,
+            "the two hypotheses must diverge by a real, non-zero margin, or this test \
+             cannot tell a real-width wrap from a character-count one"
+        );
+    }
+
+    /// Proves `chat_options.colors` is read, not merely stored. `§c` is
+    /// zero-width whether it recolours or is stripped, so the two frames'
+    /// vertex *counts* are equal by construction — the option's whole effect
+    /// is on colour, so the control that actually matters is `verts`
+    /// (positions **and** colours) differing.
+    #[test]
+    fn chat_colors_option_strips_legacy_codes_when_off() {
+        let stats = DebugStats::default();
+        let coded = [("\u{00a7}chi", 0.0_f32)];
+        let frame = |colors: bool| HudFrame {
+            crosshair: false,
+            show_debug: false,
+            chat: &coded,
+            chat_options: ChatDisplayOptions {
+                colors,
+                ..ChatDisplayOptions::default()
+            },
+            ..HudFrame::new(&stats)
+        };
+        let with_colors = HudGeometry::build(&frame(true), 640, 480);
+        let without_colors = HudGeometry::build(&frame(false), 640, 480);
+        assert_eq!(
+            with_colors.vertex_count(),
+            without_colors.vertex_count(),
+            "the code is zero-width either way, so geometry *count* must match"
+        );
+        assert_ne!(
+            with_colors.verts, without_colors.verts,
+            "chat_colors=false must actually strip the colour, not just round-trip the option"
+        );
+    }
+
+    /// Proves `chat_options.background_opacity` is read with the right
+    /// *magnitude*, not merely that changing it changes something — the
+    /// species of vacuous test CLAUDE.md calls out (a hurt-overlay gate once
+    /// passed 3440/3440 while only checking the *sign* of a change, not how
+    /// much). Row 0's background rect is emitted before any of its text
+    /// glyphs, so its first vertex's alpha channel is `verts[5]` — no
+    /// filtering, no averaging, the exact float the draw call passed in.
+    #[test]
+    fn chat_background_opacity_sets_the_exact_row_alpha() {
+        let stats = DebugStats::default();
+        let chat = [("hi", 0.0_f32)];
+        for bg in [0.1_f32, 0.5, 1.0] {
+            let geo = HudGeometry::build(
+                &HudFrame {
+                    crosshair: false,
+                    show_debug: false,
+                    chat: &chat,
+                    chat_options: ChatDisplayOptions {
+                        background_opacity: bg,
+                        ..ChatDisplayOptions::default()
+                    },
+                    ..HudFrame::new(&stats)
+                },
+                640,
+                480,
+            );
+            let alpha = geo.verts[5];
+            assert!(
+                (alpha - bg).abs() < 1e-5,
+                "row background alpha must equal chat_background_opacity ({bg}), got {alpha}"
+            );
+        }
+    }
+
+    /// As [`chat_background_opacity_sets_the_exact_row_alpha`], for
+    /// `chat_options.text_opacity`: `hi` carries no `§` code, so its colour
+    /// stays `base` throughout `Builder::text_legacy`'s fallback path and
+    /// every glyph pixel's alpha is exactly the `alpha` parameter passed in —
+    /// here, `text_opacity * 0.9 + 0.1` (`ChatComponent.java:149`) at a fresh
+    /// line's fade of `1.0`.
+    #[test]
+    fn chat_text_opacity_sets_the_exact_glyph_alpha() {
+        let stats = DebugStats::default();
+        let chat = [("hi", 0.0_f32)];
+        for op in [0.0_f32, 0.5, 1.0] {
+            let geo = HudGeometry::build(
+                &HudFrame {
+                    crosshair: false,
+                    show_debug: false,
+                    chat: &chat,
+                    chat_options: ChatDisplayOptions {
+                        text_opacity: op,
+                        ..ChatDisplayOptions::default()
+                    },
+                    ..HudFrame::new(&stats)
+                },
+                640,
+                480,
+            );
+            let expected = op.mul_add(0.9, 0.1);
+            // `verts[0..36)` is row 0's background rect (6 vertices); `h`'s
+            // bitmap (`font::glyph_rows('h')`) lights bit 0 of its very top
+            // row, so the next quad emitted is that pixel — its alpha is
+            // `verts[41]` (the 6th float of the 2nd vertex block).
+            let alpha = geo.verts[41];
+            assert!(
+                (alpha - expected).abs() < 1e-5,
+                "text_opacity {op}: expected glyph alpha {expected}, got {alpha}"
+            );
+        }
+    }
+
+    /// As the two magnitude gates above, for `chat_options.width_pct`, via
+    /// vanilla's own `ChatComponent.getWidth` algebra
+    /// (`pct * 280.0 + 40.0`, floored) computed independently here rather
+    /// than by calling [`chat_width_px`] — so a bug shared between the two
+    /// could not cancel out.
+    #[test]
+    fn chat_width_option_sizes_the_box_to_the_predicted_pixel_width() {
+        let stats = DebugStats::default();
+        let chat = [("hi", 0.0_f32)];
+        // `b.w == 320` at this canvas size:
+        // `logical_canvas(AUTO_GUI_SCALE, 640, 480) == (320, 240)` (height
+        // binds at `calculate_gui_scale(0, 640, 480) == 2`).
+        const CANVAS_W: f32 = 320.0;
+        for (pct, expected_px) in [(1.0_f32, 320.0_f32), (0.5, 180.0), (0.0, 40.0)] {
+            let geo = HudGeometry::build(
+                &HudFrame {
+                    crosshair: false,
+                    show_debug: false,
+                    chat: &chat,
+                    chat_options: ChatDisplayOptions {
+                        width_pct: pct,
+                        ..ChatDisplayOptions::default()
+                    },
+                    ..HudFrame::new(&stats)
+                },
+                640,
+                480,
+            );
+            // Row 0's background rect starts at `x == 0`, so its second
+            // vertex `(x + w, y)` (`ColourStream::rect`) converted to NDC is
+            // `2 * w / b.w - 1` — `verts[6]`.
+            let x1_ndc = geo.verts[6];
+            let expected_ndc = 2.0 * expected_px / CANVAS_W - 1.0;
+            assert!(
+                (x1_ndc - expected_ndc).abs() < 1e-4,
+                "pct {pct}: expected box width {expected_px}px (x1 {expected_ndc}), got x1 {x1_ndc}"
+            );
+        }
+    }
+
+    /// As the width gate above, for `chat_options.scale`: it must exactly
+    /// double the on-screen row height when set to `2.0`, not merely change
+    /// it by some amount.
+    #[test]
+    fn chat_scale_option_doubles_the_row_height_exactly() {
+        let stats = DebugStats::default();
+        let chat = [("hi", 0.0_f32)];
+        let frame = |scale: f32| HudFrame {
+            crosshair: false,
+            show_debug: false,
+            chat: &chat,
+            chat_options: ChatDisplayOptions {
+                scale,
+                ..ChatDisplayOptions::default()
+            },
+            ..HudFrame::new(&stats)
+        };
+        let default_geo = HudGeometry::build(&frame(1.0), 640, 480);
+        let doubled_geo = HudGeometry::build(&frame(2.0), 640, 480);
+        // Row 0's rect vertex 0 (`y0`) and vertex 2 (`y1`, the 3rd vertex —
+        // floats 12..18) give its height in NDC: `verts[1] - verts[13]`.
+        let height = |g: &HudGeometry| g.verts[1] - g.verts[13];
+        let default_h = height(&default_geo);
+        let doubled_h = height(&doubled_geo);
+        assert!(default_h > 0.0, "sanity: the rect must have positive height");
+        assert!(
+            (doubled_h - 2.0 * default_h).abs() < 1e-5,
+            "chat_scale=2.0 must exactly double the row height: default {default_h}, doubled {doubled_h}"
+        );
+    }
+
+    /// Proves `chat_options.height_pct_unfocused` is read as a genuine *cap*
+    /// on visible rows, not just stored: at `0.0` (`chat_height_px(0.0) ==
+    /// 20`px against an `18`px default row) only one row fits, so a five-line
+    /// log must render identically to a one-line log, not five.
+    #[test]
+    fn chat_height_option_caps_the_number_of_visible_rows() {
+        let stats = DebugStats::default();
+        let chat = [
+            ("a", 0.0_f32),
+            ("b", 0.0),
+            ("c", 0.0),
+            ("d", 0.0),
+            ("e", 0.0),
+        ];
+        let capped = HudGeometry::build(
+            &HudFrame {
+                crosshair: false,
+                show_debug: false,
+                chat: &chat,
+                chat_options: ChatDisplayOptions {
+                    height_pct_unfocused: 0.0,
+                    ..ChatDisplayOptions::default()
+                },
+                ..HudFrame::new(&stats)
+            },
+            640,
+            480,
+        );
+        let one_line_uncapped = HudGeometry::build(
+            &HudFrame {
+                crosshair: false,
+                show_debug: false,
+                chat: &chat[4..],
+                ..HudFrame::new(&stats)
+            },
+            640,
+            480,
+        );
+        assert_eq!(
+            capped.vertex_count(),
+            one_line_uncapped.vertex_count(),
+            "height_pct_unfocused == 0.0 must cap the scrollback to exactly one row"
+        );
+        let uncapped = HudGeometry::build(
+            &HudFrame {
+                crosshair: false,
+                show_debug: false,
+                chat: &chat,
+                ..HudFrame::new(&stats)
+            },
+            640,
+            480,
+        );
+        assert!(
+            uncapped.vertex_count() > capped.vertex_count(),
+            "the default (uncapped-enough-for-5-lines) height must show more than the capped one"
+        );
     }
 
     #[test]
