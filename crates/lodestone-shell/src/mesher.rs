@@ -925,6 +925,25 @@ impl FluidSectionView for SnapshotFluidView<'_> {
         self.models.occludes(id)
     }
 
+    /// Whether the neighbour at `(x, y, z)` takes water's **overlay** sprite
+    /// rather than its still/flow sprite.
+    ///
+    /// Without this override the trait default answered `false` everywhere, so one
+    /// of the five `FluidRenderer` divergences was fixed in `lodestone-render` and
+    /// **not live**: the crate had the behaviour and the shell's view never asked
+    /// for it. Same shape as `occludes_at` above, keyed on
+    /// `BlockModels::fluid_overlay`.
+    fn overlay_at(&self, x: i32, y: i32, z: i32) -> bool {
+        let (dx, lx) = split16(x);
+        let (dy, ly) = split16(y);
+        let (dz, lz) = split16(z);
+        if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dy) || !(-1..=1).contains(&dz) {
+            return false;
+        }
+        let id = self.snapshot.at(dx, dy, dz).get_block(lx, ly, lz);
+        self.models.fluid_overlay(id)
+    }
+
     fn light_at(&self, x: usize, y: usize, z: usize) -> u8 {
         // A fluid surface has no single facing (its top slopes and its sides are
         // baked together), so it takes the brightest cell of the immediate

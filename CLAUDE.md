@@ -179,6 +179,27 @@ Oracles (not part of repo state — recreate them):
   git update-ref refs/heads/main "$NEW" "$OLD"   # HEAD moves FIRST
   git reset -- <paths>                           # then refresh, against the NEW HEAD
   ```
+- **`git write-tree` against a missing index writes the EMPTY tree, silently — and that commit
+  deletes the entire repository.** This is the worst outcome available from the escape hatch and it
+  has already reached `refs/heads/main` once, for a few seconds, before its author caught it in
+  `git show --stat` and reverted with a compare-and-swap.
+
+  The trigger is mundane: **shell state does not persist between tool calls.** A private-index path
+  built with a `$$` nonce in one invocation is an *empty string* in the next, so `GIT_INDEX_FILE=""`
+  and `write-tree` has nothing to write. No error, no warning — a valid commit object whose tree
+  contains nothing.
+
+  Three defences, and use all three because each catches a different slip:
+  1. **One invocation** for `read-tree` → `add` → `write-tree` → `commit-tree` → `update-ref`. Not
+     "one per step, carefully ordered" — the variables do not survive.
+  2. **A literal nonce**, not `$$` or `$RANDOM`: `idx-fog-7f3a`, chosen by you and typed out.
+  3. **Sanity-check the tree before moving the ref.** `git ls-tree -r "$TREE" --name-only | grep -c ""`
+     against a plausible floor is one line and it makes this class impossible:
+     ```
+     n=$(git ls-tree -r "$TREE" --name-only | grep -c "")
+     [ "$n" -gt 1000 ] || { echo "ABORT: tree has only $n files"; exit 1; }
+     ```
+  And always `git show --stat` your own commit afterwards. That is what caught it.
 
   And still check `git diff --cached` is empty immediately *before* every commit, because another agent
   may have left one: a count, not an eyeball, and a verdict that depends on the count — an unconditional
