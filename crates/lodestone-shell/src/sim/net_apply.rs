@@ -1,0 +1,460 @@
+//! `Sim`'s per-tick network-apply cluster: `poll_net` (the ~66 `NetUpdate::`
+//! arms that turn a decoded server event into shell state) and `fold_entities`
+//! (the entity-snapshot fold that runs immediately after it in
+//! [`Sim::step`](super::Sim::step)) — seam 4 of the sim.rs decomposition
+//! sequence (seam 1 was the test module, `sim/tests.rs`; seam 2 was placement
+//! prediction, `sim/placement.rs`; seam 3 was the interaction/combat cluster,
+//! `sim/actions.rs`). This is the file with the most future contention:
+//! adding a `NetUpdate` variant means an arm here, same as adding a
+//! `ClientEvent` means a `net.rs`/`ingest`/`session` arm elsewhere.
+//!
+//! `use super::*;` for the same reason `sim/actions.rs` uses it: it pulls in
+//! `Sim`'s private fields' types and `sim.rs`'s other private helpers with no
+//! need to enumerate them, since `sim::net_apply` is a descendant of `sim` and
+//! already has the same visibility into `Sim`'s private fields that
+//! `sim::actions` and `sim::tests` have.
+//!
+//! Both methods are `pub(crate)`, not private: `Sim::step` calls
+//! `self.poll_net()`/`self.fold_entities()` from `sim.rs` itself, which is
+//! this module's *parent* — a private item in a child module is not visible
+//! to the parent (privacy only cascades downward, the same rule
+//! `sim/actions.rs`'s doc explains for `begin_attack_live` and friends) — and
+//! `sim/tests.rs`'s many `sim.poll_net()` calls cross the same sibling
+//! boundary `sim/actions.rs` hit for its three `pub(crate)` methods.
+
+use super::*;
+
+impl Sim {
+    /// Fold this frame's entity snapshots into the render-side component set, so
+    /// [`entity_draws`](Self::entity_draws) yields smooth per-frame transforms.
+    /// No live connection means no entities.
+    ///
+    /// # What §4.1(c) changed here
+    ///
+    /// This used to be `update_entities`, which drove
+    /// `EntityInterpolator::update_with_view` — a whole second `World` running its
+    /// own `Update`, its own `GameTick` loop off its own accumulator, and its own
+    /// `Extract`. Those three schedule runs are now the frame's own, so all this
+    /// does is the fold. The item collision it used to pass by argument is the
+    /// [`crate::entities::ItemCollision`] resource the tick loop inserts.
+    pub(crate) fn fold_entities(&mut self) {
+        let snapshots = self
+            .net
+            .as_ref()
+            .map_or_else(Vec::new, NetClient::entity_snapshots);
+        // `entity_snapshots` reads this same `World` through `ClientHandle`, so it
+        // is resolved to an owned `Vec` *before* the guard below is taken. Doing it
+        // the other way round is `EcsHandle`'s rule 1 and deadlocks.
+        self.write(|w| crate::entities::fold_entity_snapshots(w, &snapshots));
+    }
+
+    pub(crate) fn poll_net(&mut self) {
+        // Collect owned updates first so the immutable borrow of `self.net`
+        // ends before the loop — the sound arms need `&mut self.audio` and (for
+        // entity sounds) a fresh read of `self.net` for positions, neither of
+        // which can coexist with a borrow held across the loop.
+        // Adopt the client's chunk store the first frame a handle exists — this
+        // is where the process comes to have exactly one `lodestone_world::World`
+        // (`docs/chunk-world-resource.md`). Idempotent and a pointer compare
+        // thereafter.
+        self.adopt_live_world();
+        // The connected dimension (and therefore the absent-sky policy) can change
+        // mid-session on a portal trip, so the mesh policy is refreshed every poll
+        // rather than only at attach.
+        self.refresh_mesh_policy();
+        let updates = match &self.net {
+            Some(net) => net.poll(),
+            None => return,
+        };
+        for update in updates {
+            match update {
+                NetUpdate::Connecting => {
+                    self.status = "connecting…".into();
+                    self.set_phase(SessionPhase::Connecting);
+                }
+                NetUpdate::LoggedIn { entity_id } => {
+                    // The id is *not* recorded here. `ClientEvent::Login` folds it
+                    // into the `ServerEntityId` component (and into
+                    // `EntityIndex`) on the net thread, in the same `World` this
+                    // `Sim` reads — a second write here would be the duplicate the
+                    // vitals collapse deleted. It stays in the status line because
+                    // that is a human-readable string, not state.
+                    self.status = format!("connected (entity {entity_id})");
+                    self.set_phase(SessionPhase::Connected);
+                }
+                NetUpdate::Chunk { x, z } => {
+                    // §12.24 dirty-region signal: no block data travels on the
+                    // event — the client applies decoded chunks to its own
+                    // `World`, which we read via `NetClient::sections_and_light_at`
+                    // (+ `world_dimensions` for geometry). `mark_column_dirty`
+                    // meshes live columns through the vanilla classifier.
+                    self.on_column_arrived(x, z);
+                }
+                NetUpdate::SectionBlocks { x, y, z, blocks } => {
+                    // A server-authoritative edit inside one loaded section.
+                    // Re-mesh at *section* granularity, not the whole column:
+                    // the same signal carries every redstone tick, and a column
+                    // re-mesh is ~24 sections × a 27-section snapshot each.
+                    // `remesh_around` also handles the boundary case, so a break
+                    // at x=15 dirties the neighbouring column's face too.
+                    self.reconcile_predictions(x, y, z, &blocks);
+                    self.remesh_changed_blocks(x, y, z, &blocks);
+                }
+                NetUpdate::BlockEvent { pos, b0, b1 } => {
+                    // Chest lids (issue #23). `ChestBlockEntity.triggerEvent`
+                    // takes `b0 == 1` and `b1 > 0` as "somebody is looking in
+                    // this chest"; `ChestLids` owns both that rule and the
+                    // per-tick ramp, so this arm forwards the raw bytes rather
+                    // than interpreting them here. Every other `b0` belongs to
+                    // some other block type (a note block's pitch, a piston's
+                    // direction) and is dropped by `apply_block_event`.
+                    self.chest_lids.apply_block_event(pos, b0, b1);
+                }
+                NetUpdate::ItemPickup(event) => {
+                    // Issue #365. Accumulated, not acted on here: the drain at the
+                    // end of this function needs a `&mut World` guard and there is
+                    // no reason to take one per collected item.
+                    self.pickups.apply(&event);
+                }
+                NetUpdate::Teleport {
+                    pos,
+                    rotation,
+                    flags,
+                } => {
+                    // Adopt the server's authoritative placement. The shell runs
+                    // its own physics and streams an optimistic position every
+                    // tick from the demo spawn; on a server whose spawn is far
+                    // from the origin the server ignores that bogus claim and
+                    // keeps us at the real spawn, streaming chunks there. Snap the
+                    // camera onto it (resolving any relative components against the
+                    // current pose) so it sits where the world actually is instead
+                    // of stranded over the unmeshed demo platform. `prev_position`
+                    // is moved with it so the frame interpolator does not smear the
+                    // camera across the teleport.
+                    let placed = self.player_mut(|player| {
+                        let base = player.position;
+                        player.position = Vec3d::new(
+                            if flags.relative_x {
+                                base.x + pos.x
+                            } else {
+                                pos.x
+                            },
+                            if flags.relative_y {
+                                base.y + pos.y
+                            } else {
+                                pos.y
+                            },
+                            if flags.relative_z {
+                                base.z + pos.z
+                            } else {
+                                pos.z
+                            },
+                        );
+                        player.yaw = if flags.relative_yaw {
+                            player.yaw + rotation.yaw
+                        } else {
+                            rotation.yaw
+                        };
+                        player.pitch = if flags.relative_pitch {
+                            player.pitch + rotation.pitch
+                        } else {
+                            rotation.pitch
+                        };
+                        player.velocity = Vec3d::ZERO;
+                        // A teleport is not a fall. Vanilla resets fall distance on
+                        // every position snap, and this one handler covers server
+                        // corrections, respawn and every teleport packet — so
+                        // without it, a corrective teleport mid-fall leaves the
+                        // accumulated distance behind to feed `maybeBackOffFromEdge`
+                        // (and, later, fall damage) as though the fall continued.
+                        player.reset_fall_distance();
+                        player.position
+                    });
+                    self.set_prev_position(placed);
+                    self.teleport_count += 1;
+                }
+                NetUpdate::Chat { text, player } => {
+                    // Resolve translate nodes (death messages, join/leave, …) to
+                    // words once, at arrival, against the language table — so the
+                    // stored scrollback and the log line both read as prose, not
+                    // raw keys like `entity.minecraft.spider`.
+                    let text = self.resolve_text(&text);
+                    tracing::info!(target: "chat", "{}", text.to_legacy_string());
+                    // Stamped with the driver's own clock, which is why the log and
+                    // the clock had to move to the ECS together (Stage 3 deferred
+                    // both for exactly this reason). `local` is the session entity,
+                    // so a `SessionChat` that somehow went missing drops the line
+                    // rather than panicking mid-poll.
+                    let now = self.clock().secs;
+                    let local = self.local;
+                    self.write(|w| {
+                        if let Some(mut chat) = w.get_mut::<SessionChat>(local) {
+                            if player {
+                                chat.0.push_player(
+                                    text,
+                                    lodestone_game::chat::MessageTrust::NotSecure,
+                                    now,
+                                );
+                            } else {
+                                chat.0.push_system(text, now);
+                            }
+                        }
+                    });
+                }
+                NetUpdate::BlockDestroyed { pos, state } => {
+                    // The live counterpart of the offline `break_block` emit.
+                    // It is driven by the server rather than by our own click
+                    // because the server is authoritative about *whether* the
+                    // block broke and *what* it was — a predicted break that the
+                    // server rejects would otherwise throw debris off a block
+                    // still standing there.
+                    //
+                    // Shape is a full cube for the same reason as the offline
+                    // path: vanilla derives the fragment grid from the block's
+                    // outline shape, which the shell does not carry. Debris from
+                    // a slab or a fence therefore fills the whole cell rather
+                    // than hugging the model.
+                    self.particles_mut(|p| {
+                        p.destroy_block([pos.x, pos.y, pos.z], state, [1.0, 1.0, 1.0]);
+                    });
+                    // The *other* half of vanilla's `case 2001`, which this arm
+                    // used to drop: `playLocalSound(pos, getBreakSound(), …)`.
+                    // `Level.destroyBlock` fires the event with **no** excluded
+                    // entity (`Level.java:280-289`), so this is a genuinely
+                    // server-sent sound, not a prediction — every client in range
+                    // hears it, the breaker included. Note which breaks reach here:
+                    // `Level.destroyBlock`'s callers (a torch losing support, fire
+                    // spread, an explosion), *not* a player's own dig, which
+                    // `ServerPlayerGameMode.destroyBlock` routes through
+                    // `removeBlock` with no `levelEvent` at all — see the long note
+                    // in `interact.rs` on the same asymmetry for the particles.
+                    self.play_block_break_sound([pos.x, pos.y, pos.z], state);
+                }
+                NetUpdate::Particles {
+                    kind,
+                    long_distance,
+                    pos,
+                    offset,
+                    max_speed,
+                    count,
+                } => {
+                    // `ClientLevel.doAddParticle`'s render cutoff: a particle
+                    // farther than 32 blocks (`1024.0` == `32.0` squared) from
+                    // the viewer is dropped unless the packet set the
+                    // override-limiter flag (`long_distance` here). Vanilla
+                    // measures from the render camera; the player's feet
+                    // position is close enough for a cutoff whose only
+                    // visible effect is "does this puff bother rendering,"
+                    // and it is what the rest of the shell's render-adjacent
+                    // logic already keys off.
+                    let feet = self.player().position;
+                    let dx = pos.x - feet.x;
+                    let dy = pos.y - feet.y;
+                    let dz = pos.z - feet.z;
+                    let within_cutoff =
+                        long_distance || dx.mul_add(dx, dy.mul_add(dy, dz * dz)) <= 1024.0;
+                    if within_cutoff {
+                        self.particles_mut(|p| {
+                            p.spawn_particles(
+                                &kind,
+                                [pos.x, pos.y, pos.z],
+                                [offset.x, offset.y, offset.z],
+                                max_speed,
+                                count,
+                            );
+                        });
+                    }
+                }
+                // No `Health`/`Experience` arms, and no `NetUpdate` variants for
+                // them either: the net thread folds `ClientEvent::HealthChanged`
+                // and `ExperienceChanged` straight into the `Vitals`/`Xp`
+                // components on `self.local`, so [`Self::health`], [`Self::food`]
+                // and [`Self::experience`] read what they always read and this
+                // side has nothing left to do. Death is still a separate event
+                // ([`NetUpdate::Death`]); health reaching zero is not itself a
+                // session event and does not unload chunks.
+                NetUpdate::Death { message } => {
+                    // Death is a state the shell rides through, not the end of the
+                    // session. `net::run` now builds the client with
+                    // `RespawnPolicy::Manual` (issue #103), so nothing respawns
+                    // automatically here: this arm marks the player dead (which
+                    // freezes movement in `step`) and records the message for the
+                    // death screen (`app.rs`'s `drive_ui_from_session` notices
+                    // `is_dead()` and shows it); the screen's Respawn button is
+                    // what eventually calls `Self::respawn`. The new position
+                    // rides in on the placement teleport that follows
+                    // `NetUpdate::Respawned`, whose arm snaps `prev_position` too.
+                    if self.recover_from_death {
+                        self.set_dead(true);
+                        self.death_message = Some(message);
+                        self.status = "you died".into();
+                    } else {
+                        // Retained only as the live death gate's negative control:
+                        // the pre-fix behaviour that declared the session over and
+                        // stranded the client on the death screen forever.
+                        self.status = "server: died".into();
+                        self.set_phase(SessionPhase::Ended("player died".into()));
+                    }
+                }
+                NetUpdate::Respawned => {
+                    // The server confirmed the respawn: the player is alive again.
+                    // The fresh spawn position arrives in the placement teleport
+                    // that immediately follows this event; the `NetUpdate::Teleport`
+                    // arm snaps `position` and `prev_position` together, so the
+                    // frame interpolator never smears the camera from the death
+                    // site across the world to the new spawn (the same class of
+                    // bug as the original far-spawn camera gap).
+                    self.set_dead(false);
+                    self.death_message = None;
+                    let local = self.local;
+                    self.write(|w| {
+                        if let Some(mut count) = w.get_mut::<RespawnCount>(local) {
+                            count.0 += 1;
+                        }
+                    });
+                    self.status = "respawned".into();
+                }
+                NetUpdate::Sound {
+                    name,
+                    category,
+                    pos,
+                    volume,
+                    pitch,
+                    seed,
+                } => {
+                    if let Some(audio) = &mut self.audio {
+                        let pos = glam::Vec3::new(pos.x as f32, pos.y as f32, pos.z as f32);
+                        audio.play_sound(&name, category, pos, volume, pitch, seed);
+                    }
+                }
+                NetUpdate::EntitySound {
+                    name,
+                    category,
+                    entity_id,
+                    volume,
+                    pitch,
+                    seed,
+                } => {
+                    // Resolve the entity's live position *before* borrowing the
+                    // audio engine mutably (disjoint, sequential borrows).
+                    let pos = self.entity_sound_position(entity_id);
+                    if let Some(audio) = &mut self.audio {
+                        audio.play_entity_sound(&name, category, pos, volume, pitch, seed);
+                    }
+                }
+                // Only the local player's effects are folded: they feed both the
+                // physics view ([`PlayerState::effects`]) and the display view
+                // ([`Sim::hud_effects`]). Entity-scoped effects are filtered here
+                // rather than in `net::forward`, keeping the wire event
+                // entity-agnostic.
+                NetUpdate::EffectApplied {
+                    entity_id,
+                    effect,
+                    amplifier,
+                    duration_ticks,
+                    ambient,
+                    show_icon,
+                } => {
+                    if self.server_entity_id() == Some(entity_id) {
+                        let local = self.local;
+                        self.write(|w| {
+                            if let Some(mut state) = w.get_mut::<PhysicsState>(local) {
+                                state.0.effects.apply(&effect, amplifier);
+                            }
+                            if let Ok(id) =
+                                lodestone_model::Identifier::new("minecraft", effect.as_str())
+                                && let Some(mut effects) = w.get_mut::<HudEffects>(local)
+                            {
+                                effects.0.apply(lodestone_game::effect::StatusEffect {
+                                    id,
+                                    amplifier: u8::try_from(amplifier).unwrap_or(u8::MAX),
+                                    duration_ticks,
+                                    ambient,
+                                    show_particles: true,
+                                    show_icon,
+                                });
+                            }
+                        });
+                    }
+                }
+                NetUpdate::EffectRemoved { entity_id, effect } => {
+                    if self.server_entity_id() == Some(entity_id) {
+                        let local = self.local;
+                        self.write(|w| {
+                            if let Some(mut state) = w.get_mut::<PhysicsState>(local) {
+                                state.0.effects.remove(&effect);
+                            }
+                            if let Ok(id) =
+                                lodestone_model::Identifier::new("minecraft", effect.as_str())
+                                && let Some(mut effects) = w.get_mut::<HudEffects>(local)
+                            {
+                                effects.0.remove(&id);
+                            }
+                        });
+                    }
+                }
+                // The tab-list and scoreboard arms are *deleted*, not moved:
+                // `lodestone_ecs::session`'s systems fold them inside the
+                // client, and `Sim::sidebar`/`player_rows` read that one copy
+                // through `NetClient`. Keeping a fold here as well is precisely
+                // the two-sources-of-truth Stage 3 exists to remove.
+                NetUpdate::TitleEvent(event) => {
+                    let local = self.local;
+                    self.write(|w| {
+                        if let Some(mut title) = w.get_mut::<TitleOverlay>(local) {
+                            let _ = title.0.apply(&event);
+                        }
+                    });
+                }
+                NetUpdate::ActionBar(text) => {
+                    let local = self.local;
+                    self.write(|w| {
+                        if let Some(mut bar) = w.get_mut::<ActionBarOverlay>(local) {
+                            bar.0.set(text);
+                        }
+                    });
+                }
+                NetUpdate::Disconnected(reason) => {
+                    // `reason` is an unresolved `Text` (issue #68): a kicked
+                    // player's disconnect reason is a `translate` component
+                    // like `multiplayer.disconnect.kicked`, so it has to go
+                    // through the same read-boundary translator that
+                    // `title_overlay`/`action_bar_overlay` already use,
+                    // rather than being formatted straight into `status`.
+                    let reason = self.resolve_text(&reason).to_legacy_string();
+                    self.status = format!("disconnected: {reason}");
+                    self.set_phase(SessionPhase::Ended(format!("disconnected: {reason}")));
+                }
+                NetUpdate::Error(e) => {
+                    self.status = format!("net error: {e}");
+                    self.set_phase(SessionPhase::Ended(format!("net error: {e}")));
+                }
+            }
+        }
+
+        // Start this frame's pickup animations (issue #365) — **inside `poll_net`,
+        // ahead of `fold_entities`, and that ordering is the whole trick.**
+        // `handleTakeItemEntity` removes the item entity in the same breath as it
+        // spawns the animation, so by the time `Sim::step` reaches `fold_entities`
+        // the server has stopped reporting the item and `fold_snapshots` prunes its
+        // render track and its `ItemStacks` entry. `begin_item_pickup` reads both.
+        // Deferring this by even one call site draws nothing, silently.
+        let pickups = self.pickups.drain();
+        if !pickups.is_empty() {
+            self.write(|w| {
+                for pickup in pickups {
+                    // `false` is "the item was not tracked on the render side" —
+                    // no stack ever reported, or the track already pruned. Nothing
+                    // to animate, and that is the pre-#365 behaviour rather than a
+                    // failure worth logging every time somebody walks over an
+                    // unreported drop.
+                    let _ = crate::entities::begin_item_pickup(
+                        w,
+                        pickup.item_entity_id,
+                        pickup.collector_id,
+                    );
+                }
+            });
+        }
+    }
+}
