@@ -275,16 +275,21 @@ fn ore_composition_gap_is_measured_and_reported() {
         // reproduces the oracle's own scope and measured a much smaller
         // residual (563/98304 at (0,0)) — proving the engine itself is
         // correct and the remaining full-3×3 gap is (mostly) real spill this
-        // oracle stage cannot see. At (-120,-120) the single-source residual
-        // is *larger* than the composed number, not smaller — that chunk's
-        // real biome is badlands, which `crate::biome::usable_overworld_table`
-        // still excludes (issue #405/#295's carried-over gap, Job 3), so
-        // every source chunk's ore *list* is already wrong before 3×3 spill
-        // is even considered; composing ores cannot fix a wrong biome.
-        // Floors below are measured, not guessed, with headroom.
+        // oracle stage cannot see.
+        //
+        // (-120,-120) used to be the exception: its single-source residual
+        // was *larger* than the composed number, because that chunk's real
+        // biome is badlands, which `crate::biome::usable_overworld_table`
+        // used to exclude (issue #405/#295's carried-over gap, Job 3) — every
+        // source chunk's ore *list* was wrong before 3×3 spill was even
+        // considered. `3cf523c` ported `SurfaceSystem.getBand` and made that
+        // table a pass-through, closing Job 3: re-measured here at
+        // 96429/98304 (up from the pre-fix 91703), the same kind of jump the
+        // other parity tests in this file saw once badlands resolved
+        // correctly. Floors below are measured, not guessed, with headroom.
         let floor = match (f.chunk_x, f.chunk_z) {
             (0, 0) => 92_000,       // measured 92223/98304
-            (-120, -120) => 91_500, // measured 91703/98304 — badlands-degraded, see above
+            (-120, -120) => 96_300, // measured 96429/98304 — Job 3 closed, see above
             other => panic!("no measured floor recorded for fixture chunk {other:?} — add one"),
         };
         assert!(
@@ -380,26 +385,34 @@ fn ore_counts_by_type_are_predicted_and_measured() {
             if v < 10 {
                 continue;
             }
-            // Documented exception, not a loosened check: chunk (-120,-120)'s
-            // real vanilla biome is badlands, which `usable_overworld_table`
-            // still excludes (Job 3, unported `SurfaceSystem.getBand`) — so
-            // every source chunk here resolves to a *different* biome's ore
-            // list. `badlands.json`'s own `UNDERGROUND_ORES` step names
-            // `minecraft:ore_gold_extra` (badlands' well-known bonus gold
-            // vein) as its 27th entry; `plains.json`'s step has no such
-            // entry — confirmed directly against
-            // `.cache/mc/26.2/src/data/minecraft/worldgen/biome/{badlands,
-            // plains}.json` while diagnosing this exact failure. A biome
-            // substitution can only ever place the *substitute* biome's ore
-            // list, so a badlands-only feature placing zero here is the
-            // correct, predicted consequence of the pre-existing gap, not a
-            // new defect in ore composition — this assertion caught it
-            // first as a hard failure, which is exactly what it is for.
+            // Former documented exception, now a success assertion.
+            // `usable_overworld_table` used to exclude badlands (Job 3,
+            // unported `SurfaceSystem.getBand`), so chunk (-120,-120) — real
+            // vanilla biome badlands, whose `UNDERGROUND_ORES` step names
+            // the bonus `minecraft:ore_gold_extra` vein as its 27th entry
+            // (confirmed against `.cache/mc/26.2/src/data/minecraft/
+            // worldgen/biome/badlands.json`; no substitute biome's list
+            // contains it) — always placed zero here. `3cf523c` ported
+            // `getBand` and made that table a pass-through, so this chunk
+            // now resolves to its real biome and should place real gold —
+            // measured 57 (vanilla 51) once the exception below was
+            // removed and this ran as a normal assertion. Kept as its own
+            // `eprintln` (rather than folding into the generic loop below,
+            // silently) so a regression that broke gold specifically is
+            // easy to spot in the log, not just in a hard failure.
             if (f.chunk_x, f.chunk_z) == (-120, -120) && id == "minecraft:gold_ore" {
+                let r = rust_counts.get(id).copied().unwrap_or(0);
                 eprintln!(
-                    "[ore-counts] chunk (-120,-120): minecraft:gold_ore vanilla={v} rust=0 — \
-                     expected, badlands' ore_gold_extra is unreachable via the excluded biome \
-                     table (Job 3), not an ore-composition bug"
+                    "[ore-counts] chunk (-120,-120): minecraft:gold_ore vanilla={v} rust={r} — \
+                     badlands' ore_gold_extra is reachable now that usable_overworld_table is a \
+                     pass-through (Job 3 closed)"
+                );
+                assert!(
+                    r > 0,
+                    "chunk (-120,-120): vanilla placed {v} of minecraft:gold_ore but rust's \
+                     composed column() placed NONE — badlands' bonus gold vein \
+                     (ore_gold_extra) should be reachable now that usable_overworld_table is a \
+                     pass-through; this is a regression, not the pre-existing Job 3 gap"
                 );
                 continue;
             }
@@ -451,17 +464,25 @@ fn composed_pipeline_vs_vanilla_postsurface_reference() {
         // ore block where vanilla's pre-carve `postsurface` still has plain
         // stone — now also counts as a "mismatch" against this pre-carve,
         // pre-feature reference, exactly the same pattern carve composition
-        // produced against this same stage earlier; not a regression);
-        // chunk (-120,-120) real=11257/98304 (still overwhelmingly the
-        // badlands-exclusion gap, worsened further by ore composition using
-        // the wrong biome's ore list there — see
-        // `ore_composition_gap_is_measured_and_reported`'s doc comment).
+        // produced against this same stage earlier; not a regression).
+        //
+        // chunk (-120,-120) used to be real=11257/98304, overwhelmingly the
+        // badlands-exclusion gap (Job 3). `3cf523c` ported
+        // `SurfaceSystem.getBand` and made `usable_overworld_table` a
+        // pass-through, closing Job 3: re-measured here at 6704/98304 — down,
+        // not up, because a correctly-resolved badlands biome's own surface
+        // rule (banded terracotta) tracks vanilla's `postsurface` far better
+        // than the substitute biome's rule ever did, even though the ore step
+        // (a separate, still-imperfect gap — see
+        // `ore_composition_gap_is_measured_and_reported`) keeps contributing
+        // its own share of mismatches here too.
+        //
         // 5% headroom over the measured value per chunk so this test does
         // not flap on insignificant noise while still catching a real
         // regression.
         let ceiling = match (f.chunk_x, f.chunk_z) {
-            (0, 0) => 9_230,       // measured 8787
-            (-120, -120) => 11_820, // measured 11257
+            (0, 0) => 9_230,      // measured 8787
+            (-120, -120) => 7_040, // measured 6704 — Job 3 closed, see above
             other => panic!("no measured ceiling recorded for fixture chunk {other:?} — add one"),
         };
         assert!(
@@ -470,6 +491,11 @@ fn composed_pipeline_vs_vanilla_postsurface_reference() {
             f.chunk_x,
             f.chunk_z,
             report.summary(20)
+        );
+        eprintln!(
+            "[parity] chunk ({}, {}): {real} real mismatches vs vanilla postsurface (ceiling {ceiling})",
+            f.chunk_x,
+            f.chunk_z
         );
     }
 }
@@ -510,13 +536,15 @@ fn full_vanilla_pipeline_gap_is_measured_and_reported() {
         // Measured after composing ores: chunk (0,0) 88733/98304 match,
         // 5727 real mismatches (down from the pre-ore 94460/0 baseline by
         // exactly the ore blocks placed — see `ore_composition_gap_is_measured_and_reported`
-        // for the vs-`postfeatures` breakdown of that number). Chunk
-        // (-120,-120) 87508/98304, 10790 real — still dominated by the
-        // badlands-exclusion gap, worsened further by ore composition using
-        // the wrong biome's ore list there (same root cause, not a new one).
+        // for the vs-`postfeatures` breakdown of that number).
+        //
+        // Chunk (-120,-120) used to be 87508/98304, 10790 real — dominated by
+        // the badlands-exclusion gap (Job 3). `3cf523c` closed Job 3
+        // (`usable_overworld_table` is now a pass-through); re-measured here
+        // at 92061/98304, 6237 real.
         let floor = match (f.chunk_x, f.chunk_z) {
             (0, 0) => 88_700,       // measured 88733
-            (-120, -120) => 87_450, // measured 87508
+            (-120, -120) => 92_000, // measured 92061 — Job 3 closed, see above
             other => panic!("no measured floor recorded for fixture chunk {other:?} — add one"),
         };
         assert!(

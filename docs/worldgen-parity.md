@@ -151,27 +151,42 @@ chunk, after #295:
   "mismatch" against the pre-carve reference. `docs/worldgen-parity.md`
   keeps both stages in the fixture specifically so this distinction is
   visible instead of collapsing into one number.
-- **(-120, -120), both stages**: still dominated by `terracotta`/
+- **(-120, -120), both stages**: at the time this was measured (immediately
+  after #295, before Job 3 below closed), still dominated by `terracotta`/
   `orange_terracotta`/`yellow_terracotta`/`white_terracotta`/
   `red_terracotta`/`light_gray_terracotta` → `stone`/`dirt`/`grass_block` —
-  the pre-existing badlands-exclusion gap (`crates/lodestone-worldgen/src/biome.rs`'s
+  the badlands-exclusion gap (`crates/lodestone-worldgen/src/biome.rs`'s
   `usable_overworld_table`, unrelated to #295, see the original write-up
   below) — plus a modest **postcarve improvement over postsurface** (5157 →
   4690 real mismatches) from `deepslate → lava` and similar carve-introduced
-  cells now agreeing with vanilla. The badlands gap dominates regardless of
-  #295's work here.
+  cells now agreeing with vanilla. The badlands gap dominated regardless of
+  #295's work here — **until Job 3 closed it; see below.**
 
-**Original (pre-#295) badlands finding, unchanged:** this chunk's real
-vanilla biome is `badlands`/`eroded_badlands` — and
-`crates/lodestone-worldgen/src/biome.rs`'s `usable_overworld_table`
-**deliberately excludes** badlands/eroded_badlands/wooded_badlands from the
-searchable biome table (vanilla's `Bandlands` surface rule delegates to an
+**Original (pre-#295) badlands finding, since closed (Job 3, `3cf523c`):**
+this chunk's real vanilla biome is `badlands`/`eroded_badlands` — and
+`crates/lodestone-worldgen/src/biome.rs`'s `usable_overworld_table` **used
+to deliberately exclude** badlands/eroded_badlands/wooded_badlands from the
+searchable biome table (vanilla's `Bandlands` surface rule delegated to an
 unported `SurfaceSystem.getBand` subsystem that would panic if reached), so
-Rust falls back to the nearest *supported* biome and its surface rule never
-produces terracotta banding. Composing carvers/the real aquifer does not
-change this: the same excluded table feeds carver/ore biome resolution too, so
-a column can never resolve to one of the three excluded names in the first
-place (see `crates/lodestone-worldgen/src/overworld.rs`'s "Badlands" section).
+Rust fell back to the nearest *supported* biome and its surface rule never
+produced terracotta banding. Composing carvers/the real aquifer did not
+change this on their own: the same excluded table fed carver/ore biome
+resolution too, so a column could never resolve to one of the three excluded
+names in the first place.
+
+`3cf523c` ported `SurfaceSystem.getBand` (`crate::surface::Rule::Bandlands`/
+`BandBlocks`/`generate_bands`) and turned `usable_overworld_table` into a
+pass-through (see that function's own doc comment), closing Job 3: a column
+can resolve to any of the three badlands variants again, and their surface
+rule now produces real banded terracotta
+(`crates/lodestone-server/src/worldgen_data.rs`'s
+`badlands_columns_when_present_carry_terracotta_bands` is the permanent
+regression control for this — it scans for badlands cells and asserts they
+carry one of the 7 real terracotta band blocks, using the known-badlands
+chunk `(-120,-120)` from this doc so the check is never vacuous). See
+`crates/lodestone-worldgen/src/overworld.rs`'s "Badlands" module-doc section
+for the wiring (`biome_for_carver_source` and carver/ore biome resolution
+both now see the real names too).
 
 **After the ore-oracle fix (issue #295's ore-oracle-parity increment,
 `postfeatures` stage — before ore composition landed):**
@@ -195,9 +210,25 @@ and ore-features sections):
 | (0, 0) | 92223/98304 match, **2237** real mismatches (down from 4113) | 88733/98304 match, 5727 real | 8787 real |
 | (-120, -120) | 91703/98304 match, **6595** real mismatches (up from 4942) | 87508/98304 match, 10790 real | 11257 real |
 
-**The gap against `postfeatures` did not go to (near) zero, and that is the
-finding, not a bug to route around** — measured, not guessed, per
-`CLAUDE.md`'s evidence standard:
+**After closing Job 3** (`3cf523c` ported `SurfaceSystem.getBand`, making
+`usable_overworld_table` a pass-through — same generator, same fixture, only
+the biome-table exclusion removed):
+
+| chunk | vs `postfeatures` (issue) | vs `postcarve` (full-pipeline floor) | vs `postsurface` (reference ceiling) |
+|---|---|---|---|
+| (0, 0) | 92223/98304 match, 2237 real (unchanged — this chunk never touches badlands climate) | 88733/98304 match, 5727 real (unchanged) | 8787 real (unchanged) |
+| (-120, -120) | **96429**/98304 match, **1869** real (down from 6595) | **92061**/98304 match, **6237** real (down from 10790) | **6704** real (down from 11257) |
+
+Every number at `(-120,-120)` moved in the direction real correctness
+predicts: once the column resolves to its actual vanilla biome, its surface
+material, carver selection *and* ore list all draw from the right table
+instead of a substitute's — the badlands gap that used to dominate this
+chunk's mismatches is gone, and what remains is the same kind of residual
+`(0,0)` already has (real 3×3 ore spill vs. a single-source oracle).
+
+**The gap against `postfeatures` did not go to (near) zero even after Job 3,
+and that remains the finding, not a bug to route around** — measured, not
+guessed, per `CLAUDE.md`'s evidence standard:
 
 - `postfeatures` is **single-source only** (`ComposedChunkOracle.java`'s own
   doc comment: it never extends to a real 3×3 with real per-quart biome
@@ -214,21 +245,26 @@ finding, not a bug to route around** — measured, not guessed, per
   evidence the ore *engine* and per-source biome resolution are correct, and
   that most of the full-3×3 residual (2237/98304) against `postfeatures` is
   real spill this oracle stage cannot model.
-- At chunk (-120,-120), the single-source residual (5391/98304) is *larger*
-  than the pre-composition baseline (4942) — because that chunk's real
-  vanilla biome is badlands, which `usable_overworld_table` still excludes
-  (Job 3, unported `SurfaceSystem.getBand`). Every source chunk there
-  resolves to the *wrong* biome's ore list, not merely an incomplete one.
-  This was confirmed directly, not inferred: a new per-ore-type count test
+- At chunk (-120,-120), **before Job 3 closed**, the single-source residual
+  (5391/98304) was *larger* than the pre-composition baseline (4942) —
+  because that chunk's real vanilla biome is badlands, which
+  `usable_overworld_table` excluded at the time. Every source chunk there
+  resolved to the *wrong* biome's ore list, not merely an incomplete one.
+  This was confirmed directly, not inferred: a per-ore-type count test
   (`ore_counts_by_type_are_predicted_and_measured`) found vanilla placed 51
   `minecraft:gold_ore` at this chunk while composed Rust placed **zero** —
   `badlands.json`'s own `UNDERGROUND_ORES` step names
   `minecraft:ore_gold_extra` (badlands' well-known bonus gold vein) as its
   27th entry, absent from `plains.json`'s step (and every other substitute
   biome's). A biome substitution can only ever place the substitute's ore
-  list, so this is the pre-existing badlands gap cascading into ore
-  selection, not a new defect — recorded as a documented exception in that
-  test, not a loosened assertion.
+  list, so this was the pre-existing badlands gap cascading into ore
+  selection, not a new defect.
+  **After Job 3 closed**, that same test now measures vanilla=51,
+  rust=**57** — gold is reachable again, and the test asserts `r > 0` as a
+  real success condition rather than documenting an exception that skips the
+  assertion. The count is not an exact match (57 vs 51): the same real-3×3-
+  spill effect the bullet above documents for every other ore type at this
+  chunk applies to gold too, now that it can be placed at all.
 - Per `CLAUDE.md`'s "an exact-match ore comparison can fail purely from RNG
   stream ordering": the per-ore-type count table (chunk (0,0), vanilla
   single-source / rust composed) shows the *narrow-target* ores (coal, iron,
