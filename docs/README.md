@@ -743,6 +743,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   sprint-swimming didn't work even though the client believed it was sprinting the
   whole time. Landed in `13a1d3a` ("kelp is breakable again, and swimming actually
   swims").
+- [The task runner (`just`)](./task-runner.md) — A [`Justfile`](../Justfile) at the
+  repo root, run with `casey/just` (installed at `/opt/homebrew/bin/just`, 1.58.0+).
+  It gives every health check, `xtask` invocation, and `LODESTONE_REGEN` regeneration
+  a short, memorable name — `just check`, `just xtask docs-index`, `just
+  regen-hardness` — so an agent does not have to reconstruct the exact flag set from
+  CLAUDE.md by hand every time, and so a fidelity check has one file to diff against
+  instead of a half-remembered command.
 - [Telemetry Data screen](./telemetry-screen.md) — `SettingsPage::Telemetry` (issue
   #415): vanilla's `TelemetryInfoScreen`, reached from the root settings grid's own
   "Telemetry Data..." button (flipped from `no_screen` to `nav()`). Built as an honest

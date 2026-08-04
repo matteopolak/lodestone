@@ -51,6 +51,21 @@ The `cargo xtask` alias has no --target-dir; use the expanded form:
    cargo run -q -p xtask -j 4 --target-dir /tmp/lt-427-k3f9 -- docs-index --check
 ```
 
+**The Justfile (`docs/task-runner.md`) now bakes both of the above.** `just`'s
+`xtask *args` recipe already runs the expanded `cargo run -q -p xtask
+--target-dir … --` form — the alias's missing `--target-dir` is exactly why
+that recipe exists — so `LODESTONE_TARGET_DIR=/tmp/lt-427-k3f9 just xtask
+docs-index --check` is the same invocation as the hand-expanded one above,
+without retyping it. Every other cargo recipe in the Justfile
+(`check`/`check-all`/`check-seam`/`test`/`health`) reads the same
+`LODESTONE_TARGET_DIR` env var and an optional `LODESTONE_JOBS` for `-j`, e.g.
+`LODESTONE_TARGET_DIR=/tmp/lt-427-k3f9 LODESTONE_JOBS=4 just health`. `just`
+interpolates the variable into the command line *before* cargo runs, so cargo
+still only ever sees the flag form — the env var read by `just` is not the
+one cargo sees. This is a convenience, not a new mechanism: the raw commands
+above remain correct and are exactly what each recipe expands to (verify with
+`just -n <recipe>`).
+
 Why each piece is shaped that way is the rest of this doc.
 
 ## Why: the lock, not the compiler, was the bottleneck
