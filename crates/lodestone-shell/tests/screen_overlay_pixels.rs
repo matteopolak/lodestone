@@ -44,9 +44,8 @@
 
 use lodestone::gpu::{RenderState, ScreenEffects};
 use lodestone_assets::{MemorySource, ResourceManager};
-use lodestone_render::{
-    Camera, GpuContext, HeadlessTarget, RenderTarget, ScreenEffectRenderer, fire_overlay_vertical_extent,
-};
+use lodestone_render::screen_effects::fire_overlay_vertical_extent;
+use lodestone_render::{Camera, GpuContext, HeadlessTarget, RenderTarget, ScreenEffectRenderer};
 
 const W: u32 = 256;
 const H: u32 = 256;

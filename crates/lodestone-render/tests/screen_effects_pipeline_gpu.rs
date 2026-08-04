@@ -14,7 +14,8 @@
 //! per-frame call — this file is the pipeline working in isolation.
 
 use lodestone_assets::{MemorySource, ResourceManager};
-use lodestone_render::{GpuContext, HeadlessTarget, RenderTarget, ScreenEffectRenderer, fire_overlay_vertical_extent};
+use lodestone_render::screen_effects::fire_overlay_vertical_extent;
+use lodestone_render::{GpuContext, HeadlessTarget, RenderTarget, ScreenEffectRenderer};
 
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 64;
