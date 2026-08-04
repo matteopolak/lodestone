@@ -509,6 +509,17 @@ fn is_hostile_species(entity_type: &ResourceKey) -> bool {
     )
 }
 
+/// Vanilla `Creeper.DEFAULT_EXPLOSION_RADIUS`
+/// (`.cache/mc/26.2/src/net/minecraft/world/entity/monster/Creeper.java:52`,
+/// `private static final byte DEFAULT_EXPLOSION_RADIUS = 3;`), used flat by
+/// [`MobSim::tick`]'s detonation trigger. Vanilla doubles this for a
+/// lightning-charged (`isPowered`) creeper (`Creeper.java:230-234`,
+/// `explosionMultiplier = isPowered() ? 2.0F : 1.0F`); `SimMob` has no
+/// "powered" state anywhere in this crate (no lightning-charging is
+/// implemented), so that multiplier is not modelled — a disclosed gap, not a
+/// silent one.
+const CREEPER_EXPLOSION_RADIUS: f32 = 3.0;
+
 /// One live mob in the simulation: its [`NavigatingMob`] body and its own
 /// [`GoalSelector`].
 ///
@@ -582,6 +593,36 @@ impl<'w> SimMob<'w> {
     /// Sets the mob's current attack target (what a `MeleeAttackGoal` chases).
     pub fn set_attack_target(&mut self, target: Option<Vec3>) {
         self.mob.set_attack_target(target);
+    }
+
+    /// Marks the mob ignited (vanilla `Creeper.ignite()`), forcing a
+    /// creeper's swell direction to climb every tick regardless of
+    /// [`SwellGoal`](lodestone_entity::ai::goals::SwellGoal)'s own proximity
+    /// check. A no-op for a mob whose [`NavigatingMob`] never has anything
+    /// else move its swell direction off `-1` (every non-creeper species).
+    pub fn ignite(&mut self) -> &mut Self {
+        self.mob.ignite();
+        self
+    }
+
+    /// Whether this mob is currently ignited. See [`ignite`](Self::ignite).
+    #[must_use]
+    pub fn is_ignited(&self) -> bool {
+        self.mob.is_ignited()
+    }
+
+    /// The current fuse counter (vanilla `Creeper.swell`), `0..=MAX_SWELL`
+    /// for a creeper; permanently `0` for a species nothing ever moves off
+    /// [`swell_dir`](Self::swell_dir)'s `-1` default.
+    #[must_use]
+    pub fn swell(&self) -> i32 {
+        self.mob.swell()
+    }
+
+    /// The mob's current swell direction (vanilla `Creeper.getSwellDir`).
+    #[must_use]
+    pub fn swell_dir(&self) -> i32 {
+        self.mob.swell_dir()
     }
 
     /// Sets which live mob (by id) this mob's connecting melee attacks damage.
@@ -1064,6 +1105,7 @@ impl<'w> MobSim<'w> {
     /// tick that killed it (vanilla's immediate death removal).
     pub fn tick(&mut self) {
         let mut hits: Vec<(Option<i32>, f32)> = Vec::new();
+        let mut detonations: Vec<(i32, Vec3)> = Vec::new();
         for m in &mut self.mobs {
             // Vanilla ages `invulnerableTime`/`hurtTime` every tick regardless
             // of whether the mob was hit this tick.
@@ -1072,6 +1114,9 @@ impl<'w> MobSim<'w> {
             m.no_action_time = m.no_action_time.saturating_add(1);
             if !m.mob.take_new_attacks().is_empty() {
                 hits.push((m.attack_target_id, m.attack_damage));
+            }
+            if m.mob.take_detonated() {
+                detonations.push((m.id, m.position()));
             }
         }
         for (target_id, raw_damage) in hits {
@@ -1082,6 +1127,22 @@ impl<'w> MobSim<'w> {
             }
         }
         self.mobs.retain(|m| m.health > 0.0);
+
+        // Issue #213: `explode`'s exposure/damage maths was already correct
+        // and already unit-tested, but had zero production callers anywhere
+        // — a creeper's own fuse reaching `MAX_SWELL`
+        // (`NavigatingMob::take_detonated`, driven by `SwellGoal`/`ignite`)
+        // is the first one. Vanilla's `explodeCreeper`
+        // (`Creeper.java:230-239`) unconditionally discards the creeper
+        // alongside the blast (`this.dead = true; ...; this.discard();`), so
+        // the explicit retain below does not rely on the creeper taking
+        // lethal self-damage from its own blast — a wall could shield it
+        // from its own explosion exactly as it shields any other mob, and
+        // vanilla's `discard()` has no such exception.
+        for (id, pos) in detonations {
+            self.explode(pos, CREEPER_EXPLOSION_RADIUS, DamageFlags::default());
+            self.mobs.retain(|m| m.id != id);
+        }
 
         // Issues #211/#215: `ProjectileRegistry`/`ItemEntityRegistry` existed
         // and were unit-tested but nothing called their `tick` from a real
