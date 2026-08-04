@@ -76,14 +76,25 @@ struct AnimSlots {
 };
 @group(2) @binding(0) var<uniform> anim: AnimSlots;
 
-fn fog_amount(dist: f32) -> f32 {
-    let start = camera.fog_color_start.w;
-    let end = camera.fog_end_enabled.x;
-    let enabled = camera.fog_end_enabled.y;
+// Identical to the model shader's `linear_fog`/`fog_amount` and to
+// `crate::fog::fog_factor`/`total_fog_factor`. `fog_eye.w` /
+// `fog_end_enabled.w` are vanilla's environmental term's start/end (measured
+// spherically); `fog_color_start.w` / `fog_end_enabled.x` are the
+// render-distance term's (measured cylindrically) — see the model shader's
+// `Camera` doc for the full lane layout.
+fn linear_fog(dist: f32, start: f32, end: f32) -> f32 {
     if (end <= start) {
         return 0.0;
     }
-    return clamp((dist - start) / (end - start), 0.0, 1.0) * enabled;
+    return clamp((dist - start) / (end - start), 0.0, 1.0);
+}
+
+fn fog_amount(rel: vec3<f32>) -> f32 {
+    let sph = length(rel);
+    let cyl = max(length(rel.xz), abs(rel.y));
+    let env = linear_fog(sph, camera.fog_eye.w, camera.fog_end_enabled.w);
+    let rd = linear_fog(cyl, camera.fog_color_start.w, camera.fog_end_enabled.x);
+    return max(env, rd) * camera.fog_end_enabled.y;
 }
 
 // sRGB transfer functions (component-wise); see the model shader for why the
@@ -154,7 +165,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // shader for the derivation from `fog.glsl` and for the measured size of the
     // linear-space error this replaced. All three fogged shaders must agree, or
     // water and the terrain it sits in dissolve at visibly different rates.
-    let amount = fog_amount(length(in.world - camera.fog_eye.xyz));
+    let amount = fog_amount(in.world - camera.fog_eye.xyz);
     let fogged_srgb = mix(lit_srgb, linear_to_srgb(camera.fog_color_start.rgb), amount);
     return vec4<f32>(srgb_to_linear(fogged_srgb), tex.a);
 }

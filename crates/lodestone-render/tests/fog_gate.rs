@@ -227,6 +227,14 @@ fn distant_fragment_is_pulled_to_the_fog_colour() {
         sky_color: [0.0, 1.0, 0.0],
         start: 100.0,
         end: 500.0,
+        // The environmental term stays disabled: this scene's eye offset is
+        // along world Z, which the shader's cylindrical metric groups with X
+        // as "horizontal" (`fog.glsl:36-40`'s `max(length(rel.xz),
+        // abs(rel.y))`), so the render-distance term alone already reads
+        // ~1000 at the centre pixel — no environmental term is needed to
+        // saturate past `end`.
+        environmental_start: 0.0,
+        environmental_end: 0.0,
     };
     let fog_on = FogUniform::new(&settings, [0.0, 0.0, -1000.0]);
     let (r_on, g_on, b_on) = render_center(&gpu, fog_on);

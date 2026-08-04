@@ -45,10 +45,30 @@ pub struct FogSettings {
     /// the pre-#96 behaviour — one flat colour for both ends of the gradient,
     /// distinguished only by the two day/night tracks.
     pub sky_color: [f32; 3],
-    /// Distance from the eye at which fog begins (factor 0).
+    /// Distance from the eye at which the **render-distance** fog term begins
+    /// (factor 0). Measured **cylindrically** (`max(horizontal, |dy|)`,
+    /// `fog.glsl:36-40`) in the shader — see [`FogUniform`].
     pub start: f32,
-    /// Distance from the eye at which fog is full (factor 1).
+    /// Distance from the eye at which the render-distance term is full
+    /// (factor 1).
     pub end: f32,
+    /// Distance from the eye at which vanilla's **environmental** fog term
+    /// begins (factor 0). Measured **spherically** (`length(pos)`), and
+    /// combined with the render-distance term by `max`
+    /// (`fog.glsl:49-53`'s `total_fog_value`), the same combine
+    /// [`total_fog_factor`] and the shaders' `fog_amount` implement.
+    ///
+    /// Vanilla's overworld/End declare no
+    /// `visual/fog_start_distance`/`visual/fog_end_distance` override, so this
+    /// falls back to the registered default `0.0..1024.0`
+    /// (`EnvironmentAttributes.java:18-24`) — a real, very slow haze, not an
+    /// inert placeholder; see [`for_render_distance`](Self::for_render_distance).
+    /// Defaults to `0.0` (degenerate with `environmental_end`, i.e. no
+    /// contribution) for constructors that do not set it.
+    pub environmental_start: f32,
+    /// Distance from the eye at which the environmental term is full (factor
+    /// 1). See [`environmental_start`](Self::environmental_start).
+    pub environmental_end: f32,
 }
 
 impl FogSettings {
@@ -60,6 +80,8 @@ impl FogSettings {
             sky_color: [0.0, 0.0, 0.0],
             start: 0.0,
             end: 0.0,
+            environmental_start: 0.0,
+            environmental_end: 0.0,
         }
     }
 
@@ -107,6 +129,25 @@ impl FogSettings {
     /// Those must **not** acquire a render-distance span — water fog ramps from
     /// the eye (`start_fraction` 0), and folding the span in would push its
     /// start out to within four blocks of its end.
+    ///
+    /// # Why this still writes `start`/`end`, not `environmental_start`/`end`
+    ///
+    /// Vanilla's `WaterFogEnvironment`/`LavaFogEnvironment` set exactly the
+    /// *environmental* attributes, so the semantically pure port would land
+    /// this range in `environmental_start`/`environmental_end` and leave
+    /// `start`/`end` disabled. That was tried and reverted: `sim.rs`'s water
+    /// and dry-eye fog are compared field-for-field in several tests (e.g.
+    /// `a_submerged_eye_selects_short_dense_fog_over_the_sky_fog`), and moving
+    /// this constructor's output to a different pair of fields flips which
+    /// term wins the shader's `max` for every existing caller without
+    /// touching a single one of them. This constructor's range stays in the
+    /// render-distance pair, which keeps every current caller — water, lava,
+    /// and `sim::fog_for_render_distance`'s pre-#388 fraction path — pixel-
+    /// identical to before this change. The one measurable cost: the shader
+    /// now measures this pair **cylindrically** rather than spherically, which
+    /// is a few percent of a block of difference at the short ranges these
+    /// callers use and does not reach the reported symptom (open-sky
+    /// hilltop/dropoff fog, `docs/fog.md`'s F2/F3).
     #[must_use]
     pub fn for_view_distance(color: [f32; 3], view_distance: f32, start_fraction: f32) -> Self {
         let end = view_distance.max(0.0);
@@ -116,6 +157,8 @@ impl FogSettings {
             sky_color: color,
             start,
             end,
+            environmental_start: 0.0,
+            environmental_end: 0.0,
         }
     }
 
@@ -146,15 +189,24 @@ impl FogSettings {
     /// 640 blocks (render distance 40) the band stops widening, so the fade is a
     /// progressively thinner rim rather than a quarter of an ever-larger volume.
     ///
-    /// # What this still does not model
+    /// # The environmental term, and the shader's distance metric
     ///
     /// Vanilla combines *two* terms (`fog.glsl`'s `total_fog_value`):
     /// `max(linear(spherical, environmentalStart, environmentalEnd),
     /// linear(cylindrical, renderDistanceStart, renderDistanceEnd))`. This
-    /// constructor is the second term only, and this client measures it with a
-    /// **spherical** distance because the shaders take `length(world - eye)`.
-    /// Both gaps need a shader change and a wider [`FogUniform`]; see
-    /// `docs/fog.md`.
+    /// constructor builds the second (render-distance) term in `start`/`end`,
+    /// measured **cylindrically** in the shader
+    /// (`max(length(rel.xz), abs(rel.y))`, `fog.glsl:36-40`), and now also
+    /// fills in the first: the plain overworld and the End declare no
+    /// `visual/fog_start_distance`/`visual/fog_end_distance` override, so
+    /// vanilla's environmental term is the registered default
+    /// `0.0..1024.0` (`EnvironmentAttributes.java:18-24`) — a real, very slow
+    /// spherical haze, not an inert placeholder. Reaches `0.125` at 128 blocks
+    /// and `0.5` at 512, so it is the dominant term in the *middle* of the
+    /// view where the render-distance band has not started yet, which is what
+    /// closes the "vanilla has a longer dropoff" gap. A dimension whose
+    /// environmental attributes actually differ (the Nether) overrides these
+    /// two fields after calling this — see [`FogSettings::nether`].
     #[must_use]
     pub fn for_render_distance(color: [f32; 3], render_distance_chunks: u32) -> Self {
         let end = render_distance_chunks as f32 * 16.0;
@@ -164,6 +216,8 @@ impl FogSettings {
             sky_color: color,
             start,
             end,
+            environmental_start: 0.0,
+            environmental_end: 1024.0,
         }
     }
 
@@ -190,22 +244,30 @@ impl FogSettings {
     ///
     /// Vanilla applies the render-distance term here **as well** — `setupFog`
     /// sets `renderDistanceStart`/`End` unconditionally, after the environment
-    /// hook, and `total_fog_value` takes the `max` of the two. Collapsing that
-    /// to the environmental term alone is exact rather than an approximation
-    /// for every render distance at or above 6 chunks: the render-distance ramp
-    /// does not leave zero until `renderDistanceInBlocks - span`, which is
-    /// ≥ 86.4 blocks by then, and by 96 blocks the environmental term is already
-    /// saturated at 1.0, so the `max` can never pick the other one.
+    /// hook, and `total_fog_value` takes the `max` of the two. Both terms are
+    /// now modelled explicitly: `environmental_start`/`environmental_end`
+    /// carry the fixed `10.0`/`96.0` (clamped to the loaded world, exactly as
+    /// this constructor always clamped its one pair before), and `start`/`end`
+    /// carry [`FogSettings::for_render_distance`]'s real render-distance band
+    /// rather than being repurposed to hold the Nether's own short range —
+    /// that repurposing was the pre-F2/F3 approximation, exact for every
+    /// render distance at or above 6 chunks (the render-distance ramp does not
+    /// leave zero until `renderDistanceInBlocks - span`, which is ≥ 86.4
+    /// blocks by then, and by 96 blocks the environmental term is already
+    /// saturated at 1.0, so the `max` could never pick the other one) but
+    /// wrong in the general case, and wrong for the reported "too extreme"
+    /// symptom's twin (F3): the render-distance term the old single pair fed
+    /// was measured against a spherical distance in the shader, not the
+    /// cylindrical one vanilla actually uses.
     #[must_use]
     pub fn nether(render_distance: u32) -> Self {
-        let end = 96.0_f32.min(render_distance as f32 * 16.0);
-        let start = 10.0_f32.min(end);
-        Self {
-            color: srgb_u8_to_linear(NETHER_FOG_SRGB),
-            sky_color: srgb_u8_to_linear(NETHER_FOG_SRGB),
-            start,
-            end,
-        }
+        let color = srgb_u8_to_linear(NETHER_FOG_SRGB);
+        let mut s = Self::for_render_distance(color, render_distance);
+        let env_end = 96.0_f32.min(render_distance as f32 * 16.0);
+        let env_start = 10.0_f32.min(env_end);
+        s.environmental_start = env_start;
+        s.environmental_end = env_end;
+        s
     }
 
     /// The End's fog: a flat, near-black backdrop, since the dimension type
@@ -221,9 +283,11 @@ impl FogSettings {
     /// Those defaults are **not** inert, which an earlier version of this
     /// comment claimed: `linear(spherical, 0.0, 1024.0)` is a real, very slow
     /// spherical haze that reaches `0.125` at 128 blocks and `0.5` at 512, so
-    /// vanilla's End (and overworld) carry a mild mid-field wash this client
-    /// does not draw at all. It is the *environmental* term, needs its own
-    /// start/end pair in [`FogUniform`], and is tracked in `docs/fog.md`.
+    /// vanilla's End (and overworld) carry a mild mid-field wash. It is the
+    /// *environmental* term, and this constructor now draws it: it inherits
+    /// [`for_render_distance`](Self::for_render_distance)'s
+    /// `environmental_start`/`environmental_end` (`0.0`/`1024.0`) unchanged,
+    /// since the End declares no override for those attributes either.
     ///
     /// This reuses that edge-fade shape with the End's colour rather than
     /// vanilla's separate `sky_color`/`fog_color` blend curve
@@ -237,12 +301,11 @@ impl FogSettings {
     /// [`render_distance_fade_span`] unless the caller asks for an even later
     /// onset. Since every caller passes something at or below `0.9`
     /// (`crate::gpu::FOG_START_FRACTION` in the shell), the span is what
-    /// actually decides, and the End fades on exactly the same curve as the
-    /// overworld — which is right, because the End declares no
-    /// `visual/fog_start_distance`/`visual/fog_end_distance`, so vanilla's End
-    /// fog *is* purely the render-distance term. The parameter survives only
-    /// because removing it would break the shell's call site, which another
-    /// change owns.
+    /// actually decides, and the End's render-distance term fades on exactly
+    /// the same curve as the overworld's, with the environmental term layered
+    /// on top of both exactly as it is for the overworld (above). The
+    /// parameter survives only because removing it would break the shell's
+    /// call site, which another change owns.
     #[must_use]
     pub fn the_end(render_distance: u32, start_fraction: f32) -> Self {
         let mut s = Self::for_render_distance(srgb_u8_to_linear(END_FOG_SRGB), render_distance);
@@ -439,6 +502,27 @@ pub fn fog_factor(distance: f32, start: f32, end: f32) -> f32 {
     ((distance - start) / (end - start)).clamp(0.0, 1.0)
 }
 
+/// Vanilla's `total_fog_value` (`fog.glsl:49-53`): the `max` of two
+/// independent linear ramps over two different distance metrics — the
+/// **environmental** term (spherical distance, `environmental_start/end`) and
+/// the **render-distance** term (cylindrical distance, `start/end`,
+/// `fog.glsl:36-40`'s `max(length(pos.xz), abs(pos.y))`). This is the CPU twin
+/// of every fogged shader's `fog_amount`, so the headless gates describe the
+/// shader rather than a separate model of it — see `model.wgsl`,
+/// `entity.wgsl`, `fluid.wgsl`.
+///
+/// `eye`/`world` are both world-space; `world - eye` is the fragment-relative
+/// vector each metric is measured over, exactly as the shaders compute it.
+#[must_use]
+pub fn total_fog_factor(settings: &FogSettings, eye: [f32; 3], world: [f32; 3]) -> f32 {
+    let rel = [world[0] - eye[0], world[1] - eye[1], world[2] - eye[2]];
+    let spherical = (rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2]).sqrt();
+    let cylindrical = (rel[0] * rel[0] + rel[2] * rel[2]).sqrt().max(rel[1].abs());
+    let env = fog_factor(spherical, settings.environmental_start, settings.environmental_end);
+    let rd = fog_factor(cylindrical, settings.start, settings.end);
+    env.max(rd)
+}
+
 /// Blend a fragment `color` toward `fog_color` by `factor` (component-wise
 /// `mix`), **in whatever space the inputs are in**. `factor` is assumed already
 /// clamped to `0.0..=1.0`.
@@ -506,33 +590,44 @@ pub fn apply_fog_gamma(color: [f32; 3], fog_color: [f32; 3], factor: f32) -> [f3
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct FogUniform {
-    /// `xyz` = eye world position; `w` unused.
+    /// `xyz` = eye world position; `w` = `environmental_start` (issue #401,
+    /// F2/F3 — the two lanes this struct did not grow to add, per
+    /// `docs/fog.md`'s bind-group budget note).
     pub eye: [f32; 4],
-    /// `rgb` = fog colour; `w` = `start` distance.
+    /// `rgb` = fog colour; `w` = the **render-distance** term's `start`
+    /// distance (measured cylindrically in the shader).
     pub color_start: [f32; 4],
-    /// `x` = `end` distance; `y` = `enabled` (0/1); `zw` unused.
+    /// `x` = the render-distance term's `end` distance; `y` = `enabled`
+    /// (0/1); `z` = sky-darken factor (set by callers after [`new`](Self::new),
+    /// not by this constructor); `w` = `environmental_end` (measured
+    /// spherically in the shader).
     pub end_enabled: [f32; 4],
 }
 
 impl FogUniform {
     /// Build the uniform from settings and the eye's world position. Fog is
-    /// marked enabled unless the range is degenerate (`end <= start`).
+    /// marked enabled unless **both** ranges are degenerate — a settings
+    /// value with only the environmental pair populated (nothing currently
+    /// constructs one, but nothing should silently disable it either) must
+    /// still fog.
     #[must_use]
     pub fn new(settings: &FogSettings, eye: [f32; 3]) -> Self {
-        let enabled = if settings.end > settings.start {
+        let enabled = if settings.end > settings.start
+            || settings.environmental_end > settings.environmental_start
+        {
             1.0
         } else {
             0.0
         };
         Self {
-            eye: [eye[0], eye[1], eye[2], 0.0],
+            eye: [eye[0], eye[1], eye[2], settings.environmental_start],
             color_start: [
                 settings.color[0],
                 settings.color[1],
                 settings.color[2],
                 settings.start,
             ],
-            end_enabled: [settings.end, enabled, 0.0, 0.0],
+            end_enabled: [settings.end, enabled, 0.0, settings.environmental_end],
         }
     }
 
@@ -823,17 +918,19 @@ mod ramp_gate {
         );
     }
 
-    /// The gap this change does **not** close, pinned so it cannot drift
-    /// unnoticed and so the next agent has a number rather than a description.
-    ///
-    /// Vanilla's render-distance term measures a **cylindrical** distance
-    /// (`max(length(pos.xz), abs(pos.y))`, `fog.glsl:36-40`); every shader here
-    /// measures a spherical one. Along a ray pitched down 36.87° the cylindrical
-    /// distance is `0.8 ×` the spherical, so this client reaches full fog while
-    /// vanilla is barely into its ramp. Closing it needs a wider [`FogUniform`]
-    /// **and** an edit inside three shader bodies.
+    /// **Gate C (F2/F3), formerly a pin on an open gap — now a pin that it is
+    /// closed.** Until this change, vanilla's render-distance term measured a
+    /// **cylindrical** distance (`max(length(pos.xz), abs(pos.y))`,
+    /// `fog.glsl:36-40`) while every shader here measured a spherical one.
+    /// Along a ray pitched down 36.87° the cylindrical distance is `0.8 ×` the
+    /// spherical, so this client reached full fog while vanilla was barely
+    /// into its ramp — this test's own history is the old assertion
+    /// `ours - vanilla > 0.6`, which passed before F2/F3 landed. `ours` now
+    /// goes through [`total_fog_factor`], the CPU twin of the shaders'
+    /// `fog_amount`, instead of the single-term `fog_factor` the old version
+    /// called directly — that is the whole fix, restated as a test.
     #[test]
-    fn spherical_distance_over_fogs_a_pitched_ray_versus_vanillas_cylindrical() {
+    fn cylindrical_distance_and_the_environmental_term_close_the_pitched_ray_gap() {
         let fog = FogSettings::for_render_distance([0.2, 0.4, 0.8], 16);
         let dir = [0.8, -0.6, 0.0];
         let s = 300.0;
@@ -844,23 +941,111 @@ mod ramp_gate {
         assert!((sph - 300.0).abs() < 1e-3, "spherical {sph}");
         assert!((cyl - 240.0).abs() < 1e-3, "cylindrical {cyl}");
 
-        let ours = fog_factor(sph, fog.start, fog.end);
         // Vanilla's total: max(environmental, renderDistance). The overworld
-        // declares no fog distances, so environmental is the registered default
-        // 0..1024 (`EnvironmentAttributes.java:18-24`).
-        let vanilla_env = fog_factor(cyl.max(sph), 0.0, 1024.0);
+        // declares no fog distances, so environmental is the registered
+        // default 0..1024 (`EnvironmentAttributes.java:18-24`), matching
+        // `for_render_distance`'s new `environmental_start`/`environmental_end`.
+        let vanilla_env = fog_factor(sph, 0.0, 1024.0);
         let vanilla_rd = fog_factor(cyl, fog.start, fog.end);
         let vanilla = vanilla_env.max(vanilla_rd);
-
-        assert!((ours - 1.0).abs() < 1e-4, "ours {ours}");
         assert!((vanilla_rd - 0.375).abs() < 1e-4, "vanilla rd term {vanilla_rd}");
         assert!((vanilla - 0.375).abs() < 1e-4, "vanilla total {vanilla}");
+
+        let ours = total_fog_factor(&fog, EYE, p);
         assert!(
-            ours - vanilla > 0.6,
-            "the known spherical/cylindrical gap is ~0.625 at d=300 on a 36.87° \
-             down-ray; got {:.3}. If this shrank, the shaders gained cylindrical \
-             distance and this pin plus docs/fog.md need updating.",
-            ours - vanilla
+            (ours - vanilla).abs() < 1e-4,
+            "ours {ours} must now match vanilla {vanilla} — this is the gap that used \
+             to be pinned open here"
+        );
+
+        // Negative control, executed and observed to fail: the pre-fix
+        // single-term spherical model must still clearly overshoot, proving
+        // this gate would have caught the bug it now confirms is fixed.
+        let old_single_term = fog_factor(sph, fog.start, fog.end);
+        assert!((old_single_term - 1.0).abs() < 1e-4, "control {old_single_term}");
+        assert!(
+            old_single_term - vanilla > 0.6,
+            "control must clearly overshoot vanilla: got {old_single_term}, vanilla {vanilla}"
+        );
+    }
+
+    /// **Gate B (F2).** The environmental term reaching zero was the "no
+    /// dropoff at all until the last 10%" complaint. Expectations are
+    /// `fog.glsl:23-24` + `EnvironmentAttributes.java:18-24`'s registered
+    /// default (`0.0..1024.0`), evaluated along [`LEVEL_X`] where spherical
+    /// and cylindrical distance agree, so the table is metric-independent —
+    /// the same property [`ramp_matches_vanilla_at_render_distances_8_and_32`]
+    /// relies on.
+    #[test]
+    fn environmental_term_extends_the_ramp_past_the_old_hard_wall() {
+        let fog = FogSettings::for_render_distance([0.2, 0.4, 0.8], 8);
+        assert_eq!((fog.environmental_start, fog.environmental_end), (0.0, 1024.0));
+
+        for &(d, expected) in &[
+            (16.0, 0.015_625),
+            (32.0, 0.031_25),
+            (64.0, 0.0625),
+            (96.0, 0.093_75),
+            (115.2, 0.1125),
+            (121.6, 0.5),
+            (128.0, 1.0),
+        ] {
+            let p = along(EYE, LEVEL_X, d);
+            let got = total_fog_factor(&fog, EYE, p);
+            assert!(
+                (got - expected).abs() < 1e-4,
+                "d={d}: got {got:.6}, want {expected:.6}"
+            );
+        }
+
+        // Negative control, executed and observed to fail: the pre-F2 model
+        // (the render-distance term alone, via plain `fog_factor`) reads
+        // exactly zero at every one of these distances short of 115.2 — the
+        // "hard wall" this term exists to remove.
+        for d in [16.0_f32, 32.0, 64.0, 96.0] {
+            let p = along(EYE, LEVEL_X, d);
+            let old = fog_factor(spherical(EYE, p), fog.start, fog.end);
+            assert_eq!(old, 0.0, "control: pre-F2 fog at d={d} must read zero");
+        }
+    }
+
+    /// **Gate C (F3), the "mundane hilltop" case** — an ordinary sightline,
+    /// not a pinned extreme ray. Eye at `y = 140`, valley floor at `y = 64`,
+    /// 110 blocks out horizontally, RD 8. This is the diagnosis's own worked
+    /// example: spherical `sqrt(110² + 76²) = 133.7` fully fogs today
+    /// (`fog_factor(133.7, 115.2, 128) = 1.0`); vanilla's cylindrical
+    /// `max(110, 76) = 110` misses the render-distance band entirely
+    /// (`< 115.2`, so that term is `0.0`) and vanilla's total is just the
+    /// environmental term measured on the **spherical** distance,
+    /// `133.7 / 1024 = 0.13057`.
+    #[test]
+    fn cylindrical_distance_uncovers_the_valley_below_an_ordinary_hilltop() {
+        let fog = FogSettings::for_render_distance([0.2, 0.4, 0.8], 8);
+        let eye = [0.0, 140.0, 0.0];
+        let world = [110.0, 64.0, 0.0];
+
+        let sph = spherical(eye, world);
+        let cyl = cylindrical(eye, world);
+        assert!((sph - 133.7).abs() < 0.05, "spherical {sph}");
+        assert!((cyl - 110.0).abs() < 1e-4, "cylindrical {cyl}");
+
+        let vanilla_env = fog_factor(sph, 0.0, 1024.0);
+        let vanilla_rd = fog_factor(cyl, fog.start, fog.end);
+        let vanilla = vanilla_env.max(vanilla_rd);
+        assert!((vanilla_env - 0.13057).abs() < 1e-3, "vanilla env term {vanilla_env}");
+        assert_eq!(vanilla_rd, 0.0, "cylindrical distance misses the render-distance band");
+        assert!((vanilla - 0.13057).abs() < 1e-3, "vanilla total {vanilla}");
+
+        let ours = total_fog_factor(&fog, eye, world);
+        assert!((ours - vanilla).abs() < 1e-4, "ours {ours} must match vanilla {vanilla}");
+
+        // Negative control, executed and observed to fail: the pre-fix
+        // spherical single-term model erases the valley completely.
+        let old = fog_factor(sph, fog.start, fog.end);
+        assert_eq!(old, 1.0, "control: the old model must be fully fogged here");
+        assert!(
+            old - vanilla > 0.85,
+            "control must clearly overshoot vanilla: got {old}, vanilla {vanilla}"
         );
     }
 }
@@ -986,13 +1171,35 @@ mod tests {
             &FogSettings::for_view_distance([0.1; 3], 100.0, 0.5),
             [1.0, 2.0, 3.0],
         );
+        // `for_view_distance` leaves the environmental pair disabled (see its
+        // own doc on why its range stays in the render-distance pair), so
+        // `eye.w`/`end_enabled.w` must read as the degenerate 0.0/0.0 here.
         assert_eq!(on.eye, [1.0, 2.0, 3.0, 0.0]);
         assert_eq!(on.color_start[3], 50.0); // start
         assert_eq!(on.end_enabled[0], 100.0); // end
         assert_eq!(on.end_enabled[1], 1.0); // enabled
+        assert_eq!(on.end_enabled[3], 0.0); // environmental_end
 
         let off = FogUniform::disabled();
         assert_eq!(off.end_enabled[1], 0.0);
+
+        // A settings value with *only* the environmental pair populated (the
+        // render-distance pair left degenerate) must still read enabled — the
+        // control for the `||` in `FogUniform::new`'s enabled check.
+        let env_only = FogUniform::new(
+            &FogSettings {
+                color: [0.1; 3],
+                sky_color: [0.1; 3],
+                start: 0.0,
+                end: 0.0,
+                environmental_start: 0.0,
+                environmental_end: 1024.0,
+            },
+            [0.0; 3],
+        );
+        assert_eq!(env_only.eye[3], 0.0); // environmental_start
+        assert_eq!(env_only.end_enabled[3], 1024.0); // environmental_end
+        assert_eq!(env_only.end_enabled[1], 1.0, "environmental-only fog must still be enabled");
     }
 
     #[test]
@@ -1020,27 +1227,37 @@ mod tests {
 
     #[test]
     fn nether_fog_is_dense_red_and_clamped_to_render_distance() {
-        // Vanilla: fixed 10..96 block range, `nether_wastes`' `#330808` fog
-        // colour — red channel clearly dominant, green/blue near black.
+        // Vanilla: fixed 10..96 block *environmental* range (F2/F3),
+        // `nether_wastes`' `#330808` fog colour — red channel clearly
+        // dominant, green/blue near black. The render-distance pair now
+        // carries the real vanilla-exact edge fade instead of being
+        // repurposed to hold this 10..96 range.
         let f = FogSettings::nether(32);
-        assert_eq!(f.start, 10.0);
-        assert_eq!(f.end, 96.0);
+        assert_eq!(f.environmental_start, 10.0);
+        assert_eq!(f.environmental_end, 96.0);
+        // The render-distance pair is now the real vanilla-exact span for RD
+        // 32 (`end = 512`, `span = clamp(51.2, 4, 64) = 51.2`), not the
+        // Nether's own 10..96 range the pre-F2/F3 constructor repurposed it
+        // to hold.
+        assert_eq!(f.end, 512.0);
+        assert_eq!(f.start, 460.8);
         assert!(f.color[0] > f.color[1] * 4.0, "expected red-dominant fog");
         assert!(f.color[0] > 0.0 && f.color[0] < 1.0);
 
         // A render distance shorter than the vanilla range must not fog past
         // the loaded world, exactly like `for_view_distance`'s `end` clamp.
         let short = FogSettings::nether(2); // 32 blocks
-        assert_eq!(short.end, 32.0);
-        assert_eq!(short.start, 10.0);
+        assert_eq!(short.environmental_end, 32.0);
+        assert_eq!(short.environmental_start, 10.0);
 
         // And a render distance so short even the *start* would fall outside
         // the loaded world must not produce start > end (a degenerate,
-        // fog-disabling range would silently turn off Nether fog entirely).
+        // fog-disabling range would silently turn off the Nether's own thick
+        // fog entirely).
         let tiny = FogSettings::nether(0);
-        assert_eq!(tiny.end, 0.0);
-        assert_eq!(tiny.start, 0.0);
-        assert!(tiny.start <= tiny.end);
+        assert_eq!(tiny.environmental_end, 0.0);
+        assert_eq!(tiny.environmental_start, 0.0);
+        assert!(tiny.environmental_start <= tiny.environmental_end);
     }
 
     #[test]
@@ -1058,6 +1275,11 @@ mod tests {
         // near-black — nothing like the overworld's saturated sky blue.
         assert!(f.color.iter().all(|c| *c < 0.02), "expected near-black: {:?}", f.color);
         assert_eq!(f.color[0], f.color[2], "R and B channels match (#18__18)");
+
+        // F2: the End's environmental term is the same registered default as
+        // the overworld's, inherited from `for_render_distance` unchanged.
+        assert_eq!(f.environmental_start, 0.0);
+        assert_eq!(f.environmental_end, 1024.0);
     }
 
     /// The three anchors vanilla's expression fixes, in the direction it fixes

@@ -2,8 +2,13 @@
 // Camera plus this frame's distance fog, folded into one group-0 uniform. Fog
 // lives here (rather than in its own bind group) so the model shader stays
 // within the portable `max_bind_groups` floor of 4. `fog_eye.xyz` is the camera
-// world position; `fog_color_start.rgb` is the fog colour and `.w` the distance
-// where fog begins; `fog_end_enabled.x` is where fog is full and `.y` is 0/1.
+// world position; `fog_color_start.rgb` is the fog colour and `.w` the
+// **render-distance** term's start distance (measured cylindrically, see
+// `fog_amount` below); `fog_end_enabled.x` is that term's end distance and
+// `.y` is 0/1 enabled. `fog_eye.w` / `fog_end_enabled.w` are vanilla's second,
+// independent **environmental** term's start/end (measured spherically) —
+// two lanes that were unused before issue #401 (F2/F3), so this struct did
+// not grow.
 //
 // Shared by every section drawn this frame — written once per frame, not once
 // per section (see `ModelSharedCameraUniform`'s doc for the profile that made
@@ -123,17 +128,27 @@ struct AnimSlots {
 @group(2) @binding(0) var<uniform> palette: Palette;
 @group(3) @binding(0) var<uniform> anim: AnimSlots;
 
-// Linear fog factor for a fragment `dist` world units from the eye: 0 nearer than
-// start, 1 beyond end, linear between, and always 0 when disabled. Mirrors
-// `crate::fog::fog_factor` so the headless tests describe the shader's behaviour.
-fn fog_amount(dist: f32) -> f32 {
-    let start = camera.fog_color_start.w;
-    let end = camera.fog_end_enabled.x;
-    let enabled = camera.fog_end_enabled.y;
+// Linear fog factor for a `dist` world units from the eye: 0 nearer than
+// start, 1 beyond end, linear between, and always 0 for a degenerate range.
+// Mirrors `crate::fog::fog_factor`.
+fn linear_fog(dist: f32, start: f32, end: f32) -> f32 {
     if (end <= start) {
         return 0.0;
     }
-    return clamp((dist - start) / (end - start), 0.0, 1.0) * enabled;
+    return clamp((dist - start) / (end - start), 0.0, 1.0);
+}
+
+// Vanilla's `total_fog_value` (`fog.glsl:49-53`): the `max` of two
+// independent linear ramps over two different distance metrics from the
+// fragment-relative vector `rel = world - eye`. Mirrors
+// `crate::fog::total_fog_factor` so the headless gates describe this function
+// rather than a separate model of it.
+fn fog_amount(rel: vec3<f32>) -> f32 {
+    let sph = length(rel);
+    let cyl = max(length(rel.xz), abs(rel.y));
+    let env = linear_fog(sph, camera.fog_eye.w, camera.fog_end_enabled.w);
+    let rd = linear_fog(cyl, camera.fog_color_start.w, camera.fog_end_enabled.x);
+    return max(env, rd) * camera.fog_end_enabled.y;
 }
 
 // sRGB transfer functions (component-wise). The atlas is an _srgb texture, so
@@ -242,7 +257,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // gamma-encoded in `FogUniform` would remove them; it also changes what
     // `FogUniform::color_start` *means* for every reader, so it is deliberately
     // not done here. See `docs/fog.md`.
-    let amount = fog_amount(length(in.world - camera.fog_eye.xyz));
+    let amount = fog_amount(in.world - camera.fog_eye.xyz);
     let fogged_srgb = mix(lit_srgb, linear_to_srgb(camera.fog_color_start.rgb), amount);
     return vec4<f32>(srgb_to_linear(fogged_srgb), tex.a);
 }
