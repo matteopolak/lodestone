@@ -857,3 +857,121 @@ fn spawn_species_only_the_hostile_species_can_ever_land_a_melee_hit() {
     );
     assert!(sim.get(zombie_id).is_some(), "the zombie is untouched");
 }
+
+// -- Creeper swell/detonate: the "creepers never prime" fix -------------
+//
+// Before this, `MobSim::explode` had correct exposure/damage maths (issue
+// #213) and exactly two callers anywhere in the tree — both direct calls from
+// this file's own explosion tests above. Nothing ever *decided* an explosion
+// should happen: `SwellGoal` did not exist, no species got it, and
+// `NavigatingMob` had no fuse state at all. These gates drive the whole
+// chain through `MobSim::tick` — the same production entry point
+// `run_mob_tick_loop` calls every server tick — with no test-only shortcut
+// to the detonation trigger.
+
+/// The `ignite()` path: vanilla's `readAdditionalSaveData` calls this when a
+/// summoned creeper carries NBT `ignited:1b`
+/// (`.cache/mc/26.2/src/net/minecraft/world/entity/monster/Creeper.java:120-122`),
+/// and `Creeper.java:129-131` then forces `swellDir = 1` every tick regardless
+/// of proximity. Predicts the exact tick-29 value (not merely "increased" —
+/// see CLAUDE.md's *magnitude* vacuous-test species) and the exact tick the
+/// blast reaches a mob standing one block away.
+#[test]
+fn ignited_creeper_climbs_by_exactly_one_per_tick_and_detonates_at_tick_30() {
+    let world = ChunkWorld::new(-4, 24);
+    let mut sim = MobSim::new(&world);
+
+    let creeper_id = {
+        let creeper = sim.spawn_species(rk("minecraft:creeper"), Vec3::new(0.0, 0.0, 0.0));
+        creeper.ignite();
+        creeper.id()
+    };
+    let victim_id = {
+        let victim = sim.spawn(Vec3::new(1.0, 0.0, 0.0), MobShape::land(0.6, 1.95), 0.0, 10);
+        victim.set_defenses(Defenses::default());
+        victim.set_health(20.0);
+        victim.id()
+    };
+
+    for expected in 1..lodestone_entity::ai::MAX_SWELL {
+        sim.tick();
+        let creeper = sim.get(creeper_id).unwrap_or_else(|| {
+            panic!("creeper must not detonate before tick {}, but is already gone at tick {expected}", lodestone_entity::ai::MAX_SWELL)
+        });
+        assert_eq!(creeper.swell(), expected, "swell must climb by exactly 1/tick while ignited");
+    }
+    assert_eq!(
+        sim.get(creeper_id).unwrap().swell(),
+        lodestone_entity::ai::MAX_SWELL - 1,
+        "predicted tick-29 value"
+    );
+    assert_eq!(sim.get(victim_id).unwrap().health(), 20.0, "no blast yet — the victim must be untouched");
+
+    sim.tick(); // the 30th tick: swell reaches MAX_SWELL
+
+    assert!(
+        sim.get(creeper_id).is_none(),
+        "MobSim::tick must call MobSim::explode and discard the creeper on the tick its fuse completes"
+    );
+    let victim_health = sim.get(victim_id).map_or(0.0, |m| m.health());
+    assert!(
+        victim_health < 20.0,
+        "the production tick path must land real explosion damage on a mob one block away, got {victim_health}"
+    );
+}
+
+/// A creeper given a stationary attack target within `SwellGoal`'s 3-block
+/// start range (`SwellGoal.java:20`) must prime from proximity alone, with no
+/// `ignite()` call — the actual bug report ("creepers never prime near a
+/// player"). Same exact-tick prediction as the ignited case.
+#[test]
+fn creeper_with_a_close_stationary_target_primes_from_proximity_alone() {
+    let world = ChunkWorld::new(-4, 24);
+    let mut sim = MobSim::new(&world);
+
+    let creeper_id = {
+        let creeper = sim.spawn_species(rk("minecraft:creeper"), Vec3::new(0.0, 0.0, 0.0));
+        creeper.set_attack_target(Some(Vec3::new(1.0, 0.0, 0.0))); // distSqr 1 < 9
+        assert!(!creeper.is_ignited(), "this path must not need ignition");
+        creeper.id()
+    };
+
+    let mut detonated_at = None;
+    for t in 1..=lodestone_entity::ai::MAX_SWELL {
+        sim.tick();
+        if sim.get(creeper_id).is_none() {
+            detonated_at = Some(t);
+            break;
+        }
+    }
+    assert_eq!(
+        detonated_at,
+        Some(lodestone_entity::ai::MAX_SWELL),
+        "a stationary target within 3 blocks must prime and detonate in exactly MAX_SWELL ticks"
+    );
+}
+
+/// The negative control: a creeper that is never ignited and never given an
+/// attack target must sit inert through hundreds of production ticks —
+/// proving the previous two tests' detonations come from the fix, not from
+/// `MobSim::tick`/`explode` firing unconditionally for every creeper.
+#[test]
+fn creeper_with_no_target_and_never_ignited_never_primes_or_detonates() {
+    let world = ChunkWorld::new(-4, 24);
+    let mut sim = MobSim::new(&world);
+
+    let creeper_id = {
+        let creeper = sim.spawn_species(rk("minecraft:creeper"), Vec3::new(0.0, 0.0, 0.0));
+        creeper.id()
+    };
+
+    for _ in 0..300 {
+        sim.tick();
+    }
+
+    let creeper = sim
+        .get(creeper_id)
+        .expect("an inert creeper must never detonate itself away");
+    assert_eq!(creeper.swell(), 0, "swell must stay at 0 with no direction ever set positive");
+    assert_eq!(creeper.swell_dir(), -1, "swell_dir must stay at vanilla's own default");
+}
