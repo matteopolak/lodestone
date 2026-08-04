@@ -112,7 +112,12 @@ fn open_sky_position(net: &NetClient, feet: Vec3) -> ([i32; 3], u8) {
     let mut seen = Vec::new();
     for dy in 0..24 {
         let y = base + dy;
-        if let Some(packed) = entity_light_at(&net.shared_handle(), x, y, z) {
+        // `SkyDefault::Full` because the oracle this gate drives is the overworld.
+        // It is not a formality: with `None` the scan would read every section
+        // above the top of the lit column as sky 0 and never find its `== 15`.
+        if let Some(packed) =
+            entity_light_at(&net.shared_handle(), x, y, z, lodestone_render::SkyDefault::Full)
+        {
             seen.push((y, packed));
             if (packed >> 4) & 15 == 15 {
                 return ([x, y, z], packed);
@@ -183,8 +188,9 @@ fn the_servers_sky_light_byte_is_identical_at_noon_and_midnight() {
         let _ = net.poll();
         std::thread::sleep(Duration::from_millis(50));
     }
-    let midnight_packed = entity_light_at(&net.shared_handle(), x, y, z)
-        .expect("the column that was resident at noon must still be resident at midnight");
+    let midnight_packed =
+        entity_light_at(&net.shared_handle(), x, y, z, lodestone_render::SkyDefault::Full)
+            .expect("the column that was resident at noon must still be resident at midnight");
 
     let noon_term = light_term(noon_packed);
     let midnight_term = light_term(midnight_packed);
