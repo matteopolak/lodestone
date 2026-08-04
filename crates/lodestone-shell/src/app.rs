@@ -2459,6 +2459,7 @@ impl WindowApp {
         hud_frame.xp = self.sim.xp();
         hud_frame.title = self.sim.title_overlay();
         hud_frame.action_bar = self.sim.action_bar_overlay();
+        hud_frame.held_item = self.sim.held_item_overlay();
         hud_frame.recipe_stats = self
             .recipe_book
             .as_ref()
@@ -2556,7 +2557,17 @@ impl WindowApp {
                 // falls back to the generic `(8, 6)` — the same class of gap as
                 // a source installed but never set.
                 .with_menu_type(open_menu.as_ref().map(|open| &open.menu_type))
-                .with_recipe_book(self.recipe_book.as_ref());
+                .with_recipe_book(self.recipe_book.as_ref())
+                // The anvil's XP cost and the enchanting table's three level
+                // costs (`docs/container-cost-screens.md`'s "What is not yet
+                // wired" gap). `&[]` on the player-inventory screen (no
+                // `open_menu`), which draws neither cost — correct, since
+                // neither special layout is ever the player's own inventory.
+                .with_cost_context(
+                    open_menu.as_ref().map_or(&[][..], |open| open.data.as_slice()),
+                    self.sim.has_infinite_materials(),
+                    self.sim.xp().map_or(0, |(level, _)| level),
+                );
             // `render_with_icons_scaled`, **not** `render_scaled`: the latter
             // hardcodes `depth: None, models: None`, so `want_models` was always
             // false and `push_item_model` returned early. Flat sprite icons still

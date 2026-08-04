@@ -218,6 +218,20 @@ impl Menus {
             .map(|(_, v)| *v)
     }
 
+    /// Every `container_set_data` property of the open container, as
+    /// `(property_id, value)` — the borrow-friendly counterpart to
+    /// [`Self::container_data`] for a caller that wants the whole set rather
+    /// than probing one property at a time (the anvil's single cost slot vs.
+    /// the enchanting table's three). Empty when nothing is open or the
+    /// server has sent no properties yet, never a stale value from a
+    /// previously open screen — `ScreenOpened`'s own fold starts a fresh
+    /// `OpenMenu` with an empty `data`, so there is nothing here to carry
+    /// over.
+    #[must_use]
+    pub fn opened_data(&self) -> &[(i32, i32)] {
+        self.opened.as_ref().map_or(&[], |o| o.data.as_slice())
+    }
+
     /// Folds a container [`ClientEvent`] into the session, returning `true` if
     /// the event was one this state owns. Same fan-out contract as the other
     /// game aggregates' `apply` methods.

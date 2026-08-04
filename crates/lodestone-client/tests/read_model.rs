@@ -432,6 +432,7 @@ async fn read_model_folds_generic_container_with_player_inventory_tail() {
         menu_type,
         title,
         menu,
+        ..
     } = handle
         .open_menu()
         .expect("generic container should be open");

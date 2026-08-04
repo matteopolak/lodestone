@@ -196,6 +196,25 @@ pub struct ContainerFrame<'a> {
     /// anchor. Read only by [`menu_type_title_anchor`], for the nine real screens
     /// whose title anchor vanilla overrides.
     pub menu_type: Option<&'a lodestone_model::ResourceKey>,
+    /// `container_set_data` properties of the open menu
+    /// (`OpenMenuSnapshot::data`), as `(property_id, value)` — the anvil's XP
+    /// level cost (property `0`) and the enchanting table's three per-row
+    /// level costs (properties `0..3`). `&[]` (the default) draws neither
+    /// cost, which is what keeps every existing caller (headless builds, the
+    /// pixel gates, `tests/container_screen.rs`) unchanged. See
+    /// [`with_cost_context`](Self::with_cost_context) and
+    /// `docs/container-cost-screens.md`.
+    pub cost_data: &'a [(i32, i32)],
+    /// `Player.hasInfiniteMaterials()` — `Abilities.instabuild`
+    /// (`AnvilMenu.java:70-71`, `EnchantmentScreen.java:111`). Gates the
+    /// anvil's "Too Expensive!" branch and the enchanting rows' afford
+    /// check. `false` (the default) is the honest value for every existing
+    /// caller and for a survival session.
+    pub has_infinite_materials: bool,
+    /// The local player's XP level, for the same afford checks
+    /// (`AnvilMenu.mayPickup`, `EnchantmentScreen.java:111`). `0` (the
+    /// default) matches every existing caller.
+    pub xp_level: i32,
 }
 
 impl<'a> ContainerFrame<'a> {
@@ -212,6 +231,9 @@ impl<'a> ContainerFrame<'a> {
             recipe_book: None,
             drag: None,
             menu_type: None,
+            cost_data: &[],
+            has_infinite_materials: false,
+            xp_level: 0,
         }
     }
 
@@ -226,6 +248,9 @@ impl<'a> ContainerFrame<'a> {
             recipe_book: None,
             drag: None,
             menu_type: None,
+            cost_data: &[],
+            has_infinite_materials: false,
+            xp_level: 0,
         }
     }
 
@@ -258,6 +283,24 @@ impl<'a> ContainerFrame<'a> {
     #[must_use]
     pub fn with_menu_type(mut self, menu_type: Option<&'a lodestone_model::ResourceKey>) -> Self {
         self.menu_type = menu_type;
+        self
+    }
+
+    /// Attach the anvil/enchanting-table cost context: the raw
+    /// `container_set_data` properties (`OpenMenuSnapshot::data`), whether
+    /// the local player has infinite materials, and their XP level. `&[]`
+    /// (the default from [`new`](Self::new)) draws neither cost, which is
+    /// what keeps every existing caller unchanged. See [`cost_data`](Self::cost_data).
+    #[must_use]
+    pub fn with_cost_context(
+        mut self,
+        data: &'a [(i32, i32)],
+        has_infinite_materials: bool,
+        xp_level: i32,
+    ) -> Self {
+        self.cost_data = data;
+        self.has_infinite_materials = has_infinite_materials;
+        self.xp_level = xp_level;
         self
     }
 
@@ -1106,6 +1149,13 @@ impl ContainerGeometry {
             b.label(frame.inventory_label, x + lx, y + ly, 1.0, label_colour);
         }
 
+        // The anvil's XP cost and the enchanting table's three level costs —
+        // `docs/container-cost-screens.md`'s "What is not yet wired" gap,
+        // closed. Both are drawn from `frame.cost_data` alongside the two
+        // labels above, matching vanilla's own `extractLabels` pass
+        // (`AnvilScreen.java:93-118`, `EnchantmentScreen.java:96-135`).
+        draw_container_costs(&mut b, menu, &layout, frame, x, y);
+
         // Every well first, so the colour stream splits cleanly into "chrome"
         // and "what goes on top of an icon". The icons are drawn between the two
         // halves (they are a separate pass, and the 3-D ones need a depth
@@ -1297,6 +1347,142 @@ impl ContainerGeometry {
                 h: layout.height,
             }),
         }
+    }
+}
+
+/// Vanilla's `-8323296` (`0x80FF20`) — green, the anvil cost's affordable
+/// colour and the enchanting row's affordable cost-number colour
+/// (`AnvilScreen.java:97`, and the `col = -8323296` reassignment at
+/// `EnchantmentScreen.java:129`).
+const COST_GREEN: [f32; 4] = [128.0 / 255.0, 1.0, 32.0 / 255.0, 1.0];
+/// Vanilla's `-40864` (`0xFFFF6060`) — red, the anvil's "too expensive" and
+/// "can't afford" colour (`AnvilScreen.java:101`, `:107`).
+const COST_RED: [f32; 4] = [1.0, 96.0 / 255.0, 96.0 / 255.0, 1.0];
+/// Vanilla's `-12550384` (`0x407F10`) — the enchanting row's *disabled*
+/// cost-number colour, exactly half [`COST_GREEN`]'s brightness
+/// (`EnchantmentScreen.java:115`'s `col = -12550384`, itself
+/// `ARGB.opaque((col & 16711422) >> 1)` of the enabled green applied to the
+/// row's other text — the cost number reuses the same halved constant).
+const COST_DISABLED_GREEN: [f32; 4] = [64.0 / 255.0, 127.0 / 255.0, 16.0 / 255.0, 1.0];
+
+/// Draws the anvil's XP level cost and the enchanting table's three per-row
+/// level costs, from `frame.cost_data` — the last hop
+/// `docs/container-cost-screens.md` names. A no-op for every other screen
+/// (`cost_data` empty, or `menu.special_layout()` neither `Anvil` nor
+/// `Enchanting`), which is what keeps every existing caller unchanged.
+fn draw_container_costs(
+    b: &mut Builder<'_>,
+    menu: &Menu,
+    layout: &SlotLayout,
+    frame: &ContainerFrame<'_>,
+    x: f32,
+    y: f32,
+) {
+    match menu.special_layout() {
+        Some(SpecialLayout::Anvil) => draw_anvil_cost(b, menu, layout, frame, x, y),
+        Some(SpecialLayout::Enchanting) => draw_enchanting_costs(b, menu, frame, x, y),
+        _ => {}
+    }
+}
+
+/// `AnvilScreen.extractLabels` (`AnvilScreen.java:92-118`): the XP cost in
+/// the top-right of the panel, on a translucent backdrop, right-aligned.
+/// `container_data(0)` is `AnvilMenu`'s one `DataSlot` (`AnvilMenu.java:33`).
+fn draw_anvil_cost(
+    b: &mut Builder<'_>,
+    menu: &Menu,
+    layout: &SlotLayout,
+    frame: &ContainerFrame<'_>,
+    x: f32,
+    y: f32,
+) {
+    let cost = frame
+        .cost_data
+        .iter()
+        .find(|(p, _)| *p == 0)
+        .map_or(0, |(_, v)| *v);
+    if cost <= 0 {
+        return;
+    }
+    // `AnvilMenu`'s result slot is menu index 2 (`Menu::item_combiner(3, 2,
+    // Anvil)` — see `docs/container-cost-screens.md`).
+    const RESULT_SLOT: usize = 2;
+    let line: Option<(String, [f32; 4])> = if cost >= 40 && !frame.has_infinite_materials {
+        Some(("Too Expensive!".to_owned(), COST_RED))
+    } else if menu.slot_item(RESULT_SLOT).is_none() {
+        None
+    } else {
+        // `AnvilMenu::mayPickup` (`AnvilMenu.java:70-71`): affordable iff
+        // infinite materials, or the player's level covers the cost.
+        let may_pickup = frame.has_infinite_materials || frame.xp_level >= cost;
+        let colour = if may_pickup { COST_GREEN } else { COST_RED };
+        // `en_us.json`'s `container.repair.cost`: `"Enchantment Cost: %1$s"`.
+        // No language table reaches this module (the same documented gap
+        // `styled_hover_name` has for item names), so this is the resolved
+        // English wording rather than a `translate` lookup — readable
+        // either way, matching vanilla text only when the table is en_us.
+        Some((format!("Enchantment Cost: {cost}"), colour))
+    };
+    let Some((text, colour)) = line else {
+        return;
+    };
+    let text_width = b.font.map_or(0.0, |f| f.width(&text, 1.0));
+    // `AnvilScreen.java:112-115`: `tx = imageWidth - 8 - font.width(line) - 2`,
+    // `ty = 69`, backdrop `fill(tx - 2, 67, imageWidth - 8, 79, 0x4F000000)`.
+    let tx = layout.width - 8.0 - text_width - 2.0;
+    let ty = 69.0;
+    b.rect_px(
+        x + tx - 2.0,
+        y + 67.0,
+        (layout.width - 8.0) - (tx - 2.0),
+        79.0 - 67.0,
+        [0.0, 0.0, 0.0, 79.0 / 255.0],
+    );
+    b.shadowed_label(&text, x + tx, y + ty, 1.0, colour);
+}
+
+/// `EnchantmentScreen.extractBackground` (`EnchantmentScreen.java:96-134`):
+/// the per-row level-cost number, bottom-right of each of the three offer
+/// buttons. `container_data(0..3)` are `EnchantmentMenu.costs[0..3]`
+/// (`EnchantmentMenu.java:73-75`).
+///
+/// **Deliberately does not draw the enchantment-name text.** That is
+/// `EnchantmentNames`' Standard Galactic Alphabet cipher font, a whole
+/// separate subsystem this build has no glyphs for — orthogonal to the cost
+/// number `docs/container-cost-screens.md` scopes this work to.
+fn draw_enchanting_costs(b: &mut Builder<'_>, menu: &Menu, frame: &ContainerFrame<'_>, x: f32, y: f32) {
+    // `EnchantmentMenu`'s lapis slot is menu index 1 (`Menu::enchanting_table`
+    // marks slot 1 `SlotKind::LapisOnly` — see `docs/container-cost-screens.md`).
+    const LAPIS_SLOT: usize = 1;
+    let gold_count = menu.slot_item(LAPIS_SLOT).map_or(0, ItemStack::count);
+    for i in 0..3i32 {
+        let cost = frame
+            .cost_data
+            .iter()
+            .find(|(p, _)| *p == i)
+            .map_or(0, |(_, v)| *v);
+        if cost <= 0 {
+            continue;
+        }
+        // `EnchantmentScreen.java:111`: disabled unless infinite materials,
+        // or both enough lapis (`goldCount >= i + 1`) and enough levels.
+        let afford = frame.has_infinite_materials
+            || (gold_count >= i + 1 && frame.xp_level >= cost);
+        let colour = if afford { COST_GREEN } else { COST_DISABLED_GREEN };
+        let text = cost.to_string();
+        let text_width = b.font.map_or(0.0, |f| f.width(&text, 1.0));
+        // `EnchantmentScreen.java:101-132`: `leftPos = xo + 60`,
+        // `leftPosText = leftPos + 20`, row `y = yo + 14 + 19*i`, cost drawn
+        // at `(leftPosText + 86 - width, y + 16 + 7)`.
+        let left_pos_text = x + 60.0 + 20.0;
+        let row_y = y + 14.0 + 19.0 * i as f32;
+        b.shadowed_label(
+            &text,
+            left_pos_text + 86.0 - text_width,
+            row_y + 16.0 + 7.0,
+            1.0,
+            colour,
+        );
     }
 }
 
@@ -2326,6 +2512,22 @@ impl<'a> Builder<'a> {
             Some(f) => {
                 let mut cs = self.colour();
                 f.draw_plain(&mut cs, s, x, y, scale, c);
+            }
+            None => self.colour().text(s, x, y, scale, c),
+        }
+    }
+
+    /// The anvil/enchanting-table cost numbers' own text call — vanilla's
+    /// **default** `graphics.text(font, str, x, y, colour)` overload
+    /// (`GuiGraphicsExtractor.java:239-241`), which defaults `dropShadow` to
+    /// `true`, unlike [`label`](Self::label)'s explicit `false` for the two
+    /// container labels. Degrades to the same fixed-advance debug font
+    /// [`label`](Self::label) does on a jar-less run.
+    fn shadowed_label(&mut self, s: &str, x: f32, y: f32, scale: f32, c: [f32; 4]) {
+        match self.font {
+            Some(f) => {
+                let mut cs = self.colour();
+                f.draw(&mut cs, s, x, y, scale, c);
             }
             None => self.colour().text(s, x, y, scale, c),
         }
@@ -4106,6 +4308,170 @@ mod tests {
             plain.slots.iter().find(|s| s.menu_index == 0).map(|s| (s.x, s.y)),
             Some((8.0, 18.0)),
             "control: a plain 3-slot container must use the generic grid, not the anvil layout"
+        );
+    }
+
+    /// Counts vertices in `verts` (the `[x_ndc, y_ndc, r, g, b, a]` colour
+    /// stream) whose colour is within `tol` of `want` — the same
+    /// approximate-match approach `held_item_name_pixels.rs` uses for real
+    /// glyph ink, adapted to this crate's hermetic (font-less) debug glyphs.
+    fn ink_near(verts: &[f32], want: [f32; 3], tol: f32) -> usize {
+        verts
+            .chunks_exact(FLOATS_PER_VERTEX)
+            .filter(|v| {
+                (v[2] - want[0]).abs() < tol
+                    && (v[3] - want[1]).abs() < tol
+                    && (v[4] - want[2]).abs() < tol
+            })
+            .count()
+    }
+
+    /// The anvil's XP cost (`docs/container-cost-screens.md`'s "What is not
+    /// yet wired" gap): reaches real ink, in the colour vanilla's own
+    /// `AnvilMenu.mayPickup`/`AnvilScreen.extractLabels` predicts — and, per
+    /// CLAUDE.md's *magnitude* evidence rule, this checks the actual colour
+    /// drawn, not merely "something changed".
+    #[test]
+    fn anvil_cost_reaches_pixels_and_colours_by_affordability() {
+        let anvil = Menu::item_combiner(3, 2, SpecialLayout::Anvil);
+        let base = ContainerFrame::new(Some(&anvil), "Repair & Name");
+
+        // Controls: no `cost_data` at all (every pre-existing caller) must
+        // draw no green or red ink whatsoever.
+        let none_geo = ContainerGeometry::build(&base, VIEW.0, VIEW.1);
+        assert_eq!(
+            ink_near(&none_geo.verts, [128.0 / 255.0, 1.0, 32.0 / 255.0], 0.05)
+                + ink_near(&none_geo.verts, [1.0, 96.0 / 255.0, 96.0 / 255.0], 0.05),
+            0,
+            "control: no cost_data must draw neither cost colour"
+        );
+
+        // Control: cost > 0 but the result slot is empty — `AnvilScreen.java:102-103`
+        // draws nothing in this case either.
+        let data = [(0, 17)];
+        let frame_no_result = base.with_cost_context(&data, false, 20);
+        let empty_geo = ContainerGeometry::build(&frame_no_result, VIEW.0, VIEW.1);
+        assert_eq!(
+            ink_near(&empty_geo.verts, [128.0 / 255.0, 1.0, 32.0 / 255.0], 0.05)
+                + ink_near(&empty_geo.verts, [1.0, 96.0 / 255.0, 96.0 / 255.0], 0.05),
+            0,
+            "control: cost > 0 with an empty result slot must draw nothing \
+             (AnvilScreen.java:102-103)"
+        );
+
+        // Subject: a result item present and enough levels — green ink.
+        let mut with_result = anvil.clone();
+        with_result.set_slot_item(
+            2,
+            Some(lodestone_game::item::ItemStack::new(
+                "minecraft:diamond_pickaxe".parse().unwrap(),
+                1,
+            )),
+        );
+        let frame_afford = ContainerFrame::new(Some(&with_result), "Repair & Name")
+            .with_cost_context(&data, false, 20);
+        let afford_geo = ContainerGeometry::build(&frame_afford, VIEW.0, VIEW.1);
+        assert!(
+            ink_near(&afford_geo.verts, [128.0 / 255.0, 1.0, 32.0 / 255.0], 0.05) > 0,
+            "an affordable cost (xp_level 20 >= cost 17) must draw in vanilla's \
+             green (AnvilMenu.mayPickup true) — the pixel this feature draws"
+        );
+
+        // Subject: same result item, but too few levels — red ink, no green.
+        let frame_unafford = ContainerFrame::new(Some(&with_result), "Repair & Name")
+            .with_cost_context(&data, false, 3);
+        let unafford_geo = ContainerGeometry::build(&frame_unafford, VIEW.0, VIEW.1);
+        assert!(
+            ink_near(&unafford_geo.verts, [1.0, 96.0 / 255.0, 96.0 / 255.0], 0.05) > 0,
+            "an unaffordable cost (xp_level 3 < cost 17) must draw in vanilla's \
+             red (AnvilMenu.mayPickup false)"
+        );
+        assert_eq!(
+            ink_near(&unafford_geo.verts, [128.0 / 255.0, 1.0, 32.0 / 255.0], 0.05),
+            0,
+            "an unaffordable cost must not also draw green"
+        );
+
+        // Subject: cost >= 40 without infinite materials draws "Too
+        // Expensive!" in red regardless of the result slot or level.
+        let expensive = [(0, 40)];
+        let frame_expensive =
+            ContainerFrame::new(Some(&anvil), "Repair & Name").with_cost_context(&expensive, false, 99);
+        let expensive_geo = ContainerGeometry::build(&frame_expensive, VIEW.0, VIEW.1);
+        assert!(
+            ink_near(&expensive_geo.verts, [1.0, 96.0 / 255.0, 96.0 / 255.0], 0.05) > 0,
+            "cost >= 40 without infinite materials must draw red \"Too Expensive!\" \
+             (AnvilScreen.java:99-101) even with an empty result slot and a high level"
+        );
+
+        // Control: the same >= 40 cost, but with infinite materials, must
+        // fall through to the ordinary (green, since the result slot still
+        // has an item) path rather than "Too Expensive!".
+        let frame_creative = ContainerFrame::new(Some(&with_result), "Repair & Name")
+            .with_cost_context(&expensive, true, 99);
+        let creative_geo = ContainerGeometry::build(&frame_creative, VIEW.0, VIEW.1);
+        assert!(
+            ink_near(&creative_geo.verts, [128.0 / 255.0, 1.0, 32.0 / 255.0], 0.05) > 0,
+            "infinite materials must bypass the >= 40 \"Too Expensive!\" branch \
+             (AnvilScreen.java:99: `!hasInfiniteMaterials()`)"
+        );
+    }
+
+    /// The enchanting table's three per-row level costs: reach pixels, in
+    /// vanilla's own affordable/disabled colours
+    /// (`EnchantmentScreen.java:110-129`). Deliberately does not check the
+    /// enchantment-name text — this build has no Standard Galactic Alphabet
+    /// glyphs, see [`draw_enchanting_costs`]'s doc.
+    #[test]
+    fn enchanting_costs_reach_pixels_and_colour_by_affordability() {
+        let enchanting = Menu::enchanting_table();
+
+        // Control: no cost_data draws nothing.
+        let base = ContainerFrame::new(Some(&enchanting), "Enchant");
+        let none_geo = ContainerGeometry::build(&base, VIEW.0, VIEW.1);
+        assert_eq!(
+            ink_near(&none_geo.verts, [128.0 / 255.0, 1.0, 32.0 / 255.0], 0.05)
+                + ink_near(&none_geo.verts, [64.0 / 255.0, 127.0 / 255.0, 16.0 / 255.0], 0.05),
+            0,
+            "control: no cost_data must draw neither enchanting cost colour"
+        );
+
+        // One lapis in the lapis-only slot (menu index 1) — enough for row 0
+        // (`goldCount >= i + 1`) but not row 1 or row 2.
+        let mut with_lapis = enchanting.clone();
+        with_lapis.set_slot_item(
+            1,
+            Some(lodestone_game::item::ItemStack::new(
+                "minecraft:lapis_lazuli".parse().unwrap(),
+                1,
+            )),
+        );
+        // Row 0: cost 1, affordable (1 lapis, level 5 >= 1) -> green.
+        // Row 1: cost 5, unaffordable (needs 2 lapis, has 1) -> disabled green.
+        // Row 2: cost 0 -> vanilla draws nothing for this row at all.
+        let data = [(0, 1), (1, 5), (2, 0)];
+        let frame = ContainerFrame::new(Some(&with_lapis), "Enchant").with_cost_context(&data, false, 5);
+        let geo = ContainerGeometry::build(&frame, VIEW.0, VIEW.1);
+        assert!(
+            ink_near(&geo.verts, [128.0 / 255.0, 1.0, 32.0 / 255.0], 0.05) > 0,
+            "row 0 (affordable) must draw green"
+        );
+        assert!(
+            ink_near(&geo.verts, [64.0 / 255.0, 127.0 / 255.0, 16.0 / 255.0], 0.05) > 0,
+            "row 1 (not enough lapis) must draw the disabled half-brightness green \
+             (EnchantmentScreen.java:115's col = -12550384)"
+        );
+
+        // Control: row 2's cost is 0, so removing it must not change the
+        // geometry at all — proving cost == 0 draws nothing, not just "less".
+        let data_row2_dropped = [(0, 1), (1, 5)];
+        let frame_dropped = ContainerFrame::new(Some(&with_lapis), "Enchant")
+            .with_cost_context(&data_row2_dropped, false, 5);
+        let geo_dropped = ContainerGeometry::build(&frame_dropped, VIEW.0, VIEW.1);
+        assert_eq!(
+            geo.verts, geo_dropped.verts,
+            "control: a row already at cost 0 must be identical whether or not \
+             property 2 is even present in cost_data"
         );
     }
 
