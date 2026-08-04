@@ -41,8 +41,8 @@ use lodestone_data::mob_effects::{mob_effect_id, mob_effect_name};
 use crate::packet_ids::{configuration, handshaking, login, play};
 use crate::packets::chunk::{ChunkShape, LevelChunkWithLight};
 use crate::packets::common::{
-    BrandPayload, ClientInformation, KeepAlive, PingRequest, Pong, ResourcePackResponse,
-    TeleportToEntity,
+    BrandPayload, ClientInformation, CookieResponse, KeepAlive, PingRequest, Pong,
+    ResourcePackResponse, TeleportToEntity,
 };
 use crate::packets::configuration::{
     AcceptCodeOfConduct, FinishConfiguration, ServerboundKnownPacks,
@@ -1627,6 +1627,20 @@ fn decode_update_tags(payload: &[u8]) -> Result<(), AdapterError> {
     Ok(())
 }
 
+/// Decodes a clientbound `cookie_request`: a single identifier key, no other
+/// fields (`ClientboundCookieRequestPacket`, `ClientCookiePacketListener`).
+/// Shared by the Login, Configuration and Play states — issue #291's
+/// "aren't handled in `handle_login` at all" applied equally to
+/// `handle_configuration`, which also had no arm for this before now, only
+/// `handle_play` did.
+fn decode_cookie_request(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    let mut reader = Reader::new(payload);
+    let key = reader.string(32767).map_err(dec_err)?;
+    let key = parse_key(&key, "cookie")?;
+    reader.ensure_empty().map_err(dec_err)?;
+    Ok(vec![Directive::Emit(ClientEvent::CookieRequested { key })])
+}
+
 /// Builds a [`Directive::Send`] from a packet id and an encodable body.
 fn send<T: Encode>(packet_id: i32, packet: &T) -> Result<Directive, AdapterError> {
     Ok(Directive::Send {
@@ -2413,6 +2427,11 @@ impl V770Adapter {
             let body: LoginDisconnect = decode_body(payload)?;
             return Ok(vec![Directive::Disconnect(Text::literal(body.reason))]);
         }
+        if packet_id == login::clientbound::COOKIE_REQUEST {
+            // Issue #291: this state had no arm at all before now, a
+            // different code path from the Play-state one below.
+            return decode_cookie_request(payload);
+        }
         Ok(Vec::new())
     }
 
@@ -2461,6 +2480,12 @@ impl V770Adapter {
         if packet_id == configuration::clientbound::PING {
             let ping: Pong = decode_body(payload)?;
             return Ok(vec![Directive::Emit(ClientEvent::Ping { id: ping.id })]);
+        }
+        if packet_id == configuration::clientbound::COOKIE_REQUEST {
+            // Issue #291: also missing here, not just in `handle_login` — the
+            // issue named Login and Play explicitly; Configuration had the
+            // identical gap.
+            return decode_cookie_request(payload);
         }
         if packet_id == configuration::clientbound::UPDATE_TAGS {
             // Issue #296: block/item tags were always hardcoded from the
@@ -4014,11 +4039,7 @@ impl V770Adapter {
             })]);
         }
         if packet_id == play::clientbound::COOKIE_REQUEST {
-            let mut reader = Reader::new(payload);
-            let key = reader.string(32767).map_err(dec_err)?;
-            let key = parse_key(&key, "cookie")?;
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(ClientEvent::CookieRequested { key })]);
+            return decode_cookie_request(payload);
         }
         if packet_id == play::clientbound::STORE_COOKIE {
             let mut reader = Reader::new(payload);
@@ -4834,6 +4855,23 @@ impl VersionAdapter for V770Adapter {
                     play::serverbound::CHANGE_GAME_MODE,
                     encode_body(&body)?,
                 )))
+            }
+            // Issue #291: `cookie_response` exists in Login, Configuration and
+            // Play alike (`ServerCookiePacketListener` is common to all
+            // three), so this is one arm with a per-state packet id rather
+            // than three separate ones.
+            ClientAction::CookieResponse { key, payload } => {
+                let packet_id = match state {
+                    ConnectionState::Login => login::serverbound::COOKIE_RESPONSE,
+                    ConnectionState::Configuration => configuration::serverbound::COOKIE_RESPONSE,
+                    ConnectionState::Play => play::serverbound::COOKIE_RESPONSE,
+                    ConnectionState::Handshaking | ConnectionState::Status => return Ok(None),
+                };
+                let body = CookieResponse {
+                    key: key.to_string(),
+                    payload: payload.clone(),
+                };
+                Ok(Some((packet_id, encode_body(&body)?)))
             }
             _ => Ok(None),
         }

@@ -391,6 +391,23 @@ pub enum ClientAction {
         /// Requested game mode.
         mode: GameMode,
     },
+    /// Reply to a [`crate::event::ClientEvent::CookieRequested`] (issue #291).
+    ///
+    /// Vanilla's own client (`ClientCommonPacketListenerImpl.handleRequestCookie`)
+    /// answers immediately from its local `serverCookies` map with no UI and no
+    /// player input — `payload` is `None` when the client has never received a
+    /// [`crate::event::ClientEvent::CookieStored`] for this `key`, which the wire
+    /// carries as a nullable byte array rather than an error. Present in the
+    /// Login, Configuration and Play states alike (`minecraft:cookie_response`
+    /// is a `ServerCookiePacketListener` packet, shared by all three).
+    CookieResponse {
+        /// Cookie key, echoed from the matching
+        /// [`crate::event::ClientEvent::CookieRequested`].
+        key: ResourceKey,
+        /// The previously stored cookie payload, or `None` if this client has
+        /// none for `key`.
+        payload: Option<Vec<u8>>,
+    },
 }
 
 /// Which recipe book a recipe-book action applies to.

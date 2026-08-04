@@ -69,6 +69,28 @@ pub struct ResourcePackResponse {
     pub action: i32,
 }
 
+/// Serverbound `cookie_response`, shared by the Login, Configuration and Play
+/// states — `ServerCookiePacketListener` is common to all three
+/// (`ServerboundCookieResponsePacket.java`), issue #291.
+///
+/// Wire layout: the cookie key (a UTF string — `writeIdentifier` writes the
+/// same VarInt-length-prefixed UTF-8 as `writeUtf`, matching [`BrandPayload`]'s
+/// `channel`), then the payload as a nullable byte array
+/// (`writeNullable`/`ByteBufCodecs.byteArray(5120)`): a bool presence flag,
+/// and if `true`, a VarInt length followed by that many raw bytes. Both
+/// halves fall out of `lodestone-core`'s blanket `Option<T>: Encode` and
+/// `Vec<u8>: Encode` impls with no `#[mc(...)]` needed — the payload is
+/// already capped at 5120 bytes by the clientbound `store_cookie` decoder
+/// that produced it, not re-checked here.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+pub struct CookieResponse {
+    /// Cookie key, echoed from the `cookie_request` this answers.
+    pub key: String,
+    /// The previously stored cookie payload, or `None` if this client has
+    /// none for `key`.
+    pub payload: Option<Vec<u8>>,
+}
+
 /// Serverbound `client_information` packet describing client settings.
 ///
 /// Wire layout: string language (max 16 chars), signed byte view distance,
