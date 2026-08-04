@@ -60,6 +60,18 @@ test:
 # All four checks above, in order.
 health: check check-all check-seam test
 
+# --- Running the game -------------------------------------------------------
+
+# The [[bin]] is `lodestone`, not `lodestone-shell`, and `default-members`
+# makes a bare `cargo run` target the shell anyway; -p is spelled out so this
+# recipe does not depend on that. Release is not a preference here — a debug
+# build is unplayable. The `live` feature (which turns on v770, and nothing
+# else) is ON by default now, so there is no --features flag: use
+# `cargo run --no-default-features` to reproduce a version-family-free build.
+# cargo run --release -p lodestone-shell --bin lodestone — launch the game
+run *args:
+    cargo run --release -p lodestone-shell --bin lodestone {{jflag}} --target-dir {{tdir}} -- {{args}}
+
 # --- xtask ------------------------------------------------------------------
 
 # cargo xtask <args>, pre-expanded. The `cargo xtask` alias in
