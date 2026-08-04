@@ -297,15 +297,28 @@ impl EditForm {
     pub fn adding() -> Self {
         let [name_rect, address_rect] =
             super::render::field_row_rects(SEED_CANVAS.0, SEED_CANVAS.1);
+        // The narration text was "Name"/"Address" — plausible-looking and
+        // wrong. Vanilla's are `manageServer.enterName`/`manageServer.enterIp`
+        // (`ManageServerScreen.java:14-15`), whose `en_us.json` values are
+        // "Server Name"/"Server Address" — which happen to already be what
+        // `render.rs`'s (unrelated) `detail` line under each field shows, so
+        // this was invisible on screen and only wrong to a screen reader.
+        let mut name =
+            EditBox::new(name_rect.0, name_rect.1, name_rect.2, name_rect.3, "Server Name")
+                .with_max_length(MAX_NAME_CHARS);
+        // `nameEdit.setHint(DEFAULT_SERVER_NAME)` (`ManageServerScreen.java:35`),
+        // `selectServer.defaultName` = "Minecraft Server" — shown only while
+        // the field is empty and unfocused (`EditBox.hint`'s own doc), so this
+        // was missing entirely rather than merely mislabelled.
+        name.hint = Some("Minecraft Server".to_string());
         let mut fields = FormFields {
-            name: EditBox::new(name_rect.0, name_rect.1, name_rect.2, name_rect.3, "Name")
-                .with_max_length(MAX_NAME_CHARS),
+            name,
             address: EditBox::new(
                 address_rect.0,
                 address_rect.1,
                 address_rect.2,
                 address_rect.3,
-                "Address",
+                "Server Address",
             )
             .with_max_length(MAX_ADDRESS_CHARS),
         };
@@ -426,18 +439,22 @@ impl EditForm {
     /// The mouse moved over row `row` (issue: the screen's framework
     /// conversion added three button rows this form has no `FocusTarget` for).
     ///
-    /// A text field is still focused exactly as [`Self::focus_row`] does —
-    /// hover and focus are the same question there, as they always were. A
-    /// button row ([`RESOURCE_PACK_ROW`]/[`DONE_ROW`]/[`CANCEL_ROW`]) records
-    /// *only* [`Self::hovered`] and leaves keyboard focus untouched, which is
-    /// what lets the mouse travel to Done without pulling the caret out of the
-    /// address field the player is still typing into.
+    /// **A field row does nothing here** — a player report (2026-08-04)
+    /// caught that pure mouse motion over the name/address field was granting
+    /// it real keyboard focus, with no click involved. Vanilla's
+    /// `ContainerEventHandler` only moves focus from `mouseClicked` or Tab
+    /// traversal; hovering a field is not one of those, and `EditBox` does
+    /// not even highlight on hover (see [`super::widget::Widget::slider`]'s
+    /// sibling asymmetry note in `edit_box.rs`). A button row
+    /// ([`RESOURCE_PACK_ROW`]/[`DONE_ROW`]/[`CANCEL_ROW`]) still records
+    /// *only* [`Self::hovered`] — that part was always right, since it never
+    /// touched keyboard focus — which is what lets the mouse travel to Done
+    /// without pulling the caret out of the address field the player is still
+    /// typing into. A click (`MenuNav::click`'s `ServerEdit` arm) still calls
+    /// [`Self::focus_row`] directly, unaffected.
     pub fn hover_row(&mut self, row: usize) {
         match row {
-            NAME_FIELD | ADDRESS_FIELD => {
-                self.focus_row(row);
-                self.hovered = None;
-            }
+            NAME_FIELD | ADDRESS_FIELD => {}
             RESOURCE_PACK_ROW | DONE_ROW | CANCEL_ROW => self.hovered = Some(row),
             _ => {}
         }
@@ -1011,6 +1028,17 @@ pub struct MenuNav {
     /// (issue #190). Held here for the same reason [`Self::form`] is: it owns
     /// real [`EditBox`] state that cannot be rebuilt per frame.
     create_world: crate::menu::create_world::CreateWorldNav,
+    /// A double-click on a server row joins it — vanilla's
+    /// `ServerSelectionList.java:513-514`, `if (doubleClick) join()`,
+    /// unconditional on where in the row the click landed. The primitive is
+    /// [`super::focus::DoubleClickTracker`]; this is `click_list`'s only
+    /// caller of it.
+    double_click: super::focus::DoubleClickTracker<usize>,
+    /// The monotonic clock [`Self::double_click`] measures against. An
+    /// `Instant` fixed at construction rather than reset per click — only
+    /// the *differences* `DoubleClickTracker` computes matter, so nothing
+    /// needs rearming.
+    click_clock: std::time::Instant,
 }
 
 impl Default for MenuNav {
@@ -1089,6 +1117,8 @@ impl MenuNav {
             social: crate::menu::social::SocialNav::with_path(hidden_players_path),
             stats: crate::menu::stats::StatsNav::default(),
             create_world: crate::menu::create_world::CreateWorldNav::new(),
+            double_click: super::focus::DoubleClickTracker::new(),
+            click_clock: std::time::Instant::now(),
         }
     }
 
@@ -1670,10 +1700,38 @@ impl MenuNav {
         if row < self.list.len() {
             self.server = row;
             self.list_button = None;
-            let Some((rx, ry, size)) = self.entry_icon_cursor(row) else {
-                return MenuAction::None;
-            };
-            if widget::over_right_half(rx, ry, size) {
+            // The icon-quadrant checks, run only when the click actually
+            // landed in the 32 px favicon (`entry_icon_cursor` is `Some`).
+            // Unlike before, a click that misses the icon — or hits a
+            // quadrant this row's position blocks, e.g. "move up" on row 0 —
+            // no longer returns early here: it falls through to the
+            // double-click check below instead of stopping dead, which is
+            // the bug a player report (2026-08-04) traced to this function.
+            if let Some((rx, ry, size)) = self.entry_icon_cursor(row) {
+                if widget::over_right_half(rx, ry, size) {
+                    return match self.list.get(row) {
+                        Some(entry) => {
+                            let entry = entry.clone();
+                            ui.begin(SessionKind::Multiplayer);
+                            MenuAction::Connect(entry)
+                        }
+                        None => MenuAction::None,
+                    };
+                }
+                if row > 0 && widget::over_top_left_quarter(rx, ry, size) {
+                    return self.swap_rows(row, row - 1);
+                }
+                if row + 1 < self.list.len() && widget::over_bottom_left_quarter(rx, ry, size) {
+                    return self.swap_rows(row, row + 1);
+                }
+            }
+            // Vanilla's own order (`ServerSelectionList.java:490-514`): after
+            // the icon-quadrant checks above, **unconditionally**,
+            // `if (doubleClick) join()` — it fires wherever on the row the
+            // click landed, icon or not. `entry_icon_cursor` played no part
+            // in reaching this before, and must not gate it now either.
+            let now_ms = self.click_clock.elapsed().as_millis() as u64;
+            if self.double_click.click(now_ms, row) {
                 return match self.list.get(row) {
                     Some(entry) => {
                         let entry = entry.clone();
@@ -1682,12 +1740,6 @@ impl MenuNav {
                     }
                     None => MenuAction::None,
                 };
-            }
-            if row > 0 && widget::over_top_left_quarter(rx, ry, size) {
-                return self.swap_rows(row, row - 1);
-            }
-            if row + 1 < self.list.len() && widget::over_bottom_left_quarter(rx, ry, size) {
-                return self.swap_rows(row, row + 1);
             }
             return MenuAction::None;
         }
@@ -3254,10 +3306,24 @@ mod tests {
         assert_eq!(frame.rows.len(), 5);
         assert_eq!(frame.rows[NAME_FIELD].detail, "Server Name");
         assert_eq!(frame.rows[ADDRESS_FIELD].detail, "Server Address");
-        // A hover on row 1 must focus the *address* field, and the frame's own
-        // `selected` must follow it.
+        // A hover on row 1 must **not** focus the address field — a player
+        // report (2026-08-04) caught pure mouse motion granting real keyboard
+        // focus, which vanilla's `ContainerEventHandler` only ever does from a
+        // click or Tab. `the_form_field_ids_are_the_row_indices_the_mouse_
+        // reports`'s own name is about hover *hit-testing* landing on the
+        // right row, which is still true — it is `hover_row`'s reaction to
+        // that row that changed.
         nav.hover(&ui, ADDRESS_FIELD);
-        assert_eq!(nav.form().field(), FormField::Address);
+        assert_eq!(
+            nav.form().field(),
+            FormField::Name,
+            "hovering a field must not move keyboard focus"
+        );
+        // The control: a real click on the same row *does* focus it —
+        // `MenuNav::click`'s `ServerEdit` arm calls `focus_row` directly and is
+        // unaffected by the `hover_row` fix above.
+        nav.click(&mut ui, ADDRESS_FIELD);
+        assert_eq!(nav.form().field(), FormField::Address, "a click must still focus");
         let frame = crate::menu::render::frame_for(
             &ui,
             &nav,
@@ -3266,20 +3332,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame.selected, ADDRESS_FIELD);
-        // A hover on the Done row must **not** steal focus from the address
+        // Tab must still advance focus — the other legitimate way in, besides a
+        // click.
+        nav.key(&mut ui, MenuKey::Tab);
+        assert_eq!(
+            nav.form().field(),
+            FormField::Name,
+            "Tab from Address must advance (wrapping back to Name)"
+        );
+        // A hover on the Done row must **not** steal focus from the name
         // field — it is a different question, carried on `hovered` (#391's
         // shape averted a second way: a button hover must not silently move
         // the caret).
         nav.hover(&ui, DONE_ROW);
         assert_eq!(
             nav.form().field(),
-            FormField::Address,
+            FormField::Name,
             "hovering a button must not move text focus"
         );
         assert_eq!(nav.form().hovered_button(), Some(DONE_ROW));
         // Out of range does nothing rather than clamping onto a real field.
         nav.hover(&ui, 7);
-        assert_eq!(nav.form().field(), FormField::Address);
+        assert_eq!(nav.form().field(), FormField::Name);
+    }
+
+    #[test]
+    fn the_edit_form_fields_carry_vanillas_real_narration_and_hint() {
+        // `ManageServerScreen.java:14-16,33-38`: `manageServer.enterName`/
+        // `manageServer.enterIp` (`en_us.json`: "Server Name"/"Server
+        // Address") as each field's own message, and `nameEdit.setHint(
+        // selectServer.defaultName)` = "Minecraft Server" on the name field
+        // only — the IP field never gets a hint in the jar either.
+        let form = EditForm::adding();
+        assert_eq!(form.fields.name.widget.message, "Server Name");
+        assert_eq!(form.fields.address.widget.message, "Server Address");
+        assert_eq!(form.fields.name.hint.as_deref(), Some("Minecraft Server"));
+        assert_eq!(
+            form.fields.address.hint, None,
+            "vanilla's ipEdit never gets a setHint call"
+        );
     }
 
     /// Clicking a field must **focus** it, not activate the screen.
@@ -5184,6 +5275,53 @@ mod tests {
         let (mut nav, mut ui, _) = listing("list-click-nocursor", 2);
         assert_eq!(nav.click(&mut ui, 0), MenuAction::None);
         assert_eq!(ui.screen(), Screen::ServerList, "no cursor, no join");
+    }
+
+    #[test]
+    fn a_double_click_on_the_row_body_joins_it() {
+        // Player report (2026-08-04): vanilla's `if (doubleClick) join()`
+        // fires wherever on the row the click landed
+        // (`ServerSelectionList.java:490-514`) — but `click_list` used to
+        // return early from `entry_icon_cursor` returning `None`/missing
+        // every quadrant, before the double-click check ever ran, unless the
+        // click happened to be inside the 32 px favicon. This point is well
+        // clear of it, same as the "row body" case in the test above.
+        let (mut nav, mut ui, _) = listing("list-dblclick", 2);
+        let (bx, by) = icon_point(0, 3.0, 0.5);
+        point_at(&mut nav, bx, by);
+        assert_eq!(
+            nav.click(&mut ui, 0),
+            MenuAction::None,
+            "the first click only selects"
+        );
+        assert_eq!(ui.screen(), Screen::ServerList);
+        match nav.click(&mut ui, 0) {
+            MenuAction::Connect(entry) => assert_eq!(entry.host, "h0.example"),
+            other => panic!("a double-click on the row body must join, got {other:?}"),
+        }
+        assert_eq!(ui.screen(), Screen::Connecting);
+
+        // The control: `DoubleClickTracker` only pairs *consecutive* clicks on
+        // the *same* target, so a click on a different row in between must not
+        // let the next click on row 0 count as its pair.
+        let (mut nav, mut ui, _) = listing("list-dblclick-interrupted", 2);
+        point_at(&mut nav, bx, by);
+        assert_eq!(nav.click(&mut ui, 0), MenuAction::None);
+        assert_eq!(
+            nav.click(&mut ui, 1),
+            MenuAction::None,
+            "a different row resets the pair"
+        );
+        assert_eq!(
+            nav.click(&mut ui, 0),
+            MenuAction::None,
+            "row 0 again, but not consecutively — must not join"
+        );
+        assert_eq!(
+            ui.screen(),
+            Screen::ServerList,
+            "no genuine consecutive pair means no join"
+        );
     }
 
     /// The move quadrants reorder the list, persist it, and carry the selection
