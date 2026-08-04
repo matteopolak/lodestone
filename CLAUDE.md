@@ -860,5 +860,23 @@ generated index also cannot drift from the docs, which is the failure this repo'
 Note that a doc with no usable summary makes the generator **fail loudly naming the file**, rather
 than emitting a blank entry.
 
+**But the drift gate proves consistency, not coverage — and it silently omitted a whole directory.**
+The generator scanned `docs/`, `docs/roadmap/` and `docs/research/`, and **not `docs/plans/`**. Six
+plan documents landed invisible to `docs/README.md`, each one written to satisfy the H1 +
+`## What it is` contract that only matters *because* the generator reads it. Nothing failed:
+`docs_index_matches_committed` compares the generator against the committed index, and both agreed
+the directory did not exist. Fixed in `5bf792c`, but the general shape is worth keeping — **a gate
+that compares two things you control cannot tell you that a third thing exists.** Ask of any
+drift/parity gate: what is *in scope* for it, and how would I find out if something fell outside?
+This is `decode(encode(x)) == x` wearing different clothes.
+
+Two operational notes from the same episode. `read_md_dir_sorted` **errors on a missing directory**,
+so deleting `docs/plans/` breaks the generator rather than degrading — same as `roadmap`/`research`,
+so it is consistent, not a new trap, but do not create a fourth scanned directory lazily. And a
+regenerated `docs/README.md` left sitting in the working tree **was swept into an unrelated agent's
+pathspec commit** within minutes, briefly reddening `main` because the index moved without the
+generator. If you regenerate, commit the generator change and the index **together and immediately**;
+the window is measured in minutes, not hours.
+
 Write down *why*, and especially write down what was measured. The most valuable thing in this repo
 is not the code — it is the record of beliefs that were confidently held and turned out to be false.
