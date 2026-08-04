@@ -182,11 +182,17 @@ Remaining gaps:
 
 ## Recipe-book UI (issue #163)
 
-The browsing/unlock UI layered on top of the matcher above, entirely in
-`lodestone-game` (`recipe.rs`, `menu.rs`) and `lodestone-shell`
-(`container.rs`). It does **not** duplicate `RecipeBook::match_grid` — see
-"Auto-fill" below, which reuses it via a new inverse operation
-(`Recipe::placement`), not a second matcher.
+The browsing/unlock UI layered on top of the matcher above: the data and
+geometry in `lodestone-game` (`recipe.rs`, `menu.rs`) and `lodestone-shell`
+(`container.rs`), and the wiring that puts it on screen in `app.rs`/`hud.rs`
+(see "Shell wiring" below). It does **not** duplicate
+`RecipeBook::match_grid` — see "Auto-fill" below, which reuses it via a new
+inverse operation (`Recipe::placement`), not a second matcher.
+
+The panel, the click-to-fill and the toast render are all live. The one
+remaining gap is the **protocol decode**, so unlock state and toast content
+have no live producer yet; both degrade visibly rather than silently (see
+"Still brokered").
 
 ### Categories and browsing — `recipe.rs`
 
@@ -261,7 +267,8 @@ Pure timing data mirroring `RecipeToast.java`: `RECIPE_TOAST_DISPLAY_MS =
 one toast that **cycles** through them (`displayed_entry`, mirroring
 `RecipeToast.java:49-51`'s formula) rather than stacking separate toasts.
 Nothing calls `push` from live data yet — same blocker as unlock tracking —
-and nothing renders it: that is `hud.rs`, brokered (below).
+but `hud.rs` **does** render it now (`HudFrame::recipe_toast`, see "Shell
+wiring" below), so the toast appears the moment a producer exists.
 
 ### Auto-fill — `Recipe::placement` + `plan_auto_fill` (`recipe.rs`), `Menu::plan_recipe_auto_fill` (`menu.rs`)
 
@@ -285,40 +292,172 @@ vanilla's own `PlaceRecipeHelper`, which only ever walks
 `Inventory.items`), and returns steps already offset to absolute menu-slot
 indices.
 
-**What still turns a plan into pixels is brokered, not done**: the plan is a
-`Vec<PlacementStep>` (`{cell: menu_slot, source_slot: menu_slot}`), not a
-network action. There is no existing "move exactly one item from slot A to
-slot B" primitive without introducing wire-level stack accounting, so the
-dispatch loop (issue two `ContainerClick`s per step, using the same
-per-click prediction/dispatch every other manual slot click already goes
-through) belongs in `app.rs`/`sim.rs` — see "Brokered work" below. Sending
-vanilla's own `PlaceRecipe` action instead is not an option today: its wire
-field is a **`RecipeDisplayId`**, a server-session-assigned integer from the
-undecoded `recipe_book_add` packet, not this corpus's `Identifier` — so this
-client cannot construct a correct one without that same decode.
+The plan is a `Vec<PlacementStep>` (`{cell: menu_slot, source_slot:
+menu_slot}`), not a network action. `app.rs`'s `auto_fill_clicks` turns one
+into clicks, and **the click sequence is not "two per step"**, which is what
+this section used to say and is wrong in a way that reads correct:
 
-### Brokered work
+`plan_auto_fill` emits one step per grid cell, each moving a **single** item,
+and several steps can name the same `source_slot` (one coal stack supplying
+three cells). `Click::left` on a slot places the **whole** carried stack
+(`click.rs`: "pick up whole / place whole"), so a literal "pick up from
+`source_slot`, place into `cell`" pair puts a 5-coal stack entirely in the
+first cell and leaves every later cell empty. That is not a hypothetical: it
+is the executed negative control
+`two_clicks_per_step_would_dump_the_whole_stack_in_one_cell` in `app.rs`,
+which observes exactly `Some(("minecraft:coal", 5))` in cell 0.
 
-None of the following is implemented — `crates/protocol/**` is off-limits to
-this change, and `app.rs`/`sim.rs`/`hud.rs` are choke-point files this repo
-brokers through file-owner review rather than editing directly:
+The sequence that actually yields one item per cell is vanilla's own manual
+gesture, **grouped by source slot** (first appearance, not adjacency — steps
+are ordered by cell, so one source's cells need not be consecutive):
+
+1. `Click::left(source_slot)` — the whole stack onto the cursor;
+2. `Click::right(cell)` for each cell that source supplies — "place one";
+3. `Click::left(source_slot)` — return the remainder (a no-op when the source
+   was exhausted exactly, so it needs no guard).
+
+Every click goes through `WindowApp::send_menu_click`, i.e. the same
+per-click predict-then-send path a manual `MenuInput::press`/`release` takes.
+A second dispatch path would diverge from `container.rs`'s vanilla-exact
+click semantics.
+
+Sending vanilla's own `PlaceRecipe` action instead is still not an option:
+its wire field is a **`RecipeDisplayId`**, a server-session-assigned integer
+from the undecoded `recipe_book_add` packet, not this corpus's `Identifier` —
+so this client cannot construct a correct one without that same decode.
+
+### Shell wiring — `app.rs`, `hud.rs` (landed)
+
+The three brokered shell patches are **applied**, so the panel, the auto-fill
+and the toast all reach pixels. What each one is:
+
+- **Persisted panel state** — `app.rs`'s `RecipePanelState` (`open`, `search`,
+  `tab`, `page`, `search_focused`), a field on `WindowApp` beside
+  `recipe_book`. Persisted across container open/close on purpose: vanilla's
+  own book state lives on the client's `RecipeBook`, not on the screen, so
+  reopening a crafting table keeps the book open on the same tab.
+- **Hit-testing** — `WindowApp::handle_recipe_panel_click` runs *before* the
+  existing `hit_test_with_scale` in the `WindowEvent::MouseInput` arm, and
+  returns whether it consumed the click. Order matters: the panel overlaps the
+  main panel's left edge at narrow canvases (the clamp above), so testing it
+  second would make its own widgets unclickable there. Only a **press** is
+  offered to it — a release must still reach `MenuInput::release` so a drag
+  that began on a real slot can terminate.
+- **The draw pass** — `HudRenderer::render_recipe_book_panel`, called from
+  `redraw` immediately after `ContainerRenderer::render_with_icons_scaled`.
+  It lives on `HudRenderer` rather than `ContainerRenderer` because the
+  colour/sprite/model pipelines a `RecipeBookPanelGeometry` needs already
+  exist there and `ContainerRenderer` exposes no entry point taking a prebuilt
+  geometry. The streams are byte-compatible by construction, not coincidence:
+  the panel's colour verts come from the same shared `item_icon::ColourStream`
+  the HUD's do (6 floats, NDC), its item verts from the same
+  `push_sprite_quad` (8 floats).
+- **The toast** — `HudFrame::recipe_toast` / `hud.rs`'s `RecipeToastView` and
+  `draw_recipe_toast`, fed each frame by `recipe_toast_view`.
+
+**Two gotchas worth knowing before changing any of this.**
+
+`recipe_panel_layout` is called by *both* the hit-test and the draw, and must
+stay that way — `container.rs`'s own `hit_test_with_scale` warns that a layout
+built with a different `gui_scale` than the frame was drawn with silently
+mis-resolves every click, and one shared function is the only structural
+guarantee they agree. For the same reason `hud.rs` exposes
+`recipe_toast_rect`, so the toast's draw and any gate measuring it share one
+expression rather than restating `canvas_w - 160.0`.
+
+The panel geometry keeps **one unsplit colour stream**, unlike
+`ContainerGeometry` with its `chrome_vertex_count` split. So the draw order is
+colour → sprites → models, and a recipe result's stack-count digits (emitted
+into that same colour stream by `draw_stack`) land *under* its icon rather
+than over it. Splitting the stream belongs in `container.rs`; it affects only
+multi-output recipes' count text.
+
+#### Toast geometry, read from the record
+
+Every number is from the **definitions** in `.cache/mc/26.2/client-src`, not a
+summary of a call site — this repo has a documented instance of transcribing a
+Java record's positional fields backwards:
+
+- `Toast.width() == 160`, `Toast.height() == 32` (`Toast.java:39-45`).
+- `xPos(screenWidth, visiblePortion) == screenWidth - width() *
+  visiblePortion` (`Toast.java:31-33`). This is **not** a fixed right margin:
+  it is the slide-in. At `visiblePortion == 1.0` the left edge sits exactly
+  160 from the right edge.
+- `yPos(firstSlotIndex) == firstSlotIndex * height()` (`Toast.java:35-37`), so
+  the first toast is **flush with the top of the screen at `y == 0`**, not
+  inset by a margin. We draw at most one, so `firstSlotIndex == 0`.
+- Contents (`RecipeToast.extractRenderState`, `:55-65`): background sprite
+  `toast/recipe` over the full `160×32` (the sprite really is in 26.2's atlas,
+  checked against the jar); title at `(30, 7)` colour `-11534256` =
+  `0xFF500050`; description at `(30, 18)` colour `-16777216` = black; the
+  station icon at `(3, 3)` under a `scale(0.6)` that scales the **position
+  too**, so it lands at `(1.8, 1.8)` at `9.6px`; the unlocked item at
+  `(8, 8)`, unscaled.
+- Strings are the real ones from `en_us.json`: `"New Recipe(s) Unlocked!"` and
+  `"Check your recipe book"` — note the parenthesised plural a paraphrase
+  loses.
+
+Vanilla's 600ms slide (`ToastManager.java:229-232`) is **not** modelled:
+`RecipeToastQueue` exposes no animation origin (`last_changed_ms` is private
+and it has no notion of a visibility transition), so `visible_portion` is
+fixed at `1.0`. The field exists and the draw honours it, so whoever gives the
+queue a real producer can add the slide without touching the geometry.
+
+`sim.rs` needed **no** change, despite the brokered list naming it: the
+dispatch seam `WindowApp::send_menu_click` already goes straight to
+`ClientHandle::menu_click` and deliberately bypasses `Sim`/`NetClient`, as its
+own doc comment records.
+
+### Still brokered
 
 1. **Protocol decode** (`crates/protocol/v770/src/adapter.rs`): clientbound
-   arms for `recipe_book_add`/`recipe_book_remove`/`recipe_book_settings`,
-   plus a `ClientEvent` variant in `lodestone-model` to decode into and a
-   `net.rs`/ingest consumer that calls `RecipeUnlockState::unlock`/`remove`.
-2. **Toggle wiring** (`app.rs`): one bool (or small struct, see
-   `container.rs`'s `RecipeBookPanelLayout`) for panel-open state, a call to
-   `recipe_book_panel_hit_test_with_scale` alongside the existing
-   `hit_test_with_scale` call, and drawing the panel's own geometry.
-3. **Click-to-fill dispatch** (`app.rs`/`sim.rs`): turning a
-   `Menu::plan_recipe_auto_fill` plan into a sequence of `ContainerClick`
-   actions through the existing single-click pipeline.
-4. **Toast rendering** (`hud.rs`): `RecipeToastQueue::displayed_entry` into
-   an on-screen toast, at the size/position `Toast.java`'s own
-   `xPos`/`yPos`/`width`/`height` describe.
+   arms for `place_ghost_recipe`/`recipe_book_add`/`recipe_book_remove`/
+   `recipe_book_settings`/`update_recipes`, plus a `ClientEvent` variant in
+   `lodestone-model` to decode into and a `net.rs`/ingest consumer that calls
+   `RecipeUnlockState::unlock`/`remove` and `RecipeToastQueue::push`.
+
+Until that lands, two things degrade **honestly and visibly**: the panel shows
+the full local corpus (`RecipeUnlockState::is_unlocked` reports everything
+unlocked until `has_data()` flips), and the toast never fires, because nothing
+can call `push`. No fake producer was added to make either light up early —
+that would be the island defect one layer down. `app.rs`'s
+`recipe_toast_now_ms` is the clock a future producer should push on, so the two
+sides cannot pick incompatible origins.
 
 Tracked on [#436](https://github.com/matteopolak/lodestone/issues/436).
+
+### Gates
+
+The wiring has its own gates, because `container.rs`'s 75 geometry tests all
+passed while the panel drew nothing — a crate's own suite is a closed loop.
+
+In `app.rs` (`mod recipe_book_wiring`): every vertex the draw submits lands
+inside the `[-1, 1]` NDC clip range (the sweep that catches the whole
+"geometry exists, nothing on screen" class, and the one that found the
+author's own two bugs — tabs at `bx - 30` going off-canvas and a
+`Builder::new(1.0, 1.0, None)` placeholder), the same sweep at a canvas narrow
+enough to hit the `RECIPE_PANEL_MIN_X` clamp, and coverage of the panel's own
+screen rect derived from `recipe_panel_layout` itself. Auto-fill asserts the
+**resulting slot contents** after the dispatch loop, on a torch — chosen
+because its arithmetic is falsifiable: a `1×2` shape in a `3×3` grid occupies
+cells `0` and `3`, since the stride is the *grid's* width, and a hand-count
+using the shape's width predicts `0` and `1`.
+
+In `hud.rs` (`mod recipe_toast_gate`): the toast covers `Toast.java`'s own
+rect, and `the_toast_is_anchored_to_the_top_right_corner` predicts the value
+rather than asserting a sign — at half visibility the left edge must be
+`cw - 80`, which a fixed-margin transcription (still reporting `cw - 160`)
+fails.
+
+Each has an **executed** control. A closed panel must cover *none* of the book
+rect while still emitting its toggle (so the control is not vacuous for the
+other reason: nothing drawn at all), and
+`no_toast_frame_paints_nothing_in_the_toast_rect` **verifies the control's
+premise** instead of assuming it — a control here once failed at 3.5% because
+the first-person bare arm was painting, a premise false since long before the
+feature existed. Failure output prints a **bounding box**, not just a
+fraction, because a fraction cannot tell a uniform-but-wrong frame from a
+localised blob.
 
 ## Dependencies
 

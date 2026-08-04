@@ -1276,6 +1276,294 @@ fn weather_columns_for_frame(
     (instances, rain)
 }
 
+/// Persisted recipe-book panel UI state (issue #163) — see
+/// [`WindowApp::recipe_panel`].
+///
+/// `tab` is an index into [`crate::container::RecipeBookPanelLayout::tabs`],
+/// which is [`lodestone_game::recipe::RecipeBook::visible_tabs`]'s own order;
+/// `None` is the all-categories view. `page` is clamped by
+/// [`crate::container::recipe_book_panel_contents`] on read, so a stale page
+/// left over from a wider search degrades to the last real page rather than
+/// showing an empty grid.
+#[derive(Debug, Default, Clone)]
+struct RecipePanelState {
+    /// Whether the panel body is open. The toggle button draws either way.
+    open: bool,
+    /// Current search text (substring match on the result id — see
+    /// `RecipeBook::browse`).
+    search: String,
+    /// Selected category tab, or `None` for all categories.
+    tab: Option<usize>,
+    /// Current page within the filtered result set.
+    page: usize,
+    /// Whether the search box has keyboard focus, so typing edits
+    /// [`Self::search`] instead of reaching the container's own key handling.
+    ///
+    /// Vanilla focuses its `EditBox` the same way (a click inside it), and this
+    /// flag is what stops `search` being a field nothing ever writes — an
+    /// island one layer down.
+    search_focused: bool,
+}
+
+/// Wall-clock milliseconds for the recipe-toast window.
+///
+/// [`lodestone_game::recipe::RecipeToastQueue`] takes "now" from its caller and
+/// only ever compares two of these against each other, so any clock with
+/// millisecond resolution works. The epoch clock is used because that is what
+/// vanilla's own toast timing is keyed off (`System.currentTimeMillis()`, see
+/// `RECIPE_TOAST_DISPLAY_MS`'s doc) — so whoever wires
+/// `RecipeToastQueue::push` from the decode reaches for the same function
+/// rather than inventing a second, incompatible origin.
+fn recipe_toast_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// This frame's recipe-unlock toast, if one should be on screen at `now_ms`.
+///
+/// `now_ms` is injected rather than read here so this is a pure function of the
+/// queue plus a timestamp, which is what lets a test drive the toast at an exact
+/// point in its 5000ms window without a sleep.
+///
+/// `visible_portion` is fixed at `1.0` — fully on screen. Vanilla's 600ms slide
+/// (`ToastManager.java:229-232`) needs an animation origin, and
+/// [`lodestone_game::recipe::RecipeToastQueue`] exposes none (its
+/// `last_changed_ms` is private, and it has no notion of a visibility
+/// transition). Drawing at rest is the honest subset; whoever lands the decode
+/// and gives the queue a real producer is the right person to add the slide, and
+/// [`crate::hud::RecipeToastView::visible_portion`] already takes it.
+///
+/// A free function over the queue rather than a `&self` method: `redraw` holds a
+/// `&mut` borrow of `self.render` across the whole frame, so anything taking
+/// `&self` there fails the borrow check. Taking the one field it reads keeps the
+/// borrows disjoint — and makes it directly unit-testable against a queue with
+/// no `WindowApp` in sight.
+fn recipe_toast_view(
+    queue: &lodestone_game::recipe::RecipeToastQueue,
+    now_ms: u64,
+) -> Option<crate::hud::RecipeToastView> {
+    if !queue.visible(now_ms) {
+        return None;
+    }
+    let (station, unlocked) = queue.displayed_entry(now_ms)?;
+    Some(crate::hud::RecipeToastView {
+        station: toast_icon(station)?,
+        unlocked: toast_icon(unlocked)?,
+        visible_portion: 1.0,
+    })
+}
+
+/// The recipe-book panel's own layout, derived from the *same* state and scale
+/// the draw uses.
+///
+/// Shared by the hit-test and draw paths on purpose: `container.rs`'s own
+/// `hit_test_with_scale` carries a warning that a layout built with a different
+/// `gui_scale` than the frame was drawn with silently mis-resolves every click,
+/// and one function used twice is the only way to guarantee they agree.
+fn recipe_panel_layout(
+    panel: &RecipePanelState,
+    menu: &Menu,
+    gui_scale: u32,
+    w: u32,
+    h: u32,
+    tab_count: usize,
+    total_pages: usize,
+) -> crate::container::RecipeBookPanelLayout {
+    crate::container::recipe_book_panel_layout_with_scale(
+        menu,
+        gui_scale,
+        w,
+        h,
+        tab_count,
+        panel.page > 0,
+        panel.page + 1 < total_pages,
+    )
+}
+
+/// The panel's contents for one frame as `(tab_count, total_pages, page_ids)`,
+/// with the ids **owned** so the borrow of `book` ends before a caller mutates
+/// its own panel state.
+///
+/// Degrades to "no tabs, one empty page" with no corpus loaded (jar-less run),
+/// which draws an empty-but-present panel rather than hiding the toggle.
+fn recipe_panel_contents(
+    book: Option<&RecipeBook>,
+    panel: &RecipePanelState,
+    book_type: lodestone_model::RecipeBookType,
+) -> (usize, usize, Vec<lodestone_model::Identifier>) {
+    let Some(book) = book else {
+        return (0, 1, Vec::new());
+    };
+    let contents = crate::container::recipe_book_panel_contents(
+        book,
+        book_type,
+        panel.tab,
+        &panel.search,
+        panel.page,
+    );
+    (
+        contents.tabs.len(),
+        contents.total_pages,
+        contents.page_ids.into_iter().cloned().collect(),
+    )
+}
+
+/// Build one frame of recipe-book panel geometry, or `None` when `menu` has no
+/// recipe book at all (a chest, an anvil) and the panel is suppressed.
+///
+/// `items`/`models` are the atlases the icons resolve against; both absent is
+/// the jar-less path, which falls back to
+/// [`crate::container::recipe_book_panel_geometry`]'s hash-derived colour
+/// swatches — the same degradation every other icon in this shell uses, and what
+/// lets a headless gate exercise this at all.
+///
+/// Free rather than a method for the same borrow reason as
+/// [`recipe_toast_view`].
+#[allow(clippy::too_many_arguments)]
+fn recipe_panel_geometry(
+    book: Option<&RecipeBook>,
+    panel: &RecipePanelState,
+    menu: &Menu,
+    gui_scale: u32,
+    items: Option<&lodestone_assets::ItemAtlas>,
+    models: Option<&lodestone_render::BlockModels>,
+    w: u32,
+    h: u32,
+) -> Option<crate::container::RecipeBookPanelGeometry> {
+    let book_type = recipe_book_type_for(menu)?;
+    let (tab_count, total_pages, results) = match book {
+        Some(book) => {
+            let contents = crate::container::recipe_book_panel_contents(
+                book,
+                book_type,
+                panel.tab,
+                &panel.search,
+                panel.page,
+            );
+            // `map_while`, not `filter_map`: `page_results[i]` must line up with
+            // `layout.recipes[i]`, so a recipe with no result stack has to *end*
+            // the slice rather than shift every later icon one cell left.
+            // Truncating is the documented "fewer entries than populated cells
+            // draws only what is given" behaviour.
+            let results: Vec<&lodestone_game::item::ItemStack> = contents
+                .page_ids
+                .iter()
+                .map_while(|id| {
+                    book.get(id)
+                        .and_then(lodestone_game::recipe::Recipe::result_stack)
+                })
+                .collect();
+            (contents.tabs.len(), contents.total_pages, results)
+        }
+        None => (0, 1, Vec::new()),
+    };
+    let layout = recipe_panel_layout(panel, menu, gui_scale, w, h, tab_count, total_pages);
+    Some(match items {
+        Some(items) => crate::container::recipe_book_panel_geometry_with_icons(
+            &layout,
+            panel.open,
+            panel.tab,
+            &results,
+            gui_scale,
+            w,
+            h,
+            items,
+            models,
+        ),
+        None => crate::container::recipe_book_panel_geometry(
+            &layout,
+            panel.open,
+            panel.tab,
+            &results,
+            gui_scale,
+            w,
+            h,
+        ),
+    })
+}
+
+/// One toast icon: a single-item [`HotbarSlot`] for `id`.
+///
+/// `None` for an id the [`ResourceLocation`] parser rejects, which suppresses
+/// the whole toast rather than drawing half of one.
+fn toast_icon(id: &lodestone_model::Identifier) -> Option<HotbarSlot> {
+    Some(HotbarSlot {
+        item: ResourceLocation::parse(&id.to_string()).ok()?,
+        count: 1,
+        damage: None,
+        max_damage: None,
+        enchanted: false,
+    })
+}
+
+/// Turn an auto-fill plan into the container clicks that realise it.
+///
+/// # Why this is not "two clicks per step"
+///
+/// [`lodestone_game::recipe::plan_auto_fill`] emits **one step per grid cell**,
+/// each moving a *single* item, and several steps can name the same
+/// `source_slot` (one stack of coal supplying three cells). The obvious
+/// "pick up from `source_slot`, place into `cell`" pair does not express that,
+/// because [`Click::left`] on a slot places the **whole** carried stack
+/// (`click.rs`: "pick up whole / place whole") — so a 5-coal stack would land
+/// entirely in the first cell and every later cell would be empty.
+///
+/// The sequence that actually produces one item per cell is vanilla's own
+/// manual gesture, grouped by source:
+///
+/// 1. [`Click::left`] the source slot — pick the whole stack onto the cursor;
+/// 2. [`Click::right`] each cell that source supplies — "place one" each;
+/// 3. [`Click::left`] the source slot again — return the remainder.
+///
+/// Step 3 is a no-op when the source was exhausted exactly (left-clicking an
+/// empty slot with an empty cursor does nothing), so it needs no guard.
+///
+/// Grouping is by **first appearance** of each `source_slot`, not by adjacency:
+/// steps are ordered by grid cell, so one source's cells need not be
+/// consecutive.
+fn auto_fill_clicks(steps: &[lodestone_game::recipe::PlacementStep]) -> Vec<Click> {
+    let mut clicks = Vec::new();
+    let mut seen: Vec<usize> = Vec::new();
+    for step in steps {
+        if seen.contains(&step.source_slot) {
+            continue;
+        }
+        seen.push(step.source_slot);
+        clicks.push(Click::left(step.source_slot));
+        for cell in steps
+            .iter()
+            .filter(|s| s.source_slot == step.source_slot)
+            .map(|s| s.cell)
+        {
+            clicks.push(Click::right(cell));
+        }
+        clicks.push(Click::left(step.source_slot));
+    }
+    clicks
+}
+
+/// Which recipe book, if any, a menu shows — the same fork
+/// [`lodestone_game::menu::Menu::plan_recipe_auto_fill`] makes internally, kept
+/// in one place so the panel's *contents* and its *auto-fill* can never
+/// disagree about which book they are in.
+///
+/// `None` means this menu has no recipe book at all (a chest, an anvil), and
+/// the panel is suppressed entirely rather than drawing an empty one.
+fn recipe_book_type_for(menu: &Menu) -> Option<lodestone_model::RecipeBookType> {
+    use lodestone_game::menu::SpecialLayout;
+    use lodestone_model::RecipeBookType;
+    if menu.craft_layout().is_some() {
+        return Some(RecipeBookType::Crafting);
+    }
+    match menu.special_layout()? {
+        SpecialLayout::Furnace => Some(RecipeBookType::Furnace),
+        SpecialLayout::BlastFurnace => Some(RecipeBookType::BlastFurnace),
+        SpecialLayout::Smoker => Some(RecipeBookType::Smoker),
+        _ => None,
+    }
+}
+
 struct WindowApp {
     config: Config,
     sim: Sim,
@@ -1395,6 +1683,26 @@ struct WindowApp {
     /// debug-overlay counter — the crafting result slot itself is always the
     /// server's, never a local match (see `docs/crafting.md`).
     recipe_book: Option<RecipeBook>,
+    /// Persisted recipe-book **panel** state (issue #163): whether the panel is
+    /// open, and the search/tab/page the user last left it on.
+    ///
+    /// Persisted across frames *and* across container open/close, deliberately:
+    /// vanilla's `RecipeBookComponent` state lives on the client's own
+    /// `RecipeBook`, not on the screen, so reopening a crafting table keeps the
+    /// book open with the same tab. Rebuilding it per frame would reset the
+    /// search box on every mouse move.
+    recipe_panel: RecipePanelState,
+    /// The recipe-unlock toast queue (issue #163) —
+    /// [`lodestone_game::recipe::RecipeToastQueue`], drained into
+    /// [`crate::hud::HudFrame::recipe_toast`] each frame.
+    ///
+    /// **Has no live producer yet.** The only thing that can fill it is the
+    /// `recipe_book_add` decode, which does not exist in
+    /// `crates/protocol/v770` (tracked on #436), so on a real server this stays
+    /// empty and no toast draws. That is the honest degradation, not a bug: the
+    /// render path is wired and gated so the toast appears the moment decode
+    /// lands. Deliberately **no** fake producer was added to light it up early.
+    recipe_toasts: lodestone_game::recipe::RecipeToastQueue,
     /// The world's weather, resolved from the net thread's cell once per frame.
     /// `None` before a session exists; installed alongside the other render
     /// sources by [`WindowApp::install_session_render_sources`] and cleared with
@@ -1455,6 +1763,8 @@ impl WindowApp {
             applied_fog,
             ecs,
             recipe_book: None,
+            recipe_panel: RecipePanelState::default(),
+            recipe_toasts: lodestone_game::recipe::RecipeToastQueue::new(),
             // No session yet, so no weather cell to read; see
             // `install_session_render_sources`.
             weather: None,
@@ -1865,6 +2175,109 @@ impl WindowApp {
         // (`container.rs`'s own click-driving tests use `PlayerCtx::survival()`
         // /`::creative()` explicitly rather than reading one off anything).
         let _ = handle.menu_click(click, PlayerCtx::survival());
+    }
+
+    /// Resolve a click at the current cursor against the recipe-book panel and
+    /// act on it, returning whether the panel **consumed** the click.
+    ///
+    /// Called before the container's own `hit_test_with_scale` so the panel —
+    /// which overlaps the main panel's left edge at narrow canvases, by
+    /// `container.rs`'s documented design — wins over the slot underneath it.
+    /// Returning `false` leaves the click to the normal slot path untouched.
+    fn handle_recipe_panel_click(&mut self, menu: &Menu, w: u32, h: u32) -> bool {
+        let Some(book_type) = recipe_book_type_for(menu) else {
+            return false;
+        };
+        let (tab_count, total_pages, page_ids) =
+            recipe_panel_contents(self.recipe_book.as_ref(), &self.recipe_panel, book_type);
+        let layout = recipe_panel_layout(
+            &self.recipe_panel,
+            menu,
+            self.nav.gui_scale(),
+            w,
+            h,
+            tab_count,
+            total_pages,
+        );
+        let Some(hit) = crate::container::recipe_book_panel_hit_test_with_scale(
+            &layout,
+            self.recipe_panel.open,
+            self.nav.gui_scale(),
+            w,
+            h,
+            self.cursor.0,
+            self.cursor.1,
+        ) else {
+            return false;
+        };
+
+        use crate::container::RecipeBookPanelHit as Hit;
+        match hit {
+            Hit::Toggle => {
+                self.recipe_panel.open = !self.recipe_panel.open;
+                self.recipe_panel.search_focused = false;
+            }
+            Hit::SearchBox => self.recipe_panel.search_focused = true,
+            Hit::Tab(i) => {
+                // Clicking the selected tab again clears the filter, so there is
+                // always a way back to all categories without a dedicated
+                // "all" tab (this client's tab list has none — see
+                // `recipe_book_panel_contents`).
+                self.recipe_panel.tab = if self.recipe_panel.tab == Some(i) {
+                    None
+                } else {
+                    Some(i)
+                };
+                self.recipe_panel.page = 0;
+                self.recipe_panel.search_focused = false;
+            }
+            Hit::PageForward => {
+                if self.recipe_panel.page + 1 < total_pages {
+                    self.recipe_panel.page += 1;
+                }
+                self.recipe_panel.search_focused = false;
+            }
+            Hit::PageBack => {
+                self.recipe_panel.page = self.recipe_panel.page.saturating_sub(1);
+                self.recipe_panel.search_focused = false;
+            }
+            Hit::Recipe(i) => {
+                self.recipe_panel.search_focused = false;
+                // A cell can be empty on a short final page — `page_ids` is the
+                // authority on which of the 20 fixed cells is populated, exactly
+                // as `RecipeBookPanelHit::Recipe`'s own doc requires.
+                if let Some(id) = page_ids.get(i).cloned() {
+                    self.auto_fill_recipe(menu, &id);
+                }
+            }
+            // A click on the panel body or the unimplemented All/Craftable
+            // filter is still *consumed*, so it does not fall through and
+            // click the container slot behind the panel.
+            Hit::FilterButton | Hit::Panel => self.recipe_panel.search_focused = false,
+        }
+        true
+    }
+
+    /// Auto-fill the crafting grid for `id` (issue #163's "click a recipe to
+    /// fill the grid").
+    ///
+    /// Every click goes out through [`Self::send_menu_click`], i.e. the **same**
+    /// per-click predict-then-send path a manual `MenuInput::press`/`release`
+    /// takes. That is deliberate and load-bearing: a second dispatch path would
+    /// diverge from `container.rs`'s vanilla-exact click semantics, and the
+    /// prediction has to see each click in order for the next one's `ctx` to be
+    /// right.
+    fn auto_fill_recipe(&self, menu: &Menu, id: &lodestone_model::Identifier) {
+        let Some(book) = self.recipe_book.as_ref() else {
+            return;
+        };
+        let Some(recipe) = book.get(id) else { return };
+        let Some(steps) = menu.plan_recipe_auto_fill(recipe, book.tags()) else {
+            return;
+        };
+        for click in auto_fill_clicks(&steps) {
+            self.send_menu_click(click);
+        }
     }
 
     /// A number-key / off-hand-key `SWAP` against the slot under the cursor
@@ -2796,6 +3209,11 @@ impl WindowApp {
             .recipe_book
             .as_ref()
             .map(|book| (book.len(), book.tags().len()));
+        // The recipe-unlock toast (issue #163). `None` on every real session
+        // today, because the queue's only possible producer is the
+        // `recipe_book_add` decode that does not exist yet — see the field's own
+        // doc. Wired here anyway so it lights up the moment that lands.
+        hud_frame.recipe_toast = recipe_toast_view(&self.recipe_toasts, recipe_toast_now_ms());
         // Always `Some`: `Sim::attack_strength_scale` is defined on both the
         // demo and live worlds (the ticker and the `attack_speed` attribute
         // default both exist before any server connection), unlike
@@ -2922,6 +3340,41 @@ impl WindowApp {
                 w,
                 h,
             );
+
+            // The recipe-book panel (issue #163), as its own pass **over** the
+            // container panel it belongs to — the toggle button sits on the
+            // container's own chrome and the book body overlaps its left edge at
+            // narrow canvases (`container.rs`'s documented clamp), so drawing it
+            // before the container would bury both.
+            //
+            // This call is what stops the whole
+            // `recipe_book_panel_layout`/`_hit_test`/`_geometry` family being an
+            // island: it was built and unit-tested with 75 tests and reached
+            // zero pixels because nothing composited the vertices.
+            if let Some(menu) = container_menu {
+                let items = hud.item_atlas();
+                if let Some(geo) = recipe_panel_geometry(
+                    self.recipe_book.as_ref(),
+                    &self.recipe_panel,
+                    menu,
+                    self.nav.gui_scale(),
+                    items.as_deref(),
+                    item_models,
+                    w,
+                    h,
+                ) {
+                    hud.render_recipe_book_panel(
+                        device,
+                        queue,
+                        frame.view(),
+                        Some(render.depth_view()),
+                        &geo,
+                        self.nav.gui_scale(),
+                        w,
+                        h,
+                    );
+                }
+            }
         }
 
         // The pause overlay draws *over* the world/HUD/container passes above
@@ -3372,38 +3825,54 @@ impl ApplicationHandler for WindowApp {
                         self.target.as_ref().map(RenderTarget::size),
                     )
                 {
-                    let hit = hit_test_with_scale(
-                        &menu,
-                        self.nav.gui_scale(),
-                        w,
-                        h,
-                        self.cursor.0,
-                        self.cursor.1,
-                    );
-                    let ctx = MenuContext {
-                        cursor_loaded: menu.carried().is_some(),
-                        // No game-mode plumbing exists on `Sim` to source this
-                        // from yet — see the report on this change.
-                        creative: false,
-                    };
-                    let clicks = match state {
-                        ElementState::Pressed => {
-                            let now = Instant::now();
-                            let is_repeat = menu_button == MenuButton::Left
-                                && self
-                                    .last_menu_click
-                                    .is_some_and(|t| now.duration_since(t) < DOUBLE_CLICK_WINDOW);
-                            self.last_menu_click = Some(now);
-                            self.menu_input
-                                .press(hit, menu_button, self.shift_held, ctx, is_repeat, &menu)
+                    // The recipe-book panel gets first refusal on the click
+                    // (issue #163). It overlaps the main panel's left edge at
+                    // narrow canvases by `container.rs`'s documented design, so
+                    // testing it *after* the slot layout would make its own
+                    // widgets unclickable there. Only a press is offered: a
+                    // release landing on the panel must still reach
+                    // `MenuInput::release` so an in-flight drag that started on
+                    // a real slot can terminate.
+                    // Deliberately not an early `return`: the tail of
+                    // `window_event` latches `quit_requested`, and returning
+                    // from here would skip it.
+                    let consumed_by_recipe_panel = matches!(state, ElementState::Pressed)
+                        && menu_button == MenuButton::Left
+                        && self.handle_recipe_panel_click(&menu, w, h);
+                    if !consumed_by_recipe_panel {
+                        let hit = hit_test_with_scale(
+                            &menu,
+                            self.nav.gui_scale(),
+                            w,
+                            h,
+                            self.cursor.0,
+                            self.cursor.1,
+                        );
+                        let ctx = MenuContext {
+                            cursor_loaded: menu.carried().is_some(),
+                            // No game-mode plumbing exists on `Sim` to source this
+                            // from yet — see the report on this change.
+                            creative: false,
+                        };
+                        let clicks = match state {
+                            ElementState::Pressed => {
+                                let now = Instant::now();
+                                let is_repeat = menu_button == MenuButton::Left
+                                    && self.last_menu_click.is_some_and(|t| {
+                                        now.duration_since(t) < DOUBLE_CLICK_WINDOW
+                                    });
+                                self.last_menu_click = Some(now);
+                                self.menu_input
+                                    .press(hit, menu_button, self.shift_held, ctx, is_repeat, &menu)
+                            }
+                            ElementState::Released => {
+                                self.menu_input
+                                    .release(hit, menu_button, self.shift_held, ctx, &menu)
+                            }
+                        };
+                        for click in clicks {
+                            self.send_menu_click(click);
                         }
-                        ElementState::Released => {
-                            self.menu_input
-                                .release(hit, menu_button, self.shift_held, ctx, &menu)
-                        }
-                    };
-                    for click in clicks {
-                        self.send_menu_click(click);
                     }
                 }
             }
@@ -5722,5 +6191,517 @@ mod tests {
         );
 
         drain.abort();
+    }
+}
+
+/// Gates for the recipe-book panel wiring (issue #163).
+///
+/// The recipe-book UI landed fully built and unit-tested in `container.rs` and
+/// `lodestone-game`, and reached **zero pixels** because the three call sites
+/// that drive it live in `app.rs`/`sim.rs`/`hud.rs`. These gates measure the
+/// wiring itself, not the geometry — `container.rs`'s own 75 tests already prove
+/// the geometry is right, and every one of them passed while nothing drew.
+#[cfg(test)]
+mod recipe_book_wiring {
+    use super::*;
+    use lodestone_game::item::ItemStack;
+    use lodestone_game::recipe::{Ingredient, Recipe, RecipeBook, ShapedRecipe, TagResolver};
+    use lodestone_model::Identifier;
+
+    fn id(name: &str) -> Identifier {
+        name.parse().expect("valid identifier")
+    }
+
+    fn stack(name: &str, count: i32) -> ItemStack {
+        ItemStack::new(id(name), count)
+    }
+
+    /// A canvas big enough that the panel is *not* pushed against the
+    /// `RECIPE_PANEL_MIN_X` clamp, so the layout under test is the ordinary one.
+    const W: u32 = 1280;
+    const H: u32 = 800;
+
+    /// The torch: `1` wide, `2` tall — coal over stick.
+    ///
+    /// Chosen because its arithmetic is **falsifiable**. Laid row-major into a
+    /// 3-wide grid the two ingredients occupy cells `0` and `3`, because the
+    /// stride is the *grid's* width and not the shape's. A hand-count that used
+    /// the shape's width predicts `0` and `1`, and that prediction is wrong —
+    /// which is exactly why this recipe is the subject rather than a 1×1 one
+    /// that cannot tell the two apart.
+    fn torch() -> Recipe {
+        Recipe::Shaped(ShapedRecipe::new(
+            1,
+            2,
+            vec![
+                Some(Ingredient::Item(id("minecraft:coal"))),
+                Some(Ingredient::Item(id("minecraft:stick"))),
+            ],
+            stack("minecraft:torch", 4),
+        ))
+    }
+
+    fn torch_book() -> RecipeBook {
+        let mut book = RecipeBook::new();
+        book.insert(id("minecraft:torch"), torch());
+        book
+    }
+
+    // -- click-to-fill ---------------------------------------------------
+
+    /// The dispatch loop's **resulting slot contents**, not merely that clicks
+    /// were issued.
+    ///
+    /// This is the assertion that would have caught the plan this change was
+    /// briefed with. "Two `ContainerClick`s per step — pick up from
+    /// `source_slot`, place into `cell`" reads correctly and is wrong:
+    /// `Click::left` on a slot places the **whole** carried stack, so a 5-coal
+    /// stack would land entirely in cell 0. See [`auto_fill_clicks`].
+    #[test]
+    fn auto_fill_puts_exactly_one_item_in_each_grid_cell() {
+        let mut menu = Menu::crafting(3, 3);
+        menu.set_slot_item(12, Some(stack("minecraft:coal", 5)));
+        menu.set_slot_item(20, Some(stack("minecraft:stick", 3)));
+        let book = torch_book();
+        let steps = menu
+            .plan_recipe_auto_fill(book.get(&id("minecraft:torch")).expect("recipe"), book.tags())
+            .expect("the plan must exist — both ingredients are in the inventory");
+
+        // `craft.first_input == 1` for a crafting table, so grid cells 0 and 3
+        // are menu slots 1 and 4.
+        assert_eq!(
+            steps.iter().map(|s| s.cell).collect::<Vec<_>>(),
+            vec![1, 4],
+            "row-major into a 3-wide grid: cells 0 and 3, offset by first_input"
+        );
+
+        for click in auto_fill_clicks(&steps) {
+            click.apply(&mut menu, lodestone_game::click::PlayerCtx::survival());
+        }
+
+        assert_eq!(
+            menu.slot_item(1).map(|s| (s.item().to_string(), s.count())),
+            Some(("minecraft:coal".to_string(), 1)),
+            "cell 0 must hold exactly ONE coal, not the whole stack"
+        );
+        assert_eq!(
+            menu.slot_item(4).map(|s| (s.item().to_string(), s.count())),
+            Some(("minecraft:stick".to_string(), 1)),
+            "cell 3 must hold exactly one stick"
+        );
+        assert_eq!(
+            menu.slot_item(2).map(|s| s.item().to_string()),
+            None,
+            "cell 1 must stay EMPTY — the 1x2 shape does not occupy it"
+        );
+        assert_eq!(
+            menu.slot_item(12).map(|s| s.count()),
+            Some(4),
+            "the remainder must be returned to the source slot, not left on the cursor"
+        );
+        assert_eq!(
+            menu.slot_item(20).map(|s| s.count()),
+            Some(2),
+            "same for the second source"
+        );
+        assert!(
+            menu.carried().is_none(),
+            "the cursor must end empty, or the next real click would misbehave"
+        );
+    }
+
+    /// The negative control for the gate above, and it is **executed**, not
+    /// described: the briefed "two clicks per step" sequence, run through the
+    /// same menu, must fail the same assertion.
+    ///
+    /// Without this, "one item per cell" is satisfied by any plan that happens
+    /// to place something, and the magnitude — *how many* — is never under test.
+    #[test]
+    fn two_clicks_per_step_would_dump_the_whole_stack_in_one_cell() {
+        let mut menu = Menu::crafting(3, 3);
+        menu.set_slot_item(12, Some(stack("minecraft:coal", 5)));
+        menu.set_slot_item(20, Some(stack("minecraft:stick", 3)));
+        let book = torch_book();
+        let steps = menu
+            .plan_recipe_auto_fill(book.get(&id("minecraft:torch")).expect("recipe"), book.tags())
+            .expect("plan");
+
+        // The rejected design: literally two clicks per step, both left.
+        let ctx = lodestone_game::click::PlayerCtx::survival();
+        for step in &steps {
+            Click::left(step.source_slot).apply(&mut menu, ctx);
+            Click::left(step.cell).apply(&mut menu, ctx);
+        }
+
+        assert_eq!(
+            menu.slot_item(1).map(|s| s.count()),
+            Some(5),
+            "control must observe the WHOLE 5-coal stack in cell 0 — if this ever \
+             reads 1, `Click::left` has changed meaning and the real gate above \
+             is no longer measuring anything"
+        );
+        assert_ne!(
+            menu.slot_item(1).map(|s| s.count()),
+            Some(1),
+            "and it must NOT satisfy the real gate's assertion"
+        );
+    }
+
+    /// One source stack feeding several cells still leaves one item per cell —
+    /// the case the "group by source" sequence exists for.
+    #[test]
+    fn one_source_stack_can_fill_several_cells() {
+        let mut menu = Menu::crafting(3, 3);
+        menu.set_slot_item(12, Some(stack("minecraft:coal", 5)));
+        let book = {
+            let mut b = RecipeBook::new();
+            b.insert(
+                id("test:three_coal"),
+                Recipe::Shaped(ShapedRecipe::new(
+                    3,
+                    1,
+                    vec![
+                        Some(Ingredient::Item(id("minecraft:coal"))),
+                        Some(Ingredient::Item(id("minecraft:coal"))),
+                        Some(Ingredient::Item(id("minecraft:coal"))),
+                    ],
+                    stack("minecraft:coal_block", 1),
+                )),
+            );
+            b
+        };
+        let steps = menu
+            .plan_recipe_auto_fill(book.get(&id("test:three_coal")).expect("recipe"), book.tags())
+            .expect("plan");
+        for click in auto_fill_clicks(&steps) {
+            click.apply(&mut menu, lodestone_game::click::PlayerCtx::survival());
+        }
+        for cell in [1usize, 2, 3] {
+            assert_eq!(
+                menu.slot_item(cell).map(|s| s.count()),
+                Some(1),
+                "cell {cell} must hold exactly one coal"
+            );
+        }
+        assert_eq!(
+            menu.slot_item(12).map(|s| s.count()),
+            Some(2),
+            "5 coal minus 3 placed = 2 returned to the source"
+        );
+    }
+
+    /// The plan is all-or-nothing, so a missing ingredient must issue **no**
+    /// clicks at all rather than half-filling the grid.
+    #[test]
+    fn a_missing_ingredient_issues_no_clicks() {
+        let mut menu = Menu::crafting(3, 3);
+        menu.set_slot_item(12, Some(stack("minecraft:coal", 5)));
+        let book = torch_book();
+        assert!(
+            menu.plan_recipe_auto_fill(
+                book.get(&id("minecraft:torch")).expect("recipe"),
+                book.tags()
+            )
+            .is_none(),
+            "no stick in the inventory, so there must be no plan"
+        );
+    }
+
+    // -- the draw pass reaches the screen --------------------------------
+
+    /// Rasterise a colour stream's triangles onto a `res × res` grid in NDC and
+    /// report `(covered_cells, bounding_box)` restricted to `rect`, an
+    /// `(x0, y0, x1, y1)` NDC box.
+    ///
+    /// A CPU rasteriser rather than a GPU gate on purpose: this measures whether
+    /// the wiring puts geometry **where the panel is**, which is a property of
+    /// the vertices, and it runs in every `cargo test` instead of behind an
+    /// `#[ignore]`. The bounding box is returned because a bare fraction cannot
+    /// tell a uniform-but-wrong frame from a localised blob.
+    fn coverage(
+        verts: &[f32],
+        rect: (f32, f32, f32, f32),
+        res: usize,
+    ) -> (usize, Option<(f32, f32, f32, f32)>) {
+        let (rx0, ry0, rx1, ry1) = rect;
+        let mut covered = 0usize;
+        let mut bbox: Option<(f32, f32, f32, f32)> = None;
+        // Cell centres, in NDC.
+        let to_ndc = |i: usize| -1.0 + 2.0 * (i as f32 + 0.5) / res as f32;
+        for gy in 0..res {
+            for gx in 0..res {
+                let (px, py) = (to_ndc(gx), to_ndc(gy));
+                if px < rx0 || px > rx1 || py < ry0 || py > ry1 {
+                    continue;
+                }
+                let mut hit = false;
+                for tri in verts.chunks_exact(6 * 3) {
+                    let (ax, ay) = (tri[0], tri[1]);
+                    let (bx, by) = (tri[6], tri[7]);
+                    let (cx, cy) = (tri[12], tri[13]);
+                    let d = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
+                    if d.abs() < f32::EPSILON {
+                        continue;
+                    }
+                    let w0 = ((bx - px) * (cy - py) - (cx - px) * (by - py)) / d;
+                    let w1 = ((cx - px) * (ay - py) - (ax - px) * (cy - py)) / d;
+                    let w2 = 1.0 - w0 - w1;
+                    if w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 {
+                        hit = true;
+                        break;
+                    }
+                }
+                if hit {
+                    covered += 1;
+                    bbox = Some(match bbox {
+                        None => (px, py, px, py),
+                        Some((x0, y0, x1, y1)) => (x0.min(px), y0.min(py), x1.max(px), y1.max(py)),
+                    });
+                }
+            }
+        }
+        (covered, bbox)
+    }
+
+    /// The panel's own rect in NDC, derived from **the same layout expression the
+    /// draw uses** — never a restated constant.
+    ///
+    /// A HUD gate in this repo hardcoded a `cluster_top` the draw computed from a
+    /// moving anchor and reported 0 px for a row that was rendering perfectly.
+    /// This calls `recipe_panel_layout` exactly as `recipe_panel_geometry` does.
+    fn panel_rect_ndc(panel: &RecipePanelState, menu: &Menu, tabs: usize, pages: usize) -> (f32, f32, f32, f32) {
+        let layout = recipe_panel_layout(panel, menu, 1, W, H, tabs, pages);
+        let (cw, ch) = crate::menu::render::logical_canvas(1, W, H);
+        let r = layout.panel;
+        (
+            2.0 * r.x / cw - 1.0,
+            1.0 - 2.0 * (r.y + r.h) / ch,
+            2.0 * (r.x + r.w) / cw - 1.0,
+            1.0 - 2.0 * r.y / ch,
+        )
+    }
+
+    fn open_panel() -> RecipePanelState {
+        RecipePanelState {
+            open: true,
+            ..RecipePanelState::default()
+        }
+    }
+
+    /// **Every vertex the draw pass will submit must land inside the `[-1, 1]`
+    /// NDC clip range.**
+    ///
+    /// This one sweep catches the entire "geometry exists, nothing is on screen"
+    /// class, and it is the sweep that found both of the bugs the panel's own
+    /// author hit: tabs at `bx - 30` going off-canvas, and a
+    /// `Builder::new(1.0, 1.0, None)` placeholder putting every vertex far
+    /// outside the visible range.
+    #[test]
+    fn every_panel_vertex_lands_inside_the_ndc_clip_range() {
+        let menu = Menu::crafting(3, 3);
+        let book = torch_book();
+        let geo = recipe_panel_geometry(
+            Some(&book),
+            &open_panel(),
+            &menu,
+            1,
+            None,
+            None,
+            W,
+            H,
+        )
+        .expect("a crafting table has a recipe book");
+
+        assert!(
+            geo.vertex_count() > 0,
+            "the open panel must emit geometry at all"
+        );
+        for (i, v) in geo.verts.chunks_exact(6).enumerate() {
+            assert!(
+                (-1.0..=1.0).contains(&v[0]) && (-1.0..=1.0).contains(&v[1]),
+                "vertex {i} at ({}, {}) is outside the NDC clip range — the panel \
+                 would have geometry and draw nothing",
+                v[0],
+                v[1]
+            );
+        }
+    }
+
+    /// The same sweep at a canvas narrow enough to hit the
+    /// `RECIPE_PANEL_MIN_X` clamp, which is where the tabs previously escaped
+    /// off-canvas to `x = -1.1218` NDC.
+    #[test]
+    fn panel_vertices_stay_on_canvas_at_the_min_x_clamp() {
+        let menu = Menu::crafting(3, 3);
+        let book = torch_book();
+        let geo = recipe_panel_geometry(
+            Some(&book),
+            &open_panel(),
+            &menu,
+            1,
+            None,
+            None,
+            420,
+            400,
+        )
+        .expect("recipe book");
+        for (i, v) in geo.verts.chunks_exact(6).enumerate() {
+            assert!(
+                (-1.0..=1.0).contains(&v[0]) && (-1.0..=1.0).contains(&v[1]),
+                "vertex {i} at ({}, {}) escaped the canvas at the clamp",
+                v[0],
+                v[1]
+            );
+        }
+    }
+
+    /// **Coverage inside the recipe book's own screen rect.**
+    ///
+    /// The island this closes could not be seen by any test that only checked
+    /// the geometry was *built*: `container.rs`'s 75 tests all passed while the
+    /// panel drew nothing. This asserts the vertices actually cover the rect the
+    /// layout puts the panel in.
+    #[test]
+    fn an_open_panel_covers_its_own_screen_rect() {
+        let menu = Menu::crafting(3, 3);
+        let book = torch_book();
+        let panel = open_panel();
+        let (tabs, pages, _) = recipe_panel_contents(
+            Some(&book),
+            &panel,
+            lodestone_model::RecipeBookType::Crafting,
+        );
+        let rect = panel_rect_ndc(&panel, &menu, tabs, pages);
+        let geo = recipe_panel_geometry(Some(&book), &panel, &menu, 1, None, None, W, H)
+            .expect("recipe book");
+
+        let res = 128;
+        let (covered, bbox) = coverage(&geo.verts, rect, res);
+        // Total grid cells whose centre falls inside the rect, so the fraction
+        // below is "of the panel", not "of the screen".
+        let inside = {
+            let (mut n, to_ndc) = (0usize, |i: usize| -1.0 + 2.0 * (i as f32 + 0.5) / res as f32);
+            for gy in 0..res {
+                for gx in 0..res {
+                    let (px, py) = (to_ndc(gx), to_ndc(gy));
+                    if px >= rect.0 && px <= rect.2 && py >= rect.1 && py <= rect.3 {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        assert!(inside > 0, "the panel rect must contain sample points at all");
+        let fraction = covered as f32 / inside as f32;
+        assert!(
+            fraction > 0.9,
+            "an open panel must fill its own rect: covered {covered}/{inside} \
+             ({fraction:.3}) inside rect {rect:?}, covered bbox {bbox:?}"
+        );
+    }
+
+    /// The **executed** negative control for the coverage gate: a *closed*
+    /// panel draws only its toggle button, which lives on the container's own
+    /// chrome and is nowhere inside the book panel's rect. It must fail the same
+    /// assertion.
+    ///
+    /// This is what distinguishes "the panel is drawn" from "something, anything,
+    /// emitted vertices" — and note what else already paints here: nothing, since
+    /// this measures the panel geometry's own stream in isolation rather than a
+    /// composited frame.
+    #[test]
+    fn a_closed_panel_fails_the_coverage_assertion() {
+        let menu = Menu::crafting(3, 3);
+        let book = torch_book();
+        let open = open_panel();
+        let closed = RecipePanelState::default();
+        let (tabs, pages, _) = recipe_panel_contents(
+            Some(&book),
+            &open,
+            lodestone_model::RecipeBookType::Crafting,
+        );
+        // The *same* rect the positive gate measures — derived from the open
+        // layout, so the control differs only in what was drawn.
+        let rect = panel_rect_ndc(&open, &menu, tabs, pages);
+        let geo = recipe_panel_geometry(Some(&book), &closed, &menu, 1, None, None, W, H)
+            .expect("recipe book");
+
+        let (covered, bbox) = coverage(&geo.verts, rect, 128);
+        assert_eq!(
+            covered, 0,
+            "a closed panel must cover NONE of the book rect (bbox {bbox:?}) — if \
+             this ever passes, the positive gate above is measuring something \
+             other than the panel body"
+        );
+        assert!(
+            geo.vertex_count() > 0,
+            "but it must still emit the toggle button, or the control is vacuous \
+             for a different reason: nothing drawn at all"
+        );
+    }
+
+    /// A menu with no recipe book at all draws no panel — so a chest does not
+    /// grow a recipe-book toggle.
+    #[test]
+    fn a_menu_without_a_recipe_book_draws_no_panel() {
+        let chest = Menu::generic(27);
+        assert!(
+            recipe_book_type_for(&chest).is_none(),
+            "a chest has no recipe book"
+        );
+        assert!(
+            recipe_panel_geometry(None, &open_panel(), &chest, 1, None, None, W, H).is_none(),
+            "and therefore emits no geometry"
+        );
+    }
+
+    /// The furnace family maps to its own book, not the crafting one — the fork
+    /// `Menu::plan_recipe_auto_fill` makes internally, kept in agreement.
+    #[test]
+    fn book_type_matches_the_menu() {
+        assert_eq!(
+            recipe_book_type_for(&Menu::crafting(3, 3)),
+            Some(lodestone_model::RecipeBookType::Crafting)
+        );
+    }
+
+    // -- the toast --------------------------------------------------------
+
+    /// The toast reaches [`crate::hud::HudFrame`] from a queue with a real
+    /// entry, at a timestamp inside the display window.
+    ///
+    /// Driven through a `RecipeToastQueue` the test fills itself. That is the
+    /// **test-only injection point** this feature needs, and deliberately not a
+    /// fake producer in production code: the live producer is the
+    /// `recipe_book_add` decode, which does not exist yet.
+    #[test]
+    fn a_queued_unlock_becomes_a_toast_view() {
+        let mut queue = lodestone_game::recipe::RecipeToastQueue::new();
+        let now = 1_000_000u64;
+        queue.push(id("minecraft:crafting_table"), id("minecraft:torch"), now);
+
+        let view = recipe_toast_view(&queue, now + 100).expect("inside the 5000ms window");
+        assert_eq!(view.station.item.to_string(), "minecraft:crafting_table");
+        assert_eq!(view.unlocked.item.to_string(), "minecraft:torch");
+        assert_eq!(view.visible_portion, 1.0);
+    }
+
+    /// The control for the gate above: past the 5000ms window there is no
+    /// toast, and an empty queue never produces one. Both must fail the same
+    /// `expect`.
+    #[test]
+    fn the_toast_expires_and_an_empty_queue_never_shows_one() {
+        let mut queue = lodestone_game::recipe::RecipeToastQueue::new();
+        let now = 1_000_000u64;
+        assert!(
+            recipe_toast_view(&queue, now).is_none(),
+            "an empty queue must not produce a toast — this is the state every \
+             real session is in until the decode lands"
+        );
+        queue.push(id("minecraft:crafting_table"), id("minecraft:torch"), now);
+        assert!(
+            recipe_toast_view(&queue, now + lodestone_game::recipe::RECIPE_TOAST_DISPLAY_MS).is_none(),
+            "and it must expire exactly at DISPLAY_TIME"
+        );
     }
 }

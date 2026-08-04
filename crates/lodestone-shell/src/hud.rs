@@ -247,6 +247,58 @@ const FLOATS_PER_VERTEX: usize = 6;
 /// so the existing colour pipeline is untouched.
 pub(crate) const SPRITE_FLOATS_PER_VERTEX: usize = 8;
 
+/// Vanilla's `recipe.toast.title` (`assets/minecraft/lang/en_us.json`, read
+/// from the real `client.jar` rather than transcribed from memory — note the
+/// parenthesised plural, which a paraphrase loses).
+pub const RECIPE_TOAST_TITLE: &str = "New Recipe(s) Unlocked!";
+/// Vanilla's `recipe.toast.description`, same source.
+pub const RECIPE_TOAST_DESCRIPTION: &str = "Check your recipe book";
+/// `RecipeToast.BACKGROUND_SPRITE` (`RecipeToast.java:16`) — `toast/recipe`,
+/// which really is present in 26.2's GUI atlas
+/// (`assets/minecraft/textures/gui/sprites/toast/recipe.png`), so the sprite
+/// path is reachable rather than permanently falling back.
+pub const RECIPE_TOAST_SPRITE: &str = "toast/recipe";
+/// `ToastManager`'s slide duration in milliseconds — the bare `600L` at
+/// `ToastManager.java:243,252,257` (it has no named constant there).
+pub const RECIPE_TOAST_SLIDE_MS: u64 = 600;
+
+/// One recipe-unlock toast to draw this frame, resolved from
+/// [`lodestone_game::recipe::RecipeToastQueue::displayed_entry`] by whoever owns
+/// the clock (`app.rs`).
+///
+/// # Geometry, read from the record rather than a call site
+///
+/// Every number below comes from `Toast.java`/`RecipeToast.java` in
+/// `.cache/mc/26.2/client-src`, checked against the **definitions**:
+///
+/// - `Toast.width() == 160`, `Toast.height() == 32` (`Toast.java:39-45`; the
+///   `DEFAULT_WIDTH`/`SLOT_HEIGHT` constants at `:14-15` carry the same values).
+/// - `xPos(screenWidth, visiblePortion) == screenWidth - width() *
+///   visiblePortion` (`Toast.java:31-33`). This is **not** a fixed right
+///   margin: it is the slide-in, and at `visiblePortion == 1.0` the toast's
+///   left edge sits exactly `160` from the right edge of the screen.
+/// - `yPos(firstSlotIndex) == firstSlotIndex * height()` (`Toast.java:35-37`),
+///   so the *first* toast is flush with the top of the screen at `y == 0`, not
+///   inset by a margin. We only ever draw one, so `firstSlotIndex == 0`.
+/// - Contents (`RecipeToast.extractRenderState`, `RecipeToast.java:55-65`), all
+///   toast-local: background sprite over the full `160×32`; title at `(30, 7)`
+///   colour `-11534256` (`0xFF500050`); description at `(30, 18)` colour
+///   `-16777216` (opaque black); the crafting-station icon at `(3, 3)` under a
+///   `scale(0.6)` that applies to the *position too*, so it lands at
+///   `(1.8, 1.8)` at `9.6px`; the unlocked item's icon at `(8, 8)`, unscaled.
+#[derive(Debug, Clone)]
+pub struct RecipeToastView {
+    /// The crafting station's icon — the small scaled corner item
+    /// (`RecipeToast.Entry::categoryItem`, `RecipeToast.java:85`).
+    pub station: HotbarSlot,
+    /// The newly unlocked recipe's result icon (`Entry::unlockedItem`).
+    pub unlocked: HotbarSlot,
+    /// `ToastManager.ToastInstance::visiblePortion` (`ToastManager.java:199`,
+    /// used at `:266`): `1.0` fully on screen, `0.0` entirely off the right
+    /// edge. Callers with no animation state should pass `1.0`.
+    pub visible_portion: f32,
+}
+
 /// Everything the HUD draws for one frame, bundled so the geometry builder and
 /// the GPU renderer take one argument that can grow without churning every call
 /// site. Borrows so building it per frame allocates nothing beyond the `chat`
@@ -407,6 +459,18 @@ pub struct HudFrame<'a> {
     /// icon; `docs/combat.md` names the cut). `None` draws nothing, the
     /// pre-#121 behaviour.
     pub attack_cooldown: Option<f32>,
+    /// The recipe-unlock toast to draw top-right, `Some` only while
+    /// [`lodestone_game::recipe::RecipeToastQueue`] has a live entry (issue
+    /// #163). See [`RecipeToastView`] for the geometry and its vanilla
+    /// citations.
+    ///
+    /// **Honestly degraded today**: the queue this comes from is only ever
+    /// filled by the `recipe_book_add` decode, which does not exist yet
+    /// (`crates/protocol/v770` — tracked on #436), so on a live server this
+    /// stays `None`. That is deliberate: the consumer side is wired so the
+    /// toast appears the moment the decode lands, and no fake producer was
+    /// added to make it light up early.
+    pub recipe_toast: Option<RecipeToastView>,
 }
 
 impl<'a> HudFrame<'a> {
@@ -437,6 +501,7 @@ impl<'a> HudFrame<'a> {
             held_item: None,
             recipe_stats: None,
             attack_cooldown: None,
+            recipe_toast: None,
         }
     }
 }
@@ -1152,6 +1217,13 @@ impl HudGeometry {
             }
         }
 
+        // Recipe-unlock toast, top-right (issue #163). Drawn last so it lands
+        // over the sidebar/tab overlays, matching vanilla's own toast layer,
+        // which `ToastManager.render` composites after the HUD entirely.
+        if let Some(toast) = &frame.recipe_toast {
+            draw_recipe_toast(&mut b, toast);
+        }
+
         Self {
             verts: b.verts,
             sprite_verts: b.sprite_verts,
@@ -1160,6 +1232,76 @@ impl HudGeometry {
             special: b.special,
         }
     }
+}
+
+/// The recipe-unlock toast's rect in **logical canvas pixels**, as
+/// `(x, y, w, h)` — `Toast::xPos`/`yPos` with `firstSlotIndex == 0`
+/// (`Toast.java:31-37`).
+///
+/// This exists so the draw and any gate measuring it share **one** expression.
+/// A gate that restated `canvas_w - 160.0` would silently stop describing the
+/// draw the moment the slide-in is threaded through, which is exactly the
+/// failure mode a HUD gate here already hit once by hardcoding a `cluster_top`
+/// the draw computed from a moving anchor.
+#[must_use]
+pub fn recipe_toast_rect(canvas_w: f32, visible_portion: f32) -> (f32, f32, f32, f32) {
+    let tw = lodestone_game::recipe::RECIPE_TOAST_WIDTH as f32;
+    let th = lodestone_game::recipe::RECIPE_TOAST_HEIGHT as f32;
+    (canvas_w - tw * visible_portion, 0.0, tw, th)
+}
+
+/// Draw one recipe-unlock toast. Geometry and colours are cited on
+/// [`RecipeToastView`]; this function is only the transcription.
+///
+/// The background prefers the real `toast/recipe` sprite and falls back to a
+/// flat fill when no GUI atlas is attached — the same jar-less degradation
+/// every other element in this module uses, and the reason a coverage gate can
+/// run headless.
+fn draw_recipe_toast(b: &mut Builder, toast: &RecipeToastView) {
+    let (tx, ty, tw, th) = recipe_toast_rect(b.w, toast.visible_portion);
+
+    // `blitSprite(BACKGROUND_SPRITE, 0, 0, width(), height())`
+    // (`RecipeToast.java:56`).
+    let quads = b.gui_geometry(RECIPE_TOAST_SPRITE, tx, ty, tw, th);
+    if quads.is_empty() {
+        // Jar-less: vanilla's toast art is an opaque light panel, so a flat
+        // fill keeps the text legible rather than leaving it on the world.
+        b.rect_px(tx, ty, tw, th, [0.86, 0.86, 0.86, 1.0]);
+    } else {
+        for q in quads {
+            b.push_sprite_quad(q, [1.0, 1.0, 1.0, 1.0]);
+        }
+    }
+
+    // `-11534256 == 0xFF500050` and `-16777216 == 0xFF000000`
+    // (`RecipeToast.java:57-58`). Unscaled, and unshadowed (the trailing
+    // `false`).
+    const TITLE_COLOUR: [f32; 4] = [0x50 as f32 / 255.0, 0.0, 0x50 as f32 / 255.0, 1.0];
+    const DESCRIPTION_COLOUR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+    b.text(RECIPE_TOAST_TITLE, tx + 30.0, ty + 7.0, 1.0, TITLE_COLOUR);
+    b.text(
+        RECIPE_TOAST_DESCRIPTION,
+        tx + 30.0,
+        ty + 18.0,
+        1.0,
+        DESCRIPTION_COLOUR,
+    );
+
+    // The station badge is drawn under `pose().scale(0.6)`, which scales the
+    // *position* as well as the size — so `fakeItem(categoryItem, 3, 3)` lands
+    // at `(1.8, 1.8)` with a `9.6px` icon, not at `(3, 3)` with a small one.
+    // Transcribing this as `(3, 3)` is the same class of mistake as reading a
+    // Java record's positional fields in the wrong order.
+    const ICON: f32 = 16.0;
+    const STATION_SCALE: f32 = 0.6;
+    b.item_icon(
+        &toast.station,
+        tx + 3.0 * STATION_SCALE,
+        ty + 3.0 * STATION_SCALE,
+        ICON * STATION_SCALE,
+    );
+    // `fakeItem(unlockedItem, 8, 8)` (`RecipeToast.java:64`), unscaled.
+    b.item_icon(&toast.unlocked, tx + 8.0, ty + 8.0, ICON);
 }
 
 /// Draw the item icons into the nine hotbar cells. Mirrors the slot geometry of
@@ -1947,6 +2089,18 @@ pub struct HudRenderer {
     heart_anim: anim::HeartAnim,
     /// Cross-frame per-slot hotbar pop timers (`hud/anim::HotbarPop`).
     hotbar_pop: anim::HotbarPop,
+    /// Colour-stream buffer for the **recipe-book panel** pass
+    /// ([`HudRenderer::render_recipe_book_panel`]), created lazily on the first
+    /// frame the panel is open.
+    ///
+    /// Deliberately *not* [`Self::buffer`]: the panel draws after the HUD's own
+    /// encoder has been submitted, and re-uploading the shared buffer would be
+    /// correct only by virtue of `wgpu`'s queue ordering. A separate buffer
+    /// makes that independence structural instead of subtle, for the cost of
+    /// one allocation on the first open.
+    recipe_panel_buffer: Option<wgpu::Buffer>,
+    /// Capacity of [`Self::recipe_panel_buffer`], in floats.
+    recipe_panel_capacity_floats: usize,
 }
 
 /// The GPU resources for drawing HUD sprites from the vanilla GUI atlas: the
@@ -2039,6 +2193,8 @@ impl HudRenderer {
             anim_start: Instant::now(),
             heart_anim: anim::HeartAnim::new(),
             hotbar_pop: anim::HotbarPop::new(),
+            recipe_panel_buffer: None,
+            recipe_panel_capacity_floats: 0,
         }
     }
 
@@ -2147,6 +2303,18 @@ impl HudRenderer {
             anim,
             "hud-item-model",
         );
+    }
+
+    /// The flat item atlas attached by [`Self::attach_items`], if any.
+    ///
+    /// Exists so a caller building geometry that draws item icons — the
+    /// recipe-book panel ([`Self::render_recipe_book_panel`]) — can ask for the
+    /// atlas it will be drawn against instead of re-loading a second copy or
+    /// threading one through as a new field. `None` on a jar-less run, which is
+    /// the icon-less fallback path and the pixel gate's negative control.
+    #[must_use]
+    pub fn item_atlas(&self) -> Option<Arc<ItemAtlas>> {
+        self.icons.item_atlas()
     }
 
     /// How many block-entity sheets the **special-renderer** icon pass has
@@ -2388,6 +2556,132 @@ impl HudRenderer {
             pass.set_vertex_buffer(0, self.buffer.slice(..));
             pass.draw(0..colour_count, 0..1);
         }
+        queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// Draw one frame of the **recipe-book panel** (issue #163) as its own pass,
+    /// over whatever is already in `view`.
+    ///
+    /// This is the call that stops
+    /// [`crate::container::recipe_book_panel_geometry_with_icons`] being an
+    /// island: that function and its whole layout/hit-test family were built,
+    /// unit-tested and reached zero pixels because nothing drew the vertices.
+    /// Its own doc says "`app.rs` draws this in its own pass" — but the pipeline
+    /// a colour/sprite/model triple needs already exists *here*, and
+    /// `ContainerRenderer` exposes no entry point taking a prebuilt
+    /// [`crate::container::RecipeBookPanelGeometry`], so the pass lives on the
+    /// renderer that already owns matching pipelines rather than growing a
+    /// fourth copy of them in `app.rs`.
+    ///
+    /// The streams are byte-compatible by construction, not by coincidence:
+    /// `RecipeBookPanelGeometry`'s colour verts come from the same shared
+    /// [`item_icon::ColourStream`] the HUD's do (6 floats, position already in
+    /// NDC), and its item verts from the same `item_icon::push_sprite_quad`
+    /// (8 floats). Both match [`HUD_WGSL`]/[`HUD_SPRITE_WGSL`]'s vertex layouts
+    /// exactly.
+    ///
+    /// `gui_scale`/`width`/`height` must be the **same triple** the geometry and
+    /// its layout were built from — see
+    /// [`crate::container::recipe_book_panel_geometry`]'s own warning about what
+    /// a mismatched triple does (every vertex lands outside the `[-1, 1]` clip
+    /// range and the panel draws nothing at all).
+    ///
+    /// # Pass order, and one known cosmetic gap
+    ///
+    /// Colour first (panel, tabs, buttons, slot wells), then the flat item
+    /// sprites, then the 3-D block-item models — so icons land *over* their
+    /// wells. Unlike [`crate::container::ContainerGeometry`], the panel geometry
+    /// keeps **one unsplit colour stream** with no `chrome_vertex_count`
+    /// equivalent, so a recipe result's stack-count digits (emitted into that
+    /// same stream by `draw_stack`) end up *under* its icon rather than over it.
+    /// Splitting the stream belongs to the geometry's owner in `container.rs`,
+    /// not to this draw call; it affects only multi-output recipes' count text.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_recipe_book_panel(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        depth: Option<&wgpu::TextureView>,
+        geo: &crate::container::RecipeBookPanelGeometry,
+        gui_scale: u32,
+        width: u32,
+        height: u32,
+    ) {
+        if geo.verts.is_empty() && geo.item_verts.is_empty() && geo.model_verts.is_empty() {
+            return;
+        }
+
+        if !geo.verts.is_empty() {
+            if geo.verts.len() > self.recipe_panel_capacity_floats {
+                self.recipe_panel_capacity_floats = geo.verts.len().next_power_of_two();
+                self.recipe_panel_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("hud-recipe-panel-verts"),
+                    size: (self.recipe_panel_capacity_floats * 4) as wgpu::BufferAddress,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
+            }
+            if let Some(buffer) = &self.recipe_panel_buffer {
+                queue.write_buffer(buffer, 0, bytemuck::cast_slice(&geo.verts));
+            }
+        }
+
+        // Same logical-canvas expression the geometry itself used, so the
+        // model pass's GUI projection agrees with the vertices it is drawing.
+        let (logical_w, logical_h) = crate::menu::render::logical_canvas(gui_scale, width, height);
+        let (item_count, model_count) = self.icons.upload(
+            device,
+            queue,
+            &geo.item_verts,
+            &geo.model_verts,
+            &geo.special,
+            // The panel has no carried stack, so every special icon (none, in
+            // the current corpus) is in the slot stratum — the same argument
+            // `render_with_item_models` makes for the hotbar.
+            geo.special.len(),
+            logical_w.max(1.0) as u32,
+            logical_h.max(1.0) as u32,
+            "hud-recipe-panel-item-verts",
+        );
+
+        let colour_count = geo.vertex_count() as u32;
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("hud-recipe-panel"),
+        });
+        if colour_count > 0
+            && let Some(buffer) = &self.recipe_panel_buffer
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("hud-recipe-panel-colour-pass"),
+                color_attachments: &[Some(item_icon::load_colour_attachment(view))],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            pass.draw(0..colour_count, 0..1);
+        }
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("hud-recipe-panel-sprite-pass"),
+                color_attachments: &[Some(item_icon::load_colour_attachment(view))],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.icons.draw_sprites(&mut pass, item_count);
+        }
+        self.icons.draw_models(
+            &mut encoder,
+            view,
+            depth,
+            model_count,
+            "hud-recipe-panel-item-model-pass",
+        );
         queue.submit(std::iter::once(encoder.finish()));
     }
 }
@@ -3925,6 +4219,181 @@ mod tests {
             pos_frac - neg_frac > 0.40,
             "vanilla vs fallback delta too small to prove the atlas is what reaches pixels: \
              vanilla={pos_frac:.2} fallback={neg_frac:.2}"
+        );
+    }
+}
+
+/// Gate for the recipe-unlock toast draw (issue #163).
+///
+/// The toast timing (`RecipeToastQueue`) landed unit-tested in `lodestone-game`
+/// and reached zero pixels because `hud.rs` never rendered it. This measures the
+/// draw, in the rect `Toast.java` itself specifies.
+#[cfg(test)]
+mod recipe_toast_gate {
+    use super::*;
+
+    /// A frame with the debug overlay and crosshair off, so the **only** thing
+    /// that can paint is the toast.
+    ///
+    /// This matters: a control asserting "nothing paints here" is worthless if
+    /// something else already does, and this repo has burned a cycle on exactly
+    /// that (a sky control that failed at 3.5% because the first-person bare arm
+    /// was drawing, a premise false since long before the feature existed). The
+    /// `no_toast_frame_paints_nothing_in_the_toast_rect` test below *verifies*
+    /// this premise rather than assuming it.
+    fn bare_frame<'a>(stats: &'a DebugStats) -> HudFrame<'a> {
+        let mut f = HudFrame::new(stats);
+        f.show_debug = false;
+        f.crosshair = false;
+        f
+    }
+
+    fn icon(name: &str) -> HotbarSlot {
+        HotbarSlot {
+            item: lodestone_assets::ResourceLocation::parse(name).expect("valid id"),
+            count: 1,
+            damage: None,
+            max_damage: None,
+            enchanted: false,
+        }
+    }
+
+    const W: u32 = 640;
+    const H: u32 = 480;
+
+    /// Covered sample cells and their bounding box inside `rect`, an
+    /// `(x0, y0, x1, y1)` NDC box — same CPU rasteriser the panel gate uses.
+    /// Returns the box because a bare fraction cannot distinguish a
+    /// uniform-but-wrong frame from a localised blob.
+    fn coverage(
+        verts: &[f32],
+        rect: (f32, f32, f32, f32),
+        res: usize,
+    ) -> (usize, usize, Option<(f32, f32, f32, f32)>) {
+        let (rx0, ry0, rx1, ry1) = rect;
+        let to_ndc = |i: usize| -1.0 + 2.0 * (i as f32 + 0.5) / res as f32;
+        let (mut covered, mut inside) = (0usize, 0usize);
+        let mut bbox: Option<(f32, f32, f32, f32)> = None;
+        for gy in 0..res {
+            for gx in 0..res {
+                let (px, py) = (to_ndc(gx), to_ndc(gy));
+                if px < rx0 || px > rx1 || py < ry0 || py > ry1 {
+                    continue;
+                }
+                inside += 1;
+                let mut hit = false;
+                for tri in verts.chunks_exact(FLOATS_PER_VERTEX * 3) {
+                    let (ax, ay) = (tri[0], tri[1]);
+                    let (bx, by) = (tri[FLOATS_PER_VERTEX], tri[FLOATS_PER_VERTEX + 1]);
+                    let (cx, cy) = (tri[FLOATS_PER_VERTEX * 2], tri[FLOATS_PER_VERTEX * 2 + 1]);
+                    let d = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
+                    if d.abs() < f32::EPSILON {
+                        continue;
+                    }
+                    let w0 = ((bx - px) * (cy - py) - (cx - px) * (by - py)) / d;
+                    let w1 = ((cx - px) * (ay - py) - (ax - px) * (cy - py)) / d;
+                    let w2 = 1.0 - w0 - w1;
+                    if w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 {
+                        hit = true;
+                        break;
+                    }
+                }
+                if hit {
+                    covered += 1;
+                    bbox = Some(match bbox {
+                        None => (px, py, px, py),
+                        Some((x0, y0, x1, y1)) => (x0.min(px), y0.min(py), x1.max(px), y1.max(py)),
+                    });
+                }
+            }
+        }
+        (covered, inside, bbox)
+    }
+
+    /// The toast rect in NDC, from [`recipe_toast_rect`] — **the same expression
+    /// the draw calls**, never a restated `canvas_w - 160.0`.
+    fn toast_rect_ndc(visible_portion: f32) -> (f32, f32, f32, f32) {
+        let (cw, ch) = crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, W, H);
+        let (x, y, tw, th) = recipe_toast_rect(cw, visible_portion);
+        (
+            2.0 * x / cw - 1.0,
+            1.0 - 2.0 * (y + th) / ch,
+            2.0 * (x + tw) / cw - 1.0,
+            1.0 - 2.0 * y / ch,
+        )
+    }
+
+    /// **The control's premise, verified rather than assumed**: with no toast,
+    /// nothing at all paints in the toast's rect.
+    ///
+    /// If this ever fails, every "the toast drew" assertion below is measuring
+    /// somebody else's pixels and must be re-derived.
+    #[test]
+    fn no_toast_frame_paints_nothing_in_the_toast_rect() {
+        let stats = DebugStats::default();
+        let geo = HudGeometry::build(&bare_frame(&stats), W, H);
+        let (covered, inside, bbox) = coverage(&geo.verts, toast_rect_ndc(1.0), 96);
+        assert!(inside > 0, "the toast rect must contain sample points");
+        assert_eq!(
+            covered, 0,
+            "something other than the toast already paints the top-right \
+             {inside}-cell rect (bbox {bbox:?}) — the positive gate's premise is \
+             false and its rect must be re-derived"
+        );
+    }
+
+    /// The toast covers its own rect — `Toast.java`'s `xPos`/`yPos`/`width`/
+    /// `height`, at rest.
+    #[test]
+    fn a_recipe_toast_covers_toast_javas_own_rect() {
+        let stats = DebugStats::default();
+        let mut frame = bare_frame(&stats);
+        frame.recipe_toast = Some(RecipeToastView {
+            station: icon("minecraft:crafting_table"),
+            unlocked: icon("minecraft:torch"),
+            visible_portion: 1.0,
+        });
+        let geo = HudGeometry::build(&frame, W, H);
+        let rect = toast_rect_ndc(1.0);
+        let (covered, inside, bbox) = coverage(&geo.verts, rect, 96);
+        let fraction = covered as f32 / inside as f32;
+        assert!(
+            fraction > 0.9,
+            "the toast must fill its rect: covered {covered}/{inside} \
+             ({fraction:.3}) in rect {rect:?}, covered bbox {bbox:?}"
+        );
+    }
+
+    /// The toast is anchored to the **right edge and the very top**, not inset
+    /// by a margin.
+    ///
+    /// This is the assertion that catches a transcription of `yPos` as "some
+    /// top margin": `yPos(firstSlotIndex) == firstSlotIndex * height()`
+    /// (`Toast.java:35-37`), and with one toast `firstSlotIndex == 0`, so the
+    /// top edge is `y == 0` exactly. Predicted from the definition, not the
+    /// call site.
+    #[test]
+    fn the_toast_is_anchored_to_the_top_right_corner() {
+        let (cw, _) = crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, W, H);
+        let (x, y, tw, th) = recipe_toast_rect(cw, 1.0);
+        assert_eq!(y, 0.0, "the first toast sits flush with the top of the screen");
+        assert_eq!(tw, 160.0, "Toast::width()");
+        assert_eq!(th, 32.0, "Toast::height()");
+        assert_eq!(
+            x + tw,
+            cw,
+            "at full visibility the toast's right edge is the screen's right edge"
+        );
+        // The slide is a *scaling of the width*, so half-visible puts the left
+        // edge exactly 80 logical pixels from the right edge — and this differs
+        // from the wrong hypothesis (a fixed x that ignores visible_portion),
+        // which would still report `cw - 160`.
+        let (half_x, _, _, _) = recipe_toast_rect(cw, 0.5);
+        assert_eq!(half_x, cw - 80.0, "xPos scales the width by visible_portion");
+        assert_ne!(
+            half_x,
+            cw - 160.0,
+            "a fixed-margin transcription would fail to move at all"
         );
     }
 }
