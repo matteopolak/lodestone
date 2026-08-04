@@ -13,6 +13,8 @@
 # Runs `--rm` so the container self-cleans on stop. Reuses the bundled 26.2
 # server.jar already fetched for the creative oracle.
 #
+# Runtime: Apple `container` — see docs/oracle-runtimes.md.
+#
 # Once up, the interactive account named by $LODESTONE_OP_NAME (default
 # below) is opped over RCON via rcon-op.py — see that file for why RCON
 # `op <name>` and not a hand-written ops.json. This assumes RCON is already
@@ -30,7 +32,9 @@ WORLD="$ROOT/.cache/mc/terrain"
 RCON_PORT=25581
 RCON_PASSWORD=lodestone
 
-docker rm -f "$NAME" >/dev/null 2>&1 || true
+container system start >/dev/null 2>&1 || true
+
+container rm -f "$NAME" >/dev/null 2>&1 || true
 
 if [ ! -f "$WORLD/server.jar" ]; then
   mkdir -p "$WORLD"
@@ -38,7 +42,12 @@ if [ ! -f "$WORLD/server.jar" ]; then
   printf 'eula=true\n' > "$WORLD/eula.txt"
 fi
 
-docker run -d --rm --name "$NAME" \
+# Bare `-p` (never a host-IP prefix — resets on first byte, see creative.sh)
+# and `--memory 3g` (the 1 GiB per-VM default is smaller than this JVM's own
+# `-Xmx2G`) — both traps documented at length in creative.sh and
+# docs/oracle-runtimes.md.
+container run -d --rm --name "$NAME" \
+  --memory 3g \
   -p 25580:25580 -p 25581:25581 \
   -v "$WORLD":/w -w /w \
   eclipse-temurin:25-jdk \
@@ -62,13 +71,13 @@ op_interactive_player() {
 
 echo "waiting for '$NAME' to finish generating the world..."
 for _ in $(seq 1 60); do
-  if docker logs "$NAME" 2>&1 | grep -q 'Done ('; then
+  if container logs "$NAME" 2>&1 | grep -q 'Done ('; then
     op_interactive_player
     # ...and keep opping, for every player that joins from now on. The live gates
     # join under `unique_username`, so no gate's name can be opped in advance —
     # see op-on-join.sh for why the log is watched rather than ops.json written.
     # Backgrounded and detached: it outlives this script and dies with the
-    # container, since `docker logs -f` exits when the container stops.
+    # container, since `container logs -f` exits when the container stops.
     nohup "$ROOT/scripts/live-oracles/op-on-join.sh" \
       "$NAME" "$RCON_PORT" "$RCON_PASSWORD" >>"$WORLD/op-on-join.log" 2>&1 &
     disown 2>/dev/null || true
@@ -78,5 +87,5 @@ for _ in $(seq 1 60); do
   fi
   sleep 5
 done
-echo "timed out waiting for server ready; check: docker logs $NAME" >&2
+echo "timed out waiting for server ready; check: container logs $NAME" >&2
 exit 1

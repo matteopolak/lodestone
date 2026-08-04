@@ -14,7 +14,7 @@
 #
 #   game port : 25570
 #   RCON port : 25571  (password below; local-only, never exposed off-host)
-#   world     : .cache/mc/creative  (bind-mounted, survives `docker rm`)
+#   world     : .cache/mc/creative  (bind-mounted, survives `container rm`)
 #
 # Runs `--rm` so the container self-cleans on stop. The world directory is
 # gitignored and intentionally kept by cleanup.sh, so re-running this is cheap.
@@ -25,6 +25,15 @@
 # already enabled in this world's server.properties (rcon.port=25571,
 # rcon.password=lodestone), which this script does not manage — see terrain.sh
 # for the same assumption and why it isn't rewritten here.
+#
+# # Runtime: Apple `container`
+#
+# This oracle runs under Apple's `container` CLI
+# (https://github.com/apple/container). Docker is gone from this script —
+# see docs/oracle-runtimes.md for the migration writeup (memory numbers, the
+# traps below, and the couple of things not yet ported: legacy-1.12.sh's and
+# worldgen-oracle/run.sh's status, and the orchestrator's out-of-repo
+# cleanup.sh, which still targets `docker ps --filter`).
 set -euo pipefail
 
 NAME=lodestone-creative
@@ -39,9 +48,34 @@ if [ ! -f "$WORLD/server.jar" ]; then
   exit 1
 fi
 
-docker rm -f "$NAME" >/dev/null 2>&1 || true
+# Idempotent: a no-op if the system services are already up. Unlike Docker
+# Desktop (launched by hand before any script runs), `container run` does not
+# start its own services — this script has to.
+container system start >/dev/null 2>&1 || true
 
-docker run -d --rm --name "$NAME" \
+container rm -f "$NAME" >/dev/null 2>&1 || true
+
+# Two traps measured against this exact image, both load-bearing:
+#
+# * NEVER publish with a host-IP prefix (`-p 127.0.0.1:25571:25571`) — it
+#   accepts the TCP connection and then resets on the first byte, every time
+#   (found by negative control against vanilla's RCON). The bare
+#   `host:container` form below is required, and it listens on all
+#   interfaces — same exposure this script always had under Docker's bare
+#   form, so this is parity, not a new hazard. Upstream apple/container#2029
+#   also reports localhost forwarding broken on the macOS 27 beta: treat this
+#   port relay as a fragility hotspot, not a solved problem, and re-verify
+#   after any `container` upgrade.
+# * `--memory 3g` is required. The per-VM default is 1 GiB and this JVM's own
+#   `-Xmx2G` blows straight through that with no `--memory` override.
+#
+# No explicit `container image pull` here — `container run`'s on-demand pull
+# defaults to the host's arch (arm64), which is what we want. An *explicit*
+# `pull` of this image without `--platform linux/arm64` fetches the whole
+# multi-arch manifest (measured: 5.29 GB / 64 blobs, versus 150.6 MB / 9 blobs
+# pinned) — a trap for later, not one this script hits.
+container run -d --rm --name "$NAME" \
+  --memory 3g \
   -p 25570:25570 -p 25571:25571 \
   -v "$WORLD":/w -w /w \
   eclipse-temurin:25-jdk \
@@ -65,13 +99,13 @@ op_interactive_player() {
 
 echo "waiting for '$NAME' to accept connections..."
 for _ in $(seq 1 60); do
-  if docker logs "$NAME" 2>&1 | grep -q 'Done ('; then
+  if container logs "$NAME" 2>&1 | grep -q 'Done ('; then
     op_interactive_player
     # ...and keep opping, for every player that joins from now on. The live gates
     # join under `unique_username`, so no gate's name can be opped in advance —
     # see op-on-join.sh for why the log is watched rather than ops.json written.
     # Backgrounded and detached: it outlives this script and dies with the
-    # container, since `docker logs -f` exits when the container stops.
+    # container, since `container logs -f` exits when the container stops.
     nohup "$ROOT/scripts/live-oracles/op-on-join.sh" \
       "$NAME" "$RCON_PORT" "$RCON_PASSWORD" >>"$WORLD/op-on-join.log" 2>&1 &
     disown 2>/dev/null || true
@@ -81,5 +115,5 @@ for _ in $(seq 1 60); do
   fi
   sleep 5
 done
-echo "timed out waiting for server ready; check: docker logs $NAME" >&2
+echo "timed out waiting for server ready; check: container logs $NAME" >&2
 exit 1

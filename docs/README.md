@@ -510,6 +510,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   is the "not Minecraft" tell issue
   [#22](https://github.com/matteopolak/lodestone/issues/22) named: flat per-block
   light plus directional shade, with no darkening in corners and crevices.
+- [Oracle runtimes: Apple `container`](./oracle-runtimes.md) — All six JVM-oracle
+  scripts under `scripts/live-oracles/` and `scripts/worldgen-oracle/`, plus the three
+  Rust test files that used to shell out to `docker` directly, now run their real
+  vanilla server (or JVM oracle) under Apple's `container` CLI
+  (https://github.com/apple/container) instead of Docker. Docker is gone from every
+  one of these paths — there is no `LODESTONE_ORACLE_RUNTIME` switch and no
+  fallback; `container` is simply what these scripts and tests invoke.
 - [The particle catalogue: what's wired, what isn't, and why](./particle-catalogue.md) —
   `lodestone-particle`'s `Sheet` enum names a physical texture sheet under
   `textures/particle/*.png`; `Behaviour` names a per-type tick/quad-size/layer

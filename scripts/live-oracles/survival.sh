@@ -10,11 +10,13 @@
 #
 #   game port : 25565
 #   RCON port : 25566
-#   world     : .cache/mc/survival  (bind-mounted, survives `docker rm`)
+#   world     : .cache/mc/survival  (bind-mounted, survives `container rm`)
 #   seed      : fixed, so the spawn area is reproducible when comparing screenshots
 #
 # online-mode=false so any username can join without a Mojang account.
 # Runs `--rm` so the container self-cleans on stop.
+#
+# Runtime: Apple `container` — see docs/oracle-runtimes.md.
 #
 # Once up, the interactive account named by $LODESTONE_OP_NAME (default
 # below) is opped over RCON via rcon-op.py, so client-side testing
@@ -70,9 +72,16 @@ enforce-secure-profile=false
 motd=Lodestone survival test world
 PROPS
 
-docker rm -f "$NAME" >/dev/null 2>&1 || true
+container system start >/dev/null 2>&1 || true
 
-docker run -d --rm --name "$NAME" \
+container rm -f "$NAME" >/dev/null 2>&1 || true
+
+# Bare `-p` (never a host-IP prefix — resets on first byte, see creative.sh)
+# and `--memory 3g` (the 1 GiB per-VM default is smaller than this JVM's own
+# `-Xmx2G`) — both traps documented at length in creative.sh and
+# docs/oracle-runtimes.md.
+container run -d --rm --name "$NAME" \
+  --memory 3g \
   -p 25565:25565 -p 25566:25566 \
   -v "$WORLD":/w -w /w \
   eclipse-temurin:25-jdk \
@@ -96,13 +105,13 @@ op_interactive_player() {
 
 echo "waiting for '$NAME' to generate terrain (first run takes a minute)..."
 for _ in $(seq 1 90); do
-  if docker logs "$NAME" 2>&1 | grep -q 'Done ('; then
+  if container logs "$NAME" 2>&1 | grep -q 'Done ('; then
     op_interactive_player
     # ...and keep opping, for every player that joins from now on. The live gates
     # join under `unique_username`, so no gate's name can be opped in advance —
     # see op-on-join.sh for why the log is watched rather than ops.json written.
     # Backgrounded and detached: it outlives this script and dies with the
-    # container, since `docker logs -f` exits when the container stops.
+    # container, since `container logs -f` exits when the container stops.
     nohup "$ROOT/scripts/live-oracles/op-on-join.sh" \
       "$NAME" "$RCON_PORT" "$RCON_PASSWORD" >>"$WORLD/op-on-join.log" 2>&1 &
     disown 2>/dev/null || true
@@ -112,5 +121,5 @@ for _ in $(seq 1 90); do
   fi
   sleep 5
 done
-echo "timed out waiting for server ready; check: docker logs $NAME" >&2
+echo "timed out waiting for server ready; check: container logs $NAME" >&2
 exit 1

@@ -17,13 +17,21 @@
 # 1.12.2's server.jar targets Java 8; `eclipse-temurin:8-jdk` is used rather
 # than the newer JDK the 26.2 oracles use, even though a modern JVM would
 # probably still load 1.12.2's class files (old bytecode is forward-compatible)
-# — no reason to rely on that when the exact intended runtime is one `docker
-# run` away.
+# — no reason to rely on that when the exact intended runtime is one
+# `container run` away.
 #
 # This script *does* manage server.properties (unlike creative.sh/terrain.sh,
 # which assume RCON is pre-configured): the cached instance was fetched with
 # RCON disabled and the default port, so both are patched in place here,
 # idempotently, before every start.
+#
+# Runtime: Apple `container` — see docs/oracle-runtimes.md. This was the one
+# JDK image in the whole migration that had never been booted under
+# `container` before this port (arm64 exists but was untested) — verified
+# here directly: `container image pull --platform linux/arm64
+# eclipse-temurin:8-jdk` fetches 118.6 MB / 9 blobs (same pinned-platform
+# shape as the 25-jdk image), and the server boots to `Done (` and answers
+# RCON through the bare-published port exactly like the 26.2 oracles.
 set -euo pipefail
 
 NAME=lodestone-legacy-1-12
@@ -56,9 +64,16 @@ set_prop rcon.password "$RCON_PASSWORD"
 # oracles' assumption, per this repo's live-server hazards).
 set_prop online-mode false
 
-docker rm -f "$NAME" >/dev/null 2>&1 || true
+container system start >/dev/null 2>&1 || true
 
-docker run -d --rm --name "$NAME" \
+container rm -f "$NAME" >/dev/null 2>&1 || true
+
+# Bare `-p` (never a host-IP prefix — resets on first byte, see creative.sh)
+# and `--memory 3g` (the 1 GiB per-VM default is smaller than this JVM's own
+# `-Xmx2G`) — both traps documented at length in creative.sh and
+# docs/oracle-runtimes.md; neither is specific to the 26.2 JDK image.
+container run -d --rm --name "$NAME" \
+  --memory 3g \
   -p "$GAME_PORT:$GAME_PORT" -p "$RCON_PORT:$RCON_PORT" \
   -v "$WORLD":/w -w /w \
   eclipse-temurin:8-jdk \
@@ -66,11 +81,11 @@ docker run -d --rm --name "$NAME" \
 
 echo "waiting for '$NAME' to accept connections..."
 for _ in $(seq 1 60); do
-  if docker logs "$NAME" 2>&1 | grep -q 'Done ('; then
+  if container logs "$NAME" 2>&1 | grep -q 'Done ('; then
     echo "ready: game on :$GAME_PORT, RCON on :$RCON_PORT"
     exit 0
   fi
   sleep 5
 done
-echo "timed out waiting for server ready; check: docker logs $NAME" >&2
+echo "timed out waiting for server ready; check: container logs $NAME" >&2
 exit 1

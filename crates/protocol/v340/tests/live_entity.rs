@@ -99,7 +99,7 @@ fn summon_mobs(x: i32, y: i32, z: i32) {
         // Summon slightly spread out so they are distinct entities in view.
         let cmd = format!("summon {mob} {x} {y} {z}\n");
         let redirect = format!("printf %s '{cmd}' > {console}");
-        let status = Command::new("docker")
+        let status = Command::new("container")
             .args(["exec", &container, "sh", "-c", &redirect])
             .status();
         match status {

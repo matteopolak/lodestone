@@ -47,13 +47,15 @@
 #
 # That is CLAUDE.md's *world* species of vacuous test — the flaw is in the input
 # data, so no amount of reading the check finds it. Hence: **the accept sample
-# below is a real line, pasted out of `docker logs`.** If you change the pattern,
-# re-capture it; do not write one from the format string.
+# below is a real line, pasted out of a running oracle's log** (captured with
+# `docker logs` back when this ran under Docker; the line itself is vanilla's
+# own log format and is unaffected by which container CLI fetched it). If you
+# change the pattern, re-capture it; do not write one from the format string.
 #
 # # How to change it
 #
 # Takes the container name, RCON port and password, and runs until the container
-# stops (`docker logs -f` exits on its own then, so there is no PID to reap).
+# stops (`container logs -f` exits on its own then, so there is no PID to reap).
 # Callers background it and never let it fail the parent: an oracle that started
 # fine must not be reported as broken because RCON hiccupped.
 #
@@ -136,7 +138,7 @@ self_check || exit 1
 #
 # Both are safe because `op` is idempotent — a duplicate answers "Nothing
 # changed" for one RCON round trip.
-docker logs -f "$CONTAINER" 2>&1 \
+container logs -f "$CONTAINER" 2>&1 \
   | grep --line-buffered -E "$LOGIN_RE" \
   | while IFS= read -r line; do
       name="$(player_name_from "$line")"
