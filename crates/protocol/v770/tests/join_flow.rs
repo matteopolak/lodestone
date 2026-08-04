@@ -20,6 +20,7 @@ use lodestone_v770::packets::handshake::Intention;
 use lodestone_v770::packets::login::{
     EncryptionRequest, EncryptionResponse, LoginCompression, LoginFinished, LoginHello,
 };
+use lodestone_testsupport::assert_emits_set;
 use lodestone_world::World;
 use uuid::Uuid;
 
@@ -354,8 +355,31 @@ fn full_login_sequence_produces_expected_directives() {
     );
 
     // Game join -> login event.
-    assert_eq!(
-        adapter
+    //
+    // Four `Emit`s, order **not** asserted: this used to be an exact `vec![…]`
+    // whose own comment claimed the order was load-bearing ("a consumer
+    // folding them sees the dimension's geometry and the biome colour table
+    // *before* the `Login` that makes a session out of them"). That claim was
+    // never true of any actual consumer — `crates/lodestone-ecs/src/session.rs`
+    // folds `DimensionTypeChanged`/`BiomeVisuals`/`Login` into disjoint
+    // resources (`dimension_type.0`, `biome_sky_colors.0`, and
+    // `id`/`game_mode`/`dimension`/`alive` respectively), and the fold is
+    // commutative — and it is exactly the assertion that reddened `main` for
+    // one commit when `ClientEvent::BiomeVisuals` (#96) landed a second Emit
+    // next to `DimensionTypeChanged`, changing the sequence a prior exact-vec
+    // assertion pinned. `assert_emits_set` asserts the same four events land,
+    // with no ordering claim this test cannot actually back up.
+    //
+    // `dimension_type: None` (issue #288) and `sky_colors`/`temperatures`/
+    // `downfall`/`has_precipitation` all empty (issues #96, #25/#26) because
+    // this flow feeds only a `world_clock` registry above, so neither the
+    // dimension-type holder id nor the biome registry resolves. All of them
+    // must report as **unresolved** rather than defaulting to the overworld —
+    // an empty biome table means "the server sent no biome registry", which
+    // the shell renders as its dimension colour, never as a
+    // plausible-looking overworld blue.
+    assert_emits_set(
+        &adapter
             .handle_packet(
                 &mut World::new(),
                 ConnectionState::Play,
@@ -363,31 +387,25 @@ fn full_login_sequence_produces_expected_directives() {
                 &hex(GAME_LOGIN_HEX),
             )
             .unwrap(),
-        // Three directives, in this order, and the order is load-bearing: a
-        // consumer folding them sees the dimension's geometry and the biome
-        // colour table *before* the `Login` that makes a session out of them.
-        //
-        // `dimension_type: None` (issue #288) and `sky_colors: []` (issue #96)
-        // for the same reason: this flow feeds only a `world_clock` registry
-        // above, so neither the dimension-type holder id nor the biome registry
-        // resolves. Both must report as **unresolved** rather than defaulting to
-        // the overworld — an empty biome table means "the server sent no biome
-        // registry", which the shell renders as its dimension colour, never as a
-        // plausible-looking overworld blue.
-        vec![
-            Directive::Emit(ClientEvent::DimensionTypeChanged {
+        &[
+            ClientEvent::DimensionTypeChanged {
                 holder_id: 0,
                 dimension_type: None,
-            }),
-            Directive::Emit(ClientEvent::BiomeVisuals {
+            },
+            ClientEvent::BiomeVisuals {
                 sky_colors: Vec::new(),
-            }),
-            Directive::Emit(ClientEvent::Login {
+            },
+            ClientEvent::BiomeClimates {
+                temperatures: Vec::new(),
+                downfall: Vec::new(),
+                has_precipitation: Vec::new(),
+            },
+            ClientEvent::Login {
                 entity_id: 1,
                 game_mode: GameMode::Survival,
                 dimension: "minecraft:overworld".parse().unwrap(),
-            }),
-        ]
+            },
+        ],
     );
 }
 
@@ -440,9 +458,9 @@ fn play_keep_alive_emits_event() {
             &hex(PLAY_KEEP_ALIVE_HEX),
         )
         .unwrap();
-    assert_eq!(
-        directives,
-        vec![Directive::Emit(ClientEvent::KeepAlive { id: 0x002d_84b6 })]
+    assert_emits_set(
+        &directives,
+        &[ClientEvent::KeepAlive { id: 0x002d_84b6 }],
     );
 }
 
@@ -492,13 +510,13 @@ fn system_chat_emits_chat_event() {
             &payload,
         )
         .unwrap();
-    assert_eq!(
-        directives,
-        vec![Directive::Emit(ClientEvent::Chat {
+    assert_emits_set(
+        &directives,
+        &[ClientEvent::Chat {
             text: Text::literal("hello"),
             kind: ChatKind::System,
             ack: None,
-        })]
+        }],
     );
 }
 
@@ -514,13 +532,13 @@ fn system_chat_overlay_is_game_info() {
             &payload,
         )
         .unwrap();
-    assert_eq!(
-        directives,
-        vec![Directive::Emit(ClientEvent::Chat {
+    assert_emits_set(
+        &directives,
+        &[ClientEvent::Chat {
             text: Text::literal("hi"),
             kind: ChatKind::GameInfo,
             ack: None,
-        })]
+        }],
     );
 }
 

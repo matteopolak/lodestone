@@ -26,6 +26,7 @@ use lodestone_v47::packets::login::{
 };
 use lodestone_v47::packets::position::{Position, pack_position, unpack_position};
 use lodestone_v47::packets::status::{StatusPing, StatusPong, StatusRequest, StatusResponse};
+use lodestone_testsupport::assert_emits_set;
 use lodestone_world::World;
 use uuid::Uuid;
 
@@ -482,10 +483,7 @@ fn play_keep_alive_emits_event_and_response_encodes_varint() {
             &payload,
         )
         .expect("handle");
-    assert_eq!(
-        directives,
-        vec![Directive::Emit(ClientEvent::KeepAlive { id: 12345 })]
-    );
+    assert_emits_set(&directives, &[ClientEvent::KeepAlive { id: 12345 }]);
 
     let action = ClientAction::KeepAliveResponse { id: 12345 };
     let (packet_id, body) = adapter

@@ -9,6 +9,11 @@ workspace = true
 
 [dependencies]
 lodestone-core.workspace = true
+# For `directives::assert_emits_set` — an order-tolerant assertion over
+# `Vec<Directive>`/`ClientEvent`, both defined here. Already a normal
+# (non-dev) dependency of every crate that would call it (adapters, the
+# client driver, the shell), so this adds no new dependency edge.
+lodestone-model.workspace = true
 tokio.workspace = true
 # Tier 2 (fast, synthetic) bench/test fixtures in `bench_fixtures` build an
 # ordinary `lodestone_world::ChunkColumn` -- already a normal (non-dev)
