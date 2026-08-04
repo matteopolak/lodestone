@@ -67,6 +67,19 @@ pub enum Directive {
     },
     /// The connection should be closed.
     Disconnect(Text),
+    /// A `minecraft:bundle_delimiter` boundary (issue #299).
+    ///
+    /// Vanilla's own pipeline (`BundlerInfo.java`) never gives this packet a
+    /// body — it exists purely as a toggle: the first delimiter after a run of
+    /// ordinary packets opens a bundle, the next one closes it, and everything
+    /// decoded in between is meant to apply to the client in one atomic step
+    /// rather than packet-by-packet. The adapter only recognises the
+    /// boundary and hands it up unpaired; pairing two of these into one
+    /// bundle and deferring the directives between them is the connection
+    /// layer's job (see `lodestone-client`'s driver), since the adapter's
+    /// `handle_packet` is called once per packet and has no memory of "am I
+    /// inside a bundle" across calls.
+    BundleDelimiter,
 }
 
 /// Identity the client presents during login.
@@ -222,6 +235,10 @@ pub enum ClientActionKind {
     TeleportToEntity,
     /// [`ClientAction::ChangeGameMode`].
     ChangeGameMode,
+    /// [`ClientAction::CookieResponse`].
+    CookieResponse,
+    /// [`ClientAction::SendCustomPayload`].
+    SendCustomPayload,
 }
 
 impl From<&ClientAction> for ClientActionKind {
@@ -279,6 +296,8 @@ impl From<&ClientAction> for ClientActionKind {
             ClientAction::SpectatorAction { .. } => Self::SpectatorAction,
             ClientAction::TeleportToEntity { .. } => Self::TeleportToEntity,
             ClientAction::ChangeGameMode { .. } => Self::ChangeGameMode,
+            ClientAction::CookieResponse { .. } => Self::CookieResponse,
+            ClientAction::SendCustomPayload { .. } => Self::SendCustomPayload,
         }
     }
 }
