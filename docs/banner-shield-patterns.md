@@ -213,13 +213,21 @@ plus a `lodestone-render`/`lodestone-shell` compile were re-run to confirm
 that (there is no pixel gate to add yet — nothing constructs a banner mesh to
 draw through it).
 
-**The alpha-cutout `discard` is still there and still unconditional.**
-`banner_layer_pipeline` changes the pipeline's blend/depth state, not the
-shader program — `entity.wgsl`'s `fs_main` discards below alpha 0.5
-regardless of which pipeline invokes it, so a mask layer's antialiased edge
-texels would still be lost rather than blended, which vanilla's own
-no-cutout draw does not do. A `fs_main_no_cutout` entry point is the fix and
-is **deferred**, not built, in this pass — see "Still missing" below.
+**Step C, landed: the alpha-cutout `discard` no longer applies to banner
+layers.** The paragraph above used to end here saying the fix was deferred.
+`entity.wgsl` now has a second fragment entry point, `fs_main_no_cutout` —
+byte-identical shading to `fs_main` (both call a shared `shade_entity`
+helper) except it never runs the `tex_col.a < 0.5` discard —  and
+`banner_layer_pipeline` binds it instead of `fs_main`.
+`build_entity_pipeline` grew a `fragment_entry: &str` parameter for this;
+both existing callers (`EntityPipeline::new`, `armour_pipeline`) pass
+`"fs_main"` explicitly, so this is zero behaviour change for mobs and
+armour — mirroring exactly how `blend`/`depth_write` were threaded through
+for step B. Verified with `cargo test -p lodestone-render --test
+wgsl_valid` (naga parses and validates both entry points) plus
+`lodestone-render`'s own 572 lib tests; there is still no pixel gate for
+this pipeline specifically, because nothing yet constructs a banner mesh to
+draw through it (see "Steps D-F: handoff" below).
 
 The order-dependency finding this section originally reached is still
 correct and unaffected by the tint correction: because translucent
@@ -304,3 +312,150 @@ None — pure, deterministic function of its inputs.
 
 None of the three exist today; this module is what all three will share
 instead of each re-deriving `submitPatterns`' layer math independently.
+
+## Steps D–F: handoff, with the vanilla data already extracted
+
+Not built this pass. Read before starting, because every number below came
+from re-reading the actual 26.2 decompiled sources rather than being
+assumed, and re-deriving them a second time is wasted work.
+
+**Why this stopped here, honestly.** Steps D (mesh)/E (resolver)/F (pixel
+gate) need a placement transform this session could not pixel-verify — no
+live oracle or existing banner screenshot to check a guess against, and
+`CLAUDE.md`'s own recent history (`a27230c`'s `Less`→`LessEqual` fix, the
+hurt-overlay 70%-vs-30% red bug) is specifically about wrong render math
+that looked plausible and shipped anyway. Landing an unverified transform
+here would be exactly that pattern. What follows is the research, not the
+implementation — so the next pass starts at "write the code" rather than
+"read four Java files".
+
+### The two model classes, decompiled directly
+
+`BannerModel.createBodyLayer(standing: bool)`
+(`.cache/mc/26.2/client-src/net/minecraft/client/model/object/banner/BannerModel.java`):
+
+```text
+if standing:
+  "pole": texOffs(44, 0), addBox(-1, -42, -1,  2, 42, 2), pose ZERO
+"bar":   texOffs(0, 42),  addBox(-10, standing? -44 : -20.5, standing? -1 : 9.5,  20, 2, 2), pose ZERO
+```
+
+`BannerFlagModel.createFlagLayer(standing: bool)` (same package):
+
+```text
+"flag": texOffs(0, 0), addBox(-10, 0, -2,  20, 40, 1),
+        pose offset(0, standing? -44 : -20.5, standing? 0 : 10.5)
+```
+
+Canvas is `64x64` for both layers (`LayerDefinition.create(mesh, 64, 64)`).
+This session's own `BLOCK_ENTITY_MODELS`/`bake_entity_parts` pipeline (see
+`lodestone-assets::block_entity_models`, `bell_model` for the shape to
+follow) already knows how to turn `addBox`/`texOffs`/`PartPose.offset` into
+a `BlockEntityMesh` — a banner needs one more entry there, not a new baker.
+Only the **standing** (`standing = true`) variant is this issue's scope —
+wall banners are a second entry later, same shape.
+
+**The flag's sway is one per-part rotation, not per-vertex** (corrected
+earlier in this doc — re-check "A third prerequisite" above if starting
+from an older summary):
+
+```text
+flag.xRot = (-0.0125 + 0.01 * cos(2*PI*phase)) * PI
+```
+
+`phase`, from `BannerRenderer.extractRenderState`:
+
+```text
+phase = (floorMod(blockPos.x*7 + blockPos.y*9 + blockPos.z*13 + gameTime, 100) + partialTicks) / 100.0
+```
+
+— i.e. a per-block-position phase offset (so neighbouring banners do not
+sway in lockstep) advancing one step per game tick, wrapped every 100
+ticks. `BlockEntityMesh::part_transforms`'s `overrides` mechanism (already
+used by chest's `lid`/`lock` and bell's `bell_body`) is the right shape for
+this: override the `flag` part's `x_rot` per frame, same as
+`resolve_bell` overrides `bell_body`.
+
+### The placement transform — the part that needs care
+
+`BannerRenderer.submit` does `poseStack.mulPose(state.transformation)` where
+`state.transformation` is (ground-placed banners; wall banners use
+`direction.toYRot()` in place of the rotation-segment angle):
+
+```text
+MODEL_TRANSLATION = (0.5, 0.0, 0.5)
+MODEL_SCALE       = (0.6666667, -0.6666667, -0.6666667)   // note the Y *and* Z flip
+Transformation(MODEL_TRANSLATION, Axis.YP.rotationDegrees(-angle), MODEL_SCALE, rightRotation = null)
+angle = RotationSegment.convertToDegrees(segment)   // segment * 22.5, ground; already have this helper's shape in skull_ground_placement_matrix
+```
+
+A `Transformation(t, r, s, null)` composes as `M = T * R * S` (scale in
+local space first, then rotate, then translate) — **not** the
+"translate-rotate-about-pivot-then-undo" shape
+`block_entity_placement_matrix`/`skull_ground_placement_matrix` already use
+in this file. Those two exist because chest/skull geometry is baked
+*corner*-anchored (vertices already live inside the block's `0..1` footprint,
+so rotating in place needs a pivot). Banner geometry is *not*
+corner-anchored — `BannerFlagModel`'s own `PartPose.offset` already
+positions it relative to an origin the same way an entity's skeleton does —
+so the straight `T * R * S` vanilla itself uses is the right shape here, a
+**third** placement convention alongside the two the module doc at the top
+of `block_entity.rs` already tables. Concretely, for a ground banner:
+
+```text
+world = translate(block_pos)
+      * translate(0.5, 0, 0.5)
+      * rotate_y(-angle_degrees)
+      * scale(2/3, -2/3, -2/3)
+      * model_vertex
+```
+
+The `2/3` scale and the Y/Z flip both being present is not a typo to
+"simplify away" — `BannerModel`/`BannerFlagModel` are shared with the
+banner **item**'s GUI/held-item render (`SIZE = 0.6666667` is the same
+constant vanilla's item-in-hand code uses elsewhere), so the in-world block
+entity path re-applies that same correction on top of otherwise
+entity-style baked geometry. Skipping the flip renders the flag upside down
+and mirrored; skipping the scale renders it 1.5x too large.
+
+**This transform has no pixel gate yet and untested matrix code is exactly
+the trap this repo's own history warns about** (a positive-determinant
+guess shipped an inside-out block once). Write
+`banner_ground_placement_matrix`/`banner_wall_placement_matrix` mirroring
+`skull_ground_placement_matrix`'s shape, but derive a
+`placement_matches_vanillas_transformation_composition_order` test that
+checks the matrix against the literal `T*R*S` formula above — the same
+"measure the determinant, don't assert it" discipline
+`placement_preserves_orientation` already holds `block_entity_placement_matrix`
+to — before trusting any screenshot of it.
+
+### Draw order and pipeline routing (step F)
+
+`submitBanner` draws, in order: (1) the banner's own body model (pole+bar)
+opaque, sheet `Sheets.BANNER_BASE` — the plain wood/cloth texture, not a
+pattern; (2) the flag model, same opaque pass, same sheet; (3)
+`submitPatterns`: the base-colour mask (`Sheets.BANNER_PATTERN_BASE`,
+`entity/banner/base`) tinted by the banner block's own colour, then up to 16
+pattern masks in the item's stored order, each `entity/banner/<pattern
+asset id>` tinted by that layer's dye — **all** through
+`RenderTypes::bannerPattern`, i.e. `banner_layer_pipeline`. So: 1–2 go
+through the ordinary `plan_block_entities` batcher (opaque, this doc's
+"send the opaque flag/pole/bar through the existing batcher" conclusion),
+and 3 is the small ordered draw list, **N+1 entries long** (base colour
+counts as entry 0), each reusing the flag part's own transform (masks paint
+over the flag, not the pole/bar).
+
+Real mask sprites need the banner-pattern atlas
+(`assets/minecraft/textures/entity/banner/*.png`, ~40 files —
+`docs/README.md`'s "The jar ships individual sprite PNGs" section above has
+the loader shape to follow) — that is `lodestone-assets` work, outside this
+task's ownership. A pixel gate can still exist without it: inject a
+directly-constructed 1x1 solid-colour texture per layer (the same "an
+unresolved sheet particle draws nothing rather than garbage" shape
+`crate::gpu::RenderState::install_particle_sheet_atlas`'s fallback already
+uses one crate over) and assert (a) the blend is genuinely translucent —
+predict the composited colour from the two layers' tints and the
+`ALPHA_BLENDING` formula, not merely "some pixels changed" — and (b) two
+layers submitted in opposite orders produce different composited colour
+where they overlap, which is the concrete, measurable form of "these draws
+are order-dependent" this doc has argued from the start.

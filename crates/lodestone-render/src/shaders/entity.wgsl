@@ -207,6 +207,27 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if (tex_col.a < 0.5) {
         discard;
     }
+    return shade_entity(in, tex_col);
+}
+
+// `EntityPipeline::banner_layer_pipeline`'s fragment entry point (issue #174
+// step C). Vanilla's `RenderPipelines.BANNER_PATTERN` draws its mask layers
+// translucent, depth-write-off, with **no alpha cutout at all** — a banner
+// pattern's antialiased mask edge is meant to blend, not vanish, and `fs_main`'s
+// unconditional `discard` below 0.5 would lose exactly those edge texels. This
+// entry point is otherwise identical to `fs_main`: same shading, same tint, same
+// fog — the pipeline (blend state, depth write) is what changes the *result*,
+// this is only the one difference the pipeline cannot express by itself, since
+// `build_entity_pipeline` configures pipeline state, not the shader program.
+@fragment
+fn fs_main_no_cutout(in: VsOut) -> @location(0) vec4<f32> {
+    let tex_col = textureSample(tex, smp, in.uv);
+    return shade_entity(in, tex_col);
+}
+
+// Shared by both fragment entry points above; see `fs_main`'s own comments
+// (unchanged) for the derivation of every step here.
+fn shade_entity(in: VsOut, tex_col: vec4<f32>) -> vec4<f32> {
     // Reconstruct a face normal from world-position derivatives, so the mob reads
     // as 3D without a per-vertex normal.
     //
