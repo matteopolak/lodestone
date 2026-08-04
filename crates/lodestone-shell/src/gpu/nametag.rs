@@ -708,6 +708,8 @@ mod tests {
                 see_through: true,
             }),
             item_use: None,
+            // Not a creeper: only a creeper ever swells.
+            creeper_swelling: 0.0,
         };
         // A raster is required to reach the distance check at all in
         // `prepare`, but `push_entity_quads` itself only needs one to lay
@@ -764,6 +766,8 @@ mod tests {
                 see_through: true,
             }),
             item_use: None,
+            // Not a creeper: only a creeper ever swells.
+            creeper_swelling: 0.0,
         };
         push_entity_quads(
             &raster,
@@ -841,6 +845,8 @@ mod tests {
                 see_through: true,
             }),
             item_use: None,
+            // Not a creeper: only a creeper ever swells.
+            creeper_swelling: 0.0,
         };
         push_entity_quads(
             &raster,
