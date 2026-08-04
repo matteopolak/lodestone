@@ -1109,3 +1109,11 @@ of these caught the *brief* being wrong rather than the code.
   through the wire to a named client consumer. Written 2026-08-04 against a verified
   tree; every "X doesn't exist" below was re-grepped tree-wide, and three children
   turned out substantially landed since their issues were written.
+- [Plan: full 26.2 chunk-generation parity, and the version seam for later generators](./plans/worldgen-parity.md) —
+  The dispatch plan for taking `lodestone-worldgen` from today's composed subset
+  (shape, aquifer, biomes, surface, carvers, ores, most vegetation) to **full 26.2
+  chunk parity**, plus the design — not the build — of the seam that lets other
+  versions' generators be added later. It sequences the prerequisite work the owner
+  already expects (structures and the other unported decoration steps), names
+  agent-sized units with file ownership, and states what "full parity" cannot mean
+  yet.
