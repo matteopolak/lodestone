@@ -569,6 +569,33 @@ impl RenderState {
         };
     }
 
+    /// Like [`set_clear_color`](Self::set_clear_color), but applies the same
+    /// `FOG_COLOR` day/night track [`fog_with_clock`](Self::fog_with_clock)
+    /// applies to the fogged passes, deriving it from `self.time_of_day`
+    /// exactly the same way. `day_base` is the *untracked* day colour — pass
+    /// the same value that goes into [`set_fog`](Self::set_fog), never a
+    /// pre-tracked one (see `fog_with_clock`'s doc on why pre-multiplying the
+    /// stored base double-applies the track elsewhere).
+    ///
+    /// This clear only paints anything when [`has_sky`](Self::has_sky) is
+    /// `false`: with a sky installed, the sky pass overwrites it with its own
+    /// tracked colour every frame (`gpu.rs`'s sky-frame call site). Without
+    /// one — a jar-less run — the untracked clear was a bright sky-blue void
+    /// at night; this is that loose end, closed.
+    pub fn set_clear_color_tracked(&mut self, day_base: [f32; 3]) {
+        self.set_clear_color(Self::clear_color_tracked_for(
+            self.time_of_day.value(),
+            day_base,
+        ));
+    }
+
+    /// Pure core of [`set_clear_color_tracked`](Self::set_clear_color_tracked),
+    /// split out for the same reason [`fog_uniform_for`](Self::fog_uniform_for)
+    /// is: testable without a GPU device.
+    fn clear_color_tracked_for(time_of_day: i64, day_base: [f32; 3]) -> [f32; 3] {
+        lodestone_render::fog_color_for_time_of_day(time_of_day, day_base)
+    }
+
     /// Install the world light sampler mobs are lit by (see
     /// [`EntityLightSource`]). Call once, after a world exists; without it every
     /// mob renders [`ENTITY_FULLBRIGHT`] and out-shines the terrain it stands
@@ -2937,6 +2964,38 @@ mod tests {
             diff > 100,
             "control must clearly disagree with the fixed midnight value: {diff}"
         );
+    }
+
+    /// [`RenderState::set_clear_color_tracked`]'s pure core must land on the
+    /// same tracked value [`fog_with_clock_carries_the_night_track_gate_a`]
+    /// pins for terrain fog — the clear colour and the fog colour derive from
+    /// one function and one clock, so they cannot drift apart the way
+    /// `docs/dimension-visuals.md`'s wiring note warns a second copy would.
+    #[test]
+    fn clear_color_tracked_matches_the_fog_colour_at_the_same_tick() {
+        let to_bytes = |c: [f32; 3]| {
+            c.map(|v| (lodestone_render::fog::linear_to_srgb_f32(v) * 255.0).round() as i32)
+        };
+        for tick in [6000_i64, 18000, 13670] {
+            let clear = RenderState::clear_color_tracked_for(tick, SKY_COLOR);
+            let fog = RenderState::fog_uniform_for(
+                &FogSettings::for_render_distance(SKY_COLOR, 8),
+                tick,
+                1.0,
+                [0.0, 0.0, 0.0],
+            );
+            let fog_rgb = [fog.color_start[0], fog.color_start[1], fog.color_start[2]];
+            assert_eq!(
+                to_bytes(clear),
+                to_bytes(fog_rgb),
+                "tick {tick}: clear and fog must track identically"
+            );
+        }
+        // Negative control: the untracked day base must clearly disagree at
+        // midnight, proving this actually reads the clock rather than being a
+        // no-op wrapper around `set_clear_color`.
+        let clear_midnight = RenderState::clear_color_tracked_for(18000, SKY_COLOR);
+        assert_ne!(to_bytes(clear_midnight), to_bytes(SKY_COLOR));
     }
 
     /// Issue #388. [`FOG_START_FRACTION`] is the shell's last fraction-shaped
