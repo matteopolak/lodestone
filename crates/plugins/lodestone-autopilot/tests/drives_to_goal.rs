@@ -189,6 +189,36 @@ fn flat_chunk_world(radius: i32) -> ChunkWorld {
     ChunkWorld::new(world)
 }
 
+/// A world with a floor but the player walled into a 1×1 pocket: real
+/// [`STONE`] on the `+x`/`+z` sides, and — since only column `(0, 0)` is
+/// loaded — an *unloaded* column standing in for a wall on the `-x`/`-z`
+/// sides, which the search already treats as illegal
+/// (`lodestone_nav::NavView::state_at`'s own contract: `None` is not air).
+/// Genuinely no progress is possible in any direction, which is what makes
+/// this the negative control M2's segmentation change needs: with a partial,
+/// goal-missing plan now driven rather than failed outright
+/// (`docs/baritone-port.md` §4.9), "the goal is unreachable" has to be
+/// re-proven with a scene where *no* plan — not even a partial one — can ever
+/// clear [`lodestone_nav::NavPolicy::min_progress`].
+fn boxed_in_chunk_world() -> ChunkWorld {
+    let mut world = World::new();
+    let block_kind = PaletteKind::block_states();
+    let biome_kind = PaletteKind::biomes();
+    const SECTION_COUNT: usize = 4;
+
+    let mut column = ChunkColumn::new(0, SECTION_COUNT, block_kind, biome_kind, AIR, 0);
+    column.set_block(0, 0, 0, STONE); // the floor under (0, 1, 0)
+    column.set_block(1, 1, 0, STONE); // east wall
+    column.set_block(1, 2, 0, STONE);
+    column.set_block(0, 1, 1, STONE); // south wall
+    column.set_block(0, 2, 1, STONE);
+    let light = ColumnLight::new(SECTION_COUNT);
+    let chunk = LoadedChunk::new(column, light, Heightmaps::default(), Vec::new());
+    world.load(ChunkPos::new(0, 0), chunk);
+
+    ChunkWorld::new(world)
+}
+
 /// An `App` with the real production plugin stack: `CorePlugin` (schedules),
 /// `LocalPlayerPlugin` (`TickSet::Physics`, `MovementIntent`/`LookIntent`
 /// components) and [`AutopilotPlugin`] itself — plus the local player entity,
@@ -254,6 +284,58 @@ fn a_nearby_goal_is_reached_through_the_real_physics_seam() {
     );
 }
 
+/// The reason M2's segmentation change exists: a goal **provably outside the
+/// first segment's own snapshot** is still reached, by dispatching and
+/// splicing a continuation while the first segment is still being walked
+/// (`docs/baritone-port.md` §4.9).
+///
+/// # Why 200 blocks and not just "far away"
+///
+/// `SNAPSHOT_RADIUS` is 8 chunks, so a search dispatched from the player's
+/// starting column can see at most `8 * 16 + 15 = 143` blocks east of it.
+/// The goal here, `x = 200`, is **geometrically outside that view** — no
+/// single search, however lucky, could ever return `Outcome::Reached` for it,
+/// because the goal cell is not even part of the snapshot it would search
+/// over. So the only way this test can end in `AutopilotStatus::Arrived` at
+/// all is if a second search, dispatched later from further along the route,
+/// actually ran and its plan was actually spliced onto the first — this is
+/// not a plausible-looking pass, it is the one outcome only the continuation
+/// mechanism can produce.
+#[test]
+fn a_goal_beyond_the_first_snapshot_is_reached_by_splicing_a_continuation() {
+    let (mut app, entity) = app_on_flat_floor(13);
+    let start = position(&app, entity);
+
+    let goal = BlockPos::new(200, 1, 0);
+    assert!(
+        f64::from(goal.x) > f64::from(lodestone_autopilot::SNAPSHOT_RADIUS) * 16.0 + 15.0,
+        "test premise: the goal must be outside the first segment's own snapshot"
+    );
+    app.insert_resource(AutopilotGoal(Some(goal)));
+
+    // 200 blocks at ~4.317 blocks/s is ~46 s of pure movement (~926 ticks);
+    // 3,000 ticks is generous headroom for that plus at least two searches'
+    // planning ticks (each far smaller than a 20,000-node search over this
+    // flat, unobstructed corridor).
+    run_ticks(&mut app, 3_000);
+
+    let end = position(&app, entity);
+    assert!(
+        (end.x - start.x).abs() > f64::from(lodestone_autopilot::SNAPSHOT_RADIUS) * 16.0,
+        "expected the player to have travelled further than one snapshot could ever \
+         plan in a single search, start={start:?} end={end:?}"
+    );
+    assert!(
+        (end.x - 200.5).abs() < 0.6 && (end.z - 0.5).abs() < 0.6,
+        "expected the player to have arrived near block (200, 1, 0), end={end:?}"
+    );
+    assert_eq!(
+        *app.world().resource::<AutopilotStatus>(),
+        AutopilotStatus::Arrived,
+        "the plugin's own status resource must agree that it arrived"
+    );
+}
+
 /// Clearing the goal mid-walk hands rotation control back (removes
 /// `LookIntent`) and stops driving `MovementIntent` — proven by ticking a few
 /// more times after clearing and observing no further net progress toward
@@ -287,22 +369,38 @@ fn clearing_the_goal_stops_driving() {
     let _ = after;
 }
 
-/// The negative control: a goal outside the loaded snapshot must be reported
-/// as a failure to start, not silently ignored — the detector this test
-/// exists to prove *can* fail, per this repo's evidence standards ("an
+/// The negative control: a goal that is genuinely unreachable — no partial
+/// plan can ever clear `min_progress` either, since the player starts already
+/// walled into a 1×1 pocket — must be reported as a failure, not silently
+/// driven or reported `Arrived`. Per this repo's evidence standards ("an
 /// assertion of absence needs a control proving the detector works").
+///
+/// # Why this is not simply "radius 0, goal far away" any more
+///
+/// Before segmentation, *any* non-`Reached` search outcome failed the goal
+/// outright, so a snapshot too small to reach a distant goal was already a
+/// sufficient control. Segmentation's whole point is that a goal-missing
+/// partial plan is now driven, with a continuation dispatched once it nears
+/// its end (`docs/baritone-port.md` §4.9) — so "the goal is outside the
+/// snapshot" no longer implies failure; it implies "drive the partial, then
+/// segment". The control has to be a scene where even the *first* partial has
+/// nowhere to go.
 #[test]
-fn goal_outside_the_snapshot_is_reported_as_no_start() {
-    // Radius 0: only the centre column is loaded, so a goal several chunks
-    // away cannot be reached by any snapshot this app could ever build.
-    let (mut app, _entity) = app_on_flat_floor(0);
-    app.insert_resource(AutopilotGoal(Some(BlockPos::new(500, 1, 500))));
+fn a_goal_with_no_reachable_progress_at_all_is_reported_as_a_search_failure() {
+    let mut app = App::new();
+    app.add_plugins((lodestone_ecs::CorePlugin, LocalPlayerPlugin, AutopilotPlugin));
+    app.insert_resource(PlayerCollision::View(Arc::new(FlatFloor)));
+    app.insert_resource(boxed_in_chunk_world());
+    app.insert_resource(VersionData(Some(Box::new(FixtureAdapter))));
+    let entity = spawn_local_player(app.world_mut(), PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0));
+    let _ = entity;
 
+    app.insert_resource(AutopilotGoal(Some(BlockPos::new(500, 1, 500))));
     run_ticks(&mut app, 20);
 
     match *app.world().resource::<AutopilotStatus>() {
         AutopilotStatus::Failed(FailReason::Search(_)) => {}
-        other => panic!("expected a search failure for an unreachable goal, got {other:?}"),
+        other => panic!("expected a search failure for a boxed-in, unreachable goal, got {other:?}"),
     }
 }
 

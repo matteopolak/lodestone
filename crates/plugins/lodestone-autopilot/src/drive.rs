@@ -15,9 +15,30 @@
 use std::sync::Arc;
 
 use lodestone_model::BlockPos;
-use lodestone_nav::{AtBlock, Budget, Edge, FactsTable, Goal, NavPolicy, Outcome, Plan, Search, SnapshotView, WalkDrive};
+use lodestone_nav::{
+    AtBlock, Budget, Edge, FactsTable, Goal, NavNode, NavPolicy, Outcome, Plan, Search,
+    SnapshotView, WalkDrive,
+};
 use lodestone_physics::{PhysicsProfile, Vec3d};
 use lodestone_world::World;
+
+/// Build a [`Search`] toward `goal`'s block, given an already-built `view` and
+/// its `start` node.
+///
+/// Shared by [`seed_search`] (view centred on a live position, start derived
+/// from [`lodestone_nav::seed_node`]) and [`continuation_search`] (view
+/// centred on a plan's own terminal node, which **is** the start) — the two
+/// differ only in how the view and start are obtained, never in how the
+/// search itself is built from them, which is what keeps a continuation's
+/// search indistinguishable from a fresh one to everything downstream.
+fn search_from(view: SnapshotView, start: NavNode, goal: BlockPos, policy: NavPolicy) -> Search {
+    let goal: Box<dyn Goal> = Box::new(AtBlock {
+        x: goal.x,
+        y: goal.y,
+        z: goal.z,
+    });
+    Search::new(Arc::new(view), start, goal, policy, PhysicsProfile::mc_1_21())
+}
 
 /// Build a [`Search`] from `position` toward `goal`'s block, snapshotting
 /// `radius` columns of `world` around `position`'s column.
@@ -41,18 +62,32 @@ pub fn seed_search(
     let (cx, cz) = (position.x.floor() as i32, position.z.floor() as i32);
     let view = SnapshotView::build(world, cx, cz, radius, facts)?;
     let start = lodestone_nav::seed_node(&view, position)?;
-    let goal: Box<dyn Goal> = Box::new(AtBlock {
-        x: goal.x,
-        y: goal.y,
-        z: goal.z,
-    });
-    Some(Search::new(
-        Arc::new(view),
-        start,
-        goal,
-        policy,
-        PhysicsProfile::mc_1_21(),
-    ))
+    Some(search_from(view, start, goal, policy))
+}
+
+/// Build a [`Search`] continuing a plan from its own terminal node —
+/// segmentation's mechanism for a journey longer than one snapshot
+/// (`docs/baritone-port.md` §4.9). Snapshots `radius` columns of `world`
+/// around the terminal node's own column and starts the search there, with
+/// its `Arrival` carried over unchanged, rather than re-deriving a start node
+/// from the player's live position: a continuation plans *ahead* of where the
+/// body currently is, and concatenation is only valid when the new plan
+/// begins at exactly the position (and momentum state) the old one ends at.
+///
+/// `None` only when the terminal node's own column is not loaded — normal
+/// while walking toward the edge of a snapshot that has not caught up yet,
+/// not a search failure; the caller should simply try again on a later tick.
+#[must_use]
+pub fn continuation_search(
+    world: &World,
+    terminal: NavNode,
+    goal: BlockPos,
+    facts: Arc<FactsTable>,
+    radius: i32,
+    policy: NavPolicy,
+) -> Option<Search> {
+    let view = SnapshotView::build(world, terminal.x, terminal.z, radius, facts)?;
+    Some(search_from(view, terminal, goal, policy))
 }
 
 /// [`seed_search`] plus running the search to completion in one call.

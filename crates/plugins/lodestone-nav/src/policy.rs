@@ -107,6 +107,14 @@ pub struct NavPolicy {
     /// Minimum ticks between replans, so a trigger that can fire every tick cannot
     /// make the bot oscillate and execute nothing.
     pub min_replan_interval_ticks: u32,
+    /// Once a plan's remaining cost (excluding the currently executing edge —
+    /// see [`crate::plan::Plan::remaining_cost_after`]'s own doc comment on why
+    /// the exclusion matters) drops below this many ticks, dispatch the next
+    /// segment's search now rather than waiting for the plan to run out.
+    /// Default **30** (1.5 s), `docs/baritone-port.md` §4.9's own figure — this
+    /// is what makes a journey longer than one snapshot possible without a
+    /// visible stall at every segment boundary.
+    pub replan_lead_ticks: u32,
     /// Whether the executor writes a `LookIntent` as well as the movement axes.
     ///
     /// With it off, the bot walks without turning — which still works, because the
@@ -139,6 +147,7 @@ impl Default for NavPolicy {
             stall_grace: 10,
             stall_patience: 3,
             min_replan_interval_ticks: 10,
+            replan_lead_ticks: 30,
             steer_yaw: true,
         }
     }
