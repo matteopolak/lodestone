@@ -196,7 +196,7 @@ impl Category {
 /// A rebindable thing the player can ask for.
 ///
 /// Every variant here has a real consumer in `app.rs` — vanilla mappings this
-/// client does not implement (`key.screenshot`, `key.advancements`, …) are
+/// client does not implement (`key.advancements`, `key.fullscreen`, …) are
 /// deliberately **absent** rather than listed and dead. Adding one is a
 /// two-line change here plus the branch that consumes it; adding one
 /// *without* the branch is the island defect `CLAUDE.md` §1 is about, and a
@@ -280,6 +280,42 @@ pub enum InputAction {
     /// Hold to show the player list.
     PlayerList,
     // -- misc -------------------------------------------------------------
+    /// Vanilla's `key.screenshot` (`Options.java:675`, GLFW keysym `291` =
+    /// F2, category `MISC`).
+    ///
+    /// **The odd one out: purely local, no packet.** Every other action in
+    /// this enum ends at a `ClientAction`/container `Click`; this one ends at
+    /// a file. Vanilla's `Screenshot.grab` (`Screenshot.java:37-70`) copies
+    /// the main render target's colour texture to a CPU buffer and writes it
+    /// as a PNG to `<gameDirectory>/screenshots/`, named
+    /// `Util.getFilenameFormattedDateTime()` (`yyyy-MM-dd_HH.mm.ss`, the
+    /// system clock at capture time) with a `_2`, `_3`, … suffix appended on
+    /// a same-second collision (`Screenshot.getFile`, `:136-148`) — never
+    /// overwriting an existing file. See [`crate::app::KeyOutcome::
+    /// Screenshot`] for the capture itself, which needs the GPU device/
+    /// surface texture and so lives in `gpu.rs`, not here.
+    ///
+    /// **Not modelled: the Control-held panorama variant.**
+    /// `Minecraft.handleGlobalKeyPress` passes `controlDown` straight to
+    /// `Screenshot.grab(this, controlDown)`, which only takes the
+    /// four-angle `panorama_0..3.png` branch when
+    /// `SharedConstants.DEBUG_PANORAMA_SCREENSHOT` is also true — a
+    /// developer-only flag vanilla ships `false` in every release build. A
+    /// normal player's Ctrl+F2 is byte-identical to a plain F2, so this
+    /// action carries no `ctrl` payload; the consumer may still read the
+    /// driver's tracked `ctrl_held` if it ever wants to build the debug
+    /// variant, but nothing here requires it to.
+    ///
+    /// **Not modelled: `handleGlobalKeyPress`'s screen-independence.**
+    /// Vanilla checks this key *outside* `Screen.keyPressed` entirely, so a
+    /// screenshot can be taken from the pause menu or an open inventory.
+    /// This port routes it through [`crate::app::resolve_key`] like every
+    /// other action, which the menu/chat/container gates swallow first — the
+    /// same simplification [`Self::DebugOverlay`] already accepts (F3 does
+    /// not open the debug overlay from behind a menu here either). Fixing
+    /// both together, if ever wanted, is one change: hoist both above the
+    /// `gate.menu`/`gate.chat_open` early returns.
+    Screenshot,
     TogglePerspective,
     /// Open the pause screen, or close an open container.
     ///
@@ -304,7 +340,7 @@ impl InputAction {
     /// category and, within a category, follows `Options.java`'s own
     /// declaration order — so walking `ALL` filtered by [`Category::SORT_ORDER`]
     /// reproduces vanilla's Controls-screen ordering without a sort.
-    pub const ALL: [InputAction; 28] = [
+    pub const ALL: [InputAction; 29] = [
         InputAction::Forward,
         InputAction::Back,
         InputAction::Left,
@@ -330,6 +366,7 @@ impl InputAction {
         InputAction::Chat,
         InputAction::Command,
         InputAction::PlayerList,
+        InputAction::Screenshot,
         InputAction::TogglePerspective,
         InputAction::Pause,
         InputAction::DebugOverlay,
@@ -368,6 +405,7 @@ impl InputAction {
             InputAction::Chat => "key.chat",
             InputAction::Command => "key.command",
             InputAction::PlayerList => "key.playerlist",
+            InputAction::Screenshot => "key.screenshot",
             InputAction::TogglePerspective => "key.togglePerspective",
             InputAction::Pause => "key.lodestone.pause",
             InputAction::DebugOverlay => "key.debug.overlay",
@@ -410,7 +448,9 @@ impl InputAction {
             InputAction::Chat | InputAction::Command | InputAction::PlayerList => {
                 Category::Multiplayer
             }
-            InputAction::TogglePerspective | InputAction::Pause => Category::Misc,
+            InputAction::Screenshot | InputAction::TogglePerspective | InputAction::Pause => {
+                Category::Misc
+            }
             InputAction::DebugOverlay => Category::Debug,
         }
     }
@@ -457,6 +497,8 @@ impl InputAction {
             InputAction::Chat => Binding::Key(KeyCode::KeyT),
             InputAction::Command => Binding::Key(KeyCode::Slash),
             InputAction::PlayerList => Binding::Key(KeyCode::Tab),
+            // `Options.java:675` — 291.
+            InputAction::Screenshot => Binding::Key(KeyCode::F2),
             // `Options.java:676` — 294.
             InputAction::TogglePerspective => Binding::Key(KeyCode::F5),
             // No vanilla counterpart (Escape is not a `KeyMapping`); GLFW 256.
@@ -1086,6 +1128,7 @@ mod tests {
             87 => KeyCode::KeyW,
             256 => KeyCode::Escape,
             258 => KeyCode::Tab,
+            291 => KeyCode::F2,
             292 => KeyCode::F3,
             294 => KeyCode::F5,
             340 => KeyCode::ShiftLeft,
@@ -1111,6 +1154,7 @@ mod tests {
             (InputAction::Chat, 84, Category::Multiplayer),
             (InputAction::PlayerList, 258, Category::Multiplayer),
             (InputAction::Command, 47, Category::Multiplayer),
+            (InputAction::Screenshot, 291, Category::Misc),
             (InputAction::TogglePerspective, 294, Category::Misc),
             (InputAction::Hotbar1, 49, Category::Inventory),
             (InputAction::Hotbar2, 50, Category::Inventory),
@@ -1328,9 +1372,10 @@ mod tests {
         // nine hotbar slots — all twelve of vanilla's `Category.INVENTORY`
         // mappings (`Options.java:662-664,683-693`).
         assert_eq!(Keybinds::in_category(Category::Inventory).count(), 12);
-        // Misc lost a member to #382: `key.lodestone.toggleFly` is gone, leaving
+        // Misc lost a member to #382 (`key.lodestone.toggleFly` is gone) and
+        // gained one back here (`key.screenshot`, issue #16): `key.screenshot`,
         // `key.togglePerspective` and this client's non-vanilla pause entry.
-        assert_eq!(Keybinds::in_category(Category::Misc).count(), 2);
+        assert_eq!(Keybinds::in_category(Category::Misc).count(), 3);
     }
 
     // -- persistence -------------------------------------------------------
