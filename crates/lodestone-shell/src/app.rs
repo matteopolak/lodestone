@@ -2440,30 +2440,17 @@ impl WindowApp {
             nausea_intensity: 0.0,
             portal_intensity: 0.0,
         };
-        // Route the progressive-mining crack overlay(s): the local player's own
-        // dig via `crack_target()` (`None` off a server and on the demo path),
-        // plus — per issue #410 — a slot for every *other* player's overlay the
+        // Route the progressive-mining crack overlay(s) (issue #410): the local
+        // player's own dig plus one slot for every *other* player's overlay the
         // server has reported. `CrackPipeline`/`render_with_crack_and_effects`
-        // now accept any number of targets in one pass instead of at most one,
-        // which was the whole defect: `SessionBlockDestruction` already carried
-        // other players' digs and had nowhere to draw them.
-        //
-        // Only the local target is folded in today. Enumerating every other
-        // player's overlay needs `Sim` to walk
-        // `SessionBlockDestruction`/`BlockDestructionOverlays`'s active entries,
-        // and that collection currently exposes only a single-position probe
-        // (`Sim::block_destruction_stage_at`) — enumerating all of them needs a
-        // small additive accessor on `lodestone_game::mining::
-        // BlockDestructionOverlays` itself, which is outside this pass's file
-        // ownership (`lodestone-game` — see the #410 report for the exact
-        // three-line patch). An empty `cracks` slice beyond the local entry
-        // costs nothing extra (`render_inner` skips the shared camera-uniform
-        // write when there is nothing to draw), so this is a correct, if
-        // partial, wiring: identical local-player behaviour to before, through
-        // the new N-target call shape, ready for the second producer to plug
-        // straight in.
-        let mut cracks: Vec<crate::gpu::CrackTarget> = Vec::new();
-        cracks.extend(self.sim.crack_target());
+        // accept any number of targets in one pass, and `Sim::crack_targets`
+        // is the accessor that actually walks `SessionBlockDestruction`/
+        // `BlockDestructionOverlays` via `crate::gpu::gather_crack_targets` —
+        // the hop that was still missing when #410 was closed: the gather and
+        // the pipeline were both proven in isolation, but nothing in
+        // production called the gather, so only the local target ever reached
+        // this vec.
+        let cracks: Vec<crate::gpu::CrackTarget> = self.sim.crack_targets();
         let stats = render.render_with_crack_and_effects(
             device,
             queue,

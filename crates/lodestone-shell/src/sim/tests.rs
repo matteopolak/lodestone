@@ -2506,6 +2506,62 @@ fn tab_overlay_rows_read_the_clients_one_folded_tab_list() {
     assert_eq!(sim.player_rows(), vec!["Bob  30ms".to_string()]);
 }
 
+/// Issue #410's missing hop: `crate::gpu::gather_crack_targets` and
+/// `BlockDestructionOverlays::iter` were both proven in `gpu/outline.rs`'s
+/// own gate, but the issue was closed with nothing in production calling the
+/// gather — `app.rs` only ever passed `Sim::crack_target()`'s single local
+/// dig through. This proves `Sim::crack_targets()` actually walks
+/// `SessionBlockDestruction` for two *different* breaking entities, not just
+/// the local target the pipeline gate already covers in isolation.
+#[test]
+fn crack_targets_reaches_every_other_players_overlay_not_just_the_local_dig() {
+    use lodestone_model::ClientEvent;
+
+    let (net, _actions, _feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.attach_net(net);
+
+    let ingest = |sim: &Sim, event: ClientEvent| {
+        sim.net().expect("net attached").ingest_session_event(event);
+    };
+    ingest(
+        &sim,
+        ClientEvent::BlockDestruction {
+            entity_id: 301,
+            pos: BlockPos::new(10, 64, 20),
+            progress: 3,
+        },
+    );
+    ingest(
+        &sim,
+        ClientEvent::BlockDestruction {
+            entity_id: 402,
+            pos: BlockPos::new(-5, 70, 8),
+            progress: 7,
+        },
+    );
+
+    let targets = sim.crack_targets();
+    assert_eq!(
+        targets.len(),
+        2,
+        "no local dig is in progress, so this must be exactly the two \
+         other-player overlays reaching pixels — not one, not zero"
+    );
+    assert!(
+        targets
+            .iter()
+            .any(|t| t.block == [10, 64, 20] && t.stage == 3),
+        "entity 301's overlay must reach Sim::crack_targets: {targets:?}"
+    );
+    assert!(
+        targets
+            .iter()
+            .any(|t| t.block == [-5, 70, 8] && t.stage == 7),
+        "entity 402's overlay must reach Sim::crack_targets: {targets:?}"
+    );
+}
+
 /// The negative control for the pair above: with no connection there is no
 /// session `World` to read, so both projections must be empty rather than
 /// falling back to some shell-local copy — which is the assertion that
