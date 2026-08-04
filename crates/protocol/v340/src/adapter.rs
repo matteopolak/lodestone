@@ -22,8 +22,9 @@ use crate::packets::entity::{
 };
 use crate::packets::game::{
     BlockDig, BlockPlace, ClientCommand, ClientboundChat, ClientboundPositionLook, EntityAction,
-    JoinGame, KickDisconnect, ServerboundArmAnimation, ServerboundChat, ServerboundPositionLook,
-    Spectate, TeleportConfirm, UseEntity, UseEntityAt, UseEntityInteract,
+    JoinGame, KickDisconnect, Respawn, ServerboundArmAnimation, ServerboundChat,
+    ServerboundPositionLook, Spectate, TeleportConfirm, UpdateHealth, UseEntity, UseEntityAt,
+    UseEntityInteract,
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{EncryptionRequest, LoginDisconnect, LoginSuccess, SetCompression};
@@ -137,6 +138,15 @@ fn encode_crafting_book_settings(open: bool, filtering: bool) -> Vec<u8> {
 /// Decodes a packet body from raw bytes.
 fn decode_body<T: Decode>(payload: &[u8]) -> Result<T, AdapterError> {
     lodestone_core::decode_body(payload, CTX).map_err(AdapterError::Decode)
+}
+
+/// Maps a decode error to the adapter's decode-error variant. Used by the
+/// hand-decoded arms (`block_change`/`multi_block_change`/`entity_status`/
+/// `entity_head_rotation`) that read a [`Reader`] directly rather than going
+/// through a derived [`Decode`] body, mirroring `lodestone-v770`'s own
+/// `dec_err` helper.
+fn dec_err(err: impl std::fmt::Display) -> AdapterError {
+    AdapterError::Decode(err.to_string())
 }
 
 /// Like [`decode_body`] but additionally requires the payload to be fully
@@ -558,6 +568,71 @@ impl V340Adapter {
         if packet_id == play::clientbound::KICK_DISCONNECT {
             let body: KickDisconnect = decode_body(payload)?;
             return Ok(vec![Directive::Disconnect(json_reason_text(&body.reason))]);
+        }
+        if packet_id == play::clientbound::UPDATE_HEALTH {
+            // f32 health, varint food, f32 saturation — verified against
+            // minecraft-data's 1.12.2 `packet_update_health` (identical to 1.8's
+            // own shape). `UpdateHealth` already existed in this crate but was
+            // only ever round-tripped in `tests/join_flow.rs`, never wired into
+            // `handle_play` — an island per CLAUDE.md's own definition (decoded
+            // nowhere in production, tested only against our own encoder).
+            let body: UpdateHealth = decode_body(payload)?;
+            return Ok(vec![Directive::Emit(ClientEvent::HealthChanged {
+                health: body.health,
+                food: body.food,
+                saturation: body.food_saturation,
+            })]);
+        }
+        if packet_id == play::clientbound::RESPAWN {
+            // Signed int dimension, u8 difficulty, u8 game mode, string level
+            // type — verified against minecraft-data's 1.12.2
+            // `packet_respawn`. Like `join`'s `dimension`, `respawn`'s
+            // `game_mode` packs the hardcore flag in bit `0x8`; reusing the
+            // same `game_mode` helper masks it off identically. The dimension
+            // shape re-recorded here matters for the *next* `map_chunk`: a
+            // portal into the nether/end must flip `ChunkShape` before that
+            // column's light arrays are decoded, exactly as `LOGIN` does on
+            // first join.
+            let body: Respawn = decode_body(payload)?;
+            self.set_dimension(body.dimension);
+            return Ok(vec![Directive::Emit(ClientEvent::Respawned {
+                dimension: dimension_id(body.dimension)?,
+                game_mode: game_mode(body.game_mode)?,
+                previous_game_mode: None,
+                last_death_location: None,
+            })]);
+        }
+        if packet_id == play::clientbound::ENTITY_STATUS {
+            // A raw (non-VarInt) `i32` entity id, then a raw status byte —
+            // verified against minecraft-data's 1.12.2 `packet_entity_status`
+            // (identical to 1.8's shape) and matching `lodestone-v770`'s own
+            // `ENTITY_EVENT` decode (`dec_err`, hand-`Reader` rather than a
+            // derived struct, since there is nothing else to model). Drives
+            // hurt/death animation, totem-of-undying particles, etc. — the
+            // consumer interprets `status` per the entity's own type, exactly
+            // as the modern decode already documents.
+            let mut reader = Reader::new(payload);
+            let entity_id = reader.i32().map_err(dec_err)?;
+            let status = reader.u8().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::EntityStatus {
+                entity_id,
+                status,
+            })]);
+        }
+        if packet_id == play::clientbound::ENTITY_HEAD_ROTATION {
+            // VarInt entity id, then a packed signed-byte yaw (256 steps per
+            // circle, same packing `unpack_degrees` already handles for body
+            // rotation) — verified against minecraft-data's 1.12.2
+            // `packet_entity_head_rotation`.
+            let mut reader = Reader::new(payload);
+            let entity_id = reader.var_i32().map_err(dec_err)?;
+            let packed = reader.i8().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::EntityHeadRotation {
+                entity_id,
+                head_yaw: unpack_degrees(packed),
+            })]);
         }
         // Everything else in play is intentionally ignored for now.
         Ok(Vec::new())
