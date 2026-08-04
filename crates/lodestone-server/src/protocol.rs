@@ -9,7 +9,9 @@
 //! encoders/decoders (plan §3).
 
 use lodestone_core::State;
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Difficulty, ResourceKey, Rotation, Vec3};
+use lodestone_model::{
+    BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, ResourceKey, Rotation, Vec3,
+};
 use uuid::Uuid;
 
 use crate::chunk::ChunkColumn;
@@ -182,6 +184,56 @@ pub enum ServerBound {
     GameRuleChanged {
         /// `(rule key, raw value)` pairs, in wire order.
         entries: Vec<(String, String)>,
+    },
+    /// The client selected a new hotbar slot
+    /// (`ServerboundSetCarriedItemPacket`). Mirrors vanilla's
+    /// `ServerGamePacketListenerImpl::handleSetCarriedItem`, which writes
+    /// straight into `ServerPlayer.getInventory().setSelectedSlot(...)` with
+    /// **no confirmation packet** — see `crate::inventory::PlayerInventory
+    /// ::set_selected_hotbar_slot`'s consumer in `crate::server` for why
+    /// nothing is sent back here either.
+    CarriedItemChanged {
+        /// The newly selected hotbar slot. The protocol decoder validates
+        /// `0..HOTBAR_SIZE` before producing this variant (mirroring
+        /// vanilla's `Inventory.isHotbarSlot` guard,
+        /// `Inventory.java:70-76`); an out-of-range wire value decodes to
+        /// [`Ignored`](Self::Ignored) instead.
+        slot: u8,
+    },
+    /// A container click the client has already predicted locally
+    /// (`ServerboundContainerClickPacket`). `changed_slots` and
+    /// `carried_item` are the client's own **post-click prediction** — the
+    /// wire packet's `HashedStack` payloads, not raw button/slot input —
+    /// because `lodestone-game`'s `click.rs` already computed the full
+    /// `doClick` result before encoding this packet (issue #27,
+    /// `docs/container-clicks.md`). See `crate::inventory`'s module doc
+    /// comment and `crate::server`'s consumer for why this crate applies
+    /// that diff directly against window `0` (the player's own inventory)
+    /// rather than re-deriving vanilla's click state machine server-side —
+    /// a deliberate, documented scope cut, not an oversight.
+    ContainerClicked {
+        /// The window the click targeted. Only window `0` (the player's own
+        /// inventory) has a server-side model to apply into today; any
+        /// other id is decoded but dropped by the consumer (see
+        /// `crate::server`'s doc comment on that arm).
+        window_id: i32,
+        /// The client's menu state id at the time of the click. Decoded for
+        /// parity with the wire packet; not yet validated against a
+        /// server-tracked state id (this crate sends no
+        /// `container_set_slot`/`container_set_content` for the player's own
+        /// inventory to resync from, so there is nothing to validate against
+        /// yet).
+        state_id: i32,
+        /// Every menu slot whose contents changed, with the new value —
+        /// `None` clears the slot.
+        changed_slots: Vec<(i32, Option<ItemStack>)>,
+        /// The cursor ("carried") stack after the click. Decoded for parity
+        /// with the wire packet but not yet acted on:
+        /// [`PlayerInventory`](crate::inventory::PlayerInventory) has no
+        /// cursor field, since nothing server-side reads one today (the same
+        /// "decoded but not yet acted on" pattern `BlockAction::sequence`
+        /// already established here).
+        carried_item: Option<ItemStack>,
     },
     /// A packet the loop does not need to act on (chunk-batch
     /// acknowledgements, teleport confirmations, look-only or status-only

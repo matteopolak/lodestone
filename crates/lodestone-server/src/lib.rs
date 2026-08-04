@@ -57,6 +57,19 @@
 //!   safe-fall-distance threshold, applied through the same
 //!   [`lodestone_entity::apply_reductions`] pipeline
 //!   [`crate::mobs::SimMob::apply_damage`] uses for mobs.
+//! * [`PlayerInventory`] — the server-authoritative model for the player's
+//!   own 41-slot inventory (hotbar, main storage, armour, off-hand), the
+//!   prerequisite the server-side decode of `SET_CARRIED_ITEM` and
+//!   `CONTAINER_CLICK` needed and did not have (see that module's own doc
+//!   comment for the vanilla `Inventory` citation and the menu-slot →
+//!   native-index table it mirrors from `lodestone-game`'s client-side
+//!   `Menu`). `crate::server`'s `dispatch_play_packet` is the consumer:
+//!   [`ServerBound::CarriedItemChanged`] sets the selected hotbar slot,
+//!   [`ServerBound::ContainerClicked`] against window `0` applies the
+//!   client's own predicted per-slot diff directly (see that variant's doc
+//!   comment for why trusting the diff, rather than re-deriving vanilla's
+//!   full `doClick` state machine server-side, is the deliberate scope for
+//!   this landing).
 //!
 //! Wiring a real vanilla client to this server end-to-end requires the version
 //! crate to provide client-bound *encoders* (join game, registry data,
@@ -70,6 +83,7 @@
 mod chunk;
 mod fall;
 mod integrated;
+mod inventory;
 mod mob_spawn;
 mod mobs;
 mod protocol;
@@ -81,6 +95,7 @@ mod worldgen_data;
 pub use chunk::{ChunkColumn, ChunkSource, OverworldChunkSource, WorldgenChunkSource};
 pub use fall::{FALL_DAMAGE_MULTIPLIER, FallTracker, SAFE_FALL_DISTANCE};
 pub use integrated::IntegratedServer;
+pub use inventory::{HOTBAR_SIZE, OFFHAND_NATIVE, PLAYER_NATIVE_SIZE, PlayerInventory};
 pub use mob_spawn::{
     DespawnOutcome, MAGIC_NUMBER, MobCategory, SpawnCandidate, SpawnCandidateSource, SpawnRng,
     SpawnState, check_despawn, resolve_mob_shape,

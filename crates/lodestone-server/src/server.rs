@@ -18,6 +18,7 @@ use lodestone_net::{Connection, NetError, Transport};
 
 use crate::chunk::{AIR, ChunkSource, STONE, is_air_or_fluid, is_water};
 use crate::fall::FallTracker;
+use crate::inventory::PlayerInventory;
 use crate::protocol::{EntitySnapshot, ServerBound, ServerDirective, ServerProtocol};
 use crate::vitals::{EYE_HEIGHT, PlayerVitals};
 
@@ -250,6 +251,16 @@ pub struct ServeSummary {
     pub username: String,
     /// Number of chunk columns sent for the initial view.
     pub chunks_sent: usize,
+    /// The connection's final server-authoritative inventory state — empty
+    /// (`PlayerInventory::default()`) if the client disconnected before ever
+    /// reaching [`State::Play`], since [`PlayerInventory`] is only
+    /// constructed once `serve_play` starts. Exposed here (rather than only
+    /// internally) so a test can drive a real client through
+    /// `SET_CARRIED_ITEM`/`CONTAINER_CLICK` and observe the resulting model
+    /// state once the connection closes, without threading a new parameter
+    /// through [`IntegratedServer`](crate::IntegratedServer)'s public
+    /// constructors.
+    pub inventory: PlayerInventory,
 }
 
 /// Errors from the integrated-server driver.
@@ -440,6 +451,8 @@ where
             | ServerBound::DifficultyChanged { .. }
             | ServerBound::DifficultyLockChanged { .. }
             | ServerBound::GameRuleChanged { .. }
+            | ServerBound::CarriedItemChanged { .. }
+            | ServerBound::ContainerClicked { .. }
             | ServerBound::Ignored => {}
         }
     }
@@ -448,6 +461,7 @@ where
         Some(username) => Ok(ServeSummary {
             username,
             chunks_sent: 0,
+            inventory: PlayerInventory::default(),
         }),
         None => Err(ServerError::ClosedBeforeLogin),
     }
@@ -653,6 +667,59 @@ where
     apply(conn, state, directive).await
 }
 
+/// Applies a `SET_CARRIED_ITEM` request (`ServerBound::CarriedItemChanged`),
+/// mirroring `ServerGamePacketListenerImpl::handleSetCarriedItem`, which
+/// writes straight into `Inventory.setSelectedSlot` and sends **no**
+/// confirmation packet back — see that `ServerBound` variant's own doc
+/// comment. A no-op if `slot` is already out of range (the protocol decoder
+/// only ever constructs this variant with a validated slot, so this guard is
+/// a second, defensive layer rather than the primary one — see
+/// `PlayerInventory::set_selected_hotbar_slot`'s own doc comment for why it
+/// degrades instead of panicking).
+fn apply_carried_item_changed(inventory: &mut PlayerInventory, slot: u8) {
+    inventory.set_selected_hotbar_slot(slot);
+}
+
+/// Applies a `CONTAINER_CLICK` result the client already predicted locally
+/// (`ServerBound::ContainerClicked`).
+///
+/// **Scope, stated plainly**: this does not re-run vanilla's `doClick` state
+/// machine server-side. It applies the client's own predicted diff
+/// (`changed_slots`) directly into [`PlayerInventory`], and only for
+/// `window_id == 0` (the player's own inventory) — any other window is
+/// decoded but dropped here, since this crate has no open-container model to
+/// apply into yet (issue #266's other 15 packets, and #250-#252's
+/// hopper/furnace/brewing-stand features, are what would give a non-zero
+/// window somewhere to land).
+///
+/// This is a deliberate scope cut, not an oversight, and it is *exactly*
+/// consistent with today's actual desync risk: `docs/container-clicks.md`
+/// states plainly that "the client runs exactly this locally to predict the
+/// result of a click before the server confirms it" and that prediction
+/// already ships with **no server confirmation needed to look correct** —
+/// nothing before this landing validated it server-side at all. Applying the
+/// client's own diff verbatim cannot introduce a *new* desync relative to
+/// that baseline (the server model becomes a mirror of what the client
+/// already believes, by construction), where re-deriving `doClick`
+/// server-side and getting one of its seven modes or the quick-craft drag
+/// machine subtly wrong **would** — a wrong from-scratch reimplementation is
+/// strictly worse than an honest passthrough here. A server-authoritative
+/// `doClick` (rejecting an impossible client diff, catching a cheating
+/// client) is real future work, not done by this landing; see
+/// `crate::inventory`'s module doc comment.
+fn apply_container_clicked(
+    inventory: &mut PlayerInventory,
+    window_id: i32,
+    changed_slots: Vec<(i32, Option<lodestone_model::ItemStack>)>,
+) {
+    if window_id != 0 {
+        return;
+    }
+    for (menu_slot, item) in changed_slots {
+        inventory.apply_menu_slot_change(menu_slot, item);
+    }
+}
+
 /// Decodes and applies one inbound packet once the connection is in
 /// [`State::Play`]: matches a keep-alive echo against the pending challenge
 /// (clearing it, so the next keep-alive tick does not mistake a live client
@@ -660,8 +727,10 @@ where
 /// tracks the player's latest position for [`PlayerVitals`]' submersion test,
 /// feeds [`FallTracker`] and applies any resulting fall damage, applies a
 /// block break/placement (see [`apply_block_action`]/[`apply_use_item_on`]),
-/// or applies a difficulty/game-rule change (see
-/// [`apply_difficulty_change`]/[`apply_game_rule_changed`]).
+/// applies a difficulty/game-rule change (see
+/// [`apply_difficulty_change`]/[`apply_game_rule_changed`]), or applies a
+/// hotbar selection/container click against [`PlayerInventory`] (see
+/// [`apply_carried_item_changed`]/[`apply_container_clicked`]).
 /// Every other packet decodes to [`ServerBound::Ignored`] in `State::Play`
 /// under the current protocols (no further state transitions are modeled —
 /// no respawn/dimension change yet) and is a no-op here.
@@ -679,6 +748,7 @@ async fn dispatch_play_packet<T, P, S>(
     fall: &mut FallTracker,
     vitals: &mut PlayerVitals,
     admin: &mut WorldAdminState,
+    inventory: &mut PlayerInventory,
     packet_id: i32,
     payload: &[u8],
 ) -> Result<(), ServerError>
@@ -736,6 +806,17 @@ where
         }
         ServerBound::GameRuleChanged { entries } => {
             apply_game_rule_changed(conn, proto, state, admin, entries).await?;
+        }
+        ServerBound::CarriedItemChanged { slot } => {
+            apply_carried_item_changed(inventory, slot);
+        }
+        ServerBound::ContainerClicked {
+            window_id,
+            state_id: _,
+            changed_slots,
+            carried_item: _,
+        } => {
+            apply_container_clicked(inventory, window_id, changed_slots);
         }
         ServerBound::Handshake { .. }
         | ServerBound::LoginStart { .. }
@@ -818,6 +899,7 @@ where
     let mut vitals = PlayerVitals::default();
     let mut fall = FallTracker::default();
     let mut admin = WorldAdminState::default();
+    let mut inventory = PlayerInventory::default();
     let mut keep_alive_tick = tokio::time::interval_at(
         tokio::time::Instant::now() + KEEP_ALIVE_INTERVAL,
         KEEP_ALIVE_INTERVAL,
@@ -846,7 +928,7 @@ where
         tokio::select! {
             packet = conn.read_packet() => {
                 let Some((packet_id, payload)) = packet? else {
-                    return Ok(ServeSummary { username, chunks_sent });
+                    return Ok(ServeSummary { username, chunks_sent, inventory });
                 };
                 dispatch_play_packet(
                     conn,
@@ -861,6 +943,7 @@ where
                     &mut fall,
                     &mut vitals,
                     &mut admin,
+                    &mut inventory,
                     packet_id,
                     &payload,
                 )
@@ -949,6 +1032,7 @@ where
     let mut vitals = PlayerVitals::default();
     let mut fall = FallTracker::default();
     let mut admin = WorldAdminState::default();
+    let mut inventory = PlayerInventory::default();
 
     while let Some((packet_id, payload)) = conn.read_packet().await? {
         dispatch_play_packet(
@@ -964,6 +1048,7 @@ where
             &mut fall,
             &mut vitals,
             &mut admin,
+            &mut inventory,
             packet_id,
             &payload,
         )
@@ -972,7 +1057,7 @@ where
             apply(conn, &mut state, directive).await?;
         }
     }
-    Ok(ServeSummary { username, chunks_sent })
+    Ok(ServeSummary { username, chunks_sent, inventory })
 }
 
 #[cfg(test)]
