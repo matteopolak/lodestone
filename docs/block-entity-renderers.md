@@ -25,16 +25,31 @@ letting the top-line summary overclaim it.
 `BlockEntityRenderers.java`'s static block
 (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/blockentity/BlockEntityRenderers.java:34-61`)
 is the authoritative list: 26 `register(...)` calls (chest counts once for three block types).
+
+**"Is a block entity" and "needs a block-entity renderer" are two different sets, and the smaller one
+is the one this issue is about.** `BlockEntityTypes.java` registers **49** types; only **26** of them
+get a renderer. The 23 with none — furnace, jukebox, dispenser, dropper, brewing stand, daylight
+detector, hopper, comparator, barrel, smoker, blast furnace, jigsaw, beehive, the four sculk types,
+chiseled bookshelf, crafter, creaking heart, command block, test block, potent sulfur — are drawn
+entirely by their ordinary block model. So a census of `block_entity_types` is **not** a work list
+for this issue; it is nearly twice the size. Count `register(...)` calls, not registry entries.
+
 Issue #23's own list — the one this doc used to quote as "still absent" — was hand-recalled and is
 wrong in both directions:
 
-- **`beds` are not on the registration list at all.** A bed is a real block model
-  (`assets/minecraft/models/block/*_bed_head.json` has genuine geometry, verified against the real
-  jar), same shape as the sign correction below. There is no `BedRenderer` anywhere in
-  `client-src`. Nothing to build here.
-- **`item frames` and `end crystals` are not block entities.** Both are `Entity`
-  (`HangingEntity`/`EndCrystal`), drawn by an `EntityRenderer`, not a `BlockEntityRenderer` — out of
-  this issue's scope entirely, tracked wherever entity rendering is.
+- **`beds` are not on the registration list at all** — and, stronger than that, **`BED` is not in
+  `BlockEntityTypes.java` either**, so a bed is not a block entity in 26.2 by any definition. A bed
+  is a real block model (`assets/minecraft/models/block/*_bed_head.json` has genuine geometry,
+  verified against the real jar), same shape as the sign correction below. There is no `BedRenderer`
+  anywhere in `client-src`. Nothing to build here.
+- **`item frames` and `end crystals` are not block entities.** Both are `Entity`, drawn by an
+  `EntityRenderer`, not a `BlockEntityRenderer` — out of this issue's scope entirely, tracked
+  wherever entity rendering is. Re-derived from the class declarations rather than from memory:
+  `net/minecraft/world/entity/decoration/ItemFrame.java` is `public class ItemFrame extends
+  HangingEntity`, and `net/minecraft/world/entity/boss/enderdragon/EndCrystal.java` is
+  `public class EndCrystal extends Entity`. Note the *directory* is the tell — both live under
+  `world/entity/`, where every real block entity lives under
+  `world/level/block/entity/`.
 - The list is also missing several real entries the issue never mentioned: `mob spawner`
   (`SpawnerRenderer`, a miniature spinning entity inside the cage), `piston head`
   (`PistonHeadRenderer`), `end portal`/`end gateway` (their own full-bright shader effects, not
