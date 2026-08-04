@@ -42,13 +42,22 @@
 //! whenever one is touched.
 
 use lodestone_game::bossbar::{BossBarColor, BossBarSet};
+use lodestone_model::text::TextSpan;
 
 /// A ready-to-draw scoreboard sidebar: a title plus up to 15 rows, each a label
-/// and its score string.
+/// and its score.
+///
+/// Every field is a **styled span list**, not a `String`. These used to be
+/// `String`s, and that was where the sidebar's colour died: the projection
+/// called `Text::to_plain_string()`, so a server that coloured its objective
+/// title or a holder's name — which is most of what a scoreboard sidebar is
+/// *for* — had that colour discarded one layer before the HUD, and the HUD then
+/// painted every row in a hardcoded constant. Keeping spans here means the
+/// vocabulary between fold and pixels can express what the wire already carried.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Sidebar {
     /// The objective's display name, shown centred at the top.
-    pub title: String,
+    pub title: Vec<TextSpan>,
     /// The score rows, top-to-bottom in render order.
     pub lines: Vec<SidebarLine>,
 }
@@ -57,9 +66,40 @@ pub struct Sidebar {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SidebarLine {
     /// Left-aligned holder label (per-score display override, else the holder).
-    pub label: String,
-    /// Right-aligned score (rendered in red, vanilla-style, by the HUD).
-    pub score: String,
+    pub label: Vec<TextSpan>,
+    /// Right-aligned score. Vanilla's default is red, which the HUD supplies as
+    /// the *base* colour; a `NumberFormat::Styled`/`Fixed` colour from the server
+    /// overrides it per span.
+    pub score: Vec<TextSpan>,
+}
+
+/// One uncoloured span: the "no server styling" case.
+///
+/// For demo/test fixtures and for any caller that has a plain string and wants
+/// the sidebar's span vocabulary. An uncoloured span renders in whatever base
+/// colour the surface passes, so this is behaviour-preserving for text that was
+/// never styled to begin with.
+#[must_use]
+pub fn plain_spans(text: impl Into<String>) -> Vec<TextSpan> {
+    let text = text.into();
+    if text.is_empty() {
+        return Vec::new();
+    }
+    vec![TextSpan {
+        text,
+        style: lodestone_model::text::TextStyle::default(),
+    }]
+}
+
+/// The concatenated plain text of a span list, style discarded.
+///
+/// For assertions about **wording** and for the few consumers that genuinely
+/// need a string (a window title, a log line). Note what this cannot do: a test
+/// that only ever calls this is blind to colour by construction, so a colour
+/// assertion has to read `span.style.color` per span, or measure pixels.
+#[must_use]
+pub fn spans_text(spans: &[TextSpan]) -> String {
+    spans.iter().map(|s| s.text.as_str()).collect()
 }
 
 /// A ready-to-draw boss bar: a plain title, a clamped progress fraction, and an

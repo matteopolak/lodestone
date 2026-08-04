@@ -94,7 +94,10 @@ fn live_tab_list_and_scoreboard_reach_pixels() {
         if !rows.is_empty()
             && sidebar
                 .as_ref()
-                .is_some_and(|side| side.title.contains(&title) && side.lines.len() == 1)
+                .is_some_and(|side| {
+                    lodestone::overlay::spans_text(&side.title).contains(&title)
+                        && side.lines.len() == 1
+                })
         {
             break;
         }

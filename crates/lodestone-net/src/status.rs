@@ -38,7 +38,20 @@ pub const MAX_FAVICON_BYTES: usize = 1 << 20;
 pub struct ServerStatus {
     /// The MOTD, flattened to plain text with formatting codes stripped.
     /// Multi-line MOTDs keep their `\n`.
+    ///
+    /// This is the *wording*, for layout and for anything that needs a string.
+    /// It is derived from [`Self::motd_spans`] rather than separately parsed, so
+    /// the two cannot disagree about what the server said.
     pub motd: String,
+    /// The MOTD as styled runs, carrying whatever colour and formatting the
+    /// server sent — both modern component `color` keys and legacy `§` codes.
+    ///
+    /// A server list that draws [`Self::motd`] shows the right words in one flat
+    /// colour, which is what this client did: the old decoder read only
+    /// `text`/`translate`/`extra` and then ran a `strip_formatting` pass that
+    /// deleted every `§` pair, so colour was discarded twice before any renderer
+    /// could have used it. Draw this field instead.
+    pub motd_spans: Vec<lodestone_model::text::TextSpan>,
     /// Players currently online, when the server reports it.
     pub online: Option<u32>,
     /// Player slots, when the server reports it.
@@ -85,7 +98,11 @@ pub fn parse_status_json(json: &str, latency_ms: Option<u64>) -> Result<ServerSt
         .as_object()
         .ok_or(NetError::MalformedFrame("status response is not a JSON object"))?;
 
-    let motd = obj.get("description").map(flatten_component).unwrap_or_default();
+    let motd_spans = obj
+        .get("description")
+        .map(component_spans)
+        .unwrap_or_default();
+    let motd: String = motd_spans.iter().map(|s| s.text.as_str()).collect();
 
     let players = obj.get("players").and_then(|p| p.as_object());
     let count = |key: &str| -> Option<u32> {
@@ -112,6 +129,7 @@ pub fn parse_status_json(json: &str, latency_ms: Option<u64>) -> Result<ServerSt
 
     Ok(ServerStatus {
         motd,
+        motd_spans,
         online: count("online"),
         max: count("max"),
         version,
@@ -121,55 +139,27 @@ pub fn parse_status_json(json: &str, latency_ms: Option<u64>) -> Result<ServerSt
     })
 }
 
-/// Flattens a chat component (or a bare string) to plain text.
+/// Flattens a chat component (or a bare string) to **styled runs**.
 ///
-/// Handles the three shapes a `description` actually arrives in: a JSON string,
-/// an array of components, and an object with `text`/`extra`. `translate` keys
-/// are emitted verbatim — resolving them needs a language table this crate has
-/// no business owning, and a raw key on screen is more honest than an empty
-/// MOTD. Section-sign formatting codes are stripped, since the list renders
-/// plain text.
-fn flatten_component(v: &serde_json::Value) -> String {
-    let mut out = String::new();
-    push_component(v, &mut out);
-    strip_formatting(&out)
-}
-
-fn push_component(v: &serde_json::Value, out: &mut String) {
-    match v {
-        serde_json::Value::String(s) => out.push_str(s),
-        serde_json::Value::Array(items) => {
-            for item in items {
-                push_component(item, out);
-            }
-        }
-        serde_json::Value::Object(map) => {
-            if let Some(text) = map.get("text").and_then(serde_json::Value::as_str) {
-                out.push_str(text);
-            } else if let Some(key) = map.get("translate").and_then(serde_json::Value::as_str) {
-                out.push_str(key);
-            }
-            if let Some(extra) = map.get("extra") {
-                push_component(extra, out);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Removes `§x` legacy formatting pairs.
-fn strip_formatting(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '\u{a7}' {
-            // Drop the code character that follows the section sign.
-            chars.next();
-        } else {
-            out.push(c);
-        }
-    }
-    out
+/// Handles the shapes a `description` actually arrives in — a JSON string, an
+/// array of components, an object with `text`/`extra`/`translate`, nested
+/// arbitrarily deep — by handing the whole value to
+/// [`Text::from_json`](lodestone_model::Text::from_json) rather than walking it
+/// here. `translate` keys are emitted verbatim: resolving them needs a language
+/// table this crate has no business owning, and a raw key on screen is more
+/// honest than an empty MOTD.
+///
+/// `to_spans_expanding_legacy` is the load-bearing choice. A great many real
+/// MOTDs are legacy `§`-coded strings, including ones wrapped in modern JSON, so
+/// a parse that only understood component `color` keys would still show the
+/// codes as literal glyphs. The two functions this replaced did the opposite:
+/// one ignored `color` entirely, the other deleted every `§` pair.
+fn component_spans(v: &serde_json::Value) -> Vec<lodestone_model::text::TextSpan> {
+    // `Text::from_json` parses source text, and what we hold is already a parsed
+    // `Value`, so re-serialise. Round-tripping one small JSON value per ping is
+    // not a cost worth a second component parser to avoid — a second parser is
+    // exactly what this module's doc warns about, and what it had.
+    lodestone_model::Text::from_json(&v.to_string()).to_spans_expanding_legacy()
 }
 
 /// Decodes a `favicon` field into PNG bytes.

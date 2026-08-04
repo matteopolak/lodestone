@@ -5,16 +5,25 @@
 
 use lodestone_game::scoreboard::{NumberFormat, Scoreboard};
 use lodestone_model::Text;
+use lodestone_model::text::{TextSpan, TextStyle};
 
 use crate::overlay::{Sidebar, SidebarLine};
 
 const MAX_SIDEBAR_LINES: usize = 15;
 
-/// Resolve a component's `translate` nodes with `translate`, then flatten to a
-/// plain string — the shape the HUD sidebar draws. Keeps this module free of the
-/// language table itself: the caller supplies the translator closure.
-fn plain(text: &Text, translate: &dyn Fn(&str) -> Option<String>) -> String {
-    lodestone_game::text::resolve(text, translate).to_plain_string()
+/// Resolve a component's `translate` nodes with `translate`, then flatten to
+/// **styled spans** — the shape the HUD sidebar draws. Keeps this module free of
+/// the language table itself: the caller supplies the translator closure.
+///
+/// This was `to_plain_string()`, and that call was the single line where the
+/// sidebar lost every colour a server sent. `lodestone_game::text::resolve`
+/// hands back a `Text` with style fully intact (its own test asserts
+/// `style.color == Some(Aqua)` survives); `to_plain_string` then threw all of it
+/// away, one layer above a HUD that had no way to accept it anyway. `to_spans`
+/// resolves the same tree *and* applies `TextStyle::inherit` down it, so a
+/// nested run with no colour of its own arrives carrying its parent's.
+fn spans(text: &Text, translate: &dyn Fn(&str) -> Option<String>) -> Vec<TextSpan> {
+    lodestone_game::text::resolve(text, translate).to_spans()
 }
 
 /// Builds the right-edge sidebar view from the folded game scoreboard, resolving
@@ -38,38 +47,58 @@ pub fn sidebar_from(
                 &entry.number_format
             };
             SidebarLine {
-                label: plain(
+                label: spans(
                     &entry
                         .display_name
                         .as_ref()
                         .map_or_else(|| scoreboard.display_name_of(holder), Clone::clone),
                     translate,
                 ),
-                score: score_text(entry.value, number_format, translate),
+                score: score_spans(entry.value, number_format, translate),
             }
         })
         .collect();
     Some(Sidebar {
-        title: plain(&objective.display_name, translate),
+        title: spans(&objective.display_name, translate),
         lines,
     })
 }
 
-fn score_text(
+/// The score cell's spans for one row.
+///
+/// `NumberFormat::Styled` used to be matched as `Styled(_)` alongside
+/// `Default` — the server's chosen colour was bound to a wildcard and dropped on
+/// the floor, which is the whole point of that variant existing. It now becomes a
+/// single span carrying that colour, so the HUD's default red is overridden
+/// exactly where the server asked and nowhere else.
+fn score_spans(
     value: i32,
     format: &NumberFormat,
     translate: &dyn Fn(&str) -> Option<String>,
-) -> String {
+) -> Vec<TextSpan> {
     match format {
-        NumberFormat::Blank => String::new(),
-        NumberFormat::Fixed(text) => plain(text, translate),
-        NumberFormat::Default | NumberFormat::Styled(_) => value.to_string(),
+        NumberFormat::Blank => Vec::new(),
+        NumberFormat::Fixed(text) => spans(text, translate),
+        NumberFormat::Styled(color) => vec![TextSpan {
+            text: value.to_string(),
+            style: TextStyle {
+                color: Some(*color),
+                ..TextStyle::default()
+            },
+        }],
+        // No style of its own: an uncoloured span defers to the HUD's base
+        // colour, which for the score column is vanilla's red.
+        NumberFormat::Default => vec![TextSpan {
+            text: value.to_string(),
+            style: TextStyle::default(),
+        }],
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::overlay::spans_text;
     use lodestone_game::scoreboard::{DisplaySlot, Objective, ScoreEntry};
     use lodestone_model::Text;
 
@@ -95,13 +124,19 @@ mod tests {
         scoreboard.set_score("kills", "Bob", 3);
 
         let side = sidebar_from(&scoreboard, &no_tr).expect("sidebar visible");
-        assert_eq!(side.title, "Kills");
-        let rows: Vec<(&str, &str)> = side
+        assert_eq!(spans_text(&side.title), "Kills");
+        let rows: Vec<(String, String)> = side
             .lines
             .iter()
-            .map(|line| (line.label.as_str(), line.score.as_str()))
+            .map(|line| (spans_text(&line.label), spans_text(&line.score)))
             .collect();
-        assert_eq!(rows, vec![("Alice the Brave", "7"), ("Bob", "3")]);
+        assert_eq!(
+            rows,
+            vec![
+                ("Alice the Brave".to_string(), "7".to_string()),
+                ("Bob".to_string(), "3".to_string())
+            ]
+        );
     }
 
     #[test]
@@ -123,12 +158,18 @@ mod tests {
         );
 
         let side = sidebar_from(&scoreboard, &no_tr).expect("sidebar visible");
-        let rows: Vec<(&str, &str)> = side
+        let rows: Vec<(String, String)> = side
             .lines
             .iter()
-            .map(|line| (line.label.as_str(), line.score.as_str()))
+            .map(|line| (spans_text(&line.label), spans_text(&line.score)))
             .collect();
-        assert_eq!(rows, vec![("Hidden", ""), ("Fixed", "ok")]);
+        assert_eq!(
+            rows,
+            vec![
+                ("Hidden".to_string(), String::new()),
+                ("Fixed".to_string(), "ok".to_string())
+            ]
+        );
     }
 
     #[test]
@@ -158,13 +199,16 @@ mod tests {
             _ => None,
         };
         let side = sidebar_from(&scoreboard, &tr).expect("sidebar visible");
-        assert_eq!(side.title, "Statistics");
-        assert_eq!(side.lines[0].label, "Spider");
+        assert_eq!(spans_text(&side.title), "Statistics");
+        assert_eq!(spans_text(&side.lines[0].label), "Spider");
 
         // Negative control: without the table, the raw key leaks through — the
         // exact defect this wiring fixes.
         let raw = sidebar_from(&scoreboard, &no_tr).expect("sidebar visible");
-        assert_eq!(raw.lines[0].label, "entity.minecraft.spider");
+        assert_eq!(
+            spans_text(&raw.lines[0].label),
+            "entity.minecraft.spider"
+        );
     }
 
     #[test]

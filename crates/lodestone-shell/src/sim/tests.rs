@@ -2795,15 +2795,23 @@ fn sidebar_rows_read_the_clients_one_folded_scoreboard() {
     }
 
     let sidebar = sim.sidebar().expect("sidebar objective should be visible");
-    assert_eq!(sidebar.title, "Kills");
-    let rows: Vec<(&str, &str)> = sidebar
+    assert_eq!(crate::overlay::spans_text(&sidebar.title), "Kills");
+    let rows: Vec<(String, String)> = sidebar
         .lines
         .iter()
-        .map(|line| (line.label.as_str(), line.score.as_str()))
+        .map(|line| {
+            (
+                crate::overlay::spans_text(&line.label),
+                crate::overlay::spans_text(&line.score),
+            )
+        })
         .collect();
     assert_eq!(
         rows,
-        vec![("Alice the Brave", "7"), ("Bob", "3")],
+        vec![
+            ("Alice the Brave".to_string(), "7".to_string()),
+            ("Bob".to_string(), "3".to_string())
+        ],
         "sidebar rows must come from the client's folded Scoreboard state"
     );
 }
