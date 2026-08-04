@@ -38,8 +38,9 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   per-material sheets resolved through the `equipment_asset` chain, drawn through the
   entity pipeline over the wearer's own already-animated part matrices.
 - [Autonomous navigation: `lodestone-nav` + `lodestone-autopilot`](./autonomous-navigation.md) —
-  Two crates under [`crates/plugins/`](../crates/plugins/) implementing the M1 slice
-  of [`docs/baritone-port.md`](./baritone-port.md)'s Baritone-class navigation design:
+  Two crates under [`crates/plugins/`](../crates/plugins/) implementing M1 and part of
+  M2 of [`docs/baritone-port.md`](./baritone-port.md)'s Baritone-class navigation
+  design:
 - [Banner and shield pattern compositing (issue #174)](./banner-shield-patterns.md) —
   The shared colour/ordering math behind vanilla's banner and shield pattern system: a
   base dye colour plus an ordered list of pattern layers, each drawn as a masked
@@ -334,6 +335,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   [`crates/lodestone-shell/src/app.rs`](../crates/lodestone-shell/src/app.rs) owns the
   shell's frame clock. Once per event-loop iteration it answers two questions: **how
   much real time to hand the simulation**, and **whether to present a frame at all**.
+- [Fuzz/property-testing harness](./fuzz-harness.md) — `crates/lodestone-fuzz` is a
+  property-based fuzzing harness (issue #282) for lodestone's wire decoders — the
+  first one in the repo. It exists to check properties that need no expected value at
+  all: a decoder must never panic on arbitrary bytes, a truncated prefix of a valid
+  packet must error cleanly, and a length prefix must not force an allocation
+  disconnected from the bytes actually available. That last property is not
+  hypothetical — this harness found it already violated on its first run (see "Bug
+  found" below).
 - [`gpu/` module layout](./gpu-module-layout.md) —
   `crates/lodestone-shell/src/gpu.rs` was a single ~5,300-line file carrying eight
   distinct render responsibilities (block outline, debug lines, per-frame stats,
