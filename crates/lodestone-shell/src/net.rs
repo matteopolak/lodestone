@@ -1656,7 +1656,30 @@ fn forward(
         }
         // Everything else (keep-alive, entities, time, player list, chunk
         // unloads) isn't needed by the shell yet.
-        _ => return Ok(()),
+        //
+        // The `debug_assert!` is the only thing standing between this arm and the
+        // island class `CLAUDE.md` §1 names — **four** have already been found in
+        // this one function (`BLOCK_EVENT`, `ItemPickup`, the sound family,
+        // `WeatherChanged`), each a correct, tested decode reaching zero pixels.
+        // `lodestone_model::event::route` is an *exhaustive* table beside the
+        // `ClientEvent` declaration (`#[non_exhaustive]` does not bind inside the
+        // defining crate), so a variant that says it belongs on the shell's stream
+        // and has no arm above now fails loudly in every debug test and oracle run
+        // instead of quietly costing a chest lid.
+        //
+        // This function deliberately stays non-exhaustive: a ~100-arm match does
+        // not belong in a file this contended. `must_forward()` excludes the two
+        // *guarded* arms above — `LevelEvent`'s literal `2001` and
+        // `EntitySpawned`'s `lightning_bolt` — whose other values reach here
+        // legitimately. See `docs/event-routing.md`.
+        ref other => {
+            debug_assert!(
+                !lodestone_model::event::route(other).must_forward(),
+                "`lodestone_model::event::route` routes this event to the shell, but \
+                 `forward` has no arm for it, so it reaches zero pixels: {other:?}"
+            );
+            return Ok(());
+        }
     };
     tx.send(update).map_err(|_| ())
 }
