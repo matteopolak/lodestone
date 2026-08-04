@@ -405,14 +405,24 @@ Two specific traps, both of which have already cost real work:
 Prefer `cargo xtask connectedness` over any hand-derived coverage number; the hand-derived version
 has been wrong four times in four different ways.
 
-**But know what it measures, because it is silent rather than wrong outside that scope.** It reports
-**protocol packet decode → event wiring**, not Rust call graphs. Pointed at a *crate-internal* island
-— an implemented type nothing in the workspace constructs — it returns **byte-identical output before
-and after the fix**, which reads as "no change" rather than "not applicable". Measured: an agent
-closing `projectile.rs` and `item_entity.rs`'s missing tick drivers ran it either side and correctly
-reported the identical output as meaningless here instead of quoting it as a result. For that class,
-the instrument is a grep for constructors across the whole tree plus a test that drives the *registry*
-rather than the type.
+**But know what it measures, because it is silent rather than wrong outside that scope — and it is
+narrower than its name suggests.** Measured twice today, each time by an agent I had pointed at it
+wrongly:
+
+- It reports **clientbound decode → event wiring on the client side only.** It does **not** measure
+  serverbound decode in `lodestone-server`; an agent implementing three server decode arms ran it and
+  found it reports client encode coverage exclusively, matching a prior finding already recorded in
+  `docs/roadmap/protocol.md`. Server decode coverage has to be counted by grep (that agent measured
+  5/69 → 8/69 by hand for exactly this reason).
+- It does not measure **Rust call graphs** either. Pointed at a *crate-internal* island — an
+  implemented type nothing in the workspace constructs — it returns **byte-identical output before and
+  after the fix**, which reads as "no change" rather than "not applicable". The agent closing
+  `projectile.rs`/`item_entity.rs`'s missing tick drivers hit this and correctly reported the identical
+  output as meaningless rather than quoting it.
+
+So: right instrument for "is this clientbound packet reaching anything", wrong one for everything else.
+For a crate-internal island, grep for constructors tree-wide plus a test that drives the *registry*
+rather than the type. For server decode, grep the packet ids.
 
 ---
 
