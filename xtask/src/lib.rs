@@ -818,7 +818,9 @@ fn format_rust_source(source: &str) -> Result<String> {
     String::from_utf8(output.stdout).context("rustfmt emitted non-UTF-8 output")
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+// `PartialEq` only (not `Eq`): `BenchCompare`'s `tolerance: f64` has no `Eq`
+// impl, and assert_eq! in this module's tests only needs `PartialEq + Debug`.
+#[derive(Clone, Debug, PartialEq)]
 pub enum CliCommand {
     Help,
     GenPacketIds {
@@ -869,6 +871,14 @@ pub enum CliCommand {
     DocsIndex {
         check: bool,
     },
+    BenchCompare {
+        path: PathBuf,
+        metric: String,
+        scene: String,
+        baseline_sha: Option<String>,
+        candidate_sha: Option<String>,
+        tolerance: f64,
+    },
     Planned {
         name: &'static str,
     },
@@ -876,7 +886,7 @@ pub enum CliCommand {
 
 #[must_use]
 pub const fn root_help() -> &'static str {
-    "xtask\n\nUsage:\n    cargo run -p xtask -- <command> [options]\n\nCommands:\n    gen-packet-ids   Generate Rust packet ID tables from a Mojang report or minecraft-data\n    fetch-assets     Download and verify vanilla client.jar, the asset index, and the asset-store objects client.jar stubs, into .cache/mc/<version>/\n    fetch-sounds     Download and verify the vanilla .ogg sound corpus (~80 MB) into .cache/mc/<version>/objects/\n    fetch-version    Download and verify vanilla server.jar into .cache/mc/<version>/\n    version-table    Generate/check the epic-343 16-version protocol/data-version table\n    gen-registries   Generate selected registry id->ResourceKey tables from registries.json\n    check-isolation  Enforce protocol version crate dependency isolation\n    check-connected  Enforce workspace crates are reachable from shipped binary/cdylib roots\n    connectedness    Report v770 play packet reachability\n    check-deletable  Simulate deleting a version family's folder and report the fallout\n    codegen-ratio    Report generated-vs-hand-written codec metrics per protocol family\n    new-version      Scaffold a protocol family; registry support is withheld until SHAPE_REVIEW.toml is discharged\n    gen-reports      Not implemented yet\n    conformance      Run packet-id, registry, isolation, deletability, test, and clippy checks for a family\n    docs-index       Generate docs/README.md from every doc's own H1 + `## What it is` summary\n\nOptions for gen-packet-ids:\n    --version <version>   Minecraft version, e.g. 26.2 (Mojang) or 1.8 (minecraft-data dir)\n    --protocol <id>       Protocol version, e.g. 776 or 47\n    --source <source>     Report source: mojang (default) or minecraft-data\n    --out <path>          Output path under crates/protocol/*/src/generated/\n    --check               Compare generated output against disk and fail on drift without writing\n\nOptions for gen-registries:\n    --version <version>       Minecraft version, e.g. 26.2\n    --protocol <id>           Protocol version, e.g. 776\n    --out-dir <path>          Output directory under crates/protocol/*/src/generated\n    --registries <csv>        Registry keys to generate (default: sound_event,particle_type,menu,item)\n    --check                   Compare generated registry tables against disk without writing\n\nOptions for check-connected:\n    --allowlist <path>    TOML file of explicit exceptions (default: xtask/check-connected.toml)\n\nOptions for connectedness:\n    Parses v770's generated packet_ids.rs for play denominators, then classifies adapter dispatch outlets (ClientEvent, Directive, world/sink writes) with explicit UNCLASSIFIED output.\n\nOptions for check-deletable:\n    <version>             Version family to simulate deleting: package name (lodestone-v47), folder (v47), or path\n\nOptions for codegen-ratio:\n    Reports both the optimistic per-struct derive/manual ratio and the more decision-useful absolute hand-written source lines.\n\nOptions for new-version:\n    --protocol <id>       Protocol number for the new family (required)\n    --minecraft <ver>    Minecraft version key for the packet-id oracle (required)\n    --from <family>       Existing family to copy from, e.g. v770 (default) or v47\n    --source <source>     Oracle: mojang or minecraft-data (default inferred from --from)\n    --name <vNNN>         Family folder/label (default v<protocol>)\n    --force               Overwrite the target folder if it already exists\n    SHAPE_REVIEW.toml     Generated when packet shapes differ; every entry must be reviewed before registry support may be added\n\nOptions for conformance:\n    --family <vNNN>       Version family folder/label to check, e.g. v735\n    --minecraft <ver>     Minecraft version key for packet-id/registry checks\n    --protocol <id>       Protocol number for the family\n    --source <source>     Packet-id oracle: mojang or minecraft-data (default mojang)\n    --skip-cargo          Only run xtask structural checks; skip cargo test/clippy\n\nOptions for fetch-version:\n    --version <version>   Minecraft version, e.g. 1.16.5\n    --force               Re-download even when cached server.jar already matches its SHA-1\n\nOptions for fetch-assets:\n    --version <version>   Minecraft version, e.g. 26.2\n    --force               Re-download even when cached files already match their SHA-1\n    -h, --help            Print help\n  Also fetches asset-store objects, ~3.2 MB in total:\n    - the 8 whose name is in client.jar at a DIFFERENT size, i.e. the stubs the jar ships to be\n      overridden (the 6 panorama faces, panorama_overlay, unifont.json). Nothing at runtime can\n      tell a stub from the real asset, which is why these must be eager.\n    - minecraft/sounds.json (626 KB), which ShellAudio reads eagerly and cannot start without.\n  The 4871 .ogg samples (375 MB) are NOT fetched: a missing sample is one silent sound, resolved\n  lazily per event. Run `fetch-sounds` for the corpus.\n\nOptions for fetch-sounds:\n    --version <version>   Minecraft version, e.g. 26.2 (fetch-assets must have run first)\n    --all                 Also fetch background music and jukebox discs (+293 MB, 92 objects)\n    --jobs <n>            Concurrent downloads (default 12)\n    --force               Re-download every object even when it already matches its SHA-1\n  Derives the corpus from sounds.json, not a file list: every sample any non-music event can\n  select. Measured on 26.2 -- 4751 objects, 80.14 MB, including all six biome ambience loops.\n  Excluded by default: 70 music tracks + 22 jukebox records = 92 objects, 293.23 MB. The 28 index\n  .ogg objects no event references are fetched in neither mode. Every object's SHA-1 is verified\n  against the index, and a re-run of a complete fetch downloads nothing.\n\nOptions for version-table:\n    --check               Compare the generated table against crates/lodestone-registry/src/generated/version_table.rs and fail on drift without writing\n    --fetch-missing       Also run fetch-version for any of the 16 target versions with no cached .cache/mc/<version>/server.jar (network + disk heavy; off by default)\n\nOptions for docs-index:\n    --check               Compare the generated index against docs/README.md and fail on drift without writing\n  Do not hand-edit docs/README.md: add/edit a doc under docs/ (with an H1 and a `## What\n  it is`/`## What this is` summary paragraph) and re-run this command. `cargo test -p xtask`\n  already fails if the committed file drifts from the generator.\n"
+    "xtask\n\nUsage:\n    cargo run -p xtask -- <command> [options]\n\nCommands:\n    gen-packet-ids   Generate Rust packet ID tables from a Mojang report or minecraft-data\n    fetch-assets     Download and verify vanilla client.jar, the asset index, and the asset-store objects client.jar stubs, into .cache/mc/<version>/\n    fetch-sounds     Download and verify the vanilla .ogg sound corpus (~80 MB) into .cache/mc/<version>/objects/\n    fetch-version    Download and verify vanilla server.jar into .cache/mc/<version>/\n    version-table    Generate/check the epic-343 16-version protocol/data-version table\n    gen-registries   Generate selected registry id->ResourceKey tables from registries.json\n    check-isolation  Enforce protocol version crate dependency isolation\n    check-connected  Enforce workspace crates are reachable from shipped binary/cdylib roots\n    connectedness    Report v770 play packet reachability\n    check-deletable  Simulate deleting a version family's folder and report the fallout\n    codegen-ratio    Report generated-vs-hand-written codec metrics per protocol family\n    new-version      Scaffold a protocol family; registry support is withheld until SHAPE_REVIEW.toml is discharged\n    gen-reports      Not implemented yet\n    conformance      Run packet-id, registry, isolation, deletability, test, and clippy checks for a family\n    docs-index       Generate docs/README.md from every doc's own H1 + `## What it is` summary\n    bench-compare    Ratio + verdict between two recorded bench-results/*.jsonl runs (issue #82)\n\nOptions for gen-packet-ids:\n    --version <version>   Minecraft version, e.g. 26.2 (Mojang) or 1.8 (minecraft-data dir)\n    --protocol <id>       Protocol version, e.g. 776 or 47\n    --source <source>     Report source: mojang (default) or minecraft-data\n    --out <path>          Output path under crates/protocol/*/src/generated/\n    --check               Compare generated output against disk and fail on drift without writing\n\nOptions for gen-registries:\n    --version <version>       Minecraft version, e.g. 26.2\n    --protocol <id>           Protocol version, e.g. 776\n    --out-dir <path>          Output directory under crates/protocol/*/src/generated\n    --registries <csv>        Registry keys to generate (default: sound_event,particle_type,menu,item)\n    --check                   Compare generated registry tables against disk without writing\n\nOptions for check-connected:\n    --allowlist <path>    TOML file of explicit exceptions (default: xtask/check-connected.toml)\n\nOptions for connectedness:\n    Parses v770's generated packet_ids.rs for play denominators, then classifies adapter dispatch outlets (ClientEvent, Directive, world/sink writes) with explicit UNCLASSIFIED output.\n\nOptions for check-deletable:\n    <version>             Version family to simulate deleting: package name (lodestone-v47), folder (v47), or path\n\nOptions for codegen-ratio:\n    Reports both the optimistic per-struct derive/manual ratio and the more decision-useful absolute hand-written source lines.\n\nOptions for new-version:\n    --protocol <id>       Protocol number for the new family (required)\n    --minecraft <ver>    Minecraft version key for the packet-id oracle (required)\n    --from <family>       Existing family to copy from, e.g. v770 (default) or v47\n    --source <source>     Oracle: mojang or minecraft-data (default inferred from --from)\n    --name <vNNN>         Family folder/label (default v<protocol>)\n    --force               Overwrite the target folder if it already exists\n    SHAPE_REVIEW.toml     Generated when packet shapes differ; every entry must be reviewed before registry support may be added\n\nOptions for conformance:\n    --family <vNNN>       Version family folder/label to check, e.g. v735\n    --minecraft <ver>     Minecraft version key for packet-id/registry checks\n    --protocol <id>       Protocol number for the family\n    --source <source>     Packet-id oracle: mojang or minecraft-data (default mojang)\n    --skip-cargo          Only run xtask structural checks; skip cargo test/clippy\n\nOptions for fetch-version:\n    --version <version>   Minecraft version, e.g. 1.16.5\n    --force               Re-download even when cached server.jar already matches its SHA-1\n\nOptions for fetch-assets:\n    --version <version>   Minecraft version, e.g. 26.2\n    --force               Re-download even when cached files already match their SHA-1\n    -h, --help            Print help\n  Also fetches asset-store objects, ~3.2 MB in total:\n    - the 8 whose name is in client.jar at a DIFFERENT size, i.e. the stubs the jar ships to be\n      overridden (the 6 panorama faces, panorama_overlay, unifont.json). Nothing at runtime can\n      tell a stub from the real asset, which is why these must be eager.\n    - minecraft/sounds.json (626 KB), which ShellAudio reads eagerly and cannot start without.\n  The 4871 .ogg samples (375 MB) are NOT fetched: a missing sample is one silent sound, resolved\n  lazily per event. Run `fetch-sounds` for the corpus.\n\nOptions for fetch-sounds:\n    --version <version>   Minecraft version, e.g. 26.2 (fetch-assets must have run first)\n    --all                 Also fetch background music and jukebox discs (+293 MB, 92 objects)\n    --jobs <n>            Concurrent downloads (default 12)\n    --force               Re-download every object even when it already matches its SHA-1\n  Derives the corpus from sounds.json, not a file list: every sample any non-music event can\n  select. Measured on 26.2 -- 4751 objects, 80.14 MB, including all six biome ambience loops.\n  Excluded by default: 70 music tracks + 22 jukebox records = 92 objects, 293.23 MB. The 28 index\n  .ogg objects no event references are fetched in neither mode. Every object's SHA-1 is verified\n  against the index, and a re-run of a complete fetch downloads nothing.\n\nOptions for version-table:\n    --check               Compare the generated table against crates/lodestone-registry/src/generated/version_table.rs and fail on drift without writing\n    --fetch-missing       Also run fetch-version for any of the 16 target versions with no cached .cache/mc/<version>/server.jar (network + disk heavy; off by default)\n\nOptions for docs-index:\n    --check               Compare the generated index against docs/README.md and fail on drift without writing\n  Do not hand-edit docs/README.md: add/edit a doc under docs/ (with an H1 and a `## What\n  it is`/`## What this is` summary paragraph) and re-run this command. `cargo test -p xtask`\n  already fails if the committed file drifts from the generator.\n\nOptions for bench-compare:\n    <path>                 A bench-results/<bench>.jsonl file (gitignored local measurement log)\n    --metric <name>        Metric name to compare, e.g. neighbourhood_factor_vs_single\n    --scene <name>          Scene string to compare (must match exactly, including punctuation)\n    --candidate <sha>       Git-sha prefix of the \"after\" run (default: most recent recorded run)\n    --baseline <sha>        Git-sha prefix of the \"before\" run (default: the run immediately\n                            preceding the candidate on the same machine/profile)\n    --tolerance <pct>       Tolerance band as a percentage (default 25, i.e. +/-25%)\n  Never wired into CI by this command -- a manual/local/scheduled check, per\n  docs/roadmap/benchmarks.md's policy. Exits non-zero when the ratio falls outside the\n  tolerance band (useful for a future opt-in script; this alone does not make anything\n  CI-blocking).\n"
 }
 
 pub fn parse_cli_args<I, S>(args: I) -> Result<CliCommand>
@@ -908,6 +918,7 @@ where
         "version-table" => parse_version_table_args(&args[1..]),
         "conformance" => parse_conformance_args(&args[1..]),
         "docs-index" => parse_docs_index_args(&args[1..]),
+        "bench-compare" => parse_bench_compare_args(&args[1..]),
         "gen-reports" => Ok(CliCommand::Planned {
             name: planned_command_name(command).expect("matched planned command has a name"),
         }),
@@ -1109,6 +1120,31 @@ pub fn run_cli_command(command: CliCommand) -> Result<()> {
             } else {
                 let path = write_docs_index(&workspace_root)?;
                 println!("generated {}", path.display());
+            }
+            Ok(())
+        }
+        CliCommand::BenchCompare {
+            path,
+            metric,
+            scene,
+            baseline_sha,
+            candidate_sha,
+            tolerance,
+        } => {
+            let records = read_bench_records(&path)?;
+            let report = compare_bench_records(
+                &records,
+                &BenchCompareOptions {
+                    metric,
+                    scene,
+                    baseline_sha,
+                    candidate_sha,
+                    tolerance,
+                },
+            )?;
+            print!("{}", report.render());
+            if !report.within_tolerance() {
+                std::process::exit(1);
             }
             Ok(())
         }
@@ -1317,6 +1353,81 @@ fn parse_docs_index_args(args: &[String]) -> Result<CliCommand> {
     }
 
     Ok(CliCommand::DocsIndex { check })
+}
+
+fn parse_bench_compare_args(args: &[String]) -> Result<CliCommand> {
+    let mut path: Option<PathBuf> = None;
+    let mut metric: Option<String> = None;
+    let mut scene: Option<String> = None;
+    let mut baseline_sha: Option<String> = None;
+    let mut candidate_sha: Option<String> = None;
+    let mut tolerance = 0.25_f64;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "-h" | "--help" => return Ok(CliCommand::Help),
+            "--metric" => {
+                index += 1;
+                metric = Some(
+                    args.get(index)
+                        .ok_or_else(|| anyhow!("--metric requires a value"))?
+                        .clone(),
+                );
+            }
+            "--scene" => {
+                index += 1;
+                scene = Some(
+                    args.get(index)
+                        .ok_or_else(|| anyhow!("--scene requires a value"))?
+                        .clone(),
+                );
+            }
+            "--baseline" => {
+                index += 1;
+                baseline_sha = Some(
+                    args.get(index)
+                        .ok_or_else(|| anyhow!("--baseline requires a git-sha prefix"))?
+                        .clone(),
+                );
+            }
+            "--candidate" => {
+                index += 1;
+                candidate_sha = Some(
+                    args.get(index)
+                        .ok_or_else(|| anyhow!("--candidate requires a git-sha prefix"))?
+                        .clone(),
+                );
+            }
+            "--tolerance" => {
+                index += 1;
+                let raw = args
+                    .get(index)
+                    .ok_or_else(|| anyhow!("--tolerance requires a percentage, e.g. 25"))?;
+                let pct: f64 = raw
+                    .parse()
+                    .with_context(|| format!("--tolerance {raw:?} is not a number"))?;
+                tolerance = pct / 100.0;
+            }
+            unknown if unknown.starts_with("--") => bail!("unknown bench-compare option {unknown:?}"),
+            positional => {
+                if path.is_some() {
+                    bail!("bench-compare takes exactly one positional <path>, got a second: {positional:?}");
+                }
+                path = Some(PathBuf::from(positional));
+            }
+        }
+        index += 1;
+    }
+
+    Ok(CliCommand::BenchCompare {
+        path: path.ok_or_else(|| anyhow!("bench-compare requires a <path> to a bench-results/*.jsonl file"))?,
+        metric: metric.ok_or_else(|| anyhow!("bench-compare requires --metric <name>"))?,
+        scene: scene.ok_or_else(|| anyhow!("bench-compare requires --scene <name>"))?,
+        baseline_sha,
+        candidate_sha,
+        tolerance,
+    })
 }
 
 fn parse_gen_registries_args(args: &[String]) -> Result<CliCommand> {
@@ -6963,6 +7074,212 @@ pub fn check_docs_index(workspace_root: &Path) -> Result<DocsIndexCheck> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// bench-compare: issue #82's ratio-against-a-stored-baseline tool
+// ---------------------------------------------------------------------------
+//
+// `docs/roadmap/benchmarks.md` already states the policy this tool
+// implements (ratio against a same-machine baseline, ±25% tolerance band,
+// never a CI-blocking gate) -- issue #82's own acceptance criteria calls that
+// policy "already written" and asks for the one piece that was still
+// missing: "a small comparison script/tool ... that reads two
+// bench-results/*.jsonl records and reports a ratio + verdict against a
+// stated tolerance." `benches/support.rs`'s `record()` already does this
+// automatically for "this run vs the immediately preceding run" every time a
+// bench executes; this command is the standalone form that needs no bench
+// re-run at all -- point it at an existing `bench-results/<bench>.jsonl` and
+// ask it to compare two *specific* recorded commits (e.g. "before my change"
+// vs "after my change") without regenerating anything.
+//
+// Per CLAUDE.md's evidence standard, this never asserts a verdict like
+// "regression" -- a metric can be either direction-is-better depending on
+// its unit (lower is better for a `_ms` timing, higher is better for a
+// `_throughput` count), and this schema does not carry that annotation. It
+// reports the ratio and whether it falls inside the tolerance band, and lets
+// the caller -- who knows what the metric means -- read the direction.
+
+/// One recorded line from a `bench-results/<bench>.jsonl` file, matching
+/// `benches/support.rs`'s `record()` schema exactly (kept as its own
+/// deserialization target, independent of that file, since `xtask` cannot
+/// depend on any one crate's `benches/support.rs` — it is intentionally
+/// duplicated per crate, not a shared module).
+#[derive(Clone, Debug)]
+pub struct BenchRecord {
+    pub timestamp: u64,
+    pub git_sha: String,
+    pub machine: String,
+    pub profile: String,
+    pub scene: String,
+    pub metric: String,
+    pub value: f64,
+    pub unit: String,
+}
+
+/// Parses every line of a `bench-results/*.jsonl` file into [`BenchRecord`]s,
+/// in file order (which is chronological -- the format is append-only).
+/// Malformed lines are skipped with a `None` filtered out rather than
+/// failing the whole read, matching `support.rs`'s own tolerant parsing (a
+/// hand-edited or partially-written line should not make every other
+/// recorded run unreadable).
+pub fn read_bench_records(path: &Path) -> Result<Vec<BenchRecord>> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let records = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|v| {
+            Some(BenchRecord {
+                timestamp: v.get("timestamp")?.as_u64()?,
+                git_sha: v.get("git_sha")?.as_str()?.to_string(),
+                machine: v.get("machine")?.as_str()?.to_string(),
+                profile: v.get("profile")?.as_str()?.to_string(),
+                scene: v.get("scene")?.as_str()?.to_string(),
+                metric: v.get("metric")?.as_str()?.to_string(),
+                value: v.get("value")?.as_f64()?,
+                unit: v.get("unit")?.as_str()?.to_string(),
+            })
+        })
+        .collect();
+    Ok(records)
+}
+
+/// Inputs to [`compare_bench_records`].
+#[derive(Clone, Debug)]
+pub struct BenchCompareOptions {
+    pub metric: String,
+    pub scene: String,
+    /// Git-sha prefix to select the candidate ("after") run. `None` means
+    /// "the most recent recorded run matching `metric`/`scene`".
+    pub candidate_sha: Option<String>,
+    /// Git-sha prefix to select the baseline ("before") run. `None` means
+    /// "the run immediately preceding the candidate, on the same machine and
+    /// build profile" -- the same pairing `support.rs::record` compares
+    /// against automatically.
+    pub baseline_sha: Option<String>,
+    /// Tolerance band as a fraction (e.g. `0.25` for ±25%), matching
+    /// `docs/roadmap/benchmarks.md`'s stated policy and `support.rs`'s own
+    /// literal.
+    pub tolerance: f64,
+}
+
+/// The result of comparing two [`BenchRecord`]s.
+#[derive(Clone, Debug)]
+pub struct BenchCompareReport {
+    pub baseline: BenchRecord,
+    pub candidate: BenchRecord,
+    pub ratio: f64,
+    pub tolerance: f64,
+}
+
+impl BenchCompareReport {
+    #[must_use]
+    pub fn within_tolerance(&self) -> bool {
+        (1.0 - self.tolerance..=1.0 + self.tolerance).contains(&self.ratio)
+    }
+
+    #[must_use]
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        let _ = writeln!(
+            out,
+            "metric={} scene={:?}",
+            self.candidate.metric, self.candidate.scene
+        );
+        let _ = writeln!(
+            out,
+            "  baseline  {:>12.4}{} @ {} ({}, {})",
+            self.baseline.value, self.baseline.unit, self.baseline.git_sha, self.baseline.machine, self.baseline.profile
+        );
+        let _ = writeln!(
+            out,
+            "  candidate {:>12.4}{} @ {} ({}, {})",
+            self.candidate.value, self.candidate.unit, self.candidate.git_sha, self.candidate.machine, self.candidate.profile
+        );
+        let band_pct = self.tolerance * 100.0;
+        if self.within_tolerance() {
+            let _ = writeln!(
+                out,
+                "  ratio {:.3} -- within +/-{band_pct:.2}% band -> OK",
+                self.ratio
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "  ratio {:.3} -- OUTSIDE +/-{band_pct:.2}% band -> FLAGGED (direction depends on whether \
+                 {:?} is lower- or higher-is-better; this tool does not know)",
+                self.ratio, self.candidate.metric
+            );
+        }
+        out
+    }
+}
+
+/// Finds the baseline/candidate pair `opts` describes among `records`
+/// (already filtered to one `metric`/`scene`... no -- takes the *unfiltered*
+/// list and does the metric/scene filtering itself, so callers just hand it
+/// [`read_bench_records`]'s output) and reports their ratio.
+pub fn compare_bench_records(records: &[BenchRecord], opts: &BenchCompareOptions) -> Result<BenchCompareReport> {
+    let filtered: Vec<&BenchRecord> = records
+        .iter()
+        .filter(|r| r.metric == opts.metric && r.scene == opts.scene)
+        .collect();
+    if filtered.is_empty() {
+        bail!(
+            "no records match metric {:?} scene {:?}",
+            opts.metric,
+            opts.scene
+        );
+    }
+
+    let candidate_index = match &opts.candidate_sha {
+        Some(prefix) => filtered
+            .iter()
+            .rposition(|r| r.git_sha.starts_with(prefix.as_str()))
+            .ok_or_else(|| anyhow!("no record matching metric/scene has git_sha prefix {prefix:?} (candidate)"))?,
+        None => filtered.len() - 1,
+    };
+    let candidate = filtered[candidate_index];
+
+    let baseline_index = match &opts.baseline_sha {
+        Some(prefix) => filtered[..candidate_index]
+            .iter()
+            .rposition(|r| r.git_sha.starts_with(prefix.as_str()))
+            .ok_or_else(|| {
+                anyhow!("no record before the candidate has git_sha prefix {prefix:?} (baseline)")
+            })?,
+        None => filtered[..candidate_index]
+            .iter()
+            .rposition(|r| r.machine == candidate.machine && r.profile == candidate.profile)
+            .ok_or_else(|| {
+                anyhow!(
+                    "no prior record on machine {:?} profile {:?} to use as an implicit baseline -- \
+                     pass --baseline <sha>",
+                    candidate.machine,
+                    candidate.profile
+                )
+            })?,
+    };
+    let baseline = filtered[baseline_index];
+
+    if baseline.machine != candidate.machine || baseline.profile != candidate.profile {
+        bail!(
+            "baseline ({}, {}) and candidate ({}, {}) are not the same machine/profile -- \
+             not a valid comparison per the evidence standard (a number is not comparable across machines)",
+            baseline.machine,
+            baseline.profile,
+            candidate.machine,
+            candidate.profile
+        );
+    }
+
+    Ok(BenchCompareReport {
+        baseline: baseline.clone(),
+        candidate: candidate.clone(),
+        ratio: candidate.value / baseline.value,
+        tolerance: opts.tolerance,
+    })
+}
+
 fn file_sha1_hex(path: &Path) -> Result<String> {
     let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut hasher = sha1::Sha1::new();
@@ -7373,6 +7690,206 @@ mod tests {
             generated, committed,
             "docs/README.md is stale vs the doc tree -- regenerate with `cargo xtask docs-index` \
              or `LODESTONE_REGEN=1 cargo test -p xtask docs_index_matches_committed`"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cli_parses_bench_compare_command() -> Result<()> {
+        assert_eq!(
+            parse_cli_args([
+                "bench-compare",
+                "bench-results/foo.jsonl",
+                "--metric",
+                "m",
+                "--scene",
+                "s",
+            ])?,
+            CliCommand::BenchCompare {
+                path: PathBuf::from("bench-results/foo.jsonl"),
+                metric: "m".to_string(),
+                scene: "s".to_string(),
+                baseline_sha: None,
+                candidate_sha: None,
+                tolerance: 0.25,
+            }
+        );
+        assert_eq!(
+            parse_cli_args([
+                "bench-compare",
+                "bench-results/foo.jsonl",
+                "--metric",
+                "m",
+                "--scene",
+                "s",
+                "--baseline",
+                "abc123",
+                "--candidate",
+                "def456",
+                "--tolerance",
+                "10",
+            ])?,
+            CliCommand::BenchCompare {
+                path: PathBuf::from("bench-results/foo.jsonl"),
+                metric: "m".to_string(),
+                scene: "s".to_string(),
+                baseline_sha: Some("abc123".to_string()),
+                candidate_sha: Some("def456".to_string()),
+                tolerance: 0.10,
+            }
+        );
+        assert!(parse_cli_args(["bench-compare", "p.jsonl", "--metric", "m"]).is_err());
+        assert!(root_help().contains("bench-compare"));
+        Ok(())
+    }
+
+    fn bench_record(sha: &str, ts: u64, value: f64) -> BenchRecord {
+        BenchRecord {
+            timestamp: ts,
+            git_sha: sha.to_string(),
+            machine: "macbook.local".to_string(),
+            profile: "release".to_string(),
+            scene: "test scene".to_string(),
+            metric: "test_metric".to_string(),
+            value,
+            unit: "ms".to_string(),
+        }
+    }
+
+    #[test]
+    fn compare_bench_records_defaults_to_latest_vs_immediately_preceding() -> Result<()> {
+        let records = vec![
+            bench_record("aaa000000000", 1, 10.0),
+            bench_record("bbb000000000", 2, 11.0),
+            bench_record("ccc000000000", 3, 20.0),
+        ];
+        let opts = BenchCompareOptions {
+            metric: "test_metric".to_string(),
+            scene: "test scene".to_string(),
+            candidate_sha: None,
+            baseline_sha: None,
+            tolerance: 0.25,
+        };
+        let report = compare_bench_records(&records, &opts)?;
+        assert_eq!(report.baseline.git_sha, "bbb000000000");
+        assert_eq!(report.candidate.git_sha, "ccc000000000");
+        assert!((report.ratio - (20.0 / 11.0)).abs() < 1e-9);
+        assert!(!report.within_tolerance(), "20/11 ~= 1.818, well outside +/-25%");
+        Ok(())
+    }
+
+    #[test]
+    fn compare_bench_records_selects_by_explicit_sha_prefix() -> Result<()> {
+        let records = vec![
+            bench_record("aaa000000000", 1, 10.0),
+            bench_record("bbb000000000", 2, 11.0),
+            bench_record("ccc000000000", 3, 20.0),
+        ];
+        let opts = BenchCompareOptions {
+            metric: "test_metric".to_string(),
+            scene: "test scene".to_string(),
+            candidate_sha: Some("ccc".to_string()),
+            baseline_sha: Some("aaa".to_string()),
+            tolerance: 0.25,
+        };
+        let report = compare_bench_records(&records, &opts)?;
+        assert_eq!(report.baseline.value, 10.0);
+        assert_eq!(report.candidate.value, 20.0);
+        assert!((report.ratio - 2.0).abs() < 1e-9);
+        Ok(())
+    }
+
+    /// Anti-vacuity control for the tolerance check itself: a ratio of
+    /// exactly 1.0 (identical value) must read as within tolerance, run and
+    /// watched to actually assert `true`, not merely constructed.
+    #[test]
+    fn compare_bench_records_within_tolerance_reports_ok_for_identical_values() -> Result<()> {
+        let records = vec![bench_record("aaa000000000", 1, 5.0), bench_record("bbb000000000", 2, 5.0)];
+        let opts = BenchCompareOptions {
+            metric: "test_metric".to_string(),
+            scene: "test scene".to_string(),
+            candidate_sha: None,
+            baseline_sha: None,
+            tolerance: 0.25,
+        };
+        let report = compare_bench_records(&records, &opts)?;
+        assert!(report.within_tolerance());
+        assert!(report.render().contains("-> OK"));
+        Ok(())
+    }
+
+    /// The negative control for the above: run and watched to actually
+    /// fail the same `within_tolerance` predicate, not merely assumed to.
+    #[test]
+    fn compare_bench_records_outside_tolerance_reports_flagged() -> Result<()> {
+        let records = vec![bench_record("aaa000000000", 1, 5.0), bench_record("bbb000000000", 2, 50.0)];
+        let opts = BenchCompareOptions {
+            metric: "test_metric".to_string(),
+            scene: "test scene".to_string(),
+            candidate_sha: None,
+            baseline_sha: None,
+            tolerance: 0.25,
+        };
+        let report = compare_bench_records(&records, &opts)?;
+        assert!(!report.within_tolerance());
+        assert!(report.render().contains("FLAGGED"));
+        Ok(())
+    }
+
+    #[test]
+    fn compare_bench_records_rejects_cross_machine_comparison() {
+        let mut older = bench_record("aaa000000000", 1, 5.0);
+        older.machine = "other-machine".to_string();
+        let records = vec![older, bench_record("bbb000000000", 2, 5.0)];
+        let opts = BenchCompareOptions {
+            metric: "test_metric".to_string(),
+            scene: "test scene".to_string(),
+            candidate_sha: None,
+            baseline_sha: Some("aaa".to_string()),
+            tolerance: 0.25,
+        };
+        let error = compare_bench_records(&records, &opts).unwrap_err();
+        assert!(error.to_string().contains("not the same machine"));
+    }
+
+    #[test]
+    fn compare_bench_records_errors_when_no_records_match() {
+        let records = vec![bench_record("aaa000000000", 1, 5.0)];
+        let opts = BenchCompareOptions {
+            metric: "nonexistent".to_string(),
+            scene: "test scene".to_string(),
+            candidate_sha: None,
+            baseline_sha: None,
+            tolerance: 0.25,
+        };
+        assert!(compare_bench_records(&records, &opts).is_err());
+    }
+
+    /// Demonstration against this repo's own real recorded data (issue #82's
+    /// acceptance criterion: "used by at least one sibling benchmark as a
+    /// demonstration"). `#[ignore]`d because it depends on the *contents* of
+    /// a gitignored, machine-local file that keeps growing every time anyone
+    /// runs the bench -- not hermetic, but valuable to run by hand.
+    #[test]
+    #[ignore = "depends on the local, gitignored bench-results/light_propagation.jsonl history"]
+    fn bench_compare_against_real_light_propagation_history() -> Result<()> {
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let path = workspace_root.join("bench-results/light_propagation.jsonl");
+        let records = read_bench_records(&path)?;
+        let report = compare_bench_records(
+            &records,
+            &BenchCompareOptions {
+                metric: "neighbourhood_factor_vs_single".to_string(),
+                scene: "3x3 realistic terrain neighbourhood".to_string(),
+                candidate_sha: None,
+                baseline_sha: None,
+                tolerance: 0.25,
+            },
+        )?;
+        println!("{}", report.render());
+        assert!(
+            report.within_tolerance(),
+            "issue #80's fixture consolidation should not have changed this bench's numbers"
         );
         Ok(())
     }

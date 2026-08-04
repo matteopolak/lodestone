@@ -593,9 +593,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   was deleting the **double fold** that doc's §1.1 measured.
 - [The settings tree, with unsupported controls disabled](./settings-screen.md) —
   `crates/lodestone-shell/src/menu/options.rs` — vanilla's `OptionsScreen` tree as a
-  **table plus arithmetic**: nine pages, **143 controls**, of which **24 or 25 work**
-  (see below) **and the rest are present and greyed out**. Reached from the title
-  screen's Options button and from the pause menu's, on `Screen::Settings`.
+  **table plus arithmetic**: nine `OptionsList` pages, **143 controls**, of which **25
+  or 26 work** (see below) **and the rest are present and greyed out** — plus a
+  tenth page, Key Binds, which is not an `OptionsList` at all and is counted
+  separately (see below). Reached from the title screen's Options button and from the
+  pause menu's, on `Screen::Settings`.
 - [Shaders](./shaders.md) — Every WGSL shader in the client lives in its own `.wgsl`
   file under `crates/<crate>/src/shaders/`, pulled into the binary at compile time
   with `include_str!`. There is no runtime file loading, no asset path and nothing to
