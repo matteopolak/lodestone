@@ -48,6 +48,15 @@ pub const BABY_START_AGE: i32 = -24_000;
 /// down by one every tick until it reaches `0` (breedable again).
 pub const PARENT_AGE_AFTER_BREEDING: i32 = 6000;
 
+/// Vanilla `Creeper.DEFAULT_MAX_SWELL`
+/// (`.cache/mc/26.2/src/net/minecraft/world/entity/monster/Creeper.java:51`,
+/// `private static final short DEFAULT_MAX_SWELL = 30;`). The fuse length in
+/// ticks: [`swell`](NavigatingMob::swell) climbs by
+/// [`swell_dir`](MobController::swell_dir) once per [`advance`](NavigatingMob::advance)
+/// call, and reaching this value is detonation
+/// (`Creeper.java:144-146`, `explodeCreeper()`).
+pub const MAX_SWELL: i32 = 30;
+
 /// A tiny deterministic RNG (SplitMix64) so a `NavigatingMob` needs no `rand`
 /// dependency and its stroll behaviour is reproducible in tests.
 #[derive(Debug, Clone)]
@@ -150,6 +159,35 @@ pub struct NavigatingMob<'w> {
     /// [`MobController::parent_position`], the same host-computes-the-filter
     /// shape as [`partner_candidate`](Self::partner_candidate).
     parent_candidate: Option<Vec3>,
+    /// Vanilla `Creeper.swellDir` (`DATA_SWELL_DIR`, defaults to `-1` —
+    /// `Creeper.java:100`, `entityData.define(DATA_SWELL_DIR, -1)`). Set by
+    /// [`SwellGoal`](super::goals::SwellGoal) through
+    /// [`MobController::set_swell_dir`], or forced to `1` every
+    /// [`advance`](Self::advance) while [`ignited`](Self::ignited) is `true`
+    /// (`Creeper.java:129-131`). `> 0` climbs [`swell`](Self::swell) toward
+    /// [`MAX_SWELL`]; `<= 0` lets it fall back toward zero.
+    swell_dir: i32,
+    /// Vanilla `Creeper.swell`: the live fuse counter, integrated once per
+    /// tick in [`advance`](Self::advance) unconditionally — exactly like
+    /// [`age`](Self::age)/[`love_ticks`](Self::love_ticks) — regardless of
+    /// whether any goal ran this tick. This is the entity's own `tick()`
+    /// (`Creeper.java:126-151`), distinct from `SwellGoal`, which only ever
+    /// decides the *direction*.
+    swell: i32,
+    /// Vanilla `Creeper.isIgnited()` / `DATA_IS_IGNITED`. `true` forces
+    /// [`swell_dir`](Self::swell_dir) to `1` every tick regardless of what
+    /// [`SwellGoal`](super::goals::SwellGoal) would otherwise choose
+    /// (`Creeper.java:129-131`). Set by [`ignite`](Self::ignite); no
+    /// production caller wires a flint-and-steel/fire-charge interaction to
+    /// it yet (`Creeper.java:210-228`'s `mobInteract`) — that is a separate,
+    /// disclosed gap, not modelled here.
+    ignited: bool,
+    /// Drained by [`take_detonated`](Self::take_detonated): `true` for
+    /// exactly one call, the tick [`swell`](Self::swell) first reaches
+    /// [`MAX_SWELL`] (`Creeper.java:144-146`, `explodeCreeper()`). Mirrors
+    /// [`bred`](Self::bred)'s "flag the host drains" shape — this seam has no
+    /// notion of triggering an explosion, only of the *event* happening.
+    detonated: bool,
 }
 
 /// Minecraft body yaw (degrees) for a horizontal movement delta: 0 = +Z (south),
@@ -217,6 +255,10 @@ impl<'w> NavigatingMob<'w> {
             age: 0,
             age_locked: false,
             parent_candidate: None,
+            swell_dir: -1,
+            swell: 0,
+            ignited: false,
+            detonated: false,
         }
     }
 
@@ -416,6 +458,29 @@ impl<'w> NavigatingMob<'w> {
         std::mem::take(&mut self.bred)
     }
 
+    /// Current fuse counter (vanilla `Creeper.swell`), `0..=`[`MAX_SWELL`].
+    #[must_use]
+    pub fn swell(&self) -> i32 {
+        self.swell
+    }
+
+    /// Marks the mob ignited (vanilla `Creeper.ignite()`,
+    /// `Creeper.java:264-266`), forcing its swell direction to climb every
+    /// tick regardless of what [`SwellGoal`](super::goals::SwellGoal) would
+    /// otherwise pick from proximity alone. See the `ignited` field's own doc
+    /// comment for the interaction (flint-and-steel) that would call this in
+    /// a full implementation.
+    pub fn ignite(&mut self) -> &mut Self {
+        self.ignited = true;
+        self
+    }
+
+    /// Drains the "swell just reached [`MAX_SWELL`]" flag — `true` for
+    /// exactly one call. See the `detonated` field's own doc comment.
+    pub fn take_detonated(&mut self) -> bool {
+        std::mem::take(&mut self.detonated)
+    }
+
     /// Runs one AI tick: the goal selector (whose goals call back through the
     /// [`MobController`] seam) followed by one kinematic follower step.
     pub fn tick(&mut self, ai: &mut GoalSelector) {
@@ -439,6 +504,21 @@ impl<'w> NavigatingMob<'w> {
             } else if self.age > 0 {
                 self.age -= 1;
             }
+        }
+        // Vanilla `Creeper.tick()` (`Creeper.java:126-151`): runs every tick
+        // regardless of whether `SwellGoal` (or anything else) is currently
+        // running, exactly like the age/love integration above. `ignited`
+        // overrides whatever direction the goal picked.
+        if self.ignited {
+            self.swell_dir = 1;
+        }
+        self.swell += self.swell_dir;
+        if self.swell < 0 {
+            self.swell = 0;
+        }
+        if self.swell >= MAX_SWELL {
+            self.swell = MAX_SWELL;
+            self.detonated = true;
         }
         let old = self.pos;
         let Some(waypoint) = self.navigator.tick(self.pos) else {
@@ -623,6 +703,18 @@ impl MobController for NavigatingMob<'_> {
     fn clear_love_partner(&mut self) {
         self.partner_candidate = None;
     }
+
+    fn is_ignited(&self) -> bool {
+        self.ignited
+    }
+
+    fn swell_dir(&self) -> i32 {
+        self.swell_dir
+    }
+
+    fn set_swell_dir(&mut self, dir: i32) {
+        self.swell_dir = dir;
+    }
 }
 
 #[cfg(test)]
@@ -630,7 +722,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
-    use crate::ai::goals::MeleeAttackGoal;
+    use crate::ai::goals::{MeleeAttackGoal, SwellGoal};
     use crate::pathfinding::{Aabb, PathType};
 
     /// Flat ground one block below `y=0`, plus a set of fence cells with a 1.5
@@ -1278,5 +1370,112 @@ mod tests {
             Vec3::new(0.0, 0.0, 0.0),
             "with no path, advance() must not perpetuate the knockback velocity"
         );
+    }
+
+    // ---- Creeper fuse (issue: creepers never prime or detonate) -----------
+
+    #[test]
+    fn ignited_mob_climbs_by_exactly_one_per_tick_then_detonates_at_max_swell() {
+        // Predicts the exact tick-29 value, not merely "increased" — see
+        // CLAUDE.md's *magnitude* vacuous-test species.
+        let world = Arena {
+            walls: HashSet::new(),
+        };
+        let shape = MobShape::land(0.6, 1.95);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400);
+        mob.ignite();
+
+        for expected in 1..MAX_SWELL {
+            mob.advance();
+            assert_eq!(mob.swell(), expected, "swell must climb by exactly 1/tick while ignited");
+            assert!(
+                !mob.take_detonated(),
+                "must not detonate before reaching MAX_SWELL (tick {expected})"
+            );
+        }
+        assert_eq!(mob.swell(), MAX_SWELL - 1, "predicted tick-29 value");
+
+        mob.advance(); // the 30th tick
+        assert_eq!(mob.swell(), MAX_SWELL);
+        assert!(
+            mob.take_detonated(),
+            "swell reaching MAX_SWELL must fire the detonation flag exactly once"
+        );
+        assert!(
+            !mob.take_detonated(),
+            "the flag must be drained (take), not re-armed, on the next read"
+        );
+    }
+
+    #[test]
+    fn un_ignited_mob_with_no_target_never_swells_or_detonates() {
+        // Negative control: with nothing ever calling `ignite()` or
+        // `set_swell_dir`, `swell_dir()` must stay at its default `-1`
+        // indefinitely, so `swell` clamps at 0 and detonation never fires —
+        // proving the fuse does not run unconditionally.
+        let world = Arena {
+            walls: HashSet::new(),
+        };
+        let shape = MobShape::land(0.6, 1.95);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400);
+
+        for _ in 0..500 {
+            mob.advance();
+        }
+        assert_eq!(mob.swell(), 0);
+        assert_eq!(mob.swell_dir(), -1);
+        assert!(!mob.take_detonated());
+    }
+
+    #[test]
+    fn swell_goal_drives_a_proximate_stationary_target_to_detonation_in_exactly_max_swell_ticks() {
+        // End-to-end: `SwellGoal` (proximity only, no ignition) through the
+        // real `GoalSelector` + `advance()` composition, exactly the path a
+        // production `MobSim::tick` drives.
+        let world = Arena {
+            walls: HashSet::new(),
+        };
+        let shape = MobShape::land(0.6, 1.95);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400);
+        mob.set_attack_target(Some(Vec3::new(1.0, 0.0, 0.0))); // distSqr 1 < 9
+
+        let mut ai = GoalSelector::new();
+        ai.add(0, Box::new(SwellGoal::new()));
+
+        let mut detonated_at: Option<i32> = None;
+        for t in 1..=MAX_SWELL {
+            mob.tick(&mut ai);
+            if mob.take_detonated() {
+                detonated_at = Some(t);
+                break;
+            }
+        }
+        assert_eq!(
+            detonated_at,
+            Some(MAX_SWELL),
+            "a stationary target within 3 blocks must detonate in exactly MAX_SWELL ticks"
+        );
+    }
+
+    #[test]
+    fn swell_goal_does_not_fire_for_a_distant_target() {
+        // Negative control for the goal itself, through the real scheduler:
+        // a target well beyond the 3-block start gate, with no prior swell,
+        // must never move the fuse off zero.
+        let world = Arena {
+            walls: HashSet::new(),
+        };
+        let shape = MobShape::land(0.6, 1.95);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400);
+        mob.set_attack_target(Some(Vec3::new(20.0, 0.0, 0.0))); // distSqr 400
+
+        let mut ai = GoalSelector::new();
+        ai.add(0, Box::new(SwellGoal::new()));
+
+        for _ in 0..100 {
+            mob.tick(&mut ai);
+        }
+        assert_eq!(mob.swell(), 0);
+        assert!(!mob.take_detonated());
     }
 }

@@ -164,6 +164,30 @@ pub trait MobController {
     /// Forgets the currently-selected breeding partner (called when the goal
     /// stops), mirroring vanilla clearing `this.partner = null`.
     fn clear_love_partner(&mut self) {}
+
+    /// Whether the mob is ignited (vanilla `Creeper.isIgnited`,
+    /// `.cache/mc/26.2/src/net/minecraft/world/entity/monster/Creeper.java:260-262`).
+    /// While `true`, [`Creeper.java:129-131`] forces the swell direction to
+    /// climb every tick regardless of what
+    /// [`SwellGoal`](crate::ai::goals::SwellGoal) would otherwise pick.
+    /// Defaults to `false` for every mob that carries no fuse.
+    fn is_ignited(&self) -> bool {
+        false
+    }
+
+    /// The mob's current swell direction (vanilla `Creeper.getSwellDir`,
+    /// `DATA_SWELL_DIR`, `Creeper.java:195-197`). Defaults to `-1`, matching
+    /// vanilla's own default (`Creeper.java:100`,
+    /// `entityData.define(DATA_SWELL_DIR, -1)`) for a mob that never sets one.
+    fn swell_dir(&self) -> i32 {
+        -1
+    }
+
+    /// Sets the swell direction (vanilla `Creeper.setSwellDir`,
+    /// `Creeper.java:199-201`). A no-op for a mob that does not track one.
+    fn set_swell_dir(&mut self, dir: i32) {
+        let _ = dir;
+    }
 }
 
 /// Squared horizontal+vertical distance between two points.
