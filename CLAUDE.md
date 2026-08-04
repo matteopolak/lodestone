@@ -96,6 +96,21 @@ cargo run --release                       # launch the game -- no recipe; nothin
 - Live and GPU gates are `#[ignore]`d. Run them explicitly: `-- --ignored --nocapture`.
 - A test total gathered while another agent is mid-edit is a **sample, not a measurement**. The
   invariant is *zero failures and zero non-compiling targets*, never the absolute count.
+- **A *timing* taken while other agents build is not a measurement either, and it will be attributed
+  to the wrong cause.** Measured: an agent recorded 2.66 ticks/s in debug versus 19.29 in release and
+  wrote the build profile into both its test and its doc as the explanation. Re-run on an idle
+  machine, the **same unoptimised build** hit 19.29/s. The real variable was concurrent machine load;
+  the profile explained nothing. It caught this itself and corrected both in `3380fb0`.
+
+  This is worse than a noisy number, because the *story* survives the correction: "debug is 7×
+  slower" is plausible, memorable, and gets quoted downstream. Note
+  `docs/plans/worldgen-parity.md`'s risk 3 rests on debug-profile figures for exactly this reason —
+  treat any debug-vs-release attribution recorded during a multi-agent session as unproven until
+  re-measured quiet.
+
+  What survives contention: a **ratio** between two arms measured in the same run. That agent's
+  tick-loop gate asserted a ratio and was never affected. Prefer one; when you need an absolute,
+  re-measure on an idle machine and say which it was.
 
 Oracles (not part of repo state — recreate them):
 
