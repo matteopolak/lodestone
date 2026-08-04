@@ -143,30 +143,46 @@ a *per-entity* value cannot ride a single session-scoped `bool` on
 symmetrically, and why the hurt half did not wait on `on_fire`'s
 `entity_view()` reachability fix.
 
-### Fire: a real animated texture, a simplified placement
+### Fire: a real animated texture, and now the real two-quad placement
 
-`submitFire` (`ScreenEffectRenderer.java:168-180`) draws two quads sampling
-`ModelBakery.FIRE_1` (`"block/fire_1"`, `ModelBakery.java:50`), each
-translated `±0.24` on X, `-0.3` on Y, and rotated `∓10°` about Y, at vertex
-colour `-436207617` = ARGB `(229, 255, 255, 255)` (white, alpha `229/255` —
-`FIRE_TINT` in this port). `fire_1.png` is a **16×512** strip: 32 stacked
-16×16 frames (`fire_frame_count`), vanilla's default animation metadata
+`submitFire` (`ScreenEffectRenderer.java:168-184`) draws **exactly two**
+1×1 unit quads sampling `ModelBakery.FIRE_1` (`"block/fire_1"`,
+`ModelBakery.java:50`), each `translate(±0.24, -0.3, 0.0)` then
+`rotateY(∓π/18)` (10°), at vertex colour `-436207617` = ARGB
+`(229, 255, 255, 255)` (white, alpha `229/255` — `FIRE_TINT` in this port).
+`fire_1.png` is a **16×512** strip: 32 stacked 16×16 frames
+(`fire_frame_count`), vanilla's default animation metadata
 (`fire_1.png.mcmeta` is `{"animation": {}}`, i.e. one frame per tick,
 looping) — this is genuinely the "looping flame texture" issue #112 asks
 for, not a hand-authored UV scroll.
 
-**Placement is a deliberate simplification.** Reproducing vanilla's exact
-`PoseStack`/`hud3dProjection` transform for two small rotated 3-D quads would
-buy nothing here — there is no other 3-D content in this pass to interact
-with — so `fire_overlay_triangles` instead tiles [`FIRE_TILE_COUNT`] (4)
-plain NDC quads across a horizontal strip from the bottom edge up to
-[`FIRE_STRIP_TOP`] (`y = -0.3`, i.e. the bottom ~35% of the frame), which is
-what the issue's own description asks for ("flame texture across the bottom
-of the screen"). Alternate tiles are horizontally mirrored purely so four
-copies of one 16×16 frame do not read as an obviously repeated stamp — a
-cosmetic choice vanilla's two-quad layout has no need for. The **texture,
-its 32-frame animation and the alpha blend are all real**; only the
-silhouette's exact screen position differs from vanilla's.
+**Placement is now vanilla's real transform, flattened to NDC instead of
+tiled (issue #420).** This doc previously said the two rotated quads were
+approximated as four mirrored NDC tiles across a bottom strip capped at
+`y = -0.3` (~35% of the frame), and that was a deliberate choice at the
+time, matching #112's own wording ("flame texture across the bottom of the
+screen"). It read, in practice, as the fire texture visibly repeating —
+exactly what a player reported (issue #420) — because vanilla never tiles
+this sprite at all. `fire_overlay_triangles` now reproduces vanilla's real
+per-quad transform (`rotateY` then `translate`, matching the pose-stack's
+own accumulation order) and only drops the resulting `z` afterwards — an
+orthographic flatten, not vanilla's `hud3dProjection` perspective, for the
+same "no camera/projection uniform" reason every other overlay here stays
+in flat NDC — then scales the pair uniformly so their combined horizontal
+extent exactly fills NDC width (`fire_quad_scale`, derived from
+`FIRE_QUAD_OFFSET_X`/`FIRE_QUAD_TILT_RADIANS`, not tuned). The two quads
+genuinely overlap near screen centre rather than sitting edge-to-edge, and
+the vertical extent (`fire_overlay_vertical_extent`) reaches well above the
+old `-0.3` cap — roughly `y ∈ [-0.977, 0.244]` on the current constants —
+while not quite reaching the very bottom NDC edge. UV is vanilla's own
+"mirrored corner mapping" (`buildSpriteQuad` passes `buildQuad` the
+sprite's `u1`/`u0` swapped), applied identically to both quads — there is
+no per-quad direction parameter in `buildFireQuad`, unlike the old design's
+*alternating* tile mirror, which existed only to keep four copies of one
+16×16 frame from reading as an obvious repeated stamp; that cosmetic
+problem does not exist with only two quads. The **texture, its 32-frame
+animation and the alpha blend were already real** and are unchanged by
+this fix.
 
 The strip samples with `FilterMode::Nearest` and `AddressMode::ClampToEdge`,
 not `Linear`/`Repeat` like the underwater texture: `fire_1.png` is a strip of
@@ -827,11 +843,15 @@ drive one, and `nausea_intensity`/`portal_intensity` share portal's fixture
 in the third-person control above); the pipeline-level gate below already
 proves their geometry independent of the shell.
 
-The fire gate's `top rows differ 0.6%` (not exactly `0.0%`) is the strip's
-own top edge landing on a partial pixel row (`FIRE_STRIP_TOP = -0.3` does not
-divide the frame height evenly) — well under the `< 1%` assertion, and
-exactly the kind of thing a frame-average could have hidden and a row-band
-bounding-box check catches.
+The fire gate's row bands are now predicted from
+`fire_overlay_vertical_extent()` rather than a restated `FIRE_STRIP_TOP`
+decimal (issue #420 replaced the tiled-strip placement with vanilla's real
+two-quad transform — see "Fire: a real animated texture" above), with a
+small `MARGIN_ROWS` either side of the exact predicted edge to absorb
+rasterisation rounding at the boundary itself without weakening the claim
+that rows well outside it are untouched — the same "partial pixel row"
+concern the old fixed-decimal version had, handled generically instead of
+by a one-off tolerance.
 
 **Every control above is executed, not described**, per `CLAUDE.md`'s rule
 that an absence assertion is only as good as evidence the detector would

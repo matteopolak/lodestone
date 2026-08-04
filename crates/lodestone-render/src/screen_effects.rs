@@ -31,13 +31,34 @@
 //! perspective would buy nothing here — the quads have no other 3-D content to
 //! interact with — so this pass places them directly in NDC (`x, y` in
 //! `-1.0..1.0`, no camera uniform, no projection). The underwater quad still
-//! fills the screen either way. **Deliberate simplification, not a decode
-//! error**: the fire overlay's *placement* (a tiled strip across the bottom of
-//! the frame here, vs. vanilla's two rotated 3-D quads either side of the
-//! reticle) is chosen to match the visible result issue #112 asks for — a
-//! flame texture across the bottom of the screen — rather than vanilla's exact
-//! pose-stack transform. The **texture, its 32-frame animation, the tint
-//! maths and the alpha blend** are all real.
+//! fills the screen either way.
+//!
+//! **The fire overlay is vanilla's real two-quad geometry, flattened to NDC —
+//! not a tiled strip (issue #420, fixing a regression from #112's original
+//! placement).** `ScreenEffectRenderer.submitFire`/`buildFireQuad`
+//! (`ScreenEffectRenderer.java:168-184`) draws **exactly two** 1×1 unit quads
+//! at local `z = -0.5`, each `translate(±0.24, -0.3, 0.0)` then
+//! `rotateY(∓π/18)` (10°) — never a repeated/tiled sprite. A previous pass
+//! here deliberately tiled four mirrored copies across a bottom strip instead
+//! (both this doc and `docs/screen-overlays.md` said so outright, citing the
+//! same constants and choosing to tile anyway to match #112's wording), which
+//! is what the repo owner saw as "the fire texture repeated multiple times"
+//! instead of vanilla's one large licking flame. [`fire_overlay_triangles`]
+//! now reproduces the real transform — `rotateY` then `translate`, exactly
+//! vanilla's pose-stack order — and only drops the `z` component afterwards
+//! (an orthographic flatten, not vanilla's perspective projection, for the
+//! same "no camera uniform" reason underwater/pumpkin/etc. stay in flat NDC),
+//! then scales the pair uniformly so their combined horizontal extent exactly
+//! fills NDC width — the one property the old tiled strip had
+//! (`fire_quads_span_the_full_ndc_width_with_no_gaps`) that this fix
+//! preserves, now met by two *overlapping* quads instead of four disjoint
+//! tiles. UV is vanilla's own "mirrored corner mapping": `buildSpriteQuad`
+//! passes `buildQuad` the sprite's `(u1, v1, u0, v0)` — swapped, not
+//! identity — so local `x = -0.5` samples the frame's far U edge and
+//! `x = +0.5` samples its near edge, identically for both quads (there is no
+//! per-quad direction parameter in `buildFireQuad`). The **texture, its
+//! 32-frame animation, the tint maths and the alpha blend** were already
+//! real and are unchanged by this fix.
 //!
 //! # Underwater: a tint, not a second fog
 //!
@@ -164,47 +185,115 @@ pub fn underwater_overlay_triangles(
 /// `229/255`) in `ScreenEffectRenderer.submitFire`/`buildFireQuad`.
 pub const FIRE_TINT: [f32; 4] = [1.0, 1.0, 1.0, 229.0 / 255.0];
 
-/// How many tiled quads span the bottom strip — see the module doc on why
-/// this pass places the fire overlay as a horizontal strip rather than
-/// vanilla's two rotated 3-D quads.
-pub const FIRE_TILE_COUNT: u32 = 4;
+/// Vanilla's real fire-overlay transform constants
+/// (`ScreenEffectRenderer.submitFire`, `ScreenEffectRenderer.java:168-180`):
+/// `poseStack.translate(±FIRE_QUAD_OFFSET_X, FIRE_QUAD_OFFSET_Y, 0.0F);
+/// poseStack.rotateY(∓FIRE_QUAD_TILT_RADIANS)` — one call of each sign, one
+/// quad per call. Transcribed literally rather than simplified.
+pub const FIRE_QUAD_OFFSET_X: f32 = 0.24;
+/// See [`FIRE_QUAD_OFFSET_X`].
+pub const FIRE_QUAD_OFFSET_Y: f32 = -0.3;
+/// See [`FIRE_QUAD_OFFSET_X`] — vanilla's `Math.PI / 18`, i.e. 10 degrees.
+pub const FIRE_QUAD_TILT_RADIANS: f32 = std::f32::consts::PI / 18.0;
 
-/// NDC height of the fire strip (`-1.0` is the bottom edge of the screen).
-pub const FIRE_STRIP_TOP: f32 = -0.3;
+/// `buildSpriteQuad`'s own local unit-square half-extent and fixed `z`
+/// (`ScreenEffectRenderer.java:184`: `buildSpriteQuad(..., -0.5F, -0.5F,
+/// 0.5F, 0.5F, -0.5F, ...)`).
+const FIRE_QUAD_HALF_EXTENT: f32 = 0.5;
+const FIRE_QUAD_LOCAL_Z: f32 = -0.5;
 
-/// Builds the fire overlay's tiled bottom strip for animation frame
-/// `frame_index` (wrapped by `frame_count`, which callers get from
-/// [`lodestone_assets::fire_frame_count`]). Alternate tiles are horizontally
-/// mirrored (swap `u` endpoints) purely so a repeating strip does not read as
-/// one texture stamped copy-paste; vanilla's two-quad layout has no such
-/// artifact to avoid because it only ever draws two quads.
+/// The uniform scale [`fire_quad`] applies after flattening `z`, chosen so
+/// the two quads' combined horizontal extent exactly fills NDC width —
+/// derived from [`FIRE_QUAD_OFFSET_X`]/[`FIRE_QUAD_TILT_RADIANS`], not
+/// tuned. Each quad's outer edge (the one facing away from screen centre)
+/// lands at local `x = ±(FIRE_QUAD_OFFSET_X + 0.5·sin(tilt) + 0.5·cos(tilt))`
+/// before scaling (see [`fire_quad`]'s derivation in its own doc); scaling by
+/// the reciprocal of that magnitude puts both outer edges exactly on
+/// `x = ±1.0`. This is the one property the old four-tile strip had
+/// (`fire_quads_span_the_full_ndc_width_with_no_gaps`) that this fix
+/// preserves, now via two *overlapping* quads instead of four disjoint ones.
 #[must_use]
-pub fn fire_overlay_triangles(
-    frame_index: u32,
-    frame_count: u32,
-) -> [ScreenOverlayVertex; (FIRE_TILE_COUNT * 6) as usize] {
+pub fn fire_quad_scale() -> f32 {
+    let (s, c) = FIRE_QUAD_TILT_RADIANS.sin_cos();
+    1.0 / (FIRE_QUAD_OFFSET_X + 0.5 * s + 0.5 * c)
+}
+
+/// The fire overlay's exact NDC vertical extent (`y_min`, `y_max`), derived
+/// from the same constants [`fire_overlay_triangles`] uses. `rotateY` never
+/// touches `y`, so unlike the X extent (deliberately normalised to fill
+/// `[-1, 1]`, see [`fire_quad_scale`]) this is whatever
+/// [`FIRE_QUAD_OFFSET_Y`] ± [`FIRE_QUAD_HALF_EXTENT`] happens to scale to —
+/// on the current constants, about `[-0.977, 0.244]`, i.e. the quads do
+/// *not* quite reach the bottom NDC edge and extend well past the screen's
+/// vertical centre. Exposed so a caller (a pixel gate, mostly) can predict
+/// which rows the real geometry can touch instead of hardcoding a decimal
+/// that would silently drift from the transform.
+#[must_use]
+pub fn fire_overlay_vertical_extent() -> (f32, f32) {
+    let scale = fire_quad_scale();
+    (
+        (FIRE_QUAD_OFFSET_Y - FIRE_QUAD_HALF_EXTENT) * scale,
+        (FIRE_QUAD_OFFSET_Y + FIRE_QUAD_HALF_EXTENT) * scale,
+    )
+}
+
+/// One of the fire overlay's two real quads, flattened into NDC.
+///
+/// `tilt`/`offset_x` are the quad's own signed `rotateY`/X-translate
+/// (`buildFireQuad` is called once with `(FIRE_QUAD_OFFSET_X,
+/// -FIRE_QUAD_TILT_RADIANS)` and once with `(-FIRE_QUAD_OFFSET_X,
+/// FIRE_QUAD_TILT_RADIANS)`). Vanilla's pose-stack applies `rotateY` to the
+/// vertex first, then `translate` (`Matrix4f.translate` then `.rotateY`
+/// accumulates as `pose · T · R`, so a vertex `v` maps to `T·(R·v)`) — this
+/// reproduces exactly that, then drops the rotated `z` and scales by
+/// [`fire_quad_scale`] (an orthographic flatten, not vanilla's perspective
+/// projection — see the module doc's "Screen-space, not world-space" note
+/// for why this whole pass has no camera/projection uniform to do better).
+///
+/// `mirror_u`/`v0`/`v1` are unchanged from before: vanilla's own "mirrored
+/// corner mapping" (`buildSpriteQuad` passes `buildQuad` the sprite's
+/// `(u1, v1, u0, v0)`, swapped) applies identically to both quads, so this
+/// takes no direction flag — a caller always passes the same mirroring.
+fn fire_quad(offset_x: f32, tilt: f32, v0: f32, v1: f32) -> [ScreenOverlayVertex; 4] {
+    let scale = fire_quad_scale();
+    let (s, c) = tilt.sin_cos();
+    let corner = |local_x: f32, local_y: f32| -> [f32; 2] {
+        // rotateY(tilt): x' = x·cosθ + z·sinθ (z is fixed at
+        // FIRE_QUAD_LOCAL_Z, unaffected by y); y is untouched by a Y-axis
+        // rotation. Then translate by offset_x, then drop z and scale.
+        let x = local_x * c + FIRE_QUAD_LOCAL_Z * s + offset_x;
+        let y = local_y + FIRE_QUAD_OFFSET_Y;
+        [x * scale, y * scale]
+    };
+    let h = FIRE_QUAD_HALF_EXTENT;
+    // Mirrored: local x=-h (this quad's own "left") samples v1/near-U as
+    // u=1.0, local x=+h samples u=0.0 — see the function doc.
+    [
+        vertex(corner(-h, -h), [1.0, v1], FIRE_TINT),
+        vertex(corner(h, -h), [0.0, v1], FIRE_TINT),
+        vertex(corner(h, h), [0.0, v0], FIRE_TINT),
+        vertex(corner(-h, h), [1.0, v0], FIRE_TINT),
+    ]
+}
+
+/// Builds the fire overlay's real two-quad geometry for animation frame
+/// `frame_index` (wrapped by `frame_count`, from
+/// [`lodestone_assets::fire_frame_count`]) — see the module doc and
+/// [`fire_quad`] for the transform this reproduces. Exactly two quads, one
+/// per `submitFire` call, never a repeated/tiled copy.
+#[must_use]
+pub fn fire_overlay_triangles(frame_index: u32, frame_count: u32) -> [ScreenOverlayVertex; 12] {
     let frame_count = frame_count.max(1);
     let frame = frame_index % frame_count;
     let v0 = frame as f32 / frame_count as f32;
     let v1 = (frame + 1) as f32 / frame_count as f32;
 
-    let mut out = [vertex([0.0, 0.0], [0.0, 0.0], FIRE_TINT); (FIRE_TILE_COUNT * 6) as usize];
-    let width = 2.0 / FIRE_TILE_COUNT as f32;
-    for i in 0..FIRE_TILE_COUNT {
-        let x0 = -1.0 + width * i as f32;
-        let x1 = x0 + width;
-        let mirror = i % 2 == 1;
-        let (ul, ur) = if mirror { (1.0, 0.0) } else { (0.0, 1.0) };
-        let quad = [
-            vertex([x0, -1.0], [ul, v1], FIRE_TINT),
-            vertex([x1, -1.0], [ur, v1], FIRE_TINT),
-            vertex([x1, FIRE_STRIP_TOP], [ur, v0], FIRE_TINT),
-            vertex([x0, FIRE_STRIP_TOP], [ul, v0], FIRE_TINT),
-        ];
-        let tris = [quad[0], quad[1], quad[2], quad[2], quad[3], quad[0]];
-        out[(i * 6) as usize..(i * 6 + 6) as usize].copy_from_slice(&tris);
-    }
-    out
+    let a = fire_quad(FIRE_QUAD_OFFSET_X, -FIRE_QUAD_TILT_RADIANS, v0, v1);
+    let b = fire_quad(-FIRE_QUAD_OFFSET_X, FIRE_QUAD_TILT_RADIANS, v0, v1);
+    [
+        a[0], a[1], a[2], a[2], a[3], a[0],
+        b[0], b[1], b[2], b[2], b[3], b[0],
+    ]
 }
 
 /// The pumpkin overlay's vertex tint — opaque white, i.e. no multiply at all
@@ -1266,22 +1355,111 @@ mod tests {
         assert_eq!(&FIRE_TINT[0..3], &[1.0, 1.0, 1.0]);
     }
 
+    /// `fire_overlay_triangles` is exactly two quads (12 vertices, two
+    /// six-vertex triangle fans) — never a repeated/tiled sprite. This is
+    /// the property issue #420 exists to restore: a previous pass here drew
+    /// four mirrored copies of one tile instead, which is what the repo
+    /// owner saw as the fire texture "repeated multiple times".
     #[test]
-    fn fire_strip_spans_the_full_ndc_width_with_no_gaps() {
+    fn fire_overlay_is_exactly_two_quads_not_a_tiled_strip() {
         let tris = fire_overlay_triangles(0, 32);
-        let xs: Vec<f32> = tris.iter().map(|v| v.position[0]).collect();
-        assert_eq!(xs.iter().cloned().fold(f32::INFINITY, f32::min), -1.0);
-        assert_eq!(xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max), 1.0);
+        assert_eq!(tris.len(), 12, "two quads, six vertices each");
     }
 
+    /// Preserves the one invariant the old four-tile strip had — see the
+    /// module doc's "The fire overlay is vanilla's real two-quad geometry"
+    /// section — now met by two *overlapping* quads instead of four
+    /// disjoint ones (see `the_two_fire_quads_overlap_rather_than_tile`,
+    /// below, for the overlap itself and its numeric rejection of the old
+    /// four-tile hypothesis).
     #[test]
-    fn fire_strip_sits_along_the_bottom_edge() {
+    fn fire_quads_span_the_full_ndc_width_with_no_gaps() {
+        let tris = fire_overlay_triangles(0, 32);
+        let xs: Vec<f32> = tris.iter().map(|v| v.position[0]).collect();
+        let min = xs.iter().cloned().fold(f32::INFINITY, f32::min);
+        let max = xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        // `fire_quad_scale` goes through `sin_cos`, unlike the old design's
+        // exact literal arithmetic, so this is an epsilon check rather than
+        // `assert_eq!` -- the whole point of `fire_quad_scale`'s own
+        // derivation is that these land within float rounding of exactly
+        // `[-1, 1]`, not bit-identically on it.
+        assert!((min - -1.0).abs() < 1e-5, "min {min} should be within rounding of -1.0");
+        assert!((max - 1.0).abs() < 1e-5, "max {max} should be within rounding of 1.0");
+    }
+
+    /// Predicts the *exact* NDC vertical extent from
+    /// [`FIRE_QUAD_OFFSET_X`]/[`FIRE_QUAD_OFFSET_Y`]/[`FIRE_QUAD_TILT_RADIANS`]
+    /// via [`fire_overlay_vertical_extent`] (the same function a pixel gate
+    /// uses to know which rows to check) and requires the real geometry to
+    /// land on it exactly — not merely "somewhere in the bottom area". The
+    /// old strip's `[-1.0, FIRE_STRIP_TOP=-0.3]` is the rejected hypothesis:
+    /// the real extent's top edge lands at `+0.244`, `0.544` NDC units past
+    /// where the old strip was capped, and its bottom edge does not even
+    /// reach `-1.0` — both measurable distances a bounding-box check alone
+    /// (min/max only) cannot mistake for rounding noise.
+    #[test]
+    fn fire_quads_vertical_extent_matches_the_predicted_transform() {
         let tris = fire_overlay_triangles(0, 32);
         let ys: Vec<f32> = tris.iter().map(|v| v.position[1]).collect();
-        assert_eq!(ys.iter().cloned().fold(f32::INFINITY, f32::min), -1.0);
-        assert_eq!(
-            ys.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
-            FIRE_STRIP_TOP
+        let measured_min = ys.iter().cloned().fold(f32::INFINITY, f32::min);
+        let measured_max = ys.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let (predicted_min, predicted_max) = fire_overlay_vertical_extent();
+
+        assert!(
+            (measured_min - predicted_min).abs() < 1e-5,
+            "measured y_min {measured_min} vs predicted {predicted_min}"
+        );
+        assert!(
+            (measured_max - predicted_max).abs() < 1e-5,
+            "measured y_max {measured_max} vs predicted {predicted_max}"
+        );
+
+        // The rejected hypothesis, made concrete: the old four-tile strip's
+        // top edge was a hardcoded -0.3. The real transform's top edge is
+        // measurably far from that -- not a rounding-distance disagreement.
+        const OLD_STRIP_TOP: f32 = -0.3;
+        assert!(
+            (predicted_max - OLD_STRIP_TOP).abs() > 0.3,
+            "predicted top {predicted_max} is suspiciously close to the retired \
+             OLD_STRIP_TOP={OLD_STRIP_TOP} -- the fix may not have changed anything"
+        );
+        // Nor does the real geometry reach the exact bottom edge the old
+        // strip always touched (`-1.0`) -- a further, independent way the
+        // two shapes measurably differ.
+        assert!(
+            (predicted_min - (-1.0)).abs() > 0.01,
+            "predicted bottom {predicted_min} should not land on the old strip's -1.0 \
+             bottom edge exactly"
+        );
+    }
+
+    /// The concrete, numeric form of "two quads, not four tiles": the two
+    /// real quads' own X-spans genuinely overlap near screen centre (vanilla
+    /// draws both licks converging), which four disjoint tiles — by
+    /// construction, since adjacent tiles only ever touch at a shared edge —
+    /// cannot produce. Verified failing: the four-tile hypothesis predicts
+    /// exactly zero overlap; the measured overlap here is `> 0.3` NDC units
+    /// away from that, not a rounding-distance call.
+    #[test]
+    fn the_two_fire_quads_overlap_rather_than_tile() {
+        let tris = fire_overlay_triangles(0, 32);
+        let quad_a_xs: Vec<f32> = tris[0..6].iter().map(|v| v.position[0]).collect();
+        let quad_b_xs: Vec<f32> = tris[6..12].iter().map(|v| v.position[0]).collect();
+        let (a_min, a_max) = (
+            quad_a_xs.iter().cloned().fold(f32::INFINITY, f32::min),
+            quad_a_xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
+        );
+        let (b_min, b_max) = (
+            quad_b_xs.iter().cloned().fold(f32::INFINITY, f32::min),
+            quad_b_xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
+        );
+        let overlap = a_max.min(b_max) - a_min.max(b_min);
+        assert!(
+            overlap > 0.3,
+            "expected the two fire quads to overlap by a wide margin (quad A [{a_min}, \
+             {a_max}], quad B [{b_min}, {b_max}]), got overlap={overlap} -- the rejected \
+             four-disjoint-tile hypothesis predicts exactly 0 overlap, so this must clear \
+             it by far more than rounding noise"
         );
     }
 
@@ -1336,13 +1514,23 @@ mod tests {
         assert_eq!(vs.iter().cloned().fold(f32::NEG_INFINITY, f32::max), 1.0);
     }
 
+    /// Vanilla's own "mirrored corner mapping" (`buildSpriteQuad` passes
+    /// `buildQuad` the sprite's `(u1, v1, u0, v0)`, swapped —
+    /// `ScreenEffectRenderer.java:184,199`) applies identically to *both*
+    /// quads — `buildFireQuad` takes no direction parameter and is called
+    /// the same way for each sign of `translate`/`rotateY`. This is the
+    /// opposite of the old design, where mirroring alternated *between*
+    /// tiles purely so a repeating strip did not look copy-pasted; there is
+    /// no such artifact to avoid with only two quads.
     #[test]
-    fn fire_alternate_tiles_are_mirrored() {
+    fn fire_both_quads_use_the_same_mirrored_uv_mapping() {
         let tris = fire_overlay_triangles(0, 32);
-        // Tile 0's first two verts (bottom-left, bottom-right) vs tile 1's.
-        let tile0_u = [tris[0].uv[0], tris[1].uv[0]];
-        let tile1_u = [tris[6].uv[0], tris[7].uv[0]];
-        assert_eq!(tile0_u, [tile1_u[1], tile1_u[0]], "tile 1 must be a horizontal mirror of tile 0");
+        // Each quad's own first two verts: local-left corner, local-right
+        // corner (see `fire_quad`'s corner order).
+        let quad_a_u = [tris[0].uv[0], tris[1].uv[0]];
+        let quad_b_u = [tris[6].uv[0], tris[7].uv[0]];
+        assert_eq!(quad_a_u, [1.0, 0.0], "local-left samples u=1.0, local-right samples u=0.0");
+        assert_eq!(quad_a_u, quad_b_u, "both quads use the identical mirrored mapping");
     }
 
     // -- freeze overlay (#139) -----------------------------------------

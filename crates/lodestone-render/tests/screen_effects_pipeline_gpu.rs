@@ -14,7 +14,7 @@
 //! per-frame call — this file is the pipeline working in isolation.
 
 use lodestone_assets::{MemorySource, ResourceManager};
-use lodestone_render::{GpuContext, HeadlessTarget, RenderTarget, ScreenEffectRenderer};
+use lodestone_render::{GpuContext, HeadlessTarget, RenderTarget, ScreenEffectRenderer, fire_overlay_vertical_extent};
 
 const WIDTH: u32 = 64;
 const HEIGHT: u32 = 64;
@@ -157,15 +157,18 @@ fn underwater_overlay_paints_the_whole_frame() {
     );
 }
 
-/// The fire overlay, drawn onto a black target, must paint a genuinely
-/// bottom-only strip: non-black rows only in the bottom ~35% of the frame
-/// (`FIRE_STRIP_TOP = -0.3`), and the top rows must stay untouched. A
-/// frame-average check could not tell this from a full-screen tint at a lower
-/// intensity — see `CLAUDE.md`'s "measure by location" rule — so this checks
-/// row bands, not one global fraction.
+/// The fire overlay, drawn onto a black target, must paint rows matching
+/// its real two-quad geometry's predicted vertical extent
+/// (`fire_overlay_vertical_extent`, issue #420) — not the old design's
+/// hardcoded bottom-35% strip, and genuinely untouched above that real
+/// extent. A frame-average check could not tell "painted in the right
+/// place" from "a full-screen tint at a lower intensity" — see `CLAUDE.md`'s
+/// "measure by location" rule — so this checks row bands, not one global
+/// fraction, and predicts the band boundary from the same constants the
+/// geometry itself uses rather than a restated decimal.
 #[test]
 #[ignore = "requires a GPU adapter"]
-fn fire_overlay_paints_only_the_bottom_strip() {
+fn fire_overlay_paints_its_predicted_extent_not_the_old_bottom_strip() {
     let Some(ctx) = ctx() else { return };
     let fx = ScreenEffectRenderer::new(
         ctx.device(),
@@ -189,44 +192,90 @@ fn fire_overlay_paints_only_the_bottom_strip() {
 
     let pixels = target.read_texels(ctx.device(), ctx.queue());
     // Row 0 is the top of the readback in this project's convention (see
-    // `sky_pixels.rs`'s own row-band gates); the strip's NDC top
-    // (`FIRE_STRIP_TOP = -0.3`) is 35% of the way up from the bottom, i.e.
-    // the bottom 35% of rows.
-    let strip_rows = ((HEIGHT as f64) * 0.35) as u32;
-    let mut top_non_black = 0usize;
-    let mut top_total = 0usize;
-    let mut bottom_non_black = 0usize;
-    let mut bottom_total = 0usize;
+    // `sky_pixels.rs`'s own row-band gates). Predict the real geometry's
+    // vertical extent from the same constants `fire_overlay_triangles`
+    // itself uses, rather than a restated decimal.
+    let (_predicted_min_ndc, predicted_max_ndc) = fire_overlay_vertical_extent();
+    let frac_from_bottom = |y_ndc: f32| (f64::from(y_ndc) + 1.0) / 2.0;
+    let row_from_top = |frac: f64| (f64::from(HEIGHT) * (1.0 - frac)) as u32;
+    let predicted_top_row = row_from_top(frac_from_bottom(predicted_max_ndc));
+
+    // A small margin either side of the exact predicted edge absorbs
+    // rasterisation rounding at the boundary itself, without weakening the
+    // claim that rows well outside the predicted extent are untouched.
+    const MARGIN_ROWS: u32 = 2;
+    let untouched_above_row = predicted_top_row.saturating_sub(MARGIN_ROWS);
+    let lit_below_row = predicted_top_row + MARGIN_ROWS;
+    // The old design's own top edge (`FIRE_STRIP_TOP = -0.3`, 35% up from
+    // the bottom) — the rejected hypothesis this test falsifies below.
+    let old_design_top_row = row_from_top(0.35);
+    assert!(
+        untouched_above_row < old_design_top_row,
+        "sanity: the real extent's top ({untouched_above_row}) should sit well above \
+         (numerically less than) the old strip's top ({old_design_top_row}), or this test \
+         cannot distinguish the two hypotheses at all"
+    );
+
+    let (mut untouched_lit, mut untouched_total) = (0usize, 0usize);
+    let (mut lit_lit, mut lit_total) = (0usize, 0usize);
+    // Rows the *old* bottom-35% strip could never have touched but the real
+    // predicted extent now reaches — proof the fix moved where pixels land,
+    // not merely how the old band is described.
+    let (mut reclaimed_lit, mut reclaimed_total) = (0usize, 0usize);
     for y in 0..HEIGHT {
         for x in 0..WIDTH {
             let idx = ((y * WIDTH + x) * 4) as usize;
             let px = &pixels[idx..idx + 4];
             let lit = px[0] > 8 || px[1] > 8 || px[2] > 8;
-            if y < HEIGHT - strip_rows {
-                top_total += 1;
-                if lit {
-                    top_non_black += 1;
-                }
-            } else {
-                bottom_total += 1;
-                if lit {
-                    bottom_non_black += 1;
-                }
+            if y < untouched_above_row {
+                untouched_total += 1;
+                untouched_lit += usize::from(lit);
+            }
+            if y >= lit_below_row {
+                lit_total += 1;
+                lit_lit += usize::from(lit);
+            }
+            if y >= untouched_above_row && y < old_design_top_row {
+                reclaimed_total += 1;
+                reclaimed_lit += usize::from(lit);
             }
         }
     }
-    let top_frac = top_non_black as f64 / top_total.max(1) as f64;
-    let bottom_frac = bottom_non_black as f64 / bottom_total.max(1) as f64;
+    let untouched_frac = untouched_lit as f64 / untouched_total.max(1) as f64;
+    let lit_frac = lit_lit as f64 / lit_total.max(1) as f64;
+    let reclaimed_frac = reclaimed_lit as f64 / reclaimed_total.max(1) as f64;
+
+    eprintln!(
+        "predicted top row={predicted_top_row}, old design top row={old_design_top_row}, \
+         untouched={:.1}% lit_below={:.1}% reclaimed_band={:.1}%",
+        untouched_frac * 100.0,
+        lit_frac * 100.0,
+        reclaimed_frac * 100.0
+    );
+
     assert!(
-        bottom_frac > 0.5,
-        "expected the fire overlay to light up the bottom strip, only {:.1}% non-black there",
-        bottom_frac * 100.0
+        untouched_frac < 0.01,
+        "fire overlay must not paint above its real predicted extent: {:.1}% non-black \
+         above row {untouched_above_row} (bounding-box check per CLAUDE.md — a \
+         frame-average could not have caught this)",
+        untouched_frac * 100.0
     );
     assert!(
-        top_frac < 0.01,
-        "fire overlay must not paint above its strip: {:.1}% non-black in the top rows \
-         (bounding-box check per CLAUDE.md — a frame-average could not have caught this)",
-        top_frac * 100.0
+        lit_frac > 0.3,
+        "expected the fire overlay to light up rows well below its top edge, only \
+         {:.1}% non-black there",
+        lit_frac * 100.0
+    );
+    // The rejected hypothesis, made concrete and numeric: under the old
+    // bottom-35%-only strip, this band's lit fraction would be forced to
+    // (near) zero, because the old geometry structurally never reached it.
+    assert!(
+        reclaimed_frac > 0.1,
+        "expected the band between the real top edge (row {untouched_above_row}) and the \
+         old strip's top edge (row {old_design_top_row}) to now show real fire coverage — \
+         only {:.1}% non-black, indistinguishable from the retired bottom-35%-only \
+         hypothesis, which predicts ~0% here",
+        reclaimed_frac * 100.0
     );
 }
 
