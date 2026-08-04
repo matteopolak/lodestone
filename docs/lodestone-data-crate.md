@@ -58,7 +58,7 @@ architectural dead end — see `docs/roadmap/server-entities.md`.
     directly.
   - **JVM-walked tables** (`block_entity_types`, `hardness`, `collision_shapes`, `block_solidity`,
     `entity_census`, `entity_dimensions`, `item_prototypes`, `outline_shapes`,
-    `path_types`, `shade_brightness`, `sound_types`, `tools`) need an
+    `path_types`, `shade_brightness`, `snow_support`, `sound_types`, `tools`) need an
     `oracle-java/*Oracle.java` program that boots
     the real 26.2 server headlessly (`SharedConstants.tryDetectVersion();
     Bootstrap.bootStrap();`) and walks a registry or `Block.BLOCK_STATE_REGISTRY`
@@ -67,6 +67,23 @@ architectural dead end — see `docs/roadmap/server-entities.md`.
     `blocks.json`. One exception: `collision_shapes`' dumper, `ShapeOracle.java`,
     stays in `crates/lodestone-physics/oracle-java/` — see "What did not move"
     below.
+
+    `snow_support` (issue #404's U2, world generation's `freeze_top_layer`) is the
+    clearest case for why this list is JVM-walked rather than derived. Its four
+    columns are `Block.isFaceFull(collisionShape, UP)`,
+    `!getFluidState().isEmpty()`, `getFluidState().is(Fluids.WATER) && block
+    instanceof LiquidBlock`, and `hasProperty(SNOWY)`. Measured on first run, the
+    dump contradicted four separate hand guesses at once: only **6,359 of 32,366**
+    states have a full UP collision face (against 3,287 whose collision shape is a
+    single unit box — **159 blocks** are full-faced without being unit boxes, and a
+    unit-box derivation would have refused snow on every one); the water predicate
+    is true for **exactly one** state, `water[level=0]`, because flowing water is
+    `Fluids.FLOWING_WATER` and a waterlogged block is not a `LiquidBlock`;
+    **`snow[layers=8]` is not full-faced**, which is why
+    `SnowLayerBlock.canSurvive` needs its explicit `layers == 8` clause; and
+    `powder_snow` — not `chorus_plant` — is the one `dynamicShape()` block world
+    generation exposes at a surface top. `tests/snow_support.rs` asserts each of
+    those rather than restating them.
 - `tests/*.rs` — one test per JVM-walked or registry-report table: hermetic
   consistency checks over the committed table, plus an `#[ignore]`d drift
   guard that regenerates the table from the committed dump
