@@ -1749,24 +1749,42 @@ Witness-set invalidation plus per-edge re-verification and the look-ahead window
 - **Gate:** a ≥300-block traversal on the terrain oracle with the correction counter flat, zero
   `Stalled` aborts, plan well-formedness asserted, and the cost histogram inside tolerance (§6).
 
-**Status, this pass:** `StepUp`, `Descend`/`Drop` and segmentation landed
-(`crates/plugins/lodestone-nav`, `crates/plugins/lodestone-autopilot`); see
-[`docs/autonomous-navigation.md`](./autonomous-navigation.md) for the detail. **Not landed:**
-diagonals (and the corner-cutting rule), `Climb`, prefix trimming, tail truncation, witness-set
-invalidation, per-edge re-verification, the look-ahead window, and the debug overlay — this pass
-scoped to the movements and segmentation explicitly briefed, in the order StepUp → Descend/Drop →
-segmentation, and stopped there rather than rush diagonals' cost-model generalisation (a genuinely
-different canonical frame, not a small edit) at the same sitting. `StepUp`/`Descend`/`Drop` are each
-gated against real jar-derived collision, not only the crate's own `FixtureCensus` unit tests
+**Status, this pass (updated — `WalkDiagonal` landed in a later pass than the note below
+describes):** `StepUp`, `Descend`/`Drop`, segmentation and **`WalkDiagonal` (including the
+corner-cutting rule)** are landed (`crates/plugins/lodestone-nav`, `crates/plugins/lodestone-autopilot`);
+see [`docs/autonomous-navigation.md`](./autonomous-navigation.md) for the detail, including the
+"`Climb`: stopped, and why" section. **Not landed:** `Climb`, prefix trimming, tail truncation,
+witness-set invalidation, per-edge re-verification, the look-ahead window, and the debug overlay.
+`Climb` is stopped deliberately — it needs a genuinely different *script* (holding a direction key
+against a climbable column, not aiming at a cell centre), not merely another cost-model frame, and
+the brief for this pass explicitly preferred a documented stop over a rushed third generalisation
+in one sitting.
+
+The paragraph below is kept for the record of what *StepUp/Descend/Drop's own* pass found and
+scoped; `WalkDiagonal` needed a real generalisation of the cost model's canonical simulation frame
+(not a small edit, confirming the concern this paragraph raised) — see
+`docs/autonomous-navigation.md`'s "`WalkDiagonal` generalised cleanly in three places and needed
+real new work in two" entry for what that turned out to mean concretely, including a genuine
+sub-tick-completion bug found and fixed (the diagonal analogue of the `WalkDrive::done()` straddle
+bug below) and a genuine heuristic-admissibility gap found and fixed
+(`cost::TemplateTable::cheapest_ticks_per_block` had to learn to scan diagonal templates too, not
+only cardinal steady-state speed).
+
+`StepUp`/`Descend`/`Drop` (and, since the later pass, `WalkDiagonal`) are each gated against real
+jar-derived collision, not only the crate's own `FixtureCensus` unit tests
 (`lodestone-autopilot/tests/drives_to_goal.rs`'s `real_collision` module), and each carries an
 unreachable/negative control (an ascend past the real, simulated jump apex; a fall through lava with
 solid ground further down; a slab excluded as a multi-cell drop landing; a goal with no reachable
-progress at all). One real bug was found and fixed in the process: `WalkDrive::done()` tested only
-horizontal cell plus `on_ground`, which is unsafe the moment a `MoveKind`'s source and destination
-surfaces differ in height — the player's 0.6-wide AABB straddles the boundary for a few ticks, and a
+progress at all; a real stone block at a diagonal's shoulder refusing that one diagonal edge). One
+real bug was found and fixed in the process: `WalkDrive::done()` tested only horizontal cell plus
+`on_ground`, which is unsafe the moment a `MoveKind`'s source and destination surfaces differ in
+height — the player's 0.6-wide AABB straddles the boundary for a few ticks, and a
 `StepUp`/`Descend`/`Drop` could read "arrived" before ever climbing or falling. Found by the M2 cost
 tests themselves (two different `Drop` heights simulating to the identical tick count), not by
-inspection — see `lodestone-nav/src/drive.rs`'s `WalkDrive::arrived`.
+inspection — see `lodestone-nav/src/drive.rs`'s `WalkDrive::arrived`. That specific bug did **not**
+recur for `WalkDiagonal` — `WalkDrive::inside_cell` was already a two-axis test, so a diagonal never
+straddled a single-axis boundary check the way a height-changing kind did — but the *cost model's*
+own sub-tick fraction had the equivalent single-axis blind spot, and needed the equivalent fix.
 
 ### M3 — jumps and gaps
 

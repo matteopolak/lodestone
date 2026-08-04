@@ -185,6 +185,25 @@ impl Dir4 {
     pub const fn turns_to(self, other: Self) -> u8 {
         (other.index() + 4 - self.index()) % 4
     }
+
+    /// The next direction clockwise — `Dir4::ALL`'s own successor, matching
+    /// vanilla's `Direction.getClockWise()` for a horizontal direction
+    /// (`.cache/mc/26.2/src/net/minecraft/world/level/pathfinder/WalkNodeEvaluator.java:143`:
+    /// `Direction secondDirection = direction.getClockWise();`).
+    ///
+    /// This is the pairing [`MoveKind::WalkDiagonal`] always uses: `(North,
+    /// East)`, `(East, South)`, `(South, West)`, `(West, North)` — the same
+    /// four pairs the mob pathfinder iterates when deciding whether a
+    /// diagonal neighbour exists at all.
+    #[must_use]
+    pub const fn clockwise(self) -> Self {
+        match self {
+            Self::North => Self::East,
+            Self::East => Self::South,
+            Self::South => Self::West,
+            Self::West => Self::North,
+        }
+    }
 }
 
 /// How the player entered a node.
@@ -339,6 +358,11 @@ impl NavNode {
 /// vanilla's own physics would (a body cannot fall past a surface it would
 /// land on, so there is only ever one candidate per direction, never a family
 /// of "try n = 2, 3, 4…").
+///
+/// `WalkDiagonal` is also M2, landed separately and later: it needed a real
+/// generalisation of the cost model's canonical simulation frame rather than a
+/// small edit (`crate::cost`'s module docs and `docs/autonomous-navigation.md`
+/// record what generalised cleanly and what did not).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MoveKind {
     /// A same-cell-height step to an orthogonal neighbour, including a step up or
@@ -365,6 +389,13 @@ pub enum MoveKind {
     /// jar rule (`LivingEntity.java:1856`:
     /// `fallDistance + 1e-6 - SAFE_FALL_DISTANCE`) the damage check itself uses.
     Drop(Dir4, u8),
+    /// A `(1, 1)` diagonal step, same-cell-height family like [`Self::Walk`]
+    /// (no diagonal ascend/descend/jump — that would be a third cost-model
+    /// frame on top of the one this already needed, and is left open rather
+    /// than rushed; see `docs/autonomous-navigation.md`). The pair is always
+    /// `(d, d.clockwise())` — [`diagonal_step`] and [`successors`] are the only
+    /// constructors, and both hold that invariant.
+    WalkDiagonal(Dir4, Dir4),
 }
 
 impl MoveKind {
@@ -373,6 +404,11 @@ impl MoveKind {
     /// because two drops of different height are not the same equivalence
     /// class and memoising them together would cost a shorter fall's edge the
     /// ticks a longer one actually takes.
+    ///
+    /// [`Self::WalkDiagonal`] collapses all four direction pairs to **one**
+    /// id, exactly as every [`Self::Walk`] direction already does — the
+    /// canonical-frame simulation in `crate::cost` treats direction as
+    /// irrelevant, so the actual `(Dir4, Dir4)` never needs to reach the key.
     #[must_use]
     pub const fn id(self) -> u8 {
         match self {
@@ -380,14 +416,24 @@ impl MoveKind {
             Self::StepUp(_) => 1,
             Self::Descend(_) => 2,
             Self::Drop(_, _) => 3,
+            Self::WalkDiagonal(_, _) => 4,
         }
     }
 
-    /// The direction this movement travels.
+    /// The direction this movement travels — for [`Self::WalkDiagonal`], its
+    /// **first** component only.
+    ///
+    /// That is a real approximation, not a full answer: a diagonal travels
+    /// along two axes at once, and no single [`Dir4`] describes it. It exists
+    /// only so every [`MoveKind`] has *some* answer for callers that have not
+    /// been taught about diagonals specifically (this crate has exactly one,
+    /// [`crate::cost::EntryRel::of_diagonal`] is the diagonal-aware
+    /// replacement `search::Search::expand` actually uses for costing).
     #[must_use]
     pub const fn dir(self) -> Dir4 {
         match self {
             Self::Walk(dir) | Self::StepUp(dir) | Self::Descend(dir) | Self::Drop(dir, _) => dir,
+            Self::WalkDiagonal(d1, _) => d1,
         }
     }
 
@@ -417,6 +463,7 @@ impl MoveKind {
             Self::StepUp(dir) => step_up_stencil(dir),
             Self::Descend(dir) => descend_stencil(dir),
             Self::Drop(dir, _) => drop_stencil(dir),
+            Self::WalkDiagonal(d1, d2) => diagonal_stencil(d1, d2),
         }
     }
 }
@@ -466,6 +513,35 @@ column_stencil_fn!(descend_stencil, -2, 1);
 // of which one a specific edge landed at — over-covering a witness set is safe
 // (`docs/baritone-port.md` §4.5), under-covering is not.
 column_stencil_fn!(drop_stencil, -(FALL_SCAN_CELLS + 2), 2);
+
+/// Cached per-`(d1, d2)` diagonal stencil: the source column, **both**
+/// shoulder columns (`d1` and `d2` alone) and the destination column
+/// (`d1 + d2`), each over the same `-1..=2` span [`WALK_EAST`] and its
+/// rotations use. Four columns instead of two is the one structural
+/// difference from [`column_stencil`] — a diagonal's legality genuinely reads
+/// two extra columns the cardinal kinds never touch (the corner-cutting
+/// check, see [`diagonal_step`]), so under-covering the witness set here
+/// would mean a corner wall could change without the plan ever noticing.
+fn diagonal_stencil(d1: Dir4, d2: Dir4) -> &'static [[i32; 3]] {
+    static CACHE: std::sync::OnceLock<[&'static [[i32; 3]]; 4]> = std::sync::OnceLock::new();
+    let table = CACHE.get_or_init(|| {
+        Dir4::ALL.map(|first| {
+            let second = first.clockwise();
+            let (dx1, dz1) = first.delta();
+            let (dx2, dz2) = second.delta();
+            let mut cells = Vec::with_capacity(4 * 4);
+            for y in -1..=2 {
+                cells.push([0, y, 0]);
+                cells.push([dx1, y, dz1]);
+                cells.push([dx2, y, dz2]);
+                cells.push([dx1 + dx2, y, dz1 + dz2]);
+            }
+            Vec::leak(cells) as &'static [[i32; 3]]
+        })
+    });
+    debug_assert_eq!(d2, d1.clockwise(), "WalkDiagonal must pair (d, d.clockwise())");
+    table[d1.index() as usize]
+}
 
 /// `Walk`'s stencil: the source column's support/body/head cells and the
 /// destination column's. The four rotations are spelled out because the stencil
@@ -675,6 +751,14 @@ pub fn successors(view: &dyn NavView, from: NavNode, out: &mut Vec<Step>) {
             out.push(step);
         }
     }
+    // Diagonals last, in the same clockwise pairing order vanilla's own mob
+    // evaluator iterates them (`WalkNodeEvaluator.java:142-158`) — determinism
+    // for the byte-identical-plan gate, same as the cardinal loop above.
+    for d1 in Dir4::ALL {
+        if let Some(step) = diagonal_step(view, from, from_surface, d1, d1.clockwise()) {
+            out.push(step);
+        }
+    }
 }
 
 /// `Walk(dir)` out of `from`, or `None` when illegal.
@@ -872,6 +956,104 @@ pub fn fall_step(view: &dyn NavView, from: NavNode, from_surface: f64, dir: Dir4
     None
 }
 
+/// `WalkDiagonal(d1, d2)` out of `from`, or `None` when illegal. `d2` must be
+/// `d1.clockwise()` — the only pairing [`successors`] ever constructs.
+///
+/// # The corner-cutting rule, derived from real vanilla source
+///
+/// A diagonal move can be physically blocked even when its destination cell is
+/// wide open: the player's `0.6`-wide body clips a solid corner unless there is
+/// clearance on **both** of the two orthogonal cells that corner sits between.
+/// That is a fact about the moving body's shape, not about who is moving it, so
+/// the mob pathfinder's own discrete rule for exactly this — real Minecraft
+/// source, not Baritone — is the right citation even though this crate does not
+/// (and per `docs/baritone-port.md` §3.4, should not) extend that pathfinder:
+///
+/// `WalkNodeEvaluator.isDiagonalValid(pos, ew, ns)`
+/// (`.cache/mc/26.2/src/net/minecraft/world/level/pathfinder/WalkNodeEvaluator.java:167-182`):
+///
+/// ```text
+/// if (ns == null || ew == null || ns.y > pos.y || ew.y > pos.y) return false;
+/// ...
+/// return (ns.y < pos.y || ns.costMalus >= 0.0F || canPassBetweenPosts)
+///     && (ew.y < pos.y || ew.costMalus >= 0.0F || canPassBetweenPosts);
+/// ```
+///
+/// Translated: **both** shoulders must be a legally walkable neighbour (a real
+/// node, not a hazard), and **neither may sit above the current cell** — even
+/// one that would otherwise be a perfectly legal [`walk_step`] (stepping off a
+/// soul-sand floor onto ordinary stone beside it is a legal `Walk` one cell
+/// *up*, and real vanilla refuses it as a diagonal shoulder anyway, before it
+/// ever looks at cost). This function reuses [`walk_step`]'s own hazard and
+/// head-room checks for the "legally walkable" half — the direct analogue of
+/// the evaluator reusing its cardinal neighbour nodes for `ns`/`ew` rather than
+/// re-deriving them — and adds the `y <= from.y` gate on top.
+///
+/// One real permissiveness is **not** replicated: vanilla accepts a shoulder
+/// that is strictly *lower* than `pos.y` regardless of its malus, i.e. even a
+/// hazardous one, on the reasoning that a mob's body does not reach down into
+/// a cell below its feet while merely clipping past its corner. This crate
+/// stays conservative instead — every shoulder goes through the same
+/// `must_not_enter` refusal a stand or a walk would — because a shoulder more
+/// than a step below the body is already outside [`walk_step`]'s own domain
+/// (a genuine descent, not a `Walk`) and this movement does not model
+/// diagonal descent at all (see the module docs on why: a third cost-model
+/// frame, left open rather than rushed).
+///
+/// # Same-height family only
+///
+/// Like [`Self::Walk`] this has no ascend/descend/jump component: the
+/// destination search below mirrors [`walk_step`]'s exactly, gated by
+/// [`STEP_HEIGHT`]. A diagonal step-up exists in vanilla's own mob evaluator
+/// (via its `jumpSize`) but is deliberately out of scope here.
+#[must_use]
+pub fn diagonal_step(
+    view: &dyn NavView,
+    from: NavNode,
+    from_surface: f64,
+    d1: Dir4,
+    d2: Dir4,
+) -> Option<Step> {
+    let shoulder1 = walk_step(view, from, from_surface, d1)?;
+    let shoulder2 = walk_step(view, from, from_surface, d2)?;
+    if shoulder1.to.y > from.y || shoulder2.to.y > from.y {
+        return None;
+    }
+
+    let (dx1, dz1) = d1.delta();
+    let (dx2, dz2) = d2.delta();
+    let (tx, tz) = (from.x + dx1 + dx2, from.z + dz1 + dz2);
+    for ty in [from.y, from.y - 1, from.y + 1] {
+        let Some(to_surface) = standable(view, tx, ty, tz) else {
+            continue;
+        };
+        if (to_surface - from_surface).abs() > STEP_HEIGHT + SURFACE_EPS {
+            continue;
+        }
+        return Some(Step {
+            kind: MoveKind::WalkDiagonal(d1, d2),
+            to: NavNode {
+                x: tx,
+                y: ty,
+                z: tz,
+                // Approximation, recorded on `MoveKind::WalkDiagonal` and in
+                // `docs/autonomous-navigation.md`: the exit arrival collapses
+                // onto the first component rather than gaining a genuinely
+                // diagonal `Arrival` variant. `NavNode::try_pack` spends
+                // exactly 3 bits (0..=7) on `Arrival::index()` and only 3 are
+                // free (5, 6, 7) — one short of the 4 a full diagonal arrival
+                // set needs — and the other 61 bits are already exactly
+                // spent covering the real world border (`±29,999,984`), so
+                // widening the field is not a free edit.
+                arrival: Arrival::Walking(d1),
+            },
+            from_surface,
+            to_surface,
+        });
+    }
+    None
+}
+
 /// Where the player's feet cell is **for planning purposes**, from a real position,
 /// or `None` when nothing under them is standable.
 ///
@@ -966,7 +1148,21 @@ mod tests {
         let view = flat();
         let mut out = Vec::new();
         successors(&view, NavNode::still(0, 1, 0), &mut out);
-        assert_eq!(out.len(), 4);
+        // 4 cardinal `Walk`s plus 4 `WalkDiagonal`s — open flat ground has no
+        // corner to block any of the four diagonals either.
+        assert_eq!(out.len(), 8, "{out:?}");
+        assert_eq!(
+            out.iter()
+                .filter(|s| matches!(s.kind, MoveKind::Walk(_)))
+                .count(),
+            4
+        );
+        assert_eq!(
+            out.iter()
+                .filter(|s| matches!(s.kind, MoveKind::WalkDiagonal(_, _)))
+                .count(),
+            4
+        );
         assert!(out.iter().all(|s| (s.to_surface - 1.0).abs() < 1e-9));
     }
 
@@ -1119,10 +1315,20 @@ mod tests {
         let view = flat();
         let mut out = Vec::new();
         // (16, 1, 0) is the last in-bounds column, so its `+X` neighbour is
-        // outside and must not be proposed.
+        // outside and must not be proposed. `North`, `South` and `West` are
+        // the three legal cardinal walks; the two diagonals that do **not**
+        // involve `East` as a shoulder (`West+North`, `South+West`) are also
+        // legal, since West decreases x and never approaches the boundary —
+        // the two that do (`North+East`, `East+South`) are refused by
+        // `diagonal_step`'s own shoulder check, exactly as `East` alone is.
         successors(&view, NavNode::still(16, 1, 0), &mut out);
-        assert_eq!(out.len(), 3, "{out:?}");
+        assert_eq!(out.len(), 5, "{out:?}");
         assert!(!out.iter().any(|s| s.to.x == 17));
+        assert!(
+            !out.iter()
+                .any(|s| matches!(s.kind, MoveKind::WalkDiagonal(d1, d2) if d1 == Dir4::North && d2 == Dir4::East)),
+            "a diagonal through the East shoulder must not reach past the boundary"
+        );
     }
 
     #[test]
@@ -1325,6 +1531,140 @@ mod tests {
             let north = kind_of(Dir4::North).stencil();
             assert!(!east.is_empty());
             assert_ne!(east, north, "each direction must translate, not repeat +X");
+        }
+    }
+
+    // --- M2: WalkDiagonal ---
+
+    #[test]
+    fn clockwise_cycles_through_all_four() {
+        assert_eq!(Dir4::North.clockwise(), Dir4::East);
+        assert_eq!(Dir4::East.clockwise(), Dir4::South);
+        assert_eq!(Dir4::South.clockwise(), Dir4::West);
+        assert_eq!(Dir4::West.clockwise(), Dir4::North);
+    }
+
+    /// The plain case: open flat ground, both shoulders and the destination
+    /// clear.
+    #[test]
+    fn a_diagonal_over_open_flat_ground_is_legal() {
+        let view = flat();
+        let step = diagonal_step(&view, NavNode::still(0, 1, 0), 1.0, Dir4::North, Dir4::East)
+            .expect("legal");
+        assert_eq!(step.kind, MoveKind::WalkDiagonal(Dir4::North, Dir4::East));
+        assert_eq!((step.to.x, step.to.y, step.to.z), (1, 1, -1));
+        assert!((step.to_surface - 1.0).abs() < 1e-9);
+    }
+
+    /// The corner-cutting rule, from real vanilla source
+    /// (`WalkNodeEvaluator.isDiagonalValid`,
+    /// `.cache/mc/26.2/src/net/minecraft/world/level/pathfinder/WalkNodeEvaluator.java:167-182`):
+    /// a diagonal requires **both** orthogonal shoulders to be legally
+    /// walkable. A single-block wall in just the East shoulder — with the
+    /// North shoulder and the destination both left open — must refuse the
+    /// whole diagonal, matching `ew.costMalus >= 0.0F`'s requirement on `ew`
+    /// alone being insufficient to save it.
+    #[test]
+    fn a_diagonal_across_a_blocked_corner_is_refused() {
+        let mut view = flat();
+        view.set(1, 1, 0, FixtureCensus::STONE);
+        assert!(
+            diagonal_step(&view, NavNode::still(0, 1, 0), 1.0, Dir4::North, Dir4::East).is_none(),
+            "one blocked shoulder must refuse the whole diagonal"
+        );
+    }
+
+    /// The other shoulder, alone, is just as disqualifying — without this the
+    /// previous test could pass by coincidence if the check happened to look
+    /// at only the East shoulder specifically.
+    #[test]
+    fn the_other_blocked_shoulder_refuses_it_too() {
+        let mut view = flat();
+        view.set(0, 1, -1, FixtureCensus::STONE);
+        assert!(
+            diagonal_step(&view, NavNode::still(0, 1, 0), 1.0, Dir4::North, Dir4::East).is_none()
+        );
+    }
+
+    /// Both shoulders blocked — the classic "wedged in a corner" case
+    /// `docs/baritone-port.md` §2.3 names — is refused too.
+    #[test]
+    fn both_shoulders_blocked_is_refused() {
+        let mut view = flat();
+        view.set(1, 1, 0, FixtureCensus::STONE);
+        view.set(0, 1, -1, FixtureCensus::STONE);
+        assert!(
+            diagonal_step(&view, NavNode::still(0, 1, 0), 1.0, Dir4::North, Dir4::East).is_none()
+        );
+    }
+
+    /// A blocked destination with both shoulders clear is refused too —
+    /// otherwise "shoulders clear" could be satisfied by a rule that never
+    /// checks the target cell at all.
+    #[test]
+    fn a_blocked_destination_with_clear_shoulders_is_still_refused() {
+        let mut view = flat();
+        view.set(1, 1, -1, FixtureCensus::STONE);
+        assert!(
+            diagonal_step(&view, NavNode::still(0, 1, 0), 1.0, Dir4::North, Dir4::East).is_none()
+        );
+    }
+
+    /// Real vanilla refuses a shoulder that sits **above** the current cell
+    /// even when it is otherwise a perfectly legal `Walk` — stepping off a
+    /// soul-sand floor (surface `0.875`) onto ordinary stone beside it
+    /// (surface `1.0`) is a legal one-cell-up `Walk`, and
+    /// `WalkNodeEvaluator.isDiagonalValid`'s `ns.y > pos.y` check refuses it
+    /// as a diagonal shoulder anyway, before it ever looks at cost. Without
+    /// this the corner-cutting rule could be satisfied by a check that only
+    /// ever asked "is this shoulder walkable", never "is it also not higher".
+    #[test]
+    fn a_shoulder_that_is_a_legal_walk_but_one_cell_higher_still_refuses_the_diagonal() {
+        let mut view = flat();
+        // Standing *on* soul sand (surface `0.875`, feet cell `y = 0`) and
+        // stepping onto plain stone beside it is a legal `Walk` that lands
+        // one cell **up** (`to.y = from.y + 1`) — the exact case
+        // `soul_sand_is_walkable_in_both_directions` already proves is a
+        // legal `walk_step`. Both the North and East shoulders here are that
+        // same "legal walk, one cell up" case, and the destination (further
+        // stone, also `0.125` above the soul sand) is independently legal —
+        // so if the diagonal accepted it, the only thing that could have
+        // stopped it is the `y <= from.y` gate this test exists to prove.
+        view.set(1, 0, 0, FixtureCensus::SOUL_SAND);
+        let from = NavNode::still(1, 0, 0);
+        let from_surface = standable(&view, from.x, from.y, from.z).expect("standing on the soul sand");
+        assert!((from_surface - 0.875).abs() < 1e-9, "{from_surface}");
+
+        let shoulder = walk_step(&view, from, from_surface, Dir4::East).expect("a legal walk");
+        assert_eq!(shoulder.to.y, from.y + 1, "one cell up, exactly the case this test needs");
+
+        assert!(
+            diagonal_step(&view, from, from_surface, Dir4::North, Dir4::East).is_none(),
+            "a shoulder that walk_step accepts but that sits above from.y must still refuse \
+             the diagonal, matching WalkNodeEvaluator's own ns.y > pos.y / ew.y > pos.y check"
+        );
+    }
+
+    #[test]
+    fn diagonal_stencils_are_built_per_direction_and_are_not_empty() {
+        let ne = MoveKind::WalkDiagonal(Dir4::North, Dir4::East).stencil();
+        let se = MoveKind::WalkDiagonal(Dir4::East, Dir4::South).stencil();
+        assert!(!ne.is_empty());
+        assert_ne!(ne, se, "each pairing must translate, not repeat one direction");
+    }
+
+    /// The diagonal stencil covers all four columns its own legality check
+    /// reads: source, both shoulders, and the destination — the witness set
+    /// (`docs/baritone-port.md` §4.5) has to see every cell a block update
+    /// could invalidate this edge through.
+    #[test]
+    fn diagonal_stencil_covers_both_shoulders_and_the_destination() {
+        let stencil = MoveKind::WalkDiagonal(Dir4::North, Dir4::East).stencil();
+        for cell in [[0, 0, 0], [1, 0, 0], [0, 0, -1], [1, 0, -1]] {
+            assert!(
+                stencil.contains(&cell),
+                "{cell:?} missing from the diagonal stencil"
+            );
         }
     }
 }

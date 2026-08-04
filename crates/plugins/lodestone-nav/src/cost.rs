@@ -174,6 +174,59 @@ impl EntryRel {
             Self::Reverse => 2,
         }
     }
+
+    /// Entry relation for a [`MoveKind::WalkDiagonal(d1, d2)`], from the
+    /// arrival that reached the `from` node.
+    ///
+    /// # Why this collapses to three classes, not five
+    ///
+    /// `Arrival` is always cardinal — `Still` or `Walking(Dir4)` — because
+    /// `WalkDiagonal`'s own exit arrival already collapses onto one cardinal
+    /// component (`MoveKind::WalkDiagonal`'s doc comment), so nothing ever
+    /// arrives at a node already moving diagonally. A cardinal direction is
+    /// always exactly `0°`, `90°`, `180°` or `270°` from *some* reference, and
+    /// a diagonal's own heading sits at an odd multiple of `45°` from every
+    /// cardinal — so a cardinal entry is **never** `0°` (`Straight`) or `180°`
+    /// (`Reverse`) from a diagonal `going`, and never exactly `90°`
+    /// (`Left`/`Right`) either. It is always `45°` (entry is `d1` or `d2`
+    /// themselves — "moving into the corner already") or `135°` (entry is
+    /// `d1.opposite()` or `d2.opposite()` — "moving away from it"), and by the
+    /// diagonal's own mirror symmetry (reflecting across its own axis swaps
+    /// `d1` and `d2` and leaves the physics unchanged — same friction, same
+    /// speed factor, same isotropic drag), those two members of each pair are
+    /// cost-equivalent. Three classes — `Still`, one `45°` class, one `135°`
+    /// class — are therefore both necessary and sufficient, never four or
+    /// five.
+    ///
+    /// This reuses [`Self::Straight`]/[`Self::Reverse`] rather than minting
+    /// two new variants, because [`TemplateTable::simulate`] already has a
+    /// correct, tested position/velocity formula for exactly "already moving
+    /// favourably, just crossed the entry face" (`Straight`) and "already
+    /// moving unfavourably, must turn around" (`Reverse`) — the diagonal case
+    /// needs the *same* physical state, just approached along a different
+    /// pair of axes, and `Self::WalkDiagonal`'s canonical simulation frame is
+    /// always the same one direction pair regardless of which real diagonal
+    /// is being costed (`crate::graph::MoveKind::id`'s own doc comment makes
+    /// the identical claim for the cardinal case).
+    ///
+    /// **A real, bounded approximation this collapse costs:** `turn_penalty`
+    /// (a preference on top of the simulated cost, not a measurement — see
+    /// [`crate::policy::NavPolicy::turn_penalty`]'s own doc comment) charges
+    /// `Straight`'s `0` quarter-turns for a genuine `45°` realignment and
+    /// `Reverse`'s `2` for a genuine `135°` one, under- and over-charging
+    /// respectively by one quarter-turn's worth of preference. The simulated
+    /// tick count itself is unaffected — only the additive preference is
+    /// approximate, and only in the direction that still prefers walking a
+    /// diagonal that continues a straight approach over one that reverses
+    /// one, which is the right ordering even if the exact charge is off.
+    #[must_use]
+    pub fn of_diagonal(entry: Option<Dir4>, d1: Dir4, d2: Dir4) -> Self {
+        match entry {
+            None => Self::Still,
+            Some(dir) if dir == d1 || dir == d2 => Self::Straight,
+            Some(_) => Self::Reverse,
+        }
+    }
 }
 
 /// The equivalence class a simulated cost is memoised under.
@@ -363,6 +416,27 @@ impl TemplateTable {
     /// the heuristic must bound the cheapest movement the graph could contain, and
     /// making it depend on a policy flag is how an "optimisation" quietly turns `h`
     /// inadmissible.
+    ///
+    /// # `WalkDiagonal` needed a second scan, not just a smaller deflation
+    ///
+    /// This used to scan only steady-state *cardinal* speed, on the reasoning that
+    /// nothing moves faster per block than continuing in a straight line. That
+    /// reasoning quietly broke the moment `WalkDiagonal` existed: its `Reverse`
+    /// entry class (`EntryRel::of_diagonal`'s doc comment explains why only three
+    /// classes exist at all) measured **~3.09 ticks per octile block** against a
+    /// cardinal-derived `h_rate` of **~3.46** — the heuristic *overestimating* the
+    /// true cost of a diagonal approached that way, a real inadmissibility this
+    /// crate's own `debug_assert`-backed contract exists to forbid. The cause is
+    /// not that a diagonal is genuinely faster than steady state; it is that
+    /// `Reverse`'s aligned axis inherits almost no residual distance from a prior
+    /// cardinal edge's own **boundary**-crossing completion (`WalkDrive::done` is a
+    /// cell-boundary test, not a "reached centre" test) — see the module docs and
+    /// `docs/autonomous-navigation.md` for the full account. Steady-state motion
+    /// cannot see this, because it never measures a bounded edge at all. So this
+    /// now also simulates every diagonal template `EntryRel::of_diagonal` can
+    /// actually produce (`Still`/`Straight`/`Reverse` — never `Left`/`Right`,
+    /// which it never emits) and folds their own per-octile-block rate into the
+    /// same minimum.
     pub fn cheapest_ticks_per_block(&mut self) -> f64 {
         let mut best = f64::INFINITY;
         for surface in SurfaceClass::ALL {
@@ -370,6 +444,26 @@ impl TemplateTable {
                 let speed = self.steady_speed(surface, SpeedClass::Normal, sprint);
                 if speed > 1e-6 {
                     best = best.min(1.0 / speed);
+                }
+            }
+        }
+        for surface in SurfaceClass::ALL {
+            for sprint in [false, true] {
+                for entry in [EntryRel::Still, EntryRel::Straight, EntryRel::Reverse] {
+                    let template = self.get(TemplateKey {
+                        kind: MoveKind::WalkDiagonal(Dir4::North, Dir4::East).id(),
+                        entry,
+                        surface,
+                        speed: SpeedClass::Normal,
+                        sprint,
+                        drop_n: 0,
+                    });
+                    if template.ok {
+                        let rate = template.ticks.as_f64() / std::f64::consts::SQRT_2;
+                        if rate > 1e-6 {
+                            best = best.min(rate);
+                        }
+                    }
                 }
             }
         }
@@ -404,7 +498,7 @@ impl TemplateTable {
             };
         };
         let rise: i32 = match kind {
-            MoveKind::Walk(_) => 0,
+            MoveKind::Walk(_) | MoveKind::WalkDiagonal(_, _) => 0,
             MoveKind::StepUp(_) => 1,
             MoveKind::Descend(_) => -1,
             MoveKind::Drop(_, n) => -i32::from(n),
@@ -434,8 +528,15 @@ impl TemplateTable {
 
         let mut state = start_state(&world, position, key.sprint, &self.profile);
         state.velocity = velocity;
+        // `WalkDiagonal` moves along **both** `+X` and `-Z` at once, in the
+        // canonical `(North, East)` frame `decode_kind` always produces for
+        // it — direction is irrelevant to a canonical-frame simulation, same
+        // as every cardinal kind already relies on (`MoveKind::id`'s own doc
+        // comment). Every other kind still moves along `+X` only.
+        let is_diagonal = matches!(kind, MoveKind::WalkDiagonal(_, _));
+        let dest_z: i32 = if is_diagonal { -1 } else { 0 };
         let drive = WalkDrive {
-            cell: [1, 1 + rise, 0],
+            cell: [1, 1 + rise, dest_z],
             surface: 1.0 + f64::from(rise),
             brake: false,
             sprint: key.sprint,
@@ -459,11 +560,25 @@ impl TemplateTable {
                 // so charging a whole tick over-counts by up to 1.0 — which, chained
                 // over a hundred edges, is a hundred ticks of pessimism and a route
                 // chosen for the wrong reason.
-                let travelled = state.position.x - before.x;
-                let fraction = if travelled > 1e-9 {
-                    ((1.0 - before.x) / travelled).clamp(0.0, 1.0)
+                //
+                // Every cardinal kind moves along `x` only, so the original,
+                // unconditional single-axis formula stays exactly as it was —
+                // touching it at all would risk every already-tested cardinal
+                // template. `WalkDiagonal` is the one kind whose `done()` can
+                // become true because of a `z` crossing that happens on a
+                // *different* tick than the `x` crossing (`WalkDrive::inside_cell`
+                // requires both), so it alone gets the two-axis version — see
+                // `completion_fraction`'s own doc comment for why a single axis
+                // is unsafe there.
+                let fraction = if is_diagonal {
+                    completion_fraction(before, state.position, drive.cell)
                 } else {
-                    1.0
+                    let travelled = state.position.x - before.x;
+                    if travelled > 1e-9 {
+                        ((1.0 - before.x) / travelled).clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    }
                 };
                 return Template {
                     ticks: Ticks::from_f64(f64::from(ticks - 1) + fraction),
@@ -565,15 +680,79 @@ fn start_state(
 
 /// `MoveKind` from its dense id (plus, for `Drop`, the fall distance the key
 /// itself carried, since [`MoveKind::id`] cannot see it). Direction is
-/// irrelevant to a canonical-frame simulation, so `East` stands for all four.
+/// irrelevant to a canonical-frame simulation, so `East` stands for all four
+/// cardinal kinds and `(North, East)` stands for all four diagonal pairs.
 const fn decode_kind(id: u8, drop_n: u8) -> Option<MoveKind> {
     match id {
         0 => Some(MoveKind::Walk(Dir4::East)),
         1 => Some(MoveKind::StepUp(Dir4::East)),
         2 => Some(MoveKind::Descend(Dir4::East)),
         3 if drop_n > 0 => Some(MoveKind::Drop(Dir4::East, drop_n)),
+        4 => Some(MoveKind::WalkDiagonal(Dir4::North, Dir4::East)),
         _ => None,
     }
+}
+
+/// Fraction of the tick's own motion, on whichever axis crossed into `cell`
+/// **during this tick**, needed to reach that axis's own boundary.
+///
+/// # Why a diagonal needs both axes, and why "just reuse the `x` formula"
+/// silently drifts wrong
+///
+/// `Walk`/`StepUp`/`Descend`/`Drop` only ever move along `x`, so charging a
+/// whole tick when the boundary was crossed partway through it only ever
+/// needed to look at `x`. `WalkDiagonal` moves along **both** axes, and
+/// [`WalkDrive::done`]/[`WalkDrive::inside_cell`] require **both** to already
+/// be inside the destination cell — so the two axes can, and typically do,
+/// cross their own boundaries on *different* ticks. On the tick where `done`
+/// first becomes true, whichever axis crossed on an *earlier* tick is no
+/// longer moving toward a boundary at all (it may still be drifting slightly
+/// inside the cell it already reached), and measuring "how far into this
+/// tick did it cross" against a boundary it crossed ticks ago produces a
+/// number with no physical meaning. So only an axis that is **newly** inside
+/// its target cell this tick contributes a fraction; if both are newly inside
+/// on the same tick, completion is gated by whichever crosses **later**
+/// within it, so the answer is the **maximum** over axes that newly crossed,
+/// not either one alone or their sum.
+///
+/// For every cardinal kind this reduces to exactly the original single-axis
+/// formula: `z`'s target always equals the source `z` (no cardinal kind ever
+/// moves in `z`), so `z` is never "newly inside" its target and never
+/// contributes — only `x` ever does, unconditionally, which is the same
+/// answer the original code computed. `WalkDiagonal` uses this generalised
+/// version alone (see the call site in [`TemplateTable::simulate`]);
+/// no cardinal kind's behaviour changes.
+fn completion_fraction(before: Vec3d, after: Vec3d, cell: [i32; 3]) -> f64 {
+    let mut fraction: Option<f64> = None;
+    for (b, a, target) in [(before.x, after.x, cell[0]), (before.z, after.z, cell[2])] {
+        #[allow(clippy::cast_possible_truncation)]
+        let before_cell = b.floor() as i32;
+        #[allow(clippy::cast_possible_truncation)]
+        let after_cell = a.floor() as i32;
+        if before_cell != target && after_cell == target {
+            let f = axis_boundary_fraction(b, a, target);
+            fraction = Some(fraction.map_or(f, |existing: f64| existing.max(f)));
+        }
+    }
+    fraction.unwrap_or(1.0)
+}
+
+/// How far through `before -> after`'s own displacement the near boundary of
+/// `target_cell` sits, on one axis: `0.0` means the boundary was crossed at
+/// the very start of the tick's motion, `1.0` means at the very end (or that
+/// there was no meaningful motion at all, the same conservative default the
+/// original single-axis formula used).
+fn axis_boundary_fraction(before: f64, after: f64, target_cell: i32) -> f64 {
+    let travelled = after - before;
+    if travelled.abs() <= 1e-9 {
+        return 1.0;
+    }
+    let boundary = if travelled > 0.0 {
+        f64::from(target_cell)
+    } else {
+        f64::from(target_cell) + 1.0
+    };
+    ((boundary - before) / travelled).clamp(0.0, 1.0)
 }
 
 /// The synthetic world a template simulation runs against: an unbounded floor
@@ -980,5 +1159,189 @@ mod tests {
         t.get(key_for(MoveKind::Drop(Dir4::East, 3), EntryRel::Straight, SurfaceClass::Normal));
         t.get(key_for(MoveKind::Drop(Dir4::East, 3), EntryRel::Straight, SurfaceClass::Normal));
         assert_eq!(t.len(), 2, "n=2 and n=3 are different templates; the repeat of n=3 must not add a third");
+    }
+
+    // --- M2: WalkDiagonal cost simulation ---
+
+    fn diagonal_key(entry: EntryRel) -> TemplateKey {
+        key_for(
+            MoveKind::WalkDiagonal(Dir4::North, Dir4::East),
+            entry,
+            SurfaceClass::Normal,
+        )
+    }
+
+    /// A diagonal genuinely simulates and completes, and — the actual
+    /// functional claim `docs/baritone-port.md` §4.1 makes ("a diagonal wins
+    /// ties against two axis moves") — costs **less than two cardinal
+    /// steps**, so the search prefers one diagonal edge over a two-edge
+    /// cardinal detour of the same net displacement.
+    ///
+    /// This does *not* assert the doc's other figure, "a hair below `sqrt(2)`
+    /// times a straight step", and that is a real, recorded finding rather
+    /// than an oversight: that figure describes a full centre-to-centre
+    /// Euclidean crossing, while [`WalkDrive::done`] is a **cell-boundary**
+    /// test on both axes. `EntryRel::of_diagonal`'s entry classes reuse the
+    /// cardinal `Straight`/`Reverse` position formulas verbatim (see its own
+    /// doc comment), which place the *aligned* axis near its far face
+    /// (`~0.999` blocks still to cross) but leave the *other* axis centred
+    /// (`~0.5` blocks to cross) — a real asymmetry inherited from a
+    /// prior cardinal edge's own `done()` having fired at a boundary, not at
+    /// its destination's centre. Measured here: `Straight` costs **~1.17×** a
+    /// cardinal step (more distance, so more than `1×`, but nowhere near
+    /// `sqrt(2)`), and `Reverse` costs **~0.89×** — genuinely *less* than one
+    /// cardinal step, because its aligned axis has almost no residual
+    /// distance left (having already nearly reached the corresponding
+    /// cardinal boundary) even though it must first kill and reverse its
+    /// velocity. Both numbers are real outputs of the same integrator
+    /// everything else in this crate trusts, not a formula, and the
+    /// `docs/autonomous-navigation.md` update records this rather than
+    /// silently asserting a number that does not hold.
+    #[test]
+    fn a_diagonal_step_costs_less_than_two_cardinal_steps() {
+        let mut t = table();
+        let straight_cardinal = walk(&mut t, EntryRel::Straight, SurfaceClass::Normal);
+        for entry in [EntryRel::Still, EntryRel::Straight, EntryRel::Reverse] {
+            let diagonal = t.get(diagonal_key(entry));
+            assert!(diagonal.ok, "{entry:?}: a diagonal over open flat ground must simulate ok");
+            let ratio = diagonal.ticks.as_f64() / straight_cardinal.ticks.as_f64();
+            assert!(
+                (0.5..2.0).contains(&ratio),
+                "{entry:?}: diagonal/cardinal-straight ratio {ratio} — must beat two cardinal \
+                 steps (<2.0), and a sanity floor against a degenerate near-zero simulation (>0.5)"
+            );
+        }
+    }
+
+    /// The admissibility claim `goal::octile`'s own doc comment makes ("exact
+    /// once `WalkDiagonal` lands") depends on `h`'s per-block rate never
+    /// exceeding the diagonal's own real rate **per octile block** (`sqrt(2)`
+    /// Euclidean blocks per edge), for **every** entry class the search can
+    /// actually produce — not only the intuitive one. `Reverse` is the
+    /// control: measured independently in `cheapest_ticks_per_block`'s own
+    /// doc comment at ~3.09 ticks/octile-block against a purely
+    /// cardinal-derived rate of ~3.46, this entry class is exactly the one
+    /// that would have silently broken admissibility if
+    /// `cheapest_ticks_per_block` had not been taught to scan diagonal
+    /// templates too.
+    #[test]
+    fn the_heuristic_rate_still_bounds_every_diagonal_entry_classs_own_rate() {
+        let mut t = table();
+        let h_rate = t.cheapest_ticks_per_block();
+        for entry in [EntryRel::Still, EntryRel::Straight, EntryRel::Reverse] {
+            let diagonal = t.get(diagonal_key(entry));
+            assert!(diagonal.ok, "{entry:?}");
+            let diagonal_rate = diagonal.ticks.as_f64() / std::f64::consts::SQRT_2;
+            assert!(
+                h_rate < diagonal_rate,
+                "{entry:?}: heuristic {h_rate} t/blk must stay below the diagonal's \
+                 {diagonal_rate} t/octile-block"
+            );
+        }
+    }
+
+    /// `EntryRel::of_diagonal`'s whole claim: a cardinal entry is always
+    /// exactly one of the two components (`Straight`) or one of their
+    /// opposites (`Reverse`), never `Left`/`Right`/anything else — checked
+    /// directly against all four cardinal directions for one diagonal.
+    #[test]
+    fn diagonal_entry_classification_only_ever_produces_still_straight_or_reverse() {
+        assert_eq!(EntryRel::of_diagonal(None, Dir4::North, Dir4::East), EntryRel::Still);
+        assert_eq!(
+            EntryRel::of_diagonal(Some(Dir4::North), Dir4::North, Dir4::East),
+            EntryRel::Straight
+        );
+        assert_eq!(
+            EntryRel::of_diagonal(Some(Dir4::East), Dir4::North, Dir4::East),
+            EntryRel::Straight
+        );
+        assert_eq!(
+            EntryRel::of_diagonal(Some(Dir4::South), Dir4::North, Dir4::East),
+            EntryRel::Reverse
+        );
+        assert_eq!(
+            EntryRel::of_diagonal(Some(Dir4::West), Dir4::North, Dir4::East),
+            EntryRel::Reverse
+        );
+    }
+
+    /// `turn_penalty` is a *preference on top of a measurement*
+    /// (`crate::policy::NavPolicy::turn_penalty`'s own doc comment), not a
+    /// correction to one — so `EntryRel::of_diagonal`'s `quarter_turns()`
+    /// mapping (`Straight` → 0, `Reverse` → 2) only has to be a reasonable
+    /// *preference ordering*, never a claim about the simulated ticks
+    /// themselves. This is the control that proves that distinction is load
+    /// -bearing here, not decorative: the simulated ticks for `Straight` and
+    /// `Reverse` do **not** order the way cardinal `turn_rates_are_ordered`
+    /// orders them (`Reverse` is cheaper, not dearer — see
+    /// `a_diagonal_step_costs_less_than_two_cardinal_steps`'s doc comment for
+    /// why), so asserting that ordering here would pin a false claim. What
+    /// *is* still true, and asserted, is that `turn_penalty` itself continues
+    /// to charge `Reverse` more than `Straight` as an additive preference,
+    /// which is all `search::Search::edge_cost` actually relies on.
+    #[test]
+    fn diagonal_turn_penalty_still_prefers_straight_over_reverse_even_though_ticks_do_not() {
+        assert!(EntryRel::Reverse.quarter_turns() > EntryRel::Straight.quarter_turns());
+
+        let mut t = table();
+        let straight = t.get(diagonal_key(EntryRel::Straight));
+        let reverse = t.get(diagonal_key(EntryRel::Reverse));
+        assert!(straight.ok && reverse.ok);
+        assert!(
+            reverse.ticks < straight.ticks,
+            "recording the actual (surprising) relation, so a future change that flips it back \
+             is a deliberate decision, not a silent regression: reverse {} vs straight {}",
+            reverse.ticks,
+            straight.ticks
+        );
+    }
+
+    /// The generalised sub-tick fraction, tested directly against the
+    /// single-axis formula it must reduce to for a cardinal-shaped crossing
+    /// (`z` never leaves its target), and against a genuinely two-axis
+    /// crossing where the two boundaries are hit on the same tick.
+    #[test]
+    fn completion_fraction_matches_the_original_single_axis_formula_when_z_never_moves() {
+        // A cardinal-shaped crossing: only `x` moves, `z` sits at its target
+        // (`0`) the whole time -- must reduce to exactly the original
+        // `(1.0 - before.x) / travelled` formula.
+        let before = Vec3d::new(0.9, 1.0, 0.0);
+        let after = Vec3d::new(1.05, 1.0, 0.0);
+        let expected = (1.0 - before.x) / (after.x - before.x);
+        let got = completion_fraction(before, after, [1, 1, 0]);
+        assert!((got - expected).abs() < 1e-9, "{got} vs {expected}");
+    }
+
+    /// A genuinely diagonal crossing: `z` crosses into its target (`-1`)
+    /// this tick while `x` is already settled inside cell `1` from an
+    /// earlier tick and merely drifts a little further. Only `z`'s own
+    /// fraction may contribute -- the bug this generalisation fixes is
+    /// exactly the single-axis formula reading `x`'s stale, no-longer-
+    /// meaningful delta here instead.
+    #[test]
+    fn completion_fraction_ignores_an_axis_that_already_settled_on_an_earlier_tick() {
+        // `z` crosses from cell `0` into cell `-1` (`floor(-0.1) == -1`) this
+        // tick; `x` is already settled in cell `1` from an earlier tick and
+        // merely drifts a little further within it.
+        let before = Vec3d::new(1.05, 1.0, 0.2);
+        let after = Vec3d::new(1.06, 1.0, -0.1);
+        let expected_z = axis_boundary_fraction(before.z, after.z, -1);
+        let got = completion_fraction(before, after, [1, 1, -1]);
+        assert!((got - expected_z).abs() < 1e-9, "{got} vs {expected_z}");
+    }
+
+    /// Both axes newly cross on the same tick: the fraction is the **later**
+    /// (larger) of the two, since completion needs both.
+    #[test]
+    fn completion_fraction_takes_the_later_of_two_simultaneous_crossings() {
+        let before = Vec3d::new(0.8, 1.0, 0.3);
+        let after = Vec3d::new(1.1, 1.0, -0.05);
+        let fx = axis_boundary_fraction(before.x, after.x, 1);
+        let fz = axis_boundary_fraction(before.z, after.z, -1);
+        let got = completion_fraction(before, after, [1, 1, -1]);
+        assert!((got - fx.max(fz)).abs() < 1e-9, "{got} vs max({fx}, {fz})");
+        // The control that proves this is not vacuously satisfied by taking
+        // the minimum instead: with these numbers the two really do differ.
+        assert!((fx - fz).abs() > 1e-6, "fx {fx} and fz {fz} must differ for this test to mean anything");
     }
 }
