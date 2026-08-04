@@ -226,6 +226,21 @@ impl VersionData {
         self.0.as_ref()?.tool_mining(held, state_id)
     }
 
+    /// The version's pick/outline geometry for a block-state id, block-local
+    /// `0..1`-per-cell boxes, or `None` when there is no adapter or the id is
+    /// outside its census.
+    ///
+    /// Added for [`crate::player::BreakIntent`]'s legality check: a plugin
+    /// supplies a target with no mouse ray behind it, so `drive_mining` has to
+    /// cast one of its own from the eye to confirm the target is actually
+    /// reachable and unobstructed — the same question a human's crosshair
+    /// answers for free. This is the read that lets it build the same
+    /// `pick_boxes` closure a live mouse cast already uses.
+    #[must_use]
+    pub fn block_outline(&self, state_id: u32) -> Option<&'static [lodestone_model::BlockAabb]> {
+        self.0.as_ref()?.block_outline(state_id)
+    }
+
     /// The version's per-entity-type physics facts for a resolved entity type, or
     /// `None` when there is no adapter or the type is outside its census.
     ///

@@ -90,19 +90,20 @@ use lodestone_ecs::ecs::resource::Resource;
 use lodestone_ecs::ecs::schedule::IntoScheduleConfigs;
 use lodestone_client::{BlockPos, ClientAction, ClientHandle};
 use lodestone_ecs::player::{
-    ActionQueue, Dead, Egress, Flying, LastFlyingSent, LastSprintingSent, LocalPlayer, PhysicsState,
-    SelectedSlot, Submersion,
+    ActionQueue, BreakIntent, BreakOutcome, BreakRejection, BreakStatus, Dead, Egress, Flying,
+    LastFlyingSent, LastSprintingSent, LocalPlayer, PhysicsState, SelectedSlot, Submersion,
 };
 use lodestone_ecs::session::{Abilities, ServerEntityId, SessionMenus};
 use lodestone_ecs::{GameTick, TickSet, VersionData};
 use lodestone_game::mining::Mining;
 use lodestone_game::placement::Placement;
-use lodestone_model::PlayerCommand;
+use lodestone_model::{BlockFace, PlayerCommand};
+use lodestone_physics::Vec3d;
 
 use crate::blocks::id;
 use crate::net::SharedHandle;
 use crate::particles::Particles;
-use crate::raycast::RayHit;
+use crate::raycast::{PickBox, RayHit, raycast};
 use crate::sim::{bare_handed_tool_mining, dig_break_inputs, face_from_normal, particle_face};
 
 /// The block the view ray currently points at, for the outline and every edit.
@@ -348,6 +349,75 @@ pub fn send_abilities(
     }
 }
 
+/// [`BlockFace`] to its outward unit normal — the inverse of
+/// [`face_from_normal`], needed because a [`BreakIntent`] carries a face
+/// (like a mouse ray hit's [`RayHit::normal`]) rather than a direction to cast
+/// along.
+fn face_to_normal(face: BlockFace) -> [i32; 3] {
+    match face {
+        BlockFace::Down => [0, -1, 0],
+        BlockFace::Up => [0, 1, 0],
+        BlockFace::North => [0, 0, -1],
+        BlockFace::South => [0, 0, 1],
+        BlockFace::West => [-1, 0, 0],
+        BlockFace::East => [1, 0, 0],
+    }
+}
+
+/// Resolve a plugin's [`BreakIntent`] into the same [`RayHit`] shape a mouse
+/// click's [`RayTarget`] would produce, or reject it.
+///
+/// A plugin has no crosshair, so there is no ray to read — this casts one of
+/// its own, from the eye toward the centre of the face the intent names,
+/// using the version's own [`VersionData::block_outline`] census for the
+/// per-cell geometry the same way [`crate::raycast::raycast`]'s only other
+/// caller (the mouse-driven `Sim::update_target`) does. Accepting the
+/// resolved hit **only when it lands on the intended cell** is what makes
+/// this a real reach-and-line-of-sight check rather than a rubber stamp: a
+/// closer block in the way, or a target beyond vanilla's 4.5-block
+/// [`crate::raycast::REACH`], both resolve to a different cell (or no hit at
+/// all) and are rejected identically, matching
+/// [`BreakRejection::UnreachableOrObstructed`]'s own doc on why the two share
+/// one variant.
+///
+/// Cells with no live block data (`NetHandle::block_at` returning `None`) are
+/// treated as untargetable rather than solid — the same "not painted, not an
+/// obstruction" answer the mouse-driven cast gives for a chunk that has not
+/// streamed in, and it is what makes a target beyond the loaded world resolve
+/// as unreachable rather than panicking or inventing geometry.
+fn resolve_break_intent(
+    intent: BreakIntent,
+    eye: Vec3d,
+    net: &NetHandle,
+    version: &VersionData,
+) -> Result<RayHit, BreakRejection> {
+    let block = [intent.pos.x, intent.pos.y, intent.pos.z];
+    let normal = face_to_normal(intent.face);
+    let aim_point = RayHit::face_center(block, normal).hit;
+    let origin = [eye.x, eye.y, eye.z];
+    let dir = [
+        aim_point[0] - origin[0],
+        aim_point[1] - origin[1],
+        aim_point[2] - origin[2],
+    ];
+    let hit = raycast(origin, dir, crate::raycast::REACH, |x, y, z, out| {
+        let Some(state) = net.block_at(BlockPos::new(x, y, z)) else {
+            return;
+        };
+        let Some(boxes) = version.block_outline(state) else {
+            return;
+        };
+        out.extend(boxes.iter().map(|b| PickBox {
+            min: [f64::from(b.min[0]), f64::from(b.min[1]), f64::from(b.min[2])],
+            max: [f64::from(b.max[0]), f64::from(b.max[1]), f64::from(b.max[2])],
+        }));
+    });
+    match hit {
+        Some(resolved) if resolved.block == block => Ok(resolved),
+        _ => Err(BreakRejection::UnreachableOrObstructed),
+    }
+}
+
 /// Drive the live mining predictor one tick from the held attack button and the
 /// current target.
 ///
@@ -378,6 +448,21 @@ pub fn send_abilities(
 /// post-break-cooldown cases — the latter a deliberate, documented divergence
 /// matching this port's existing choice not to send a block-action packet during
 /// cooldown either.
+///
+/// # A plugin's [`BreakIntent`], and why it joins here rather than getting its
+/// own system
+///
+/// Consulted only when the human is **not** attacking (see [`BreakIntent`]'s
+/// own docs on why the human path takes priority) — resolved by
+/// [`resolve_break_intent`] into the identical [`RayHit`] shape a mouse click
+/// produces, then handed to the exact same `pos`/`face`/`id_value`/`entry`
+/// pipeline below. That reuse is the point: a plugin's dig is not a second,
+/// parallel implementation that could drift from the human one, it is the
+/// same code with a different source for `hit`. [`BreakOutcome`] is written
+/// at every point this function would otherwise silently do nothing with the
+/// intent, so a plugin can tell a stalled dig from a progressing one — see
+/// that component's own docs for why an unreported rejection is a silent
+/// autopilot stall.
 #[allow(clippy::too_many_arguments)]
 pub fn drive_mining(
     egress: Res<Egress>,
@@ -388,13 +473,15 @@ pub fn drive_mining(
     mut mining: ResMut<MiningPredictor>,
     mut particles: ResMut<ParticleSim>,
     mut queue: ResMut<ActionQueue>,
-    players: Query<
+    mut players: Query<
         (
             &PhysicsState,
             &Submersion,
             &SelectedSlot,
             Option<&Dead>,
             Option<&SessionMenus>,
+            Option<&BreakIntent>,
+            &mut BreakOutcome,
         ),
         With<LocalPlayer>,
     >,
@@ -402,17 +489,48 @@ pub fn drive_mining(
     if !(egress.in_world && egress.live) {
         return;
     }
-    let Ok((state, submersion, slot, dead, menus)) = players.single() else {
+    let Ok((state, submersion, slot, dead, menus, intent, mut outcome)) = players.single_mut()
+    else {
         return;
     };
 
-    let hit = if attacking.0 && dead.is_none() {
-        target.0
+    let human_attacking = attacking.0 && dead.is_none();
+    // `via_intent` distinguishes "no hit, human idle" from "no hit, a plugin's
+    // intent was rejected" — only the latter owes `outcome` a write below, and
+    // only the latter is allowed to overwrite an `Idle` a previous branch
+    // already set.
+    let (hit, via_intent) = if human_attacking {
+        (target.0, false)
+    } else if let Some(intent) = intent {
+        if dead.is_some() {
+            outcome.0 = BreakStatus::Rejected(BreakRejection::Dead);
+            (None, true)
+        } else {
+            let eye = Vec3d::new(
+                state.0.position.x,
+                state.0.position.y + f64::from(state.0.eye_height),
+                state.0.position.z,
+            );
+            match resolve_break_intent(*intent, eye, &net, &version) {
+                Ok(resolved) => (Some(resolved), true),
+                Err(reason) => {
+                    outcome.0 = BreakStatus::Rejected(reason);
+                    (None, true)
+                }
+            }
+        }
     } else {
-        None
+        (None, false)
     };
-    // Not attacking (or no target / dead): abort any live dig. `stop()` is
-    // idempotent — one `ABORT` for a live dig, nothing on later ticks.
+    if !via_intent {
+        // Human-driven or genuinely idle: this tick has nothing to report
+        // *from the plugin*, regardless of how the human's own dig is going.
+        outcome.0 = BreakStatus::Idle;
+    }
+
+    // Not attacking (or no target / dead / rejected intent): abort any live
+    // dig. `stop()` is idempotent — one `ABORT` for a live dig, nothing on
+    // later ticks.
     let Some(hit) = hit else {
         queue.0.extend(mining.0.stop());
         return;
@@ -422,13 +540,22 @@ pub fn drive_mining(
     // No live state at this position (or no live connection): same "abort, never
     // guess" contract as the unknown-state case below.
     let Some(id_value) = net.block_at(pos) else {
+        if via_intent {
+            outcome.0 = BreakStatus::Rejected(BreakRejection::NoWorldData);
+        }
         queue.0.extend(mining.0.stop());
         return;
     };
     let Some(entry) = version.block_hardness(id_value) else {
+        if via_intent {
+            outcome.0 = BreakStatus::Rejected(BreakRejection::UnknownBlockState);
+        }
         queue.0.extend(mining.0.stop());
         return;
     };
+    if via_intent {
+        outcome.0 = BreakStatus::Progressing;
+    }
 
     // The held item's contribution (speed, correct-tool-for-drops), resolved
     // through the same version-owned seam as `entry`. Falls back to bare hand —

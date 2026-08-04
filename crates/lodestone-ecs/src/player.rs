@@ -179,6 +179,147 @@ pub fn apply_look_intent(mut players: Query<(&mut PhysicsState, &LookIntent), Wi
     }
 }
 
+// ---------------------------------------------------------------------------
+// Break intent — a plugin's wish to mine a block
+// ---------------------------------------------------------------------------
+
+/// A plugin's wish to mine a block, mirroring [`MovementIntent`]/[`LookIntent`]'s
+/// "express a wish, the shell owns the machine" contract exactly.
+///
+/// # Why this exists
+///
+/// A plugin can already push a raw [`ClientAction`] onto
+/// [`ActionQueue`](crate::player::ActionQueue) (`docs/plugin-api.md`), but it
+/// must never push a [`ClientAction::BlockAction`] directly: the
+/// block-prediction `sequence` counter, the dig state machine and the
+/// post-break cooldown are owned by `lodestone_shell::interact::MiningPredictor`,
+/// driven by shell-only resources (`Attacking`, the mouse-driven ray target)
+/// that a plugin structurally cannot reach — a plugin depends on
+/// `lodestone-ecs` and never on `lodestone-shell` (`docs/plugin-api.md`). A
+/// plugin-synthesised sequence number would **fork the counter**, which
+/// `docs/baritone-port.md` §3.6 forbids outright ("threaded, never
+/// synthesised") — a forked sequence desynchronises block prediction against
+/// the server's own acknowledgements.
+///
+/// So, exactly like [`LookIntent`] claims rotation without ever touching
+/// `PhysicsState` itself, this claims *which block to mine* without touching
+/// the predictor, the action queue or the counter directly. The shell
+/// consumes it (`lodestone_shell::interact::drive_mining`) and remains the
+/// **only** writer of the counter, the dig state and the cooldown — a plugin
+/// only ever expresses "I would like to be mining this face of this block
+/// right now."
+///
+/// # Two components, not one `InteractIntent`
+///
+/// Break and place are genuinely different state machines in vanilla: a dig
+/// has progress, a cooldown, and a `sequence`-carrying
+/// `START`/`STOP`/`ABORT` triple spread over many ticks, while a place is one
+/// instantaneous `use_item_on`. A shared enum would make every reader
+/// pattern-match a variant just to ask "is a dig in progress" — a question
+/// this type's own *presence* already answers. It also mirrors a split the
+/// shell already made on its own: `MiningPredictor` and `PlacementPredictor`
+/// are two resources with two independent counters, not one, so a plugin's
+/// intent vocabulary having the same shape is the less surprising choice, not
+/// an arbitrary one.
+///
+/// # Optional and additive, like [`LookIntent`]
+///
+/// Absent (the default) changes nothing about human play — mining still runs
+/// off the attack button and the mouse ray, resources a plugin cannot reach
+/// at all. A plugin claims a dig by inserting this on the [`LocalPlayer`]
+/// entity; removing it hands control back with no other handshake, the same
+/// "insertion and removal already are one" property [`LookIntent`] documents.
+///
+/// **While the human attack button is held, the human path takes priority**
+/// over this component. A plugin's intent left behind after it stops running
+/// must never fight a real player for the same swing, and the human's own
+/// input already has a dedicated, always-available seam
+/// (`Attacking`/the mouse ray) that this must not shadow.
+///
+/// # What this cannot express, by construction
+///
+/// No `sequence`, no [`ClientAction::BlockAction`], no raw `ClientAction` at
+/// all — only a target block and the face to approach it from, the same two
+/// facts a mouse click's ray hit already carries. Everything the shell would
+/// refuse anyway — out of reach, through a wall, an unresolvable block state,
+/// a dead player — is rejected by `drive_mining` and reported back through
+/// [`BreakOutcome`], never silently absorbed. See that type's docs for why an
+/// unreported rejection would be a silent autopilot stall.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BreakIntent {
+    /// The block to mine.
+    pub pos: lodestone_model::BlockPos,
+    /// Which face to approach it from — decides the outward normal
+    /// `ClientAction::BlockAction`'s `face` reports, exactly as a mouse ray
+    /// hit would.
+    pub face: lodestone_model::BlockFace,
+}
+
+/// The shell's answer to this tick's [`BreakIntent`] — the observability half
+/// of the contract that component's own docs describe.
+///
+/// Without this, a plugin whose [`BreakIntent`] the shell silently ignores
+/// (target out of reach, through a wall, an unresolvable block state, a dead
+/// player) has no way to tell "digging, almost done" from "stalled and will
+/// never finish" — exactly the silent-stall failure mode
+/// `docs/baritone-port.md` catalogues repeatedly for a committed plan that
+/// cannot observe why an edge refuses to progress.
+///
+/// Always present on [`LocalPlayer`] — unlike the optional, claim-semantics
+/// [`BreakIntent`] — so a plugin can poll it on the very first tick without
+/// first checking whether the shell has ever run with an intent installed at
+/// all. [`spawn_local_player`]/[`reset_local_player`] both insert the
+/// [`Default`], [`BreakStatus::Idle`].
+///
+/// Reflects only the **plugin's own** intent, never the human's: while the
+/// human attack button is held, [`BreakIntent`] is not consulted at all (see
+/// its own docs on why the human path takes priority), and this reports
+/// [`BreakStatus::Idle`] for that tick regardless of how the human's own dig
+/// is going — a plugin polling this while a human is playing sees "nothing to
+/// report from me," never a fabricated success or failure.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BreakOutcome(pub BreakStatus);
+
+/// See [`BreakOutcome`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BreakStatus {
+    /// No [`BreakIntent`] was consulted this tick — either none is installed
+    /// on the entity, or the human attack button was driving instead.
+    #[default]
+    Idle,
+    /// The intent was accepted this tick: the dig is running (or a
+    /// single-tick block just broke instantly) through the very same
+    /// `MiningPredictor` a mouse-driven dig uses.
+    Progressing,
+    /// The shell would not act on the intent this tick, and why.
+    Rejected(BreakRejection),
+}
+
+/// Why `drive_mining` would not act on a [`BreakIntent`] this tick.
+///
+/// Every variant here is something the shell would have refused from a mouse
+/// click too — this is not a plugin-specific restriction, it is the same
+/// legality the human path is already subject to, just made observable
+/// because a plugin has no crosshair and no chat to notice a silent no-op.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BreakRejection {
+    /// The local player is dead (on the death screen).
+    Dead,
+    /// The intended block is outside vanilla's 4.5-block block-interaction
+    /// range, or something else stands between the eye and it. The two
+    /// collapse to one variant because both are observed the same way: a ray
+    /// aimed at the intended face does not land on the intended cell.
+    UnreachableOrObstructed,
+    /// No live chunk data at that position — outside the loaded world, or no
+    /// live connection at all.
+    NoWorldData,
+    /// The version has no break-time census entry for this exact block
+    /// state. The shell refuses to guess a hardness rather than mine at an
+    /// invented speed — the same "abort, never guess" contract
+    /// `drive_mining`'s own docs already apply to the mouse-driven path.
+    UnknownBlockState,
+}
+
 /// The **raw** sprint key, ungated by the forward-only/sneak rules
 /// [`MovementIntent`] applies.
 ///
@@ -1117,6 +1258,10 @@ pub fn spawn_local_player(world: &mut World, state: PlayerState) -> Entity {
             LastSprintingSent(Some(false)),
             LastFlyingSent(Some(false)),
             AttackStrengthTicker(0),
+            // Always present — see `BreakOutcome`'s own docs on why the
+            // observability half of the `BreakIntent` contract must not be
+            // opt-in the way the intent itself is.
+            BreakOutcome::default(),
             // Creative-flight client state. Both start cleared: `jumpTriggerTime`
             // at `0` means the *next* jump press opens a fresh double-tap window
             // rather than immediately completing one, and `wasJumping` at `false`
@@ -1151,6 +1296,7 @@ pub fn reset_local_player(world: &mut World, entity: Entity, state: PlayerState)
         LastSprintingSent(Some(false)),
         LastFlyingSent(Some(false)),
         AttackStrengthTicker(0),
+        BreakOutcome::default(),
         // A quit-to-title must not leave a half-open double-tap window behind.
         // `Abilities` itself is reset by `insert_session_components`, which the
         // driver calls alongside this — so a new session starts with no flight
@@ -1159,6 +1305,11 @@ pub fn reset_local_player(world: &mut World, entity: Entity, state: PlayerState)
         WasJumping(false),
     ));
     entity.remove::<Dead>();
+    // A quit-to-title must hand rotation back to mouse-look and drop any
+    // plugin's claimed dig — a stale `BreakIntent` surviving into the next
+    // session would resume mining as soon as a plugin re-adds itself, with no
+    // human ever having pressed anything this session.
+    entity.remove::<BreakIntent>();
 }
 
 // ---------------------------------------------------------------------------
@@ -1698,6 +1849,54 @@ mod tests {
         assert_eq!(app.world().get::<SelectedSlot>(entity).unwrap().0, 0);
         assert!(!app.world().get::<Flying>(entity).unwrap().0);
         assert!(app.world().get::<Dead>(entity).is_none());
+    }
+
+    /// [`spawn_local_player`] must insert [`BreakOutcome`] unconditionally
+    /// (unlike the opt-in [`BreakIntent`]) and it must start at
+    /// [`BreakStatus::Idle`] — a plugin polling on the very first tick, before
+    /// any dig has ever run, must see "nothing to report" rather than a
+    /// missing component or a fabricated success.
+    #[test]
+    fn spawn_local_player_starts_with_idle_break_outcome_and_no_intent() {
+        let (app, entity) = app_with_player(PlayerCollision::NoWorld);
+        assert_eq!(
+            app.world().get::<BreakOutcome>(entity).unwrap().0,
+            BreakStatus::Idle
+        );
+        assert!(
+            app.world().get::<BreakIntent>(entity).is_none(),
+            "a fresh session must not start with a claimed dig — nothing has \
+             claimed it yet"
+        );
+    }
+
+    /// A quit-to-title must hand the dig back, the same way it hands rotation
+    /// back by never having claimed it in the first place. A `BreakIntent`
+    /// left over from the previous session must not resume mining under the
+    /// next one.
+    #[test]
+    fn reset_local_player_drops_a_claimed_break_intent() {
+        let (mut app, entity) = app_with_player(PlayerCollision::NoWorld);
+        app.world_mut().entity_mut(entity).insert(BreakIntent {
+            pos: lodestone_model::BlockPos::new(3, 4, 5),
+            face: lodestone_model::BlockFace::Up,
+        });
+        assert!(app.world().get::<BreakIntent>(entity).is_some());
+
+        let spawn = PlayerState::at(Vec3d::new(0.5, 71.0, 0.5), 0.0);
+        reset_local_player(app.world_mut(), entity, spawn);
+
+        assert!(
+            app.world().get::<BreakIntent>(entity).is_none(),
+            "reset_local_player must clear a claimed dig like every other \
+             session-scoped claim"
+        );
+        assert_eq!(
+            app.world().get::<BreakOutcome>(entity).unwrap().0,
+            BreakStatus::Idle,
+            "the outcome must reset alongside the intent, not report a stale \
+             Progressing/Rejected from a session that no longer exists"
+        );
     }
 
     /// The whole point of [`LookIntent`]: inserting it changes the tick's

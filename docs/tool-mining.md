@@ -333,18 +333,32 @@ external source (here, the registry-order dump) disagrees.
   mines at the vanilla rate on this client. When `update_tags` is decoded,
   override at `block_tag_members` — it is the single lookup every rule match
   goes through.
-- **Wired into the shell.** `crates/lodestone-shell/src/sim.rs`'s
-  `Sim::drive_mining` resolves the held `ItemStack` for `self.selected_slot`
-  through `tool_mining_item`, calls `adapter.tool_mining(held, state_id)`, and
-  feeds `speed`/`correct_tool` into `dig_break_inputs` in place of the
-  bare-hand constants (`damage_per_block` is not yet consumed — durability
-  damage isn't modelled on this path). `bare_handed_tool_mining` is the
-  fallback for no held item or an unresolvable state, kept in exactly one
-  place so Gotcha 1's inversion isn't restated at the call site. A diamond
-  pickaxe in the running client now mines at pickaxe speed, not bare-hand
-  speed. `tool_inputs_stay_at_bare_hand_defaults` (`sim.rs`) is the unit test
-  that pins what stays default (efficiency/haste/fatigue) versus what now
-  varies with the held item.
+- **Wired into the shell — re-verified for issue on plugin break/place intent,
+  and the previous paragraph here was stale.** This used to say
+  `crates/lodestone-shell/src/sim.rs`'s `Sim::drive_mining`; Stage 5 of
+  `docs/bevy-migration.md` moved mining from a hand-called `Sim` method into a
+  `TickSet::Send` **system**, `crates/lodestone-shell/src/interact.rs`'s
+  `drive_mining` (`lodestone_shell::interact::drive_mining`) — a free function
+  taking `Query`/`Res`/`ResMut` parameters, not `&mut Sim`, and reading the
+  selected slot off the `SelectedSlot` **component** rather than
+  `self.selected_slot`. The behaviour this bullet describes is unchanged:
+  `drive_mining` resolves the held `ItemStack` through `tool_mining_item`,
+  calls `adapter.tool_mining(held, state_id)`, and feeds `speed`/`correct_tool`
+  into `dig_break_inputs` in place of the bare-hand constants
+  (`damage_per_block` is not yet consumed — durability damage isn't modelled
+  on this path). `bare_handed_tool_mining` is the fallback for no held item or
+  an unresolvable state, kept in exactly one place so Gotcha 1's inversion
+  isn't restated at the call site. A diamond pickaxe in the running client
+  mines at pickaxe speed, not bare-hand speed.
+  `tool_inputs_stay_at_bare_hand_defaults` (`crates/lodestone-shell/src/sim/tests.rs`,
+  moved out of `sim.rs` itself along with the rest of that file's test module)
+  is the unit test that pins what stays default (efficiency/haste/fatigue)
+  versus what now varies with the held item. **Not an island**: re-checked
+  directly against the tree while building the `BreakIntent` plugin seam
+  (`docs/plugin-api.md`) rather than assumed from this doc's own history —
+  `drive_mining` genuinely calls `VersionAdapter::tool_mining` on every tick a
+  dig is live, whether the target came from the mouse or from a plugin's
+  `BreakIntent`.
 
 ## Configuration
 

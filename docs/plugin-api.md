@@ -248,6 +248,51 @@ has no `VersionAdapter` method (`lodestone_model::PathTypeRegistry` exists; noth
 from v770 data) — confirmed still true, unaffected by either `67ff7c3` or `24af787`. That is the one
 piece of `docs/baritone-port.md` §7.5's "the important one" gap still without a route for a plugin.
 
+**5. `BreakIntent` — a plugin's wish to mine a block, without a raw `ClientAction` — closed.**
+Walking has `MovementIntent`/`LookIntent` (gap 2); mining had nothing equivalent. `ActionQueue`
+(the correction note above) lets a plugin push any `ClientAction`, but it must never push
+`ClientAction::BlockAction` directly: the block-prediction `sequence` counter, the dig state
+machine and the post-break cooldown are owned by `lodestone_shell::interact::MiningPredictor`,
+driven by shell-only resources (`Attacking`, the mouse-driven ray target) a plugin cannot reach —
+a plugin depends on `lodestone-ecs`, never on `lodestone-shell`. A plugin-synthesised sequence
+number would fork the counter, which `docs/baritone-port.md` §3.6 forbids outright ("threaded,
+never synthesised").
+
+`crates/lodestone-ecs/src/player.rs` now has `BreakIntent { pos: BlockPos, face: BlockFace }`,
+optional and additive exactly like `LookIntent` — absent changes nothing about human play, and a
+plugin claims a dig by inserting it on `LocalPlayer` with no other handshake. **While the human
+attack button is held, the human path takes priority**, mirroring how a plugin never fights mouse
+input for rotation either. `lodestone_shell::interact::drive_mining` consumes it: it resolves the
+intent into the identical `RayHit` shape a mouse click produces (casting its own ray through
+`VersionData::block_outline`, since a plugin has no crosshair to have already done that), then
+runs the *same* `MiningPredictor` pipeline a human dig uses — same counter, same state machine,
+same cooldown, never a second implementation that could drift from the first.
+
+**The refusal side is the part worth naming, because it is the one a movement intent does not
+need as sharply.** `MovementIntent` degrades gracefully — an intent physics cannot satisfy just
+produces less motion. A break intent for an unreachable, obstructed, or unresolvable block has a
+binary answer, and silently doing nothing is indistinguishable, to a plugin with no crosshair and
+no chat, from "still working on it." So `BreakOutcome(BreakStatus)` is a second, **always-present**
+component (`Idle` / `Progressing` / `Rejected(BreakRejection)`) that `drive_mining` writes on every
+tick a plugin's intent is (or would be) consulted — `docs/baritone-port.md`'s own "a plan can be
+legal, executable, and still stall forever" is exactly the failure mode an unreported rejection
+would reproduce at the level of a single edge.
+
+**`PlaceIntent` does not exist yet, and this is a real, checked stop, not an oversight.**
+`BreakIntent` was reachable as "an additional input" to an already-`Resource`-shaped system
+because `MiningPredictor`, `NetHandle` and `VersionData` are all bevy resources a `GameTick` system
+can already read. Placement's equivalent local write —
+`lodestone_shell::sim::placement::write_predicted_block` plus the re-mesh that makes it visible
+(`Sim::remesh_around`) — is reachable from `ChunkWorld` for the *write* half (a plugin-driven
+placement could set the block state), but `remesh_around` reaches into `Sim`'s own mesh-worker
+pool and GPU terrain state, which are plain struct fields, not resources, and are not part of
+`crates/lodestone-shell/src/interact.rs`'s ownership. Building `PlaceIntent`'s consumer honestly
+needs either a new resource exposing "remesh this position" from `sim.rs`/`sim/meshing.rs`, or
+accepting a placement that writes the block but never repaints it — neither of which is "add a
+system alongside `drive_mining`." That is real restructuring, in files this document's own
+authoring pass did not have standing to change; see the issue this gap is tracked against for the
+brokered patch.
+
 ### Native versus WASM
 
 `docs/bevy-migration.md` §6.1 sets up two tiers and is explicit that neither substitutes for the
@@ -312,6 +357,8 @@ cheaper substitute for the other is the mistake `docs/bevy-migration.md` warns a
 | world-space debug-geometry `Extract` channel | unassigned | **done** — see gap 3 above; this row was left stale (still saying "gap") for a time after gap 3 itself was marked closed, which is its own small instance of `CLAUDE.md`'s "staleness is the most common defect" rule: fixing one paragraph does not fix every other paragraph that restates the same fact |
 | block physics constants (friction/speed/jump/bounce/stuck/climbable) reachable without depending on `lodestone-shell` | unassigned | **closed in `24af787`** — `lodestone_model::block_physics(&str) -> BlockPhysics`; see §3 above |
 | `PathType` per state through the seam | unassigned | **gap — `docs/baritone-port.md` §3.3 named this in the original document; still true today** |
+| `BreakIntent`/`BreakOutcome` (mine-a-block seam, mirroring `MovementIntent`) | unassigned | **done** — `crates/lodestone-ecs/src/player.rs`, consumed by `lodestone_shell::interact::drive_mining`; see gap 5 above |
+| `PlaceIntent` (place-a-block seam) | unassigned | **gap, checked rather than assumed** — needs `sim.rs`/`sim/meshing.rs` to expose a remesh-capable resource before a `drive_placement` system can exist without touching `Sim`-only state; see gap 5 above for exactly what is missing |
 
 **The gap list, restated as the single most useful output of this document:** at the time this table
 was first written, four items had **no stage that claims them** at all in `docs/bevy-migration.md`'s
