@@ -46,6 +46,8 @@ pub(crate) mod generated_block_solidity;
 pub(crate) mod generated_block_states;
 #[path = "generated/collision_shapes.rs"]
 pub(crate) mod generated_collision_shapes;
+#[path = "generated/damage_types.rs"]
+pub(crate) mod generated_damage_types;
 #[path = "generated/data_component_types.rs"]
 pub(crate) mod generated_data_component_types;
 #[path = "generated/entity_census.rs"]
@@ -72,6 +74,8 @@ pub(crate) mod generated_particle_types;
 pub(crate) mod generated_path_types;
 #[path = "generated/shade_brightness.rs"]
 pub(crate) mod generated_shade_brightness;
+#[path = "generated/snow_support.rs"]
+pub(crate) mod generated_snow_support;
 #[path = "generated/sound_events.rs"]
 pub(crate) mod generated_sound_events;
 #[path = "generated/sound_types.rs"]
@@ -84,6 +88,7 @@ pub mod block_entity_types;
 pub mod block_solidity;
 pub mod block_states;
 pub mod collision_shapes;
+pub mod damage_types;
 pub mod data_component_types;
 pub mod entity_census;
 pub mod entity_dimensions;
@@ -97,6 +102,7 @@ pub mod outline_shapes;
 pub mod particle_types;
 pub mod path_types;
 pub mod shade_brightness;
+pub mod snow_support;
 pub mod sound_events;
 pub mod sound_types;
 pub mod tool;
