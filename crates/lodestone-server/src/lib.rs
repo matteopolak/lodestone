@@ -84,6 +84,7 @@ mod chunk;
 mod composter;
 mod fall;
 mod furnace;
+mod hopper;
 mod integrated;
 mod inventory;
 mod mob_spawn;
@@ -105,6 +106,10 @@ pub use furnace::{
     BURN_COOL_SPEED, CookingRecipe, DEFAULT_COOK_TIME, Furnace, FurnaceKind, FurnaceTick,
     MAX_STACK_SIZE as FURNACE_MAX_STACK_SIZE, base_burn_duration, effective_burn_duration,
     experience_for as furnace_experience_for, recipe_for as furnace_recipe_for,
+};
+pub use hopper::{
+    HOPPER_SIZE, Hopper, HopperTick, MAX_STACK_SIZE as HOPPER_MAX_STACK_SIZE,
+    TRANSFER_COOLDOWN_TICKS as HOPPER_TRANSFER_COOLDOWN_TICKS, try_move_one_item,
 };
 pub use integrated::IntegratedServer;
 pub use inventory::{HOTBAR_SIZE, OFFHAND_NATIVE, PLAYER_NATIVE_SIZE, PlayerInventory};
