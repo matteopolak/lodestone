@@ -329,10 +329,31 @@ Oracles (not part of repo state — recreate them):
   Practical rule: `rtk` for reading something you already believe, the real binary for anything a
   conclusion rests on. **Re-read every exit code from a captured file with a program, not from a
   pipeline.**
-- **This machine is shared with an unrelated project.** Docker holds images and volumes belonging to
-  other work (`mht-*`, postgres, valkey, seaweedfs). **Never run `docker system prune`,
-  `docker volume prune`, or `docker builder prune`.** Name every target explicitly; note Docker's
-  `name=` filter is a *substring* match. Lodestone containers are `lodestone-*`; prefer `--rm`.
+- **Docker's memory cost is the machine's real ceiling, and this entry used to say the opposite of
+  what to do.** It previously warned that the machine was shared with an unrelated project whose
+  `mht-*`, postgres, valkey and seaweedfs containers must never be pruned. **Checked 2026-08-04:
+  none of those containers or images exist**, and the owner confirmed nothing else in Docker matters
+  to them. That stale warning had every agent — and me — avoiding Docker maintenance all session
+  while the box suffocated.
+
+  What was actually there, measured: the three JVM oracle containers holding **2.75 GB**, the Docker
+  VM reserving **7.26 GB**, **22 GB** of build cache, **19 GB** of dangling images, and two dead
+  `temurin:8-jdk` containers. Free memory was down to about **87 MB** with load average **91**, and a
+  single-crate `cargo check` took **10m44s**. Stopping the oracles, pruning, and quitting Docker
+  Desktop recovered roughly **5.5 GB** of RAM — free pages went 5,542 → 360,121 and the compressor
+  dropped from 259k to 67k pages.
+
+  So: **Docker is fair game to stop and prune when no live gate needs it.** Prefer stopping the
+  oracles over leaving them idle — they are explicitly not repo state and
+  `scripts/live-oracles/{creative,survival,terrain}.sh` recreates them. Quitting Docker Desktop
+  entirely (`osascript -e 'quit app "Docker"'`) reclaims the VM reservation, which is the single
+  largest win available; restart it before any `#[ignore]`d live-oracle gate. Still name targets
+  explicitly rather than trusting a filter — Docker's `name=` filter is a *substring* match — and
+  still prefer `--rm`. Lodestone containers are `lodestone-*`.
+
+  **Volumes are the one thing to keep hesitating over.** 81 local volumes / 2.18 GB survive here
+  untouched; they are cheap, and a volume is the only Docker object that can hold data nothing
+  recreates. Prune images and build cache freely; think before pruning volumes.
 - **A `cargo check` in this checkout can report hundreds of phantom errors naming another agent's
   worktree.** Measured: `cargo check -p lodestone-shell --no-default-features` produced **435 error
   lines**, mostly `couldn't read …/scratchpad/wt-route-9a4c/crates/lodestone-server/assets/worldgen/
