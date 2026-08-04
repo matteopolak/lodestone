@@ -2028,6 +2028,13 @@ impl RenderState {
                     fx.draw_fire(queue, &mut encoder, view, screen_effects.tick);
                     stats.fire_overlay_drawn = true;
                 }
+                // The fourth overlay (issue #185). Same `Load` pass and the same
+                // first-person/not-spectator gate as the two above; no queue write
+                // because the pumpkin sprite needs no per-frame uniform.
+                if screen_effects.wearing_pumpkin {
+                    fx.draw_pumpkin(&mut encoder, view);
+                    stats.pumpkin_overlay_drawn = true;
+                }
             }
         }
 
