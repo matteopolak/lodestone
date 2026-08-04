@@ -1405,9 +1405,15 @@ impl ServerProtocol for V770ServerProtocol {
             // [`read_hashed_stack`].
             State::Play if packet_id == play::serverbound::SET_CREATIVE_MODE_SLOT => {
                 let mut r = Reader::new(payload);
+                // Qualified as `self::` (not a bare call) so
+                // `cargo xtask connectedness`'s delegate-following classifier
+                // doesn't try to recurse into a helper that returns
+                // `Option<Option<ItemStack>>`, not `ServerBound`, and
+                // misreport this arm as unclassified instead of the
+                // `Ignored` it always produces below.
                 let decoded = (|| -> Option<()> {
                     let _slot = r.i16().ok()?;
-                    let _item = read_optional_item_stack(&mut r)?;
+                    let _item = self::read_optional_item_stack(&mut r)?;
                     r.ensure_empty().ok()
                 })();
                 let _ = decoded;
@@ -1435,9 +1441,11 @@ impl ServerProtocol for V770ServerProtocol {
             // `crate::adapter::encode_set_beacon`.
             State::Play if packet_id == play::serverbound::SET_BEACON => {
                 let mut r = Reader::new(payload);
+                // See `SET_CREATIVE_MODE_SLOT`'s comment above for why these
+                // are qualified as `self::` rather than bare calls.
                 let decoded = (|| -> Option<()> {
-                    let _primary = read_optional_mob_effect(&mut r)?;
-                    let _secondary = read_optional_mob_effect(&mut r)?;
+                    let _primary = self::read_optional_mob_effect(&mut r)?;
+                    let _secondary = self::read_optional_mob_effect(&mut r)?;
                     r.ensure_empty().ok()
                 })();
                 let _ = decoded;
