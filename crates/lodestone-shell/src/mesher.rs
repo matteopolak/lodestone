@@ -40,10 +40,12 @@ use lodestone_ecs::{ChunkWorld, FrameSet, Update};
 use lodestone_render::{
     BlockClassifier, BlockModels, ChunkSectionView, FluidCell, FluidKind, FluidMeshes,
     FluidSectionView, FluidSprites, Mesh, ModelMesh, ModelSectionView, SectionLight,
-    SectionNeighborhood, SkyDefault, UniformLight, WorldSectionLight, face_of_direction,
-    mesh_fluids, mesh_models, mesh_simple,
+    SectionNeighborhood, SkyDefault, UniformLight, WorldSectionLight, biome_tint_kind_for_slot,
+    face_of_direction, mesh_fluids, mesh_models, mesh_simple,
 };
+use lodestone_render::biome_tint::{BLEND_RADIUS, NamedBiomeTint, resolve_blended_tint, rgb_to_bytes};
 use lodestone_assets::{BakedQuad, Direction};
+use lodestone_model::BlockPos;
 use lodestone_world::{
     ChunkPos, ChunkSection, PaletteKind, SectionLight as SectionLightData, World,
 };
@@ -794,6 +796,110 @@ fn split16(v: i32) -> (i32, usize) {
     (v.div_euclid(16), v.rem_euclid(16) as usize)
 }
 
+/// Biome-id → name, for the [`ChunkSection::biome_at_block`] id space **this
+/// client's own server assigns** — `crates/protocol/v770/src/
+/// server_protocol.rs`'s `BIOME_NAMES` (alphabetical over the 55 biomes the
+/// embedded overworld generator can select; nether/end biomes aren't in the
+/// servable set yet, see `docs/worldgen-biomes.md`).
+///
+/// # This is a known, provisional gap, not an oversight
+///
+/// The *correct* source for this mapping is per-connection: a real server's
+/// `registry_data` sync order, which `crates/protocol/v770/src/packets/
+/// registry.rs`'s `ClientRegistries::entry_names(ClientRegistries::BIOME)`
+/// already decodes correctly — but nothing between there and here carries it
+/// yet (`crates/lodestone-shell/src/net.rs` does not store a
+/// `ClientRegistries` on `NetClient` at all today, and threading one through
+/// `MeshScheduler`'s worker-thread jobs is real, separately-scoped wiring).
+/// This table is only correct **against this codebase's own server** — the
+/// only server v770 can host (`CLAUDE.md`), and the default single-player-ish
+/// path `cargo run --release` reaches — where it is exactly right by
+/// construction, since both sides derive the same alphabetical order from the
+/// same fixed biome set. Against a *third-party* vanilla server the mapping
+/// would very likely be wrong (any registry reorder, or any biome the real
+/// server's data pack adds/removes, shifts every later index), which is why
+/// this is a local, `#[expect]`-free fallback rather than treated as the real
+/// thing: replace it with a real `ClientRegistries`-backed lookup once that
+/// wiring exists, and delete this table's provisional status note when it
+/// does — do not treat this list as a substitute for that sync.
+///
+/// Keep in sync with `crates/protocol/v770/src/server_protocol.rs`'s
+/// `BIOME_NAMES` if that table's biome set or order ever changes.
+const FALLBACK_BIOME_NAMES: &[&str] = &[
+    "minecraft:badlands",
+    "minecraft:bamboo_jungle",
+    "minecraft:beach",
+    "minecraft:birch_forest",
+    "minecraft:cherry_grove",
+    "minecraft:cold_ocean",
+    "minecraft:dark_forest",
+    "minecraft:deep_cold_ocean",
+    "minecraft:deep_dark",
+    "minecraft:deep_frozen_ocean",
+    "minecraft:deep_lukewarm_ocean",
+    "minecraft:deep_ocean",
+    "minecraft:desert",
+    "minecraft:dripstone_caves",
+    "minecraft:eroded_badlands",
+    "minecraft:flower_forest",
+    "minecraft:forest",
+    "minecraft:frozen_ocean",
+    "minecraft:frozen_peaks",
+    "minecraft:frozen_river",
+    "minecraft:grove",
+    "minecraft:ice_spikes",
+    "minecraft:jagged_peaks",
+    "minecraft:jungle",
+    "minecraft:lukewarm_ocean",
+    "minecraft:lush_caves",
+    "minecraft:mangrove_swamp",
+    "minecraft:meadow",
+    "minecraft:mushroom_fields",
+    "minecraft:ocean",
+    "minecraft:old_growth_birch_forest",
+    "minecraft:old_growth_pine_taiga",
+    "minecraft:old_growth_spruce_taiga",
+    "minecraft:pale_garden",
+    "minecraft:plains",
+    "minecraft:river",
+    "minecraft:savanna",
+    "minecraft:savanna_plateau",
+    "minecraft:snowy_beach",
+    "minecraft:snowy_plains",
+    "minecraft:snowy_slopes",
+    "minecraft:snowy_taiga",
+    "minecraft:sparse_jungle",
+    "minecraft:stony_peaks",
+    "minecraft:stony_shore",
+    "minecraft:sulfur_caves",
+    "minecraft:sunflower_plains",
+    "minecraft:swamp",
+    "minecraft:taiga",
+    "minecraft:warm_ocean",
+    "minecraft:windswept_forest",
+    "minecraft:windswept_gravelly_hills",
+    "minecraft:windswept_hills",
+    "minecraft:windswept_savanna",
+    "minecraft:wooded_badlands",
+];
+
+/// The biome name at a **signed**, snapshot-relative position (the same
+/// coordinate space [`SnapshotModelView::occludes_at`]/[`SnapshotFluidView::
+/// occludes_at`] already use), or `None` past the snapshotted 3×3×3
+/// neighbourhood. `resolve_blended_tint`'s box blend only ever steps a couple
+/// of blocks past the centre section, which is always within that
+/// neighbourhood — see `split16`.
+fn biome_name_at(snapshot: &SectionSnapshot, pos: BlockPos) -> Option<&'static str> {
+    let (dx, lx) = split16(pos.x);
+    let (dy, ly) = split16(pos.y);
+    let (dz, lz) = split16(pos.z);
+    if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dy) || !(-1..=1).contains(&dz) {
+        return None;
+    }
+    let id = snapshot.at(dx, dy, dz).biome_at_block(lx, ly, lz);
+    FALLBACK_BIOME_NAMES.get(id as usize).copied()
+}
+
 impl ModelSectionView for SnapshotModelView<'_> {
     fn quads_at(&self, x: usize, y: usize, z: usize) -> &[BakedQuad] {
         let id = self.snapshot.at(0, 0, 0).get_block(x, y, z);
@@ -872,6 +978,31 @@ impl ModelSectionView for SnapshotModelView<'_> {
     fn corner_light_at(&self, x: i32, y: i32, z: i32) -> u8 {
         let (sky, block) = self.light.levels_at(x, y, z);
         (sky << 4) | block
+    }
+
+    /// The real, position-blended biome colour for a grass/foliage/
+    /// dry-foliage/water quad — the live consumer of [`biome_name_at`] +
+    /// [`resolve_blended_tint`], and the whole reason issue #171/#174's
+    /// `BiomeTint` trait now has an implementor outside a test mock. `slot`
+    /// tells us *which* of the four kinds this quad is
+    /// ([`biome_tint_kind_for_slot`]); `None` when it's not one of them (no
+    /// override needed) or when [`BlockModels::colormaps`] failed to load
+    /// (tolerated — falls back to the reserved slot's plains default in the
+    /// palette, exactly as before this existed).
+    fn biome_tint_at(&self, x: usize, y: usize, z: usize, slot: u8) -> Option<[u8; 3]> {
+        let kind = biome_tint_kind_for_slot(slot)?;
+        let colormaps = self.models.colormaps()?;
+        let biome = NamedBiomeTint::new(|pos| biome_name_at(self.snapshot, pos));
+        let rgb = resolve_blended_tint(
+            kind,
+            colormaps,
+            &biome,
+            BLEND_RADIUS,
+            x as i32,
+            y as i32,
+            z as i32,
+        )?;
+        Some(rgb_to_bytes(rgb))
     }
 }
 
@@ -955,6 +1086,25 @@ impl FluidSectionView for SnapshotFluidView<'_> {
 
     fn fluid_sprites(&self, kind: FluidKind) -> FluidSprites {
         self.models.fluid_sprites(kind)
+    }
+
+    /// The real, position-blended water colour — the fluid-path counterpart
+    /// of [`SnapshotModelView::biome_tint_at`]. `x, y, z` are already
+    /// snapshot-relative and signed (matching every other method here), so
+    /// [`biome_name_at`] takes them directly with no coordinate conversion.
+    fn water_tint_at(&self, x: i32, y: i32, z: i32) -> Option<[u8; 3]> {
+        let colormaps = self.models.colormaps()?;
+        let biome = NamedBiomeTint::new(|pos| biome_name_at(self.snapshot, pos));
+        let rgb = resolve_blended_tint(
+            lodestone_assets::tint::TintKind::Water,
+            colormaps,
+            &biome,
+            BLEND_RADIUS,
+            x,
+            y,
+            z,
+        )?;
+        Some(rgb_to_bytes(rgb))
     }
 }
 

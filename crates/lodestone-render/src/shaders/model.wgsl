@@ -215,6 +215,15 @@ struct VsOut {
     @location(2) @interpolate(flat) tint_idx: u32,
     @location(3) @interpolate(flat) anim_idx: u32,
     @location(4) world: vec3<f32>,
+    // A real, position-resolved biome colour (rgb) plus an override flag
+    // (.a: 0 = "no override, use `palette.colors[tint_idx]`", 255 = "use
+    // .rgb directly"). Additive to the four attributes above — see
+    // `ModelVertex::tint_rgb_override`'s Rust doc for why a per-vertex colour
+    // exists alongside the palette rather than replacing it: the palette is
+    // one buffer shared by every section drawn this frame, so it cannot hold
+    // a different grass green per section, but a constant/redstone tint
+    // never needs to vary and is cheaper to leave in the palette.
+    @location(5) @interpolate(flat) tint_rgb_override: vec4<u32>,
 };
 
 @vertex
@@ -223,6 +232,7 @@ fn vs_main(
     @location(1) uv: vec2<f32>,
     @location(2) ao: f32,
     @location(3) packed: vec4<u32>,
+    @location(4) tint_rgb_override: vec4<u32>,
 ) -> VsOut {
     let light_byte = packed.x;
     let sky = f32((light_byte >> 4u) & 15u) / 15.0;
@@ -237,6 +247,7 @@ fn vs_main(
     out.tint_idx = packed.y;
     out.anim_idx = packed.z;
     out.world = world;
+    out.tint_rgb_override = tint_rgb_override;
     return out;
 }
 
@@ -258,10 +269,20 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if (tex.a < 0.5) {
         discard;
     }
-    // Per-quad tint: the palette slot resolves grass/foliage/etc. to their real
-    // default colour; the untinted slot (255) leaves the texel untouched.
+    // Per-quad tint. `tint_rgb_override.a != 0` means the mesher already
+    // resolved this quad's *real*, position-blended biome colour (grass,
+    // foliage, dry-foliage, water) at mesh time — see `ModelVertex::
+    // tint_rgb_override`'s Rust doc — so read that straight from the vertex
+    // rather than the palette, which cannot vary per section. Otherwise fall
+    // back to the palette slot exactly as before: it resolves a constant/
+    // redstone tint to its real colour, and the untinted slot (255) leaves
+    // the texel untouched. A biome-dependent quad with no live override (the
+    // reserved slot's own plains default) also lands here, at its reserved
+    // palette slot — the two paths agree by construction.
     var tint_col = vec3<f32>(1.0, 1.0, 1.0);
-    if (in.tint_idx != 255u) {
+    if (in.tint_rgb_override.a != 0u) {
+        tint_col = vec3<f32>(in.tint_rgb_override.rgb) / 255.0;
+    } else if (in.tint_idx != 255u) {
         tint_col = palette.colors[in.tint_idx].rgb;
     }
     // Both the tint and the shade (AO * light) are vanilla, non-colour-managed

@@ -150,6 +150,13 @@ struct VsOut {
     @location(2) tinted: f32,
     @location(3) @interpolate(flat) anim_idx: u32,
     @location(4) world: vec3<f32>,
+    // Real, position-resolved water colour plus override flag (`.a`), exactly
+    // like the model shader's own `tint_rgb_override` — see that shader's
+    // comment. The fluid pipeline has no palette bind group at all, so before
+    // this a water quad's *only* colour was the hardcoded `water` constant
+    // below; this is additive to it, not a replacement, and a mesh that never
+    // sets it (`.a == 0`) still gets that exact constant.
+    @location(5) @interpolate(flat) tint_rgb_override: vec4<u32>,
 };
 
 @vertex
@@ -158,6 +165,7 @@ fn vs_main(
     @location(1) uv: vec2<f32>,
     @location(2) ao: f32,
     @location(3) packed: vec4<u32>,
+    @location(4) tint_rgb_override: vec4<u32>,
 ) -> VsOut {
     let light_byte = packed.x;
     let sky = f32((light_byte >> 4u) & 15u) / 15.0;
@@ -173,6 +181,7 @@ fn vs_main(
     out.tinted = select(0.0, 1.0, tint_idx != 255u);
     out.anim_idx = packed.z;
     out.world = world;
+    out.tint_rgb_override = tint_rgb_override;
     return out;
 }
 
@@ -185,13 +194,19 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let b = textureSampleLevel(atlas_tex, atlas_smp, in.uv + vec2<f32>(0.0, slot.v_off_b), 0.0);
         tex = mix(a, b, slot.blend);
     }
-    // Default water colour (#3F76E4), a straight sRGB byte-space constant;
-    // untinted quads keep their own colour. Tint and shade both go through a
-    // single gamma round-trip together (see the model shader) rather than
-    // multiplying them into the linear texel directly, which is the same bug
-    // fixed there, on this shader's own multiply.
+    // Default water colour (#3F76E4), a straight sRGB byte-space constant —
+    // the fallback for an untinted quad (lava) or a tinted one with no live
+    // biome data. When the mesher *did* resolve a real, position-blended
+    // colour (`tint_rgb_override.a != 0` — see `ModelSectionView::
+    // water_tint_at`'s Rust doc), use that instead. Tint and shade both go
+    // through a single gamma round-trip together (see the model shader)
+    // rather than multiplying them into the linear texel directly, which is
+    // the same bug fixed there, on this shader's own multiply.
     let water = vec3<f32>(0.247, 0.463, 0.894);
-    let tint_col = mix(vec3<f32>(1.0, 1.0, 1.0), water, in.tinted);
+    var tint_col = mix(vec3<f32>(1.0, 1.0, 1.0), water, in.tinted);
+    if (in.tint_rgb_override.a != 0u) {
+        tint_col = vec3<f32>(in.tint_rgb_override.rgb) / 255.0;
+    }
     let lit_srgb = linear_to_srgb(tex.rgb) * tint_col * in.shade;
     // Fog mixes in gamma space, inside the same round-trip — see the model
     // shader for the derivation from `fog.glsl` and for the measured size of the

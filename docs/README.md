@@ -66,6 +66,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Migrating to `bevy_ecs`](./bevy-migration.md) — A staged plan for moving
   Lodestone's world/entity/session state onto `bevy_ecs`, so that third-party
   extensions are native Rust plugins with the same power as built-in code.
+- [Real per-position biome tint (grass, foliage, water)](./biome-tint.md) — Grass,
+  foliage, dry-foliage and water quads used to render one fixed **plains-default**
+  colour everywhere — real per-biome variety existed in the world data (climate
+  table, per-biome
+  `water_color`/`grass_color`/`foliage_color`/`grass_color_modifier`), but nothing
+  consumed it at render time. `lodestone_assets::tint::BiomeTint` had zero
+  implementors outside a test mock. This closes that gap: the live mesher now resolves
+  each tinted quad's **real, position-blended** colour, matching vanilla's own
+  `ClientLevel.calculateBlockTint` box-blend.
 - [Block-break timing](./block-break-timing.md) — How long the shell takes to mine a
   block, and how fast the crack overlay fills while it does. The arithmetic lives in
   `lodestone-game`'s `mining` module (`BreakInputs`, `Mining`), the per-block data

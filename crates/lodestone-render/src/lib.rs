@@ -36,6 +36,7 @@ pub mod air_bubbles;
 pub mod anim;
 pub mod arena;
 pub mod banner_pattern;
+pub mod biome_tint;
 pub mod block;
 pub mod block_entity;
 pub mod block_models;
@@ -108,8 +109,9 @@ pub use block_entity::{
     skull_wall_placement_matrix,
 };
 pub use block_models::{
-    BlockModels, BlockModelsError, CRACK_STAGE_COUNT, FluidCell, FluidKind, FluidSprites,
-    ItemGeometry, ItemVariants, StateModel,
+    BlockModels, BlockModelsError, CRACK_STAGE_COUNT, DRY_FOLIAGE_TINT_SLOT, FOLIAGE_TINT_SLOT,
+    FluidCell, FluidKind, FluidSprites, GRASS_TINT_SLOT, ItemGeometry, ItemVariants, StateModel,
+    WATER_TINT_SLOT, biome_tint_kind_for_slot, biome_tint_slot,
 };
 pub use block_resolver::{BlockAtlas, BlockAtlasError, MAX_SPRITES};
 pub use blocks_json::{BlocksJsonError, BlocksJsonRegistry};

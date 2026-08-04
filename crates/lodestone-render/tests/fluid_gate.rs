@@ -69,6 +69,7 @@ fn water_quad() -> ModelMesh {
         tint: 0,
         anim: 0,
         _pad: 0,
+        tint_rgb_override: [0, 0, 0, 0],
     };
     ModelMesh {
         // CCW from the front; the fluid pass disables culling anyway.

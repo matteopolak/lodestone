@@ -2,8 +2,8 @@
 
 use lodestone_assets::Image;
 use lodestone_assets::tint::{
-    BiomeTint, Colormap, GrassColorModifier, Rgb, TintKind, colors, redstone_power_color,
-    vanilla_particle_tint_kind, vanilla_tint_kind,
+    BiomeTint, Colormap, DEFAULT_BLEND_RADIUS, GrassColorModifier, Rgb, TintKind, biome_effects,
+    blend_box, colors, redstone_power_color, vanilla_particle_tint_kind, vanilla_tint_kind,
 };
 use lodestone_model::{BlockPos, Identifier};
 use std::collections::BTreeMap;
@@ -382,4 +382,142 @@ fn particle_tint_diverges_from_the_face_tint_exactly_where_vanilla_does() {
         vanilla_particle_tint_kind(&id("minecraft:redstone_wire"), &rprops),
         TintKind::RedstonePower(9)
     );
+}
+
+// --- BiomeEffects table -----------------------------------------------
+
+#[test]
+fn biome_effects_accepts_namespaced_and_bare_ids() {
+    let bare = biome_effects("swamp").expect("swamp is one of the 66");
+    let namespaced = biome_effects("minecraft:swamp").expect("swamp is one of the 66");
+    assert_eq!(bare, namespaced);
+}
+
+#[test]
+fn biome_effects_unknown_id_is_none() {
+    assert!(biome_effects("minecraft:not_a_real_biome").is_none());
+}
+
+#[test]
+fn biome_effects_table_has_all_66_vanilla_biomes() {
+    // The same 66-biome set `docs/worldgen-biomes.md`'s "66/66" gate checks,
+    // read directly off the jar's `worldgen/biome/*.json` filenames.
+    const NAMES: &[&str] = &[
+        "badlands", "bamboo_jungle", "basalt_deltas", "beach", "birch_forest", "cherry_grove",
+        "cold_ocean", "crimson_forest", "dark_forest", "deep_cold_ocean", "deep_dark",
+        "deep_frozen_ocean", "deep_lukewarm_ocean", "deep_ocean", "desert", "dripstone_caves",
+        "end_barrens", "end_highlands", "end_midlands", "eroded_badlands", "flower_forest",
+        "forest", "frozen_ocean", "frozen_peaks", "frozen_river", "grove", "ice_spikes",
+        "jagged_peaks", "jungle", "lukewarm_ocean", "lush_caves", "mangrove_swamp", "meadow",
+        "mushroom_fields", "nether_wastes", "ocean", "old_growth_birch_forest",
+        "old_growth_pine_taiga", "old_growth_spruce_taiga", "pale_garden", "plains", "river",
+        "savanna", "savanna_plateau", "small_end_islands", "snowy_beach", "snowy_plains",
+        "snowy_slopes", "snowy_taiga", "soul_sand_valley", "sparse_jungle", "stony_peaks",
+        "stony_shore", "sulfur_caves", "sunflower_plains", "swamp", "taiga", "the_end",
+        "the_void", "warm_ocean", "warped_forest", "windswept_forest",
+        "windswept_gravelly_hills", "windswept_hills", "windswept_savanna", "wooded_badlands",
+    ];
+    assert_eq!(NAMES.len(), 66, "test's own list should be 66 too");
+    for name in NAMES {
+        assert!(biome_effects(name).is_some(), "missing biome: {name}");
+    }
+}
+
+/// Every value here transcribed directly from
+/// `.cache/mc/26.2/src/data/minecraft/worldgen/biome/{swamp,plains,mangrove_swamp,
+/// desert}.json` — see `crates/lodestone-assets/src/tint.rs`'s `BIOME_EFFECTS`
+/// doc for the full derivation.
+#[test]
+fn biome_effects_matches_jar_values() {
+    let swamp = biome_effects("swamp").unwrap();
+    assert_eq!(swamp.temperature, 0.8);
+    assert_eq!(swamp.downfall, 0.9);
+    assert_eq!(swamp.water_color, 0x617B64);
+    assert_eq!(swamp.grass_color, None);
+    assert_eq!(swamp.foliage_color, Some(0x6A7039));
+    assert_eq!(swamp.dry_foliage_color, Some(0x7B5334));
+    assert_eq!(swamp.grass_modifier, GrassColorModifier::Swamp);
+
+    let plains = biome_effects("plains").unwrap();
+    assert_eq!(plains.temperature, 0.8);
+    assert_eq!(plains.downfall, 0.4);
+    assert_eq!(plains.water_color, 0x3F76E4);
+    assert_eq!(plains.grass_color, None);
+    assert_eq!(plains.grass_modifier, GrassColorModifier::None);
+
+    let mangrove = biome_effects("mangrove_swamp").unwrap();
+    assert_eq!(mangrove.water_color, 0x3A7A6A);
+    assert_eq!(mangrove.foliage_color, Some(0x8DB127));
+    assert_eq!(mangrove.grass_modifier, GrassColorModifier::Swamp);
+
+    let desert = biome_effects("desert").unwrap();
+    assert_eq!(desert.temperature, 2.0);
+    assert_eq!(desert.downfall, 0.0);
+    assert_eq!(desert.water_color, 0x3F76E4);
+}
+
+// --- blend_box -----------------------------------------------------------
+
+#[test]
+fn blend_box_radius_zero_is_the_single_sample() {
+    // Vanilla's `dist == 0` fast path: no averaging at all.
+    let c = blend_box(5, 9, 0, |x, z| {
+        assert_eq!((x, z), (5, 9), "radius 0 must sample exactly (x, z), nothing else");
+        0x102030
+    });
+    assert_eq!(c, 0x102030);
+}
+
+#[test]
+fn blend_box_uniform_field_is_the_identity() {
+    // A field that returns the same colour everywhere must blend to that
+    // colour exactly, at the default radius — the control every biome-tint
+    // gate should reduce to away from a boundary.
+    let c = blend_box(0, 0, DEFAULT_BLEND_RADIUS, |_, _| 0x40_80_C0);
+    assert_eq!(c, 0x40_80_C0);
+}
+
+#[test]
+fn blend_box_averages_a_hard_boundary_and_counts_every_sample() {
+    // A hard boundary at x >= 0 (red) vs x < 0 (blue), sampled at radius 2
+    // centred on the boundary itself: 25 samples, of which 15 have x >= 0
+    // (columns x = 0, 1, 2) and 10 have x < 0 (columns x = -2, -1). Verifies
+    // both the exact vanilla kernel shape (5x5 around the centre, not
+    // (2r)x(2r) or clipped) and the integer (floor) division.
+    let mut calls = 0u32;
+    let c = blend_box(0, 0, 2, |x, _z| {
+        calls += 1;
+        if x >= 0 { 0xFF0000 } else { 0x0000FF }
+    });
+    assert_eq!(calls, 25, "5x5 = 25 samples at radius 2");
+    let red_count = 15u32; // x in {0,1,2} * 5 rows
+    let blue_count = 10u32; // x in {-2,-1} * 5 rows
+    let expected_r = (0xFFu32 * red_count) / 25;
+    let expected_b = (0xFFu32 * blue_count) / 25;
+    assert_eq!((c >> 16) & 0xFF, expected_r);
+    assert_eq!(c & 0xFF, expected_b);
+    assert_eq!((c >> 8) & 0xFF, 0, "no green in either source colour");
+}
+
+#[test]
+fn blend_box_samples_every_cell_of_the_kernel_exactly_once() {
+    // A hash-based per-cell colour: if any cell were sampled twice or skipped,
+    // the arithmetic-mean channel wouldn't match a hand-summed total computed
+    // independently of `blend_box`'s own loop.
+    let mut total = [0u32; 3];
+    let mut count = 0u32;
+    let c = blend_box(100, -50, DEFAULT_BLEND_RADIUS, |x, z| {
+        count += 1;
+        let r = (x.rem_euclid(256)) as u32;
+        let g = (z.rem_euclid(256)) as u32;
+        let b = ((x + z).rem_euclid(256)) as u32;
+        total[0] += r;
+        total[1] += g;
+        total[2] += b;
+        (r << 16) | (g << 8) | b
+    });
+    assert_eq!(count, 25);
+    assert_eq!((c >> 16) & 0xFF, total[0] / 25);
+    assert_eq!((c >> 8) & 0xFF, total[1] / 25);
+    assert_eq!(c & 0xFF, total[2] / 25);
 }

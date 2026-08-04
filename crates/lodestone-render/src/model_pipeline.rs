@@ -261,7 +261,7 @@ impl ModelPipeline {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[Some(ModelVertex::vertex_layout())],
+                buffers: &[Some(ModelVertex::vertex_layout_with_biome_tint())],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -689,11 +689,33 @@ mod tests {
     }
 
     #[test]
-    fn model_vertex_layout_is_28_bytes_over_four_attributes() {
+    fn model_vertex_layout_is_32_bytes_over_four_attributes_no_location_4() {
+        // `vertex_layout` (not `_with_biome_tint`) is the one `crate::
+        // entity_pipeline` builds its instance-buffer attributes on top of,
+        // starting at location 4 — this must never claim it, or every entity
+        // pipeline build fails a wgpu validation check (measured: "Two or
+        // more vertex attributes were assigned to the same location in the
+        // shader: 4", the exact regression this test exists to catch).
         let layout = ModelVertex::vertex_layout();
-        assert_eq!(layout.array_stride, 28);
+        assert_eq!(layout.array_stride, 32, "stride is the real struct size");
         assert_eq!(layout.attributes.len(), 4);
-        // Last attribute (packed light/tint tail) starts at offset 24.
+        assert!(
+            layout.attributes.iter().all(|a| a.shader_location != 4),
+            "location 4 is reserved for the entity pipeline's instance buffer"
+        );
+        // Packed light/tint/anim tail starts at offset 24.
         assert_eq!(layout.attributes[3].offset, 24);
+    }
+
+    #[test]
+    fn model_vertex_layout_with_biome_tint_is_32_bytes_over_five_attributes() {
+        let layout = ModelVertex::vertex_layout_with_biome_tint();
+        assert_eq!(layout.array_stride, 32);
+        assert_eq!(layout.attributes.len(), 5);
+        // Packed light/tint/anim tail starts at offset 24.
+        assert_eq!(layout.attributes[3].offset, 24);
+        // The real-colour biome-tint override (additive, location 4) starts
+        // right after it at offset 28.
+        assert_eq!(layout.attributes[4].offset, 28);
     }
 }
