@@ -273,6 +273,28 @@ To capture a rebind, take the `KeyCode` from a `KeyEvent`'s `physical_key` or th
   or function* the arm merely calls (see `offhand_swap_action`), so the part
   worth testing sits somewhere a test can reach it.
 
+## Deliberately out of scope: touchscreen mode and gamepads (issue #219)
+
+Neither exists here, and the absence is a decision rather than a gap. Recorded so a
+future reader does not read "no hits for `gamepad`" as an oversight and start building.
+
+- **Touchscreen mode** (`Options.touchscreen` in vanilla) changes hit-target sizing
+  and a couple of tooltip/long-press behaviours that only matter without a mouse.
+  Worth a settings checkbox for completeness someday; not worth input engineering.
+- **Gamepads** are a materially larger effort — a full analog mapping layer parallel
+  to keyboard-and-mouse — and vanilla *desktop* Minecraft does not ship it at all, so
+  there is no `Options.java` behaviour to be faithful to.
+
+The reason this is one entry rather than two: `docs/baritone-port.md` §3.7 already
+wants **an analog movement-intent injection point**, for an unrelated reason — a
+pathfinder needs finer control than the ±1.0 axes `InputState` exposes. A human with
+a gamepad and a bot with a path want the *same* missing seam. So if this is ever
+built, build that seam once and let both consume it; building gamepad support on its
+own would produce a second analog path and leave the nav plugin still asking for the
+first.
+
+Revisit if a real request arrives, jointly with that seam.
+
 ## Dependencies
 
 - `winit` — `KeyCode` (physical key identity) and `MouseButton`
