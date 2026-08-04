@@ -37,24 +37,37 @@
 //!    surface height; carver selection is a different question from surface
 //!    material). See [`crate::carver::apply_carvers`]'s doc comment.
 //!
-//! **Ore features are deliberately not composed here yet**, even though the
-//! engine (`crate::feature::apply_ore_step`) and the per-biome resolution
-//! glue (`crate::compose::build_biome_ores`) both exist. An architecture
-//! review of this exact composition found that `FeatureOracle.java` — the
-//! oracle `feature_parity` validates the ore engine against — shares the
-//! simplification it was supposed to be checking: its own header states it
-//! "deliberately does NOT model ore spill from the 8 neighbouring chunks
-//! into the centre," and `OreInput::get_height`/`in_center`
-//! (`crate::feature`) wrap/drop edge probes to match that oracle rather than
-//! vanilla's real `blockStateWriteRadius(1)` 3×3 driver
-//! (`ChunkPyramid.java:32-35`). Composing on top of that today would bake a
-//! wrong ~4-block edge band into every chunk, invisible to every existing
-//! gate (`ComposedChunkOracle.java` has no `postfeatures` stage to catch it).
-//! The fix is a real 3×3 `FeatureOracle.java` driver with real neighbour
-//! `OCEAN_FLOOR_WG` heightmaps, a `postfeatures` fixture stage, and a
-//! matching `OreInput` that no longer clamps/drops at the centre-chunk edge —
-//! tracked as the next increment of #295, not attempted in this composition
-//! pass so the carver/aquifer landing isn't held hostage to it.
+//! **Ore features are deliberately still not composed here**, even though the
+//! engine (`crate::feature::apply_ore_step_3x3`) and the per-biome resolution
+//! glue (`crate::compose::build_biome_ores`) both exist and the ORACLE this
+//! gap depended on has since been fixed. An architecture review of this exact
+//! composition originally found that `FeatureOracle.java` — the oracle
+//! `feature_parity` validates the ore engine against — shared the
+//! simplification it was supposed to be checking: its own header used to say
+//! it "deliberately does NOT model ore spill from the 8 neighbouring chunks
+//! into the centre," and `OreInput::get_height`/`in_center` (`crate::feature`)
+//! used to wrap/drop edge probes to match that oracle rather than vanilla's
+//! real `blockStateWriteRadius(1)` 3×3 driver (`ChunkPyramid.java:32-35`).
+//! **That part is now fixed**: `FeatureOracle.java` drives a real 3×3
+//! neighbourhood (memoised per-chunk generation, clamped beyond it — see its
+//! own doc comment for the measured residual), `OreInput::region_local`
+//! replaces the old wrap/drop, and `ComposedChunkOracle.java` has a
+//! `postfeatures` stage (single-source only there — see that stage's own doc
+//! comment in `ComposedChunkOracle.java` for why it is narrower than
+//! `FeatureOracle.java`'s fixture). The parity numbers this produced (measured
+//! against the *fixed* oracle, not the one that shared its own bug) are in
+//! `docs/worldgen-parity.md`.
+//!
+//! What is **still** the next increment: wiring `apply_ore_step_3x3` into
+//! this module's own `column()` (real per-quart biome instead of a fixed
+//! biome, and the choke-point-file discipline that composing over
+//! `CarveGrid`-shaped HashMaps was too slow for at carver scale — see this
+//! module's own carver step above and `CLAUDE.md`'s "do not compose ores over
+//! the String-keyed HashMap grids" note, which applies here identically).
+//! Landing the oracle fix first and the composition second (rather than
+//! together) is deliberate: composing against a wrong oracle would have baked
+//! a wrong ~13-block edge-case band into every chunk with no gate able to see
+//! it, per the same review.
 //!
 //! **Still not composed:** ore features (see above), vegetation/tree
 //! features (unbuilt anywhere in this crate, epic #404 Phase 3), and

@@ -16,18 +16,23 @@
 //   -> applyCarvers (caves/ravines, replicating the real per-source-chunk
 //      `carverBiome` resolution from `NoiseBasedChunkGenerator.applyCarvers`,
 //      not a fixed biome)
+//   -> postfeatures (ore-only decoration of the CENTRE chunk against its own
+//      real per-column biome — narrower than `FeatureOracle.java`'s own
+//      isolated ore fixture, which now drives a real 3x3 neighbour-spill
+//      model; see the `dumpChunk` method's own doc comment at the
+//      `postfeatures` stage for exactly what is and is not modelled here)
 //
 // Deliberately NOT composed here (see `docs/worldgen-parity.md` for why):
-// features (ores/vegetation) and structures. Structures are unbuilt anywhere
-// in this repo's Rust; ore features have their own isolated oracle
-// (`FeatureOracle.java`) that this one does not yet fold in — extending this
-// class to call the same feature-decoration step `FeatureOracle.java` already
-// drives is the natural next step, not attempted here to keep one Docker run
-// bounded.
+// vegetation features and structures. Structures are unbuilt anywhere in
+// this repo's Rust. Vegetation has no isolated oracle yet anywhere in this
+// directory (epic #404 Phase 3).
 //
 // No Mojang source is copied: this only drives compiled 26.2 classes (the
 // same pattern as every other file in this directory) and reads their output.
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Proxy;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -45,6 +50,7 @@ import net.minecraft.core.MappedRegistry;
 import net.minecraft.core.QuartPos;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
+import net.minecraft.core.SectionPos;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.data.registries.VanillaRegistries;
 import net.minecraft.network.chat.Component;
@@ -61,10 +67,12 @@ import net.minecraft.tags.TagKey;
 import net.minecraft.tags.TagLoader;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.LevelHeightAccessor;
+import net.minecraft.world.level.WorldGenLevel;
 import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.biome.BiomeGenerationSettings;
 import net.minecraft.world.level.biome.BiomeManager;
 import net.minecraft.world.level.biome.Climate;
+import net.minecraft.world.level.biome.FeatureSorter;
 import net.minecraft.world.level.biome.MultiNoiseBiomeSource;
 import net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterList;
 import net.minecraft.world.level.block.Block;
@@ -77,6 +85,8 @@ import net.minecraft.world.level.chunk.ProtoChunk;
 import net.minecraft.world.level.chunk.UpgradeData;
 import net.minecraft.world.level.levelgen.Aquifer;
 import net.minecraft.world.level.levelgen.Beardifier;
+import net.minecraft.world.level.levelgen.GenerationStep;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.LegacyRandomSource;
 import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
 import net.minecraft.world.level.levelgen.NoiseChunk;
@@ -85,9 +95,13 @@ import net.minecraft.world.level.levelgen.RandomState;
 import net.minecraft.world.level.levelgen.RandomSupport;
 import net.minecraft.world.level.levelgen.WorldGenerationContext;
 import net.minecraft.world.level.levelgen.WorldgenRandom;
+import net.minecraft.world.level.levelgen.XoroshiroRandomSource;
 import net.minecraft.world.level.levelgen.blending.Blender;
 import net.minecraft.world.level.levelgen.carver.ConfiguredWorldCarver;
 import net.minecraft.world.level.levelgen.carver.CarvingContext;
+import net.minecraft.world.level.levelgen.feature.ConfiguredFeature;
+import net.minecraft.world.level.levelgen.feature.OreFeature;
+import net.minecraft.world.level.levelgen.placement.PlacedFeature;
 
 public final class ComposedChunkOracle {
     static final StringBuilder sb = new StringBuilder(1 << 22);
@@ -283,7 +297,140 @@ public final class ComposedChunkOracle {
                     sb.append("postcarve.").append(x).append(',').append(y).append(',').append(z)
                       .append(' ').append(c).append('\n');
                 }
+
+        // ---- stage: postfeatures (ore-only decoration of the CENTRE chunk
+        // against its own REAL per-column biome, over the real composed
+        // postcarve terrain above) ----
+        //
+        // Honest scope, narrower than `FeatureOracle.java`'s own isolated ore
+        // fixture: this runs only the CENTRE chunk's own `UNDERGROUND_ORES`
+        // step (its own origin, its own decorationSeed, its own biome's
+        // feature list) — it does NOT drive the real 3x3 neighbour-spill
+        // model `FeatureOracle.java` now does (vanilla's real
+        // `blockStateWriteRadius(1)`), because that would need 8 more
+        // real-per-quart-biome chunks generated here (each with its own
+        // fillFromNoise/buildSurface/17x17-carve pass), which is a
+        // significant expansion of this already-heavy oracle's Docker run
+        // time. `FeatureOracle.java`'s fixture remains the authoritative
+        // check on the ore ENGINE itself (RNG order, placement, and now real
+        // spill); this stage exists to show what composing the centre's own
+        // ore step looks like against real biome variety (useful for the
+        // ore count-band predictions #295 asks for), not as a fully
+        // vanilla-accurate edge band. See docs/worldgen-parity.md's "known
+        // gap" section.
+        Holder<Biome> centreBiomeForFeatures = biomeSource.getNoiseBiome(
+            QuartPos.fromBlock(chunkPos.getMinBlockX()), 0, QuartPos.fromBlock(chunkPos.getMinBlockZ()), sampler);
+        List<FeatureSorter.StepFeatureData> perStep = FeatureSorter.buildFeaturesPerStep(
+            List.of(centreBiomeForFeatures), b -> b.value().getGenerationSettings().features(), true);
+        int oreStep = GenerationStep.Decoration.UNDERGROUND_ORES.ordinal();
+        if (oreStep < perStep.size()) {
+            List<PlacedFeature> feats = perStep.get(oreStep).features();
+            BlockPos featureOrigin = SectionPos.of(chunkPos, heightAccessor.getMinSectionY()).origin();
+            WorldgenRandom fRandom = new WorldgenRandom(new XoroshiroRandomSource(RandomSupport.generateUniqueSeed()));
+            long decorationSeed = fRandom.setDecorationSeed(seed, featureOrigin.getX(), featureOrigin.getZ());
+            WorldGenLevel level = makeCentreOnlyLevel(chunk, chunkPos, centreBiomeForFeatures, heightAccessor, factory, minY, height, seed);
+            for (int i = 0; i < feats.size(); i++) {
+                PlacedFeature pf = feats.get(i);
+                fRandom.setFeatureSeed(decorationSeed, i, oreStep);
+                ConfiguredFeature<?, ?> cf = pf.feature().value();
+                if (cf.feature() instanceof OreFeature) {
+                    pf.placeWithBiomeCheck(level, generator, fRandom, featureOrigin);
+                }
+            }
+        }
+        for (int x = 0; x < 16; x++)
+            for (int z = 0; z < 16; z++)
+                for (int y = minY; y < minY + height; y++)
+                    sb.append("postfeatures.").append(x).append(',').append(y).append(',').append(z)
+                      .append(' ').append(canon(chunk.getBlockState(pos.set(chunkX * 16 + x, y, chunkZ * 16 + z)))).append('\n');
+
         sb.append("meta.done ").append(chunkX).append(',').append(chunkZ).append('\n');
+    }
+
+    // A minimal WorldGenLevel via dynamic proxy, scoped to the CENTRE chunk
+    // only (neighbour writes go to throwaway scratch chunks) — matches what
+    // `FeatureOracle.java` did before its own 3x3 driver extension. See the
+    // "postfeatures" stage's doc comment above for why this oracle keeps the
+    // narrower, single-source scope rather than replicating that extension.
+    static WorldGenLevel makeCentreOnlyLevel(
+        ProtoChunk center, ChunkPos centerPos, Holder<Biome> biome, LevelHeightAccessor ha,
+        PalettedContainerFactory factory, int minY, int height, long seed
+    ) {
+        Map<Long, ProtoChunk> scratch = new HashMap<>();
+        WorldGenLevel[] self = new WorldGenLevel[1];
+        InvocationHandler handler = (proxy, method, methodArgs) -> {
+            String name = method.getName();
+            Object[] a = methodArgs;
+            switch (name) {
+                case "getHeight":
+                    if (a != null && a.length == 3) {
+                        int hx = ((Number) a[1]).intValue() & 15;
+                        int hz = ((Number) a[2]).intValue() & 15;
+                        return center.getHeight((Heightmap.Types) a[0], hx, hz) + 1;
+                    }
+                    return height;
+                case "getMinY":
+                    return minY;
+                case "getMaxY":
+                    return minY + height - 1;
+                case "getSectionsCount":
+                    return height >> 4;
+                case "getSectionIndex":
+                    return (((Number) a[0]).intValue() - minY) >> 4;
+                case "getMinSectionY":
+                    return minY >> 4;
+                case "getMaxSectionY":
+                    return (minY + height - 1) >> 4;
+                case "isOutsideBuildHeight": {
+                    int y = a.length == 1 && a[0] instanceof Number
+                        ? ((Number) a[0]).intValue() : ((BlockPos) a[0]).getY();
+                    return y < minY || y >= minY + height;
+                }
+                case "getChunk": {
+                    int cx, cz;
+                    if (a[0] instanceof Number) { cx = ((Number) a[0]).intValue(); cz = ((Number) a[1]).intValue(); }
+                    else { BlockPos bp = (BlockPos) a[0]; cx = bp.getX() >> 4; cz = bp.getZ() >> 4; }
+                    if (cx == centerPos.x() && cz == centerPos.z()) return center;
+                    long key = (((long) cx) << 32) ^ (cz & 0xffffffffL);
+                    return scratch.computeIfAbsent(key,
+                        k -> new ProtoChunk(new ChunkPos(cx, cz), UpgradeData.EMPTY, ha, factory, null));
+                }
+                case "getBiome":
+                    return biome;
+                case "ensureCanWrite":
+                    return Boolean.TRUE;
+                case "getSeed":
+                    return seed;
+                case "getLevel":
+                    return self[0];
+                case "registryAccess":
+                    return null;
+                case "getMinBuildHeight":
+                    return minY;
+                case "dimensionType":
+                    return null;
+                case "hashCode":
+                    return System.identityHashCode(proxy);
+                case "equals":
+                    return proxy == a[0];
+                case "toString":
+                    return "ComposedChunkOracleFeatureLevel";
+                default: {
+                    Class<?> rt = method.getReturnType();
+                    if (rt == boolean.class) return Boolean.FALSE;
+                    if (rt == int.class) return 0;
+                    if (rt == long.class) return 0L;
+                    if (rt == float.class) return 0f;
+                    if (rt == double.class) return 0d;
+                    if (rt.isPrimitive()) return 0;
+                    return null;
+                }
+            }
+        };
+        WorldGenLevel lvl = (WorldGenLevel) Proxy.newProxyInstance(
+            ComposedChunkOracle.class.getClassLoader(), new Class[]{WorldGenLevel.class}, handler);
+        self[0] = lvl;
+        return lvl;
     }
 
     public static void main(String[] args) {

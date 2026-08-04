@@ -371,22 +371,42 @@ pub fn parse_placements(placed: &Value) -> Vec<Placement> {
         .collect()
 }
 
-/// The mutable centre-chunk block field the ore stage reads and writes. Keyed by
-/// `(local_x, y, local_z)` with `local_x, local_z ∈ [0,16)` and `y` absolute.
-pub type CenterGrid = HashMap<(i32, i32, i32), String>;
+/// The mutable block field the ore stage reads and writes, over the whole
+/// driven 3×3 neighbourhood. Keyed by `(local_x, y, local_z)`, centre-relative,
+/// with `local_x, local_z ∈ [`[`REGION_MIN`]`,`[`REGION_MAX`]`)` and `y` absolute.
+/// See [`OreInput::region_local`] for why this is wider than one chunk.
+pub type RegionGrid = HashMap<(i32, i32, i32), String>;
+
+/// Centre-relative local coordinate lower/upper (exclusive) bound the 3×3
+/// driver ([`apply_ore_step_3x3`]) reads and writes over: one 16-wide band
+/// per row/column of the 3×3 chunk grid (`-16..0` the west/north neighbour,
+/// `0..16` the centre, `16..32` the east/south neighbour).
+pub const REGION_MIN: i32 = -16;
+pub const REGION_MAX: i32 = 32;
 
 /// Inputs the ore driver needs beyond the RNG.
 pub struct OreInput<'a> {
+    /// The chunk currently placing features — its own origin/seed
+    /// ([`OreInput::origin`]). The [`apply_ore_step_3x3`] driver varies this
+    /// across the 9 source chunks while holding `center_x`/`center_z` fixed.
     pub chunk_x: i32,
     pub chunk_z: i32,
+    /// The chunk whose output is being dumped/compared. [`OreInput::in_center`]
+    /// tests writes against this pair, not `chunk_x`/`chunk_z` — the whole
+    /// point of the 3×3 driver is that a source chunk other than the centre
+    /// can still produce a write that lands in the centre (vanilla's real
+    /// `blockStateWriteRadius(1)` at the FEATURES stage, `ChunkPyramid.java:32-35`).
+    pub center_x: i32,
+    pub center_z: i32,
     pub min_y: i32,
     pub height: i32,
     /// `getMinGenY` / `getGenDepth` for `VerticalAnchor` resolution.
     pub min_gen_y: i32,
     pub gen_depth: i32,
-    /// `OCEAN_FLOOR_WG` heightmap as `level.getHeight` returns it, keyed by local
-    /// `(x, z) ∈ [0,16)` (probes outside the chunk wrap via `& 15`, matching the
-    /// oracle's proxy level).
+    /// `OCEAN_FLOOR_WG` heightmap across the whole driven 3×3 region, as
+    /// `level.getHeight` returns it, keyed by centre-relative local
+    /// `(x, z) ∈ [`[`REGION_MIN`]`,`[`REGION_MAX`]`)` (see
+    /// [`OreInput::region_local`] for probes landing outside that range).
     pub ocean_floor_wg: &'a HashMap<(i32, i32), i32>,
     /// `true` iff the given block base name is in the given tag (closure already
     /// resolved by the caller).
@@ -398,6 +418,8 @@ impl std::fmt::Debug for OreInput<'_> {
         f.debug_struct("OreInput")
             .field("chunk_x", &self.chunk_x)
             .field("chunk_z", &self.chunk_z)
+            .field("center_x", &self.center_x)
+            .field("center_z", &self.center_z)
             .field("min_y", &self.min_y)
             .field("height", &self.height)
             .field("min_gen_y", &self.min_gen_y)
@@ -416,9 +438,15 @@ impl OreInput<'_> {
         }
     }
 
-    fn in_center(&self, x: i32, z: i32) -> Option<(i32, i32)> {
-        let lx = x - self.chunk_x * 16;
-        let lz = z - self.chunk_z * 16;
+    /// Exact (unclamped) local coordinate within the CENTRE chunk only —
+    /// `None` for anything else, including a position inside one of the 8
+    /// neighbour chunks. This is the boundary the fixture's `ore.*`/`in.*`
+    /// data is scoped to: only writes landing in the centre are reported,
+    /// even though every one of the 9 source passes can produce them.
+    #[must_use]
+    pub fn in_center(&self, x: i32, z: i32) -> Option<(i32, i32)> {
+        let lx = x - self.center_x * 16;
+        let lz = z - self.center_z * 16;
         if (0..16).contains(&lx) && (0..16).contains(&lz) {
             Some((lx, lz))
         } else {
@@ -426,16 +454,72 @@ impl OreInput<'_> {
         }
     }
 
+    /// Centre-relative local coordinates, **clamped** into the driven 3×3
+    /// region (`[`[`REGION_MIN`]`,`[`REGION_MAX`]`)` each axis).
+    ///
+    /// Vanilla's real `blockStateWriteRadius(1)` reach is nominally one
+    /// chunk, but the largest overworld blob ores (`size=64`:
+    /// andesite/diorite/granite/tuff) can, in rare boundary-adjacent cases,
+    /// probe or write up to ~13 blocks beyond the chunk they originate in —
+    /// enough to exceed this 3×3 footprint by a further ~13 blocks in the
+    /// extreme. Rather than drive an unbounded neighbourhood (which has no
+    /// natural stopping point and no oracle counterpart), reads/writes past
+    /// the region are clamped to the nearest column this driver actually
+    /// modelled — a bounded, honest approximation, not the old proxy's "wrap
+    /// into centre" (which was wrong for effectively every out-of-chunk
+    /// probe, not just this residual). See `docs/worldgen-parity.md`'s
+    /// "known gap" section for the measured scope of this.
+    fn region_local(&self, x: i32, z: i32) -> (i32, i32) {
+        let lx = (x - self.center_x * 16).clamp(REGION_MIN, REGION_MAX - 1);
+        let lz = (z - self.center_z * 16).clamp(REGION_MIN, REGION_MAX - 1);
+        (lx, lz)
+    }
+
     fn get_height(&self, x: i32, z: i32) -> i32 {
-        // Proxy level maps any probe into the centre heightmap via `& 15`.
-        self.ocean_floor_wg[&(x & 15, z & 15)]
+        let (lx, lz) = self.region_local(x, z);
+        *self.ocean_floor_wg.get(&(lx, lz)).unwrap_or_else(|| {
+            panic!("OreInput::get_height: no heightmap entry for region-local ({lx},{lz})")
+        })
     }
 }
 
-/// Run the whole `UNDERGROUND_ORES` decoration step for the centre chunk over an
-/// identical post-carve input, returning the block field after placement. `ores`
-/// must be in step order with each entry's `index` set to its position within the
-/// step's feature list (matching vanilla's `setFeatureSeed` index).
+/// Runs ONE source chunk's own `UNDERGROUND_ORES` step (`input.chunk_x`/
+/// `chunk_z`'s own origin and decoration seed), writing into `working`
+/// in-place (region-local, centre-relative coordinates — see
+/// [`OreInput::region_local`]). Returns the derived decoration seed, mostly
+/// so callers can cross-check the centre pass's own seed against an oracle.
+fn apply_one_source<R: RandomSource>(
+    random: &mut WorldgenRandom<R>,
+    seed: i64,
+    input: &OreInput<'_>,
+    ores: &[PlacedOre],
+    working: &mut RegionGrid,
+) -> i64 {
+    let origin = input.origin();
+    let decoration_seed = random.set_decoration_seed(seed, origin.x, origin.z);
+    let ctx = Ctx {
+        min_gen_y: input.min_gen_y,
+        gen_depth: input.gen_depth,
+    };
+    for ore in ores {
+        random.set_feature_seed(decoration_seed, ore.index as i32, STEP_UNDERGROUND_ORES);
+        place_placed_feature(random, origin, ore, input, &ctx, working);
+    }
+    decoration_seed
+}
+
+/// Run the whole `UNDERGROUND_ORES` decoration step for a single chunk (its
+/// own origin doubling as the centre — i.e. `input.chunk_x/chunk_z` must
+/// equal `input.center_x/center_z`) over an identical post-carve input,
+/// returning the region field after placement. `ores` must be in step order
+/// with each entry's `index` set to its position within the step's feature
+/// list (matching vanilla's `setFeatureSeed` index).
+///
+/// This is the single-source primitive; [`apply_ore_step_3x3`] is the real
+/// vanilla driver (9 of these, one per source chunk in the 3×3 neighbourhood,
+/// sharing one region grid) and is what a whole-chunk parity comparison
+/// should use — see this module's doc comment for why a single-source-only
+/// driver under-models vanilla's `blockStateWriteRadius(1)` spill.
 ///
 /// The returned grid is the input `grid` with ore writes applied; the caller
 /// diffs it against the original to obtain the placed ores.
@@ -443,21 +527,77 @@ pub fn apply_ore_step<R: RandomSource>(
     random: &mut WorldgenRandom<R>,
     seed: i64,
     input: &OreInput<'_>,
-    grid: &CenterGrid,
+    grid: &RegionGrid,
     ores: &[PlacedOre],
-) -> CenterGrid {
-    let origin = input.origin();
-    let decoration_seed = random.set_decoration_seed(seed, origin.x, origin.z);
-    let ctx = Ctx {
-        min_gen_y: input.min_gen_y,
-        gen_depth: input.gen_depth,
-    };
+) -> RegionGrid {
     let mut working = grid.clone();
-    for ore in ores {
-        random.set_feature_seed(decoration_seed, ore.index as i32, STEP_UNDERGROUND_ORES);
-        place_placed_feature(random, origin, ore, input, &ctx, &mut working);
-    }
+    apply_one_source(random, seed, input, ores, &mut working);
     working
+}
+
+/// The real vanilla 3×3 neighbourhood driver for one CENTRE chunk.
+///
+/// Vanilla's `blockStateWriteRadius(1)` at the FEATURES generation stage
+/// (`ChunkPyramid.java:32-35`) means a NEIGHBOUR chunk's own ore decoration
+/// (its own origin, its own `decorationSeed` — `ChunkGenerator
+/// .applyBiomeDecoration` is called once per chunk, using that chunk's own
+/// seed) can legitimately spill blocks into the centre. This runs the full
+/// `UNDERGROUND_ORES` step for each of the 9 chunks in `center ± 1`, in turn
+/// (`dx` outer `-1..=1`, `dz` inner `-1..=1`, matching
+/// `crate::carver::apply_carvers`'s own source-chunk loop convention — a
+/// fixed, documented iteration order, not a claim this matches real-world
+/// chunk *load* order, which vanilla itself does not guarantee is
+/// deterministic at boundaries), writing every result into one shared region
+/// grid keyed by centre-relative local coordinates.
+///
+/// `ores` is the SAME list for all 9 passes — correct whenever biome does not
+/// vary across the neighbourhood (true for a fixed single-biome fixture; a
+/// per-source biome, needed once this composes against real per-quart biome
+/// variety, would need a per-source `ores` list and is not built here — see
+/// `docs/worldgen-parity.md`'s "known gap" section).
+///
+/// Returns the region grid after all 9 passes; the caller diffs the CENTRE
+/// 16×16 slice (`in_center`) against the original to obtain the fixture-
+/// comparable `ore.*` output, and can separately read `working` at any
+/// region-local coordinate to see spill into (or within) a neighbour.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_ore_step_3x3<R: RandomSource>(
+    random: &mut WorldgenRandom<R>,
+    seed: i64,
+    center_x: i32,
+    center_z: i32,
+    min_y: i32,
+    height: i32,
+    min_gen_y: i32,
+    gen_depth: i32,
+    ocean_floor_wg: &HashMap<(i32, i32), i32>,
+    in_tag: &dyn Fn(&str, &str) -> bool,
+    grid: &RegionGrid,
+    ores: &[PlacedOre],
+) -> (RegionGrid, i64) {
+    let mut working = grid.clone();
+    let mut center_decoration_seed = 0;
+    for dx in -1..=1 {
+        for dz in -1..=1 {
+            let input = OreInput {
+                chunk_x: center_x + dx,
+                chunk_z: center_z + dz,
+                center_x,
+                center_z,
+                min_y,
+                height,
+                min_gen_y,
+                gen_depth,
+                ocean_floor_wg,
+                in_tag,
+            };
+            let ds = apply_one_source(random, seed, &input, ores, &mut working);
+            if dx == 0 && dz == 0 {
+                center_decoration_seed = ds;
+            }
+        }
+    }
+    (working, center_decoration_seed)
 }
 
 /// The `decorationSeed` for a chunk origin — exposed so tests can cross-check it
@@ -479,7 +619,7 @@ fn place_placed_feature<R: RandomSource>(
     ore: &PlacedOre,
     input: &OreInput<'_>,
     ctx: &Ctx,
-    working: &mut CenterGrid,
+    working: &mut RegionGrid,
 ) {
     fn recurse<R: RandomSource>(
         random: &mut R,
@@ -489,7 +629,7 @@ fn place_placed_feature<R: RandomSource>(
         ctx: &Ctx,
         config: &OreConfig,
         input: &OreInput<'_>,
-        working: &mut CenterGrid,
+        working: &mut RegionGrid,
     ) {
         if i == modifiers.len() {
             place_ore_feature(random, pos, config, input, working);
@@ -512,14 +652,17 @@ fn place_placed_feature<R: RandomSource>(
 }
 
 /// `OreFeature.place` + `doPlace` for a single origin. Writes into `working`
-/// (centre-local); positions outside the centre read as air and so are never
-/// placed (the isolated oracle uses empty neighbour chunks identically).
+/// at region-local coordinates (centre-relative, clamped beyond the driven
+/// 3×3 neighbourhood — see [`OreInput::region_local`]), so a write can land
+/// in a neighbour chunk exactly as vanilla's real `blockStateWriteRadius(1)`
+/// spill does; the caller decides which of those matter (only the CENTRE's
+/// own 16×16 is fixture-comparable — see [`OreInput::in_center`]).
 pub fn place_ore_feature<R: RandomSource>(
     random: &mut R,
     origin: BlockPos,
     config: &OreConfig,
     input: &OreInput<'_>,
-    working: &mut CenterGrid,
+    working: &mut RegionGrid,
 ) {
     let size = config.size;
     let dir = random.next_float() * std::f32::consts::PI;
@@ -560,7 +703,7 @@ fn do_place<R: RandomSource>(
     random: &mut R,
     config: &OreConfig,
     input: &OreInput<'_>,
-    working: &mut CenterGrid,
+    working: &mut RegionGrid,
     x0: f64,
     x1: f64,
     z0: f64,
@@ -665,16 +808,18 @@ fn try_place_ore<R: RandomSource>(
     random: &mut R,
     config: &OreConfig,
     input: &OreInput<'_>,
-    working: &mut CenterGrid,
+    working: &mut RegionGrid,
     x: i32,
     y: i32,
     z: i32,
 ) {
-    let Some((lx, lz)) = input.in_center(x, z) else {
-        // Neighbour chunks are empty air in the isolated oracle → no target
-        // tag matches air, so `canPlaceOre` returns false with no RNG draw.
-        return;
-    };
+    // Writes always land somewhere in the driven 3×3 region (clamped beyond
+    // it — see `OreInput::region_local`); whether this particular write is
+    // in the CENTRE (and therefore fixture-comparable) is decided later by
+    // the caller via `in_center`, not here — a neighbour-chunk write still
+    // has to happen so later reads (isAdjacentToAir, a later source's own
+    // placement) see it, exactly as vanilla's real, shared block field would.
+    let (lx, lz) = input.region_local(x, z);
     let key = (lx, y, lz);
     let current = working.get(&key).map_or("minecraft:air", String::as_str);
     let base = current.split('[').next().unwrap_or(current).to_string();
@@ -712,11 +857,12 @@ fn should_skip_air_check<R: RandomSource>(random: &mut R, chance: f32) -> bool {
     }
 }
 
-/// `Feature.isAdjacentToAir` over the six `Direction` neighbours. Reads the live
-/// working grid for in-centre cells and treats everything else (neighbour
-/// chunks, out-of-build-height) as air, matching the oracle's empty scratch
-/// sections.
-fn is_adjacent_to_air(input: &OreInput<'_>, working: &CenterGrid, x: i32, y: i32, z: i32) -> bool {
+/// `Feature.isAdjacentToAir` over the six `Direction` neighbours. Reads the
+/// live working grid across the whole driven 3×3 region (clamped beyond it —
+/// see `OreInput::region_local`), so a read just outside the centre sees the
+/// real neighbour terrain (or an in-flight write from an earlier source
+/// pass), not an assumed-empty scratch chunk.
+fn is_adjacent_to_air(input: &OreInput<'_>, working: &RegionGrid, x: i32, y: i32, z: i32) -> bool {
     const DIRS: [(i32, i32, i32); 6] = [
         (0, -1, 0),
         (0, 1, 0),
@@ -732,16 +878,14 @@ fn is_adjacent_to_air(input: &OreInput<'_>, working: &CenterGrid, x: i32, y: i32
     })
 }
 
-fn block_at<'a>(input: &OreInput<'_>, working: &'a CenterGrid, x: i32, y: i32, z: i32) -> &'a str {
+fn block_at<'a>(input: &OreInput<'_>, working: &'a RegionGrid, x: i32, y: i32, z: i32) -> &'a str {
     if is_outside_build_height(y, input.min_y, input.height) {
         return "minecraft:air";
     }
-    match input.in_center(x, z) {
-        Some((lx, lz)) => working
-            .get(&(lx, y, lz))
-            .map_or("minecraft:air", String::as_str),
-        None => "minecraft:air",
-    }
+    let (lx, lz) = input.region_local(x, z);
+    working
+        .get(&(lx, y, lz))
+        .map_or("minecraft:air", String::as_str)
 }
 
 fn is_air(base: &str) -> bool {
