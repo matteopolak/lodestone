@@ -5,7 +5,7 @@
 //! adapter lowers `set_health`, `set_experience`, `player_abilities`,
 //! `change_difficulty`, the title packets, and friends into mutations here.
 
-use lodestone_model::{ClientEvent, Difficulty, GameMode, Text};
+use lodestone_model::{ClientEvent, Difficulty, GameMode, Identifier, Text};
 
 /// Player vitals and progression shown on the HUD.
 #[derive(Debug, Clone, PartialEq)]
@@ -409,6 +409,101 @@ impl ActionBar {
     }
 }
 
+/// The held-item name highlight above the hotbar (issue #126): vanilla's
+/// `Hud.toolHighlightTimer`, driven from `Hud.tick()`
+/// (`Hud.java:1190-1203` in the 26.2 client):
+///
+/// ```java
+/// ItemStack selected = this.minecraft.player.getInventory().getSelectedItem();
+/// if (selected.isEmpty()) {
+///     this.toolHighlightTimer = 0;
+/// } else if (this.lastToolHighlight.isEmpty()
+///     || !selected.is(this.lastToolHighlight.getItem())
+///     || !selected.getHoverName().equals(this.lastToolHighlight.getHoverName())) {
+///     this.toolHighlightTimer = (int)(40.0 * this.minecraft.options.notificationDisplayTime().get());
+/// } else if (this.toolHighlightTimer > 0) {
+///     this.toolHighlightTimer--;
+/// }
+/// ```
+///
+/// Two things fall out of that which are easy to get wrong by guessing
+/// instead of reading it:
+///
+/// * **It re-fires on item *identity*, not on slot change.** Switching
+///   between two slots that both hold plain dirt does not restart the
+///   animation — `selected` still `is()` `lastToolHighlight` and the hover
+///   name is unchanged, so the `else if timer > 0` branch just keeps
+///   counting down. Only a genuinely different item (different item type, or
+///   the *same* type with a different resolved hover name — e.g. a rename)
+///   restarts it. [`tick`](Self::tick) takes the already-resolved identity
+///   (item id + hover name) for exactly this reason: the caller does the
+///   name resolution once, this type only compares.
+/// * **There is no fade-*in*.** `alpha` (`Hud.java:639`,
+///   `(int)(toolHighlightTimer * 256.0F / 10.0F)`, clamped to 255) is at
+///   maximum for any `toolHighlightTimer >= 10` — i.e. the whole hold phase —
+///   and only ramps down across the *last* 10 ticks before hitting zero. The
+///   label appears at full opacity the instant the item changes and only
+///   ever fades **out**.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HeldItemHighlight {
+    last: Option<(Identifier, String)>,
+    timer: i32,
+}
+
+impl HeldItemHighlight {
+    /// The timer length in ticks at the default `notificationDisplayTime`
+    /// option value of `1.0` (`Hud.java:1197`,
+    /// `(int)(40.0 * notificationDisplayTime)`). The option itself is not
+    /// modelled here — see the module-level gap this leaves.
+    pub const TIMER_TICKS: i32 = 40;
+    /// Ticks over which the label fades out once the timer starts expiring
+    /// (`Hud.java:639`'s divisor).
+    pub const FADE_TICKS: f32 = 10.0;
+
+    /// A new, hidden highlight.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Advances by one client tick given the currently-selected hotbar
+    /// stack's identity — `None` for an empty slot, `Some((item, hover_name))`
+    /// otherwise. `hover_name` should already carry any custom-name override
+    /// (i.e. it is the string identity changes are compared against, matching
+    /// vanilla's `ItemStack::getHoverName()` equality check).
+    pub fn tick(&mut self, selected: Option<(&Identifier, &str)>) {
+        match selected {
+            None => {
+                self.timer = 0;
+                self.last = None;
+            }
+            Some((item, name)) => {
+                let changed = match &self.last {
+                    Some((last_item, last_name)) => last_item != item || last_name != name,
+                    None => true,
+                };
+                if changed {
+                    self.timer = Self::TIMER_TICKS;
+                } else if self.timer > 0 {
+                    self.timer -= 1;
+                }
+                self.last = Some((item.clone(), name.to_owned()));
+            }
+        }
+    }
+
+    /// The current opacity, `0.0..=1.0`. `0.0` means "draw nothing" — the
+    /// state the initial highlight and an empty selected slot both settle
+    /// into (`self.timer == 0`).
+    #[must_use]
+    pub fn alpha(&self) -> f32 {
+        if self.timer <= 0 {
+            return 0.0;
+        }
+        (self.timer as f32 * 256.0 / Self::FADE_TICKS / 255.0).min(1.0)
+    }
+}
+
 #[cfg(test)]
 mod fold_tests {
     use super::*;
@@ -568,5 +663,101 @@ mod fold_tests {
             food: 1,
             saturation: 1.0,
         }));
+    }
+
+    fn item(path: &str) -> Identifier {
+        format!("minecraft:{path}").parse().unwrap()
+    }
+
+    #[test]
+    fn selecting_a_new_item_starts_at_full_opacity_no_fade_in() {
+        let mut hi = HeldItemHighlight::new();
+        assert_eq!(hi.alpha(), 0.0);
+        hi.tick(Some((&item("diamond_sword"), "Diamond Sword")));
+        // `Hud.java:639`: alpha is at maximum for the whole hold phase, not
+        // ramped up from zero — the "magnitude" check CLAUDE.md's evidence
+        // rules ask for, not just "alpha > 0".
+        assert_eq!(hi.alpha(), 1.0);
+    }
+
+    #[test]
+    fn empty_slot_shows_nothing() {
+        let mut hi = HeldItemHighlight::new();
+        hi.tick(Some((&item("diamond_sword"), "Diamond Sword")));
+        hi.tick(None);
+        assert_eq!(hi.alpha(), 0.0);
+    }
+
+    #[test]
+    fn reselecting_the_same_item_does_not_restart_the_timer() {
+        // Two slots holding identical dirt: switching between them must not
+        // re-trigger the animation (`Hud.java:1194-1196`'s `is()` +
+        // hover-name equality check) — only the *timer counting down* should
+        // be observed, not a reset back to full duration.
+        let mut hi = HeldItemHighlight::new();
+        hi.tick(Some((&item("dirt"), "Dirt")));
+        for _ in 0..(HeldItemHighlight::TIMER_TICKS - 1) {
+            hi.tick(Some((&item("dirt"), "Dirt")));
+        }
+        // One tick short of expiry: still visible, and importantly still
+        // fading (not reset to full) because the identity never changed.
+        assert!(hi.alpha() > 0.0);
+        assert!(hi.alpha() < 1.0, "should be mid-fade, not freshly reset");
+    }
+
+    #[test]
+    fn switching_to_a_different_item_restarts_the_timer() {
+        let mut hi = HeldItemHighlight::new();
+        hi.tick(Some((&item("dirt"), "Dirt")));
+        for _ in 0..35 {
+            hi.tick(Some((&item("dirt"), "Dirt")));
+        }
+        assert!(hi.alpha() < 1.0, "should have started fading");
+        hi.tick(Some((&item("stone"), "Stone")));
+        assert_eq!(hi.alpha(), 1.0, "a genuinely different item resets to full");
+    }
+
+    #[test]
+    fn a_rename_with_the_same_item_type_restarts_the_timer() {
+        // `Hud.java:1196`: hover-name equality, not just item-type equality —
+        // an anvil rename (same item id) must still restart the animation.
+        let mut hi = HeldItemHighlight::new();
+        hi.tick(Some((&item("diamond_sword"), "Diamond Sword")));
+        for _ in 0..35 {
+            hi.tick(Some((&item("diamond_sword"), "Diamond Sword")));
+        }
+        assert!(hi.alpha() < 1.0);
+        hi.tick(Some((&item("diamond_sword"), "Excalibur")));
+        assert_eq!(hi.alpha(), 1.0);
+    }
+
+    #[test]
+    fn timer_expires_to_zero_after_forty_ticks() {
+        let mut hi = HeldItemHighlight::new();
+        hi.tick(Some((&item("stone"), "Stone")));
+        for _ in 0..HeldItemHighlight::TIMER_TICKS {
+            hi.tick(Some((&item("stone"), "Stone")));
+        }
+        assert_eq!(hi.alpha(), 0.0);
+    }
+
+    #[test]
+    fn alpha_ramps_linearly_over_the_final_ten_ticks() {
+        // Predicts the exact value at a specific tick (CLAUDE.md's *magnitude*
+        // species: assert the number, not just that it decreased).
+        // `Hud.java:639`: `alpha = timer * 256 / 10`, clamped to 255, then
+        // this type normalises to `0.0..=1.0` by dividing by 255.
+        let mut hi = HeldItemHighlight::new();
+        hi.tick(Some((&item("stone"), "Stone")));
+        // Drive the timer down to exactly 5 remaining ticks.
+        for _ in 0..(HeldItemHighlight::TIMER_TICKS - 5) {
+            hi.tick(Some((&item("stone"), "Stone")));
+        }
+        let expected = (5.0_f32 * 256.0 / 10.0 / 255.0).min(1.0);
+        assert!(
+            (hi.alpha() - expected).abs() < 1e-6,
+            "got {}, want {expected}",
+            hi.alpha()
+        );
     }
 }
