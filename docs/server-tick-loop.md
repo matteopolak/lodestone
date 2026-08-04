@@ -42,31 +42,63 @@ surviving that connection's disconnect. They are unchanged by this work, and
 this doc's job is partly to record *why*, so nobody re-derives "unify the six
 timers" as "delete the other four" from a shorter brief later.
 
-## Recommendation re-verified: do not link `lodestone-ecs` into the server
+## Recommendation reversed: `lodestone-ecs` is now linked into the server
 
-A prior analysis recorded that the server should own its own clock rather
-than borrow the client's ECS schedule. Re-checked directly for this work,
-not assumed:
+**This reverses `server-tick-loop.md`'s linking recommendation, while preserving both
+architectural findings it encoded: the server owns its clock, and the server never runs inside the
+client's schedule.**
 
-- `crates/lodestone-server/Cargo.toml` has no `lodestone-ecs` dependency, and
-  adding one would create a second problem beyond scope: `lodestone-ecs` is
-  explicitly off-limits in this task's file-ownership split (owned by the
-  interaction-intent seam agent), so depending on it here would collide with
-  concurrent work regardless of the architectural question.
-- More fundamentally, `lodestone-ecs`'s schedule is *client*-side and
-  `bevy_ecs`-shaped (systems, resources, a `World`) — the server's own state
-  (`MobSim`, `BlockEntityRegistry`) is plain Rust behind `Arc<Mutex<_>>`
-  handles shared with `tokio::spawn`ed connection tasks, not an ECS `World`.
-  Bridging the two would mean either running an ECS schedule inside the
-  server (a new, heavyweight dependency and a second threading model to
-  reconcile with tokio) or running the server's tick from *inside* the
-  client's own schedule (which breaks singleplayer's own premise: the
-  integrated server must keep advancing even if the render loop stalls, and
-  must be the thing open-to-LAN serves with no render loop attached at all —
-  see `lib.rs`'s own module doc for why `IntegratedServer` speaks the same
-  loop for both).
-- The finding holds: `run_tick_loop` is a plain `tokio::spawn`ed async
-  function with no ECS involvement, exactly like the two loops it replaces.
+The owner has decided to adopt `bevy_ecs` in `lodestone-server` (issue
+[#433](https://github.com/matteopolak/lodestone/issues/433)), so that server-side plugins get the
+same five-clause intent doctrine [`docs/plugin-api.md`](./plugin-api.md) already gives client-side
+plugins — matching Bukkit/Spigot's own precedent of implementing core server functionality through
+the plugin surface itself, rather than beside it. A read-only architecture review designed the
+migration; the decision record and the new subsystem this unlocks are
+[`docs/server-ecs.md`](./server-ecs.md). What follows is why the three legs that used to block this
+no longer do — each re-verified against source for this pass, not restated from the earlier
+analysis:
+
+1. **File-ownership collision — task-scoped and expired. Void.** The original blocker was that
+   `lodestone-ecs` sat in a different agent's file-ownership split for one concurrent-editing task.
+   That scoping has expired; it was never an architectural argument on its own and carries no weight
+   now.
+2. **"Bridging means a second threading model to reconcile with tokio" — the first horn is
+   empirically void in this workspace; the second horn is fully preserved.** The *second* horn —
+   running the server's tick from *inside* the client's own schedule, which would break the
+   integrated-server premise that singleplayer (and open-to-LAN, with no render loop attached at
+   all) must keep advancing on its own — is still the wrong design and stays rejected. The tokio
+   loop and its clock remain the sole driver; nothing about that changes.
+
+   The *first* horn does not hold, checked directly rather than assumed: `bevy_app`/`bevy_ecs` are
+   pinned **without** `multi_threaded` on every target, workspace-wide (root `Cargo.toml:91-92`:
+   `bevy_app = { version = "0.19", default-features = false, features = ["std"] }` /
+   `bevy_ecs = { version = "0.19", default-features = false, features = ["std"] }`).
+   `crates/lodestone-ecs/Cargo.toml`'s own comment on the same two lines: "`multi_threaded` does not
+   even compile on wasm32 with no threads... left off on every target so native and wasm run the
+   same executor and the same system order." With no multi-threaded executor compiled in,
+   `World::run_schedule(...)` is a plain synchronous call on the calling thread — there is no second
+   runtime and no thread pool for tokio to reconcile with.
+
+   `crates/lodestone-ecs/src/runner.rs`'s `Runner::Headless` variant already demonstrates exactly
+   this, and has since before this decision. `Runner::Headless { tick_hz, max_catch_up_ticks }`
+   (`runner.rs:36-43`) and its `run_headless` method (`runner.rs:58-98`) are a hand-rolled `while`
+   loop built on `std::time::Instant`/`std::thread::sleep` — no tokio, no executor — that calls
+   `app.world_mut().run_schedule(GameTick)` directly at `runner.rs:80`. The server's tick loop takes
+   the identical shape: `tokio::time::sleep_until` drives the wake-up (unchanged from today), and the
+   schedule run itself is one more synchronous call on the tick task, exactly like `mobs.tick()` and
+   `block_entities.tick_all()` are today.
+3. **`run_tick_loop` is a plain spawned function — unchanged, and it remains the driver.**
+   `crate::tick::run_tick_loop` is still `pub(crate) async fn`
+   (`crates/lodestone-server/src/tick.rs:477`), still its own `loop { ... sleep_until ... }`, and
+   still reached from exactly one call site — `spawn_tick_task`
+   (`crates/lodestone-server/src/integrated.rs:85-96`), a plain wrapper around `tokio::spawn` +
+   a shutdown `tokio::select!`, invoked at `integrated.rs:326-338`. Adopting `bevy_ecs` changes what
+   runs *inside* one iteration of that loop — `world.run_schedule(GameTick)` in place of calling
+   `MobSim::tick`/`BlockEntityRegistry::tick_all` directly — not who calls the loop or how often.
+
+See [`docs/server-ecs.md`](./server-ecs.md) for the subsystem this reversal unlocks: two `World`s,
+never one, and the plugin-adjudication window a scheduled apply makes possible that an inline
+connection-task mutation never could.
 
 ## How it works
 
