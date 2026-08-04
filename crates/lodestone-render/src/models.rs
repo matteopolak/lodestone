@@ -281,6 +281,21 @@ pub fn quad_is_full_face(q: &BakedQuad) -> bool {
     corners == 0b1111
 }
 
+/// Vanilla `BlockModelLighter.prepareQuadShape`'s `faceCubic`
+/// (`BlockModelLighter.java:265-272`): whether the quad's plane is flush with
+/// the block boundary on its own facing axis.
+///
+/// **Not** [`quad_is_full_face`], which additionally demands a full `1×1` span
+/// and `cullface == direction`. Vanilla's test is planarity plus position
+/// only, so a stair's top step qualifies and a cross blade or a fence post's
+/// side does not.
+#[must_use]
+fn quad_is_on_face_boundary(q: &BakedQuad) -> bool {
+    const EPS: f32 = 1e-4;
+    let (fixed, plane) = face_plane(q.direction);
+    q.positions.iter().all(|p| (p[fixed] - plane).abs() <= EPS)
+}
+
 /// Snaps a coordinate to `0` or `1` (returned as `0`/`1`), or `None` if it is
 /// not within epsilon of a unit-cube corner.
 fn snap01(v: f32) -> Option<u8> {
@@ -622,6 +637,16 @@ pub fn mesh_models(view: &dyn ModelSectionView) -> ModelMesh {
                 // model (or, once light emission is threaded through, a torch or
                 // glowstone) renders flat together.
                 let ao_enabled = view.ambient_occlusion_at(x, y, z);
+                // Vanilla's `state.isCollisionShapeFullBlock(level, pos)` clause
+                // of `faceCubic` (`BlockModelLighter.java:265-272`). We have no
+                // collision-shape table on this trait; `occludes_at` on the
+                // block's *own* cell covers the population the clause exists
+                // for — opaque full cubes, whose interior quads must still be
+                // lit from the neighbour. A non-opaque full collision cube
+                // (slime, spawner, ice) falls to the own cell instead, which
+                // for a non-opaque cell carries real light, so the
+                // approximation errs bright rather than black.
+                let own_is_full_cube = view.occludes_at(x as i32, y as i32, z as i32);
                 for quad in quads {
                     if let Some(cf) = quad.cullface {
                         let nrm = face_of_direction(cf).normal();
@@ -630,17 +655,45 @@ pub fn mesh_models(view: &dyn ModelSectionView) -> ModelMesh {
                             continue;
                         }
                     }
-                    // Per *quad*, not per block: each face carries the light of
-                    // the cell it opens into (see `face_light_at`).
-                    let light = view.face_light_at(x, y, z, quad.direction);
+                    // Vanilla `ModelBlockRenderer.tesselateFlat` (:165, :175,
+                    // :186-187) plus `BlockModelLighter.prepareQuadFlat`
+                    // (:205-208) and `.prepareQuadAmbientOcclusion` (:39, :117):
+                    //   * a quad in a *culled* bucket is lit from the cell its
+                    //     `cullface` opens into — the bucket direction, which is
+                    //     not always `quad.direction` (powder_snow, see
+                    //     `block_models.rs:2031`);
+                    //   * an *unculled* quad is lit from the neighbour only when
+                    //     its plane is flush with the block boundary
+                    //     (`faceCubic`), otherwise from the block's OWN cell.
+                    // A cross blade is unculled and its plane is diagonal, so
+                    // it is lit from its own cell. Sampling the neighbour reads
+                    // the interior of an adjacent solid, which the light engine
+                    // stores as 0 — the "grass is black on one side" report.
+                    let sample_dir = quad.cullface.or_else(|| {
+                        (quad_is_on_face_boundary(quad) || own_is_full_cube)
+                            .then_some(quad.direction)
+                    });
+                    let (np, light) = match sample_dir {
+                        Some(d) => {
+                            let n = face_of_direction(d).normal();
+                            let np = [x as i32 + n[0], y as i32 + n[1], z as i32 + n[2]];
+                            (np, view.face_light_at(x, y, z, d))
+                        }
+                        // Vanilla's `faceCubic == false` branch: the ring and
+                        // the centre light both move back onto the block's own
+                        // cell. `corner_light_at` at the own coordinate IS the
+                        // own cell's exact packed light, and using it keeps the
+                        // centre value consistent with the ring — a `max`-over-
+                        // neighbourhood centre against exact corners is the
+                        // self-inconsistency `grass_light_response_gate.rs:
+                        // 255-270` documents.
+                        None => (
+                            [x as i32, y as i32, z as i32],
+                            view.corner_light_at(x as i32, y as i32, z as i32),
+                        ),
+                    };
                     let corners = if ao_enabled {
                         let face = face_of_direction(quad.direction);
-                        let face_n = face.normal();
-                        let np = [
-                            x as i32 + face_n[0],
-                            y as i32 + face_n[1],
-                            z as i32 + face_n[2],
-                        ];
                         [0, 1, 2, 3]
                             .map(|i| quad_corner_sample(view, np, face, quad.positions[i], light))
                     } else {
@@ -1013,10 +1066,21 @@ mod tests {
     }
 
     fn cube_face(dir: Direction, cull: Option<Direction>) -> BakedQuad {
-        // A unit quad on the face `dir`; exact corner positions are irrelevant
-        // to the culling logic under test.
+        // A degenerate quad — all four "corners" collapsed to one point — so
+        // the exact in-plane shape stays irrelevant to the culling logic under
+        // test (and every AO-ring test built on this fixture keeps sampling
+        // one shared corner). But that single point now sits on `dir`'s own
+        // block-boundary plane, because `quad_is_on_face_boundary` (used by
+        // `mesh_models` to pick `faceCubic`) reads real positions: a point
+        // left at the origin looks like a face flush with `dir`'s plane only
+        // for `Down`/`North`/`West` and silently fails the boundary test for
+        // `Up`/`South`/`East`, which would route light through the wrong
+        // branch for those tests.
+        let (fixed, plane) = face_plane(dir);
+        let mut p = [0.0f32; 3];
+        p[fixed] = plane;
         BakedQuad {
-            positions: [[0.0; 3]; 4],
+            positions: [p; 4],
             uvs: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
             direction: dir,
             cullface: cull,
