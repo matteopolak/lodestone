@@ -1,6 +1,7 @@
 //! The four per-block-state facts vanilla's `freeze_top_layer`
 //! (`TOP_LAYER_MODIFICATION`, `SnowAndFreezeFeature`) needs and that no other
-//! census in this crate carries, for protocol 776 (Minecraft 26.2).
+//! census in this crate carries, plus the default-state key its consumer needs to
+//! look them up, for protocol 776 (Minecraft 26.2).
 //!
 //! # Why this table has to exist
 //!
@@ -67,7 +68,8 @@
 //!
 //! # Memory design
 //!
-//! Four bitsets, 4,046 bytes each — pure rodata, no heap, O(1) by id.
+//! Five bitsets, 4,046 bytes each — pure rodata, no heap, O(1) by id. The fifth,
+//! [`is_default_state`], is not a `freeze_top_layer` predicate; see its own doc.
 
 use crate::generated_snow_support as table;
 
@@ -133,6 +135,24 @@ pub fn has_snowy_property(id: u32) -> Option<bool> {
     bit(&table::HAS_SNOWY_PROPERTY, id)
 }
 
+/// Vanilla `state == state.getBlock().defaultBlockState()` for block-state `id`,
+/// or `None` if `id` is not in `0..`[`STATE_COUNT`]. Exactly one state per block
+/// is set, so a single walk of `0..STATE_COUNT` recovers every block's default
+/// with no name lookup.
+///
+/// This is not a `freeze_top_layer` predicate — it is the key its consumer needs.
+/// `lodestone-worldgen` emits fluids without their `level` property
+/// (`docs/worldgen-parity.md`'s "Known representation gap"), so a generated
+/// column's water reads as `minecraft:water`; since
+/// [`is_water_source_liquid_block`] is true for exactly one water state, a
+/// property-less lookup must resolve to the block's **default** state or no ocean
+/// ever freezes. `blocks.json` does carry a `"default": true` flag per block, but
+/// [`crate::block_states`]' extraction did not retain it.
+#[must_use]
+pub fn is_default_state(id: u32) -> Option<bool> {
+    bit(&table::IS_DEFAULT_STATE, id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,6 +163,7 @@ mod tests {
         assert!(has_fluid_state(STATE_COUNT).is_none());
         assert!(is_water_source_liquid_block(STATE_COUNT).is_none());
         assert!(has_snowy_property(STATE_COUNT).is_none());
+        assert!(is_default_state(STATE_COUNT).is_none());
         assert!(face_full_up(u32::MAX).is_none());
     }
 
@@ -161,6 +182,7 @@ mod tests {
                 is_water_source_liquid_block,
             ),
             ("has_snowy_property", has_snowy_property),
+            ("is_default_state", is_default_state),
         ] {
             let set = (0..STATE_COUNT).filter(|&id| f(id) == Some(true)).count();
             assert!(set > 0, "{name} is all-zero across {STATE_COUNT} states");

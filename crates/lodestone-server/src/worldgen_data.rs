@@ -169,11 +169,143 @@ impl Resolver for EmbeddedResolver {
     }
 
     /// `tags/block/<name>.json` — 261 files, needed to resolve
-    /// `#overworld_carver_replaceables`' recursive closure (issue #295).
+    /// `#overworld_carver_replaceables`' recursive closure (issue #295), and
+    /// `#cannot_support_snow_layer`/`#support_override_snow_layer` for
+    /// `freeze_top_layer` (issue #404's U2).
     fn block_tag(&self, id: &str) -> Value {
         let name = id.strip_prefix("minecraft:").unwrap_or(id);
         self.try_json(&format!("tags/block/{name}"))
     }
+
+    /// The five per-block-state predicates `freeze_top_layer` needs (issue
+    /// #404's U2), built from [`lodestone_data`]'s jar-dumped censuses rather
+    /// than from an embedded JSON asset.
+    ///
+    /// **This is deliberately not a datapack asset**, unlike every other method
+    /// on this impl. `blocks_motion`, fluid presence and collision UP-face
+    /// fullness are properties of the game's *compiled behaviour*, not of any
+    /// JSON file — `blocks.json` has no geometry at all — so the authoritative
+    /// source is `lodestone_data::{block_solidity, snow_support}`, which are
+    /// themselves dumps of the real 26.2 server. Routing them through the
+    /// `Resolver` seam rather than making `lodestone-worldgen` depend on
+    /// `lodestone-data` is what keeps the engine version-free (see
+    /// `docs/plans/worldgen-parity.md` §4 — the engine takes *all* its data
+    /// through `Resolver` by construction).
+    ///
+    /// Built once per process, not per generator: it is a pure function of two
+    /// static tables.
+    fn block_freeze_facts(&self) -> Value {
+        freeze_facts().clone()
+    }
+}
+
+/// Builds [`Resolver::block_freeze_facts`]'s document by walking all 32,366
+/// block states once.
+///
+/// The output shape is "the answer for each block's **default** state, by base
+/// name" plus "an override for every state that disagrees with its own default".
+/// That is exact — the override list is produced by a full registry walk, never
+/// curated — and it is two orders of magnitude smaller than a per-state map,
+/// which matters because this document is parsed into `HashSet`/`HashMap`s at
+/// generator construction.
+///
+/// The default-state half is load-bearing rather than an optimisation:
+/// `lodestone-worldgen` emits fluids without their `level` property
+/// (`docs/worldgen-parity.md`'s "Known representation gap"), so a generated
+/// column's water reads as `minecraft:water`, and
+/// `snow_support::is_water_source_liquid_block` is true for exactly *one* water
+/// state. Without the default-state fallback no ocean would ever freeze.
+fn freeze_facts() -> &'static Value {
+    static FACTS: OnceLock<Value> = OnceLock::new();
+    FACTS.get_or_init(|| {
+        use lodestone_data::{block_solidity, block_states, snow_support};
+
+        type Reader = fn(u32) -> Option<bool>;
+        const COLUMNS: [(&str, Reader); 5] = [
+            ("blocks_motion", block_solidity::blocks_motion),
+            ("has_fluid_state", snow_support::has_fluid_state),
+            ("water_source", snow_support::is_water_source_liquid_block),
+            ("face_full_up", snow_support::face_full_up),
+            ("snowy_property", snow_support::has_snowy_property),
+        ];
+        assert_eq!(
+            snow_support::STATE_COUNT,
+            block_solidity::STATE_COUNT,
+            "the two censuses must share one state-id space"
+        );
+
+        // Pass 1: each block's default-state answer per column. `is_default_state`
+        // sets exactly one bit per block (asserted in `lodestone-data`'s
+        // `tests/snow_support.rs`), so one walk suffices.
+        let mut default_answers: std::collections::HashMap<&'static str, [bool; COLUMNS.len()]> =
+            std::collections::HashMap::new();
+        for id in 0..snow_support::STATE_COUNT {
+            if snow_support::is_default_state(id) != Some(true) {
+                continue;
+            }
+            let name = block_states::block_name(id).expect("every state has a block name");
+            let answers = std::array::from_fn(|c| COLUMNS[c].1(id) == Some(true));
+            default_answers.insert(name, answers);
+        }
+
+        // Pass 2: every state that disagrees with its own block's default.
+        let mut defaults: [Vec<&'static str>; COLUMNS.len()] = Default::default();
+        let mut overrides: [serde_json::Map<String, Value>; COLUMNS.len()] = Default::default();
+        for (name, answers) in &default_answers {
+            for (c, &answer) in answers.iter().enumerate() {
+                if answer {
+                    defaults[c].push(name);
+                }
+            }
+        }
+        for id in 0..snow_support::STATE_COUNT {
+            let name = block_states::block_name(id).expect("every state has a block name");
+            let default = default_answers
+                .get(name)
+                .unwrap_or_else(|| panic!("block {name} has no default state in the census"));
+            for (c, &(_, read)) in COLUMNS.iter().enumerate() {
+                let answer = read(id) == Some(true);
+                if answer != default[c] {
+                    overrides[c].insert(canonical_state(id), Value::Bool(answer));
+                }
+            }
+        }
+
+        let mut out = serde_json::Map::new();
+        for (c, (column, _)) in COLUMNS.iter().enumerate() {
+            let mut names: Vec<&str> = defaults[c].clone();
+            names.sort_unstable();
+            out.insert(
+                (*column).to_owned(),
+                serde_json::json!({
+                    "default": names,
+                    "states": Value::Object(overrides[c].clone()),
+                }),
+            );
+        }
+        Value::Object(out)
+    })
+}
+
+/// The canonical block-state string for `id` — name plus alphabetically-sorted
+/// `key=value` properties, the exact spelling
+/// `lodestone_worldgen::feature::canon_state` produces and the generator's block
+/// field holds.
+fn canonical_state(id: u32) -> String {
+    use lodestone_data::block_states;
+    let name = block_states::block_name(id).expect("every state has a block name");
+    let props = block_states::properties(id).expect("every state has a property list");
+    if props.is_empty() {
+        return name.to_owned();
+    }
+    // `block_states::properties` already returns a sorted slice (see its doc), so
+    // no re-sort is needed — but the join must not assume that silently.
+    debug_assert!(
+        props.windows(2).all(|w| w[0].0 <= w[1].0),
+        "block_states::properties is documented sorted; {name} is not"
+    );
+    let body: Vec<String> = props.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    format!("{name}[{}]", body.join(","))
 }
 
 /// The parsed overworld noise settings (parsed once, reused across seeds).
@@ -217,6 +349,70 @@ pub fn overworld_chunk_source(seed: i64) -> crate::chunk::OverworldChunkSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Coordinate sweep used to *choose* the `freeze_top_layer` fixtures rather
+    /// than guess them (issue #404's U2). `#[ignore]`d: it is a several-minute
+    /// release-profile scan, and its output is a report, not an assertion.
+    ///
+    /// ```text
+    /// cargo test --release -p lodestone-server --lib freeze_coordinate_sweep -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "multi-minute coordinate sweep; a report, not an assertion"]
+    fn freeze_coordinate_sweep() {
+        let env = |key: &str, fallback: i32| -> i32 {
+            std::env::var(key)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(fallback)
+        };
+        let seed = i64::from(env("SWEEP_SEED", 42));
+        let extent = env("SWEEP_EXTENT", 240);
+        let step = env("SWEEP_STEP", 80).max(1) as usize;
+        let generator = overworld_generator(seed);
+        let mut rows = Vec::new();
+        for cx in (-extent..=extent).step_by(step) {
+            for cz in (-extent..=extent).step_by(step) {
+                let column = generator.column(cx, cz);
+                let mut snow = 0usize;
+                let mut ice = 0usize;
+                let mut snowy = 0usize;
+                let mut min_top = i32::MAX;
+                let mut max_top = i32::MIN;
+                for lx in 0..16usize {
+                    for lz in 0..16usize {
+                        let top = column.top_non_air_y(lx, lz);
+                        min_top = min_top.min(top);
+                        max_top = max_top.max(top);
+                    }
+                }
+                for lx in 0..16usize {
+                    for lz in 0..16usize {
+                        for y in generator.min_y()..(generator.min_y() + generator.height()) {
+                            let state = column.block_state(lx, y, lz);
+                            if state.starts_with("minecraft:snow[") {
+                                snow += 1;
+                            } else if state == "minecraft:ice" {
+                                ice += 1;
+                            } else if state.contains("snowy=true") {
+                                snowy += 1;
+                            }
+                        }
+                    }
+                }
+                let biomes: std::collections::BTreeSet<&str> = (0..16)
+                    .map(|i| column.biome_state((i % 4) * 4, (i / 4) * 4))
+                    .collect();
+                rows.push(format!(
+                    "({cx:>5},{cz:>5}) top {min_top:>4}..{max_top:<4} \
+                     snow={snow:<4} ice={ice:<4} snowy={snowy:<4} biomes={biomes:?}"
+                ));
+            }
+        }
+        for row in &rows {
+            println!("{row}");
+        }
+    }
 
     #[test]
     fn embedded_table_is_sorted_and_nonempty() {

@@ -237,6 +237,37 @@ pub trait Resolver {
         Value::Null
     }
 
+    /// The five per-block-state predicates vanilla's `freeze_top_layer`
+    /// (`TOP_LAYER_MODIFICATION`, issue #404's U2) needs, as the JSON document
+    /// [`crate::feature::top_layer::SnowSupport::parse`] expects:
+    ///
+    /// ```json
+    /// {
+    ///   "blocks_motion":   { "default": ["minecraft:stone", ...], "states": {"...": false} },
+    ///   "has_fluid_state": { "default": [...], "states": {...} },
+    ///   "water_source":    { "default": [...], "states": {...} },
+    ///   "face_full_up":    { "default": [...], "states": {...} },
+    ///   "snowy_property":  { "default": [...], "states": {...} }
+    /// }
+    /// ```
+    ///
+    /// Each column is "the answer for every block's default state" plus an
+    /// override for **every** state that disagrees with its own default — a
+    /// complete, exact encoding, not a curated subset (see
+    /// [`crate::feature::top_layer::StatePredicate`] for why the two-level shape
+    /// exists and why the override list has to be exhaustive).
+    ///
+    /// Default: `Value::Null`, which parses to empty predicates and makes the
+    /// whole step a no-op — the same "no data supplied" convention
+    /// [`biome_parameters`](Self::biome_parameters) established. This is *not*
+    /// datapack data: it is a census of the game's own compiled behaviour
+    /// (collision geometry, fluid states), so a resolver that wants snow supplies
+    /// it from `lodestone_data::snow_support` rather than from a JSON asset. See
+    /// `lodestone_server::worldgen_data`'s implementation.
+    fn block_freeze_facts(&self) -> Value {
+        Value::Null
+    }
+
     /// `tags/block/<name>.json` (the raw tag document, `{"values": [...]}`,
     /// with sub-tag references as `"#minecraft:..."` entries needing their
     /// own recursive lookup — see `crate::compose::resolve_block_tag`).
