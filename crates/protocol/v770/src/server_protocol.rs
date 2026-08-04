@@ -135,6 +135,106 @@ fn air_id() -> u32 {
     )
 }
 
+/// This port's own biome registry id space (issue #405) — index in this
+/// **sorted** array is the wire id [`resolve_biome_id`] uses. Regenerable
+/// with `awk '/^row\./{print $2}' scripts/worldgen-oracle/biome_java.txt |
+/// sort -u`, the exact set `lodestone-worldgen`'s embedded overworld
+/// parameter table can ever resolve a column to.
+///
+/// # Why "sorted by name" and not vanilla's own biome registry order
+///
+/// Real vanilla assigns biome wire ids by **registration order** in a
+/// `minecraft:worldgen/biome` dynamic-registry sync sent during the
+/// configuration phase — and this server sends **no registry data at all**
+/// yet (`begin_configuration`'s own doc comment: "registry data … are all
+/// real vanilla packets this join sequence does not yet need to send"). So
+/// there is no existing id space this needs to agree with, and no consumer
+/// on the client side to agree with it either — `lodestone-shell` has no
+/// `impl BiomeTint` yet (checked directly: zero implementors in
+/// `crates/lodestone-shell/src` at the time this was written), so the
+/// `ChunkSection::biomes()` container this now populates reaches the wire
+/// and nothing downstream reads it back into a name. Any stable,
+/// reproducible convention is therefore safe **for now**; alphabetical is
+/// the simplest one that needs no extra bookkeeping. **This is provisional**
+/// — once real registry-data sync exists (or a render-layers agent needs a
+/// name for a wire id), replace this table with that sync's actual order,
+/// do not assume this one is a substitute for it.
+const BIOME_NAMES: &[&str] = &[
+    "minecraft:badlands",
+    "minecraft:bamboo_jungle",
+    "minecraft:beach",
+    "minecraft:birch_forest",
+    "minecraft:cherry_grove",
+    "minecraft:cold_ocean",
+    "minecraft:dark_forest",
+    "minecraft:deep_cold_ocean",
+    "minecraft:deep_dark",
+    "minecraft:deep_frozen_ocean",
+    "minecraft:deep_lukewarm_ocean",
+    "minecraft:deep_ocean",
+    "minecraft:desert",
+    "minecraft:dripstone_caves",
+    "minecraft:eroded_badlands",
+    "minecraft:flower_forest",
+    "minecraft:forest",
+    "minecraft:frozen_ocean",
+    "minecraft:frozen_peaks",
+    "minecraft:frozen_river",
+    "minecraft:grove",
+    "minecraft:ice_spikes",
+    "minecraft:jagged_peaks",
+    "minecraft:jungle",
+    "minecraft:lukewarm_ocean",
+    "minecraft:lush_caves",
+    "minecraft:mangrove_swamp",
+    "minecraft:meadow",
+    "minecraft:mushroom_fields",
+    "minecraft:ocean",
+    "minecraft:old_growth_birch_forest",
+    "minecraft:old_growth_pine_taiga",
+    "minecraft:old_growth_spruce_taiga",
+    "minecraft:pale_garden",
+    "minecraft:plains",
+    "minecraft:river",
+    "minecraft:savanna",
+    "minecraft:savanna_plateau",
+    "minecraft:snowy_beach",
+    "minecraft:snowy_plains",
+    "minecraft:snowy_slopes",
+    "minecraft:snowy_taiga",
+    "minecraft:sparse_jungle",
+    "minecraft:stony_peaks",
+    "minecraft:stony_shore",
+    "minecraft:sulfur_caves",
+    "minecraft:sunflower_plains",
+    "minecraft:swamp",
+    "minecraft:taiga",
+    "minecraft:warm_ocean",
+    "minecraft:windswept_forest",
+    "minecraft:windswept_gravelly_hills",
+    "minecraft:windswept_hills",
+    "minecraft:windswept_savanna",
+    "minecraft:wooded_badlands",
+];
+
+/// Resolves a biome id string ([`ServerChunkColumn::biome_state`]'s
+/// vocabulary) to this port's [`BIOME_NAMES`] index — see that constant's
+/// doc comment for the id-space caveat. Falls back to `minecraft:plains`'s
+/// index for any name outside the known set (never panics on unexpected
+/// data, mirroring [`resolve_state_id`]'s tiered-fallback posture).
+///
+/// # Panics
+/// Panics if `BIOME_NAMES` has no `"minecraft:plains"` entry (a corrupt
+/// table, not a runtime condition).
+fn resolve_biome_id(name: &str) -> u32 {
+    BIOME_NAMES.iter().position(|&n| n == name).unwrap_or_else(|| {
+        BIOME_NAMES
+            .iter()
+            .position(|&n| n == "minecraft:plains")
+            .expect("BIOME_NAMES missing minecraft:plains")
+    }) as u32
+}
+
 /// Resolves a canonical block-state string ([`ServerChunkColumn`]'s own
 /// vocabulary, e.g. `"minecraft:water[level=0]"`, `"minecraft:stone"`) to its
 /// protocol-776 registry id, via a linear scan matching both the block name
@@ -617,10 +717,12 @@ fn encode_game_login_rest() -> Vec<u8> {
 /// version-free [`WorldChunkColumn`] the wire codec speaks, carrying the
 /// **real** per-block state the source already computed (grass, dirt,
 /// deepslate, gravel, water, …) rather than a solid/air classification —
-/// see issue #363. Every cell is resolved via
-/// [`ServerChunkColumn::block_state`] (the same string source
-/// [`V770ServerProtocol::encode_block_update`] already reads for a single
-/// cell) through [`resolve_state_id`].
+/// see issue #363 — and, since issue #405, the source's real per-quart
+/// biome assignment rather than one constant id everywhere. Every block
+/// cell is resolved via [`ServerChunkColumn::block_state`] (the same string
+/// source [`V770ServerProtocol::encode_block_update`] already reads for a
+/// single cell) through [`resolve_state_id`]; every biome quart via
+/// [`ServerChunkColumn::biome_state`] through [`resolve_biome_id`].
 ///
 /// # Why this does not cost a linear scan per block
 ///
@@ -635,6 +737,10 @@ fn encode_game_login_rest() -> Vec<u8> {
 /// calls — the columns a server sends are different data every time (edits,
 /// different chunk coordinates), so there is nothing durable to cache
 /// across them without the source outliving one `encode_chunk` call.
+/// [`resolve_biome_id`] is a 55-entry linear scan and biome only varies at
+/// 16-per-column quart resolution, so it is resolved once per column
+/// (`biome_ids` below), not memoized per section — 16 calls per column is
+/// already cheaper than memoizing would be.
 ///
 /// Iterates section-major (matching wire order) and skips sections that end
 /// up entirely default (air-only, default biome), since
@@ -650,6 +756,18 @@ fn build_world_column(shape: &ChunkShape, source: &ServerChunkColumn) -> WorldCh
     );
 
     let mut seen: HashMap<&str, u32> = HashMap::new();
+
+    // This column's 16 real biome ids (issue #405), row-major `qz * 4 + qx`
+    // — constant across every section (biome is broadcast vertically, see
+    // `ChunkColumn::biome_state`'s doc comment), so resolved once up front
+    // rather than recomputed per section.
+    let mut biome_ids = [0u32; 16];
+    for qz in 0..4i32 {
+        for qx in 0..4i32 {
+            let name = source.biome_state(qx * 4, qz * 4);
+            biome_ids[(qz * 4 + qx) as usize] = resolve_biome_id(name);
+        }
+    }
 
     for section_index in 0..shape.section_count {
         let base_y = shape.min_y + (section_index * ChunkSection::EDGE) as i32;
@@ -675,6 +793,14 @@ fn build_world_column(shape: &ChunkShape, source: &ServerChunkColumn) -> WorldCh
                     if id != shape.air_id {
                         section.set_block(lx, ly, lz, id);
                     }
+                }
+            }
+        }
+        for qz in 0..4usize {
+            for qx in 0..4usize {
+                let id = biome_ids[qz * 4 + qx];
+                for qy in 0..4usize {
+                    section.set_biome(qx, qy, qz, id);
                 }
             }
         }
@@ -1473,6 +1599,64 @@ mod block_edit_tests {
         // terrain) still reads as air — the fix does not smear a stray
         // non-air write across cells the source itself reports as air.
         assert_eq!(decoded.column.get_block(5, 300, 5), air_id());
+    }
+
+    /// Issue #405's own island check: real per-quart biome assignment must
+    /// reach the **encoded wire bytes**, not just [`ServerChunkColumn`] —
+    /// the exact chain CLAUDE.md's rule 1 asks for (climate sample -> biome
+    /// -> the column the encoder sends -> the actual bytes a client would
+    /// decode). Chunk (0, 0) at seed 42 is the same fixture
+    /// `biome_matches_vanilla_at_known_coordinates_seed_42`
+    /// (`lodestone-server::worldgen_data`) proves against the JVM: quart
+    /// (0, 0) is `dark_forest`, quart (2, 2) is `river` — two *different*
+    /// biomes in the same chunk, so this also proves the wire encoder
+    /// doesn't collapse a chunk to one id the way it used to have to (no
+    /// per-quart biome existed before this issue).
+    #[test]
+    fn encode_chunk_carries_real_per_quart_biome() {
+        use crate::packets::chunk::LevelChunkWithLight;
+        use lodestone_server::{ChunkSource, overworld_chunk_source};
+
+        let seed: i64 = 42;
+        let source = overworld_chunk_source(seed);
+        let served_column = source.column(0, 0);
+        assert_eq!(served_column.biome_state(0, 0), "minecraft:dark_forest");
+        assert_eq!(served_column.biome_state(8, 8), "minecraft:river");
+        let dark_forest_id = resolve_biome_id("minecraft:dark_forest");
+        let river_id = resolve_biome_id("minecraft:river");
+        assert_ne!(
+            dark_forest_id, river_id,
+            "fixture sanity: the two biomes must resolve to different wire ids"
+        );
+
+        let proto = V770ServerProtocol;
+        let directive = proto.encode_chunk(0, 0, &served_column);
+        let payload = match directive {
+            ServerDirective::Send { payload, .. } => payload,
+            other => panic!("expected Send, got {other:?}"),
+        };
+
+        let shape = ChunkShape::overworld_1_21();
+        let mut r = Reader::new(&payload);
+        let decoded = LevelChunkWithLight::decode(&mut r, &shape).expect("decode column");
+        r.ensure_empty().expect("no trailing bytes");
+
+        // `lodestone_world::ChunkColumn::get_biome`'s `x`/`z` are in-chunk
+        // **biome cells** (`0..4`, quart resolution), not block coordinates
+        // — world block (8, 8) is biome cell (2, 2) (`8 >> 2`). World y=70
+        // lands well inside this column's generated terrain range for both
+        // probes, and biome is constant across y for a given cell per this
+        // port's Phase 1 scope, so the exact y does not matter here.
+        assert_eq!(
+            decoded.column.get_biome(0, 70, 0),
+            dark_forest_id,
+            "quart (0,0) must carry dark_forest's real wire id, not a constant default"
+        );
+        assert_eq!(
+            decoded.column.get_biome(2, 70, 2),
+            river_id,
+            "quart (2,2) must carry river's real wire id, distinct from quart (0,0)'s"
+        );
     }
 
     /// Pins `encode_block_update`'s wire layout end to end: packed `BlockPos`

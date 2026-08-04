@@ -42,12 +42,24 @@
 
 use serde_json::Value;
 
+use crate::biome::{BiomeParameterPoint, ClimateSampler};
 use crate::density::{Builder, Density, NoiseChunkSampler, Resolver};
 use crate::surface::{SurfaceSystem, identity_canon};
 
 /// Overworld cell dimensions (`NoiseSettings.getCellWidth()/getCellHeight()`).
 const CELL_WIDTH: i32 = 4;
 const CELL_HEIGHT: i32 = 8;
+
+/// Real multi-noise biome assignment (issue #405), present on
+/// [`OverworldGenerator`] whenever its [`Resolver`] supplies a non-empty
+/// [`Resolver::biome_parameters`] table. See `crate::biome`'s module doc for
+/// the resolution/height/excluded-biome decisions baked into this.
+#[allow(missing_debug_implementations)]
+struct DynamicBiome {
+    climate: ClimateSampler,
+    table: Vec<BiomeParameterPoint>,
+    temperatures: std::collections::HashMap<String, f32>,
+}
 
 /// A composed, reusable overworld generator. Build once per seed; call
 /// [`column`](Self::column) per chunk.
@@ -61,15 +73,32 @@ pub struct OverworldGenerator {
     sea_level: i32,
     default_block: String,
     default_fluid: String,
+    /// The biome (and its `coldEnoughToSnow` answer) used for every column
+    /// when [`Self::dynamic_biome`] is `None` — i.e. exactly the whole-world
+    /// behaviour this generator had before issue #405, kept as the fallback
+    /// a [`Resolver`] with no biome data still gets.
+    fallback_biome: String,
+    fallback_cold_enough_to_snow: bool,
+    /// `None` unless `resolver.biome_parameters()` returned a non-empty
+    /// table, in which case every column samples real climate instead of
+    /// using the fallback above.
+    dynamic_biome: Option<DynamicBiome>,
 }
 
 impl OverworldGenerator {
     /// Builds the generator for `seed` from a noise-settings `Value` and a
-    /// [`Resolver`] that supplies the density functions and noises it references.
+    /// [`Resolver`] that supplies the density functions and noises it
+    /// references.
     ///
-    /// `biome` is the fixed biome id (e.g. `"minecraft:plains"`) generation runs
-    /// under until the multi-noise biome source exists; `cold_enough_to_snow` is
-    /// that biome's answer (only the `temperature` surface condition consults it).
+    /// `biome` is the fallback biome id (e.g. `"minecraft:plains"`) used for
+    /// every column when `resolver` supplies no real biome-parameter table
+    /// (`resolver.biome_parameters()` empty, the default — see
+    /// [`Resolver::biome_parameters`]); `cold_enough_to_snow` is that
+    /// biome's answer. A resolver that overrides `biome_parameters`/
+    /// `biome_temperatures` (the bundled singleplayer generator does) gets
+    /// real per-column biome variety instead, and these two arguments are
+    /// then unused except as a documentation of "what this used to always
+    /// be."
     #[must_use]
     pub fn new(
         seed: i64,
@@ -82,7 +111,7 @@ impl OverworldGenerator {
         let final_density = builder.build(&settings["noise_router"]["final_density"]);
         let slot_count = builder.slot_count();
         let canon = identity_canon(settings);
-        let surface = SurfaceSystem::new(settings, &builder, biome, &canon, cold_enough_to_snow);
+        let surface = SurfaceSystem::new(settings, &builder, &canon);
 
         let min_y = settings["noise"]["min_y"].as_i64().unwrap_or(-64) as i32;
         let height = settings["noise"]["height"].as_i64().unwrap_or(384) as i32;
@@ -96,6 +125,20 @@ impl OverworldGenerator {
             .unwrap_or("minecraft:water")
             .to_string();
 
+        let raw_table = crate::biome::parse_table(&resolver.biome_parameters());
+        let dynamic_biome = if raw_table.is_empty() {
+            None
+        } else {
+            let table = crate::biome::usable_overworld_table(raw_table);
+            let temperatures = crate::biome::parse_temperatures(&resolver.biome_temperatures());
+            let climate = ClimateSampler::new(settings, &builder);
+            Some(DynamicBiome {
+                climate,
+                table,
+                temperatures,
+            })
+        };
+
         Self {
             final_density,
             slot_count,
@@ -105,6 +148,9 @@ impl OverworldGenerator {
             sea_level,
             default_block,
             default_fluid,
+            fallback_biome: biome.to_string(),
+            fallback_cold_enough_to_snow: cold_enough_to_snow,
+            dynamic_biome,
         }
     }
 
@@ -134,8 +180,9 @@ impl OverworldGenerator {
 
         let solid = self.shape_stage(base_x, base_z);
         let heights = self.fluid_heightmap_stage(&solid);
-        let post = self.surface_stage(&solid, &heights, base_x, base_z);
-        self.intern_stage(&solid, post)
+        let biome_quarts = self.biome_stage(&heights, base_x, base_z);
+        let post = self.surface_stage(&solid, &heights, &biome_quarts, base_x, base_z);
+        self.intern_stage(&solid, post, biome_quarts)
     }
 
     /// Identical to [`column`](Self::column), timed per stage. Exists so the
@@ -154,10 +201,11 @@ impl OverworldGenerator {
         let solid = self.shape_stage(base_x, base_z);
         let t1 = std::time::Instant::now();
         let heights = self.fluid_heightmap_stage(&solid);
+        let biome_quarts = self.biome_stage(&heights, base_x, base_z);
         let t2 = std::time::Instant::now();
-        let post = self.surface_stage(&solid, &heights, base_x, base_z);
+        let post = self.surface_stage(&solid, &heights, &biome_quarts, base_x, base_z);
         let t3 = std::time::Instant::now();
-        let col = self.intern_stage(&solid, post);
+        let col = self.intern_stage(&solid, post, biome_quarts);
         let t4 = std::time::Instant::now();
 
         (
@@ -230,7 +278,65 @@ impl OverworldGenerator {
         heights
     }
 
-    /// Stage 3: surface rules over the pre-surface (shape + fluid) column.
+    /// Stage "biome" (issue #405): one climate sample per horizontal quart
+    /// `(qx, qz)` in `0..4`, row-major `qz * 4 + qx` — 16 per chunk, matching
+    /// [`lodestone_world`](crate)'s own `ChunkSection::BIOME_EDGE` (4) so a
+    /// future encoder can write this straight into a real biome container.
+    /// Broadcast vertically: see `crate::biome`'s module doc for why one
+    /// sample per quart *column*, not a full 3-D grid, is this phase's
+    /// deliberate scope.
+    ///
+    /// Each quart samples at its own **already-generated surface height**
+    /// (`heights[]`, this chunk's stage-2 output) rather than a fixed Y — the
+    /// module doc's "y = 0 trap" section is why a constant height silently
+    /// produces almost all cave/deep-ocean biomes instead of the terrain
+    /// biome a player standing there would actually see.
+    fn biome_stage(&self, heights: &[i32; 256], base_x: i32, base_z: i32) -> [(String, bool); 16] {
+        std::array::from_fn(|i| {
+            let Some(dynamic) = &self.dynamic_biome else {
+                return (
+                    self.fallback_biome.clone(),
+                    self.fallback_cold_enough_to_snow,
+                );
+            };
+            let qx = (i % 4) as i32;
+            let qz = (i / 4) as i32;
+            // Quart cell (qx, qz) covers local x/z in [qx*4, qx*4+4); sample
+            // at its own **corner** (`qx*4`), not its center. This matches
+            // vanilla exactly: `Climate.Sampler.sample(quartX, quartY,
+            // quartZ)` converts back to block space via
+            // `QuartPos.toBlock(quartX) == quartX << 2`, i.e. the quart's
+            // minimum corner — verified the hard way: an earlier version of
+            // this code sampled at `qx*4 + 2` (the quart's center, matching
+            // `ChunkSection::biome_at_block`'s `>> 2` *membership* test,
+            // which is a different question from *where a quart's own
+            // sample point sits*) and it JVM-parity-mismatched at a
+            // dark_forest/river boundary the corner convention gets right —
+            // `[1217,5285,-900,1346,-293,-495,0]` (center, wrong biome) vs.
+            // the oracle's `[1223,5292,-882,1325,-118,-517]` at the
+            // *corner*, which this now reproduces exactly.
+            let lx = qx * 4;
+            let lz = qz * 4;
+            // Y needs the same quart-rounding as X/Z, and it is easy to miss
+            // since it is not part of `biome_stage`'s own loop variables —
+            // `heights[]` is a real terrain surface Y, essentially never a
+            // multiple of 4. Vanilla's `Climate.Sampler.sample(quartX,
+            // quartY, quartZ)` floors *every* axis to `QuartPos.toBlock`
+            // before evaluating, and skipping this for Y alone reproduced
+            // the exact bug the X/Z fix above already fixed once: the
+            // `depth` channel came out 156 quantized units off
+            // (`y_clamped_gradient`'s slope, `3.0 / 384` per block, times
+            // the 2-block rounding error) — right table, right search, just
+            // sampling 2 blocks away from where vanilla would.
+            let y = (heights[(lz * 16 + lx) as usize] >> 2) << 2;
+            let target = dynamic.climate.target(base_x + lx, y, base_z + lz);
+            let name = crate::biome::nearest_biome(&dynamic.table, &target);
+            let cold = crate::biome::cold_enough_to_snow(&dynamic.temperatures, name);
+            (name.to_string(), cold)
+        })
+    }
+
+    /// Stage 4: surface rules over the pre-surface (shape + fluid) column.
     /// Returns a **sparse diff** (see [`SurfaceSystem::build_surface`]): only
     /// the positions a surface rule actually rewrote. [`Self::intern_stage`]
     /// reconstructs the full column by seeding from `solid` (the same
@@ -241,6 +347,7 @@ impl OverworldGenerator {
         &self,
         solid: &[bool],
         heights: &[i32; 256],
+        biome_quarts: &[(String, bool); 16],
         base_x: i32,
         base_z: i32,
     ) -> std::collections::HashMap<(i32, i32, i32), String> {
@@ -259,8 +366,13 @@ impl OverworldGenerator {
             }
         };
         let heightmap = |lx: i32, lz: i32| -> i32 { heights[(lz * 16 + lx) as usize] };
+        let biome_at = |lx: i32, lz: i32| -> (String, bool) {
+            let (name, cold) = &biome_quarts[((lz >> 2) * 4 + (lx >> 2)) as usize];
+            (name.clone(), *cold)
+        };
 
-        self.surface.build_surface(&pre, &heightmap, base_x, base_z)
+        self.surface
+            .build_surface(&pre, &heightmap, &biome_at, base_x, base_z)
     }
 
     /// Stage 4: intern the surface-rewritten column into a dense
@@ -276,6 +388,7 @@ impl OverworldGenerator {
         &self,
         solid: &[bool],
         post: std::collections::HashMap<(i32, i32, i32), String>,
+        biome_quarts: [(String, bool); 16],
     ) -> GeneratedColumn {
         let height = self.height as usize;
         let mut palette: Vec<String> = vec!["minecraft:air".to_string()];
@@ -322,6 +435,7 @@ impl OverworldGenerator {
             height: self.height,
             palette,
             blocks,
+            biome_quarts: biome_quarts.map(|(name, _)| name),
         }
     }
 
@@ -343,6 +457,10 @@ impl OverworldGenerator {
 #[derive(Debug, Clone, Copy)]
 pub struct StageTimes {
     pub shape: std::time::Duration,
+    /// Fluid fill + heightmap **and** biome sampling (issue #405's
+    /// [`OverworldGenerator::biome_stage`] runs between them and is folded
+    /// into this bucket rather than earning a fifth field every existing
+    /// caller of this struct would need to learn about).
     pub fluid_heightmap: std::time::Duration,
     pub surface: std::time::Duration,
     pub intern: std::time::Duration,
@@ -366,6 +484,10 @@ pub struct GeneratedColumn {
     height: i32,
     palette: Vec<String>,
     blocks: Vec<u16>,
+    /// Biome id per horizontal quart, row-major `qz * 4 + qx` (issue #405) —
+    /// see [`OverworldGenerator::biome_stage`]. Broadcast vertically: the
+    /// whole column shares these 16 values regardless of `y`.
+    biome_quarts: [String; 16],
 }
 
 impl GeneratedColumn {
@@ -412,16 +534,49 @@ impl GeneratedColumn {
         self.blocks.iter().filter(|b| **b != 0).count()
     }
 
+    /// Biome id at local `(lx, lz)` in `0..16` (issue #405) — quart
+    /// resolution, broadcast vertically (see [`OverworldGenerator::biome_stage`]),
+    /// so the same answer comes back for every `y` at this `(lx, lz)`.
+    ///
+    /// # Panics
+    /// Panics if `lx`/`lz` are not in `0..16`.
+    #[must_use]
+    pub fn biome_state(&self, lx: usize, lz: usize) -> &str {
+        assert!(lx < 16 && lz < 16, "biome_state coordinates out of range");
+        &self.biome_quarts[(lz >> 2) * 4 + (lx >> 2)]
+    }
+
+    /// Distinct biome count in this column (telemetry / anti-vacuity — a
+    /// chunk straddling a biome boundary should report more than one).
+    #[must_use]
+    pub fn distinct_biome_count(&self) -> usize {
+        let mut seen: Vec<&str> = Vec::with_capacity(16);
+        for name in &self.biome_quarts {
+            if !seen.contains(&name.as_str()) {
+                seen.push(name.as_str());
+            }
+        }
+        seen.len()
+    }
+
     /// Consumes the column into its raw parts: `(min_y, height, palette,
-    /// blocks)`, where `blocks[(ly * 16 + lz) * 16 + lx]` indexes into `palette`
-    /// (`palette[0] == "minecraft:air"`) and `ly = y - min_y`.
+    /// blocks, biome_quarts)`, where `blocks[(ly * 16 + lz) * 16 + lx]`
+    /// indexes into `palette` (`palette[0] == "minecraft:air"`), `ly = y -
+    /// min_y`, and `biome_quarts[qz * 4 + qx]` is this column's biome id for
+    /// horizontal quart `(qx, qz)` (issue #405), constant across `y`.
     ///
     /// This is the zero-copy hand-off a downstream carrier (e.g. the integrated
     /// server's chunk column) uses to adopt the generated block field without
     /// re-interning every block. The index layout is stable and part of the
     /// contract.
     #[must_use]
-    pub fn into_raw(self) -> (i32, i32, Vec<String>, Vec<u16>) {
-        (self.min_y, self.height, self.palette, self.blocks)
+    pub fn into_raw(self) -> (i32, i32, Vec<String>, Vec<u16>, [String; 16]) {
+        (
+            self.min_y,
+            self.height,
+            self.palette,
+            self.blocks,
+            self.biome_quarts,
+        )
     }
 }

@@ -44,6 +44,12 @@ use lodestone_worldgen::overworld::{GeneratedColumn, OverworldGenerator};
 
 pub(crate) const AIR: &str = "minecraft:air";
 pub(crate) const STONE: &str = "minecraft:stone";
+/// Fallback biome for a [`ChunkColumn`] built with no generator behind it
+/// ([`ChunkColumn::new`]'s blank column, and [`WorldgenChunkSource`], which
+/// only ever models solidity — see that type's own doc comment). A column
+/// adopted from the real generator via [`ChunkColumn::from_generated`] always
+/// overwrites this with real per-quart biome data (issue #405).
+pub(crate) const DEFAULT_BIOME: &str = "minecraft:plains";
 
 /// Returns `true` for blocks that do not count as collidable terrain: air
 /// variants and fluids. `is_solid` is the negation of this over the block name.
@@ -94,10 +100,17 @@ pub struct ChunkColumn {
     palette: Vec<String>,
     /// `blocks[(y_local * 16 + z) * 16 + x]` indexes into `palette`.
     blocks: Vec<u16>,
+    /// Biome id per horizontal quart, row-major `qz * 4 + qx` (issue #405),
+    /// constant across `y` — see [`GeneratedColumn::biome_state`]'s doc for
+    /// why this port broadcasts one climate sample per quart column instead
+    /// of a full 3-D grid.
+    biome_quarts: [String; 16],
 }
 
 impl ChunkColumn {
-    /// Creates an all-air column of the given vertical extent.
+    /// Creates an all-air column of the given vertical extent, biome fixed
+    /// to [`DEFAULT_BIOME`] everywhere (no generator behind this column to
+    /// ask — see that constant's doc comment).
     #[must_use]
     pub fn new(min_y: i32, height: i32) -> Self {
         assert!(height > 0, "height must be positive");
@@ -106,15 +119,16 @@ impl ChunkColumn {
             height,
             palette: vec![AIR.to_string()],
             blocks: vec![0u16; 16 * 16 * height as usize],
+            biome_quarts: std::array::from_fn(|_| DEFAULT_BIOME.to_string()),
         }
     }
 
     /// Adopts a [`GeneratedColumn`] from the real worldgen pipeline. Zero-copy:
     /// the palette and block grid are moved as-is (their index layout is the
-    /// same).
+    /// same), including the real per-quart biome data (issue #405).
     #[must_use]
     pub fn from_generated(column: GeneratedColumn) -> Self {
-        let (min_y, height, palette, blocks) = column.into_raw();
+        let (min_y, height, palette, blocks, biome_quarts) = column.into_raw();
         debug_assert_eq!(
             palette.first().map(String::as_str),
             Some(AIR),
@@ -125,7 +139,16 @@ impl ChunkColumn {
             height,
             palette,
             blocks,
+            biome_quarts,
         }
+    }
+
+    /// Biome id at local `(x, z)` in `0..16` — quart resolution, same value
+    /// for every `y` at this `(x, z)` (issue #405).
+    #[must_use]
+    pub fn biome_state(&self, x: i32, z: i32) -> &str {
+        debug_assert!((0..16).contains(&x) && (0..16).contains(&z));
+        &self.biome_quarts[((z >> 2) * 4 + (x >> 2)) as usize]
     }
 
     #[inline]

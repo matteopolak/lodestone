@@ -181,6 +181,32 @@ pub trait Resolver {
     fn density_function(&self, id: &str) -> Value;
     /// Loads noise parameters by id (e.g. `"minecraft:continentalness"`).
     fn noise(&self, id: &str) -> NoiseParams;
+
+    /// The overworld multi-noise biome parameter table (issue #405), as the
+    /// JSON array [`crate::biome::parse_table`] expects. Default: an empty
+    /// array, meaning "no real biome variety supplied" —
+    /// [`crate::overworld::OverworldGenerator`] falls back to its fixed
+    /// constructor-supplied biome for every column, exactly as it did before
+    /// this method existed. A resolver that wants real biome assignment (the
+    /// bundled singleplayer generator, `lodestone-server::worldgen_data`)
+    /// overrides this to return the embedded oracle dump. Kept as a
+    /// *default* method rather than a required one so no existing `Resolver`
+    /// implementor (fixture resolvers in this crate's own tests, benches,
+    /// and `lodestone-world`'s pool-footprint test) needs to change to keep
+    /// compiling.
+    fn biome_parameters(&self) -> Value {
+        Value::Array(Vec::new())
+    }
+
+    /// Per-biome `temperature` map (`{"minecraft:plains": 0.8, ...}`) as the
+    /// JSON object [`crate::biome::parse_temperatures`] expects, used to
+    /// derive each sampled column's `cold_enough_to_snow` answer. Default:
+    /// an empty object — paired with an empty [`biome_parameters`](Self::biome_parameters),
+    /// this is never consulted (the fixed-biome fallback path supplies its
+    /// own `cold_enough_to_snow` directly).
+    fn biome_temperatures(&self) -> Value {
+        Value::Object(serde_json::Map::new())
+    }
 }
 
 /// Evaluation context: a single block position (`SinglePointContext`).

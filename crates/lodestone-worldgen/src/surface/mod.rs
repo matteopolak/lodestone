@@ -44,12 +44,15 @@ const NO_WATER: i32 = i32::MIN;
 /// lines. Keeping this out of the engine preserves the version-free split.
 pub type BlockCanon = HashMap<String, String>;
 
-/// A parsed surface-rule condition (`SurfaceRules.ConditionSource` applied to a
-/// context). `biome` conditions are resolved to a constant at build time
-/// because the biome is fixed per column for a given run.
+/// A parsed surface-rule condition (`SurfaceRules.ConditionSource` applied to
+/// a context).
 enum Cond {
     AbovePreliminarySurface,
-    Const(bool),
+    /// `biome` — issue #405 made this a per-column runtime check
+    /// (`ctx.biome` membership) rather than a build-time constant, since a
+    /// generator run no longer has one fixed biome for its whole life. The
+    /// list is the rule's raw `biome_is` set, exactly as written in JSON.
+    BiomeIs(Vec<String>),
     NoiseThreshold {
         noise: NormalNoise,
         min: f64,
@@ -108,6 +111,11 @@ struct Ctx {
     water_height: i32,
     stone_depth_above: i32,
     stone_depth_below: i32,
+    /// This column's biome id (issue #405) — consulted by [`Cond::BiomeIs`].
+    biome: String,
+    /// This column's biome's `coldEnoughToSnow` answer — consulted by
+    /// [`Cond::Temperature`]. See [`crate::biome::cold_enough_to_snow`].
+    cold_enough_to_snow: bool,
 }
 
 /// The interpreter: instantiated noises + parsed rule tree, ready to build any
@@ -122,26 +130,21 @@ pub struct SurfaceSystem {
     master: XoroshiroPositionalFactory,
     prelim: Density,
     rule: Rule,
-    cold_enough_to_snow: bool,
 }
 
 impl SurfaceSystem {
     /// Builds the interpreter for `settings` (a `noise_settings` JSON value)
     /// using `builder` (already seeded with the same seed) to instantiate
     /// noises and derive random factories exactly as `RandomState` does.
-    /// `biome` is the fixed biome id for this run; `canon` resolves result-state
-    /// partial keys to full canonical strings. `cold_enough_to_snow` is the
-    /// fixed biome's `coldEnoughToSnow` answer (only consulted by the
-    /// `temperature` condition, which the default overworld path reaches for
-    /// cold biomes only).
+    /// `canon` resolves result-state partial keys to full canonical strings.
+    ///
+    /// Unlike before issue #405, this takes **no biome** — a generator run no
+    /// longer has one fixed biome for its whole life, so `biome`/
+    /// `cold_enough_to_snow` moved from build-time constants here to
+    /// per-column runtime inputs on [`build_surface`](Self::build_surface)/
+    /// [`top_material`](Self::top_material) instead.
     #[must_use]
-    pub fn new(
-        settings: &Value,
-        builder: &Builder,
-        biome: &str,
-        canon: &BlockCanon,
-        cold_enough_to_snow: bool,
-    ) -> Self {
+    pub fn new(settings: &Value, builder: &Builder, canon: &BlockCanon) -> Self {
         let min_y = settings["noise"]["min_y"].as_i64().unwrap_or(-64) as i32;
         let gen_depth = settings["noise"]["height"].as_i64().unwrap_or(384) as i32;
         let default_block = canonical_from_block_json(&settings["default_block"], canon);
@@ -153,7 +156,6 @@ impl SurfaceSystem {
 
         let parser = RuleParser {
             builder,
-            biome,
             canon,
             min_y,
             gen_depth,
@@ -169,7 +171,6 @@ impl SurfaceSystem {
             master,
             prelim,
             rule,
-            cold_enough_to_snow,
         }
     }
 
@@ -250,6 +251,10 @@ impl SurfaceSystem {
     ///   local `(x, y, z)` (`x, z` in `0..16`, `y` a world Y). Out-of-range Y is
     ///   treated as air.
     /// * `heightmap` yields `WORLD_SURFACE_WG` at local `(x, z)`.
+    /// * `biome_at` yields `(biome id, cold_enough_to_snow)` at local `(x, z)`
+    ///   (issue #405) — called once per column, not per block, so a caller
+    ///   whose biome varies at quart (not block) resolution can cheaply
+    ///   return the same pair for every `(x, z)` in one 4×4 cell.
     /// * `min_block_x`/`min_block_z` are the chunk's world-space origin.
     ///
     /// Returns a **sparse diff**: local `(x, y, z)` -> canonical block string,
@@ -273,6 +278,7 @@ impl SurfaceSystem {
         &self,
         pre: &dyn Fn(i32, i32, i32) -> String,
         heightmap: &dyn Fn(i32, i32) -> i32,
+        biome_at: &dyn Fn(i32, i32) -> (String, bool),
         min_block_x: i32,
         min_block_z: i32,
     ) -> HashMap<(i32, i32, i32), String> {
@@ -317,6 +323,7 @@ impl SurfaceSystem {
                 let block_x = min_block_x + x;
                 let block_z = min_block_z + z;
                 let surface_depth = self.surface_depth(block_x, block_z);
+                let (biome, cold_enough_to_snow) = biome_at(x, z);
                 let mut ctx = Ctx {
                     block_x,
                     block_z,
@@ -335,6 +342,8 @@ impl SurfaceSystem {
                     water_height: NO_WATER,
                     stone_depth_above: 0,
                     stone_depth_below: 0,
+                    biome,
+                    cold_enough_to_snow,
                 };
 
                 let height = heightmap(x, z) + 1;
@@ -395,6 +404,7 @@ impl SurfaceSystem {
     /// rule matched. `heightmap(local_x, local_z)` is only consulted by the
     /// `steep` condition.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn top_material(
         &self,
         block_x: i32,
@@ -402,6 +412,8 @@ impl SurfaceSystem {
         block_z: i32,
         under_fluid: bool,
         heightmap: &dyn Fn(i32, i32) -> i32,
+        biome: &str,
+        cold_enough_to_snow: bool,
     ) -> Option<String> {
         let surface_depth = self.surface_depth(block_x, block_z);
         let ctx = Ctx {
@@ -414,6 +426,8 @@ impl SurfaceSystem {
             water_height: if under_fluid { block_y + 1 } else { NO_WATER },
             stone_depth_above: 1,
             stone_depth_below: 1,
+            biome: biome.to_string(),
+            cold_enough_to_snow,
         };
         self.try_apply(&self.rule, heightmap, &ctx)
     }
@@ -449,7 +463,7 @@ impl SurfaceSystem {
 
     fn test(&self, cond: &Cond, heightmap: &dyn Fn(i32, i32) -> i32, ctx: &Ctx) -> bool {
         match cond {
-            Cond::Const(b) => *b,
+            Cond::BiomeIs(list) => list.iter().any(|b| b == &ctx.biome),
             Cond::AbovePreliminarySurface => ctx.block_y >= ctx.min_surface_level,
             Cond::NoiseThreshold {
                 noise,
@@ -514,7 +528,7 @@ impl SurfaceSystem {
                 };
                 stone_depth <= 1 + offset + surface_depth + secondary
             }
-            Cond::Temperature => self.cold_enough_to_snow,
+            Cond::Temperature => ctx.cold_enough_to_snow,
             Cond::Hole => ctx.surface_depth <= 0,
             Cond::VerticalGradient {
                 factory,
@@ -574,7 +588,6 @@ impl SurfaceSystem {
 /// `ConditionSource.apply`).
 struct RuleParser<'a, 'b> {
     builder: &'a Builder<'b>,
-    biome: &'a str,
     canon: &'a BlockCanon,
     min_y: i32,
     gen_depth: i32,
@@ -607,11 +620,22 @@ impl RuleParser<'_, '_> {
         match ty {
             "above_preliminary_surface" => Cond::AbovePreliminarySurface,
             "biome" => {
-                let matches = node["biome_is"]
+                let list = node["biome_is"]
                     .as_array()
-                    .map(|a| a.iter().any(|b| b.as_str() == Some(self.biome)))
-                    .unwrap_or_else(|| node["biome_is"].as_str() == Some(self.biome));
-                Cond::Const(matches)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|b| b.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_else(|| {
+                        vec![
+                            node["biome_is"]
+                                .as_str()
+                                .expect("biome_is must be a string or array of strings")
+                                .to_string(),
+                        ]
+                    });
+                Cond::BiomeIs(list)
             }
             "noise_threshold" => Cond::NoiseThreshold {
                 noise: self
