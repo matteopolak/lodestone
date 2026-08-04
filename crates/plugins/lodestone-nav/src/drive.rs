@@ -402,6 +402,41 @@ mod tests {
         assert!(braking.done(&state));
     }
 
+    /// `ClimbDrive::done` is explicitly vertical, not `WalkDrive::done` with a
+    /// parameter — `docs/autonomous-navigation.md`'s own brief for this kind
+    /// is direct that an in-cell horizontal test cannot mean "arrived" for a
+    /// move with no horizontal destination at all. This checks the two
+    /// branches directly, with no physics tick involved: a `continuing`
+    /// climb is done the instant the feet cell crosses the target,
+    /// regardless of `on_ground` (which a clinging body never reports); a
+    /// dismount additionally requires it, or a body still airborne over the
+    /// landing would be called arrived before it ever touches down.
+    #[test]
+    fn climb_drive_arrival_is_a_vertical_cell_crossing_gated_on_on_ground_only_when_dismounting() {
+        let continuing = ClimbDrive {
+            column: [0, 0],
+            target_y: 2,
+            target_surface: 2.0,
+            ascending: true,
+            continuing: true,
+        };
+        let mut state = PlayerState::at(Vec3d::new(0.5, 1.5, 0.5), 0.0);
+        assert!(!continuing.done(&state), "still in the source cell");
+        state.position.y = 2.03;
+        assert!(
+            continuing.done(&state),
+            "crossed into the target cell — a clinging body is never on_ground"
+        );
+
+        let dismount = ClimbDrive { continuing: false, ..continuing };
+        assert!(
+            !dismount.done(&state),
+            "crossed the boundary but not yet settled onto real ground"
+        );
+        state.on_ground = true;
+        assert!(dismount.done(&state), "crossed and settled — a real dismount");
+    }
+
     /// The drive actually walks: given the engine and a floor, the body reaches the
     /// next cell. This is the closed loop in miniature, and it is the same call the
     /// cost model and the executor make.
