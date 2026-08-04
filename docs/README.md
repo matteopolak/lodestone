@@ -607,6 +607,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   translation layer — the ViaVersion shape, not sixteen parallel simulations). This
   doc settles two questions before fifteen more `crates/protocol/vNNN` crates get
   created:
+- [Redstone: dust, torches, repeaters, comparators, observers](./redstone.md) — Five
+  new modules in `crates/lodestone-server/src/`, all pure query/decision functions
+  with no `ChunkColumn` in scope except through a `lookup: Fn(BlockPos) -> String`
+  closure — the same "pure decision, fake world via closure" shape
+  [`docs/tick-scheduling.md`](./tick-scheduling.md) already established for gravity
+  blocks:
 - [Registry data ingest (`registry_data`, dimension types, world clocks)](./registry-data-ingest.md) —
   The client's decode of the Configuration-phase `registry_data` packet, and the two
   registries it turns into typed values: `minecraft:dimension_type` and
