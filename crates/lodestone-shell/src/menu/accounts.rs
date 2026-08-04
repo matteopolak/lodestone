@@ -594,7 +594,16 @@ fn pump_locked(sign_in: SignIn) -> (SignIn, Option<(Option<String>, Option<Accou
                 user_code,
                 verification_uri,
             }) => {
-                let effect = Some((Some(verification_uri.clone()), None));
+                // **A `Prompt` that arrives after Cancel must open nothing.**
+                // `run_browser_login` sends its `Prompt` *before* the loop that
+                // first checks the flag, so cancelling in the window between
+                // "Add account" and the worker's first poll used to still
+                // launch a browser window the user had just asked not to see —
+                // a second, smaller instance of the unrequested-window symptom.
+                // The worker notices the flag on its next sleep and follows
+                // with `Cancelled`, which is what returns this to `Idle`.
+                let effect = (!cancel.load(Ordering::Relaxed))
+                    .then(|| (Some(verification_uri.clone()), None));
                 (
                     SignIn::Waiting {
                         user_code,
@@ -950,13 +959,76 @@ async fn cancellable_sleep(secs: u64, cancel: &AtomicBool) -> bool {
 /// No `open`/`webbrowser` crate dependency: three one-line OS commands cover
 /// the three desktop platforms this client targets without adding to the
 /// dependency graph for a single call site.
-fn open_in_browser(url: &str) {
+///
+/// `pub(crate)` since issue #415: `super::telemetry`'s Privacy Statement/Give
+/// Feedback buttons reuse this rather than duplicating it, since opening a
+/// URL has nothing account-specific about it.
+/// **A unit test must never reach the OS handoff, and one did — it reached a
+/// player.** `add_account_button_starts_the_flow_and_a_prompt_message_shows_it`
+/// fed the state machine a [`WorkerMsg::Prompt`] carrying the literal
+/// `https://microsoft.com/link` and then called [`AccountsNav::pump`], which
+/// performs the open as an *effect*. So every `cargo test -p lodestone-shell`
+/// run — several agents run that suite continuously — spawned `open` on
+/// Microsoft's device-code page, which 301s to
+/// `https://login.live.com/oauth20_remoteconnect.srf`. The owner, playing the
+/// game, saw OAuth windows appear from nowhere and reported it twice; the flow
+/// they were attributed to (Add Account) had not been touched. Measured with a
+/// PATH shim standing in for `open`: one call per lib-test run,
+/// `OPEN_CALLED https://microsoft.com/link`.
+///
+/// The interception below is a `cfg` **fork**, not a `cfg!(test)` early return,
+/// for two reasons: the `Command::spawn` is then not even compiled into a test
+/// binary, and a test can *assert* the interception is live
+/// (`the_real_browser_handoff_is_unreachable_from_a_unit_test`) rather than
+/// trust a silent skip. `super::telemetry`'s Privacy Statement / Give Feedback
+/// buttons come through here too, so they are covered by the same fork — a
+/// latent copy of this bug that had not fired only because no telemetry test
+/// activates rows 0 or 1.
+#[cfg(not(test))]
+pub(crate) fn open_in_browser(url: &str) {
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open").arg(url).spawn();
     #[cfg(target_os = "windows")]
     let _ = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
     let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+}
+
+/// The test build's [`open_in_browser`]: records the URL instead of handing it
+/// to the OS. See the `cfg(not(test))` sibling above for the incident.
+#[cfg(test)]
+pub(crate) fn open_in_browser(url: &str) {
+    test_browser_opens::record(url);
+}
+
+/// Per-thread record of what [`open_in_browser`] was asked to open, in test
+/// builds only.
+///
+/// Thread-local rather than a global counter because the test harness runs each
+/// `#[test]` on its own thread, so this isolates concurrently-running tests
+/// from each other with no lock and no ordering assumption. Every consumer is
+/// on the same thread as the `pump` it is observing.
+#[cfg(test)]
+mod test_browser_opens {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static OPENS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn record(url: &str) {
+        OPENS.with(|o| o.borrow_mut().push(url.to_owned()));
+    }
+
+    /// Everything recorded so far, clearing the record. Taking rather than
+    /// peeking so a test's assertions are about *its own* interval.
+    pub(super) fn taken() -> Vec<String> {
+        OPENS.with(|o| std::mem::take(&mut *o.borrow_mut()))
+    }
+
+    pub(super) fn count() -> usize {
+        OPENS.with(|o| o.borrow().len())
+    }
 }
 
 /// Best-effort: copies `text` to the system clipboard via the same
@@ -1004,6 +1076,15 @@ mod tests {
     fn spawn_stub(rx: Receiver<WorkerMsg>, cancel: Arc<AtomicBool>) -> Spawn {
         Box::new(move || (rx, cancel))
     }
+
+    /// Fixture URLs use RFC 2606's reserved `.invalid` TLD, **never a real
+    /// endpoint**. This is defence in depth behind `open_in_browser`'s
+    /// `cfg(test)` fork: these strings used to be `https://microsoft.com/link`,
+    /// and `pump` handed that to the OS on every lib-test run. If the fork is
+    /// ever removed, a regression opens a tab that cannot resolve rather than a
+    /// live Microsoft OAuth page.
+    const FIXTURE_URI: &str = "https://example.invalid/device-login";
+    const FIXTURE_URI_2: &str = "https://example.invalid/device-login-again";
 
     #[test]
     fn offline_is_always_present_and_selected_by_default() {
@@ -1149,7 +1230,7 @@ mod tests {
 
         tx.send(WorkerMsg::Prompt {
             user_code: "ABCD-EFGH".to_string(),
-            verification_uri: "https://microsoft.com/link".to_string(),
+            verification_uri: FIXTURE_URI.to_string(),
         })
         .unwrap();
         nav.pump();
@@ -1157,8 +1238,139 @@ mod tests {
             nav.sign_in_view(),
             SignInView::Waiting {
                 user_code: "ABCD-EFGH".to_string(),
-                verification_uri: "https://microsoft.com/link".to_string(),
+                verification_uri: FIXTURE_URI.to_string(),
             }
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// **The gate that would have caught the unrequested-browser report.**
+    ///
+    /// `pump` performs the browser open as an *effect*, so a test that feeds the
+    /// state machine a `Prompt` and pumps is indistinguishable, from the OS's
+    /// point of view, from a player pressing "Add account" — and the test above
+    /// did exactly that with `https://microsoft.com/link`, which 301s to
+    /// `login.live.com/oauth20_remoteconnect.srf`. Measured before the fix with
+    /// a PATH shim in place of `open`: one real `open` per lib-test run.
+    ///
+    /// This asserts the `cfg(test)` fork in [`open_in_browser`] is the arm that
+    /// got compiled. If it is ever deleted, the `Command::spawn` comes back and
+    /// this fails — it cannot pass by accident, because nothing else populates
+    /// the recorder.
+    #[test]
+    fn the_real_browser_handoff_is_unreachable_from_a_unit_test() {
+        let _ = test_browser_opens::taken();
+        open_in_browser("https://example.invalid/probe");
+        assert_eq!(
+            test_browser_opens::taken(),
+            vec!["https://example.invalid/probe".to_string()],
+            "the cfg(test) interception is not live — a unit test just handed a URL to the OS"
+        );
+    }
+
+    /// **The invariant the report violated: at most one browser open per user
+    /// action.** `pump` runs every frame the screen is showing, so "opens once"
+    /// and "opens sixty times a second" are the same code path with a different
+    /// guard, and only a count across many frames can tell them apart.
+    ///
+    /// Both controls matter. The first (20 empty pumps → 0) rules out "every
+    /// pump opens", which would make the later count meaningless. The second (a
+    /// *second* Add is allowed a second open) proves the recorder can move, so
+    /// "still exactly one" is not the vacuous pass a permanently-dead recorder
+    /// would also produce.
+    #[test]
+    fn the_browser_opens_at_most_once_per_add_account_action() {
+        let path = temp_path("open-once-per-action");
+        let nav = AccountsNav::with_path(path.clone());
+        let (tx, rx) = channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let _ = test_browser_opens::taken();
+
+        nav.hover(1 + BUTTON_ADD);
+        nav.handle_key_with(MenuKey::Enter, spawn_stub(rx, Arc::clone(&cancel)));
+        for _ in 0..20 {
+            nav.pump();
+        }
+        assert_eq!(
+            test_browser_opens::count(),
+            0,
+            "control: an in-flight flow with nothing to report must open nothing"
+        );
+
+        tx.send(WorkerMsg::Prompt {
+            user_code: String::new(),
+            verification_uri: FIXTURE_URI.to_string(),
+        })
+        .unwrap();
+        for _ in 0..50 {
+            nav.pump();
+        }
+        assert_eq!(
+            test_browser_opens::taken(),
+            vec![FIXTURE_URI.to_string()],
+            "one user action must produce exactly one open, across 50 frames"
+        );
+
+        // Back to Idle, then a second, genuinely separate user action.
+        tx.send(WorkerMsg::Cancelled).unwrap();
+        nav.pump();
+        assert_eq!(nav.sign_in_view(), SignInView::Idle);
+
+        let (tx2, rx2) = channel();
+        nav.handle_key_with(
+            MenuKey::Enter,
+            spawn_stub(rx2, Arc::new(AtomicBool::new(false))),
+        );
+        tx2.send(WorkerMsg::Prompt {
+            user_code: String::new(),
+            verification_uri: FIXTURE_URI_2.to_string(),
+        })
+        .unwrap();
+        for _ in 0..10 {
+            nav.pump();
+        }
+        assert_eq!(
+            test_browser_opens::taken(),
+            vec![FIXTURE_URI_2.to_string()],
+            "control: the recorder can move — a second action gets its own single open"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Cancelling in the window between "Add account" and the worker's first
+    /// poll must not still launch a browser. `run_browser_login` sends its
+    /// `Prompt` *before* the loop that checks the cancel flag, so the message is
+    /// already on its way when the user changes their mind.
+    ///
+    /// The positive control lives in
+    /// `the_browser_opens_at_most_once_per_add_account_action` above: the same
+    /// `Prompt`, without the cancel, does open exactly once — so this is not
+    /// asserting an absence the recorder could never have observed.
+    #[test]
+    fn a_prompt_that_arrives_after_cancel_opens_nothing() {
+        let path = temp_path("cancel-before-prompt");
+        let nav = AccountsNav::with_path(path.clone());
+        let (tx, rx) = channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let _ = test_browser_opens::taken();
+
+        nav.hover(1 + BUTTON_ADD);
+        nav.handle_key_with(MenuKey::Enter, spawn_stub(rx, Arc::clone(&cancel)));
+        nav.handle_key(MenuKey::Escape);
+        assert!(cancel.load(Ordering::Relaxed), "Escape must have set the flag");
+
+        tx.send(WorkerMsg::Prompt {
+            user_code: String::new(),
+            verification_uri: FIXTURE_URI.to_string(),
+        })
+        .unwrap();
+        for _ in 0..10 {
+            nav.pump();
+        }
+        assert_eq!(
+            test_browser_opens::count(),
+            0,
+            "a prompt racing a cancel must not open a window the user just refused"
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
