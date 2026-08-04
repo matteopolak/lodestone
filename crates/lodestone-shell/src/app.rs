@@ -1490,6 +1490,19 @@ impl WindowApp {
         } else if self.ui.is_death() {
             self.ui.respawn_confirmed();
         }
+        // The credits screen (issue #192): `Sim::has_won()` is the ground
+        // truth `NetUpdate::WinGame` sets in `poll_net`, reconciled here the
+        // same way `is_dead()` is reconciled above. The `!= Screen::Credits`
+        // guard mirrors the `!self.ui.is_death()` one: `show_credits` is
+        // already idempotent (it only moves the screen from a live-gameplay
+        // screen), but this avoids re-latching every frame the screen stays
+        // up. No "un-won" transition is needed on the other side — unlike
+        // death, winning has no server-confirmed reversal to reconcile
+        // against, and `Sim::end_session` clears the flag for the next
+        // session.
+        if self.sim.has_won() && self.ui.screen() != crate::menu::Screen::Credits {
+            self.ui.show_credits();
+        }
         // A transition may have changed grab intent (Connected → Playing grabs;
         // Ended/Death → menu-owned screens release). Only touch the OS grab
         // when it disagrees.
@@ -1982,7 +1995,7 @@ impl WindowApp {
     fn apply_menu_action(&mut self, action: MenuAction) {
         match action {
             MenuAction::None => {}
-            MenuAction::Singleplayer => {
+            MenuAction::Singleplayer(config) => {
                 // A real integrated server (#287), not the old offline demo
                 // world. `Sim::new` no longer builds one (see its docs): a client
                 // holds the server's world or none at all, and a demo world left
@@ -1991,20 +2004,15 @@ impl WindowApp {
                 // takes the *same* path a join does, so there is only ever one
                 // world and it always came off the wire.
                 //
-                // `None`: `Screen::WorldSelect`'s Play Selected World collects no
-                // seed of its own, so this resolves to `BUNDLED_WORLD.seed` via
-                // `resolve_launch_seed`. Issue #190's `Screen::CreateWorld` Create
-                // button is meant to produce `Some(config)` here instead — the
-                // rest of this seam (`begin_singleplayer`, `resolve_launch_seed`,
-                // `launch_singleplayer`) is already built and tested for that
-                // shape (see this file's `resolved_seeds_from_different_world_
-                // creation_configs_generate_different_terrain`), but wiring the
-                // *producer* needs `MenuAction::Singleplayer` to carry
-                // `Option<WorldCreationConfig>` and `menu/nav.rs`'s
-                // `apply_create_world` to produce it on the Create button —
-                // both in `menu/`, brokered for this batch (see issue #190's own
-                // report for the exact, verified patch).
-                self.begin_singleplayer(None);
+                // `None` when `Screen::WorldSelect`'s Play Selected World produced
+                // the action (no seed of its own, so this resolves to
+                // `BUNDLED_WORLD.seed` via `resolve_launch_seed`); `Some(config)`
+                // when `Screen::CreateWorld`'s Create button did (issue #190,
+                // `menu/nav.rs`'s `apply_create_world`). `begin_singleplayer`,
+                // `resolve_launch_seed` and `launch_singleplayer` handle both
+                // uniformly (see this file's `resolved_seeds_from_different_world_
+                // creation_configs_generate_different_terrain`).
+                self.begin_singleplayer(config);
             }
             MenuAction::Connect(entry) => {
                 self.connect_to(entry.host.clone(), entry.effective_port());
@@ -5316,6 +5324,67 @@ mod tests {
             names,
             vec!["Alice", "Bob"],
             "the roster must reflect the real folded tab list, in vanilla's display order"
+        );
+    }
+
+    /// Issue #192's last hop, exercised through production code exactly like
+    /// the social-roster test above: `menu::UiState::show_credits` and
+    /// `net::NetUpdate::WinGame` both already existed, individually tested,
+    /// with **nothing calling either from the other** — the credits screen was
+    /// reachable only from a test, and `WinGame` only reached a channel no
+    /// one drained into UI state. This drives the real chain end to end: a
+    /// real `WindowApp`, a real `NetUpdate::WinGame` through the loopback
+    /// feed (the same seam `NetClient::run`'s background thread publishes
+    /// into in production, once `net::forward` — separately proven by
+    /// `forward_translates_win_game_into_the_credits_signal` — turns the real
+    /// decoded `ClientEvent::WinGame` into it), `Sim::poll_net`'s real
+    /// `WinGame` arm, and `drive_ui_from_session` itself.
+    #[test]
+    fn drive_ui_from_session_opens_credits_on_the_real_win_game_event() {
+        use crate::net::NetUpdate;
+
+        let mut app = WindowApp::new(Config {
+            mode: Mode::Headless,
+            ..Config::default()
+        });
+        let (net, _actions, feed) = NetClient::loopback_with_feed();
+        app.sim.attach_net(net);
+        // Reach a live-gameplay screen the same way `on_credits` (`menu/
+        // nav.rs`'s own test helper) does — `show_credits` only leaves from
+        // `Playing | Chat | Container | Paused`, matching `die`'s guard.
+        app.ui.enter_dev_world();
+        assert_eq!(
+            app.ui.screen(),
+            crate::menu::Screen::Playing,
+            "precondition: must be on a live-gameplay screen before WinGame arrives"
+        );
+        assert!(
+            !app.sim.has_won(),
+            "precondition: nothing has signalled a win yet"
+        );
+
+        feed.send(NetUpdate::WinGame).unwrap();
+        app.sim.step(1.0 / 20.0);
+        assert!(
+            app.sim.has_won(),
+            "Sim::poll_net's real WinGame arm must latch the win"
+        );
+        // Precondition restated after the poll but before the real call this
+        // test exercises, so the assertion below cannot be explained by
+        // something upstream having already moved the screen.
+        assert_eq!(
+            app.ui.screen(),
+            crate::menu::Screen::Playing,
+            "precondition: drive_ui_from_session has not run yet"
+        );
+
+        app.drive_ui_from_session();
+
+        assert_eq!(
+            app.ui.screen(),
+            crate::menu::Screen::Credits,
+            "the real WIN_GAME event (GAME_EVENT code 4, ClientPacketListener.java:1548) \
+             must open the credits screen"
         );
     }
 
