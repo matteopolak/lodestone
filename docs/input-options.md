@@ -88,11 +88,16 @@ across the reset, the same way it already preserved `mouse_dx`/`mouse_dy` —
 losing the option itself on every cursor-release would be a much stranger bug
 than losing a held key.
 
-**Residual gap, not fixed here:** something has to call
-`InputState::set_toggle_modes` with the live `Options::toggle_sneak`/
-`toggle_sprint` values. The natural call site is wherever `Sim` already reads
-config into `InputState` each tick — `sim.rs`, off-limits at the time of this
-change. See the handoff note below for the exact one-line patch needed.
+**Landed:** `Sim::set_toggle_modes(sneak, sprint)` (`sim.rs`) stores the two
+bools; `app.rs`'s `redraw()` pushes `nav.toggle_sneak()`/`toggle_sprint()`
+into it once per frame, *before* `Sim::step`, and `Sim::step` itself calls
+`input_mut(|i| i.set_toggle_modes(...))` at the top of every call — one push
+per frame, but that covers every catch-up tick that frame runs, since the
+option cannot change mid-frame. See
+`sim::tests::toggle_sneak_option_reaches_live_input_and_survives_key_release`/
+`toggle_sprint_option_reaches_live_input_and_survives_key_release` for the
+end-to-end proof (with a hold-mode negative control), not just that the
+setter exists.
 
 ### #203 — mouse feel
 
@@ -104,19 +109,36 @@ Three options, three different depths of wiring:
   function's doc comment on why a round-trip through an integer step index
   drifts) within vanilla's own slider bounds
   (`config::MIN_MOUSE_WHEEL_SENSITIVITY`/`MAX_MOUSE_WHEEL_SENSITIVITY`,
-  `10^(-200/100)..10^(100/100)` from `Options.java:480-482`). The consumer
-  (the hotbar-scroll `MouseWheel` handler in `app.rs`) needs a brokered patch
-  — see below.
-- **`invertMouseX`/`invertMouseY`** are wired as far as this crate can reach:
+  `10^(-200/100)..10^(100/100)` from `Options.java:480-482`). **Landed:**
+  `app.rs`'s `MouseWheel` handler now scales the hotbar-cycle step by
+  `nav.mouse_wheel_sensitivity()` through `accumulate_scroll`, a fractional
+  carry mirroring vanilla's own `ScrollWheelHandler.onMouseScroll` (so a
+  sensitivity below `1.0` takes more than one notch to move a slot, and one
+  above `1.0` can cross several in one notch, rather than a threshold on the
+  old fixed ±1 step) — see `app::tests::accumulate_scroll_*` for the exact
+  scaled amounts and the direction-reversal reset. The multiplayer server
+  list's own `MouseWheel` arm (issue #402, `nav.scroll_server_list`) is a
+  separate, unscaled arm — one notch moves one row, per
+  `docs/server-list.md`'s scrolling section on why a fractional row has no
+  meaning in this pipeline's row-quantized model.
+- **`invertMouseX`/`invertMouseY`** are wired end to end: `Sim` gained
+  `invert_mouse_x`/`invert_mouse_y` fields and `Sim::set_mouse_invert`,
+  pushed from `app.rs`'s `redraw()` (`nav.invert_mouse_x()`/`invert_mouse_y()`)
+  once per frame, *before* `Sim::step` so the frame the option changes
+  already sees it. `Sim::apply_mouse` now calls
   `lodestone_controller::apply_look_inverted(yaw, pitch, dx, dy, sensitivity,
-  invert_x, invert_y)` negates `dx`/`dy` before `apply_look`'s sensitivity
-  curve, matching vanilla's `MouseHandler.turnPlayer`'s
-  `player.turn(invertMouseX ? -xo : xo, invertMouseY ? -yo : yo)`
-  (negation happens *after* the curve there; the two orders agree
-  numerically since the curve has no dependence on the delta's sign — see the
-  function's doc comment). `apply_look` itself is untouched, for the same
-  reason `movement_intent` is untouched: `sim.rs` calls it directly and this
-  crate does not own that file.
+  invert_x, invert_y)` instead of plain `apply_look` — it negates `dx`/`dy`
+  before `apply_look`'s sensitivity curve, matching vanilla's
+  `MouseHandler.turnPlayer`'s
+  `player.turn(invertMouseX ? -xo : xo, invertMouseY ? -yo : yo)` (negation
+  happens *after* the curve there; the two orders agree numerically since the
+  curve has no dependence on the delta's sign — see the function's own doc
+  comment). See `sim::tests::invert_mouse_x_negates_the_yaw_delta_exactly`/
+  `invert_mouse_y_negates_the_pitch_delta_exactly` for the exact-magnitude
+  proof (not just a sign flip) — the yaw one has to compare through a
+  wrap-safe angular delta, since `apply_look` wraps yaw into `[-180, 180)`
+  and a fixture whose starting yaw sits near that seam can wrap the plain and
+  inverted runs on opposite sides.
 - **`sensitivity` (mouse look, not the wheel)** is deliberately still
   inactive. It lives on `config::Config`, parsed from argv every run and never
   written back — see `menu/options.rs`'s `LiveOption` doc. A settings row that
@@ -164,21 +186,23 @@ degrades to `1.0` — not `0.0` — on a corrupt or out-of-range value, since a
   `ToggleKeyMapping.java`, `Options.java`, `MouseHandler.java` — behavioural
   reference only, never transliterated.
 
-## Handoff: two brokered patches this doc's fixes still need
+## Landed: the `app.rs`/`sim.rs` patches this doc's fixes were waiting on
 
-`lodestone-controller`'s exclusive owner cannot land these — they touch
-`app.rs` (brokered through the orchestrator) and `sim.rs` (owned by another
-agent at the time of writing). Both are small.
+Closes #402 (the server-list half), #203 and #202. Both patches this doc
+originally described as "brokered, not yet landed" have landed, once
+`sim.rs`/`app.rs` had a clean window:
 
-1. **`app.rs`'s `MouseWheel` handler** needs a new arm (or an extension of the
-   existing gameplay one) that reads `nav.mouse_wheel_sensitivity()` and
-   scales the hotbar-cycle step by it, and — for issue #402, landed alongside
-   this — a `Screen::ServerList` arm calling `nav.scroll_server_list`. See
-   `docs/server-list.md`'s scrolling section for the second half.
-2. **`sim.rs`** needs, wherever it currently calls
-   `lodestone_controller::apply_look(yaw, pitch, dx, dy, sensitivity)`, to
-   call `apply_look_inverted(yaw, pitch, dx, dy, sensitivity, nav.invert_mouse_x(), nav.invert_mouse_y())`
-   instead — and, wherever it feeds keys into `InputState::set`, a call to
-   `input_mut(|i| i.set_toggle_modes(nav.toggle_sneak(), nav.toggle_sprint()))`
-   run at least once per tick (cheap and idempotent, so it can sit right
-   beside the existing `set` calls with no new synchronization).
+1. **`app.rs`'s `MouseWheel` handler** is now two arms: the existing
+   gameplay one scales the hotbar-cycle step by `nav.mouse_wheel_sensitivity()`
+   through `accumulate_scroll` (see #203 above), and a new
+   `Screen::ServerList` arm calls `nav.scroll_server_list` with the real
+   canvas height from `RenderTarget::size`/`logical_canvas` — see
+   `docs/server-list.md`'s scrolling section for that half's own detail.
+2. **`sim.rs`** now calls `apply_look_inverted` from `apply_mouse` (see #203
+   above) and applies `Sim::set_toggle_modes`'s pushed option to the live
+   `InputState` once per frame at the top of `Sim::step` (see #202 above).
+
+`lodestone_controller::apply_look_inverted` also needed re-exporting from
+`lodestone-controller/src/lib.rs`'s `pub use input::{...}` list — it existed
+in `input.rs` since the original change but was not on that list, so nothing
+outside the crate could name it.

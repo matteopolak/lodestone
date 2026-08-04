@@ -11,7 +11,7 @@ use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World as EcsWorld;
 use lodestone_assets::{Language, ResourceLocation};
 use lodestone_client::{BlockPos, ClientAction, Hand, OpenMenuSnapshot, Rotation};
-use lodestone_controller::{ControllerPlugin, InputState, RawInput, apply_look};
+use lodestone_controller::{ControllerPlugin, InputState, RawInput, apply_look_inverted};
 pub use lodestone_ecs::SessionPhase;
 use lodestone_ecs::entity::{Attributes, EntityIndex, EntityKind, MinecraftEntityId, Position};
 use lodestone_ecs::player::{
@@ -1186,6 +1186,24 @@ pub struct Sim {
     /// read from disk here — `Sim` owns no `Options`, and the menu is the only
     /// thing that can change it.
     view_bobbing: bool,
+    /// Vanilla's `invertMouseX`/`invertMouseY` options
+    /// ([`crate::config::Options::invert_mouse_x`]/`invert_mouse_y`, issue
+    /// #203), pushed down the same way as [`Self::view_bobbing`] — see
+    /// [`Self::set_mouse_invert`]. Read by [`Self::apply_mouse`], which calls
+    /// [`lodestone_controller::apply_look_inverted`] instead of the plain
+    /// `apply_look` now that there is somewhere to source the two bools from.
+    invert_mouse_x: bool,
+    invert_mouse_y: bool,
+    /// Vanilla's `key.sneak`/`key.sprint` hold-vs-toggle options
+    /// ([`crate::config::Options::toggle_sneak`]/`toggle_sprint`, issue
+    /// #202), pushed down the same way. Applied to the live [`InputState`]
+    /// once per frame at the top of [`Self::step`] (see
+    /// [`Self::set_toggle_modes`]) rather than at each key event: the option
+    /// cannot change mid-frame, and `InputState::set_toggle_modes` is cheap
+    /// and idempotent, so one push per frame covers every catch-up tick that
+    /// frame runs.
+    toggle_sneak: bool,
+    toggle_sprint: bool,
     /// Per-position chest lid animation state (issue #23) — vanilla's
     /// `ChestLidController`, one per open or closing chest.
     ///
@@ -1459,6 +1477,14 @@ impl Sim {
             // caller that forgets `set_view_bobbing` gets the vanilla behaviour
             // rather than a silently disabled feature.
             view_bobbing: true,
+            // Vanilla's defaults (both options default `false` — see
+            // `docs/input-options.md`); a caller that forgets the setters gets
+            // vanilla's own behaviour, not a silently-inverted or
+            // silently-toggling one.
+            invert_mouse_x: false,
+            invert_mouse_y: false,
+            toggle_sneak: false,
+            toggle_sprint: false,
             chest_lids: crate::block_entities::ChestLids::new(),
             pickups: lodestone_game::mining::PickupFeed::new(),
         };
@@ -2694,12 +2720,41 @@ impl Sim {
         if dx != 0.0 || dy != 0.0 {
             let sensitivity = self.config.sensitivity;
             let player = self.player();
-            let (yaw, pitch) = apply_look(player.yaw, player.pitch, dx, dy, sensitivity);
+            let (yaw, pitch) = apply_look_inverted(
+                player.yaw,
+                player.pitch,
+                dx,
+                dy,
+                sensitivity,
+                self.invert_mouse_x,
+                self.invert_mouse_y,
+            );
             self.player_mut(|player| {
                 player.yaw = yaw;
                 player.pitch = pitch;
             });
         }
+    }
+
+    /// Push vanilla's `invertMouseX`/`invertMouseY` options down from the menu
+    /// layer (issue #203), the same way [`Self::set_view_bobbing`] does for
+    /// View Bobbing. Cheap and idempotent; `app.rs` calls it once per frame,
+    /// before [`Self::step`] so the very tick the option changes already
+    /// sees it.
+    pub fn set_mouse_invert(&mut self, invert_x: bool, invert_y: bool) {
+        self.invert_mouse_x = invert_x;
+        self.invert_mouse_y = invert_y;
+    }
+
+    /// Push vanilla's `key.sneak`/`key.sprint` hold-vs-toggle options down
+    /// from the menu layer (issue #202). Stored rather than applied directly
+    /// because the actual [`InputState::set_toggle_modes`] call has to
+    /// happen inside [`Self::step`] (see that field's doc) — `Sim` has no
+    /// `MenuNav` to read from at that point, only whatever was last pushed
+    /// here.
+    pub fn set_toggle_modes(&mut self, toggle_sneak: bool, toggle_sprint: bool) {
+        self.toggle_sneak = toggle_sneak;
+        self.toggle_sprint = toggle_sprint;
     }
 
     /// What this tick's physics collides against.
@@ -3098,6 +3153,12 @@ impl Sim {
     /// confined to stalls).
     pub fn step(&mut self, dt: f64) {
         self.apply_mouse();
+        // Issue #202: apply the hold-vs-toggle option to the live
+        // `InputState` before any `GameTick` schedule this call runs reads
+        // it. One push per `step` call is enough — the option cannot change
+        // mid-frame, and every catch-up tick inside this call shares it.
+        let (toggle_sneak, toggle_sprint) = (self.toggle_sneak, self.toggle_sprint);
+        self.input_mut(|i| i.set_toggle_modes(toggle_sneak, toggle_sprint));
         // The **one** accumulator, on the **one** catch-up policy
         // (`lodestone_ecs::MAX_CATCH_UP_SECS` — ten ticks, vanilla's own; see that
         // constant for why the shell's old inner `0.25 s` clamp lost).
@@ -6711,6 +6772,133 @@ mod tests {
         sim.apply_mouse();
         assert_ne!(sim.player().yaw, yaw0);
         assert_eq!(sim.input().mouse_dx, 0.0);
+    }
+
+    /// Issue #203: `invertMouseX` must negate the yaw delta by the *exact*
+    /// same magnitude `apply_look`'s curve would otherwise produce, not just
+    /// change its sign in some direction. A test that only asserted
+    /// `delta.signum() != plain.signum()` would also pass for a shader-style
+    /// bug that inverts and also rescales — see `CLAUDE.md`'s note on the
+    /// *magnitude* species of vacuous test.
+    #[test]
+    fn invert_mouse_x_negates_the_yaw_delta_exactly() {
+        // A raw `after - before` is not safe here: `apply_look` wraps yaw
+        // into `[-180, 180)`, so if the fixture's starting yaw happens to
+        // sit near that seam, the plain and inverted runs can wrap on
+        // opposite sides and a naive subtraction reports deltas 360° apart
+        // even though the underlying rotation is the exact negation. This
+        // computes the shortest signed angular delta instead, the same
+        // normalisation `apply_look` itself applies to the absolute angle.
+        fn yaw_delta(before: f32, after: f32) -> f32 {
+            (after - before + 180.0).rem_euclid(360.0) - 180.0
+        }
+
+        let mut plain = Sim::new(test_config());
+        let yaw0 = plain.player().yaw;
+        plain.input_mut(|i| i.add_mouse(50.0, 0.0));
+        plain.apply_mouse();
+        let plain_delta = yaw_delta(yaw0, plain.player().yaw);
+        assert_ne!(plain_delta, 0.0, "the fixture must actually turn the player");
+
+        let mut inverted = Sim::new(test_config());
+        inverted.set_mouse_invert(true, false);
+        let yaw0i = inverted.player().yaw;
+        inverted.input_mut(|i| i.add_mouse(50.0, 0.0));
+        inverted.apply_mouse();
+        let inverted_delta = yaw_delta(yaw0i, inverted.player().yaw);
+
+        assert_eq!(
+            inverted_delta, -plain_delta,
+            "invert_mouse_x must negate dx before the sensitivity curve, \
+             producing the exact opposite yaw delta, not merely a different one"
+        );
+    }
+
+    /// As [`invert_mouse_x_negates_the_yaw_delta_exactly`], for `invertMouseY`
+    /// and pitch.
+    #[test]
+    fn invert_mouse_y_negates_the_pitch_delta_exactly() {
+        let mut plain = Sim::new(test_config());
+        let pitch0 = plain.player().pitch;
+        plain.input_mut(|i| i.add_mouse(0.0, 30.0));
+        plain.apply_mouse();
+        let plain_delta = plain.player().pitch - pitch0;
+        assert_ne!(plain_delta, 0.0, "the fixture must actually tilt the player");
+
+        let mut inverted = Sim::new(test_config());
+        inverted.set_mouse_invert(false, true);
+        let pitch0i = inverted.player().pitch;
+        inverted.input_mut(|i| i.add_mouse(0.0, 30.0));
+        inverted.apply_mouse();
+        let inverted_delta = inverted.player().pitch - pitch0i;
+
+        assert_eq!(inverted_delta, -plain_delta, "invert_mouse_y must negate dy exactly");
+    }
+
+    /// Issue #202, end-to-end: `Sim::set_toggle_modes` (what `app.rs` calls
+    /// from `nav.toggle_sneak()`/`toggle_sprint()`) has to actually reach the
+    /// live `InputState` a key event drives — that push happens inside
+    /// [`Sim::step`], not at the setter itself, so this proves the wiring
+    /// rather than just the setter storing a bool nobody reads.
+    ///
+    /// Includes a negative control (hold mode, the default): without it, a
+    /// version of this test that always reported "still engaged" would pass
+    /// just as well against a build that never wired toggle mode at all.
+    #[test]
+    fn toggle_sneak_option_reaches_live_input_and_survives_key_release() {
+        let mut toggle = Sim::new(test_config());
+        toggle.set_toggle_modes(true, false);
+        // `step` is what actually applies the pushed option to `InputState`;
+        // see that method's doc. Without this call, `set` below would still
+        // run in hold mode.
+        toggle.step(1.0 / 20.0);
+
+        toggle.input_mut(|i| i.set(lodestone_controller::Action::Sneak, true));
+        assert!(
+            lodestone_controller::movement_intent(&toggle.input()).sneak,
+            "a fresh press must engage toggle sneak"
+        );
+        toggle.input_mut(|i| i.set(lodestone_controller::Action::Sneak, false));
+        assert!(
+            lodestone_controller::movement_intent(&toggle.input()).sneak,
+            "toggle sneak must survive key release, unlike hold mode"
+        );
+
+        // -- negative control -------------------------------------------------
+        let mut hold = Sim::new(test_config());
+        hold.set_toggle_modes(false, false);
+        hold.step(1.0 / 20.0);
+        hold.input_mut(|i| i.set(lodestone_controller::Action::Sneak, true));
+        assert!(lodestone_controller::movement_intent(&hold.input()).sneak);
+        hold.input_mut(|i| i.set(lodestone_controller::Action::Sneak, false));
+        assert!(
+            !lodestone_controller::movement_intent(&hold.input()).sneak,
+            "hold mode must clear sneak on release, or the toggle assertions \
+             above are not really exercising the toggle"
+        );
+    }
+
+    /// As the sneak half above, for `key.sprint`/`toggle_sprint` — a
+    /// different `InputState` field with its own `set` branch, not merely
+    /// the same code path exercised twice. Sprint needs `forward` held too
+    /// (`movement_intent`'s gate), so this drives that as well.
+    #[test]
+    fn toggle_sprint_option_reaches_live_input_and_survives_key_release() {
+        let mut toggle = Sim::new(test_config());
+        toggle.set_toggle_modes(false, true);
+        toggle.step(1.0 / 20.0);
+
+        toggle.input_mut(|i| i.set(lodestone_controller::Action::Forward, true));
+        toggle.input_mut(|i| i.set(lodestone_controller::Action::Sprint, true));
+        assert!(
+            lodestone_controller::movement_intent(&toggle.input()).sprint,
+            "a fresh press must engage toggle sprint"
+        );
+        toggle.input_mut(|i| i.set(lodestone_controller::Action::Sprint, false));
+        assert!(
+            lodestone_controller::movement_intent(&toggle.input()).sprint,
+            "toggle sprint must survive key release, unlike hold mode"
+        );
     }
 
     #[test]

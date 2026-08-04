@@ -51,8 +51,8 @@ mod input;
 pub use action::move_action;
 pub use ecs::{ControllerPlugin, RawInput, swim_adjusted_intent};
 pub use input::{
-    Action, InputState, PITCH_LIMIT, SPRINT_TRIGGER_WINDOW_TICKS, apply_look, movement_intent,
-    sensitivity_factor,
+    Action, InputState, PITCH_LIMIT, SPRINT_TRIGGER_WINDOW_TICKS, apply_look,
+    apply_look_inverted, movement_intent, sensitivity_factor,
 };
 
 #[cfg(test)]
