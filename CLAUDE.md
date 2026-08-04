@@ -639,7 +639,23 @@ have shipped.
 
 Keep [`docs/`](./docs/README.md) current: one doc per subsystem, `kebab-case`, named after the
 feature rather than the file. Each should cover what it is, how it works, **how to change it and the
-gotchas**, configuration, and dependencies. Update `docs/README.md` as the index.
+gotchas**, configuration, and dependencies.
+
+**`docs/README.md` is now generated — do not hand-edit it.** It is produced by
+`cargo xtask docs-index` from every doc's own H1 plus its `## What it is` summary paragraph, and
+`cargo test -p xtask` fails loudly if the committed file drifts from the generator's output
+(`LODESTONE_REGEN=1` to refresh, the same pattern as the collision-shape and hardness tables). To
+change how your doc appears in the index, **edit your doc's H1 and summary paragraph**, then
+regenerate.
+
+This replaced a standing instruction to update the index by hand, and the reason is measured: at 77
+commit-touches in 30 days `docs/README.md` was the **single most contended file in the repo** — more
+than `sim.rs` — because every feature needed one line in it. It caused real damage in both directions:
+a stale staged blob of it would have *deleted* a newer agent's bullet, and `0b95b4e` shipped a broken
+link by capturing another agent's in-flight line. Those 77 touches per month now do not exist. A
+generated index also cannot drift from the docs, which is the failure this repo's whole §2 is about.
+Note that a doc with no usable summary makes the generator **fail loudly naming the file**, rather
+than emitting a blank entry.
 
 Write down *why*, and especially write down what was measured. The most valuable thing in this repo
 is not the code — it is the record of beliefs that were confidently held and turned out to be false.
