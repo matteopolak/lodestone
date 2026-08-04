@@ -6,3 +6,25 @@
 #   cargo xtask gen-packet-ids --source minecraft-data --version 1.8 --protocol 47
 [alias]
 xtask = "run --quiet --package xtask --"
+
+# ---------------------------------------------------------------------------
+# sccache — measured and ready, deliberately NOT active. Read
+# docs/build-caching.md ("How to turn it on repo-wide") before uncommenting:
+# flipping the wrapper invalidates EVERY fingerprint in the shared target/
+# (one full rebuild for every agent, measured, not theoretical), and CI
+# (docs/ci.md) currently assumes no rustc-wrapper. Flip only in a coordinated
+# quiet window, then prime with the three CLAUDE.md health checks.
+#
+# Until then, opt in per-build for private dirs only (safe today):
+#   RUSTC_WRAPPER=/opt/homebrew/bin/sccache cargo check -p <crate> \
+#     --target-dir /tmp/<unique-dir>
+# Use the --target-dir FLAG, never the CARGO_TARGET_DIR env var — sccache
+# hashes CARGO_* env vars into its keys, and the env-var form measured 0%
+# hits where the flag form measured 78-94%.
+#
+# [build]
+# rustc-wrapper = "/opt/homebrew/bin/sccache"
+#
+# [env]
+# SCCACHE_CACHE_SIZE = "20G"
+# ---------------------------------------------------------------------------
