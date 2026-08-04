@@ -377,6 +377,154 @@ pub(crate) fn draw_item_icon_counted(
     }
 }
 
+/// Vanilla's pickup-"pop" destination rect (`Hud.java:1146-1152`), as a pure
+/// function so the transform math is checkable with no atlas, no sink and no
+/// `ItemStack` — just numbers in, numbers out.
+///
+/// `squeeze = 1 + pop / 5`; vanilla's
+/// `translate(x+8, y+12); scale(1/squeeze, (squeeze+1)/2); translate(-(x+8), -(y+12))`
+/// is an axis-aligned, non-uniform scale about the fixed point `(x + 8, y +
+/// 12)` (both scaled by `size / 16`, matching every other length in
+/// [`draw_item_icon_popped`]) — i.e. each edge moves to
+/// `pivot + (edge - pivot) * scale`, **not** a rect re-centred on the pivot:
+/// `8` happens to be half of the 16px icon's width, so the pivot is the
+/// horizontal centre and the two are equivalent for `x`, but `12` is not half
+/// of its height, so for `y` they are not, and the pivot sits below the
+/// icon's own vertical centre. `pop <= 0.0` returns the original square rect
+/// unchanged (`squeeze == 1.0` makes both axis scales `1.0`, the identity).
+fn pop_squeeze_rect(x: f32, y: f32, size: f32, pop: f32) -> [f32; 4] {
+    let scale = size / 16.0;
+    let squeeze = 1.0 + pop.max(0.0) / 5.0;
+    let scale_x = 1.0 / squeeze;
+    let scale_y = (squeeze + 1.0) / 2.0;
+    let pivot_x = x + 8.0 * scale;
+    let pivot_y = y + 12.0 * scale;
+    let new_x = pivot_x + (x - pivot_x) * scale_x;
+    let new_y = pivot_y + (y - pivot_y) * scale_y;
+    [new_x, new_y, size * scale_x, size * scale_y]
+}
+
+/// As [`draw_item_icon`], but the icon layer squashes/stretches through
+/// vanilla's pickup "pop" animation before settling.
+///
+/// `pop` is vanilla's `ItemStack.getPopTime() - partialTick`
+/// (`Hud.java:1146`): `5.0` the instant a stack lands in the slot — set by
+/// `Inventory.add` whenever an item merges into or fills one
+/// (`Inventory.java:220,268`) — decaying to `0.0` over 5 ticks
+/// (`ItemStack.java:713-714`, one tick per call there). `0.0` (idle) draws
+/// pixel-identically to [`draw_item_icon`]; every caller of that function is
+/// unaffected by this one existing.
+///
+/// Only the **flat [`IconPart::Sprite`] layer squashes.** A 3-D block-item
+/// mini-icon or a special-renderer (chest) icon draws undistorted, at the
+/// original square rect — a deliberate, documented narrowing (most hotbar
+/// items are flat sprites; vanilla's single pose-stack transform covers all
+/// three, this does not), not a decode-parity claim.
+///
+/// The durability bar and stack count draw **unsquashed**, at the original
+/// `(x, y, size)` — vanilla's own `graphics.itemDecorations` call sits after
+/// the pose is popped (`Hud.java:1155-1160`), outside the transform, and
+/// [`draw_item_icon_counted`] already draws that tail at squeeze `1.0`; this
+/// duplicates just that tail rather than sharing it, so this function stays
+/// fully self-contained and callers of [`draw_item_icon_counted`] (the
+/// container screen) are untouched by its existence.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_item_icon_popped(
+    sink: &mut IconSink<'_>,
+    assets: &IconAssets<'_>,
+    view: (f32, f32),
+    slot: &ItemIcon,
+    x: f32,
+    y: f32,
+    size: f32,
+    font: Option<&VanillaFont>,
+    pop: f32,
+) {
+    if pop <= 0.0 {
+        draw_item_icon(sink, assets, view, slot, x, y, size, font);
+        return;
+    }
+    let (vw, vh) = view;
+    let scale = size / 16.0;
+    let [dst_x, dst_y, dst_w, dst_h] = pop_squeeze_rect(x, y, size, pop);
+
+    if let Some(atlas) = assets.items
+        && let Some(icon) = atlas.icon(&slot.item)
+    {
+        for part in &icon.parts {
+            match part {
+                IconPart::Sprite { layers } => {
+                    for layer in layers {
+                        if let Some(spr) = atlas.sprite(&layer.sprite) {
+                            push_sprite_quad(
+                                sink.sprite,
+                                vw,
+                                vh,
+                                GuiSpriteQuad {
+                                    dst: [dst_x, dst_y, dst_w, dst_h],
+                                    uv_min: spr.uv_min,
+                                    uv_max: spr.uv_max,
+                                },
+                                [1.0, 1.0, 1.0, 1.0],
+                            );
+                        }
+                    }
+                }
+                // Undistorted — see the doc comment above.
+                IconPart::Model { .. } => {
+                    push_item_model(sink.model, assets.models, &slot.item, x, y, size);
+                }
+                IconPart::Special { kind, .. } => {
+                    push_special_icon(
+                        sink.special,
+                        &slot.item,
+                        kind,
+                        &icon.display.get(DisplaySlot::Gui),
+                        x,
+                        y,
+                        size,
+                    );
+                }
+            }
+        }
+    }
+
+    // Durability bar + stack count: unsquashed — see the doc comment above.
+    // Duplicated from `draw_item_icon_counted`'s tail rather than shared.
+    if let (Some(dmg), Some(max)) = (slot.damage, slot.max_damage)
+        && dmg > 0
+        && max > 0
+    {
+        let remaining = 1.0 - (dmg.min(max) as f32 / max as f32);
+        let bx = x + 2.0 * scale;
+        let bw = 13.0 * scale;
+        let by = y + size - 3.0 * scale;
+        let bh = 2.0 * scale;
+        sink.colour.rect(bx, by, bw, bh, [0.0, 0.0, 0.0, 1.0]);
+        let col = [1.0 - remaining, remaining, 0.0, 1.0];
+        sink.colour
+            .rect(bx, by, (bw * remaining).max(1.0 * scale), bh, col);
+    }
+
+    if slot.count > 1 {
+        let s = slot.count.to_string();
+        let tw = match font {
+            Some(f) => f.width(&s, scale),
+            None => text_w(&s, scale),
+        };
+        let tx = x + COUNT_RIGHT * scale - tw;
+        let ty = y + COUNT_TOP * scale;
+        match font {
+            Some(f) => f.draw(&mut sink.colour, &s, tx, ty, scale, COUNT_INK),
+            None => {
+                let shadow = vanilla_font::shadow_of(COUNT_INK);
+                sink.colour.text(&s, tx + scale, ty + scale, scale, shadow);
+                sink.colour.text(&s, tx, ty, scale, COUNT_INK);
+            }
+        }
+    }
+}
+
 /// Where a stack count's **right edge** sits, in slot-local GUI pixels
 /// (issue #384).
 ///
@@ -1624,5 +1772,67 @@ impl IconRenderer {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod pop_tests {
+    use super::pop_squeeze_rect;
+
+    /// `pop <= 0.0` must reproduce the original square rect exactly — the
+    /// "not animating" control for [`super::draw_item_icon_popped`]'s early
+    /// return, and the reason that function is safe to call unconditionally
+    /// from `hud.rs` with an idle `0.0` every settled frame.
+    #[test]
+    fn idle_pop_is_the_original_square_rect() {
+        assert_eq!(pop_squeeze_rect(10.0, 20.0, 16.0, 0.0), [10.0, 20.0, 16.0, 16.0]);
+        assert_eq!(pop_squeeze_rect(10.0, 20.0, 16.0, -3.0), [10.0, 20.0, 16.0, 16.0]);
+    }
+
+    /// Predicted value at the instant a stack lands (`pop == 5.0`, vanilla's
+    /// `setPopTime(5)`): `squeeze = 1 + 5/5 = 2.0`, `scale_x = 0.5`,
+    /// `scale_y = 1.5`. Pivot at `(x+8, y+12) = (18, 32)` (scale `16/16 ==
+    /// 1.0`). `new_x = 18 + (10-18)*0.5 = 14`, `new_y = 32 + (20-32)*1.5 =
+    /// 14`, `w = 16*0.5 = 8`, `h = 16*1.5 = 24`.
+    ///
+    /// Two wrong hypotheses this pins against: a **uniform** 2x scale (the
+    /// "it's just bigger" guess) would predict a `32×32` square, not an
+    /// oblong; and a **rect-centred-on-the-pivot** scale (treating `(x+8,
+    /// y+12)` as the rect's own centre, which it is only for `x`) would
+    /// predict `y == 20` unchanged — the pivot is `12` down but the resulting
+    /// half-height is `12`, so a centred rect coincidentally also lands on
+    /// `20` at this exact size, which is why [`pivot_scales_with_icon_size_not_just_the_rect`]
+    /// below uses a different size specifically to separate the two.
+    #[test]
+    fn pop_five_is_a_2x_squeeze_at_the_vanilla_pivot() {
+        assert_eq!(pop_squeeze_rect(10.0, 20.0, 16.0, 5.0), [14.0, 14.0, 8.0, 24.0]);
+    }
+
+    /// Two opposite phases at a non-16px size, which is what actually
+    /// separates "scale about the fixed pivot point" from "resize the rect
+    /// centred on the pivot" for `y` — at `size == 16.0` the two coincide (see
+    /// the note on [`pop_five_is_a_2x_squeeze_at_the_vanilla_pivot`]) and a
+    /// wrong centred-rect implementation would pass unnoticed. At `size = 32`
+    /// (`scale = 2.0`), pivot is `(x + 16, y + 24) = (26, 44)`.
+    #[test]
+    fn pivot_scales_with_icon_size_not_just_the_rect() {
+        // Half decay (`pop = 2.5`): `squeeze = 1.5`, `scale_x = 1/1.5`,
+        // `scale_y = 1.25`. `w = 32/1.5 = 21.333...`, `h = 32*1.25 = 40.0`.
+        // `new_x = 26 + (10-26)/1.5 = 26 - 10.666... = 15.333...`.
+        // `new_y = 44 + (20-44)*1.25 = 44 - 30 = 14.0` — the
+        // centred-rect wrong hypothesis would instead predict `44 - 20 = 24.0`.
+        let r = pop_squeeze_rect(10.0, 20.0, 32.0, 2.5);
+        assert!((r[2] - 32.0 / 1.5).abs() < 1e-4, "w = {}", r[2]);
+        assert_eq!(r[3], 40.0);
+        assert!((r[0] - 15.333_33).abs() < 1e-3, "x = {}", r[0]);
+        assert!(
+            (r[1] - 14.0).abs() < 1e-4,
+            "y = {} (centred-rect wrong hypothesis predicts 24.0)",
+            r[1]
+        );
+
+        // Fully settled (`pop = 0.0`) at the same size must be the plain
+        // square again — the opposite phase from the case above.
+        assert_eq!(pop_squeeze_rect(10.0, 20.0, 32.0, 0.0), [10.0, 20.0, 32.0, 32.0]);
     }
 }

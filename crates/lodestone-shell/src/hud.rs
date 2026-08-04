@@ -1024,7 +1024,7 @@ impl HudGeometry {
 
         // Item icons sit inside the hotbar cells, drawn over whichever hotbar
         // frame (real atlas or procedural) was emitted above.
-        draw_hotbar_items(&mut b, frame);
+        draw_hotbar_items(&mut b, frame, &anim);
 
         // Action bar: a single centred line just above the vitals/XP cluster,
         // fading with the server-driven alpha. Legacy `§` colour codes render.
@@ -1166,7 +1166,7 @@ impl HudGeometry {
 /// both hotbar-draw paths (real GUI atlas at scale 2, or the procedural 22px
 /// cells) so icons land centred in the wells either way. A no-op without an item
 /// atlas or `hotbar_items`, so headless / jar-less runs are unaffected.
-fn draw_hotbar_items(b: &mut Builder, frame: &HudFrame) {
+fn draw_hotbar_items(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) {
     let Some(slots) = frame.hotbar_items else {
         return;
     };
@@ -1194,16 +1194,16 @@ fn draw_hotbar_items(b: &mut Builder, frame: &HudFrame) {
     for (i, slot) in slots.iter().enumerate().take(9) {
         if let Some(item) = slot {
             let x = icon0_x + i as f32 * pitch;
-            b.item_icon(item, x, icon_y, size);
+            let pop = anim.hotbar_pop.get(i).copied().unwrap_or(0.0);
+            b.item_icon_popped(item, x, icon_y, size, pop);
         }
     }
 }
 
 /// The per-frame vitals-cluster animation phases [`HudGeometry::build_inner`]
-/// draws with — heart blink/jitter and the hunger wobble (both driven by
-/// `tick` below), and (a later addition to this type) the hotbar pop. See
-/// `hud/anim.rs` for the vanilla citations and `docs/hud-animations.md` for
-/// the port notes.
+/// draws with — heart blink/jitter, the hunger wobble and the hotbar pop.
+/// See `hud/anim.rs` for the vanilla citations and `docs/hud-animations.md`
+/// for the port notes.
 ///
 /// [`HudAnim::NONE`] is idle (every field at its settled value) and is what
 /// [`HudGeometry::build`]/[`HudGeometry::build_with_font`]/
@@ -1223,6 +1223,9 @@ struct HudAnim {
     /// The wall-tick index this frame resolved to (see `hud/anim::wall_tick`)
     /// — the input the pure per-container/per-pip jitter functions need.
     tick: i64,
+    /// Per-hotbar-slot pop amount, vanilla's `5.0 → 0.0` scale, `0.0` =
+    /// settled/idle (see `hud/anim::HotbarPop`).
+    hotbar_pop: [f32; 9],
 }
 
 impl HudAnim {
@@ -1230,6 +1233,7 @@ impl HudAnim {
         heart_blink: false,
         display_health: i32::MIN, // unused while `heart_blink` is false and jitter is skipped
         tick: 0,
+        hotbar_pop: [0.0; 9],
     };
 }
 
@@ -1718,6 +1722,30 @@ impl<'a> Builder<'a> {
         item_icon::draw_item_icon(&mut sink, &assets, (w, h), slot, x, y, size, self.font);
     }
 
+    /// As [`Builder::item_icon`], but the icon squashes/stretches through
+    /// vanilla's pickup "pop" animation first — `pop` is
+    /// `hud::anim::HotbarPop`'s `5.0 → 0.0` amount, `0.0` (idle) drawing
+    /// pixel-identically to [`Builder::item_icon`] (see
+    /// [`item_icon::draw_item_icon_popped`] for the vanilla citations).
+    fn item_icon_popped(&mut self, slot: &HotbarSlot, x: f32, y: f32, size: f32, pop: f32) {
+        let assets = IconAssets {
+            items: self.items,
+            models: self.models,
+        };
+        let (w, h) = (self.w, self.h);
+        let mut sink = IconSink {
+            colour: ColourStream {
+                verts: &mut self.verts,
+                w,
+                h,
+            },
+            sprite: &mut self.item_verts,
+            model: &mut self.model_verts,
+            special: &mut self.special,
+        };
+        item_icon::draw_item_icon_popped(&mut sink, &assets, (w, h), slot, x, y, size, self.font, pop);
+    }
+
     /// Emit a GUI sprite scaled into the pixel rect `(x, y, w, h)`, tinted by
     /// `c`. A no-op when no atlas is attached or the id is unknown, so callers
     /// need not branch.
@@ -1917,6 +1945,8 @@ pub struct HudRenderer {
     anim_start: Instant,
     /// Cross-frame heart blink/ghost state (`hud/anim::HeartAnim`).
     heart_anim: anim::HeartAnim,
+    /// Cross-frame per-slot hotbar pop timers (`hud/anim::HotbarPop`).
+    hotbar_pop: anim::HotbarPop,
 }
 
 /// The GPU resources for drawing HUD sprites from the vanilla GUI atlas: the
@@ -2008,6 +2038,7 @@ impl HudRenderer {
             font: VanillaFont::shared(),
             anim_start: Instant::now(),
             heart_anim: anim::HeartAnim::new(),
+            hotbar_pop: anim::HotbarPop::new(),
         }
     }
 
@@ -2216,10 +2247,14 @@ impl HudRenderer {
         // state machine it feeds is otherwise a pure function of that integer.
         let tick = anim::wall_tick(self.anim_start);
         let (heart_blink, display_health) = self.heart_anim.tick(tick, frame.health.unwrap_or(0.0));
+        let hotbar_pop = self
+            .hotbar_pop
+            .tick(tick, frame.hotbar_items.unwrap_or(&[]));
         let anim = HudAnim {
             heart_blink,
             display_health,
             tick,
+            hotbar_pop,
         };
         let geo = HudGeometry::build_inner(
             frame,

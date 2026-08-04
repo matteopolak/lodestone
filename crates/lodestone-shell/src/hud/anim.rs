@@ -2,11 +2,10 @@
 //! (`.cache/mc/26.2/client-src/net/minecraft/client/gui/Hud.java`) — see
 //! `docs/hud-animations.md` for the full citation-by-citation notes.
 //!
-//! This module currently carries the heart row's flash (blink) and
-//! critical-health jitter on a health change, and the hunger-row wobble
-//! while saturation is empty (issue #30). The hotbar item "pop" lands in its
-//! own follow-up commit, reusing the same wall-clock tick and `jitter` helper
-//! defined here.
+//! This module carries all three of issue #30's real vanilla animations: the
+//! heart row's flash (blink) and critical-health jitter on a health change,
+//! the hunger-row wobble while saturation is empty, and the hotbar item
+//! "pop" when a stack lands in a slot.
 //!
 //! ## Why a wall clock, not the server's game tick
 //!
@@ -42,6 +41,10 @@
 //! below is a small splitmix64-style mix keyed by `(tick, salt)` instead.
 
 use std::time::Instant;
+
+use lodestone_assets::ResourceLocation;
+
+use super::HotbarSlot;
 
 /// Vanilla-tick-equivalent index derived from a wall-clock instant — see the
 /// module doc for why this substitutes for the real `tickCount`.
@@ -166,6 +169,68 @@ pub(super) fn hunger_wobble(tick: i64, food: i32, saturation: f32, pip: usize) -
         return 0.0;
     }
     jitter(tick, 0xF00D_0000_u64 ^ pip as u64, 3) as f32 - 1.0
+}
+
+/// Cross-frame per-slot hotbar "pop" timers — vanilla's `ItemStack.popTime`,
+/// set to `5` by `Inventory.add` whenever a stack merges into or fills a slot
+/// (`Inventory.java:220,268`) and decremented once per tick
+/// (`ItemStack.java:713-714`). [`HotbarPop::tick`] detects the same trigger
+/// client-side (a slot's item identity changed, or its count rose) since
+/// nothing forwards the server's own `Inventory.add` call site here, and
+/// returns each slot's current pop amount on vanilla's own `5.0 → 0.0` scale
+/// (`Hud.java:1146`, `getPopTime() - partialTick`), stepped once per tick
+/// rather than partial-tick-interpolated.
+#[derive(Debug, Clone)]
+pub(super) struct HotbarPop {
+    slots: [Option<(ResourceLocation, u32)>; 9],
+    triggered_tick: [Option<i64>; 9],
+    /// Whether [`HotbarPop::tick`] has run at least once. All nine slots are
+    /// primed together on the same first call (unlike [`HeartAnim`], nothing
+    /// here is staggered per-slot), so one flag covers all nine — without it,
+    /// a hotbar that already holds items at HUD startup would misread as
+    /// nine simultaneous pickups on frame one, the same false-trigger
+    /// [`HeartAnim::tick`]'s `None` arm exists to prevent for health.
+    primed: bool,
+}
+
+impl HotbarPop {
+    pub(super) fn new() -> Self {
+        Self {
+            slots: Default::default(),
+            triggered_tick: [None; 9],
+            primed: false,
+        }
+    }
+
+    /// Advances to `tick` for this frame's hotbar contents (`0..9`, missing
+    /// slots treated as empty), returning each slot's current pop amount.
+    pub(super) fn tick(&mut self, tick: i64, slots: &[Option<HotbarSlot>]) -> [f32; 9] {
+        let mut out = [0.0f32; 9];
+        for i in 0..9 {
+            let now = slots
+                .get(i)
+                .and_then(Option::as_ref)
+                .map(|s| (s.item.clone(), s.count));
+            let popped = self.primed
+                && match (&self.slots[i], &now) {
+                    (Some((prev_item, prev_count)), Some((item, count))) => {
+                        item != prev_item || count > prev_count
+                    }
+                    (None, Some(_)) => true,
+                    _ => false,
+                };
+            if popped {
+                self.triggered_tick[i] = Some(tick);
+            }
+            out[i] = match self.triggered_tick[i] {
+                Some(t0) => (5.0 - (tick - t0) as f32).max(0.0),
+                None => 0.0,
+            };
+            self.slots[i] = now;
+        }
+        self.primed = true;
+        out
+    }
 }
 
 #[cfg(test)]
@@ -322,5 +387,99 @@ mod tests {
             vals.iter().any(|&v| v != vals[0]),
             "pips must not all draw the same offset: {vals:?}"
         );
+    }
+
+    fn slot(item: &str, count: u32) -> HotbarSlot {
+        HotbarSlot {
+            item: ResourceLocation::parse(item).unwrap(),
+            count,
+            damage: None,
+            max_damage: None,
+            enchanted: false,
+        }
+    }
+
+    #[test]
+    fn hotbar_pop_first_observation_primes_without_a_false_pop() {
+        // A hotbar that already holds items the instant the HUD starts must
+        // not pop — the same guard `HeartAnim`'s `None` arm provides for
+        // health. Without it every pre-existing stack would misread as
+        // having just landed, on frame one, and (per the bug this caught) the
+        // false pop's decay would also bleed into the *next* real event: a
+        // later genuine decrease would still read a nonzero pop left over
+        // from the phantom one.
+        let mut p = HotbarPop::new();
+        let slots = [Some(slot("minecraft:torch", 3)), None, None, None, None, None, None, None, None];
+        assert_eq!(p.tick(0, &slots), [0.0; 9], "must not pop on the very first tick");
+        assert_eq!(p.tick(1, &slots), [0.0; 9], "and must stay settled with no change");
+    }
+
+    #[test]
+    fn hotbar_pop_settled_case_is_bit_identical() {
+        // The "not animating" control: an unchanging hotbar must report 0.0
+        // (settled) in every slot, forever — the pre-existing draw exactly.
+        let mut p = HotbarPop::new();
+        let slots = [Some(slot("minecraft:stone", 1)), None, None, None, None, None, None, None, None];
+        assert_eq!(p.tick(0, &slots), [0.0; 9]);
+        assert_eq!(p.tick(1_000, &slots), [0.0; 9]);
+    }
+
+    #[test]
+    fn hotbar_pop_new_item_pops_then_decays_linearly_to_zero() {
+        let mut p = HotbarPop::new();
+        let empty = [None, None, None, None, None, None, None, None, None];
+        p.tick(0, &empty);
+        let mut with_item = empty.clone();
+        with_item[2] = Some(slot("minecraft:diamond", 1));
+
+        // Predicted value at the trigger tick: pop == 5.0 exactly (vanilla's
+        // `setPopTime(5)`). Wrong hypothesis under test: a pop that starts at
+        // 1.0 (an "is it popping" bool rather than the real magnitude) would
+        // also pass a bare `> 0.0` check, which is why this asserts the exact
+        // value rather than just its sign.
+        let at_trigger = p.tick(10, &with_item);
+        assert_eq!(at_trigger[2], 5.0);
+        assert_eq!(
+            &at_trigger[..2],
+            &[0.0, 0.0][..],
+            "only the changed slot pops"
+        );
+
+        // Two opposite phases: 2 ticks later it must have decayed by exactly
+        // 2.0 (linear, 1.0/tick), and by tick 15 (5 ticks later) it must have
+        // fully settled at 0.0, not gone negative.
+        let mid = p.tick(12, &with_item);
+        assert_eq!(mid[2], 3.0);
+        let settled = p.tick(15, &with_item);
+        assert_eq!(settled[2], 0.0);
+        let past = p.tick(30, &with_item);
+        assert_eq!(past[2], 0.0, "must clamp at 0.0, never go negative");
+    }
+
+    #[test]
+    fn hotbar_pop_fires_on_count_increase_but_not_on_decrease() {
+        let mut p = HotbarPop::new();
+        let mut slots = [None, None, None, None, None, None, None, None, None];
+        slots[0] = Some(slot("minecraft:arrow", 10));
+        p.tick(0, &slots);
+
+        slots[0] = Some(slot("minecraft:arrow", 5)); // used some — a decrease
+        let after_decrease = p.tick(1, &slots);
+        assert_eq!(after_decrease[0], 0.0, "a decrease must not pop");
+
+        slots[0] = Some(slot("minecraft:arrow", 20)); // picked more up
+        let after_increase = p.tick(2, &slots);
+        assert_eq!(after_increase[0], 5.0, "an increase must pop");
+    }
+
+    #[test]
+    fn hotbar_pop_fires_on_identity_change_at_equal_or_lower_count() {
+        let mut p = HotbarPop::new();
+        let mut slots = [None, None, None, None, None, None, None, None, None];
+        slots[5] = Some(slot("minecraft:oak_log", 3));
+        p.tick(0, &slots);
+        slots[5] = Some(slot("minecraft:stone", 1)); // different item, lower count
+        let after = p.tick(1, &slots);
+        assert_eq!(after[5], 5.0, "a swapped identity must pop even at a lower count");
     }
 }
