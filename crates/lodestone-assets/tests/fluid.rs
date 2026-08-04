@@ -147,6 +147,63 @@ fn none() -> FlowNeighbor {
     }
 }
 
+/// `full_footprint_y_range` — the scoped partial-occluder shape test.
+mod full_footprint_y_range {
+    use lodestone_assets::fluid::full_footprint_y_range;
+    use lodestone_model::BlockAabb;
+
+    fn aabb(min: [f32; 3], max: [f32; 3]) -> BlockAabb {
+        BlockAabb { min, max }
+    }
+
+    #[test]
+    fn accepts_a_single_full_footprint_box() {
+        // dirt_path/farmland's real shape: full x/z, reduced y (15/16).
+        let boxes = [aabb([0.0, 0.0, 0.0], [1.0, 15.0 / 16.0, 1.0])];
+        let range = full_footprint_y_range(&boxes).expect("full-footprint box qualifies");
+        assert!((range.0 - 0.0).abs() < 1e-6, "got {range:?}");
+        assert!((range.1 - 15.0 / 16.0).abs() < 1e-6, "got {range:?}");
+    }
+
+    #[test]
+    fn rejects_multiple_boxes() {
+        // A multi-box shape (fence, stairs, wall) is out of scope: the general
+        // algorithm needs real slice merging, not a height comparison.
+        let boxes = [
+            aabb([0.0, 0.0, 0.0], [1.0, 0.5, 1.0]),
+            aabb([0.0, 0.5, 0.0], [0.5, 1.0, 0.5]),
+        ];
+        assert_eq!(full_footprint_y_range(&boxes), None);
+    }
+
+    #[test]
+    fn rejects_no_boxes() {
+        assert_eq!(full_footprint_y_range(&[]), None);
+    }
+
+    #[test]
+    fn rejects_a_partial_x_footprint() {
+        // A single box that doesn't span the full x extent (e.g. half of a
+        // stair's bottom slab) cannot be reduced to a height-only comparison.
+        let boxes = [aabb([0.0, 0.0, 0.0], [0.5, 1.0, 1.0])];
+        assert_eq!(full_footprint_y_range(&boxes), None);
+    }
+
+    #[test]
+    fn rejects_a_partial_z_footprint() {
+        let boxes = [aabb([0.0, 0.0, 0.0], [1.0, 1.0, 0.5])];
+        assert_eq!(full_footprint_y_range(&boxes), None);
+    }
+
+    #[test]
+    fn accepts_a_full_cube() {
+        // Not the interesting case (occludes_at already handles it), but the
+        // scoped test should not reject it either.
+        let boxes = [aabb([0.0, 0.0, 0.0], [1.0, 1.0, 1.0])];
+        assert_eq!(full_footprint_y_range(&boxes), Some((0.0, 1.0)));
+    }
+}
+
 use lodestone_assets::Direction;
 use lodestone_assets::fluid::{FaceSet, FluidGeometry, SideOverlay, SpriteUv, bake_fluid};
 

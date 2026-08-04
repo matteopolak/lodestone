@@ -205,10 +205,16 @@ jar's** `grass_block`, not on a hand-written view.
 ## Known gaps
 
 Issue #18 tracked five divergences from `FluidRenderer`, none of them the
-reported shoreline bug. Re-verified 2026-07-31 against the same 26.2
-`client-src` cited throughout this doc: three were still live and are now
-closed; one (the overlay material) is closed in `lodestone-render` but not yet
-reachable from a live server; one (partial occluders) is still open.
+reported shoreline bug. Re-verified 2026-08-04 against the same 26.2
+`client-src` cited throughout this doc: **all five are now closed.** The
+overlay material's live-shell hop landed in `385b4fee` (see below — this
+section previously said "not yet reachable from a live server", which was
+true when written but is stale now: `SnapshotFluidView::overlay_at` exists in
+`crates/lodestone-shell/src/mesher.rs` today). Partial occluders — the one gap
+this doc used to call "still open" — now has a scoped fix for the single-box,
+full-footprint case (`dirt_path`, `farmland`, slabs, snow layers); the general
+multi-box case (stairs, fences, walls) remains unmodelled and is now the
+documented boundary of this feature rather than an open TODO.
 
 - **Closed — the up face is no longer culled by a solid block above.**
   `mesh_fluids`'s `up_occluded` now matches `isFaceOccludedByState`'s
@@ -244,64 +250,107 @@ reachable from a live server; one (partial occluders) is still open.
   inset `0.001` off their block boundary; a side face's bottom edge — and the
   bottom face itself — sit at `y = 0.001` only when the bottom face is *also*
   drawn (`bottomOffs = renderDown ? 0.001F : 0.0F`), else flush at `y = 0`.
-- **Closed in `lodestone-render`, not yet live — overlay material.** Side
-  faces against a vanilla `HalfTransparentBlock` or `LeavesBlock` (glass, every
-  stained-glass colour, tinted glass, ice, blue ice, frosted ice, honey,
-  slime, all eleven leaves types — scanned from `Blocks.java`, see
-  `is_fluid_overlay_neighbor` in `block_models.rs`) now bake against
-  `block/water_overlay` with no back face, via `bake_fluid`'s `overlay:
-  Option<SpriteUv>` parameter and `FluidGeometry::side_overlay`.
+- **Closed, and now live.** Side faces against a vanilla `HalfTransparentBlock`
+  or `LeavesBlock` (glass, every stained-glass colour, tinted glass, ice, blue
+  ice, frosted ice, honey, slime, all eleven leaves types — scanned from
+  `Blocks.java`, see `is_fluid_overlay_neighbor` in `block_models.rs`) bake
+  against `block/water_overlay` with no back face, via `bake_fluid`'s
+  `overlay: Option<SpriteUv>` parameter and `FluidGeometry::side_overlay`.
   `FluidSectionView` gained `overlay_at(x, y, z) -> bool` (default `false`, so
   every existing implementation keeps compiling and keeps its old behaviour).
-  **The live shell doesn't override it yet** — `SnapshotFluidView` in
-  `crates/lodestone-shell/src/mesher.rs` needs:
+  **This doc previously said the live shell hadn't overridden it** —
+  `SnapshotFluidView::overlay_at` in `crates/lodestone-shell/src/mesher.rs`
+  now exists (landed `385b4fee`, forwarding to `BlockModels::fluid_overlay`
+  exactly as sketched here), so a real server's water now draws the overlay
+  material against glass/leaves instead of `*_flow` with a stray back face.
+- **Closed for the scoped case — partial occluders.**
+  `isFaceOccludedByState`'s third branch (`Shapes.blockOccludes(box(0,0,0,1,h,1),
+  occluder, dir)`, `FluidRenderer.java:44`) needed real voxel shapes: a
+  `dirt_path` or `farmland` bank occludes an `8/9`-high water face in vanilla,
+  and did not here, so those banks drew a spurious side face.
+
+  **Correction to this doc's own previous citation**: it used to point at
+  `lodestone-data`'s `collision_shapes` module as "exactly the missing
+  geometry". That is the wrong shape family. Vanilla's
+  `Block.getOcclusionShape` is `state.getShape(EmptyBlockGetter.INSTANCE,
+  BlockPos.ZERO)` — the **outline** getter
+  (`crates/lodestone-data/src/outline_shapes.rs`'s own module docs quote this
+  exact call, and independently: `BlockBehaviour.java`'s three shape getters
+  disagree at their defaults, and 50.9% of 26.2's 32,366 states have an
+  outline that differs from their collision shape). `collision_shapes` answers
+  a genuinely different question (can an entity stand on it) and would have
+  been silently wrong for any state where the two diverge. The correct source
+  is `lodestone_data::outline_shapes::outline_boxes(state_id)`.
+
+  Read `Shapes.blockOccludes` directly
+  (`.cache/mc/26.2/client-src/net/minecraft/world/phys/shapes/Shapes.java`) —
+  it is not the general voxel-grid slice-and-compare this doc previously
+  guessed at from the method's shape, it is short enough to derive exactly:
+
+  ```java
+  public static boolean blockOccludes(shape, occluder, direction) {
+     if (shape == block() && occluder == block()) return true;
+     if (occluder.isEmpty()) return false;
+     axis = direction.getAxis();
+     first  = direction.getAxisDirection() == POSITIVE ? shape : occluder;
+     second = direction.getAxisDirection() == POSITIVE ? occluder : shape;
+     op = direction.getAxisDirection() == POSITIVE ? ONLY_FIRST : ONLY_SECOND;
+     return fuzzyEquals(first.max(axis), 1.0) && fuzzyEquals(second.min(axis), 0.0)
+         && !joinIsNotEmpty(sliceAt(first, axis, far), sliceAt(second, axis, near), op);
+  }
+  ```
+
+  For a **single box spanning the full `x`/`z` footprint of its cell**
+  (`dirt_path`, `farmland`, slabs, snow layers — "flat, height-only-reduced"
+  shapes), every slice along a horizontal axis has the same cross-section, so
+  this collapses to a pure height comparison: the neighbour occludes the
+  fluid's side face (at test height `h = max` of the two corners on that edge)
+  iff the occluder's own `y`-range satisfies `min_y <= 0` **and**
+  `max_y >= h`. A box that starts above `y = 0` (a raised platform) or stops
+  short of `h` leaves a gap and does not occlude — both are executed negative
+  controls, not just described (see "Tests").
+
+  **Landed in this pass**, split the way the doc's own dependency boundary
+  requires (`lodestone-render`/`lodestone-assets` cannot depend on
+  `lodestone-data` — see "Dependencies"):
+
+  - `lodestone_assets::fluid::full_footprint_y_range(&[BlockAabb]) -> Option<(f32, f32)>`
+    — the pure shape reduction: `None` unless there is exactly one box and it
+    spans the full `0..=1` extent on `x` and `z`, else `Some((min_y, max_y))`.
+  - `FluidSectionView::partial_occluder_y_range_at(x, y, z) -> Option<(f32, f32)>`
+    (default `None`, same compatibility shape as `overlay_at`) and `mesh_fluids`
+    now calls it for all four horizontal directions, culling when
+    `min_y <= 0 && max_y >= max(corner_a, corner_b)` on top of the existing
+    `occludes_at` boolean.
+
+  **Not yet live** — same shape as the overlay gap above until this lands:
+  `SnapshotFluidView` in `crates/lodestone-shell/src/mesher.rs` needs
   ```rust
-  fn overlay_at(&self, x: i32, y: i32, z: i32) -> bool {
+  fn partial_occluder_y_range_at(&self, x: i32, y: i32, z: i32) -> Option<(f32, f32)> {
       let (dx, lx) = split16(x);
       let (dy, ly) = split16(y);
       let (dz, lz) = split16(z);
       if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dy) || !(-1..=1).contains(&dz) {
-          return false;
+          return None;
       }
       let id = self.snapshot.at(dx, dy, dz).get_block(lx, ly, lz);
-      self.models.fluid_overlay(id)
+      let boxes = lodestone_data::outline_shapes::outline_boxes(id)?;
+      lodestone_assets::fluid::full_footprint_y_range(boxes)
   }
   ```
-  — the same pattern `occludes_at` already uses one method up, forwarding to
-  the new `BlockModels::fluid_overlay(state_id)` accessor. Until that patch
-  lands, a real server's water still draws `*_flow` with a back face against
-  glass/leaves, same as before.
-- **Still open — partial occluders are not modelled.** `isFaceOccludedByState`'s
-  third branch (`Shapes.blockOccludes(box(0,0,0,1,h,1), occluder, dir)`,
-  `FluidRenderer.java:44`) needs real voxel shapes: a `dirt_path` or `farmland`
-  bank occludes an `8/9`-high water face in vanilla (its collision shape
-  reaches `15/16`, and `occluder`'s footprint is full-width so `blockOccludes`
-  degenerates to "does the occluder's height cover the fluid's test height over
-  the full boundary square") and does not here, so those banks still draw a
-  side face.
+  `mesher.rs` already depends on `lodestone_data` (it calls
+  `lodestone_data::shade_brightness::occludes_ambient_light` a few dozen lines
+  above `SnapshotFluidView`), so this needs no new dependency, only the method.
 
-  This was re-investigated, not just re-flagged: `lodestone-data`'s
-  `collision_shapes` module (`crates/lodestone-data/src/collision_shapes.rs`)
-  already has exactly the missing geometry — real per-state AABB unions dumped
-  from the 26.2 jar (`collision_boxes(state_id) -> &[Aabb]`), 326 distinct
-  shapes across all 32,366 states — so this is *not* blocked on new jar data
-  the way it looked when this doc was first written. What's still missing is
-  the algorithm: `Shapes.blockOccludes` (`Shapes.java:244`) is a real
-  voxel-shape slice-and-compare (via `VoxelShape.getFaceShape`,
-  `VoxelShape.java:197`, and `Shapes.joinIsNotEmpty`'s boolean-grid merge), and
-  porting it faithfully for the general multi-box case (stairs, fences, walls
-  — shapes with actual holes) is a bigger undertaking than the two named
-  examples suggest. The two named examples (and slabs, snow layers, and most
-  other "flat-topped, height-only-reduced" blocks) are the *simple* case,
-  where `blockOccludes` collapses to the height/footprint comparison described
-  above and would not need the general algorithm — a scoped implementation
-  covering only single-box, full-horizontal-footprint shapes (falling back to
-  today's boolean `occludes_at` for anything else) is a bounded, honestly-scoped
-  next step, left undone this pass rather than shipped half-verified against
-  the harder shapes. Wiring it needs a new `FluidSectionView` query (something
-  like `side_occlusion_height_at(x, y, z) -> Option<f32>`, `None` falling back
-  to the existing boolean) and, on the shell side, a lookup from block state id
-  to `collision_boxes`.
+  **Still open — the general multi-box case.** A shape with holes or a partial
+  footprint (stairs, fences, walls, panes) needs the real voxel-grid
+  slice-and-compare (`VoxelShape.getFaceShape`, `VoxelShape.java:197`, and
+  `Shapes.joinIsNotEmpty`'s boolean-grid merge over both shapes' full
+  coordinate lists, not just their boundary box), which is a materially bigger
+  port than the scoped closed-form above. `full_footprint_y_range` returns
+  `None` for these (falling back to today's boolean `occludes_at`), which is
+  the same honestly-scoped boundary this doc drew before landing the scoped
+  case — left undone rather than shipped half-verified.
 
 ## Configuration
 
@@ -313,20 +362,27 @@ skipping.
 
 ## Dependencies
 
-- `lodestone-assets` — `fluid::{bake_fluid, corner_height, flow_horizontal, …}`,
-  `BlockBaker`, the stitched `Atlas` (fluid sprites, **and now
-  `block/water_overlay`**, are seeded explicitly, since no blockstate
-  references them).
+- `lodestone-assets` — `fluid::{bake_fluid, corner_height, flow_horizontal,
+  full_footprint_y_range, …}`, `BlockBaker`, the stitched `Atlas` (fluid
+  sprites, and `block/water_overlay`, are seeded explicitly, since no
+  blockstate references them). `full_footprint_y_range` takes
+  `&[lodestone_model::BlockAabb]` directly rather than depending on
+  `lodestone-data`, so the crate boundary below still holds — the shell passes
+  the boxes in.
 - `lodestone-render` — `BlockModels` (classification, per-face occlusion,
-  sprite rects, and now `fluid_overlay(state_id)` — the
+  sprite rects, and `fluid_overlay(state_id)` — the
   `HalfTransparentBlock`/`LeavesBlock` name-list classification), `mesh_fluids`,
-  `ModelPipeline::for_fluid`.
+  `ModelPipeline::for_fluid`, `FluidSectionView::partial_occluder_y_range_at`.
 - `lodestone-shell` — `SnapshotFluidView` / `mesh_snapshot_fluids`, the live
-  neighbourhood. Does not yet implement `FluidSectionView::overlay_at`; see
-  "Known gaps".
-- `lodestone-data` — `collision_shapes::collision_boxes`, the real per-state
-  jar-dumped collision geometry the still-open partial-occluders gap needs and
-  didn't previously have a known source for.
+  neighbourhood. Implements `FluidSectionView::overlay_at` (landed `385b4fee`).
+  **Does not yet implement `partial_occluder_y_range_at`**; see "Known gaps"
+  for the exact patch, and note it needs no new dependency —
+  `crates/lodestone-shell/src/mesher.rs` already depends on `lodestone-data`
+  for `shade_brightness::occludes_ambient_light`.
+- `lodestone-data` — `outline_shapes::outline_boxes`, the real per-state
+  jar-dumped **outline** geometry the partial-occluders fix needs. **Not**
+  `collision_shapes` — see "Known gaps" for why the two disagree for about
+  half of all 26.2 states and why that distinction matters here.
 
 ## Tests
 
@@ -350,7 +406,17 @@ Hermetic (`cargo test -p lodestone-render --lib`):
   against hand-derived `FluidRenderer` values, plus the `0.001` inset
   (including the "no top face drawn → side reads the *un*-inset height"
   interaction), back-face winding (top and side), and overlay-sprite selection
-  cases added for this pass.
+  cases. Its `full_footprint_y_range` submodule covers a `dirt_path`-shaped
+  single full-footprint box, rejection of multi-box shapes, rejection of a
+  partial `x` or `z` footprint (a lone box that doesn't reach the boundary,
+  the stairs/panes case), and that a genuine full cube still qualifies.
+- `models::tests::a_tall_full_footprint_bank_culls_the_side_face_it_fully_covers`,
+  `a_short_full_footprint_bank_does_not_cull_the_side_face`,
+  `a_raised_full_footprint_occluder_does_not_cull_the_side_face` — the
+  partial-occluder wiring through `mesh_fluids`, with the height and
+  near-boundary conditions each checked as a magnitude (a bank just short of
+  the fluid's real corner height, and one that starts above `y = 0`), not
+  merely "an occluder is present".
 
 Jar-backed, `#[ignore]`d:
 

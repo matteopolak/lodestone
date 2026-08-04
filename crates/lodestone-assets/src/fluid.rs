@@ -275,6 +275,39 @@ pub fn flow_angle(flow: [f64; 2]) -> f32 {
     (flow[1].atan2(flow[0]) as f32) - std::f32::consts::FRAC_PI_2
 }
 
+/// Reduces a neighbour's outline shape to the one partial-occlusion case this
+/// module can evaluate exactly: a **single** collision box spanning the full
+/// `x`/`z` footprint of its cell — `dirt_path`, `farmland`, slabs, snow layers,
+/// and every other "flat, height-only-reduced" shape. Returns its
+/// `(min_y, max_y)` in block-local `0.0..=1.0` when it qualifies; `None`
+/// otherwise (air, multiple boxes, or a box that doesn't span the full
+/// footprint — stairs, fences, walls, panes).
+///
+/// This is the scoped subset of vanilla's `Shapes.blockOccludes`
+/// (`Shapes.java:244`), which the doc comment on
+/// [`crate`][crate]'s `FluidSectionView::partial_occluder_y_range_at`
+/// consumer explains the derivation for. `boxes` should come from the
+/// neighbour's **outline** shape — `VersionAdapter::block_outline` /
+/// `lodestone_data::outline_shapes::outline_boxes` — not its collision shape:
+/// vanilla's `getOcclusionShape` is `state.getShape(...)`, the outline getter,
+/// and the two disagree for roughly half of all 26.2 block states (see
+/// `lodestone_data::outline_shapes`'s module docs).
+#[must_use]
+pub fn full_footprint_y_range(boxes: &[lodestone_model::BlockAabb]) -> Option<(f32, f32)> {
+    const EPS: f32 = 1e-4;
+    if boxes.len() != 1 {
+        return None;
+    }
+    let only = &boxes[0];
+    let full_x = only.min[0] <= EPS && only.max[0] >= 1.0 - EPS;
+    let full_z = only.min[2] <= EPS && only.max[2] >= 1.0 - EPS;
+    if full_x && full_z {
+        Some((only.min[1], only.max[1]))
+    } else {
+        None
+    }
+}
+
 /// A normalised sprite UV rectangle, resolved from the atlas by the mesher.
 ///
 /// Passing UV rects (rather than an [`crate::atlas::Atlas`]) keeps this module
