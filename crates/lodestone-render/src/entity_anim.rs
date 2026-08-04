@@ -222,6 +222,50 @@ pub fn creeper_swell_scale(swell: f32) -> [f32; 3] {
     [horizontal, vertical, horizontal]
 }
 
+/// `CreeperRenderer.getWhiteOverlayProgress`: the white-flash overlay strength
+/// for a given swell, `0.0..=1.0`.
+///
+/// Transcribed from the decompiled 26.2 client:
+///
+/// ```text
+///   float step = state.swelling;
+///   return (int)(step * 10.0F) % 2 == 0 ? 0.0F : Mth.clamp(step, 0.5F, 1.0F);
+/// ```
+///
+/// # This is a **blink**, not a ramp
+///
+/// The player-visible defect this exists to fix was described as the creeper
+/// failing to "expand/turn white or blink or whatever" — and "blink" is
+/// exactly right, not a loose description of a fade. `swelling` is bucketed
+/// into steps of `0.1`; even-numbered steps (`[0.0,0.1)`, `[0.2,0.3)`, …) are
+/// fully off, odd-numbered steps are on at a strength clamped to
+/// `0.5..=1.0`. So across one full fuse the overlay hard-cuts on/off five
+/// times before detonation, each "on" pulse brighter than the last (`step`
+/// itself is what gets clamped, and it is monotonically increasing), which is
+/// the flicker vanilla is known for — not a smooth fade-to-white.
+///
+/// # Overlay progress vs. overlay alpha
+///
+/// This returns vanilla's `whiteOverlayProgress`, the same value
+/// `OverlayTexture.pack(progress, redOverlay)` takes — it is **not** the
+/// blend alpha yet. `OverlayTexture`'s white row quantises `progress` to
+/// `u = floor(progress * 15)` and derives alpha as
+/// `(1 - u/15 * 0.75) * 255`; see
+/// [`crate::entity_pipeline::creeper_overlay_alpha_from_progress`] for that
+/// second step, which a caller applies only when the hurt/death red overlay
+/// is *not* also active — vanilla's texture has red and white on mutually
+/// exclusive rows (`v == 3` for red ignores `u` entirely), so red always wins
+/// when both are true.
+#[must_use]
+pub fn creeper_white_overlay_progress(swelling: f32) -> f32 {
+    let step = swelling;
+    if (step * 10.0) as i32 % 2 == 0 {
+        0.0
+    } else {
+        step.clamp(0.5, 1.0)
+    }
+}
+
 /// The model-space transform that reproduces vanilla's creeper swell, to be
 /// composed *above* the root part.
 ///
@@ -1360,6 +1404,56 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Hand-evaluated from `CreeperRenderer.getWhiteOverlayProgress`'s decompiled
+    /// source at a grid of steps, not read back off this implementation — the
+    /// same discipline `creeper_swell_scale_transcribes_the_vanilla_formula`
+    /// uses one test up.
+    #[test]
+    fn white_overlay_progress_transcribes_the_vanilla_formula() {
+        for step in [0.0f32, 0.05, 0.1, 0.15, 0.25, 0.35, 0.55, 0.65, 0.95, 1.0, MAX_SWELL] {
+            let want = if (step * 10.0) as i32 % 2 == 0 {
+                0.0
+            } else {
+                step.clamp(0.5, 1.0)
+            };
+            assert_eq!(
+                creeper_white_overlay_progress(step),
+                want,
+                "step {step}"
+            );
+        }
+    }
+
+    /// The blink pattern by name: five on/off cycles across a fuse, each `on`
+    /// pulse clamped to `0.5..=1.0` rather than fading smoothly. This is what
+    /// distinguishes it from a ramp — see the function's own doc.
+    #[test]
+    fn white_overlay_progress_blinks_rather_than_ramps() {
+        // [0.0, 0.1) is off.
+        assert_eq!(creeper_white_overlay_progress(0.05), 0.0);
+        // [0.1, 0.2) is on, clamped up to 0.5 even though step itself is small.
+        assert_eq!(creeper_white_overlay_progress(0.15), 0.5);
+        // [0.2, 0.3) is off again — a real hard cut, not a decay.
+        assert_eq!(creeper_white_overlay_progress(0.25), 0.0);
+        // [0.3, 0.4) is on, still clamped to 0.5 (step 0.35 < 0.5).
+        assert_eq!(creeper_white_overlay_progress(0.35), 0.5);
+        // Once step itself exceeds 0.5, an "on" pulse is no longer clamped flat:
+        // [0.5, 0.6) reports the step value itself.
+        assert!((creeper_white_overlay_progress(0.55) - 0.55).abs() < 1e-6);
+        // [0.9, 1.0) is on at just under the maximum.
+        assert!((creeper_white_overlay_progress(0.95) - 0.95).abs() < 1e-6);
+    }
+
+    /// The range is always `0.0..=1.0`, even at `MAX_SWELL` (~1.071, past 1.0) —
+    /// `Mth.clamp(step, 0.5, 1.0)` caps the top explicitly, unlike
+    /// `creeper_swell_scale`'s own `g` which clamps to `0.0..=1.0` *before*
+    /// raising to the fourth power.
+    #[test]
+    fn white_overlay_progress_never_exceeds_one_even_past_max_swell() {
+        let p = creeper_white_overlay_progress(MAX_SWELL);
+        assert!((0.0..=1.0).contains(&p), "progress {p} out of range at MAX_SWELL");
     }
 
     #[test]

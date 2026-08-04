@@ -462,6 +462,17 @@ pub struct EntitySnapshot {
     /// should draw above it — a mob with no visible custom name, or a player
     /// entity with no matching tab-list entry. See [`NameTag`].
     pub name_tag: Option<NameTag>,
+    /// A creeper's synced fuse direction (`Creeper.DATA_SWELL_DIR`), as last
+    /// reported — meaningless when [`Self::type_path`] is not `"creeper"`.
+    ///
+    /// `None` means "the server has never reported this", exactly
+    /// [`Self::variant`]'s own contract: [`spawn_track`] seeds a fresh
+    /// creeper's [`CreeperFuse`] from vanilla's own idle default
+    /// ([`CreeperFuse::IDLE`]) rather than treating `None` as zero, and
+    /// [`update_track`] only overwrites the direction when a snapshot
+    /// actually carries one — silence must not reset a mid-fuse creeper back
+    /// to idle.
+    pub creeper_swell_dir: Option<i32>,
 }
 
 /// A sheep's decoded wool state, narrowed from [`EntitySnapshot::variant`] for
@@ -648,6 +659,21 @@ pub struct EntityDraw {
     /// `RenderState::merge_held_items` must compare it against the arm it is
     /// drawing or a skeleton drawing a bow would bend its off-hand item too.
     pub item_use: Option<ItemUse>,
+    /// A creeper's pre-detonation swell, `0.0..~1.07`, vanilla's
+    /// `Creeper.getSwelling(partialTick)` — `0.0` (and hence
+    /// [`lodestone_render::entity_anim::Skeleton::pose_swelling`]'s exact
+    /// identity case) for every non-creeper, and for a creeper whose fuse is
+    /// unlit. Interpolated from [`CreeperFuse::old_swell`]/`swell` by this
+    /// frame's partial tick, the same way [`Self::feet`] etc. are.
+    ///
+    /// This one field feeds **two** consumers downstream (both in `gpu.rs`,
+    /// not this module): the whole-model scale
+    /// (`Skeleton::pose_swelling`/`creeper_swell_scale`) and, via
+    /// [`lodestone_render::entity_anim::creeper_white_overlay_progress`] and
+    /// [`lodestone_render::entity_pipeline::creeper_overlay_alpha_from_progress`],
+    /// the white-flash overlay — see those two functions' docs for why one
+    /// swelling value is enough to drive both.
+    pub creeper_swelling: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -743,6 +769,62 @@ pub struct ItemPhysics {
     /// collision result and the server's own resting position. See
     /// [`step_item_physics`] for the (collision-aware) airborne case.
     pub grounded: bool,
+}
+
+/// Vanilla's `Creeper.DEFAULT_MAX_SWELL` (`Creeper.java:51`): the tick count a
+/// fuse counts up to before [`tick_creeper_fuse`] treats it as fully swollen.
+/// A creeper's real `maxSwell` can differ (the `Fuse` NBT tag), but that value
+/// is never synchronised to the client — see
+/// [`lodestone_render::entity_anim::MAX_SWELL`]'s doc for the same constant on
+/// the render side (`/ 28`, not `/ 30`, is `maxSwell - 2`).
+const CREEPER_MAX_SWELL_TICKS: i32 = 30;
+
+/// A creeper's fuse, integrated **client-side** one tick at a time from the
+/// synced [`EntitySnapshot::creeper_swell_dir`] — exactly what vanilla's own
+/// client does (`Creeper.java:139`, `this.swell += swellDir`), because only
+/// the *direction* is ever on the wire, never the counter itself. See
+/// [`lodestone_render::entity_anim::pose_swelling`]'s doc for the full
+/// derivation of why this split exists.
+///
+/// **Present only on entities whose [`RenderKind`] is `"creeper"`** — the
+/// same "absence is the switch" pattern [`ItemPhysics`] uses, so every other
+/// entity type carries no cost from this at all.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CreeperFuse {
+    /// The last-synced fuse direction: `-1` idle/backing off, `1` counting up
+    /// to detonation. [`tick_creeper_fuse`] only ever reads this;
+    /// [`update_track`] is what writes it, from a snapshot that reported one.
+    pub swell_dir: i32,
+    /// The integrated counter one tick ago — what [`extract_entity_draws`]
+    /// interpolates *from*, exactly as `Creeper.oldSwell` does.
+    pub old_swell: i32,
+    /// The integrated counter as of the most recent tick — what
+    /// [`extract_entity_draws`] interpolates *to*.
+    pub swell: i32,
+}
+
+impl CreeperFuse {
+    /// Vanilla's own accessor default (`Creeper.java:100`,
+    /// `entityData.define(DATA_SWELL_DIR, -1)`): idle, nothing swollen. Used
+    /// to seed a freshly spawned creeper before its first metadata report —
+    /// see [`spawn_track`].
+    pub const IDLE: Self = Self {
+        swell_dir: -1,
+        old_swell: 0,
+        swell: 0,
+    };
+}
+
+/// `GameTick` / `TickSet::Animate`: integrates every tracked creeper's fuse by
+/// exactly one tick, byte-for-byte `Creeper.java:139`'s
+/// `this.swell += swellDir` (clamped `0..=maxSwell` the same way `tick()`
+/// clamps it — `Creeper.java:140-145`). Run client-side because only
+/// [`CreeperFuse::swell_dir`] is ever synced; the counter itself is not.
+pub fn tick_creeper_fuse(mut fuses: Query<&mut CreeperFuse>) {
+    for mut fuse in &mut fuses {
+        fuse.old_swell = fuse.swell;
+        fuse.swell = (fuse.swell + fuse.swell_dir).clamp(0, CREEPER_MAX_SWELL_TICKS);
+    }
 }
 
 /// The occupied equipment slots, narrowed from [`EntitySnapshot::equipment`].
@@ -1079,6 +1161,8 @@ pub fn extract_pickup_draws(
             // A flying pickup is an item entity, not a living one: nothing can be
             // using it, so its variant resolves in `DisplaySlot::Ground` alone.
             item_use: None,
+            // An item entity is never a creeper.
+            creeper_swelling: 0.0,
         });
     }
 }
@@ -1439,6 +1523,10 @@ pub fn extract_entity_draws(
         &RenderEquipment,
         &RenderWool,
         &RenderNameTag,
+        // `Option`, not `&CreeperFuse` bare: present only on creepers, same
+        // "absence is the switch" shape `ItemPhysics` uses elsewhere in this
+        // module. Every non-creeper entity matches `None` here at zero cost.
+        Option<&CreeperFuse>,
     )>,
     mut out: ResMut<ExtractedDraws>,
 ) {
@@ -1448,7 +1536,7 @@ pub fn extract_entity_draws(
     // player with, which is the point of §4.1(c).
     let partial_tick = clock.interp_alpha.clamp(0.0, 1.0);
     out.0.clear();
-    for (id, kind, scale, from, to, clock, walk, equipment, wool, name_tag) in &tracks {
+    for (id, kind, scale, from, to, clock, walk, equipment, wool, name_tag, fuse) in &tracks {
         // One lookup, not two: `item` and `count` both come from the same
         // recorded stack, and a drop with no stack yet must not manufacture a
         // count out of nowhere.
@@ -1488,6 +1576,17 @@ pub fn extract_entity_draws(
             .and_then(|entity| item_uses.get(entity).ok())
             .map(|item_use| *item_use);
         let arm_pose = arm_pose_for(&kind.0, &equipment.0, item_use, aggressive);
+        // `0.0` (and hence a bit-identical `pose_swelling` to `pose`, per that
+        // function's own doc) for every non-creeper — `fuse` is `None` — and
+        // for a creeper whose fuse has never moved off idle. Vanilla's own
+        // `Creeper.getSwelling`: `lerp(partialTick, oldSwell, swell) /
+        // (maxSwell - 2)`, `maxSwell` fixed at 30 client-side (see
+        // `CREEPER_MAX_SWELL_TICKS`'s doc).
+        let creeper_swelling = fuse.map_or(0.0, |fuse| {
+            let old = fuse.old_swell as f32;
+            let new = fuse.swell as f32;
+            (old + (new - old) * partial_tick) / (CREEPER_MAX_SWELL_TICKS as f32 - 2.0)
+        });
         out.0.push(EntityDraw {
             id: id.0,
             type_path: kind.0.clone(),
@@ -1513,6 +1612,7 @@ pub fn extract_entity_draws(
             name_tag: name_tag.0.clone(),
             hurt,
             item_use,
+            creeper_swelling,
         });
     }
 }
@@ -1667,6 +1767,7 @@ fn fold_snapshots(world: &mut World, snapshots: &[EntitySnapshot]) {
 /// nowhere.
 fn spawn_track(world: &mut World, snap: &EntitySnapshot) {
     let is_item = snap.type_path == ITEM_ENTITY_TYPE_PATH;
+    let is_creeper = snap.type_path == "creeper";
     let mut entity = world.spawn((
         MinecraftEntityId(snap.id),
         RenderKind(snap.type_path.clone()),
@@ -1697,6 +1798,12 @@ fn spawn_track(world: &mut World, snap: &EntitySnapshot) {
     ));
     if is_item {
         entity.insert(new_item_physics(snap));
+    }
+    if is_creeper {
+        entity.insert(CreeperFuse {
+            swell_dir: snap.creeper_swell_dir.unwrap_or(CreeperFuse::IDLE.swell_dir),
+            ..CreeperFuse::IDLE
+        });
     }
     let entity = entity.id();
     world.resource_mut::<TrackIndex>().0.insert(snap.id, entity);
@@ -1740,6 +1847,16 @@ fn update_track(world: &mut World, entity: Entity, snap: &EntitySnapshot) {
     // `CUSTOM_NAME_VISIBLE` can toggle, neither of which moves the entity.
     if let Some(mut name_tag) = entity.get_mut::<RenderNameTag>() {
         name_tag.0.clone_from(&snap.name_tag);
+    }
+    // Same "outside the motion gate" reasoning once more: a creeper's fuse
+    // direction can flip while it stands still (backing away from a player it
+    // was swelling toward). Only overwritten when *reported* — `None` means
+    // this packet did not mention it, which must never reset a mid-fuse
+    // creeper back to idle. See `EntitySnapshot::creeper_swell_dir`.
+    if let Some(dir) = snap.creeper_swell_dir
+        && let Some(mut fuse) = entity.get_mut::<CreeperFuse>()
+    {
+        fuse.swell_dir = dir;
     }
 
     let (Some(from), Some(to), Some(clock)) = (
@@ -1867,6 +1984,7 @@ impl Plugin for EntityInterpPlugin {
         );
         app.add_systems(GameTick, tick_walk_animation.in_set(TickSet::Animate));
         app.add_systems(GameTick, tick_pickup_animations.in_set(TickSet::Animate));
+        app.add_systems(GameTick, tick_creeper_fuse.in_set(TickSet::Animate));
         app.add_systems(Extract, extract_entity_draws.in_set(ExtractSet::Entities));
         // **`.after` is load-bearing, not tidiness.** `extract_entity_draws`
         // clears `ExtractedDraws`; without the ordering, bevy is free to run this
@@ -2324,6 +2442,15 @@ mod tests {
             variant: None,
             count: 1,
             name_tag: None,
+            creeper_swell_dir: None,
+        }
+    }
+
+    fn creeper_snap(id: i32, swell_dir: Option<i32>) -> EntitySnapshot {
+        EntitySnapshot {
+            type_path: "creeper".into(),
+            creeper_swell_dir: swell_dir,
+            ..snap(id, Vec3::ZERO, 0.0)
         }
     }
 
@@ -2417,6 +2544,81 @@ mod tests {
         assert!(
             !interp.draws()[0].hurt,
             "HurtTime(0) is an expired countdown, not an absent one — the overlay must clear"
+        );
+    }
+
+    /// The full creeper-swell chain this pass wired, exercised end to end
+    /// through the public `update` seam — `EntitySnapshot::creeper_swell_dir`
+    /// → `spawn_track`'s `CreeperFuse` insert → `tick_creeper_fuse` (driven by
+    /// real 20 Hz ticks inside `update`, not hand-poked) →
+    /// `EntityDraw::creeper_swelling`. Live player report: "the creeper ...
+    /// doesnt expand/turn white or blink or whatever" — this is the render-side
+    /// half of "expand".
+    #[test]
+    fn a_primed_creepers_swelling_rises_over_real_ticks_and_a_non_creeper_never_swells() {
+        let mut interp = EntityInterpolator::new();
+
+        // A non-creeper must read exactly 0.0, always — the default every
+        // other entity type gets, at zero cost (no `CreeperFuse` component at
+        // all; see `EntityDraw::creeper_swelling`'s doc).
+        interp.update(&[snap(1, Vec3::ZERO, 0.0)], 1.0);
+        assert_eq!(
+            interp.draws()[0].creeper_swelling,
+            0.0,
+            "a non-creeper must never report a nonzero swell"
+        );
+
+        // A freshly spawned creeper whose first snapshot has not yet reported
+        // a fuse direction: seeded from vanilla's own idle default (`-1`), so
+        // it must read 0.0 too, the same as before this feature existed.
+        interp.update(&[creeper_snap(2, None)], 0.0);
+        let draw_for = |interp: &EntityInterpolator, id: i32| -> EntityDraw {
+            interp
+                .draws()
+                .into_iter()
+                .find(|d| d.id == id)
+                .unwrap_or_else(|| panic!("no draw for entity {id}"))
+        };
+        assert_eq!(
+            draw_for(&interp, 2).creeper_swelling,
+            0.0,
+            "an unreported fuse direction must seed idle (-1), not swell"
+        );
+
+        // Fold `swell_dir = 1` first, at `dt = 0.0` (no ticks run yet) — `update`
+        // runs this call's tick loop *before* folding this call's snapshot (see
+        // its own doc's numbered order), so a direction change only takes effect
+        // starting with the *next* call's ticks. Folding it alone first, then
+        // ticking a full second in a follow-up call, is what actually exercises
+        // `tick_creeper_fuse` at `swell_dir = 1`.
+        interp.update(&[creeper_snap(2, Some(1))], 0.0);
+        interp.update(&[creeper_snap(2, Some(1))], 1.0);
+        let swelling = draw_for(&interp, 2).creeper_swelling;
+        assert!(
+            swelling > 0.0,
+            "20 real ticks at swell_dir=1 produced no swelling at all — \
+             tick_creeper_fuse is not reaching this entity (the island this test \
+             exists to catch)"
+        );
+        // Vanilla's own divisor is `maxSwell - 2 = 28`; 20 ticks in one second
+        // cannot have crossed 1.0 (that needs the fuse to reach 28+ ticks),
+        // so this also catches a runaway integrator (e.g. ticking every frame
+        // instead of every 20 Hz tick).
+        assert!(
+            swelling < 1.0,
+            "20 ticks in produced swelling {swelling}, which should not yet be able to \
+             exceed 1.0 (that needs ~28 ticks) — the tick rate looks wrong"
+        );
+
+        // And backing off (`swell_dir = -1`) must bring it back down, proving
+        // the direction is actually read each update rather than latched once.
+        // Same fold-then-tick shape as above.
+        interp.update(&[creeper_snap(2, Some(-1))], 0.0);
+        interp.update(&[creeper_snap(2, Some(-1))], 2.0);
+        let receded = draw_for(&interp, 2).creeper_swelling;
+        assert!(
+            receded < swelling,
+            "swelling did not recede after 2s at swell_dir=-1: was {swelling}, now {receded}"
         );
     }
 
@@ -2867,6 +3069,7 @@ mod tests {
             variant: None,
             count: 1,
             name_tag: None,
+            creeper_swell_dir: None,
         }
     }
 

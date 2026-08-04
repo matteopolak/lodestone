@@ -336,3 +336,141 @@ fn stop_sound_rejects_truncated_source() {
     );
     assert!(result.is_err(), "a truncated source must be rejected");
 }
+
+// ---- explode (issue: live player report, "creeper has no explosion sound") --
+//
+// `ClientboundExplodePacket`'s wire order (`ClientboundExplodePacket.java`'s
+// `STREAM_CODEC.composite(...)` list): `center: Vec3` (three raw `f64`s, *not*
+// the sound packet's fixed-point ints — see `Vec3.java`'s own `STREAM_CODEC`),
+// `radius: f32`, `blockCount: i32` (plain 4-byte, `ByteBufCodecs.INT`),
+// `playerKnockback: Optional<Vec3>`, `explosionParticle: ParticleOptions`,
+// `explosionSound: Holder<SoundEvent>`, `blockParticles: WeightedList<...>`
+// (not decoded — see `decode_explode`'s doc). Golden bytes are hand-assembled
+// from that spec, not from our own encoder, per `CLAUDE.md`'s evidence
+// standard.
+
+/// A minimal, byte-accurate `explode` payload: centred at `(1.0, 2.0, 3.0)`,
+/// radius `3.0`, `blockCount` `0`, no player knockback, the
+/// `explosion_emitter` particle (registry id 29, a single-byte VarInt), and a
+/// registry-referenced `minecraft:entity.generic.explode` sound (holder id
+/// `700` = registry index `699`, a two-byte VarInt: low 7 bits `0x3C` with the
+/// continuation bit set is `0xBC`, then the remaining `5` is `0x05`).
+fn explode_bytes() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&1.0f64.to_be_bytes()); // center.x
+    bytes.extend_from_slice(&2.0f64.to_be_bytes()); // center.y
+    bytes.extend_from_slice(&3.0f64.to_be_bytes()); // center.z
+    bytes.extend_from_slice(&3.0f32.to_be_bytes()); // radius
+    bytes.extend_from_slice(&0i32.to_be_bytes()); // blockCount
+    bytes.push(0x00); // playerKnockback absent
+    bytes.push(29); // explosionParticle: explosion_emitter, single-byte VarInt
+    bytes.push(0xBC); // explosionSound holder id 700, byte 1
+    bytes.push(0x05); // explosionSound holder id 700, byte 2
+    // `blockParticles` deliberately omitted: `decode_explode` never reads it.
+    bytes
+}
+
+#[test]
+fn explode_decodes_the_explosion_sound_at_its_centre() {
+    let adapter = V770Adapter::new();
+    let directives = handle(&adapter, play::clientbound::EXPLODE, &explode_bytes());
+    assert_eq!(directives.len(), 1, "exactly one Sound directive");
+    let Directive::Emit(ClientEvent::Sound {
+        sound,
+        category,
+        pos,
+        volume,
+        pitch,
+        seed: _,
+        fixed_range: _,
+    }) = &directives[0]
+    else {
+        panic!("expected a Sound directive, got {:?}", directives[0]);
+    };
+    assert_eq!(*sound, key("minecraft:entity.generic.explode"));
+    assert_eq!(*category, SoundCategory::Block, "SoundSource.BLOCKS");
+    assert_eq!(
+        *pos,
+        Vec3 {
+            x: 1.0,
+            y: 2.0,
+            z: 3.0
+        }
+    );
+    // `volume` (4.0) and `pitch`'s formula are client constants, never on the
+    // wire (`ClientPacketListener.handleExplosion`); pitch is rolled fresh
+    // each decode, so only its documented bound is checked, not an exact
+    // value — `(1.0 ± 0.2) * 0.7` bounds to `[0.56, 0.84]`.
+    assert_eq!(*volume, 4.0);
+    assert!(
+        (0.56..=0.84).contains(pitch),
+        "pitch {pitch} outside vanilla's (1.0 +/- 0.2) * 0.7 band"
+    );
+}
+
+/// The `explosion` particle (registry id 30) is the other simple particle type
+/// `Level.explode`'s call sites can select; it must decode exactly like
+/// `explosion_emitter` above.
+#[test]
+fn explode_accepts_the_plain_explosion_particle_too() {
+    let adapter = V770Adapter::new();
+    let mut bytes = explode_bytes();
+    // Replace the single `explosionParticle` byte (29) with 30. Its position is
+    // fixed: 8 (center) + 8 (center) + 8 (center) + 4 (radius) + 4 (blockCount)
+    // + 1 (knockback absent) = 33.
+    assert_eq!(bytes[33], 29);
+    bytes[33] = 30;
+    let directives = handle(&adapter, play::clientbound::EXPLODE, &bytes);
+    assert_eq!(directives.len(), 1);
+}
+
+/// An unmodeled `explosionParticle` (anything but 29/30) must fail loudly
+/// rather than silently misparse the rest of the packet — the same
+/// reject-rather-than-guess convention `metadata.rs`'s `SER_PARTICLE` uses.
+#[test]
+fn explode_rejects_an_unmodeled_explosion_particle() {
+    let adapter = V770Adapter::new();
+    let mut bytes = explode_bytes();
+    bytes[33] = 5; // an arbitrary, unmodeled particle registry id
+    let result = adapter.handle_packet(
+        &mut World::new(),
+        ConnectionState::Play,
+        play::clientbound::EXPLODE,
+        &bytes,
+    );
+    assert!(result.is_err(), "an unrecognised particle id must not be guessed at");
+}
+
+/// Player knockback, when present, must still leave the reader aligned to
+/// reach `explosionSound` correctly — even though nothing consumes the
+/// knockback value itself yet.
+#[test]
+fn explode_stays_aligned_past_a_present_player_knockback() {
+    let adapter = V770Adapter::new();
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&0.0f64.to_be_bytes());
+    bytes.extend_from_slice(&64.0f64.to_be_bytes());
+    bytes.extend_from_slice(&0.0f64.to_be_bytes());
+    bytes.extend_from_slice(&3.0f32.to_be_bytes());
+    bytes.extend_from_slice(&12i32.to_be_bytes());
+    bytes.push(0x01); // playerKnockback present
+    bytes.extend_from_slice(&0.1f64.to_be_bytes());
+    bytes.extend_from_slice(&0.2f64.to_be_bytes());
+    bytes.extend_from_slice(&0.3f64.to_be_bytes());
+    bytes.push(29); // explosion_emitter
+    bytes.push(0xBC);
+    bytes.push(0x05);
+    let directives = handle(&adapter, play::clientbound::EXPLODE, &bytes);
+    let Directive::Emit(ClientEvent::Sound { sound, pos, .. }) = &directives[0] else {
+        panic!("expected a Sound directive");
+    };
+    assert_eq!(*sound, key("minecraft:entity.generic.explode"));
+    assert_eq!(
+        *pos,
+        Vec3 {
+            x: 0.0,
+            y: 64.0,
+            z: 0.0
+        }
+    );
+}

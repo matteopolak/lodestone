@@ -181,6 +181,7 @@ fn a_fully_armoured_zombie_draws_more_silhouette_than_a_bare_one() {
         count: 1,
         name_tag: None,
         item_use: None,
+        creeper_swelling: 0.0,
     };
     // The negative control: identical in every respect except equipment.
     let control = EntityDraw {

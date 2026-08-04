@@ -178,14 +178,58 @@ const IDX_BABY: u8 = 16;
 const IDX_SHEEP_WOOL: u8 = 18;
 const IDX_HORSE_VARIANT: u8 = 19;
 
+/// `Creeper.DATA_SWELL_DIR` (`Creeper.java:46`), `Creeper`'s first `defineId`
+/// and therefore index 16 — `Monster` (its superclass) declares none of its
+/// own, so the count runs `Entity`(0-7) → `LivingEntity`(8-14) → `Mob`(15) →
+/// `Creeper`(16-18) directly, with no `AgeableMob` in between (a creeper is
+/// not ageable). Verified against `tests/support/entity_data_index_jvm.txt`,
+/// not hand-counted — see that file's own warning about what hand-counting
+/// this exact shape (a class with no `Ageable` in its chain) has cost before.
+///
+/// An `INT`, `-1` or `1`: which way `swell` is currently moving, integrated
+/// **client-side** every tick exactly as the server does (`Creeper.java:139`,
+/// `this.swell += swellDir`) — only the direction is synced, never the
+/// counter itself. See [`crate::adapter`]'s per-tick fuse integration and
+/// `lodestone_render::entity_anim::pose_swelling`'s docs for why that split
+/// exists.
+const IDX_CREEPER_SWELL_DIR: u8 = 16;
+/// `Creeper.DATA_IS_POWERED` (`Creeper.java:47`), index 17 — a `BOOLEAN`, set
+/// once by `thunderHit` (`Creeper.java:206`) and never cleared. Doubles the
+/// explosion radius (`Creeper.java:232`) and gates the charged-creeper skull
+/// drop; not consumed by rendering yet.
+const IDX_CREEPER_POWERED: u8 = 17;
+/// `Creeper.DATA_IS_IGNITED` (`Creeper.java:48`), index 18 — a `BOOLEAN`, set
+/// once by `ignite()` (flint-and-steel or fire-charge, `Creeper.java:264`) and
+/// never cleared. Distinct from a **non**-ignited swell (the `SwellGoal`
+/// proximity case, which moves `swell_dir` without ever setting this):
+/// `ignited` alone would miss a creeper that swells because a player got
+/// close and then backs off before detonation, since that path only ever
+/// touches `DATA_SWELL_DIR`.
+const IDX_CREEPER_IGNITED: u8 = 18;
+/// Both of index 18's claimants share nothing (`BYTE` vs `BOOLEAN`), so the
+/// serializer alone tells them apart at decode time — but see the module's
+/// `decode_value` for why the *index* still needs a class guard: a mob this
+/// seam does not model could in principle also declare a `BOOLEAN` at 18.
+
 /// The mobs whose cosmetic variant sits at an index that other mobs reuse for an
 /// unrelated field, so the raiser can only read it when the concrete entity type
 /// is known. Registry-holder variants (cat, cow, …) are self-identifying by
 /// serializer and need no entry here.
+///
+/// [`Creeper`](Self::Creeper) is here for the same structural reason, not a
+/// cosmetic variant: indices 16-18 are `Creeper`'s own fields, and every one of
+/// them is claimed by several *other* mobs' unrelated `INT`/`BOOLEAN` fields at
+/// the same index (`Display.DATA_BRIGHTNESS_OVERRIDE_ID`, `EnderDragon.DATA_PHASE`
+/// and `Warden.CLIENT_ANGER_LEVEL` are all `INT` at 16; `EnderMan.DATA_CREEPY` and
+/// `Witch.DATA_USING_ITEM` are both `BOOLEAN` at 17 — see
+/// `tests/support/entity_data_index_jvm.txt`). Without this guard a warden's
+/// anger level would decode as a creeper's swell direction on any client that
+/// also tracks wardens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetadataClass {
     Sheep,
     Horse,
+    Creeper,
 }
 
 /// Classifies a resolved entity-type identifier into the [`MetadataClass`] whose
@@ -195,6 +239,7 @@ pub fn metadata_class(entity_type: &str) -> Option<MetadataClass> {
     match entity_type {
         "minecraft:sheep" => Some(MetadataClass::Sheep),
         "minecraft:horse" => Some(MetadataClass::Horse),
+        "minecraft:creeper" => Some(MetadataClass::Creeper),
         _ => None,
     }
 }
@@ -573,6 +618,26 @@ pub fn read_entity_metadata(
                     markings: ((v >> 8) & 0xFF) as u8,
                 });
             }
+            // A creeper's fuse direction (-1 idle/retreating, 1 counting up to
+            // detonation). Guarded on class: index 16 is an `INT` on several other
+            // mobs too (`Display`, `EnderDragon`, `Phantom`, `Warden`, `WitherBoss`
+            // — see `IDX_CREEPER_SWELL_DIR`'s doc), none of which mean a creeper's
+            // swell.
+            (IDX_CREEPER_SWELL_DIR, Value::Int(v)) if class == Some(MetadataClass::Creeper) => {
+                md.creeper_swell_dir = Some(v);
+            }
+            // Charged (lightning-struck): doubles the explosion radius and gates
+            // the charged-creeper skull drop. Guarded for the same reason as
+            // above — index 17 is `BOOLEAN` on several unrelated mobs.
+            (IDX_CREEPER_POWERED, Value::Bool(b)) if class == Some(MetadataClass::Creeper) => {
+                md.creeper_powered = Some(b);
+            }
+            // Lit by flint-and-steel/fire charge. Guarded for the same reason —
+            // index 18 is `BOOLEAN` on several unrelated mobs, distinct from the
+            // sheep's `BYTE` at the same index just above.
+            (IDX_CREEPER_IGNITED, Value::Bool(b)) if class == Some(MetadataClass::Creeper) => {
+                md.creeper_ignited = Some(b);
+            }
             // Registry-holder variants identify themselves by serializer, so the
             // index is irrelevant and no class context is needed.
             (_, Value::Keyed(key)) => md.variant = Some(EntityVariant::Keyed(key)),
@@ -698,6 +763,14 @@ mod tests {
     fn a_horse() -> TrackedEntity {
         TrackedEntity {
             class: Some(MetadataClass::Horse),
+            living: true,
+            mob: true,
+        }
+    }
+
+    fn a_creeper() -> TrackedEntity {
+        TrackedEntity {
+            class: Some(MetadataClass::Creeper),
             living: true,
             mob: true,
         }
@@ -1190,6 +1263,112 @@ mod tests {
         assert_eq!(md.variant, None);
     }
 
+    /// A primed creeper's three fields: fuse direction (index 16, `INT`),
+    /// powered (17, `BOOLEAN`), ignited (18, `BOOLEAN`) — all raised together on
+    /// a known creeper. These were undecoded entirely before this seam (issue:
+    /// live player report, "no swelling, no white flash"): `swell_dir` existed
+    /// on the wire but had nowhere to land, which is why
+    /// `lodestone_render::entity_anim::pose_swelling`'s working swell math never
+    /// reached a real creeper.
+    #[test]
+    fn creeper_fields_are_raised_together() {
+        let mut bytes = Vec::new();
+        bytes.push(IDX_CREEPER_SWELL_DIR);
+        bytes.extend(varint(SER_INT));
+        bytes.extend(varint(1)); // counting up: ignited or in SwellGoal range
+        bytes.push(IDX_CREEPER_POWERED);
+        bytes.extend(varint(SER_BOOLEAN));
+        bytes.push(1);
+        bytes.push(IDX_CREEPER_IGNITED);
+        bytes.extend(varint(SER_BOOLEAN));
+        bytes.push(1);
+        bytes.push(EOF_MARKER);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, a_creeper())
+            .expect("decode")
+            .metadata;
+        reader.ensure_empty().expect("no trailing bytes");
+        assert_eq!(md.creeper_swell_dir, Some(1));
+        assert_eq!(md.creeper_powered, Some(true));
+        assert_eq!(md.creeper_ignited, Some(true));
+    }
+
+    /// The idle default: `swell_dir == -1` (`Creeper.java:100`,
+    /// `entityData.define(DATA_SWELL_DIR, -1)`), `powered`/`ignited` both
+    /// `false`. A real server never puts these on the wire for an ordinary
+    /// spawn (`SynchedEntityData` only sends non-default values — the same
+    /// mechanism the sheep-wool fix's module docs describe), so this is what
+    /// `handle_add_entity`'s synthesized default must produce, not what a real
+    /// packet carries.
+    #[test]
+    fn creeper_idle_defaults_decode_when_present() {
+        let mut bytes = Vec::new();
+        bytes.push(IDX_CREEPER_SWELL_DIR);
+        bytes.extend(varint(SER_INT));
+        bytes.extend(varint(-1));
+        bytes.push(EOF_MARKER);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, a_creeper())
+            .expect("decode")
+            .metadata;
+        reader.ensure_empty().expect("no trailing bytes");
+        assert_eq!(md.creeper_swell_dir, Some(-1));
+    }
+
+    /// **The control, and it must fail without the class guard.** Index 16's
+    /// `INT` is also `Warden.CLIENT_ANGER_LEVEL` — bit-identical serializer, no
+    /// other signal distinguishes them. Without `if class ==
+    /// Some(MetadataClass::Creeper)` this test fails: a warden's anger level
+    /// would decode as `creeper_swell_dir`, and every warden in render distance
+    /// would report a creeper's fuse. Run by deleting the guard to watch it
+    /// fail — it was watched.
+    #[test]
+    fn index_16_without_creeper_class_is_consumed_but_not_surfaced() {
+        let mut bytes = Vec::new();
+        bytes.push(IDX_CREEPER_SWELL_DIR);
+        bytes.extend(varint(SER_INT));
+        bytes.extend(varint(37)); // a plausible warden anger level
+        // A following field to prove alignment survived the unmatched value.
+        bytes.push(IDX_HEALTH);
+        bytes.extend(varint(SER_FLOAT));
+        bytes.extend(4.0f32.to_be_bytes());
+        bytes.push(EOF_MARKER);
+        for tracked in [a_mob(), a_sheep(), a_horse()] {
+            let mut reader = Reader::new(&bytes);
+            let md = read_entity_metadata(&mut reader, tracked)
+                .expect("decode")
+                .metadata;
+            reader.ensure_empty().expect("the value must be consumed, staying aligned");
+            assert_eq!(
+                md.creeper_swell_dir, None,
+                "a non-creeper's index-16 INT must not surface as a creeper's swell direction"
+            );
+            assert_eq!(md.health, Some(4.0), "the following field must still align");
+        }
+    }
+
+    /// The same control for the two `BOOLEAN` fields (17 powered, 18 ignited),
+    /// which collide with `Witch.DATA_USING_ITEM`/`EnderMan.DATA_CREEPY` (17)
+    /// and `Turtle.HAS_EGG`/`Ocelot.DATA_TRUSTING` (18) among others.
+    #[test]
+    fn indices_17_and_18_without_creeper_class_are_consumed_but_not_surfaced() {
+        let mut bytes = Vec::new();
+        bytes.push(IDX_CREEPER_POWERED);
+        bytes.extend(varint(SER_BOOLEAN));
+        bytes.push(1);
+        bytes.push(IDX_CREEPER_IGNITED);
+        bytes.extend(varint(SER_BOOLEAN));
+        bytes.push(1);
+        bytes.push(EOF_MARKER);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, a_mob())
+            .expect("decode")
+            .metadata;
+        reader.ensure_empty().expect("no trailing bytes");
+        assert_eq!(md.creeper_powered, None);
+        assert_eq!(md.creeper_ignited, None);
+    }
+
     /// A registry-holder appearance variant (here a wolf, serializer 25) is
     /// self-identifying: it raises `Keyed` from the serializer alone, at whatever
     /// index it appears and with no class context. Wire value is `id + 1`.
@@ -1440,6 +1619,24 @@ mod tests {
                 "Horse.DATA_ID_TYPE_VARIANT",
                 SER_INT,
             ),
+            (
+                IDX_CREEPER_SWELL_DIR,
+                "IDX_CREEPER_SWELL_DIR",
+                "Creeper.DATA_SWELL_DIR",
+                SER_INT,
+            ),
+            (
+                IDX_CREEPER_POWERED,
+                "IDX_CREEPER_POWERED",
+                "Creeper.DATA_IS_POWERED",
+                SER_BOOLEAN,
+            ),
+            (
+                IDX_CREEPER_IGNITED,
+                "IDX_CREEPER_IGNITED",
+                "Creeper.DATA_IS_IGNITED",
+                SER_BOOLEAN,
+            ),
         ];
         assert!(!claims.is_empty(), "the claim table is empty, so this test proves nothing");
         for &(constant, name, owner_field, serializer) in claims {
@@ -1483,6 +1680,35 @@ mod tests {
             assert!(
                 at_15.contains(&(owner.to_owned(), SER_BYTE)),
                 "index 15 does not claim {owner} as a BYTE in the dump"
+            );
+        }
+
+        // Index 16 is `Creeper.DATA_SWELL_DIR` *and* an unrelated `INT` on at
+        // least `Warden.CLIENT_ANGER_LEVEL` — the `Creeper` class guard's premise
+        // for `index_16_without_creeper_class_is_consumed_but_not_surfaced`.
+        let at_16 = dump_claimants(16);
+        for owner in ["Creeper.DATA_SWELL_DIR", "Warden.CLIENT_ANGER_LEVEL"] {
+            assert!(
+                at_16.contains(&(owner.to_owned(), SER_INT)),
+                "index 16 does not claim {owner} as an INT in the dump; the `Creeper` class \
+                 guard's premise is not what this test thinks it is"
+            );
+        }
+
+        // Indices 17 and 18 are `Creeper.DATA_IS_POWERED`/`DATA_IS_IGNITED` *and*
+        // unrelated `BOOLEAN`s on other mobs.
+        let at_17 = dump_claimants(17);
+        for owner in ["Creeper.DATA_IS_POWERED", "Witch.DATA_USING_ITEM"] {
+            assert!(
+                at_17.contains(&(owner.to_owned(), SER_BOOLEAN)),
+                "index 17 does not claim {owner} as a BOOLEAN in the dump"
+            );
+        }
+        let at_18 = dump_claimants(18);
+        for owner in ["Creeper.DATA_IS_IGNITED", "Turtle.HAS_EGG"] {
+            assert!(
+                at_18.contains(&(owner.to_owned(), SER_BOOLEAN)),
+                "index 18 does not claim {owner} as a BOOLEAN in the dump"
             );
         }
 

@@ -14,6 +14,7 @@ The chain, end to end, all of which exists:
 | stage | where |
 |---|---|
 | `SOUND` (117) / `SOUND_ENTITY` (116) decode | `crates/protocol/v770/src/adapter.rs:3405` |
+| `EXPLODE` (36, `minecraft:explode`) decode → `ClientEvent::Sound` | `adapter.rs`'s `decode_explode` — one packet's `explosionSound` field, no separate event type |
 | → `ClientEvent::Sound` / `EntitySound` | `adapter.rs:1340`, `:1362` |
 | → `NetUpdate::Sound` / `EntitySound` | `crates/lodestone-shell/src/net.rs:1212`, `:1228` |
 | → `ShellAudio::play_sound` | `crates/lodestone-shell/src/sim.rs:4631`, `:4644` |
@@ -103,7 +104,8 @@ guesswork; it follows from whether vanilla's server passes an *excluded player* 
 |---|---|---|
 | mob idle / hurt / death | `Entity.playSound` → `playSound(null, …)`, broadcast to all | **plays** |
 | chest lid open / close | `ChestBlockEntity.playSound` → `playSound(null, …)` server-side | **plays** |
-| item and XP pickup, explosions, ambient loops, weather | server-broadcast | **plays** |
+| item and XP pickup, ambient loops, weather | server-broadcast | **plays** |
+| explosion (creeper, TNT, bed, respawn anchor) | `ClientboundExplodePacket.explosionSound`, a **dedicated packet** (id 36, `minecraft:explode`) — see below | **plays** (new) |
 | *another* player's placements | excluded player is *them*, so we get it | **plays** |
 | **cascading** block break (torch losing support, fire, explosion) | `Level.destroyBlock` → `levelEvent(2001, …)`, no exclusion (`Level.java:280-289`) | **plays** (new) |
 | **your own** block placement | `BlockItem.place` → `playSound(player, …)` (`BlockItem.java:87`) — predicted | **plays** (new) |
@@ -143,6 +145,46 @@ Vanilla makes your own break audible by *predicting* it: the client's
 `Block.spawnDestroyParticles` → `level.levelEvent(player, 2001, pos, id)`, and
 `ClientLevel.levelEvent` **ignores the exclusion** and dispatches straight into the
 same `case 2001` locally (`ClientLevel.java:877-882`) — sound and debris together.
+
+### The explosion sound was not decoded at all — and it is not client-predicted
+
+Live player report: "the creeper has a hiss but no explosion sound." The hiss
+(`entity.creeper.primed`, `Creeper.java:135`, an ordinary `Entity.playSound`)
+was already audible — it is only the detonation that was silent, and the
+reason is structural, not a routing gap: `v770` never decoded packet id 36
+(`minecraft:explode`) at all before this change, so there was nothing for any
+router to forward.
+
+This is **not** the block-break trap repeated. Block breaking's own defect was
+"vanilla predicts your own break client-side and sends nothing" — the sound
+genuinely never crosses the wire for the player's own dig. An explosion is the
+opposite case, verified the same way: `Creeper.explodeCreeper` (`Creeper.java:
+230-239`) calls `level.explode(...)`, which always resolves to `Level.java:
+1208`'s six-argument overload, which constructs a `ServerExplosion` and — after
+`explosion.explode()` runs — sends exactly one `ClientboundExplodePacket` per
+in-range client, carrying `center`, `radius`, `blockCount`, an optional player
+knockback, `explosionParticle`, `explosionSound` (a `Holder<SoundEvent>`,
+`GENERIC_EXPLODE` for a plain creeper) and a `blockParticles` list.
+`ClientPacketListener.handleExplosion` (`ClientPacketListener.java:1357`) does
+nothing but play exactly what the server sent — at a **client-rolled** pitch,
+since neither `volume` (a fixed `4.0F`) nor `pitch`
+(`(1.0F + (random.nextFloat() - random.nextFloat()) * 0.2F) * 0.7F`) is on the
+wire at all. `decode_explode` (`crates/protocol/v770/src/adapter.rs`) rolls the
+identical die rather than inventing a fixed pitch, which is why its emitted
+`ClientEvent::Sound` reaches `net.rs`'s existing `Sound` forwarding arm with no
+new routing needed — this is a decode gap closed entirely inside `v770`, not
+an island in any of the three routers.
+
+`decode_explode` deliberately does not model the whole packet: `explosionParticle`
+is consumed via a narrow allowlist (the two "simple", argument-less particle
+registry ids `Level.explode`'s call sites ever use, `explosion_emitter`/
+`explosion`) rather than the full particle-options codec, and `blockParticles`
+(the flying-debris list) is not decoded at all — `explosionSound` is the
+second-to-last field, so nothing downstream needs it yet. This means the
+explosion shockwave/smoke particle and the block-debris particles are both
+still **unimplemented**: `explosionParticle`'s registry id is recognised only
+to stay byte-aligned past it, never spawned. The player's own report ("or
+whatever") plausibly includes these; only the sound is fixed here.
 
 ### What is still missing, and the exact seam
 
