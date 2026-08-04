@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use lodestone_core::State;
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Difficulty};
 use lodestone_net::{Connection, NetError, Transport};
 
 use crate::chunk::{AIR, ChunkSource, STONE, is_air_or_fluid, is_water};
@@ -437,6 +437,9 @@ where
             | ServerBound::PlayerMoved { .. }
             | ServerBound::BlockAction { .. }
             | ServerBound::UseItemOn { .. }
+            | ServerBound::DifficultyChanged { .. }
+            | ServerBound::DifficultyLockChanged { .. }
+            | ServerBound::GameRuleChanged { .. }
             | ServerBound::Ignored => {}
         }
     }
@@ -558,13 +561,107 @@ where
     Ok(())
 }
 
+/// Per-connection difficulty + game-rule session state (issue #268).
+///
+/// This crate has no permission/operator model and no `GameRules` registry —
+/// see [`apply_difficulty_change`]/[`apply_game_rule_changed`]'s own doc
+/// comments — so this is deliberately the smallest state that lets the round
+/// trip (a `ServerBound::DifficultyChanged`/`DifficultyLockChanged`/
+/// `GameRuleChanged` request in, a confirmation back out) be real and
+/// observable without inventing a full world-rules model. Per-connection
+/// rather than shared across connections, matching `player_pos`/`vitals`/
+/// `fall`'s existing precedent in [`serve_play`] — a real scope cut for
+/// open-to-LAN (two connections would each hold an independent view, and
+/// neither would see the other's change), documented rather than silent.
+#[derive(Debug)]
+struct WorldAdminState {
+    difficulty: Difficulty,
+    difficulty_locked: bool,
+    game_rules: HashMap<String, String>,
+}
+
+impl Default for WorldAdminState {
+    fn default() -> Self {
+        Self {
+            // Matches `LevelSettings.DEFAULT`'s difficulty
+            // (`.cache/mc/26.2/src/net/minecraft/world/level/levelgen/`
+            // `WorldOptions.java`'s sibling `LevelSettings` default) — a
+            // fresh session's starting point before any
+            // `DifficultyChanged` request rewrites it.
+            difficulty: Difficulty::Normal,
+            difficulty_locked: false,
+            game_rules: HashMap::new(),
+        }
+    }
+}
+
+/// Applies a difficulty-change request (`ServerBound::DifficultyChanged`),
+/// mirroring `ServerGamePacketListenerImpl::handleChangeDifficulty`
+/// (`.cache/mc/26.2/src/net/minecraft/server/network/ServerGamePacketListenerImpl.java:2088-2099`)
+/// minus its permission check: vanilla gates this on
+/// `Permissions.COMMANDS_GAMEMASTER` **or** `isSingleplayerOwner()`, and
+/// every connection this crate ever serves *is* the singleplayer owner (no
+/// accounts/op model exists — the same simplification `docs/singleplayer.md`
+/// already documents elsewhere for this integrated server), so the check
+/// always passes here. Confirms back to the *same* connection via
+/// [`ServerProtocol::encode_change_difficulty`]; vanilla instead broadcasts
+/// to every player (`MinecraftServer::setDifficulty` → `PlayerList`), which
+/// needs cross-connection state this crate does not share — see
+/// [`WorldAdminState`]'s own doc comment.
+async fn apply_difficulty_change<T, P>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    state: &mut State,
+    admin: &mut WorldAdminState,
+) -> Result<(), ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+{
+    let directive = proto.encode_change_difficulty(admin.difficulty, admin.difficulty_locked);
+    apply(conn, state, directive).await
+}
+
+/// Applies a game-rule change request (`ServerBound::GameRuleChanged`),
+/// mirroring `ServerGamePacketListenerImpl::handleSetGameRule`
+/// (`.cache/mc/26.2/src/net/minecraft/server/network/ServerGamePacketListenerImpl.java:800-816`)
+/// minus its permission check (see [`apply_difficulty_change`]'s doc comment
+/// for why) and minus rule-name/value validation: vanilla looks each key up
+/// in `BuiltInRegistries.GAME_RULE` and parses `value` through that rule's
+/// own type (`GameRule<T>::deserialize`), discarding an unknown key or an
+/// unparseable value with a warning log. This crate has no `GameRules`
+/// registry (see [`WorldAdminState`]'s own doc comment) — every entry is
+/// stored verbatim as `(String, String)`, unvalidated. Confirms back to the
+/// same connection with exactly the entries that were just set; vanilla's
+/// `broadcastGameRuleChangeToOperators` instead sends one packet per changed
+/// rule to every operator.
+async fn apply_game_rule_changed<T, P>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    state: &mut State,
+    admin: &mut WorldAdminState,
+    entries: Vec<(String, String)>,
+) -> Result<(), ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+{
+    for (key, value) in &entries {
+        admin.game_rules.insert(key.clone(), value.clone());
+    }
+    let directive = proto.encode_game_rule_values(&entries);
+    apply(conn, state, directive).await
+}
+
 /// Decodes and applies one inbound packet once the connection is in
 /// [`State::Play`]: matches a keep-alive echo against the pending challenge
 /// (clearing it, so the next keep-alive tick does not mistake a live client
 /// for a dead one), streams the view when the player's chunk column changed,
 /// tracks the player's latest position for [`PlayerVitals`]' submersion test,
-/// feeds [`FallTracker`] and applies any resulting fall damage, or applies a
-/// block break/placement (see [`apply_block_action`]/[`apply_use_item_on`]).
+/// feeds [`FallTracker`] and applies any resulting fall damage, applies a
+/// block break/placement (see [`apply_block_action`]/[`apply_use_item_on`]),
+/// or applies a difficulty/game-rule change (see
+/// [`apply_difficulty_change`]/[`apply_game_rule_changed`]).
 /// Every other packet decodes to [`ServerBound::Ignored`] in `State::Play`
 /// under the current protocols (no further state transitions are modeled —
 /// no respawn/dimension change yet) and is a no-op here.
@@ -581,6 +678,7 @@ async fn dispatch_play_packet<T, P, S>(
     player_pos: &mut Option<(f64, f64, f64)>,
     fall: &mut FallTracker,
     vitals: &mut PlayerVitals,
+    admin: &mut WorldAdminState,
     packet_id: i32,
     payload: &[u8],
 ) -> Result<(), ServerError>
@@ -627,6 +725,17 @@ where
             sequence: _,
         } => {
             apply_use_item_on(conn, proto, source, state, pos, face).await?;
+        }
+        ServerBound::DifficultyChanged { difficulty } => {
+            admin.difficulty = difficulty;
+            apply_difficulty_change(conn, proto, state, admin).await?;
+        }
+        ServerBound::DifficultyLockChanged { locked } => {
+            admin.difficulty_locked = locked;
+            apply_difficulty_change(conn, proto, state, admin).await?;
+        }
+        ServerBound::GameRuleChanged { entries } => {
+            apply_game_rule_changed(conn, proto, state, admin, entries).await?;
         }
         ServerBound::Handshake { .. }
         | ServerBound::LoginStart { .. }
@@ -708,6 +817,7 @@ where
     let mut player_pos: Option<(f64, f64, f64)> = None;
     let mut vitals = PlayerVitals::default();
     let mut fall = FallTracker::default();
+    let mut admin = WorldAdminState::default();
     let mut keep_alive_tick = tokio::time::interval_at(
         tokio::time::Instant::now() + KEEP_ALIVE_INTERVAL,
         KEEP_ALIVE_INTERVAL,
@@ -750,6 +860,7 @@ where
                     &mut player_pos,
                     &mut fall,
                     &mut vitals,
+                    &mut admin,
                     packet_id,
                     &payload,
                 )
@@ -837,6 +948,7 @@ where
     let mut player_pos: Option<(f64, f64, f64)> = None;
     let mut vitals = PlayerVitals::default();
     let mut fall = FallTracker::default();
+    let mut admin = WorldAdminState::default();
 
     while let Some((packet_id, payload)) = conn.read_packet().await? {
         dispatch_play_packet(
@@ -851,6 +963,7 @@ where
             &mut player_pos,
             &mut fall,
             &mut vitals,
+            &mut admin,
             packet_id,
             &payload,
         )

@@ -43,7 +43,7 @@
 use std::collections::HashMap;
 
 use lodestone_core::{Ctx, Decode, Encode, Nbt, Reader, Writer, write_network_nbt};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Difficulty};
 use lodestone_server::{
     ChunkColumn as ServerChunkColumn, EntitySnapshot, ServerBound, ServerDirective, ServerProtocol,
 };
@@ -58,8 +58,9 @@ use crate::packets::common::KeepAlive;
 use crate::packets::configuration::FinishConfiguration;
 use crate::packets::entity::{pack_degrees, write_lp_vec3};
 use crate::packets::game::{
-    GameLogin, GlobalPos, MOVE_FLAG_ON_GROUND, MovePlayerPos, MovePlayerPosRot, PlayerAction,
-    SetDefaultSpawnPosition, SetHealth, UseItemOn,
+    ChangeDifficultyClientbound, ChangeDifficultyServerbound, GameLogin, GameRuleEntry,
+    GameRuleValues, GlobalPos, LockDifficulty, MOVE_FLAG_ON_GROUND, MovePlayerPos,
+    MovePlayerPosRot, PlayerAction, SetDefaultSpawnPosition, SetGameRule, SetHealth, UseItemOn,
 };
 use crate::packets::handshake::Intention;
 use crate::packets::login::{LoginFinished, LoginHello};
@@ -249,6 +250,34 @@ fn face_from_ordinal(ordinal: i32) -> BlockFace {
         3 => BlockFace::South,
         4 => BlockFace::West,
         _ => BlockFace::East,
+    }
+}
+
+/// Maps a wire difficulty ordinal (`0` peaceful … `3` hard,
+/// `Difficulty.STREAM_CODEC`) to [`Difficulty`], mirroring `V770Adapter`'s
+/// own `CHANGE_DIFFICULTY` decode (`adapter.rs`, the clientbound direction of
+/// the same wire concept): an out-of-range id decodes to `None` rather than
+/// vanilla's `ByIdMap.OutOfBoundsStrategy::WRAP` silently aliasing it to a
+/// different difficulty — a malformed packet drops (`ServerBound::Ignored`),
+/// it does not misreport.
+fn difficulty_from_ordinal(ordinal: i32) -> Option<Difficulty> {
+    match ordinal {
+        0 => Some(Difficulty::Peaceful),
+        1 => Some(Difficulty::Easy),
+        2 => Some(Difficulty::Normal),
+        3 => Some(Difficulty::Hard),
+        _ => None,
+    }
+}
+
+/// The inverse of [`difficulty_from_ordinal`], for encoding a confirmation
+/// back out.
+fn difficulty_to_ordinal(difficulty: Difficulty) -> i32 {
+    match difficulty {
+        Difficulty::Peaceful => 0,
+        Difficulty::Easy => 1,
+        Difficulty::Normal => 2,
+        Difficulty::Hard => 3,
     }
 }
 
@@ -746,6 +775,39 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
+            // Issue #268: world/block-admin decode. `CHANGE_DIFFICULTY`,
+            // `LOCK_DIFFICULTY` and `SET_GAME_RULE` are the three cheap,
+            // observable packets from that issue's 13 — see
+            // `crate::server::apply_difficulty_change`/
+            // `apply_game_rule_changed` for the consumer and
+            // `WorldAdminState`'s doc comment for what is deliberately not
+            // modelled (a `GameRules` registry, cross-connection broadcast).
+            // The command/structure/jigsaw-block and test-only packets from
+            // the same issue are deliberately not decoded here — see that
+            // issue's tracker comment for why each is a deep feature rather
+            // than a decode gap.
+            State::Play if packet_id == play::serverbound::CHANGE_DIFFICULTY => {
+                match decode_full::<ChangeDifficultyServerbound>(payload)
+                    .and_then(|p| difficulty_from_ordinal(p.difficulty))
+                {
+                    Some(difficulty) => ServerBound::DifficultyChanged { difficulty },
+                    None => ServerBound::Ignored,
+                }
+            }
+            State::Play if packet_id == play::serverbound::LOCK_DIFFICULTY => {
+                match decode_full::<LockDifficulty>(payload) {
+                    Some(p) => ServerBound::DifficultyLockChanged { locked: p.locked },
+                    None => ServerBound::Ignored,
+                }
+            }
+            State::Play if packet_id == play::serverbound::SET_GAME_RULE => {
+                match decode_full::<SetGameRule>(payload) {
+                    Some(p) => ServerBound::GameRuleChanged {
+                        entries: p.entries.into_iter().map(|e| (e.key, e.value)).collect(),
+                    },
+                    None => ServerBound::Ignored,
+                }
+            }
             _ => ServerBound::Ignored,
         }
     }
@@ -996,6 +1058,39 @@ impl ServerProtocol for V770ServerProtocol {
                 health: health.clamp(0.0, 20.0),
                 food: 20,
                 saturation: 5.0,
+            },
+        )
+    }
+
+    /// Issue #268's difficulty confirmation — see
+    /// [`ServerProtocol::encode_change_difficulty`]'s trait doc comment and
+    /// `crate::server::apply_difficulty_change` for the consumer.
+    fn encode_change_difficulty(&self, difficulty: Difficulty, locked: bool) -> ServerDirective {
+        send(
+            play::clientbound::CHANGE_DIFFICULTY,
+            &ChangeDifficultyClientbound {
+                difficulty: difficulty_to_ordinal(difficulty),
+                locked,
+            },
+        )
+    }
+
+    /// Issue #268's game-rule confirmation — see
+    /// [`ServerProtocol::encode_game_rule_values`]'s trait doc comment and
+    /// `crate::server::apply_game_rule_changed` for the consumer. Carries
+    /// only `entries` (the just-changed rules), not vanilla's full current
+    /// table — see [`GameRuleValues`]'s own doc comment.
+    fn encode_game_rule_values(&self, entries: &[(String, String)]) -> ServerDirective {
+        send(
+            play::clientbound::GAME_RULE_VALUES,
+            &GameRuleValues {
+                entries: entries
+                    .iter()
+                    .map(|(key, value)| GameRuleEntry {
+                        key: key.clone(),
+                        value: value.clone(),
+                    })
+                    .collect(),
             },
         )
     }
