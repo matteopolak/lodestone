@@ -455,10 +455,11 @@ particular that mattered:
    wool mesh, tints via `sheep_wool_tint(color)`, and accumulates per-part
    instance buffers (`WoolPartAccum`, mirroring `ArmourPartAccum` minus the
    texture grouping armour needs and wool does not — one mesh, one sheet).
-   Drawn through the **base** entity pipeline (`self.entities.pipeline.pipeline`,
-   `Less`), not `armour_pipeline` (`LessEqual`), for exactly the reason
-   specified: wool has no second layer at the same inflation to correct
-   z-fighting for. `EntityRenderer` gained `wool_models: SheepWoolModelSet`,
+   Drawn through the **base** entity pipeline (`self.entities.pipeline.pipeline`),
+   not `armour_pipeline`, for exactly the reason specified: wool has no second
+   layer at the same inflation to correct z-fighting for. (Both pipelines are
+   `LessEqual` since issue #21, so this is now a choice of pass, not of depth
+   compare — see `docs/armour-rendering.md`'s depth section.) `EntityRenderer` gained `wool_models: SheepWoolModelSet`,
    `wool_gpu: Option<GpuEntityModel>` and `wool_texture: Option<wgpu::BindGroup>`
    (no per-material table — there is only one mesh), loaded from
    `entity/sheep/sheep_wool.png` by a `load_sheep_wool_texture` that

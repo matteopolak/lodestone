@@ -60,10 +60,13 @@ pub(super) struct EntityRenderer {
     /// per frame to pair each part with the wearer's own part index, the same
     /// as `armour_models`), its GPU upload, and its one texture bind group.
     ///
-    /// Drawn through the **base** entity pipeline (`self.pipeline`, `Less`),
-    /// not `armour_pipeline` (`LessEqual`) — wool has no second layer at the
-    /// same inflation as itself, so there is no coplanar z-fighting to correct
-    /// for the way leather's dyeable base and overlay need. See
+    /// Drawn through the **base** entity pipeline (`self.pipeline`) rather than
+    /// `armour_pipeline` — wool has no second layer at the same inflation as
+    /// itself, so there is no coplanar z-fighting to correct for the way
+    /// leather's dyeable base and overlay need. Since issue #21 the two
+    /// pipelines are depth-identical anyway (both `LessEqual`, vanilla's
+    /// `ENTITY_SNIPPET` value), so this choice is now about which pass the draw
+    /// belongs to, not about which depth compare it gets. See
     /// `docs/entity-rendering.md`.
     ///
     /// `wool_texture` is `None` without a vanilla pack, and wool then draws

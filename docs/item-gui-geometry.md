@@ -163,7 +163,9 @@ matrix to reproduce that sign for `{Up, East, North}` and the opposite for
 `{Down, West, South}`.
 
 It then checks the **other half**, which a determinant cannot express: the faces
-that survive culling must also be the **nearest** ones under `CompareFunction::Less`.
+that survive culling must also be the **nearest** ones under the pipeline's
+depth compare (`CompareFunction::LessEqual` since issue #21; `Less` before it —
+either way, nearest wins, and only exactly-coincident faces tell them apart).
 Culling and depth must agree, or the depth test hides exactly what culling kept.
 `item_geometry_gate::a_posed_item_lands_inside_its_slot_and_keeps_its_winding`
 runs the same check on real baked stone geometry.
