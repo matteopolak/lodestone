@@ -516,7 +516,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   that closes two more decoded-but-unconsumed events, the attack-strength ticker
   and the crosshair cooldown indicator (issue #121, built as one unit because
   either half alone is an island), and why crit and sweep feedback specifically
-  stays unbuilt until particles and sounds can consume it.
+  stays unbuilt until particles and sounds can consume it. In the same file: the
+  shield/bow island **pair** — `ReleaseUseItem` had no producer and the input layer
+  had no release edge for `Use` at all, while `use_item_live` returned early on any
+  entity under the crosshair instead of falling through to a generic use, so aiming
+  at a mob sent nothing. Food hid both, because `useOnRelease() == false` items
+  auto-complete on tick count. Plus a live gate firing a real server arrow, and the
+  two false beliefs its first draft was built on.
 - [Autonomous navigation](./baritone-port.md) — the design for a Baritone-class
   pathfinding plugin: why movement costs are derived by simulating our own physics
   rather than by formula, how a 150 ms search reconciles with a one-threaded
