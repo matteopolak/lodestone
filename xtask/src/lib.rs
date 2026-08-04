@@ -2962,14 +2962,26 @@ impl ConnectednessReport {
 /// than silently subtracted, so the exemption cannot itself become a hiding place.
 /// Adding an entry needs the same standard as any other claim: say what consumes the
 /// packet and why no event is right.
-const PROTOCOL_INTERNAL_CLIENTBOUND: &[(&str, &str)] = &[(
-    "CHUNK_BATCH_START",
-    "empty marker; starts the batch rate timer (`begin_chunk_batch`). The client's \
-     reply is emitted from CHUNK_BATCH_FINISHED as CHUNK_BATCH_RECEIVED carrying the \
-     measured rate, and the server halts chunk delivery after ten unacknowledged \
-     batches — so the handshake is load-bearing and complete, with nothing observable \
-     at the START edge",
-)];
+const PROTOCOL_INTERNAL_CLIENTBOUND: &[(&str, &str)] = &[
+    (
+        "CHUNK_BATCH_START",
+        "empty marker; starts the batch rate timer (`begin_chunk_batch`). The client's \
+         reply is emitted from CHUNK_BATCH_FINISHED as CHUNK_BATCH_RECEIVED carrying the \
+         measured rate, and the server halts chunk delivery after ten unacknowledged \
+         batches — so the handshake is load-bearing and complete, with nothing observable \
+         at the START edge",
+    ),
+    (
+        "UPDATE_TAGS",
+        "issue #296: decodes the server's tag sync and installs the `minecraft:block` \
+         registry's tags as a process-wide override consulted by \
+         `lodestone_data::tool::block_tag_members` (`set_block_tag_overrides`), the single \
+         lookup every tool-mining rule match goes through. That override is a side effect on \
+         a global table, not a per-connection `ClientEvent` — there is nothing for a fold or \
+         a renderer to observe at this packet's own edge, the same shape as \
+         `CHUNK_BATCH_START` above",
+    ),
+];
 
 /// The reason `packet` is exempt from the stranded verdict, if it is.
 fn protocol_internal_reason(packet: &str) -> Option<&'static str> {
@@ -3197,16 +3209,39 @@ pub fn connectedness_report(workspace_root: &Path) -> Result<ConnectednessReport
                     reason,
                     depth_limited: limited,
                 } => {
-                    let unknown = ConnectednessUnknown {
-                        packet: arm.packet.clone(),
-                        file: rel_adapter.clone(),
-                        line: arm.line,
-                        reason: reason.clone(),
-                    };
-                    if *limited {
-                        depth_limited.push(unknown);
-                    } else {
-                        unclassified.push(unknown);
+                    // Same allowlist as `DecodedButStranded` above, reached
+                    // from the opposite direction: `UPDATE_TAGS` (issue #296)
+                    // delegates to a helper returning `Result<(), _>` rather
+                    // than `Result<Vec<Directive>, _>` (it has no directives
+                    // to produce, only a side effect on a global table), so
+                    // `classify_body`'s delegate-follow never finds a
+                    // recognized outlet *or* the literal `Ok(Vec::new())` +
+                    // `reader.`/`ensure_empty` pair `is_decoded_but_stranded`
+                    // needs — that evidence lives in the callee, and a
+                    // stranded verdict on a followed delegate is deliberately
+                    // discarded, not propagated, a few lines above. The
+                    // packet is still genuinely decoded and genuinely
+                    // produces no event, the same claim `DecodedButStranded`
+                    // makes; the allowlist entry carries the same "say what
+                    // consumes it" bar either way.
+                    match protocol_internal_reason(&arm.packet) {
+                        Some(reason) => {
+                            decoded += 1;
+                            internal.push((arm.packet.clone(), reason.to_owned()));
+                        }
+                        None => {
+                            let unknown = ConnectednessUnknown {
+                                packet: arm.packet.clone(),
+                                file: rel_adapter.clone(),
+                                line: arm.line,
+                                reason: reason.clone(),
+                            };
+                            if *limited {
+                                depth_limited.push(unknown);
+                            } else {
+                                unclassified.push(unknown);
+                            }
+                        }
                     }
                 }
             }
