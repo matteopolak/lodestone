@@ -1150,6 +1150,44 @@ fn move_is_withheld_until_connected() {
     assert_eq!(sent, 0, "no movement should be sent before login");
 }
 
+/// Issue #23 (bell, `docs/block-entity-renderers.md`'s Bell section):
+/// `Sim::bell_source` is the accessor `app.rs`'s new per-frame install calls
+/// (`if let Some(f) = self.sim.bell_source() { render.set_bell_source(f); }`)
+/// — a plain island-detector for that one call site, not a pixel gate. A
+/// full through-the-wire proof needs a real `ClientHandle` (login, a real
+/// chunk with a `minecraft:bell` state *and* a recorded block-entity entry),
+/// which no test double in this crate builds yet — every existing chest/
+/// skull/sign/bell pixel gate installs a hand-built closure on `RenderState`
+/// directly rather than going through `Sim::*_source`, so that gap predates
+/// this change and is shared by all four block-entity types, not bell alone.
+/// This is the part that *is* checkable without one: the accessor must
+/// track connection state exactly like its skull/sign siblings (`None`
+/// before any net is attached, `Some` after), and the closure it returns
+/// must be safe to call before login rather than panicking on the
+/// not-yet-published `ClientHandle` — the same "empty rather than a panic"
+/// contract `block_entities::bell_spawns_before_login_is_empty_rather_than_a_panic`
+/// already pins for the free function underneath it.
+#[test]
+fn bell_source_tracks_connection_state_and_is_safe_before_login() {
+    let mut sim = Sim::new(test_config());
+    assert!(
+        sim.bell_source().is_none(),
+        "no net attached at all must report no source, matching skull_source/sign_source"
+    );
+
+    let (net, _actions, _feed) = NetClient::loopback_with_feed();
+    sim.attach_net(net);
+    let source = sim
+        .bell_source()
+        .expect("a net is attached, so a source must exist even before login completes");
+    assert_eq!(
+        source(glam::Vec3::ZERO),
+        Vec::new(),
+        "no ClientHandle has been published yet, so the closure must return \
+         no spawns rather than panicking on the empty OnceLock"
+    );
+}
+
 /// Both [`CollisionSource`] implementors must actually be `Send + Sync +
 /// 'static`, or they could not be held in a `Resource` at all.
 ///

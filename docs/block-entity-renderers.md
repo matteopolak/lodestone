@@ -625,7 +625,7 @@ bell draws — correctly, at rest — but never shakes. That is a real, named ga
 closing it needs a `BellShakes`-shaped tick map plus a `BLOCK_EVENT` arm that distinguishes bell from
 chest by block type, both outside this session's scope.
 
-### Status: the render pass is wired and gated; the live install is not
+### Status: fully wired, including the live install
 
 Same generic path chest/skull/sign already proved: `BellSpawn` → `BlockEntityModelSet::resolve_bell`
 → `plan_block_entities` → the existing `EntityPipeline` draw, with **zero changes** needed to
@@ -634,15 +634,23 @@ Same generic path chest/skull/sign already proved: `BellSpawn` → `BlockEntityM
 sufficient). `gpu.rs` gained a `BellSource` field, a `set_bell_source` setter and one more
 `filter_map` in `prepare_block_entities`, exactly mirroring `SkullSource`'s own three call sites.
 
-**What genuinely is missing, and is a different gap from anything chest/skull/sign had**: no
-`sim.rs`/`app.rs` call site installs a bell source from the live per-frame path.
-`crate::block_entities::bell_spawns` (the gather) exists and is unit-tested against the real 26.2
-state table, but both files that would call `RenderState::set_bell_source` every frame were another
-agent's in-flight work for this entire session (both are on this workspace's off-limits list), so the
-five-file pattern chest/skull used — CPU-side geometry proven first, GPU wiring handed to the session
-orchestrator once ready — stops one file short of that handoff: the wiring inside `gpu.rs` itself
-*is* applied (it is a small, additive, three-call-site change with no plausible collision), but the
-`sim.rs`/`app.rs` install is not, and is the one remaining hop before a real client draws a bell.
+**The live install landed too.** `Sim::bell_source()` (`sim.rs`, next to `Self::sign_source`) mirrors
+`Self::skull_source` exactly — `self.net.as_ref()?.shared_handle()` plus a closure over
+`crate::block_entities::bell_spawns` — and `app.rs`'s per-frame block-entity install block gained one
+more arm alongside chest/skull/sign: `if let Some(f) = self.sim.bell_source() { render.set_bell_source(f); }`.
+That closes the one hop that was missing: the render pass, the GPU wiring and the CPU-side gather
+were already proven; this is what actually feeds a live session's data to them every frame.
+
+**What is proven, and what still is not.**
+`sim::tests::bell_source_tracks_connection_state_and_is_safe_before_login` proves the accessor tracks
+connection state (`None` with no net attached, `Some` once one is, matching skull/sign) and that its
+closure is safe to call before login (empty `Vec`, not a panic on the unpopulated `ClientHandle`).
+What no gate in this crate proves — for chest, skull, sign or bell alike, not a bell-specific gap —
+is a real client drawing one through an actual live `ClientHandle`: that needs a full login handshake
+plus a chunk carrying both a `minecraft:bell` block state and a recorded block-entity entry, and no
+test double here builds one. `bell_block_entity_pixels.rs`'s two GPU gates still install a hand-built
+closure directly on `RenderState`, the same way `chest_block_entity_pixels.rs` does, precisely because
+that harness does not exist yet.
 
 `crates/lodestone-shell/tests/bell_block_entity_pixels.rs` is the proof this pass reaches pixels
 without that install — it calls `RenderState::set_bell_source` directly, the same way

@@ -3051,6 +3051,20 @@ impl Sim {
         Some(move |eye: glam::Vec3| crate::block_entities::sign_spawns(&handle, eye))
     }
 
+    /// The bell sibling of [`Self::skull_source`] — see
+    /// `crate::block_entities::bell_spawns`. Same per-frame install shape as
+    /// chest/skull/sign; see `docs/block-entity-renderers.md`'s Bell section
+    /// for why the render pass and the CPU-side gather were already landed
+    /// and only this call site (plus `app.rs`'s install) was missing.
+    #[must_use]
+    pub fn bell_source(
+        &self,
+    ) -> Option<impl Fn(glam::Vec3) -> Vec<lodestone_render::BellSpawn> + Send + Sync + 'static>
+    {
+        let handle = self.net.as_ref()?.shared_handle();
+        Some(move |eye: glam::Vec3| crate::block_entities::bell_spawns(&handle, eye))
+    }
+
     /// How many chest lids are currently animating or open — for the debug
     /// overlay and for the live gate, which needs to distinguish "the block event
     /// never arrived" from "the lid is drawn shut".
