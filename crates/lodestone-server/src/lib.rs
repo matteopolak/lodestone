@@ -80,6 +80,7 @@
 //!
 //! [`Transport`]: lodestone_net::Transport
 
+mod brewing;
 mod chunk;
 mod composter;
 mod fall;
@@ -95,6 +96,10 @@ mod spawn;
 mod vitals;
 mod worldgen_data;
 
+pub use brewing::{
+    BREW_TIME_TICKS, Bottle, BottleKind, BrewTick, BrewingStand, FUEL_USES, has_mix, is_ingredient,
+    mix_bottle,
+};
 pub use chunk::{ChunkColumn, ChunkSource, OverworldChunkSource, WorldgenChunkSource};
 pub use composter::{
     Composter, InsertOutcome as ComposterInsertOutcome, MAX_FILL_LEVEL as COMPOSTER_MAX_FILL_LEVEL,
