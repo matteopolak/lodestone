@@ -289,62 +289,120 @@ numbers as a baseline going forward.
 
 The workflow YAML is statically validated (`actionlint`, zero findings,
 including its embedded `shellcheck` pass over every `run:` block, re-checked
-after the `sccache` steps were added). The `alsa-sys`/`libasound2-dev`
-finding was confirmed empirically in an isolated container (Docker was later
-shut down as part of the infrastructure rework, so it was not re-verified a
-second time — the original finding stands).
+after the `sccache` steps and the `pull_request`-only `cancel-in-progress`
+fix were added). The `alsa-sys`/`libasound2-dev` finding was confirmed
+empirically in an isolated container.
 
-All four `CLAUDE.md` commands plus `check-isolation` and `check-deletable`
-for every protocol family were run for real, in an isolated `git worktree`
-at committed `HEAD` (not the shared checkout, which had unrelated in-flight
-work from other agents mid-edit — including, at the time, a genuine compile
-error in an unfinished `menu/language.rs` that does not exist at `HEAD`).
-Machine load: contended early on (ten-plus concurrent agents), quieter by
-the time these ran. All real exit codes, not inferred from a pipeline:
+### Local, pre-`e0dc99f` figures (superseded)
+
+An earlier pass measured all four `CLAUDE.md` commands plus
+`check-isolation`/`check-deletable` in a `git worktree` at committed `HEAD`,
+before the dev machine's build-infrastructure rework (`e0dc99f`: private
+per-agent `--target-dir`s, `sccache` live, `[profile.dev] debug =
+"line-tables-only"`, lower `opt-level` for deps). Those numbers (40s/19s/54s
+for the three checks, 7s/2s for the xtask commands) are **not reproduced
+here** because they no longer describe the current build — see the
+post-`e0dc99f` table below instead. The one exception is `cargo test
+--workspace`, which that first pass could not complete: it was killed by an
+external `SIGTERM` (exit 143) at 1166s — the dev machine's own `target/`
+cleanup, not a test failure — after 189 test binaries had already reported
+zero failures. That run was redone to completion below.
+
+### Post-`e0dc99f` figures, with a private target dir
+
+Re-measured in a fresh `git worktree` at `origin/main` (`e0dc99f`, plus this
+workflow's own commit `cffb86a`), using the now-standard per-agent build
+isolation — **`--target-dir` as a flag, never `CARGO_TARGET_DIR` as an env
+var**, because `sccache` hashes `CARGO_*` env vars into its cache key and the
+env-var form measured 0% hits against the flag form's 78-94% (see
+`docs/build-caching.md`) — and `-j 4` to bound rustc parallelism on a
+10-core/16 GB machine shared with other agents:
 
 | command | exit | wall time |
 |---|---|---|
-| `cargo check --workspace --all-targets` | 0 | 40s |
-| `cargo check --workspace --all-features --all-targets --exclude lodestone-allocbench` | 0 | 19s |
-| `cargo check -p lodestone-shell --no-default-features` | 0 | 54s |
-| `cargo run -p xtask -- check-isolation` | 0 | 7s |
-| `cargo run -p xtask -- check-deletable v47/v340/v735/v770` | 0 (all four) | 2s total |
-| `cargo test --workspace --no-fail-fast` | **143** (SIGTERM) | 1166s (interrupted) |
+| `cargo test --workspace --no-fail-fast -j 4 --target-dir <private>` | **101** | 999s |
 
-**The `test` row is not a real result and should not be read as one.** Exit
-143 is `128 + SIGTERM` — something outside this process sent a termination
-signal (almost certainly the dev machine's own infrastructure work clearing
-its shared `target/`, which was happening concurrently; this worktree's
-`target/` was a separate directory, but a broad process-level kill would not
-care about that). It was not a test failure: grepping the full captured
-output for `FAILED`, `panicked`, or any `N failed` with `N > 0` finds
-**nothing** — 189 test binaries had already reported `test result: ok` (zero
-failures) across every crate from the start of the alphabetical run through
-most of `lodestone-shell`'s `lib`/`sim` unit tests, `lodestone-render`'s full
-pixel-gate suite, and partway into `lodestone-server`'s unit tests, when the
-signal arrived. What did **not** get its own confirmed green run before the
-interruption: the remainder of `lodestone-server`, and everything
-alphabetically after it (`lodestone-sound`, `lodestone-testsupport`,
-`lodestone-world`, `lodestone-worldgen`, `lodestone-worldgen-parity`, the four
-`protocol/*` crates, `xtask`, and `crates/plugins/*`) — including the doctest
-compile pass and the 22-shader `wgsl_valid` run this job exists partly to
-provide, and the 11-test self-skip inventory this file documents above (those
-were separately confirmed by name — see the `xtask`/`lodestone-data` rows
-implied by "Surfacing the tests that self-skip" — but not as part of this
-particular `--workspace` invocation). This should be re-run to completion
-once the build infrastructure work has landed, both because that is the
-honest thing to do and because the outcome will be measured in the *new*
-environment anyway.
+**This is a real result, not an infrastructure artifact, and it is not
+green.** Exit 101 is a genuine `cargo test` failure report (`error: 1 target
+failed: -p lodestone-shell --lib`), not a signal/exit-code fluke — confirmed
+by grepping for `FAILED`/`panicked` rather than trusting the exit code alone:
 
-Read the wall-clock figures above (including the incomplete 1166s) as
-"before the infrastructure rework," not as a CI budget: most of the suite
-that did run was fast, but `lodestone-server`'s worldgen tests
+- `app::tests::pressing_play_reaches_a_running_integrated_server` panicked:
+  `the client never logged in to the integrated server; errors: []`.
+- `sim::tests::extract_particles_does_not_hold_the_world_guard_across_the_per_particle_work`
+  panicked: a wall-clock timing ratio landed at `3.58x` against a `3x` bound.
+
+`lodestone-shell --lib` otherwise reported 950 passed, 46 ignored — these are
+the only 2 failures in the entire workspace run, and every other crate's
+test binary (including all of `lodestone-render`'s pixel gates and
+`lodestone-server`'s worldgen suite, both of which never got a confirmed
+green run in the earlier interrupted attempt) passed clean this time.
+
+Both failures have real circumstantial evidence of being **timing/load
+sensitive rather than logic regressions** — a login-wait deadline and a
+wall-clock growth-ratio assertion, both run on the shared dev machine
+alongside other agents' concurrent work rather than on a dedicated runner —
+but circumstantial evidence is not the same as confirmation, and this file
+does not own `lodestone-shell`'s tests. **Flagged as a separate task
+(`task_5cfe780f`) rather than fixed or dismissed here**: whether they are
+flaky (re-run in isolation) or a real regression is for whoever owns
+`lodestone-shell` to determine, not for this CI doc to guess at. Until that
+lands, a real (rare) flake in this specific pair on a GitHub-hosted runner —
+which has no other agents contending for its CPU — is the most likely
+outcome, but "most likely" is not "confirmed," and the `test` job should be
+watched, not assumed green, until a CI run actually reports on it (the first
+run's `test` job never got the chance — see below).
+
+### The CI run itself (`30925426704`, the first ever)
+
+| job | result | time |
+|---|---|---|
+| `check: --workspace --all-targets` | ✅ pass | 3m17s |
+| `check: --all-features (allocbench excluded)` | ✅ pass | 2m48s |
+| `check: lodestone-shell --no-default-features (version seam)` | ✅ pass | 2m39s |
+| `xtask: check-isolation / check-deletable` | ✅ pass | 41s |
+| `test: --workspace --no-fail-fast` | ❌ **cancelled**, not failed | 34m51s |
+
+**Finding, not papered over: `test` was cancelled by this workflow's own
+`concurrency` setting, not by a test failure.** The annotation is explicit —
+"Canceling since a higher priority waiting request for
+ci-CI-refs/heads/main exists" — because a second push to `main` landed while
+the first run's 35-minute `test` job was still going, and the original
+`cancel-in-progress: true` (scoped to the ref, not the event type) killed it.
+On a busy shared trunk where pushes arrive every few minutes, a `test` job
+that takes over half an hour will *never* get to report a real result under
+that policy — it will always find a newer push waiting. **Fixed in this same
+change**: `cancel-in-progress` is now `${{ github.event_name == 'pull_request'
+}}`, so a PR still cancels its own superseded runs (the scenario the setting
+exists for) but a push to `main` always runs `test` to completion. This was
+caught by reading the actual run, exactly per "read the finished run and
+report what happened" — `actionlint` cannot see this class of problem, since
+the YAML is valid either way.
+
+**`sccache` engagement, confirmed from the run's own logs, not assumed**: every
+job's `Post Run mozilla-actions/sccache-action` step printed real
+`--show-stats` output with nonzero `compile_requests` and 0 `cache_errors` —
+e.g. `check-default`: 1330 compile requests, 810 executed, 167 hits / 639
+misses (21%). The wrapper is genuinely intercepting `rustc`, not silently
+bypassed. **One real nuance worth flagging rather than hiding**: the same
+job's JSON stats reported **434 `cache_write_errors`** against only 205
+successful `cache_writes` — a majority of attempted writes to the GitHub-Actions-
+cache-backed `sccache` server failed, distinct from (and not counted in) the
+`0 errors` the summary annotation shows, which only covers a different
+counter (`cache_errors`). This is plausibly first-run contention: five jobs
+writing to the same brand-new GHA cache namespace simultaneously is a known
+rough edge for `sccache`'s GHA backend. It did not fail the build (writes
+failing just means less is cached for next time, not a build error) and low
+hit rates are expected on a cold cache regardless — but if hit rates stay low
+on the *second* CI run too, this write-error count is where to look first,
+not the hit-rate percentage alone.
+
+Read wall-clock figures in both tables as machine/runner-dependent
+snapshots, not a CI budget: `lodestone-server`'s worldgen tests
 (`chunk::tests::parallel_generation_is_deterministic_and_matches_serial`,
-several `worldgen_data::tests::*`) are individually CPU-heavy and, run
-serially as `cargo test` does by default within one binary, would have
-dominated whatever the final total turned out to be. A GitHub runner's exact
-core count and clock speed will shift this further; none of this should be
-read as a tight CI budget.
+several `worldgen_data::tests::*`) are individually CPU-heavy, and a GitHub
+runner's core count and clock speed — and how warm its `sccache`/`rust-cache`
+state is — will shift every number here run to run.
 
 ## How to extend it
 

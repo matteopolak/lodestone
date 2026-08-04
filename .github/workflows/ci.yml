@@ -51,11 +51,18 @@ env:
   SCCACHE_GHA_ENABLED: "true"
   RUSTC_WRAPPER: "sccache"
 
-# A new push to the same branch/PR supersedes the old one — no point finishing
-# a check run against a commit nobody will look at.
+# A new PR push supersedes the old one — no point finishing a check run
+# against a diff nobody will look at. But NOT for push-to-main: main here is
+# a shared trunk with many agents pushing every few minutes (empirically,
+# every few minutes — measured directly: the first-ever run of this workflow
+# had its ~35-minute `test` job cancelled by the *next* push before it could
+# finish a single time), and every commit on main is real, permanent history
+# that deserves its own result, not a perpetually-superseded one. Restricting
+# cancel-in-progress to pull_request keeps the fast-iteration benefit for PRs
+# without starving `test` on main.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   check-default:
