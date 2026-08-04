@@ -196,12 +196,12 @@ impl Category {
 /// A rebindable thing the player can ask for.
 ///
 /// Every variant here has a real consumer in `app.rs` — vanilla mappings this
-/// client does not implement (`key.pickItem`, `key.screenshot`,
-/// `key.advancements`, …) are deliberately **absent** rather than listed and
-/// dead. Adding one is a two-line change here plus the branch that consumes
-/// it; adding one *without* the branch is the island defect `CLAUDE.md` §1 is
-/// about, and a Controls menu offering a binding that does nothing is exactly
-/// how that looks to a player.
+/// client does not implement (`key.screenshot`, `key.advancements`, …) are
+/// deliberately **absent** rather than listed and dead. Adding one is a
+/// two-line change here plus the branch that consumes it; adding one
+/// *without* the branch is the island defect `CLAUDE.md` §1 is about, and a
+/// Controls menu offering a binding that does nothing is exactly how that
+/// looks to a player.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum InputAction {
     // -- movement ---------------------------------------------------------
@@ -218,6 +218,28 @@ pub enum InputAction {
     Attack,
     /// Use / place.
     Use,
+    /// Vanilla's `key.pickItem` (`Options.java:669`, `Type.MOUSE` button `2`,
+    /// category `GAMEPLAY`). Middle-click (or, once rebound, a key) requests
+    /// the item under the crosshair be placed in the hotbar.
+    ///
+    /// **Two mechanisms, split the same way as [`Self::SwapOffhand`]/
+    /// [`Self::Drop`], except the container half already had its producer.**
+    /// With a container screen open, middle-click was already wired straight
+    /// through `MenuButton::Pick` (`crate::app::menu_button_for`) before this
+    /// variant existed at all, and `MenuInput::key_pressed`'s `MenuKey::
+    /// PickItem` arm (`container.rs`) was built and tested with **no**
+    /// producer for the *keyboard* form of the same screen — see
+    /// [`crate::app::KeyOutcome::ContainerPickItem`]. With no screen open,
+    /// vanilla's `Minecraft.pickBlockOrEntity` (`Minecraft.java:2342-2354`)
+    /// switches on the current `HitResult`: `ClientAction::
+    /// PickItemFromEntity` when the crosshair is over an entity,
+    /// `ClientAction::PickItemFromBlock` when it is over a block, nothing on
+    /// a miss — both already encoded and round-trip tested
+    /// (`crates/protocol/v770/tests/serverbound_interaction_tier2.rs`) with
+    /// zero producers before this. `include_data` on either action is
+    /// `hasControlDown()`, read the same place [`Self::Drop`]'s `ctrl` is.
+    /// See [`crate::app::KeyOutcome::PickItem`].
+    PickItem,
     // -- inventory --------------------------------------------------------
     Inventory,
     /// Vanilla's `key.swapOffhand` (`Options.java:663`).
@@ -282,7 +304,7 @@ impl InputAction {
     /// category and, within a category, follows `Options.java`'s own
     /// declaration order — so walking `ALL` filtered by [`Category::SORT_ORDER`]
     /// reproduces vanilla's Controls-screen ordering without a sort.
-    pub const ALL: [InputAction; 27] = [
+    pub const ALL: [InputAction; 28] = [
         InputAction::Forward,
         InputAction::Back,
         InputAction::Left,
@@ -292,6 +314,7 @@ impl InputAction {
         InputAction::Sprint,
         InputAction::Attack,
         InputAction::Use,
+        InputAction::PickItem,
         InputAction::Inventory,
         InputAction::SwapOffhand,
         InputAction::Drop,
@@ -329,6 +352,7 @@ impl InputAction {
             InputAction::Sprint => "key.sprint",
             InputAction::Attack => "key.attack",
             InputAction::Use => "key.use",
+            InputAction::PickItem => "key.pickItem",
             InputAction::Inventory => "key.inventory",
             InputAction::SwapOffhand => "key.swapOffhand",
             InputAction::Drop => "key.drop",
@@ -370,7 +394,7 @@ impl InputAction {
             | InputAction::Jump
             | InputAction::Sneak
             | InputAction::Sprint => Category::Movement,
-            InputAction::Attack | InputAction::Use => Category::Gameplay,
+            InputAction::Attack | InputAction::Use | InputAction::PickItem => Category::Gameplay,
             InputAction::Inventory
             | InputAction::SwapOffhand
             | InputAction::Drop
@@ -413,6 +437,8 @@ impl InputAction {
             // in the source is `keyUse` (button 1) then `keyAttack` (button 0).
             InputAction::Attack => Binding::Mouse(MouseButton::Left),
             InputAction::Use => Binding::Mouse(MouseButton::Right),
+            // `Options.java:669` — `Type.MOUSE` 2.
+            InputAction::PickItem => Binding::Mouse(MouseButton::Middle),
             // `Options.java:662-664` — 69, 70 and 81.
             InputAction::Inventory => Binding::Key(KeyCode::KeyE),
             InputAction::SwapOffhand => Binding::Key(KeyCode::KeyF),
@@ -1113,9 +1139,10 @@ mod tests {
             );
         }
 
-        // The two mouse defaults: `Options.java:665-668` declares
-        // `keyUse` as `Type.MOUSE` 1 and `keyAttack` as `Type.MOUSE` 0, and
-        // `InputConstants.java:343-344` names those `left` and `right`.
+        // The three mouse defaults: `Options.java:665-669` declares
+        // `keyUse` as `Type.MOUSE` 1, `keyAttack` as `Type.MOUSE` 0 and
+        // `keyPickItem` as `Type.MOUSE` 2; `InputConstants.java:343-345` names
+        // those `left`, `right` and `middle`.
         assert_eq!(
             InputAction::Attack.default_binding(),
             Binding::Mouse(MouseButton::Left)
@@ -1124,8 +1151,13 @@ mod tests {
             InputAction::Use.default_binding(),
             Binding::Mouse(MouseButton::Right)
         );
+        assert_eq!(
+            InputAction::PickItem.default_binding(),
+            Binding::Mouse(MouseButton::Middle)
+        );
         assert_eq!(InputAction::Attack.category(), Category::Gameplay);
         assert_eq!(InputAction::Use.category(), Category::Gameplay);
+        assert_eq!(InputAction::PickItem.category(), Category::Gameplay);
     }
 
     #[test]
@@ -1441,7 +1473,7 @@ mod tests {
             "key.attack": "key.keyboard.zzz.not.a.key",
             "key.back": "key.keyboard.up",
             "key.chat": 42,
-            "key.pickItem": "key.keyboard.q",
+            "key.advancements": "key.keyboard.q",
             "key.forward": "key.keyboard.down",
             "key.jump": null,
             "key.left": "scancode.30",
@@ -1461,12 +1493,13 @@ mod tests {
             binds.is(InputAction::Left, KeyCode::KeyA),
             "an unsupported binding *type* must also fall back, not error"
         );
-        // …and unknown *action* names were simply ignored. `key.pickItem` is
-        // deliberately still absent from this table (see `InputAction`'s own
-        // module doc) — `key.drop` used to fill this slot before it gained an
-        // `InputAction::Drop` of its own, which would have made this line
-        // silently start asserting something else instead of failing loudly.
-        assert!(InputAction::from_name("key.pickItem").is_none());
+        // …and unknown *action* names were simply ignored. `key.advancements`
+        // is deliberately still absent from this table (see `InputAction`'s
+        // own module doc) — `key.pickItem` used to fill this slot before it
+        // gained an `InputAction::PickItem` of its own (and `key.drop` filled
+        // it before that), which would have made this line silently start
+        // asserting something else instead of failing loudly.
+        assert!(InputAction::from_name("key.advancements").is_none());
 
         // The load kept going: every good entry after a bad one still applied.
         assert!(
