@@ -4,10 +4,22 @@ Issue #58. The camera's response to walking (`bobView`), to being hit (`bobHurt`
 and the held item's smoothed lag behind the mouse (`xBob`/`yBob`). Walking used to
 feel dead because the camera never moved with the stride.
 
-**Status: `bobView` is implemented and reaches pixels. `bobHurt` is implemented and
-deliberately not wired. `xBob`/`yBob` are not started.** The reason for each is
-below — none of them is an oversight, and the blocker for two of the three is the
-same one thing.
+**Status: `bobView` reaches pixels for both the world camera and the first-person
+hand. `bobHurt` is implemented for both and deliberately unwired for both —
+for two *different* reasons. `xBob`/`yBob` are not started.** The reason for
+each is below — none of them is an oversight.
+
+> **The hand has its own copy of this transform, independent of the world's.**
+> Vanilla applies `bobHurt`/`bobView` to `renderItemInHand` a **second time**
+> (`GameRenderer.java:344-347`), separate from the copy folded into the world's
+> projection (`:534-536`) — not something the arm inherits from the bobbed
+> world camera. `gpu/first_person.rs`'s `HandBobSource`/`hand_view_proj` are
+> that second application; see [How it works](#how-it-works) below. This used
+> to be listed under "Divergences deliberately not modelled" as "the
+> first-person arm does not bob... fix belongs with `xBob`/`yBob`" — that was
+> **wrong**, kept here as a record rather than silently deleted: the arm's bob
+> and the view-lag feature are unrelated mechanisms, and the arm did not need
+> `xBob`/`yBob` at all, only its own wiring.
 
 > **Issue #391, and the reason it is filed under the menu and not the camera.**
 > "View bobbing does nothing in game" was reported from play with the whole
@@ -38,9 +50,13 @@ fire together and are otherwise unrelated.
 
 ## How it works
 
-Everything lives in [`crates/lodestone-shell/src/camera_rig.rs`](../crates/lodestone-shell/src/camera_rig.rs)
+The tick-advanced state lives in
+[`crates/lodestone-shell/src/camera_rig.rs`](../crates/lodestone-shell/src/camera_rig.rs)
 alongside `EyeHeightSmoother`, which has the same shape: per-tick state that
-cannot be a pure function of the current `PlayerState`.
+cannot be a pure function of the current `PlayerState`. From one `BobFrame`
+read per frame, **two independent consumers** apply the identical transform —
+mirroring vanilla's own two call sites for `bobHurt`/`bobView`
+(`GameRenderer.java:534-536` for the world, `:344-347` for the hand):
 
 ```
 Sim::step, once per 20 Hz tick
@@ -51,9 +67,22 @@ Sim::step, once per 20 Hz tick
 
 Sim::render_camera, once per frame
   Sim::bob_frame()  -> ViewBob::frame(interp_alpha) -> BobFrame
-  bobbed_camera(camera, frame, damage_tilt_strength) -> Camera
-     -> Camera::view_projection, which gpu.rs already reads
+   |
+   +-> bobbed_camera(camera, frame, damage_tilt_strength) -> Camera   [the world]
+   |      -> Camera::view_projection, which gpu.rs already reads
+   |
+   +-> RenderState::set_hand_bob_source(|| frame)                    [the hand]
+          -> HandBobSource::value() -> hand_view_proj(aspect, frame, tilt)
+          -> gpu/first_person.rs's write_hand_camera, both hand-pass uniforms
 ```
+
+The hand's half needs **no fold at all** — `hand_view_proj` multiplies
+`BobFrame::eye_transform`'s raw matrix straight into `hand_projection`, because
+the hand pass carries no view matrix in the first place (`hand_projection`'s
+own doc: the view rotation already cancels). That is *why* the hand can afford
+`bobHurt`'s roll term where the world cannot — see
+[The one blocker](#the-one-blocker-and-what-it-costs), which is a **world-only**
+limitation now, not a shared one.
 
 ### The constants, and where each came from
 
@@ -105,7 +134,7 @@ gives the same basis). So every constant transcribes with **no sign flip**. The
 `[0,1]`-versus-reversed-Z depth difference `CLAUDE.md` warns about lives entirely
 inside the projection matrix, which sits to the *left* of the bob in `P · B · V`.
 
-## The one blocker, and what it costs
+## The one blocker, and what it costs — **the world camera only**
 
 `Camera` has `position`, `yaw` and `pitch`, and `view_matrix` hardcodes `Vec3::Y`
 as up — **three degrees of freedom where a bob matrix has four.** `bobbed_camera`
@@ -126,9 +155,17 @@ and the damage tilt is not: a frontal hit is *pure* roll, so wiring `bobHurt`
 through this fold would produce a visibly wrong tilt rather than a slightly
 imprecise one. `Sim::render_camera` therefore passes `damage_tilt_strength = 0.0`.
 
+**This table does not apply to the hand.** `gpu/first_person.rs`'s
+`hand_view_proj` multiplies `BobFrame::eye_transform`'s matrix straight into
+`hand_projection`, with no `Camera` decomposition step at all, so it carries
+**every** term exactly — roll included. The hand's `bobHurt` is unwired for an
+entirely different, much smaller reason: see
+[`HAND_HURT_TILT_STRENGTH`'s own doc](../crates/lodestone-shell/src/gpu/first_person.rs)
+and the note below on `Sim::bob_frame`'s all-or-nothing gating.
+
 ## How to change it
 
-### To land `bobHurt` (and the walk bob's last 0.3°)
+### To land the world's `bobHurt` (and the walk bob's last 0.3°)
 
 `Camera` needs to carry roll. Either a `roll: f32` field, or a `Mat4` eye-space
 hook consulted by `view_projection`. **Both are workspace-wide changes**: there are
@@ -144,29 +181,74 @@ player's `EntityHurtAnimation` (the yaw is already decoded and on the event; see
 `lodestone-model/src/event.rs`) and `HurtTime` (already ingested and ticking), and
 pass the real `damage_tilt_strength` instead of `0.0`.
 
+### To land the hand's `bobHurt`
+
+Unlike the world, this needs **no `Camera` change at all** — `hand_view_proj`
+already carries the full matrix, roll included (see the table above). What
+blocks it is `Sim::bob_frame()` (`sim/camera.rs:320-325`):
+
+```rust
+pub fn bob_frame(&self) -> crate::camera_rig::BobFrame {
+    if !self.view_bobbing {
+        return crate::camera_rig::BobFrame::default();
+    }
+    self.view_bob.frame(self.clock().interp_alpha)
+}
+```
+
+This zeroes `hurt`/`hurt_dir_degrees` along with the walk terms when View
+Bobbing is off. Vanilla's own `bobHurt` is unconditional
+(`GameRenderer.java:534-536` calls it outside the `bobView` check) — this
+function's `false` branch should keep `hurt`/`hurt_dir_degrees` live and zero
+only the walk terms:
+
+```rust
+pub fn bob_frame(&self) -> crate::camera_rig::BobFrame {
+    let frame = self.view_bob.frame(self.clock().interp_alpha);
+    if self.view_bobbing {
+        frame
+    } else {
+        crate::camera_rig::BobFrame {
+            walk_phase: 0.0,
+            bob: 0.0,
+            ..frame
+        }
+    }
+}
+```
+
+Once that lands, flip
+[`HAND_HURT_TILT_STRENGTH`](../crates/lodestone-shell/src/gpu/first_person.rs)
+from `0.0` to `1.0` (or wire `Options::damage_tilt_strength` through once it
+exists) — `hand_view_proj_can_carry_the_hurt_tilt_once_a_nonzero_strength_is_supplied`
+already proves the transform is correct at that value.
+
 ### To land `xBob`/`yBob`
 
-This is **not a camera change** — it poses the *held item* and the third-person
-body, in `lodestone-shell/src/gpu/first_person.rs` and
-`lodestone-render/src/entity.rs`. Add the `x_bob`/`y_bob` pair (same
-current/previous shape, `+= (target − current) · 0.5` per tick) to `ViewBob` and
-prefix `Rx((viewXRot − xBob)·0.1°)`, `Ry((viewYRot − yBob)·0.1°)` onto the hand
-pose. `entity.rs:1702-1703` already names the mechanism.
+This is **not a camera change, and not the same fix as the arm's bob above** —
+they were conflated in this issue's tracker for a while (`#58`'s own body used
+to say "the arm does not bob... fix belongs with `xBob`/`yBob`"; it does not).
+`xBob`/`yBob` poses the held item and third-person body against a *smoothed
+follow* of the head rotation — a lag, not a bob — in
+`lodestone-shell/src/gpu/first_person.rs` and `lodestone-render/src/entity.rs`.
+Add the `x_bob`/`y_bob` pair (same current/previous shape,
+`+= (target − current) · 0.5` per tick) to `ViewBob` and prefix
+`Rx((viewXRot − xBob)·0.1°)`, `Ry((viewYRot − yBob)·0.1°)` onto the hand pose.
+`entity.rs:1702-1703` already names the mechanism.
 
 ### Divergences deliberately not modelled
 
-* **Roll**, as above — with the 2.52 px measurement.
-* **The first-person arm does not bob.** Vanilla prefixes `bobHurt` and `bobView`
-  onto `renderItemInHand`'s pose stack (`GameRenderer.java:344-346`); here the hand
-  pass uses its own projection, so the arm is static. Convenient for the pixel
-  gate (the arm cancels out of every diff) and wrong. Fix belongs with `xBob`/`yBob`.
+* **Roll, for the world camera only** — with the 2.52 px measurement. The hand
+  carries it exactly (see above).
+* **The hand's `bobHurt`** — mechanism proven, held at `HAND_HURT_TILT_STRENGTH
+  = 0.0` pending the `Sim::bob_frame` fix above.
 * **Third person still bobs, and that is correct for 26.2.** #58's body says
   vanilla disables bobbing in third person. Re-read against
   `.cache/mc/26.2/client-src`: `renderLevel` (`:534-536`) has no camera-type check
   and `bobView` itself only tests `isPlayer`. Older versions did suppress it; 26.2
   does not.
 * **`damageTiltStrength` has no UI.** Vanilla puts it on the Accessibility screen.
-  Pointless to surface while the tilt itself is unwired.
+  Pointless to surface while the tilt itself is unwired for the world.
 
 ## Configuration
 
@@ -210,9 +292,17 @@ and the asymmetry is deliberate: a malformed value must read as **on**, because
 degrading a shipped option to off is a silent feature loss. Only written when
 turned off, so an untouched install has no key.
 
-Note vanilla gates only `bobView` on this flag — `bobHurt` is applied
-unconditionally (`GameRenderer.java:534-536`). That split is reproduced, so
-turning bobbing off will still leave the damage tilt once it is wired.
+**Vanilla gates only `bobView` on this flag — `bobHurt` is applied
+unconditionally (`GameRenderer.java:534-536`). That split is *not* currently
+reproduced** (this line used to claim it was; found false while wiring the
+hand's copy of the transform). `Sim::bob_frame()` returns
+`BobFrame::default()` whole-cloth when the option is off, which would silently
+mute the damage tilt too, the moment anything reads `hurt` with a nonzero
+strength. It is invisible today because nothing does yet — the world passes
+`damage_tilt_strength = 0.0` unconditionally, and the hand holds
+`HAND_HURT_TILT_STRENGTH` at `0.0` for exactly this reason. See
+[To land the hand's `bobHurt`](#to-land-the-hands-bobhurt) for the one-function
+fix, needed before either constant can safely move off `0.0`.
 
 ## Gotchas when testing this
 
@@ -276,6 +366,23 @@ turning bobbing off will still leave the damage tilt once it is wired.
   and the GPU pixel gate green (it calls `bobbed_camera` directly). Only the `Sim`
   gate above catches it. If you delete one test in this feature, do not delete that
   one.
+* **`view_bobbing` being toggleable is exactly why the hand needed two gates, not
+  one.** `tests/view_bob_pixels.rs`'s `the_arm_does_not_move_when_no_hand_bob_source_is_installed`
+  asserts the unset/off case is **bit-identical** (`assert_eq!(moved, 0)`, not a
+  tolerance), and `the_arm_moves_when_a_hand_bob_source_is_installed` asserts the
+  on case moves a substantial, direction-checked number of pixels. Either alone
+  would leave the other state unverified — an arm that always bobs regardless of
+  the option would pass a "does it bob" test and fail no gate that only checks
+  the on case.
+* **A GPU pixel gate cannot re-derive the hand's exact magnitude from a real
+  mesh's silhouette** — the same bounding-box-vs-centroid gap the chest's own
+  `+8.50` vs `+6.53` records, and the hand sits close enough to the eye that the
+  effect is proportionally larger. The *exact* prediction is pinned without a GPU
+  in `gpu::first_person::tests::the_dip_moves_the_test_point_by_the_hand_derived_pixel_offset`
+  (`+27.10 px` for a synthetic point at a plausible arm depth, against two
+  rejected hypotheses at `+28.56`/`+30.03`) and its sway sibling
+  (`-14.28 px`/`-0.30 px`); the pixel gate's job is only to prove the transform is
+  *called* for a really-rendered arm, not to re-pin its magnitude.
 
 ## Dependencies
 

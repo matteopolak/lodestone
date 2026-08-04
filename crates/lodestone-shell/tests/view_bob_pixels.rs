@@ -44,19 +44,32 @@
 //!
 //! It does not, for a reason worth stating rather than assuming: the hand pass
 //! uses its own projection, not `Camera::view_projection`
-//! (`lodestone-shell/src/gpu/first_person.rs:67` says so outright — using the
-//! world matrix there "would leave the arm parked at the world origin"). So the
-//! arm is **pixel-identical in both frames**, and this gate does not rely on that
-//! being true either: [`the_arm_is_disjoint_from_the_chest_rect_and_does_not_move`]
+//! (`lodestone-shell/src/gpu/first_person.rs`'s `hand_projection` doc says so
+//! outright — using the world matrix there "would leave the arm parked at the
+//! world origin"). Every `frame()` call in *this* file's world-measuring test
+//! installs no [`lodestone::gpu::RenderState::set_hand_bob_source`], so the
+//! hand reads [`BobFrame::default`] regardless of what `cam` carries — the arm
+//! stays **pixel-identical in both frames** for a reason this file controls
+//! directly, not by accident. [`the_arm_does_not_move_when_no_hand_bob_source_is_installed`]
 //! locates the arm's own bounding box, asserts it is disjoint from the chest's,
-//! and asserts it is *unchanged* between the two frames. Every measurement below
-//! is confined to the chest's projected rect.
+//! and asserts it is *unchanged* between the two frames. Every measurement in
+//! the world-bob test above is confined to the chest's projected rect.
 //!
-//! That last assertion is also the record of a **divergence**: vanilla prefixes
-//! `bobHurt` and `bobView` onto `renderItemInHand`'s pose stack
-//! (`GameRenderer.java:344-346`), so in vanilla the arm *does* bob with the view.
-//! Here it does not. Fixing that is a change to `gpu/first_person.rs`; see
-//! `docs/view-bobbing.md`.
+//! # The arm *does* bob once the shell feeds it one (issue #58's hand-side gap)
+//!
+//! Vanilla prefixes `bobHurt` and `bobView` onto `renderItemInHand`'s pose stack
+//! a **second, independent** time (`GameRenderer.java:344-346`), separate from
+//! the world's own copy (`:534-536`) — not something the hand inherits from the
+//! bobbed world camera. `gpu/first_person.rs`'s `HandBobSource`/`hand_view_proj`
+//! are that second application, and `the_arm_moves_when_a_hand_bob_source_is_installed`
+//! below proves it reaches real rendered pixels, with the same production
+//! `BobFrame` a real `Sim` would install via
+//! `RenderState::set_hand_bob_source`. The *exact* pixel prediction — hand-derived
+//! from vanilla's constants, no GPU needed — lives in
+//! `gpu::first_person::tests` (`the_dip_moves_the_test_point_by_the_hand_derived_pixel_offset`
+//! and its sway sibling); this file's job is only the thing a matrix test cannot
+//! show, the same division of labour the module doc above already draws between
+//! this file and `camera_rig.rs`'s own unit tests.
 //!
 //! Fail-closed: no GPU adapter or no `client.jar` is a **failure, never a skip**.
 //!
@@ -364,12 +377,28 @@ fn spawns(world: &World, pos: ChunkPos, eye: glam::Vec3) -> Vec<ChestSpawn> {
 /// `placed_chest_block_entity_pixels.rs`'s, so nothing about how the chest gets
 /// drawn is novel here — only the camera differs between calls, which is the
 /// entire point.
-fn frame(ctx: &GpuContext, target: &mut HeadlessTarget, cam: Camera, spawns: &[ChestSpawn]) -> Vec<u8> {
+///
+/// `hand_bob` is a **separate** input from `cam` and that is the point: vanilla
+/// applies `bobView`/`bobHurt` to the hand a second, independent time
+/// (`GameRenderer.java:344-347`), so this helper models the two real installers
+/// a live `Sim` drives independently — `Sim::render_camera` (folded into `cam`
+/// by the caller, same as before) and `RenderState::set_hand_bob_source` (which
+/// this helper installs directly). Passing `BobFrame::default()` here is what
+/// keeps the world-only test's arm provably inert; passing the *same* frame the
+/// caller folded into `cam` is what proves the hand receives it too.
+fn frame(
+    ctx: &GpuContext,
+    target: &mut HeadlessTarget,
+    cam: Camera,
+    hand_bob: BobFrame,
+    spawns: &[ChestSpawn],
+) -> Vec<u8> {
     let device = ctx.device();
     let queue = ctx.queue();
     let owned: Vec<ChestSpawn> = spawns.to_vec();
     let mut state = RenderState::new(device, queue, wgpu::TextureFormat::Rgba8Unorm, W, H, None);
     state.set_block_entity_source(move |_eye| owned.clone());
+    state.set_hand_bob_source(move || hand_bob);
     let frame = target.acquire().expect("headless acquire");
     state.render(device, queue, frame.view(), &cam, None, &[]);
     target.read_texels(device, queue)
@@ -402,7 +431,12 @@ fn the_bob_moves_the_world_by_the_predicted_number_of_pixels() {
     // The still frame. Not a synthetic identity — `BobFrame::default()` is what
     // `Sim::bob_frame` really returns for a settled, still player, asserted in the
     // test above.
-    let still = frame(&ctx, &mut target, cam, &installed);
+    // `hand_bob: BobFrame::default()` throughout this test — the arm must stay
+    // out of every measurement below, and it does because nothing here installs
+    // `set_hand_bob_source`; see `the_arm_does_not_move_when_no_hand_bob_source_is_installed`
+    // for the assertion of that, and `the_arm_moves_when_a_hand_bob_source_is_installed`
+    // for the case where it *is* installed.
+    let still = frame(&ctx, &mut target, cam, BobFrame::default(), &installed);
     let (still_rect, still_px) = non_sky_bbox_in(&still, window, sky)
         .expect("the chest must draw *something* in the still frame, or nothing below means anything");
     println!("still  chest bbox {still_rect}, {still_px} px");
@@ -419,7 +453,13 @@ fn the_bob_moves_the_world_by_the_predicted_number_of_pixels() {
         hurt: -1.0,
         hurt_dir_degrees: 0.0,
     };
-    let dip_frame = frame(&ctx, &mut target, bobbed_camera(cam, dip, 0.0), &installed);
+    let dip_frame = frame(
+        &ctx,
+        &mut target,
+        bobbed_camera(cam, dip, 0.0),
+        BobFrame::default(),
+        &installed,
+    );
     let (dip_rect, dip_px) = non_sky_bbox_in(&dip_frame, window, sky)
         .expect("the chest must still be drawn while bobbing");
     let (sx, sy) = still_rect.centre();
@@ -453,7 +493,13 @@ fn the_bob_moves_the_world_by_the_predicted_number_of_pixels() {
         hurt: -1.0,
         hurt_dir_degrees: 0.0,
     };
-    let sway_frame = frame(&ctx, &mut target, bobbed_camera(cam, sway, 0.0), &installed);
+    let sway_frame = frame(
+        &ctx,
+        &mut target,
+        bobbed_camera(cam, sway, 0.0),
+        BobFrame::default(),
+        &installed,
+    );
     let (sway_rect, sway_px) = non_sky_bbox_in(&sway_frame, window, sky)
         .expect("the chest must still be drawn while swaying");
     let (wx, wy) = sway_rect.centre();
@@ -487,6 +533,7 @@ fn the_bob_moves_the_world_by_the_predicted_number_of_pixels() {
         &ctx,
         &mut target,
         bobbed_camera(cam, BobFrame::default(), 0.0),
+        BobFrame::default(),
         &installed,
     );
     match changed_bbox(&still, &control) {
@@ -498,12 +545,21 @@ fn the_bob_moves_the_world_by_the_predicted_number_of_pixels() {
     }
 }
 
-/// The arm, located rather than assumed — and asserted **not to move**, which is
-/// both what keeps the measurements above clean and the record of a divergence
-/// from vanilla (whose `renderItemInHand` is prefixed by `bobView`).
-#[test]
-#[ignore = "requires a GPU adapter and the vanilla client.jar"]
-fn the_arm_is_disjoint_from_the_chest_rect_and_does_not_move() {
+/// Locates the arm's own bounding box, disjoint from the chest's — shared setup
+/// for both tests below, which differ only in whether a hand-bob source is
+/// installed.
+struct ArmFixture {
+    ctx: GpuContext,
+    target: HeadlessTarget,
+    cam: Camera,
+    installed: Vec<ChestSpawn>,
+    sky: [u8; 3],
+    still: Vec<u8>,
+    chest_rect: Rect,
+    arm_rect: Rect,
+}
+
+fn arm_fixture() -> ArmFixture {
     let ctx = gpu();
     let mut target = HeadlessTarget::new(ctx.device(), W, H, wgpu::TextureFormat::Rgba8Unorm);
     let cam = camera();
@@ -511,7 +567,7 @@ fn the_arm_is_disjoint_from_the_chest_rect_and_does_not_move() {
     let installed = spawns(&world, pos, cam.position);
     let sky = sky_bytes();
 
-    let still = frame(&ctx, &mut target, cam, &installed);
+    let still = frame(&ctx, &mut target, cam, BobFrame::default(), &installed);
     let (chest_rect, _) =
         non_sky_bbox_in(&still, chest_window(), sky).expect("the chest must draw");
 
@@ -538,64 +594,150 @@ fn the_arm_is_disjoint_from_the_chest_rect_and_does_not_move() {
          this file would be contaminated"
     );
 
-    // And it is pixel-identical under a bob, because the hand pass has its own
-    // projection. **Vanilla's arm does bob** — see the module docs.
+    ArmFixture {
+        ctx,
+        target,
+        cam,
+        installed,
+        sky,
+        still,
+        chest_rect,
+        arm_rect,
+    }
+}
+
+/// Counts changed pixels (Manhattan RGB > 12) inside `within` between two equal-
+/// sized frames.
+fn changed_px_in(a: &[u8], b: &[u8], within: Rect) -> usize {
+    a.chunks_exact(4)
+        .zip(b.chunks_exact(4))
+        .enumerate()
+        .filter(|(i, (pa, pb))| {
+            let x = (*i as u32) % W;
+            let y = (*i as u32) / W;
+            if !within.contains(x, y) {
+                return false;
+            }
+            let d = (i32::from(pa[0]) - i32::from(pb[0])).abs()
+                + (i32::from(pa[1]) - i32::from(pb[1])).abs()
+                + (i32::from(pa[2]) - i32::from(pb[2])).abs();
+            d > 12
+        })
+        .count()
+}
+
+/// **The default: no hand-bob source installed, no arm movement.** This is
+/// `RenderState::new`'s own resting state (`HandBobSource::default()` reads as
+/// [`BobFrame::default`]) — the same guarantee every other unset source in
+/// `gpu/first_person.rs` gives (a rested swing, an empty main hand). Every
+/// world-bob measurement in this file relies on exactly this being true.
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn the_arm_does_not_move_when_no_hand_bob_source_is_installed() {
+    let mut f = arm_fixture();
     let dip = BobFrame {
         walk_phase: 0.0,
         bob: 0.1,
         hurt: -1.0,
         hurt_dir_degrees: 0.0,
     };
-    let bobbed = frame(&ctx, &mut target, bobbed_camera(cam, dip, 0.0), &installed);
-    let mut moved = 0usize;
-    for (i, (a, b)) in still
-        .chunks_exact(4)
-        .zip(bobbed.chunks_exact(4))
-        .enumerate()
-    {
-        let x = (i as u32) % W;
-        let y = (i as u32) / W;
-        if !arm_rect.contains(x, y) {
-            continue;
-        }
-        let d = (i32::from(a[0]) - i32::from(b[0])).abs()
-            + (i32::from(a[1]) - i32::from(b[1])).abs()
-            + (i32::from(a[2]) - i32::from(b[2])).abs();
-        if d > 12 {
-            moved += 1;
-        }
-    }
-    // -- control: the same diff over the *chest* box must be large ------------
-    let world_moved = {
-        let mut n = 0usize;
-        for (i, (a, b)) in still
-            .chunks_exact(4)
-            .zip(bobbed.chunks_exact(4))
-            .enumerate()
-        {
-            let x = (i as u32) % W;
-            let y = (i as u32) / W;
-            if chest_rect.contains(x, y) {
-                let d = (i32::from(a[0]) - i32::from(b[0])).abs()
-                    + (i32::from(a[1]) - i32::from(b[1])).abs()
-                    + (i32::from(a[2]) - i32::from(b[2])).abs();
-                if d > 12 {
-                    n += 1;
-                }
-            }
-        }
-        n
-    };
-    println!("under a bob: {moved} px changed inside the arm box, {world_moved} inside the chest box");
+    // The world camera *is* bobbed — only the hand source is left unset — so
+    // this isolates exactly the one flag under test.
+    let bobbed = frame(
+        &f.ctx,
+        &mut f.target,
+        bobbed_camera(f.cam, dip, 0.0),
+        BobFrame::default(),
+        &f.installed,
+    );
+    let moved = changed_px_in(&f.still, &bobbed, f.arm_rect);
+    let world_moved = changed_px_in(&f.still, &bobbed, f.chest_rect);
+    println!(
+        "no hand-bob source: {moved} px changed inside the arm box, {world_moved} inside the chest box"
+    );
     assert!(
         world_moved > 200,
         "control failed: the bob barely changed the chest either ({world_moved} \
          px), so 'the arm did not move' says nothing about the arm"
     );
+    assert_eq!(
+        moved, 0,
+        "with no hand-bob source installed the arm must be bit-identical, not \
+         merely close — got {moved} changed px"
+    );
+}
+
+/// **The arm moves once a hand-bob source is installed** — the fix for the
+/// player report ("when view bobbing is enabled, the arm should bob too").
+///
+/// Installs the *same* [`BobFrame`] used to fold the world camera, mirroring
+/// what a real `Sim`/`app.rs` frame does: one `Sim::bob_frame()` read, fed to
+/// both `Sim::render_camera` (via `bobbed_camera`, folded into `cam`) and
+/// `RenderState::set_hand_bob_source` independently — never a value derived
+/// from the other.
+///
+/// The **exact** pixel prediction for this transform is pinned without a GPU in
+/// `gpu::first_person::tests::the_dip_moves_the_test_point_by_the_hand_derived_pixel_offset`
+/// (`+27.10 px` down for a synthetic point at the arm's plausible depth,
+/// against two rejected hypotheses at `+28.56`/`+30.03`). This gate cannot
+/// re-derive that number from a real mesh's silhouette without knowing every
+/// vertex's exact depth — the same bounding-box-vs-centroid gap `CLAUDE.md`
+/// and this file's own module docs record for the chest — so it asserts the
+/// two things a matrix test cannot: that the transform is **called** for a
+/// really-rendered arm, and that it moves it in the predicted **direction** by
+/// **more than trivial noise**, a floor well below the hand-derived prediction
+/// (the arm sits closer to the eye than the chest's 2.5 blocks, so it moves
+/// *more*, never less).
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn the_arm_moves_when_a_hand_bob_source_is_installed() {
+    let mut f = arm_fixture();
+    let dip = BobFrame {
+        walk_phase: 0.0,
+        bob: 0.1,
+        hurt: -1.0,
+        hurt_dir_degrees: 0.0,
+    };
+    let bobbed = frame(
+        &f.ctx,
+        &mut f.target,
+        bobbed_camera(f.cam, dip, 0.0),
+        dip,
+        &f.installed,
+    );
+
+    let moved = changed_px_in(&f.still, &bobbed, f.arm_rect);
+    let world_moved = changed_px_in(&f.still, &bobbed, f.chest_rect);
+    println!(
+        "hand-bob source installed: {moved} px changed inside the arm box, {world_moved} inside the chest box"
+    );
     assert!(
-        moved * 20 < world_moved,
-        "the arm moved {moved} px against the world's {world_moved} — the hand \
-         pass has apparently started reading `Camera::view_projection`, which \
-         would be *closer* to vanilla but breaks every measurement in this file"
+        world_moved > 200,
+        "precondition: the world must visibly move too, or this isn't testing \
+         a real bob frame"
+    );
+    assert!(
+        moved > 200,
+        "the arm must move a substantial number of pixels once a hand-bob \
+         source is installed — got {moved}, against the world's {world_moved}. \
+         A value near 0 means the source did not reach `write_hand_camera`."
+    );
+
+    // Direction: the dip's bottom moves the *silhouette* down, same sign as the
+    // chest's own dip measurement above (`PREDICTED_DIP_DY_PX`, positive).
+    let (arm_bbox_still, _) = non_sky_bbox_in(&f.still, f.arm_rect, f.sky)
+        .expect("precondition: the arm must draw in the still frame");
+    let (arm_bbox_bobbed, _) = non_sky_bbox_in(&bobbed, f.arm_rect, f.sky)
+        .expect("the arm must still draw while bobbing");
+    let (_, sy0) = arm_bbox_still.centre();
+    let (_, sy1) = arm_bbox_bobbed.centre();
+    println!(
+        "arm bbox still {arm_bbox_still} vs bobbed {arm_bbox_bobbed}; centre dy={:+.2}",
+        sy1 - sy0
+    );
+    assert!(
+        sy1 - sy0 > 1.0,
+        "the dip must move the arm's silhouette DOWN (screen y increases); \
+         still {arm_bbox_still} vs bobbed {arm_bbox_bobbed}"
     );
 }
