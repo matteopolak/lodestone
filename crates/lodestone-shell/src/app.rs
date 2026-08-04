@@ -2781,6 +2781,10 @@ impl WindowApp {
         hud_frame.boss_bars = &boss_bars;
         hud_frame.health = health;
         hud_frame.food = food;
+        // Without this the hunger wobble (issue #30) is computed correctly and
+        // never fires: vanilla shakes the row only while saturation is
+        // exhausted, so an unfed `saturation` reads as "always satisfied".
+        hud_frame.saturation = self.sim.saturation();
         hud_frame.air = air;
         hud_frame.hotbar = world_hud.then(|| self.sim.selected_slot());
         hud_frame.hotbar_items = world_hud.then_some(hotbar_records.as_slice());
