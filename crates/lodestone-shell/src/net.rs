@@ -1256,6 +1256,40 @@ fn run(
                 // seconds on this thread, which is why the shell stays on the
                 // loading screen rather than the world appearing instantly.
                 let source = lodestone_server::overworld_chunk_source(seed);
+                // Issue #217: `MobSim` computed AI motion server-side with no
+                // production consumer streaming it anywhere — an island by its
+                // own module doc's admission. `open_in_memory_with_mobs` is
+                // the production wiring: it spawns a second task that owns a
+                // live `MobSim` over its own snapshot of the same
+                // (deterministically regenerated — same seed) terrain and
+                // republishes positions every tick through the entity-sync
+                // pass `serve_connection` already runs on this connection's
+                // own inbound-packet cadence. `wasm32` gets the old
+                // mob-free path: the tick loop needs `tokio::time`, which is
+                // unavailable there (see `lodestone_server`'s own doc
+                // comment on `mobs::run_mob_tick_loop`) — a real, documented
+                // gap, not a silent one.
+                #[cfg(not(target_arch = "wasm32"))]
+                let (server, client_io) = {
+                    // A small fixed radius around the join spawn (chunk
+                    // (0,0), matching `V770ServerProtocol::begin_play`'s
+                    // hardcoded `spawn_x`/`spawn_z` = 8) — independent of
+                    // the client's own (possibly much larger) view radius,
+                    // since this only needs to be big enough for a handful
+                    // of wandering mobs, not the whole streamed view.
+                    let mob_radius = view_radius.clamp(1, 3);
+                    let mob_world_source = lodestone_server::overworld_chunk_source(seed);
+                    lodestone_server::IntegratedServer::open_in_memory_with_mobs(
+                        server_protocol,
+                        source,
+                        mob_world_source,
+                        (-mob_radius..=mob_radius, -mob_radius..=mob_radius),
+                        (8, 8),
+                        6,
+                        view_radius,
+                    )
+                };
+                #[cfg(target_arch = "wasm32")]
                 let (server, client_io) = lodestone_server::IntegratedServer::open_in_memory(
                     server_protocol,
                     source,
@@ -1771,6 +1805,15 @@ fn entity_snapshot(view: EntityView, tab_list: &TabList) -> EntitySnapshot {
         see_through: view.flags.map_or(true, |f| f & 0x02 == 0),
     });
     EntitySnapshot {
+        // `EntityView` carries no creeper-fuse fields yet — that needs a
+        // `lodestone-ecs` component (another agent's cluster) and a field on
+        // `EntityView` itself, which that module's own doc requires be added
+        // together with the component it reads from. `entities.rs`'s
+        // `CreeperFuse`/`tick_creeper_fuse`/`EntityDraw::creeper_swelling`
+        // chain is fully wired and waiting on exactly this one value — see
+        // `docs/entity-rendering.md`'s "Creeper swell" section for the patch
+        // spec left for whoever lands the other side.
+        creeper_swell_dir: None,
         id: view.entity_id,
         type_path: view.entity_type.path().to_string(),
         feet: glam::Vec3::new(

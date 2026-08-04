@@ -33,8 +33,15 @@
 //!   the *server* ticks mob AI and streams positions; the client interpolates
 //!   and runs none. So this crate is mob AI's home: [`ChunkWorld`] adapts the
 //!   version-free solid/air terrain into `lodestone-entity`'s `PathWorld` seam,
-//!   and [`MobSim`] ticks goal-driven `NavigatingMob`s over it. Streaming the
-//!   result to a client is a separate (encoder) seam.
+//!   and [`MobSim`] ticks goal-driven `NavigatingMob`s over it. The encoder
+//!   half of streaming the result to a client (`ServerProtocol::encode_add_entity`
+//!   / `encode_entity_update` / `encode_remove_entity`) is a separate seam a
+//!   version crate implements, but as of issue #217 something in this crate
+//!   also *drives* it in production: [`IntegratedServer::open_in_memory_with_mobs`]
+//!   spawns a background task (`mobs::run_mob_tick_loop`) that owns a live
+//!   `MobSim` and republishes its snapshots through [`LiveMobSource`], an
+//!   [`EntitySource`] the existing `serve_connection` streaming pass already
+//!   diffs against every connection reactively.
 //! * [`PlayerVitals`] — the server-authoritative air-supply countdown and
 //!   drowning damage (issue #267). Player-only for now (see its own module
 //!   doc comment for why `MobSim` does not yet participate); ticked from
@@ -78,7 +85,7 @@ pub use mob_spawn::{
     DespawnOutcome, MAGIC_NUMBER, MobCategory, SpawnCandidate, SpawnCandidateSource, SpawnRng,
     SpawnState, check_despawn, resolve_mob_shape,
 };
-pub use mobs::{ChunkWorld, MobSim, SimMob};
+pub use mobs::{ChunkWorld, LiveMobSource, MobSim, SimMob};
 pub use protocol::{EntitySnapshot, ServerBound, ServerDirective, ServerProtocol};
 pub use server::{EntitySource, NoEntities, ServeSummary, ServerError, serve_connection};
 pub use vitals::{DROWN_DAMAGE, EYE_HEIGHT, MAX_AIR_SUPPLY, MAX_HEALTH, PlayerVitals, VitalsTick};
