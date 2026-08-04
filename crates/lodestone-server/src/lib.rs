@@ -153,7 +153,10 @@ pub use mob_spawn::{
     DespawnOutcome, MAGIC_NUMBER, MobCategory, SpawnCandidate, SpawnCandidateSource, SpawnRng,
     SpawnState, check_despawn, resolve_mob_shape,
 };
-pub use mobs::{AttackOutcome, ChunkWorld, Detonation, LiveMobSource, MobHandle, MobSim, SimMob};
+pub use mobs::{
+    AttackOutcome, ChunkWorld, Detonation, LiveMobSource, MobHandle, MobSim, PlayerPerception,
+    SimMob,
+};
 pub use neighbor_update::{Direction, NeighborPropagator, Notification, UPDATE_ORDER};
 pub use protocol::{EntitySnapshot, MetadataField, ServerBound, ServerDirective, ServerProtocol};
 pub use random_tick::{

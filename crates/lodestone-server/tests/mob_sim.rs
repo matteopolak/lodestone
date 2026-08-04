@@ -25,7 +25,8 @@ use lodestone_model::adapter::{
     VersionAdapter, WorldSink,
 };
 use lodestone_server::{
-    ChunkWorld, EntitySnapshot, EntitySource, MobSim, WorldgenChunkSource, resolve_mob_shape,
+    ChunkWorld, EntitySnapshot, EntitySource, MobSim, PlayerPerception, WorldgenChunkSource,
+    resolve_mob_shape,
 };
 use lodestone_worldgen::density::Density;
 use std::str::FromStr;
@@ -1332,4 +1333,197 @@ fn no_action_time_crosses_the_seam_instead_of_staying_on_the_sim_record() {
          being equal is the whole fix; before it the right-hand side climbed and \
          the left stayed 0"
     );
+}
+
+// =====================================================================
+// Issue #441, second half: the player feed, and the last two of the eight.
+//
+// `nearest_player` and `temptation` were the only two perception methods with
+// no possible source — `MobSim` knew nothing about players. The producer is now
+// `server::dispatch_play_packet`'s `PlayerMoved` arm, which feeds
+// `MobSim::set_players`. These gates assert `LookAtPlayerGoal` and `TemptGoal
+// actually act` through the real `MobSim::tick`, not that a setter was called.
+// =====================================================================
+
+/// A player at `at` holding nothing.
+fn empty_handed(at: Vec3) -> PlayerPerception {
+    PlayerPerception { position: at, held_item: None }
+}
+
+/// A player at `at` holding `item` (a bare path, e.g. `"wheat"`).
+fn holding(at: Vec3, item: &str) -> PlayerPerception {
+    PlayerPerception { position: at, held_item: Some(rk(&format!("minecraft:{item}"))) }
+}
+
+#[test]
+fn a_cow_turns_to_face_a_nearby_player_and_ignores_a_distant_one() {
+    // `LookAtPlayerGoal` end to end. The observable is `facing()` — the
+    // position the goal actually chose to look at — not `can_use`.
+    let world = breeding_pen();
+    let mut sim = MobSim::new(&world);
+    let id = sim.spawn_species(rk("minecraft:cow"), Vec3::new(0.0, 0.0, 0.0)).id();
+    // Vanilla's cow registers `LookAtPlayerGoal(Player, 6.0F)` at priority 6
+    // (`animal/cow/AbstractCow.java:41-48`). Probability 1.0 rather than
+    // vanilla's 0.02F default (`ai/goal/LookAtPlayerGoal.java:26`) so the
+    // pre-roll cannot make this flaky — the roll is not what is under test.
+    sim.get_mut(id).expect("just spawned").add_goal(
+        6,
+        Box::new(lodestone_entity::ai::goals::LookAtPlayerGoal::new(6.0, 1.0)),
+    );
+
+    // Control first: no players fed at all. The goal must never fire, so the
+    // mob must never be given anything to look at.
+    for _ in 0..20 {
+        sim.tick();
+    }
+    assert_eq!(
+        sim.get(id).expect("alive").facing(),
+        None,
+        "with no player fed, LookAtPlayerGoal must never pick a target — this is \
+         the state the whole of #441 was stuck in"
+    );
+
+    // Now a player 3 blocks away, inside the 6.0 look distance.
+    let player = Vec3::new(3.0, 0.0, 0.0);
+    sim.set_players(vec![empty_handed(player)]);
+    let mut looked = false;
+    for _ in 0..20 {
+        sim.tick();
+        if sim.get(id).expect("alive").facing() == Some(player) {
+            looked = true;
+            break;
+        }
+    }
+    assert!(
+        looked,
+        "a cow must turn to face a player 3 blocks away; facing() was {:?}",
+        sim.get(id).expect("alive").facing()
+    );
+
+    // Second control: a player beyond the goal's own 6.0 look distance must not
+    // be picked. This is what proves the feed passes `nearest_player` *uncut*
+    // and the goal applies its own range — if the feed were also range-gating,
+    // the two cuts would silently take the minimum.
+    let mut far_sim = MobSim::new(&world);
+    let far_id = far_sim.spawn_species(rk("minecraft:cow"), Vec3::new(0.0, 0.0, 0.0)).id();
+    far_sim.get_mut(far_id).expect("just spawned").add_goal(
+        6,
+        Box::new(lodestone_entity::ai::goals::LookAtPlayerGoal::new(6.0, 1.0)),
+    );
+    far_sim.set_players(vec![empty_handed(Vec3::new(20.0, 0.0, 0.0))]);
+    for _ in 0..20 {
+        far_sim.tick();
+        assert_eq!(
+            far_sim.get(far_id).expect("alive").facing(),
+            None,
+            "a player 20 blocks away is outside the 6.0 look distance"
+        );
+    }
+    // ...but the feed still told the mob about them, uncut.
+    assert_eq!(
+        far_sim.get(far_id).expect("alive").nearest_player(),
+        Some(Vec3::new(20.0, 0.0, 0.0)),
+        "the feed must report the player regardless of any goal's range"
+    );
+}
+
+#[test]
+fn a_pig_follows_a_player_holding_a_potato_and_ignores_an_empty_hand() {
+    // `TemptGoal` end to end, and the observable is **movement**: the pig must
+    // measurably close the distance to the player. A `can_use` assertion would
+    // not show that the goal's `move_to` reached the navigator.
+    let world = breeding_pen();
+    let mut sim = MobSim::new(&world);
+    let id = sim.spawn_species(rk("minecraft:pig"), Vec3::new(0.0, 0.0, 0.0)).id();
+    // Vanilla pig: `TemptGoal(1.2, PIG_FOOD)` at priority 4
+    // (`animal/pig/Pig.java:81-89`).
+    sim.get_mut(id)
+        .expect("just spawned")
+        .add_goal(4, Box::new(lodestone_entity::ai::goals::TemptGoal::new(1.2)));
+
+    let player = Vec3::new(8.0, 0.0, 0.0);
+
+    // Control: the same player, empty-handed, must not lead the pig anywhere.
+    sim.set_players(vec![empty_handed(player)]);
+    let start = sim.get(id).expect("alive").position();
+    for _ in 0..60 {
+        sim.tick();
+    }
+    let after_empty = sim.get(id).expect("alive").position();
+    assert_eq!(
+        sim.get(id).expect("alive").temptation(),
+        None,
+        "an empty-handed player must not tempt a pig"
+    );
+
+    // Now the same player holds a potato. `potato` specifically, because a
+    // from-memory tempt list says "carrot for pig" — 26.2's `pig_food` tag is
+    // three items (carrot, potato, beetroot) and a hand-written single-item
+    // list would fail exactly here.
+    sim.set_players(vec![holding(player, "potato")]);
+    sim.tick();
+    assert_eq!(
+        sim.get(id).expect("alive").temptation(),
+        Some(player),
+        "a potato is in 26.2's pig_food tag and must tempt a pig"
+    );
+
+    let before_follow = sim.get(id).expect("alive").position();
+    for _ in 0..80 {
+        sim.tick();
+    }
+    let after_follow = sim.get(id).expect("alive").position();
+
+    let d_before = (player.x - before_follow.x).abs();
+    let d_after = (player.x - after_follow.x).abs();
+    assert!(
+        d_after < d_before - 1.0,
+        "a tempted pig must actually move toward the player: distance went \
+         {d_before} -> {d_after} over 80 ticks (start {start:?}, \
+         after empty-handed {after_empty:?}, after tempted {after_follow:?})"
+    );
+}
+
+#[test]
+fn the_tempt_table_is_per_species_and_matches_the_jar_not_folklore() {
+    // The discriminating gate for `tempt_food`. Every case below is one a
+    // from-memory list gets wrong, so this fails if the table is ever
+    // "simplified" back to one item per species — and it is the test that
+    // should be *deleted and replaced* when B2's generated table lands.
+    //
+    // Tags: `.cache/mc/26.2/src/data/minecraft/tags/item/{cow,pig,chicken}_food.json`.
+    let world = breeding_pen();
+
+    // (species, item, should_tempt, why)
+    let cases: &[(&str, &str, bool, &str)] = &[
+        ("cow", "wheat", true, "cow_food is exactly [wheat]"),
+        ("cow", "carrot", false, "carrot is pig/rabbit food, never cow food"),
+        ("pig", "carrot", true, "pig_food[0]"),
+        ("pig", "potato", true, "pig_food[1] — the folklore list omits this"),
+        ("pig", "beetroot", true, "pig_food[2] — likewise"),
+        ("pig", "wheat", false, "wheat is cow/sheep food, not pig food"),
+        ("chicken", "wheat_seeds", true, "chicken_food[0]"),
+        ("chicken", "pumpkin_seeds", true, "chicken_food[2] — 6 items, not 1"),
+        ("chicken", "pitcher_pod", true, "chicken_food[5], the least obvious one"),
+        ("chicken", "wheat", false, "seeds, not wheat itself"),
+        ("sheep", "wheat", true, "sheep_food is exactly [wheat]"),
+        // A species with no food tag at all must never be tempted, rather than
+        // being tempted by everything.
+        ("zombie", "wheat", false, "a zombie has no food tag"),
+        ("creeper", "carrot", false, "nor does a creeper"),
+    ];
+
+    for (species, item, should_tempt, why) in cases {
+        let mut sim = MobSim::new(&world);
+        let id = sim
+            .spawn_species(rk(&format!("minecraft:{species}")), Vec3::new(0.0, 0.0, 0.0))
+            .id();
+        sim.set_players(vec![holding(Vec3::new(3.0, 0.0, 0.0), item)]);
+        sim.tick();
+        let tempted = sim.get(id).expect("alive").temptation().is_some();
+        assert_eq!(
+            tempted, *should_tempt,
+            "{species} + {item}: expected tempted={should_tempt} ({why}), got {tempted}"
+        );
+    }
 }

@@ -577,23 +577,75 @@ fn avoided_species(species: &str) -> &'static [&'static str] {
     }
 }
 
+/// The item paths in each species' vanilla food tag — what `TemptGoal` follows
+/// a player for.
+///
+/// **Every entry is transcribed from the jar's own tag JSON**, not from memory,
+/// which matters more than it sounds: older Minecraft versions used a *single*
+/// item per species, and a from-memory list ("carrot for pig, seeds for
+/// chicken") is wrong for 26.2 in two places — `pig_food` is three items and
+/// `chicken_food` is six. Files, all under
+/// `.cache/mc/26.2/src/data/minecraft/tags/item/`:
+///
+/// | tag | file | values |
+/// |---|---|---|
+/// | cow | `cow_food.json` | `wheat` |
+/// | sheep | `sheep_food.json` | `wheat` |
+/// | pig | `pig_food.json` | `carrot`, `potato`, `beetroot` |
+/// | chicken | `chicken_food.json` | `wheat_seeds`, `melon_seeds`, `pumpkin_seeds`, `beetroot_seeds`, `torchflower_seeds`, `pitcher_pod` |
+/// | rabbit | `rabbit_food.json` | `carrot`, `golden_carrot`, `dandelion` |
+///
+/// **This is an interim table and should be replaced, not extended.** Roster
+/// unit B2 owns a *generated* item-tag table following the
+/// `collision_shapes`/`hardness` generate-or-assert + `LODESTONE_REGEN=1`
+/// pattern; the `damage_types` extraction is the closest existing precedent for
+/// pulling tags out of datapack JSON. When that lands, this function's body
+/// becomes a lookup into it and nothing else changes — the plumbing above and
+/// below it is already in terms of a real held item.
+///
+/// Matched on the resource-key *path*, so a namespace other than `minecraft:`
+/// would also match. Harmless today (nothing loads datapacks) and the generated
+/// table will carry full keys.
+fn tempt_food(species: &str) -> &'static [&'static str] {
+    match species {
+        // `AbstractCow` covers both, and they share `cow_food`.
+        "cow" | "mooshroom" => &["wheat"],
+        "sheep" => &["wheat"],
+        "pig" => &["carrot", "potato", "beetroot"],
+        "chicken" => &[
+            "wheat_seeds",
+            "melon_seeds",
+            "pumpkin_seeds",
+            "beetroot_seeds",
+            "torchflower_seeds",
+            "pitcher_pod",
+        ],
+        "rabbit" => &["carrot", "golden_carrot", "dandelion"],
+        // Not a mistake: most species have no food tag, and an empty slice
+        // keeps `TemptGoal` correctly inert for them rather than tempting them
+        // with anything.
+        _ => &[],
+    }
+}
+
 /// What [`MobSim`] needs to know about one connected player in order to feed
 /// mob perception. See [`MobSim::set_players`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// Not `Copy`, because [`held_item`](Self::held_item) owns a [`ResourceKey`].
+#[derive(Debug, Clone, PartialEq)]
 pub struct PlayerPerception {
     /// The player's current position.
     pub position: Vec3,
-    /// Whether the player is holding an item that tempts animals.
+    /// The item the player is currently holding, if any — straight from their
+    /// `PlayerInventory`'s selected hotbar slot.
     ///
-    /// The *caller* decides this, not this crate, and that split is
-    /// deliberate: in 26.2 the predicate is a per-species item **tag**
-    /// (`sheep_food` is 1 item, `pig_food` is 3, `chicken_food` is 6 —
-    /// `.cache/mc/26.2/src/data/minecraft/tags/item/*.json`), so resolving it
-    /// needs generated tag data that belongs with the per-species roster
-    /// rather than here. Until that lands this flag is coarser than vanilla:
-    /// it tempts *every* animal rather than the ones whose tag matches. See
-    /// `docs/mob-perception.md` for the consequence.
-    pub holding_tempt_item: bool,
+    /// The **item itself** rather than a pre-computed "is this tempting?"
+    /// boolean, because the answer is per-*species*: wheat tempts a cow and a
+    /// sheep, a potato tempts only a pig, and pumpkin seeds only a chicken
+    /// (see [`tempt_food`]). A boolean here would have to be either wrong for
+    /// some species or computed once per (player, species) pair by the caller,
+    /// which is the feed's job, not the producer's.
+    pub held_item: Option<ResourceKey>,
 }
 
 /// Vanilla `Creeper.DEFAULT_EXPLOSION_RADIUS`
@@ -804,6 +856,16 @@ impl<'w> SimMob<'w> {
     #[must_use]
     pub fn is_jumping(&self) -> bool {
         self.mob.is_jumping()
+    }
+
+    /// The last position a goal asked this mob to look at, if any — the
+    /// observable effect of `LookAtPlayerGoal`. Distinct from
+    /// [`head_yaw`](SimMob::head_yaw), which is the derived angle; this is the
+    /// target the goal actually chose, so a test can assert *what* the mob
+    /// turned toward rather than merely that some angle changed.
+    #[must_use]
+    pub fn facing(&self) -> Option<Vec3> {
+        self.mob.facing()
     }
 
     /// `no_action_time` **as the goals see it**, through the
@@ -1589,13 +1651,24 @@ impl<'w> MobSim<'w> {
             // --- temptation -----------------------------------------------
             // The range *is* on the mob here (`Attributes.TEMPT_RANGE`), so it
             // belongs in the feed. See `TEMPT_RANGE`.
-            temptation[i] = nearest_by(
-                &self.players,
-                pos,
-                |p| p.position,
-                |p| p.holding_tempt_item,
-                Some((TEMPT_RANGE, TEMPT_RANGE)),
-            );
+            //
+            // The item test is per-species (`tempt_food`), which is why
+            // `PlayerPerception` carries the held item rather than a boolean:
+            // the same wheat that tempts a cow does nothing to a chicken.
+            let foods = tempt_food(&species);
+            if !foods.is_empty() {
+                temptation[i] = nearest_by(
+                    &self.players,
+                    pos,
+                    |p| p.position,
+                    |p| {
+                        p.held_item
+                            .as_ref()
+                            .is_some_and(|item| foods.contains(&item.path()))
+                    },
+                    Some((TEMPT_RANGE, TEMPT_RANGE)),
+                );
+            }
 
             // --- avoid threat ---------------------------------------------
             let avoided = avoided_species(&species);
@@ -2244,121 +2317,6 @@ fn nearest_by<T>(
 // `tests/mob_sim.rs` so it drives them through the crate's *public* API — the
 // same discipline the rest of the project uses (a consumer that is only a
 // `#[cfg(test)]` fake proves nothing about the public seam).
-
-/// The one exception to the discipline stated immediately above, and it is a
-/// *visibility* exception rather than a design one.
-///
-/// [`PlayerPerception`] is declared here but `mod mobs;` is private
-/// (`lib.rs:113`) and the crate re-exports an explicit list (`lib.rs:156`) that
-/// does not yet include it. `lib.rs` is a brokered choke point this session, so
-/// the one-word addition is handed to the orchestrator rather than made here —
-/// which means `tests/mob_sim.rs` **cannot name the type yet** and the player
-/// half of the perception feed would otherwise ship with no gate at all.
-///
-/// Everything else about the feed *is* gated through the public API in
-/// `tests/mob_sim.rs`. **Move these two tests there once `PlayerPerception` is
-/// re-exported** — they need no other change.
-#[cfg(test)]
-mod player_feed_tests {
-    use super::*;
-
-    fn flat_world() -> ChunkWorld {
-        let mut world = ChunkWorld::new(-4, 24);
-        for x in -12..=12 {
-            for z in -12..=12 {
-                world.set_solid(x, -1, z, true); // floor, surface at y=0
-            }
-        }
-        world
-    }
-
-    fn cow() -> ResourceKey {
-        ResourceKey::from_str("minecraft:cow").expect("valid key")
-    }
-
-    #[test]
-    fn a_player_position_reaches_the_mob_and_a_bare_hand_does_not_tempt() {
-        let world = flat_world();
-        let mut sim = MobSim::new(&world);
-        let id = sim.spawn_species(cow(), Vec3::new(0.0, 0.0, 0.0)).id();
-
-        // Before any feed: both must be `None`. This is the control that shows
-        // the assertions below are reading the feed rather than some default
-        // that happened to be a position.
-        sim.tick();
-        assert_eq!(sim.get(id).unwrap().nearest_player(), None);
-        assert_eq!(sim.get(id).unwrap().temptation(), None);
-
-        // A player 4 blocks away, empty-handed.
-        sim.set_players(vec![PlayerPerception {
-            position: Vec3::new(4.0, 0.0, 0.0),
-            holding_tempt_item: false,
-        }]);
-        sim.tick();
-        assert_eq!(
-            sim.get(id).unwrap().nearest_player(),
-            Some(Vec3::new(4.0, 0.0, 0.0)),
-            "the fed player position must reach the mob's perception"
-        );
-        assert_eq!(
-            sim.get(id).unwrap().temptation(),
-            None,
-            "an empty-handed player must not tempt — otherwise `holding_tempt_item` \
-             is being ignored and every player would lead every animal"
-        );
-
-        // Same player, now holding food: temptation appears, and only then.
-        sim.set_players(vec![PlayerPerception {
-            position: Vec3::new(4.0, 0.0, 0.0),
-            holding_tempt_item: true,
-        }]);
-        sim.tick();
-        assert_eq!(
-            sim.get(id).unwrap().temptation(),
-            Some(Vec3::new(4.0, 0.0, 0.0))
-        );
-    }
-
-    #[test]
-    fn temptation_respects_tempt_range_while_nearest_player_does_not() {
-        // The two feeds are deliberately gated differently — `TEMPT_RANGE` is a
-        // mob *attribute* in vanilla (`Attributes.java:107`) so the feed applies
-        // it, whereas `LookAtPlayerGoal`'s range is a goal constructor argument
-        // so the feed must not. A test that only ever used a nearby player
-        // could not tell those apart.
-        let world = flat_world();
-        let mut sim = MobSim::new(&world);
-        let id = sim.spawn_species(cow(), Vec3::new(0.0, 0.0, 0.0)).id();
-
-        let far = Vec3::new(TEMPT_RANGE + 5.0, 0.0, 0.0);
-        sim.set_players(vec![PlayerPerception {
-            position: far,
-            holding_tempt_item: true,
-        }]);
-        sim.tick();
-        assert_eq!(
-            sim.get(id).unwrap().temptation(),
-            None,
-            "a tempting player beyond TEMPT_RANGE ({TEMPT_RANGE}) must not tempt"
-        );
-        assert_eq!(
-            sim.get(id).unwrap().nearest_player(),
-            Some(far),
-            "nearest_player must be fed uncut, so the goal's own lookDistance \
-             stays the single place that range is decided"
-        );
-
-        // Just inside the range: the same player now tempts. Predicting the
-        // boundary rather than asserting a direction.
-        let near = Vec3::new(TEMPT_RANGE - 0.5, 0.0, 0.0);
-        sim.set_players(vec![PlayerPerception {
-            position: near,
-            holding_tempt_item: true,
-        }]);
-        sim.tick();
-        assert_eq!(sim.get(id).unwrap().temptation(), Some(near));
-    }
-}
 
 /// A live [`EntitySource`] fed by a background-ticked [`MobSim`] (issue
 /// #217). [`IntegratedServer::open_in_memory_with_mobs`](crate::IntegratedServer::open_in_memory_with_mobs)
