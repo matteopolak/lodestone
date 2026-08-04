@@ -26,8 +26,9 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `crates/lodestone-shell/src/menu/accounts.rs` draws the account list — every saved
   account plus an always-present offline entry — and drives its own device-code
   sign-in flow. See "The account list screen" below for how it fits alongside
-  `login`'s composition layer above (it does not call into `login` — see that
-  section for why) and for the offline-selection convention it establishes that
+  `login`'s composition layer above (it now calls straight into
+  `login::finish_interactive` rather than hand-rolling a second copy — issue #73,
+  see that section) and for the offline-selection convention it establishes that
   `login::try_cached_session` already happens to handle correctly.
 - [Arm swing animation](./arm-swing-animation.md) — The arm swing you see when you
   mine, place, or hit something. Vanilla drives three separate things off one number
