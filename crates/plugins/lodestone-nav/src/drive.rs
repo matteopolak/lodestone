@@ -161,7 +161,10 @@ impl WalkDrive {
         // Only while grounded and still short of the destination: pressing jump
         // mid-air does nothing physically, and holding it past arrival is not
         // meaningful either since `done` will end the edge on the same tick.
-        let jump = self.jump && state.on_ground && !self.inside_cell(state.position);
+        //
+        // `!self.arrived(state)`, not `!self.inside_cell(...)` — see `arrived`'s
+        // own doc comment for why `inside_cell` alone is unsafe here.
+        let jump = self.jump && state.on_ground && !self.arrived(state);
         DriveTick {
             input: MovementInput {
                 forward,
@@ -174,6 +177,31 @@ impl WalkDrive {
         }
     }
 
+    /// Whether the body is both horizontally inside the destination cell *and*
+    /// at its surface height.
+    ///
+    /// # Why `inside_cell` alone is unsafe for `StepUp`/`Descend`/`Drop`
+    ///
+    /// The player's AABB is 0.6 wide, so a body whose *centre* has just crossed
+    /// the cell boundary still overlaps the **source** column for a few ticks —
+    /// and if the source and destination surfaces are the same height (every
+    /// `Walk`, by construction), that overlap is harmless: either surface
+    /// answers the same question. It stops being harmless the moment the two
+    /// heights differ. A body approaching a `StepUp` still straddles the low
+    /// source floor when its centre first crosses into the taller
+    /// destination's footprint — `on_ground` and `inside_cell` both read `true`
+    /// while the body has not risen at all, and a `Descend`/`Drop` shows the
+    /// mirror image, straddling the high source floor while `inside_cell` over
+    /// the pit already reads `true`. `docs/baritone-port.md` §4.4's cost model
+    /// found this directly: a synthetic `Drop` of 2 cells and one of 6 both
+    /// "completed" in the same 5 ticks, at `y` never having left the *source*
+    /// surface — the straddle window closed before the fall began, `done`
+    /// fired on the horizontal coincidence alone, and the simulated cost was
+    /// for a walk that never happened.
+    fn arrived(&self, state: &PlayerState) -> bool {
+        self.inside_cell(state.position) && (state.position.y - self.surface).abs() < SURFACE_ARRIVAL_EPS
+    }
+
     /// Whether the movement is finished.
     ///
     /// A **volume** test, not a coordinate-equality test: the feet cell equals the
@@ -182,12 +210,16 @@ impl WalkDrive {
     /// and the point of measuring completion at the cell boundary is that crossing
     /// it is a discrete event the executor cannot miss by a rounding error.
     ///
+    /// Also requires the surface height to match ([`Self::arrived`]) — necessary
+    /// only since `StepUp`/`Descend`/`Drop` gave the source and destination
+    /// different heights; every `Walk` already satisfies it trivially.
+    ///
     /// A braking edge additionally waits for the body to be near enough to stopped,
     /// because "arrived at the goal" should look like arriving rather than like
     /// skidding through.
     #[must_use]
     pub fn done(&self, state: &PlayerState) -> bool {
-        if !self.inside_cell(state.position) || !state.on_ground {
+        if !self.arrived(state) || !state.on_ground {
             return false;
         }
         if !self.brake {
@@ -196,6 +228,11 @@ impl WalkDrive {
         state.velocity.x.abs() < STOPPED_SPEED && state.velocity.z.abs() < STOPPED_SPEED
     }
 }
+
+/// Vertical tolerance for [`WalkDrive::arrived`], in blocks —
+/// `docs/baritone-port.md` §4.8's own arrival-tolerance figure ("~0.1
+/// vertical… because lily pads sit slightly above the block floor").
+const SURFACE_ARRIVAL_EPS: f64 = 0.1;
 
 /// Squared horizontal distance from the destination centre at which a braking edge
 /// releases forward. `0.6²` — a little over the body's half-width, so the release
