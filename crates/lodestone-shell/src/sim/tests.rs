@@ -1248,6 +1248,137 @@ fn autopilot_plugin_is_registered_and_its_systems_actually_run() {
     );
 }
 
+/// Issue #38's remaining half, closed: the `#goto x z` chat command
+/// (`docs/baritone-port.md`'s M1 section) actually reaching
+/// `AutopilotGoal` through `Sim::send_chat`, and the plugin actually
+/// **moving the player**, not just flipping a status enum.
+///
+/// `autopilot_plugin_is_registered_and_its_systems_actually_run` above is
+/// the isolated unit this must not repeat: it pokes `AutopilotGoal` directly
+/// and checks one tick's status. What was still unproven is (a) whether a
+/// *typed chat line* reaches the resource at all, and (b) whether driving it
+/// for real over many ticks produces real displacement toward the goal, on
+/// real jar-derived collision (`Sim::set_block_world` + the live collision
+/// path every other movement test in this file uses) — not that the command
+/// merely parsed.
+///
+/// Two runs on the same flat corridor (`docs/baritone-port.md`'s own M1
+/// scope: "walk to a coordinate over flat ground"), differing only in
+/// whether a full-height wall seals the only path — the unreachable-goal
+/// control that proves this detector can actually fail. Both goals sit well
+/// inside `lodestone_autopilot::SNAPSHOT_RADIUS` (8 blocks) of spawn.
+#[test]
+fn goto_chat_command_drives_the_player_toward_the_goal_over_real_ticks() {
+    // Player spawns at (0.5, feet, 0.5) facing north — see the walking-bob
+    // test above, which found this the hard way. The corridor runs +Z.
+    fn flat_corridor(sim: &mut Sim, feet_y: i32) {
+        for dz in -1..=6 {
+            for dx in -1..=1 {
+                sim.set_block_world([dx, feet_y - 1, dz], id::STONE);
+                sim.set_block_world([dx, feet_y, dz], id::AIR);
+                sim.set_block_world([dx, feet_y + 1, dz], id::AIR);
+                sim.set_block_world([dx, feet_y + 2, dz], id::AIR);
+            }
+        }
+    }
+    fn dist_to_goal(pos: lodestone_physics::player::PlayerState) -> f64 {
+        // Goal block (0, _, 5)'s centre.
+        ((pos.position.x - 0.5).powi(2) + (pos.position.z - 5.5).powi(2)).sqrt()
+    }
+    fn settle(sim: &mut Sim) {
+        for _ in 0..20 {
+            sim.step(1.0 / 20.0);
+        }
+    }
+    fn drive(sim: &mut Sim) {
+        for _ in 0..200 {
+            sim.step(1.0 / 20.0);
+        }
+    }
+
+    // -- Reachable: the corridor is open all the way to the goal. --
+    let mut sim = Sim::new(test_config());
+    let feet_y = sim.player().position.y.floor() as i32;
+    flat_corridor(&mut sim, feet_y);
+    settle(&mut sim);
+    let start_dist = dist_to_goal(sim.player());
+    assert!(
+        sim.send_chat("#goto 0 5"),
+        "a well-formed #goto must be consumed locally, needing no live connection"
+    );
+    drive(&mut sim);
+    let end_dist = dist_to_goal(sim.player());
+    assert!(
+        end_dist < start_dist - 2.0,
+        "the player must actually have walked toward the goal: \
+         start_dist={start_dist:.2} end_dist={end_dist:.2}"
+    );
+    assert!(
+        end_dist < 1.5,
+        "on an open flat corridor the player should reach the goal cell, \
+         got {end_dist:.2} blocks away"
+    );
+    assert_eq!(
+        sim.read(|w| *w.resource::<lodestone_autopilot::AutopilotStatus>()),
+        lodestone_autopilot::AutopilotStatus::Arrived,
+        "the command's goal must be reported arrived, not merely close"
+    );
+
+    // -- Unreachable control: same corridor, sealed by a full-height wall
+    // between spawn and the goal. M1 supports no breaking, so a sealed
+    // corridor is a genuine, not contrived, "no path" case. --
+    let mut sim = Sim::new(test_config());
+    let feet_y = sim.player().position.y.floor() as i32;
+    flat_corridor(&mut sim, feet_y);
+    for dx in -1..=1 {
+        for dy in -1..=2 {
+            sim.set_block_world([dx, feet_y + dy, 2], id::STONE);
+        }
+    }
+    settle(&mut sim);
+    let start_dist = dist_to_goal(sim.player());
+    assert!(sim.send_chat("#goto 0 5"));
+    drive(&mut sim);
+    let blocked_dist = dist_to_goal(sim.player());
+    assert!(
+        blocked_dist > start_dist - 1.0,
+        "control: a sealed corridor must actually stop the autopilot short \
+         of the goal, got start_dist={start_dist:.2} blocked_dist={blocked_dist:.2}"
+    );
+    assert_ne!(
+        sim.read(|w| *w.resource::<lodestone_autopilot::AutopilotStatus>()),
+        lodestone_autopilot::AutopilotStatus::Arrived,
+        "control: must never report arrival when walled off — if it does, \
+         this detector cannot tell a real path from a blocked one"
+    );
+}
+
+/// `#goto` must not leak onto the network as an ordinary chat line — it has
+/// no server-side meaning, and typing it must never let other players read
+/// a client-local command. Complements the drive gate above, which proves
+/// the *positive* path; this is the negative one for the interception
+/// itself, hermetic and not dependent on any particular corridor.
+#[test]
+fn goto_chat_command_never_reaches_the_outbound_action_queue() {
+    let (net, actions, _feed) = crate::net::NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.attach_net(net);
+
+    assert!(sim.send_chat("#goto 3 4"));
+    assert!(
+        actions.try_recv().is_err(),
+        "#goto must be consumed locally, never handed to the outbound action queue"
+    );
+
+    // A malformed `#goto` (not enough coordinates) must fall through to
+    // ordinary chat handling rather than silently vanish — `send_chat`
+    // returning `false` for garbage, matching a blank line's contract.
+    assert!(
+        !sim.send_chat("#goto"),
+        "a malformed #goto must not be silently swallowed as if it succeeded"
+    );
+}
+
 /// The authority test for the stage, at the shell level: the components are
 /// the *only* store, so a write through the `World` — which is what a plugin
 /// gets — changes what the server is told on the next tick.

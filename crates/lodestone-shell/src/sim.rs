@@ -259,6 +259,26 @@ pub(crate) fn face_from_normal(normal: [i32; 3]) -> BlockFace {
     }
 }
 
+/// Parse a `goto x z` body — the text of a `#goto x z` command with the
+/// leading `#` already stripped by [`Sim::send_chat`] — into the two
+/// coordinates (issue #38, M1: `docs/baritone-port.md`'s "walk to a
+/// coordinate over flat ground"). `None` for anything that is not exactly
+/// `goto`, one whitespace-separated `i32`, another, and nothing else —
+/// deliberately strict, since a line this doesn't recognise is dropped
+/// rather than leaked to chat (see `send_chat`'s doc).
+fn parse_goto_command(body: &str) -> Option<(i32, i32)> {
+    let mut parts = body.split_whitespace();
+    if parts.next()? != "goto" {
+        return None;
+    }
+    let x: i32 = parts.next()?.parse().ok()?;
+    let z: i32 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((x, z))
+}
+
 /// [`BlockFace`] to [`particle_emit::Face`] — the two enumerate the same six
 /// directions under different names because they come from different crates
 /// (`lodestone-model` for protocol-facing code, `lodestone-particle` for the
@@ -1971,14 +1991,40 @@ impl Sim {
     /// A blank line sends nothing. No-op without a live connection. Returns
     /// whether anything was sent, so the caller can echo command feedback.
     ///
-    /// **Nothing is intercepted here.** A `/givedebug` wrapper used to run ahead
-    /// of [`compose_chat_action`] and rewrite itself into the server's real
-    /// `/give @s <item> <amount>`; issue #382 deleted it, because typing `/give`
-    /// does the same thing with no bespoke parser to keep in step with the
-    /// server's. Every line now goes to the server verbatim, and every command
-    /// response — including "you are not op" — arrives back over the ordinary
-    /// inbound chat path.
+    /// **Nothing server-bound is intercepted here.** A `/givedebug` wrapper
+    /// used to run ahead of [`compose_chat_action`] and rewrite itself into
+    /// the server's real `/give @s <item> <amount>`; issue #382 deleted it,
+    /// because typing `/give` does the same thing with no bespoke parser to
+    /// keep in step with the server's. Every `/` line still goes to the
+    /// server verbatim, and every command response — including "you are not
+    /// op" — arrives back over the ordinary inbound chat path.
+    ///
+    /// A leading `#`, unlike `/`, is a **client-local** command namespace and
+    /// is intercepted before `compose_chat_action` ever sees it —
+    /// deliberately the opposite policy from `/`. `#goto` (issue #38, M1) has
+    /// no server-side meaning and must never appear in chat for anyone else
+    /// to read; `docs/baritone-port.md`'s later milestones name the same
+    /// prefix for `#follow`/`#mine`. So **any** `#`-prefixed line is consumed
+    /// here, matched or not — a malformed one is dropped rather than falling
+    /// through to `compose_chat_action` and leaking as literal chat text,
+    /// which would be worse than silently refusing it.
     pub fn send_chat(&mut self, line: &str) -> bool {
+        if let Some(rest) = line.trim().strip_prefix('#') {
+            let Some((x, z)) = parse_goto_command(rest) else {
+                return false;
+            };
+            // M1's own scope is "walk to a coordinate over **flat ground**"
+            // (`docs/baritone-port.md`) — the player's current y is the
+            // honest target for that scope. A real height lookup at the
+            // destination column is M2's "real terrain" scope, not this
+            // command's.
+            let y = self.player().position.y.floor() as i32;
+            self.write(|w| {
+                w.resource_mut::<lodestone_autopilot::AutopilotGoal>().0 =
+                    Some(BlockPos::new(x, y, z));
+            });
+            return true;
+        }
         let Some(action) = compose_chat_action(line) else {
             return false;
         };
