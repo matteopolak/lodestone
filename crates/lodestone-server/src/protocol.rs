@@ -94,9 +94,13 @@ pub enum ServerBound {
     /// The client's absolute position changed (`move_player_pos` /
     /// `move_player_pos_rot` — the only two serverbound movement packets that
     /// carry a position; `move_player_rot` and `move_player_status_only`
-    /// carry none and stay [`Ignored`](Self::Ignored)). This is what drives
-    /// chunk-cache-center and view-streaming updates; the loop needs no
-    /// look/on-ground data for that.
+    /// carry none and stay [`Ignored`](Self::Ignored)). This drives
+    /// chunk-cache-center/view-streaming updates (needs only `x`/`z`) and
+    /// [`crate::fall::FallTracker`] (issue #265, needs `y`/`on_ground`) — the
+    /// loop still needs no look data, but `on_ground` is no longer dropped:
+    /// a landing that happens to arrive via a rotation-only or status-only
+    /// packet (no net position change in that sample) is not observed here,
+    /// a known gap noted on [`FallTracker`]'s own doc comment.
     PlayerMoved {
         /// New absolute x position, in blocks.
         x: f64,
@@ -104,6 +108,8 @@ pub enum ServerBound {
         y: f64,
         /// New absolute z position, in blocks.
         z: f64,
+        /// Whether the client reports itself as grounded in this sample.
+        on_ground: bool,
     },
     /// A block-breaking phase (`ServerboundPlayerActionPacket`'s
     /// `START_DESTROY_BLOCK`/`ABORT_DESTROY_BLOCK`/`STOP_DESTROY_BLOCK`

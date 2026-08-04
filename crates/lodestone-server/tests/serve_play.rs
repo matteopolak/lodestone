@@ -132,6 +132,12 @@ impl ServerProtocol for FakeProtocol {
                     x: r.f64().expect("x"),
                     y: r.f64().expect("y"),
                     z: r.f64().expect("z"),
+                    // This stand-in wire format never carried an on_ground
+                    // bit and these tests are about keep-alive/time/view
+                    // scheduling, not fall damage — `true` is an arbitrary,
+                    // harmless choice (a landing sample every packet, never
+                    // producing a multi-tick accumulated fall).
+                    on_ground: true,
                 }
             }
             _ => ServerBound::Ignored,

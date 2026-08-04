@@ -43,6 +43,13 @@
 //!   two new [`ServerProtocol`] methods (`encode_air_supply_update`,
 //!   `encode_set_health`) defaulting to emit nothing, exactly like the
 //!   keep-alive/time/view-streaming encoders above.
+//! * [`FallTracker`] — server-authoritative fall damage (issue #265),
+//!   packet-driven rather than timer-driven like [`PlayerVitals`]: it is fed
+//!   the `(y, on_ground)` pair every [`ServerBound::PlayerMoved`] now
+//!   carries and reports damage the moment a landing crosses vanilla's
+//!   safe-fall-distance threshold, applied through the same
+//!   [`lodestone_entity::apply_reductions`] pipeline
+//!   [`crate::mobs::SimMob::apply_damage`] uses for mobs.
 //!
 //! Wiring a real vanilla client to this server end-to-end requires the version
 //! crate to provide client-bound *encoders* (join game, registry data,
@@ -54,6 +61,7 @@
 //! [`Transport`]: lodestone_net::Transport
 
 mod chunk;
+mod fall;
 mod integrated;
 mod mob_spawn;
 mod mobs;
@@ -64,6 +72,7 @@ mod vitals;
 mod worldgen_data;
 
 pub use chunk::{ChunkColumn, ChunkSource, OverworldChunkSource, WorldgenChunkSource};
+pub use fall::{FALL_DAMAGE_MULTIPLIER, FallTracker, SAFE_FALL_DISTANCE};
 pub use integrated::IntegratedServer;
 pub use mob_spawn::{
     DespawnOutcome, MAGIC_NUMBER, MobCategory, SpawnCandidate, SpawnCandidateSource, SpawnRng,
