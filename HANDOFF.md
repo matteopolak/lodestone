@@ -21,7 +21,11 @@ state of the project; work that out yourself from the tracker and the tree.
   Concurrent cargo runs contend, and a count taken while agents are mid-edit is a sample rather than a
   measurement — the invariant is zero failures, never a number. Tell agents not to run `cargo` at all,
   have them report their unverified surface honestly, and run **one** batched verification when a group
-  lands, using the health checks in `CLAUDE.md`. Feed failures back to the owning agent by name.
+  lands, using the health checks in `CLAUDE.md` — `just health` (see
+  [`docs/task-runner.md`](./docs/task-runner.md)), or the four `just check`/`check-all`/`check-seam`/`test`
+  recipes individually when you need to name which one failed. Feed failures back to the owning agent by
+  name. Also run `just wasm-check` (and, less often, `just wasm-size`) as part of the same batched pass —
+  nothing else calls either script.
 - **A red tree mid-session is usually someone's in-flight edit.** Check whether the offending symbol
   exists at `HEAD` before blaming a commit.
 - **Contention is your main job.** Four to six agents at once works *if* you broker the wiring files;
