@@ -336,6 +336,20 @@ pub struct OverworldGenerator {
     /// ever guards *insertion*, never a mutation raced against a reader.
     /// Bounded — see [`PreOreCache`] and [`PRE_ORE_CACHE_CAPACITY`].
     pre_ore_cache: Mutex<PreOreCache>,
+    /// Per-biome `VEGETAL_DECORATION` list (issue #406), resolved the same
+    /// way and at the same time as `ores_by_biome` — see
+    /// `crate::compose::build_biome_vegetation`. Empty (whole map) when the
+    /// resolver supplies no biome documents with a vegetation step, in
+    /// which case [`Self::vegetation_stage`] is a no-op, matching every
+    /// other #295/#406 resolver "no data supplied" convention.
+    vegetation_by_biome: HashMap<String, Vec<(usize, crate::feature::vegetation::PlacedRef)>>,
+    /// Block-tag closures [`crate::feature::vegetation`]'s own predicates/
+    /// checks need (`supports_vegetation`, `replaceable_by_trees`, `logs`,
+    /// `cannot_replace_below_tree_trunk`) — resolved once, analogous to
+    /// `ore_tag_map` but via `crate::feature::vegetation::build_veg_tags`
+    /// rather than a per-ore-target walk (this module's own tag set is
+    /// fixed, not data-dependent — see that function's doc comment).
+    veg_tags: crate::feature::vegetation::VegTags,
 }
 
 impl OverworldGenerator {
@@ -444,15 +458,21 @@ impl OverworldGenerator {
 
         let mut carvers_by_biome = HashMap::new();
         let mut ores_by_biome = HashMap::new();
+        let mut vegetation_by_biome = HashMap::new();
         for name in &biome_names {
             carvers_by_biome.insert(
                 name.clone(),
                 crate::compose::build_biome_carvers(resolver, name),
             );
             ores_by_biome.insert(name.clone(), crate::compose::build_biome_ores(resolver, name));
+            vegetation_by_biome.insert(
+                name.clone(),
+                crate::compose::build_biome_vegetation(resolver, name),
+            );
         }
         let all_ores: Vec<PlacedOre> = ores_by_biome.values().flatten().cloned().collect();
         let ore_tag_map = crate::compose::build_ore_tag_map(resolver, &all_ores);
+        let veg_tags = crate::feature::vegetation::build_veg_tags(resolver);
 
         // Captured last, after every `builder.build()` call above (shape,
         // surface, climate, the eight aquifer trees) — see `AquiferTrees`'s
@@ -478,6 +498,8 @@ impl OverworldGenerator {
             ores_by_biome,
             ore_tag_map,
             pre_ore_cache: Mutex::new(PreOreCache::default()),
+            vegetation_by_biome,
+            veg_tags,
         }
     }
 
@@ -509,6 +531,7 @@ impl OverworldGenerator {
         // neighbour visit), and it is cheap relative to the full pipeline
         // recomputation it replaces. See `pre_ore_cache`'s doc comment.
         let world = self.ore_stage(cx, cz, cached.0.clone(), &cached.1);
+        let world = self.vegetation_stage(cx, cz, world);
         self.intern_from_dense(world, cached.2.clone())
     }
 
@@ -753,6 +776,85 @@ impl OverworldGenerator {
         }
     }
 
+    /// Stage 6 (issue #406): `VEGETAL_DECORATION` — grass, flowers and
+    /// trees, over the centre chunk's own post-ore terrain only.
+    ///
+    /// **Single-chunk only — no cross-chunk feature spill**, unlike
+    /// [`Self::ore_stage`]'s real 3×3 driver. See
+    /// `crate::feature::vegetation`'s own module doc "Scope" section for
+    /// why (vanilla's real `blockStateWriteRadius(1)` applies here too, so
+    /// a tree near a chunk edge can legitimately spill canopy into a
+    /// neighbour, and this stage does not model that yet — a named,
+    /// bounded gap, not a hidden one).
+    ///
+    /// Biome is resolved via [`Self::biome_for_carver_source`] — the same
+    /// one-biome-per-chunk convention [`Self::ore_stage`] already uses for
+    /// ore-list selection, reused here rather than introducing a second
+    /// per-feature biome-check convention. No-op (returns `world`
+    /// unchanged) when the resolver supplied no biome with a vegetation
+    /// step, matching every other #295/#406 resolver "no data supplied"
+    /// convention.
+    fn vegetation_stage(
+        &self,
+        cx: i32,
+        cz: i32,
+        world: crate::dense_grid::DenseBlockGrid,
+    ) -> crate::dense_grid::DenseBlockGrid {
+        if self.vegetation_by_biome.values().all(Vec::is_empty) {
+            return world;
+        }
+        let biome = self.biome_for_carver_source(cx, cz);
+        let Some(features) = self.vegetation_by_biome.get(biome) else {
+            return world;
+        };
+        if features.is_empty() {
+            return world;
+        }
+
+        let base_x = cx * 16;
+        let base_z = cz * 16;
+        // `VegGrid` takes the chunk's own absolute block origin so every
+        // position flowing through the placement engine (all of it real
+        // `BlockPos` arithmetic — absolute coordinates, never chunk-local)
+        // translates correctly — see `VegGrid`'s own doc comment on the
+        // island this fixed (a chunk-local-only grid silently rejected
+        // every write/read for any chunk other than `(0, 0)`).
+        let mut grid = crate::feature::vegetation::VegGrid::new(self.min_y, self.height, base_x, base_z);
+        for ly in 0..self.height {
+            let y = self.min_y + ly;
+            for lz in 0..16i32 {
+                for lx in 0..16i32 {
+                    let state = world.get(base_x + lx, y, base_z + lz);
+                    grid.seed(base_x + lx, y, base_z + lz, state.to_string());
+                }
+            }
+        }
+
+        // Vegetal decoration draws from the SAME per-chunk `WorldgenRandom`
+        // shape every #295 decoration stage uses (`set_decoration_seed`
+        // then per-feature `set_feature_seed`) — the fresh `XoroshiroRandomSource::new(0)`
+        // seed here is a throwaway carrier state; only `set_decoration_seed`'s
+        // own derivation (which mixes in `self.seed`, `base_x`, `base_z`)
+        // determines the actual RNG stream, matching `Self::ore_stage`'s
+        // identical pattern.
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        crate::feature::vegetation::apply_vegetal_decoration_step(
+            &mut random,
+            self.seed,
+            cx,
+            cz,
+            &mut grid,
+            &self.veg_tags,
+            features,
+        );
+
+        let mut world = world;
+        for (x, y, z, state) in grid.dirty_cells() {
+            world.set(x, y, z, state);
+        }
+        world
+    }
+
     /// Identical to [`column`](Self::column), timed per stage. Exists so the
     /// per-stage cost split can be re-measured without maintaining a second,
     /// hand-duplicated copy of the pipeline: this calls the exact same private
@@ -777,6 +879,7 @@ impl OverworldGenerator {
         let world = self.materialize_world(&field, surface_diff, base_x, base_z);
         let world = self.carve_stage(cx, cz, &aquifer, &heights, &biome_quarts, base_x, base_z, world);
         let world = self.ore_stage(cx, cz, world, &heights);
+        let world = self.vegetation_stage(cx, cz, world);
         let col = self.intern_from_dense(world, biome_quarts);
         let t4 = std::time::Instant::now();
 
@@ -1119,9 +1222,10 @@ impl OverworldGenerator {
 /// covers fill (shape + the real aquifer, issue #295); `fluid_heightmap`
 /// covers the heightmap + biome sampling (issue #405's
 /// [`OverworldGenerator::biome_stage`]); `surface` covers surface rules;
-/// `intern` now also covers carve + ore-feature composition + palette
-/// interning (issue #295) — folded into this bucket rather than earning new
-/// fields every existing caller of this struct would need to learn about.
+/// `intern` now also covers carve + ore-feature composition + vegetal-
+/// decoration composition + palette interning (issues #295, #406) — folded
+/// into this bucket rather than earning new fields every existing caller of
+/// this struct would need to learn about.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy)]
 pub struct StageTimes {
