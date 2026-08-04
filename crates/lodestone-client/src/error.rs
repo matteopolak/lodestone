@@ -1,6 +1,8 @@
 //! Error and session-outcome types for the client.
 
-use lodestone_model::{AdapterError, Text};
+use std::collections::HashMap;
+
+use lodestone_model::{AdapterError, ResourceKey, Text};
 use lodestone_net::NetError;
 
 /// A fatal error that ended, or prevented, a client session.
@@ -72,6 +74,31 @@ pub enum SessionOutcome {
 
     /// The local user requested shutdown via [`crate::ClientHandle::shutdown`].
     LocalClose,
+
+    /// The server asked the client to reconnect elsewhere
+    /// ([`lodestone_model::ClientEvent::TransferRequested`], issue #291).
+    ///
+    /// Vanilla's own client (`ClientPacketListener.handleTransfer`) tears down
+    /// the connection and immediately opens a new one to `host:port`,
+    /// carrying its in-memory cookie store across the boundary via
+    /// `TransferState` so a `cookie_request` on the far side can still be
+    /// answered. The driver cannot open that new connection itself — a
+    /// native TCP socket and a `wasm32` `ws-web`/in-memory transport are
+    /// different [`crate::builder::ClientBuilder::connect`] /
+    /// [`crate::builder::ClientBuilder::connect_with`] entry points, and
+    /// nothing generic bridges them — so this ends the session with
+    /// everything a caller needs to do the reconnect itself: the target
+    /// address, and the cookies this session had collected so the new one
+    /// can seed `cookie_response`s from them (see
+    /// `crate::driver::Driver::cookies`).
+    Transferred {
+        /// Target server host.
+        host: String,
+        /// Target server port.
+        port: i32,
+        /// Cookies this session had stored, to carry into the reconnect.
+        cookies: HashMap<ResourceKey, Vec<u8>>,
+    },
 
     /// The session ended because of an error.
     Failed(ClientError),
