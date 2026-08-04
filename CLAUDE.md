@@ -333,6 +333,23 @@ Oracles (not part of repo state — recreate them):
   other work (`mht-*`, postgres, valkey, seaweedfs). **Never run `docker system prune`,
   `docker volume prune`, or `docker builder prune`.** Name every target explicitly; note Docker's
   `name=` filter is a *substring* match. Lodestone containers are `lodestone-*`; prefer `--rm`.
+- **A `cargo check` in this checkout can report hundreds of phantom errors naming another agent's
+  worktree.** Measured: `cargo check -p lodestone-shell --no-default-features` produced **435 error
+  lines**, mostly `couldn't read …/scratchpad/wt-route-9a4c/crates/lodestone-server/assets/worldgen/
+  biome/*.json: No such file or directory` — a path inside a *throwaway worktree that was being
+  removed while cargo read from it*. The named files exist perfectly well in this checkout, and all
+  430 of them are tracked. Re-running minutes later gave **3** errors, all real and all one agent's
+  in-flight edit.
+  The trap is that this looks exactly like a catastrophic breakage — hundreds of missing data files
+  reads as "someone deleted the assets" or "the embed path is wrong", and it names real filenames.
+  `cargo clean -p <crate>` "fixed" it while reporting **`Removed 0 files`**, which is the tell that
+  the artifact cache was never the cause.
+  So: **an error whose path contains `/scratchpad/` or a `wt-` prefix is not about your code.** Ignore
+  it, re-run, and remember the general rule this is one more instance of — a check run in a shared
+  checkout while a dozen agents edit is a **sample, not a measurement**. Before believing any verdict
+  about `main`, re-run at the committed sha in a fresh isolated worktree; and prefer
+  `git worktree remove` over leaving worktrees around, since a half-removed one is what poisons
+  everyone else's build output.
 
 ---
 
