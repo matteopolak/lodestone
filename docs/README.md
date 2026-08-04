@@ -638,6 +638,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [The sky pass and the air-bubble row](./sky-and-air-bubbles.md) — Two features
   that landed as complete, tested, unreachable modules and were then wired into the
   frame:
+- [Social Interactions screen](./social-interactions.md) — `Screen::Social` (issue
+  #189): vanilla's `SocialInteractionsScreen`, reached from the pause menu's Player
+  Reporting icon button (`crates/lodestone-shell/src/menu/nav.rs`'s
+  `PauseButton::PlayerReporting`, now live). An online-player list with a per-player
+  **Hide in Chat**/**Show in Chat** toggle (vanilla's own terms —
+  `gui.socialInteractions.hide`/`.show`, not "mute") and a **Report** button that
+  stays permanently inactive.
 - [Sound playback](./sound-playback.md) — The path from a server sound packet to the
   machine's speakers, and the two things that keep it quiet: a **missing sample
   corpus** and a **missing environment variable**. The mixing engine was already built

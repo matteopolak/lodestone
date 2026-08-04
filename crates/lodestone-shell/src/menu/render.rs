@@ -476,6 +476,12 @@ pub enum Origin {
     /// (a flat 20 px row height, two right-anchored buttons per row) does not
     /// fit `OptionsList`'s shape.
     KeyBinds(super::key_binds::KeyPlacement),
+    /// A widget of the Social Interactions screen (issue #189), resolved by
+    /// [`super::social::placement_anchor`]. A third data-carrying variant for
+    /// the same reason [`Origin::KeyBinds`] is one: this screen's rows are not
+    /// `OptionsList` geometry either (a name label plus two right-anchored
+    /// buttons, not `OptionsList`'s two-column captions).
+    Social(super::social::SocialPlacement),
 }
 
 impl Origin {
@@ -508,6 +514,7 @@ impl Origin {
             Origin::KeyBinds(placement) => {
                 super::key_binds::placement_anchor(placement, width, height)
             }
+            Origin::Social(placement) => super::social::placement_anchor(placement, width, height),
         }
     }
 }
@@ -2046,6 +2053,7 @@ pub fn owns_frame(screen: super::Screen) -> bool {
             | Screen::Accounts
             | Screen::Error
             | Screen::Credits
+            | Screen::Social
     )
 }
 
@@ -3485,6 +3493,9 @@ pub fn frame_for<'a>(
         // for why its content is a short placeholder rather than vanilla's
         // real auto-scrolling poem.
         Screen::Credits => Some(credits_frame()),
+        // Social Interactions (#189) — see `super::social::frame`'s own doc
+        // for the singleplayer/multiplayer fork.
+        Screen::Social => Some(super::social::frame(nav.social(), ui.kind())),
         _ => None,
     };
     // Stamped on every screen (not read back out of `nav` per-screen above) so
@@ -5416,6 +5427,11 @@ mod tests {
                     ui.enter_dev_world();
                     ui.show_credits();
                 }
+                Screen::Social => {
+                    ui.enter_dev_world();
+                    ui.pause();
+                    ui.open_social_from_pause();
+                }
             }
             assert_eq!(ui.screen(), screen, "failed to reach {screen:?}");
             reached += 1;
@@ -7256,14 +7272,21 @@ mod tests {
         assert_eq!(f.rows[7].label, PauseButton::Options.label());
         assert_eq!(f.rows[8].label, PauseButton::QuitToTitle.label());
         assert_eq!(f.selected, 8, "selection follows the nav's pause_index");
-        // Exactly three are live, and they are the three with actions.
+        // Four are live: the three with actions, plus Player Reporting since
+        // issue #189 built the screen behind it (see `PauseButton::enabled`'s
+        // own doc — the Report control *inside* that screen is still gated,
+        // but the screen itself needs nothing this button's liveness used to
+        // stand in for).
         let live: Vec<&str> = f
             .rows
             .iter()
             .filter(|r| r.enabled)
             .map(|r| r.label.as_str())
             .collect();
-        assert_eq!(live, vec!["Back to Game", "Options...", "Disconnect"]);
+        assert_eq!(
+            live,
+            vec!["Back to Game", "Player Reporting", "Options...", "Disconnect"]
+        );
         // The four icon buttons carry a sprite instead of a label.
         assert_eq!(f.rows.iter().filter(|r| r.icon.is_some()).count(), 4);
         assert!(f.rows.iter().all(|r| r.slot.is_some()));

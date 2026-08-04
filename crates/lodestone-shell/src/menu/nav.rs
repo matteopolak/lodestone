@@ -663,8 +663,19 @@ pub enum PauseButton {
     /// Vanilla's friends icon button. Present and disabled, as on the title
     /// screen: it needs a Microsoft-account social graph.
     Friends,
-    /// Vanilla's `menu.playerReporting` icon button. Present and disabled: it
-    /// needs the chat-signature reporting context.
+    /// Vanilla's `menu.playerReporting` icon button — opens
+    /// [`super::Screen::Social`] (issue #189), vanilla's
+    /// `SocialInteractionsScreen`. **Now live**, not present-and-disabled:
+    /// the screen itself (an online-player list with a Hide/Show-in-Chat
+    /// toggle) needs nothing this button's own disabled reason used to name.
+    /// What is *still* gated is one control **inside** that screen — every
+    /// row's Report button, because that needs the chat-signature/secure
+    /// chat-signing context this client does not have (see
+    /// [`super::social`]'s module docs). If secure chat signing lands, that
+    /// is the doc to update, not this one — this comment used to be the only
+    /// place the dependency was written down, and issue #189's own tracking
+    /// note flagged that as a trap because comments drift; it no longer needs
+    /// to be, now that `super::social`'s module docs carry it instead.
     PlayerReporting,
     /// Open the settings screen (reuses [`super::Screen::Settings`] — see
     /// [`super::UiState::open_settings_from_pause`]).
@@ -711,7 +722,12 @@ impl PauseButton {
     pub fn enabled(self) -> bool {
         matches!(
             self,
-            PauseButton::BackToGame | PauseButton::Options | PauseButton::QuitToTitle
+            PauseButton::BackToGame
+                | PauseButton::Options
+                | PauseButton::QuitToTitle
+                // Issue #189: the screen behind this button is built. See the
+                // variant's own doc for what is and is not wired inside it.
+                | PauseButton::PlayerReporting
         )
     }
 
@@ -955,6 +971,11 @@ pub struct MenuNav {
     /// however deep the page stack is, and `UiState` models legal screen edges
     /// only.
     settings: crate::menu::options::SettingsNav,
+    /// The Social Interactions screen's own cursor, roster snapshot and
+    /// hidden-player choices (issue #189). Held here for the same reason
+    /// [`Self::settings`] is: `Screen::Social` is one screen regardless of how
+    /// far its list is scrolled, and `UiState` models legal screen edges only.
+    social: crate::menu::social::SocialNav,
 }
 
 impl Default for MenuNav {
@@ -1003,6 +1024,15 @@ impl MenuNav {
         options_path: std::path::PathBuf,
         profiles_path: std::path::PathBuf,
     ) -> Self {
+        // Derived from `path`'s directory the same way `Self::with_path`
+        // already derives `options_path`/`profiles_path` when only the list
+        // path is given — not a fourth constructor parameter, so every
+        // existing three-argument caller (there are many, across this file's
+        // own tests) keeps working unchanged.
+        let hidden_players_path = path
+            .parent()
+            .map(|d| d.join("hidden_players.json"))
+            .unwrap_or_else(|| std::path::PathBuf::from("hidden_players.json"));
         Self {
             main: 0,
             server: 0,
@@ -1021,6 +1051,7 @@ impl MenuNav {
             server_scroll: 0,
             menu_cursor: None,
             settings: crate::menu::options::SettingsNav::new(),
+            social: crate::menu::social::SocialNav::with_path(hidden_players_path),
         }
     }
 
@@ -1104,6 +1135,23 @@ impl MenuNav {
     #[must_use]
     pub fn settings(&self) -> &crate::menu::options::SettingsNav {
         &self.settings
+    }
+
+    /// The Social Interactions screen's own state (issue #189).
+    #[must_use]
+    pub fn social(&self) -> &crate::menu::social::SocialNav {
+        &self.social
+    }
+
+    /// Replaces the online-player snapshot the Social Interactions screen
+    /// shows — see [`crate::menu::social::entries_from_tablist`]'s doc for
+    /// who is meant to call this. Exposed here rather than requiring a caller
+    /// to reach through `social_mut()` (there is none) because this is the
+    /// one piece of live-session data this screen needs from outside, the
+    /// same shape [`Self::settings`]'s sibling accessors take for granted
+    /// everything else is either persisted or pure.
+    pub fn refresh_social(&mut self, entries: Vec<crate::menu::social::SocialEntry>) {
+        self.social.refresh(entries);
     }
 
     /// Whether a Key Binds bind button is mid-capture (issue #15) — a click
@@ -1369,6 +1417,10 @@ impl MenuNav {
                 self.settings.key_binds_mut().hover_row(row);
             }
             Screen::Settings => self.settings.hover_row(row),
+            // Social Interactions (#189) — same reasoning as the Settings
+            // arm above: without this, a click would have to route through
+            // `Enter`, which is #391's exact trap one screen further.
+            Screen::Social => self.social.hover_row(row),
             _ => {}
         }
     }
@@ -1460,6 +1512,12 @@ impl MenuNav {
             // path — which is the other half of #391's fix.
             let outcome = self.settings.click_row(row);
             return self.apply_settings(ui, outcome);
+        }
+        // Social Interactions (#189) — #391's fix, one screen further: a
+        // click resolves directly to the row it hit, never through Enter.
+        if ui.screen() == Screen::Social {
+            let outcome = self.social.click_row(row);
+            return self.apply_social(ui, outcome);
         }
         // The fourth (#396). A click on a *row* here is
         // `AbstractSelectionList.mouseClicked` — it selects, and only the favicon's
@@ -1646,6 +1704,15 @@ impl MenuNav {
             // `PauseButton::QuitToTitle`/`DeathButton::TitleScreen`, not
             // through the ordinary menu-stack unwind).
             Screen::Credits => self.key_credits(ui, key),
+            // Social Interactions (#189) has a real cursor and a real
+            // "back", unlike `Screen::Credits` — its own arm rather than the
+            // catch-all below for the same reason `Screen::Settings`'s is:
+            // that catch-all's Escape goes through `UiState::on_escape`,
+            // which would work here too (its `Screen::Social` arm calls
+            // `close_social`), but routing every key through `key_social`
+            // keeps Up/Down/Enter and Escape's screen-specific meaning in one
+            // place instead of splitting it across two functions.
+            Screen::Social => self.key_social(ui, key),
             // Escape is the only menu key that means anything on the world and
             // loading screens, and `UiState` already owns it.
             _ => {
@@ -2119,12 +2186,20 @@ impl MenuNav {
                         ui.quit_to_title();
                         MenuAction::QuitToTitle
                     }
+                    // Issue #189: a fresh screen, not a resumed one — the
+                    // same "reset on every entry" rule `PauseButton::Options`
+                    // follows above, so re-opening it never resumes scrolled
+                    // down onto a stale roster.
+                    PauseButton::PlayerReporting => {
+                        self.social.reset();
+                        ui.open_social_from_pause();
+                        MenuAction::None
+                    }
                     PauseButton::Advancements
                     | PauseButton::Statistics
                     | PauseButton::ReportBugs
                     | PauseButton::Feedback
-                    | PauseButton::Friends
-                    | PauseButton::PlayerReporting => MenuAction::None,
+                    | PauseButton::Friends => MenuAction::None,
                 }
             }
             MenuKey::Escape => {
@@ -2187,6 +2262,47 @@ impl MenuNav {
             }
             _ => MenuAction::None,
         }
+    }
+
+    /// The Social Interactions screen (issue #189). Up/Down/Enter mirror
+    /// [`Self::key_settings`]'s shape one screen over (this screen has its
+    /// own [`crate::menu::social::SocialNav`], same reason `SettingsNav` gets
+    /// one); Escape always leaves for the pause menu, since nothing on this
+    /// screen has a "cancel a pending state" step the way a Key Binds capture
+    /// does.
+    fn key_social(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        match key {
+            MenuKey::Up => {
+                self.social.step(false);
+                MenuAction::None
+            }
+            MenuKey::Down => {
+                self.social.step(true);
+                MenuAction::None
+            }
+            MenuKey::Enter => {
+                let outcome = self.social.enter();
+                self.apply_social(ui, outcome)
+            }
+            MenuKey::Escape => {
+                ui.close_social();
+                MenuAction::None
+            }
+            _ => MenuAction::None,
+        }
+    }
+
+    /// What a [`crate::menu::social::SocialOutcome`] means at the `UiState`
+    /// level — mirrors [`Self::apply_key_binds`]'s shape.
+    fn apply_social(
+        &mut self,
+        ui: &mut UiState,
+        outcome: crate::menu::social::SocialOutcome,
+    ) -> MenuAction {
+        if outcome == crate::menu::social::SocialOutcome::Back {
+            ui.close_social();
+        }
+        MenuAction::None
     }
 
     /// Steps the persisted `gui_scale` option by `delta`, wrapping between
@@ -3845,6 +3961,10 @@ mod tests {
         nav.key(&mut ui, MenuKey::Down);
         assert_eq!(nav.pause_button(), PauseButton::BackToGame);
         nav.key(&mut ui, MenuKey::Down);
+        // Issue #189: Player Reporting is now live, so it is the next stop
+        // rather than Options.
+        assert_eq!(nav.pause_button(), PauseButton::PlayerReporting);
+        nav.key(&mut ui, MenuKey::Down);
         assert_eq!(nav.pause_button(), PauseButton::Options);
         nav.key(&mut ui, MenuKey::Down);
         assert_eq!(nav.pause_button(), PauseButton::QuitToTitle);
@@ -3870,7 +3990,10 @@ mod tests {
         let mut ui = UiState::new();
         ui.enter_dev_world();
         ui.pause();
-        nav.key(&mut ui, MenuKey::Down); // BackToGame -> Options
+        // BackToGame -> Player Reporting -> Options (#189 made the middle
+        // stop live).
+        nav.key(&mut ui, MenuKey::Down);
+        nav.key(&mut ui, MenuKey::Down);
         assert_eq!(nav.pause_button(), PauseButton::Options);
 
         assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
@@ -3975,8 +4098,9 @@ mod tests {
     #[test]
     fn keyboard_navigation_steps_over_every_disabled_button() {
         // Vanilla's own focus rule: arrow keys never land on a greyed-out
-        // widget. Both screens carry five/six disabled rows now, so without this
-        // the arrow keys would walk through dead rows.
+        // widget. Both screens carry several disabled rows (pause's own count
+        // dropped from six to five when issue #189 made Player Reporting
+        // live), so without this the arrow keys would walk through dead rows.
         let (mut nav, _) = nav("skip-disabled");
         let mut ui = UiState::new();
 
@@ -4008,11 +4132,12 @@ mod tests {
             );
         }
 
-        // Pause screen: Back to Game, Options, Disconnect.
+        // Pause screen: Back to Game, Player Reporting, Options, Disconnect
+        // (issue #189 made Player Reporting the fourth live row).
         ui.enter_dev_world();
         ui.pause();
         let mut seen = vec![nav.pause_button()];
-        for _ in 0..2 {
+        for _ in 0..3 {
             nav.key(&mut ui, MenuKey::Down);
             seen.push(nav.pause_button());
         }
@@ -4020,6 +4145,7 @@ mod tests {
             seen,
             vec![
                 PauseButton::BackToGame,
+                PauseButton::PlayerReporting,
                 PauseButton::Options,
                 PauseButton::QuitToTitle
             ]
@@ -4194,6 +4320,70 @@ mod tests {
         let (mut nav, mut ui) = on_credits("credits-click");
         assert_eq!(nav.click(&mut ui, 0), MenuAction::QuitToTitle);
         assert_eq!(ui.screen(), Screen::MainMenu);
+    }
+
+    // -- Social Interactions (#189) --------------------------------------------
+
+    fn on_social(nav_tag: &str) -> (MenuNav, UiState) {
+        let (mut nav, _) = self::nav(nav_tag);
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.pause();
+        // Step to Player Reporting and press it — reproduces exactly what a
+        // player does, rather than calling `ui.open_social_from_pause()`
+        // directly, so this also proves the button click chain end to end.
+        while nav.pause_button() != PauseButton::PlayerReporting {
+            nav.key(&mut ui, MenuKey::Down);
+        }
+        nav.key(&mut ui, MenuKey::Enter);
+        assert_eq!(
+            ui.screen(),
+            Screen::Social,
+            "test setup did not reach Social via the real button"
+        );
+        (nav, ui)
+    }
+
+    #[test]
+    fn pressing_player_reporting_opens_social_with_a_fresh_cursor() {
+        let (mut nav, mut ui) = on_social("social-open");
+        // Move the cursor, leave, come back through the button again — must
+        // not resume scrolled/selected where it was left, mirroring
+        // `SettingsNav::reset`'s rule.
+        nav.key(&mut ui, MenuKey::Down);
+        ui.close_social();
+        while nav.pause_button() != PauseButton::PlayerReporting {
+            nav.key(&mut ui, MenuKey::Down);
+        }
+        nav.key(&mut ui, MenuKey::Enter);
+        assert_eq!(ui.screen(), Screen::Social);
+        assert_eq!(nav.social().selected_row(), Some(0), "cursor reset to the top");
+    }
+
+    #[test]
+    fn escape_leaves_social_for_the_pause_menu_not_the_title() {
+        let (mut nav, mut ui) = on_social("social-escape");
+        assert_eq!(nav.key(&mut ui, MenuKey::Escape), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::Paused);
+    }
+
+    #[test]
+    fn done_also_leaves_social_for_the_pause_menu() {
+        let (mut nav, mut ui) = on_social("social-done");
+        // With no players in the roster, the only control is Done, at the
+        // cursor already.
+        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::Paused);
+    }
+
+    #[test]
+    fn a_disconnect_while_on_the_social_screen_reaches_error() {
+        // Same reasoning as the death-screen disconnect gate: a session that
+        // ends while this screen is open must not silently strand the player
+        // on a roster from a server that is no longer there.
+        let (_nav, mut ui) = on_social("social-disconnect");
+        ui.session_failed("connection lost");
+        assert_eq!(ui.screen(), Screen::Error);
     }
 
     // -- the multiplayer list's footer and row actions (#396) -----------------
