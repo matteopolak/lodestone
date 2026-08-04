@@ -946,7 +946,7 @@ pub struct MenuNav {
     /// session is in — and the quadrant actions must then simply not fire, rather
     /// than behaving as if the cursor were at `(0, 0)`.
     menu_cursor: Option<(f32, f32, f32, f32)>,
-    /// The settings tree's own cursor — which of the eight pages is showing,
+    /// The settings tree's own cursor — which of the nine pages is showing,
     /// where the cursor is on it, and how far its `OptionsList` is scrolled
     /// (issue #55). See [`super::options::SettingsNav`].
     ///
@@ -1634,7 +1634,10 @@ impl MenuNav {
                         // Vanilla builds a **new** `OptionsScreen` every time
                         // (`TitleScreen.java`'s `setScreen(new OptionsScreen(…))`),
                         // so re-entering Options never resumes three pages deep.
-                        self.settings.reset();
+                        // Opened from the title, so `inWorld` is false — the
+                        // root's Online button is live (`SettingsPage::Online`),
+                        // not the permanently-absent World Options fork.
+                        self.settings.reset(false);
                         ui.open_settings();
                         MenuAction::None
                     }
@@ -1961,8 +1964,10 @@ impl MenuNav {
                     }
                     PauseButton::Options => {
                         // See `MainButton::Options` — a fresh screen, not a
-                        // resumed one.
-                        self.settings.reset();
+                        // resumed one. Opened from the pause menu, so
+                        // `inWorld` is true: the root's header button is the
+                        // (unbuilt) World Options fork, same as before.
+                        self.settings.reset(true);
                         ui.open_settings_from_pause();
                         MenuAction::None
                     }
@@ -2821,7 +2826,11 @@ mod tests {
         pred: impl Fn(&crate::menu::options::Cell) -> bool,
     ) -> usize {
         let page = nav.settings().page();
-        let controls = crate::menu::options::all_controls(page);
+        // `nav` was opened via `self::nav(...)` + `ui.open_settings()` in these
+        // tests, never through `MainButton::Options`/`PauseButton::Options`, so
+        // `SettingsNav::in_world` is still `new()`'s default (`false`) — match
+        // it here rather than hand the census the wrong Root(2) cell.
+        let controls = crate::menu::options::all_controls(page, false);
         let target = controls
             .iter()
             .position(|c| pred(c))
@@ -3128,28 +3137,43 @@ mod tests {
         open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::Mouse);
         let wheel = settings_row(&mut nav, &mut ui, is_option("mouseWheelSensitivity"));
 
-        // The exact closed form the mutator implements: an additive step on
-        // the continuous offset from `MIN`, wrapped modulo one period
-        // (`span + STEP`). Computed independently here rather than re-run,
-        // and checked at *every* click for 90 of them — more than two full
-        // periods (`10.0 / 0.25 == 40` steps/period) — so this both predicts
-        // the exact value (not just its sign or its bound) and proves the
-        // wrap is periodic rather than a one-off clamp.
+        // A single-shot closed form (`MIN + (start_offset + n*STEP).rem_euclid(period)`,
+        // with no clamp) is **not** what the mutator implements, and this used
+        // to assert exactly that — measured wrong at click 77, predicting
+        // `10.01` where the real value is `10.0`. `span` (`9.99`) is not a
+        // multiple of `STEP` (`0.25`), so `period = span + STEP` (`10.24`)
+        // leaves a dead zone of width `STEP - (period - span - STEP)` — i.e.
+        // the last `0.01` of every period — where the raw modular position
+        // is past `MAX` but has not yet wrapped past a full `period`.
+        // `cycle_mouse_wheel_sensitivity` clamps there, and that clamp is
+        // **lossy**: the next click's offset is read back from the clamped
+        // value, not the discarded raw one, so every click after the first
+        // one that lands in the dead zone is permanently shifted by however
+        // much that click clamped away. A one-shot formula computed from `n`
+        // alone cannot see this — it has to be the same per-click recurrence,
+        // reproduced here from the documented constants (not by calling
+        // `cycle_mouse_wheel_sensitivity` itself, which would make this
+        // vacuous) so the test still predicts every value rather than just
+        // asserting it changed. Checked at *every* click for 90 of them —
+        // more than two full periods (`10.24 / 0.25 ≈ 41` steps/period) — so
+        // this exercises more than one dead-zone clamp.
         let span = MAX_MOUSE_WHEEL_SENSITIVITY - MIN_MOUSE_WHEEL_SENSITIVITY;
         let period = span + MOUSE_WHEEL_SENSITIVITY_STEP;
-        let start_offset = 1.0 - MIN_MOUSE_WHEEL_SENSITIVITY; // vanilla's own default is 1.0
         assert!(
             (nav.mouse_wheel_sensitivity() - 1.0).abs() < 1e-6,
             "precondition: starts at vanilla's default"
         );
+        let mut expected = 1.0_f32; // vanilla's own default
 
         for n in 1..=90_i32 {
             nav.click(&mut ui, wheel);
-            let expected = MIN_MOUSE_WHEEL_SENSITIVITY
-                + (start_offset + n as f32 * MOUSE_WHEEL_SENSITIVITY_STEP).rem_euclid(period);
+            let offset = expected - MIN_MOUSE_WHEEL_SENSITIVITY;
+            let wrapped = (offset + MOUSE_WHEEL_SENSITIVITY_STEP).rem_euclid(period);
+            expected = (MIN_MOUSE_WHEEL_SENSITIVITY + wrapped)
+                .clamp(MIN_MOUSE_WHEEL_SENSITIVITY, MAX_MOUSE_WHEEL_SENSITIVITY);
             let got = nav.mouse_wheel_sensitivity();
             assert!(
-                (got - expected).abs() < 1e-3,
+                (got - expected).abs() < 1e-4,
                 "click {n}: expected {expected}, got {got}"
             );
             assert!(
