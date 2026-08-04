@@ -726,6 +726,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   a connection asks for a burst of terrain: `serve_connection`'s initial `view_radius`
   join, and `ViewTracker::recenter`'s "chunks that entered the view" diff (both in
   `crates/lodestone-server/src/server.rs`).
+- [Server ECS, Phase 0: the `App` exists and is provably live](./server-ecs-phase0.md) —
+  Phase 0 of [`docs/plans/server-ecs-migration.md`](./plans/server-ecs-migration.md)
+  — the dependency edge and `ServerCorePlugin` that give `lodestone-server` its own
+  `bevy_ecs::World`, plus the gate that proves the `World` is *live* rather than an
+  inert scaffold. It migrates no state and does not make the tick loop drive the
+  `World`; that is Phase 1. [`docs/server-ecs.md`](./server-ecs.md) is the
+  architectural decision record and this document does not revisit it.
 - [The server's own `bevy_ecs::World`](./server-ecs.md) — The architectural
   decision, and the design it produced, to link `lodestone-ecs` into
   `lodestone-server` so that server-side plugins get the same five-clause intent
@@ -836,6 +843,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   "Telemetry Data..." button (flipped from `no_screen` to `nav()`). Built as an honest
   prose screen: a title, a two-paragraph description, and four buttons — two of them
   real.
+- [Text colour](./text-colour.md) — Server-authored text colour and formatting —
+  the sixteen legacy `§` colours, modern `TextColor` hex values, and the five format
+  flags — carried from the wire through to the emitted vertex on every surface that
+  draws a chat component: chat, the scoreboard sidebar, and the server-list MOTD.
 - [The third-person player body](./third-person-player-body.md) — The render-side
   path that turns the local player's own state into a drawable third-person avatar —
   full rig, both skin layers, walking/head-look animation — reusing the same code
