@@ -2458,6 +2458,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "lodestone-command"
+version = "0.1.0"
+
+[[package]]
 name = "lodestone-controller"
 version = "0.1.0"
 dependencies = [
