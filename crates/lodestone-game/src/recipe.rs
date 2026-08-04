@@ -25,9 +25,79 @@
 
 use std::collections::{HashMap, HashSet};
 
-use lodestone_model::Identifier;
+use lodestone_model::{Identifier, RecipeBookType};
 
 use crate::item::ItemStack;
+
+/// Vanilla's `RecipeBookCategories` grouping
+/// (`RecipeBookCategories.java:7-19`), captured from each recipe JSON's own
+/// `"category"` field (present on 694 of 1585 recipes in 26.2's datapack;
+/// [`recipe_json`](crate::recipe_json) parses it, see
+/// [`RecipeBook::insert_with_category`]).
+///
+/// Vanilla actually registers a *separate* category object per recipe-book
+/// type (`CRAFTING_MISC` and `FURNACE_MISC` are different registry entries),
+/// but the underlying JSON string is the same handful of values regardless of
+/// which book reads it, so one enum keyed by that string — paired with
+/// [`RecipeBookType`] at the query site — covers every book without a
+/// combinatorial variant list. A recipe with no `"category"` field defaults
+/// to [`Misc`](Self::Misc), matching vanilla's own default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RecipeCategory {
+    /// `"building"` — crafting-table building blocks.
+    Building,
+    /// `"redstone"` — crafting-table redstone components.
+    Redstone,
+    /// `"equipment"` — crafting-table tools/armour/combat.
+    Equipment,
+    /// `"food"` — furnace/smoker cooking.
+    Food,
+    /// `"blocks"` — furnace/blast-furnace smelting.
+    Blocks,
+    /// No JSON category, or one this client does not recognise.
+    Misc,
+}
+
+impl RecipeCategory {
+    /// Parses a recipe JSON `"category"` value. Unknown strings (and the
+    /// field's absence, handled by the caller) fall back to
+    /// [`Misc`](Self::Misc) rather than failing the whole recipe's load — a
+    /// tab miscategorised as "misc" is a cosmetic gap, not a reason to lose
+    /// the recipe.
+    #[must_use]
+    pub fn from_json_str(s: &str) -> Self {
+        match s {
+            "building" => Self::Building,
+            "redstone" => Self::Redstone,
+            "equipment" => Self::Equipment,
+            "food" => Self::Food,
+            "blocks" => Self::Blocks,
+            _ => Self::Misc,
+        }
+    }
+}
+
+/// The recipe-book tabs vanilla shows for `book_type`, in declaration order —
+/// `RecipeBookCategories.java:7-19`, which is **not** alphabetical (the
+/// rejected hypothesis: `[Blocks, Equipment, Misc, Redstone]`; the real order
+/// interleaves `Redstone` before `Equipment`). A tab only actually appears if
+/// at least one loaded recipe has that category (see
+/// [`RecipeBook::visible_tabs`]) — this is the full, unfiltered set.
+///
+/// Notably `BlastFurnace` has no `Food` tab (`BLAST_FURNACE_BLOCKS`/
+/// `_MISC` only, no `BLAST_FURNACE_FOOD` constant) and `Smoker` has only
+/// `Food` (`SMOKER_FOOD` alone) — asymmetries a hand-derived "same three tabs
+/// for every cooking appliance" guess would have missed.
+#[must_use]
+pub fn tabs_for(book_type: RecipeBookType) -> &'static [RecipeCategory] {
+    use RecipeCategory::{Blocks, Building, Equipment, Food, Misc, Redstone};
+    match book_type {
+        RecipeBookType::Crafting => &[Building, Redstone, Equipment, Misc],
+        RecipeBookType::Furnace => &[Food, Blocks, Misc],
+        RecipeBookType::BlastFurnace => &[Blocks, Misc],
+        RecipeBookType::Smoker => &[Food],
+    }
+}
 
 /// A single ingredient slot: an item, a tag, or a choice among options.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -279,6 +349,36 @@ pub struct CookingRecipe {
     pub experience: f32,
     /// Cooking time in ticks (default 200 for smelting).
     pub cooking_time: i32,
+    /// Recipe-book category (see [`RecipeCategory`]).
+    pub category: RecipeCategory,
+}
+
+impl CookingRecipe {
+    /// The furnace-family recipe book this recipe belongs to, or `None` for
+    /// [`CookingKind::CampfireCooking`] — a campfire has no menu and
+    /// therefore no recipe book at all.
+    #[must_use]
+    pub fn book_type(&self) -> Option<RecipeBookType> {
+        match self.kind {
+            CookingKind::Smelting => Some(RecipeBookType::Furnace),
+            CookingKind::Blasting => Some(RecipeBookType::BlastFurnace),
+            CookingKind::Smoking => Some(RecipeBookType::Smoker),
+            CookingKind::CampfireCooking => None,
+        }
+    }
+
+    /// A cooking recipe's "placement" is trivially its single ingredient in
+    /// the furnace-family menu's one input slot (menu index `0` — see
+    /// [`crate::menu::Menu::furnace`]), modelled as a `1×1` grid so it shares
+    /// [`plan_auto_fill`] with the crafting-table case. Any `grid_w`/`grid_h`
+    /// other than `(1, 1)` returns `None`.
+    #[must_use]
+    pub fn placement(&self, grid_w: usize, grid_h: usize) -> Option<Vec<Option<&Ingredient>>> {
+        if (grid_w, grid_h) != (1, 1) {
+            return None;
+        }
+        Some(vec![Some(&self.ingredient)])
+    }
 }
 
 /// A shaped recipe: a `width × height` pattern with optional cells.
@@ -291,6 +391,7 @@ pub struct ShapedRecipe {
     result: ItemStack,
     mirror: bool,
     group: Option<String>,
+    category: RecipeCategory,
 }
 
 impl ShapedRecipe {
@@ -310,6 +411,7 @@ impl ShapedRecipe {
             result,
             mirror: true,
             group: None,
+            category: RecipeCategory::Misc,
         }
     }
 
@@ -318,6 +420,39 @@ impl ShapedRecipe {
     pub fn without_mirror(mut self) -> Self {
         self.mirror = false;
         self
+    }
+
+    /// Sets the recipe-book category (see [`RecipeCategory`]); recipes built
+    /// with [`new`](Self::new) default to [`RecipeCategory::Misc`].
+    #[must_use]
+    pub fn with_category(mut self, category: RecipeCategory) -> Self {
+        self.category = category;
+        self
+    }
+
+    /// The concrete ingredient (or "must be empty") for each cell of a
+    /// `grid_w × grid_h` crafting grid, placing the pattern at a fixed,
+    /// canonical offset — top-left (`0, 0`), never mirrored.
+    ///
+    /// Vanilla's own recipe-book click (`ServerPlaceRecipe`/
+    /// `PlaceRecipeHelper.calculatePlacementFor`) places at the position the
+    /// server-sent `RecipeDisplay` itself carries. We do not decode that
+    /// packet (`docs/crafting.md`'s "Remaining gaps"), so this is a
+    /// deliberate, documented simplification rather than a guess at the real
+    /// position: always the pattern's own unmirrored top-left. Returns `None`
+    /// if the pattern does not fit the grid.
+    #[must_use]
+    pub fn placement(&self, grid_w: usize, grid_h: usize) -> Option<Vec<Option<&Ingredient>>> {
+        if self.width > grid_w || self.height > grid_h {
+            return None;
+        }
+        let mut out = vec![None; grid_w * grid_h];
+        for y in 0..self.height {
+            for x in 0..self.width {
+                out[y * grid_w + x] = self.pattern_at(x, y, false);
+            }
+        }
+        Some(out)
     }
 
     /// The recipe result.
@@ -404,6 +539,7 @@ pub struct ShapelessRecipe {
     ingredients: Vec<Ingredient>,
     result: ItemStack,
     group: Option<String>,
+    category: RecipeCategory,
 }
 
 impl ShapelessRecipe {
@@ -414,13 +550,39 @@ impl ShapelessRecipe {
             ingredients,
             result,
             group: None,
+            category: RecipeCategory::Misc,
         }
+    }
+
+    /// Sets the recipe-book category (see [`RecipeCategory`]); recipes built
+    /// with [`new`](Self::new) default to [`RecipeCategory::Misc`].
+    #[must_use]
+    pub fn with_category(mut self, category: RecipeCategory) -> Self {
+        self.category = category;
+        self
     }
 
     /// The recipe result.
     #[must_use]
     pub fn result(&self) -> &ItemStack {
         &self.result
+    }
+
+    /// Ingredients in declaration order, one per grid cell in a
+    /// `grid_w × grid_h` grid — vanilla has no notion of *position* for a
+    /// shapeless recipe, so this simply lays them out left-to-right,
+    /// top-to-bottom starting at cell `0`. Returns `None` if there are more
+    /// ingredients than cells.
+    #[must_use]
+    pub fn placement(&self, grid_w: usize, grid_h: usize) -> Option<Vec<Option<&Ingredient>>> {
+        if self.ingredients.len() > grid_w * grid_h {
+            return None;
+        }
+        let mut out = vec![None; grid_w * grid_h];
+        for (i, ing) in self.ingredients.iter().enumerate() {
+            out[i] = Some(ing);
+        }
+        Some(out)
     }
 
     /// Whether this recipe matches `grid`. The grid's occupied items must equal
@@ -478,6 +640,73 @@ impl Recipe {
     #[must_use]
     pub fn is_grid_recipe(&self) -> bool {
         matches!(self, Recipe::Shaped(_) | Recipe::Shapeless(_))
+    }
+
+    /// The recipe-book category, for the three kinds the recipe-book UI
+    /// shows recipes from. `None` for stonecutting/smithing/transmute/special
+    /// — none of those have a browsable recipe book in this client (the
+    /// stonecutter's own recipe list is a separate, unmodelled scroll list,
+    /// see [`crate::menu::SpecialLayout::Stonecutter`]'s doc comment).
+    #[must_use]
+    pub fn category(&self) -> Option<RecipeCategory> {
+        match self {
+            Recipe::Shaped(r) => Some(r.category),
+            Recipe::Shapeless(r) => Some(r.category),
+            Recipe::Cooking(r) => Some(r.category),
+            _ => None,
+        }
+    }
+
+    /// Which recipe book (if any) browses this recipe — see
+    /// [`RecipeBookType`].
+    #[must_use]
+    pub fn book_type(&self) -> Option<RecipeBookType> {
+        match self {
+            Recipe::Shaped(_) | Recipe::Shapeless(_) => Some(RecipeBookType::Crafting),
+            Recipe::Cooking(r) => r.book_type(),
+            _ => None,
+        }
+    }
+
+    /// The item id this recipe produces, for the recipe-book panel's icon and
+    /// search. `None` for kinds with no single fixed result id relevant here.
+    #[must_use]
+    pub fn result_item(&self) -> Option<&Identifier> {
+        match self {
+            Recipe::Shaped(r) => Some(r.result.item()),
+            Recipe::Shapeless(r) => Some(r.result.item()),
+            Recipe::Cooking(r) => Some(r.result.item()),
+            Recipe::Stonecutting { result, .. } => Some(result.item()),
+            _ => None,
+        }
+    }
+
+    /// The full result stack (id **and** count), for the panel's item icon —
+    /// see [`result_item`](Self::result_item) for the id-only accessor used by
+    /// search.
+    #[must_use]
+    pub fn result_stack(&self) -> Option<&ItemStack> {
+        match self {
+            Recipe::Shaped(r) => Some(&r.result),
+            Recipe::Shapeless(r) => Some(&r.result),
+            Recipe::Cooking(r) => Some(&r.result),
+            Recipe::Stonecutting { result, .. } => Some(result),
+            _ => None,
+        }
+    }
+
+    /// The concrete per-cell ingredient placement for a `grid_w × grid_h`
+    /// grid — see [`ShapedRecipe::placement`], [`ShapelessRecipe::placement`]
+    /// and [`CookingRecipe::placement`]. `None` for every non-placeable kind
+    /// and for a grid the recipe cannot fit.
+    #[must_use]
+    pub fn placement(&self, grid_w: usize, grid_h: usize) -> Option<Vec<Option<&Ingredient>>> {
+        match self {
+            Recipe::Shaped(r) => r.placement(grid_w, grid_h),
+            Recipe::Shapeless(r) => r.placement(grid_w, grid_h),
+            Recipe::Cooking(r) => r.placement(grid_w, grid_h),
+            _ => None,
+        }
     }
 
     /// The exact number of occupied grid cells required for this recipe to
@@ -650,6 +879,320 @@ impl RecipeBook {
     pub fn match_grid(&self, grid: &CraftingGrid) -> Option<&ItemStack> {
         self.match_grid_entry(grid).map(|(_, result)| result)
     }
+
+    /// Looks up a recipe by id.
+    #[must_use]
+    pub fn get(&self, id: &Identifier) -> Option<&Recipe> {
+        let at = self.recipes.binary_search_by(|(k, _)| k.cmp(id)).ok()?;
+        Some(&self.recipes[at].1)
+    }
+
+    // -- Recipe-book browsing (issue #163) -----------------------------
+
+    /// As [`insert`](Self::insert), but also records an explicit
+    /// [`RecipeCategory`] for the id, overriding whatever
+    /// [`Recipe::category`] would otherwise report. Used by
+    /// [`crate::recipe_json`] when a recipe JSON carries a `"category"`
+    /// field — see that module's `parse_recipe`.
+    pub fn insert_with_category(&mut self, id: Identifier, recipe: Recipe, category: RecipeCategory) {
+        let recipe = match recipe {
+            Recipe::Shaped(r) => Recipe::Shaped(r.with_category(category)),
+            Recipe::Shapeless(r) => Recipe::Shapeless(r.with_category(category)),
+            Recipe::Cooking(mut r) => {
+                r.category = category;
+                Recipe::Cooking(r)
+            }
+            other => other,
+        };
+        self.insert(id, recipe);
+    }
+
+    /// Recipe ids relevant to `book_type` (see [`Recipe::book_type`]),
+    /// optionally narrowed to `category` (`None` is vanilla's "search" tab —
+    /// every category) and a case-insensitive substring `search` — matched
+    /// against the result item's namespaced id *and* its bare path (so
+    /// `"planks"` matches `minecraft:oak_planks` without the namespace),
+    /// never empty-string-vacuously (an empty `search` matches everything).
+    ///
+    /// Results come back in the corpus's own id order (`recipes` is kept
+    /// id-sorted — see the type docs' "Ordering"), **not** vanilla's real
+    /// fuzzy tooltip/name search tree (`ClientPacketListener.searchTrees()`),
+    /// which needs the resolved item display name and tooltip text this
+    /// crate does not have. This is a deliberate, documented simplification:
+    /// substring-on-id, not word-fuzzy-on-display-name.
+    #[must_use]
+    pub fn browse(
+        &self,
+        book_type: RecipeBookType,
+        category: Option<RecipeCategory>,
+        search: &str,
+    ) -> Vec<&Identifier> {
+        let needle = search.to_ascii_lowercase();
+        self.recipes
+            .iter()
+            .filter(|(_, r)| r.book_type() == Some(book_type))
+            .filter(|(_, r)| category.is_none() || r.category() == category)
+            .filter(|(_, r)| needle.is_empty() || Self::result_matches(r, &needle))
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    fn result_matches(recipe: &Recipe, needle: &str) -> bool {
+        let Some(id) = recipe.result_item() else {
+            return false;
+        };
+        id.path().to_ascii_lowercase().contains(needle) || id.to_string().to_ascii_lowercase().contains(needle)
+    }
+
+    /// The subset of [`tabs_for`] that actually has at least one loaded
+    /// recipe for `book_type` — vanilla's `RecipeBookTabButton::updateVisibility`
+    /// (`RecipeBookTabButton.java:88-100`): a tab with zero matching recipes
+    /// never renders at all, rather than rendering empty.
+    #[must_use]
+    pub fn visible_tabs(&self, book_type: RecipeBookType) -> Vec<RecipeCategory> {
+        tabs_for(book_type)
+            .iter()
+            .copied()
+            .filter(|cat| {
+                self.recipes
+                    .iter()
+                    .any(|(_, r)| r.book_type() == Some(book_type) && r.category() == Some(*cat))
+            })
+            .collect()
+    }
+}
+
+/// One step of an auto-fill plan (issue #163, "click recipe to auto-fill"):
+/// move one item from inventory slot `source_slot` into grid cell `cell`.
+///
+/// `cell` is a **0-based, row-major index into the placement grid**
+/// ([`Recipe::placement`]'s own indexing), not yet a menu-slot index —
+/// [`crate::menu::Menu::plan_recipe_auto_fill`] is what adds the menu's own
+/// `craft_layout().first_input` offset. `source_slot` **is** already an
+/// absolute menu-slot index, since that is what the caller's inventory
+/// snapshot was keyed on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlacementStep {
+    /// 0-based row-major grid cell.
+    pub cell: usize,
+    /// Absolute menu-slot index of the inventory slot supplying it.
+    pub source_slot: usize,
+}
+
+/// Computes an auto-fill plan for `recipe` against a `grid_w × grid_h`
+/// crafting grid (or a furnace-family menu's `1×1` ingredient slot — see
+/// [`CookingRecipe::placement`]), given the player's available inventory as
+/// `(menu-slot index, stack)` pairs.
+///
+/// For each grid cell the placement requires an ingredient, this greedily
+/// takes the **first** inventory entry (in the order given) whose item
+/// matches and still has an undrawn unit, decrementing its remaining count so
+/// the same physical stack cannot supply two cells beyond what it actually
+/// holds. This models "place one set of ingredients" only — not vanilla's
+/// `use_max_items` (shift-click) multiplier, which spreads across however
+/// many complete sets the inventory can supply; that is a documented scope
+/// reduction, not an oversight.
+///
+/// Returns `None` if the recipe has no placement for this grid size, **or**
+/// if any single required ingredient has no matching inventory entry at
+/// all — a conservative all-or-nothing plan, so a caller never ends up
+/// partially filling a grid it cannot complete.
+#[must_use]
+pub fn plan_auto_fill(
+    recipe: &Recipe,
+    grid_w: usize,
+    grid_h: usize,
+    inventory: &[(usize, &ItemStack)],
+    tags: &TagResolver,
+) -> Option<Vec<PlacementStep>> {
+    let placement = recipe.placement(grid_w, grid_h)?;
+    let mut remaining: Vec<i32> = inventory.iter().map(|(_, s)| s.count()).collect();
+    let mut steps = Vec::new();
+    for (cell, ing) in placement.iter().enumerate() {
+        let Some(ing) = ing else { continue };
+        let found = inventory.iter().enumerate().find(|(i, (_, stack))| {
+            remaining[*i] > 0 && ing.matches(stack.item(), tags)
+        });
+        let (i, (slot, _)) = found?;
+        remaining[i] -= 1;
+        steps.push(PlacementStep {
+            cell,
+            source_slot: *slot,
+        });
+    }
+    Some(steps)
+}
+
+/// Tracks which recipes the server has told this client are unlocked
+/// (issue #163, "recipe-unlock tracking"), plus which of those are still
+/// "new" (unseen — vanilla's highlight squeeze animation and toast).
+///
+/// **Nothing populates this yet.** The server signal is vanilla's
+/// `recipe_book_add`/`recipe_book_remove` packets (`RecipeBookAddPacket`/
+/// `RecipeBookRemovePacket`), and `crates/protocol/v770/src/adapter.rs`
+/// decodes neither — confirmed by grepping the packet-id constants
+/// (`RECIPE_BOOK_ADD`/`RECIPE_BOOK_REMOVE`) against `adapter.rs`, zero hits —
+/// nor is there a `ClientEvent` variant for them in `lodestone-model` to
+/// decode *into*. Both are outside this issue's owned files (`crates/
+/// protocol/**` is off-limits to this change; see `docs/crafting.md`).
+///
+/// Until that lands, [`is_unlocked`](Self::is_unlocked) reports every recipe
+/// as unlocked (see its own doc comment) so the browsable panel shows the
+/// full local corpus rather than nothing — a **visible, honestly degraded**
+/// stand-in, not a silent fake. [`unlock`](Self::unlock) and
+/// [`take_new`](Self::take_new) are real and unit-tested against direct
+/// calls; they are simply never called by anything today.
+#[derive(Debug, Default, Clone)]
+pub struct RecipeUnlockState {
+    /// Recipes the server has explicitly unlocked, once real data arrives.
+    /// Empty on every session today — see the type doc.
+    known: HashSet<Identifier>,
+    /// Unlocked recipes not yet shown to the player (`recipeShown`,
+    /// `RecipeBookComponent.java:533-535`) — drives the toast and the tab
+    /// squeeze-highlight animation.
+    new: HashSet<Identifier>,
+    /// Whether [`unlock`](Self::unlock) or [`remove`](Self::remove) has ever
+    /// been called. **Deliberately not derived from `known.is_empty()`**: an
+    /// unlock immediately followed by a remove (or a server that unlocks
+    /// then un-learns the same recipe, e.g. a datapack reload) would empty
+    /// `known` again and — without this flag — incorrectly fall back into
+    /// [`is_unlocked`](Self::is_unlocked)'s "no data yet" degrade, silently
+    /// re-showing every recipe as unlocked after real data had already
+    /// narrowed it down. A test pins exactly this sequence.
+    has_data: bool,
+}
+
+impl RecipeUnlockState {
+    /// A state with no unlock data at all.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Marks `id` unlocked and unseen. Idempotent.
+    pub fn unlock(&mut self, id: Identifier) {
+        self.new.insert(id.clone());
+        self.known.insert(id);
+        self.has_data = true;
+    }
+
+    /// Reverses [`unlock`](Self::unlock) — vanilla's `recipe_book_remove`,
+    /// sent when a recipe is un-learned (e.g. a datapack reload).
+    pub fn remove(&mut self, id: &Identifier) {
+        self.known.remove(id);
+        self.new.remove(id);
+        self.has_data = true;
+    }
+
+    /// Whether `id` should currently show as unlocked in the panel.
+    ///
+    /// **Degrades to "yes, always"** while this state has never received a
+    /// single real unlock/removal signal (see the type doc and
+    /// [`has_data`](Self::has_data)) — a browsable panel that always reports
+    /// every recipe locked, forever, on every server, would be a *dead*
+    /// control masquerading as a real one. The moment a single real unlock
+    /// or removal arrives this switches to the honest per-id answer,
+    /// including reporting recipes *other than* the one just unlocked as
+    /// locked.
+    #[must_use]
+    pub fn is_unlocked(&self, id: &Identifier) -> bool {
+        !self.has_data || self.known.contains(id)
+    }
+
+    /// Whether any real unlock/removal has ever been recorded — the escape
+    /// hatch a caller needs to tell "everything shown because we have no
+    /// data" apart from "everything shown because everything really is
+    /// unlocked", since [`is_unlocked`] cannot distinguish them by itself.
+    #[must_use]
+    pub fn has_data(&self) -> bool {
+        self.has_data
+    }
+
+    /// Drains and returns every recipe marked "new" — call once per toast
+    /// dispatch (see [`RecipeToastQueue`]) so each unlock notifies exactly
+    /// once.
+    pub fn take_new(&mut self) -> Vec<Identifier> {
+        std::mem::take(&mut self.new).into_iter().collect()
+    }
+}
+
+/// Vanilla's recipe-unlock toast timing (`RecipeToast.java`): one toast that
+/// **merges** every recipe unlocked within its display window, cycling
+/// through them, rather than stacking N separate toasts.
+///
+/// `DISPLAY_TIME = 5000L` milliseconds (`RecipeToast.java:17`) is **100
+/// ticks** at the server's fixed 50ms/tick — not a round number of ticks by
+/// coincidence, exactly like every other vanilla UI timing keyed off
+/// `System.currentTimeMillis()` rather than tick count.
+pub const RECIPE_TOAST_DISPLAY_MS: u64 = 5000;
+/// Vanilla's toast width in GUI pixels (`Toast.DEFAULT_WIDTH`, `Toast.java:14`).
+pub const RECIPE_TOAST_WIDTH: u32 = 160;
+/// Vanilla's toast height in GUI pixels (`Toast.SLOT_HEIGHT`, `Toast.java:15`).
+pub const RECIPE_TOAST_HEIGHT: u32 = 32;
+
+/// A pending recipe-unlock toast: which recipes to show and when the current
+/// display window started. Pure timing data — no rendering, no clock of its
+/// own; the caller supplies "now" so this stays deterministic and testable.
+///
+/// See [`RecipeUnlockState`]'s doc comment: this queue is exercised directly
+/// by its own tests, but nothing yet calls [`push`](Self::push) from live
+/// server data — the decode it depends on does not exist yet either.
+#[derive(Debug, Default, Clone)]
+pub struct RecipeToastQueue {
+    /// `(crafting-station item, unlocked item)` pairs — mirrors
+    /// `RecipeToast.Entry` (`RecipeToast.java:85-86`); the station item is
+    /// the small corner icon (a crafting table, furnace, etc.).
+    entries: Vec<(Identifier, Identifier)>,
+    /// Milliseconds timestamp (caller's clock) the display window last reset.
+    last_changed_ms: u64,
+}
+
+impl RecipeToastQueue {
+    /// An empty, hidden queue.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds an unlocked recipe and resets the display window — vanilla's
+    /// `RecipeToast.addItem` setting `changed = true`
+    /// (`RecipeToast.java:67-70`), which `update` reads back into
+    /// `lastChanged` on the *next* frame. Modelled here as an immediate
+    /// reset since this queue has no separate "changed" flag to defer
+    /// through.
+    pub fn push(&mut self, station: Identifier, unlocked: Identifier, now_ms: u64) {
+        self.entries.push((station, unlocked));
+        self.last_changed_ms = now_ms;
+    }
+
+    /// Whether the toast should currently be visible: non-empty and still
+    /// within [`RECIPE_TOAST_DISPLAY_MS`] of the last reset
+    /// (`RecipeToast.java:44-46`).
+    #[must_use]
+    pub fn visible(&self, now_ms: u64) -> bool {
+        !self.entries.is_empty() && now_ms.saturating_sub(self.last_changed_ms) < RECIPE_TOAST_DISPLAY_MS
+    }
+
+    /// Which entry should be showing right now, cycling through every pending
+    /// unlock over the display window — `RecipeToast.java:49-51`'s
+    /// `displayedRecipeIndex` formula, with the notification-time multiplier
+    /// fixed at `1.0` (this client has no accessibility "toast display time"
+    /// option to read).
+    #[must_use]
+    pub fn displayed_entry(&self, now_ms: u64) -> Option<(&Identifier, &Identifier)> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        let elapsed = now_ms.saturating_sub(self.last_changed_ms);
+        let per_entry = (RECIPE_TOAST_DISPLAY_MS as f64 / self.entries.len() as f64).max(1.0);
+        let index = ((elapsed as f64 / per_entry) as usize) % self.entries.len();
+        self.entries.get(index).map(|(a, b)| (a, b))
+    }
+
+    /// Clears every pending entry, hiding the toast immediately.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
 }
 
 /// Inserts `id` into a bucket kept sorted in the same order as
@@ -806,6 +1349,7 @@ mod tests {
                 result: stack("minecraft:iron_ingot", 1),
                 experience: 0.7,
                 cooking_time: 200,
+                category: RecipeCategory::Misc,
             }),
         );
 
@@ -931,5 +1475,400 @@ mod tests {
         let book = book();
         let g = grid(3, 3, &[Some("minecraft:oak_planks"); 9]);
         assert_eq!(book.match_grid_entry(&g), None);
+    }
+
+    // -- Recipe-book browsing (issue #163) -----------------------------
+
+    /// A small crafting-book corpus, deliberately with a **non-alphabetical**
+    /// id order relative to the result item name, so a search-order test can
+    /// tell "corpus id order" apart from "alphabetical by result" instead of
+    /// the two hypotheses coinciding by accident.
+    fn browse_book() -> RecipeBook {
+        let mut book = RecipeBook::new();
+        // id `minecraft:zz_planks_wall`, result `oak_planks` — sorts LAST by
+        // id but would sort FIRST alphabetically by its result name.
+        book.insert(
+            id("minecraft:zz_planks_wall"),
+            Recipe::Shaped(
+                ShapedRecipe::new(
+                    1,
+                    1,
+                    vec![Some(Ingredient::Item(id("minecraft:oak_planks")))],
+                    stack("minecraft:oak_planks", 1),
+                )
+                .with_category(RecipeCategory::Building),
+            ),
+        );
+        // id `minecraft:aa_torch` — sorts FIRST by id, result `oak_planks`
+        // path also contains "planks".
+        book.insert(
+            id("minecraft:aa_torch"),
+            Recipe::Shapeless(
+                ShapelessRecipe::new(
+                    vec![Ingredient::Item(id("minecraft:oak_planks"))],
+                    stack("minecraft:torch", 4),
+                )
+                .with_category(RecipeCategory::Misc),
+            ),
+        );
+        // A redstone-category recipe with no "planks" in its result, to
+        // prove the search narrows rather than just listing the category.
+        book.insert(
+            id("minecraft:mm_dropper"),
+            Recipe::Shaped(
+                ShapedRecipe::new(
+                    1,
+                    1,
+                    vec![Some(Ingredient::Item(id("minecraft:cobblestone")))],
+                    stack("minecraft:dropper", 1),
+                )
+                .with_category(RecipeCategory::Redstone),
+            ),
+        );
+        // A furnace recipe, to prove `browse` narrows by book type too.
+        book.insert(
+            id("minecraft:cooked_porkchop"),
+            Recipe::Cooking(CookingRecipe {
+                kind: CookingKind::Smelting,
+                ingredient: Ingredient::Item(id("minecraft:porkchop")),
+                result: stack("minecraft:cooked_porkchop", 1),
+                experience: 0.35,
+                cooking_time: 200,
+                category: RecipeCategory::Food,
+            }),
+        );
+        book
+    }
+
+    /// Predicts the exact ordered id list `browse` returns for a corpus
+    /// where id order and "alphabetical by result item name" **disagree**:
+    /// `minecraft:aa_first` (sorts first by id) produces `minecraft:zz_oak_
+    /// planks`, while `minecraft:zz_second` (sorts last by id) produces
+    /// `minecraft:aa_birch_planks` — alphabetically `aa_birch_planks` <
+    /// `zz_oak_planks`, so the **rejected** "alphabetical by result name"
+    /// hypothesis would return `[zz_second, aa_first]`. `browse` searches on
+    /// the *result* item's id (`result_item`, not the ingredients), so both
+    /// match `"planks"`; the actual, correct order is the corpus's own id
+    /// order: `aa_first` then `zz_second`.
+    #[test]
+    fn browse_search_orders_by_corpus_id_not_alphabetically_by_result() {
+        let mut book = RecipeBook::new();
+        book.insert(
+            id("minecraft:aa_first"),
+            Recipe::Shaped(ShapedRecipe::new(
+                1,
+                1,
+                vec![Some(Ingredient::Item(id("minecraft:oak_log")))],
+                stack("minecraft:zz_oak_planks", 4),
+            )),
+        );
+        book.insert(
+            id("minecraft:zz_second"),
+            Recipe::Shaped(ShapedRecipe::new(
+                1,
+                1,
+                vec![Some(Ingredient::Item(id("minecraft:birch_log")))],
+                stack("minecraft:aa_birch_planks", 4),
+            )),
+        );
+        let got: Vec<String> = book
+            .browse(RecipeBookType::Crafting, None, "planks")
+            .into_iter()
+            .map(ToString::to_string)
+            .collect();
+        let rejected_alphabetical_by_result: Vec<String> =
+            vec!["minecraft:zz_second".to_string(), "minecraft:aa_first".to_string()];
+        assert_eq!(
+            got,
+            vec!["minecraft:aa_first".to_string(), "minecraft:zz_second".to_string()]
+        );
+        assert_ne!(got, rejected_alphabetical_by_result);
+    }
+
+    #[test]
+    fn browse_narrows_by_book_type_and_category() {
+        let book = browse_book();
+        assert_eq!(
+            book.browse(RecipeBookType::Crafting, Some(RecipeCategory::Redstone), ""),
+            vec![&id("minecraft:mm_dropper")]
+        );
+        assert_eq!(
+            book.browse(RecipeBookType::Furnace, None, ""),
+            vec![&id("minecraft:cooked_porkchop")]
+        );
+        assert_eq!(book.browse(RecipeBookType::BlastFurnace, None, ""), Vec::<&Identifier>::new());
+    }
+
+    #[test]
+    fn browse_empty_search_matches_everything_in_scope() {
+        let book = browse_book();
+        assert_eq!(book.browse(RecipeBookType::Crafting, None, "").len(), 3);
+    }
+
+    /// `tabs_for` is vanilla's own declaration order
+    /// (`RecipeBookCategories.java:7-19`), not alphabetical. Pinning the
+    /// asymmetric cases explicitly: `BlastFurnace` has no `Food` tab and
+    /// `Smoker` has only `Food`.
+    #[test]
+    fn tabs_for_matches_vanillas_declaration_order() {
+        assert_eq!(
+            tabs_for(RecipeBookType::Crafting),
+            &[
+                RecipeCategory::Building,
+                RecipeCategory::Redstone,
+                RecipeCategory::Equipment,
+                RecipeCategory::Misc
+            ]
+        );
+        assert_eq!(
+            tabs_for(RecipeBookType::Furnace),
+            &[RecipeCategory::Food, RecipeCategory::Blocks, RecipeCategory::Misc]
+        );
+        assert_eq!(
+            tabs_for(RecipeBookType::BlastFurnace),
+            &[RecipeCategory::Blocks, RecipeCategory::Misc]
+        );
+        assert_eq!(tabs_for(RecipeBookType::Smoker), &[RecipeCategory::Food]);
+    }
+
+    /// A tab with zero loaded recipes must not appear — `visible_tabs` is
+    /// `tabs_for` filtered, not `tabs_for` restated.
+    #[test]
+    fn visible_tabs_omits_empty_categories() {
+        let book = browse_book();
+        // Crafting has Building + Redstone + Misc recipes loaded, but no
+        // Equipment recipe at all in this corpus.
+        assert_eq!(
+            book.visible_tabs(RecipeBookType::Crafting),
+            vec![RecipeCategory::Building, RecipeCategory::Redstone, RecipeCategory::Misc]
+        );
+    }
+
+    #[test]
+    fn recipe_json_category_field_parses_to_the_right_variant() {
+        assert_eq!(RecipeCategory::from_json_str("building"), RecipeCategory::Building);
+        assert_eq!(RecipeCategory::from_json_str("redstone"), RecipeCategory::Redstone);
+        assert_eq!(RecipeCategory::from_json_str("equipment"), RecipeCategory::Equipment);
+        assert_eq!(RecipeCategory::from_json_str("food"), RecipeCategory::Food);
+        assert_eq!(RecipeCategory::from_json_str("blocks"), RecipeCategory::Blocks);
+        assert_eq!(RecipeCategory::from_json_str("nonsense"), RecipeCategory::Misc);
+    }
+
+    // -- Auto-fill planning (issue #163, "click recipe to auto-fill") --
+
+    #[test]
+    fn shaped_placement_is_top_left_unmirrored() {
+        // "X " / " #" in a 2x2 pattern.
+        let recipe = ShapedRecipe::new(
+            2,
+            1,
+            vec![
+                Some(Ingredient::Item(id("minecraft:stick"))),
+                Some(Ingredient::Item(id("minecraft:coal"))),
+            ],
+            stack("minecraft:torch", 4),
+        );
+        let placement = recipe.placement(3, 3).expect("fits a 3x3 grid");
+        // Row-major 3x3: cell 0 = (0,0) = stick, cell 1 = (1,0) = coal, the
+        // rest empty — top-left, never mirrored (mirrored would put coal
+        // first).
+        assert_eq!(placement[0], Some(&Ingredient::Item(id("minecraft:stick"))));
+        assert_eq!(placement[1], Some(&Ingredient::Item(id("minecraft:coal"))));
+        assert_eq!(placement[2], None);
+        assert!(placement[3..].iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn shapeless_placement_fills_left_to_right_top_to_bottom() {
+        let recipe = ShapelessRecipe::new(
+            vec![
+                Ingredient::Item(id("minecraft:coal")),
+                Ingredient::Item(id("minecraft:stick")),
+            ],
+            stack("minecraft:torch", 4),
+        );
+        let placement = recipe.placement(3, 3).unwrap();
+        assert_eq!(placement[0], Some(&Ingredient::Item(id("minecraft:coal"))));
+        assert_eq!(placement[1], Some(&Ingredient::Item(id("minecraft:stick"))));
+        assert!(placement[2..].iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn cooking_placement_is_a_single_cell_at_1x1_only() {
+        let recipe = CookingRecipe {
+            kind: CookingKind::Smelting,
+            ingredient: Ingredient::Item(id("minecraft:porkchop")),
+            result: stack("minecraft:cooked_porkchop", 1),
+            experience: 0.35,
+            cooking_time: 200,
+            category: RecipeCategory::Food,
+        };
+        assert_eq!(
+            recipe.placement(1, 1),
+            Some(vec![Some(&Ingredient::Item(id("minecraft:porkchop")))])
+        );
+        assert_eq!(recipe.placement(3, 3), None);
+    }
+
+    /// Predicts the exact plan for a torch (`stick` + `coal`/`charcoal`) in a
+    /// 3x3 grid, with the player holding coal at slot 12 and sticks at slot
+    /// 20. Cell 0 (stick) must draw from slot 20, cell 1 (coal) from slot
+    /// 12 — **not** id order, source order: the rejected hypothesis "lowest
+    /// slot index first regardless of which cell needs it" would still pick
+    /// slot 12 before 20, but would assign it to whichever cell is checked
+    /// first that it satisfies, which happens to coincide here only because
+    /// cell 1 needs coal — so the second case below (swapped inventory
+    /// order) is the one that actually distinguishes the hypotheses.
+    #[test]
+    fn plan_auto_fill_predicts_exact_source_slots_for_a_torch() {
+        let torch = Recipe::Shaped(ShapedRecipe::new(
+            1,
+            2,
+            vec![
+                Some(Ingredient::Item(id("minecraft:coal"))),
+                Some(Ingredient::Item(id("minecraft:stick"))),
+            ],
+            stack("minecraft:torch", 4),
+        ));
+        let coal = stack("minecraft:coal", 5);
+        let stick = stack("minecraft:stick", 3);
+        let inventory = [(12usize, &coal), (20usize, &stick)];
+        let tags = TagResolver::new();
+        let plan = plan_auto_fill(&torch, 1, 2, &inventory, &tags).expect("both ingredients present");
+        assert_eq!(
+            plan,
+            vec![
+                PlacementStep { cell: 0, source_slot: 12 },
+                PlacementStep { cell: 1, source_slot: 20 },
+            ]
+        );
+    }
+
+    /// The same recipe with the coal stack **exhausted** (one coal, but two
+    /// cells that could each match "coal or a coal-like tag" is not this
+    /// recipe's shape — instead this pins the *all-or-nothing* behaviour: a
+    /// recipe needing an item the inventory does not have at all returns
+    /// `None`, not a partial plan.
+    #[test]
+    fn plan_auto_fill_is_all_or_nothing() {
+        let torch = Recipe::Shaped(ShapedRecipe::new(
+            1,
+            2,
+            vec![
+                Some(Ingredient::Item(id("minecraft:coal"))),
+                Some(Ingredient::Item(id("minecraft:stick"))),
+            ],
+            stack("minecraft:torch", 4),
+        ));
+        let coal = stack("minecraft:coal", 5);
+        // No sticks anywhere in inventory.
+        let inventory = [(12usize, &coal)];
+        let tags = TagResolver::new();
+        assert_eq!(plan_auto_fill(&torch, 1, 2, &inventory, &tags), None);
+    }
+
+    /// A single stack cannot supply two cells beyond the units it actually
+    /// holds: with exactly one stick, a recipe needing two sticks fails
+    /// rather than reusing the same slot twice.
+    #[test]
+    fn plan_auto_fill_does_not_overdraw_a_single_stack() {
+        let two_sticks = Recipe::Shapeless(ShapelessRecipe::new(
+            vec![
+                Ingredient::Item(id("minecraft:stick")),
+                Ingredient::Item(id("minecraft:stick")),
+            ],
+            stack("minecraft:test_result", 1),
+        ));
+        let stick = stack("minecraft:stick", 1);
+        let inventory = [(20usize, &stick)];
+        let tags = TagResolver::new();
+        assert_eq!(plan_auto_fill(&two_sticks, 1, 2, &inventory, &tags), None);
+    }
+
+    // -- RecipeUnlockState (issue #163, "recipe-unlock tracking") -------
+
+    #[test]
+    fn unlock_state_degrades_to_everything_unlocked_with_no_data() {
+        let state = RecipeUnlockState::new();
+        assert!(!state.has_data());
+        assert!(state.is_unlocked(&id("minecraft:anything_at_all")));
+    }
+
+    #[test]
+    fn unlock_state_switches_to_honest_per_id_answers_after_first_real_signal() {
+        let mut state = RecipeUnlockState::new();
+        state.unlock(id("minecraft:torch"));
+        assert!(state.has_data());
+        assert!(state.is_unlocked(&id("minecraft:torch")));
+        // A different, never-unlocked recipe now correctly reports locked —
+        // the whole point of leaving the always-unlocked degrade behind.
+        assert!(!state.is_unlocked(&id("minecraft:diamond_pickaxe")));
+    }
+
+    #[test]
+    fn unlock_state_new_highlight_is_taken_exactly_once() {
+        let mut state = RecipeUnlockState::new();
+        state.unlock(id("minecraft:torch"));
+        let first = state.take_new();
+        assert_eq!(first, vec![id("minecraft:torch")]);
+        assert_eq!(state.take_new(), Vec::<Identifier>::new());
+    }
+
+    #[test]
+    fn unlock_state_remove_reverses_unlock() {
+        let mut state = RecipeUnlockState::new();
+        state.unlock(id("minecraft:torch"));
+        state.remove(&id("minecraft:torch"));
+        assert!(state.has_data());
+        assert!(!state.is_unlocked(&id("minecraft:torch")));
+    }
+
+    // -- RecipeToastQueue (issue #163, "unlock toast notification") -----
+
+    #[test]
+    fn toast_queue_hidden_when_empty() {
+        let queue = RecipeToastQueue::new();
+        assert!(!queue.visible(0));
+        assert_eq!(queue.displayed_entry(0), None);
+    }
+
+    /// `RECIPE_TOAST_DISPLAY_MS` is vanilla's `5000` (`RecipeToast.java:17`).
+    /// Visible strictly before the 5000ms mark, hidden at and after it.
+    #[test]
+    fn toast_queue_visible_window_is_exactly_5000ms() {
+        let mut queue = RecipeToastQueue::new();
+        queue.push(id("minecraft:crafting_table"), id("minecraft:torch"), 1_000);
+        assert!(queue.visible(1_000));
+        assert!(queue.visible(1_000 + RECIPE_TOAST_DISPLAY_MS - 1));
+        assert!(!queue.visible(1_000 + RECIPE_TOAST_DISPLAY_MS));
+    }
+
+    /// Two entries over the 5000ms window cycle at the 2500ms midpoint —
+    /// `RecipeToast.java:49-51`'s formula with `manager.getNotificationDisplayTimeMultiplier() == 1.0`.
+    #[test]
+    fn toast_queue_cycles_entries_at_the_predicted_midpoint() {
+        let mut queue = RecipeToastQueue::new();
+        queue.push(id("minecraft:crafting_table"), id("minecraft:torch"), 0);
+        queue.push(id("minecraft:furnace"), id("minecraft:cooked_porkchop"), 0);
+        assert_eq!(
+            queue.displayed_entry(0),
+            Some((&id("minecraft:crafting_table"), &id("minecraft:torch")))
+        );
+        assert_eq!(
+            queue.displayed_entry(2_499),
+            Some((&id("minecraft:crafting_table"), &id("minecraft:torch")))
+        );
+        assert_eq!(
+            queue.displayed_entry(2_500),
+            Some((&id("minecraft:furnace"), &id("minecraft:cooked_porkchop")))
+        );
+    }
+
+    #[test]
+    fn toast_queue_clear_hides_immediately() {
+        let mut queue = RecipeToastQueue::new();
+        queue.push(id("minecraft:crafting_table"), id("minecraft:torch"), 0);
+        queue.clear();
+        assert!(!queue.visible(0));
     }
 }

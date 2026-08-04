@@ -606,6 +606,80 @@ impl Menu {
         Some(CraftingGrid::new(layout.width, layout.height, cells))
     }
 
+    /// The menu-slot range holding the player's **main storage and hotbar**
+    /// only — never armour or off-hand, matching vanilla's own recipe-book
+    /// placement (`PlaceRecipeHelper.calculatePlacementFor` walks
+    /// `Inventory.items`, the 36 main+hotbar slots, never
+    /// `Inventory.armor`/`offhand`). `None` for a [`MenuKind`] this crate
+    /// does not (yet) know an inventory range for.
+    fn inventory_slot_range(&self) -> Option<std::ops::Range<usize>> {
+        match self.kind {
+            // `0` result, `1..=4` crafting, `5..=8` armour, `9..=35` main,
+            // `36..=44` hotbar, `45` off-hand (module doc table).
+            MenuKind::Player => Some(9..45),
+            // `0..n` container, `n..n+27` main, `n+27..n+36` hotbar.
+            MenuKind::Generic { container_size } => {
+                Some(container_size..container_size + 36)
+            }
+        }
+    }
+
+    /// Computes an auto-fill plan (issue #163, "click recipe to auto-fill")
+    /// for `recipe` against this menu's crafting grid — a crafting table's
+    /// grid via [`craft_layout`](Self::craft_layout), or a furnace-family
+    /// menu's single ingredient slot (menu index `0`) via
+    /// [`special_layout`](Self::special_layout) — reusing
+    /// [`crate::recipe::plan_auto_fill`] against a snapshot of the player's
+    /// main storage and hotbar.
+    ///
+    /// Every [`recipe::PlacementStep::cell`] in the returned plan is already
+    /// translated to an **absolute menu-slot index** (crafting's
+    /// `craft_layout().first_input` offset applied, furnace's own `0`), so a
+    /// caller can feed each step directly to the same slot-click machinery
+    /// [`crate::click::Click`] already provides — no separate offset step
+    /// needed downstream.
+    ///
+    /// Returns `None` when this menu has no crafting grid *and* no
+    /// furnace-family [`SpecialLayout`], when the recipe's own
+    /// [`Recipe::book_type`](crate::recipe::Recipe::book_type) does not
+    /// match this menu's grid shape at all, or when
+    /// [`plan_auto_fill`](crate::recipe::plan_auto_fill) itself returns
+    /// `None` (missing ingredient — see its own doc comment).
+    #[must_use]
+    pub fn plan_recipe_auto_fill(
+        &self,
+        recipe: &crate::recipe::Recipe,
+        tags: &crate::recipe::TagResolver,
+    ) -> Option<Vec<crate::recipe::PlacementStep>> {
+        let inventory_range = self.inventory_slot_range()?;
+        let inventory: Vec<(usize, &ItemStack)> = inventory_range
+            .filter_map(|i| self.slot_item(i).map(|s| (i, s)))
+            .collect();
+
+        if let Some(craft) = self.craft {
+            let steps = crate::recipe::plan_auto_fill(recipe, craft.width, craft.height, &inventory, tags)?;
+            return Some(
+                steps
+                    .into_iter()
+                    .map(|s| crate::recipe::PlacementStep {
+                        cell: craft.first_input + s.cell,
+                        source_slot: s.source_slot,
+                    })
+                    .collect(),
+            );
+        }
+
+        match self.special_layout {
+            Some(SpecialLayout::Furnace | SpecialLayout::BlastFurnace | SpecialLayout::Smoker) => {
+                // The ingredient slot is menu index 0 (`Menu::furnace`'s own
+                // layout), so no cell offset is needed beyond what
+                // `plan_auto_fill` already reports (cell 0).
+                crate::recipe::plan_auto_fill(recipe, 1, 1, &inventory, tags)
+            }
+            _ => None,
+        }
+    }
+
     /// Returns the current state id.
     #[must_use]
     pub fn state_id(&self) -> u32 {
@@ -2119,5 +2193,123 @@ mod tests {
             None,
             "an ordinary generic container has no special layout"
         );
+    }
+
+    // -- plan_recipe_auto_fill (issue #163) ------------------------------
+
+    /// A crafting table's 3×3: coal at menu slot 12, a stick at menu slot 20
+    /// (both inside the `10..=36` main-storage range this menu reports —
+    /// see the module's own slot-order table), recipe wants coal above stick
+    /// in a **1-wide** pattern placed into the real **3-wide** grid.
+    /// `Recipe::placement` lays that pattern out row-major against the
+    /// grid's own width, so coal (row 0, col 0) is grid cell `0` and stick
+    /// (row 1, col 0) is grid cell `3` — **not** cell `1`, which is what a
+    /// hand-count that forgot the grid is 3 cells per row, not 1, would
+    /// predict. `craft.first_input == 1` then offsets both: menu slots `1`
+    /// and `4`.
+    #[test]
+    fn plan_recipe_auto_fill_offsets_crafting_table_cells_by_first_input() {
+        let mut menu = Menu::crafting(3, 3);
+        menu.set_slot_item(12, Some(stack("minecraft:coal", 5)));
+        menu.set_slot_item(20, Some(stack("minecraft:stick", 3)));
+        let torch = crate::recipe::Recipe::Shaped(crate::recipe::ShapedRecipe::new(
+            1,
+            2,
+            vec![
+                Some(crate::recipe::Ingredient::Item(id("minecraft:coal"))),
+                Some(crate::recipe::Ingredient::Item(id("minecraft:stick"))),
+            ],
+            stack("minecraft:torch", 4),
+        ));
+        let tags = crate::recipe::TagResolver::new();
+        let plan = menu
+            .plan_recipe_auto_fill(&torch, &tags)
+            .expect("both ingredients present in main storage");
+        assert_eq!(
+            plan,
+            vec![
+                crate::recipe::PlacementStep { cell: 1, source_slot: 12 },
+                crate::recipe::PlacementStep { cell: 4, source_slot: 20 },
+            ]
+        );
+    }
+
+    /// A furnace-family menu has no `craft_layout` at all — its single
+    /// ingredient slot is menu index `0`, reached through
+    /// `special_layout` instead. Predicts `cell: 0` unmodified (no offset to
+    /// apply, unlike the crafting-table case above).
+    #[test]
+    fn plan_recipe_auto_fill_targets_furnace_ingredient_slot_zero() {
+        let mut menu = Menu::furnace(SpecialLayout::Furnace);
+        // Main storage starts at `container_size == 3`.
+        menu.set_slot_item(15, Some(stack("minecraft:porkchop", 8)));
+        let smelting = crate::recipe::Recipe::Cooking(crate::recipe::CookingRecipe {
+            kind: crate::recipe::CookingKind::Smelting,
+            ingredient: crate::recipe::Ingredient::Item(id("minecraft:porkchop")),
+            result: stack("minecraft:cooked_porkchop", 1),
+            experience: 0.35,
+            cooking_time: 200,
+            category: crate::recipe::RecipeCategory::Food,
+        });
+        let tags = crate::recipe::TagResolver::new();
+        let plan = menu.plan_recipe_auto_fill(&smelting, &tags).expect("porkchop is in main storage");
+        assert_eq!(plan, vec![crate::recipe::PlacementStep { cell: 0, source_slot: 15 }]);
+    }
+
+    /// A blast-furnace recipe never matches a plain furnace's ingredient
+    /// slot: `CookingRecipe::placement` only returns `Some` for `(1, 1)`, and
+    /// `Recipe::book_type` distinguishes furnace/blast-furnace/smoker, but
+    /// `plan_recipe_auto_fill` does not itself check the kind matches the
+    /// menu — this pins that a *smoking*-only ingredient (raw chicken, not
+    /// modelled as smeltable here) with no matching inventory item still
+    /// correctly returns `None` via `plan_auto_fill`'s own all-or-nothing
+    /// rule, rather than silently placing the wrong thing.
+    #[test]
+    fn plan_recipe_auto_fill_returns_none_when_ingredient_is_absent() {
+        let menu = Menu::furnace(SpecialLayout::Furnace);
+        let smelting = crate::recipe::Recipe::Cooking(crate::recipe::CookingRecipe {
+            kind: crate::recipe::CookingKind::Smelting,
+            ingredient: crate::recipe::Ingredient::Item(id("minecraft:iron_ore")),
+            result: stack("minecraft:iron_ingot", 1),
+            experience: 0.7,
+            cooking_time: 200,
+            category: crate::recipe::RecipeCategory::Blocks,
+        });
+        let tags = crate::recipe::TagResolver::new();
+        assert_eq!(menu.plan_recipe_auto_fill(&smelting, &tags), None);
+    }
+
+    /// A menu with neither a crafting grid nor a furnace-family
+    /// `special_layout` (a plain chest) has nothing to auto-fill at all.
+    #[test]
+    fn plan_recipe_auto_fill_none_for_a_menu_with_no_grid() {
+        let mut menu = Menu::generic(27);
+        menu.set_slot_item(30, Some(stack("minecraft:coal", 5)));
+        let torch = crate::recipe::Recipe::Shaped(crate::recipe::ShapedRecipe::new(
+            1,
+            1,
+            vec![Some(crate::recipe::Ingredient::Item(id("minecraft:coal")))],
+            stack("minecraft:torch", 4),
+        ));
+        let tags = crate::recipe::TagResolver::new();
+        assert_eq!(menu.plan_recipe_auto_fill(&torch, &tags), None);
+    }
+
+    /// Auto-fill never draws from armour or off-hand, even when they hold a
+    /// matching item — vanilla's own placement helper only ever walks
+    /// `Inventory.items` (main+hotbar). The player-inventory screen's 2×2
+    /// puts armour at menu slots `5..=8`; a coal "helmet" placed there must
+    /// be invisible to the planner.
+    #[test]
+    fn plan_recipe_auto_fill_never_draws_from_armour_or_offhand() {
+        let mut menu = Menu::player();
+        menu.set_slot_item(5, Some(stack("minecraft:coal", 1))); // armour range
+        menu.set_slot_item(45, Some(stack("minecraft:coal", 1))); // off-hand
+        let torch = crate::recipe::Recipe::Shapeless(crate::recipe::ShapelessRecipe::new(
+            vec![crate::recipe::Ingredient::Item(id("minecraft:coal"))],
+            stack("minecraft:torch", 4),
+        ));
+        let tags = crate::recipe::TagResolver::new();
+        assert_eq!(menu.plan_recipe_auto_fill(&torch, &tags), None);
     }
 }
