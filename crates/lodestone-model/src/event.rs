@@ -1913,6 +1913,33 @@ pub enum ClientEvent {
         /// biome's colour by a slot.
         sky_colors: Vec<Option<u32>>,
     },
+    /// The per-biome **climate** the server declared in the same Configuration
+    /// `registry_data` [`Self::BiomeVisuals`] reads (issue #25/#26's shared
+    /// biome lane), **indexed by biome holder id** exactly as
+    /// [`Self::BiomeVisuals::sky_colors`] is.
+    ///
+    /// A *separate* variant rather than two more fields on [`Self::BiomeVisuals`]
+    /// on purpose: [`Self::BiomeVisuals`] already has a non-`ecs` consumer that
+    /// destructures it by name with no `..`, so adding fields there is a
+    /// breaking change to a file this session could not touch to fix in the
+    /// same commit. Emitted at the same point as [`Self::BiomeVisuals`] (see its
+    /// doc for why `Login` is the right moment), so the two always agree on
+    /// which registry generation they describe.
+    BiomeClimates {
+        /// Each biome's declared (not height-adjusted) `temperature`, at its
+        /// holder id. `None` where the entry could not be parsed — every real
+        /// 26.2 biome declares one, so unlike `sky_colors` a `None` here should
+        /// only ever mean "malformed or elided", never "this biome has none".
+        temperatures: Vec<Option<f32>>,
+        /// Each biome's `downfall`, at its holder id. Feeds the grass/foliage
+        /// colormap sample alongside `temperature`; not itself part of the
+        /// rain/snow decision.
+        downfall: Vec<Option<f32>>,
+        /// Each biome's `has_precipitation`, at its holder id. `false` means
+        /// the biome never rains or snows regardless of temperature (deserts,
+        /// most Nether/End biomes).
+        has_precipitation: Vec<Option<bool>>,
+    },
 }
 
 /// Which of the client's event routers claim a [`ClientEvent`].
@@ -2196,7 +2223,8 @@ pub fn route(event: &ClientEvent) -> Route {
         | ClientEvent::SectionBlocksChanged { .. }
         | ClientEvent::BlockEvent { .. }
         | ClientEvent::ItemPickup { .. }
-        | ClientEvent::WeatherChanged { .. } => SHELL,
+        | ClientEvent::WeatherChanged { .. }
+        | ClientEvent::BiomeClimates { .. } => SHELL,
         // Chat reaches the shell feed *and* the driver's signed-message
         // acknowledgement valve.
         ClientEvent::Chat { .. } => Route {

@@ -140,7 +140,7 @@ Not reaching pixels, each for a named reason:
 
 | gap | blocker |
 |---|---|
-| **Snow** | The biome's `temperature`/`has_precipitation` are not decoded. See below. |
+| **Snow** | The decode is closed (see below); `ShellWeatherProbe::precipitation` still hard-codes `Rain` — a prepared, unapplied patch, not yet landed. |
 | **Rain ambience** | `Sim`'s `ShellAudio` is private with no public play method. |
 | **Lightning bolt geometry** | The bolt's own model; deferred (see "Deferred"). |
 | **Rain splash particles** | `ClientLevel.tickWeatherEffects`' `ParticleTypes.RAIN`; needs the per-column heightmap below. |
@@ -148,12 +148,47 @@ Not reaching pixels, each for a named reason:
 
 ### Snow: the biome lane, precisely
 
-Biome **holder ids** do reach the client — `lodestone_world::ChunkSection` stores a
-4×4×4 biome palette and `Section::biome_at_block` reads it. What does not reach it is
-the biome's *climate*: `ClientRegistries` keeps only
-`minecraft:visual/sky_color` per biome
-(`crates/protocol/v770/src/packets/registry.rs:285`), so there is no `temperature`
-and no `has_precipitation` to decide rain-versus-snow with.
+**Decode: closed as of the #25/#26 biome-climate-lane session.** Biome **holder ids**
+reach the client two ways — the initial `level_chunk_with_light`'s per-section biome
+container, and, since that session, a live update via `chunks_biomes`
+(`World::merge_biomes`, `crates/lodestone-world/src/world.rs`) — and
+`lodestone_world::ChunkSection::biome_at_block` reads either. The biome's *climate*
+now reaches the client too:
+[`ClientRegistries::biome_climates`](../crates/protocol/v770/src/packets/registry.rs)
+decodes `has_precipitation`/`temperature`/`downfall` off the same `registry_data` entry
+`biome_sky_colors` already reads (top-level fields, siblings of `attributes` — see
+`Biome.ClimateSettings.CODEC`, `Biome.java:358-368`, **not** nested under `attributes`
+the way `sky_color` is), and `ClientEvent::BiomeClimates` carries it out of the adapter
+at the same `Login`-time point `BiomeVisuals` does.
+
+That table is **not** a new field on `BiomeVisuals`, which the original plan below (kept
+for the record) called for — `crates/lodestone-ecs/src/session.rs` destructures
+`ClientEvent::BiomeVisuals { sky_colors }` with no `..`, so adding fields there is a
+breaking change to a file outside this session's file ownership. `BiomeClimates` is a
+sibling variant instead, routed `SHELL` (`crates/lodestone-model/src/event.rs`) exactly
+like `WeatherChanged` — it needs no `ingest`/`session` arm, only the same
+`net.rs`-`forward`-into-a-cell shape `WeatherCell` already uses (see the `Login`-time
+proof in `crates/protocol/v770/tests/join_flow.rs`, and the live cross-check against
+Mojang's own `worldgen/biome/*.json` files in
+`crates/protocol/v770/tests/live_registry_data.rs::biome_climates_from_a_real_server_match_mojangs_own_biome_files`,
+measured 66/66 biomes resolved and matching on the creative oracle).
+
+**Not yet closed: the probe.** `ShellWeatherProbe::precipitation`
+(`crates/lodestone-shell/src/app.rs`) still returns `Rain` unconditionally — `app.rs` was
+under active edit by another agent for the whole #25/#26 session (five other patches
+already queued against it), so the wiring was written up as a patch rather than applied.
+The remaining shape: a `BiomeClimateCell` in `net.rs` (mirroring `WeatherCell`, folded
+from `BiomeClimates` in `forward`'s arm), and `ShellWeatherProbe::precipitation` reading
+the block's biome via `ClientHandle::section_at(pos, section_index)` +
+`ChunkSection::biome_at_block` (no new `ClientHandle` method needed — `section_at`
+already hands back a full section), looking that biome's climate up in the cell, and
+calling `height_adjusted_temperature` then `precipitation_for_temperature` — both
+already implemented and unit-tested in `lodestone-render`'s `weather.rs`, unchanged by
+this session. `RenderState::weather_rain_columns()` is exposed next to
+`weather_columns()` for exactly this: the day the two stop being equal is the day snow
+started working.
+
+<details><summary>Original plan (superseded by the field-vs-variant finding above)</summary>
 
 Both fields are already on the wire and already in the hermetic fixture —
 `crates/protocol/v770/tests/registry_data.rs:227-228` asserts
@@ -162,11 +197,7 @@ it is a `biome_climates()` table alongside `biome_sky_colors()`, one new
 `ClientEvent::BiomeVisuals` field, and a `ShellWeatherProbe::precipitation` that
 consults it. **Not** a new packet and **not** a proxy.
 
-Until then `precipitation_for_temperature` — vanilla's exact predicate, including the
-height falloff, unit-tested — has no caller with real input, and every column answers
-`Rain`. `RenderState::weather_rain_columns()` is exposed next to
-`weather_columns()` for exactly this: the day the two stop being equal is the day snow
-started working.
+</details>
 
 ## How to change it
 

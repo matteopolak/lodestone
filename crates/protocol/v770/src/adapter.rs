@@ -26,7 +26,9 @@ use lodestone_model::{
     TeamAction, TeamColor, TeamParameters, TeleportFlags, Text, TextColor, ToolBlocks, ToolMining,
     ToolPatch, ToolRule, Vec3, Vec3f, VersionAdapter, Visibility, WorldSink,
 };
-use lodestone_world::{ChunkPos as WorldChunkPos, LightPatch, LoadedChunk, NibbleArray};
+use lodestone_world::{
+    BiomePatch, ChunkPos as WorldChunkPos, LightPatch, LoadedChunk, NibbleArray, PalettedContainer,
+};
 
 use lodestone_data::block_entity_types::block_entity_type;
 use lodestone_data::block_states::block_type_name;
@@ -2396,6 +2398,27 @@ impl V770Adapter {
                 .ok()
                 .map(|registries| registries.biome_sky_colors().to_vec())
                 .unwrap_or_default();
+            // The same registry generation's climate table (issue #25/#26's
+            // shared biome lane), emitted at the same point and for the same
+            // reason as `biome_sky_colors` just above — see `BiomeClimates`'s
+            // own doc for why this is a second variant rather than two more
+            // fields on `BiomeVisuals`.
+            let (biome_temperatures, biome_downfall, biome_has_precipitation) = self
+                .registries
+                .lock()
+                .ok()
+                .map(|registries| {
+                    let climates = registries.biome_climates();
+                    (
+                        climates.iter().map(|c| c.map(|c| c.temperature)).collect(),
+                        climates.iter().map(|c| c.map(|c| c.downfall)).collect(),
+                        climates
+                            .iter()
+                            .map(|c| c.map(|c| c.has_precipitation))
+                            .collect(),
+                    )
+                })
+                .unwrap_or_default();
             return Ok(vec![
                 // Before `Login`, deliberately: a consumer folding both sees the
                 // dimension's geometry before the level name that depends on it.
@@ -2405,6 +2428,11 @@ impl V770Adapter {
                 }),
                 Directive::Emit(ClientEvent::BiomeVisuals {
                     sky_colors: biome_sky_colors,
+                }),
+                Directive::Emit(ClientEvent::BiomeClimates {
+                    temperatures: biome_temperatures,
+                    downfall: biome_downfall,
+                    has_precipitation: biome_has_precipitation,
                 }),
                 Directive::Emit(ClientEvent::Login {
                     entity_id: body.entity_id,
@@ -2874,6 +2902,59 @@ impl V770Adapter {
                 id: boss.id,
                 action: map_boss_action(boss.op)?,
             })]);
+        }
+        if packet_id == play::clientbound::CHUNKS_BIOMES {
+            // `ClientboundChunksBiomesPacket` (id 13): a VarInt-prefixed list of
+            // `(ChunkPos, byte[])` entries. Vanilla sends this to *resend* biomes
+            // for chunks a player already has loaded — `ChunkMap.
+            // resendBiomesForChunks`, whose only caller is `/fillbiome`
+            // (`FillBiomeCommand.java`) — never at initial load, which is why the
+            // per-section biome container already rides `level_chunk_with_light`
+            // and this packet only ever *updates* it.
+            //
+            // Each entry's byte array is, per `ChunkBiomeData.extractChunkData`,
+            // every section's `PalettedContainer<Holder<Biome>>.write` back to
+            // back with **no other framing at all** — no non-air/fluid counts (it
+            // has no blocks to count), no block-state container, just
+            // `section_count` biome containers in ascending section order. That
+            // makes this the one chunk-shaped packet whose per-section loop is
+            // *shorter* than `level_chunk_with_light`'s, not a variant of it.
+            let shape = self.current_shape();
+            let mut reader = Reader::new(payload);
+            let count = reader.var_i32().map_err(dec_err)?;
+            let count = usize::try_from(count)
+                .map_err(|_| AdapterError::Decode(format!("negative chunk-biomes count {count}")))?;
+            let mut directives = Vec::with_capacity(count.min(1024));
+            for _ in 0..count {
+                // `ChunkPos.pack`/`unpack`: x in the low 32 bits, z in the high 32
+                // — the same layout `forget_level_chunk` already unpacks.
+                let packed = reader.i64().map_err(dec_err)?;
+                let (x, z) = (packed as i32, (packed >> 32) as i32);
+                let bytes = reader.var_bytes(2_097_152).map_err(dec_err)?;
+                let mut blob = Reader::new(bytes);
+                let mut patch = BiomePatch::new();
+                for section_index in 0..shape.section_count {
+                    let biomes = PalettedContainer::decode(shape.biome_kind, &mut blob)
+                        .map_err(|err| AdapterError::Decode(err.to_string()))?;
+                    patch.set_section(section_index, biomes);
+                }
+                // Zero trailing bytes in this chunk's own sub-blob is the
+                // strongest per-chunk alignment check, exactly as
+                // `level_chunk_with_light`'s section blob uses `ensure_empty` on
+                // its own bounded sub-reader.
+                blob.ensure_empty().map_err(dec_err)?;
+                world.merge_biomes(WorldChunkPos::new(x, z), patch);
+                // Reused rather than a new event: `ChunkLoaded` already means "the
+                // column at pos is dirty, re-read or re-mesh it" (see
+                // `light_update`'s arm above), which is exactly what a live biome
+                // change needs — surface material and (once wired) tint both
+                // read the world directly, not the event payload.
+                directives.push(Directive::Emit(ClientEvent::ChunkLoaded {
+                    pos: ChunkPos::new(x, z),
+                }));
+            }
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(directives);
         }
         if packet_id == play::clientbound::LEVEL_CHUNK_WITH_LIGHT {
             // The chunk framing depends on the current dimension's build-height

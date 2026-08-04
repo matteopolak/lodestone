@@ -105,12 +105,33 @@ existed — nothing new needed on the wire-format side).
 - **No render-side consumer exists yet.** `crates/lodestone-assets/src/tint.rs` already defines a
   `BiomeTint` trait and `Colormaps::resolve` for grass/foliage/water tint, but nothing in
   `crates/lodestone-shell` implements `BiomeTint` (checked directly — zero implementors at the time
-  this landed). So although real biome ids now reach the wire and decode correctly
-  (`crates/protocol/v770`'s `encode_chunk_carries_real_per_quart_biome` proves the whole chain),
-  grass color on screen will stay uniform until a render-layers consumer reads
+  this landed, and **still zero** as of the #25/#26 biome-climate-lane session that re-checked it: the
+  only `impl BiomeTint` anywhere in the workspace is a test mock in
+  `crates/lodestone-assets/tests/tint.rs`). So although real biome ids now reach the wire and decode
+  correctly (`crates/protocol/v770`'s `encode_chunk_carries_real_per_quart_biome` proves the whole
+  chain), grass color on screen will stay uniform until a render-layers consumer reads
   `ChunkSection::biome_at_block` and implements `BiomeTint`. **Surface material already varies**
   independent of tint (sand/snow/etc. come from the surface-rule `biome` condition, which this issue
   did wire up), so the world is not visually flat — just not yet tinted correctly.
+  That same session added the **data** half of what a `BiomeTint` implementor would need —
+  `ClientRegistries::biome_climates` (`crates/protocol/v770/src/packets/registry.rs`) decodes
+  `temperature`/`downfall`/`has_precipitation` per biome holder id, reaching the shell as
+  `ClientEvent::BiomeClimates` — but built it for `docs/weather.md`'s snow gap (which needs only
+  `temperature`+`has_precipitation`), not for tint (which additionally needs `grass_color`/
+  `foliage_color`/`water_color` overrides and the `grass_color_modifier` out of the biome's `effects`
+  compound, neither of which is decoded yet). A `BiomeTint` implementor is real, separately-scoped
+  work: a struct bundling per-position biome lookup (already possible via
+  `ClientHandle::section_at` + `ChunkSection::biome_at_block`) with a climate table, wired into
+  whichever pass builds vertex colours (`lodestone-render`'s block-model mesher) — none of that
+  landed this session, since the mesher passes it would touch were under concurrent edit by another
+  agent for the session's whole duration.
+- **`chunks_biomes` (protocol issue #26) is decoded and reaches the world**, independently of tint:
+  `World::merge_biomes` (`crates/lodestone-world/src/world.rs`) applies a live biome edit (vanilla's
+  `/fillbiome`) to an already-loaded column without touching its block state, and
+  `crates/protocol/v770/src/adapter.rs`'s `CHUNKS_BIOMES` arm reuses `ClientEvent::ChunkLoaded` as the
+  remesh signal — the same dirty-region event `light_update` already uses for a non-block-changing
+  update. See `docs/clientbound-packet-coverage.md`'s now-`Landed` row and
+  `crates/protocol/v770/tests/chunks_biomes.rs`.
 
 ## Configuration
 

@@ -285,6 +285,100 @@ fn biome_sky_colours_resolve_by_holder_id() {
     assert_eq!(registries.biome_sky_colors(), [Some(0x0078_a7ff)]);
 }
 
+/// The `has_precipitation`/`temperature`/`downfall` triple lives at the top of
+/// the biome compound, a sibling of `attributes` — not nested under it like
+/// `sky_color` — per `Biome.ClimateSettings.CODEC` (`Biome.java:358-368`).
+/// Issue #25 (snow): this is the input `precipitation_for_temperature` and
+/// `height_adjusted_temperature` (`lodestone-render`'s `weather.rs`) have had
+/// unit tests for but no real caller for, per `docs/weather.md`'s "Snow: the
+/// biome lane, precisely".
+#[test]
+fn biome_climates_resolve_by_holder_id_and_hold_place_for_a_bad_entry() {
+    use lodestone_core::Nbt;
+    use lodestone_v770::packets::registry::{BiomeClimate, PackedRegistryEntry};
+
+    fn biome(id: &str, has_precipitation: bool, temperature: f32, downfall: f32) -> PackedRegistryEntry {
+        PackedRegistryEntry {
+            id: id.to_owned(),
+            data: Some(Nbt::Compound(vec![
+                ("has_precipitation".to_owned(), Nbt::Byte(has_precipitation as i8)),
+                ("temperature".to_owned(), Nbt::Float(temperature)),
+                ("downfall".to_owned(), Nbt::Float(downfall)),
+                ("attributes".to_owned(), Nbt::Compound(Vec::new())),
+            ])),
+        }
+    }
+
+    let mut registries = ClientRegistries::default();
+    registries.apply(RegistryData {
+        registry: ClientRegistries::BIOME.to_owned(),
+        entries: vec![
+            // Holder 0: a real biome below the rain/snow threshold.
+            biome("minecraft:frozen_peaks", true, 0.1, 0.9),
+            // Holder 1: a desert — precipitation entirely off, warm.
+            biome("minecraft:desert", false, 2.0, 0.0),
+            // Holder 2: an entry whose NBT is elided entirely.
+            PackedRegistryEntry {
+                id: "mypack:elided".to_owned(),
+                data: None,
+            },
+            // Holder 3: missing `downfall` — vanilla's codec has it required
+            // (`fieldOf`, not `optionalFieldOf`), so this must read as `None`,
+            // not default to 0.0 and silently answer for a real biome.
+            PackedRegistryEntry {
+                id: "mypack:malformed".to_owned(),
+                data: Some(Nbt::Compound(vec![
+                    ("has_precipitation".to_owned(), Nbt::Byte(1)),
+                    ("temperature".to_owned(), Nbt::Float(0.8)),
+                ])),
+            },
+            // Holder 4: warm enough to rain, right at the neighbour of holder 0
+            // so the table is not separable by "is it the cold one".
+            biome("minecraft:plains", true, 0.8, 0.4),
+        ],
+    });
+
+    let climates = registries.biome_climates();
+    assert_eq!(
+        climates,
+        [
+            Some(BiomeClimate {
+                has_precipitation: true,
+                temperature: 0.1,
+                downfall: 0.9,
+            }),
+            Some(BiomeClimate {
+                has_precipitation: false,
+                temperature: 2.0,
+                downfall: 0.0,
+            }),
+            None,
+            None,
+            Some(BiomeClimate {
+                has_precipitation: true,
+                temperature: 0.8,
+                downfall: 0.4,
+            }),
+        ],
+        "index i must be holder id i, with the elided/malformed entries holding their places"
+    );
+
+    // A resent registry replaces rather than appends, exactly as
+    // `biome_sky_colours_resolve_by_holder_id` proves for the sibling table.
+    registries.apply(RegistryData {
+        registry: ClientRegistries::BIOME.to_owned(),
+        entries: vec![biome("minecraft:swamp", true, 0.8, 0.9)],
+    });
+    assert_eq!(
+        registries.biome_climates(),
+        [Some(BiomeClimate {
+            has_precipitation: true,
+            temperature: 0.8,
+            downfall: 0.9,
+        })]
+    );
+}
+
 /// The modifier form of an attribute entry, which no vanilla biome uses for
 /// `sky_color` and a data pack may.
 ///

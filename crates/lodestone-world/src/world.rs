@@ -18,6 +18,7 @@ use lodestone_core::Nbt;
 
 use crate::block_entity::BlockEntity;
 use crate::column::ChunkColumn;
+use crate::container::PalettedContainer;
 use crate::heightmap::Heightmaps;
 use crate::light::{ColumnLight, LightData, NibbleArray, SectionLight};
 use crate::section::ChunkSection;
@@ -272,6 +273,55 @@ impl LightPatch {
             sky: light_layer_from_masks(sky_mask, empty_sky_mask, sky_arrays),
             block: light_layer_from_masks(block_mask, empty_block_mask, block_arrays),
         }
+    }
+}
+
+/// A sparse set of per-section biome-container overwrites applied to an
+/// already-loaded column by [`World::merge_biomes`].
+///
+/// This is the `chunks_biomes` seam's payload (issue #26): the packet carries,
+/// per chunk, one full [`PalettedContainer`] biome replacement per section and
+/// **no block data whatsoever** — unlike [`ColumnPatch`], whose entries are
+/// whole [`ChunkSection`]s. A version crate decodes each section's biome
+/// container with the same [`PalettedContainer::decode`] call the chunk-load
+/// path already uses (same [`PaletteKind`], same framing) and pushes it here
+/// with [`set_section`](Self::set_section).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BiomePatch {
+    sections: Vec<(usize, PalettedContainer)>,
+}
+
+impl BiomePatch {
+    /// Creates an empty patch.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Queues a biome-container replacement for `section_index`, overwriting
+    /// any already queued at that index.
+    pub fn set_section(&mut self, section_index: usize, biomes: PalettedContainer) {
+        if let Some(slot) = self
+            .sections
+            .iter_mut()
+            .find(|(i, _)| *i == section_index)
+        {
+            slot.1 = biomes;
+        } else {
+            self.sections.push((section_index, biomes));
+        }
+    }
+
+    /// The number of sections queued in this patch.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.sections.len()
+    }
+
+    /// Whether the patch names no sections.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.sections.is_empty()
     }
 }
 
@@ -613,6 +663,30 @@ impl World {
         }
     }
 
+    /// Applies a sparse [`BiomePatch`] to the chunk at `pos`, replacing only the
+    /// named sections' biome containers and leaving block state, light, and
+    /// unnamed sections untouched.
+    ///
+    /// This is the `chunks_biomes` seam (issue #26): unlike [`merge`](World::merge)
+    /// its per-section payload carries *only* biomes, no block data at all, so it
+    /// cannot go through [`ColumnPatch`] without inventing block states the
+    /// packet never sent. Deliberately a **no-op** when the chunk is not loaded —
+    /// vanilla only ever sends this for a chunk a player already has loaded
+    /// (`ChunkMap.resendBiomesForChunks` iterates `getPlayers`), so a column this
+    /// client does not hold has nothing to update, and synthesising one from
+    /// biomes alone would need a shape (min-Y, section count, palettes) this
+    /// patch does not carry.
+    pub fn merge_biomes(&mut self, pos: ChunkPos, patch: BiomePatch) {
+        let Some(chunk) = self.chunks.get_mut(&pos) else {
+            return;
+        };
+        for (index, biomes) in patch.sections {
+            if index < chunk.column.section_count() {
+                chunk.column.set_biome_section(index, biomes);
+            }
+        }
+    }
+
     /// Whether a chunk is loaded at `pos`.
     #[must_use]
     pub fn contains(&self, pos: ChunkPos) -> bool {
@@ -808,6 +882,16 @@ pub trait WorldSink {
     /// trap this seam exists to close.
     fn merge_light(&mut self, pos: ChunkPos, patch: LightPatch);
 
+    /// Applies a sparse [`BiomePatch`] to the chunk at `pos`, overwriting only
+    /// the sections it names and leaving block state untouched.
+    ///
+    /// This is the `chunks_biomes` seam. Like [`merge_light`](WorldSink::merge_light)
+    /// it is a **no-op** when the chunk is not loaded — vanilla only ever sends
+    /// this for a chunk a player already has. Required for the same reason as
+    /// [`merge`](WorldSink::merge): a silent default would drop a live biome
+    /// update (e.g. `/fillbiome`) and leave the sink's world quietly stale.
+    fn merge_biomes(&mut self, pos: ChunkPos, patch: BiomePatch);
+
     /// Unloads the chunk at `pos`, if present.
     fn unload(&mut self, pos: ChunkPos);
 }
@@ -851,6 +935,10 @@ impl WorldSink for World {
 
     fn merge_light(&mut self, pos: ChunkPos, patch: LightPatch) {
         World::merge_light(self, pos, patch);
+    }
+
+    fn merge_biomes(&mut self, pos: ChunkPos, patch: BiomePatch) {
+        World::merge_biomes(self, pos, patch);
     }
 
     fn unload(&mut self, pos: ChunkPos) {
@@ -1746,6 +1834,94 @@ mod tests {
             world.get(pos).unwrap().light.block(2),
             &LightData::Uniform(11),
             "merge_light must dispatch through &mut dyn WorldSink"
+        );
+    }
+
+    // --- `merge_biomes`: the `chunks_biomes` write path (issue #26) ---
+
+    #[test]
+    fn merge_biomes_overwrites_only_named_sections_and_leaves_blocks_untouched() {
+        let mut world = World::new();
+        let pos = ChunkPos::new(0, 0);
+        let mut chunk = sample_chunk();
+        // section 4 is world y = 0..16 for min_y = -64.
+        chunk.column.set_block(1, 5, 1, 77);
+        world.load(pos, chunk);
+
+        let mut biomes = PalettedContainer::new(PaletteKind::biomes(), 0);
+        biomes.set(0, 6);
+        let mut patch = BiomePatch::new();
+        patch.set_section(4, biomes);
+        world.merge_biomes(pos, patch);
+
+        let column = &world.get(pos).unwrap().column;
+        assert_eq!(
+            column.get_biome(0, 0, 0),
+            6,
+            "the named section's biome cell (0,0,0) was replaced"
+        );
+        assert_eq!(
+            column.get_block(1, 5, 1),
+            77,
+            "a biomes-only update must never touch block state"
+        );
+        assert!(
+            column.section(5).is_none(),
+            "an unnamed section must stay untouched (still elided)"
+        );
+    }
+
+    #[test]
+    fn merge_biomes_is_a_noop_for_an_unloaded_chunk() {
+        let mut world = World::new();
+        let mut patch = BiomePatch::new();
+        patch.set_section(0, PalettedContainer::new(PaletteKind::biomes(), 3));
+        // Vanilla only ever sends `chunks_biomes` for a chunk a player already
+        // has loaded (`ChunkMap.resendBiomesForChunks` iterates `getPlayers`),
+        // so a chunk we do not hold has nothing to update.
+        world.merge_biomes(ChunkPos::new(5, 5), patch);
+        assert!(
+            world.is_empty(),
+            "merge_biomes must not create an absent chunk"
+        );
+    }
+
+    #[test]
+    fn merge_biomes_ignores_an_out_of_range_section_index() {
+        let mut world = World::new();
+        let pos = ChunkPos::new(0, 0);
+        world.load(pos, sample_chunk());
+        let column_before = world.get(pos).unwrap().column.clone();
+
+        let mut patch = BiomePatch::new();
+        // A modern column has 24 sections; this is past it.
+        patch.set_section(999, PalettedContainer::new(PaletteKind::biomes(), 3));
+        world.merge_biomes(pos, patch);
+
+        assert_eq!(
+            &world.get(pos).unwrap().column,
+            &column_before,
+            "an out-of-range section index must be ignored, not panic"
+        );
+    }
+
+    #[test]
+    fn merge_biomes_is_reachable_through_the_worldsink_trait() {
+        let mut world = World::new();
+        let pos = ChunkPos::new(0, 0);
+        world.load(pos, sample_chunk());
+
+        let mut biomes = PalettedContainer::new(PaletteKind::biomes(), 0);
+        biomes.set(0, 9);
+        let mut patch = BiomePatch::new();
+        patch.set_section(4, biomes);
+        let sink: &mut dyn WorldSink = &mut world;
+        sink.merge_biomes(pos, patch);
+
+        assert_eq!(
+            world.get(pos).unwrap().column.get_biome(0, 0, 0),
+            9,
+            "merge_biomes must dispatch through &mut dyn WorldSink"
         );
     }
 

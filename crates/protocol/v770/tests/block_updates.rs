@@ -13,7 +13,7 @@ use lodestone_model::{ConnectionState, VersionAdapter};
 use lodestone_v770::V770Adapter;
 use lodestone_v770::packet_ids::play;
 use lodestone_world::{
-    BlockEntitySync, ChunkPos, ColumnPatch, LightPatch, LoadedChunk, World, WorldSink,
+    BiomePatch, BlockEntitySync, ChunkPos, ColumnPatch, LightPatch, LoadedChunk, World, WorldSink,
 };
 
 /// A [`WorldSink`] that records single- and multi-block writes for assertion.
@@ -46,6 +46,7 @@ impl WorldSink for RecordingSink {
             .push((section_x, section_y, section_z, blocks.to_vec()));
     }
     fn merge_light(&mut self, _pos: ChunkPos, _patch: LightPatch) {}
+    fn merge_biomes(&mut self, _pos: ChunkPos, _patch: BiomePatch) {}
     fn unload(&mut self, _pos: ChunkPos) {}
     fn set_block_entity(&mut self, x: i32, y: i32, z: i32, type_id: u32, nbt: Nbt) {
         self.set_block_entity.push((x, y, z, type_id, nbt));
