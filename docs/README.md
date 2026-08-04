@@ -726,11 +726,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   modelled versus deliberately deferred (Respiration, water-breathing, i-frames,
   non-player entities, death/respawn); and the undrained-`EventStream` trap that
   silently stalled a real-client test with no error anywhere.
-- [Underwater and fire screen overlays](./screen-overlays.md) — issues #108 and
-  #112: one shared one-bind-group pass, why the underwater tint is **grayscale**
-  and independent of `fog.rs` (the blue comes from the texture's own pixels), and
-  the on-fire flag's missing session-scoped fold — it decodes, but the local player
-  is deliberately excluded from the generic entity-view path that would carry it.
+- [Screen overlays: underwater, fire, pumpkin, freeze, spyglass, confusion, portal](./screen-overlays.md)
+  — issues #108, #112, #185, #139, #154, #144, #149: one shared one-bind-group pass
+  plus a second **pipeline-agnostic** dispatch group for the three that draw in third
+  person; why the underwater tint is **grayscale** and independent of `fog.rs` (the blue
+  comes from the texture's own pixels); the nausea/portal world-projection warp that
+  lives in `camera.rs` rather than here; and the spyglass FOV-zoom half that is real and
+  tested but still has no live scoping input wired to it.
 - [Entity and player nametags](./entity-nametags.md) — issue #100: billboarded text
   above named entities and other players, why the two are resolved by genuinely
   different vanilla predicates at `net::entity_snapshot` rather than in the draw
