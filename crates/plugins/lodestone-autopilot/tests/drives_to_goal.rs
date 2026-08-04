@@ -305,3 +305,351 @@ fn goal_outside_the_snapshot_is_reported_as_no_start() {
         other => panic!("expected a search failure for an unreachable goal, got {other:?}"),
     }
 }
+
+/// # Genuine collision, not a flat plane
+///
+/// Every test above builds its world from [`FixtureAdapter`]/[`FlatFloor`]: two
+/// synthetic states (`AIR`, `STONE`) and a hand-rolled `1x1x1` box. That is a
+/// legitimate hermetic seam test (it proves the *wiring* — `ChunkWorld` in,
+/// `MovementIntent`/`LookIntent` out, through the real schedule), but it is
+/// also exactly the "world" species of vacuous test CLAUDE.md's evidence
+/// standards warn about: the input structurally cannot contain a non-cube
+/// shape, so a bug in how `top`/`full_cube` are *derived from real geometry*
+/// (`lodestone_nav::facts::BlockFacts`) would pass this file's other three
+/// tests unchanged.
+///
+/// This section re-runs the happy path over **real, jar-derived collision
+/// data** — `lodestone_data::collision_shapes`/`block_states`/`block_solidity`,
+/// the exact tables `lodestone_v770::adapter::V770Adapter` itself reads (issue
+/// #361's census, dumped from the real 26.2 server's
+/// `Block.BLOCK_STATE_REGISTRY`) — and, critically, includes one **real bottom
+/// slab** (`minecraft:oak_slab[type=bottom]`, true collision top `0.5`, not a
+/// full block) astride the walked path. `lodestone-nav`'s own unit tests
+/// (`graph::tests::a_bottom_slab_is_walkable_and_reports_the_slab_surface`)
+/// already prove the *search* handles a slab correctly against a synthetic
+/// census; this proves the same claim end to end, through the real per-state
+/// data source and the real physics integrator, which is the thing that
+/// actually reaches a player.
+///
+/// This is a dev-only dependency on `lodestone-data` (see
+/// `Cargo.toml`'s `[dev-dependencies]` comment) — not a version crate, so this
+/// does not version-lock the plugin and is not even the soft
+/// `SharedDependsOnVersion` isolation warning.
+mod real_collision {
+    use super::{App, position, run_ticks};
+    use lodestone_autopilot::{AutopilotGoal, AutopilotPlugin, AutopilotStatus};
+    use lodestone_ecs::player::{CollisionSource, LocalPlayerPlugin, PlayerCollision, spawn_local_player};
+    use lodestone_ecs::{ChunkWorld, VersionData};
+    use lodestone_model::{
+        AdapterError, BlockAabb, BlockPos, ClientAction, ConnectionState, Directive, LoginProfile,
+        ServerAddress, VersionAdapter, WorldSink,
+    };
+    use lodestone_physics::{CollisionView, PlayerState, Vec3d};
+    use lodestone_world::{ChunkColumn, ChunkPos, ColumnLight, Heightmaps, LoadedChunk, PaletteKind, World};
+    use std::sync::Arc;
+
+    /// The first state id whose real block name is exactly `name` — e.g.
+    /// `"minecraft:stone"`, `"minecraft:air"`. Scans the generated table
+    /// (`STATE_COUNT` is ~32,366; this runs once per test, zero heap) rather
+    /// than hardcoding an id, so a regen of the census cannot silently point
+    /// this test at the wrong block.
+    fn real_state_id(name: &str) -> u32 {
+        (0..lodestone_data::block_states::STATE_COUNT as u32)
+            .find(|&id| lodestone_data::block_states::block_name(id) == Some(name))
+            .unwrap_or_else(|| panic!("no real block-state census entry for {name}"))
+    }
+
+    /// The first state id whose block name is `name` and whose properties
+    /// contain `(key, value)` — used to pin the exact slab half
+    /// (`type=bottom`) rather than whichever of top/bottom/double/waterlogged
+    /// variants happens to sort first.
+    fn real_state_id_with(name: &str, key: &str, value: &str) -> u32 {
+        (0..lodestone_data::block_states::STATE_COUNT as u32)
+            .find(|&id| {
+                lodestone_data::block_states::block_name(id) == Some(name)
+                    && lodestone_data::block_states::properties(id)
+                        .is_some_and(|props| props.iter().any(|&(k, v)| k == key && v == value))
+            })
+            .unwrap_or_else(|| panic!("no real block-state census entry for {name} with {key}={value}"))
+    }
+
+    /// A [`VersionAdapter`] whose three block-census methods delegate straight
+    /// to `lodestone-data`'s generated tables — the same functions
+    /// `lodestone_v770::adapter::V770Adapter` calls, so this is not a second,
+    /// independent implementation of the census that could quietly drift from
+    /// the real one; it *is* the real one, minus the packet/login machinery
+    /// this test never drives.
+    #[derive(Debug)]
+    struct RealDataAdapter;
+
+    impl VersionAdapter for RealDataAdapter {
+        fn protocol_version(&self) -> i32 {
+            0
+        }
+
+        fn minecraft_versions(&self) -> &'static [&'static str] {
+            &[]
+        }
+
+        fn supports(&self, _protocol: i32) -> bool {
+            false
+        }
+
+        fn begin_login(
+            &self,
+            _profile: &LoginProfile,
+            _server: &ServerAddress,
+        ) -> Result<Vec<Directive>, AdapterError> {
+            Err(AdapterError::Unsupported("real-data adapter: no login".to_owned()))
+        }
+
+        fn handle_packet(
+            &self,
+            _world: &mut dyn WorldSink,
+            _state: ConnectionState,
+            _packet_id: i32,
+            _payload: &[u8],
+        ) -> Result<Vec<Directive>, AdapterError> {
+            Err(AdapterError::Unsupported("real-data adapter: no packets".to_owned()))
+        }
+
+        fn encode_action(
+            &self,
+            _state: ConnectionState,
+            _action: &ClientAction,
+        ) -> Result<Option<(i32, Vec<u8>)>, AdapterError> {
+            Err(AdapterError::Unsupported("real-data adapter: no actions".to_owned()))
+        }
+
+        fn block_collision(&self, state_id: u32) -> Option<&'static [BlockAabb]> {
+            lodestone_data::collision_shapes::collision_boxes(state_id)
+        }
+
+        fn block_name(&self, state_id: u32) -> Option<&'static str> {
+            lodestone_data::block_states::block_name(state_id)
+        }
+
+        fn block_blocks_motion(&self, state_id: u32) -> Option<bool> {
+            lodestone_data::block_solidity::blocks_motion(state_id)
+        }
+    }
+
+    /// The floor this test walks: real `minecraft:stone` everywhere at world
+    /// `y = 0` except two consecutive columns, `SLAB_X_MIN..=SLAB_X_MAX` at
+    /// `SLAB_Z`, which are real bottom `minecraft:oak_slab` — true collision
+    /// top `0.5`, half the height of the stone either side of it. Two columns,
+    /// not one: the player's AABB is 0.6 wide, so a single low column bordered
+    /// by full blocks only fully clears its neighbours for a couple of ticks —
+    /// not enough time to actually settle onto the lower surface before the far
+    /// edge's support takes over again. Two columns give a real, uninterrupted
+    /// stretch to fall onto and rest on the slab's true height, which is the
+    /// whole point of this test (predicting the *settled* magnitude, not just
+    /// a momentary dip). Shared between the planning world
+    /// ([`real_chunk_world`]) and the physics collision view
+    /// ([`RealFloorCollision`]) so both seams agree on what is actually there,
+    /// exactly as production's two independent seams (`ChunkWorld` for
+    /// planning, `PlayerCollision` for physics) are required to.
+    const SLAB_X_MIN: i32 = 3;
+    const SLAB_X_MAX: i32 = 4;
+    const SLAB_Z: i32 = 0;
+
+    fn floor_state_at(x: i32, z: i32, stone: u32, slab: u32) -> u32 {
+        if (SLAB_X_MIN..=SLAB_X_MAX).contains(&x) && z == SLAB_Z { slab } else { stone }
+    }
+
+    /// A [`ChunkWorld`] with the [`floor_state_at`] floor at world `y = 0`,
+    /// otherwise real `minecraft:air`, spanning `-radius..=radius` chunk
+    /// columns — the planning-side seam `lodestone_nav::SnapshotView::build`
+    /// reads.
+    fn real_chunk_world(radius: i32, stone: u32, air: u32, slab: u32) -> ChunkWorld {
+        let mut world = World::new();
+        let block_kind = PaletteKind::block_states();
+        let biome_kind = PaletteKind::biomes();
+        const SECTION_COUNT: usize = 4;
+
+        for cx in -radius..=radius {
+            for cz in -radius..=radius {
+                let mut column = ChunkColumn::new(0, SECTION_COUNT, block_kind, biome_kind, air, 0);
+                for lx in 0..16i32 {
+                    for lz in 0..16i32 {
+                        let wx = cx * 16 + lx;
+                        let wz = cz * 16 + lz;
+                        column.set_block(lx as usize, 0, lz as usize, floor_state_at(wx, wz, stone, slab));
+                    }
+                }
+                let light = ColumnLight::new(SECTION_COUNT);
+                let chunk = LoadedChunk::new(column, light, Heightmaps::default(), Vec::new());
+                world.load(ChunkPos::new(cx, cz), chunk);
+            }
+        }
+
+        ChunkWorld::new(world)
+    }
+
+    /// The **physics**-side seam (`PlayerCollision`): for any world cell,
+    /// looks up the same [`floor_state_at`] floor and hands back that real
+    /// state's genuine, jar-derived collision boxes (`lodestone_data`),
+    /// translated from block-local `0.0..1.0` coordinates into world space by
+    /// adding the cell's own `(x, y, z)`. Deliberately independent code from
+    /// [`real_chunk_world`] (same data, different call site), matching
+    /// `docs/autonomous-navigation.md`'s note that production reads
+    /// `ChunkWorld` and `PlayerCollision` through two different seams and a
+    /// test collapsing them would stop it from catching a plugin that
+    /// accidentally depended on one standing in for the other.
+    #[derive(Debug)]
+    struct RealFloorCollision {
+        stone: u32,
+        air: u32,
+        slab: u32,
+    }
+
+    impl CollisionView for RealFloorCollision {
+        fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<lodestone_physics::Aabb>) {
+            let state = if y == 0 {
+                floor_state_at(x, z, self.stone, self.slab)
+            } else {
+                self.air
+            };
+            let Some(boxes) = lodestone_data::collision_shapes::collision_boxes(state) else {
+                return;
+            };
+            for b in boxes {
+                out.push(lodestone_physics::Aabb {
+                    min_x: f64::from(x) + f64::from(b.min[0]),
+                    min_y: f64::from(y) + f64::from(b.min[1]),
+                    min_z: f64::from(z) + f64::from(b.min[2]),
+                    max_x: f64::from(x) + f64::from(b.max[0]),
+                    max_y: f64::from(y) + f64::from(b.max[1]),
+                    max_z: f64::from(z) + f64::from(b.max[2]),
+                });
+            }
+        }
+    }
+
+    impl CollisionSource for RealFloorCollision {
+        fn with_view(&self, f: &mut dyn FnMut(&dyn CollisionView)) {
+            f(self);
+        }
+    }
+
+    fn app_on_real_terrain(chunk_radius: i32) -> (App, bevy_ecs::entity::Entity) {
+        let stone = real_state_id("minecraft:stone");
+        let air = real_state_id("minecraft:air");
+        let slab = real_state_id_with("minecraft:oak_slab", "type", "bottom");
+
+        // Sanity-check the premise before building anything on top of it: the
+        // slab must actually be shorter than the stone either side of it, or
+        // this test proves nothing (this is the "predict the value, do not
+        // merely assert the sign" discipline — know the two numbers apart
+        // before the assertion that depends on the gap between them).
+        let stone_top = lodestone_data::collision_shapes::collision_boxes(stone)
+            .and_then(|b| b.iter().map(|b| b.max[1]).reduce(f32::max))
+            .expect("stone has a real collision shape");
+        let slab_top = lodestone_data::collision_shapes::collision_boxes(slab)
+            .and_then(|b| b.iter().map(|b| b.max[1]).reduce(f32::max))
+            .expect("the bottom slab has a real collision shape");
+        assert!(
+            (stone_top - 1.0).abs() < 1e-4,
+            "test premise: real minecraft:stone must be a full-height cube, got top={stone_top}"
+        );
+        assert!(
+            (slab_top - 0.5).abs() < 1e-4,
+            "test premise: a real bottom slab must be half-height, got top={slab_top}"
+        );
+
+        let mut app = App::new();
+        app.add_plugins((lodestone_ecs::CorePlugin, LocalPlayerPlugin, AutopilotPlugin));
+
+        app.insert_resource(PlayerCollision::View(Arc::new(RealFloorCollision { stone, air, slab })));
+        app.insert_resource(real_chunk_world(chunk_radius, stone, air, slab));
+        app.insert_resource(VersionData(Some(Box::new(RealDataAdapter))));
+
+        let state = PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0);
+        let entity = spawn_local_player(app.world_mut(), state);
+        (app, entity)
+    }
+
+    /// The strengthened version of
+    /// `a_nearby_goal_is_reached_through_the_real_physics_seam`: same claim
+    /// (a goal is reached through the real `TickSet::Intent -> Physics`
+    /// pipeline), but over genuine per-state jar collision including one real
+    /// non-cube shape astride the path, and with a **predicted magnitude**,
+    /// not just a predicted sign — while the player is over the slab column
+    /// its feet must rest at `y ≈ 0.5`, not `y ≈ 1.0`. A search or physics bug
+    /// that quietly treated the slab as a full block (the exact failure mode
+    /// `lodestone_nav::facts::BlockFacts::top`'s own doc comment names as
+    /// "nearly gotten wrong twice") would still let this test *arrive* — the
+    /// path is short enough either way — but would not produce that dip, so
+    /// "arrived" alone is not the assertion this test rests on.
+    #[test]
+    fn a_nearby_goal_is_reached_over_a_real_bottom_slab_using_genuine_jar_collision() {
+        let (mut app, entity) = app_on_real_terrain(4);
+        let start = position(&app, entity);
+
+        app.insert_resource(AutopilotGoal(Some(BlockPos::new(6, 1, 0))));
+
+        let mut saw_the_slab_dip = false;
+        // 400 ticks, same generous 20 s budget as the flat-floor happy path
+        // (a 6-block walk is, if anything, cheaper) — sampled tick by tick so
+        // the dip assertion below can find the moment the player is actually
+        // over the slab, rather than only checking the final position.
+        //
+        // The player's AABB is 0.6 wide (`lodestone_physics::entity`'s player
+        // dimensions), half-width 0.3, so it is fully inside the two-column
+        // slab region (`x` in `[3, 5)`) only once its centre is in
+        // `[3.3, 4.7]` — outside that, the box still overlaps the full-height
+        // stone next door and is correctly supported at `y = 1.0` by it, the
+        // same "a narrow low patch beside full blocks does not let you dip
+        // immediately" behaviour vanilla itself has. The "settled" window
+        // below (`|x - 4.0| < 0.3`, i.e. `[3.7, 4.3]`) is deep enough into that
+        // range to give several ticks of fall time after entering it, so the
+        // strict "must not still read full height" assertion is not raced
+        // against the fall itself.
+        for _ in 0..400 {
+            run_ticks(&mut app, 1);
+            let p = position(&app, entity);
+            if (p.x - 4.0).abs() < 0.3 {
+                if (p.y - 0.5).abs() < 0.15 {
+                    saw_the_slab_dip = true;
+                }
+                // Deep into the slab region, the player must not be resting
+                // at the stone height either side of it — that would mean the
+                // slab's real half-height shape never reached the physics
+                // seam.
+                assert!(
+                    p.y < 0.85,
+                    "expected the real bottom slab (top 0.5) to be shorter than the stone \
+                     either side of it, found the player resting at y={} over x={} z={}",
+                    p.y,
+                    p.x,
+                    p.z
+                );
+            }
+        }
+
+        assert!(
+            saw_the_slab_dip,
+            "expected at least one tick with the player's feet at the slab's real height \
+             (~0.5) while crossing x={SLAB_X_MIN}..={SLAB_X_MAX}"
+        );
+
+        let end = position(&app, entity);
+        assert!(
+            (end.x - start.x).abs() > 3.0,
+            "expected real horizontal progress toward the goal, start={start:?} end={end:?}"
+        );
+        assert!(
+            (end.x - 6.5).abs() < 0.6 && (end.z - 0.5).abs() < 0.6,
+            "expected the player to have arrived near block (6, 1, 0), end={end:?}"
+        );
+        assert!(
+            (end.y - 1.0).abs() < 0.15,
+            "expected the player back at full stone height (1.0) past the slab, end={end:?}"
+        );
+        assert_eq!(
+            *app.world().resource::<AutopilotStatus>(),
+            AutopilotStatus::Arrived,
+            "the plugin's own status resource must agree that it arrived"
+        );
+    }
+}

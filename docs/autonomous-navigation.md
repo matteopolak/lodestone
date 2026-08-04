@@ -125,6 +125,36 @@ competing route to the same packet.
   planning) and `PlayerCollision` (for physics) through two different seams, and collapsing them in a
   test would stop the test from being able to catch the plugin accidentally depending on one standing
   in for the other.
+- **A flat, two-block synthetic census is a real gap in coverage, not a simplification.** `FixtureAdapter`
+  only ever answers `AIR`/`STONE`, and every hand-built world in the original version of this test was a
+  flat plane of full cubes — CLAUDE.md's "world" species of vacuous test, where the input structurally
+  cannot exercise a non-cube shape. `tests/drives_to_goal.rs`'s `real_collision` module is the fix:
+  a `RealDataAdapter` whose three census methods delegate straight to
+  `lodestone_data::{collision_shapes, block_states, block_solidity}` — the same generated tables
+  `lodestone_v770::adapter::V770Adapter` itself calls, dev-only (`Cargo.toml`'s `[dev-dependencies]`,
+  not a version crate so this is not even the soft `SharedDependsOnVersion` isolation warning) — over a
+  two-column real bottom `minecraft:oak_slab` floor (true collision top `0.5`) astride an otherwise real
+  `minecraft:stone` path, and asserts the player's feet actually settle at `y ≈ 0.5` while crossing it,
+  not just that the walk arrives (CLAUDE.md's "predict the value, not just the sign" discipline — a
+  search or physics bug that quietly treated the slab as a full block would still let a 6-block walk
+  *arrive*, so "arrived" alone was never the strong half of this test).
+- **That gate found a real bug on its first run, which a flat-plane test structurally cannot.**
+  `lodestone_nav::graph::standable`'s final hazard check —
+  `if view.facts_at(x, y - 1, z)?.must_not_enter { return None; }` — ran unconditionally, on reasoning
+  that only holds for [`stand_surface`]'s "below" branch (a full-cube support one cell under the stand,
+  never swept by the body-hazard loop that starts at `y`). For the *other* branch — feet resting
+  **inside** cell `y` on a partial block (a bottom slab, soul sand, farmland, a snow layer) — that block
+  *is* cell `y`, already covered by the sweep, and `y - 1` is one cell further down than the stand
+  depends on at all. Two bugs followed, both invisible to every fixture already in the tree (`flat()`'s
+  `GridView` spans `-64..320`, so `y - 1` was always in range and never a hazard): a slab at the very
+  bottom of a loaded `SnapshotView` reads `facts_at(x, y - 1, z)` as `None` (outside the snapshot), and
+  the `?` propagated that into refusing an entirely ordinary stand; and a hazard one cell under a slab
+  (lava under a soul-sand floor, say) would refuse standing on the block that fully seals the player
+  from it. Fixed in `graph.rs` by gating that check on `(surface - f64::from(y)).abs() <= SURFACE_EPS`
+  — true only for the "below" branch — with the reasoning recorded in `standable`'s own doc comment.
+  All 75 pre-existing `lodestone-nav` unit tests still pass unchanged; none of them exercises this path,
+  which is exactly why a genuine-jar-data, non-flat integration gate earns its cost even though the
+  crate's own fixture-based unit suite is fast and already large.
 
 ## Configuration
 
@@ -143,6 +173,9 @@ in every direction) is a compile-time constant, not yet a runtime policy knob.
 - `lodestone-world` — the `World` type `ChunkWorld::read()` guards; `SnapshotView::build` takes it
   directly.
 - `bevy_ecs` / `bevy_app`, direct (see "how to change it" above).
+- `lodestone-data`, dev-only (`[dev-dependencies]`) — `tests/drives_to_goal.rs`'s `real_collision`
+  module's source of genuine per-state jar-derived collision/name/solidity data. Not a version crate
+  (it lives outside `crates/protocol/`), so this does not version-lock the plugin.
 
 ## See also
 
