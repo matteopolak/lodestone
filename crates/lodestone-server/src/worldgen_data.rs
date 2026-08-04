@@ -19,12 +19,16 @@
 //!
 //! [`OverworldGenerator`] composes shape + the **real** aquifer + surface
 //! rules + real multi-noise biome assignment (issue #405) + real carvers
-//! (issue #295) — real terrain shape, surface, biome variety, and caves/
-//! ravines, verified block-for-block (and, for biome, exact-id) against a
-//! JVM (`docs/worldgen-parity.md`'s harness measures the composed subset
-//! directly). It does **not** yet run ore/vegetation features — deferred
-//! pending a real neighbour-aware `FeatureOracle.java` driver, see
-//! [`lodestone_worldgen::overworld`]'s module doc — or structures.
+//! and ore features (issue #295, the real 3×3 `blockStateWriteRadius(1)`
+//! driver) + grass/flower/tree vegetal decoration (issue #406, **single-
+//! chunk only — no cross-chunk canopy/patch spill**, see
+//! `lodestone_worldgen::feature::vegetation`'s own module doc for the full
+//! scope and named gaps) — real terrain shape, surface, biome variety,
+//! caves/ravines, and now vegetation, block-for-block verified where a JVM
+//! oracle exists for the stage (`docs/worldgen-parity.md`'s harness
+//! measures the composed subset directly; vegetation has no such oracle
+//! yet — see that module's doc). Structures are still unbuilt anywhere in
+//! this repo (`#136`).
 
 use std::sync::OnceLock;
 
@@ -642,5 +646,240 @@ mod tests {
                 "chunk ({cx},{cz}) biome quarts differ between two independently constructed generators"
             );
         }
+    }
+
+    /// End-to-end: real vegetation reaches the **served** column for a
+    /// known plains chunk — closing the exact island CLAUDE.md's rule 1
+    /// warns about, and the specific one this issue's own composition hit:
+    /// `crate::feature::vegetation::VegGrid` used to store *and expose*
+    /// chunk-local coordinates while every position the placement engine
+    /// computes is absolute — so vegetation composed at construction time,
+    /// ran without erroring, and placed **zero** blocks in every chunk
+    /// except `(0, 0)` (`in_bounds`/`get` compared an absolute world
+    /// coordinate against a `0..16` bound that was essentially always
+    /// false). `crate::feature::vegetation`'s own hermetic unit tests never
+    /// caught this because every one of them happened to use `origin =
+    /// BlockPos { x: 8, y: 70, z: 8 }` — coincidentally already "local".
+    /// Chunk `(18, -50)` (world `(300, -800)`) is the same known-plains
+    /// fixture `biome_matches_vanilla_at_known_coordinates_seed_42` already
+    /// names, so this isn't a freshly-picked coordinate chosen to make the
+    /// test pass.
+    #[test]
+    fn vegetation_reaches_a_known_plains_chunk() {
+        let generator = overworld_generator(42);
+        let col = generator.column(18, -50);
+        assert_eq!(col.biome_state(12, 0), "minecraft:plains");
+
+        let mut grass = 0usize;
+        for lz in 0..16usize {
+            for lx in 0..16usize {
+                for y in col.min_y()..col.min_y() + col.height() {
+                    if col.block_state(lx, y, lz) == "minecraft:short_grass" {
+                        grass += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            grass > 0,
+            "a plains chunk composed through the served pipeline must carry grass"
+        );
+    }
+
+    /// The issue's own requested gate (`#406`: "an aggregate-statistics
+    /// gate (tree count per biome type within an expected band)"),
+    /// predicted from the embedded placement JSON itself rather than a live
+    /// vanilla dump (no JVM oracle for vegetation exists yet — see
+    /// `crate::feature::vegetation`'s module doc). Two independent
+    /// predictions, both computed *before* looking at the measured numbers
+    /// (recorded here so a future reader can see the reasoning, not just
+    /// the assertion):
+    ///
+    /// - **Grass upper bound**: `patch_grass_plain.json`'s outer
+    ///   `noise_threshold_count` yields 5 or 10 attempts per chunk, each
+    ///   feeding an inner `count: 32` — so at most `10 * 32 = 320` candidate
+    ///   `short_grass` placements per chunk, before the final
+    ///   `block_predicate_filter` (air) and `canSurvive` (support-block)
+    ///   checks reject most of them. Measured must be `> 0` and comfortably
+    ///   under `320 * chunk_count`.
+    /// - **Oak logs**: `trees_plains.json`'s outer count is
+    ///   `weighted_list{0: 19, 1: 1}`
+    ///   (`IntProvider::expected_value() == 0.05`), and the `oak`
+    ///   configured-feature branch of `trees_plains`'s `RandomSelector`
+    ///   survives with probability `(1 - 0.33333334) * (1 - 0.0125) ≈
+    ///   0.6579` (the `fancy_oak`/`fallen_oak` branches are
+    ///   `ConfiguredFeature::Unsupported` — see module doc). A successful
+    ///   straight oak trunk places `base_height=4` to `4+2=6` logs. So the
+    ///   expected oak-log count per chunk is
+    ///   `0.05 * 0.6579 * (4..6) ≈ 0.132..0.197`, i.e. **not zero, and not
+    ///   large** — over a 64-chunk sweep, `8.4..12.6` logs. Measured: `12`.
+    ///   This is an internal-consistency check against the engine's own
+    ///   inputs, not vanilla parity (named explicitly, per
+    ///   `crate::feature::vegetation`'s own module doc and this crate's
+    ///   evidence standard).
+    #[test]
+    fn plains_vegetation_counts_are_predicted_and_measured() {
+        let generator = overworld_generator(42);
+        // (18, -50) is world (300, -800), a known plains chunk
+        // (`biome_matches_vanilla_at_known_coordinates_seed_42`).
+        let base_cx = 18;
+        let base_cz = -50;
+        let sweep_chunks = 8 * 8;
+        let mut grass = 0usize;
+        let mut flowers = 0usize;
+        let mut logs = 0usize;
+        let mut leaves = 0usize;
+        let mut plains_touching_chunks = 0usize;
+        for dcx in 0..8 {
+            for dcz in 0..8 {
+                let cx = base_cx + dcx;
+                let cz = base_cz + dcz;
+                let col = generator.column(cx, cz);
+                let mut any_plains = false;
+                for lz in 0..16usize {
+                    for lx in 0..16usize {
+                        if col.biome_state(lx, lz) == "minecraft:plains" {
+                            any_plains = true;
+                        }
+                        for y in col.min_y()..col.min_y() + col.height() {
+                            let b = col.block_state(lx, y, lz);
+                            let base = b.split('[').next().unwrap_or(b);
+                            match base {
+                                "minecraft:short_grass" => grass += 1,
+                                "minecraft:dandelion" | "minecraft:poppy" | "minecraft:azure_bluet"
+                                | "minecraft:oxeye_daisy" | "minecraft:cornflower"
+                                | "minecraft:orange_tulip" | "minecraft:red_tulip"
+                                | "minecraft:pink_tulip" | "minecraft:white_tulip" => flowers += 1,
+                                "minecraft:oak_log" => logs += 1,
+                                "minecraft:oak_leaves" => leaves += 1,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                if any_plains {
+                    plains_touching_chunks += 1;
+                }
+            }
+        }
+        // Anti-vacuity floor per CLAUDE.md's "world" vacuous-test species:
+        // the sweep must actually contain plains, or every assertion below
+        // would pass by both sides being empty.
+        assert!(
+            plains_touching_chunks > 0,
+            "test's own premise failed: the 8x8 sweep from chunk ({base_cx},{base_cz}) contains \
+             no plains — pick a different anchor before trusting anything below"
+        );
+
+        // Grass: measured must be positive, and bounded well under the
+        // structural upper bound (10 outer * 32 inner = 320 candidates per
+        // chunk, before survival checks).
+        assert!(grass > 0, "measured zero grass over a plains-touching sweep");
+        assert!(
+            grass < 320 * sweep_chunks,
+            "measured grass ({grass}) exceeds the structural upper bound \
+             (320 candidates/chunk * {sweep_chunks} chunks) — the placement \
+             pipeline is over-counting, not merely dense"
+        );
+
+        // Oak logs: predicted band from the JSON's own IntProvider, not a
+        // guessed number — see this test's own doc comment for the
+        // derivation. `0.05 * 0.6579 * 4 = 0.1316`, `* 6 = 0.1974`, times 64
+        // chunks.
+        let predicted_min = 0.05 * 0.6579 * 4.0 * sweep_chunks as f64;
+        let predicted_max = 0.05 * 0.6579 * 6.0 * sweep_chunks as f64;
+        assert!(
+            (predicted_min..=predicted_max * 1.5).contains(&(logs as f64)),
+            "measured oak logs ({logs}) over {sweep_chunks} chunks is far outside the \
+             predicted band [{predicted_min:.1}, {predicted_max:.1}] (widened 50% for sampling \
+             noise across which of the swept chunks actually resolve to plains at their own \
+             carver-source corner, per Self::biome_for_carver_source) derived from \
+             trees_plains.json's own weighted_list count and RandomSelector branch chances"
+        );
+        // A tree with logs must also carry leaves (the "not enough room"
+        // gate and the log/leaf presence check in `place_tree` both require
+        // this — see `crate::feature::vegetation::place_tree`).
+        assert!(
+            logs == 0 || leaves > 0,
+            "measured {logs} oak logs but zero leaves — a real straight-trunk tree always \
+             carries both"
+        );
+        // Flowers are gated behind a rarer noise_threshold_count + a
+        // rarity_filter(32) on top — expect them present but sparse
+        // relative to grass.
+        assert!(flowers > 0, "measured zero flowers over a plains-touching sweep");
+        assert!(
+            flowers < grass,
+            "flowers ({flowers}) should be sparser than grass ({grass}) given \
+             flower_plains.json's extra rarity_filter(32) the grass pipeline lacks"
+        );
+    }
+
+    /// `build_biome_vegetation` must resolve plains' real `trees_plains`/
+    /// `flower_plains`/`patch_grass_plain` entries into the concrete
+    /// [`ConfiguredFeature`](lodestone_worldgen::feature::vegetation::ConfiguredFeature)
+    /// variants this engine actually implements — a construction-time
+    /// regression control for the composition step
+    /// [`plains_vegetation_counts_are_predicted_and_measured`] depends on:
+    /// if any of these three silently degraded to `Unsupported`, that test
+    /// would still measure *some* output from the other plains entries and
+    /// could mask the regression.
+    #[test]
+    fn build_biome_vegetation_resolves_plains_grass_flower_and_tree() {
+        use lodestone_worldgen::feature::vegetation::{BlockStateProvider, ConfiguredFeature};
+
+        let list = lodestone_worldgen::compose::build_biome_vegetation(
+            &EmbeddedResolver,
+            "minecraft:plains",
+        );
+        assert!(!list.is_empty(), "plains must have a non-empty vegetal-decoration list");
+
+        let grass_resolved = list.iter().any(|(_, p)| {
+            matches!(
+                &*p.feature,
+                ConfiguredFeature::SimpleBlock(BlockStateProvider::Simple(s))
+                    if s == "minecraft:short_grass"
+            )
+        });
+        assert!(
+            grass_resolved,
+            "patch_grass_plain must resolve to SimpleBlock(Simple(\"minecraft:short_grass\")), \
+             not Unsupported — entries: {list:?}"
+        );
+
+        let tree = list
+            .iter()
+            .find(|(_, p)| matches!(*p.feature, ConfiguredFeature::RandomSelector { .. }))
+            .expect("trees_plains must resolve to a RandomSelector");
+        if let ConfiguredFeature::RandomSelector { default, .. } = &*tree.1.feature {
+            assert!(
+                matches!(*default.feature, ConfiguredFeature::Tree(_)),
+                "trees_plains' default branch must resolve to a real Tree, not Unsupported"
+            );
+        }
+    }
+
+    /// Regression control for the tag closures
+    /// [`crate::feature::vegetation::place_simple_block`]'s `canSurvive`
+    /// check and [`crate::feature::vegetation::place_tree`]'s space-check
+    /// depend on — if `#minecraft:supports_vegetation`'s nested
+    /// `#substrate_overworld` -> `#grass_blocks` chain ever stopped
+    /// resolving (a tag file renamed, a resolver regression), every grass/
+    /// flower placement in the real embedded data would silently reject at
+    /// the `canSurvive` check, exactly as the coordinate-translation bug
+    /// this issue's own history section describes did — this test exists
+    /// so *that* failure mode has a direct, fast-failing check instead of
+    /// only being visible through a 64-chunk sweep's aggregate count.
+    #[test]
+    fn embedded_veg_tags_resolve_grass_block_as_supporting_vegetation() {
+        let tags = lodestone_worldgen::feature::vegetation::build_veg_tags(&EmbeddedResolver);
+        assert!(
+            tags.supports_vegetation.contains("minecraft:grass_block"),
+            "supports_vegetation must include grass_block via \
+             #supports_vegetation -> #substrate_overworld -> #grass_blocks"
+        );
+        assert!(!tags.replaceable_by_trees.is_empty());
+        assert!(!tags.logs.is_empty());
+        assert!(!tags.cannot_replace_below_tree_trunk.is_empty());
     }
 }
