@@ -757,7 +757,21 @@ impl EntityPipeline {
             &camera_layout,
             &texture_layout,
             "lodestone-entity",
-            wgpu::CompareFunction::Less,
+            // Vanilla's own value, translated (issue #21). Every 26.2 entity
+            // render type is built from `ENTITY_SNIPPET`, which pins
+            // `DepthStencilState.DEFAULT` (`RenderPipelines.java:49-56`), and that
+            // is `(GREATER_THAN_OR_EQUAL, writeDepth = true)`
+            // (`DepthStencilState.java:5-6`) — `LessEqual` under this engine's
+            // `[0,1]` DirectX-style depth. `ENTITY_SOLID` (`:232`),
+            // `ENTITY_CUTOUT` (`:245`), `ENTITY_CUTOUT_CULL` (`:238`) and
+            // `ENTITY_TRANSLUCENT` (`:274`) all inherit it; none overrides
+            // `withDepthStencilState`.
+            //
+            // This was `Less` until `entity_depth_coincident_pixels.rs` existed to
+            // prove the change safe — see that gate's module docs for the measured
+            // before/after (coincident red-then-blue read `[189, 0, 0]`, i.e. the
+            // *first* draw winning, with blue covering 0 of 16384 pixels).
+            wgpu::CompareFunction::LessEqual,
             None,
             true,
         );
@@ -770,8 +784,7 @@ impl EntityPipeline {
     }
 
     /// A second render pipeline over **this** pipeline's own bind-group layouts,
-    /// differing only in its depth comparison: `LessEqual` rather than `Less`.
-    /// For the humanoid-armour layers.
+    /// for the humanoid-armour layers.
     ///
     /// Sharing `self`'s layout objects rather than creating equivalent ones is
     /// deliberate: every camera and texture bind group already built through
@@ -780,24 +793,32 @@ impl EntityPipeline {
     /// no second set of uploads, and there is no reliance on wgpu deduplicating
     /// two structurally identical layout descriptors.
     ///
-    /// # Why `LessEqual`, and why only here
+    /// # Why `LessEqual`, and why it is no longer only here
     ///
     /// Vanilla's own entity depth state is
     /// `DepthStencilState.DEFAULT = (GREATER_THAN_OR_EQUAL, writeDepth = true)`
     /// (`DepthStencilState.java:6`), which under this engine's `[0,1]`
-    /// DirectX-style depth — vanilla is reversed-Z — is `LessEqual`. The base
-    /// entity pipeline above uses `Less`, so it is the one that departs from
-    /// vanilla; that is left alone here rather than "fixed", because changing it
-    /// would alter how *every* mob's coplanar geometry resolves and this change
-    /// has no pixel gate to prove that safe.
+    /// DirectX-style depth — vanilla is reversed-Z — is `LessEqual`.
     ///
-    /// Armour needs the faithful value for a concrete reason: leather's
-    /// `humanoid` layer list is **two coplanar layers** at one inflation — a
-    /// greyscale dyeable base and an untinted `leather_overlay` detail pass
-    /// drawn straight over it (`equipment/leather.json`). Under `Less` the
-    /// second draw fails the depth test against the first at every texel and
-    /// the overlay is silently invisible; under `LessEqual` it wins, which is
-    /// what vanilla does.
+    /// This doc used to say the base pipeline "uses `Less`, so it is the one that
+    /// departs from vanilla; that is left alone here rather than 'fixed', because
+    /// changing it would alter how *every* mob's coplanar geometry resolves and
+    /// this change has no pixel gate to prove that safe." Both halves were true
+    /// when written. Issue #21 built the missing gate
+    /// (`entity_depth_coincident_pixels.rs`) and then made the change, so
+    /// [`Self::new`] is now `LessEqual` too and this pipeline is depth-identical
+    /// to it. It survives as a separate pipeline for its label and its blend
+    /// state, not for its depth compare — if the two ever need to diverge again,
+    /// this is where it happens.
+    ///
+    /// Armour needed the faithful value first, for a concrete reason worth
+    /// keeping: leather's `humanoid` layer list is **two coplanar layers** at one
+    /// inflation — a greyscale dyeable base and an untinted `leather_overlay`
+    /// detail pass drawn straight over it (`equipment/leather.json`). Under
+    /// `Less` the second draw fails the depth test against the first at every
+    /// texel and the overlay is silently invisible; under `LessEqual` it wins,
+    /// which is what vanilla does. That is the same mechanism the base pipeline
+    /// was getting wrong for every mob, one layer up.
     #[must_use]
     pub fn armour_pipeline(
         &self,
@@ -827,9 +848,13 @@ impl EntityPipeline {
     ///
     /// | | mob (`Self::new`) | armour ([`Self::armour_pipeline`]) | banner layer (here) |
     /// |---|---|---|---|
-    /// | `depth_compare` | `Less` | `LessEqual` | `LessEqual` |
+    /// | `depth_compare` | `LessEqual` | `LessEqual` | `LessEqual` |
     /// | `blend` | `None` (cutout) | `None` (cutout) | `ALPHA_BLENDING` |
     /// | `depth_write` | `true` | `true` | `false` |
+    ///
+    /// The first column read `Less` until issue #21; all three now agree on the
+    /// depth compare, and the blend/depth-write pair is what makes this pipeline
+    /// distinct.
     ///
     /// `LessEqual`, not `Less`: the flag base and every mask layer share the
     /// same depth per vanilla's coincident-geometry draw, the same reasoning

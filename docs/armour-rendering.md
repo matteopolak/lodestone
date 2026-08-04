@@ -329,23 +329,35 @@ armour, and every mob in the game goes through `EntityInstanceRaw::new`.
 ### Depth: why armour has its own pipeline
 
 `EntityPipeline::armour_pipeline` is a second `wgpu::RenderPipeline` over the
-*same* bind-group layout objects, differing only in `depth_compare`:
-`LessEqual` instead of `Less`.
+*same* bind-group layout objects. It was created because it needed a different
+`depth_compare` from the base pipeline; **since issue #21 the two are
+depth-identical** (both `LessEqual`) and it survives for its label and to keep
+the armour pass's requirement explicit at its own call site.
 
 Vanilla's entity depth state is
 `DepthStencilState.DEFAULT = (GREATER_THAN_OR_EQUAL, writeDepth = true)`
-(`DepthStencilState.java:6`), which under this engine's `[0,1]` DirectX-style
-depth — vanilla is reversed-Z — is **`LessEqual`**. So the base entity pipeline's
-`Less` is the one that departs from vanilla. It is left alone rather than
-"fixed": changing it alters how every mob's coplanar geometry resolves, and this
-work has no pixel gate to prove that safe.
+(`DepthStencilState.java:6`), inherited by every entity render type from
+`ENTITY_SNIPPET` (`RenderPipelines.java:49-56`) with no override anywhere —
+`ENTITY_SOLID` (`:232`), `ENTITY_CUTOUT` (`:245`), `ENTITY_CUTOUT_CULL` (`:238`),
+`ENTITY_TRANSLUCENT` (`:274`). Under this engine's `[0,1]` DirectX-style depth —
+vanilla is reversed-Z — that is **`LessEqual`**.
 
-Armour needs the faithful value because leather's two layers are **coplanar at
-one inflation**. Under `Less`, the `leather_overlay` pass fails the depth test
-against the base at every texel and is silently invisible. `armour_layers_drawn`
-counts *layers* rather than pieces so a regression here is legible: a count that
-drops to one per piece means resolution broke, a count that stays at two with no
-overlay on screen means depth did.
+This section used to say the base pipeline's `Less` "is the one that departs from
+vanilla. It is left alone rather than 'fixed': changing it alters how every mob's
+coplanar geometry resolves, and this work has no pixel gate to prove that safe."
+That was accurate when written, and it named its own missing prerequisite. Issue
+#21 built the gate — `lodestone-render/tests/entity_depth_coincident_pixels.rs`,
+which measured the bug directly (two coincident quads, red drawn first, blue
+second: the frame read `[189, 0, 0]` with blue covering **0 of 16384** pixels, so
+the *first* draw was winning) — and then made the change.
+
+Armour needed the faithful value first because leather's two layers are
+**coplanar at one inflation**. Under `Less`, the `leather_overlay` pass fails the
+depth test against the base at every texel and is silently invisible.
+`armour_layers_drawn` counts *layers* rather than pieces so a regression here is
+legible: a count that drops to one per piece means resolution broke, a count that
+stays at two with no overlay on screen means depth did. The same mechanism was
+costing every mob its coincident geometry one layer up, which is what #21 fixed.
 
 Sharing `self`'s layout objects (rather than creating equivalent descriptors)
 means every camera and texture bind group already built through the base pipeline

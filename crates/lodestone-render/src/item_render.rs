@@ -177,7 +177,9 @@ pub fn gui_item_pose(rect_px: [f32; 4], transform: &DisplayTransform) -> Mat4 {
 /// * `z`: [`GUI_DEPTH_HALF_RANGE`]`..-`[`GUI_DEPTH_HALF_RANGE`] → `0..1`, so a
 ///   **larger** GUI `z` is **nearer** — vanilla's convention, and the one
 ///   [`gui_item_pose`]'s positive `z` scale needs for the faces that survive
-///   back-face culling to also be the faces nearest under `CompareFunction::Less`.
+///   back-face culling to also be the faces nearest under the entity pipeline's
+///   depth compare (`CompareFunction::LessEqual` since issue #21 — nearest still
+///   wins; only exactly-coincident faces distinguish it from `Less`).
 ///
 /// The `y` flip here is the counterpart to [`gui_item_pose`]'s: the two cancel,
 /// so triangle winding is preserved. See the module docs.
