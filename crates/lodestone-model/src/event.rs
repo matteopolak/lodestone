@@ -1,6 +1,7 @@
 use uuid::Uuid;
 
 use crate::{
+    command_tree::{CommandSuggestionEntry, CommandTree},
     common::{Difficulty, GameMode},
     ids::{DimensionId, Identifier, ResourceKey},
     item::ItemStack,
@@ -1990,6 +1991,37 @@ pub enum ClientEvent {
     /// like [`Self::Respawned`] is for a plain "you are alive again" with no
     /// win-specific payload.
     WinGame,
+    /// The server's whole Brigadier command tree (`minecraft:commands`,
+    /// clientbound id 16), sent once after login (and again if the tree
+    /// changes, e.g. a permission level change). Boxed for the same reason
+    /// `TitleText`/`UpdateName` box a [`Text`]: a full tree is the largest
+    /// payload any `ClientEvent` carries, and every other variant pays that
+    /// size in the enum's own stack footprint if it isn't indirected.
+    ///
+    /// Same shape as [`Self::BiomeRegistryNames`]: a registry-generation
+    /// table with a single, obvious consumer (the chat box's tab completion
+    /// and syntax highlighting) and no per-entity or per-session scalar to
+    /// fold — see [`route`]'s `SHELL` arm for both.
+    CommandTreeUpdated {
+        /// The decoded tree.
+        tree: Box<CommandTree>,
+    },
+    /// A reply to a serverbound `command_suggestion` request
+    /// (`minecraft:command_suggestions`, clientbound id 15):
+    /// `ClientboundCommandSuggestionsPacket(int id, int start, int length,
+    /// List<Entry>)`. The transaction id lets the chat box discard a stale
+    /// reply to a request it has since superseded, matching vanilla's own
+    /// `ClientSuggestionProvider::completeCustomSuggestions` id check.
+    CommandSuggestionsReceived {
+        /// Transaction id, echoing the request's.
+        id: i32,
+        /// Start of the input-text byte range these suggestions replace.
+        start: i32,
+        /// Length of that byte range.
+        length: i32,
+        /// The suggested replacement strings.
+        suggestions: Vec<CommandSuggestionEntry>,
+    },
 }
 
 /// Which of the client's event routers claim a [`ClientEvent`].
@@ -2282,7 +2314,13 @@ pub fn route(event: &ClientEvent) -> Route {
         // The credits screen (issue #192): a pure world/session signal with no
         // per-entity or per-session scalar to fold, forwarded to the shell's
         // own `NetUpdate` stream exactly like `WeatherChanged`.
-        | ClientEvent::WinGame => SHELL,
+        | ClientEvent::WinGame
+        // Issue #46: same shape as `BiomeRegistryNames` just above — a
+        // registry-generation table with one obvious consumer (the chat
+        // box), no per-entity or per-session scalar to fold. Both travel the
+        // shell's own stream; no `handles_event` arm needed for either.
+        | ClientEvent::CommandTreeUpdated { .. }
+        | ClientEvent::CommandSuggestionsReceived { .. } => SHELL,
         // Chat reaches the shell feed *and* the driver's signed-message
         // acknowledgement valve.
         ClientEvent::Chat { .. } => Route {

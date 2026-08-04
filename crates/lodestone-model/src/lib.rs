@@ -21,6 +21,7 @@
 
 pub mod action;
 pub mod adapter;
+pub mod command_tree;
 pub mod common;
 pub mod event;
 pub mod ids;
@@ -32,6 +33,7 @@ pub mod text;
 
 pub use action::*;
 pub use adapter::*;
+pub use command_tree::*;
 pub use common::*;
 pub use event::*;
 pub use ids::*;
