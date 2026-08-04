@@ -108,7 +108,7 @@ use std::collections::HashMap;
 
 use glam::Vec3;
 use lodestone_render::{
-    ChestHalf, ChestMaterial, ChestSpawn, SignOrientation, SignSpawn, SkullOrientation,
+    BellSpawn, ChestHalf, ChestMaterial, ChestSpawn, SignOrientation, SignSpawn, SkullOrientation,
     SkullSpawn, SkullType, horizontal_facing_yaw,
 };
 use lodestone_world::{ChunkPos, SignText, World};
@@ -512,6 +512,83 @@ pub fn skull_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<SkullSpawn> {
         let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
             .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
         if let Some(spawn) = skull_spawn(block, state_id, light) {
+            out.push(spawn);
+        }
+    }
+    out.sort_by_key(|s| s.pos);
+    out
+}
+
+/// Resolves one block state id into whether it names a bell — `None` for
+/// anything else. Unlike [`chest_material`]/[`skull_type_for_state`] there is
+/// no per-block-path variant to select: every bell block state (any
+/// `FACING`/`ATTACHMENT`/`POWERED` combination) draws the identical rig, so
+/// this only needs to confirm the block *is* one.
+#[must_use]
+fn bell_is_present(state_id: u32) -> bool {
+    let Some(name) = lodestone_data::block_states::block_name(state_id) else {
+        return false;
+    };
+    name == "minecraft:bell"
+}
+
+/// One candidate resolved into a [`BellSpawn`], or `None` if the state at
+/// that position is not a bell. Same shape as [`chest_spawn`]/[`skull_spawn`]:
+/// the block **state** is the truth about whether this is a bell at all, so a
+/// stale or orphan record whose state is not a bell draws nothing.
+///
+/// `shake` is always `None` — see [`BellSpawn::shake`]'s doc for exactly why
+/// (the `BLOCK_EVENT` trigger is not wired from this gather) — so a bell
+/// always draws at rest rather than not drawing at all, which is still a real
+/// improvement over the hole `docs/block-entity-renderers.md` describes for a
+/// block entity with no ported renderer.
+#[must_use]
+pub fn bell_spawn(block: [i32; 3], state_id: u32, light: u8) -> Option<BellSpawn> {
+    if !bell_is_present(state_id) {
+        return None;
+    }
+    Some(BellSpawn {
+        pos: block,
+        shake: None,
+        light,
+    })
+}
+
+/// Every bell to draw this frame, gathered from the client-owned world's
+/// block-entity records. Reuses [`chest_candidates`] exactly as
+/// [`skull_spawns`] does, for the same reason: that gather is already generic
+/// over block-entity type.
+#[must_use]
+pub fn bell_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<BellSpawn> {
+    let Some(client) = handle.get() else {
+        return Vec::new();
+    };
+    let store = client.chunk_world();
+
+    let chunks = client.loaded_chunks();
+
+    let candidates = {
+        let world = store.read();
+        chest_candidates(
+            &world,
+            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            eye,
+        )
+    };
+
+    let sky_default = {
+        let player = client.player();
+        crate::mesher::sky_default_for_dimension(
+            player.dimension.as_ref(),
+            player.dimension_type.as_ref(),
+        )
+    };
+
+    let mut out = Vec::new();
+    for (block, state_id) in candidates {
+        let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
+            .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
+        if let Some(spawn) = bell_spawn(block, state_id, light) {
             out.push(spawn);
         }
     }
@@ -991,6 +1068,56 @@ mod skull_tests {
     fn skull_spawns_before_login_is_empty_rather_than_a_panic() {
         let handle: SharedHandle = std::sync::Arc::new(std::sync::OnceLock::new());
         assert!(skull_spawns(&handle, Vec3::ZERO).is_empty());
+    }
+}
+
+/// Kept as its own module for the same reason `skull_tests` is: this file is
+/// shared with the chest/skull/sign gather work.
+#[cfg(test)]
+mod bell_tests {
+    use super::*;
+
+    /// A real 26.2 `bell` state must resolve, and a bell has no per-block-path
+    /// variant to pick between — unlike chest/skull, every state of the one
+    /// `minecraft:bell` block draws the identical rig, so this only checks
+    /// presence and resolution, not orientation.
+    #[test]
+    fn bell_is_present_and_resolves_from_the_real_table() {
+        let id = (0..lodestone_data::block_states::STATE_COUNT)
+            .find(|id| lodestone_data::block_states::block_name(*id) == Some("minecraft:bell"))
+            .expect("bell must be in the 26.2 state table");
+        assert!(bell_is_present(id));
+        let spawn =
+            bell_spawn([1, 2, 3], id, lodestone_render::ENTITY_FULLBRIGHT).expect("must resolve");
+        assert_eq!(spawn.pos, [1, 2, 3]);
+        assert_eq!(spawn.shake, None, "no gather here drives the shake yet");
+    }
+
+    /// A non-bell block entity with a `facing` property (a furnace, a chest)
+    /// must not resolve — the control on the type filter, mirroring
+    /// `a_non_skull_block_entity_resolves_to_no_skull_type`.
+    #[test]
+    fn a_non_bell_block_entity_resolves_to_no_bell_spawn() {
+        for path in ["furnace", "chest", "barrel", "skeleton_skull"] {
+            let name = format!("minecraft:{path}");
+            let Some(id) = (0..lodestone_data::block_states::STATE_COUNT)
+                .find(|id| lodestone_data::block_states::block_name(*id) == Some(name.as_str()))
+            else {
+                continue;
+            };
+            assert!(!bell_is_present(id), "{name} matched as a bell");
+            assert_eq!(
+                bell_spawn([0, 0, 0], id, lodestone_render::ENTITY_FULLBRIGHT),
+                None,
+                "{name} unexpectedly resolved a bell spawn"
+            );
+        }
+    }
+
+    #[test]
+    fn bell_spawns_before_login_is_empty_rather_than_a_panic() {
+        let handle: SharedHandle = std::sync::Arc::new(std::sync::OnceLock::new());
+        assert!(bell_spawns(&handle, Vec3::ZERO).is_empty());
     }
 }
 

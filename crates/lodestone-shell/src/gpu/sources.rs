@@ -475,6 +475,44 @@ impl std::fmt::Debug for SkullSource {
     }
 }
 
+/// Where this frame's bells come from — same shape as [`SkullSource`], again
+/// an independent source rather than folding a third spawn type into an
+/// existing closure's return type: `crate::block_entities::bell_spawns` is
+/// gathered by its own function with no state shared with chests or skulls.
+///
+/// **Unlike [`BlockEntitySource`]'s lid clock, nothing here needs
+/// re-installing for a partial tick.** [`crate::block_entities::bell_spawn`]
+/// always resolves [`lodestone_render::BellSpawn::shake`] to `None` today —
+/// the `BLOCK_EVENT` shake trigger is not wired from any gather in this
+/// workspace yet (see `docs/block-entity-renderers.md`'s Bell section) — so
+/// a bell always draws at rest. That is a real, tracked gap, not a design
+/// choice of this source: the day a shake-tick clock lands (its own map,
+/// alongside [`crate::block_entities::ChestLids`], per that module's own
+/// "How to change it" note), this source's contract does not need to change,
+/// only the closure it is given.
+#[derive(Default)]
+pub struct BellSource(
+    #[allow(clippy::type_complexity)]
+    pub(super)  Option<Box<dyn Fn(glam::Vec3) -> Vec<lodestone_render::BellSpawn> + Send + Sync>>,
+);
+
+impl BellSource {
+    /// This frame's bells, or none when unset — the same "unset means draw
+    /// nothing" convention [`BlockEntitySource`] uses.
+    #[must_use]
+    pub(super) fn bells(&self, eye: glam::Vec3) -> Vec<lodestone_render::BellSpawn> {
+        self.0.as_ref().map(|f| f(eye)).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for BellSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("BellSource")
+            .field(&if self.0.is_some() { "set" } else { "empty" })
+            .finish()
+    }
+}
+
 /// Where this frame's sign text comes from — same shape as [`SkullSource`],
 /// again an independent source rather than a shared return type:
 /// `crate::block_entities::sign_spawns` reads a different half of a block
