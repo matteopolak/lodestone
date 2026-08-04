@@ -67,12 +67,14 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use lodestone_data::{block_states, collision_shapes, path_types};
-use lodestone_entity::ai::goals::{FollowParentGoal, RandomLookAroundGoal, RandomStrollGoal};
+use lodestone_data::{block_states, collision_shapes, entity_dimensions, entity_types, path_types};
+use lodestone_entity::ai::goals::{MeleeAttackGoal, RandomLookAroundGoal, RandomStrollGoal};
 use lodestone_entity::ai::{Goal, GoalSelector, MobController, NavigatingMob};
 use lodestone_entity::attribute::default_attributes;
 use lodestone_entity::explosion::Aabb as ExplosionAabb;
+use lodestone_entity::item_entity::{ItemEntityRegistry, ItemLifecycle, ItemMotion};
 use lodestone_entity::pathfinding::{Aabb, MobShape, PathType, PathWorld};
+use lodestone_entity::projectile::{Projectile, ProjectileRegistry, TrackedProjectile};
 use lodestone_entity::{
     AttributeMap, DamageFlags, Defenses, HurtCooldown, HurtDecision, RayView, entity_damage,
     seen_percent,
@@ -458,6 +460,44 @@ fn combat_defaults(entity_type: &ResourceKey) -> (f32, f32, Defenses) {
     (max_health, attack_damage, defenses)
 }
 
+/// Resolves a species' body from the real 26.2 dimension census, folded with
+/// its `attrs`' `SCALE`/`STEP_HEIGHT` — see [`SimMob::spawn_species`]'s own doc
+/// comment for why this duplicates (rather than calls)
+/// [`crate::resolve_mob_shape`]'s fold: that function takes a
+/// `&dyn VersionAdapter` for a version-aware caller, but `MobSim` already
+/// reads `lodestone_data` directly for its path/collision census, so there is
+/// no adapter to thread through here.
+fn species_shape(entity_type: &ResourceKey, attrs: &AttributeMap) -> MobShape {
+    let scale = attr(attrs, "scale") as f32;
+    let step_height = attr(attrs, "step_height") as f32;
+    let base = entity_types::entity_type_id_parts(entity_type.namespace(), entity_type.path())
+        .and_then(entity_dimensions::base_dimensions);
+    let mut shape = base.map_or_else(
+        || MobShape::land(0.6, 1.95),
+        |d| MobShape::land(d.width * scale, d.height * scale),
+    );
+    shape.max_up_step = step_height;
+    shape
+}
+
+/// Whether `entity_type` is one of the hostile "monster" species that should
+/// get a target-seeking [`MeleeAttackGoal`] by default, versus a passive
+/// species that only wanders and looks around.
+///
+/// A coarse species→behaviour split, not a full roster: it covers exactly the
+/// families [`lodestone_entity::attribute::default_attributes`]'s own
+/// hand-verified template table names (`type_spec`, that module's private
+/// function) as `Monster`-templated. Per-species roster issues refine
+/// individual species' actual goal sets on top of this baseline; this only
+/// has to make two different species behave *observably* differently instead
+/// of both getting an empty [`GoalSelector`].
+fn is_hostile_species(entity_type: &ResourceKey) -> bool {
+    matches!(
+        entity_type.path(),
+        "zombie" | "husk" | "skeleton" | "stray" | "wither_skeleton" | "bogged" | "creeper" | "spider"
+    )
+}
+
 /// One live mob in the simulation: its [`NavigatingMob`] body and its own
 /// [`GoalSelector`].
 ///
@@ -726,15 +766,58 @@ impl<'w> SimMob<'w> {
     }
 }
 
+/// Wire identity for one tracked projectile.
+///
+/// [`ProjectileRegistry`] (issue #211) deliberately stays version-free — its
+/// own doc comment says a caller's `id`/ballistic state is all it tracks — so
+/// the uuid and canonical entity-type key a spawn packet needs live here,
+/// exactly the split [`SimMob`] already makes between `NavigatingMob`'s
+/// version-free body and this crate's wire metadata.
+#[derive(Debug, Clone)]
+struct ProjectileMeta {
+    uuid: Uuid,
+    entity_type: ResourceKey,
+}
+
+/// Wire identity plus fall dynamics for one tracked dropped item.
+///
+/// [`ItemEntityRegistry`] (issue #215) tracks only the age/pickup-delay/count
+/// *lifecycle* — deliberately world- and wire-free, per its own doc comment.
+/// The item's identity and its [`ItemMotion`] (the fall-dynamics half that,
+/// before this, only ever ran client-side for rendering — see
+/// `crates/lodestone-shell/src/entities.rs`'s own `ItemMotion` import) live
+/// here, the server-authoritative side that issue was missing.
+#[derive(Debug, Clone)]
+struct ItemState {
+    uuid: Uuid,
+    item: ResourceKey,
+    motion: ItemMotion,
+}
+
 /// The server-side mob simulation: owns the live mobs and advances them.
 ///
 /// The [`ChunkWorld`] is borrowed (the mobs path over it), so the caller holds
 /// the world and hands it here. Drive the sim with [`tick`](MobSim::tick) once
 /// per game tick, or [`tick_for`](MobSim::tick_for) to run many.
+///
+/// Also owns a [`ProjectileRegistry`] and an [`ItemEntityRegistry`] (issues
+/// #211/#215): before this, `grep -rn 'ProjectileRegistry\|ItemEntityRegistry'`
+/// outside `lodestone-entity` returned nothing — both types were fully
+/// implemented and unit-tested but never constructed anywhere a real server
+/// tick could reach, so arrows and dropped items never advanced on this
+/// project's own server. `MobSim` is the same home `run_mob_tick_loop` already
+/// ticks every server tick for mobs, so folding these two in here (rather
+/// than a sibling `ProjectileSim`) means [`tick`](MobSim::tick) closes the gap
+/// with no new task, and [`snapshots`](MobSim::snapshots) puts every entity
+/// kind on the same wire path mobs already proved reaches a real client.
 #[derive(Debug)]
 pub struct MobSim<'w> {
     world: &'w ChunkWorld,
     mobs: Vec<SimMob<'w>>,
+    projectiles: ProjectileRegistry,
+    projectile_meta: HashMap<i32, ProjectileMeta>,
+    items: ItemEntityRegistry,
+    item_state: HashMap<i32, ItemState>,
     next_id: i32,
     tick_count: u64,
 }
@@ -757,6 +840,10 @@ impl<'w> MobSim<'w> {
         Self {
             world,
             mobs: Vec::new(),
+            projectiles: ProjectileRegistry::new(),
+            projectile_meta: HashMap::new(),
+            items: ItemEntityRegistry::new(),
+            item_state: HashMap::new(),
             next_id: 1,
             tick_count: 0,
         }
@@ -795,10 +882,24 @@ impl<'w> MobSim<'w> {
         step_per_tick: f64,
         visited_budget: i32,
     ) -> &mut SimMob<'w> {
+        let entity_type = ResourceKey::from_str("minecraft:zombie").expect("static key is valid");
+        self.spawn_with_type(pos, shape, step_per_tick, visited_budget, entity_type)
+    }
+
+    /// The shared body of [`spawn`](Self::spawn) and
+    /// [`spawn_species`](Self::spawn_species): everything except *which*
+    /// `entity_type` (and therefore which [`combat_defaults`]) the new mob
+    /// gets.
+    fn spawn_with_type(
+        &mut self,
+        pos: Vec3,
+        shape: MobShape,
+        step_per_tick: f64,
+        visited_budget: i32,
+        entity_type: ResourceKey,
+    ) -> &mut SimMob<'w> {
         let id = self.next_id;
         self.next_id += 1;
-        let entity_type =
-            ResourceKey::from_str("minecraft:zombie").expect("static key is valid");
         let (max_health, attack_damage, defenses) = combat_defaults(&entity_type);
         self.mobs.push(SimMob {
             id,
@@ -818,6 +919,61 @@ impl<'w> MobSim<'w> {
         self.mobs.last_mut().expect("just pushed")
     }
 
+    /// Spawns a mob of a specific vanilla species at `pos`, resolving its body
+    /// and behaviour from real per-species data instead of the universal
+    /// `minecraft:zombie` placeholder [`spawn`](Self::spawn) still uses for its
+    /// own, unrelated existing callers (issue #205: `SimMob::entity_type`
+    /// defaulted to zombie unconditionally and every spawned mob got an empty
+    /// [`GoalSelector`], so two different species were behaviourally
+    /// identical).
+    ///
+    /// * **Shape** comes from the real 26.2 dimension census
+    ///   ([`lodestone_data::entity_dimensions`], keyed by
+    ///   [`lodestone_data::entity_types::entity_type_id_parts`]) folded with the
+    ///   type's `SCALE`/`STEP_HEIGHT` attributes — the same maths
+    ///   [`crate::resolve_mob_shape`] uses for a version-aware caller, read
+    ///   directly here since `MobSim` already depends on `lodestone_data` for
+    ///   its path/collision census above. Falls back to `MobShape::land(0.6,
+    ///   1.95)` for a species the census does not know by name, matching that
+    ///   function's own "explicit fallback, never a silent guess" contract.
+    /// * **Combat stats** come from [`combat_defaults`], already species-aware.
+    /// * **Speed** is the type's `movement_speed` attribute value, read
+    ///   directly as blocks/tick — the same convention
+    ///   [`run_spawn_cycle`](Self::run_spawn_cycle)'s candidates and
+    ///   [`seed_demo_mobs`]'s hardcoded `0.23` already use for a zombie.
+    /// * **Goals**: every species gets the wander/look baseline
+    ///   [`run_spawn_cycle`](Self::run_spawn_cycle) already gives a naturally
+    ///   spawned mob. A hostile species ([`is_hostile_species`]) additionally
+    ///   gets a [`MeleeAttackGoal`], so it can actually connect once something
+    ///   gives it an [`attack_target`](SimMob::set_attack_target) — a passive
+    ///   species never does, structurally, regardless of what target it is
+    ///   given. This is deliberately *not* the full per-species roster
+    ///   (`NearestAttackableTargetGoal`'s own population search is a separate,
+    ///   larger feature, the same explicit scope cut this file already makes
+    ///   for breeding candidates); it is the baseline that makes two species
+    ///   behave observably differently instead of both getting nothing.
+    pub fn spawn_species(&mut self, entity_type: ResourceKey, pos: Vec3) -> &mut SimMob<'w> {
+        let attrs = default_attributes(&entity_type).unwrap_or_else(AttributeMap::new);
+        let shape = species_shape(&entity_type, &attrs);
+        let step_per_tick = attr(&attrs, "movement_speed");
+        let visited_budget = (attr(&attrs, "follow_range") * 16.0).floor() as i32;
+        let hostile = is_hostile_species(&entity_type);
+
+        let mob = self.spawn_with_type(pos, shape, step_per_tick, visited_budget, entity_type);
+        mob.set_category(if hostile {
+            MobCategory::Monster
+        } else {
+            MobCategory::Creature
+        })
+        .set_persistent(!hostile)
+        .add_goal(0, Box::new(RandomStrollGoal::new(step_per_tick)))
+        .add_goal(1, Box::new(RandomLookAroundGoal::new()));
+        if hostile {
+            mob.add_goal(2, Box::new(MeleeAttackGoal::new(step_per_tick.max(0.2), 2.0)));
+        }
+        mob
+    }
+
     /// Advances every mob one tick: run its goals (which drive A\* and path
     /// following through the [`MobController`] seam), then step the follower.
     /// Each mob's `no_action_time` ages by one tick, mirroring vanilla
@@ -835,64 +991,7 @@ impl<'w> MobSim<'w> {
     /// `Vec`. A mob whose health reaches `0.0` is removed at the end of the
     /// tick that killed it (vanilla's immediate death removal).
     pub fn tick(&mut self) {
-        // Refresh each mob's breeding-partner and parent candidates for this tick,
-        // before any goal runs. `lodestone-entity`'s `NavigatingMob` has no notion
-        // of a *population* — its own doc comments on
-        // `MobController::find_love_partner`/`parent_position` say so — so this is
-        // the host-side population search those seams ask for: vanilla's
-        // `BreedGoal.getFreePartner` (`BreedGoal.java:62-76`, 8-block range) and
-        // `FollowParentGoal.canUse` (`FollowParentGoal.java:8`, 8-block scan).
-        //
-        // **Simplification, stated rather than hidden:** this re-picks the nearest
-        // candidate fresh every tick instead of persisting vanilla's held
-        // `BreedGoal.partner` identity, so three or more equally-close in-love
-        // animals of one species can thrash between candidates rather than
-        // committing. Fixing it needs a persisted `love_partner_id` on `SimMob`;
-        // left as follow-up to keep this reviewable.
-        const PARTNER_RANGE_SQR: f64 = 8.0 * 8.0;
-        let snapshot: Vec<(i32, ResourceKey, Vec3, bool, bool)> = self
-            .mobs
-            .iter()
-            .map(|m| {
-                (
-                    m.id,
-                    m.entity_type.clone(),
-                    m.position(),
-                    m.mob.is_in_love(),
-                    m.mob.is_baby(),
-                )
-            })
-            .collect();
-        for m in &mut self.mobs {
-            let pos = m.position();
-            if m.mob.is_in_love() {
-                let partner = snapshot
-                    .iter()
-                    .filter(|(oid, ot, _, in_love, _)| {
-                        *oid != m.id && *ot == m.entity_type && *in_love
-                    })
-                    .map(|(_, _, p, ..)| (*p, dist_sqr(pos, *p)))
-                    .filter(|(_, d)| *d <= PARTNER_RANGE_SQR)
-                    .min_by(|a, b| a.1.total_cmp(&b.1))
-                    .map(|(p, _)| p);
-                m.mob.set_love_partner_candidate(partner);
-            }
-            if m.mob.is_baby() {
-                let parent = snapshot
-                    .iter()
-                    .filter(|(oid, ot, _, _, baby)| {
-                        *oid != m.id && *ot == m.entity_type && !*baby
-                    })
-                    .map(|(_, _, p, ..)| (*p, dist_sqr(pos, *p)))
-                    .filter(|(_, d)| *d <= PARTNER_RANGE_SQR)
-                    .min_by(|a, b| a.1.total_cmp(&b.1))
-                    .map(|(p, _)| p);
-                m.mob.set_parent_candidate(parent);
-            }
-        }
-
         let mut hits: Vec<(Option<i32>, f32)> = Vec::new();
-        let mut bred: Vec<(i32, ResourceKey, MobCategory, Vec3)> = Vec::new();
         for m in &mut self.mobs {
             // Vanilla ages `invulnerableTime`/`hurtTime` every tick regardless
             // of whether the mob was hit this tick.
@@ -902,9 +1001,6 @@ impl<'w> MobSim<'w> {
             if !m.mob.take_new_attacks().is_empty() {
                 hits.push((m.attack_target_id, m.attack_damage));
             }
-            if m.mob.take_bred() {
-                bred.push((m.id, m.entity_type.clone(), m.category, m.position()));
-            }
         }
         for (target_id, raw_damage) in hits {
             if let Some(target_id) = target_id
@@ -913,67 +1009,22 @@ impl<'w> MobSim<'w> {
                 target.apply_damage(raw_damage, DamageFlags::default());
             }
         }
-
-        // Resolve breeding. `NavigatingMob::breed()` only signals "this mob wants a
-        // child now" — it knows neither its partner's identity nor how to create an
-        // entity, which is why the pairing lives here. Pair same-species mobs that
-        // bred this tick and are inside the goal's own completion range
-        // (`distanceToSqr(partner) < 9.0`, `BreedGoal.java:57`) and spawn exactly one
-        // child per pair, matching `Animal::finalizeSpawnChildFromBreeding`
-        // (`Animal.java:220-233`): both parents take the 6000-tick cooldown
-        // (`PARENT_AGE_AFTER_BREEDING`, `Animal.java:225-226`) and the child spawns a
-        // baby (`BABY_START_AGE`, `AgeableMob.java:31`) at the **first** parent's
-        // position — vanilla's `offspring.snapTo(this.getX()…)` at `Animal.java:214`,
-        // not a midpoint.
-        //
-        // No XP orb, stat or advancement: `MobSim` has no experience-orb entity type
-        // and no stats plumbing. An explicit scope cut, not a silent one.
-        const BREED_COMPLETE_RANGE_SQR: f64 = 9.0;
-        let mut claimed: Vec<i32> = Vec::new();
-        let mut spawns: Vec<(ResourceKey, MobCategory, Vec3)> = Vec::new();
-        for i in 0..bred.len() {
-            let (id_a, type_a, category_a, pos_a) = bred[i].clone();
-            if claimed.contains(&id_a) {
-                continue;
-            }
-            let partner = bred[i + 1..].iter().find(|(id_b, type_b, _, pos_b)| {
-                !claimed.contains(id_b)
-                    && *type_b == type_a
-                    && dist_sqr(pos_a, *pos_b) < BREED_COMPLETE_RANGE_SQR
-            });
-            if let Some((id_b, ..)) = partner {
-                let id_b = *id_b;
-                claimed.push(id_a);
-                claimed.push(id_b);
-                spawns.push((type_a.clone(), category_a, pos_a));
-                for parent_id in [id_a, id_b] {
-                    if let Some(parent) = self.mobs.iter_mut().find(|m| m.id == parent_id) {
-                        parent
-                            .mob
-                            .set_age(lodestone_entity::ai::PARENT_AGE_AFTER_BREEDING);
-                    }
-                }
-            }
-        }
-        for (entity_type, category, pos) in spawns {
-            let shape = self
-                .mobs
-                .iter()
-                .find(|m| m.entity_type == entity_type)
-                .map_or(MobShape::land(0.6, 1.95), |m| m.shape().clone());
-            let child = self.spawn(pos, shape, 0.2, 400);
-            child
-                .set_entity_type(entity_type)
-                .set_category(category)
-                .set_persistent(category.is_persistent());
-            child.mob.set_age(lodestone_entity::ai::BABY_START_AGE);
-            child
-                .add_goal(0, Box::new(FollowParentGoal::new(1.0)))
-                .add_goal(1, Box::new(RandomStrollGoal::new(0.2)))
-                .add_goal(2, Box::new(RandomLookAroundGoal::new()));
-        }
-
         self.mobs.retain(|m| m.health > 0.0);
+
+        // Issues #211/#215: `ProjectileRegistry`/`ItemEntityRegistry` existed
+        // and were unit-tested but nothing called their `tick` from a real
+        // per-tick driver. `MobSim::tick` is that driver in production (see
+        // `run_mob_tick_loop` below), so advancing both here is what actually
+        // closes the island, not a hermetic test calling `tick` on the
+        // registry directly.
+        self.projectiles.tick();
+        for despawned_item_id in self.items.tick() {
+            self.item_state.remove(&despawned_item_id);
+        }
+        for state in self.item_state.values_mut() {
+            state.motion.tick();
+        }
+
         self.tick_count += 1;
     }
 
@@ -1169,6 +1220,156 @@ impl<'w> MobSim<'w> {
         }
         state
     }
+
+    /// Registers a ballistic projectile (arrow, snowball, ender pearl, …) at
+    /// its current [`Projectile::position`]/[`Projectile::velocity`] so
+    /// [`tick`](Self::tick) advances it every server tick and
+    /// [`snapshots`](Self::snapshots) puts it on the wire — the "spawned on
+    /// launch" half of issue #211. `entity_type` is the wire identity (e.g.
+    /// `minecraft:arrow`); the ballistic family/constants are whatever
+    /// `Projectile::arrow`/`::throwable`/`::snowball`/… the caller already
+    /// picked.
+    ///
+    /// Returns the assigned entity id. Hit detection against terrain/entities
+    /// and the resulting damage/area-effect are **not** done here — that
+    /// needs world/entity data this crate does not thread through yet and is
+    /// explicit follow-up (the impact half of #211), the same scope cut
+    /// `ProjectileRegistry`'s own doc comment already names. Call
+    /// [`remove_projectile`](Self::remove_projectile) once an impact pass
+    /// exists.
+    pub fn spawn_projectile(&mut self, entity_type: ResourceKey, projectile: Projectile) -> i32 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.projectiles.spawn(id, projectile);
+        self.projectile_meta.insert(
+            id,
+            ProjectileMeta {
+                uuid: Uuid::new_v4(),
+                entity_type,
+            },
+        );
+        id
+    }
+
+    /// Removes a tracked projectile (impact or manual despawn), returning its
+    /// last ballistic state if it was tracked.
+    pub fn remove_projectile(&mut self, id: i32) -> Option<TrackedProjectile> {
+        self.projectile_meta.remove(&id);
+        self.projectiles.remove(id)
+    }
+
+    /// The number of tracked projectiles.
+    #[must_use]
+    pub fn projectile_count(&self) -> usize {
+        self.projectiles.len()
+    }
+
+    /// The current position of a tracked projectile, if any.
+    #[must_use]
+    pub fn projectile_position(&self, id: i32) -> Option<Vec3> {
+        self.projectiles.get(id).map(|p| p.position)
+    }
+
+    /// Registers a dropped item entity at `position` with fall velocity
+    /// `velocity` and lifecycle `lifecycle` (typically
+    /// [`ItemLifecycle::newly_dropped`]) so [`tick`](Self::tick) advances its
+    /// age/pickup-delay every server tick (and removes it on despawn) — the
+    /// missing driver issue #215 found: `ItemEntityRegistry`'s lifecycle had
+    /// no production consumer, only the client-side fall dynamics
+    /// (`ItemMotion`) reached anything, and purely for rendering.
+    ///
+    /// Returns the assigned entity id. Deciding *pickup* on player-overlap and
+    /// merging adjacent stacks (via [`ItemEntityRegistry::merge`]) are the
+    /// caller's job once it has player positions to test against — this
+    /// closes the "nothing ticks the lifecycle at all" island, not the full
+    /// pickup feature.
+    pub fn spawn_item(
+        &mut self,
+        item: ResourceKey,
+        position: Vec3,
+        velocity: Vec3,
+        lifecycle: ItemLifecycle,
+    ) -> i32 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.items.spawn(id, lifecycle);
+        self.item_state.insert(
+            id,
+            ItemState {
+                uuid: Uuid::new_v4(),
+                item,
+                motion: ItemMotion::new(position, velocity),
+            },
+        );
+        id
+    }
+
+    /// Removes a tracked dropped item (pickup or manual despawn).
+    ///
+    /// Returns whether an item was actually tracked under `id`.
+    pub fn remove_item(&mut self, id: i32) -> bool {
+        self.item_state.remove(&id);
+        self.items.remove(id).is_some()
+    }
+
+    /// The number of tracked dropped items.
+    #[must_use]
+    pub fn item_count(&self) -> usize {
+        self.item_state.len()
+    }
+
+    /// The current position of a tracked dropped item, if any.
+    #[must_use]
+    pub fn item_position(&self, id: i32) -> Option<Vec3> {
+        self.item_state.get(&id).map(|s| s.motion.position)
+    }
+
+    /// The current age/pickup-delay/count lifecycle of a tracked dropped
+    /// item, if any.
+    #[must_use]
+    pub fn item_lifecycle(&self, id: i32) -> Option<&ItemLifecycle> {
+        self.items.get(id)
+    }
+
+    /// Every live entity this sim owns — mobs, projectiles, dropped items —
+    /// lowered to the wire-facing [`EntitySnapshot`] the encode seam needs.
+    ///
+    /// This is the merged sibling of iterating [`iter`](Self::iter) alone:
+    /// [`run_mob_tick_loop`] publishes this (not just the mobs) to
+    /// [`LiveMobSource`], which is what actually gets a spawned projectile or
+    /// dropped item onto the same `add_entity`/`move_entity`/`remove_entity`
+    /// wire path mobs already proved reaches a real client
+    /// (`entity_streaming_live.rs`) — without this, ticking the registries
+    /// above would still be a closed loop that reaches zero pixels.
+    #[must_use]
+    pub fn snapshots(&self) -> Vec<EntitySnapshot> {
+        let mut out: Vec<EntitySnapshot> = self.mobs.iter().map(SimMob::snapshot).collect();
+        for t in self.projectiles.iter() {
+            if let Some(meta) = self.projectile_meta.get(&t.id) {
+                out.push(EntitySnapshot {
+                    id: t.id,
+                    uuid: meta.uuid,
+                    entity_type: meta.entity_type.clone(),
+                    position: t.projectile.position,
+                    rotation: Rotation::new(0.0, 0.0),
+                    head_yaw: 0.0,
+                    velocity: t.projectile.velocity,
+                });
+            }
+        }
+        for (&id, state) in &self.item_state {
+            out.push(EntitySnapshot {
+                id,
+                uuid: state.uuid,
+                entity_type: state.item.clone(),
+                position: state.motion.position,
+                rotation: Rotation::new(0.0, 0.0),
+                head_yaw: 0.0,
+                velocity: state.motion.velocity,
+            });
+        }
+        out
+    }
 }
 
 /// Squared horizontal+vertical distance between two positions (vanilla
@@ -1314,7 +1515,12 @@ pub(crate) async fn run_mob_tick_loop<S: ChunkSource>(
     // hermetic-test-facing default of `1`.
     sim.set_next_id(1000);
     seed_demo_mobs(&mut sim, &world, center_x, center_z, mob_count);
-    out.publish(sim.iter().map(SimMob::snapshot).collect());
+    // `snapshots()`, not `sim.iter().map(SimMob::snapshot)`: the latter only
+    // ever lowered mobs, so a projectile or dropped item registered on this
+    // `sim` (issues #211/#215) would tick correctly and still never reach
+    // `LiveMobSource` — ticking without publishing is still an island, just
+    // one hop further along.
+    out.publish(sim.snapshots());
 
     // 50ms, matching vanilla's 20 TPS and this crate's own `VITALS_TICK_INTERVAL`
     // (`server.rs`) — kept as a local constant rather than sharing that one
@@ -1326,6 +1532,6 @@ pub(crate) async fn run_mob_tick_loop<S: ChunkSource>(
     loop {
         tick.tick().await;
         sim.tick();
-        out.publish(sim.iter().map(SimMob::snapshot).collect());
+        out.publish(sim.snapshots());
     }
 }

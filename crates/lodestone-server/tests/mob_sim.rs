@@ -17,6 +17,7 @@
 use lodestone_entity::ai::goals::MeleeAttackGoal;
 use lodestone_entity::pathfinding::MobShape;
 use lodestone_entity::{AttributeMap, DamageFlags, Defenses};
+use lodestone_model::ResourceKey;
 use lodestone_model::Vec3;
 use lodestone_model::action::ClientAction;
 use lodestone_model::adapter::{
@@ -27,6 +28,7 @@ use lodestone_server::{
     ChunkWorld, EntitySnapshot, EntitySource, MobSim, WorldgenChunkSource, resolve_mob_shape,
 };
 use lodestone_worldgen::density::Density;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 /// A `y_clamped_gradient` that is positive below y=0 and negative above: a flat
@@ -729,4 +731,129 @@ fn explosion_exposure_is_ray_sampled_a_wall_fully_shields_a_mob() {
         exposed_dealt.is_some_and(|d| d > 0.0),
         "the unshielded mob at the same distance must take real damage: {exposed_dealt:?}"
     );
+}
+
+// -- `MobSim::spawn_species`: the #205 driver --------------------------
+//
+// Before this, `SimMob::entity_type` defaulted to `minecraft:zombie`
+// unconditionally and `MobSim::spawn`'s `GoalSelector` started empty, so
+// every spawned mob — whatever species a caller thought it was placing —
+// was behaviourally and nominally identical. These gates drive
+// `spawn_species` (never hand-building a `SimMob` with a manually forced
+// entity_type/goal set) and assert real, jar-verified per-species numbers
+// (`lodestone_entity::attribute`'s own hand-verified `type_spec` table),
+// not invented test constants.
+
+fn rk(name: &str) -> ResourceKey {
+    ResourceKey::from_str(name).expect("valid resource key")
+}
+
+/// `type_spec`'s zombie override (`attribute.rs`: `follow_range` 35,
+/// `movement_speed` 0.23, `attack_damage` 3.0, `armor` 2.0) and pig override
+/// (`max_health` 10, `movement_speed` 0.25) must actually reach a spawned
+/// mob's real fields — shape from the 26.2 dimension census
+/// (`entity_dimensions.rs`: zombie `(0.6, 1.95)`, pig `(0.9, 0.9)`), not the
+/// old universal zombie placeholder box.
+#[test]
+fn spawn_species_resolves_real_per_species_shape_speed_and_combat_stats() {
+    let world = ChunkWorld::new(-4, 24);
+    let mut sim = MobSim::new(&world);
+
+    let zombie_height = {
+        let zombie = sim.spawn_species(rk("minecraft:zombie"), Vec3::new(0.5, 0.0, 0.5));
+        assert_eq!(*zombie.entity_type(), rk("minecraft:zombie"));
+        assert_eq!(zombie.health(), 20.0, "zombie max_health");
+        assert_eq!(zombie.attack_damage(), 3.0, "zombie attack_damage override");
+        assert_eq!(zombie.defenses().armor, 2.0, "zombie armor override");
+        assert_eq!(zombie.shape().width, 0.6, "zombie census width");
+        assert_eq!(zombie.shape().height, 1.95, "zombie census height");
+        zombie.shape().height
+    };
+
+    let pig_height = {
+        let pig = sim.spawn_species(rk("minecraft:pig"), Vec3::new(5.0, 0.0, 0.5));
+        assert_eq!(*pig.entity_type(), rk("minecraft:pig"));
+        assert_eq!(pig.health(), 10.0, "pig max_health override");
+        assert_eq!(pig.shape().width, 0.9, "pig census width");
+        assert_eq!(pig.shape().height, 0.9, "pig census height");
+        pig.shape().height
+    };
+
+    // Species differ observably, not just internally: two different
+    // entity_types must not collapse to the same body or stats.
+    assert_ne!(zombie_height, pig_height);
+}
+
+/// The behavioural half of #205's own worked example: "a `minecraft:pig`
+/// never acquires a melee target, a `minecraft:zombie` does." A pig's
+/// `spawn_species` goal set has no `MeleeAttackGoal` at all, so setting an
+/// attack target on it (exactly as the zombie below is given one) can never
+/// produce a connecting hit — structurally, not by chance/timing. The zombie
+/// closes the same distance and its own real `attack_damage` (3.0, not a
+/// hand-set test constant) is exactly lethal against a pig staged at 3.0
+/// health, mirroring this file's existing `melee_attack_reduces_target_
+/// health…` pattern but through the species-aware entry point.
+#[test]
+fn spawn_species_only_the_hostile_species_can_ever_land_a_melee_hit() {
+    let mut world = ChunkWorld::new(-4, 24);
+    for x in -4..=12 {
+        for z in -4..=4 {
+            world.set_solid(x, -1, z, true);
+        }
+    }
+    let mut sim = MobSim::new(&world);
+
+    let zombie_pos = Vec3::new(0.5, 0.0, 0.5);
+    let target_pos = Vec3::new(4.5, 0.0, 0.5);
+
+    let victim_id = {
+        let pig = sim.spawn_species(rk("minecraft:pig"), target_pos);
+        pig.set_defenses(Defenses::default());
+        pig.set_health(3.0); // exactly the zombie's real attack_damage
+        pig.id()
+    };
+    let zombie_id = {
+        let zombie = sim.spawn_species(rk("minecraft:zombie"), zombie_pos);
+        assert_eq!(zombie.attack_damage(), 3.0, "real species attribute, not staged");
+        zombie.set_attack_target(Some(target_pos));
+        zombie.set_attack_target_id(Some(victim_id));
+        zombie.id()
+    };
+
+    // Control, run first: the pig is given an attack target/id pointing at
+    // the zombie too, exactly like the zombie's own setup below — proving
+    // any difference in outcome comes from the goal set `spawn_species` gave
+    // each species, not from one of them simply never being told to attack.
+    let control_zombie_health = {
+        let control_world = ChunkWorld::new(-4, 24);
+        let mut control_sim = MobSim::new(&control_world);
+        let z = control_sim.spawn_species(rk("minecraft:zombie"), zombie_pos);
+        let z_id = z.id();
+        let p = control_sim.spawn_species(rk("minecraft:pig"), target_pos);
+        p.set_attack_target(Some(zombie_pos));
+        p.set_attack_target_id(Some(z_id));
+        for _ in 0..500 {
+            control_sim.tick();
+        }
+        control_sim.get(z_id).map(|m| m.health())
+    };
+    assert_eq!(
+        control_zombie_health,
+        Some(20.0),
+        "a pig given an attack target must never actually connect: no MeleeAttackGoal exists to act on it"
+    );
+
+    let mut ticks_run = 0;
+    for _ in 0..2000 {
+        sim.tick();
+        ticks_run += 1;
+        if sim.get(victim_id).is_none() {
+            break;
+        }
+    }
+    assert!(
+        sim.get(victim_id).is_none(),
+        "the zombie's real attack_damage must land and be exactly lethal (ran {ticks_run} ticks)"
+    );
+    assert!(sim.get(zombie_id).is_some(), "the zombie is untouched");
 }

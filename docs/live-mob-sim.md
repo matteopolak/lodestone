@@ -95,12 +95,13 @@ call `set_next_id`.
   `docs/entity-tick-drivers.md`). This wiring does not fold them together —
   `seed_demo_mobs` does not touch spawn categories at all — but a future
   natural-spawning pass will need to pick one.
-- **Adding `ProjectileRegistry`/`ItemEntityRegistry` to the same loop is the
-  natural next step**, per `docs/entity-tick-drivers.md`'s own request: both
-  are world-free per-tick drivers with zero production callers, and
-  `run_mob_tick_loop` is now the one place in this crate that owns a live tick
-  loop. Not done here — this issue's scope was mob positions specifically —
-  but the loop is the right home once someone picks it up.
+- **Done: `ProjectileRegistry`/`ItemEntityRegistry` now share this loop**
+  (issues #211/#215). `MobSim` owns both as fields, ticks them inside
+  `MobSim::tick()`, and `run_mob_tick_loop` publishes `sim.snapshots()`
+  (mobs + projectiles + items) instead of just the mobs. See
+  `docs/entity-tick-drivers.md`'s "Production wiring" section for the shape;
+  this bullet used to ask for it as follow-up and is corrected now that it
+  exists, rather than left to mislead the next reader.
 
 ## Configuration
 
