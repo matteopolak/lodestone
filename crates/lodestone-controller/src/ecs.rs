@@ -37,12 +37,13 @@ use lodestone_ecs::player::{
     ActionQueue, Dead, Egress, LastPlayerInput, LocalPlayer, MovementIntent, PhysicsState,
     SprintKeyHeld, Submersion,
 };
+use lodestone_ecs::session::{Abilities, Vitals};
 use lodestone_ecs::{GameTick, TickSet};
 use lodestone_model::PlayerInput;
 use lodestone_physics::MovementInput;
 
 use crate::action::move_action;
-use crate::input::{Action, InputState, movement_intent};
+use crate::input::{Action, InputState, movement_intent_with_food};
 
 /// The platform's held keys and accumulated mouse motion.
 ///
@@ -54,11 +55,11 @@ use crate::input::{Action, InputState, movement_intent};
 #[derive(Resource, Debug, Clone, Copy, Default, PartialEq)]
 pub struct RawInput(pub InputState);
 
-/// [`movement_intent`] plus the one water exception vanilla's sprint gate
-/// makes.
+/// [`movement_intent_with_food`] plus the one water exception vanilla's sprint
+/// gate makes.
 ///
-/// `movement_intent` vetoes sprint while sneaking, which is right on land
-/// (`isMovingSlowly()`). Underwater it is wrong:
+/// `movement_intent_with_food` vetoes sprint while sneaking, which is right on
+/// land (`isMovingSlowly()`). Underwater it is wrong:
 /// `LocalPlayer.canStartSprinting` is
 /// `… && (!isMovingSlowly() || isUnderWater())` (`LocalPlayer.java:1137-1144`)
 /// and `shouldStopSwimSprinting` explicitly *keeps* a swim-sprint alive while
@@ -70,15 +71,23 @@ pub struct RawInput(pub InputState);
 /// cleared, rather than restating the gate: the two must not be able to drift
 /// apart. Only the sprint bit is taken; `sneak` itself stays set, so the sink
 /// impulse and the crouch pose still see it.
+///
+/// `sprint_allowed_by_food` (issue #200) is threaded through unchanged to both
+/// calls — food does not depend on submersion, so it is one value for the
+/// whole tick, not something the swim recomputation could disagree with.
 #[must_use]
-pub fn swim_adjusted_intent(state: &InputState, submerged: bool) -> MovementInput {
-    let mut intent = movement_intent(state);
+pub fn swim_adjusted_intent(
+    state: &InputState,
+    submerged: bool,
+    sprint_allowed_by_food: bool,
+) -> MovementInput {
+    let mut intent = movement_intent_with_food(state, sprint_allowed_by_food);
     if !intent.sneak || !submerged {
         return intent;
     }
     let mut without_sneak = *state;
     without_sneak.set(Action::Sneak, false);
-    intent.sprint = movement_intent(&without_sneak).sprint;
+    intent.sprint = movement_intent_with_food(&without_sneak, sprint_allowed_by_food).sprint;
     intent
 }
 
@@ -102,6 +111,18 @@ pub fn swim_adjusted_intent(state: &InputState, submerged: bool) -> MovementInpu
 ///
 /// The one-tick lag on submersion is deliberate and is vanilla's own:
 /// `baseTick` computes submersion before `aiStep` reads it.
+///
+/// # The food gate (issue #200)
+///
+/// `Vitals`/`Abilities` are read `Option`al because both start absent until
+/// [`lodestone_ecs::session::insert_session_components`] runs (spawn, or
+/// before a session ever begins) — an absent `Vitals` means "the server has
+/// not told us a food level yet", which resolves to *allowed* rather than
+/// *gated*, matching the `None` reading used everywhere else `Vitals` is
+/// consulted (`docs/`, `Vitals`'s own doc comment): the absence of a report is
+/// not evidence of empty food. `Abilities` absent likewise resolves to
+/// "flight is not permitted", the same default `player.rs`'s own `Flying`
+/// consumer uses.
 pub fn compute_movement_intent(
     input: Res<RawInput>,
     mut players: Query<
@@ -111,18 +132,28 @@ pub fn compute_movement_intent(
             &PhysicsState,
             &Submersion,
             Option<&Dead>,
+            Option<&Vitals>,
+            Option<&Abilities>,
         ),
         With<LocalPlayer>,
     >,
 ) {
-    for (mut intent, mut sprint_key, state, submersion, dead) in &mut players {
+    for (mut intent, mut sprint_key, state, submersion, dead, vitals, abilities) in &mut players {
         sprint_key.0 = input.0.sprint_held();
         intent.0 = if dead.is_some() {
             // A corpse does not walk: ignore held keys while dead so the player
             // holds still on the death screen until the respawn teleport lands.
             MovementInput::NONE
         } else {
-            swim_adjusted_intent(&input.0, submersion.0.under_water() || state.0.swimming)
+            let sprint_allowed_by_food = vitals
+                .and_then(|v| v.food)
+                .is_none_or(|food| food > crate::input::MIN_FOOD_LEVEL_TO_SPRINT)
+                || abilities.is_some_and(|a| a.may_fly);
+            swim_adjusted_intent(
+                &input.0,
+                submersion.0.under_water() || state.0.swimming,
+                sprint_allowed_by_food,
+            )
         };
     }
 }
@@ -353,10 +384,10 @@ mod tests {
         state.set(Action::Sneak, true);
 
         assert!(
-            !swim_adjusted_intent(&state, false).sprint,
+            !swim_adjusted_intent(&state, false, true).sprint,
             "control: on land, sneaking still vetoes sprint"
         );
-        let intent = swim_adjusted_intent(&state, true);
+        let intent = swim_adjusted_intent(&state, true, true);
         assert!(
             intent.sprint,
             "submerged, shift must not cancel a swim-sprint"
@@ -364,6 +395,28 @@ mod tests {
         assert!(
             intent.sneak,
             "…and shift itself must survive, or the sink impulse is lost"
+        );
+    }
+
+    /// #200: the food gate is independent of the swim exception — vanilla ANDs
+    /// `hasEnoughFoodToDoExhaustiveManoeuvres()` into `isSprintingPossible`
+    /// regardless of the shallow-water/underwater branch it also gates
+    /// (`Player.java:1131-1135`), so "food says no" must win even in the one
+    /// case (submerged + sneaking) that would otherwise grant a swim-sprint.
+    #[test]
+    fn the_food_gate_applies_even_to_a_swim_sprint() {
+        let mut state = InputState::default();
+        state.set(Action::Forward, true);
+        state.set(Action::Sprint, true);
+        state.set(Action::Sneak, true);
+
+        // Control: without the food gate (allowed = true), submerged + sneak
+        // does swim-sprint, matching the test above.
+        assert!(swim_adjusted_intent(&state, true, true).sprint);
+        // With it denied, the swim exception must not resurrect the sprint bit.
+        assert!(
+            !swim_adjusted_intent(&state, true, false).sprint,
+            "low food must veto a swim-sprint too, not just the land case"
         );
     }
 
@@ -411,6 +464,82 @@ mod tests {
         assert!(
             app.world().get::<SprintKeyHeld>(entity).unwrap().0,
             "…but free-fly still needs to see the key itself"
+        );
+    }
+
+    /// #200: the system, not just the free functions — `Vitals::food` has to
+    /// actually reach `compute_movement_intent` for a low-food player to stop
+    /// sprinting. The healthy-food tick is the control: without it, "low food
+    /// stops sprint" could pass against a system that vetoes sprint
+    /// unconditionally.
+    #[test]
+    fn low_food_stops_the_intent_system_from_granting_sprint() {
+        let (mut app, entity) = app();
+        press(&mut app, Action::Forward, true);
+        press(&mut app, Action::Sprint, true);
+
+        app.world_mut().entity_mut(entity).insert(Vitals {
+            food: Some(20),
+            ..Vitals::default()
+        });
+        tick(&mut app);
+        assert!(
+            app.world().get::<MovementIntent>(entity).unwrap().0.sprint,
+            "control: full food sprints normally"
+        );
+
+        app.world_mut().entity_mut(entity).insert(Vitals {
+            food: Some(6),
+            ..Vitals::default()
+        });
+        tick(&mut app);
+        assert!(
+            !app.world().get::<MovementIntent>(entity).unwrap().0.sprint,
+            "food level 6 is vanilla's own cutoff (`> 6`, not `>= 6`) and must not sprint"
+        );
+    }
+
+    /// No `Vitals` component at all (before the first `set_health` packet)
+    /// must not be read as "zero food" — that would make sprint impossible for
+    /// every tick before the server's first vitals report.
+    #[test]
+    fn absent_vitals_does_not_block_sprint() {
+        let (mut app, entity) = app();
+        press(&mut app, Action::Forward, true);
+        press(&mut app, Action::Sprint, true);
+        tick(&mut app);
+        assert!(
+            app.world().get::<MovementIntent>(entity).unwrap().0.sprint,
+            "no vitals report yet must resolve to allowed, not denied"
+        );
+    }
+
+    /// Vanilla's `mayfly` ability bypasses the food check entirely
+    /// (`Player.java:1592-1594`'s `||`), so creative/spectator sprint must
+    /// survive food exhaustion.
+    #[test]
+    fn may_fly_bypasses_the_food_gate() {
+        let (mut app, entity) = app();
+        press(&mut app, Action::Forward, true);
+        press(&mut app, Action::Sprint, true);
+        app.world_mut().entity_mut(entity).insert(Vitals {
+            food: Some(0),
+            ..Vitals::default()
+        });
+        tick(&mut app);
+        assert!(
+            !app.world().get::<MovementIntent>(entity).unwrap().0.sprint,
+            "control: zero food alone stops sprint"
+        );
+
+        app.world_mut().entity_mut(entity).insert(Abilities {
+            may_fly: true,
+            ..Abilities::default()
+        });
+        tick(&mut app);
+        assert!(
+            app.world().get::<MovementIntent>(entity).unwrap().0.sprint,
+            "may_fly must override the food gate, exactly like vanilla's `||`"
         );
     }
 

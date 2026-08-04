@@ -196,13 +196,13 @@ pub enum OptionWidget {
 
 /// A persisted option this client genuinely honours.
 ///
-/// The whole enum is two variants, and that is the honest count — see
-/// [`crate::config::Options`], which has three fields of which `keybinds` is
-/// not a vanilla `OptionInstance`. **`render_distance` and `sensitivity` are
-/// not here**, and the census in #55 and `docs/ui-framework.md` is wrong to
-/// list them: both live on [`crate::config::Config`], which is parsed from argv
-/// every run and *never written back* (`config.rs`'s own doc comment says so).
-/// A settings row that appeared to set them would be fabricated persistence.
+/// See [`crate::config::Options`], whose fields (besides `keybinds`, not a
+/// vanilla `OptionInstance`) this enum enumerates one-for-one. **`render_distance`
+/// and `sensitivity` are not here**, and the census in #55 and
+/// `docs/ui-framework.md` is wrong to list them: both live on
+/// [`crate::config::Config`], which is parsed from argv every run and *never
+/// written back* (`config.rs`'s own doc comment says so). A settings row that
+/// appeared to set them would be fabricated persistence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveOption {
     /// `options.guiScale` → [`crate::config::Options::gui_scale`]. Threaded to
@@ -212,6 +212,21 @@ pub enum LiveOption {
     /// per presented frame by `app.rs` and handed to `Sim::set_view_bobbing`;
     /// see `docs/view-bobbing.md`.
     ViewBobbing,
+    /// `key.sneak` → [`crate::config::Options::toggle_sneak`] (issue #202).
+    /// Fed to `InputState::set_toggle_modes` every tick.
+    ToggleSneak,
+    /// `key.sprint` → [`crate::config::Options::toggle_sprint`] (issue #202).
+    ToggleSprint,
+    /// `options.invertMouseX` → [`crate::config::Options::invert_mouse_x`]
+    /// (issue #203). Fed to `apply_look_inverted`.
+    InvertMouseX,
+    /// `options.invertMouseY` → [`crate::config::Options::invert_mouse_y`]
+    /// (issue #203).
+    InvertMouseY,
+    /// `options.mouseWheelSensitivity` →
+    /// [`crate::config::Options::mouse_wheel_sensitivity`] (issue #203). Fed
+    /// to the hotbar scroll handler.
+    MouseWheelSensitivity,
 }
 
 /// One vanilla `OptionInstance`, reduced to what a row needs.
@@ -341,6 +356,27 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
         LiveOption::ViewBobbing => {
             if options.view_bobbing { "ON" } else { "OFF" }.to_string()
         }
+        // `ToggleKeyMapping`'s own stringifier is `value ? KEY_TOGGLE :
+        // KEY_HOLD` (`ToggleKeyMapping`'s caller in `Options.java:605-609`),
+        // i.e. "Toggle"/"Hold" — **not** ON/OFF, unlike every other boolean
+        // option on this page. `en_us.json`'s `options.key.toggle`/
+        // `options.key.hold`.
+        LiveOption::ToggleSneak => {
+            if options.toggle_sneak { "Toggle" } else { "Hold" }.to_string()
+        }
+        LiveOption::ToggleSprint => {
+            if options.toggle_sprint { "Toggle" } else { "Hold" }.to_string()
+        }
+        LiveOption::InvertMouseX => {
+            if options.invert_mouse_x { "ON" } else { "OFF" }.to_string()
+        }
+        LiveOption::InvertMouseY => {
+            if options.invert_mouse_y { "ON" } else { "OFF" }.to_string()
+        }
+        // `String.format(Locale.ROOT, "%.2f", value)` (`Options.java:479`).
+        LiveOption::MouseWheelSensitivity => {
+            format!("{:.2}", options.mouse_wheel_sensitivity)
+        }
     }
 }
 
@@ -383,6 +419,20 @@ const fn live_cycle(accessor: &'static str, caption: &'static str, live: LiveOpt
         accessor,
         caption,
         widget: OptionWidget::Cycle,
+        live: Some(live),
+    })
+}
+
+/// As [`live_cycle`], for a slider-widget option — issues #200/#202/#203's
+/// `mouseWheelSensitivity` is the first slider to leave the "labels only"
+/// set. A click steps it by one increment, the same simplification
+/// `guiScale` already uses (`SettingsOutcome::Cycle` has one variant for both
+/// widget kinds — see that type's doc).
+const fn live_slider(accessor: &'static str, caption: &'static str, live: LiveOption) -> Cell {
+    Cell::Option(OptionSpec {
+        accessor,
+        caption,
+        widget: OptionWidget::Slider,
         live: Some(live),
     })
 }
@@ -511,12 +561,21 @@ static VIDEO: &[Entry] = &[
 /// **keybind** name rather than an `options.*` key — `key.sneak`, `key.sprint`,
 /// `key.attack`, `key.use` (`Options.java:603-629`) — and their values are
 /// `options.key.toggle`/`options.key.hold` rather than ON/OFF.
+///
+/// **Sneak and Sprint are live** (issue #202) — [`crate::config::Options::toggle_sneak`]/
+/// `toggle_sprint`, read by `InputState::set` (`lodestone-controller`).
+/// Attack/Destroy and Use Item/Place Block stay inactive: #202 is scoped to
+/// movement, and this crate's attack/use handling (`interact.rs`) has no
+/// toggle concept to hang a mode off yet.
 static CONTROLS: &[Entry] = &[
     pair(
         nav("Mouse Settings...", SettingsPage::Mouse),
         no_screen("Key Binds..."),
     ),
-    pair(cycle("toggleCrouch", "Sneak"), cycle("toggleSprint", "Sprint")),
+    pair(
+        live_cycle("toggleCrouch", "Sneak", LiveOption::ToggleSneak),
+        live_cycle("toggleSprint", "Sprint", LiveOption::ToggleSprint),
+    ),
     pair(
         cycle("toggleAttack", "Attack/Destroy"),
         cycle("toggleUse", "Use Item/Place Block"),
@@ -532,19 +591,34 @@ static CONTROLS: &[Entry] = &[
 ///
 /// `rawMouseInput` is included: vanilla appends it only when
 /// `InputConstants.isRawMouseInputSupported()`, which is true on every desktop
-/// GLFW build, so the seven-control shape is the one a player sees. It is
-/// inactive here like the rest of the screen.
+/// GLFW build, so the seven-control shape is the one a player sees.
+///
+/// **Scroll Sensitivity and both inverts are live** (issue #203) —
+/// [`crate::config::Options::mouse_wheel_sensitivity`]/`invert_mouse_x`/
+/// `invert_mouse_y`. **Sensitivity (look) is not, and stays inactive
+/// deliberately**: it lives on [`crate::config::Config`], parsed from argv and
+/// never written back (see [`LiveOption`]'s doc) — a settings row that
+/// appeared to persist it would be fabricated. `discreteMouseScroll`,
+/// `allowCursorChanges` and `rawMouseInput` are also still inactive: none of
+/// the three has a consumer in this shell yet (there is no discrete-vs-continuous
+/// scroll distinction, no OS cursor swap, and no raw-input toggle), so wiring
+/// the label without the behaviour would be exactly the fabrication #203
+/// exists to fix, one row over.
 static MOUSE: &[Entry] = &[
     pair(
         slider("sensitivity", "Sensitivity"),
-        slider("mouseWheelSensitivity", "Scroll Sensitivity"),
+        live_slider(
+            "mouseWheelSensitivity",
+            "Scroll Sensitivity",
+            LiveOption::MouseWheelSensitivity,
+        ),
     ),
     pair(
         cycle("discreteMouseScroll", "Discrete Scrolling"),
-        cycle("invertMouseX", "Invert Mouse X"),
+        live_cycle("invertMouseX", "Invert Mouse X", LiveOption::InvertMouseX),
     ),
     pair(
-        cycle("invertMouseY", "Invert Mouse Y"),
+        live_cycle("invertMouseY", "Invert Mouse Y", LiveOption::InvertMouseY),
         cycle("allowCursorChanges", "Allow Cursor Changes"),
     ),
     lone(cycle("rawMouseInput", "Raw Input")),
@@ -1769,8 +1843,9 @@ mod tests {
             }
         }
         assert_eq!(total, 135);
-        // Exactly two *options* are live, and they are the two persisted
-        // fields of `config::Options`.
+        // Seven *options* are live, in page order (`PAGES`) and then
+        // declaration order within each page — the persisted fields of
+        // `config::Options` besides `keybinds`.
         let live_options: Vec<LiveOption> = live
             .iter()
             .filter_map(|(_, cell)| match cell {
@@ -1780,8 +1855,18 @@ mod tests {
             .collect();
         assert_eq!(
             live_options,
-            vec![LiveOption::GuiScale, LiveOption::ViewBobbing],
-            "GUI Scale on Video, View Bobbing on Accessibility — and nothing else"
+            vec![
+                LiveOption::GuiScale,
+                LiveOption::ToggleSneak,
+                LiveOption::ToggleSprint,
+                LiveOption::MouseWheelSensitivity,
+                LiveOption::InvertMouseX,
+                LiveOption::InvertMouseY,
+                LiveOption::ViewBobbing,
+            ],
+            "GUI Scale on Video; Sneak/Sprint toggle on Controls (#202); scroll \
+             sensitivity and both inverts on Mouse (#203); View Bobbing on \
+             Accessibility — and nothing else"
         );
         // The control: an option we do not persist must report itself inactive,
         // and the detector must be able to tell the difference.

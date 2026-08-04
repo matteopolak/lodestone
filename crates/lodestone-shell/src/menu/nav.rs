@@ -999,6 +999,42 @@ impl MenuNav {
         self.options.view_bobbing
     }
 
+    /// Vanilla's `key.sneak` hold/toggle option (issue #202) — see
+    /// [`crate::config::Options::toggle_sneak`]. Read every tick and handed to
+    /// `InputState::set_toggle_modes`.
+    #[must_use]
+    pub fn toggle_sneak(&self) -> bool {
+        self.options.toggle_sneak
+    }
+
+    /// As [`MenuNav::toggle_sneak`], for `key.sprint`.
+    #[must_use]
+    pub fn toggle_sprint(&self) -> bool {
+        self.options.toggle_sprint
+    }
+
+    /// Vanilla's `options.invertMouseX` (issue #203) — see
+    /// [`crate::config::Options::invert_mouse_x`]. Read per look-integration
+    /// call and handed to `apply_look_inverted`.
+    #[must_use]
+    pub fn invert_mouse_x(&self) -> bool {
+        self.options.invert_mouse_x
+    }
+
+    /// As [`MenuNav::invert_mouse_x`], for Y.
+    #[must_use]
+    pub fn invert_mouse_y(&self) -> bool {
+        self.options.invert_mouse_y
+    }
+
+    /// Vanilla's `options.mouseWheelSensitivity` (issue #203) — see
+    /// [`crate::config::Options::mouse_wheel_sensitivity`]. Read by the
+    /// hotbar scroll handler.
+    #[must_use]
+    pub fn mouse_wheel_sensitivity(&self) -> f32 {
+        self.options.mouse_wheel_sensitivity
+    }
+
     /// The last options-save failure, if any.
     #[must_use]
     pub fn options_save_error(&self) -> Option<&str> {
@@ -1779,6 +1815,26 @@ impl MenuNav {
                 self.toggle_view_bobbing();
                 MenuAction::None
             }
+            SettingsOutcome::Cycle(LiveOption::ToggleSneak) => {
+                self.toggle_toggle_sneak();
+                MenuAction::None
+            }
+            SettingsOutcome::Cycle(LiveOption::ToggleSprint) => {
+                self.toggle_toggle_sprint();
+                MenuAction::None
+            }
+            SettingsOutcome::Cycle(LiveOption::InvertMouseX) => {
+                self.toggle_invert_mouse_x();
+                MenuAction::None
+            }
+            SettingsOutcome::Cycle(LiveOption::InvertMouseY) => {
+                self.toggle_invert_mouse_y();
+                MenuAction::None
+            }
+            SettingsOutcome::Cycle(LiveOption::MouseWheelSensitivity) => {
+                self.cycle_mouse_wheel_sensitivity(1);
+                MenuAction::None
+            }
         }
     }
 
@@ -1906,6 +1962,58 @@ impl MenuNav {
     /// eager-persistence rule as [`MenuNav::cycle_gui_scale`].
     fn toggle_view_bobbing(&mut self) {
         self.options.view_bobbing = !self.options.view_bobbing;
+        self.persist_options();
+    }
+
+    /// Flips `key.sneak`'s hold/toggle mode (issue #202) and saves
+    /// immediately, same eager-persistence rule as
+    /// [`MenuNav::cycle_gui_scale`].
+    fn toggle_toggle_sneak(&mut self) {
+        self.options.toggle_sneak = !self.options.toggle_sneak;
+        self.persist_options();
+    }
+
+    /// As [`MenuNav::toggle_toggle_sneak`], for `key.sprint`.
+    fn toggle_toggle_sprint(&mut self) {
+        self.options.toggle_sprint = !self.options.toggle_sprint;
+        self.persist_options();
+    }
+
+    /// Flips `options.invertMouseX` (issue #203) and saves immediately.
+    fn toggle_invert_mouse_x(&mut self) {
+        self.options.invert_mouse_x = !self.options.invert_mouse_x;
+        self.persist_options();
+    }
+
+    /// As [`MenuNav::toggle_invert_mouse_x`], for Y.
+    fn toggle_invert_mouse_y(&mut self) {
+        self.options.invert_mouse_y = !self.options.invert_mouse_y;
+        self.persist_options();
+    }
+
+    /// Steps `mouseWheelSensitivity` by `delta` clicks of
+    /// [`crate::config::MOUSE_WHEEL_SENSITIVITY_STEP`], wrapping between
+    /// [`crate::config::MIN_MOUSE_WHEEL_SENSITIVITY`] and
+    /// [`crate::config::MAX_MOUSE_WHEEL_SENSITIVITY`] inclusive (issue #203),
+    /// and saves immediately.
+    fn cycle_mouse_wheel_sensitivity(&mut self, delta: i32) {
+        use crate::config::{
+            MAX_MOUSE_WHEEL_SENSITIVITY, MIN_MOUSE_WHEEL_SENSITIVITY, MOUSE_WHEEL_SENSITIVITY_STEP,
+        };
+        // Additive, on the *continuous* value — not a round-trip through a
+        // quantized step index. Rounding to the nearest step and back would
+        // drift the value toward whatever grid the rounding implies (e.g. a
+        // starting `1.0` is not itself a multiple of `STEP` away from `MIN`,
+        // so round-tripping it would silently move it to the nearest one
+        // that is), which is both surprising and, once `sensitivity` no
+        // longer sits exactly on the grid, a source of accumulating error
+        // across repeated clicks.
+        let span = MAX_MOUSE_WHEEL_SENSITIVITY - MIN_MOUSE_WHEEL_SENSITIVITY;
+        let period = span + MOUSE_WHEEL_SENSITIVITY_STEP;
+        let offset = self.options.mouse_wheel_sensitivity - MIN_MOUSE_WHEEL_SENSITIVITY;
+        let wrapped = (offset + delta as f32 * MOUSE_WHEEL_SENSITIVITY_STEP).rem_euclid(period);
+        self.options.mouse_wheel_sensitivity =
+            (MIN_MOUSE_WHEEL_SENSITIVITY + wrapped).clamp(MIN_MOUSE_WHEEL_SENSITIVITY, MAX_MOUSE_WHEEL_SENSITIVITY);
         self.persist_options();
     }
 
@@ -2817,6 +2925,151 @@ mod tests {
         assert_eq!(nav.gui_scale(), 2);
         assert!(nav.view_bobbing());
         assert_eq!(ui.screen(), Screen::Settings);
+    }
+
+    /// #202: clicking Sneak/Sprint's rows on the Controls page toggles their
+    /// hold/toggle mode and persists immediately, isolated from each other
+    /// and from an inactive neighbour — same shape as
+    /// [`clicking_a_settings_row_acts_on_that_row_and_no_other`], scoped to
+    /// the two new live rows.
+    #[test]
+    fn clicking_sneak_or_sprint_toggles_only_that_ones_mode() {
+        let (mut nav, path) = self::nav("settings-toggle-sneak-sprint");
+        let mut ui = UiState::new();
+        ui.open_settings();
+        let options_path = path.parent().unwrap().join("options.json");
+
+        assert!(!nav.toggle_sneak(), "vanilla's own default is hold");
+        assert!(!nav.toggle_sprint());
+
+        open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::Controls);
+        let sneak = settings_row(&mut nav, &mut ui, is_option("toggleCrouch"));
+        assert_eq!(nav.click(&mut ui, sneak), MenuAction::None);
+        assert!(nav.toggle_sneak(), "the clicked row must flip");
+        assert!(!nav.toggle_sprint(), "and not its neighbour");
+        assert!(crate::config::Options::load_from(&options_path).toggle_sneak);
+        assert!(!crate::config::Options::load_from(&options_path).toggle_sprint);
+
+        let sprint = settings_row(&mut nav, &mut ui, is_option("toggleSprint"));
+        assert_ne!(sprint, sneak);
+        assert_eq!(nav.click(&mut ui, sprint), MenuAction::None);
+        assert!(nav.toggle_sprint());
+        assert!(nav.toggle_sneak(), "sprint's click must not un-flip sneak");
+
+        // An inactive neighbour (Attack/Destroy) does nothing.
+        let attack = settings_row(&mut nav, &mut ui, is_option("toggleAttack"));
+        assert_eq!(nav.click(&mut ui, attack), MenuAction::None);
+        assert!(nav.toggle_sneak());
+        assert!(nav.toggle_sprint());
+    }
+
+    /// #203: clicking the Mouse page's Scroll Sensitivity / Invert X / Invert
+    /// Y rows mutates and persists only the clicked one.
+    #[test]
+    fn clicking_a_mouse_row_touches_only_that_row() {
+        let (mut nav, path) = self::nav("settings-mouse-feel");
+        let mut ui = UiState::new();
+        ui.open_settings();
+        let options_path = path.parent().unwrap().join("options.json");
+
+        assert_eq!(nav.mouse_wheel_sensitivity(), 1.0, "vanilla's own default");
+        assert!(!nav.invert_mouse_x());
+        assert!(!nav.invert_mouse_y());
+
+        // Mouse Settings is nested under Controls, not a root-level page
+        // (`nav("Mouse Settings...", SettingsPage::Mouse)` lives inside
+        // `CONTROLS`) — so reaching it is two hops, matching how a player
+        // would actually navigate there.
+        open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::Controls);
+        open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::Mouse);
+
+        let wheel = settings_row(&mut nav, &mut ui, is_option("mouseWheelSensitivity"));
+        assert_eq!(nav.click(&mut ui, wheel), MenuAction::None);
+        assert!(
+            (nav.mouse_wheel_sensitivity() - 1.25).abs() < 1e-4,
+            "one click is one MOUSE_WHEEL_SENSITIVITY_STEP; got {}",
+            nav.mouse_wheel_sensitivity()
+        );
+        assert!(!nav.invert_mouse_x(), "must not touch an unrelated row");
+        assert!(!nav.invert_mouse_y());
+        assert!(
+            (crate::config::Options::load_from(&options_path).mouse_wheel_sensitivity - 1.25).abs()
+                < 1e-4
+        );
+
+        let inv_x = settings_row(&mut nav, &mut ui, is_option("invertMouseX"));
+        assert_ne!(inv_x, wheel);
+        assert_eq!(nav.click(&mut ui, inv_x), MenuAction::None);
+        assert!(nav.invert_mouse_x());
+        assert!(!nav.invert_mouse_y(), "invert X must not flip invert Y");
+        assert!(
+            (nav.mouse_wheel_sensitivity() - 1.25).abs() < 1e-4,
+            "…nor touch the slider"
+        );
+
+        let inv_y = settings_row(&mut nav, &mut ui, is_option("invertMouseY"));
+        assert_ne!(inv_y, inv_x);
+        assert_eq!(nav.click(&mut ui, inv_y), MenuAction::None);
+        assert!(nav.invert_mouse_y());
+        assert!(nav.invert_mouse_x(), "invert Y's click must not un-flip X");
+
+        // Sensitivity (look) is deliberately inactive — see the module docs.
+        let look_sensitivity = settings_row(&mut nav, &mut ui, is_option("sensitivity"));
+        assert_eq!(nav.click(&mut ui, look_sensitivity), MenuAction::None);
+        assert!(nav.invert_mouse_x());
+        assert!(nav.invert_mouse_y());
+    }
+
+    /// #203: the scroll-sensitivity click wraps at vanilla's own slider bounds
+    /// rather than running away, and steps by exactly one increment at a time
+    /// — predicted from the constants, not just "it changed".
+    #[test]
+    fn mouse_wheel_sensitivity_cycles_and_wraps_at_vanillas_bounds() {
+        use crate::config::{
+            MAX_MOUSE_WHEEL_SENSITIVITY, MIN_MOUSE_WHEEL_SENSITIVITY, MOUSE_WHEEL_SENSITIVITY_STEP,
+        };
+        let (mut nav, _path) = self::nav("settings-wheel-wrap");
+        let mut ui = UiState::new();
+        ui.open_settings();
+        // Mouse Settings is nested under Controls, not a root-level page
+        // (`nav("Mouse Settings...", SettingsPage::Mouse)` lives inside
+        // `CONTROLS`) — so reaching it is two hops, matching how a player
+        // would actually navigate there.
+        open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::Controls);
+        open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::Mouse);
+        let wheel = settings_row(&mut nav, &mut ui, is_option("mouseWheelSensitivity"));
+
+        // The exact closed form the mutator implements: an additive step on
+        // the continuous offset from `MIN`, wrapped modulo one period
+        // (`span + STEP`). Computed independently here rather than re-run,
+        // and checked at *every* click for 90 of them — more than two full
+        // periods (`10.0 / 0.25 == 40` steps/period) — so this both predicts
+        // the exact value (not just its sign or its bound) and proves the
+        // wrap is periodic rather than a one-off clamp.
+        let span = MAX_MOUSE_WHEEL_SENSITIVITY - MIN_MOUSE_WHEEL_SENSITIVITY;
+        let period = span + MOUSE_WHEEL_SENSITIVITY_STEP;
+        let start_offset = 1.0 - MIN_MOUSE_WHEEL_SENSITIVITY; // vanilla's own default is 1.0
+        assert!(
+            (nav.mouse_wheel_sensitivity() - 1.0).abs() < 1e-6,
+            "precondition: starts at vanilla's default"
+        );
+
+        for n in 1..=90_i32 {
+            nav.click(&mut ui, wheel);
+            let expected = MIN_MOUSE_WHEEL_SENSITIVITY
+                + (start_offset + n as f32 * MOUSE_WHEEL_SENSITIVITY_STEP).rem_euclid(period);
+            let got = nav.mouse_wheel_sensitivity();
+            assert!(
+                (got - expected).abs() < 1e-3,
+                "click {n}: expected {expected}, got {got}"
+            );
+            assert!(
+                (MIN_MOUSE_WHEEL_SENSITIVITY - 1e-4..=MAX_MOUSE_WHEEL_SENSITIVITY + 1e-4)
+                    .contains(&got),
+                "click {n}: {got} left vanilla's own \
+                 {MIN_MOUSE_WHEEL_SENSITIVITY}..={MAX_MOUSE_WHEEL_SENSITIVITY} range"
+            );
+        }
     }
 
     /// A settings row index is an index into a `rows` vector built in

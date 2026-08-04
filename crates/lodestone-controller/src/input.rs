@@ -39,6 +39,11 @@ pub enum Action {
 /// default is hard-coded rather than exposed as a slider.
 pub const SPRINT_TRIGGER_WINDOW_TICKS: u8 = 7;
 
+/// Vanilla's minimum food level to *start* a sprint (issue #200):
+/// `FoodData.hasEnoughFood()` is `foodLevel > 6.0` (`FoodData.java:92-94`), so
+/// exactly `6` does not qualify — the cutoff is strict, not inclusive.
+pub const MIN_FOOD_LEVEL_TO_SPRINT: i32 = 6;
+
 /// The set of currently-held actions plus accumulated, not-yet-consumed mouse
 /// motion. Cheap to copy; the platform layer owns one.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -79,6 +84,20 @@ pub struct InputState {
     /// `LocalPlayer.java:798-800` (vanilla also cancels while slowed by item
     /// use — this crate has no such signal to check).
     sprint_trigger_ticks: u8,
+    /// Raw physical hold state of the sneak key, tracked **separately** from
+    /// [`Self::sneak`] so a toggle-mode press can be told apart from a repeat
+    /// (issue #202). Unused while [`Self::toggle_sneak`] is off, where
+    /// `sneak` already *is* the physical state and this would be redundant.
+    sneak_key_down: bool,
+    /// As [`Self::sneak_key_down`], for sprint.
+    sprint_key_down: bool,
+    /// Vanilla's `key.sneak` toggle option (`Options::toggleCrouch`, issue
+    /// #202). A **config** flag, not per-key transient state — see
+    /// [`Self::set_toggle_modes`] and [`Self::release_all`], which preserves
+    /// it exactly like [`Self::mouse_dx`]/[`Self::mouse_dy`].
+    toggle_sneak: bool,
+    /// As [`Self::toggle_sneak`], for `key.sprint`/`Options::toggleSprint`.
+    toggle_sprint: bool,
     /// Accumulated horizontal mouse delta in pixels since last consume.
     pub mouse_dx: f32,
     /// Accumulated vertical mouse delta in pixels since last consume.
@@ -86,7 +105,35 @@ pub struct InputState {
 }
 
 impl InputState {
+    /// Sets vanilla's `key.sneak`/`key.sprint` toggle options (issue #202,
+    /// `Options::toggleCrouch`/`toggleSprint`).
+    ///
+    /// A config setter rather than a constructor argument: the platform layer
+    /// owns one long-lived `InputState` and the option can change mid-session
+    /// from the settings screen, so this has to be callable at any time. Safe
+    /// to call every tick with the same values — it only ever writes the two
+    /// fields, never touches the effective `sneak`/`sprint` state, so calling
+    /// it redundantly is a no-op in every way that matters.
+    pub fn set_toggle_modes(&mut self, toggle_sneak: bool, toggle_sprint: bool) {
+        self.toggle_sneak = toggle_sneak;
+        self.toggle_sprint = toggle_sprint;
+    }
+
     /// Set or clear a held action.
+    ///
+    /// # Toggle mode (issue #202)
+    ///
+    /// Sneak and sprint each have a vanilla option that turns the key from
+    /// hold-to-activate into press-to-toggle — `ToggleKeyMapping::setDown`
+    /// (`ToggleKeyMapping.java:33-40`): a toggle-mode key's *effective* state
+    /// (`isDown()`) only changes on a physical **press** edge, where it flips;
+    /// a physical **release** does nothing. [`Self::sneak`]/[`Self::sprint`]
+    /// are that effective state — the same field every other reader in this
+    /// crate (`movement_intent`, the double-tap window) already consumes — so
+    /// nothing downstream has to know or care whether toggle mode is on.
+    /// [`Self::sneak_key_down`]/[`Self::sprint_key_down`] exist only to
+    /// detect the press edge; they track the raw physical key independently
+    /// of whatever the toggle has done to the effective flag.
     pub fn set(&mut self, action: Action, held: bool) {
         match action {
             Action::Forward => {
@@ -118,8 +165,28 @@ impl InputState {
             Action::Left => self.left = held,
             Action::Right => self.right = held,
             Action::Jump => self.jump = held,
-            Action::Sneak => self.sneak = held,
-            Action::Sprint => self.sprint = held,
+            Action::Sneak => {
+                let fresh_press = held && !self.sneak_key_down;
+                self.sneak_key_down = held;
+                if self.toggle_sneak {
+                    if fresh_press {
+                        self.sneak = !self.sneak;
+                    }
+                } else {
+                    self.sneak = held;
+                }
+            }
+            Action::Sprint => {
+                let fresh_press = held && !self.sprint_key_down;
+                self.sprint_key_down = held;
+                if self.toggle_sprint {
+                    if fresh_press {
+                        self.sprint = !self.sprint;
+                    }
+                } else {
+                    self.sprint = held;
+                }
+            }
         }
     }
 
@@ -157,11 +224,24 @@ impl InputState {
 
     /// Clear all held actions (used when the cursor is released / window loses
     /// focus, so the player doesn't keep walking).
+    ///
+    /// Clearing `sneak`/`sprint` to `false` here is correct in toggle mode too
+    /// — it mirrors `KeyMapping.releaseAll()` calling `release()` on every
+    /// mapping, and `ToggleKeyMapping.release()`'s `reset()` sets `isDown`
+    /// `false` unconditionally regardless of toggle mode
+    /// (`ToggleKeyMapping.java:42-49`). [`Self::toggle_sneak`]/
+    /// [`Self::toggle_sprint`] are preserved across the reset like
+    /// [`Self::mouse_dx`]/[`Self::mouse_dy`] are: they are the *option*, not
+    /// per-key transient state, and losing them here would silently revert a
+    /// player's toggle-mode choice the next time the cursor is released.
     pub fn release_all(&mut self) {
         let mouse = (self.mouse_dx, self.mouse_dy);
+        let toggles = (self.toggle_sneak, self.toggle_sprint);
         *self = InputState::default();
         self.mouse_dx = mouse.0;
         self.mouse_dy = mouse.1;
+        self.toggle_sneak = toggles.0;
+        self.toggle_sprint = toggles.1;
     }
 
     /// Whether any movement key is held (used to gate sprint etc.).
@@ -204,6 +284,33 @@ pub fn movement_intent(state: &InputState) -> MovementInput {
     }
 }
 
+/// [`movement_intent`], plus vanilla's food-level sprint gate (issue #200).
+///
+/// `LocalPlayer.canStartSprinting` requires `isSprintingPossible`, whose
+/// non-passenger branch is `hasEnoughFoodToDoExhaustiveManoeuvres()` —
+/// `foodData.hasEnoughFood() || abilities.mayfly`
+/// (`Player.java:1592-1594`), and `hasEnoughFood()` is `foodLevel > 6.0`
+/// (`FoodData.java:92-94`). So: sprint is allowed on empty/low food only while
+/// flight is permitted (creative/spectator), and otherwise cuts out at food
+/// level 6 and below, not just at 0.
+///
+/// A second function rather than a parameter on [`movement_intent`] itself:
+/// this crate holds no food or ability state (that is server-reported session
+/// data a layer up, in `lodestone-ecs`), so the gate has to be a `bool` the
+/// caller computes — and `movement_intent`'s existing signature is called
+/// directly by `lodestone-shell`'s `sim.rs`, which this crate does not own and
+/// must not silently break. The real production path
+/// (`ecs::compute_movement_intent` → `ecs::swim_adjusted_intent`) is what
+/// needs to move onto this one; see that module.
+#[must_use]
+pub fn movement_intent_with_food(state: &InputState, sprint_allowed_by_food: bool) -> MovementInput {
+    let mut intent = movement_intent(state);
+    if !sprint_allowed_by_food {
+        intent.sprint = false;
+    }
+    intent
+}
+
 /// Pitch is clamped to just under straight up/down, exactly like vanilla
 /// (`Mth.clamp(pitch, -90, 90)`), so the camera can never flip over.
 pub const PITCH_LIMIT: f32 = 89.999;
@@ -232,6 +339,11 @@ pub fn sensitivity_factor(slider: f32) -> f32 {
 ///   `lodestone_render::Camera`'s "positive pitch looks down".
 /// * The raw pixel deltas pass through the vanilla [`sensitivity_factor`] curve.
 /// * Yaw wraps to `[-180, 180)`; pitch is clamped to [`PITCH_LIMIT`].
+///
+/// **No invert option** — see [`apply_look_inverted`] (issue #203), added
+/// alongside rather than as a parameter here because this exact signature is
+/// called directly by `lodestone-shell`'s `sim.rs`, which this crate does not
+/// own and must not silently break.
 #[must_use]
 pub fn apply_look(yaw: f32, pitch: f32, dx: f32, dy: f32, sensitivity: f32) -> (f32, f32) {
     let factor = sensitivity_factor(sensitivity);
@@ -241,6 +353,34 @@ pub fn apply_look(yaw: f32, pitch: f32, dx: f32, dy: f32, sensitivity: f32) -> (
     yaw = (yaw + 180.0).rem_euclid(360.0) - 180.0;
     pitch = pitch.clamp(-PITCH_LIMIT, PITCH_LIMIT);
     (yaw, pitch)
+}
+
+/// [`apply_look`], plus vanilla's `invertXMouse`/`invertYMouse` options
+/// (issue #203).
+///
+/// `MouseHandler.turnPlayer` computes `xo`/`yo` (the raw delta already scaled
+/// by sensitivity) and negates *those* right before `Entity.turn`:
+/// `player.turn(invertMouseX ? -xo : xo, invertMouseY ? -yo : yo)`
+/// (`MouseHandler.java:372-374`) — negation is the last step, after the
+/// sensitivity curve, not before it. This negates `dx`/`dy` first and lets
+/// [`apply_look`] apply the (unsigned) [`sensitivity_factor`] afterwards, but
+/// the two orders agree numerically: the curve multiplies by a positive
+/// scalar derived from the sensitivity slider alone, with no dependence on
+/// `dx`/`dy`'s sign, so negating before or after that multiplication is the
+/// same real number either way.
+#[must_use]
+pub fn apply_look_inverted(
+    yaw: f32,
+    pitch: f32,
+    dx: f32,
+    dy: f32,
+    sensitivity: f32,
+    invert_x: bool,
+    invert_y: bool,
+) -> (f32, f32) {
+    let dx = if invert_x { -dx } else { dx };
+    let dy = if invert_y { -dy } else { dy };
+    apply_look(yaw, pitch, dx, dy, sensitivity)
 }
 
 #[cfg(test)]
@@ -278,6 +418,40 @@ mod tests {
         assert!(movement_intent(&s).sprint);
         s.set(Action::Sneak, true);
         assert!(!movement_intent(&s).sprint, "no sprint while sneaking");
+    }
+
+    /// #200: vanilla's cutoff is `foodLevel > 6` (`FoodData.java:93`), not `> 0`
+    /// — a player at exactly 6 must not be able to start a sprint.
+    #[test]
+    fn sprint_is_gated_on_food_above_six() {
+        let mut s = InputState::default();
+        s.set(Action::Sprint, true);
+        s.set(Action::Forward, true);
+
+        // Predict both hypotheses at the boundary rather than merely asserting
+        // "sprint stops somewhere": vanilla's own cutoff is 6, so 7 must still
+        // sprint and 6 must not, not just "some value near there".
+        assert!(
+            movement_intent_with_food(&s, true).sprint,
+            "sprint is otherwise requested and effective; food must not veto it when allowed"
+        );
+        assert!(
+            !movement_intent_with_food(&s, false).sprint,
+            "the caller has already resolved food <= 6 to `false`; the gate must take it"
+        );
+    }
+
+    /// The gate must only ever *remove* sprint, never grant it back — it is a
+    /// further AND, not an override of the existing forward/sneak gate.
+    #[test]
+    fn the_food_gate_cannot_grant_sprint_the_other_gates_refused() {
+        let mut s = InputState::default();
+        s.set(Action::Sprint, true);
+        s.set(Action::Sneak, true); // already vetoes sprint on its own
+        assert!(
+            !movement_intent_with_food(&s, true).sprint,
+            "food alone must not overrule the sneak veto"
+        );
     }
 
     #[test]
@@ -401,6 +575,43 @@ mod tests {
         assert!((pitch + PITCH_LIMIT).abs() < 1e-3);
     }
 
+    /// #203: `apply_look_inverted(.., false, false)` must be numerically
+    /// identical to plain [`apply_look`] — the option's *absence* changing
+    /// nothing is the control every "inversion" test below leans on.
+    #[test]
+    fn uninverted_matches_apply_look_exactly() {
+        let plain = apply_look(12.0, -3.0, 40.0, -15.0, 0.7);
+        let inverted_off = apply_look_inverted(12.0, -3.0, 40.0, -15.0, 0.7, false, false);
+        assert_eq!(plain, inverted_off);
+    }
+
+    /// Predicts the exact resulting yaw/pitch from negating the deltas by
+    /// hand, rather than merely asserting the direction flipped — a test that
+    /// only checked the sign could pass for a wrong magnitude too.
+    #[test]
+    fn inverting_x_negates_the_yaw_delta_exactly() {
+        let (yaw, pitch) = apply_look(0.0, 0.0, 40.0, 0.0, 0.5);
+        let (yaw_inv, pitch_inv) = apply_look_inverted(0.0, 0.0, 40.0, 0.0, 0.5, true, false);
+        assert_eq!(pitch, pitch_inv, "x-invert must not touch pitch");
+        assert!((yaw_inv - (-yaw)).abs() < 1e-6, "expected {}, got {yaw_inv}", -yaw);
+    }
+
+    #[test]
+    fn inverting_y_negates_the_pitch_delta_exactly() {
+        let (yaw, pitch) = apply_look(0.0, 0.0, 0.0, 20.0, 0.5);
+        let (yaw_inv, pitch_inv) = apply_look_inverted(0.0, 0.0, 0.0, 20.0, 0.5, false, true);
+        assert_eq!(yaw, yaw_inv, "y-invert must not touch yaw");
+        assert!((pitch_inv - (-pitch)).abs() < 1e-6, "expected {}, got {pitch_inv}", -pitch);
+    }
+
+    #[test]
+    fn both_axes_invert_independently_and_simultaneously() {
+        let (yaw, pitch) = apply_look(0.0, 0.0, 40.0, 20.0, 0.5);
+        let (yaw_inv, pitch_inv) = apply_look_inverted(0.0, 0.0, 40.0, 20.0, 0.5, true, true);
+        assert!((yaw_inv - (-yaw)).abs() < 1e-6);
+        assert!((pitch_inv - (-pitch)).abs() < 1e-6);
+    }
+
     #[test]
     fn take_mouse_clears() {
         let mut s = InputState::default();
@@ -417,5 +628,92 @@ mod tests {
         s.release_all();
         assert_eq!(movement_intent(&s).forward, 0.0);
         assert_eq!(s.mouse_dx, 1.0);
+    }
+
+    // -- toggle sneak/sprint (issue #202) ------------------------------------
+
+    #[test]
+    fn hold_mode_is_the_default_and_matches_the_old_behaviour() {
+        let mut s = InputState::default();
+        s.set(Action::Sneak, true);
+        assert!(movement_intent(&s).sneak, "held while the key is down");
+        s.set(Action::Sneak, false);
+        assert!(!movement_intent(&s).sneak, "released the moment the key is up");
+    }
+
+    #[test]
+    fn toggle_mode_flips_on_press_and_ignores_release() {
+        let mut s = InputState::default();
+        s.set_toggle_modes(true, false);
+
+        s.set(Action::Sneak, true); // press: flips on
+        assert!(movement_intent(&s).sneak, "a press must toggle sneak on");
+        s.set(Action::Sneak, false); // release: must NOT clear it
+        assert!(
+            movement_intent(&s).sneak,
+            "releasing a toggled key must not un-sneak — that is hold-mode behaviour"
+        );
+        s.set(Action::Sneak, true); // a second press flips it back off
+        assert!(!movement_intent(&s).sneak, "a second press must toggle it back off");
+    }
+
+    #[test]
+    fn toggle_sneak_and_toggle_sprint_are_independent() {
+        let mut s = InputState::default();
+        s.set_toggle_modes(true, false);
+        s.set(Action::Sprint, true);
+        assert!(
+            !movement_intent(&s).sneak,
+            "toggling sneak's mode must not affect the sprint key's own mode"
+        );
+        // Sprint (still hold mode) requires forward too, per the existing gate.
+        s.set(Action::Forward, true);
+        assert!(movement_intent(&s).sprint, "sprint held normally while its own toggle is off");
+        s.set(Action::Sprint, false);
+        assert!(!movement_intent(&s).sprint, "…and releases normally too");
+    }
+
+    #[test]
+    fn a_key_repeat_does_not_toggle_again() {
+        // The platform may report `set(action, true)` more than once for one
+        // physical press (key-repeat events); only a genuine press *edge*
+        // (transition from up to down) may flip the toggle, mirroring
+        // `ToggleKeyMapping.setDown`'s guard on `down` alone would be wrong —
+        // vanilla relies on the OS not re-delivering `GLFW_PRESS`, but this
+        // layer is not allowed to assume that of every platform.
+        let mut s = InputState::default();
+        s.set_toggle_modes(false, true);
+        s.set(Action::Sprint, true);
+        s.set(Action::Forward, true);
+        assert!(movement_intent(&s).sprint, "first press toggles sprint on");
+        s.set(Action::Sprint, true); // repeat, not a fresh press
+        assert!(
+            movement_intent(&s).sprint,
+            "a repeated `true` with no release between must not toggle it back off"
+        );
+    }
+
+    #[test]
+    fn release_all_clears_toggled_sneak_but_keeps_the_toggle_option() {
+        let mut s = InputState::default();
+        s.set_toggle_modes(true, true);
+        s.set(Action::Sneak, true);
+        assert!(movement_intent(&s).sneak, "precondition: toggled on");
+
+        s.release_all();
+        assert!(
+            !movement_intent(&s).sneak,
+            "release_all must clear the toggled state, like vanilla's releaseAll"
+        );
+
+        // But a later press must still toggle, not hold — the *option* must
+        // have survived the reset.
+        s.set(Action::Sneak, true);
+        assert!(movement_intent(&s).sneak);
+        s.set(Action::Sneak, false);
+        assert!(
+            movement_intent(&s).sneak,
+            "toggle mode must still be in effect after release_all — the option was not lost"
+        );
     }
 }
