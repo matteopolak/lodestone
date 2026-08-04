@@ -2643,6 +2643,7 @@ dependencies = [
  "lodestone-entity",
  "lodestone-model",
  "lodestone-net",
+ "lodestone-physics",
  "lodestone-world",
  "lodestone-worldgen",
  "serde_json",
@@ -2714,6 +2715,7 @@ name = "lodestone-testsupport"
 version = "0.1.0"
 dependencies = [
  "lodestone-core",
+ "lodestone-model",
  "lodestone-world",
  "lodestone-worldgen",
  "serde_json",

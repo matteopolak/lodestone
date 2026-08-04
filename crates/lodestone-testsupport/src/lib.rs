@@ -1,6 +1,9 @@
 //! Shared live-test support helpers.
 
 pub mod bench_fixtures;
+pub mod directives;
+
+pub use directives::assert_emits_set;
 
 use std::future::Future;
 use std::io::{Read, Write};
