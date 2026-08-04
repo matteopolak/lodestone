@@ -77,6 +77,10 @@ name = "chunk_light_decode"
 harness = false
 
 [[bench]]
+name = "palette_expansion"
+harness = false
+
+[[bench]]
 name = "nbt_decode"
 harness = false
 
