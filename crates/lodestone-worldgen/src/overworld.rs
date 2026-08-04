@@ -77,10 +77,16 @@
 //! `UNDERGROUND_ORES` step names `minecraft:ore_gold_extra`, badlands' bonus
 //! gold vein, which no substitute biome's list contains).
 //!
-//! **Still not composed:** vegetation/tree features (unbuilt anywhere in
-//! this crate, epic #404 Phase 3) and structures (unbuilt anywhere in this
-//! repo, `#136`). `docs/worldgen-parity.md` measures the composed subset
-//! (shape + real aquifer + biome + surface + carvers + ores) against a real
+//! **Still not composed:** structures (unbuilt anywhere in this repo,
+//! `#136`). Vegetation/tree features WERE still-not-composed when this line
+//! was first written, but issue #406 built and composed them
+//! (`Self::vegetation_stage`) and issue #427 gave that stage the real 3×3
+//! `blockStateWriteRadius(1)` driver every other decoration stage already
+//! had — this sentence just never got updated, which is itself the thing
+//! CLAUDE.md's §2 keeps warning stale claims in this file are prone to.
+//! `docs/worldgen-parity.md` measures the composed subset
+//! (shape + real aquifer + biome + surface + carvers + ores + vegetation)
+//! against a real
 //! vanilla JVM.
 //!
 //! # Performance (issue #295's Job 2), and an honest miss
@@ -258,6 +264,25 @@ struct PreOreCache {
     order: std::collections::VecDeque<(i32, i32)>,
 }
 
+/// [`OverworldGenerator::post_ore_cache`]'s storage — same FIFO shape as
+/// [`PreOreCache`], for the same reason: [`Self::vegetation_stage`]'s 3×3
+/// driver (issue #427) calls [`Self::post_ore_world`] for 8 neighbours on
+/// every `column()` call, and a sweep over adjacent chunks asks for the
+/// *same* neighbour's post-ore world repeatedly (centre `(cx,cz)`'s own
+/// vegetation pass computes `(cx+1,cz)`'s post-ore world; `(cx+1,cz)`'s own
+/// `column()` call needs that exact same value for itself). Without this
+/// cache, [`Self::ore_stage`]'s own real 3×3 `UNDERGROUND_ORES` RNG-driver
+/// (not just the memoised [`Self::pre_ore_stage`] terrain feeding it) would
+/// be recomputed from scratch for every `(neighbour, requester)` pair in a
+/// sweep — a further, uncached 9× on top of the 9× `docs/worldgen-parity.md`
+/// already measured for ore composition alone (700.57s for a 12×12 debug
+/// sweep), which this cache exists specifically to avoid multiplying again.
+#[derive(Default)]
+struct PostOreCache {
+    map: HashMap<(i32, i32), Arc<crate::dense_grid::DenseBlockGrid>>,
+    order: std::collections::VecDeque<(i32, i32)>,
+}
+
 /// A composed, reusable overworld generator. Build once per seed; call
 /// [`column`](Self::column) per chunk.
 #[allow(missing_debug_implementations)]
@@ -336,6 +361,13 @@ pub struct OverworldGenerator {
     /// ever guards *insertion*, never a mutation raced against a reader.
     /// Bounded — see [`PreOreCache`] and [`PRE_ORE_CACHE_CAPACITY`].
     pre_ore_cache: Mutex<PreOreCache>,
+    /// Memoises [`Self::post_ore_world`] (issue #427's vegetation 3×3
+    /// driver) — same shape, same bound, same rationale as `pre_ore_cache`
+    /// one level up the pipeline; see [`PostOreCache`]'s own doc comment for
+    /// why this one specifically matters (it caches the expensive *ore
+    /// placement RNG walk*, not just the cheap-to-clone pre-ore terrain
+    /// `pre_ore_cache` already covers).
+    post_ore_cache: Mutex<PostOreCache>,
     /// Per-biome `VEGETAL_DECORATION` list (issue #406), resolved the same
     /// way and at the same time as `ores_by_biome` — see
     /// `crate::compose::build_biome_vegetation`. Empty (whole map) when the
@@ -498,6 +530,7 @@ impl OverworldGenerator {
             ores_by_biome,
             ore_tag_map,
             pre_ore_cache: Mutex::new(PreOreCache::default()),
+            post_ore_cache: Mutex::new(PostOreCache::default()),
             vegetation_by_biome,
             veg_tags,
         }
@@ -525,12 +558,19 @@ impl OverworldGenerator {
     #[must_use]
     pub fn column(&self, cx: i32, cz: i32) -> GeneratedColumn {
         let cached = self.pre_ore_stage(cx, cz);
-        // `ore_stage` mutates and folds ore placements back into its
-        // `center_world` argument, so it needs to own a copy — this is the
-        // one clone this cache still pays per `column()` call (not per
-        // neighbour visit), and it is cheap relative to the full pipeline
-        // recomputation it replaces. See `pre_ore_cache`'s doc comment.
-        let world = self.ore_stage(cx, cz, cached.0.clone(), &cached.1);
+        // Issue #427: routed through `post_ore_world` (which wraps
+        // `ore_stage` in `Self::post_ore_cache`) rather than calling
+        // `ore_stage` directly, so this chunk's post-ore result is
+        // available with no recomputation to any OTHER chunk's
+        // `vegetation_stage` that later needs it as one of its 8
+        // neighbours — see `PostOreCache`'s own doc comment for why that
+        // sharing matters (without it, every chunk that appears as both a
+        // sweep's own centre and some other chunk's neighbour would pay the
+        // real ore-placement RNG walk twice). This costs one
+        // `DenseBlockGrid` clone (unwrapping the cached `Arc`) in place of
+        // the clone `ore_stage` already required directly — same order of
+        // cost as before, not a new one.
+        let world = (*self.post_ore_world(cx, cz)).clone();
         let world = self.vegetation_stage(cx, cz, world);
         self.intern_from_dense(world, cached.2.clone())
     }
@@ -806,24 +846,29 @@ impl OverworldGenerator {
         }
     }
 
-    /// Stage 6 (issue #406): `VEGETAL_DECORATION` — grass, flowers and
-    /// trees, over the centre chunk's own post-ore terrain only.
+    /// Stage 6 (issue #406, cross-chunk spill closed by issue #427):
+    /// `VEGETAL_DECORATION`, over the real 3×3 `center ± 1` neighbourhood —
+    /// [`crate::feature::vegetation::apply_vegetal_decoration_step_3x3_per_source`],
+    /// the same [`Self::ore_stage`] shape applied to vegetal decoration
+    /// instead of ores (see that module's own doc "Scope" section for why
+    /// this is the same mechanism, not a second one).
     ///
-    /// **Single-chunk only — no cross-chunk feature spill**, unlike
-    /// [`Self::ore_stage`]'s real 3×3 driver. See
-    /// `crate::feature::vegetation`'s own module doc "Scope" section for
-    /// why (vanilla's real `blockStateWriteRadius(1)` applies here too, so
-    /// a tree near a chunk edge can legitimately spill canopy into a
-    /// neighbour, and this stage does not model that yet — a named,
-    /// bounded gap, not a hidden one).
+    /// Builds one shared [`crate::feature::vegetation::VegGrid`] spanning
+    /// [`crate::feature::REGION_MIN`]/[`crate::feature::REGION_MAX`],
+    /// stitched from all 9 chunks' own **post-ore** terrain (the centre's
+    /// via the already-computed `world` parameter; each of the 8 neighbours'
+    /// via [`Self::post_ore_world`], which recurses into that neighbour's
+    /// *own* 3×3 ore composition — real vanilla parity, not an
+    /// approximation, at the cost this module's own doc "Performance"
+    /// section already names for `ore_stage` itself: no cache exists across
+    /// this recursion, so a full sweep pays it 9× again on top of ore's own
+    /// 9×). Biome (and therefore feature list) is resolved per-source via
+    /// [`Self::biome_for_carver_source`] — the same one-biome-per-chunk
+    /// convention [`Self::ore_stage`] already uses for `ores_for_source`.
     ///
-    /// Biome is resolved via [`Self::biome_for_carver_source`] — the same
-    /// one-biome-per-chunk convention [`Self::ore_stage`] already uses for
-    /// ore-list selection, reused here rather than introducing a second
-    /// per-feature biome-check convention. No-op (returns `world`
-    /// unchanged) when the resolver supplied no biome with a vegetation
-    /// step, matching every other #295/#406 resolver "no data supplied"
-    /// convention.
+    /// No-op (returns `world` unchanged) when the resolver supplied no biome
+    /// with a vegetation step, matching every other #295/#406/#427 resolver
+    /// "no data supplied" convention.
     fn vegetation_stage(
         &self,
         cx: i32,
@@ -833,25 +878,154 @@ impl OverworldGenerator {
         if self.vegetation_by_biome.values().all(Vec::is_empty) {
             return world;
         }
-        let biome = self.biome_for_carver_source(cx, cz);
-        let Some(features) = self.vegetation_by_biome.get(biome) else {
-            return world;
-        };
-        if features.is_empty() {
-            return world;
-        }
 
         let base_x = cx * 16;
         let base_z = cz * 16;
-        // `VegGrid` takes the chunk's own absolute block origin so every
-        // position flowing through the placement engine (all of it real
-        // `BlockPos` arithmetic — absolute coordinates, never chunk-local)
-        // translates correctly — see `VegGrid`'s own doc comment on the
-        // island this fixed (a chunk-local-only grid silently rejected
-        // every write/read for any chunk other than `(0, 0)`).
-        let mut grid = crate::feature::vegetation::VegGrid::new(self.min_y, self.height, base_x, base_z);
-        for ly in 0..self.height {
-            let y = self.min_y + ly;
+        // `VegGrid` takes the CENTRE chunk's own absolute block origin so
+        // every one of the 9 sources' absolute-coordinate writes translates
+        // correctly relative to it — see `VegGrid`'s own doc comment (the
+        // island a chunk-local-only grid used to cause) and
+        // `crate::feature::vegetation`'s module doc "Scope" section for why
+        // the footprint is widened to `REGION_MIN..REGION_MAX` here.
+        let mut grid = crate::feature::vegetation::VegGrid::with_footprint(
+            self.min_y,
+            self.height,
+            base_x,
+            base_z,
+            crate::feature::REGION_MIN,
+            crate::feature::REGION_MAX,
+        );
+
+        Self::stitch_veg_region(&mut grid, cx, cz, &world, self.min_y, self.height);
+        // Debug-only escape hatch (LODESTONE_VEG_SINGLE_SOURCE_DEBUG),
+        // mirroring `LODESTONE_ORE_SINGLE_SOURCE_DEBUG` above: skip
+        // stitching/decorating the 8 neighbours, matching
+        // `VegetationOracle.java`'s SINGLE mode's own narrower scope for
+        // direct comparison. Not used by `column()`'s normal path.
+        let single_source_debug = std::env::var("LODESTONE_VEG_SINGLE_SOURCE_DEBUG").is_ok();
+        if !single_source_debug {
+            for dx in -1..=1i32 {
+                for dz in -1..=1i32 {
+                    if dx == 0 && dz == 0 {
+                        continue;
+                    }
+                    let neighbour_world = self.post_ore_world(cx + dx, cz + dz);
+                    Self::stitch_veg_region(&mut grid, cx + dx, cz + dz, &neighbour_world, self.min_y, self.height);
+                }
+            }
+        }
+
+        let features_for_source = |source_x: i32, source_z: i32| -> &[(usize, crate::feature::vegetation::PlacedRef)] {
+            let biome = self.biome_for_carver_source(source_x, source_z);
+            self.vegetation_by_biome.get(biome).map(Vec::as_slice).unwrap_or(&[])
+        };
+
+        // Vegetal decoration draws from the SAME per-chunk `WorldgenRandom`
+        // shape every #295/#427 decoration stage uses (`set_decoration_seed`
+        // then per-feature `set_feature_seed`) — the fresh `XoroshiroRandomSource::new(0)`
+        // seed here is a throwaway carrier state; only `set_decoration_seed`'s
+        // own derivation (which mixes in `self.seed` and each source's own
+        // origin) determines the actual RNG stream, matching `Self::ore_stage`'s
+        // identical pattern.
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+        if single_source_debug {
+            let features = features_for_source(cx, cz);
+            crate::feature::vegetation::apply_vegetal_decoration_step(
+                &mut random,
+                self.seed,
+                cx,
+                cz,
+                &mut grid,
+                &self.veg_tags,
+                features,
+            );
+        } else {
+            crate::feature::vegetation::apply_vegetal_decoration_step_3x3_per_source(
+                &mut random,
+                self.seed,
+                cx,
+                cz,
+                &mut grid,
+                &self.veg_tags,
+                &features_for_source,
+            );
+        }
+
+        let mut world = world;
+        // `grid.dirty_cells()` yields absolute coordinates over the whole
+        // driven `REGION_MIN..REGION_MAX` footprint (any of the 9 sources
+        // may have written there), but `world` is sized to exactly the
+        // centre chunk's own 16×16 box — `DenseBlockGrid::set` is a no-op
+        // outside its own box, so this loop naturally keeps only the writes
+        // that land in the chunk actually being served, discarding spill
+        // into a neighbour with no extra filtering needed.
+        for (x, y, z, state) in grid.dirty_cells() {
+            world.set(x, y, z, state);
+        }
+        world
+    }
+
+    /// One chunk's own post-carve-and-ore world (stages 1-5), for an
+    /// arbitrary `(cx, cz)` — not necessarily the chunk [`Self::column`] was
+    /// asked to generate. Used by [`Self::vegetation_stage`]'s 3×3 driver to
+    /// obtain each of the 8 neighbours' own post-ore terrain, exactly the
+    /// input vegetal decoration reads/writes against for that neighbour in
+    /// real vanilla. Recurses into that neighbour's own 3×3 ore composition
+    /// via [`Self::ore_stage`]/[`Self::pre_ore_stage`] (the latter memoised,
+    /// per [`Self::pre_ore_cache`]'s doc comment) — real parity, not an
+    /// approximation.
+    ///
+    /// Memoised in [`Self::post_ore_cache`] — see that field's and
+    /// [`PostOreCache`]'s own doc comments for why this specific result
+    /// (not just the pre-ore terrain feeding it) needs its own cache: without
+    /// it, a sweep over adjacent chunks would rerun the full `ore_stage` RNG
+    /// walk once per `(neighbour, requester)` pair instead of once per
+    /// neighbour. Same lock-released-during-compute shape as
+    /// [`Self::pre_ore_stage`], for the same reason (never serialise
+    /// `generate_columns_parallel`'s worker threads on this mutex).
+    fn post_ore_world(&self, cx: i32, cz: i32) -> Arc<crate::dense_grid::DenseBlockGrid> {
+        {
+            let cache = self.post_ore_cache.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(hit) = cache.map.get(&(cx, cz)) {
+                return Arc::clone(hit);
+            }
+        }
+        let pre = self.pre_ore_stage(cx, cz);
+        let computed = Arc::new(self.ore_stage(cx, cz, pre.0.clone(), &pre.1));
+        let mut cache = self.post_ore_cache.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(existing) = cache.map.get(&(cx, cz)) {
+            return Arc::clone(existing);
+        }
+        cache.map.insert((cx, cz), Arc::clone(&computed));
+        cache.order.push_back((cx, cz));
+        if cache.order.len() > PRE_ORE_CACHE_CAPACITY {
+            if let Some(oldest) = cache.order.pop_front() {
+                cache.map.remove(&oldest);
+            }
+        }
+        computed
+    }
+
+    /// Copies one source chunk's own post-ore terrain into the shared
+    /// [`crate::feature::vegetation::VegGrid`] `grid` — the vegetation
+    /// analogue of [`Self::stitch_region`], but via [`VegGrid::seed`]
+    /// (absolute-coordinate, per-cell) rather than a second dense-grid
+    /// region, since [`VegGrid`] is this module's own established seam for
+    /// vegetal decoration's read/write surface (see that type's doc
+    /// comment) and [`Self::vegetation_stage`] already owns exactly one
+    /// such grid per `column()` call.
+    fn stitch_veg_region(
+        grid: &mut crate::feature::vegetation::VegGrid,
+        source_cx: i32,
+        source_cz: i32,
+        world: &crate::dense_grid::DenseBlockGrid,
+        min_y: i32,
+        height: i32,
+    ) {
+        let base_x = source_cx * 16;
+        let base_z = source_cz * 16;
+        for ly in 0..height {
+            let y = min_y + ly;
             for lz in 0..16i32 {
                 for lx in 0..16i32 {
                     let state = world.get(base_x + lx, y, base_z + lz);
@@ -859,30 +1033,6 @@ impl OverworldGenerator {
                 }
             }
         }
-
-        // Vegetal decoration draws from the SAME per-chunk `WorldgenRandom`
-        // shape every #295 decoration stage uses (`set_decoration_seed`
-        // then per-feature `set_feature_seed`) — the fresh `XoroshiroRandomSource::new(0)`
-        // seed here is a throwaway carrier state; only `set_decoration_seed`'s
-        // own derivation (which mixes in `self.seed`, `base_x`, `base_z`)
-        // determines the actual RNG stream, matching `Self::ore_stage`'s
-        // identical pattern.
-        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
-        crate::feature::vegetation::apply_vegetal_decoration_step(
-            &mut random,
-            self.seed,
-            cx,
-            cz,
-            &mut grid,
-            &self.veg_tags,
-            features,
-        );
-
-        let mut world = world;
-        for (x, y, z, state) in grid.dirty_cells() {
-            world.set(x, y, z, state);
-        }
-        world
     }
 
     /// Identical to [`column`](Self::column), timed per stage. Exists so the

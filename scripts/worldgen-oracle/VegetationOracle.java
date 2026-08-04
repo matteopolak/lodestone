@@ -371,7 +371,7 @@ public final class VegetationOracle {
         // ---- Pass 1: SINGLE (centre-only) vegetal decoration ----
         resetToPostOreBaseline();
         Map<Long, String> postOre = snapshotRegion();
-        dumpCentreBaseline(postOre);
+        dumpRegionBaseline(postOre);
         long singleDecorationSeed = decorationSeedFor(chunkX, chunkZ);
         runStep(STEP, false);
         Map<Long, String> postSingle = snapshotRegion();
@@ -445,18 +445,27 @@ public final class VegetationOracle {
             sb.append(label).append(".count.").append(e.getKey()).append(' ').append(e.getValue()).append('\n');
     }
 
-    /// Dumps the CENTRE chunk's own post-ore terrain (`base.x,z y_start count
-    /// state`, run-length-encoded per column, matching `FeatureOracle
-    /// .java`'s `inrun.` pattern) — what the Rust side seeds `VegGrid` from
-    /// to run its own engine against the identical starting terrain this
-    /// oracle's SINGLE pass ran against. Only the centre 16x16 is needed:
-    /// `crate::feature::vegetation::VegGrid` never reads real neighbour
-    /// terrain (every read clamps to the local chunk — see that module's own
-    /// "Approximations, named" section), unlike the ore engine's wider
-    /// region grid.
-    static void dumpCentreBaseline(Map<Long, String> postOre) {
-        for (int lx = 0; lx < 16; lx++) {
-            for (int lz = 0; lz < 16; lz++) {
+    /// Dumps the WHOLE driven `-16..32` region's post-ore terrain
+    /// (`base.x,z y_start count state`, run-length-encoded per column,
+    /// matching `FeatureOracle.java`'s `inrun.` pattern) — what the Rust
+    /// side seeds its region-wide `VegGrid` from to run its own engine
+    /// against the identical starting terrain this oracle's SINGLE and
+    /// FULL3X3 passes both ran against.
+    ///
+    /// **Widened from centre-only (issue #427).** This used to dump only the
+    /// centre 16x16, on the reasoning that `crate::feature::vegetation
+    /// ::VegGrid` never read real neighbour terrain — true for the
+    /// single-chunk engine that reasoning was written for, but false for
+    /// `apply_vegetal_decoration_step_3x3_per_source`'s real 3x3 driver
+    /// (issue #427): each of the 8 neighbours' own decoration pass reads and
+    /// writes its OWN real terrain, so a Rust-side FULL3X3 replay needs all
+    /// 9 chunks' baseline, not just the centre's — the same reason the ore
+    /// engine's `RegionGrid`/`OreInput` cover a wide region rather than one
+    /// chunk. `dumpDiff`'s own footprint (`-16..32` on both axes) was always
+    /// this wide; this function now matches it.
+    static void dumpRegionBaseline(Map<Long, String> postOre) {
+        for (int lx = -16; lx < 32; lx++) {
+            for (int lz = -16; lz < 32; lz++) {
                 int y = minY;
                 int end = minY + height;
                 while (y < end) {
@@ -537,6 +546,50 @@ public final class VegetationOracle {
                     BlockPos bp = (BlockPos) a[0];
                     int cx = bp.getX() >> 4, cz = bp.getZ() >> 4;
                     return chunkAt(cx, cz).getFluidState(bp);
+                }
+                // `LevelSimulatedReader.isStateAtPosition`/`isFluidAtPosition`
+                // are ABSTRACT on that interface (`Level`'s own
+                // implementation is just `predicate.test(this.getBlockState/
+                // getFluidState(pos))` — Level.java:1053/1058), so a proxy
+                // with no case for them fell through to the `default:`
+                // branch below, which force-returns `Boolean.FALSE` for
+                // every boolean-returning method it doesn't recognise.
+                // **That silently broke every tree ever placed by this
+                // oracle**: `TreeFeature.validTreePos` — the gate both
+                // `TrunkPlacer.placeLog` (every log) and
+                // `FoliagePlacer.tryPlaceLeaf` (every leaf) call before
+                // writing anything — is defined as exactly
+                // `level.isStateAtPosition(pos, state -> state.isAir() ||
+                // state.is(BlockTags.REPLACEABLE_BY_TREES))`
+                // (`TreeFeature.java:52-54`), so with this case missing it
+                // always evaluated to `false` and no trunk placer of any
+                // kind could ever place a single block — the committed
+                // plains fixtures happening to show zero `oak_log` looked
+                // like bad luck at plains' genuinely low ~5%-per-chunk tree
+                // rate, until the SAME zero recurred at real, known savanna
+                // coordinates (`(-2500,3200)`, `docs`'s own
+                // `biome_matches_vanilla_at_known_coordinates_seed_42`
+                // fixture) where `trees_savanna`'s outer count is `weighted_
+                // list{1: 9, 2: 1}` — ALWAYS at least one attempt per
+                // chunk, never zero — across 9 sources and two separate
+                // real locations. That is not explainable by chance; it is
+                // this proxy gap, discovered while adding issue #428's
+                // acacia trunk/foliage placer support and needing a real
+                // tree to actually land in a fixture to test against.
+                case "isStateAtPosition": {
+                    BlockPos bp = (BlockPos) a[0];
+                    @SuppressWarnings("unchecked")
+                    java.util.function.Predicate<BlockState> predicate = (java.util.function.Predicate<BlockState>) a[1];
+                    int cx = bp.getX() >> 4, cz = bp.getZ() >> 4;
+                    return predicate.test(chunkAt(cx, cz).getBlockState(bp));
+                }
+                case "isFluidAtPosition": {
+                    BlockPos bp = (BlockPos) a[0];
+                    @SuppressWarnings("unchecked")
+                    java.util.function.Predicate<net.minecraft.world.level.material.FluidState> predicate =
+                        (java.util.function.Predicate<net.minecraft.world.level.material.FluidState>) a[1];
+                    int cx = bp.getX() >> 4, cz = bp.getZ() >> 4;
+                    return predicate.test(chunkAt(cx, cz).getFluidState(bp));
                 }
                 // The actual write path for every non-ore feature this
                 // oracle places (`SimpleBlockFeature`/`TreeFeature`/

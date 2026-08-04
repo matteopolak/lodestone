@@ -309,8 +309,13 @@ mod tests {
         ("minecraft:pale_garden", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider", "vegetation_patch"]),
         ("minecraft:plains", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
         ("minecraft:river", &["multiface_growth", "seagrass", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:savanna", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:savanna_plateau", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        // savanna/savanna_plateau/windswept_savanna all resolve through
+        // trees_savanna's RandomSelector (oak_checked default, acacia_checked
+        // 80%, fallen_oak_tree 1.25%) — issue #428's `TrunkPlacerCfg::Forking`/
+        // `FoliagePlacerCfg::Acacia` closes the "tree: unsupported..." entry
+        // for all three; `fallen_tree` stays (still unimplemented).
+        ("minecraft:savanna", &["fallen_tree", "multiface_growth"]),
+        ("minecraft:savanna_plateau", &["fallen_tree", "multiface_growth"]),
         ("minecraft:snowy_beach", &["multiface_growth"]),
         ("minecraft:snowy_plains", &["fallen_tree", "multiface_growth"]),
         ("minecraft:snowy_slopes", &["multiface_growth"]),
@@ -326,7 +331,7 @@ mod tests {
         ("minecraft:windswept_forest", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
         ("minecraft:windswept_gravelly_hills", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
         ("minecraft:windswept_hills", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:windswept_savanna", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
+        ("minecraft:windswept_savanna", &["fallen_tree", "multiface_growth"]),
         ("minecraft:wooded_badlands", &["fallen_tree", "multiface_growth"]),
     ];
 
@@ -903,13 +908,42 @@ mod tests {
     ///   0.6579` (the `fancy_oak`/`fallen_oak` branches are
     ///   `ConfiguredFeature::Unsupported` — see module doc). A successful
     ///   straight oak trunk places `base_height=4` to `4+2=6` logs. So the
-    ///   expected oak-log count per chunk is
+    ///   *isolated, single-chunk* expected oak-log count per chunk is
     ///   `0.05 * 0.6579 * (4..6) ≈ 0.132..0.197`, i.e. **not zero, and not
-    ///   large** — over a 64-chunk sweep, `8.4..12.6` logs. Measured: `12`.
+    ///   large** — over a 64-chunk sweep, `8.4..12.6` logs. Measured under
+    ///   the pre-#427 single-chunk-only engine: `12`, inside that band.
+    ///
+    ///   **After issue #427's real 3×3 driver, measured: `6` — a real drop,
+    ///   not a regression.** The isolated prediction above assumes each
+    ///   swept chunk's tree placement reads only its OWN terrain; the real
+    ///   3×3 driver now lets an edge-adjacent tree's space-check
+    ///   (`place_tree`'s `getMaxFreeTreeHeight`-equivalent scan) read the
+    ///   TRUE neighbour terrain at the tree's own absolute height instead of
+    ///   the old clamped approximation (which just re-read the centre's own
+    ///   nearest in-bounds column — usually open air above a similar
+    ///   surface height, so it almost always reported "free"). Real terrain
+    ///   height genuinely varies chunk to chunk; when a neighbour's surface
+    ///   is taller than the centre's at the probed offset, the scan now sees
+    ///   real solid ground where the old approximation saw air, and the tree
+    ///   is correctly rejected instead of spuriously placed. Confirmed to be
+    ///   this mechanism, not an unrelated defect, by re-running this exact
+    ///   sweep with `LODESTONE_VEG_SINGLE_SOURCE_DEBUG=1` (the debug escape
+    ///   hatch in `OverworldGenerator::vegetation_stage` that reverts to the
+    ///   pre-#427 single-source-only pass): that reproduces `12`, exactly
+    ///   the old measurement, with no other code changed — the entire delta
+    ///   is attributable to the 3×3 driver's real neighbour reads, per
+    ///   CLAUDE.md's evidence standard ("a control's premise" — here, that
+    ///   flipping only the 3×3-vs-single-source toggle recovers the old
+    ///   number — "proving the detector/mechanism actually fired").
     ///   This is an internal-consistency check against the engine's own
     ///   inputs, not vanilla parity (named explicitly, per
     ///   `crate::feature::vegetation`'s own module doc and this crate's
-    ///   evidence standard).
+    ///   evidence standard) — the isolated band remains documented above as
+    ///   a floor on what single-chunk-only placement alone would produce,
+    ///   but the assertion below now widens to also accept the real,
+    ///   measured 3×3 reduction rather than asserting a number this
+    ///   docstring cannot re-derive analytically (real terrain height
+    ///   variance has no closed form here) as if it could.
     #[test]
     fn plains_vegetation_counts_are_predicted_and_measured() {
         let generator = overworld_generator(42);
@@ -979,15 +1013,32 @@ mod tests {
         // guessed number — see this test's own doc comment for the
         // derivation. `0.05 * 0.6579 * 4 = 0.1316`, `* 6 = 0.1974`, times 64
         // chunks.
-        let predicted_min = 0.05 * 0.6579 * 4.0 * sweep_chunks as f64;
-        let predicted_max = 0.05 * 0.6579 * 6.0 * sweep_chunks as f64;
+        let isolated_min = 0.05 * 0.6579 * 4.0 * sweep_chunks as f64;
+        let isolated_max = 0.05 * 0.6579 * 6.0 * sweep_chunks as f64;
+        // Issue #427: the real 3×3 driver's edge-adjacent space-check now
+        // reads TRUE neighbour terrain (see this test's own doc comment for
+        // the mechanism and the `LODESTONE_VEG_SINGLE_SOURCE_DEBUG=1`
+        // control that isolated it), which can legitimately reject a tree
+        // the old clamped approximation always let through — measured `6`,
+        // half the pre-#427 measurement of `12`. The floor is loosened to
+        // `0.25x` the isolated-model's own minimum (not lowered to the bare
+        // `> 0` anti-vacuity floor above, which would make this assertion
+        // vacuous against a real regression that drove logs to near-zero)
+        // rather than re-centred on `6` itself, since `6` is one sample from
+        // one real-terrain sweep, not a value with a closed-form derivation
+        // this docstring could defend the way the isolated band's `8.4..
+        // 12.6` is defended.
+        let min = isolated_min * 0.25;
+        let max = isolated_max * 1.5;
         assert!(
-            (predicted_min..=predicted_max * 1.5).contains(&(logs as f64)),
-            "measured oak logs ({logs}) over {sweep_chunks} chunks is far outside the \
-             predicted band [{predicted_min:.1}, {predicted_max:.1}] (widened 50% for sampling \
-             noise across which of the swept chunks actually resolve to plains at their own \
-             carver-source corner, per Self::biome_for_carver_source) derived from \
-             trees_plains.json's own weighted_list count and RandomSelector branch chances"
+            (min..=max).contains(&(logs as f64)),
+            "measured oak logs ({logs}) over {sweep_chunks} chunks is outside the band \
+             [{min:.1}, {max:.1}] — the isolated single-chunk model predicts \
+             [{isolated_min:.1}, {isolated_max:.1}] (trees_plains.json's own weighted_list \
+             count and RandomSelector branch chances), widened downward for issue #427's real \
+             3x3 driver rejecting more edge-adjacent trees against true neighbour terrain (see \
+             this test's own doc comment) and upward for sampling noise across which of the \
+             swept chunks actually resolve to plains at their own carver-source corner"
         );
         // A tree with logs must also carry leaves (the "not enough room"
         // gate and the log/leaf presence check in `place_tree` both require

@@ -12,24 +12,37 @@
 //!
 //! # Scope, named plainly
 //!
-//! **Single-chunk only — no cross-chunk feature spill.** Vanilla's
+//! **Cross-chunk spill (issue #427): closed.** Vanilla's
 //! `blockStateWriteRadius(1)` at the FEATURES generation stage
 //! (`ChunkPyramid.java:32-35`, the same limit `docs/worldgen-parity.md`
 //! documents for the ore 3×3 driver) applies to `VEGETAL_DECORATION` too —
 //! a tree placed near a chunk edge can legitimately spill canopy into a
 //! neighbour, and a neighbour's own pass can spill grass/leaves into this
-//! chunk. This module runs **only the centre chunk's own pass**: a write
-//! whose final position lands outside the local `0..16` × `0..16` footprint
-//! is silently dropped (never written anywhere — there is no neighbour grid
-//! to write into), and a read (heightmap probe, air/tag check) clamps into
-//! the nearest in-bounds column rather than seeing real neighbour terrain.
-//! This is the same shape the ore engine had *before* issue #295's 3×3
-//! driver landed (see `docs/worldgen-parity.md`'s "before Job 3" numbers) —
-//! an accepted, named intermediate milestone, not a hidden approximation.
-//! Extending this to a real 3×3+ driver (canopies are small — 2-3 blocks for
-//! all three species here — so the affected fraction of edge columns is
-//! bounded but nonzero) is the natural next increment and is **not**
-//! attempted in this landing.
+//! chunk. [`apply_vegetal_decoration_step_3x3_per_source`] is the real
+//! vanilla driver: each of the 9 chunks in `center ± 1` gets its own full
+//! decoration pass (its own origin, its own decoration seed, its own
+//! biome-resolved feature list), all writing into one shared
+//! [`VegGrid::with_footprint`] region spanning
+//! [`crate::feature::REGION_MIN`]/[`crate::feature::REGION_MAX`] — the exact
+//! shape [`crate::feature::apply_ore_step_3x3_per_source`] already
+//! established for the ore engine, reused rather than reinvented. See
+//! `docs/worldgen-parity.md` for the measured residual against the real JVM
+//! oracle's `FULL3X3` mode.
+//!
+//! [`apply_vegetal_decoration_step`] (the single-source primitive this
+//! module shipped with originally, issue #406) still exists and is still
+//! correct on its own terms — it is simply no longer what
+//! `crate::overworld::OverworldGenerator::vegetation_stage` calls in
+//! production. A write whose final position lands outside whatever
+//! footprint the caller's [`VegGrid`] covers is silently dropped (never
+//! written anywhere else), and a read (heightmap probe, air/tag check)
+//! clamps into the nearest in-bounds column — for the single-source
+//! primitive that means the nearest column *within the one chunk*; for the
+//! 3×3 driver it means the nearest column within the driven 48×48 region,
+//! narrower than vanilla's genuinely unbounded read (see
+//! `docs/worldgen-parity.md`'s "known gap: the 3×3 ore driver's residual
+//! beyond its own neighbourhood" for the ore engine's identical, already-
+//! named instance of this same shape).
 //!
 //! **No oracle validates this against a real vanilla dump.**
 //! `docs/worldgen-parity.md`'s "what could not be isolated" section already
@@ -85,13 +98,41 @@
 //!   `PineFoliagePlacer` — **implemented**, see below) and
 //!   `fallen_spruce_tree` (0.83%) — with pine supported, only the fallen
 //!   branch is a gap, so taiga is ~99.2% supported.
+//! - **acacia/savanna** (`trees_savanna`, issue #428): `acacia_checked`
+//!   (80%, [`TrunkPlacerCfg::Forking`]+[`FoliagePlacerCfg::Acacia`] —
+//!   **implemented**) and the default `oak_checked` branch (~19.75%, the
+//!   same straight-trunk oak every other biome already supports) leave only
+//!   `fallen_oak_tree` (1.25%) unsupported — savanna/savanna_plateau/
+//!   windswept_savanna (all three resolve through this same configured
+//!   feature) are ~98.75% supported.
 //!
 //! `pine`/`PineFoliagePlacer` was added beyond the issue's literal "oak,
 //! birch, spruce" minimum because it shares [`TrunkPlacerCfg`] entirely and
 //! is a small, self-contained addition ([`FoliagePlacerCfg::Pine`]) that
 //! turns taiga's honest coverage from ~66% to ~99%, in contrast to oak's
 //! `fancy_oak`/`FallenTreeFeature`, which are structurally different
-//! trunk/foliage/feature families and are out of scope for this landing.
+//! trunk/foliage/feature families and were out of scope for issue #406's
+//! landing. Acacia (`TrunkPlacerCfg::Forking`) is issue #428's own addition
+//! in that same spirit — a real, separate trunk/foliage family (leaning
+//! column + branch, not oak's straight-trunk-plus-variant shape), landed
+//! because savanna is a common, visible biome and `ForkingTrunkPlacer` is
+//! self-contained (no multi-block-wide "giant" trunk footprint the way
+//! jungle/dark-oak/mangrove/cherry all have). Jungle (`GiantTrunkPlacer`+
+//! `MegaJungleFoliagePlacer`), dark oak (`DarkOakTrunkPlacer`+
+//! `DarkOakFoliagePlacer`, a real 2×2 trunk with branches), mangrove
+//! (`UpwardsBranchingTrunkPlacer` — has real above-water roots) and cherry
+//! (`CherryTrunkPlacer`+`CherryFoliagePlacer`) remain
+//! [`ConfiguredFeature::Unsupported`] — each is a structurally distinct
+//! trunk/foliage shape, not a small extension of `Straight`/`Forking`, and
+//! none was attempted this session; see
+//! `lodestone_server::worldgen_data::KNOWN_VEGETATION_GAPS` for exactly
+//! which biomes still carry `"tree: unsupported trunk/foliage/size/provider"`
+//! because of them. `FallenTreeFeature` (a decorator-like feature reachable
+//! from MANY biomes' `RandomSelector`s at a small, consistent ~1-1.25%
+//! chance each — plains, birch, taiga, savanna, and more) is a different,
+//! separately-named gap (`"fallen_tree"`) for the same reason: a real,
+//! distinct feature type, not a variant of `ConfiguredFeature::Tree`, and
+//! also not attempted this session.
 //!
 //! # Approximations, named
 //!
@@ -763,40 +804,364 @@ impl Decorator {
     }
 }
 
-/// `net.minecraft.world.level.levelgen.feature.trunkplacers.StraightTrunkPlacer`
-/// — the only trunk placer this module implements (see module doc).
+/// `net.minecraft.world.level.levelgen.feature.trunkplacers.TrunkPlacer` (the
+/// `Straight`/`Forking` subset — issue #428 adds `Forking`, acacia's real
+/// trunk placer, alongside the `Straight` this module shipped with under
+/// #406). Both variants carry the identical `(base_height, height_rand_a,
+/// height_rand_b)` triple `TrunkPlacer.getTreeHeight` (a base-class method,
+/// not overridden by either subclass) draws from — kept as one shared shape
+/// rather than duplicating the three fields per variant.
 #[derive(Clone, Copy, Debug)]
-pub struct TrunkPlacerCfg {
-    base_height: i32,
-    height_rand_a: i32,
-    height_rand_b: i32,
+pub enum TrunkPlacerCfg {
+    Straight {
+        base_height: i32,
+        height_rand_a: i32,
+        height_rand_b: i32,
+    },
+    /// `ForkingTrunkPlacer` — acacia's real trunk (issue #428): a single
+    /// leaning column, plus (usually) one branch in a different horizontal
+    /// direction. See [`place_trunk`] for the port of `placeTrunk` itself.
+    Forking {
+        base_height: i32,
+        height_rand_a: i32,
+        height_rand_b: i32,
+    },
 }
 
 impl TrunkPlacerCfg {
     fn try_parse(v: &Value) -> Option<Self> {
         let ty = v["type"].as_str()?;
-        if ty.strip_prefix("minecraft:").unwrap_or(ty) != "straight_trunk_placer" {
-            return None;
+        let base_height = v["base_height"].as_i64()? as i32;
+        let height_rand_a = v["height_rand_a"].as_i64()? as i32;
+        let height_rand_b = v["height_rand_b"].as_i64()? as i32;
+        match ty.strip_prefix("minecraft:").unwrap_or(ty) {
+            "straight_trunk_placer" => Some(Self::Straight { base_height, height_rand_a, height_rand_b }),
+            "forking_trunk_placer" => Some(Self::Forking { base_height, height_rand_a, height_rand_b }),
+            _ => None,
         }
-        Some(Self {
-            base_height: v["base_height"].as_i64()? as i32,
-            height_rand_a: v["height_rand_a"].as_i64()? as i32,
-            height_rand_b: v["height_rand_b"].as_i64()? as i32,
-        })
     }
 
-    /// `TrunkPlacer.getTreeHeight`.
+    fn heights(&self) -> (i32, i32, i32) {
+        match *self {
+            Self::Straight { base_height, height_rand_a, height_rand_b }
+            | Self::Forking { base_height, height_rand_a, height_rand_b } => {
+                (base_height, height_rand_a, height_rand_b)
+            }
+        }
+    }
+
+    /// `TrunkPlacer.getTreeHeight` — shared across every subclass (not
+    /// overridden by `ForkingTrunkPlacer`, `DarkOakTrunkPlacer`, etc. in
+    /// real vanilla either).
     fn get_tree_height<R: RandomSource>(&self, random: &mut R) -> i32 {
-        self.base_height
-            + random.next_int_bounded(self.height_rand_a + 1)
-            + random.next_int_bounded(self.height_rand_b + 1)
+        let (base_height, height_rand_a, height_rand_b) = self.heights();
+        base_height + random.next_int_bounded(height_rand_a + 1) + random.next_int_bounded(height_rand_b + 1)
     }
 }
 
+/// `FoliagePlacer.FoliageAttachment` — one trunk-placement result the
+/// foliage placer runs `create_foliage` against. [`TrunkPlacerCfg::Straight`]
+/// always produces exactly one; [`TrunkPlacerCfg::Forking`] can produce one
+/// or two (the lean column always attaches if it placed any log at all; the
+/// branch attaches only if its own direction differs from the lean's AND it
+/// placed at least one log — see [`place_trunk`]).
+#[derive(Clone, Copy, Debug)]
+struct Attachment {
+    pos: BlockPos,
+    /// `FoliageAttachment.radiusOffset` — nonzero only for
+    /// `ForkingTrunkPlacer`'s primary (lean) attachment (`1`); every other
+    /// attachment this module produces uses `0`. Consumed by
+    /// [`FoliagePlacerCfg::Acacia`]'s `create_foliage`.
+    radius_offset: i32,
+    /// `FoliageAttachment.doubleTrunk` — always `false` for every trunk
+    /// placer this module implements (`Straight`, `Forking`); kept as a
+    /// real field rather than assumed, since a future `DarkOakTrunkPlacer`
+    /// port would set it `true` for its primary attachment. Not read by
+    /// anything yet (no implemented foliage placer branches on it — see
+    /// [`FoliagePlacerCfg::should_skip_location`]'s own doc on why even
+    /// `Acacia` never needs it), hence the explicit allow rather than
+    /// deleting a field the next placer family will need on day one.
+    #[allow(dead_code)]
+    double_trunk: bool,
+}
+
+/// `ForkingTrunkPlacer.placeTrunk` — acacia's real trunk (issue #428).
+/// Places `placeBelowTrunkBlock(origin.below())` first (matching
+/// `StraightTrunkPlacer`'s own convention, [`place_tree`]'s existing
+/// pre-loop call for the `Straight` case), then a single leaning log column
+/// (`Direction.Plane.HORIZONTAL.getRandomDirection` = `random.nextInt(4)`
+/// indexing `[NORTH, EAST, SOUTH, WEST]`, i.e. step vectors `(0,-1)`,
+/// `(1,0)`, `(0,1)`, `(-1,0)` in that exact order — `Direction.java`'s own
+/// `Plane.HORIZONTAL` face array), and then, only if a *second*,
+/// independently-rolled direction differs from the first, a branch that
+/// starts partway up the lean and runs for a few more logs in that second
+/// direction. Both attachments are only added if `placeLog` actually placed
+/// at least one log along that column (`OptionalInt` in the Java; `Option`
+/// here) — an entirely-blocked lean or branch contributes no
+/// [`Attachment`], matching vanilla exactly rather than attaching at a
+/// position nothing was ever placed at.
+/// Returns `(attachments, trunk_positions, placed_any)`. `trunk_positions`
+/// is every position `trunkSetter`/`placeBelowTrunkBlock` was actually
+/// invoked at (matching vanilla's real `trunks` set in `TreeFeature.place`)
+/// — including the below-origin block, which real `placeBelowTrunkBlock`
+/// places via the SAME `trunkSetter` (`TrunkPlacer.java`'s own
+/// `placeBelowTrunkBlock`), and therefore counts as a real distance-0
+/// source for [`update_leaf_distances`], not merely cosmetic soil.
+fn place_forking_trunk<R: RandomSource>(
+    random: &mut R,
+    origin: BlockPos,
+    tree_height: i32,
+    grid: &mut VegGrid,
+    tags: &VegTags,
+    trunk_provider: &BlockStateProvider,
+    below_trunk_provider: &Option<BlockStateProvider>,
+) -> (Vec<Attachment>, Vec<BlockPos>, bool) {
+    let mut trunk_positions = Vec::new();
+    if let Some(below_provider) = below_trunk_provider {
+        let below_pos = BlockPos { x: origin.x, y: origin.y - 1, z: origin.z };
+        if let Some(state) = below_provider.get_state(grid, tags, random, below_pos) {
+            grid.set_if_in_bounds(below_pos.x, below_pos.y, below_pos.z, state);
+            trunk_positions.push(below_pos);
+        }
+    }
+
+    let mut attachments = Vec::new();
+    let mut placed_any = false;
+
+    const STEP: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)]; // NORTH, EAST, SOUTH, WEST
+    let lean_direction = STEP[random.next_int_bounded(4) as usize];
+    let lean_height = tree_height - random.next_int_bounded(4) - 1;
+    let mut lean_steps = 3 - random.next_int_bounded(3);
+    let mut tx = origin.x;
+    let mut tz = origin.z;
+    let mut ey: Option<i32> = None;
+    for yo in 0..tree_height {
+        let yy = origin.y + yo;
+        if yo >= lean_height && lean_steps > 0 {
+            tx += lean_direction.0;
+            tz += lean_direction.1;
+            lean_steps -= 1;
+        }
+        let pos = BlockPos { x: tx, y: yy, z: tz };
+        let base = base_id(grid.get(pos.x, pos.y, pos.z));
+        if is_air(base) || tags.replaceable_by_trees.contains(base) {
+            if let Some(state) = trunk_provider.get_state(grid, tags, random, pos) {
+                grid.set_if_in_bounds(pos.x, pos.y, pos.z, state);
+                placed_any = true;
+                trunk_positions.push(pos);
+                ey = Some(yy + 1);
+            }
+        }
+    }
+    if let Some(y) = ey {
+        attachments.push(Attachment { pos: BlockPos { x: tx, y, z: tz }, radius_offset: 1, double_trunk: false });
+    }
+
+    tx = origin.x;
+    tz = origin.z;
+    let branch_direction = STEP[random.next_int_bounded(4) as usize];
+    if branch_direction != lean_direction {
+        let branch_pos = lean_height - random.next_int_bounded(2) - 1;
+        let mut branch_steps = 1 + random.next_int_bounded(3);
+        let mut ey: Option<i32> = None;
+        let mut yo = branch_pos;
+        while yo < tree_height && branch_steps > 0 {
+            if yo >= 1 {
+                let yy = origin.y + yo;
+                tx += branch_direction.0;
+                tz += branch_direction.1;
+                let pos = BlockPos { x: tx, y: yy, z: tz };
+                let base = base_id(grid.get(pos.x, pos.y, pos.z));
+                if is_air(base) || tags.replaceable_by_trees.contains(base) {
+                    if let Some(state) = trunk_provider.get_state(grid, tags, random, pos) {
+                        grid.set_if_in_bounds(pos.x, pos.y, pos.z, state);
+                        placed_any = true;
+                        trunk_positions.push(pos);
+                        ey = Some(yy + 1);
+                    }
+                }
+            }
+            branch_steps -= 1;
+            yo += 1;
+        }
+        if let Some(y) = ey {
+            attachments.push(Attachment { pos: BlockPos { x: tx, y, z: tz }, radius_offset: 0, double_trunk: false });
+        }
+    }
+
+    (attachments, trunk_positions, placed_any)
+}
+
+/// `TreeFeature.updateLeaves` — the real post-processing pass vanilla runs
+/// after a tree's trunk, foliage AND decorators have all been placed: a
+/// multi-source BFS from every position in `trunk_positions` (bucket 0),
+/// lowering every reachable `distance`-carrying block's `distance` property
+/// to the true shortest distance-to-a-log, capped at 7 (never written past
+/// that cap, matching `LeavesBlock.DECAY_DISTANCE`). This is why every
+/// configured leaves state's own JSON-literal `distance` (always `7`, the
+/// "fresh, undecayed" default) is not what real vanilla ever actually
+/// serves near a trunk — before this function existed, this engine placed
+/// every leaf at the JSON's literal `distance=7` and never corrected it, a
+/// real, measured mismatch found by issue #428's savanna oracle fixtures
+/// (real oak/acacia canopies are NOT reachable at plains' ~5%-per-chunk tree
+/// rate with the two originally-committed fixtures, which is why this
+/// gap was invisible until now — see this module's own parity test's doc
+/// comment "A real bug in the oracle itself" for the reason trees were
+/// never actually exercised before).
+///
+/// **Not a literal line-for-line port of the bucket/queue mechanics** — the
+/// real Java keeps `toCheck`'s buckets as `Set`s and only guards re-adding
+/// a position via a separately-tracked `DiscreteVoxelShape` "filled" bitset
+/// checked at *dequeue* time (`shape.fill`)/*enqueue* time
+/// (`shape.isFull`). A first attempt at translating that literally with
+/// per-bucket `VecDeque`s and no cross-bucket dedup **hung indefinitely**:
+/// a log's neighbour (a leaf) enqueues the log's own position back into
+/// bucket 0 every time it is visited (the log always answers distance `0`,
+/// so `min(smallest+1, 0)` is always `0`), and with no de-duplication nothing
+/// ever stops that log from being re-popped and re-expanding the exact same
+/// leaf forever. This function instead tracks one `visited: HashSet` and
+/// marks a position the moment it is *enqueued* (not when it is later
+/// popped) — a standard, well-known equivalent formulation of a uniform
+/// (all-edge-weight-`1`) multi-source BFS via a bucket queue: the first
+/// discovery of any position, under a discipline that always drains the
+/// current-nearest bucket completely before advancing, **is** its true
+/// shortest distance, so marking on first discovery cannot produce a
+/// different final value than marking on completion — it only prevents the
+/// redundant re-enqueues that made the literal port hang. This changes
+/// nothing about *which* `distance` value ultimately gets written to any
+/// cell, only how many times an already-settled cell gets looked at again.
+/// No RNG is consumed anywhere in this function (a pure grid post-process),
+/// so none of this affects the decoration RNG stream either way.
+///
+/// `#minecraft:prevents_nearby_leaf_decay` is, in the real registry, defined
+/// as exactly `["#minecraft:logs"]` (`prevents_nearby_leaf_decay.json`) —
+/// not an approximation, so this reuses [`VegTags::logs`] rather than
+/// resolving a second, redundant tag.
+///
+/// **`bbox` is load-bearing, not a perf bound.** Real
+/// `TreeFeature.place`/`updateLeaves` scopes its own BFS to
+/// `BoundingBox.encapsulatingPositions(trunks ∪ foliage ∪ decorations ∪
+/// roots)` — the bounding box of THIS ONE TREE's own placed blocks, not the
+/// whole world — and gates BOTH the write and the neighbour-expansion step
+/// on `bounds.isInside(pos)`. A first version of this port had no such
+/// bound at all (any in-grid position was fair game), and measured wrong
+/// against real savanna oracle fixtures: it found a *closer* neighbouring
+/// tree's log through gaps between two adjacent canopies, giving every
+/// affected leaf a lower `distance` than vanilla's own bbox-scoped BFS ever
+/// would (vanilla's version, confined to one tree's own extent, simply
+/// cannot see a different tree's logs at all, no matter how close). `bbox`
+/// is `(min_x, min_y, min_z, max_x, max_y, max_z)`, inclusive, computed by
+/// the caller from exactly the positions this one [`place_tree`] call wrote
+/// (see that function's own call site for how).
+fn update_leaf_distances(
+    grid: &mut VegGrid,
+    tags: &VegTags,
+    trunk_positions: &[BlockPos],
+    bbox: (i32, i32, i32, i32, i32, i32),
+) {
+    const MAX_DISTANCE: i32 = 7;
+    const NEIGHBOR_OFFSETS: [(i32, i32, i32); 6] =
+        [(0, -1, 0), (0, 1, 0), (-1, 0, 0), (1, 0, 0), (0, 0, -1), (0, 0, 1)];
+    let (min_x, min_y, min_z, max_x, max_y, max_z) = bbox;
+    let inside = |x: i32, y: i32, z: i32| {
+        (min_x..=max_x).contains(&x) && (min_y..=max_y).contains(&y) && (min_z..=max_z).contains(&z)
+    };
+
+    let mut buckets: Vec<std::collections::VecDeque<(i32, i32, i32)>> =
+        (0..MAX_DISTANCE).map(|_| std::collections::VecDeque::new()).collect();
+    let mut visited: HashSet<(i32, i32, i32)> = HashSet::new();
+    // Every trunk position is, by construction, inside `bbox` (the caller
+    // derives `bbox` to encapsulate them) — matching real vanilla, where
+    // `bounds` is built FROM `trunks`, so a log is trivially always its own
+    // bbox member. No `inside` check needed here.
+    for p in trunk_positions {
+        let key = (p.x, p.y, p.z);
+        if visited.insert(key) {
+            buckets[0].push_back(key);
+        }
+    }
+
+    let mut smallest: i32 = 0;
+    loop {
+        loop {
+            if smallest >= MAX_DISTANCE {
+                return;
+            }
+            let Some((x, y, z)) = buckets[smallest as usize].pop_front() else {
+                break;
+            };
+            if smallest != 0 {
+                let state = grid.get(x, y, z).to_string();
+                if let Some(new_state) = set_distance_property(&state, smallest) {
+                    grid.set_if_in_bounds(x, y, z, new_state);
+                }
+            }
+            for (dx, dy, dz) in NEIGHBOR_OFFSETS {
+                let (nx, ny, nz) = (x + dx, y + dy, z + dz);
+                let neighbor_key = (nx, ny, nz);
+                if visited.contains(&neighbor_key) {
+                    continue;
+                }
+                // The real `bounds.isInside(neighborPos)` gate — see this
+                // function's own doc comment on why this must be the
+                // tree's own bbox, not the grid's whole footprint.
+                if !inside(nx, ny, nz) {
+                    continue;
+                }
+                let neighbor_state = grid.get(nx, ny, nz);
+                let base = base_id(neighbor_state);
+                let current_distance = if tags.logs.contains(base) {
+                    Some(0)
+                } else {
+                    distance_property(neighbor_state)
+                };
+                if let Some(current_distance) = current_distance {
+                    let new_distance = (smallest + 1).min(current_distance);
+                    if new_distance < MAX_DISTANCE {
+                        visited.insert(neighbor_key);
+                        buckets[new_distance as usize].push_back(neighbor_key);
+                        smallest = smallest.min(new_distance);
+                    }
+                }
+            }
+        }
+        smallest += 1;
+    }
+}
+
+/// `LeavesBlock.getOptionalDistanceAt`'s non-tag half:
+/// `state.hasProperty(DISTANCE) ? OptionalInt.of(state.getValue(DISTANCE)) :
+/// OptionalInt.empty()`. The `#prevents_nearby_leaf_decay` half is handled
+/// by the caller ([`update_leaf_distances`]) via [`VegTags::logs`] directly.
+fn distance_property(state: &str) -> Option<i32> {
+    let idx = state.find("distance=")?;
+    let start = idx + "distance=".len();
+    let end = state[start..].find([',', ']']).map_or(state.len(), |o| start + o);
+    state[start..end].parse().ok()
+}
+
+/// Rewrites an existing `distance=N` property in place, preserving every
+/// other property and bracket — the same `replace_range` idiom
+/// [`try_place_leaf`]'s waterlogged fix-up already uses for the identical
+/// shape of edit. `None` if `state` has no `distance` property at all
+/// (never actually called on such a state — [`update_leaf_distances`] only
+/// calls this after confirming [`distance_property`] returned `Some` for
+/// the same position — but returning `Option` rather than panicking keeps
+/// this fn safe to call standalone, e.g. from a future caller or a test).
+fn set_distance_property(state: &str, new_distance: i32) -> Option<String> {
+    let idx = state.find("distance=")?;
+    let start = idx + "distance=".len();
+    let end = state[start..].find([',', ']']).map_or(state.len(), |o| start + o);
+    let mut s = state.to_string();
+    s.replace_range(start..end, &new_distance.to_string());
+    Some(s)
+}
+
 /// `net.minecraft.world.level.levelgen.feature.foliageplacers.FoliagePlacer`
-/// (the `Blob`/`Spruce`/`Pine` subset — see module doc's "Named per-branch
-/// gaps" for why `Pine` is here despite not being one of the issue's three
-/// named species).
+/// (the `Blob`/`Spruce`/`Pine`/`Acacia` subset — see module doc's "Named
+/// per-branch gaps" for why `Pine` is here despite not being one of issue
+/// #406's three named species; `Acacia` is issue #428's addition, paired
+/// with [`TrunkPlacerCfg::Forking`]).
 #[derive(Clone, Debug)]
 pub enum FoliagePlacerCfg {
     Blob {
@@ -811,6 +1176,14 @@ pub enum FoliagePlacerCfg {
     },
     Pine {
         height: IntProvider,
+        radius: IntProvider,
+        offset: IntProvider,
+    },
+    /// `AcaciaFoliagePlacer` — acacia's real foliage (issue #428). Its
+    /// `foliageHeight` override always returns the constant `0`, drawing no
+    /// RNG at all (unlike `Blob`'s config-constant `height` field or
+    /// `Pine`'s sampled one) — see [`Self::foliage_height`]'s own arm.
+    Acacia {
         radius: IntProvider,
         offset: IntProvider,
     },
@@ -837,6 +1210,7 @@ impl FoliagePlacerCfg {
                 radius,
                 offset,
             }),
+            "acacia_foliage_placer" => Some(FoliagePlacerCfg::Acacia { radius, offset }),
             _ => None,
         }
     }
@@ -848,14 +1222,17 @@ impl FoliagePlacerCfg {
                 (tree_height - trunk_height.sample(random)).max(4)
             }
             FoliagePlacerCfg::Pine { height, .. } => height.sample(random),
+            // `AcaciaFoliagePlacer.foliageHeight` ignores every one of its
+            // own arguments and returns the constant `0` — no RNG draw.
+            FoliagePlacerCfg::Acacia { .. } => 0,
         }
     }
 
     fn foliage_radius<R: RandomSource>(&self, random: &mut R, trunk_len: i32) -> i32 {
         match self {
-            FoliagePlacerCfg::Blob { radius, .. } | FoliagePlacerCfg::Spruce { radius, .. } => {
-                radius.sample(random)
-            }
+            FoliagePlacerCfg::Blob { radius, .. }
+            | FoliagePlacerCfg::Spruce { radius, .. }
+            | FoliagePlacerCfg::Acacia { radius, .. } => radius.sample(random),
             FoliagePlacerCfg::Pine { radius, .. } => {
                 radius.sample(random) + random.next_int_bounded(trunk_len.max(0) + 1)
             }
@@ -866,12 +1243,20 @@ impl FoliagePlacerCfg {
         match self {
             FoliagePlacerCfg::Blob { offset, .. }
             | FoliagePlacerCfg::Spruce { offset, .. }
-            | FoliagePlacerCfg::Pine { offset, .. } => offset.sample(random),
+            | FoliagePlacerCfg::Pine { offset, .. }
+            | FoliagePlacerCfg::Acacia { offset, .. } => offset.sample(random),
         }
     }
 
-    /// `FoliagePlacer.shouldSkipLocation` (double-trunk always `false` for
-    /// every species this module implements — none use a fancy/giant trunk).
+    /// `FoliagePlacer.shouldSkipLocation`/`shouldSkipLocationSigned`.
+    /// `double_trunk` is always `false` for every trunk placer this module
+    /// implements (`Straight`, `Forking`), so the signed wrapper's default
+    /// implementation (`shouldSkipLocationSigned`, not overridden by
+    /// `AcaciaFoliagePlacer`) reduces to calling `shouldSkipLocation` with
+    /// `dx.abs()`/`dz.abs()` — exactly what every call site already passes,
+    /// so this stays a plain (non-signed) check rather than adding a second
+    /// entry point that only `DarkOakFoliagePlacer` (not implemented) would
+    /// ever need to override.
     fn should_skip_location<R: RandomSource>(
         &self,
         random: &mut R,
@@ -895,9 +1280,19 @@ impl FoliagePlacerCfg {
             FoliagePlacerCfg::Spruce { .. } | FoliagePlacerCfg::Pine { .. } => {
                 dx == current_radius && dz == current_radius && current_radius > 0
             }
+            // `AcaciaFoliagePlacer.shouldSkipLocation` — pure geometry, no
+            // RNG draw (unlike `Blob`'s corner coin flip above).
+            FoliagePlacerCfg::Acacia { .. } => {
+                if y == 0 {
+                    (dx > 1 || dz > 1) && dx != 0 && dz != 0
+                } else {
+                    dx == current_radius && dz == current_radius && current_radius > 0
+                }
+            }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_foliage<R: RandomSource>(
         &self,
         random: &mut R,
@@ -905,6 +1300,7 @@ impl FoliagePlacerCfg {
         foliage_height: i32,
         leaf_radius: i32,
         offset: i32,
+        radius_offset: i32,
         grid: &mut VegGrid,
         tags: &VegTags,
         provider: &BlockStateProvider,
@@ -971,6 +1367,25 @@ impl FoliagePlacerCfg {
                     }
                     yo -= 1;
                 }
+            }
+            // `AcaciaFoliagePlacer.createFoliage` — exactly three explicit
+            // `placeLeavesRow` calls (not a scanning loop like `Blob`/
+            // `Spruce`/`Pine` above), at `y = -1 - foliageHeight`,
+            // `-foliageHeight`, `0` — with `foliageHeight` always `0` (see
+            // `Self::foliage_height`), that's `y = -1, 0, 0`. The two `y =
+            // 0` rows use DIFFERENT radii (`leaf_radius - 1` then
+            // `leaf_radius + radius_offset - 1`) and are both real, in that
+            // exact order — the second simply overwrites part of what the
+            // first already wrote, matching vanilla's own redundancy rather
+            // than an engine bug.
+            FoliagePlacerCfg::Acacia { .. } => {
+                place_leaves_row(
+                    random, attachment, leaf_radius + radius_offset, -1 - foliage_height, grid, tags, self, provider, placed_any,
+                );
+                place_leaves_row(random, attachment, leaf_radius - 1, -foliage_height, grid, tags, self, provider, placed_any);
+                place_leaves_row(
+                    random, attachment, leaf_radius + radius_offset - 1, 0, grid, tags, self, provider, placed_any,
+                );
             }
         }
     }
@@ -1340,9 +1755,22 @@ pub fn collect_unsupported(placed: &PlacedRef) -> Vec<String> {
     out
 }
 
-/// The mutable, chunk-local (`0..16` × `0..16`, absolute `y`) block field
-/// vegetal decoration reads and writes. See module doc's "Scope" section for
-/// why this is chunk-local rather than the ore engine's centre-±1 region.
+/// The mutable block field vegetal decoration reads and writes. Defaults to
+/// chunk-local (`0..16` × `0..16`, absolute `y`) via [`VegGrid::new`] — see
+/// module doc's "Scope" section for why single-chunk was this module's
+/// original footprint. [`VegGrid::with_footprint`] widens the local bound to
+/// an arbitrary `[lo, hi)` on both axes (issue #427: the real vanilla 3×3
+/// `blockStateWriteRadius(1)` driver uses [`crate::feature::REGION_MIN`]/
+/// [`crate::feature::REGION_MAX`], the exact constants
+/// [`crate::feature::OreInput::region_local`] already established for the
+/// ore engine's own 3×3 driver — reused here rather than duplicated, per
+/// CLAUDE.md's instruction to follow that precedent) with `origin_x`/
+/// `origin_z` fixed at the **centre** chunk's own absolute origin, so every
+/// one of the 9 sources' absolute-coordinate writes translates through the
+/// same origin and lands (or is dropped) relative to the centre — exactly
+/// [`crate::feature::OreInput`]'s `chunk_x`/`chunk_z` (varies per source) vs
+/// `center_x`/`center_z` (fixed) split, applied to this module's own grid
+/// type instead of introducing a second region-grid mechanism.
 #[derive(Debug)]
 pub struct VegGrid {
     /// Keyed by **local** `(0..16, y, 0..16)` — every public accessor takes
@@ -1382,14 +1810,34 @@ pub struct VegGrid {
     origin_z: i32,
     min_y: i32,
     height: i32,
+    /// Local-coordinate bound `[local_lo, local_hi)` on both `lx` and `lz` —
+    /// `(0, 16)` for the single-chunk case ([`VegGrid::new`]), widened to
+    /// [`crate::feature::REGION_MIN`]/[`crate::feature::REGION_MAX`] for the
+    /// 3×3 driver ([`VegGrid::with_footprint`],
+    /// [`apply_vegetal_decoration_step_3x3_per_source`]).
+    local_lo: i32,
+    local_hi: i32,
 }
 
 impl VegGrid {
     /// `origin_x`/`origin_z` are the chunk's own **absolute** block origin
     /// (`chunk_x * 16`, `chunk_z * 16`) — every other method on this type
     /// takes absolute world coordinates and translates through these.
+    /// Single-chunk footprint (`0..16` on both axes) — see
+    /// [`VegGrid::with_footprint`] for the 3×3 driver's widened case.
     #[must_use]
     pub fn new(min_y: i32, height: i32, origin_x: i32, origin_z: i32) -> Self {
+        Self::with_footprint(min_y, height, origin_x, origin_z, 0, 16)
+    }
+
+    /// Like [`VegGrid::new`], but with an explicit local-coordinate bound
+    /// `[local_lo, local_hi)` on both `lx` and `lz` instead of the hardcoded
+    /// `0..16` — the real vanilla 3×3 `blockStateWriteRadius(1)` driver
+    /// passes [`crate::feature::REGION_MIN`]/[`crate::feature::REGION_MAX`]
+    /// here with `origin_x`/`origin_z` fixed at the **centre** chunk's own
+    /// origin (see this struct's own doc comment).
+    #[must_use]
+    pub fn with_footprint(min_y: i32, height: i32, origin_x: i32, origin_z: i32, local_lo: i32, local_hi: i32) -> Self {
         Self {
             blocks: HashMap::new(),
             dirty: Vec::new(),
@@ -1397,6 +1845,8 @@ impl VegGrid {
             origin_z,
             min_y,
             height,
+            local_lo,
+            local_hi,
         }
     }
 
@@ -1417,14 +1867,30 @@ impl VegGrid {
         })
     }
 
-    fn in_bounds_local(lx: i32, lz: i32) -> bool {
-        (0..16).contains(&lx) && (0..16).contains(&lz)
+    /// The number of writes recorded so far — a caller (currently only
+    /// [`place_tree`]) that brackets a `dirty_len()` call before and after a
+    /// span of writes and then reads `dirty_cells().skip(before)` gets
+    /// exactly the absolute-coordinate positions written in that span, in
+    /// order. Used to compute one tree's own `trunks ∪ foliage ∪
+    /// decorations` bounding box for [`update_leaf_distances`] — see that
+    /// function's own doc comment for why the bound matters.
+    #[must_use]
+    pub fn dirty_len(&self) -> usize {
+        self.dirty.len()
     }
 
-    /// Absolute world `(x, z)` -> local `(0..16, 0..16)`, **clamped** into
-    /// range — used only by read paths, which must always answer something.
+    fn in_bounds_local(&self, lx: i32, lz: i32) -> bool {
+        (self.local_lo..self.local_hi).contains(&lx) && (self.local_lo..self.local_hi).contains(&lz)
+    }
+
+    /// Absolute world `(x, z)` -> local `[local_lo, local_hi)`, **clamped**
+    /// into range — used only by read paths, which must always answer
+    /// something.
     fn to_local_clamped(&self, x: i32, z: i32) -> (i32, i32) {
-        ((x - self.origin_x).clamp(0, 15), (z - self.origin_z).clamp(0, 15))
+        (
+            (x - self.origin_x).clamp(self.local_lo, self.local_hi - 1),
+            (z - self.origin_z).clamp(self.local_lo, self.local_hi - 1),
+        )
     }
 
     /// Absolute world `(x, z)` -> local, **unclamped** — used only by the
@@ -1462,14 +1928,14 @@ impl VegGrid {
         self.get_local(lx, y, lz)
     }
 
-    /// Writes past the local `0..16` footprint (or outside the vertical
-    /// build range) are dropped, not clamped — see module doc's "Scope"
-    /// section; there is no neighbour-chunk grid here to write into, and
-    /// clamping a write would fabricate a block on the wrong column.
-    /// Returns whether the write actually landed.
+    /// Writes past the local footprint (`0..16` for [`VegGrid::new`], wider
+    /// for [`VegGrid::with_footprint`]) or outside the vertical build range
+    /// are dropped, not clamped — see module doc's "Scope" section; a write
+    /// past whatever footprint this grid covers would fabricate a block on
+    /// the wrong column. Returns whether the write actually landed.
     pub fn set_if_in_bounds(&mut self, x: i32, y: i32, z: i32, state: String) -> bool {
         let (lx, lz) = self.to_local_exact(x, z);
-        if Self::in_bounds_local(lx, lz) && y >= self.min_y && y < self.min_y + self.height {
+        if self.in_bounds_local(lx, lz) && y >= self.min_y && y < self.min_y + self.height {
             self.blocks.insert((lx, y, lz), state);
             self.dirty.push((lx, y, lz));
             true
@@ -1534,6 +2000,59 @@ pub fn apply_vegetal_decoration_step<R: RandomSource>(
     for (index, placed) in features {
         random.set_feature_seed(decoration_seed, *index as i32, STEP_VEGETAL_DECORATION);
         place_placed_feature(random, origin, placed, grid, tags);
+    }
+}
+
+/// The real vanilla 3×3 neighbourhood driver for `VEGETAL_DECORATION`
+/// (issue #427) — the same `blockStateWriteRadius(1)` limit
+/// `docs/worldgen-parity.md` already documents for the ore engine's own
+/// [`crate::feature::apply_ore_step_3x3_per_source`], applied to this
+/// module's own placement pipeline instead of introducing a second
+/// mechanism.
+///
+/// Runs [`apply_vegetal_decoration_step`] for each of the 9 chunks in
+/// `center ± 1` in turn (`dx` outer `-1..=1`, `dz` inner `-1..=1`, matching
+/// the ore driver's and `crate::carver::apply_carvers`'s own fixed,
+/// documented iteration order — not a claim this matches real-world chunk
+/// *load* order, which vanilla itself does not guarantee at boundaries),
+/// against one shared `grid`. `grid` must already be seeded with every one
+/// of the 9 sources' own post-ore terrain (its footprint should span
+/// [`crate::feature::REGION_MIN`]/[`crate::feature::REGION_MAX`], built via
+/// [`VegGrid::with_footprint`] with `origin_x`/`origin_z` fixed at
+/// `(center_x * 16, center_z * 16)`) — this function does no stitching of
+/// its own, mirroring [`crate::feature::apply_ore_step_3x3_per_source`]'s
+/// own "caller stitches, driver only places" split.
+///
+/// Each source's own pass mutates `grid` **in place**, so a later source in
+/// the fixed iteration order sees an earlier source's writes — this is a
+/// real, intentional match to `VegetationOracle.java`'s `runStep`, which
+/// mutates one shared, live `WorldGenLevel` across all 9 sources in the same
+/// order, not 9 independent snapshots merged afterward. See that oracle's
+/// own doc comment on `runStep` for the vanilla behaviour this reproduces.
+///
+/// `features_for_source(source_x, source_z)` is called once per source
+/// (their own chunk coordinates, not centre-relative) and must return that
+/// source's own biome's `VEGETAL_DECORATION` list — vanilla resolves the
+/// decorating biome per chunk, so a neighbour in a different biome to the
+/// centre places (and RNG-consumes) a different feature list, matching
+/// [`crate::feature::apply_ore_step_3x3_per_source`]'s `ores_for_source`
+/// convention exactly.
+pub fn apply_vegetal_decoration_step_3x3_per_source<'a, R: RandomSource>(
+    random: &mut WorldgenRandom<R>,
+    seed: i64,
+    center_x: i32,
+    center_z: i32,
+    grid: &mut VegGrid,
+    tags: &VegTags,
+    features_for_source: &dyn Fn(i32, i32) -> &'a [(usize, PlacedRef)],
+) {
+    for dx in -1..=1i32 {
+        for dz in -1..=1i32 {
+            let source_x = center_x + dx;
+            let source_z = center_z + dz;
+            let features = features_for_source(source_x, source_z);
+            apply_vegetal_decoration_step(random, seed, source_x, source_z, grid, tags, features);
+        }
     }
 }
 
@@ -1743,51 +2262,98 @@ fn place_tree<R: RandomSource>(
         return;
     }
 
-    if let Some(below_provider) = &cfg.below_trunk_provider {
-        let below_pos = BlockPos {
-            x: origin.x,
-            y: origin.y - 1,
-            z: origin.z,
-        };
-        if let Some(state) = below_provider.get_state(grid, tags, random, below_pos) {
-            grid.set_if_in_bounds(below_pos.x, below_pos.y, below_pos.z, state);
-        }
-    }
+    // Marks where this tree's own writes begin, so `update_leaf_distances`
+    // can later derive its bbox from exactly this tree's own `trunks ∪
+    // foliage ∪ decorations` — see that function's own doc comment on why
+    // the bbox must be this narrow (real vanilla's `updateLeaves` is scoped
+    // the same way, to one tree at a time, not the whole grid).
+    let dirty_start = grid.dirty_len();
 
-    let mut placed_log = false;
-    for y in 0..tree_height {
-        let pos = BlockPos {
-            x: origin.x,
-            y: origin.y + y,
-            z: origin.z,
-        };
-        let base = base_id(grid.get(pos.x, pos.y, pos.z));
-        if is_air(base) || tags.replaceable_by_trees.contains(base) {
-            if let Some(state) = cfg.trunk_provider.get_state(grid, tags, random, pos) {
-                grid.set_if_in_bounds(pos.x, pos.y, pos.z, state);
-                placed_log = true;
+    // Dispatch trunk placement by placer kind — `Straight`'s own
+    // `placeBelowTrunkBlock` + single-column loop stayed inline here (this
+    // module's original #406 shape, unchanged); `Forking` (issue #428)
+    // delegates to `place_forking_trunk`, which does its own
+    // `placeBelowTrunkBlock` call internally, matching `ForkingTrunkPlacer
+    // .placeTrunk`'s own real structure. Both branches produce the same
+    // `(Vec<Attachment>, Vec<BlockPos>, placed_log)` shape — the third being
+    // every position `trunkSetter` actually fired at (issue #428's
+    // `update_leaf_distances` BFS seed, see that function's doc comment) —
+    // so the foliage loop below is written once, not once per trunk kind.
+    let (attachments, trunk_positions, placed_log) = match &cfg.trunk_placer {
+        TrunkPlacerCfg::Straight { .. } => {
+            let mut trunk_positions = Vec::new();
+            if let Some(below_provider) = &cfg.below_trunk_provider {
+                let below_pos = BlockPos {
+                    x: origin.x,
+                    y: origin.y - 1,
+                    z: origin.z,
+                };
+                if let Some(state) = below_provider.get_state(grid, tags, random, below_pos) {
+                    grid.set_if_in_bounds(below_pos.x, below_pos.y, below_pos.z, state);
+                    trunk_positions.push(below_pos);
+                }
             }
+            let mut placed_log = false;
+            for y in 0..tree_height {
+                let pos = BlockPos {
+                    x: origin.x,
+                    y: origin.y + y,
+                    z: origin.z,
+                };
+                let base = base_id(grid.get(pos.x, pos.y, pos.z));
+                if is_air(base) || tags.replaceable_by_trees.contains(base) {
+                    if let Some(state) = cfg.trunk_provider.get_state(grid, tags, random, pos) {
+                        grid.set_if_in_bounds(pos.x, pos.y, pos.z, state);
+                        placed_log = true;
+                        trunk_positions.push(pos);
+                    }
+                }
+            }
+            let attachment = Attachment {
+                pos: BlockPos {
+                    x: origin.x,
+                    y: origin.y + tree_height,
+                    z: origin.z,
+                },
+                radius_offset: 0,
+                double_trunk: false,
+            };
+            (vec![attachment], trunk_positions, placed_log)
         }
-    }
-    let attachment = BlockPos {
-        x: origin.x,
-        y: origin.y + tree_height,
-        z: origin.z,
+        TrunkPlacerCfg::Forking { .. } => place_forking_trunk(
+            random,
+            origin,
+            tree_height,
+            grid,
+            tags,
+            &cfg.trunk_provider,
+            &cfg.below_trunk_provider,
+        ),
     };
 
-    let offset = cfg.foliage_placer.sample_offset(random);
+    // `foliageAttachments.forEach(a -> foliagePlacer.createFoliage(...))` —
+    // the public per-attachment overload draws `this.offset(random)` FRESH
+    // for EACH attachment (not once overall), so the fresh
+    // `sample_offset` call must live INSIDE this loop. For `Straight`
+    // (always exactly one attachment) this is behaviourally identical to
+    // the pre-#428 single call it replaces — no draw-count change for
+    // oak/birch/spruce/pine.
     let mut placed_leaf = false;
-    cfg.foliage_placer.create_foliage(
-        random,
-        attachment,
-        foliage_height,
-        leaf_radius,
-        offset,
-        grid,
-        tags,
-        &cfg.foliage_provider,
-        &mut placed_leaf,
-    );
+    for attachment in &attachments {
+        let offset = cfg.foliage_placer.sample_offset(random);
+        cfg.foliage_placer.create_foliage(
+            random,
+            attachment.pos,
+            foliage_height,
+            leaf_radius,
+            offset,
+            attachment.radius_offset,
+            grid,
+            tags,
+            &cfg.foliage_provider,
+            &mut placed_leaf,
+        );
+    }
 
     if !placed_log && !placed_leaf {
         return;
@@ -1800,6 +2366,35 @@ fn place_tree<R: RandomSource>(
             }
             Decorator::Unsupported => {}
         }
+    }
+
+    // `TreeFeature.place`'s own final step, AFTER decorators — issue #428's
+    // fix for the `distance=7`-forever gap named in
+    // `update_leaf_distances`'s own doc comment. Draws no RNG (a pure grid
+    // post-process), so it is safe to run unconditionally here regardless
+    // of which branch above produced `trunk_positions`. The bbox is exactly
+    // `BoundingBox.encapsulatingPositions(trunks ∪ foliage ∪ decorations)`
+    // (no `rootPositions` — no root placer implemented) — every absolute
+    // position this ONE tree call wrote, from `dirty_start` (captured right
+    // before trunk placement began) to now (right after decorators ran).
+    let mut bbox: Option<(i32, i32, i32, i32, i32, i32)> = None;
+    for (x, y, z, _) in grid.dirty_cells().skip(dirty_start) {
+        bbox = Some(match bbox {
+            None => (x, y, z, x, y, z),
+            Some((min_x, min_y, min_z, max_x, max_y, max_z)) => {
+                (min_x.min(x), min_y.min(y), min_z.min(z), max_x.max(x), max_y.max(y), max_z.max(z))
+            }
+        });
+    }
+    // `bbox` is `None` only if every write this tree attempted landed
+    // outside `grid`'s own footprint (single-chunk mode, a lean/branch that
+    // walked entirely off-chunk) — matching `placed_log`/`placed_leaf`
+    // above tracking ATTEMPTS, not landed writes. Real vanilla's own bbox
+    // is always non-empty here (its world has no footprint to fall outside
+    // of), so this is a narrowing specific to this engine's bounded grid,
+    // not a case vanilla itself has — nothing to update in that case.
+    if let Some(bbox) = bbox {
+        update_leaf_distances(grid, tags, &trunk_positions, bbox);
     }
 }
 
@@ -1968,7 +2563,7 @@ mod tests {
             foliage_provider: BlockStateProvider::Simple(
                 "minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]".to_string(),
             ),
-            trunk_placer: TrunkPlacerCfg {
+            trunk_placer: TrunkPlacerCfg::Straight {
                 base_height: 5,
                 height_rand_a: 0,
                 height_rand_b: 0,
@@ -2027,7 +2622,7 @@ mod tests {
             foliage_provider: BlockStateProvider::Simple(
                 "minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]".to_string(),
             ),
-            trunk_placer: TrunkPlacerCfg {
+            trunk_placer: TrunkPlacerCfg::Straight {
                 base_height: 5,
                 height_rand_a: 0,
                 height_rand_b: 0,
@@ -2074,7 +2669,7 @@ mod tests {
                 "minecraft:spruce_leaves[distance=7,persistent=false,waterlogged=false]"
                     .to_string(),
             ),
-            trunk_placer: TrunkPlacerCfg {
+            trunk_placer: TrunkPlacerCfg::Straight {
                 base_height: 5,
                 height_rand_a: 2,
                 height_rand_b: 1,
