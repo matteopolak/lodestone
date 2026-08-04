@@ -430,13 +430,297 @@ fn rng_next(engine: &mut ParticleEngine) -> f32 {
     engine.rng().next_float()
 }
 
+/// `AttackSweepParticle` — the arc thrown by a sweeping melee hit.
+///
+/// `.cache/mc/26.2/client-src/net/minecraft/client/particle/AttackSweepParticle.java`:
+/// no `move()` call at all (stationary for its whole life — see
+/// [`crate::Particle::tick_sweep_attack`]), full-bright, 4-tick lifetime, a
+/// grey tint drawn once (`nextFloat() * 0.6F + 0.4F`), and
+/// `quadSize = 1.0F - (float) size * 0.5F`.
+///
+/// `size` is the constructor's own `xAux` parameter — but the one real
+/// vanilla call site
+/// (`.cache/mc/26.2/src/net/minecraft/world/entity/player/Player.java:1191`,
+/// `serverLevel.sendParticles(ParticleTypes.SWEEP_ATTACK, x, y, z, 0, dx, 0.0,
+/// dz, 0.0)`) sends `count == 0` with `maxSpeed == 0.0F`, and
+/// `ClientPacketListener.handleParticleEvent`'s `count == 0` branch computes
+/// `xAux = maxSpeed * xDist`, so the value that actually reaches this
+/// constructor in real play is always `0.0`, regardless of `dx` — i.e.
+/// `quadSize` is always `1.0` in practice. Taking `size` as a parameter
+/// anyway (rather than hardcoding that) keeps this a faithful transcription
+/// of the Java constructor for any future caller (a datapack or `/particle`
+/// invocation can still pass a nonzero `xAux`).
+pub fn sweep_attack(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, size: f32) {
+    let rng = engine.rng();
+    let mut p = Particle::new(
+        x,
+        y,
+        z,
+        SpriteSource::Sheet {
+            sheet: Sheet::SweepAttack,
+            frame: 0,
+        },
+        rng,
+    );
+    p.lifetime = 4;
+    let col = rng_next(engine).mul_add(0.6, 0.4);
+    p.colour = [col, col, col];
+    p.quad_size = size.mul_add(-0.5, 1.0);
+    p.behaviour = Behaviour::SweepAttack;
+    engine.add(p);
+}
+
+/// `NoteParticle` — the coloured chime above a played note block.
+///
+/// `.cache/mc/26.2/client-src/net/minecraft/client/particle/NoteParticle.java`:
+/// zero initial velocity, `friction = 0.66F`,
+/// `speedUpWhenYMotionIsBlocked = true`, `yd += 0.2`, a fixed `lifetime = 6`
+/// (overwriting whatever the base constructor's lifetime draw produced), and
+/// `quadSize *= 1.5F`. The RGB formula reads a note-block "colour" in `[0,
+/// 1)` (vanilla passes `note / 24.0`, the tuned-pitch index over its 24-note
+/// range) and derives three phase-shifted sine waves from it.
+pub fn note(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, color: f64) {
+    let rng = engine.rng();
+    let mut p = Particle::new(
+        x,
+        y,
+        z,
+        SpriteSource::Sheet {
+            sheet: Sheet::Note,
+            frame: 0,
+        },
+        rng,
+    );
+    p.friction = 0.66;
+    p.speed_up_when_y_blocked = true;
+    p.yd += 0.2;
+    // `(float) color` widens the double parameter down before every use.
+    let c = color as f32;
+    let tau = std::f32::consts::TAU;
+    let phase = |offset: f32| ((c + offset) * tau).sin().mul_add(0.65, 0.35).max(0.0);
+    p.colour = [phase(0.0), phase(0.333_333_34), phase(0.666_666_7)];
+    p.quad_size *= 1.5;
+    p.lifetime = 6;
+    p.behaviour = Behaviour::Note;
+    engine.add(p);
+}
+
+/// The shared `HeartParticle` constructor body
+/// (`.cache/mc/26.2/client-src/net/minecraft/client/particle/HeartParticle.java`):
+/// zero initial velocity, `speedUpWhenYMotionIsBlocked = true`,
+/// `friction = 0.86F`, `yd += 0.1`, `quadSize *= 1.5F`, `lifetime = 16`,
+/// `hasPhysics = false`. [`heart`] and [`angry_villager`] are its two
+/// registered providers — same class, different sprite and vertical offset
+/// at the emit site (the `+ 0.5` in `AngryVillagerProvider.createParticle`).
+fn heart_particle(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, sheet: Sheet) -> Particle {
+    let rng = engine.rng();
+    let mut p = Particle::new(
+        x,
+        y,
+        z,
+        SpriteSource::Sheet { sheet, frame: 0 },
+        rng,
+    );
+    p.speed_up_when_y_blocked = true;
+    p.friction = 0.86;
+    p.yd += 0.1;
+    p.quad_size *= 1.5;
+    p.lifetime = 16;
+    p.has_physics = false;
+    p.behaviour = Behaviour::Heart;
+    p
+}
+
+/// `HeartParticle.Provider` — breeding hearts (`ParticleTypes.HEART`).
+pub fn heart(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
+    let p = heart_particle(engine, x, y, z, Sheet::Heart);
+    engine.add(p);
+}
+
+/// `HeartParticle.AngryVillagerProvider` — the villager "angry" icon
+/// (`ParticleTypes.ANGRY_VILLAGER`). Same physics as [`heart`], a different
+/// sprite (`particle/angry`, not `particle/heart`), and vanilla raises the
+/// spawn point by `0.5` at the call site rather than in the particle class —
+/// reproduced here since this function *is* that call site.
+pub fn angry_villager(engine: &mut ParticleEngine, x: f64, y: f64, z: f64) {
+    let p = heart_particle(engine, x, y + 0.5, z, Sheet::Angry);
+    engine.add(p);
+}
+
+/// `SuspendedTownParticle.HappyVillagerProvider` — the villager "happy" icon
+/// (`ParticleTypes.HAPPY_VILLAGER`).
+///
+/// `.cache/mc/26.2/client-src/net/minecraft/client/particle/SuspendedTownParticle.java`:
+/// a jittered-velocity construction (vanilla's `super(level, x, y, z, xa, ya,
+/// za, sprite)` — the same `Particle(level, x, y, z, xa, ya, za)` shape
+/// [`Particle::with_velocity`] already reproduces) followed by a dim grey
+/// tint (`nextFloat() * 0.1F + 0.2F`), a `0.02`×`0.02` box, a
+/// `nextFloat() * 0.6F + 0.5F` quad-size jitter, the velocity damped to a
+/// hundredth, and `lifetime = (int)(20.0 / (nextFloat() * 0.8F + 0.2F))`.
+/// `HappyVillagerProvider` itself then calls `setColor(1, 1, 1)`, which is
+/// redundant here since white is this crate's own particle default.
+pub fn happy_villager(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    let rng = engine.rng();
+    let mut p = Particle::with_velocity(
+        x,
+        y,
+        z,
+        xa,
+        ya,
+        za,
+        SpriteSource::Sheet {
+            sheet: Sheet::Glint,
+            frame: 0,
+        },
+        rng,
+    );
+    let br = rng_next(engine).mul_add(0.1, 0.2);
+    p.colour = [br, br, br];
+    p.set_size(0.02, 0.02);
+    p.quad_size *= rng_next(engine).mul_add(0.6, 0.5);
+    let damp = f64::from(0.02_f32);
+    p.xd *= damp;
+    p.yd *= damp;
+    p.zd *= damp;
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "Java's `(int)` cast truncates; the value is small"
+    )]
+    let lifetime = (20.0 / f64::from(rng_next(engine).mul_add(0.8, 0.2))) as i32;
+    p.lifetime = lifetime;
+    p.behaviour = Behaviour::Suspended;
+    engine.add(p);
+}
+
+/// `SpellParticle.WitchProvider` — the purple motes above a drinking witch
+/// (`ParticleTypes.WITCH`).
+///
+/// `.cache/mc/26.2/client-src/net/minecraft/client/particle/SpellParticle.java`:
+/// the constructor jitters its *own* horizontal velocity from a
+/// process-wide static `RandomSource` (`SpellParticle.RANDOM`) rather than
+/// the per-particle stream every other emitter in this crate draws from —
+/// drawn from this engine's RNG instead, since particle-burst randomness is
+/// disclosed as not needing bit-exact replay (see
+/// [`crate::Particles::spawn_particles`]'s module docs in the shell for the
+/// same policy applied to the network dispatch). `friction = 0.96F`,
+/// `gravity = -0.1F`, `speedUpWhenYMotionIsBlocked = true`, `yd *= 0.2F`, and
+/// — using the constructor's *original*, unjittered `xa`/`za` parameters,
+/// not the ones just fed into the velocity jitter — a further `xd`/`zd`
+/// damp to a tenth when both were exactly zero. `quadSize *= 0.75F`,
+/// `lifetime = (int)(8.0 / (nextFloat() * 0.8F + 0.2F))`, `hasPhysics =
+/// false`. `WitchProvider` then sets the colour: `nextFloat() * 0.5F +
+/// 0.35F` brightness times `(1, 0, 1)` — magenta, never green.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors the `SpellParticle` constructor argument for argument"
+)]
+pub fn witch(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    let rng = engine.rng();
+    let jitter_x = 0.5 - rng.next_double();
+    let jitter_z = 0.5 - rng.next_double();
+    let rng = engine.rng();
+    let mut p = Particle::with_velocity(
+        x,
+        y,
+        z,
+        jitter_x,
+        ya,
+        jitter_z,
+        SpriteSource::Sheet {
+            sheet: Sheet::Spell,
+            frame: 0,
+        },
+        rng,
+    );
+    p.friction = 0.96;
+    p.gravity = -0.1;
+    p.speed_up_when_y_blocked = true;
+    p.yd *= f64::from(0.2_f32);
+    if xa == 0.0 && za == 0.0 {
+        p.xd *= f64::from(0.1_f32);
+        p.zd *= f64::from(0.1_f32);
+    }
+    p.quad_size *= 0.75;
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "Java's `(int)` cast truncates; the value is small"
+    )]
+    let lifetime = (8.0 / f64::from(rng_next(engine).mul_add(0.8, 0.2))) as i32;
+    p.lifetime = lifetime;
+    p.has_physics = false;
+    let rb = rng_next(engine).mul_add(0.5, 0.35);
+    p.colour = [rb, 0.0, rb];
+    p.behaviour = Behaviour::Spell;
+    p.sprite = SpriteSource::Sheet {
+        sheet: Sheet::Spell,
+        frame: Sheet::Spell.frame_for_age(0, p.lifetime),
+    };
+    engine.add(p);
+}
+
+/// `TotemParticle` — the burst when a totem of undying saves its holder
+/// (`ParticleTypes.TOTEM_OF_UNDYING`).
+///
+/// `.cache/mc/26.2/client-src/net/minecraft/client/particle/TotemParticle.java`:
+/// extends `SimpleAnimatedParticle` (`friction = 0.91F` overridden
+/// immediately back down to `0.6F`, `gravity = 1.25F`), takes its velocity
+/// **directly** from the caller with no jitter at all (`xd = xa` etc.),
+/// `quadSize *= 0.75F`, `lifetime = 60 + nextInt(12)`, and a 1-in-4 chance of
+/// a "golden" tint (`0.6..0.8, 0.6..0.9, 0..0.2`) versus the usual "green"
+/// one (`0.1..0.3, 0.4..0.7, 0..0.2`) — both branches draw exactly three
+/// `nextFloat()`s, so the RNG stream length does not depend on which
+/// branch is taken. No `setFadeColor`, so only alpha fades
+/// ([`Behaviour::SimpleAnimated`]'s existing `fade: None` path already
+/// covers this exactly).
+pub fn totem_of_undying(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: f64, za: f64) {
+    let rng = engine.rng();
+    let mut p = Particle::new(
+        x,
+        y,
+        z,
+        SpriteSource::Sheet {
+            sheet: Sheet::Glitter,
+            frame: 0,
+        },
+        rng,
+    );
+    p.friction = 0.6;
+    p.gravity = 1.25;
+    p.xd = xa;
+    p.yd = ya;
+    p.zd = za;
+    p.quad_size *= 0.75;
+    let extra = engine.rng().next_int_bound(12);
+    p.lifetime = 60 + extra;
+    p.sprite = SpriteSource::Sheet {
+        sheet: Sheet::Glitter,
+        frame: Sheet::Glitter.frame_for_age(0, p.lifetime),
+    };
+    let golden = engine.rng().next_int_bound(4) == 0;
+    p.colour = if golden {
+        [
+            rng_next(engine).mul_add(0.2, 0.6),
+            rng_next(engine).mul_add(0.3, 0.6),
+            rng_next(engine) * 0.2,
+        ]
+    } else {
+        [
+            rng_next(engine).mul_add(0.2, 0.1),
+            rng_next(engine).mul_add(0.3, 0.4),
+            rng_next(engine) * 0.2,
+        ]
+    };
+    p.behaviour = Behaviour::SimpleAnimated { fade: None };
+    engine.add(p);
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        FULL_CUBE, Face, breaking_block_effect, bubble, crit, destroy_block_effect, flame, smoke,
-        splash,
+        FULL_CUBE, Face, angry_villager, breaking_block_effect, bubble, crit, destroy_block_effect,
+        flame, happy_villager, heart, note, smoke, splash, sweep_attack, totem_of_undying, witch,
     };
-    use crate::{Behaviour, ParticleEngine, SpriteSource};
+    use crate::{Behaviour, ParticleEngine, Sheet, SpriteSource};
     use lodestone_physics::Aabb;
 
     const STONE: u32 = 1;
@@ -627,5 +911,253 @@ mod tests {
         };
         assert_eq!(burst(1234), burst(1234));
         assert_ne!(burst(1234), burst(1235));
+    }
+
+    /// The sweep-attack particle (#12's split-out remainder): exactly the
+    /// vanilla shape, not merely "a particle appeared". Lifetime and light
+    /// coords are exact constants in the Java source, not RNG-derived, so
+    /// they are asserted exactly rather than as a range.
+    #[test]
+    fn sweep_attack_has_the_exact_vanilla_lifetime_and_colour_range() {
+        let mut engine = ParticleEngine::seeded(100);
+        sweep_attack(&mut engine, 0.0, 64.0, 0.0, 0.0);
+        assert_eq!(engine.len(), 1, "sweep_attack must spawn exactly one quad");
+        let p = &engine.particles()[0];
+        assert_eq!(p.lifetime, 4, "AttackSweepParticle.lifetime = 4, hardcoded");
+        assert!(matches!(p.behaviour, Behaviour::SweepAttack));
+        assert!(matches!(
+            p.sprite,
+            SpriteSource::Sheet {
+                sheet: Sheet::SweepAttack,
+                ..
+            }
+        ));
+        // `size == 0.0` (the real call site's value, see this fn's docs) means
+        // `quadSize = 1.0 - 0.0 * 0.5 = 1.0` exactly, not a range.
+        assert!(
+            (p.quad_size - 1.0).abs() < 1e-6,
+            "quad_size {} should be exactly 1.0 when size == 0.0",
+            p.quad_size
+        );
+        // `nextFloat() * 0.6F + 0.4F` is bounded [0.4, 1.0) by the formula.
+        for c in p.colour {
+            assert!((0.4..1.0).contains(&c), "colour {c} outside 0.4..1.0");
+        }
+    }
+
+    /// A negative control for the removal timing: `tick_sweep_attack` must
+    /// remove the particle on exactly its 5th tick (ages 0..3 alive, age 4
+    /// removed), reproducing Java's post-increment `age++ >= lifetime` check
+    /// rather than an off-by-one pre/post variant.
+    #[test]
+    fn sweep_attack_dies_on_exactly_the_fifth_tick() {
+        use lodestone_physics::{Aabb, CollisionView};
+        struct Empty;
+        impl CollisionView for Empty {
+            fn collision_boxes(&self, _: i32, _: i32, _: i32, _: &mut Vec<Aabb>) {}
+        }
+        let mut engine = ParticleEngine::seeded(101);
+        sweep_attack(&mut engine, 0.0, 64.0, 0.0, 0.0);
+        for tick in 0..4 {
+            engine.tick(&Empty);
+            assert_eq!(
+                engine.len(),
+                1,
+                "sweep_attack must still be alive after tick {tick}"
+            );
+        }
+        engine.tick(&Empty);
+        assert!(engine.is_empty(), "sweep_attack must be removed on tick 4");
+    }
+
+    /// `NoteParticle`'s colour formula is exact and external
+    /// (`NoteParticle.java`'s three phase-shifted sines), so the expected
+    /// value is computed independently here from the same formula rather than
+    /// merely checking "some colour resulted".
+    #[test]
+    fn note_colour_matches_the_three_phase_shifted_sine_formula() {
+        let mut engine = ParticleEngine::seeded(1);
+        note(&mut engine, 0.0, 64.0, 0.0, 0.5);
+        let p = &engine.particles()[0];
+        assert_eq!(p.lifetime, 6, "NoteParticle hardcodes lifetime = 6");
+        assert!(p.speed_up_when_y_blocked);
+        let c = 0.5_f32;
+        let tau = std::f32::consts::TAU;
+        let expect = |offset: f32| ((c + offset) * tau).sin().mul_add(0.65, 0.35).max(0.0);
+        let want = [expect(0.0), expect(0.333_333_34), expect(0.666_666_7)];
+        for (got, want) in p.colour.iter().zip(want) {
+            assert!(
+                (got - want).abs() < 1e-6,
+                "colour channel {got} != predicted {want}"
+            );
+        }
+    }
+
+    /// `HeartParticle` is physics-free with a fixed 16-tick life — both
+    /// `heart` (breeding) and `angry_villager` share this constructor;
+    /// `angry_villager` additionally raises the spawn point by 0.5 and uses a
+    /// different sprite, which this test also pins.
+    #[test]
+    fn heart_and_angry_villager_share_physics_but_not_sprite_or_height() {
+        let mut engine = ParticleEngine::seeded(2);
+        heart(&mut engine, 1.0, 64.0, 1.0);
+        angry_villager(&mut engine, 1.0, 64.0, 1.0);
+        let particles = engine.particles();
+        assert_eq!(particles.len(), 2);
+        for p in particles {
+            assert!(!p.has_physics, "HeartParticle sets hasPhysics = false");
+            assert_eq!(p.lifetime, 16, "HeartParticle hardcodes lifetime = 16");
+            assert!(matches!(p.behaviour, Behaviour::Heart));
+        }
+        assert!(matches!(
+            particles[0].sprite,
+            SpriteSource::Sheet {
+                sheet: Sheet::Heart,
+                ..
+            }
+        ));
+        assert!(matches!(
+            particles[1].sprite,
+            SpriteSource::Sheet {
+                sheet: Sheet::Angry,
+                ..
+            }
+        ));
+        assert!(
+            (particles[1].y - 64.5).abs() < 1e-9,
+            "angry_villager must raise the spawn point by 0.5, got y={}",
+            particles[1].y
+        );
+        assert!(
+            (particles[0].y - 64.0).abs() < 1e-9,
+            "heart must not raise the spawn point"
+        );
+    }
+
+    /// `SuspendedTownParticle`'s tick is a `lifetime`-countdown with no
+    /// collision, not the usual `age`-increment: this pins that the particle
+    /// survives exactly `lifetime` ticks of movement (not `lifetime + 1` or
+    /// `lifetime - 1`, the two off-by-one variants a literal `age`-based
+    /// rewrite would produce) and that it moves through solid geometry
+    /// unimpeded, unlike every collision-driven behaviour in this module.
+    #[test]
+    fn happy_villager_survives_exactly_lifetime_ticks_and_ignores_collision() {
+        use lodestone_physics::{Aabb, CollisionView};
+        struct Wall;
+        impl CollisionView for Wall {
+            fn collision_boxes(&self, _x: i32, y: i32, _z: i32, out: &mut Vec<Aabb>) {
+                if y == 64 {
+                    out.push(Aabb::new(-10.0, 64.0, -10.0, 10.0, 65.0, 10.0));
+                }
+            }
+        }
+        let mut engine = ParticleEngine::seeded(3);
+        happy_villager(&mut engine, 0.0, 64.5, 0.0, 5.0, 0.0, 0.0);
+        let lifetime = engine.particles()[0].lifetime;
+        assert!(lifetime > 0, "lifetime must be positive");
+        // `lifetime--` is checked *before* decrementing on every tick, so the
+        // field reaches 0 (without removing) after exactly `lifetime` ticks
+        // of movement, and removal itself happens on tick `lifetime + 1` —
+        // the post-decrement semantics `tick_suspended`'s own doc comment
+        // spells out.
+        for _ in 0..lifetime {
+            assert_eq!(engine.len(), 1, "must still be alive during its `lifetime` ticks");
+            engine.tick(&Wall);
+        }
+        assert_eq!(
+            engine.len(),
+            1,
+            "must still be alive right after its `lifetime`th tick of movement"
+        );
+        engine.tick(&Wall);
+        assert!(
+            engine.is_empty(),
+            "happy_villager must be removed on tick `lifetime + 1`"
+        );
+
+        // Positive control: the same nominal velocity through the *same* wall
+        // must actually cross it, proving collision genuinely was skipped
+        // rather than the wall never being consulted at all (e.g. the AABB
+        // never overlapping the particle's own box).
+        let mut engine = ParticleEngine::seeded(3);
+        happy_villager(&mut engine, -1.0, 64.5, 0.0, 5.0, 0.0, 0.0);
+        let start_x = engine.particles()[0].x;
+        engine.tick(&Wall);
+        let after_x = engine.particles()[0].x;
+        assert!(
+            after_x > start_x,
+            "particle should have moved despite the wall at x={start_x}"
+        );
+    }
+
+    /// `SpellParticle.WitchProvider` always tints magenta (`(1, 0, 1)` scaled
+    /// by a shared brightness) — green is structurally impossible from this
+    /// formula, which is the exact property that distinguishes "witch" from
+    /// the green-tinted mob-effect variants of the same Java class (neither
+    /// of which this pass builds, since they need `ColorParticleOption`
+    /// decode).
+    #[test]
+    fn witch_particles_are_always_magenta_never_green() {
+        let mut engine = ParticleEngine::seeded(4);
+        for _ in 0..20 {
+            witch(&mut engine, 0.0, 64.0, 0.0, 0.0, 0.0, 0.0);
+        }
+        for p in engine.particles() {
+            assert!(!p.has_physics, "SpellParticle sets hasPhysics = false");
+            assert!(matches!(p.behaviour, Behaviour::Spell));
+            assert_eq!(p.colour[1], 0.0, "witch's green channel must be exactly 0");
+            assert!(
+                (0.35..0.85).contains(&p.colour[0]),
+                "red {} outside nextFloat()*0.5+0.35's range",
+                p.colour[0]
+            );
+            assert_eq!(
+                p.colour[0], p.colour[2],
+                "red and blue must match — the formula scales (1,0,1) by one shared brightness"
+            );
+        }
+    }
+
+    /// `TotemParticle`'s lifetime is `60 + nextInt(12)`, bounded to
+    /// `[60, 72)`, and it takes its velocity **directly** from the caller
+    /// with no jitter — unlike almost every other emitter in this module.
+    #[test]
+    fn totem_of_undying_lifetime_is_bounded_and_velocity_is_unjittered() {
+        let mut engine = ParticleEngine::seeded(5);
+        totem_of_undying(&mut engine, 0.0, 64.0, 0.0, 0.3, 0.7, -0.2);
+        let p = &engine.particles()[0];
+        assert!(
+            (60..72).contains(&p.lifetime),
+            "lifetime {} outside vanilla's 60 + nextInt(12) range",
+            p.lifetime
+        );
+        assert!((p.xd - 0.3).abs() < 1e-12, "xd must equal the raw input");
+        assert!((p.yd - 0.7).abs() < 1e-12, "yd must equal the raw input");
+        assert!((p.zd - -0.2).abs() < 1e-12, "zd must equal the raw input");
+        assert!(matches!(p.behaviour, Behaviour::SimpleAnimated { fade: None }));
+    }
+
+    /// The 1-in-4 "golden" branch versus the usual "green" branch: both must
+    /// be individually reachable, and — the magnitude check — a golden
+    /// sample's red channel must exceed a green sample's, since the ranges
+    /// (`0.6..0.8` vs `0.1..0.3`) are disjoint.
+    #[test]
+    fn totem_of_undying_has_two_disjoint_colour_populations() {
+        let mut greens: u32 = 0;
+        let mut goldens: u32 = 0;
+        for seed in 0..200 {
+            let mut engine = ParticleEngine::seeded(seed);
+            totem_of_undying(&mut engine, 0.0, 64.0, 0.0, 0.0, 0.0, 0.0);
+            let r = engine.particles()[0].colour[0];
+            if r >= 0.6 {
+                goldens += 1;
+                assert!((0.6..0.8).contains(&r), "golden red {r} outside 0.6..0.8");
+            } else {
+                greens += 1;
+                assert!((0.1..0.3).contains(&r), "green red {r} outside 0.1..0.3");
+            }
+        }
+        assert!(greens > 0, "the ~75% green branch never fired in 200 draws");
+        assert!(goldens > 0, "the ~25% golden branch never fired in 200 draws");
     }
 }

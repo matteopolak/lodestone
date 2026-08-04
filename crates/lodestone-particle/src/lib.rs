@@ -81,8 +81,19 @@ pub enum Sheet {
     Heart,
     /// `particle/effect_0` … `effect_7` — potion and spell effects.
     Effect,
-    /// `particle/glitter_0` … `glitter_7`.
+    /// `particle/glitter_0` … `glitter_7` — `TotemParticle`/`EndRodParticle`.
     Glitter,
+    /// `particle/sweep_0` … `sweep_7` — `AttackSweepParticle`.
+    SweepAttack,
+    /// `particle/spell_0` … `spell_7` — `SpellParticle` (witch, instant/mob
+    /// effect). A separate physical sheet from `Effect`: `effect.json` and
+    /// `witch.json` name different textures (`effect_N` vs `spell_N`) even
+    /// though both classes are `SpellParticle`-family.
+    Spell,
+    /// `particle/angry` — `HeartParticle.AngryVillagerProvider`.
+    Angry,
+    /// `particle/glint` — `SuspendedTownParticle.HappyVillagerProvider`.
+    Glint,
 }
 
 impl Sheet {
@@ -91,14 +102,16 @@ impl Sheet {
     #[must_use]
     pub const fn frame_count(self) -> u16 {
         match self {
-            Self::Generic | Self::Effect | Self::Glitter => 8,
+            Self::Generic | Self::Effect | Self::Glitter | Self::SweepAttack | Self::Spell => 8,
             Self::Splash => 4,
             Self::CriticalHit
             | Self::EnchantedHit
             | Self::Flame
             | Self::Bubble
             | Self::Note
-            | Self::Heart => 1,
+            | Self::Heart
+            | Self::Angry
+            | Self::Glint => 1,
         }
     }
 
@@ -116,6 +129,10 @@ impl Sheet {
             Self::Heart => "heart",
             Self::Effect => "effect",
             Self::Glitter => "glitter",
+            Self::SweepAttack => "sweep",
+            Self::Spell => "spell",
+            Self::Angry => "angry",
+            Self::Glint => "glint",
         }
     }
 
@@ -157,6 +174,10 @@ impl Sheet {
             Self::Heart,
             Self::Effect,
             Self::Glitter,
+            Self::SweepAttack,
+            Self::Spell,
+            Self::Angry,
+            Self::Glint,
         ]
     }
 
@@ -252,15 +273,37 @@ pub enum Behaviour {
         /// `setFadeColor` target, if any.
         fade: Option<[f32; 3]>,
     },
+    /// `AttackSweepParticle` — a full `tick()` override with no `move()` call
+    /// at all: it never collides, never falls, and just counts down its
+    /// 4-tick lifetime advancing through its sheet. See
+    /// [`Particle::tick_sweep_attack`].
+    SweepAttack,
+    /// `NoteParticle` — a note-block chime. Ordinary physics; only the colour
+    /// formula and the fast-fade-in quad size are special.
+    Note,
+    /// `HeartParticle` — breeding hearts and the villager "angry" icon (same
+    /// Java class, different sprite and vertical offset at the emit site).
+    /// Physics-free, like [`Self::Crit`].
+    Heart,
+    /// `SuspendedTownParticle` — the villager "happy" icon (and the wider
+    /// family of ambient specks this class covers in vanilla). A full
+    /// `tick()` override: no gravity or friction, a `lifetime`-countdown
+    /// rather than an `age`-increment, and a `move()` that skips collision
+    /// entirely. See [`Particle::tick_suspended`].
+    Suspended,
+    /// `SpellParticle` — witch/potion effect motes. Translucent, animates
+    /// through its sheet every tick with no fade.
+    Spell,
 }
 
 impl Behaviour {
     /// The sheet a behaviour animates through, if it animates.
     const fn animated_sheet(self, sprite: SpriteSource) -> Option<Sheet> {
         match (self, sprite) {
-            (Self::AshSmoke | Self::SimpleAnimated { .. }, SpriteSource::Sheet { sheet, .. }) => {
-                Some(sheet)
-            }
+            (
+                Self::AshSmoke | Self::SimpleAnimated { .. } | Self::SweepAttack | Self::Spell,
+                SpriteSource::Sheet { sheet, .. },
+            ) => Some(sheet),
             _ => None,
         }
     }
@@ -269,14 +312,18 @@ impl Behaviour {
     #[must_use]
     pub const fn layer(self) -> Layer {
         match self {
-            Self::SimpleAnimated { .. } => Layer::Translucent,
+            Self::SimpleAnimated { .. } | Self::Spell => Layer::Translucent,
             Self::Plain
             | Self::Terrain { .. }
             | Self::AshSmoke
             | Self::Crit
             | Self::Flame
             | Self::WaterDrop
-            | Self::Bubble => Layer::Opaque,
+            | Self::Bubble
+            | Self::SweepAttack
+            | Self::Note
+            | Self::Heart
+            | Self::Suspended => Layer::Opaque,
         }
     }
 }
@@ -539,8 +586,10 @@ impl Particle {
         };
         match self.behaviour {
             // `quadSize * clamp((age + a) / lifetime * 32, 0, 1)` — a fast fade
-            // *in* over the first 1/32 of life, not a fade out.
-            Behaviour::Crit | Behaviour::AshSmoke => {
+            // *in* over the first 1/32 of life, not a fade out. `NoteParticle`
+            // and `HeartParticle` both override `getQuadSize` with this exact
+            // expression too.
+            Behaviour::Crit | Behaviour::AshSmoke | Behaviour::Note | Behaviour::Heart => {
                 self.quad_size * (normalised() * 32.0).clamp(0.0, 1.0)
             }
             // `quadSize * (1 - s * s * 0.5)`.
@@ -581,6 +630,8 @@ impl Particle {
         match self.behaviour {
             Behaviour::WaterDrop => self.tick_water_drop(view),
             Behaviour::Bubble => self.tick_bubble(view),
+            Behaviour::SweepAttack => self.tick_sweep_attack(),
+            Behaviour::Suspended => self.tick_suspended(),
             _ => {
                 self.tick_base(view);
                 self.tick_overrides();
@@ -626,7 +677,7 @@ impl Particle {
                 self.colour[1] *= 0.96;
                 self.colour[2] *= 0.9;
             }
-            Behaviour::AshSmoke => self.set_sprite_from_age(),
+            Behaviour::AshSmoke | Behaviour::Spell => self.set_sprite_from_age(),
             Behaviour::SimpleAnimated { fade } => {
                 self.set_sprite_from_age();
                 let half = self.lifetime / 2;
@@ -721,6 +772,55 @@ impl Particle {
         if !view.is_water(bx, by, bz) {
             self.remove();
         }
+    }
+
+    /// `AttackSweepParticle.tick()` — a full override with no `move()` call at
+    /// all: the sweep quad is stationary for its whole 4-tick life.
+    ///
+    /// Java: `if (this.age++ >= this.lifetime) { this.remove(); } else {
+    /// this.setSpriteFromAge(this.sprites); }` — post-increment, so the
+    /// removal check reads `age` *before* the increment, but the increment
+    /// happens on both branches. Reproduced as a saved pre-increment check
+    /// rather than a literal transliteration, since Rust has no postfix `++`.
+    fn tick_sweep_attack(&mut self) {
+        self.xo = self.x;
+        self.yo = self.y;
+        self.zo = self.z;
+        let should_remove = self.age >= self.lifetime;
+        self.age += 1;
+        if should_remove {
+            self.remove();
+        } else {
+            self.set_sprite_from_age();
+        }
+    }
+
+    /// `SuspendedTownParticle.tick()` — a full override: no gravity, no
+    /// friction, no collision, and a `lifetime`-*countdown* rather than an
+    /// `age`-increment (so behaviours built on it never age past halfway —
+    /// there is no halfway to reach).
+    ///
+    /// Java: `if (this.lifetime-- <= 0) { this.remove(); } else {
+    /// this.move(xd, yd, zd); xd *= 0.99; yd *= 0.99; zd *= 0.99; }` —
+    /// `move()` is itself overridden to skip collision entirely, matching
+    /// [`Behaviour::Flame`]'s move override, so it is inlined here directly
+    /// rather than routed through [`Self::move_by`].
+    fn tick_suspended(&mut self) {
+        self.xo = self.x;
+        self.yo = self.y;
+        self.zo = self.z;
+        let should_remove = self.lifetime <= 0;
+        self.lifetime -= 1;
+        if should_remove {
+            self.remove();
+            return;
+        }
+        self.bb = self.bb.moved(self.xd, self.yd, self.zd);
+        self.set_location_from_bounding_box();
+        let damp = f64::from(0.99_f32);
+        self.xd *= damp;
+        self.yd *= damp;
+        self.zd *= damp;
     }
 
     /// A stand-in for the per-particle `random` in the two behaviours that draw
@@ -956,7 +1056,10 @@ impl ParticleEngine {
             let light = match p.behaviour {
                 // `SimpleAnimatedParticle.getLightCoords` returns full bright
                 // unconditionally — spell and note particles are self-lit.
-                Behaviour::SimpleAnimated { .. } => FULL_BRIGHT,
+                // `AttackSweepParticle.getLightCoords` overrides to the same
+                // constant explicitly (`15728880`), independently of
+                // `SimpleAnimatedParticle`.
+                Behaviour::SimpleAnimated { .. } | Behaviour::SweepAttack => FULL_BRIGHT,
                 _ => {
                     let (bx, by, bz) = block_containing(p.x, p.y, p.z);
                     light(bx, by, bz).unwrap_or(UNLOADED_LIGHT)
