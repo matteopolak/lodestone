@@ -238,11 +238,18 @@ pub(crate) fn tool_mining_item(
 /// [`Sim::new`] at render distance 32 builds thousands of sections, which is a
 /// minute of work to check a multiplication.
 pub(crate) fn fog_for_render_distance(render_distance: u32) -> lodestone_render::fog::FogSettings {
-    lodestone_render::fog::FogSettings::for_view_distance(
-        crate::gpu::SKY_COLOR,
-        render_distance as f32 * 16.0,
-        crate::gpu::FOG_START_FRACTION,
-    )
+    // `for_render_distance`, not `for_view_distance`: the latter deliberately does
+    // **not** populate the environmental fog pair, so the live overworld was still
+    // getting only the render-distance term after that fix landed. The Nether and
+    // the End already had it, because `Sim::fog_settings` calls `FogSettings::nether`
+    // /`the_end` directly — so the one dimension a player actually starts in was the
+    // one the fix did not reach.
+    //
+    // The span is unchanged: `for_render_distance` is algebraically identical to the
+    // fraction form across render distance 3..=40, which `gpu.rs`'s
+    // `fog_start_fraction_matches_vanillas_span` pins. `gpu::FOG_START_FRACTION` is
+    // still used by that test, so it does not become dead.
+    lodestone_render::fog::FogSettings::for_render_distance(crate::gpu::SKY_COLOR, render_distance)
 }
 
 /// Short, near-eye distance fog for an eye submerged in water.
@@ -2884,6 +2891,23 @@ impl Sim {
         Some(move |eye: glam::Vec3| {
             crate::block_entities::chest_spawns(&handle, &lids, eye, partial_tick)
         })
+    }
+
+    /// The skull/head sibling of [`Self::block_entity_source`], for
+    /// [`RenderState::set_skull_source`](crate::gpu::RenderState::set_skull_source).
+    ///
+    /// Unlike the chest source this captures **no partial tick and no animation
+    /// state**: none of the five ported skull types animate, so there is nothing
+    /// whose interpolation could freeze at the fraction of a tick the closure was
+    /// installed on. That asymmetry is the whole reason these are two sources
+    /// rather than one closure returning a pair.
+    #[must_use]
+    pub fn skull_source(
+        &self,
+    ) -> Option<impl Fn(glam::Vec3) -> Vec<lodestone_render::SkullSpawn> + Send + Sync + 'static>
+    {
+        let handle = self.net.as_ref()?.shared_handle();
+        Some(move |eye: glam::Vec3| crate::block_entities::skull_spawns(&handle, eye))
     }
 
     /// How many chest lids are currently animating or open — for the debug

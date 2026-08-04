@@ -1993,6 +1993,16 @@ impl WindowApp {
             render.set_block_entity_source(f);
         }
 
+        // Skulls and heads. Same per-frame install as the chests above, though for
+        // a weaker reason: none of the ported skull types animate, so there is no
+        // partial tick to go stale. It is installed here anyway rather than once at
+        // connect so the two block-entity sources cannot drift into different
+        // lifetimes — a skull source that survived a disconnect would keep handing
+        // out spawns from a dead world's handle.
+        if let Some(f) = self.sim.skull_source() {
+            render.set_skull_source(f);
+        }
+
         // Reconcile fog with the player's bit-exact fluid state each frame,
         // re-uploading only when it changes (crossing a water/lava surface) so a
         // submerged eye dissolves terrain into short water/lava fog and the
@@ -2049,7 +2059,13 @@ impl WindowApp {
             // same change-detected `if` this fog upload already used is free:
             // there is no separate "did the clear colour change" condition to
             // get out of sync with it.
-            render.set_clear_color(desired_fog.color);
+            // `_tracked`: applies the same `FOG_COLOR` day/night track
+            // `fog_with_clock` applies, so the clear colour and the terrain fog
+            // cannot drift apart. `desired_fog.color` is the untracked day base
+            // (weather-darkened, not clock-tracked), which is exactly what this
+            // wants and what `set_fog` two lines up already receives — passing an
+            // already-tracked colour would apply the track twice.
+            render.set_clear_color_tracked(desired_fog.color);
             self.applied_fog = Some(desired_fog);
         }
         // Drive the audio listener from the exact camera we render, so what the
@@ -2339,6 +2355,12 @@ impl WindowApp {
                 .with_inventory_label(&inventory_label)
                 .with_cursor(Some([self.cursor.0, self.cursor.1]))
                 .with_drag(self.menu_input.drag_paint())
+                // The wire `menu_type`, which is what `menu_type_title_anchor`
+                // keys on. Without this line the nine per-screen title anchors
+                // are correct and **unfed**, so a furnace or an anvil silently
+                // falls back to the generic `(8, 6)` — the same class of gap as
+                // a source installed but never set.
+                .with_menu_type(open_menu.as_ref().map(|open| &open.menu_type))
                 .with_recipe_book(self.recipe_book.as_ref());
             // `render_with_icons_scaled`, **not** `render_scaled`: the latter
             // hardcodes `depth: None, models: None`, so `want_models` was always
