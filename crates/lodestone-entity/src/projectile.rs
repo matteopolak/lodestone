@@ -161,6 +161,108 @@ impl Projectile {
     }
 }
 
+/// One projectile the [`ProjectileRegistry`] is advancing, keyed by its
+/// network entity id (an `i32`, matching `SimMob`'s numbering convention in
+/// `lodestone-server`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrackedProjectile {
+    /// The entity id this projectile was spawned with.
+    pub id: i32,
+    /// The projectile's own ballistic state.
+    pub projectile: Projectile,
+    /// Ticks since this projectile was registered.
+    pub ticks_alive: u32,
+}
+
+/// The live set of ballistic projectiles a driver advances once per server
+/// tick — the seam issue #211 was missing. [`Projectile::tick`] correctly
+/// integrates one projectile's motion, but nothing owned a *collection* of
+/// them across ticks: `grep`ping the whole tree outside this crate for
+/// `projectile::Projectile` returned nothing.
+///
+/// A caller (typically an integrated server's per-tick loop, alongside
+/// `MobSim::tick`) owns one of these: [`spawn`](Self::spawn) a projectile
+/// when a launch action creates one, call [`tick`](Self::tick) once per
+/// server tick, and [`remove`](Self::remove) it on impact or despawn. Hit
+/// detection and impact resolution are the caller's job — they need
+/// world/entity data this crate deliberately does not depend on (mirroring
+/// [`SpawnEnvironment`](crate::spawn::SpawnEnvironment)'s seam) — so `tick`
+/// only ever advances motion, which is the part `projectile.rs`'s own module
+/// doc calls out as verifiable bit-for-bit against a live server.
+#[derive(Debug, Default, Clone)]
+pub struct ProjectileRegistry {
+    entries: Vec<TrackedProjectile>,
+}
+
+impl ProjectileRegistry {
+    /// An empty registry.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Registers `projectile` under `id`, replacing any existing entry with
+    /// the same id.
+    pub fn spawn(&mut self, id: i32, projectile: Projectile) {
+        self.entries.retain(|e| e.id != id);
+        self.entries.push(TrackedProjectile {
+            id,
+            projectile,
+            ticks_alive: 0,
+        });
+    }
+
+    /// Removes and returns the tracked projectile with `id`, if any (e.g. on
+    /// impact).
+    pub fn remove(&mut self, id: i32) -> Option<TrackedProjectile> {
+        let idx = self.entries.iter().position(|e| e.id == id)?;
+        Some(self.entries.remove(idx))
+    }
+
+    /// The current ballistic state of `id`, if tracked.
+    #[must_use]
+    pub fn get(&self, id: i32) -> Option<&Projectile> {
+        self.entries.iter().find(|e| e.id == id).map(|e| &e.projectile)
+    }
+
+    /// Marks whether `id`'s projectile is currently submerged, selecting
+    /// [`DragProfile::water`] starting next tick. The caller (world
+    /// collision) owns this decision; the registry only stores it. Returns
+    /// `false` if `id` is not tracked.
+    pub fn set_in_water(&mut self, id: i32, in_water: bool) -> bool {
+        let Some(e) = self.entries.iter_mut().find(|e| e.id == id) else {
+            return false;
+        };
+        e.projectile.in_water = in_water;
+        true
+    }
+
+    /// Advances every tracked projectile exactly one server tick.
+    pub fn tick(&mut self) {
+        for e in &mut self.entries {
+            e.projectile.tick();
+            e.ticks_alive += 1;
+        }
+    }
+
+    /// Number of tracked projectiles.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether no projectiles are tracked.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Iterates the tracked projectiles in registration order.
+    pub fn iter(&self) -> impl Iterator<Item = &TrackedProjectile> {
+        self.entries.iter()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,5 +342,61 @@ mod tests {
         assert!(p.position.y < 64.0, "should have fallen");
         assert!(p.horizontal_speed() < x0, "horizontal speed should decay");
         assert!(p.velocity.y < 0.0, "should be moving downward");
+    }
+
+    // -- ProjectileRegistry: the #211 driver ----------------------------
+
+    #[test]
+    fn registry_tick_advances_every_tracked_projectile_through_one_call() {
+        // Two different families registered under distinct ids. Driving them
+        // exclusively through `ProjectileRegistry::tick` (never calling
+        // `Projectile::tick` directly here) must land on exactly the same
+        // state as ticking equivalent standalone instances n times — proving
+        // the *registry* is what advances multiple heterogeneous entries,
+        // not just the underlying integrator.
+        let mut reg = ProjectileRegistry::new();
+        reg.spawn(1, Projectile::arrow(v(0.0, 64.0, 0.0), v(3.0, 0.0, 0.0)));
+        reg.spawn(2, Projectile::snowball(v(0.0, 64.0, 0.0), v(1.5, 0.0, 0.0)));
+        assert_eq!(reg.len(), 2);
+
+        for _ in 0..10 {
+            reg.tick();
+        }
+
+        let mut expected_arrow = Projectile::arrow(v(0.0, 64.0, 0.0), v(3.0, 0.0, 0.0));
+        expected_arrow.tick_n(10);
+        let mut expected_snowball = Projectile::snowball(v(0.0, 64.0, 0.0), v(1.5, 0.0, 0.0));
+        expected_snowball.tick_n(10);
+
+        assert_eq!(reg.get(1), Some(&expected_arrow));
+        assert_eq!(reg.get(2), Some(&expected_snowball));
+
+        for e in reg.iter() {
+            assert_eq!(e.ticks_alive, 10);
+        }
+    }
+
+    #[test]
+    fn registry_set_in_water_changes_subsequent_ticks() {
+        let mut reg = ProjectileRegistry::new();
+        reg.spawn(1, Projectile::arrow(v(0.0, 64.0, 0.0), v(4.0, 0.0, 0.0)));
+        assert!(reg.set_in_water(1, true));
+        assert!(!reg.set_in_water(99, true), "unknown id");
+        reg.tick();
+        // Water inertia 0.6 applies via the registry-stored flag, matching
+        // the standalone `water_drag_slows_faster_than_air` expectation.
+        assert!((reg.get(1).unwrap().velocity.x - 4.0 * 0.6).abs() < 1e-12);
+    }
+
+    #[test]
+    fn registry_remove_stops_further_ticking() {
+        let mut reg = ProjectileRegistry::new();
+        reg.spawn(1, Projectile::arrow(v(0.0, 64.0, 0.0), v(1.0, 0.0, 0.0)));
+        let removed = reg.remove(1).expect("was tracked");
+        assert_eq!(removed.id, 1);
+        assert!(reg.is_empty());
+        reg.tick(); // must not panic on an empty registry
+        assert!(reg.get(1).is_none());
+        assert!(reg.remove(1).is_none(), "already removed");
     }
 }
