@@ -153,9 +153,10 @@ harness-shape decision when that sub-issue is picked up, not automatically inher
   see [`../benchmark-harness.md`](../benchmark-harness.md) for the exact shape and why
   the file is duplicated rather than shared.
 - **Profiling**: the `samply` + `debug = 2` + `threadCPUDelta`-weighting workflow that
-  found #75, packaged as a repeatable script rather than tribal knowledge in a closed
-  issue. `[profile.release] debug = 2` is already committed in the root `Cargo.toml`; the
-  sampling/analysis half is not yet a tool.
+  found #75, packaged as a repeatable script (issue #83) rather than tribal knowledge in
+  a closed issue. `[profile.release] debug = 2` is already committed in the root
+  `Cargo.toml`; the sampling/analysis half is `scripts/profile-cost-table.py` -- see
+  below for the full recipe.
 
 ## How a regression is caught, without flaking CI
 
@@ -240,6 +241,58 @@ to the shared `lodestone_testsupport::bench_fixtures::synthetic_overworld_column
 measured a 1.004× ratio on the neighbourhood-factor metric across that change — the
 tool correctly reads that as "no real change," which is what the fixture swap was
 supposed to produce.
+
+## Profiling workflow (issue #83)
+
+The end-to-end recipe that found #75's 2.08× win, now a repeatable tool instead of
+tribal knowledge in a closed issue's writeup.
+
+1. **Build with debug info in release.** Already the default here --
+   `[profile.release] debug = 2` is committed in the root `Cargo.toml` specifically for
+   this (`samply`/Instruments profiling). A plain `cargo build --release` already
+   carries the DWARF `samply` needs; no separate profiling profile to keep in sync.
+2. **Install `samply`** if it is not already on `PATH` (`cargo install samply`, or see
+   [mstange/samply](https://github.com/mstange/samply) for platform-specific setup --
+   macOS needs no special permissions for a same-user process, Linux needs
+   `/proc/sys/kernel/perf_event_paranoid` at 1 or below, or `sudo`).
+3. **Record**, against the real release binary, with presymbolication on:
+   ```bash
+   samply record --save-only --unstable-presymbolicate \
+     -o profile.json.gz -- ./target/release/lodestone
+   ```
+   `--save-only` skips opening the interactive UI server (this repo profiles headlessly,
+   then reads the saved file); `--unstable-presymbolicate` is what writes the
+   `profile.json.syms.json` sidecar the next step needs. Profile a real session (issue
+   #75's own capture was ~94 s of actual play), not a few frames at startup.
+4. **Run the join**:
+   ```bash
+   python3 scripts/profile-cost-table.py profile.json.gz
+   ```
+   Prints two tables for the main thread (or `--thread <substring>` for another one):
+   **inclusive** (this function or something it called) and **self** (leaf frames
+   only), each weighted by `samples.threadCPUDelta` -- summed CPU time actually spent,
+   not sample count, which is what makes this the *correct* instrument rather than the
+   one that reads `acquire()` stalls as work (`docs/frame-pacing.md`'s
+   occluded-`CAMetalLayer` finding is the same trap, found independently). The script
+   warns loudly and falls back to sample-count weighting only if the capture genuinely
+   has no `threadCPUDelta` data -- never silently.
+5. **Read the sidecar-join warning line.** `symbolicated N raw address(es) via sidecar,
+   M unresolved` -- a high `M` usually means the binary changed between recording and
+   the sidecar being written (rebuild, then re-record) or the profiled process wasn't
+   the one `--unstable-presymbolicate` actually symbolicated against.
+
+`scripts/profile-cost-table.py --help` has the option reference; its module doc covers
+the join in full (`profile["shared"].funcTable/frameTable/stackTable/resourceTable`,
+`profile["libs"][i].debugName`, and the sidecar's `data[].symbol_table`/
+`known_addresses`/`string_table`, all confirmed against `fxprof-processed-profile`'s and
+samply's own source rather than assumed from the on-disk shape of one capture). Verified
+against a hand-built fixture profile + sidecar with a known expected answer (not a real
+capture -- this machine's sandbox has no GPU session to profile) — see the script's own
+`--help` example for the exact invocation shape a real session uses.
+
+**No profiling data is committed by this tooling.** `profile.json.gz` and its sidecar
+are local, one-off artifacts of a specific investigation; check `git status` before
+committing anything after a profiling session.
 
 ## Evidence standards this epic inherits
 
