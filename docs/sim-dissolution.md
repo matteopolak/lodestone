@@ -62,8 +62,66 @@
 > module boundary that did not exist before. Caught immediately by
 > `cargo check`, not a silent gap.
 >
-> `net_apply`, `audio`, `camera` and `meshing` remain candidate seams, not
-> attempted this session.
+> **Seams 4 through 7 landed too, in a later session, closing the sequence.**
+> Each moved as its own commit, each re-derived its line ranges fresh against
+> the immediately preceding commit rather than trusting this doc's stale
+> numbers (by the time seam 4 started, roughly 6,000 lines had already moved
+> out of `sim.rs` today), and each was verified byte-for-byte against the
+> exact range removed before being written to the new file.
+>
+> - **Seam 4** — `poll_net` (the ~66 `NetUpdate::` arms) and `fold_entities`,
+>   the two calls `Sim::step` makes right after the tick loop, into
+>   `sim/net_apply.rs`. This is the file with the most future contention:
+>   adding a `NetUpdate` variant means an arm here. Both methods widened from
+>   private to `pub(crate)`: `Sim::step` calls them from `sim.rs` itself,
+>   which is `net_apply`'s *parent* — privacy only cascades downward, so a
+>   child module's private item is invisible to its parent, the mirror image
+>   of seam 3's own wrinkle — and `sim/tests.rs`'s many `sim.poll_net()` calls
+>   cross the same sibling boundary seam 3's three methods did.
+> - **Seam 5** — the audio cluster (`entity_sound_position`,
+>   `set_audio_listener`, `play_block_break_sound`/`play_block_place_sound`/
+>   `play_block_surface_sound`, `block_sound_seed`) into `sim/audio.rs`.
+>   `entity_sound_position` and the break/place sound pair widened to
+>   `pub(crate)` for the same parent/sibling reasons as seam 4;
+>   `play_block_surface_sound`/`block_sound_seed` stayed private since their
+>   only callers moved here with them.
+> - **Seam 6** — the camera cluster (the fog helpers `fog_for_render_distance`/
+>   `water_fog`/`lava_fog`, `fog_settings`/`biome_sky_color`,
+>   `interpolated_player`, `camera`, `toggle_third_person`, `set_view_bobbing`,
+>   `bob_frame`, `render_camera`, `spyglass_scoping`, `third_person_body_state`,
+>   plus the `NoCollision` stand-in) into `sim/camera.rs`. The one re-export
+>   with a real wrinkle: `fog_for_render_distance` is named by `app.rs` at its
+>   full path (`crate::sim::fog_for_render_distance`), and `app.rs` is
+>   neither `sim` nor a descendant of it — a plain (private) `use` re-export
+>   in `sim.rs`, which is all `sim/tests.rs`'s glob import needs, is *not*
+>   enough for a sibling module. That re-export needed `pub(crate)`, matching
+>   the item's original visibility.
+> - **Seam 7**, closing the sequence — `dirty_sections_for_blocks` and the
+>   block-store/re-mesh/reconciliation cluster (`block_at_world`,
+>   `set_block_world`, `remesh_around`, `remesh_section`,
+>   `remesh_changed_blocks`, `on_column_arrived`, `mark_column_dirty`,
+>   `reconcile_predictions`) into `sim/meshing.rs`. `dirty_sections_for_blocks`
+>   re-exports `#[cfg(test)]`-gated, unlike every earlier seam's re-export:
+>   its only non-test caller (`remesh_changed_blocks`) now lives inside
+>   `sim::meshing` itself and needs no re-export, so an unconditional one is
+>   dead code — and therefore a warning — in a `--lib`-only build. Five
+>   methods widened to `pub(crate)`, same reasoning as every seam above:
+>   `block_at_world`/`set_block_world` are called from `sim.rs`'s own
+>   `crack_target` (this module's parent now) and from `sim/actions.rs`/
+>   `sim/tests.rs`; `remesh_around` from `sim/actions.rs`;
+>   `remesh_changed_blocks`/`reconcile_predictions` from `sim/net_apply.rs`'s
+>   `poll_net`; `on_column_arrived`/`mark_column_dirty` from both.
+>   `remesh_section` stayed private.
+>
+> Nothing here was entangled enough to stop for. `sim.rs` is now roughly
+> 3,200 lines — larger than this doc's own "~1,200" estimate two sections
+> down, because the accessor facade (dozens of small `pub fn` reads `app.rs`
+> calls once per frame: chat, xp, sidebar, boss bars, the menu snapshot,
+> mouse/input handling, `step` itself, `tick_collision`, `tick_nearby_entities`,
+> the outline/block-entity/skull/sign/bell render sources, and more) turned
+> out bigger than the plan accounted for. What remains is exactly what the
+> plan below says should: the struct, lifecycle (`new`/`build`/`connect`/
+> `attach_net`/`end_session`), the accessor facade, and `step`.
 
 ## What it is
 
