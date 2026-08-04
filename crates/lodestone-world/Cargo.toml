@@ -56,3 +56,11 @@ harness = false
 [[bench]]
 name = "light_propagation"
 harness = false
+
+[[bench]]
+name = "light_application"
+harness = false
+
+[[bench]]
+name = "memory_footprint"
+harness = false
