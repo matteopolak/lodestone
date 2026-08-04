@@ -115,6 +115,37 @@ pub struct SessionScoreboard(pub lodestone_game::scoreboard::Scoreboard);
 #[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionTabList(pub lodestone_game::tablist::TabList);
 
+/// The folded world border — centre, size (including a resize in flight),
+/// warning distance and warning delay.
+///
+/// All six `ClientEvent::WorldBorder*` variants were islands: decoded, covered by
+/// `crates/protocol/v770/tests/world_border.rs`, and routed
+/// `Route::NOWHERE`. They were the largest single cluster in
+/// `docs/event-routing.md`'s list. [`lodestone_game::worldborder::WorldBorder`] is
+/// the fold; this is the component, and [`apply_world_border`] the system.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq)]
+pub struct SessionWorldBorder(pub lodestone_game::worldborder::WorldBorder);
+
+/// The world's default spawn point, from `ClientEvent::SpawnPositionChanged`.
+///
+/// The consumer is the compass: `lodestone_render::item_render` lists
+/// `minecraft:compass` among the item-model range properties that are
+/// *deliberately unsourced* because the datum "genuinely is not decoded". It is
+/// decoded — it just never reached anything. See
+/// [`lodestone_game::levelstate::SpawnPoint`].
+#[derive(Component, Debug, Clone, Default, PartialEq)]
+pub struct SessionSpawnPoint(pub lodestone_game::levelstate::SpawnPoint);
+
+/// The server's reported game-rule values, from `ClientEvent::GameRulesChanged`.
+///
+/// **Not** issue #327's typed registry — that is a server-side 59-rule table and
+/// is not built. This holds raw wire strings with typed accessors over the top;
+/// see [`lodestone_game::levelstate::GameRuleValues`] for why absence is kept
+/// distinct from `false` (the packet is request/response, not broadcast, so an
+/// unreported rule is the *normal* case).
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionGameRules(pub lodestone_game::levelstate::GameRuleValues);
+
 /// The active boss bars, in server insertion (render) order.
 ///
 /// `lodestone_game::bossbar::BossBarSet` was a fully implemented, unit-tested
@@ -513,6 +544,65 @@ pub fn apply_tab_list(batch: Res<IngestBatch>, mut lists: Query<&mut SessionTabL
     }
 }
 
+/// `IngestSet::Apply`: the world-border family → [`SessionWorldBorder`].
+///
+/// # Why this one takes a clock and its siblings do not
+///
+/// A border resize is defined by wall time, and
+/// [`lodestone_game::worldborder::WorldBorder::apply`] deliberately does not take
+/// a clock — that would fork the `apply(&ClientEvent) -> bool` convention every
+/// other aggregate in `lodestone-game` follows. So the fold records the resize
+/// unstamped and this system, which *can* see resources, stamps it.
+///
+/// [`FrameClock`](crate::FrameClock) is the right clock rather than
+/// [`WorldTime`](crate::WorldTime): `WorldTime` is the *server's* clock, which the
+/// server can freeze with `advance_time`, and a frozen clock must not freeze a
+/// border animation. `FrameClock::secs` is monotonic wall time — the same clock
+/// the chat fade-out reads.
+///
+/// # Why `Option<Res<..>>`
+///
+/// `FrameClock` is inserted by [`crate::CorePlugin`], and [`SessionPlugin`] is
+/// deliberately addable without it (`spawn_session`'s harness installs
+/// `SessionPlugin` alone). A required `Res` would panic there. Absent clock means
+/// an unstamped resize, which
+/// [`size_at`](lodestone_game::worldborder::BorderExtent::size_at) reports as the
+/// *old* size — inert, not a guess.
+pub fn apply_world_border(
+    batch: Res<IngestBatch>,
+    clock: Option<Res<crate::FrameClock>>,
+    mut borders: Query<&mut SessionWorldBorder>,
+) {
+    let now = clock.map_or(0.0, |c| c.secs);
+    for event in batch.events() {
+        for mut border in &mut borders {
+            if border.0.apply(event) {
+                // `stamp` is idempotent, so a later border packet cannot restart
+                // an interpolation that is already running.
+                border.0.stamp(now);
+            }
+        }
+    }
+}
+
+/// `IngestSet::Apply`: `SpawnPositionChanged` → [`SessionSpawnPoint`].
+pub fn apply_spawn_point(batch: Res<IngestBatch>, mut spawns: Query<&mut SessionSpawnPoint>) {
+    for event in batch.events() {
+        for mut spawn in &mut spawns {
+            let _ = spawn.0.apply(event);
+        }
+    }
+}
+
+/// `IngestSet::Apply`: `GameRulesChanged` → [`SessionGameRules`].
+pub fn apply_game_rules(batch: Res<IngestBatch>, mut rules: Query<&mut SessionGameRules>) {
+    for event in batch.events() {
+        for mut table in &mut rules {
+            let _ = table.0.apply(event);
+        }
+    }
+}
+
 /// `IngestSet::Apply`: `BossBarUpdate` → [`SessionBossBars`].
 pub fn apply_boss_bars(batch: Res<IngestBatch>, mut bars: Query<&mut SessionBossBars>) {
     for event in batch.events() {
@@ -837,7 +927,19 @@ pub fn insert_session_components(world: &mut World, entity: bevy_ecs::entity::En
         ));
         // A second `insert` call: `Bundle` tuple impls stop at arity 15 and the
         // set above is already at that ceiling, not a meaningful grouping.
-        entity.insert((ServerDifficulty::default(), SessionBlockDestruction::default()));
+        entity.insert((
+            ServerDifficulty::default(),
+            SessionBlockDestruction::default(),
+            // Also the quit-to-title reset path (see this function's docs). A
+            // stale world border is the one of these three with a visible
+            // failure mode: joining a vanilla server after a bordered one would
+            // otherwise keep the old centre and size until the new server's
+            // `InitializeBorder` arrived, so the warning overlay could paint on
+            // a world that has no border there.
+            SessionWorldBorder::default(),
+            SessionSpawnPoint::default(),
+            SessionGameRules::default(),
+        ));
     }
 }
 
@@ -880,6 +982,9 @@ impl Plugin for SessionPlugin {
                 apply_boss_bars,
                 apply_menus,
                 apply_block_destruction,
+                apply_world_border,
+                apply_spawn_point,
+                apply_game_rules,
                 apply_local_player_state,
             )
                 .chain()
@@ -2555,6 +2660,262 @@ mod tests {
         assert_eq!(board.team_of("Bob").map(|t| t.name.as_str()), Some("red"));
     }
 
+    // ---- world-level admin state: the nine variants un-stranded ------------
+    //
+    // Each of these drives the event through `fold()` — the real `IngestQueue`
+    // plus `run_schedule(NetIngest)` — rather than calling the system. Calling
+    // `apply_world_border(...)` directly would pass whether or not the system is
+    // registered in `SessionPlugin`, which is one of the two ways this island
+    // class forms. (The other half, whether `route()` sends the event here at
+    // all, cannot be proven from inside this crate: see
+    // `lodestone_client::state`'s `apply_routes_*_through_the_real_path` gates.)
+
+    /// `TabListChanged` needed no new fold — only the route flag. This proves
+    /// the pre-existing arm now runs.
+    #[test]
+    fn tab_list_header_and_footer_reach_the_fold_through_the_real_schedule() {
+        let (mut app, entity) = session_app();
+        // Precondition, so the assertion below cannot pass on a default.
+        assert_eq!(
+            app.world().get::<SessionTabList>(entity).unwrap().0.header,
+            None,
+            "header must start unreported"
+        );
+        fold(
+            &mut app,
+            ClientEvent::TabListChanged {
+                header: Text::literal("HEADER"),
+                footer: Text::literal("FOOTER"),
+            },
+        );
+        let list = &app.world().get::<SessionTabList>(entity).unwrap().0;
+        assert_eq!(
+            list.header.as_ref().map(Text::to_plain_string),
+            Some("HEADER".to_owned())
+        );
+        assert_eq!(
+            list.footer.as_ref().map(Text::to_plain_string),
+            Some("FOOTER".to_owned())
+        );
+    }
+
+    #[test]
+    fn world_border_family_reaches_the_fold_through_the_real_schedule() {
+        let (mut app, entity) = session_app();
+        let before = *app.world().get::<SessionWorldBorder>(entity).unwrap();
+        assert!(!before.0.initialized, "must start uninitialised");
+
+        fold(
+            &mut app,
+            ClientEvent::WorldBorderInitialized {
+                x: 100.0,
+                z: -200.0,
+                old_size: 512.0,
+                new_size: 512.0,
+                lerp_time_ms: 0,
+                absolute_max_size: 29_999_984,
+                warning_blocks: 9,
+                warning_time: 44,
+            },
+        );
+        let b = app.world().get::<SessionWorldBorder>(entity).unwrap().0;
+        assert!(b.initialized);
+        assert!((b.center_x - 100.0).abs() < f64::EPSILON);
+        assert!((b.center_z + 200.0).abs() < f64::EPSILON);
+        assert!((b.target_size() - 512.0).abs() < f64::EPSILON);
+        assert_eq!(b.warning_blocks, 9);
+        assert_eq!(b.warning_time, 44);
+
+        // Now each incremental variant, so a missing arm in `apply` cannot hide
+        // behind `Initialized` having set everything already.
+        fold(
+            &mut app,
+            ClientEvent::WorldBorderCenterChanged { x: 1.0, z: 2.0 },
+        );
+        fold(&mut app, ClientEvent::WorldBorderSizeChanged { size: 64.0 });
+        fold(
+            &mut app,
+            ClientEvent::WorldBorderWarningDistanceChanged { warning_blocks: 3 },
+        );
+        fold(
+            &mut app,
+            ClientEvent::WorldBorderWarningDelayChanged { warning_time: 7 },
+        );
+        let b = app.world().get::<SessionWorldBorder>(entity).unwrap().0;
+        assert!((b.center_x - 1.0).abs() < f64::EPSILON, "center X arm");
+        assert!((b.center_z - 2.0).abs() < f64::EPSILON, "center Z arm");
+        assert!((b.target_size() - 64.0).abs() < f64::EPSILON, "size arm");
+        assert_eq!(b.warning_blocks, 3, "warning distance arm");
+        assert_eq!(b.warning_time, 7, "warning delay arm");
+    }
+
+    /// The resize interpolates on [`crate::FrameClock`], and the value is
+    /// *predicted* rather than merely asserted to be between the endpoints.
+    ///
+    /// The plausible wrong implementation reads the clock at fold time and again
+    /// at fold time (so the size never moves) or interpolates on `WorldTime`
+    /// ticks (so a 4 s resize completes in 200 ms). At `t = 0.5` the correct
+    /// answer is 300.0 and both wrong ones give an endpoint, so the two-sided
+    /// assertion separates all three.
+    #[test]
+    fn a_border_resize_interpolates_on_the_frame_clock() {
+        let (mut app, entity) = session_app();
+        // `SessionPlugin` alone carries no `FrameClock` (see
+        // `apply_world_border`'s docs), so install one and control it by hand.
+        app.world_mut().insert_resource(crate::FrameClock {
+            secs: 1_000.0,
+            ..crate::FrameClock::default()
+        });
+        fold(
+            &mut app,
+            ClientEvent::WorldBorderSizeLerping {
+                old_size: 200.0,
+                new_size: 400.0,
+                lerp_time_ms: 4_000,
+            },
+        );
+        let b = app.world().get::<SessionWorldBorder>(entity).unwrap().0;
+        assert!(b.is_resizing(), "a differing-endpoint lerp must be Moving");
+        // Stamped at fold time, so t=0 here.
+        assert!(
+            (b.size_at(1_000.0) - 200.0).abs() < 1e-9,
+            "at the stamp instant the border still reads its old size, got {}",
+            b.size_at(1_000.0)
+        );
+        let mid = b.size_at(1_002.0);
+        assert!(
+            (mid - 300.0).abs() < 1e-9,
+            "half way through a 4s resize must read the predicted 300.0, got {mid}"
+        );
+        assert!(
+            (mid - 400.0).abs() > 50.0,
+            "and must not have completed early (the tick/ms confusion), got {mid}"
+        );
+        assert!((b.size_at(1_004.0) - 400.0).abs() < 1e-9, "complete at t=1");
+    }
+
+    #[test]
+    fn spawn_position_reaches_the_fold_through_the_real_schedule() {
+        let (mut app, entity) = session_app();
+        assert!(
+            !app.world()
+                .get::<SessionSpawnPoint>(entity)
+                .unwrap()
+                .0
+                .is_reported(),
+            "spawn must start unreported, or the assertion below is vacuous"
+        );
+        fold(
+            &mut app,
+            ClientEvent::SpawnPositionChanged {
+                dimension: dim("overworld"),
+                pos: lodestone_model::math::BlockPos::new(-48, 71, 300),
+                angle: 180.0,
+                pitch: 0.0,
+            },
+        );
+        let sp = &app.world().get::<SessionSpawnPoint>(entity).unwrap().0;
+        assert!(sp.is_reported());
+        assert_eq!(
+            sp.pos(),
+            Some(lodestone_model::math::BlockPos::new(-48, 71, 300))
+        );
+    }
+
+    #[test]
+    fn game_rules_reach_the_fold_through_the_real_schedule() {
+        let (mut app, entity) = session_app();
+        assert!(
+            app.world()
+                .get::<SessionGameRules>(entity)
+                .unwrap()
+                .0
+                .is_empty(),
+            "rules must start empty"
+        );
+        fold(
+            &mut app,
+            ClientEvent::GameRulesChanged {
+                values: vec![
+                    (
+                        "minecraft:immediate_respawn".parse().unwrap(),
+                        "true".to_owned(),
+                    ),
+                    (
+                        "minecraft:random_tick_speed".parse().unwrap(),
+                        "12".to_owned(),
+                    ),
+                ],
+            },
+        );
+        let rules = &app.world().get::<SessionGameRules>(entity).unwrap().0;
+        assert_eq!(rules.immediate_respawn(), Some(true));
+        assert_eq!(rules.random_tick_speed(), Some(12));
+        // Absence stays distinct from false even after a real fold.
+        assert_eq!(rules.bool_rule("minecraft:keep_inventory"), None);
+    }
+
+    /// The reset path. `insert_session_components` is what
+    /// `Sim::end_session` calls, so this proves a quit-to-title cannot carry a
+    /// previous server's border into the next session — the one failure mode of
+    /// these three components with a visible symptom.
+    #[test]
+    fn quit_to_title_clears_the_world_border_spawn_and_rules() {
+        let (mut app, entity) = session_app();
+        fold(
+            &mut app,
+            ClientEvent::WorldBorderInitialized {
+                x: 5_000.0,
+                z: 5_000.0,
+                old_size: 32.0,
+                new_size: 32.0,
+                lerp_time_ms: 0,
+                absolute_max_size: 29_999_984,
+                warning_blocks: 1,
+                warning_time: 1,
+            },
+        );
+        fold(
+            &mut app,
+            ClientEvent::SpawnPositionChanged {
+                dimension: dim("overworld"),
+                pos: lodestone_model::math::BlockPos::new(9, 9, 9),
+                angle: 0.0,
+                pitch: 0.0,
+            },
+        );
+        // Precondition: the state really is dirty before the reset, so a reset
+        // that did nothing could not pass.
+        assert!(
+            app.world()
+                .get::<SessionWorldBorder>(entity)
+                .unwrap()
+                .0
+                .initialized
+        );
+        assert!(
+            app.world()
+                .get::<SessionSpawnPoint>(entity)
+                .unwrap()
+                .0
+                .is_reported()
+        );
+
+        insert_session_components(app.world_mut(), entity);
+
+        let b = app.world().get::<SessionWorldBorder>(entity).unwrap().0;
+        assert!(!b.initialized, "a new session must not inherit a border");
+        assert!((b.center_x).abs() < f64::EPSILON);
+        assert!(
+            !app.world()
+                .get::<SessionSpawnPoint>(entity)
+                .unwrap()
+                .0
+                .is_reported(),
+            "a new session must not inherit a spawn point"
+        );
+    }
+
     // ---- the consolidated coverage table -----------------------------------
 
     /// The `session`-side twin of
@@ -2714,6 +3075,56 @@ mod tests {
         assert!(handles_event(&ClientEvent::InventorySlotChanged {
             slot: 0,
             item: None,
+        }));
+        // TabListChanged — apply_tab_list; see
+        // `tab_list_header_and_footer_reach_the_fold_through_the_real_schedule`.
+        // The fold arm predates the route flag: this variant was decoded and
+        // foldable and simply never asked for.
+        assert!(handles_event(&ClientEvent::TabListChanged {
+            header: Text::literal("H"),
+            footer: Text::literal("F"),
+        }));
+        // World-border family — apply_world_border; see
+        // `world_border_family_reaches_the_fold_through_the_real_schedule` and
+        // `a_border_resize_interpolates_on_the_frame_clock`.
+        assert!(handles_event(&ClientEvent::WorldBorderCenterChanged {
+            x: 0.0,
+            z: 0.0,
+        }));
+        assert!(handles_event(&ClientEvent::WorldBorderSizeLerping {
+            old_size: 1.0,
+            new_size: 2.0,
+            lerp_time_ms: 1,
+        }));
+        assert!(handles_event(&ClientEvent::WorldBorderSizeChanged { size: 1.0 }));
+        assert!(handles_event(&ClientEvent::WorldBorderWarningDelayChanged {
+            warning_time: 1,
+        }));
+        assert!(handles_event(
+            &ClientEvent::WorldBorderWarningDistanceChanged { warning_blocks: 1 }
+        ));
+        assert!(handles_event(&ClientEvent::WorldBorderInitialized {
+            x: 0.0,
+            z: 0.0,
+            old_size: 1.0,
+            new_size: 1.0,
+            lerp_time_ms: 0,
+            absolute_max_size: 1,
+            warning_blocks: 1,
+            warning_time: 1,
+        }));
+        // SpawnPositionChanged — apply_spawn_point; see
+        // `spawn_position_reaches_the_fold_through_the_real_schedule`.
+        assert!(handles_event(&ClientEvent::SpawnPositionChanged {
+            dimension: dim("overworld"),
+            pos: lodestone_model::math::BlockPos::new(0, 0, 0),
+            angle: 0.0,
+            pitch: 0.0,
+        }));
+        // GameRulesChanged — apply_game_rules; see
+        // `game_rules_reach_the_fold_through_the_real_schedule`.
+        assert!(handles_event(&ClientEvent::GameRulesChanged {
+            values: Vec::new(),
         }));
 
         // ---- the negative controls: ingest-only and client-only events ----
