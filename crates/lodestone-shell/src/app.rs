@@ -2306,6 +2306,15 @@ impl WindowApp {
         let hand_swing = self.sim.hand_swing_progress();
         render.set_hand_swing_source(move || hand_swing);
 
+        // The hand needs its own copy of the view bob: vanilla applies `bobView`
+        // a *second* time to a fresh pose stack seeded with the unbobbed
+        // model-view (`GameRenderer.java:333-362`), rather than letting the hand
+        // inherit the world's bobbed matrix. Without this the whole chain is an
+        // island — `hand_view_proj` reads a source nothing installs, so the arm
+        // stays rigid while the camera bobs, which is what the player reported.
+        let hand_bob = self.sim.bob_frame();
+        render.set_hand_bob_source(move || hand_bob);
+
         // Snapshot the player's nine hotbar slots into owned draw records.
         //
         // **Hoisted above the world render on purpose.** The HUD is the obvious
@@ -2692,6 +2701,30 @@ impl WindowApp {
         hud_frame.crosshair = crosshair;
         hud_frame.chat = &chat_lines;
         hud_frame.chat_input = chat_open.then(|| self.chat_input.as_str());
+        // Vanilla blinks the text cursor on a 300 ms half-period:
+        // `TextCursorUtils.CURSOR_BLINK_INTERVAL_MS == 300` and
+        // `isCursorVisible(ms) == (ms / 300) % 2 == 0`
+        // (`.cache/mc/26.2/client-src/.../TextCursorUtils.java:9,20-22`). The
+        // phase has to come from wall time rather than the tick clock, because
+        // the caret keeps blinking while the game is paused.
+        hud_frame.chat_caret_visible = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| (d.as_millis() / 300) % 2 == 0)
+            .unwrap_or(true);
+        // Without this the whole chat-option chain is an island: the fields are
+        // persisted, `ChatDisplayOptions` is read by the draw, and the live
+        // client would still show vanilla defaults forever.
+        let chat_opts = self.nav.options();
+        hud_frame.chat_options = crate::hud::ChatDisplayOptions {
+            scale: chat_opts.chat_scale,
+            width_pct: chat_opts.chat_width,
+            height_pct_unfocused: chat_opts.chat_height_unfocused,
+            height_pct_focused: chat_opts.chat_height_focused,
+            line_spacing: chat_opts.chat_line_spacing,
+            text_opacity: chat_opts.chat_opacity,
+            background_opacity: chat_opts.chat_background_opacity,
+            colors: chat_opts.chat_colors,
+        };
         hud_frame.players = self.tab_held.then_some(player_rows.as_slice());
         hud_frame.sidebar = sidebar.as_ref();
         hud_frame.boss_bars = &boss_bars;
