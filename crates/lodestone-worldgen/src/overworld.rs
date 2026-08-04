@@ -2,53 +2,85 @@
 //! proven stages into a single "give me the blocks in chunk `(cx, cz)`" call.
 //!
 //! Everything below this module is a *stage* proven bit-for-bit against a JVM in
-//! isolation (`region_parity`, `chunk_parity`, `surface_parity`, …). This module
-//! is the glue that runs them in sequence so a caller — the integrated server, or
-//! the shell's local world — gets real terrain instead of a stand-in. It holds
-//! **no data**: the noise settings `Value` and every density function / noise it
+//! isolation (`region_parity`, `chunk_parity`, `surface_parity`, `carver_parity`,
+//! `feature_parity`, `aquifer_parity`). This module is the glue that runs them in
+//! sequence so a caller — the integrated server, or the shell's local world —
+//! gets real terrain instead of a stand-in. It holds **no data**: the noise
+//! settings `Value` and every density function / noise / carver / feature it
 //! references arrive through a [`Resolver`], exactly as the parity tests supply
 //! them, so the engine stays version-free (plan §3).
 //!
-//! # Composed pipeline (and its honest scope)
+//! # Composed pipeline (issue #295), and vanilla's own order
 //!
-//! For each block it runs:
-//! 1. **Shape** — [`NoiseChunkSampler`] evaluates the interpolated `final_density`
-//!    field (the same code `chunk_parity` proves 98304/98304 block-for-block).
-//!    `density > 0` ⇒ the settings' `default_block` (stone), else non-solid.
-//! 2. **Fluid fill** — a non-solid block *below* `sea_level` becomes
-//!    `default_fluid` (water), matching vanilla's default aquifer fluid picker
-//!    (`y < seaLevel`, so the top water block sits at `sea_level - 1`). This is a **sea-level approximation of aquifers**:
-//!    it reproduces oceans, beaches and the ocean floor (the surface-visible
-//!    behaviour) but not underground water/lava pockets, which only matter once
-//!    carvers cut caves. The real [`crate::aquifer`] is proven separately and is
-//!    the drop-in replacement for this step.
-//! 3. **Surface rules** — [`SurfaceSystem::build_surface`] rewrites the top of
-//!    each column into grass/dirt/sand/gravel/etc. (the code `surface_parity`
-//!    proves block-for-block), driven by the `surface_rule` data.
+//! `NoiseBasedChunkGenerator`'s real order is `fillFromNoise` (shape + the real
+//! aquifer, the aquifer participating *inside* fill rather than after it) ->
+//! per-quart biome resolution -> `buildSurface` -> `applyCarvers` -> feature
+//! decoration. [`column`](Self::column) reproduces that order exactly:
 //!
-//! **Not yet composed here:** carvers (no caves), the real aquifer, and features
-//! (no ores/vegetation/trees). Those stages exist and are individually verified;
-//! chaining and *whole-chunk* re-verifying them against a full-generation oracle
-//! is the follow-up. What this module produces is therefore honest real terrain
-//! *shape + surface*, not a block-for-block-complete vanilla chunk — and it says
-//! so rather than looking finished.
+//! 1. **Fill** — [`AquiferSystem::block_at`] evaluates the interpolated
+//!    `final_density` field *and* the real aquifer's barrier/floodedness/
+//!    spread/lava routing together (`computeSubstance`), the same code
+//!    `aquifer_parity` proves block-for-block against the JVM. This replaces
+//!    the sea-level-only fluid approximation this generator used before #295:
+//!    underground water/lava pockets now come from the real aquifer, not just
+//!    "below sea level ⇒ water."
+//! 2. **Biome** — one climate sample per quart, unchanged from #405 (real
+//!    multi-noise biome variety), now sampling the fill stage's real
+//!    solid-top heightmap.
+//! 3. **Surface** — [`SurfaceSystem::build_surface`], unchanged from #405,
+//!    now consuming the real aquifer's fill instead of the approximation.
+//! 4. **Carve** — [`crate::carver::apply_carvers`] over a materialised
+//!    world-keyed block grid, replicating vanilla's real per-source-chunk
+//!    `carverBiome` resolution (each of the 17×17 source chunks in the carve
+//!    neighbourhood gets its own biome — and therefore its own carver list —
+//!    sampled at that source chunk's quart corner and `y = 0`, **not** its
+//!    surface height; carver selection is a different question from surface
+//!    material). See [`crate::carver::apply_carvers`]'s doc comment.
 //!
-//! # Biome scope
+//! **Ore features are deliberately not composed here yet**, even though the
+//! engine (`crate::feature::apply_ore_step`) and the per-biome resolution
+//! glue (`crate::compose::build_biome_ores`) both exist. An architecture
+//! review of this exact composition found that `FeatureOracle.java` — the
+//! oracle `feature_parity` validates the ore engine against — shares the
+//! simplification it was supposed to be checking: its own header states it
+//! "deliberately does NOT model ore spill from the 8 neighbouring chunks
+//! into the centre," and `OreInput::get_height`/`in_center`
+//! (`crate::feature`) wrap/drop edge probes to match that oracle rather than
+//! vanilla's real `blockStateWriteRadius(1)` 3×3 driver
+//! (`ChunkPyramid.java:32-35`). Composing on top of that today would bake a
+//! wrong ~4-block edge band into every chunk, invisible to every existing
+//! gate (`ComposedChunkOracle.java` has no `postfeatures` stage to catch it).
+//! The fix is a real 3×3 `FeatureOracle.java` driver with real neighbour
+//! `OCEAN_FLOOR_WG` heightmaps, a `postfeatures` fixture stage, and a
+//! matching `OreInput` that no longer clamps/drops at the centre-chunk edge —
+//! tracked as the next increment of #295, not attempted in this composition
+//! pass so the carver/aquifer landing isn't held hostage to it.
 //!
-//! The multi-noise biome source is not built yet, so generation runs a single
-//! fixed biome ([`OverworldGenerator::new`] takes it). Surface rules and the
-//! noise router are biome-parameterised the moment that source lands; nothing
-//! here has to change.
+//! **Still not composed:** ore features (see above), vegetation/tree
+//! features (unbuilt anywhere in this crate, epic #404 Phase 3), and
+//! structures (unbuilt anywhere in this repo, `#136`). `docs/worldgen-parity.md`
+//! measures the composed subset (shape + real aquifer + biome + surface +
+//! carvers) against a real vanilla JVM.
+//!
+//! # Badlands (issue #405's carried-over gap)
+//!
+//! `minecraft:badlands`/`eroded_badlands`/`wooded_badlands` remain excluded
+//! from the searchable biome table (`crate::biome::usable_overworld_table`) —
+//! their surface rule reaches an unported `SurfaceSystem.getBand` subsystem
+//! that would panic. Composing carvers/ores here does not change that: the
+//! same excluded table feeds both surface *and* the per-source-chunk carver
+//! biome and the ore biome, so a column can never resolve to one of the three
+//! excluded names in the first place.
+
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
+use crate::aquifer::{AquiferSystem, BlockKind, XoroshiroPositionalFactory};
 use crate::biome::{BiomeParameterPoint, ClimateSampler};
-use crate::density::{Builder, Density, NoiseChunkSampler, Resolver};
+use crate::carver::{CarveGrid, CarverConfig, NoObserver};
+use crate::density::{Builder, Density, Resolver};
 use crate::surface::{SurfaceSystem, identity_canon};
-
-/// Overworld cell dimensions (`NoiseSettings.getCellWidth()/getCellHeight()`).
-const CELL_WIDTH: i32 = 4;
-const CELL_HEIGHT: i32 = 8;
 
 /// Real multi-noise biome assignment (issue #405), present on
 /// [`OverworldGenerator`] whenever its [`Resolver`] supplies a non-empty
@@ -61,11 +93,39 @@ struct DynamicBiome {
     temperatures: std::collections::HashMap<String, f32>,
 }
 
+/// The real aquifer's eight router outputs plus its positional RNG factory,
+/// pre-built once (issue #295) from the same shared [`Builder`] that builds
+/// `final_density`/surface/climate, so every slot index they reference shares
+/// one address space with [`OverworldGenerator::slot_count`] (captured *after*
+/// every `builder.build()` call in [`OverworldGenerator::new`], which is
+/// always a safe, if occasionally oversized, bound for any one tree's own
+/// sampler — a sampler only ever indexes the slots its own tree references).
+///
+/// Stored so [`OverworldGenerator`] — built once per world seed and unable to
+/// hold a borrowed [`Resolver`] for its own lifetime, since callers keep it
+/// around far longer than any one `Resolver` borrow — can still build a fresh
+/// per-chunk [`AquiferSystem`] (matching vanilla's own per-chunk `NoiseChunk`)
+/// via [`AquiferSystem::from_parts`] instead of re-resolving JSON every chunk.
+#[allow(missing_debug_implementations)]
+struct AquiferTrees {
+    final_density: Density,
+    erosion: Density,
+    depth: Density,
+    barrier: Density,
+    floodedness: Density,
+    spread: Density,
+    lava: Density,
+    prelim: Density,
+    positional: XoroshiroPositionalFactory,
+}
+
 /// A composed, reusable overworld generator. Build once per seed; call
 /// [`column`](Self::column) per chunk.
 #[allow(missing_debug_implementations)]
 pub struct OverworldGenerator {
-    final_density: Density,
+    /// Shared slot-index upper bound for every `Density` tree this generator
+    /// built (final_density, surface, climate, aquifer) — see
+    /// [`AquiferTrees`]'s doc comment.
     slot_count: usize,
     surface: SurfaceSystem,
     min_y: i32,
@@ -73,6 +133,11 @@ pub struct OverworldGenerator {
     sea_level: i32,
     default_block: String,
     default_fluid: String,
+    /// Vanilla hardcodes lava as the aquifer's second fluid regardless of the
+    /// dimension's configured `default_fluid` (`Aquifer.FluidStatus` built
+    /// from `Blocks.LAVA.defaultBlockState()`, not from `NoiseGeneratorSettings`)
+    /// — not a simplification, this is vanilla's own behaviour.
+    default_lava: String,
     /// The biome (and its `coldEnoughToSnow` answer) used for every column
     /// when [`Self::dynamic_biome`] is `None` — i.e. exactly the whole-world
     /// behaviour this generator had before issue #405, kept as the fallback
@@ -83,12 +148,30 @@ pub struct OverworldGenerator {
     /// table, in which case every column samples real climate instead of
     /// using the fallback above.
     dynamic_biome: Option<DynamicBiome>,
+    seed: i64,
+    aquifer_trees: AquiferTrees,
+    /// `#overworld_carver_replaceables` tag closure (issue #295) — which
+    /// blocks a carver is allowed to overwrite. Empty when the [`Resolver`]
+    /// supplies no tag data (`Resolver::block_tag`'s default), in which case
+    /// `carver::apply_carvers`'s own `can_replace` is always false and
+    /// carving becomes a harmless no-op rather than a panic — matching the
+    /// "no data supplied" convention every #295 resolver method establishes.
+    carver_replaceable: HashSet<String>,
+    /// Per-biome carver list, resolved once at construction for every biome
+    /// name the [`Resolver`]'s biome-parameter table (or the fallback biome)
+    /// can produce — see `crate::compose::build_biome_carvers`. Ore features
+    /// are not composed here yet (see the module doc's "ore features are
+    /// deliberately not composed" section), so there is no `ores_by_biome`/
+    /// `ore_tag_map` sibling — `crate::compose::build_biome_ores`/
+    /// `build_ore_tag_map` exist and are unit-tested, ready for the follow-up
+    /// that wires them in once the harness can verify the result.
+    carvers_by_biome: HashMap<String, Vec<CarverConfig>>,
 }
 
 impl OverworldGenerator {
     /// Builds the generator for `seed` from a noise-settings `Value` and a
-    /// [`Resolver`] that supplies the density functions and noises it
-    /// references.
+    /// [`Resolver`] that supplies the density functions, noises, carvers,
+    /// features and tags it references.
     ///
     /// `biome` is the fallback biome id (e.g. `"minecraft:plains"`) used for
     /// every column when `resolver` supplies no real biome-parameter table
@@ -108,8 +191,8 @@ impl OverworldGenerator {
         cold_enough_to_snow: bool,
     ) -> Self {
         let builder = Builder::new(seed, resolver);
-        let final_density = builder.build(&settings["noise_router"]["final_density"]);
-        let slot_count = builder.slot_count();
+        let router = &settings["noise_router"];
+        let final_density = builder.build(&router["final_density"]);
         let canon = identity_canon(settings);
         let surface = SurfaceSystem::new(settings, &builder, &canon);
 
@@ -124,6 +207,7 @@ impl OverworldGenerator {
             .as_str()
             .unwrap_or("minecraft:water")
             .to_string();
+        let default_lava = "minecraft:lava".to_string();
 
         let raw_table = crate::biome::parse_table(&resolver.biome_parameters());
         let dynamic_biome = if raw_table.is_empty() {
@@ -139,8 +223,69 @@ impl OverworldGenerator {
             })
         };
 
-        Self {
+        // Aquifer support trees (issue #295) — built via the same shared
+        // `builder` as final_density/surface/climate above; see
+        // `AquiferTrees`'s doc comment for why `slot_count` is captured only
+        // after every one of these `builder.build()` calls.
+        let aquifer_trees = AquiferTrees {
             final_density,
+            erosion: builder.build(&router["erosion"]),
+            depth: builder.build(&router["depth"]),
+            barrier: builder.build(&router["barrier"]),
+            floodedness: builder.build(&router["fluid_level_floodedness"]),
+            spread: builder.build(&router["fluid_level_spread"]),
+            lava: builder.build(&router["lava"]),
+            prelim: builder.build(&router["preliminary_surface_level"]),
+            positional: {
+                use crate::rng::{PositionalRandomFactory, RandomSource};
+                let mut src = builder
+                    .positional_factory()
+                    .from_hash_of("minecraft:aquifer");
+                src.fork_positional()
+            },
+        };
+
+        // Carver-replaceable tag closure (issue #295): without this
+        // populated, every carve write is rejected (`can_replace` always
+        // false) — the same trap `CarverOracle.java`'s own header warns
+        // about for the isolated oracle.
+        let mut carver_replaceable = HashSet::new();
+        {
+            let mut seen = HashSet::new();
+            crate::compose::resolve_block_tag(
+                resolver,
+                "minecraft:overworld_carver_replaceables",
+                &mut carver_replaceable,
+                &mut seen,
+            );
+        }
+
+        // Per-biome carver composition data (issue #295): resolved once for
+        // every biome name that can appear (every distinct name in the usable
+        // biome table, plus the fallback biome) — a handful of JSON parses at
+        // construction time, not one per chunk or per source-chunk. Ore
+        // features are deliberately not resolved here yet — see the module
+        // doc.
+        let mut biome_names: std::collections::BTreeSet<String> = dynamic_biome
+            .as_ref()
+            .map(|d| d.table.iter().map(|p| p.biome.clone()).collect())
+            .unwrap_or_default();
+        biome_names.insert(biome.to_string());
+
+        let mut carvers_by_biome = HashMap::new();
+        for name in &biome_names {
+            carvers_by_biome.insert(
+                name.clone(),
+                crate::compose::build_biome_carvers(resolver, name),
+            );
+        }
+
+        // Captured last, after every `builder.build()` call above (shape,
+        // surface, climate, the eight aquifer trees) — see `AquiferTrees`'s
+        // doc comment for why this is always a safe bound.
+        let slot_count = builder.slot_count();
+
+        Self {
             slot_count,
             surface,
             min_y,
@@ -148,9 +293,14 @@ impl OverworldGenerator {
             sea_level,
             default_block,
             default_fluid,
+            default_lava,
             fallback_biome: biome.to_string(),
             fallback_cold_enough_to_snow: cold_enough_to_snow,
             dynamic_biome,
+            seed,
+            aquifer_trees,
+            carver_replaceable,
+            carvers_by_biome,
         }
     }
 
@@ -178,11 +328,16 @@ impl OverworldGenerator {
         let base_x = cx * 16;
         let base_z = cz * 16;
 
-        let solid = self.shape_stage(base_x, base_z);
-        let heights = self.fluid_heightmap_stage(&solid);
+        let aquifer = self.build_aquifer(cx, cz);
+        let field = self.fill_stage(&aquifer, base_x, base_z);
+        let heights = self.heights_from_field(&field);
         let biome_quarts = self.biome_stage(&heights, base_x, base_z);
-        let post = self.surface_stage(&solid, &heights, &biome_quarts, base_x, base_z);
-        self.intern_stage(&solid, post, biome_quarts)
+        let surface_diff = self.surface_stage(&field, &heights, &biome_quarts, base_x, base_z);
+
+        let world = self.materialize_world(&field, surface_diff, base_x, base_z);
+        let world = self.carve_stage(cx, cz, &aquifer, &heights, &biome_quarts, base_x, base_z, world);
+
+        self.intern_from_world(&world, base_x, base_z, biome_quarts)
     }
 
     /// Identical to [`column`](Self::column), timed per stage. Exists so the
@@ -198,14 +353,17 @@ impl OverworldGenerator {
         let base_z = cz * 16;
 
         let t0 = std::time::Instant::now();
-        let solid = self.shape_stage(base_x, base_z);
+        let aquifer = self.build_aquifer(cx, cz);
+        let field = self.fill_stage(&aquifer, base_x, base_z);
+        let heights = self.heights_from_field(&field);
         let t1 = std::time::Instant::now();
-        let heights = self.fluid_heightmap_stage(&solid);
         let biome_quarts = self.biome_stage(&heights, base_x, base_z);
         let t2 = std::time::Instant::now();
-        let post = self.surface_stage(&solid, &heights, &biome_quarts, base_x, base_z);
+        let surface_diff = self.surface_stage(&field, &heights, &biome_quarts, base_x, base_z);
         let t3 = std::time::Instant::now();
-        let col = self.intern_stage(&solid, post, biome_quarts);
+        let world = self.materialize_world(&field, surface_diff, base_x, base_z);
+        let world = self.carve_stage(cx, cz, &aquifer, &heights, &biome_quarts, base_x, base_z, world);
+        let col = self.intern_from_world(&world, base_x, base_z, biome_quarts);
         let t4 = std::time::Instant::now();
 
         (
@@ -219,66 +377,76 @@ impl OverworldGenerator {
         )
     }
 
-    /// Stage 1: shape. One fresh sampler per chunk mirrors vanilla's per-chunk
-    /// `NoiseChunk` and bounds the interpolation-corner cache. Returns a
-    /// `16×height×16` solid mask indexed by [`Self::idx`].
-    ///
-    /// Uses [`NoiseChunkSampler::new_bounded`] (a bounded, hash-free dense
-    /// array in place of `slot_get`'s `HashMap`, `src/density/chunk.rs`'s
-    /// `DenseShape`) rather than [`NoiseChunkSampler::new`], because every
-    /// query this loop makes is known in advance to lie within exactly this
-    /// chunk's `(base_x..=base_x+15, min_y..=min_y+height-1,
-    /// base_z..=base_z+15)` — the bounded-sampler contract `new_bounded`
-    /// documents. `docs/worldgen-surface-perf.md` has the profiling story and
-    /// why this is a narrower, lower-risk fix than adopting vanilla's
-    /// incremental cell-walk outright.
-    fn shape_stage(&self, base_x: i32, base_z: i32) -> Vec<bool> {
-        let height = self.height as usize;
-        let sampler = NoiseChunkSampler::new_bounded(
-            self.final_density.clone(),
+    /// Builds a fresh, chunk-bound [`AquiferSystem`] from this generator's
+    /// pre-built [`AquiferTrees`] — matching vanilla's own per-chunk
+    /// `NoiseChunk`, which the aquifer's internal grid-bound caches assume.
+    fn build_aquifer(&self, cx: i32, cz: i32) -> AquiferSystem {
+        let t = &self.aquifer_trees;
+        AquiferSystem::from_parts(
+            t.final_density.clone(),
+            t.erosion.clone(),
+            t.depth.clone(),
+            t.barrier.clone(),
+            t.floodedness.clone(),
+            t.spread.clone(),
+            t.lava.clone(),
+            t.prelim.clone(),
+            t.positional,
+            self.sea_level,
+            self.min_y,
+            self.height,
+            cx,
+            cz,
             self.slot_count,
-            CELL_WIDTH,
-            CELL_HEIGHT,
-            (base_x, base_x + 15),
-            (self.min_y, self.min_y + self.height - 1),
-            (base_z, base_z + 15),
-        );
-        let mut solid = vec![false; 16 * 16 * height];
+        )
+    }
+
+    /// Stage 1 (issue #295): `fillFromNoise` — shape + the **real** aquifer,
+    /// replacing the sea-level approximation this generator used before.
+    /// Returns a `16×height×16` dense field of [`BlockKind`] indexed by
+    /// [`Self::idx`].
+    fn fill_stage(&self, aquifer: &AquiferSystem, base_x: i32, base_z: i32) -> Vec<BlockKind> {
+        let height = self.height as usize;
+        let mut field = vec![BlockKind::Air; 16 * 16 * height];
         for lz in 0..16i32 {
             for lx in 0..16i32 {
                 for ly in 0..self.height {
                     let wy = self.min_y + ly;
-                    let d = sampler.final_density(base_x + lx, wy, base_z + lz);
-                    if d > 0.0 {
-                        solid[Self::idx(lx, ly, lz, self.height)] = true;
-                    }
+                    field[Self::idx(lx, ly, lz, self.height)] =
+                        aquifer.block_at(base_x + lx, wy, base_z + lz);
                 }
             }
         }
-        solid
+        field
     }
 
-    /// Stage 2: fluid fill (sea-level aquifer approximation) + WORLD_SURFACE_WG.
-    /// `heights[lz*16+lx]` = highest non-air world Y (solid, or water up to sea
-    /// level over submerged columns).
-    fn fluid_heightmap_stage(&self, solid: &[bool]) -> [i32; 256] {
+    /// The heightmap [`Self::biome_stage`] and [`SurfaceSystem::build_surface`]
+    /// consume: highest local `(lx, lz)` position whose block is *solid*
+    /// (`BlockKind::Stone` — non-air, non-fluid), or `sea_level - 1` for a
+    /// column with nothing solid. Matches
+    /// `scripts/worldgen-oracle/ComposedChunkOracle.java`'s `solidTop`
+    /// exactly (same definition, same fallback) — confirmed by name in that
+    /// oracle's own doc comment, which calls this out as the reason biome
+    /// sampling agrees between the two languages even though only the Rust
+    /// side used to run an *approximated* aquifer.
+    fn heights_from_field(&self, field: &[BlockKind]) -> [i32; 256] {
         let mut heights = [i32::MIN; 16 * 16];
         for lz in 0..16i32 {
             for lx in 0..16i32 {
-                let mut highest_solid = self.min_y - 1;
+                let mut top = self.min_y - 1;
                 for ly in (0..self.height).rev() {
-                    if solid[Self::idx(lx, ly, lz, self.height)] {
-                        highest_solid = self.min_y + ly;
+                    if field[Self::idx(lx, ly, lz, self.height)] == BlockKind::Stone {
+                        top = self.min_y + ly;
                         break;
                     }
                 }
-                heights[(lz * 16 + lx) as usize] = highest_solid.max(self.sea_level - 1);
+                heights[(lz * 16 + lx) as usize] = top.max(self.sea_level - 1);
             }
         }
         heights
     }
 
-    /// Stage "biome" (issue #405): one climate sample per horizontal quart
+    /// Stage 2 (issue #405): one climate sample per horizontal quart
     /// `(qx, qz)` in `0..4`, row-major `qz * 4 + qx` — 16 per chunk, matching
     /// [`lodestone_world`](crate)'s own `ChunkSection::BIOME_EDGE` (4) so a
     /// future encoder can write this straight into a real biome container.
@@ -286,11 +454,11 @@ impl OverworldGenerator {
     /// sample per quart *column*, not a full 3-D grid, is this phase's
     /// deliberate scope.
     ///
-    /// Each quart samples at its own **already-generated surface height**
-    /// (`heights[]`, this chunk's stage-2 output) rather than a fixed Y — the
-    /// module doc's "y = 0 trap" section is why a constant height silently
-    /// produces almost all cave/deep-ocean biomes instead of the terrain
-    /// biome a player standing there would actually see.
+    /// Each quart samples at its own already-generated surface height
+    /// (`heights[]`, [`Self::heights_from_field`]'s output) rather than a
+    /// fixed Y — the module doc's "y = 0 trap" section is why a constant
+    /// height silently produces almost all cave/deep-ocean biomes instead of
+    /// the terrain biome a player standing there would actually see.
     fn biome_stage(&self, heights: &[i32; 256], base_x: i32, base_z: i32) -> [(String, bool); 16] {
         std::array::from_fn(|i| {
             let Some(dynamic) = &self.dynamic_biome else {
@@ -302,32 +470,13 @@ impl OverworldGenerator {
             let qx = (i % 4) as i32;
             let qz = (i / 4) as i32;
             // Quart cell (qx, qz) covers local x/z in [qx*4, qx*4+4); sample
-            // at its own **corner** (`qx*4`), not its center. This matches
-            // vanilla exactly: `Climate.Sampler.sample(quartX, quartY,
-            // quartZ)` converts back to block space via
-            // `QuartPos.toBlock(quartX) == quartX << 2`, i.e. the quart's
-            // minimum corner — verified the hard way: an earlier version of
-            // this code sampled at `qx*4 + 2` (the quart's center, matching
-            // `ChunkSection::biome_at_block`'s `>> 2` *membership* test,
-            // which is a different question from *where a quart's own
-            // sample point sits*) and it JVM-parity-mismatched at a
-            // dark_forest/river boundary the corner convention gets right —
-            // `[1217,5285,-900,1346,-293,-495,0]` (center, wrong biome) vs.
-            // the oracle's `[1223,5292,-882,1325,-118,-517]` at the
-            // *corner*, which this now reproduces exactly.
+            // at its own **corner** (`qx*4`), not its center — see
+            // `crate::biome`'s module doc and `docs/worldgen-biomes.md` for
+            // why this matched a real dark_forest/river boundary and the
+            // center convention did not.
             let lx = qx * 4;
             let lz = qz * 4;
-            // Y needs the same quart-rounding as X/Z, and it is easy to miss
-            // since it is not part of `biome_stage`'s own loop variables —
-            // `heights[]` is a real terrain surface Y, essentially never a
-            // multiple of 4. Vanilla's `Climate.Sampler.sample(quartX,
-            // quartY, quartZ)` floors *every* axis to `QuartPos.toBlock`
-            // before evaluating, and skipping this for Y alone reproduced
-            // the exact bug the X/Z fix above already fixed once: the
-            // `depth` channel came out 156 quantized units off
-            // (`y_clamped_gradient`'s slope, `3.0 / 384` per block, times
-            // the 2-block rounding error) — right table, right search, just
-            // sampling 2 blocks away from where vanilla would.
+            // Y needs the same quart-rounding as X/Z (see the module doc).
             let y = (heights[(lz * 16 + lx) as usize] >> 2) << 2;
             let target = dynamic.climate.target(base_x + lx, y, base_z + lz);
             let name = crate::biome::nearest_biome(&dynamic.table, &target);
@@ -336,33 +485,48 @@ impl OverworldGenerator {
         })
     }
 
-    /// Stage 4: surface rules over the pre-surface (shape + fluid) column.
+    /// Biome for one *source chunk* in the carve neighbourhood — vanilla's
+    /// real `carverBiome` resolution (`NoiseBasedChunkGenerator.applyCarvers`):
+    /// sampled at the source chunk's own quart corner (`QuartPos.fromBlock`
+    /// of its min block X/Z, which is `source_cx * 16` / `source_cz * 16` —
+    /// already quart-aligned since 16 is a multiple of 4, so no extra
+    /// rounding is needed) and **`y = 0`**, not the source chunk's surface
+    /// height. This is deliberately not [`Self::biome_stage`]'s question:
+    /// carver *selection* and surface *material* sample the same climate
+    /// fields at different heights and get different (correct) answers —
+    /// see `docs/worldgen-parity.md`'s description of `ComposedChunkOracle
+    /// .java`'s own `sourceBiome` resolution, which this reproduces exactly.
+    fn biome_for_carver_source(&self, source_cx: i32, source_cz: i32) -> &str {
+        match &self.dynamic_biome {
+            None => self.fallback_biome.as_str(),
+            Some(d) => {
+                let target = d.climate.target(source_cx * 16, 0, source_cz * 16);
+                crate::biome::nearest_biome(&d.table, &target)
+            }
+        }
+    }
+
+    /// Stage 3: surface rules over the pre-surface (post-fill) column.
     /// Returns a **sparse diff** (see [`SurfaceSystem::build_surface`]): only
-    /// the positions a surface rule actually rewrote. [`Self::intern_stage`]
-    /// reconstructs the full column by seeding from `solid` (the same
-    /// shape+fluid default this stage's own `pre` closure computes) and
-    /// overlaying this diff, rather than this stage materialising all
-    /// 16×16×`height` positions itself.
+    /// the positions a surface rule actually rewrote.
     fn surface_stage(
         &self,
-        solid: &[bool],
+        field: &[BlockKind],
         heights: &[i32; 256],
         biome_quarts: &[(String, bool); 16],
         base_x: i32,
         base_z: i32,
-    ) -> std::collections::HashMap<(i32, i32, i32), String> {
-        // Pre-surface block string at a local column position (aquifer-filled).
+    ) -> HashMap<(i32, i32, i32), String> {
         let pre = |lx: i32, y: i32, lz: i32| -> String {
             let ly = y - self.min_y;
             if !(0..self.height).contains(&ly) {
                 return "minecraft:air".to_string();
             }
-            if solid[Self::idx(lx, ly, lz, self.height)] {
-                self.default_block.clone()
-            } else if y < self.sea_level {
-                self.default_fluid.clone()
-            } else {
-                "minecraft:air".to_string()
+            match field[Self::idx(lx, ly, lz, self.height)] {
+                BlockKind::Stone => self.default_block.clone(),
+                BlockKind::Water => self.default_fluid.clone(),
+                BlockKind::Lava => self.default_lava.clone(),
+                BlockKind::Air => "minecraft:air".to_string(),
             }
         };
         let heightmap = |lx: i32, lz: i32| -> i32 { heights[(lz * 16 + lx) as usize] };
@@ -375,59 +539,126 @@ impl OverworldGenerator {
             .build_surface(&pre, &heightmap, &biome_at, base_x, base_z)
     }
 
-    /// Stage 4: intern the surface-rewritten column into a dense
-    /// palette-indexed grid.
-    ///
-    /// `post` is [`Self::surface_stage`]'s sparse diff, not a full column, so
-    /// this seeds `blocks` from `solid` first — exactly the same
-    /// solid/fluid/air default `surface_stage`'s own `pre` closure computes,
-    /// just written straight into the dense grid instead of round-tripped
-    /// through a `String`-keyed `HashMap` — and then overlays the (much
-    /// smaller) set of positions the surface rules actually changed.
-    fn intern_stage(
+    /// Materialises the full `16×height×16` post-surface column into a
+    /// world-coordinate-keyed grid — the shape [`crate::carver::apply_carvers`]
+    /// consumes. Seeded from `field` (the same solid/fluid/air default
+    /// [`Self::surface_stage`]'s own `pre` closure computes) and overlaid
+    /// with the surface diff.
+    fn materialize_world(
         &self,
-        solid: &[bool],
-        post: std::collections::HashMap<(i32, i32, i32), String>,
+        field: &[BlockKind],
+        surface_diff: HashMap<(i32, i32, i32), String>,
+        base_x: i32,
+        base_z: i32,
+    ) -> HashMap<(i32, i32, i32), String> {
+        let mut world = HashMap::with_capacity(16 * 16 * self.height as usize);
+        for lz in 0..16i32 {
+            for lx in 0..16i32 {
+                for ly in 0..self.height {
+                    let y = self.min_y + ly;
+                    let base = match field[Self::idx(lx, ly, lz, self.height)] {
+                        BlockKind::Stone => self.default_block.as_str(),
+                        BlockKind::Water => self.default_fluid.as_str(),
+                        BlockKind::Lava => self.default_lava.as_str(),
+                        BlockKind::Air => "minecraft:air",
+                    };
+                    world.insert((base_x + lx, y, base_z + lz), base.to_string());
+                }
+            }
+        }
+        for ((lx, y, lz), state) in surface_diff {
+            world.insert((base_x + lx, y, base_z + lz), state);
+        }
+        world
+    }
+
+    /// Stage 4 (issue #295): `applyCarvers` over the post-surface world grid.
+    /// `heights`/`biome_quarts` feed the dirt-recap `top_material` callback
+    /// (a carved grass block re-caps the dirt exposed beneath it with the
+    /// *local* biome's surface material, looked up via `biome_quarts` since
+    /// carving can expose ground anywhere within the centre chunk, which now
+    /// carries real per-quart biome variety rather than one fixed biome).
+    fn carve_stage(
+        &self,
+        cx: i32,
+        cz: i32,
+        aquifer: &AquiferSystem,
+        heights: &[i32; 256],
+        biome_quarts: &[(String, bool); 16],
+        base_x: i32,
+        base_z: i32,
+        world: HashMap<(i32, i32, i32), String>,
+    ) -> HashMap<(i32, i32, i32), String> {
+        let heightmap_fn = |lx: i32, lz: i32| -> i32 { heights[(lz * 16 + lx) as usize] };
+        let top_material = |x: i32, y: i32, z: i32, under_fluid: bool| -> Option<String> {
+            let lx = x - base_x;
+            let lz = z - base_z;
+            if !(0..16).contains(&lx) || !(0..16).contains(&lz) {
+                return None;
+            }
+            let (biome, cold) = &biome_quarts[((lz >> 2) * 4 + (lx >> 2)) as usize];
+            self.surface
+                .top_material(x, y, z, under_fluid, &heightmap_fn, biome, *cold)
+        };
+        let carvers_for_source = |source_x: i32, source_z: i32| -> Vec<CarverConfig> {
+            let biome = self.biome_for_carver_source(source_x, source_z);
+            self.carvers_by_biome.get(biome).cloned().unwrap_or_default()
+        };
+
+        let mut grid = CarveGrid::new(world);
+        let mut observer = NoObserver;
+        crate::carver::apply_carvers(
+            self.seed,
+            cx,
+            cz,
+            self.min_y,
+            self.height,
+            &carvers_for_source,
+            &mut grid,
+            aquifer,
+            &self.carver_replaceable,
+            &top_material,
+            &mut observer,
+        );
+        grid.into_blocks()
+    }
+
+    /// Interns the final (post-carve) world grid into a dense palette-indexed
+    /// [`GeneratedColumn`]. Ore-feature composition (issue #295's next
+    /// increment — see the module doc) will insert its own stage between
+    /// [`Self::carve_stage`] and this one once the harness can verify it.
+    fn intern_from_world(
+        &self,
+        world: &HashMap<(i32, i32, i32), String>,
+        base_x: i32,
+        base_z: i32,
         biome_quarts: [(String, bool); 16],
     ) -> GeneratedColumn {
         let height = self.height as usize;
         let mut palette: Vec<String> = vec!["minecraft:air".to_string()];
+        let mut index_of: HashMap<String, u16> = HashMap::new();
+        index_of.insert("minecraft:air".to_string(), 0);
         let mut blocks = vec![0u16; 16 * 16 * height];
 
-        // Seed from shape + fluid fill (stage 1/2 output), matching
-        // `surface_stage`'s `pre` closure: solid -> default_block, else
-        // below sea level -> default_fluid, else air (already 0).
-        let stone_id = palette.len() as u16;
-        palette.push(self.default_block.clone());
-        let fluid_id = palette.len() as u16;
-        palette.push(self.default_fluid.clone());
         for lz in 0..16i32 {
             for lx in 0..16i32 {
                 for ly in 0..self.height {
-                    let idx = Self::idx(lx, ly, lz, self.height);
-                    if solid[idx] {
-                        blocks[idx] = stone_id;
-                    } else if self.min_y + ly < self.sea_level {
-                        blocks[idx] = fluid_id;
-                    }
+                    let y = self.min_y + ly;
+                    let state = world
+                        .get(&(base_x + lx, y, base_z + lz))
+                        .map(String::as_str)
+                        .unwrap_or("minecraft:air");
+                    let id = if let Some(&id) = index_of.get(state) {
+                        id
+                    } else {
+                        let id = palette.len() as u16;
+                        palette.push(state.to_string());
+                        index_of.insert(state.to_string(), id);
+                        id
+                    };
+                    blocks[Self::idx(lx, ly, lz, self.height)] = id;
                 }
             }
-        }
-
-        // Overlay the surface-rule diff.
-        for ((lx, y, lz), state) in post {
-            let ly = y - self.min_y;
-            if !(0..self.height).contains(&ly) {
-                continue;
-            }
-            let id = match palette.iter().position(|p| p == &state) {
-                Some(i) => i as u16,
-                None => {
-                    palette.push(state);
-                    (palette.len() - 1) as u16
-                }
-            };
-            blocks[Self::idx(lx, ly, lz, self.height)] = id;
         }
 
         GeneratedColumn {
@@ -448,19 +679,17 @@ impl OverworldGenerator {
 }
 
 /// Per-stage wall-clock cost of one [`OverworldGenerator::column_timed`] call.
-/// Stage boundaries match the doc comment on [`OverworldGenerator`]: shape,
-/// fluid fill + heightmap, surface rules, and palette interning. `shape` and
-/// `surface` are the two stages named in `HANDOFF.md` §4's original (deleted)
-/// split; `fluid_heightmap` and `intern` were folded into "surface"/"intern"
-/// there but are broken out here since they are now separate functions.
+/// Stage boundaries match the doc comment on [`OverworldGenerator`]: `shape`
+/// covers fill (shape + the real aquifer, issue #295); `fluid_heightmap`
+/// covers the heightmap + biome sampling (issue #405's
+/// [`OverworldGenerator::biome_stage`]); `surface` covers surface rules;
+/// `intern` now also covers carve + ore-feature composition + palette
+/// interning (issue #295) — folded into this bucket rather than earning new
+/// fields every existing caller of this struct would need to learn about.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, Copy)]
 pub struct StageTimes {
     pub shape: std::time::Duration,
-    /// Fluid fill + heightmap **and** biome sampling (issue #405's
-    /// [`OverworldGenerator::biome_stage`] runs between them and is folded
-    /// into this bucket rather than earning a fifth field every existing
-    /// caller of this struct would need to learn about).
     pub fluid_heightmap: std::time::Duration,
     pub surface: std::time::Duration,
     pub intern: std::time::Duration,

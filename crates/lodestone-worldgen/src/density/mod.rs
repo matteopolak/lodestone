@@ -207,6 +207,44 @@ pub trait Resolver {
     fn biome_temperatures(&self) -> Value {
         Value::Object(serde_json::Map::new())
     }
+
+    /// The full `worldgen/biome/<name>.json` document for one biome (issue
+    /// #295 composition): its `carvers` array and per-step `features` lists,
+    /// consumed by [`crate::overworld::OverworldGenerator`] to select which
+    /// carvers/ore features run for a given biome. Default: `Value::Null`,
+    /// which every consumer of this method treats as "no carvers, no ore
+    /// features for this biome" rather than panicking — the same
+    /// no-data-supplied convention [`biome_parameters`](Self::biome_parameters)
+    /// established, so a `Resolver` that only cares about shape/surface (most
+    /// of this crate's own test fixtures) never needs to implement it.
+    fn biome_document(&self, _id: &str) -> Value {
+        Value::Null
+    }
+
+    /// `worldgen/configured_carver/<name>.json`. Default: `Value::Null` (see
+    /// [`biome_document`](Self::biome_document)'s no-data convention).
+    fn configured_carver(&self, _id: &str) -> Value {
+        Value::Null
+    }
+
+    /// `worldgen/configured_feature/<name>.json`. Default: `Value::Null`.
+    fn configured_feature(&self, _id: &str) -> Value {
+        Value::Null
+    }
+
+    /// `worldgen/placed_feature/<name>.json`. Default: `Value::Null`.
+    fn placed_feature(&self, _id: &str) -> Value {
+        Value::Null
+    }
+
+    /// `tags/block/<name>.json` (the raw tag document, `{"values": [...]}`,
+    /// with sub-tag references as `"#minecraft:..."` entries needing their
+    /// own recursive lookup — see `crate::compose::resolve_block_tag`).
+    /// Default: `Value::Null`, which resolves to an empty tag (no member
+    /// blocks) rather than panicking.
+    fn block_tag(&self, _id: &str) -> Value {
+        Value::Null
+    }
 }
 
 /// Evaluation context: a single block position (`SinglePointContext`).
