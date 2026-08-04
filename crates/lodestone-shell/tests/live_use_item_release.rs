@@ -124,7 +124,12 @@ fn a_bow_drawn_at_an_entity_and_released_fires_an_arrow() {
     // Give the bow, seeded directly (the selected-slot default is unreliable
     // across joins, the same reasoning `live_dig_place.rs` uses for its
     // placement invariant).
+    // `BowItem.use()` refuses to start a draw at all without ammo in
+    // inventory (`player.getProjectile(itemstack).isEmpty()` and not
+    // creative) — server-side `InteractionResult.FAIL`, no draw, no arrow,
+    // regardless of how correct the client's packet sequence is. Give both.
     rcon.cmd("item replace entity @a weapon.mainhand with minecraft:bow");
+    rcon.cmd("give @a minecraft:arrow 16");
     for _ in 0..10 {
         pump(&mut sim);
         std::thread::sleep(Duration::from_millis(20));
@@ -156,10 +161,12 @@ fn a_bow_drawn_at_an_entity_and_released_fires_an_arrow() {
     rcon.wait_for_entity(&pig_selector, Duration::from_secs(10), Duration::from_millis(100))
         .expect("summoned pig must become selector-visible (server-side)");
 
-    // Confirm no arrow exists yet, before this gate could create one.
+    // Confirm the pig starts undamaged, before this gate could hurt it.
+    let starting_health = pig_health(&mut rcon, &pig_selector)
+        .expect("summoned pig must report a health value before the gate runs");
     assert!(
-        !arrow_present_near(&mut rcon, [px, py, pz], 12),
-        "an arrow already exists near the player before the gate ran — test area not clean"
+        (starting_health - 10.0).abs() < 0.01,
+        "pig should start at full health (10.0), got {starting_health}"
     );
 
     // Aim at the pig and poll until the client's own entity ray resolves it
@@ -188,6 +195,16 @@ fn a_bow_drawn_at_an_entity_and_released_fires_an_arrow() {
          the entity-target fallthrough this gate is for"
     );
 
+    {
+        let menu = sim.player_menu();
+        let held = menu.player_native(sim.selected_slot());
+        eprintln!(
+            "[debug] selected_slot={} held={held:?} entity_target={:?}",
+            sim.selected_slot(),
+            sim.entity_target()
+        );
+    }
+
     // ---- THE FIX UNDER TEST -------------------------------------------
     // Press: `interact_entity` (PASS on a plain pig — it has no special
     // right-click behaviour) must fall through to the generic use-item send
@@ -195,9 +212,163 @@ fn a_bow_drawn_at_an_entity_and_released_fires_an_arrow() {
     // release: `Sim::end_use` must send `ReleaseUseItem` (Finding 1), which
     // is what lets the server's own `releaseUsingItem`/bow logic fire the
     // arrow.
+    sim.send_chat("MARKER_BEFORE_USE_ITEM");
+    pump(&mut sim);
     sim.use_item();
-    for _ in 0..24 {
+    for i in 0..24 {
         pump(&mut sim);
+        assert!(
+            sim.net().is_some() && !matches!(sim.session_phase(), SessionPhase::Ended(_)),
+            "the live connection dropped mid-draw at tick {i} (phase={:?})",
+            sim.session_phase()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    sim.send_chat("MARKER_BEFORE_END_USE");
+    pump(&mut sim);
+    sim.end_use();
+    pump(&mut sim);
+    sim.send_chat("MARKER_AFTER_END_USE");
+    pump(&mut sim);
+
+    // **Not** "does an arrow entity still exist": a normal (non-piercing)
+    // arrow that hits and damages something is `discard()`ed by
+    // `AbstractArrow.onHitEntity` (`.cache/mc/26.2/src/…/AbstractArrow.java:503-505`)
+    // within the same tick it lands, and the pig sits only ~2 blocks away —
+    // well under one full tick of flight at a fully-drawn bow's velocity. An
+    // arrow-presence poll raced that discard and always lost, which is
+    // exactly the *magnitude*-species trap CLAUDE.md warns about: the first
+    // version of this gate measured the wrong thing and reported a false
+    // negative on a fix that (per the isolated no-entity variant below, and
+    // the "Take Aim" advancement server-side) was already correct. The real,
+    // persistent effect of a landed hit is **damage**, so that is the
+    // invariant.
+    let hit = {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut result = None;
+        while Instant::now() < deadline {
+            pump(&mut sim);
+            match pig_health(&mut rcon, &pig_selector) {
+                Some(h) if (h - starting_health).abs() > 0.01 => {
+                    result = Some(format!("damaged, health now {h}"));
+                    break;
+                }
+                None => {
+                    result = Some("killed".to_string());
+                    break;
+                }
+                Some(_) => {}
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        result
+    };
+    eprintln!("[invariant · bow release] pig outcome: {hit:?}");
+    assert!(
+        hit.is_some(),
+        "drawing and releasing a bow aimed at a live entity did not damage it — the \
+         release-input arm or the use_item_live fallthrough is not reaching the server"
+    );
+
+    rcon.cmd(&format!("kill {pig_selector}"));
+    rcon.cmd("kill @e[type=minecraft:arrow]");
+    rcon.cmd(&format!(
+        "forceload remove {} {} {} {}",
+        px - 6,
+        pz - 6,
+        px + 6,
+        pz + 6
+    ));
+}
+
+/// The no-target half of Finding 2, isolated from any entity interaction:
+/// aim straight up (no block within reach, no entity at all) and confirm a
+/// held bow still fires on release. Simpler than the entity variant above —
+/// no `interact_entity` send in the mix at all — so a failure here narrows
+/// the fault to the generic use-item send/release pair itself rather than
+/// anything about entity targeting.
+#[test]
+#[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/26.2, and `--features live`"]
+fn a_bow_drawn_at_open_sky_and_released_fires_an_arrow() {
+    let mut rcon = RconClient::connect(RCON_ADDR, RCON_PASSWORD).unwrap_or_else(|e| {
+        panic!("cannot reach RCON at {RCON_ADDR}: {e}")
+    });
+
+    let mut sim = Sim::new(live_config());
+    let demo_spawn = sim.player().position;
+    sim.connect(HOST.into(), PORT, PROTOCOL);
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut placed = false;
+    while Instant::now() < deadline {
+        pump(&mut sim);
+        if let Some(net) = sim.net()
+            && net.world_dimensions().is_some()
+            && !net.loaded_chunks().is_empty()
+            && sim.player().position != demo_spawn
+        {
+            placed = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(placed, "server never placed the player within 60s");
+    for _ in 0..80 {
+        pump(&mut sim);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(sim.session_phase(), SessionPhase::Connected);
+
+    for name in online_players(&mut rcon) {
+        rcon.cmd(&format!("op {name}"));
+        rcon.cmd(&format!("gamemode survival {name}"));
+    }
+    for _ in 0..20 {
+        pump(&mut sim);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let px = sim.player().position.x.floor() as i32;
+    let py = sim.player().position.y.floor() as i32;
+    let pz = sim.player().position.z.floor() as i32;
+
+    rcon.cmd("item replace entity @a weapon.mainhand with minecraft:bow");
+    let give_resp = rcon.cmd("give @a minecraft:arrow 16");
+    eprintln!("[debug] item give response: {give_resp:?}");
+    let inv = rcon.cmd("data get entity @a[limit=1] Inventory");
+    eprintln!("[debug] server-side inventory: {inv}");
+    for _ in 0..10 {
+        pump(&mut sim);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // Straight up: no block within REACH (4.5) on a clear-sky world, no
+    // entity — the pure MISS/no-target path.
+    sim.player_mut(|p| {
+        p.yaw = 0.0;
+        p.pitch = -90.0;
+    });
+    for _ in 0..5 {
+        pump(&mut sim);
+        sim.update_target(ASPECT);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(sim.target().is_none(), "precondition: nothing should be targeted straight up");
+    assert!(sim.entity_target().is_none());
+
+    assert!(
+        !arrow_present_near(&mut rcon, [px, py, pz], 12),
+        "an arrow already exists before the gate ran — test area not clean"
+    );
+
+    sim.use_item();
+    for i in 0..24 {
+        pump(&mut sim);
+        assert!(
+            sim.net().is_some() && !matches!(sim.session_phase(), SessionPhase::Ended(_)),
+            "the live connection dropped mid-draw at tick {i} (phase={:?})",
+            sim.session_phase()
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
     sim.end_use();
@@ -215,22 +386,14 @@ fn a_bow_drawn_at_an_entity_and_released_fires_an_arrow() {
         }
         ok
     };
-    eprintln!("[invariant · bow release] arrow present near player: {fired}");
+    eprintln!("[invariant · bow release, no-target path] arrow present: {fired}");
     assert!(
         fired,
-        "drawing and releasing a bow aimed at a live entity did not spawn a server-side arrow \
-         — the release-input arm or the use_item_live fallthrough is not reaching the server"
+        "drawing and releasing a bow aimed at open sky (no target at all) did not spawn a \
+         server-side arrow"
     );
 
-    rcon.cmd(&format!("kill {pig_selector}"));
     rcon.cmd("kill @e[type=minecraft:arrow]");
-    rcon.cmd(&format!(
-        "forceload remove {} {} {} {}",
-        px - 6,
-        pz - 6,
-        px + 6,
-        pz + 6
-    ));
 }
 
 /// Step the sim one tick and drain its frame outputs, the way the app loop
@@ -270,6 +433,21 @@ fn arrow_present_near(rcon: &mut RconClient, pos: [i32; 3], radius: i32) -> bool
         pos[0], pos[1], pos[2]
     ));
     resp.contains("Test passed")
+}
+
+/// The pig's current health via `/data get entity <selector> Health`, or
+/// `None` if the selector no longer resolves (the pig died and despawned —
+/// `Entity.Health` is only present while the entity exists). Parses the
+/// trailing `<float>f` out of the command's own text response rather than a
+/// second query, so a health read and an existence check are one round trip.
+fn pig_health(rcon: &mut RconClient, selector: &str) -> Option<f32> {
+    let resp = rcon.cmd(&format!("data get entity {selector} Health"));
+    if resp.contains("No entity was found") {
+        return None;
+    }
+    // Response shape: `<name> has the following entity data: 10.0f`.
+    let token = resp.rsplit(' ').next()?;
+    token.trim_end_matches('f').parse::<f32>().ok()
 }
 
 /// The players the server currently reports online, parsed from `/list`.

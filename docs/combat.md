@@ -547,6 +547,27 @@ runtime `bevy_ecs` panic, invisible to the type checker) or by hand-reading
 the diff, which looked complete. Fixed by adding
 `app.init_resource::<UsingItem>()` alongside its siblings.
 
+**A second false belief, this time in the live gate itself** —
+`tests/live_use_item_release.rs`'s entity-target variant. Its first version
+polled "does a `minecraft:arrow` entity still exist near the player" after
+release, and that poll never once observed one, reading as a fix that still
+did not reach the server. It was wrong about what to measure, not about the
+fix: `AbstractArrow.onHitEntity`
+(`.cache/mc/26.2/src/…/AbstractArrow.java:503-505`) `discard()`s a
+non-piercing arrow the instant it damages something, and the test's pig sits
+~2 blocks away — well under one tick of flight at a fully-drawn bow's
+velocity, so the arrow is gone before the very first poll iteration runs. Two
+things proved the fix itself was already correct while this was being
+misread: the server granted the "Take Aim" advancement at the exact tick
+`ReleaseUseItem` was sent, and the isolated no-entity variant (aim at open
+sky, nothing for the arrow to hit) detected the arrow immediately, every
+run. The gate now asserts the *persistent* effect of a landed hit — the
+pig's health, read via `/data get entity <selector> Health` before and after
+— which is the "measure by location/what actually changed, not by a proxy
+that happens to correlate everywhere except the case under test" mistake
+`CLAUDE.md`'s magnitude/world test-species entries already name, just with
+"arrow existence" standing in for the wrong proxy this time.
+
 ## What is deliberately not built here
 
 **Vanilla's crit condition and the sweep-attack condition.** These are real
