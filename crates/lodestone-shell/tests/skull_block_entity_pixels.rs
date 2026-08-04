@@ -93,14 +93,19 @@ const SKULL: [i32; 3] = [0, 0, 2];
 /// colour". Matches `chest_block_entity_pixels.rs`'s threshold.
 const NON_SKY: i32 = 60;
 
-/// Every block-entity sheet the jar ships, across **both** families: 22 chest
-/// stems (7 materials x 3 halves + 1 half-independent ender) plus 5 skull
-/// stems (skeleton, wither skeleton, zombie, creeper, player). The shell's
+/// Every block-entity sheet the jar ships, across **every** family: 22 chest
+/// stems (7 materials x 3 halves + 1 half-independent ender), 5 skull stems
+/// (skeleton, wither skeleton, zombie, creeper, player), plus whatever a
+/// later family adds (a bell, one stem, as of this session). The shell's
 /// texture loader and this pass's own GPU loader both iterate
-/// `lodestone_render::block_entity_texture_stems()`, the union — so this
-/// count is the union too, not skull's 5 alone, regardless of what this
-/// particular gate installs as a source this frame.
-const EXPECTED_SHEETS: usize = 27;
+/// `lodestone_render::block_entity_texture_stems()`, the union — so this is
+/// **derived from that same function**, not a literal, for the exact reason
+/// `chest_block_entity_pixels.rs`'s own doc on this constant gives: a literal
+/// here already went stale once, the moment the skull renderer added its own
+/// sheets to a count this file had hardcoded as chest-only.
+fn expected_sheets() -> usize {
+    lodestone_render::block_entity_texture_stems().len()
+}
 
 fn sky_bytes() -> [u8; 3] {
     SKY_COLOR.map(|c| (c * 255.0).round() as u8)
@@ -321,12 +326,13 @@ fn a_skull_draws_in_its_own_screen_rect_where_no_block_model_could() {
     let (subject_px, subject_stats) = shoot(true);
     let (control_px, control_stats) = shoot(false);
 
-    // --- The sheets really loaded (both families — see EXPECTED_SHEETS). -----
+    // --- The sheets really loaded (every family — see expected_sheets()). ----
+    let expected = expected_sheets();
     assert_eq!(
-        subject_stats.block_entity_sheets_loaded, EXPECTED_SHEETS,
-        "expected all {EXPECTED_SHEETS} block-entity sheets (chest + skull) from \
-         client.jar; a short count means the pack is missing or a stem is \
-         misspelled, and this gate cannot distinguish that from a broken pass"
+        subject_stats.block_entity_sheets_loaded, expected,
+        "expected all {expected} block-entity sheets from client.jar; a short \
+         count means the pack is missing or a stem is misspelled, and this \
+         gate cannot distinguish that from a broken pass"
     );
 
     // --- The exact, non-approximate corroboration. ---------------------------

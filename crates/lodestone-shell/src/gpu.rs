@@ -33,7 +33,7 @@ use lodestone_render::{
     crack_pipeline::{CrackPipeline, GpuCrackMesh},
     crack_resolver::CrackResolver,
     entity::{
-        Arm, armour_layer_tint, armour_layers, camera_orientation, dropped_item_mesh,
+        Arm, armour_layer_tint_with_dye, armour_layers, camera_orientation, dropped_item_mesh,
         ground_transform, hand_transform, held_item_mesh, item_bob_offset, thrown_item_for,
         thrown_item_mesh,
     },
@@ -68,8 +68,9 @@ pub use debug_lines::{DebugLineVertex, debug_line_vertices};
 pub use outline::CrackTarget;
 pub use screen_effects::ScreenEffects;
 pub use sources::{
-    BlockEntitySource, EntityLightSource, HandSwingSource, MainHandSource, OutlineShapeSource,
-    SignSource, SkullSource, SkyDarkenSource, ThirdPersonBodySource, ThirdPersonBodyState,
+    BellSource, BlockEntitySource, EntityLightSource, HandSwingSource, MainHandSource,
+    OutlineShapeSource, SignSource, SkullSource, SkyDarkenSource, ThirdPersonBodySource,
+    ThirdPersonBodyState,
 };
 pub use stats::RenderStats;
 
@@ -280,6 +281,12 @@ pub struct RenderState {
     /// nothing" convention as [`Self::block_entity_source`], and a separate
     /// field for the reason [`SkullSource`] documents.
     skull_source: SkullSource,
+    /// Where this frame's bells come from. Same "unset means draw nothing"
+    /// convention as [`Self::skull_source`], and a separate field for the
+    /// reason [`BellSource`] documents. Unset by every current caller — see
+    /// that source's own doc for why a bell still draws (always at rest)
+    /// rather than not existing at all.
+    bell_source: BellSource,
     /// World-space sign text (issue #23). Always constructed, like
     /// [`Self::nametag`]: it loads its own jar-sourced font and fail-opens to
     /// drawing nothing. A sign's *board* is a real block model (unlike chest
@@ -515,6 +522,11 @@ impl RenderState {
             // `set_block_entity_source`.
             block_entity_source: BlockEntitySource::default(),
             skull_source: SkullSource::default(),
+            // No bells until a caller installs a world source; see
+            // `set_bell_source`. Nothing in this workspace installs one yet
+            // (see that method's doc), so this stays empty in the live
+            // client today — a hermetic test can still set it directly.
+            bell_source: BellSource::default(),
             sign_text,
             // No signs until the shell installs a world source; see
             // `set_sign_source`.
@@ -1065,6 +1077,25 @@ impl RenderState {
         f: impl Fn(Vec3) -> Vec<lodestone_render::SkullSpawn> + Send + Sync + 'static,
     ) {
         self.skull_source = SkullSource(Some(Box::new(f)));
+    }
+
+    /// Install the source for this frame's bells — the bell equivalent of
+    /// [`set_skull_source`](Self::set_skull_source).
+    ///
+    /// **Nothing in this workspace calls this yet.** The gather it needs
+    /// (`crate::block_entities::bell_spawns`) exists and is tested, but the
+    /// per-frame install call site — the `sim.rs`/`app.rs` equivalent of
+    /// [`Self::set_block_entity_source`]'s own installer — is outside this
+    /// change's file ownership; see `docs/block-entity-renderers.md`'s Bell
+    /// section for the exact remaining hop. Until installed, a bell draws
+    /// nothing extra beyond its block model's own attachment-frame geometry,
+    /// the same "unset means draw nothing" degradation every other source
+    /// here has.
+    pub fn set_bell_source(
+        &mut self,
+        f: impl Fn(Vec3) -> Vec<lodestone_render::BellSpawn> + Send + Sync + 'static,
+    ) {
+        self.bell_source = BellSource(Some(Box::new(f)));
     }
 
     /// Install the source for this frame's sign text — same shape as
@@ -2650,7 +2681,19 @@ impl RenderState {
                     // `LivingEntityRenderer`'s model, armour included — a hurt
                     // mob whose breastplate stayed its own colour would read as
                     // a rendering fault, not as damage.
-                    let tint = InstanceTint::rgb(armour_layer_tint(layer)).with_hurt(draw.hurt);
+                    //
+                    // `dye` is looked up per-slot, not per-layer: a slot's dye
+                    // applies to every layer drawn for it, and
+                    // `armour_layer_tint_with_dye` itself is what ignores the
+                    // dye for a non-dyeable layer (diamond, iron, …) — see
+                    // that function's own doc and `docs/armour-rendering.md`.
+                    let dye = draw
+                        .equipment_dye
+                        .iter()
+                        .find(|(s, _)| humanoid_armour_slot(*s) == Some(slot))
+                        .map(|(_, dye)| *dye);
+                    let tint =
+                        InstanceTint::rgb(armour_layer_tint_with_dye(layer, dye)).with_hurt(draw.hurt);
                     let group = match accum
                         .iter_mut()
                         .position(|a| a.slot == slot && a.texture == texture)
@@ -2852,10 +2895,12 @@ impl RenderState {
         let eye = camera.position;
         let chests = self.block_entity_source.chests(eye);
         let skulls = self.skull_source.skulls(eye);
-        // Both, not either: an early return on `chests.is_empty()` alone would
-        // make a skull in an otherwise chestless room draw nothing, which is
-        // exactly how this pass would have grown a second island.
-        if chests.is_empty() && skulls.is_empty() {
+        let bells = self.bell_source.bells(eye);
+        // All three, not any pair: an early return on only `chests`/`skulls`
+        // would make a bell in an otherwise chestless, skull-less room draw
+        // nothing, which is exactly how this pass would have grown a third
+        // island.
+        if chests.is_empty() && skulls.is_empty() && bells.is_empty() {
             return Vec::new();
         }
 
@@ -2888,6 +2933,11 @@ impl RenderState {
             skulls
                 .iter()
                 .filter_map(|spawn| self.block_entities.models.resolve_skull(spawn)),
+        );
+        instances.extend(
+            bells
+                .iter()
+                .filter_map(|spawn| self.block_entities.models.resolve_bell(spawn)),
         );
 
         let frame = plan_block_entities(&instances, &camera.frustum());
