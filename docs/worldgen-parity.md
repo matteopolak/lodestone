@@ -173,6 +173,27 @@ change this: the same excluded table feeds carver/ore biome resolution too, so
 a column can never resolve to one of the three excluded names in the first
 place (see `crates/lodestone-worldgen/src/overworld.rs`'s "Badlands" section).
 
+**After the ore-oracle fix (issue #295's ore-oracle-parity increment,
+`postfeatures` stage — ore composition into `column()` itself is still not
+composed, see the module doc comment on `overworld.rs`):**
+
+| chunk | postfeatures vs postcarve (blocks the ore step placed) | postfeatures vs current `column()` (the ore-composition gap #295's next increment closes) |
+|---|---|---|
+| (0, 0) | 4113 real mismatches | 4113 real mismatches, 90347/98304 match (91.91%) |
+| (-120, -120) | 4942 real mismatches | 9632 real mismatches, 88666/98304 match (90.20%) |
+
+The `(-120,-120)` gap breaks down cleanly: 4690 of the 9632 is the
+pre-existing badlands-exclusion gap above (unrelated to ores, already
+counted in the `postcarve` numbers), and the remaining 4942 is exactly the
+ore step's own contribution — the two figures add up to 9632 with nothing
+left over, which is itself a small consistency check that the `postfeatures`
+stage isn't double-counting or missing anything relative to `postcarve`.
+
+Run `cargo test -p lodestone-worldgen-parity --no-fail-fast -- --nocapture`
+to see these printed live (`ore_composition_gap_is_measured_and_reported`,
+`postfeatures_actually_differs_from_postcarve`) rather than trusting this
+table to stay fresh forever.
+
 ## Anti-vacuity floors (`tests/chunk_parity.rs`)
 
 - `fixtures_are_non_vacuous` — both fixtures have >25% non-air content and
