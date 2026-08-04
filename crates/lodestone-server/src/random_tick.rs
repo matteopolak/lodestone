@@ -122,8 +122,11 @@
 //! regardless of how many of the four attempts actually hit a propagatable
 //! neighbour.
 
+use crate::gravity_tick;
 use crate::growth_tick;
 use crate::mob_spawn::SpawnRng;
+use crate::neighbor_update::{Direction, NeighborPropagator, Notification};
+use lodestone_model::BlockPos;
 
 /// Vanilla's own default for the `random_tick_speed` gamerule
 /// (`GameRules.java:74`). This crate has no gamerule registry yet (see
@@ -368,19 +371,29 @@ impl RandomTickScheduler {
         state: &str,
     ) -> Vec<RandomTickEvent> {
         let base = base_name(state);
-        if base == GRASS_BLOCK {
-            return self.tick_grass_block(column, min_x, min_z, x, y, z, state);
+        let mut events = if base == GRASS_BLOCK {
+            self.tick_grass_block(column, min_x, min_z, x, y, z, state)
+        } else if growth_tick::crop_max_age(base).is_some() {
+            self.tick_crop_block(column, min_x, min_z, x, y, z, state, base)
+        } else if growth_tick::is_sapling(state) {
+            self.tick_sapling_block(column, min_x, min_z, x, y, z, state, base)
+        } else if growth_tick::is_leaves(state) {
+            self.tick_leaves_block(column, min_x, min_z, x, y, z, state)
+        } else {
+            Vec::new()
+        };
+
+        // Issue #311: every mutation above notifies its six neighbours,
+        // mirroring vanilla's own `setBlockAndUpdate` (this is
+        // `NeighborPropagator`'s first real production call — see
+        // `crate::gravity_tick`'s module doc). The one reaction modeled
+        // today is a gravity block settling once its support disappears;
+        // future block families (redstone, #314) extend the same call site.
+        let mutated: Vec<(i32, i32, i32)> = events.iter().map(|e| e.pos).collect();
+        for (ex, ey, ez) in mutated {
+            events.extend(propagate_and_settle_gravity(column, min_x, min_z, ex, ey, ez));
         }
-        if growth_tick::crop_max_age(base).is_some() {
-            return self.tick_crop_block(column, min_x, min_z, x, y, z, state, base);
-        }
-        if growth_tick::is_sapling(state) {
-            return self.tick_sapling_block(column, min_x, min_z, x, y, z, state, base);
-        }
-        if growth_tick::is_leaves(state) {
-            return self.tick_leaves_block(column, min_x, min_z, x, y, z, state);
-        }
-        Vec::new()
+        events
     }
 
     /// Crop growth (issue #310) — see `crate::growth_tick`'s module doc for
@@ -554,6 +567,100 @@ impl RandomTickScheduler {
         }
         events
     }
+}
+
+/// Settles the gravity block at world `(x, y, z)` if it is one and its
+/// support was just removed — see `crate::gravity_tick`'s module doc for the
+/// jar citation and the "instant settle, no `FallingBlockEntity`" deviation.
+/// A no-op (empty `Vec`) for anything that is not an unsupported gravity
+/// block. Draws no RNG (`FallingBlock.tick` itself draws none — see that
+/// module's doc comment), so this needs no `&mut self`.
+fn settle_gravity_at(
+    column: &mut crate::chunk::ChunkColumn,
+    min_x: i32,
+    min_z: i32,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> Vec<RandomTickEvent> {
+    let lx = x - min_x;
+    let lz = z - min_z;
+    let state = column.block_state(lx, y, lz).to_string();
+    if !gravity_tick::is_gravity_block(base_name(&state)) {
+        return Vec::new();
+    }
+    let below = column.block_state(lx, y - 1, lz).to_string();
+    if !gravity_tick::is_free(&below) {
+        return Vec::new();
+    }
+    let min_y = column.min_y;
+    let landing_y = {
+        let column_ref: &crate::chunk::ChunkColumn = column;
+        gravity_tick::find_landing_y(
+            |probe_y| gravity_tick::is_free(column_ref.block_state(lx, probe_y, lz)),
+            y,
+            min_y,
+        )
+    };
+    if landing_y == y {
+        // Shouldn't happen (we already confirmed `below` is free, so the
+        // scan must move at least one step) — defensive, not reachable.
+        return Vec::new();
+    }
+    column.set_block(lx, y, lz, crate::chunk::AIR);
+    column.set_block(lx, landing_y, lz, &state);
+    vec![
+        RandomTickEvent {
+            pos: (x, y, z),
+            from: state.clone(),
+            to: crate::chunk::AIR.to_string(),
+        },
+        RandomTickEvent {
+            pos: (x, landing_y, z),
+            from: crate::chunk::AIR.to_string(),
+            to: state,
+        },
+    ]
+}
+
+/// Notifies the six neighbours of a just-mutated position `(x, y, z)` via
+/// `NeighborPropagator` (issue #308's own primitive, gaining its first real
+/// caller here) and settles any neighbour that is an unsupported gravity
+/// block. A settled block's *old* position is re-notified from directly
+/// above (`Direction::Down`, i.e. "the position above the vacated cell") so
+/// a stacked column of gravity blocks collapses one at a time, depth-first —
+/// exactly the cascade shape `NeighborPropagator::propagate` exists to
+/// provide (see `neighbor_update.rs`'s own doc comment). Neighbours outside
+/// this column's 16×16 footprint are skipped — the same cross-chunk
+/// limitation `tick_grass_block`'s own spread already accepts (`tick_chunk`
+/// has no neighbouring-column access).
+fn propagate_and_settle_gravity(
+    column: &mut crate::chunk::ChunkColumn,
+    min_x: i32,
+    min_z: i32,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> Vec<RandomTickEvent> {
+    let mut events = Vec::new();
+    let propagator = NeighborPropagator::default();
+    propagator.propagate(BlockPos::new(x, y, z), None, |n: Notification| -> Vec<Notification> {
+        let tlx = n.pos.x - min_x;
+        let tlz = n.pos.z - min_z;
+        if !(0..16).contains(&tlx) || !(0..16).contains(&tlz) {
+            return Vec::new();
+        }
+        let settled = settle_gravity_at(column, min_x, min_z, n.pos.x, n.pos.y, n.pos.z);
+        if settled.is_empty() {
+            return Vec::new();
+        }
+        events.extend(settled);
+        vec![Notification {
+            pos: BlockPos::new(n.pos.x, n.pos.y + 1, n.pos.z),
+            from: Direction::Down,
+        }]
+    });
+    events
 }
 
 /// `LevelChunkSection::isRandomlyTicking`'s boolean, computed by scanning —
@@ -992,5 +1099,85 @@ mod tests {
             assert!(events.is_empty(), "a leaf within range of a log must never be selected for a random tick");
         }
         assert_eq!(column.block_state(6, 5, 6), "minecraft:oak_leaves[distance=3,persistent=false]");
+    }
+
+    // # Issue #311 end-to-end: gravity blocks settling through
+    // `NeighborPropagator`'s first real production call. Every test below
+    // triggers the fall via an ADJACENT random-tick mutation (grass dying to
+    // dirt) — this crate's only current producer, since block-place/break
+    // (the far more common vanilla trigger) lives in `server.rs`, off-limits
+    // to this task. See `crate::gravity_tick`'s module doc for that scope
+    // note stated in full.
+
+    /// A sand block adjacent to a grass-dies-to-dirt conversion, with
+    /// nothing solid beneath it, settles all the way to the floor —
+    /// `ChunkColumn::new`'s default all-air column, so the predicted landing
+    /// is exactly `min_y` (0 here), a magnitude check, not just "it moved".
+    #[test]
+    fn a_gravity_block_settles_when_an_adjacent_random_tick_mutation_removes_its_support() {
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block(5, 5, 5, GRASS_BLOCK);
+        column.set_block(5, 6, 5, "minecraft:stone"); // covers the grass: dies to dirt
+        column.set_block(6, 5, 5, "minecraft:sand"); // east neighbour, unsupported (air below by default)
+        let mut scheduler = RandomTickScheduler::new(1, 1);
+        let mut settled = false;
+        for _ in 0..3000 {
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 200);
+            if events.iter().any(|e| e.pos == (6, 0, 5) && e.to == "minecraft:sand") {
+                settled = true;
+                break;
+            }
+        }
+        assert!(settled, "an unsupported sand block adjacent to a grass conversion must settle");
+        assert_eq!(column.block_state(6, 0, 5), "minecraft:sand", "must land exactly at min_y");
+        assert_eq!(column.block_state(6, 5, 5), "minecraft:air", "the old position must be vacated");
+    }
+
+    /// Negative control: a sand block WITH solid support directly below it
+    /// must never move, however many adjacent grass conversions happen —
+    /// proving the settle check actually discriminates on support, not
+    /// firing unconditionally on every neighbour notification.
+    #[test]
+    fn a_supported_gravity_block_never_moves_even_after_adjacent_mutations() {
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block(5, 5, 5, GRASS_BLOCK);
+        column.set_block(5, 6, 5, "minecraft:stone");
+        column.set_block(6, 5, 5, "minecraft:sand");
+        column.set_block(6, 4, 5, "minecraft:stone"); // real support
+        let mut scheduler = RandomTickScheduler::new(1, 1);
+        for _ in 0..3000 {
+            scheduler.tick_chunk(&mut column, 0, 0, 200);
+        }
+        assert_eq!(column.block_state(6, 5, 5), "minecraft:sand", "a supported sand block must never fall");
+    }
+
+    /// A stacked column of two gravity blocks collapses one at a time in a
+    /// single `NeighborPropagator::propagate` call — proof that the
+    /// depth-first re-notification (`Direction::Down` from the vacated
+    /// position) actually cascades, not just handles the one directly
+    /// notified neighbour. Predicted landing: the bottom block reaches
+    /// `min_y` (0), the top block then finds the bottom one already there
+    /// and lands at exactly one above it (`1`) — both in the SAME
+    /// triggering mutation, proven by checking both final positions after
+    /// only enough retries to land the position LCG on the grass block once.
+    #[test]
+    fn a_stacked_gravity_column_collapses_one_block_at_a_time_in_one_cascade() {
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block(5, 5, 5, GRASS_BLOCK);
+        column.set_block(5, 6, 5, "minecraft:stone");
+        column.set_block(6, 5, 5, "minecraft:sand"); // bottom of the stack, unsupported
+        column.set_block(6, 6, 5, "minecraft:gravel"); // resting on top of the sand above
+        let mut scheduler = RandomTickScheduler::new(1, 1);
+        let mut both_settled = false;
+        for _ in 0..3000 {
+            scheduler.tick_chunk(&mut column, 0, 0, 200);
+            if column.block_state(6, 0, 5) == "minecraft:sand" && column.block_state(6, 1, 5) == "minecraft:gravel" {
+                both_settled = true;
+                break;
+            }
+        }
+        assert!(both_settled, "both stacked gravity blocks must settle, the gravel directly atop the sand");
+        assert_eq!(column.block_state(6, 5, 5), "minecraft:air");
+        assert_eq!(column.block_state(6, 6, 5), "minecraft:air");
     }
 }

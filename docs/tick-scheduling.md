@@ -3,23 +3,28 @@
 Issues [#307](https://github.com/matteopolak/lodestone/issues/307) (random-tick
 scheduler) and [#308](https://github.com/matteopolak/lodestone/issues/308)
 (scheduled-tick queue and neighbour-update propagation) — the foundation layer
-every block-tick feature (crop/sapling growth #310, fluid flow #309, fire
-spread #312, gravity blocks #311, leaf decay, the redstone family #314-#322)
-builds on.
+every block-tick feature (crop/sapling growth/leaf decay #310, gravity blocks
+#311, fluid flow #309, fire spread #312, the redstone family #314-#322)
+builds on. [#310](https://github.com/matteopolak/lodestone/issues/310) and
+[#311](https://github.com/matteopolak/lodestone/issues/311) have since landed
+on top of this foundation — see their own sections below.
 
 ## What it is
 
-Three new modules in `crates/lodestone-server/src/`, each a generic,
-vanilla-shaped primitive with its own test suite, wired into
-`tick::run_tick_loop` (issue #284):
+Five modules in `crates/lodestone-server/src/`, each a generic, vanilla-shaped
+primitive with its own test suite, wired into `tick::run_tick_loop` (issue
+#284):
 
 - [`random_tick.rs`](../crates/lodestone-server/src/random_tick.rs) — issue
   #307. [`RandomTickScheduler`] replicates `ServerLevel::tickChunk`'s block
   selection (`ServerLevel.java:495-538`) and the position-pick LCG
-  (`Level.getBlockRandomPos`, `Level.java:1064-1068`) exactly, and drives the
-  one block modeled end to end today: grass turning to dirt when covered, and
-  dirt turning to grass when adjacent to an air-exposed grass block
-  (`SpreadingSnowyBlock.randomTick`, `SpreadingSnowyBlock.java:44-64`).
+  (`Level.getBlockRandomPos`, `Level.java:1064-1068`) exactly, and dispatches
+  every randomly-ticking block family this crate models to its own handler:
+  grass turning to dirt when covered, and dirt turning to grass when adjacent
+  to an air-exposed grass block (`SpreadingSnowyBlock.randomTick`,
+  `SpreadingSnowyBlock.java:44-64`) directly in this module, plus crop
+  growth/sapling growth/leaf decay (issue #310) in
+  [`growth_tick.rs`](../crates/lodestone-server/src/growth_tick.rs).
 - [`scheduled_tick.rs`](../crates/lodestone-server/src/scheduled_tick.rs) —
   issue #308, first half. [`ScheduledTickQueue<T>`] mirrors vanilla's
   `LevelTicks`/`LevelChunkTicks`/`ScheduledTick` drain order (trigger tick,
@@ -28,7 +33,18 @@ vanilla-shaped primitive with its own test suite, wired into
   issue #308, second half. [`NeighborPropagator`] mirrors
   `NeighborUpdater.UPDATE_ORDER` and `CollectingNeighborUpdater`'s
   depth-first cascade semantics — the "vanilla update-order quirks" issue
-  #316 refers to.
+  #316 refers to. As of issue #311 this has a real production caller — see
+  below.
+- [`growth_tick.rs`](../crates/lodestone-server/src/growth_tick.rs) — issue
+  #310. Crop growth (`CropBlock.randomTick`, `CropBlock.java:78-89`, with
+  beetroot's own extra gate, `BeetrootBlock.java:45-49`), sapling growth
+  (`SaplingBlock.java:45-57`, the real stage-0→1 cycle only — see its own
+  section below for why the tree-growth half is a named gap), and leaf decay
+  (`LeavesBlock.java:61-76`), all dispatched from `random_tick.rs`.
+- [`gravity_tick.rs`](../crates/lodestone-server/src/gravity_tick.rs) — issue
+  #311. Sand/gravel settling once unsupported (`FallingBlock.java:28-65`),
+  triggered through `NeighborPropagator`'s first real production call — see
+  its own section below for the two named deviations this landing accepts.
 
 ## How it works
 
@@ -117,12 +133,34 @@ notified**. [`NeighborPropagator::propagate`] is that same algorithm as an
 explicit stack, capped by `max_chained` (vanilla's
 `maxChainedNeighborUpdates`).
 
-No block in this crate has a real `neighborChanged` response yet (that is
-#311/#314-#322's job) — `NeighborPropagator` is tested standalone today, with
-no production caller. This is the one piece of this landing that is a
-genuine island, named as such rather than hidden: the algorithm and its
-ordering are correct and pinned by tests that reject the plausible-looking
-wrong hypothesis (breadth-first), but nothing calls it in `tick.rs` yet.
+**As of issue #311, this is no longer true — gravity blocks are
+`NeighborPropagator`'s first real production caller.** Every mutation
+`crate::random_tick::RandomTickScheduler::tick_randomly_ticking_block` makes
+(grass↔dirt, crop growth, sapling growth, leaf decay — #310, above) now
+calls `NeighborPropagator::propagate` on the mutated position, mirroring
+vanilla's own `setBlockAndUpdate` always notifying neighbours after a
+change. The one reaction modeled today is a sand/gravel block settling once
+its support disappears (`crate::gravity_tick`, cited from
+`FallingBlock.java`); a settled block's old position is re-notified from
+directly above so a stacked column of gravity blocks collapses one at a
+time, depth-first — the exact cascade shape this primitive exists to
+provide. See `crate::gravity_tick`'s own module doc for the full citation
+and, importantly, the **two named deviations** this landing accepts rather
+than leaving gravity blocks a further island: no `FallingBlockEntity` (the
+block moves directly, one computed step, not a smoothly-animated entity —
+this crate has no free-entity-simulation seam for a temporary block-shaped
+entity), and no 2-tick scheduled delay (the settle runs synchronously inside
+`propagate`'s own notify closure, because `ScheduledTickQueue`'s drain
+dispatch lives in `tick.rs`, a file this landing's task brief did not permit
+editing directly — see that module doc for the exact brokered-edit note).
+**The trigger surface is still narrower than vanilla's**: it fires only when
+one of `crate::random_tick`'s own mutations happens to be adjacent to an
+unsupported gravity block, not on every block change in the world — the far
+more common vanilla trigger (a player mining the block below a sand column)
+is `server.rs`'s block-break handling, which does not call `propagate` yet
+and was off-limits to this task. `redstone`/#314-#322 is the next consumer
+of this exact call site and inherits the depth-first ordering guarantee
+unchanged.
 
 ## What actually reaches a client today
 
@@ -140,10 +178,30 @@ changes"), here is exactly what does and does not:
   `serve_play`'s existing `container_sync_tick` timer (the same one that
   already forwards block-entity registry changes with no packet driving
   them) drains and forwards as `encode_block_update` packets.
-- **The scheduled-tick queues and the neighbour-update propagator have no
-  production producer yet.** Stated in `tick.rs`'s own doc comment, not
-  hidden: the queues drain (proving order) every tick; the propagator has no
-  call site in this crate at all.
+- **Crop growth, sapling growth, and leaf decay (#310) reach a client through
+  the exact same path, with zero changes to `tick.rs` or `server.rs`.**
+  `RandomTickScheduler::tick_chunk`'s caller already forwards whatever `Vec`
+  it returns, one block-state string at a time, regardless of which family
+  produced it — so extending the dispatch inside `random_tick.rs` (a file
+  this landing owns) was sufficient. **Unlike grass, nothing in this crate's
+  worldgen places crops, saplings, or leaves naturally** (`crate::chunk`'s own
+  module doc: no vegetation at all), so today's demonstration is
+  `ChunkColumn`-level (a block placed directly into the shared source ticks
+  and mutates exactly like grass does), not a fully natural in-terrain one.
+- **Gravity blocks (#311) reach a client the same way, and are additionally
+  the first real caller of `NeighborPropagator`.** Sand and gravel are
+  genuinely placed by this crate's worldgen (`crates/lodestone-worldgen/src/surface/mod.rs`'s
+  own module doc: "sand near water, gravel on the ocean floor"), so this is
+  the first block family in this landing where the *material* occurs
+  naturally — but the *trigger* (a neighbour notification) still does not
+  fire from anything a player does yet, only from this crate's own
+  random-tick mutations landing next to an unsupported gravity block. See
+  `crate::gravity_tick`'s module doc for that scope note in full, including
+  the two named deviations (no `FallingBlockEntity`, no 2-tick delay).
+- **The scheduled-tick queues still have no production producer.** Stated in
+  `tick.rs`'s own doc comment, not hidden: the queues drain (proving order)
+  every tick; nothing in this crate calls `ScheduledTickQueue::schedule` yet.
+  Fluid flow (#309) and fire (#312) are the next candidates.
 - **`tick_area` is a small, fixed chunk range** — the same
   `(cx_range, cz_range)` `open_in_memory_with_mobs` already threads through
   as `mob_area`, reused rather than adding a second "which chunks are
@@ -154,23 +212,51 @@ changes"), here is exactly what does and does not:
 
 ## How to change it, and the gotchas
 
-- **Adding a new randomly-ticking block**: extend [`is_randomly_ticking`]
-  and add a branch to `RandomTickScheduler::tick_grass_block`'s sibling (or
-  generalize it into a per-block dispatch once a second block needs one —
-  today it is grass-specific on purpose, since generalizing before a second
-  real case existed would be guessing the shape).
+- **Adding a new randomly-ticking block**: extend [`is_randomly_ticking`] and
+  add a branch to `RandomTickScheduler::tick_randomly_ticking_block`'s
+  dispatch (grass lives directly in this module; crop/sapling/leaf logic
+  lives in `growth_tick.rs` and is called from a `tick_*_block` sibling —
+  follow whichever of those two shapes your new block is closer to).
 - **Adding a real scheduled-tick producer**: call
   `ScheduledTickQueue::schedule` from wherever a block decides "run again in
   N ticks" (vanilla's own `level.scheduleTick`). The queue does not care what
   `T` is — this crate keys it by canonical block-state-name `String` to match
   `ChunkColumn`'s own representation, not by a `Block`/`Fluid` registry
-  object like vanilla, since this crate has no such registry.
+  object like vanilla, since this crate has no such registry. **Still
+  nothing calls this** — `tick_randomly_ticking_block`'s gravity settle
+  (below) runs synchronously instead, specifically because this queue's own
+  drain dispatch lives in the brokered `tick.rs`; a landing that *can* edit
+  `tick.rs` should prefer scheduling a real delayed tick over another
+  synchronous settle.
 - **Adding a real neighbour-update producer**: call
   `NeighborPropagator::propagate` with a `notify` closure that mutates the
   world and returns any further single-target notifications that mutation
   itself triggers — do **not** call `propagate` recursively from inside
   `notify`; the propagator's own stack already handles cascading, and a
   second nested call would double-count `max_chained`.
+  `RandomTickScheduler::tick_randomly_ticking_block`'s own call (`propagate_and_settle_gravity`,
+  `random_tick.rs`) is the worked example: it is called once per mutated
+  position, with a `notify` closure that checks `crate::gravity_tick`'s
+  predicates and, on a settle, returns a single `Direction::Down`
+  re-notification of the vacated position's old neighbour above it — that
+  one extra `Notification` is what makes a stacked column of gravity blocks
+  collapse one at a time within the *same* `propagate` call, rather than
+  needing a second call per block in the stack.
+- **Adding another neighbour-update reaction (e.g. redstone, #314-#322)**:
+  extend `propagate_and_settle_gravity`'s `notify` closure (or split it into
+  a per-reaction dispatch once a second real reaction exists, the same
+  "don't generalize before a second case" reasoning `is_randomly_ticking`'s
+  own history already gives) — the call site, the depth-first ordering, and
+  the cross-chunk-neighbour limitation below are all already handled; only
+  the reaction itself is new work.
+- **The cross-chunk-neighbour gap is real and applies to gravity too**: a
+  neighbour notification landing outside the ticked column's 16×16 footprint
+  is silently skipped (`propagate_and_settle_gravity`'s own bounds check) —
+  the identical limitation `tick_grass_block`'s own spread already accepts,
+  for the identical reason (`tick_chunk` has no neighbouring-column access).
+  A gravity block one block-column away from the mutation that should have
+  triggered it will not fall until a real per-tick multi-column cache exists
+  (see "widening `tick_area`" below).
 - **Widening `tick_area` beyond a handful of chunks**: add a real per-tick
   column cache first (`OverworldChunkSource`'s `edits` map only helps
   already-edited columns); this landing deliberately did not build one,
