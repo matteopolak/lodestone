@@ -92,6 +92,7 @@
 
 pub mod compression;
 mod lz4_block;
+pub mod level_dat;
 pub mod region;
 
 pub use compression::CompressionScheme;
@@ -234,4 +235,17 @@ pub enum Error {
         /// The checksum actually computed over the decompressed bytes.
         actual: u32,
     },
+
+    /// `level.dat`'s gzip wrapper failed to decode as gzip at all (wrong
+    /// magic bytes) — distinct from [`Error::Io`], which covers a
+    /// well-formed gzip stream that still fails (e.g. a CRC mismatch).
+    #[error("level.dat is not a valid gzip stream")]
+    NotGzip,
+    /// `level.dat`'s root NBT compound had no `"Data"` field.
+    #[error(r#"level.dat has no top-level "Data" compound"#)]
+    MissingDataCompound,
+    /// `level.dat`'s `"Data"` compound had no `"DataVersion"` field, or it
+    /// was not an `Int`.
+    #[error(r#"level.dat's "Data" compound has no integer "DataVersion" field"#)]
+    MissingDataVersion,
 }
