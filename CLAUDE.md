@@ -342,14 +342,28 @@ Oracles (not part of repo state — recreate them):
   in-flight edit.
   The trap is that this looks exactly like a catastrophic breakage — hundreds of missing data files
   reads as "someone deleted the assets" or "the embed path is wrong", and it names real filenames.
-  `cargo clean -p <crate>` "fixed" it while reporting **`Removed 0 files`**, which is the tell that
-  the artifact cache was never the cause.
+
+  **The cause, and the rule that prevents it: never point `CARGO_TARGET_DIR` at the shared `target/`
+  from a throwaway worktree.** Doing so bakes the worktree's absolute path into a build script's
+  output, and when the worktree is removed the shared cache keeps serving those dead paths to
+  *everyone else's* build. The agent who did it found and fixed it with
+  `cargo clean -p lodestone-server` — **34,735 files, 3.7 GiB**. A throwaway worktree must use its own
+  target dir; the cost is one extra build, and the alternative is poisoning every other agent's
+  output for as long as it takes someone to notice.
+
+  **A correction worth keeping, because it is a live example of §2.** This entry first recorded that
+  `cargo clean -p <crate>` reported `Removed 0 files`, and concluded "the artifact cache was never the
+  cause." That was exactly backwards. The clean printed zero because the agent responsible had already
+  run it minutes earlier — the cache was the whole cause. Two observations at two different moments,
+  and the second one read as evidence about the first. **A no-op result from a repair step is not
+  evidence the thing you repaired was healthy** — check whether someone else already fixed it before
+  concluding it never needed fixing.
+
   So: **an error whose path contains `/scratchpad/` or a `wt-` prefix is not about your code.** Ignore
   it, re-run, and remember the general rule this is one more instance of — a check run in a shared
   checkout while a dozen agents edit is a **sample, not a measurement**. Before believing any verdict
-  about `main`, re-run at the committed sha in a fresh isolated worktree; and prefer
-  `git worktree remove` over leaving worktrees around, since a half-removed one is what poisons
-  everyone else's build output.
+  about `main`, re-run at the committed sha in a fresh isolated worktree, and prefer
+  `git worktree remove` over leaving worktrees around.
 
 ---
 
