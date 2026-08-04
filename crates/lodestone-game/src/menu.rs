@@ -45,6 +45,35 @@ pub enum MenuKind {
     },
 }
 
+/// A `menu_type`-specific slot **position** (and, in `lodestone-shell`,
+/// background art) descriptor, for the handful of screens whose panel isn't
+/// [`MenuKind::Generic`]'s plain left-to-right grid — the anvil, grindstone,
+/// smithing table and enchanting table (issues #253-#255).
+///
+/// Carried on [`Menu`] rather than in [`MenuKind`], for the same reason
+/// [`CraftLayout`] is: [`MenuKind`] is matched exhaustively in
+/// `lodestone-shell`'s `slot_layout`, and all four of these menus are
+/// mechanically a plain [`MenuKind::Generic`] (quick-move regions included —
+/// see [`Menu::item_combiner`]'s doc comment) with only their **pixel layout**
+/// different. Putting the discriminator here means `lodestone-shell`'s
+/// `slot_layout(menu)` — the one function both drawing *and* click hit-testing
+/// already call — can special-case it with no new parameter threaded through
+/// `hit_test`/`hit_test_with_scale`'s callers. Getting that wrong (a
+/// `menu_type` passed to the draw path but not the hit-test path) is exactly
+/// this module's own documented failure mode: "clicks land one slot off... a
+/// bug invisible in any screenshot."
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecialLayout {
+    /// `AnvilMenu`: slots at `(27,47)`, `(76,47)`, `(134,47)`.
+    Anvil,
+    /// `GrindstoneMenu`: slots at `(49,19)`, `(49,40)`, `(129,34)`.
+    Grindstone,
+    /// `SmithingMenu`: slots at `(8,48)`, `(26,48)`, `(44,48)`, `(98,48)`.
+    Smithing,
+    /// `EnchantmentMenu`: slots at `(15,47)`, `(35,47)`.
+    Enchanting,
+}
+
 /// Where a menu's crafting grid and result live, in **menu-slot** indices.
 ///
 /// Both of vanilla's grid menus put the result first and the grid immediately
@@ -114,6 +143,10 @@ pub const EMPTY_ARMOR_SLOT_BOOTS: &str = "container/slot/boots";
 /// See [`EMPTY_ARMOR_SLOT_HELMET`]. The off-hand slot, whose anonymous subclass
 /// overrides `getNoItemIcon` (`InventoryMenu.java:68-72`).
 pub const EMPTY_ARMOR_SLOT_SHIELD: &str = "container/slot/shield";
+/// The enchanting table's lapis slot empty-icon (`EnchantmentMenu.java:33`,
+/// `EMPTY_SLOT_LAPIS_LAZULI`). See [`EMPTY_ARMOR_SLOT_HELMET`] for why this is
+/// a constant rather than inferred from the slot index.
+pub const EMPTY_SLOT_LAPIS_LAZULI: &str = "container/slot/lapis_lazuli";
 
 /// An ordered slot list over backing containers, with a carried cursor stack.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,6 +160,9 @@ pub struct Menu {
     player_container: usize,
     /// Where the crafting grid and result sit, for menus that have one.
     craft: Option<CraftLayout>,
+    /// The screen-specific pixel layout, for the few menus that have one.
+    /// See [`SpecialLayout`].
+    special_layout: Option<SpecialLayout>,
     /// Server-synchronised state id; bumped on every predicted mutation.
     state_id: u32,
     /// Drag (quick-craft) accumulator state; see [`crate::click`].
@@ -187,6 +223,7 @@ impl Menu {
                 width: 2,
                 height: 2,
             }),
+            special_layout: None,
             state_id: 0,
             quick_craft_status: 0,
             quick_craft_type: 0,
@@ -239,6 +276,7 @@ impl Menu {
                 width,
                 height,
             }),
+            special_layout: None,
             state_id: 0,
             quick_craft_status: 0,
             quick_craft_type: 0,
@@ -271,6 +309,7 @@ impl Menu {
             carried: None,
             player_container: 1,
             craft: None,
+            special_layout: None,
             state_id: 0,
             quick_craft_status: 0,
             quick_craft_type: 0,
@@ -278,10 +317,77 @@ impl Menu {
         }
     }
 
+    /// Builds an "item combiner" menu: `container_size` leading slots, all
+    /// accepting any item except `result_slot` (take-only), then the player's
+    /// main storage and hotbar — vanilla's `ItemCombinerMenu` shape shared by
+    /// the anvil (`AnvilMenu`, `container_size = 3, result_slot = 2`), the
+    /// grindstone (`GrindstoneMenu`, `3, 2`) and the smithing table
+    /// (`SmithingMenu`, `4, 3`). All three put `getInventorySlotStart()` /
+    /// `INV_SLOT_START` at exactly `result_slot + 1`, which is why
+    /// [`generic`](Self::generic)'s own numbering — `0..container_size`
+    /// container, then main, then hotbar — already matches their quick-move
+    /// ranges with no further change; only the result slot's *kind* differs.
+    ///
+    /// The input-slot `mayPlace` predicates these three menus actually declare
+    /// (smithing's per-slot `RecipePropertySet` tests, the grindstone's
+    /// damageable-or-enchanted check) are server data this tree does not have —
+    /// the same "genuinely different, left on generic order" call
+    /// [`crate::menus::build_menu`]'s doc comment already makes for the furnace
+    /// and brewing stand. Accepting anything client-side and letting the
+    /// server's own `container_set_slot` correct a wrong placement is the same
+    /// bounded, self-correcting cost that comment describes: a visible flicker,
+    /// not a desync. What **is** modelled, because it needs no such data, is
+    /// the result slot itself: take-only ([`SlotKind::Output`]), which is what
+    /// stops a shift-click from depositing into it.
+    ///
+    /// `layout` is stored as [`Menu::special_layout`], purely a pixel-position
+    /// discriminator for `lodestone-shell`'s `slot_layout` — it changes no
+    /// mechanics here (the anvil and grindstone are mechanically identical:
+    /// same `container_size`, same `result_slot`).
+    #[must_use]
+    pub fn item_combiner(container_size: usize, result_slot: usize, layout: SpecialLayout) -> Self {
+        let mut menu = Self::generic(container_size);
+        if let Some(slot) = menu.slots.get_mut(result_slot) {
+            slot.kind = SlotKind::Output;
+        }
+        menu.special_layout = Some(layout);
+        menu
+    }
+
+    /// Builds the enchanting table menu: an item slot, a lapis-only currency
+    /// slot, then the player's main storage and hotbar
+    /// (`EnchantmentMenu.java:55-72`). Positionally identical to
+    /// [`generic`](Self::generic) with a container size of 2 — confirmed
+    /// against `EnchantmentMenu.quickMoveStack`'s own `moveItemStackTo(stack,
+    /// 2, 38, true)` — so [`MenuKind`] stays `Generic` here too; there is no
+    /// take-only result slot to mark, only a placement restriction on slot 1.
+    ///
+    /// The three enchantment **costs**, the level-requirement clues and the
+    /// enchantment seed (`EnchantmentMenu`'s ten `DataSlot`s) are not part of
+    /// the slot layout; they arrive as `container_set_data` and are read back
+    /// through [`crate::menus::Menus::container_data`].
+    #[must_use]
+    pub fn enchanting_table() -> Self {
+        let mut menu = Self::generic(2);
+        if let Some(slot) = menu.slots.get_mut(1) {
+            slot.kind = SlotKind::LapisOnly;
+            slot.no_item_icon = Some(EMPTY_SLOT_LAPIS_LAZULI);
+        }
+        menu.special_layout = Some(SpecialLayout::Enchanting);
+        menu
+    }
+
     /// Returns the menu kind.
     #[must_use]
     pub fn kind(&self) -> MenuKind {
         self.kind
+    }
+
+    /// The screen-specific pixel layout, if this menu has one. See
+    /// [`SpecialLayout`].
+    #[must_use]
+    pub fn special_layout(&self) -> Option<SpecialLayout> {
+        self.special_layout
     }
 
     /// Returns the number of menu slots.
@@ -1752,5 +1858,83 @@ mod tests {
 
         assert_eq!(count_at(&menu, 36), Some(64), "native 0 fills first when it is not the selected slot");
         assert_eq!(count_at(&menu, 40), Some(2), "only the 1 remaining torch reaches native 4");
+    }
+
+    // --- item-combiner menus: anvil / grindstone / smithing / enchanting (#253-#255) ---
+
+    /// [`Menu::item_combiner`]'s result slot is take-only, matching
+    /// `ItemCombinerMenu.createResultSlot`'s `mayPlace` override
+    /// (`ItemCombinerMenu.java:62-69`) — the anvil/grindstone shape
+    /// (`container_size = 3, result_slot = 2`).
+    #[test]
+    fn item_combiner_result_slot_rejects_placement() {
+        let menu = Menu::item_combiner(3, 2, SpecialLayout::Anvil);
+        assert!(
+            !menu.may_place(2, &stack("minecraft:diamond_pickaxe", 1)),
+            "the result slot must reject a placed item, matching ItemCombinerMenu"
+        );
+        // The two input slots are untouched — anvil's own `itemStack -> true`
+        // (`AnvilMenu.java:58-59`) accepts anything, so this only proves the
+        // result slot is the *one* that changed.
+        assert!(menu.may_place(0, &stack("minecraft:diamond_pickaxe", 1)));
+        assert!(menu.may_place(1, &stack("minecraft:diamond_pickaxe", 1)));
+    }
+
+    /// The smithing table shape: `container_size = 4, result_slot = 3`
+    /// (`SmithingMenu.java:21-29`).
+    #[test]
+    fn item_combiner_covers_the_smithing_table_shape() {
+        let menu = Menu::item_combiner(4, 3, SpecialLayout::Smithing);
+        assert!(!menu.may_place(3, &stack("minecraft:netherite_upgrade_smithing_template", 1)));
+        assert!(menu.may_place(0, &stack("minecraft:netherite_upgrade_smithing_template", 1)));
+        assert!(menu.may_place(1, &stack("minecraft:diamond_pickaxe", 1)));
+        assert!(menu.may_place(2, &stack("minecraft:netherite_ingot", 1)));
+    }
+
+    /// [`Menu::enchanting_table`]'s slot 1 accepts only lapis lazuli
+    /// (`EnchantmentMenu.java:61-71`); slot 0 (the item to enchant) accepts
+    /// anything, matching the plain `Slot` vanilla gives it.
+    #[test]
+    fn enchanting_table_lapis_slot_rejects_non_lapis() {
+        let menu = Menu::enchanting_table();
+        assert!(
+            !menu.may_place(1, &stack("minecraft:diamond", 1)),
+            "the lapis slot must reject a non-lapis item"
+        );
+        assert!(
+            menu.may_place(1, &stack("minecraft:lapis_lazuli", 1)),
+            "the lapis slot must accept lapis lazuli"
+        );
+        assert!(menu.may_place(0, &stack("minecraft:diamond_sword", 1)));
+    }
+
+    /// Control for the test above: an *ordinary* generic container never
+    /// applies the lapis restriction, so this can only pass because
+    /// `enchanting_table` specifically marked slot 1 — not because `may_place`
+    /// rejects diamonds everywhere.
+    #[test]
+    fn control_generic_container_has_no_lapis_restriction() {
+        let menu = Menu::generic(2);
+        assert!(menu.may_place(1, &stack("minecraft:diamond", 1)));
+    }
+
+    /// The anvil and grindstone are mechanically identical (`container_size =
+    /// 3, result_slot = 2`) but must carry *different* [`SpecialLayout`]s —
+    /// `lodestone-shell`'s `slot_layout` places their three slots at
+    /// completely different pixel positions (`AnvilMenu.java:42-45` vs
+    /// `GrindstoneMenu.java:48-60`), and `Menu` has no other field that could
+    /// tell them apart.
+    #[test]
+    fn special_layout_distinguishes_menus_with_identical_mechanics() {
+        let anvil = Menu::item_combiner(3, 2, SpecialLayout::Anvil);
+        let grindstone = Menu::item_combiner(3, 2, SpecialLayout::Grindstone);
+        assert_eq!(anvil.special_layout(), Some(SpecialLayout::Anvil));
+        assert_eq!(grindstone.special_layout(), Some(SpecialLayout::Grindstone));
+        assert_eq!(Menu::enchanting_table().special_layout(), Some(SpecialLayout::Enchanting));
+        assert_eq!(
+            Menu::generic(3).special_layout(),
+            None,
+            "an ordinary generic container has no special layout"
+        );
     }
 }
