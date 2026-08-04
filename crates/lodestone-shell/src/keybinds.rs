@@ -6,8 +6,9 @@
 //! [`InputAction`] is the closed set of things the player can *ask for*
 //! ("move forward", "open the inventory"). [`Binding`] is what they press to ask
 //! (a keyboard key, a mouse button, or nothing). [`Keybinds`] is the table
-//! joining the two, plus the queries a future Controls menu needs: grouping by
-//! [`Category`], "is this the default?", and "what else is bound to this?".
+//! joining the two, plus the queries the Controls menu's Key Binds screen
+//! needs (issue #15, `crate::menu::key_binds`): grouping by [`Category`], "is
+//! this the default?", and "what else is bound to this?".
 //!
 //! `app.rs` therefore dispatches on *actions*, not keys:
 //!

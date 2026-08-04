@@ -1106,6 +1106,54 @@ impl MenuNav {
         &self.settings
     }
 
+    /// Whether a Key Binds bind button is mid-capture (issue #15) — a click
+    /// or Enter on it already latched
+    /// [`super::key_binds::KeyBindsNav::awaiting`], entirely within this
+    /// crate. `app.rs` reads this **before** translating a raw `KeyEvent`/
+    /// `MouseButton` into a [`MenuKey`] and, while it is `true`, must route
+    /// the *next* one to [`Self::capture_binding`] instead — the one hop this
+    /// crate cannot take on its own, because rebinding to a key with no
+    /// printable `text` (an F-key, a modifier, an arrow other than Up/Down)
+    /// needs the physical [`winit::keyboard::KeyCode`] `menu_key_for` throws
+    /// away today. See `docs/keybindings.md`'s "Wiring the Controls menu"
+    /// section for the exact patch.
+    #[must_use]
+    pub fn awaiting_key_capture(&self) -> bool {
+        self.settings.key_binds().awaiting().is_some()
+    }
+
+    /// Finishes a pending Key Binds capture: sets the action's binding and
+    /// persists immediately, the same eager-persistence rule every other live
+    /// row in this tree follows. A no-op if nothing is awaiting (harmless —
+    /// `app.rs` is expected to guard this on [`Self::awaiting_key_capture`],
+    /// but a stray call costing nothing is cheaper than a debug assertion
+    /// that could panic in the field).
+    ///
+    /// **The `Pause` hazard, enforced here rather than left as a comment.**
+    /// `crate::keybinds::InputAction::Pause`'s own doc names it: unbinding the
+    /// only gameplay route to the pause screen (and so to Quit to Title)
+    /// strands a session with no way out but the window's close button.
+    /// Vanilla's own `KeyBindsScreen.keyPressed` sets `InputConstants.UNKNOWN`
+    /// unconditionally on Escape while capturing (`:73-74`) — `Pause` is not a
+    /// real vanilla `KeyMapping`, so vanilla never has this hazard to guard.
+    /// Escape while capturing `Pause` here instead cancels the capture with
+    /// its *old* binding intact ([`super::key_binds::KeyBindsNav::escape`]
+    /// already does that for every action); this method additionally refuses
+    /// to *set* `Pause` to [`crate::keybinds::Binding::Unbound`] even if a
+    /// future caller reaches one some other way (a mouse click has no
+    /// "Escape" of its own to fall back on).
+    pub fn capture_binding(&mut self, binding: crate::keybinds::Binding) {
+        use crate::keybinds::{Binding, InputAction};
+        let Some(action) = self.settings.key_binds_mut().take_awaiting() else {
+            return;
+        };
+        if action == InputAction::Pause && binding == Binding::Unbound {
+            return;
+        }
+        self.options.keybinds.set(action, binding);
+        self.persist_options();
+    }
+
     /// The highlighted main-menu button.
     #[must_use]
     pub fn main_button(&self) -> MainButton {
@@ -1309,6 +1357,17 @@ impl MenuNav {
             // with no hover arm had to route a click through `Enter`. Row indices
             // are indices into `SettingsNav::visible`, which is also what
             // `render::frame_for` builds its rows from.
+            //
+            // Key Binds (issue #15) is a sub-page of this same `Screen`, and it
+            // is not an `OptionsList` page — see `SettingsPage::KeyBinds`'s own
+            // doc — so its row indices are `KeyBindsNav::visible`'s, a
+            // different list from `SettingsNav::visible`. Guarded ahead of the
+            // plain arm below rather than inside it, matching how `hover_list`
+            // and `world_select.hover` already get their own arms instead of a
+            // branch buried in a shared method.
+            Screen::Settings if self.settings.page() == crate::menu::options::SettingsPage::KeyBinds => {
+                self.settings.key_binds_mut().hover_row(row);
+            }
             Screen::Settings => self.settings.hover_row(row),
             _ => {}
         }
@@ -1387,6 +1446,14 @@ impl MenuNav {
             return Self::apply_world_select(ui, outcome);
         }
         if ui.screen() == Screen::Settings {
+            // Key Binds (issue #15) again — see `hover`'s matching guard.
+            if self.settings.page() == crate::menu::options::SettingsPage::KeyBinds {
+                let outcome = self
+                    .settings
+                    .key_binds_mut()
+                    .click_row(row, &self.options.keybinds);
+                return self.apply_key_binds(ui, outcome);
+            }
             // A click that hit-tested onto a row this page does not have does
             // nothing at all (`SettingsNav::click_row` returns `None` for an
             // out-of-range row), rather than falling through to the keyboard
@@ -1850,6 +1917,12 @@ impl MenuNav {
     /// they protected (a scale that cycles and reaches `options.json`) is still
     /// asserted, through the new path.
     fn key_settings(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        // Key Binds (issue #15) has its own cursor and its own outcome type —
+        // see `hover`'s matching guard for why this is a separate arm rather
+        // than a branch inside the match below.
+        if self.settings.page() == crate::menu::options::SettingsPage::KeyBinds {
+            return self.key_key_binds(ui, key);
+        }
         let outcome = match key {
             MenuKey::Up => {
                 self.settings.step(false);
@@ -1864,6 +1937,69 @@ impl MenuNav {
             _ => return MenuAction::None,
         };
         self.apply_settings(ui, outcome)
+    }
+
+    /// [`Self::key_settings`]'s Key Binds half.
+    fn key_key_binds(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        let outcome = match key {
+            MenuKey::Up => {
+                self.settings.key_binds_mut().step(false);
+                return MenuAction::None;
+            }
+            MenuKey::Down => {
+                self.settings.key_binds_mut().step(true);
+                return MenuAction::None;
+            }
+            MenuKey::Enter => self
+                .settings
+                .key_binds_mut()
+                .enter(&self.options.keybinds),
+            MenuKey::Escape => self.settings.key_binds_mut().escape(),
+            _ => return MenuAction::None,
+        };
+        self.apply_key_binds(ui, outcome)
+    }
+
+    /// What a [`super::options::key_binds::KeyBindsOutcome`] asks of the shell.
+    /// Mirrors [`Self::apply_settings`]'s reason for living here: this owns
+    /// [`Options`] and the file it persists to, and a rebind or a reset that
+    /// only saved on exit would be the one a crash loses — the same eager-
+    /// persistence rule every other live row in this tree already follows.
+    ///
+    /// Takes `ui` even though most arms do not touch it, rather than
+    /// fabricating a throwaway [`UiState`] for the one arm
+    /// ([`KeyBindsOutcome::Back`]) that can: `SettingsNav::leave_key_binds`
+    /// asks to close the whole tree if its page stack is ever unexpectedly
+    /// empty, and that has to reach the *real* `ui.close_settings()` or the
+    /// fallback would silently do nothing to a state nobody can see.
+    fn apply_key_binds(
+        &mut self,
+        ui: &mut UiState,
+        outcome: crate::menu::key_binds::KeyBindsOutcome,
+    ) -> MenuAction {
+        use crate::menu::key_binds::KeyBindsOutcome;
+        match outcome {
+            KeyBindsOutcome::None => MenuAction::None,
+            // Back to Controls — `leave_key_binds` pops `SettingsNav`'s own
+            // page stack (always back to Controls in practice; see its doc)
+            // and its `SettingsOutcome` is routed through `apply_settings`
+            // rather than discarded, for the reason this method's own doc
+            // gives.
+            KeyBindsOutcome::Back => {
+                let outcome = self.settings.leave_key_binds();
+                self.apply_settings(ui, outcome)
+            }
+            KeyBindsOutcome::ResetOne(action) => {
+                self.options.keybinds.reset(action);
+                self.persist_options();
+                MenuAction::None
+            }
+            KeyBindsOutcome::ResetAll => {
+                self.options.keybinds.reset_all();
+                self.persist_options();
+                MenuAction::None
+            }
+        }
     }
 
     /// The two things a [`super::options::SettingsOutcome`] can ask of the shell.
@@ -2870,6 +3006,39 @@ mod tests {
         move |c| matches!(c, crate::menu::options::Cell::Option(s) if s.accessor == name)
     }
 
+    /// [`settings_row`]'s counterpart for the Key Binds screen (issue #15):
+    /// drives `KeyBindsNav`'s own cursor with nothing but Down, the same
+    /// "reaching it this way proves it is reachable" reasoning that method's
+    /// own doc gives. `nav.key` already routes to the right cursor by itself
+    /// once `SettingsNav::page()` is `KeyBinds` — see `key_settings`'s guard
+    /// — so this needs no separate key-sending path.
+    fn key_binds_row(
+        nav: &mut MenuNav,
+        ui: &mut UiState,
+        pred: impl Fn(&crate::menu::key_binds::KeyControl) -> bool,
+    ) -> usize {
+        let controls = crate::menu::key_binds::all_controls();
+        let target = controls
+            .iter()
+            .position(|c| pred(c))
+            .expect("no such control on the Key Binds screen");
+        for _ in 0..=controls.len() {
+            if nav.settings().key_binds().cursor() == target {
+                break;
+            }
+            nav.key(ui, MenuKey::Down);
+        }
+        assert_eq!(
+            nav.settings().key_binds().cursor(),
+            target,
+            "Down must reach every control on Key Binds"
+        );
+        nav.settings()
+            .key_binds()
+            .selected_row()
+            .expect("the cursor must be inside the visible window")
+    }
+
     #[test]
     fn enter_on_the_gui_scale_row_cycles_it_and_persists_through_a_real_file() {
         // This is the re-pointed `settings_up_down_cycles_the_gui_scale…`. The
@@ -3116,6 +3285,236 @@ mod tests {
         assert_eq!(nav.click(&mut ui, look_sensitivity), MenuAction::None);
         assert!(nav.invert_mouse_x());
         assert!(nav.invert_mouse_y());
+    }
+
+    /// Issue #15: the screen the rebindable layer has been sitting behind
+    /// with no way to reach it since it landed. Two hops, matching how a
+    /// player would actually navigate there — Controls is not a root-level
+    /// page, and Key Binds is nested one level under that.
+    #[test]
+    fn the_key_binds_screen_is_reachable_from_controls_and_escape_returns_there() {
+        let (mut nav, _path) = self::nav("key-binds-reachable");
+        let mut ui = UiState::new();
+        ui.open_settings();
+
+        open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::Controls);
+        open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::KeyBinds);
+        assert_eq!(
+            nav.settings().page(),
+            crate::menu::options::SettingsPage::KeyBinds
+        );
+        assert_eq!(ui.screen(), Screen::Settings, "still one Screen the whole way down");
+
+        // Escape, with nothing being captured, leaves the page — back to
+        // Controls, not the title (the page stack, not `UiState`).
+        nav.key(&mut ui, MenuKey::Escape);
+        assert_eq!(
+            nav.settings().page(),
+            crate::menu::options::SettingsPage::Controls
+        );
+        assert_eq!(ui.screen(), Screen::Settings, "Escape here must not leave Settings");
+    }
+
+    /// The last hop app.rs owns (see `MenuNav::capture_binding`'s doc):
+    /// clicking a bind button starts capture entirely within this crate;
+    /// finishing it needs the raw key/mouse event app.rs would forward. This
+    /// drives both halves without a `WindowApp` by calling `capture_binding`
+    /// directly, the same call `app.rs`'s patch is specified to make.
+    #[test]
+    fn clicking_a_bind_button_then_capturing_a_key_rebinds_and_persists() {
+        use crate::keybinds::{Binding, InputAction};
+        use crate::menu::key_binds::KeyControl;
+        use winit::keyboard::KeyCode;
+
+        let (mut nav, path) = self::nav("key-binds-capture");
+        let mut ui = UiState::new();
+        ui.open_settings();
+        let options_path = path.parent().unwrap().join("options.json");
+
+        open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::Controls);
+        open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::KeyBinds);
+
+        assert!(!nav.awaiting_key_capture());
+        let bind_row = key_binds_row(&mut nav, &mut ui, |c| {
+            *c == KeyControl::Bind(InputAction::Forward)
+        });
+        assert_eq!(nav.click(&mut ui, bind_row), MenuAction::None);
+        assert!(
+            nav.awaiting_key_capture(),
+            "clicking the bind button alone must start capture"
+        );
+        // Nothing is persisted yet — starting capture is pure UI state.
+        assert!(
+            crate::config::Options::load_from(&options_path)
+                .keybinds
+                .is_default(InputAction::Forward)
+        );
+
+        // The forwarded raw key, exactly as `app.rs`'s patch is specified to
+        // call it.
+        nav.capture_binding(Binding::Key(KeyCode::KeyF));
+        assert!(!nav.awaiting_key_capture(), "the capture is consumed");
+        assert_eq!(
+            nav.settings().page(),
+            crate::menu::options::SettingsPage::KeyBinds,
+            "finishing a capture must not itself leave the page"
+        );
+        let persisted = crate::config::Options::load_from(&options_path);
+        assert_eq!(
+            persisted.keybinds.binding(InputAction::Forward),
+            Binding::Key(KeyCode::KeyF),
+            "and it must reach the file immediately, not at exit"
+        );
+    }
+
+    /// Escape while capturing cancels the capture and leaves the binding
+    /// exactly as it was — vanilla's own `keyPressed` sets `UNKNOWN`
+    /// unconditionally on Escape while capturing (`KeyBindsScreen.java:73-74`);
+    /// this client does not, for the `Pause`-unbind hazard
+    /// `MenuNav::capture_binding`'s doc names. The control is the *other*
+    /// direction: a genuine key still rebinds, so this is not "Escape is
+    /// broken", it is "Escape means cancel, not unbind".
+    #[test]
+    fn escape_while_capturing_cancels_without_changing_the_binding() {
+        use crate::keybinds::InputAction;
+        use crate::menu::key_binds::KeyControl;
+
+        let (mut nav, path) = self::nav("key-binds-escape-cancels");
+        let mut ui = UiState::new();
+        ui.open_settings();
+        let options_path = path.parent().unwrap().join("options.json");
+
+        open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::Controls);
+        open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::KeyBinds);
+        let bind_row = key_binds_row(&mut nav, &mut ui, |c| {
+            *c == KeyControl::Bind(InputAction::Forward)
+        });
+        nav.click(&mut ui, bind_row);
+        assert!(nav.awaiting_key_capture());
+
+        nav.key(&mut ui, MenuKey::Escape);
+        assert!(!nav.awaiting_key_capture(), "cancelled");
+        assert_eq!(
+            nav.settings().page(),
+            crate::menu::options::SettingsPage::KeyBinds,
+            "cancelling a capture must not also leave the page"
+        );
+        assert!(
+            crate::config::Options::load_from(&options_path)
+                .keybinds
+                .is_default(InputAction::Forward),
+            "unchanged — nothing was ever persisted"
+        );
+    }
+
+    /// The hazard `crate::keybinds::InputAction::Pause`'s own doc names,
+    /// `docs/keybindings.md` records as unenforced, and
+    /// `MenuNav::capture_binding` is the first place able to enforce it: a
+    /// player who captures Pause and then presses Escape (which this client
+    /// does *not* treat as "cancel" for a *literal* Escape key-press the way
+    /// it does for the menu's own Escape — see the previous test's doc) must
+    /// not end up with Pause unbound and no way back to the title screen.
+    #[test]
+    fn capturing_pause_refuses_to_leave_it_unbound() {
+        use crate::keybinds::{Binding, InputAction};
+        use crate::menu::key_binds::KeyControl;
+
+        let (mut nav, path) = self::nav("key-binds-pause-hazard");
+        let mut ui = UiState::new();
+        ui.open_settings();
+        let options_path = path.parent().unwrap().join("options.json");
+        let default_pause = nav.options().keybinds.binding(InputAction::Pause);
+
+        open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::Controls);
+        open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::KeyBinds);
+        let bind_row = key_binds_row(&mut nav, &mut ui, |c| {
+            *c == KeyControl::Bind(InputAction::Pause)
+        });
+        nav.click(&mut ui, bind_row);
+        assert!(nav.awaiting_key_capture());
+
+        nav.capture_binding(Binding::Unbound);
+        assert_eq!(
+            nav.options().keybinds.binding(InputAction::Pause),
+            default_pause,
+            "refused: Pause must never be set to Unbound through capture"
+        );
+        assert!(!nav.awaiting_key_capture(), "the capture is still consumed");
+        assert!(
+            crate::config::Options::load_from(&options_path)
+                .keybinds
+                .is_default(InputAction::Pause)
+        );
+
+        // The control: capturing a real key for Pause still works — the
+        // guard is specific to `Unbound`, not to `Pause` as a whole.
+        let bind_row = key_binds_row(&mut nav, &mut ui, |c| {
+            *c == KeyControl::Bind(InputAction::Pause)
+        });
+        nav.click(&mut ui, bind_row);
+        nav.capture_binding(Binding::Key(winit::keyboard::KeyCode::KeyP));
+        assert_eq!(
+            nav.options().keybinds.binding(InputAction::Pause),
+            Binding::Key(winit::keyboard::KeyCode::KeyP)
+        );
+    }
+
+    /// Per-row Reset and the footer's Reset Keys (#15), both persisted
+    /// immediately, both isolated from an untouched neighbour — the same
+    /// shape every other live row in this tree already proves.
+    #[test]
+    fn resetting_one_action_and_reset_all_persist_through_a_real_file() {
+        use crate::keybinds::{Binding, InputAction};
+        use crate::menu::key_binds::KeyControl;
+        use winit::keyboard::KeyCode;
+
+        let (mut nav, path) = self::nav("key-binds-reset");
+        let mut ui = UiState::new();
+        ui.open_settings();
+        let options_path = path.parent().unwrap().join("options.json");
+
+        open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::Controls);
+        open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::KeyBinds);
+
+        // Change two actions so there is something to reset.
+        for (action, key) in [
+            (InputAction::Forward, KeyCode::KeyF),
+            (InputAction::Back, KeyCode::KeyB),
+        ] {
+            let bind_row = key_binds_row(&mut nav, &mut ui, |c| *c == KeyControl::Bind(action));
+            nav.click(&mut ui, bind_row);
+            nav.capture_binding(Binding::Key(key));
+        }
+        assert_eq!(
+            nav.options().keybinds.binding(InputAction::Forward),
+            Binding::Key(KeyCode::KeyF)
+        );
+
+        // Resetting Forward alone must not touch Back.
+        let forward_reset =
+            key_binds_row(&mut nav, &mut ui, |c| *c == KeyControl::Reset(InputAction::Forward));
+        assert_eq!(nav.click(&mut ui, forward_reset), MenuAction::None);
+        assert!(nav.options().keybinds.is_default(InputAction::Forward));
+        assert_eq!(
+            nav.options().keybinds.binding(InputAction::Back),
+            Binding::Key(KeyCode::KeyB),
+            "an untouched neighbour must not reset"
+        );
+        assert!(
+            crate::config::Options::load_from(&options_path)
+                .keybinds
+                .is_default(InputAction::Forward)
+        );
+
+        // Reset Keys resets everything, including Back.
+        let reset_all = key_binds_row(&mut nav, &mut ui, |c| *c == KeyControl::ResetAll);
+        assert_eq!(nav.click(&mut ui, reset_all), MenuAction::None);
+        assert!(nav.options().keybinds.is_default(InputAction::Back));
+        assert!(
+            crate::config::Options::load_from(&options_path)
+                .keybinds
+                .is_default(InputAction::Back)
+        );
     }
 
     /// #203: the scroll-sensitivity click wraps at vanilla's own slider bounds

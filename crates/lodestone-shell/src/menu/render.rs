@@ -465,6 +465,17 @@ pub enum Origin {
     /// `OptionsSubScreen`'s footer band, and an `OptionsList` row; see
     /// [`super::options::Placement`].
     Settings(super::options::Placement),
+    /// A widget of the Key Binds screen (issue #15), resolved by
+    /// [`super::key_binds::placement_anchor`].
+    ///
+    /// A second data-carrying variant for the same reason
+    /// [`Origin::Settings`] is one: a row's position depends on which action
+    /// it is and how far the list is scrolled. Not folded into
+    /// [`Origin::Settings`]/[`super::options::Placement`] — see
+    /// [`super::key_binds`]'s module docs on why this screen's list geometry
+    /// (a flat 20 px row height, two right-anchored buttons per row) does not
+    /// fit `OptionsList`'s shape.
+    KeyBinds(super::key_binds::KeyPlacement),
 }
 
 impl Origin {
@@ -493,6 +504,9 @@ impl Origin {
             // height. See `super::options::root_widget_rects`.
             Origin::Settings(placement) => {
                 super::options::placement_anchor(placement, width, height)
+            }
+            Origin::KeyBinds(placement) => {
+                super::key_binds::placement_anchor(placement, width, height)
             }
         }
     }
