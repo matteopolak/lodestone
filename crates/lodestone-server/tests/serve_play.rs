@@ -38,9 +38,10 @@ use lodestone_core::{Reader, State, Writer};
 use lodestone_model::{Difficulty, ItemStack};
 use lodestone_net::{Connection, NetError, memory_pair};
 use lodestone_server::{
-    BlockEntityHandle, ChunkColumn, ChunkSource, MobHandle, NoEntities, ServerBound,
-    ServerDirective, ServerError, ServerProtocol, serve_connection,
+    BlockEntityHandle, ChunkColumn, ChunkSource, ChunkWorld, MobHandle, MobSim, NoEntities,
+    ServerBound, ServerDirective, ServerError, ServerProtocol, serve_connection,
 };
+use std::str::FromStr;
 use tokio::io::DuplexStream;
 use uuid::Uuid;
 
@@ -1276,4 +1277,115 @@ async fn client_information_view_distance_resizes_the_streamed_view() {
 
     drop(client);
     let _ = server.await.unwrap();
+}
+
+/// **The island gate for issue #441's player feed.**
+///
+/// Every other gate for the perception feed calls `MobSim::set_players`
+/// *itself*, so all of them would pass with no producer anywhere — which is
+/// exactly the state `nearest_player`/`temptation` were in before this: seam
+/// present, feed present, nothing calling it. This test never touches
+/// `set_players`. It drives a real `PLAYER_MOVED` packet through
+/// `serve_connection` and asserts the perception arrived, so it fails if the one
+/// line in `dispatch_play_packet`'s `PlayerMoved` arm is ever removed.
+///
+/// Note the `MobHandle` is a real one over a real `ChunkWorld` holding a real
+/// mob, not the `MobHandle::default()` every other test in this file uses — the
+/// default is an empty sim, which cannot show a mob's perception changing.
+#[tokio::test(start_paused = true)]
+async fn a_player_moved_packet_feeds_mob_perception_through_the_real_connection() {
+    let (client_end, server_end) = memory_pair();
+    let source = AirSource;
+
+    // Flat floor with its surface at y=0, and one cow standing on it.
+    let mut world = ChunkWorld::new(-4, 24);
+    for x in -8..=8 {
+        for z in -8..=8 {
+            world.set_solid(x, -1, z, true);
+        }
+    }
+    let mobs = MobHandle::new(world);
+    let cow_id = mobs.with(|sim| {
+        sim.spawn_species(
+            lodestone_model::ResourceKey::from_str("minecraft:cow").expect("valid key"),
+            lodestone_model::Vec3::new(0.0, 0.0, 0.0),
+        )
+        .id()
+    });
+
+    // Control, before any movement packet: the sim knows of no players, so the
+    // cow's perception is empty. Without this the assertions below could be
+    // satisfied by a value that was always there.
+    mobs.with(MobSim::tick);
+    assert_eq!(
+        mobs.with(|sim| sim.players().len()),
+        0,
+        "precondition: no players known before a PLAYER_MOVED arrives"
+    );
+    assert_eq!(
+        mobs.with(|sim| sim.get(cow_id).expect("alive").nearest_player()),
+        None,
+        "precondition: the cow must perceive no player yet — this is the state \
+         LookAtPlayerGoal and TemptGoal were permanently stuck in"
+    );
+
+    let conn_mobs = mobs.clone();
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(
+            &mut conn,
+            &FakeProtocol,
+            &source,
+            &NoEntities,
+            0,
+            &BlockEntityHandle::default(),
+            &conn_mobs,
+        )
+        .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "Perceived", 1).await;
+
+    // Put wheat in the selected hotbar slot, then move. Wheat because
+    // `cow_food` is exactly `[wheat]`
+    // (`.cache/mc/26.2/src/data/minecraft/tags/item/cow_food.json`), so this
+    // proves the *held item* crossed the connection too, not just the position.
+    // Slot 36 is the first hotbar slot in the player's own menu indexing.
+    let wheat = ItemStack::new(
+        lodestone_model::ResourceKey::from_str("minecraft:wheat").expect("valid key"),
+        1,
+    );
+    send_creative_slot(&mut client, 36, Some(&wheat)).await;
+    send_player_moved(&mut client, 4.0, 0.0, 0.0).await;
+    let _ = drain_available(&mut client).await;
+
+    // The producer runs inside the packet handler, so the value is present
+    // without needing a tick; a tick is what pushes it into the mob.
+    assert_eq!(
+        mobs.with(|sim| sim.players().len()),
+        1,
+        "a PLAYER_MOVED packet must register the player with the mob sim"
+    );
+    mobs.with(MobSim::tick);
+
+    let cow_sees = mobs.with(|sim| {
+        let cow = sim.get(cow_id).expect("alive");
+        (cow.nearest_player(), cow.temptation())
+    });
+    assert_eq!(
+        cow_sees.0,
+        Some(lodestone_model::Vec3::new(4.0, 0.0, 0.0)),
+        "the cow must perceive the player at the position the packet carried"
+    );
+    assert_eq!(
+        cow_sees.1,
+        Some(lodestone_model::Vec3::new(4.0, 0.0, 0.0)),
+        "and must be tempted, because the held wheat crossed the wire into \
+         PlayerPerception::held_item — if this is None but nearest_player is \
+         Some, the position is being fed and the inventory read is not"
+    );
+
+    drop(client);
+    let _ = server.await;
 }

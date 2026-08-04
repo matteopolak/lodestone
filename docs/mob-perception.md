@@ -7,8 +7,9 @@ nearest player, is there a threat nearby* — and the server-side feed that answ
 [#441](https://github.com/matteopolak/lodestone/issues/441) this seam existed but was **unfilled**:
 `NavigatingMob`'s `impl MobController` left eight perception methods at their trait defaults, so six
 goals had a `can_use` that was constant-`false` in the running game and two more read fields nothing
-ever wrote. Eight of thirteen implemented goals could not act. This doc records what each method
-reads, who feeds it, and the two that still have no production producer.
+ever wrote. Eight of thirteen implemented goals could not act, and every one of them had a *green*
+unit test. This doc records what each method reads, who feeds it, and why the whole thing was
+invisible to the test suite.
 
 ---
 
@@ -43,8 +44,8 @@ The roster had been built to the subset that happened to function, which is why 
 | `is_panicking` | decaying record, set by `note_hurt` | `SimMob::apply_damage` (every damage path) | **yes** |
 | `no_action_time` | the sim's own counter | `MobSim::tick` | **yes** |
 | `avoid_threat` | the sim's mob census + `avoided_species` | `MobSim::tick` | **yes** |
-| `nearest_player` | `MobSim::set_players` | *nothing yet* — see §5 | **no** |
-| `temptation` | `MobSim::set_players` | *nothing yet* — see §5 | **no** |
+| `nearest_player` | `MobSim::set_players` | `server.rs`'s `PlayerMoved` arm | **yes** |
+| `temptation` | `MobSim::set_players` + `tempt_food` | same | **yes** |
 
 Plus the two overridden-but-unfed fields that gated `BreedGoal` / `FollowParentGoal`:
 `partner_candidate` and `parent_candidate`, both now populated by `MobSim::tick`, and `take_bred()`,
@@ -136,30 +137,54 @@ and applied under a mutable one.
 
 ---
 
-## 5. Known gap: `nearest_player` and `temptation` have no production producer
+## 5. The player feed, and where it comes from
 
-`MobSim` had **no player-position feed at all** before this work, and still has no *producer*.
-`MobSim::tick` takes no arguments and `tick::run_tick_loop` receives no player position either — the
-same gap `run_mob_tick_loop`'s own doc comment already discloses for `despawn_pass`.
+`MobSim` had **no player-position feed at all** before this work: `MobSim::tick` takes no arguments
+and `tick::run_tick_loop` receives no player position either — the same gap `run_mob_tick_loop`'s own
+doc comment discloses for `despawn_pass`. So `nearest_player` and `temptation` had no possible source,
+and they were the last two of the eight to be closed.
 
-`MobSim::set_players` is the seam. The producer is **one line** in
-`server::dispatch_play_packet`'s `ServerBound::PlayerMoved` arm, which already holds the new position,
-a `MobHandle`, and the player's `PlayerInventory` in the same scope. Until that line lands:
+`MobSim::set_players` is the seam; the producer is `server::dispatch_play_packet`'s
+`ServerBound::PlayerMoved` arm, which already held the new position, a `MobHandle` **and** the
+player's `PlayerInventory` in one scope — so nothing had to be threaded and `tick.rs` needed no
+change.
 
-- `LookAtPlayerGoal` and `TemptGoal` remain unable to fire **in production**, though the seam and the
-  feed are both proven by tests.
-- The other six methods are fed from state this crate already owns and work today.
+Two properties of that placement, stated rather than left to be discovered:
 
-`PlayerPerception` also needs adding to `lib.rs`'s re-export list before an integration test can name
-it; the two tests for the player feed therefore live in `mobs.rs`'s own `#[cfg(test)]` module with a
-pointer to move them once it is re-exported.
+- **It is single-player-shaped.** `set_players` replaces the whole list, so with two connections each
+  would clobber the other's entry. That is correct for `open_in_memory_with_mobs`' single player — the
+  only configuration with a mob tick loop at all — and a real multiplayer server wants per-connection
+  registration instead.
+- **It is position-driven**, so a perfectly stationary player stops refreshing it. Harmless, because
+  the value is a *position*, not a timer: a stale entry for a motionless player is still the right
+  answer. The same holds for `held_item` until they move after a hotbar switch.
 
-**`holding_tempt_item` is coarser than vanilla and deliberately so.** In 26.2 the tempt predicate is a
-per-species item **tag** — `sheep_food` is 1 item, `pig_food` is 3, `chicken_food` is 6
-(`.cache/mc/26.2/src/data/minecraft/tags/item/*.json`) — so resolving it needs *generated* tag data
-that belongs with the per-species roster, following the `collision_shapes` / `hardness`
-generate-or-assert + `LODESTONE_REGEN=1` pattern. Never hand-write that list. Today the flag tempts
-every animal rather than the ones whose tag matches.
+### `PlayerPerception` carries the held **item**, not a boolean
+
+Because the answer is per-*species*: wheat tempts a cow and a sheep, a potato tempts only a pig,
+pumpkin seeds only a chicken. A boolean computed by the producer would have to be either wrong for
+some species or computed once per (player, species) pair — which is the feed's job.
+
+`tempt_food` is the table, and **every entry is transcribed from the jar's own tag JSON** under
+`.cache/mc/26.2/src/data/minecraft/tags/item/`, not from memory. That distinction is the whole point:
+older versions used a single item per species, and the folklore list ("carrot for pig, seeds for
+chicken") is wrong for 26.2 in two places — `pig_food` is three items and `chicken_food` is six.
+
+**`tempt_food` is interim and should be replaced, not extended.** Roster unit B2 owns a *generated*
+item-tag table following the `collision_shapes`/`hardness` generate-or-assert + `LODESTONE_REGEN=1`
+pattern (the `damage_types` extraction is the closest existing precedent for pulling tags out of
+datapack JSON). When it lands, `tempt_food`'s body becomes a lookup into it and nothing around it
+changes — the plumbing is already in terms of a real held item. Delete
+`the_tempt_table_is_per_species_and_matches_the_jar_not_folklore` and gate the generated table instead.
+
+### The gate that would catch this going dead again
+
+Every gate that calls `MobSim::set_players` itself would pass with **no producer anywhere** — which is
+precisely the state this was in before. So the island gate is
+`a_player_moved_packet_feeds_mob_perception_through_the_real_connection` in `tests/serve_play.rs`: it
+never touches `set_players`, it drives a real `PLAYER_MOVED` packet through `serve_connection`, and it
+asserts both the position *and* the held wheat arrived. Deleting the producer line fails that test and
+nothing else. If you are changing this subsystem, that is the test to keep alive.
 
 ---
 

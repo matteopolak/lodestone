@@ -25,7 +25,7 @@ use crate::chunk::{
 };
 use crate::fall::FallTracker;
 use crate::inventory::{ContainerMenuSlot, PlayerInventory, container_menu_slot};
-use crate::mobs::MobHandle;
+use crate::mobs::{MobHandle, PlayerPerception};
 use crate::protocol::{EntitySnapshot, ServerBound, ServerDirective, ServerProtocol};
 use crate::tick::{BlockTickFeed, ExplosionFeed};
 use crate::vitals::{EYE_HEIGHT, PlayerVitals};
@@ -1778,6 +1778,42 @@ where
         }
         ServerBound::PlayerMoved { x, y, z, on_ground } => {
             *player_pos = Some((x, y, z));
+
+            // Issue #441: feed mob perception the player's position and held
+            // item. This is the *producer* for `MobController::nearest_player`
+            // and `::temptation` — the last two of the eight perception
+            // methods that had no source at all, which is why
+            // `LookAtPlayerGoal` and `TemptGoal` had a constant-false
+            // `can_use` in the running game even after the seam existed.
+            //
+            // This arm is the right home for it rather than the tick loop:
+            // `run_tick_loop` receives no player position (the gap
+            // `run_mob_tick_loop`'s own doc comment already discloses for
+            // `despawn_pass`), whereas this scope already holds the new
+            // position, the `MobHandle` and the `PlayerInventory` together, so
+            // nothing has to be threaded anywhere. `MobSim::tick` then reads it
+            // on the next tick.
+            //
+            // **Single-player shape, stated rather than assumed:**
+            // `set_players` replaces the whole list, so with two connections
+            // each would clobber the other's entry. That is correct for
+            // `open_in_memory_with_mobs`' single player — the only
+            // configuration that has a mob tick loop at all — and a real
+            // multiplayer server wants per-connection registration instead.
+            // Widening it before a second player can exist would be untested
+            // generality.
+            //
+            // Position-driven, so a perfectly stationary player eventually
+            // stops refreshing this. Harmless: the value is a position, not a
+            // timer, so a stale entry for a motionless player is still the
+            // correct answer. The same is true of `held_item` until they move
+            // after a hotbar switch.
+            mobs.with(|sim| {
+                sim.set_players(vec![PlayerPerception {
+                    position: Vec3::new(x, y, z),
+                    held_item: inventory.selected_item().map(|stack| stack.item.clone()),
+                }]);
+            });
 
             // Chunk coordinate = floor(block / 16), not truncating division —
             // `-1.0_f64 / 16.0` must floor to chunk `-1`, matching vanilla's
