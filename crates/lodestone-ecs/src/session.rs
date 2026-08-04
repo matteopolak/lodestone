@@ -423,80 +423,37 @@ pub enum SessionSet {
 
 /// Whether an event is folded by the systems in this module.
 ///
-/// The caller-side routing switch, kept next to the systems for the same
-/// reason [`crate::ingest::handles_event`] is: an event routed to the ECS that
-/// no system folds vanishes silently.
+/// The caller-side routing switch, for the same reason
+/// [`crate::ingest::handles_event`] is: an event routed to the ECS that no system
+/// folds vanishes silently.
 ///
-/// The [`SessionMenus`] family is listed explicitly rather than delegated to
-/// `Menus::apply`, because `handles_event` must answer without a `&mut Menus`
-/// to hand it. Keep the two in step: an arm added to `Menus::apply` and
-/// forgotten here never reaches the ECS at all.
+/// # This used to be the list, and `#[non_exhaustive]` made the list a trap
+///
+/// It was a `matches!` over ~25 variants. Because `ClientEvent` is
+/// `#[non_exhaustive]`, no `matches!` outside `lodestone-model` can be exhaustive,
+/// so a variant nobody remembered returned `false` here *and* `false` in
+/// `crate::ingest::handles_event` and reached nothing at all —
+/// `DimensionTypeChanged` and `AbilitiesChanged` each shipped that way with a
+/// correct, tested decode behind them.
+///
+/// The list is now [`lodestone_model::event::route`], where the match is
+/// exhaustive and an unrouted variant does not compile. This function is one line
+/// so the predicate cannot drift from the table.
+///
+/// # The fork that has cost work twice
+///
+/// **Per-entity state is `ingest`, local-player scalars are `session`**, and
+/// block/world events are neither — they travel the shell's own stream. The table
+/// carries that convention as a comment directly above the match, which is where
+/// the decision is actually made.
+///
+/// The [`SessionMenus`] family is claimed variant by variant rather than delegated
+/// to `Menus::apply`, because the route table must answer without a `&mut Menus`
+/// to hand it. Keep the two in step: an arm added to `Menus::apply` and forgotten
+/// in the table never reaches the ECS at all.
 #[must_use]
 pub fn handles_event(event: &ClientEvent) -> bool {
-    matches!(
-        event,
-        // scoreboard
-        ClientEvent::ObjectiveUpdate { .. }
-            | ClientEvent::DisplayObjective { .. }
-            | ClientEvent::ScoreUpdate { .. }
-            | ClientEvent::ScoreReset { .. }
-            | ClientEvent::TeamUpdate { .. }
-            // tab list
-            | ClientEvent::PlayerListUpdate { .. }
-            | ClientEvent::PlayerListRemove { .. }
-            // boss bars
-            | ClientEvent::BossBarUpdate { .. }
-            // the local player's server-reported state
-            | ClientEvent::Login { .. }
-            | ClientEvent::Respawned { .. }
-            // `DimensionTypeChanged` (#288) is folded by `apply_local_player_state`
-            // into `ServerDimensionType`. **This arm is the whole wiring**: without
-            // it `SharedState::apply` routes the event to the dead legacy scalar
-            // fallback, which has no arm for it either, and a fully correct decode
-            // reaches zero pixels — the island `CLAUDE.md` §1 names, three times
-            // over.
-            | ClientEvent::DimensionTypeChanged { .. }
-            // `BiomeVisuals` (#96), folded by `apply_local_player_state` into
-            // [`ServerBiomeSkyColors`]. Session-scoped registry data, so it
-            // belongs here and **not** in `ingest::handles_event` — that switch
-            // is per-entity ECS state, and guessing it is how two events landed
-            // in the wrong router earlier in this issue's life.
-            | ClientEvent::BiomeVisuals { .. }
-            // `AbilitiesChanged` (#191). **This arm is the whole wiring.** The
-            // decode has been correct and tested since v770 landed; without this
-            // line `SharedState::apply` routes the event to the dead legacy scalar
-            // fallback and `Abilities` never changes, so flight is either
-            // permanently refused or — worse, and what actually shipped — decided
-            // locally with no server grant at all. Fourth instance of this island.
-            | ClientEvent::AbilitiesChanged { .. }
-            // `EntityPassengersChanged` (Tier 1 item 8). Claimed by **both**
-            // routers on purpose — `crate::ingest::handles_event` takes the
-            // per-entity `Passengers`/`Vehicle` pair off the same event, this side
-            // takes the local player's own [`Riding`] scalar. That is the `Login`
-            // shape, not a double fold: two disjoint writes, and
-            // `SharedState::apply` routes on the *union* of the two switches so the
-            // event still reaches the schedule exactly once.
-            //
-            // Guessing this fork is what `CLAUDE.md` records as having cost work
-            // twice, and riding is genuinely both halves — which is why it is
-            // listed in both places rather than in whichever one was thought of
-            // first.
-            | ClientEvent::EntityPassengersChanged { .. }
-            // `GameModeChanged`: `ServerGameMode` existed and was written only on
-            // `Login`/`Respawned`, so a runtime `/gamemode` never reached it.
-            | ClientEvent::GameModeChanged { .. }
-            | ClientEvent::HealthChanged { .. }
-            | ClientEvent::Death { .. }
-            | ClientEvent::ExperienceChanged { .. }
-            // menus
-            | ClientEvent::ScreenOpened { .. }
-            | ClientEvent::ScreenClosed { .. }
-            | ClientEvent::ContainerContent { .. }
-            | ClientEvent::ContainerSlot { .. }
-            | ClientEvent::ContainerData { .. }
-            | ClientEvent::CursorItemChanged { .. }
-            | ClientEvent::InventorySlotChanged { .. }
-    )
+    lodestone_model::event::route(event).session
 }
 
 /// `IngestSet::Apply`: the scoreboard family → [`SessionScoreboard`].
