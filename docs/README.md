@@ -847,6 +847,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `WorldSelectButton::Create`, now live — issue #397 left it present-and-disabled
   deliberately for this issue). Collects a world name, seed, game mode, difficulty,
   and three toggles (generate structures, bonus chest, allow cheats).
+- [World persistence: `lodestone-anvil`](./world-persistence.md) — `lodestone-anvil`
+  (`crates/lodestone-anvil/`) reads and writes Minecraft's on-disk world formats: the
+  Anvil region file (`.mca`, issue
+  [#298](https://github.com/matteopolak/lodestone/issues/298)) and `level.dat` world
+  metadata (issue [#300](https://github.com/matteopolak/lodestone/issues/300)). Before
+  this crate, nothing in the workspace could save or load a world at all — `grep
+  -rln 'RegionFile\|\.mca\b|region_file|Anvil\b'` across every `.rs` file returned
+  nothing.
 - [World select, with creation disabled](./world-select.md) — `Screen::WorldSelect`
   — vanilla's `SelectWorldScreen`, reached from the title screen's **Singleplayer**
   button. A title, a search field, a world list, and six footer buttons: Play Selected
