@@ -10,6 +10,16 @@ the three settings sub-screens #392's plan always said would need a
 `KeyBindsList`) — vanilla's `ObjectSelectionList` — and this issue builds that
 third kind.
 
+**A second entry point**: the title screen's own Language icon
+(`MainButton::Language` in `menu/nav.rs`) opens this same page directly,
+matching vanilla's `TitleScreen.java:131-136` (`LanguageSelectScreen`
+constructed with `lastScreen = this`, never through `OptionsScreen`). That
+path uses `SettingsNav::open_at` with an *empty* page stack rather than the
+grid button's push-from-Root, so Escape/Done there leaves straight back to
+the title in one step instead of surfacing the root Options grid first. This
+button was present-and-disabled from the title until this page existed to
+open; see [`main-menu.md`](./main-menu.md).
+
 ## How it works
 
 - `crates/lodestone-shell/src/menu/language.rs` — the whole model:

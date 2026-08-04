@@ -1778,6 +1778,24 @@ impl SettingsNav {
         *self = Self { in_world, ..Self::new() };
     }
 
+    /// Like [`Self::reset`], but lands directly on `page` with an **empty**
+    /// page stack, instead of [`SettingsPage::Root`].
+    ///
+    /// This is vanilla's title-screen icon buttons (`TitleScreen.java:131-139`):
+    /// the Language/Accessibility icons construct `LanguageSelectScreen`/
+    /// `AccessibilityOptionsScreen` directly with `lastScreen = this` (the
+    /// title), never routing through `OptionsScreen`. An empty stack is what
+    /// makes that faithful rather than approximate: [`Self::back`] pops the
+    /// stack and falls through to [`SettingsOutcome::Close`] when it is
+    /// empty, so Escape/Done from a page opened this way leaves the settings
+    /// screen entirely (straight back to the title, via
+    /// [`super::UiState::close_settings`]) instead of surfacing the root grid
+    /// first — one Escape, matching vanilla, not two.
+    pub fn open_at(&mut self, in_world: bool, page: SettingsPage) {
+        self.reset(in_world);
+        self.page = page;
+    }
+
     /// The page being shown.
     #[must_use]
     pub fn page(&self) -> SettingsPage {

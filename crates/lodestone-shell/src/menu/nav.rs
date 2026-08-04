@@ -522,12 +522,24 @@ pub enum MainButton {
     /// Vanilla's friends icon button (`CommonButtons.friends`). Present and
     /// disabled: it needs a Microsoft-account social graph.
     Friends,
-    /// Vanilla's language icon button. Present and disabled: the shell loads
-    /// exactly one language table (`en_us.json`, see `resources.rs`) and has no
-    /// language-selection screen.
+    /// Vanilla's language icon button — `TitleScreen.java:131-136` constructs
+    /// `LanguageSelectScreen` directly with `lastScreen = this` (the title),
+    /// never through `OptionsScreen`. **Now live** (issue #415 built
+    /// [`super::options::SettingsPage::Language`]): this doc used to say the
+    /// shell had no language-selection screen at all, which stopped being
+    /// true once that issue landed and this button was never revisited.
+    /// Opens the same page the root grid's "Language..." row does, but with
+    /// an empty page stack (see
+    /// [`super::options::SettingsNav::open_at`]) so Escape/Done returns
+    /// straight to the title, matching vanilla's `lastScreen`.
     Language,
-    /// Vanilla's accessibility icon button. Present and disabled: there is no
-    /// accessibility options screen.
+    /// Vanilla's accessibility icon button —
+    /// `TitleScreen.java:137-139`, same direct-construction shape as
+    /// [`MainButton::Language`]. **Now live** (the Accessibility Settings
+    /// page has existed since issue #55): this doc used to say there was no
+    /// accessibility options screen, which was already false by the time
+    /// anyone next read this comment. Same `open_at`-with-empty-stack
+    /// treatment as `Language`.
     Accessibility,
     /// Open the settings screen.
     Options,
@@ -599,6 +611,10 @@ impl MainButton {
                 | MainButton::Options
                 | MainButton::Quit
                 | MainButton::Accounts
+                // Issue #415/#55: both destination screens are built now —
+                // see the variants' own docs.
+                | MainButton::Language
+                | MainButton::Accessibility
         )
     }
 
@@ -1878,14 +1894,28 @@ impl MenuNav {
                         ui.open_accounts();
                         MenuAction::None
                     }
+                    // Vanilla constructs `LanguageSelectScreen`/
+                    // `AccessibilityOptionsScreen` directly from the title
+                    // (`TitleScreen.java:131-139`), with `lastScreen = this`
+                    // — never through `OptionsScreen`. `open_at` lands on the
+                    // page with an empty stack so Escape/Done leaves straight
+                    // back to the title (one Escape, not two through the root
+                    // grid) — see `SettingsNav::open_at`'s own doc.
+                    MainButton::Language => {
+                        self.settings.open_at(false, crate::menu::options::SettingsPage::Language);
+                        ui.open_settings();
+                        MenuAction::None
+                    }
+                    MainButton::Accessibility => {
+                        self.settings.open_at(false, crate::menu::options::SettingsPage::Accessibility);
+                        ui.open_settings();
+                        MenuAction::None
+                    }
                     // Unreachable — every variant below is disabled above.
                     // Spelled out instead of `_` so making one of them *enabled*
                     // without giving it an action is a compile-visible mistake
                     // rather than a silently dead button.
-                    MainButton::Realms
-                    | MainButton::Friends
-                    | MainButton::Language
-                    | MainButton::Accessibility => MenuAction::None,
+                    MainButton::Realms | MainButton::Friends => MenuAction::None,
                 }
             }
             MenuKey::Escape => {
@@ -3380,12 +3410,21 @@ mod tests {
     fn options_button_sits_between_multiplayer_and_quit_and_opens_settings() {
         let (mut nav, _) = nav("options-button");
         let mut ui = UiState::new();
-        // Singleplayer, Multiplayer, Options, Quit, in that order — inserting
-        // Options must not disturb Multiplayer's index (existing wrap tests
-        // rely on it staying at 1) or Quit's position as the last button.
+        // Singleplayer, Multiplayer, Language, Accessibility, Options, Quit,
+        // in that order — inserting Options must not disturb Multiplayer's
+        // index (existing wrap tests rely on it staying at 1) or Quit's
+        // position as the last vanilla button. Language/Accessibility now sit
+        // between Multiplayer and Options in the walk (see
+        // `MainButton::Language`/`::Accessibility`'s own docs for why they
+        // joined the enabled set) — this used to skip straight from
+        // Multiplayer to Options in one `Down`.
         assert_eq!(nav.main_button(), MainButton::Singleplayer);
         nav.key(&mut ui, MenuKey::Down);
         assert_eq!(nav.main_button(), MainButton::Multiplayer);
+        nav.key(&mut ui, MenuKey::Down);
+        assert_eq!(nav.main_button(), MainButton::Language);
+        nav.key(&mut ui, MenuKey::Down);
+        assert_eq!(nav.main_button(), MainButton::Accessibility);
         nav.key(&mut ui, MenuKey::Down);
         assert_eq!(nav.main_button(), MainButton::Options);
         nav.key(&mut ui, MenuKey::Down);
@@ -3395,6 +3434,54 @@ mod tests {
         assert_eq!(nav.main_button(), MainButton::Options);
         assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
         assert_eq!(ui.screen(), Screen::Settings);
+    }
+
+    /// The title screen's Language/Accessibility icons (`MainButton::Language`/
+    /// `::Accessibility`) used to be present-and-disabled with a stale reason
+    /// ("no language-selection screen" / "no accessibility options screen") —
+    /// both destination pages have existed since #415 and #55 respectively,
+    /// and nothing ever revisited the button. This is the structural-liveness
+    /// finding this test pins: each icon must open `Screen::Settings` on
+    /// *its own* page directly (vanilla's `TitleScreen.java:131-139`
+    /// constructs `LanguageSelectScreen`/`AccessibilityOptionsScreen` with
+    /// `lastScreen = this`, never through `OptionsScreen`), and Escape from
+    /// there must leave in **one** step, straight back to the title — not
+    /// two, via the root grid — which is what an empty page stack
+    /// (`SettingsNav::open_at`) buys over the grid button's push-from-Root.
+    #[test]
+    fn language_and_accessibility_icons_open_their_page_directly_and_escape_is_one_step() {
+        use crate::menu::options::SettingsPage;
+
+        for (button, page) in [
+            (MainButton::Language, SettingsPage::Language),
+            (MainButton::Accessibility, SettingsPage::Accessibility),
+        ] {
+            let (mut nav, _) = nav("title-icon");
+            let mut ui = UiState::new();
+            assert!(button.enabled(), "{button:?} must be enabled");
+            while nav.main_button() != button {
+                nav.key(&mut ui, MenuKey::Down);
+            }
+            assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
+            assert_eq!(ui.screen(), Screen::Settings, "{button:?} must open Settings");
+            assert_eq!(
+                nav.settings().page(),
+                page,
+                "{button:?} must land directly on its own page, not Root"
+            );
+
+            // One Escape, straight back to the title — never surfacing the
+            // root grid first, which an empty page stack is what prevents.
+            assert_eq!(nav.key(&mut ui, MenuKey::Escape), MenuAction::None);
+            assert_eq!(
+                ui.screen(),
+                Screen::MainMenu,
+                "{button:?}: Escape from a directly-opened page must leave \
+                 Settings entirely in one step, matching vanilla's \
+                 `lastScreen = this` — landing back on Root instead means the \
+                 page stack was not empty"
+            );
+        }
     }
 
     /// Drives the settings cursor onto the control `pred` picks out, using only
@@ -4574,10 +4661,12 @@ mod tests {
         let (mut nav, _) = nav("skip-disabled");
         let mut ui = UiState::new();
 
-        // Title screen: Singleplayer, Multiplayer, Options, Quit, Accounts —
-        // Realms and the three icon buttons are stepped over in both
-        // directions. `Accounts` is not vanilla (see `MainButton::Accounts`)
-        // but is enabled, so it is part of this walk too.
+        // Title screen: Singleplayer, Multiplayer, Language, Accessibility,
+        // Options — Realms and Friends are stepped over in both directions.
+        // Language/Accessibility joined the walk once they were flipped live
+        // (see `MainButton::Language`/`::Accessibility`'s own docs); `Accounts`
+        // is not vanilla (see `MainButton::Accounts`) but is enabled too, one
+        // step further than this walk goes.
         let mut seen = vec![nav.main_button()];
         for _ in 0..4 {
             nav.key(&mut ui, MenuKey::Down);
@@ -4588,9 +4677,9 @@ mod tests {
             vec![
                 MainButton::Singleplayer,
                 MainButton::Multiplayer,
+                MainButton::Language,
+                MainButton::Accessibility,
                 MainButton::Options,
-                MainButton::Quit,
-                MainButton::Accounts,
             ]
         );
         for _ in 0..9 {
