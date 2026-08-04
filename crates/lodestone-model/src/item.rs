@@ -66,6 +66,19 @@ pub struct ItemComponents {
     pub damage: Option<u32>,
     /// Enchantments applied to the stack, in wire order.
     pub enchantments: Vec<ItemEnchantment>,
+    /// `minecraft:dyed_color`'s RGB, when the patch carries one — leather
+    /// armour (and any other item whose base material takes dye) coloured by
+    /// a dye or a dyeing table. Low 24 bits are the colour; vanilla's own
+    /// `DyedItemColor.STREAM_CODEC` is a bare `ByteBufCodecs.INT`
+    /// (`DyedItemColor.java:24`), so this is the raw wire int, not yet split
+    /// into RGB bytes — `lodestone_render::entity::armour_layer_tint_with_dye`
+    /// does that, matching `ArmorMaterial`/`EquipmentLayerRenderer`'s own
+    /// `dyeColor & 0x00FFFFFF != 0` "is this dyed" gate.
+    /// `None` when the stack carries no dye (an undyed leather item, or any
+    /// non-dyeable item) — a different state from a dye that resolves to
+    /// black (`Some(0)`), which vanilla also treats as "undyed" downstream
+    /// (see `armour_layer_tint_with_dye`'s own doc for that quirk).
+    pub dyed_color: Option<u32>,
     /// What this stack's component *patch* said about `minecraft:tool`.
     ///
     /// Almost always [`ToolPatch::Inherited`] — see that type's docs; a plain

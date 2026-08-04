@@ -117,6 +117,7 @@ fn a_woolly_sheep_draws_more_silhouette_than_a_sheared_one() {
         type_path: "sheep".to_owned(),
         item: None,
         equipment: Vec::new(),
+        equipment_dye: Vec::new(),
         feet,
         yaw: 90.0,
         head_yaw: 90.0,

@@ -277,23 +277,35 @@ has RGB `0`, `dyeColor != 0` is false, and the ternary falls through to
 `dyed_color_zero_reads_as_undyed` so a future "fix" that special-cases black
 does not quietly diverge from the game it ports.
 
-Three hops still separate this from a real value reaching it, none of them in
-this pass's file ownership:
+Three hops separated this from a real value reaching it. **Two are closed:**
 
-1. `crates/protocol/v770` does not decode `minecraft:dyed_color` into
-   `ItemComponents` — it is in the generated `data_component_types` table but
-   the patch reader does not model it.
-2. `crates/lodestone-shell/src/net.rs::entity_snapshot` narrows a stack to its
-   `ResourceLocation` and drops components (its own doc comment says so).
-   `EntitySnapshot::equipment` needs an `Option<u32>` dye alongside the id,
-   which means the same widening in `entities.rs`'s
-   `RenderEquipment`/`occupied_equipment` and `EntityDraw::equipment`.
-3. `crates/lodestone-shell/src/gpu.rs`'s `prepare_armour` calls the
-   zero-argument `armour_layer_tint(layer)` today
-   (`gpu.rs:2480`); once hop 2 lands, that one call site becomes
-   `armour_layer_tint_with_dye(layer, dye)`. `armour_layer_tint` is kept as a
-   `None`-dye convenience wrapper specifically so this is a one-line change
-   whenever someone can make it, rather than a signature break.
+1. **Closed.** `crates/protocol/v770/src/adapter.rs::read_component_patch` now
+   decodes `minecraft:dyed_color` (registry id 44, `DyedItemColor.STREAM_CODEC`
+   — a bare `ByteBufCodecs.INT`, i.e. `reader.i32()`, not a `VarInt` like every
+   other scalar component here) into `ItemComponents::dyed_color: Option<u32>`.
+   Hermetically tested against a hand-built wire vector
+   (`container_set_slot_decodes_a_dyed_leather_helmet`,
+   `crates/protocol/v770/tests/container_inventory.rs`) — the expected rgb is a
+   literal chosen to prove the fixed-width read, not round-tripped through our
+   own encoder.
+2. **Additive, not the wide-tuple shape originally sketched here.** Widening
+   `EntitySnapshot::equipment`/`EntityDraw::equipment` to a 3-tuple would have
+   touched every existing call site that destructures them (several in
+   `gpu.rs` alone) for no reason — nothing about item *identity* needed to
+   change. Instead `EntitySnapshot::equipment_dye: Vec<(EquipmentSlot, u32)>`
+   and `EntityDraw::equipment_dye` (same shape) ride *alongside* `equipment`,
+   entities.rs-side plumbing (`RenderEquipmentDye` component, folded in
+   `spawn_track`/`update_track`, read in `extract_entity_draws`) is done. The
+   one remaining piece is `net.rs::entity_snapshot` populating
+   `equipment_dye` from `view.equipment`'s `ItemStack.components.dyed_color`
+   — a brokered-file patch, not yet landed as of this writing; the exact diff
+   is in the commit message of whichever commit lands this doc update.
+3. **Closed** (once hop 2's net.rs half lands). `crates/lodestone-shell/src/
+   gpu.rs`'s `prepare_armour` now looks up the current slot's dye in
+   `draw.equipment_dye` and calls
+   `armour_layer_tint_with_dye(layer, dye)`. `armour_layer_tint` is kept as
+   the `None`-dye convenience wrapper (still used by the crate's own hermetic
+   armour-pixel gates, which do not exercise dye).
 
 The tint rides the **instance buffer** as a packed `0x00RRGGBB` word at shader
 location 9, not a bind group — the model shader is at wgpu's 4-group floor and a
@@ -407,22 +419,12 @@ outstanding; that was stale by the time it was re-read for this pass, per
 stale claims in this repo. The only item still open:
 
 1. **Real dye colours** — `Dyeable.colorWhenUndyed` draws until this lands,
-   which is correct for an undyed piece and wrong for a dyed one. The render
-   side is done (`armour_layer_tint_with_dye`, see "Dye" above); three hops
-   remain, none owned by this pass:
-   * `crates/protocol/v770` decodes `minecraft:dyed_color` (it is in the
-     generated `data_component_types` table but the patch reader does not model
-     it) into `ItemComponents`.
-   * `crates/lodestone-shell/src/net.rs::entity_snapshot` currently narrows a
-     stack to its `ResourceLocation` and drops components — its own doc comment
-     says so. `EntitySnapshot::equipment` needs to carry an
-     `Option<u32>` dye alongside the id, which means the same widening in
-     `entities.rs`'s `RenderEquipment`/`occupied_equipment` and
-     `EntityDraw::equipment`.
-   * `crates/lodestone-shell/src/gpu.rs`'s `prepare_armour` swaps its
-     `armour_layer_tint(layer)` call (`gpu.rs:2480`) for
-     `armour_layer_tint_with_dye(layer, dye)`. That is the only change needed
-     on the render side; the tint already reaches the shader per instance.
+   which is correct for an undyed piece and wrong for a dyed one. See "Dye"
+   above for the current state: the protocol decode and the render/gpu.rs
+   sides are closed, `entities.rs`'s additive `equipment_dye` plumbing is
+   done, and the one remaining piece is a one-line brokered patch to
+   `crates/lodestone-shell/src/net.rs::entity_snapshot` (populate
+   `equipment_dye` from `view.equipment`'s `ItemStack.components.dyed_color`).
 
 ## Trims: designed, not landed, and why
 

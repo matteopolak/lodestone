@@ -90,6 +90,45 @@ fn container_set_slot_decodes_the_empty_stack() {
     }
 }
 
+/// `minecraft:dyed_color` (issue: armour dye's feed) — a dyed leather helmet
+/// (item id 982, `minecraft:leather_helmet`, per
+/// `lodestone_data::generated::items::ITEM_NAMES`) with one added component,
+/// `minecraft:dyed_color` (registry id 44, per
+/// `lodestone_data::generated::data_component_types::DATA_COMPONENT_TYPE_NAMES`),
+/// whose payload is `DyedItemColor.STREAM_CODEC` — a bare
+/// `ByteBufCodecs.INT` (`DyedItemColor.java:24`), i.e. 4 big-endian bytes, not
+/// a `VarInt` like every other scalar component this file exercises. The rgb
+/// `0x00336699` is arbitrary; the point is that it survives the wire exactly,
+/// unmangled by a VarInt reader that would stop after the first `0x80`-set
+/// byte (`0xD6, 0x07` alone, i.e. would misread as the *item id*'s
+/// continuation, not this field).
+#[test]
+fn container_set_slot_decodes_a_dyed_leather_helmet() {
+    let mut payload = vec![0x01, 0x05, 0x00, 0x24];
+    payload.extend_from_slice(&[
+        0x01, // count = 1
+        0xD6, 0x07, // item id 982 = minecraft:leather_helmet, VarInt
+        0x01, // added = 1
+        0x00, // removed = 0
+        0x2C, // component type id 44 = minecraft:dyed_color
+        0x00, 0x33, 0x66, 0x99, // rgb, big-endian i32
+    ]);
+    match handle(play::clientbound::CONTAINER_SET_SLOT, &payload).as_slice() {
+        [
+            Directive::Emit(ClientEvent::ContainerSlot { item, .. }),
+        ] => {
+            let item = item.as_ref().expect("a non-empty stack");
+            assert_eq!(item.item, key("minecraft:leather_helmet"));
+            assert_eq!(
+                item.components.dyed_color,
+                Some(0x0033_6699),
+                "the dyed_color patch must decode to the exact wire rgb"
+            );
+        }
+        other => panic!("expected ContainerSlot, got {other:?}"),
+    }
+}
+
 #[test]
 fn container_set_content_decodes_items_and_carried() {
     // window 1, state 2, two items [stone, empty], carried empty.

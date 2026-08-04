@@ -121,6 +121,7 @@ fn drop_draw(item: Option<ResourceLocation>, age_ticks: f32) -> EntityDraw {
         // A dropped item entity carries no equipment; this gate is about the
         // item's own ground pose, not a held-item layer.
         equipment: Vec::new(),
+        equipment_dye: Vec::new(),
         // Not a sheep, and a single-item stack: `count` above 1 would ask for
         // vanilla's 1-5 jittered copies, which `prepare_item_geometry` does not
         // draw yet, so a value other than the neutral 1 would make this gate's
@@ -456,6 +457,7 @@ fn a_thrown_snowball_reaches_pixels_through_the_real_render_call() {
         scale: 1.0,
         anim: AnimInput::REST,
         equipment: Vec::new(),
+        equipment_dye: Vec::new(),
         wool: None,
         count: 1,
         name_tag: None,

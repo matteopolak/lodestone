@@ -171,6 +171,7 @@ fn a_fully_armoured_zombie_draws_more_silhouette_than_a_bare_one() {
         type_path: "zombie".to_owned(),
         item: None,
         equipment: armour_equipment,
+        equipment_dye: Vec::new(),
         feet,
         yaw: 0.0,
         head_yaw: 0.0,

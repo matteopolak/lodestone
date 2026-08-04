@@ -127,6 +127,7 @@ fn base_draw(id: i32, type_path: &str, feet: glam::Vec3, scale: f32) -> EntityDr
         type_path: type_path.to_owned(),
         item: None,
         equipment: Vec::new(),
+        equipment_dye: Vec::new(),
         feet,
         yaw: 0.0,
         head_yaw: 0.0,
