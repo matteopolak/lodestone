@@ -450,16 +450,29 @@ Fixed in `click.rs`'s `do_swap`: `set_player_native` now runs before
 (`menu.rs`), with `control_hotbar_swap_without_overflow_is_a_plain_exchange`
 as the non-overflow control.
 
-**Not fixed, filed separately:** `give_to_player`'s own scan order (linear
-0..36, merge pass then first-empty pass) still doesn't model vanilla's actual
-`Inventory.add` → `addResource` → `getSlotWithRemainingSpace` priority — the
-*selected* hotbar slot first, then the off-hand (slot 40), only then a linear
-scan across all 41 native slots (`Inventory.java:224-240`). This only
-surfaces inside the already-rare overflow branch, self-corrects the same way
-the furnace/brewing shift-click approximation does ("a visible flicker, not a
-desync," see above), and fixing it needs the player's selected hotbar index
-threaded through `PlayerCtx`, which nothing currently supplies. Tracked as a
-follow-up rather than folded into this fix.
+**Fixed separately, issue #368:** `give_to_player`'s own scan order (it used to
+be a plain linear `0..36`, merge pass then first-empty pass) now models
+vanilla's actual `Inventory.add` → `addResource` → `getSlotWithRemainingSpace`
+priority — the *selected* hotbar slot first (`Inventory.java:225-227`), then
+the off-hand at native 40 (`:229-231`), then a merge-only linear scan across
+natives `0..36` (`:233-236`), and only once none of those already hold a
+mergeable stack does it fall back to `getFreeSlot`, the first **empty** slot
+in `0..36` (`Inventory.java:102-110`) — the off-hand is *never* used as an
+empty-slot fallback, because `getFreeSlot` scans only `this.items`, which
+vanilla sizes at exactly 36 (`Inventory.java:56`), independently of the
+off-hand's separate `EquipmentSlot`-backed storage. `click.rs`'s
+`give_to_player`/`mergeable_native` carry the ordering; `PlayerCtx` grew a
+`selected_hotbar_slot` field to carry it in (default `0`, matching every
+production caller today — `app.rs::send_menu_click` still hardcodes
+`PlayerCtx::survival()` for the same reason it hardcodes game mode, so a real
+selected-slot value is not yet threaded from live player state into a click).
+Regression: `swap_overflow_gives_to_the_selected_hotbar_slot_before_a_lower_index`
+(`menu.rs`), with `control_swap_overflow_without_a_selected_slot_still_scans_from_zero`
+as the no-preference control — selected slot is `4`, not `0`, specifically so
+a scan that merely "starts from 0" cannot pass by accident. Watched failing
+pre-fix (`native 0` landed at `64`, `native 4` at `2` — the old in-order-scan
+result) by temporarily disabling just the priority lookup and restoring it
+after.
 
 ### Finding 2 (investigated, not a bug): `THROW`'s missing repeat-while-same-item loop
 

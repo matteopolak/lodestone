@@ -4235,6 +4235,67 @@ mod tests {
         }
     }
 
+    /// Issue #398's proof requirement: "a base class with one subclass is not a
+    /// base class." The two tests above only ever exercised `Menu::player()`;
+    /// this is the identical order proof on a **second** real screen — a chest —
+    /// through the same `build_inner` path. There is no per-screen branch that
+    /// could have gotten the ordering right on one screen and wrong on the
+    /// other, and this is what proves it rather than assumes it.
+    #[test]
+    fn a_chest_hovers_the_same_two_part_highlight_in_the_same_order() {
+        let menu = Menu::generic(27);
+        let (cx, cy) = slot_point(&menu, 0);
+        let geo = geo_with_background(&menu, Some([cx, cy]));
+        let rects = bg_rects(&geo, crate::config::AUTO_GUI_SCALE);
+        let (sx, sy) = slot_origin(&menu, 0);
+        let want = [sx - 4.0, sy - 4.0, 24.0, 24.0];
+
+        let hits: Vec<usize> = rects
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.iter().zip(want).all(|(a, b)| (a - b).abs() < 0.01))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            hits.len(),
+            2,
+            "expected the back and front highlight at {want:?}; background quads were {rects:?}"
+        );
+        assert!(
+            hits[0] < geo.bg_slot_vertex_count / 6,
+            "a chest's back sprite must fall inside the under-items range too"
+        );
+        assert!(
+            hits[1] >= geo.bg_slot_vertex_count / 6,
+            "a chest's front sprite must fall past the marker — this is the same \
+             `build_inner` path a player inventory screen uses, so a chest getting \
+             the order wrong would mean the ordering had been per-screen after all"
+        );
+    }
+
+    /// The control for the test above, mirroring
+    /// `nothing_hovered_blits_no_highlight_at_all` on the same second screen.
+    #[test]
+    fn nothing_hovered_in_a_chest_blits_no_highlight_at_all() {
+        let menu = Menu::generic(27);
+        let hovered = geo_with_background(&menu, Some(slot_point(&menu, 0)).map(|(a, b)| [a, b]));
+        let none = geo_with_background(&menu, None);
+        // Far outside the panel: a cursor that exists but hits nothing.
+        let outside = geo_with_background(&menu, Some([0.0, 0.0]));
+
+        let n = |g: &ContainerGeometry| bg_rects(g, crate::config::AUTO_GUI_SCALE).len();
+        assert_eq!(
+            n(&none) + 2,
+            n(&hovered),
+            "hovering a chest slot adds exactly the two highlight quads and nothing else"
+        );
+        assert_eq!(
+            n(&outside),
+            n(&none),
+            "a cursor over no slot is not a hover, on a chest either"
+        );
+    }
+
     /// `extractSlot`'s `if (itemStack.isEmpty() && slot.isActive())` arm
     /// (`:224-230`), blitting `slot.getNoItemIcon()` at the cell origin, 16x16.
     ///

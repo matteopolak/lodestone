@@ -1680,4 +1680,77 @@ mod tests {
         assert_eq!(count_at(&menu, 9), Some(10));
         assert_eq!(count_at(&menu, 36), Some(5));
     }
+
+    /// Issue #368: `give_to_player`'s overflow-displacement scan used to be a
+    /// plain `0..36` merge-then-fill pass, ignoring vanilla's real priority —
+    /// the *selected* hotbar slot first, then the off-hand, only then a linear
+    /// scan (`Inventory.getSlotWithRemainingSpace`, `Inventory.java:224-240`).
+    ///
+    /// A torch sits in *both* native 0 (menu slot 36, room for 4) and native 4
+    /// (menu slot 40, the *selected* slot, room for 63) when a second torch
+    /// stack is displaced from a container slot by an unrelated egg swap.
+    /// Vanilla drains the selected slot first and never touches native 0's
+    /// torch; the pre-fix scan drained native 0 first because it always
+    /// started its linear pass at index 0, regardless of what was selected.
+    /// Selected slot is 4, not 0, precisely so a scan that merely "starts from
+    /// 0" cannot pass this test by accident (`CLAUDE.md`'s *world*-species
+    /// vacuous-test trap). Watched failing pre-fix: native 0 landed at 64 and
+    /// native 4 at 2, the old in-order-scan result.
+    #[test]
+    fn swap_overflow_gives_to_the_selected_hotbar_slot_before_a_lower_index() {
+        let mut menu = Menu::player();
+        // hotbar key 8 -> native 8 -> menu slot 44: the oversized source.
+        menu.set_slot_item(
+            44,
+            Some(stack("minecraft:egg", 20).with_max_stack_size(16)),
+        );
+        // Target: main storage slot 9 holds a torch, unrelated to the egg
+        // swap, so its displacement exercises `give_to_player`'s ordinary scan
+        // rather than the same-item remainder-merge finding 1 already fixed.
+        menu.set_slot_item(9, Some(stack("minecraft:torch", 5)));
+        // A torch at native 0, almost full: an in-order 0..36 scan drains into
+        // this one first.
+        menu.set_slot_item(36, Some(stack("minecraft:torch", 60)));
+        // A torch at native 4, the *selected* hotbar slot, with plenty of room.
+        menu.set_slot_item(40, Some(stack("minecraft:torch", 1)));
+
+        let ctx = PlayerCtx {
+            infinite_materials: false,
+            can_drop: true,
+            selected_hotbar_slot: 4,
+        };
+        Click::hotbar_swap(9, 8).apply(&mut menu, ctx);
+
+        assert_eq!(
+            count_at(&menu, 36),
+            Some(60),
+            "native 0's torch must be untouched — the selected slot is tried first"
+        );
+        assert_eq!(
+            count_at(&menu, 40),
+            Some(6),
+            "the displaced 5 torches land in the selected hotbar slot"
+        );
+    }
+
+    /// The control for the test above: with no *selected* slot preference in
+    /// play (slot 0 selected, matching every other test's default), the
+    /// linear-scan behaviour is unchanged — the lowest-index mergeable slot
+    /// still wins, same as before this fix.
+    #[test]
+    fn control_swap_overflow_without_a_selected_slot_still_scans_from_zero() {
+        let mut menu = Menu::player();
+        menu.set_slot_item(
+            44,
+            Some(stack("minecraft:egg", 20).with_max_stack_size(16)),
+        );
+        menu.set_slot_item(9, Some(stack("minecraft:torch", 5)));
+        menu.set_slot_item(36, Some(stack("minecraft:torch", 60)));
+        menu.set_slot_item(40, Some(stack("minecraft:torch", 1)));
+
+        Click::hotbar_swap(9, 8).apply(&mut menu, PlayerCtx::survival());
+
+        assert_eq!(count_at(&menu, 36), Some(64), "native 0 fills first when it is not the selected slot");
+        assert_eq!(count_at(&menu, 40), Some(2), "only the 1 remaining torch reaches native 4");
+    }
 }
