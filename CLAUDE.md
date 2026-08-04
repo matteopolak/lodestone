@@ -749,8 +749,17 @@ transform cannot produce. Ask *where*, not *what*.
 **Prefer interrogating the real jar over any community dataset.** `blocks.json` has no collision
 geometry and no `destroySpeed`. Per-block-state tables come from booting the real server headlessly
 (`SharedConstants.tryDetectVersion(); Bootstrap.bootStrap();`) and walking
-`Block.BLOCK_STATE_REGISTRY` — see `crates/protocol/v770/tests/{collision_shapes,hardness}.rs` for
-the generate-or-assert + `LODESTONE_REGEN=1` pattern, and `oracle-java/` for the dump programs.
+`Block.BLOCK_STATE_REGISTRY` — see `crates/lodestone-data/tests/{collision_shapes,hardness}.rs` for
+the generate-or-assert + `LODESTONE_REGEN=1` pattern, and `oracle-java/` for the dump programs. Both
+are `#[ignore]`d, so `just regen-collision` / `just regen-hardness` (or
+`cargo test -p lodestone-data --test collision_shapes committed_table_matches_dump -- --ignored`) is
+how you run them.
+
+**This citation said `crates/protocol/v770/tests/` until 2026-08-04 and was wrong** — the tables moved
+to `lodestone-data` in the #361 extraction and nothing updated the pointer. `v770/tests/` does contain
+a `block_hardness_seam.rs`, which is a *different* test, so the stale path looked plausible enough to
+survive review. It was caught only when an agent tried to build a `just` recipe from it and found no
+such file. A file path in this document is a claim like any other; verify it before relying on it.
 
 **Never hand-count an entity metadata index. Run `EntityDataIndexOracle.java`.** It dumps every
 `EntityDataAccessor` in the game sorted by index, so collisions land on adjacent lines. The first
