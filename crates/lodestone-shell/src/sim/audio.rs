@@ -197,13 +197,25 @@ impl Sim {
     /// Mixing in `ticks` rather than position alone is what stops re-breaking one
     /// cell from picking the same `.ogg` variant every time.
     fn block_sound_seed(&self, block: [i32; 3]) -> i64 {
-        let mut x = (block[0] as i64 as u64)
-            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-            ^ (block[1] as i64 as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
-            ^ (block[2] as i64 as u64).wrapping_mul(0x1656_67B1_9E37_79F9)
-            ^ self.clock().ticks;
-        x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        (x ^ (x >> 31)) as i64
+        block_sound_seed(block, self.clock().ticks)
     }
+}
+
+/// The pure formula behind [`Sim::block_sound_seed`], parameterised over the
+/// tick count instead of reading [`crate::sim::Sim::clock`] directly.
+///
+/// Split out for `crate::interact::drive_placement`: a plugin-driven
+/// placement's sound has the identical "client-chosen, no cross-client
+/// agreement to preserve" shape this seed exists for (see the method's own
+/// docs), and that system has a [`lodestone_ecs::FrameClock`] resource to read
+/// `ticks` from, not a `Sim` to call a method on.
+#[must_use]
+pub(crate) fn block_sound_seed(block: [i32; 3], ticks: u64) -> i64 {
+    let mut x = (block[0] as i64 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (block[1] as i64 as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+        ^ (block[2] as i64 as u64).wrapping_mul(0x1656_67B1_9E37_79F9)
+        ^ ticks;
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    (x ^ (x >> 31)) as i64
 }

@@ -320,6 +320,159 @@ pub enum BreakRejection {
     UnknownBlockState,
 }
 
+// ---------------------------------------------------------------------------
+// Place intent — a plugin's wish to place a block, mirroring `BreakIntent`
+// ---------------------------------------------------------------------------
+
+/// A plugin's wish to place a block, mirroring [`BreakIntent`]'s "express a
+/// wish, the shell owns the machine" contract for placement.
+///
+/// # Exactly the two facts a mouse ray hit carries
+///
+/// No sequence, no block-state id, no hand, no cursor sub-position — the
+/// block-prediction `sequence` counter is threaded internally by
+/// [`lodestone_game::placement::Placement::use_on`] (owned by
+/// `lodestone_shell::interact::PlacementPredictor`, exactly as
+/// [`BreakIntent`]'s own docs describe for `MiningPredictor`'s counter), the
+/// hand is always [`lodestone_model::Hand::Main`] (matching every other send
+/// `crate::interact::drive_placement`'s human counterpart,
+/// `Sim::use_item_live`, makes), and there is no cursor sub-position for the
+/// same reason `BreakIntent` has none: a plugin has no crosshair, so
+/// `drive_placement` casts its own ray through `VersionData::block_outline`
+/// exactly as `drive_mining` does, and the ray's own resolved hit point
+/// supplies the cursor.
+///
+/// # Placement is instantaneous where a dig is multi-tick
+///
+/// This is the one real divergence from [`BreakIntent`]'s shape, and it is
+/// why [`PlaceOutcome`] carries a [`PlaceOutcome::generation`] that
+/// [`BreakOutcome`] has no need for. A dig is a state machine spread over
+/// many ticks — `BreakIntent` stays installed for the dig's whole duration,
+/// and the plugin removes it itself when it wants to stop. A placement is one
+/// `use_item_on` and, at most, one local write: `drive_placement` **removes
+/// this component** the moment it finishes resolving an attempt, whatever the
+/// result, rather than leaving it for the plugin to clear. One insertion is
+/// one attempt, and the removal is itself the acknowledgement that the attempt
+/// happened — a plugin never has to guess whether a leftover `PlaceIntent` is
+/// "still pending" or "processed ages ago and forgotten."
+///
+/// # Optional and additive, like [`BreakIntent`]
+///
+/// Absent (the default) changes nothing about human play. **While the human
+/// use button is held, this is not consulted at all** — the human path takes
+/// priority, exactly as [`BreakIntent`]'s own docs describe for the attack
+/// button, and a plugin's intent left behind must never fight a real
+/// right-click for the same placement.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaceIntent {
+    /// The block the placement is aimed at — the cell a mouse ray's hit
+    /// would report as `clicked`, not necessarily where the new block ends
+    /// up (a replaceable `clicked` cell places *into* itself; otherwise the
+    /// block lands across `face`, exactly
+    /// [`lodestone_game::placement::resolve_target`]'s rule).
+    pub pos: lodestone_model::BlockPos,
+    /// Which face of `pos` to place against — decides which side of `pos` the
+    /// new block lands on, exactly as a mouse ray hit's face does.
+    pub face: lodestone_model::BlockFace,
+}
+
+/// The shell's answer to this tick's [`PlaceIntent`] — the observability half
+/// of the contract that component's own docs describe, mirroring
+/// [`BreakOutcome`].
+///
+/// Always present on [`LocalPlayer`], for the same reason `BreakOutcome` is:
+/// a plugin must be able to poll this on the very first tick, before any
+/// placement has ever run, without first checking whether the shell has ever
+/// installed one. [`spawn_local_player`]/[`reset_local_player`] both insert
+/// the [`Default`], generation `0` and [`PlaceStatus::Idle`].
+///
+/// # `generation`, and why `BreakOutcome` has nothing like it
+///
+/// [`BreakOutcome`] is safe to re-derive fresh every tick because a dig is
+/// still running the *next* tick too — "stale" is not a concept a continuous
+/// state machine needs. A placement is one-shot and its [`PlaceIntent`] is
+/// gone the instant `drive_placement` resolves it (see that component's own
+/// docs), so a plugin polling on some later, unrelated tick needs a way to
+/// tell "this is the result of the attempt I just made" from "this is left
+/// over from an attempt several ticks ago that I never read." `generation`
+/// increments by exactly one every time `drive_placement` actually resolves
+/// an attempt (never on a tick that only reports [`PlaceStatus::Idle`]
+/// because there was nothing to attempt), so a plugin that remembers the
+/// generation it last observed can tell the two apart without racing the
+/// tick that produced either one.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PlaceOutcome {
+    /// This tick's (or the last resolved attempt's) status.
+    pub status: PlaceStatus,
+    /// Bumped by exactly one every time [`Self::status`] is written to
+    /// something other than a no-op [`PlaceStatus::Idle`] — see this type's
+    /// own docs.
+    pub generation: u64,
+}
+
+/// See [`PlaceOutcome`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlaceStatus {
+    /// No [`PlaceIntent`] was consulted this tick — either none is installed
+    /// on the entity, or the human use button was driving instead. Mirrors
+    /// [`BreakStatus::Idle`] exactly, including the same caveat: this does
+    /// **not** advance [`PlaceOutcome::generation`], so a value written by a
+    /// real attempt survives every subsequent idle tick until the next real
+    /// attempt overwrites it — see [`PlaceOutcome`]'s own docs on why that is
+    /// what makes `generation` meaningful at all.
+    #[default]
+    Idle,
+    /// The census resolved a concrete block state and the shell wrote it
+    /// locally — the same optimistic write a human placement makes — while
+    /// the `use_item_on` packet is in flight.
+    Predicted,
+    /// The `use_item_on` packet was sent, but nothing was written locally.
+    /// **Required for honesty, not an edge case**: the census legitimately
+    /// declines to predict a great many placeable blocks (any property
+    /// `lodestone_shell::sim::state_for_placement` cannot resolve), and the
+    /// clicked cell being interactable rather than placeable (a chest, a
+    /// door) takes this same wire path too — vanilla itself always sends the
+    /// packet regardless of whether anything locally changes. A plugin needs
+    /// this to tell "will appear after a round trip" from
+    /// [`Self::Rejected`]'s "refused, nothing sent at all."
+    SentUnpredicted,
+    /// The shell would not act on the intent this tick, and why. Unlike
+    /// [`Self::SentUnpredicted`], nothing reached the wire.
+    Rejected(PlaceRejection),
+}
+
+/// Why `drive_placement` would not act on a [`PlaceIntent`] this tick.
+///
+/// Every variant here is something the shell would have refused (or simply
+/// never have attempted) from a real right-click too, made observable for the
+/// same reason [`BreakRejection`] is: a plugin has no crosshair and no
+/// inventory screen to notice a silent no-op.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaceRejection {
+    /// The local player is dead (on the death screen).
+    Dead,
+    /// The intended cell is outside vanilla's 4.5-block block-interaction
+    /// range, or something else stands between the eye and it — the two
+    /// collapse to one variant for the same reason
+    /// [`BreakRejection::UnreachableOrObstructed`] does: a ray aimed at the
+    /// intended face does not land on the intended cell.
+    UnreachableOrObstructed,
+    /// No live chunk data at the clicked position — outside the loaded
+    /// world, or no live connection at all.
+    NoWorldData,
+    /// The main hand is empty, or holds an item the census cannot classify
+    /// as a placeable block at all (a tool, food, anything
+    /// `orientation_for_placement` declines). Unlike a real right-click —
+    /// which vanilla still sends, because a non-placing item might yet
+    /// interact the clicked block — a `PlaceIntent` that structurally cannot
+    /// place is refused rather than spending a packet on a click the plugin
+    /// did not ask for.
+    NothingPlaceableHeld,
+    /// The block would overlap the player's own bounding box — vanilla's own
+    /// placement-legality rule, `lodestone_shell::sim::block_intersects_player`.
+    IntersectsPlayer,
+}
+
 /// The **raw** sprint key, ungated by the forward-only/sneak rules
 /// [`MovementIntent`] applies.
 ///
@@ -1262,13 +1415,23 @@ pub fn spawn_local_player(world: &mut World, state: PlayerState) -> Entity {
             // observability half of the `BreakIntent` contract must not be
             // opt-in the way the intent itself is.
             BreakOutcome::default(),
-            // Creative-flight client state. Both start cleared: `jumpTriggerTime`
-            // at `0` means the *next* jump press opens a fresh double-tap window
-            // rather than immediately completing one, and `wasJumping` at `false`
-            // makes a jump key already held at spawn read as a rising edge — which
-            // is vanilla's own initial state for both fields.
-            JumpTriggerTime(0),
-            WasJumping(false),
+            // Nested: bevy's tuple `Bundle` impl tops out at 15 elements and
+            // this spawn was already there, so `PlaceOutcome` (same
+            // always-present reasoning as `BreakOutcome`, one line up) joins
+            // a sub-tuple rather than the top level. A tuple of `Bundle`s is
+            // itself a `Bundle`, so this changes nothing about what gets
+            // inserted.
+            (
+                // Creative-flight client state. Both start cleared:
+                // `jumpTriggerTime` at `0` means the *next* jump press opens a
+                // fresh double-tap window rather than immediately completing
+                // one, and `wasJumping` at `false` makes a jump key already
+                // held at spawn read as a rising edge — which is vanilla's own
+                // initial state for both fields.
+                JumpTriggerTime(0),
+                WasJumping(false),
+                PlaceOutcome::default(),
+            ),
         ))
         .id()
 }
@@ -1297,12 +1460,19 @@ pub fn reset_local_player(world: &mut World, entity: Entity, state: PlayerState)
         LastFlyingSent(Some(false)),
         AttackStrengthTicker(0),
         BreakOutcome::default(),
-        // A quit-to-title must not leave a half-open double-tap window behind.
-        // `Abilities` itself is reset by `insert_session_components`, which the
-        // driver calls alongside this — so a new session starts with no flight
-        // grant until the server sends one.
-        JumpTriggerTime(0),
-        WasJumping(false),
+        // Nested for the same "bevy's tuple `Bundle` impl tops out at 15"
+        // reason `spawn_local_player`'s own comment gives — this insert was
+        // already at 14 before `PlaceOutcome` joined it.
+        (
+            // A quit-to-title must not leave a half-open double-tap window
+            // behind. `Abilities` itself is reset by
+            // `insert_session_components`, which the driver calls alongside
+            // this — so a new session starts with no flight grant until the
+            // server sends one.
+            JumpTriggerTime(0),
+            WasJumping(false),
+            PlaceOutcome::default(),
+        ),
     ));
     entity.remove::<Dead>();
     // A quit-to-title must hand rotation back to mouse-look and drop any
@@ -1310,6 +1480,10 @@ pub fn reset_local_player(world: &mut World, entity: Entity, state: PlayerState)
     // session would resume mining as soon as a plugin re-adds itself, with no
     // human ever having pressed anything this session.
     entity.remove::<BreakIntent>();
+    // Same reasoning, for placement: a leftover `PlaceIntent` from a session
+    // that ended mid-attempt must not resolve into a placement the plugin
+    // never re-confirmed under the new session.
+    entity.remove::<PlaceIntent>();
 }
 
 // ---------------------------------------------------------------------------
@@ -1896,6 +2070,60 @@ mod tests {
             BreakStatus::Idle,
             "the outcome must reset alongside the intent, not report a stale \
              Progressing/Rejected from a session that no longer exists"
+        );
+    }
+
+    /// [`spawn_local_player`] must insert [`PlaceOutcome`] unconditionally
+    /// (unlike the opt-in [`PlaceIntent`]), starting at [`PlaceStatus::Idle`]
+    /// and generation `0` — mirrors
+    /// `spawn_local_player_starts_with_idle_break_outcome_and_no_intent`
+    /// exactly, for the placement half of the contract.
+    #[test]
+    fn spawn_local_player_starts_with_idle_place_outcome_and_no_intent() {
+        let (app, entity) = app_with_player(PlayerCollision::NoWorld);
+        let outcome = app.world().get::<PlaceOutcome>(entity).unwrap();
+        assert_eq!(outcome.status, PlaceStatus::Idle);
+        assert_eq!(outcome.generation, 0);
+        assert!(
+            app.world().get::<PlaceIntent>(entity).is_none(),
+            "a fresh session must not start with a claimed placement — \
+             nothing has claimed it yet"
+        );
+    }
+
+    /// A quit-to-title must hand a queued placement back too, mirroring
+    /// `reset_local_player_drops_a_claimed_break_intent`. A `PlaceIntent`
+    /// left over from the previous session must not resolve into a placement
+    /// under the next one.
+    #[test]
+    fn reset_local_player_drops_a_claimed_place_intent() {
+        let (mut app, entity) = app_with_player(PlayerCollision::NoWorld);
+        app.world_mut().entity_mut(entity).insert(PlaceIntent {
+            pos: lodestone_model::BlockPos::new(3, 4, 5),
+            face: lodestone_model::BlockFace::Up,
+        });
+        assert!(app.world().get::<PlaceIntent>(entity).is_some());
+
+        let spawn = PlayerState::at(Vec3d::new(0.5, 71.0, 0.5), 0.0);
+        reset_local_player(app.world_mut(), entity, spawn);
+
+        assert!(
+            app.world().get::<PlaceIntent>(entity).is_none(),
+            "reset_local_player must clear a claimed placement like every \
+             other session-scoped claim"
+        );
+        let outcome = app.world().get::<PlaceOutcome>(entity).unwrap();
+        assert_eq!(
+            outcome.status,
+            PlaceStatus::Idle,
+            "the outcome must reset alongside the intent, not report a stale \
+             result from a session that no longer exists"
+        );
+        assert_eq!(
+            outcome.generation, 0,
+            "the generation counter must reset too, or a plugin from the new \
+             session could mistake a leftover generation for one of its own \
+             attempts"
         );
     }
 

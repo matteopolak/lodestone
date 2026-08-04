@@ -278,20 +278,77 @@ tick a plugin's intent is (or would be) consulted — `docs/baritone-port.md`'s 
 legal, executable, and still stall forever" is exactly the failure mode an unreported rejection
 would reproduce at the level of a single edge.
 
-**`PlaceIntent` does not exist yet, and this is a real, checked stop, not an oversight.**
-`BreakIntent` was reachable as "an additional input" to an already-`Resource`-shaped system
-because `MiningPredictor`, `NetHandle` and `VersionData` are all bevy resources a `GameTick` system
-can already read. Placement's equivalent local write —
-`lodestone_shell::sim::placement::write_predicted_block` plus the re-mesh that makes it visible
-(`Sim::remesh_around`) — is reachable from `ChunkWorld` for the *write* half (a plugin-driven
-placement could set the block state), but `remesh_around` reaches into `Sim`'s own mesh-worker
-pool and GPU terrain state, which are plain struct fields, not resources, and are not part of
-`crates/lodestone-shell/src/interact.rs`'s ownership. Building `PlaceIntent`'s consumer honestly
-needs either a new resource exposing "remesh this position" from `sim.rs`/`sim/meshing.rs`, or
-accepting a placement that writes the block but never repaints it — neither of which is "add a
-system alongside `drive_mining`." That is real restructuring, in files this document's own
-authoring pass did not have standing to change; see the issue this gap is tracked against for the
-brokered patch.
+**6. `PlaceIntent`/`PlaceOutcome` — closed.** The previous version of this section recorded
+`PlaceIntent` as a real, checked stop rather than an oversight: `remesh_around` reached into `Sim`'s
+own mesh-worker pool and GPU terrain state, which were plain struct fields, not resources, so a
+plugin-driven placement could write the block state through `ChunkWorld` but never repaint it. Two
+things closed that, in order:
+
+- **The re-mesh seam moved first.** `TerrainMesh::remesh_around(&mut self, store: &ChunkWorld, block:
+  [i32; 3])` (`crates/lodestone-shell/src/mesher.rs`) now holds the 3×3×3 boundary filter and extent
+  math that used to live in `Sim::remesh_around` (`sim/meshing.rs`) — that method had already reduced
+  to pure `ChunkWorld`/`TerrainMesh` math with no other `Sim` state in it, so the move needed nothing
+  new, only relocation. `Sim::remesh_around` is now a one-line delegation through
+  `Sim::terrain_and_world`. `TerrainMesh` was already `#[derive(Resource)]`, so this is what made
+  re-meshing reachable from a `GameTick` system that only holds `Res<ChunkWorld>` +
+  `ResMut<TerrainMesh>` — no `Sim` required.
+- **The audio engine moved too**, for a related but separate reason: `Sim::audio` was a private field,
+  invisible to a system for the same structural reason `remesh_around` used to be, and a
+  plugin-driven placement's sound needed it. `AudioEngine` (`crates/lodestone-shell/src/sim.rs`) is
+  now a resource, read directly by `drive_placement` rather than through a `Sim` method.
+
+`crates/lodestone-ecs/src/player.rs` now has `PlaceIntent { pos: BlockPos, face: BlockFace }` and
+`PlaceOutcome { status: PlaceStatus, generation: u64 }`, mirroring `BreakIntent`/`BreakOutcome`'s
+"express a wish, the shell owns the machine" contract with two deliberate divergences, both
+documented on the types themselves rather than only here:
+
+- **No sequence, no state id, no hand, no cursor** — narrower than `BreakIntent` even was, because a
+  placement needs nothing else: the sequence is threaded internally by
+  `lodestone_game::placement::Placement::use_on`, exactly as `MiningPredictor`'s counter is for
+  breaking.
+- **`generation: u64` on the outcome, which `BreakOutcome` has no need for.** Placement is one-shot
+  and its `PlaceIntent` is removed by the shell the instant an attempt resolves — unlike a dig, which
+  stays installed for its whole multi-tick duration and is removed by the plugin, not the shell. A
+  plugin polling on some later tick needs to tell "the result of the attempt I just made" from "an
+  attempt from several ticks ago I never read"; `generation` is what makes that possible without a
+  race against the exact tick the attempt landed on.
+
+`lodestone_shell::interact::drive_placement` consumes it, in `TickSet::Send` chained after
+`drive_mining`: it resolves the intent into the identical `RayHit` shape a mouse click produces
+(`resolve_intent_ray`, the cast `resolve_break_intent` used to do alone, generalised to serve both),
+then runs the *same* `Placement::use_on` a human placement uses. Unlike a human right-click — which
+vanilla always sends regardless of outcome — every `PlaceRejection` is checked **before** anything
+reaches `use_on` or the wire, because a `PlaceIntent` specifically asks to place rather than merely
+"interact," so "nothing placeable held" and "would intersect the player" are refused outright rather
+than folded into a generic sent-but-nothing-happened result. `PlaceStatus::SentUnpredicted` is
+reserved for the cases vanilla itself would still send a packet for: an interactable clicked block, or
+a placeable item the census cannot resolve a state for.
+
+**What is still open, named rather than built around:**
+
+- **Neither intent has a plugin producer yet.** `grep -rn "BreakIntent\|PlaceIntent" crates/plugins/`
+  is empty — `crates/plugins/lodestone-autopilot` (M1/M2, walk/step/descend/drop) writes
+  `MovementIntent`/`LookIntent` only. Both intents are consumer-ready and hermetically gated
+  (`crates/lodestone-shell/tests/{break_intent,place_intent}.rs`), but nothing in this tree inserts
+  either one outside a test — the mine/place half of a Baritone-class plugin is future work, not
+  reachable from the shipped client today.
+- **A plugin can only place what is already selected.** There is no `SelectSlotIntent`: writing
+  `SelectedSlot` directly would move the shell's own notion of "held item" without echoing the change
+  to the server (`ClientAction::SetCarriedItem` has no producer from this seam), so a plugin
+  autopilot cannot switch to a placeable item before issuing a `PlaceIntent` without also being wrong
+  about what the server thinks is selected. Tracked as its own issue (small — mirrors
+  `SelectedSlot`'s existing echo path in `lodestone-shell`) rather than folded into this one, since it
+  is additive and does not block `PlaceIntent` itself for a plugin that only ever wants to place
+  whatever is already in the active hotbar slot.
+- **`ChunkWorld` being `pub` with a `pub fn write()`, and `ActionQueue` accepting a raw
+  `ClientAction::UseItemOn` with a fabricated sequence, are both doors guarded by doc contract rather
+  than structurally.** Nothing stops a plugin from writing the chunk store directly (bypassing
+  `write_predicted_block`'s state+block-entity pairing) or pushing a hand-rolled `UseItemOn` with an
+  invented sequence (forking `PlacementPredictor`'s counter, exactly what §5's `BreakIntent` section
+  says must never happen). `PlaceIntent`/`BreakIntent` are the *sanctioned* route around both, but
+  they do not remove the unsanctioned one. A read-handle/write-handle split on `ChunkWorld` is the
+  structural fix and is real churn — it reaches `lodestone-client` — so it is tracked as its own item
+  rather than folded into this one.
 
 ### Native versus WASM
 
@@ -358,7 +415,7 @@ cheaper substitute for the other is the mistake `docs/bevy-migration.md` warns a
 | block physics constants (friction/speed/jump/bounce/stuck/climbable) reachable without depending on `lodestone-shell` | unassigned | **closed in `24af787`** — `lodestone_model::block_physics(&str) -> BlockPhysics`; see §3 above |
 | `PathType` per state through the seam | unassigned | **gap — `docs/baritone-port.md` §3.3 named this in the original document; still true today** |
 | `BreakIntent`/`BreakOutcome` (mine-a-block seam, mirroring `MovementIntent`) | unassigned | **done** — `crates/lodestone-ecs/src/player.rs`, consumed by `lodestone_shell::interact::drive_mining`; see gap 5 above |
-| `PlaceIntent` (place-a-block seam) | unassigned | **gap, checked rather than assumed** — needs `sim.rs`/`sim/meshing.rs` to expose a remesh-capable resource before a `drive_placement` system can exist without touching `Sim`-only state; see gap 5 above for exactly what is missing |
+| `PlaceIntent`/`PlaceOutcome` (place-a-block seam, mirroring `BreakIntent`) | unassigned | **done** — `crates/lodestone-ecs/src/player.rs`, consumed by `lodestone_shell::interact::drive_placement`; see gap 6 above. The blocker gap 6 used to name (re-mesh needing a `Sim`-only mesh-worker pool) is what closed: `TerrainMesh::remesh_around` is now the resource-only entry point, and `Sim::remesh_around` a one-line delegation to it |
 
 **The gap list, restated as the single most useful output of this document:** at the time this table
 was first written, four items had **no stage that claims them** at all in `docs/bevy-migration.md`'s

@@ -3,9 +3,8 @@
 //! `begin_attack_live`, `entity_target`, `attack_entity`,
 //! `maybe_spawn_crit_particles`, `interact_entity`, `end_attack`, `use_item`,
 //! `end_use`/`end_use_live`, `use_item_live`, `use_item_generic`,
-//! `placement_facts`, `predict_block`, `place_block` and
-//! `block_intersects_player` — seam 3 of the sim.rs decomposition sequence
-//! (seam 1 was the test module, `sim/tests.rs`; seam 2 was placement
+//! `predict_block` and `place_block` — seam 3 of the sim.rs decomposition
+//! sequence (seam 1 was the test module, `sim/tests.rs`; seam 2 was placement
 //! prediction, `sim/placement.rs`). This is `impl Sim` methods, not free
 //! functions, so nothing needed re-exporting: a method call resolves through
 //! the `Sim` type regardless of which file defines it, and `sim::actions` is
@@ -18,6 +17,13 @@
 //! reason: it pulls in `Sim`'s private fields' types, sim.rs's other private
 //! helpers (`face_from_normal`, `hit_cursor`, …) and everything `sim.rs`
 //! itself re-exports from `sim::placement`, with no need to enumerate them.
+//!
+//! **`placement_facts` and `block_intersects_player` left this `impl Sim`
+//! block entirely**, later, for `PlaceIntent` (`docs/plugin-api.md`) — moved
+//! to free functions in `sim/placement.rs`, parameterised over the two reads
+//! that used to come from `self`, since `crate::interact::drive_placement` (a
+//! `GameTick` system) needs the identical resolution with no `Sim` to call a
+//! method on. `use_item_live`/`place_block` here call the free functions now.
 
 use super::*;
 
@@ -583,9 +589,6 @@ impl Sim {
         // tick-granular here too (`Minecraft.handleKeybinds` runs in the tick).
         let sneaking = self.movement_intent().sneak;
 
-        // Native player-inventory index of the off-hand slot
-        // (`lodestone_game::menu`'s table: hotbar `0..=8`, off-hand `40`).
-        const OFFHAND_NATIVE_INDEX: usize = 40;
         let menu = self.player_menu();
         let main = menu
             .player_native(self.selected_slot())
@@ -595,7 +598,7 @@ impl Sim {
         // makes a sneak-click suppress the block's own use.
         let has_item_in_hand = main.is_some()
             || menu
-                .player_native(OFFHAND_NATIVE_INDEX)
+                .player_native(crate::sim::OFFHAND_NATIVE_INDEX)
                 .is_some_and(|stack| !stack.is_empty());
         // Placeable only when the census can name the block *and* classify how it
         // orients. Leaving `placing` at `None` otherwise is what makes an
@@ -622,8 +625,17 @@ impl Sim {
                 .map_or(OrientationKind::Fixed, |&(_, _, kind)| kind),
         };
         // Read the world facts before taking the ECS guard `use_on` needs — see
-        // `PlacementFacts` on why the two guards must not nest.
-        let facts = self.placement_facts(clicked, face);
+        // `PlacementFacts` on why the two guards must not nest. Free function
+        // since `PlaceIntent` (`crate::interact::drive_placement`, a `GameTick`
+        // system, needs the identical resolution with no `Sim` to call it on)
+        // — see `sim/placement.rs`'s `placement_facts` doc.
+        let bb = self.player().bounding_box(&self.profile());
+        let facts = placement_facts(
+            clicked,
+            face,
+            |pos| self.net.as_ref().and_then(|net| net.block_at(pos)),
+            |pos| block_intersects_player(&bb, [pos.x, pos.y, pos.z]),
+        );
         let decision = self.write(|w| {
             w.resource_mut::<PlacementPredictor>()
                 .0
@@ -720,33 +732,6 @@ impl Sim {
         self.swing_hand();
     }
 
-    /// The [`lodestone_game::placement::PlacementWorld`] facts for one right-click, read from the
-    /// client-owned world in one go. See [`PlacementFacts`].
-    fn placement_facts(&self, clicked: BlockPos, face: BlockFace) -> PlacementFacts {
-        let state_at = |pos: BlockPos| self.net.as_ref().and_then(|net| net.block_at(pos));
-        let clicked_state = state_at(clicked);
-        let clicked_replaceable = clicked_state.is_some_and(is_air_state);
-        // `resolve_target`'s rule, evaluated here because it is the same read: a
-        // replaceable clicked cell is replaced in place, otherwise the placement
-        // goes to the cell across the hit face.
-        let target = if clicked_replaceable {
-            clicked
-        } else {
-            lodestone_game::placement::offset(clicked, face)
-        };
-        PlacementFacts {
-            clicked,
-            target,
-            clicked_replaceable,
-            clicked_interactable: clicked_state.is_some_and(is_interactable_state),
-            // An unloaded column reads `None` and therefore "not replaceable",
-            // which declines the prediction — the same conservative direction as
-            // every other unknown here.
-            target_replaceable: state_at(target).is_some_and(is_air_state),
-            target_obstructed: self.block_intersects_player([target.x, target.y, target.z]),
-        }
-    }
-
     /// Apply a locally predicted block state to the one chunk store and re-mesh.
     ///
     /// The write itself is [`write_predicted_block`] — state *and* block entity,
@@ -780,7 +765,8 @@ impl Sim {
             let view = WorldCollision::new(&world);
             view.block_at(pos[0], pos[1], pos[2]) == id::AIR
         };
-        if !cell_empty || self.block_intersects_player(pos) {
+        let bb = self.player().bounding_box(&self.profile());
+        if !cell_empty || block_intersects_player(&bb, pos) {
             return false;
         }
         if self.set_block_world(pos, PLACE_BLOCK) {
@@ -791,20 +777,5 @@ impl Sim {
         } else {
             false
         }
-    }
-
-    fn block_intersects_player(&self, block: [i32; 3]) -> bool {
-        let bb = self.player().bounding_box(&self.profile());
-        let (x0, y0, z0) = (
-            f64::from(block[0]),
-            f64::from(block[1]),
-            f64::from(block[2]),
-        );
-        bb.max_x > x0
-            && bb.min_x < x0 + 1.0
-            && bb.max_y > y0
-            && bb.min_y < y0 + 1.0
-            && bb.max_z > z0
-            && bb.min_z < z0 + 1.0
     }
 }

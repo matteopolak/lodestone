@@ -13,10 +13,20 @@
 //! `crate::sim::`/`lodestone::sim::` path from `block_entities.rs` and from
 //! `tests/placed_chest_block_entity_pixels.rs` (an external integration
 //! test), and only a `pub use` preserves that path through the move.
+//!
+//! **Two more items joined later, for `PlaceIntent` (`docs/plugin-api.md`):**
+//! [`placement_facts`] and [`block_intersects_player`] used to be `Sim`
+//! methods in `sim/actions.rs`, reading `self.net`/`self.player()` directly.
+//! `crate::interact::drive_placement` is a `GameTick` **system** — a free
+//! function over `&mut World`, not a `Sim` method — so both became free
+//! functions parameterised over the two reads (a block-state lookup, a
+//! player-intersection test) instead. `Sim::use_item_live` was re-pointed at
+//! them rather than kept on a separate, parallel path.
 
 use lodestone_client::BlockPos;
 use lodestone_game::placement::{Axis, Half, OrientationKind, PlacedState, PlacementWorld};
 use lodestone_model::BlockFace;
+use lodestone_physics::Aabb;
 use lodestone_world::{BlockEntitySync, WorldSink};
 
 // ---------------------------------------------------------------------------
@@ -77,6 +87,70 @@ impl PlacementWorld for PlacementFacts {
     fn is_obstructed(&self, pos: BlockPos) -> bool {
         pos == self.target && self.target_obstructed
     }
+}
+
+/// Build [`PlacementFacts`] for one right-click, parameterised over the
+/// block-state lookup and the player-intersection test rather than reading
+/// `Sim` directly.
+///
+/// Moved out of `Sim::placement_facts` (`sim/actions.rs`) for
+/// `crate::interact::drive_placement`: a `GameTick` **system** has a
+/// `NetHandle` resource and a `&PhysicsState` component, not a `Sim`, so the
+/// two reads this needs — a block-state-by-position lookup and "does this
+/// cell overlap the player" — are taken as closures instead. `Sim::use_item_live`
+/// (the human path) now calls this too, with closures that read `self.net`/
+/// `self.player()` — a pure move, not a second implementation: this is the
+/// *same* four-question resolution [`PlacementFacts`]'s own docs describe,
+/// unchanged.
+pub(crate) fn placement_facts(
+    clicked: BlockPos,
+    face: BlockFace,
+    state_at: impl Fn(BlockPos) -> Option<u32>,
+    intersects_player: impl Fn(BlockPos) -> bool,
+) -> PlacementFacts {
+    let clicked_state = state_at(clicked);
+    let clicked_replaceable = clicked_state.is_some_and(is_air_state);
+    // `resolve_target`'s rule, evaluated here because it is the same read: a
+    // replaceable clicked cell is replaced in place, otherwise the placement
+    // goes to the cell across the hit face.
+    let target = if clicked_replaceable {
+        clicked
+    } else {
+        lodestone_game::placement::offset(clicked, face)
+    };
+    PlacementFacts {
+        clicked,
+        target,
+        clicked_replaceable,
+        clicked_interactable: clicked_state.is_some_and(is_interactable_state),
+        // An unloaded column reads `None` and therefore "not replaceable",
+        // which declines the prediction — the same conservative direction as
+        // every other unknown here.
+        target_replaceable: state_at(target).is_some_and(is_air_state),
+        target_obstructed: intersects_player(target),
+    }
+}
+
+/// Whether `block` overlaps the player's own bounding box — vanilla's
+/// placement-legality rule (a `BlockItem` cannot place a block that would
+/// intersect the placer). A pure function of the box and the cell, moved out
+/// of `Sim::block_intersects_player` (`sim/actions.rs`) for the same reason as
+/// [`placement_facts`] above: `crate::interact::drive_placement` has a
+/// `Profile` resource and a `&PhysicsState` component to build `bb` from, but
+/// no `Sim`.
+#[must_use]
+pub(crate) fn block_intersects_player(bb: &Aabb, block: [i32; 3]) -> bool {
+    let (x0, y0, z0) = (
+        f64::from(block[0]),
+        f64::from(block[1]),
+        f64::from(block[2]),
+    );
+    bb.max_x > x0
+        && bb.min_x < x0 + 1.0
+        && bb.max_y > y0
+        && bb.min_y < y0 + 1.0
+        && bb.max_z > z0
+        && bb.min_z < z0 + 1.0
 }
 
 /// Whether a block state is one the client may place *into*.

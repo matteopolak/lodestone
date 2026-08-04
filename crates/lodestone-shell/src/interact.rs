@@ -85,26 +85,33 @@
 //! world.
 
 use lodestone_ecs::app::{App, Plugin};
-use lodestone_ecs::ecs::prelude::{Query, Res, ResMut, With};
+use lodestone_ecs::ecs::prelude::{Commands, Entity, Query, Res, ResMut, With};
 use lodestone_ecs::ecs::resource::Resource;
 use lodestone_ecs::ecs::schedule::IntoScheduleConfigs;
-use lodestone_client::{BlockPos, ClientAction, ClientHandle};
+use lodestone_client::{BlockPos, ClientAction, ClientHandle, Hand, Rotation};
 use lodestone_ecs::player::{
     ActionQueue, BreakIntent, BreakOutcome, BreakRejection, BreakStatus, Dead, Egress, Flying,
-    LastFlyingSent, LastSprintingSent, LocalPlayer, PhysicsState, SelectedSlot, Submersion,
+    LastFlyingSent, LastSprintingSent, LocalPlayer, MovementIntent, PhysicsState, PlaceIntent,
+    PlaceOutcome, PlaceRejection, PlaceStatus, Profile, SelectedSlot, Submersion,
 };
 use lodestone_ecs::session::{Abilities, ServerEntityId, SessionMenus};
-use lodestone_ecs::{GameTick, TickSet, VersionData};
+use lodestone_ecs::{ChunkWorld, FrameClock, GameTick, TickSet, VersionData};
 use lodestone_game::mining::Mining;
-use lodestone_game::placement::Placement;
+use lodestone_game::placement::{Placement, UseOnContext, UseOnDecision};
 use lodestone_model::{BlockFace, PlayerCommand};
 use lodestone_physics::Vec3d;
 
 use crate::blocks::id;
+use crate::mesher::TerrainMesh;
 use crate::net::SharedHandle;
 use crate::particles::Particles;
 use crate::raycast::{PickBox, RayHit, raycast};
-use crate::sim::{bare_handed_tool_mining, dig_break_inputs, face_from_normal, particle_face};
+use crate::sim::{
+    AudioEngine, OFFHAND_NATIVE_INDEX, bare_handed_tool_mining, block_intersects_player,
+    block_sound_seed, block_states_of, dig_break_inputs, face_from_normal, hit_cursor,
+    orientation_for_placement, particle_face, placement_facts, state_for_placement,
+    write_predicted_block,
+};
 
 /// The block the view ray currently points at, for the outline and every edit.
 ///
@@ -364,35 +371,36 @@ fn face_to_normal(face: BlockFace) -> [i32; 3] {
     }
 }
 
-/// Resolve a plugin's [`BreakIntent`] into the same [`RayHit`] shape a mouse
-/// click's [`RayTarget`] would produce, or reject it.
+/// Cast a ray from `eye` toward the centre of `face` on `pos`, through the
+/// version's own [`VersionData::block_outline`] census, and accept only a hit
+/// that lands back on `pos` — the shared core of [`resolve_break_intent`] and
+/// [`resolve_place_intent`].
 ///
-/// A plugin has no crosshair, so there is no ray to read — this casts one of
-/// its own, from the eye toward the centre of the face the intent names,
-/// using the version's own [`VersionData::block_outline`] census for the
-/// per-cell geometry the same way [`crate::raycast::raycast`]'s only other
-/// caller (the mouse-driven `Sim::update_target`) does. Accepting the
+/// A plugin has no crosshair, so there is no ray to read for either intent —
+/// this casts one of its own, the same way [`crate::raycast::raycast`]'s only
+/// other caller (the mouse-driven `Sim::update_target`) does. Accepting the
 /// resolved hit **only when it lands on the intended cell** is what makes
 /// this a real reach-and-line-of-sight check rather than a rubber stamp: a
 /// closer block in the way, or a target beyond vanilla's 4.5-block
 /// [`crate::raycast::REACH`], both resolve to a different cell (or no hit at
-/// all) and are rejected identically, matching
-/// [`BreakRejection::UnreachableOrObstructed`]'s own doc on why the two share
-/// one variant.
+/// all) and are rejected identically — see [`BreakRejection::UnreachableOrObstructed`]'s
+/// own doc on why the two share one variant; [`PlaceRejection::UnreachableOrObstructed`]
+/// makes the identical choice for the same reason.
 ///
 /// Cells with no live block data (`NetHandle::block_at` returning `None`) are
 /// treated as untargetable rather than solid — the same "not painted, not an
 /// obstruction" answer the mouse-driven cast gives for a chunk that has not
 /// streamed in, and it is what makes a target beyond the loaded world resolve
 /// as unreachable rather than panicking or inventing geometry.
-fn resolve_break_intent(
-    intent: BreakIntent,
+fn resolve_intent_ray(
+    pos: BlockPos,
+    face: BlockFace,
     eye: Vec3d,
     net: &NetHandle,
     version: &VersionData,
-) -> Result<RayHit, BreakRejection> {
-    let block = [intent.pos.x, intent.pos.y, intent.pos.z];
-    let normal = face_to_normal(intent.face);
+) -> Option<RayHit> {
+    let block = [pos.x, pos.y, pos.z];
+    let normal = face_to_normal(face);
     let aim_point = RayHit::face_center(block, normal).hit;
     let origin = [eye.x, eye.y, eye.z];
     let dir = [
@@ -413,9 +421,34 @@ fn resolve_break_intent(
         }));
     });
     match hit {
-        Some(resolved) if resolved.block == block => Ok(resolved),
-        _ => Err(BreakRejection::UnreachableOrObstructed),
+        Some(resolved) if resolved.block == block => Some(resolved),
+        _ => None,
     }
+}
+
+/// Resolve a plugin's [`BreakIntent`] into the same [`RayHit`] shape a mouse
+/// click's [`RayTarget`] would produce, or reject it. See [`resolve_intent_ray`].
+fn resolve_break_intent(
+    intent: BreakIntent,
+    eye: Vec3d,
+    net: &NetHandle,
+    version: &VersionData,
+) -> Result<RayHit, BreakRejection> {
+    resolve_intent_ray(intent.pos, intent.face, eye, net, version)
+        .ok_or(BreakRejection::UnreachableOrObstructed)
+}
+
+/// Resolve a plugin's [`PlaceIntent`] the same way, into the [`RayHit`] shape
+/// `Sim::use_item_live`'s own mouse-driven `clicked`/`face` derivation reads.
+/// See [`resolve_intent_ray`].
+fn resolve_place_intent(
+    intent: PlaceIntent,
+    eye: Vec3d,
+    net: &NetHandle,
+    version: &VersionData,
+) -> Result<RayHit, PlaceRejection> {
+    resolve_intent_ray(intent.pos, intent.face, eye, net, version)
+        .ok_or(PlaceRejection::UnreachableOrObstructed)
 }
 
 /// Drive the live mining predictor one tick from the held attack button and the
@@ -698,6 +731,250 @@ pub fn drive_mining(
         particles.0.destroy_block(hit.block, id_value, [1.0; 3]);
     }
     queue.0.extend(actions);
+}
+
+/// Drive a plugin's [`PlaceIntent`] one tick — the placement mirror of
+/// [`drive_mining`], and `docs/plugin-api.md`'s re-mesh-seam note is what
+/// makes this possible at all: before it, the local write was reachable from
+/// `ChunkWorld` alone, but the re-mesh that makes it *visible* reached into
+/// `Sim`'s own mesh-worker pool, which was not a resource.
+///
+/// # Why placement is a pre-check-then-act shape, unlike `drive_mining`
+///
+/// A human right-click always sends `use_item_on` and lets
+/// [`Placement::use_on`] sort out interact-vs-place-vs-nothing after the
+/// fact — vanilla does the same (`Level.playLocalSound`'s packet always goes
+/// out). A `PlaceIntent` is narrower: it specifically asks to *place*, so
+/// every [`PlaceRejection`] below is checked **before** `use_on` runs and
+/// before anything reaches [`ActionQueue`], rather than folded into a generic
+/// [`UseOnDecision::Nothing`] the way a human miss would be. That is what
+/// lets [`PlaceRejection::NothingPlaceableHeld`] and
+/// [`PlaceRejection::IntersectsPlayer`] exist as distinct, checkable reasons
+/// instead of one undifferentiated "nothing happened" — see [`PlaceStatus`]'s
+/// own docs on why [`PlaceStatus::SentUnpredicted`] is reserved for the cases
+/// vanilla itself would still send a packet for (an interactable block, or a
+/// placeable item the census cannot resolve a state for).
+///
+/// # Sources, matching `docs/plugin-api.md`'s wiring list exactly
+///
+/// Held item/slot from [`SessionMenus`] + [`SelectedSlot`], the same
+/// container-screen-aware pattern [`drive_mining`] uses
+/// (`Menus::player_native`, never `player().player_native(..)`); the sneak
+/// bit from [`MovementIntent`], the same wire the server judges against;
+/// reach from [`resolve_place_intent`], [`resolve_break_intent`]'s cast
+/// generalised; the decision and the block-prediction sequence from
+/// [`PlacementPredictor`], whose [`Placement::use_on`] threads the counter
+/// internally — no sequence anywhere on [`PlaceIntent`] itself; the wire via
+/// [`ActionQueue`] — never [`ClientHandle::send_action`] from a system, per
+/// this module's own docs; the predicted write via [`ChunkWorld::write`] +
+/// [`write_predicted_block`], state and block entity together; the re-mesh
+/// via [`TerrainMesh::remesh_around`].
+///
+/// # Human input wins, exactly as `BreakIntent`'s own docs describe
+///
+/// While [`UsingItem`] is true, the intent is not consulted at all this tick
+/// — the human's own right-click already has a dedicated seam
+/// (`Sim::use_item_live`) that this must not shadow, and [`PlaceOutcome`] is
+/// left completely untouched rather than reset to `Idle` — see that type's
+/// own docs for why an idle tick overwriting a real, unread result would make
+/// `generation` meaningless.
+///
+/// # What this does not animate
+///
+/// Unlike a mouse-driven placement, this never calls `Sim::swing_hand` — that
+/// mutates a private `Sim` field (`body_pose`) a system cannot reach, the
+/// same reason [`drive_mining`] never calls it for a plugin-driven dig
+/// either. The `SwingArm` wire action still goes out, so the server and every
+/// other client see the swing; only this client's own first-person arm stays
+/// still. A pre-existing, accepted gap this mirrors rather than introduces.
+#[allow(clippy::too_many_arguments)]
+pub fn drive_placement(
+    egress: Res<Egress>,
+    using_item: Res<UsingItem>,
+    net: Res<NetHandle>,
+    version: Res<VersionData>,
+    chunk_world: Res<ChunkWorld>,
+    clock: Res<FrameClock>,
+    profile: Res<Profile>,
+    mut placement: ResMut<PlacementPredictor>,
+    mut terrain: ResMut<TerrainMesh>,
+    mut audio: ResMut<AudioEngine>,
+    mut queue: ResMut<ActionQueue>,
+    mut commands: Commands,
+    mut players: Query<
+        (
+            Entity,
+            &PhysicsState,
+            &MovementIntent,
+            &SelectedSlot,
+            Option<&Dead>,
+            Option<&SessionMenus>,
+            Option<&PlaceIntent>,
+            &mut PlaceOutcome,
+        ),
+        With<LocalPlayer>,
+    >,
+) {
+    if !(egress.in_world && egress.live) {
+        return;
+    }
+    let Ok((entity, state, movement, slot, dead, menus, intent, mut outcome)) =
+        players.single_mut()
+    else {
+        return;
+    };
+    // Human input wins — see this function's own docs on why the outcome is
+    // left untouched rather than reset to `Idle`.
+    if using_item.0 {
+        return;
+    }
+    let Some(intent) = intent.copied() else {
+        return;
+    };
+    // From here on this tick *is* an attempt: exactly one generation bump no
+    // matter how it resolves, and the intent is removed regardless — one
+    // insertion is one attempt, and the removal is the shell's own
+    // acknowledgement (see `PlaceIntent`'s docs).
+    commands.entity(entity).remove::<PlaceIntent>();
+    outcome.generation += 1;
+
+    if dead.is_some() {
+        outcome.status = PlaceStatus::Rejected(PlaceRejection::Dead);
+        return;
+    }
+
+    let eye = Vec3d::new(
+        state.0.position.x,
+        state.0.position.y + f64::from(state.0.eye_height),
+        state.0.position.z,
+    );
+    let hit = match resolve_place_intent(intent, eye, &net, &version) {
+        Ok(hit) => hit,
+        Err(reason) => {
+            outcome.status = PlaceStatus::Rejected(reason);
+            return;
+        }
+    };
+    let clicked = BlockPos::new(hit.block[0], hit.block[1], hit.block[2]);
+    let face = face_from_normal(hit.normal);
+
+    // Same "abort, never guess" contract `drive_mining` applies to
+    // `NetHandle::block_at` returning `None` — no live chunk data at the
+    // clicked cell.
+    if net.block_at(clicked).is_none() {
+        outcome.status = PlaceStatus::Rejected(PlaceRejection::NoWorldData);
+        return;
+    }
+
+    // `Menus::player_native`, never `player().player_native(..)`: the one
+    // inventory is owned by the *open container's* menu while a screen is up
+    // — the exact fix `drive_mining`'s own docs describe for issue #373,
+    // generalised to placement.
+    let main = menus
+        .and_then(|menus| menus.0.player_native(slot.0))
+        .filter(|stack| !stack.is_empty())
+        .map(|stack| stack.item().clone());
+    let placeable = main.as_ref().and_then(|item| {
+        let name = item.to_string();
+        let states = block_states_of(&name)?;
+        let orientation = orientation_for_placement(&name, &states)?;
+        Some((name, states, orientation))
+    });
+    let Some((name, states, orientation)) = placeable else {
+        // Deliberately refused rather than sent-and-waited, unlike a human
+        // click with a non-placing item in hand — see this function's own
+        // docs on why a `PlaceIntent` narrows to "place", not "interact".
+        outcome.status = PlaceStatus::Rejected(PlaceRejection::NothingPlaceableHeld);
+        return;
+    };
+
+    let bb = state.0.bounding_box(&profile.0);
+    let facts = placement_facts(
+        clicked,
+        face,
+        |pos| net.block_at(pos),
+        |pos| block_intersects_player(&bb, [pos.x, pos.y, pos.z]),
+    );
+    if facts.target_obstructed {
+        outcome.status = PlaceStatus::Rejected(PlaceRejection::IntersectsPlayer);
+        return;
+    }
+
+    let has_item_in_hand = main.is_some()
+        || menus
+            .and_then(|menus| menus.0.player_native(OFFHAND_NATIVE_INDEX))
+            .is_some_and(|stack| !stack.is_empty());
+    let ctx = UseOnContext {
+        hand: Hand::Main,
+        clicked,
+        face,
+        cursor: hit_cursor(hit),
+        inside_block: false,
+        rotation: Rotation::new(state.0.yaw, state.0.pitch),
+        sneaking: movement.0.sneak,
+        has_item_in_hand,
+        placing: main.clone(),
+        orientation,
+    };
+    // Read the world facts before taking the predictor's own resource guard,
+    // same reason `PlacementFacts` gives — but here there is only ever one
+    // guard (`placement`, already held as a system parameter), so the two
+    // reads are already disjoint by construction rather than by ordering.
+    let decision = placement.0.use_on(&ctx, &facts);
+    let (UseOnDecision::Interact { action }
+    | UseOnDecision::Place { action, .. }
+    | UseOnDecision::Nothing { action }) = &decision;
+    queue.0.push(action.clone());
+    queue.0.push(ClientAction::SwingArm { hand: Hand::Main });
+
+    let UseOnDecision::Place { prediction, .. } = &decision else {
+        // `Interact` (clicked cell actuates instead of placing) or `Nothing`
+        // (should not normally reach here, since every legality question
+        // `use_on` re-asks was already checked above — but the packet is
+        // honestly "sent, nothing changed locally" either way).
+        outcome.status = PlaceStatus::SentUnpredicted;
+        return;
+    };
+    let Some(state_id) = state_for_placement(&name, &states, orientation, &prediction.state) else {
+        // The census legitimately declines many placeable blocks — see
+        // `PlaceStatus::SentUnpredicted`'s own docs. The packet already went
+        // out above; there is nothing more to do.
+        outcome.status = PlaceStatus::SentUnpredicted;
+        return;
+    };
+    let pos = prediction.pos;
+    let block = [pos.x, pos.y, pos.z];
+    // The write, then the re-mesh that makes it visible — Item 2's whole
+    // point. Chunk guard taken and dropped before `remesh_around` reaches for
+    // the `TerrainMesh` resource, same rule `Sim::predict_block` follows.
+    {
+        let mut world = chunk_world.write();
+        write_predicted_block(&mut *world, block, state_id);
+    }
+    terrain.remesh_around(&chunk_world, block);
+    // The placement sound, predicted locally for the same reason
+    // `Sim::use_item_live`'s does — vanilla's own `BlockItem.place` excludes
+    // the placing player from the server's broadcast, so our copy has to come
+    // from here or not at all. Tied to `state_id` (the predicted state), not
+    // the held item, because the sound is the *placed* state's `SoundType`.
+    if let Some(sound) = lodestone_data::sound_types::sound_type(state_id)
+        && let Some(sound_name) = lodestone_data::sound_types::place_sound_name(state_id)
+        && let Some(engine) = &mut audio.0
+    {
+        engine.play_sound(
+            sound_name,
+            lodestone_model::event::SoundCategory::Block,
+            glam::Vec3::new(
+                block[0] as f32 + 0.5,
+                block[1] as f32 + 0.5,
+                block[2] as f32 + 0.5,
+            ),
+            sound.break_or_place_volume(),
+            sound.break_or_place_pitch(),
+            block_sound_seed(block, clock.ticks),
+        );
+    }
+    outcome.status = PlaceStatus::Predicted;
 }
 
 /// Registers the live-interaction half of the `GameTick`: [`send_sprint_command`]
