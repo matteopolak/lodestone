@@ -33,11 +33,17 @@ Per-subsystem detail goes in [`docs/`](./docs/README.md).
 
 ## Build and test
 
+`just` (see [`docs/task-runner.md`](./docs/task-runner.md)) is the canonical
+*command* layer — one name per raw invocation below, kept side by side so the
+recipe is never the only record of what it runs:
+
 ```bash
-cargo check --workspace --all-targets     # the health check
-cargo check --workspace --all-features --all-targets --exclude lodestone-allocbench
-cargo check -p lodestone-shell --no-default-features   # the version seam still holds
-cargo run --release                       # launch the game
+just check       # cargo check --workspace --all-targets     -- the health check
+just check-all    # cargo check --workspace --all-features --all-targets --exclude lodestone-allocbench
+just check-seam   # cargo check -p lodestone-shell --no-default-features   -- the version seam still holds
+just test         # cargo test --workspace --no-fail-fast
+just health       # all four of the above, in order
+cargo run --release                       # launch the game -- no recipe; nothing to canonicalise
 ```
 
 - **`cargo build` is NOT a health check.** It skips test targets, so a crate whose lib compiles and

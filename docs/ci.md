@@ -208,17 +208,24 @@ future agent doesn't have to re-derive them:
 
 Run the exact failing job's command from `.github/workflows/ci.yml`. All five
 are plain `cargo`/`xtask` invocations with no hidden environment beyond the
-toolchain pin and (for anything workspace-wide) `libasound2-dev`/`pkg-config`:
+toolchain pin and (for anything workspace-wide) `libasound2-dev`/`pkg-config`.
+The first four have a `just` recipe (see
+[`docs/task-runner.md`](./task-runner.md)) that runs the identical command —
+named here first, raw command beside it as the definition:
 
 ```bash
 # whichever job went red
-cargo check --workspace --all-targets
-cargo check --workspace --all-features --all-targets --exclude lodestone-allocbench
-cargo check -p lodestone-shell --no-default-features
+just check       # cargo check --workspace --all-targets
+just check-all    # cargo check --workspace --all-features --all-targets --exclude lodestone-allocbench
+just check-seam   # cargo check -p lodestone-shell --no-default-features
 cargo run -p xtask -- check-isolation
 cargo run -p xtask -- check-deletable v770   # or v47 / v340 / v735
-cargo test --workspace --no-fail-fast
+just test         # cargo test --workspace --no-fail-fast
 ```
+
+The `xtask-structural-checks` job's two commands have no dedicated recipe —
+`just xtask check-isolation` and `just xtask check-deletable v770` run them
+through the same `--target-dir`-carrying expansion as everything else.
 
 If `test` is red locally but was green in CI (or vice versa), the likely
 cause is **local `.cache/`/`vendor/` presence**: a dev checkout that has run
