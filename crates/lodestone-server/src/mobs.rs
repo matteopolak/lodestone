@@ -438,17 +438,25 @@ fn attr(attrs: &AttributeMap, path: &str) -> f64 {
 }
 
 /// The health and combat-stat defaults for a mob type: `(max_health,
-/// attack_damage, defenses)`.
+/// attack_damage, defenses, knockback_resistance)`.
 ///
 /// Folds through [`default_attributes`] when `entity_type` is one of the
 /// vanilla templates that module knows (the zombie family, skeleton family,
 /// creeper, spider, and the common animals); for anything else it falls back
 /// to an empty [`AttributeMap`], whose [`AttributeMap::value`] already resolves
 /// every path to the generic `RangedAttribute` default (`max_health` 20,
-/// `attack_damage` 2, no armor) — the same "unknown type gets the generic
-/// default, never a guess" shape [`resolve_mob_shape`](crate::resolve_mob_shape)
-/// uses for census geometry.
-fn combat_defaults(entity_type: &ResourceKey) -> (f32, f32, Defenses) {
+/// `attack_damage` 2, no armor, no knockback resistance) — the same "unknown
+/// type gets the generic default, never a guess" shape
+/// [`resolve_mob_shape`](crate::resolve_mob_shape) uses for census geometry.
+///
+/// `knockback_resistance` (`minecraft:knockback_resistance`, registry default
+/// `0.0`) is read here rather than folded into [`Defenses`] because it is a
+/// *physics* property — `lodestone_physics::knockback::knockback_impulse`'s
+/// own `knockback_resistance` parameter — not a damage-reduction one;
+/// `Defenses` is exhaustively the damage pipeline's own fields (see
+/// `lodestone_entity::damage`'s module doc, "knockback impulse... `impl-physics`
+/// builds the knockback velocity from the other side").
+fn combat_defaults(entity_type: &ResourceKey) -> (f32, f32, Defenses, f64) {
     let attrs = default_attributes(entity_type).unwrap_or_else(AttributeMap::new);
     let max_health = attr(&attrs, "max_health") as f32;
     let attack_damage = attr(&attrs, "attack_damage") as f32;
@@ -457,7 +465,8 @@ fn combat_defaults(entity_type: &ResourceKey) -> (f32, f32, Defenses) {
         armor_toughness: attr(&attrs, "armor_toughness") as f32,
         ..Defenses::default()
     };
-    (max_health, attack_damage, defenses)
+    let knockback_resistance = attr(&attrs, "knockback_resistance");
+    (max_health, attack_damage, defenses, knockback_resistance)
 }
 
 /// Resolves a species' body from the real 26.2 dimension census, folded with
@@ -546,6 +555,12 @@ pub struct SimMob<'w> {
     /// `Vec3` (which only drives movement — the goal/navigation seam has no
     /// entity identity, just positions).
     attack_target_id: Option<i32>,
+    /// `minecraft:knockback_resistance` attribute value (`0.0..=1.0`),
+    /// `lodestone_physics::knockback::knockback_impulse`'s own
+    /// `knockback_resistance` parameter for a hit landing on *this* mob. See
+    /// [`combat_defaults`]'s doc comment for why this is not folded into
+    /// [`Defenses`].
+    knockback_resistance: f64,
 }
 
 impl<'w> SimMob<'w> {
@@ -622,6 +637,26 @@ impl<'w> SimMob<'w> {
     #[must_use]
     pub fn defenses(&self) -> &Defenses {
         &self.defenses
+    }
+
+    /// Overrides this mob's `minecraft:knockback_resistance` value in place
+    /// of the type's default resolved at spawn.
+    pub fn set_knockback_resistance(&mut self, knockback_resistance: f64) -> &mut Self {
+        self.knockback_resistance = knockback_resistance;
+        self
+    }
+
+    /// This mob's current `minecraft:knockback_resistance` value.
+    #[must_use]
+    pub fn knockback_resistance(&self) -> f64 {
+        self.knockback_resistance
+    }
+
+    /// Applies a velocity impulse to this mob — see
+    /// [`NavigatingMob::apply_knockback`] for the exact one-tick-displacement
+    /// mechanic this forwards to.
+    pub fn apply_knockback(&mut self, impulse: Vec3) {
+        self.mob.apply_knockback(impulse);
     }
 
     /// Runs the full vanilla hit pipeline against this mob for one incoming
@@ -794,6 +829,25 @@ struct ItemState {
     motion: ItemMotion,
 }
 
+/// The result of [`MobSim::attack`] resolving a melee hit against a live mob.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AttackOutcome {
+    /// The target's remaining health after the hit (`0.0` if it died).
+    pub health: f32,
+    /// Whether this hit reduced health to `0.0` and removed the mob from the
+    /// sim.
+    pub killed: bool,
+    /// Damage that actually reached health — `0.0` if the hit was fully
+    /// ignored by the invulnerability-frame gate, matching
+    /// [`SimMob::apply_damage`]'s own return convention.
+    pub damage_dealt: f32,
+    /// The target's velocity after knockback (unchanged from its pre-hit
+    /// value whenever the call's `knockback_power` was `<= 0.0`), in
+    /// blocks/tick — ready to encode on the next
+    /// [`snapshots`](MobSim::snapshots) call.
+    pub velocity: Vec3,
+}
+
 /// The server-side mob simulation: owns the live mobs and advances them.
 ///
 /// The [`ChunkWorld`] is borrowed (the mobs path over it), so the caller holds
@@ -900,7 +954,8 @@ impl<'w> MobSim<'w> {
     ) -> &mut SimMob<'w> {
         let id = self.next_id;
         self.next_id += 1;
-        let (max_health, attack_damage, defenses) = combat_defaults(&entity_type);
+        let (max_health, attack_damage, defenses, knockback_resistance) =
+            combat_defaults(&entity_type);
         self.mobs.push(SimMob {
             id,
             mob: NavigatingMob::new(self.world, shape, pos, step_per_tick, visited_budget),
@@ -915,6 +970,7 @@ impl<'w> MobSim<'w> {
             attack_damage,
             hurt_cooldown: HurtCooldown::default(),
             attack_target_id: None,
+            knockback_resistance,
         });
         self.mobs.last_mut().expect("just pushed")
     }
@@ -1092,6 +1148,94 @@ impl<'w> MobSim<'w> {
         dealt
     }
 
+    /// Resolves a melee attack against a live mob: runs the damage pipeline
+    /// ([`SimMob::apply_damage`]) and, if `knockback_power` is positive, the
+    /// knockback impulse
+    /// ([`lodestone_physics::knockback::knockback_impulse`]), writing both
+    /// straight into the target's own state so the very next
+    /// [`snapshots`](Self::snapshots) call — and therefore the next entity
+    /// packet any connection tracking this mob receives — carries the
+    /// result. This is issue #12's actual missing hop: `SimMob::apply_damage`
+    /// already existed and was already correct, reached only by AI-driven
+    /// `MeleeAttackGoal` hits and explosions; this is the first path a
+    /// *player's* attack can reach it through.
+    ///
+    /// `attacker_pos` supplies the knockback *direction* only (the horizontal
+    /// vector from attacker to target) — see `crate::server::apply_attack`'s
+    /// own doc comment for why this substitutes for
+    /// `lodestone_physics::knockback::attack_direction`'s real
+    /// attacker-facing formula (nothing server-side tracks player rotation
+    /// yet) and for why that is a materially smaller divergence than it
+    /// sounds: a melee attack requires the crosshair to already be on the
+    /// target, so facing and attacker→target are nearly always the same
+    /// vector in practice.
+    ///
+    /// A mob's own [`NavigatingMob`] follower has no ground-contact state
+    /// (see that struct's own doc comment: "kinematic... not the physics
+    /// integrator" — it always snaps to its waypoint's floor), so this always
+    /// takes `knockback_impulse`'s grounded branch (the `0.4`-capped vertical
+    /// hop), matching the common case of a hit landing on a walking mob.
+    ///
+    /// Returns `None` if `target_id` names no live mob. Returns `Some` for
+    /// every resolved hit, including a fully-ignored one (still inside
+    /// i-frames — see [`AttackOutcome::damage_dealt`]) so a caller can always
+    /// tell "no such mob" from "hit landed on nothing new" without a second
+    /// lookup. A killing blow removes the mob from the sim immediately
+    /// (vanilla's own immediate death removal — the same behaviour
+    /// [`tick`](Self::tick)'s own end-of-tick retain already gives an
+    /// AI-driven kill), not deferred to the next [`tick`](Self::tick).
+    pub fn attack(
+        &mut self,
+        target_id: i32,
+        attacker_pos: Vec3,
+        raw_damage: f32,
+        flags: DamageFlags,
+        knockback_power: f64,
+    ) -> Option<AttackOutcome> {
+        let (health, velocity, damage_dealt) = {
+            let mob = self.get_mut(target_id)?;
+            let damage_dealt = mob.apply_damage(raw_damage, flags);
+            if knockback_power > 0.0 && mob.health() > 0.0 {
+                let target_pos = mob.position();
+                let dx = target_pos.x - attacker_pos.x;
+                let dz = target_pos.z - attacker_pos.z;
+                let v = mob.velocity();
+                let new_velocity = lodestone_physics::knockback::knockback_impulse(
+                    lodestone_physics::geometry::Vec3d { x: v.x, y: v.y, z: v.z },
+                    true, // always the grounded branch — see this method's own doc comment.
+                    knockback_power,
+                    dx,
+                    dz,
+                    mob.knockback_resistance(),
+                    // A degenerate (attacker and target share an exact
+                    // horizontal position) direction is possible here, unlike
+                    // `attack_direction`'s facing-derived one — see
+                    // `knockback_impulse`'s own doc comment. A fixed,
+                    // deterministic non-degenerate fallback (rather than a
+                    // threaded RNG this call site has no source for) is
+                    // sufficient: it only ever fires on that one pathological
+                    // input, and `knockback_impulse`'s own test
+                    // (`knockback_loops_the_jitter_until_a_non_degenerate_direction_lands`)
+                    // already proves a single non-degenerate draw is enough
+                    // to terminate the loop.
+                    || (1.0, 0.0),
+                );
+                mob.apply_knockback(Vec3::new(new_velocity.x, new_velocity.y, new_velocity.z));
+            }
+            (mob.health(), mob.velocity(), damage_dealt)
+        };
+        let killed = health <= 0.0;
+        if killed {
+            self.mobs.retain(|m| m.id != target_id);
+        }
+        Some(AttackOutcome {
+            health,
+            killed,
+            damage_dealt,
+            velocity,
+        })
+    }
+
     /// The number of live mobs.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -1108,6 +1252,20 @@ impl<'w> MobSim<'w> {
     #[must_use]
     pub fn get(&self, id: i32) -> Option<&SimMob<'w>> {
         self.mobs.iter().find(|m| m.id == id)
+    }
+
+    /// A mob by id, mutably, if present.
+    pub fn get_mut(&mut self, id: i32) -> Option<&mut SimMob<'w>> {
+        self.mobs.iter_mut().find(|m| m.id == id)
+    }
+
+    /// The world this sim's mobs path over. Exposed so a caller holding only
+    /// a `&mut MobSim` (e.g. [`MobHandle::with`]) can still reach terrain —
+    /// see [`seed_demo_mobs`]'s use of this to resolve spawn-surface Y
+    /// without a second, separately-threaded `&ChunkWorld` parameter.
+    #[must_use]
+    pub(crate) fn world(&self) -> &'w ChunkWorld {
+        self.world
     }
 
     /// The position of the mob with `id`, if present.
@@ -1417,6 +1575,116 @@ impl LiveMobSource {
     }
 }
 
+/// A shared, mutation-capable handle onto one live [`MobSim`] — the
+/// counterpart [`crate::BlockEntityHandle`] already established for block
+/// entities, and the exact piece issue #12's own combat census named as
+/// missing: *"there is no way to reach a live mob's health from a
+/// connection's own task... `MobSim` is ticked entirely inside its own
+/// background task and is never wrapped in a shared, lockable handle."*
+/// [`LiveMobSource`] is deliberately read-only (a snapshot cache for
+/// streaming, fed *by* the tick loop); this is the mutation-capable sibling a
+/// connection needs to actually damage/knock back a mob a player attacked —
+/// see `crate::server::apply_attack`, its one production caller.
+///
+/// # Why `MobSim<'static>`, and the leak that produces it
+///
+/// [`MobSim`] borrows its [`ChunkWorld`] (`MobSim<'w>`), but a handle shared
+/// with a separately-`tokio::spawn`ed connection task must be `'static` (that
+/// is what `tokio::spawn` requires of everything it captures). [`new`](Self::new)
+/// resolves this with [`Box::leak`]: the `ChunkWorld` a caller hands in is
+/// leaked once, for the process's remaining lifetime, rather than borrowed
+/// for one task's own stack frame the way [`run_mob_tick_loop`]'s previous
+/// (pre-handle) implementation did.
+///
+/// This is a **deliberate, bounded** leak, not an oversight.
+/// `run_mob_tick_loop`'s own doc comment already discloses that its
+/// `ChunkWorld` snapshot is static for the sim's whole lifetime — a fixed
+/// area around the mob-spawn center, never widened after the initial load.
+/// Leaking it only changes *whose* lifetime "static" is measured against:
+/// "static for this one task" becomes "static for the process" — the same
+/// bytes, held slightly longer, for the one [`MobSim`] a running
+/// [`crate::IntegratedServer`] ever constructs per call to
+/// [`open_in_memory_with_mobs`](crate::IntegratedServer::open_in_memory_with_mobs).
+/// A caller that constructs many short-lived handles (e.g. one per test) does
+/// leak once per handle — acceptable for a bounded terrain snapshot in a
+/// process that exits shortly after, the same trade-off `MobSim`'s own
+/// `assert_send::<MobSim<'static>>()` const-check already anticipated by
+/// name.
+#[derive(Debug, Clone)]
+pub struct MobHandle(Arc<Mutex<MobSim<'static>>>);
+
+impl Default for MobHandle {
+    /// A handle over an empty, mobless sim backed by a tiny leaked
+    /// [`ChunkWorld`] — the "nothing ticks it, but it is real and safe to
+    /// attack against" default [`crate::BlockEntityHandle::default`] already
+    /// establishes for connections built without a live mob population
+    /// (`IntegratedServer::open_in_memory`/`open_in_memory_with_entities`/`bind`).
+    /// An `Attack` packet against any entity id here simply finds no mob
+    /// ([`MobSim::attack`] returns `None`) — a harmless no-op, never a panic.
+    fn default() -> Self {
+        Self::new(ChunkWorld::new(-64, 384))
+    }
+}
+
+impl MobHandle {
+    /// Builds a handle over a fresh, empty [`MobSim`] backed by a leaked copy
+    /// of `world` — see the struct's own doc comment for why leaking is the
+    /// deliberate choice here.
+    #[must_use]
+    pub fn new(world: ChunkWorld) -> Self {
+        let world: &'static ChunkWorld = Box::leak(Box::new(world));
+        Self(Arc::new(Mutex::new(MobSim::new(world))))
+    }
+
+    /// Builds a handle already seeded with [`seed_demo_mobs`]'s baseline
+    /// population, snapshotting `world_source` the same way the previous
+    /// (pre-handle) `run_mob_tick_loop` did at the top of its own future —
+    /// see that function's doc comment for the `cx_range`/`cz_range`/
+    /// `mob_center` scope notes, unchanged by this refactor.
+    #[must_use]
+    pub fn seeded<S: ChunkSource>(
+        world_source: &S,
+        cx_range: std::ops::RangeInclusive<i32>,
+        cz_range: std::ops::RangeInclusive<i32>,
+        center_x: i32,
+        center_z: i32,
+        mob_count: usize,
+    ) -> Self {
+        let world = ChunkWorld::from_source(world_source, cx_range, cz_range);
+        let handle = Self::new(world);
+        handle.with(|sim| {
+            // See `MobSim::set_next_id`'s own doc comment: id `1` collides
+            // with `LOCAL_PLAYER_ENTITY_ID` on the wire.
+            sim.set_next_id(1000);
+            seed_demo_mobs(sim, center_x, center_z, mob_count);
+        });
+        handle
+    }
+
+    /// Runs `f` against the locked sim, returning its result — the same
+    /// funnel-every-access shape [`crate::BlockEntityHandle::with`]
+    /// established, for the identical "no caller can forget to handle a
+    /// poisoned lock inconsistently" reason.
+    pub fn with<R>(&self, f: impl FnOnce(&mut MobSim<'static>) -> R) -> R {
+        let mut guard = self.0.lock().expect("mob sim lock poisoned");
+        f(&mut guard)
+    }
+}
+
+impl EntitySource for MobHandle {
+    /// A `MobHandle` is a legitimate [`EntitySource`] all on its own — no
+    /// separate [`LiveMobSource`] cache required — for any caller that mutates
+    /// the sim directly and does not also need a background
+    /// [`run_mob_tick_loop`] republishing it on a timer. Production
+    /// (`IntegratedServer::open_in_memory_with_mobs`) still layers
+    /// [`LiveMobSource`] on top so the tick loop's own AI motion reaches the
+    /// wire on its own cadence; a test that only cares about a hand-placed,
+    /// unticked mob (e.g. an attack test) can use the handle directly instead.
+    fn snapshots(&self) -> Vec<EntitySnapshot> {
+        self.with(|sim| sim.snapshots())
+    }
+}
+
 /// The highest solid-block Y at `(x, z)` within `world`'s loaded vertical
 /// range, or `None` if the whole column reads air (or is unloaded) — the
 /// ground a freshly seeded mob should stand on. A linear scan from the top
@@ -1441,7 +1709,8 @@ fn surface_y(world: &ChunkWorld, x: i32, z: i32) -> Option<i32> {
 /// purely so issue #217's actual subject — computed AI motion reaching the
 /// wire — has a population to move; a caller that wants real spawning wires
 /// [`MobSim::run_spawn_cycle`] in its place once a real source exists.
-fn seed_demo_mobs(sim: &mut MobSim<'_>, world: &ChunkWorld, center_x: i32, center_z: i32, count: usize) {
+fn seed_demo_mobs(sim: &mut MobSim<'_>, center_x: i32, center_z: i32, count: usize) {
+    let world = sim.world();
     let zombie = ResourceKey::from_str("minecraft:zombie").expect("static key is valid");
     for i in 0..count.max(1) {
         let angle = (i as f64) * std::f64::consts::TAU / (count.max(1) as f64);
@@ -1458,31 +1727,32 @@ fn seed_demo_mobs(sim: &mut MobSim<'_>, world: &ChunkWorld, center_x: i32, cente
     }
 }
 
-/// Native tick-loop driver for issue #217: owns a [`ChunkWorld`] snapshot and
-/// a seeded [`MobSim`] for the lifetime of the returned future, ticking it
-/// once every [`MOB_TICK_INTERVAL`] and republishing snapshots to `out` after
-/// every tick.
+/// Native tick-loop driver for issue #217: ticks the live [`MobSim`] behind
+/// `handle` once every [`MOB_TICK_INTERVAL`], forever, republishing snapshots
+/// to `out` after every tick.
 ///
-/// `world_source` supplies the terrain the mobs path over. It is intended to
-/// be a **second, independent instance** of whatever [`ChunkSource`] the
-/// paired connection is also streaming terrain from — not the same shared
-/// value — because this future needs to *own* a `'static` snapshot for its
-/// whole lifetime (`ChunkWorld::from_source` copies the requested columns out
-/// once, up front) while the connection's own `source` is moved into a
-/// different, independently-spawned task. Every `ChunkSource` this crate
-/// ships (`OverworldChunkSource`, `WorldgenChunkSource`) is a pure function of
-/// its construction parameters/seed, so two instances built the same way
-/// produce identical terrain — this is two handles onto the same
-/// deterministic world, not two different worlds.
+/// # Issue #12 update: `handle` is now shared, not owned
 ///
-/// # Scope cuts, explicit
+/// This function used to build its own `ChunkWorld`/`MobSim` locally (borrowed
+/// for its own stack frame) — the reason a connection could never reach a
+/// live mob's health, per this module's own combat-census history. It now
+/// takes a pre-built [`MobHandle`] instead ([`MobHandle::seeded`] is the
+/// direct replacement for what this function used to do at its own top,
+/// including the `set_next_id(1000)`/[`seed_demo_mobs`] seeding), so the
+/// exact same [`MobSim`] this loop ticks is also the one
+/// `crate::server::apply_attack` mutates through a clone of the same handle.
+/// Ticking without a shared handle would still be a closed loop — the same
+/// "computed but never reaches the wire" island issue #217 originally closed
+/// for AI motion, this time for combat.
 ///
-/// * The `ChunkWorld` snapshot loaded here is **static** for the task's whole
-///   lifetime — nothing re-queries `world_source` after the initial load, so a
-///   mob does not path across a chunk boundary that was not included in
-///   `cx_range`/`cz_range`. Widening this to grow with the player's view is
-///   future work; for a first live driver a fixed area around spawn is an
-///   honest, working scope cut rather than a silent limitation.
+/// # Scope cuts, explicit, unchanged by the above
+///
+/// * The `ChunkWorld` snapshot [`MobHandle::seeded`] loads is **static** for
+///   the handle's whole lifetime — nothing re-queries the original
+///   `world_source` after the initial load, so a mob does not path across a
+///   chunk boundary outside the area it was seeded with. Widening this to
+///   grow with the player's view is future work; a fixed area around spawn is
+///   an honest, working scope cut rather than a silent limitation.
 /// * No natural spawning — see [`seed_demo_mobs`]'s own doc comment.
 /// * No despawn pass (`MobSim::despawn_pass` needs a player position this
 ///   task has no way to learn; it is not plumbed through
@@ -1497,30 +1767,13 @@ fn seed_demo_mobs(sim: &mut MobSim<'_>, world: &ChunkWorld, center_x: i32, cente
 /// therefore gets no live mob sim yet, exactly the same kind of documented gap
 /// `PlayerVitals` already has on that target.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) async fn run_mob_tick_loop<S: ChunkSource>(
-    world_source: S,
-    cx_range: std::ops::RangeInclusive<i32>,
-    cz_range: std::ops::RangeInclusive<i32>,
-    center_x: i32,
-    center_z: i32,
-    mob_count: usize,
-    out: LiveMobSource,
-) {
-    let world = ChunkWorld::from_source(&world_source, cx_range, cz_range);
-    let mut sim = MobSim::new(&world);
-    // See `set_next_id`'s own doc comment: id `1` is `LOCAL_PLAYER_ENTITY_ID`
-    // on the wire (v770's, and plausibly any future protocol's own "self" id
-    // — starting well clear of the low reserved range is the safe default
-    // regardless), so mob ids start at 1000 rather than `MobSim::new`'s
-    // hermetic-test-facing default of `1`.
-    sim.set_next_id(1000);
-    seed_demo_mobs(&mut sim, &world, center_x, center_z, mob_count);
+pub(crate) async fn run_mob_tick_loop(handle: MobHandle, out: LiveMobSource) {
     // `snapshots()`, not `sim.iter().map(SimMob::snapshot)`: the latter only
     // ever lowered mobs, so a projectile or dropped item registered on this
     // `sim` (issues #211/#215) would tick correctly and still never reach
     // `LiveMobSource` — ticking without publishing is still an island, just
     // one hop further along.
-    out.publish(sim.snapshots());
+    out.publish(handle.with(|sim| sim.snapshots()));
 
     // 50ms, matching vanilla's 20 TPS and this crate's own `VITALS_TICK_INTERVAL`
     // (`server.rs`) — kept as a local constant rather than sharing that one
@@ -1531,7 +1784,7 @@ pub(crate) async fn run_mob_tick_loop<S: ChunkSource>(
     let mut tick = tokio::time::interval(MOB_TICK_INTERVAL);
     loop {
         tick.tick().await;
-        sim.tick();
-        out.publish(sim.snapshots());
+        handle.with(MobSim::tick);
+        out.publish(handle.with(|sim| sim.snapshots()));
     }
 }

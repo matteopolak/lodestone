@@ -44,7 +44,7 @@ use tokio::sync::Notify;
 
 use crate::block_entities::{BlockEntityHandle, run_block_entity_tick_loop};
 use crate::chunk::ChunkSource;
-use crate::mobs::{LiveMobSource, run_mob_tick_loop};
+use crate::mobs::{LiveMobSource, MobHandle, run_mob_tick_loop};
 use crate::protocol::ServerProtocol;
 use crate::server::{EntitySource, NoEntities, serve_connection};
 use crate::spawn::{Task, spawn};
@@ -123,6 +123,12 @@ impl IntegratedServer {
         // advances on its own. Still real: `apply_use_item_on` can insert
         // into it and a later `CONTAINER_CLICK`/read could observe it.
         let block_entities = BlockEntityHandle::default();
+        // A fresh, mobless handle for the same reason `block_entities` above
+        // is fresh-and-empty: nothing ticks it here, only
+        // `open_in_memory_with_mobs` seeds and ticks a real population. An
+        // `Attack` packet against any id through this constructor simply
+        // finds no mob (see `MobHandle::default`'s own doc comment).
+        let mobs = MobHandle::default();
 
         let task = spawn(async move {
             let mut conn = Connection::new(server_end);
@@ -131,7 +137,7 @@ impl IntegratedServer {
             // thus the client's read side) is dropped on the way out.
             tokio::select! {
                 _ = signal.notified() => {}
-                _ = serve_connection(&mut conn, &protocol, &source, &entities, view_radius, &block_entities) => {}
+                _ = serve_connection(&mut conn, &protocol, &source, &entities, view_radius, &block_entities, &mobs) => {}
             }
         });
 
@@ -191,30 +197,46 @@ impl IntegratedServer {
     {
         let (client_end, server_end) = memory_pair();
         let shutdown = Arc::new(Notify::new());
-        let mobs = LiveMobSource::default();
-        // Shared with the tick task spawned below, the same way `mobs` is —
-        // this is the constructor `docs/block-entities.md` named as the one
-        // with somewhere to hang a `run_block_entity_tick_loop` off of.
+        let live_mobs = LiveMobSource::default();
+        // Shared with the tick task spawned below, the same way `live_mobs`
+        // is — this is the constructor `docs/block-entities.md` named as the
+        // one with somewhere to hang a `run_block_entity_tick_loop` off of.
         let block_entities = BlockEntityHandle::default();
+        // Issue #12: built *synchronously*, here, before either task spawns —
+        // not inside `run_mob_tick_loop`'s own future the way the pre-handle
+        // version built its `ChunkWorld`/`MobSim` — so the exact same handle
+        // (cloned below) can be shared by the connection task (which mutates
+        // it on an `Attack` packet, through `crate::server::apply_attack`)
+        // and the tick-loop task (which ticks and republishes it). See
+        // `MobHandle`'s own doc comment for why this is `'static`-safe.
+        let (cx_range, cz_range) = mob_area;
+        let (center_x, center_z) = mob_center;
+        let mob_handle = MobHandle::seeded(
+            &world_source,
+            cx_range,
+            cz_range,
+            center_x,
+            center_z,
+            mob_count,
+        );
 
         let conn_signal = shutdown.clone();
-        let conn_entities = mobs.clone();
+        let conn_entities = live_mobs.clone();
         let conn_block_entities = block_entities.clone();
+        let conn_mobs = mob_handle.clone();
         let task = spawn(async move {
             let mut conn = Connection::new(server_end);
             tokio::select! {
                 _ = conn_signal.notified() => {}
-                _ = serve_connection(&mut conn, &protocol, &source, &conn_entities, view_radius, &conn_block_entities) => {}
+                _ = serve_connection(&mut conn, &protocol, &source, &conn_entities, view_radius, &conn_block_entities, &conn_mobs) => {}
             }
         });
 
         let sim_signal = shutdown.clone();
-        let (cx_range, cz_range) = mob_area;
-        let (center_x, center_z) = mob_center;
         let mob_task = spawn(async move {
             tokio::select! {
                 _ = sim_signal.notified() => {}
-                _ = run_mob_tick_loop(world_source, cx_range, cz_range, center_x, center_z, mob_count, mobs) => {}
+                _ = run_mob_tick_loop(mob_handle, live_mobs) => {}
             }
         });
 
@@ -276,8 +298,12 @@ impl IntegratedServer {
         // `block_entity_task` doc comment for why only the mobs constructor
         // does that); a block entity placed over LAN exists and holds state
         // but does not advance on its own, the same real-but-static gap
-        // `open_in_memory_with_entities` has.
+        // `open_in_memory_with_entities` has. Same reasoning for `mobs`: no
+        // live population over LAN via this constructor, but an `Attack`
+        // packet against it is still safe (see `MobHandle::default`'s own
+        // doc comment) rather than a special-cased no-op path.
         let block_entities = BlockEntityHandle::default();
+        let mobs = MobHandle::default();
 
         let task = spawn(async move {
             loop {
@@ -288,6 +314,7 @@ impl IntegratedServer {
                         let protocol = protocol.clone();
                         let source = source.clone();
                         let block_entities = block_entities.clone();
+                        let mobs = mobs.clone();
                         // Fire-and-forget: route through the same `spawn` seam so
                         // all task spawning stays confined to `crate::spawn`, and
                         // detach by dropping the returned handle (a tokio
@@ -296,7 +323,7 @@ impl IntegratedServer {
                             let mut conn = Connection::new(socket);
                             let _ = serve_connection(
                                 &mut conn, &*protocol, &*source, &NoEntities, view_radius,
-                                &block_entities,
+                                &block_entities, &mobs,
                             )
                             .await;
                         }));

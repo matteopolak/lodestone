@@ -18,6 +18,11 @@ lodestone-worldgen = { path = "../lodestone-worldgen" }
 # `lodestone-model` + `uuid`, so this adds no version/protocol coupling and no
 # dependency cycle (entity never depends on server).
 lodestone-entity = { path = "../lodestone-entity" }
+# `knockback::{knockback_impulse, attack_direction}` — the melee knockback
+# velocity mechanic (issue #12). Zero dependencies of its own (see that
+# crate's own `Cargo.toml`), so this adds no cycle: `lodestone-entity` does
+# not depend on it, only `lodestone-server` reaches for both.
+lodestone-physics = { path = "../lodestone-physics" }
 lodestone-model = { path = "../lodestone-model" }
 # The 26.2 per-block-state game-data censuses (`path_types`, `block_states`,
 # `collision_shapes`, ...). This depends on nothing but `lodestone-model` (see

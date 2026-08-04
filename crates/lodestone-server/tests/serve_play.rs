@@ -38,8 +38,8 @@ use lodestone_core::{Reader, State, Writer};
 use lodestone_model::Difficulty;
 use lodestone_net::{Connection, NetError, memory_pair};
 use lodestone_server::{
-    BlockEntityHandle, ChunkColumn, ChunkSource, NoEntities, ServerBound, ServerDirective,
-    ServerError, ServerProtocol, serve_connection,
+    BlockEntityHandle, ChunkColumn, ChunkSource, MobHandle, NoEntities, ServerBound,
+    ServerDirective, ServerError, ServerProtocol, serve_connection,
 };
 use tokio::io::DuplexStream;
 use uuid::Uuid;
@@ -441,7 +441,7 @@ async fn silent_client_is_disconnected_after_keep_alive_timeout() {
 
     let server = tokio::spawn(async move {
         let mut conn = Connection::new(server_end);
-        serve_connection(&mut conn, &FakeProtocol, &source, &NoEntities, 0, &BlockEntityHandle::default())
+        serve_connection(&mut conn, &FakeProtocol, &source, &NoEntities, 0, &BlockEntityHandle::default(), &MobHandle::default())
             .await
     });
 
@@ -470,7 +470,7 @@ async fn responsive_client_survives_multiple_keep_alive_intervals() {
 
     let server = tokio::spawn(async move {
         let mut conn = Connection::new(server_end);
-        serve_connection(&mut conn, &FakeProtocol, &source, &NoEntities, 0, &BlockEntityHandle::default())
+        serve_connection(&mut conn, &FakeProtocol, &source, &NoEntities, 0, &BlockEntityHandle::default(), &MobHandle::default())
             .await
     });
 
@@ -516,7 +516,7 @@ async fn time_of_day_anchors_at_join_then_broadcasts_periodically() {
 
     let server = tokio::spawn(async move {
         let mut conn = Connection::new(server_end);
-        serve_connection(&mut conn, &FakeProtocol, &source, &NoEntities, 0, &BlockEntityHandle::default())
+        serve_connection(&mut conn, &FakeProtocol, &source, &NoEntities, 0, &BlockEntityHandle::default(), &MobHandle::default())
             .await
     });
 
@@ -596,6 +596,7 @@ async fn player_moved_streams_view_across_several_chunk_boundaries() {
             &NoEntities,
             view_radius,
             &BlockEntityHandle::default(),
+            &MobHandle::default(),
         )
         .await
     });
@@ -689,7 +690,7 @@ async fn submerged_player_loses_air_and_takes_drowning_damage_on_vanilla_cadence
 
     let server = tokio::spawn(async move {
         let mut conn = Connection::new(server_end);
-        serve_connection(&mut conn, &FakeProtocol, &source, &NoEntities, 0, &BlockEntityHandle::default())
+        serve_connection(&mut conn, &FakeProtocol, &source, &NoEntities, 0, &BlockEntityHandle::default(), &MobHandle::default())
             .await
     });
 
@@ -760,7 +761,7 @@ async fn dry_player_keeps_full_air_and_takes_no_damage() {
 
     let server = tokio::spawn(async move {
         let mut conn = Connection::new(server_end);
-        serve_connection(&mut conn, &FakeProtocol, &source, &NoEntities, 0, &BlockEntityHandle::default())
+        serve_connection(&mut conn, &FakeProtocol, &source, &NoEntities, 0, &BlockEntityHandle::default(), &MobHandle::default())
             .await
     });
 
@@ -799,7 +800,7 @@ async fn difficulty_change_is_confirmed_back_to_the_connection() {
 
     let server = tokio::spawn(async move {
         let mut conn = Connection::new(server_end);
-        serve_connection(&mut conn, &FakeProtocol, &source, &NoEntities, 0, &BlockEntityHandle::default())
+        serve_connection(&mut conn, &FakeProtocol, &source, &NoEntities, 0, &BlockEntityHandle::default(), &MobHandle::default())
             .await
     });
 

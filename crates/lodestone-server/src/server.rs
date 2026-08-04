@@ -13,13 +13,15 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use lodestone_core::State;
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack};
+use lodestone_entity::DamageFlags;
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, Vec3};
 use lodestone_net::{Connection, NetError, Transport};
 
 use crate::block_entities::{BlockEntity, BlockEntityHandle, block_entity_for_item};
 use crate::chunk::{AIR, ChunkSource, STONE, is_air_or_fluid, is_water};
 use crate::fall::FallTracker;
 use crate::inventory::{ContainerMenuSlot, PlayerInventory, container_menu_slot};
+use crate::mobs::MobHandle;
 use crate::protocol::{EntitySnapshot, ServerBound, ServerDirective, ServerProtocol};
 use crate::vitals::{EYE_HEIGHT, PlayerVitals};
 
@@ -57,6 +59,39 @@ const TIME_SYNC_INTERVAL: Duration = Duration::from_millis(1_000);
 /// per-tick server loop.
 #[cfg(not(target_arch = "wasm32"))]
 const MILLIS_PER_TICK: u128 = 50;
+
+/// A bare-handed player's raw melee damage — `Player.createAttributes()`'s
+/// own `.add(Attributes.ATTACK_DAMAGE, 1.0)` (`.cache/mc/26.2/src/net/
+/// minecraft/world/entity/player/Player.java:208`), **not**
+/// `LivingEntity`'s generic `RangedAttribute` default of `2.0` a player would
+/// otherwise inherit. This crate has no item/weapon-attribute model for the
+/// player (`lodestone_entity::damage`'s own module doc already names this gap
+/// for #261), so every hit uses this constant regardless of what is in the
+/// main hand — the same "no per-item census, no cooldown ticker" scope
+/// `docs/combat.md`'s attack-strength section already discloses for the
+/// client side. `Player.attack`'s `baseDamageScaleFactor()` (cooldown-scaled
+/// damage) is also not modelled here for the identical reason: no
+/// server-tracked attack-strength ticker to read, so every hit is treated as
+/// full-strength (`damage.rs`'s own module doc: "no attack-cooldown timer...
+/// exists server-side").
+const PLAYER_BARE_HAND_ATTACK_DAMAGE: f32 = 1.0;
+
+/// The melee knockback-bonus power a **sprinting** attacker's hit applies,
+/// matching `Player.attack`'s `knockbackAttack` bonus exactly:
+/// `causeExtraKnockback(entity, this.getKnockback(entity, damageSource) +
+/// (knockbackAttack ? 0.5F : 0.0F), ...)` (`Player.java:987-988`), where
+/// `knockbackAttack = this.isSprinting() && fullStrengthAttack`
+/// (`Player.java:963-966`). `getKnockback` itself resolves to the attacker's
+/// `minecraft:attack_knockback` attribute (registry default `0.0`,
+/// `Attributes.java:18`) — `0.0` for a bare-handed player, since this crate
+/// has no weapon/enchantment model to add to it — so a **non-sprinting**
+/// attack's total knockback power is exactly `0.0`. That is not a
+/// placeholder: it is the literal jar formula for the one case this crate can
+/// currently model (no weapon, no server-tracked attack-cooldown ticker so
+/// every hit reads as full-strength), and it is why
+/// [`apply_attack`] passes `0.0` unconditionally for a non-sprinting attacker
+/// and this constant only for a sprinting one.
+const SPRINT_ATTACK_KNOCKBACK_POWER: f64 = 0.5;
 
 /// Cadence of the air-supply/drowning-damage tick ([`crate::vitals`]).
 /// Vanilla ticks `LivingEntity.baseTick`'s water-breath block once per real
@@ -347,6 +382,7 @@ async fn apply<T: Transport>(
 /// [`ServerError::ClosedBeforeLogin`] if the client hangs up before it ever
 /// reaches [`ServerBound::LoginStart`], or whatever [`serve_play`] returns
 /// once [`State::Play`] is reached.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve_connection<T, P, S, E>(
     conn: &mut Connection<T>,
     proto: &P,
@@ -354,6 +390,7 @@ pub async fn serve_connection<T, P, S, E>(
     entities: &E,
     view_radius: i32,
     block_entities: &BlockEntityHandle,
+    mobs: &MobHandle,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -444,6 +481,7 @@ where
                     username,
                     chunks_sent,
                     block_entities,
+                    mobs,
                 )
                 .await;
             }
@@ -457,6 +495,8 @@ where
             | ServerBound::CarriedItemChanged { .. }
             | ServerBound::ContainerClicked { .. }
             | ServerBound::ContainerClosed { .. }
+            | ServerBound::Attack { .. }
+            | ServerBound::PlayerInput { .. }
             | ServerBound::Ignored => {}
         }
     }
@@ -1043,6 +1083,59 @@ fn apply_container_clicked(
     }
 }
 
+/// Resolves a `minecraft:attack` request (issue #12) against the live mob
+/// simulation: runs the damage pipeline and, for a sprinting attacker, the
+/// melee knockback bonus, through [`MobSim::attack`](crate::MobSim::attack).
+///
+/// **No reply packet is sent from here.** This mirrors the real wire shape —
+/// vanilla's own `ServerboundAttackPacket` has no clientbound acknowledgement
+/// — and relies on the *existing* entity-streaming pass
+/// (`EntityStreamer::sync`, called immediately after
+/// [`dispatch_play_packet`] returns, on every inbound packet including this
+/// one) to carry the result to every connection tracking the target: a
+/// knocked-back mob's new position/velocity, or its removal on a killing
+/// blow, both already flow through [`MobHandle`]'s [`EntitySource`] impl once
+/// `mobs` is the same handle [`crate::mobs::run_mob_tick_loop`] ticks and
+/// publishes from. See [`MobSim::attack`](crate::MobSim::attack)'s own doc
+/// comment for why `attacker_pos` (not a tracked player yaw — this crate
+/// tracks no player rotation at all) stands in for
+/// [`lodestone_physics::knockback::attack_direction`]'s real facing formula.
+///
+/// A connection with no tracked position yet (`player_pos` is `None` —
+/// hasn't sent a single `move_player_pos` since join) still lands the
+/// damage; only the knockback direction needs a position, so it is skipped
+/// entirely in that case (`attacker_pos` defaults to the origin and
+/// `knockback_power` is forced to `0.0`) rather than guessing one, the same
+/// "no data yet, don't guess" gate `vitals_tick`'s own submersion check
+/// already uses for a fresh session.
+///
+/// `sprinting` is this connection's last-known [`ServerBound::PlayerInput`]
+/// sprint flag — see [`SPRINT_ATTACK_KNOCKBACK_POWER`]'s own doc comment for
+/// why a non-sprinting attack's knockback power is correctly `0.0`, not a
+/// bug.
+fn apply_attack(mobs: &MobHandle, player_pos: Option<(f64, f64, f64)>, sprinting: bool, entity_id: i32) {
+    let (attacker_pos, knockback_power) = match player_pos {
+        Some((x, y, z)) => (
+            Vec3::new(x, y, z),
+            if sprinting {
+                SPRINT_ATTACK_KNOCKBACK_POWER
+            } else {
+                0.0
+            },
+        ),
+        None => (Vec3::new(0.0, 0.0, 0.0), 0.0),
+    };
+    mobs.with(|sim| {
+        sim.attack(
+            entity_id,
+            attacker_pos,
+            PLAYER_BARE_HAND_ATTACK_DAMAGE,
+            DamageFlags::default(),
+            knockback_power,
+        )
+    });
+}
+
 /// Decodes and applies one inbound packet once the connection is in
 /// [`State::Play`]: matches a keep-alive echo against the pending challenge
 /// (clearing it, so the next keep-alive tick does not mistake a live client
@@ -1076,6 +1169,8 @@ async fn dispatch_play_packet<T, P, S>(
     open_container: &mut Option<OpenContainer>,
     container_sync: &mut ContainerSync,
     next_window_id: &mut i32,
+    mobs: &MobHandle,
+    sprinting: &mut bool,
     packet_id: i32,
     payload: &[u8],
 ) -> Result<(), ServerError>
@@ -1182,6 +1277,12 @@ where
                 *container_sync = ContainerSync::default();
             }
         }
+        ServerBound::Attack { entity_id } => {
+            apply_attack(mobs, *player_pos, *sprinting, entity_id);
+        }
+        ServerBound::PlayerInput { sprint } => {
+            *sprinting = sprint;
+        }
         ServerBound::Handshake { .. }
         | ServerBound::LoginStart { .. }
         | ServerBound::LoginAcknowledged
@@ -1251,6 +1352,7 @@ async fn serve_play<T, P, S, E>(
     username: String,
     chunks_sent: usize,
     block_entities: &BlockEntityHandle,
+    mobs: &MobHandle,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -1267,6 +1369,10 @@ where
     let mut inventory = PlayerInventory::default();
     let mut open_container: Option<OpenContainer> = None;
     let mut container_sync = ContainerSync::default();
+    // This connection's last-known `ServerBound::PlayerInput` sprint flag —
+    // see `apply_attack`'s own doc comment for the one thing it feeds
+    // (the melee knockback sprint bonus).
+    let mut sprinting = false;
     // Vanilla's `ServerPlayer::nextContainerCounter` starts at `0` and the
     // very first open bumps it to `1` before use (`ServerPlayer.java:1330,
     // 1343`) — see [`open_container_screen`]'s own `% 100 + 1` wrap.
@@ -1327,6 +1433,8 @@ where
                     &mut open_container,
                     &mut container_sync,
                     &mut next_window_id,
+                    mobs,
+                    &mut sprinting,
                     packet_id,
                     &payload,
                 )
@@ -1413,6 +1521,7 @@ async fn serve_play<T, P, S, E>(
     username: String,
     chunks_sent: usize,
     block_entities: &BlockEntityHandle,
+    mobs: &MobHandle,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -1422,6 +1531,7 @@ where
 {
     let mut pending_keep_alive: Option<i64> = None;
     let mut pending_break: Option<BlockPos> = None;
+    let mut sprinting = false;
     // `player_pos`/`vitals` are tracked for parity with the native loop's
     // `dispatch_play_packet` calls (shared function, shared signature), but
     // `vitals` is only ever *ticked* by the native loop's timer, which
@@ -1468,6 +1578,8 @@ where
             &mut open_container,
             &mut container_sync,
             &mut next_window_id,
+            mobs,
+            &mut sprinting,
             packet_id,
             &payload,
         )

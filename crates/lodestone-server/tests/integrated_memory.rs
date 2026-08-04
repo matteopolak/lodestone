@@ -22,8 +22,9 @@
 use lodestone_core::{Reader, State, Writer};
 use lodestone_net::{Connection, memory_pair};
 use lodestone_server::{
-    BlockEntityHandle, ChunkColumn, ChunkSource, EntitySnapshot, EntitySource, NoEntities,
-    ServerBound, ServerDirective, ServerProtocol, WorldgenChunkSource, serve_connection,
+    BlockEntityHandle, ChunkColumn, ChunkSource, EntitySnapshot, EntitySource, MobHandle,
+    NoEntities, ServerBound, ServerDirective, ServerProtocol, WorldgenChunkSource,
+    serve_connection,
 };
 use lodestone_worldgen::density::{Builder, Density, NoiseParams, Resolver};
 use serde_json::Value;
@@ -245,6 +246,7 @@ async fn integrated_server_streams_worldgen_chunks_over_memory_transport() {
             &NoEntities,
             view_radius,
             &BlockEntityHandle::default(),
+            &MobHandle::default(),
         )
         .await
         .expect("serve")
@@ -460,6 +462,7 @@ async fn integrated_server_streams_entity_lifecycle_over_memory_transport() {
             &server_entities,
             view_radius,
             &BlockEntityHandle::default(),
+            &MobHandle::default(),
         )
         .await
         .expect("serve")

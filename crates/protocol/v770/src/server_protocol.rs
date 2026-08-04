@@ -61,7 +61,7 @@ use crate::packets::common::KeepAlive;
 use crate::packets::configuration::FinishConfiguration;
 use crate::packets::entity::{pack_degrees, write_lp_vec3};
 use crate::packets::game::{
-    ChangeDifficultyClientbound, ChangeDifficultyServerbound, GameLogin, GameRuleEntry,
+    Attack, ChangeDifficultyClientbound, ChangeDifficultyServerbound, GameLogin, GameRuleEntry,
     GameRuleValues, GlobalPos, LockDifficulty, MOVE_FLAG_ON_GROUND, MovePlayerPos,
     MovePlayerPosRot, PlayerAction, SetCarriedItem, SetDefaultSpawnPosition, SetGameRule,
     SetHealth, UseItemOn,
@@ -1098,6 +1098,32 @@ impl ServerProtocol for V770ServerProtocol {
                         sequence: use_item.sequence,
                     },
                     None => ServerBound::Ignored,
+                }
+            }
+            // Issue #12: the `Attack` packet is the whole trigger for a
+            // melee hit — see `ServerBound::Attack`'s own doc comment for why
+            // the sibling `minecraft:interact` packet is deliberately left
+            // undecoded (no interaction model to hand it to).
+            State::Play if packet_id == play::serverbound::ATTACK => {
+                match decode_full::<Attack>(payload) {
+                    Some(a) => ServerBound::Attack {
+                        entity_id: a.entity_id,
+                    },
+                    None => ServerBound::Ignored,
+                }
+            }
+            // `ServerboundPlayerInputPacket`: a single flags byte
+            // (`Input.STREAM_CODEC`, `Input.java`) — bit `0x40` is `sprint`,
+            // the only flag `ServerBound::PlayerInput` carries (see its own
+            // doc comment for why the rest are decoded off the wire here and
+            // then dropped rather than threaded further).
+            State::Play if packet_id == play::serverbound::PLAYER_INPUT => {
+                let mut r = Reader::new(payload);
+                match r.u8() {
+                    Ok(flags) if r.ensure_empty().is_ok() => ServerBound::PlayerInput {
+                        sprint: flags & 0x40 != 0,
+                    },
+                    _ => ServerBound::Ignored,
                 }
             }
             // Issue #268: world/block-admin decode. `CHANGE_DIFFICULTY`,
@@ -2172,5 +2198,130 @@ mod inventory_decode_tests {
         let body = w.into_vec();
         let decoded = proto.decode(State::Play, play::serverbound::CONTAINER_CLICK, &body);
         assert_eq!(decoded, ServerBound::Ignored);
+    }
+}
+
+/// Issue #12: decode tests for `minecraft:attack` and
+/// `minecraft:player_input`, the two packets the melee-damage/knockback
+/// pipeline depends on.
+#[cfg(test)]
+mod combat_decode_tests {
+    use super::*;
+    use lodestone_core::State;
+    use lodestone_model::{
+        ClientAction, ConnectionState, EntityInteraction, Hand, PlayerInput, VersionAdapter,
+    };
+
+    /// Round-trips through the **real client encoder**
+    /// (`ClientAction::InteractEntity { interaction: EntityInteraction::Attack,
+    /// .. }`) rather than hand-building the wire body — the same "prove the
+    /// two sides actually agree" style `decode_set_carried_item_from_real_
+    /// client_encoder` already established, and the one that matters most
+    /// here: `Sim::attack_entity` (`lodestone-shell`) already sends exactly
+    /// this action in production (`docs/combat.md`'s "Sending the attack"
+    /// section) — this is the decode side finally meeting a real producer.
+    #[test]
+    fn decode_attack_from_the_real_client_encoder() {
+        let proto = V770ServerProtocol;
+        let (packet_id, payload) = crate::adapter()
+            .encode_action(
+                ConnectionState::Play,
+                &ClientAction::InteractEntity {
+                    entity_id: 1234,
+                    interaction: EntityInteraction::Attack,
+                    sneaking: true, // must be dropped — the wire body carries no such bit.
+                },
+            )
+            .expect("encodes")
+            .expect("Attack always encodes in Play");
+        assert_eq!(packet_id, play::serverbound::ATTACK);
+        let decoded = proto.decode(State::Play, packet_id, &payload);
+        assert_eq!(decoded, ServerBound::Attack { entity_id: 1234 });
+    }
+
+    /// Control: a malformed/truncated `Attack` payload must drop the packet,
+    /// not panic.
+    #[test]
+    fn decode_attack_rejects_a_truncated_payload() {
+        let proto = V770ServerProtocol;
+        let decoded = proto.decode(State::Play, play::serverbound::ATTACK, &[]);
+        assert_eq!(decoded, ServerBound::Ignored);
+    }
+
+    /// `minecraft:interact` (a plain `Interact`, not `Attack`) is deliberately
+    /// **not** given its own `ServerBound` variant — see that variant's own
+    /// doc comment. Pinning it here as `Ignored` rather than leaving it
+    /// undocumented: a future agent adding taming/feeding must change this
+    /// test, not silently discover a gap.
+    #[test]
+    fn decode_plain_interact_from_the_real_client_encoder_is_ignored() {
+        let proto = V770ServerProtocol;
+        let (packet_id, payload) = crate::adapter()
+            .encode_action(
+                ConnectionState::Play,
+                &ClientAction::InteractEntity {
+                    entity_id: 1234,
+                    interaction: EntityInteraction::Interact { hand: Hand::Main },
+                    sneaking: false,
+                },
+            )
+            .expect("encodes")
+            .expect("Interact always encodes in Play");
+        assert_eq!(packet_id, play::serverbound::INTERACT);
+        let decoded = proto.decode(State::Play, packet_id, &payload);
+        assert_eq!(decoded, ServerBound::Ignored);
+    }
+
+    /// Round-trips through the real client encoder: `sprint` survives,
+    /// bit-identical, out the other side; the other six `Input` flags are
+    /// decoded off the wire (so a malformed byte still fails cleanly) but do
+    /// not appear in `ServerBound::PlayerInput` — see that variant's own doc
+    /// comment for why.
+    #[test]
+    fn decode_player_input_sprint_from_the_real_client_encoder() {
+        let proto = V770ServerProtocol;
+        for sprint in [true, false] {
+            let (packet_id, payload) = crate::adapter()
+                .encode_action(
+                    ConnectionState::Play,
+                    &ClientAction::SetPlayerInput(PlayerInput {
+                        forward: true,
+                        backward: false,
+                        left: false,
+                        right: false,
+                        jump: false,
+                        shift: false,
+                        sprint,
+                    }),
+                )
+                .expect("encodes")
+                .expect("SetPlayerInput always encodes in Play");
+            assert_eq!(packet_id, play::serverbound::PLAYER_INPUT);
+            let decoded = proto.decode(State::Play, packet_id, &payload);
+            assert_eq!(decoded, ServerBound::PlayerInput { sprint }, "sprint={sprint}");
+        }
+    }
+
+    /// Control: an empty payload must drop the packet, not panic on the
+    /// missing flags byte.
+    #[test]
+    fn decode_player_input_rejects_an_empty_payload() {
+        let proto = V770ServerProtocol;
+        let decoded = proto.decode(State::Play, play::serverbound::PLAYER_INPUT, &[]);
+        assert_eq!(decoded, ServerBound::Ignored);
+    }
+
+    /// Sanity check on the bit layout itself, independent of the real
+    /// encoder: bit `0x40` alone must decode to `sprint: true`, so a future
+    /// change to `ServerBound::PlayerInput`'s field can be checked against a
+    /// known byte, not only against the adapter's own (also-changeable)
+    /// encoder.
+    #[test]
+    fn decode_player_input_bit_layout_pins_sprint_at_0x40() {
+        let proto = V770ServerProtocol;
+        let decoded = proto.decode(State::Play, play::serverbound::PLAYER_INPUT, &[0x40]);
+        assert_eq!(decoded, ServerBound::PlayerInput { sprint: true });
+        let decoded = proto.decode(State::Play, play::serverbound::PLAYER_INPUT, &[0x1F]); // every other flag, not sprint
+        assert_eq!(decoded, ServerBound::PlayerInput { sprint: false });
     }
 }
