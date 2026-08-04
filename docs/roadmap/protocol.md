@@ -28,8 +28,17 @@ protocol connectedness (denominators from each family play::{clientbound,serverb
 v47  clientbound decoded 17/74; emits 17/74; decoded-but-stranded 0; serverbound encoded 17/26; examined 17 arm(s); serverbound decode: not applicable (no src/server_protocol.rs — family does not implement ServerProtocol, so it cannot host)
 v340  clientbound decoded 16/80; emits 16/80; decoded-but-stranded 0; serverbound encoded 20/33; examined 16 arm(s); serverbound decode: not applicable (no src/server_protocol.rs — family does not implement ServerProtocol, so it cannot host)
 v735  clientbound decoded 17/92; emits 17/92; decoded-but-stranded 0; serverbound encoded 21/48; examined 17 arm(s); serverbound decode: not applicable (no src/server_protocol.rs — family does not implement ServerProtocol, so it cannot host)
-v770  clientbound decoded 111/141; emits 110/141; decoded-but-stranded 0; serverbound encoded 53/69; examined 111 arm(s); serverbound decoded 60/69, connected 13/69; examined 60 arm(s); decodes-to-Ignored-only 47
+v770  clientbound decoded 112/141; emits 111/141; decoded-but-stranded 0; serverbound encoded 54/69; examined 113 arm(s); serverbound decoded 60/69, connected 13/69; examined 60 arm(s); decodes-to-Ignored-only 47
 ```
+
+Re-measured 2026-08-04 (same day, a later pass than the one below), after adding
+`lodestone-server` consumers for four of the 47 decode-to-`Ignored` arms — see
+["Consumer landed, decode arm still off-limits"](#consumer-landed-decode-arm-still-off-limits-2026-08-04)
+below. **`connected` is unchanged at 13/69**: this measurement joins the protocol-crate decode
+arm against the server-crate consumer, and the decode-arm half of that join was not touched
+this pass (`crates/protocol/v770/src/server_protocol.rs` was off-limits). The
+clientbound/serverbound-*encoded* deltas above (111→112, 53→54) are unrelated concurrent work
+by other agents in this same session, not anything filed here.
 
 Re-measured 2026-08-04, after landing decode arms for issues #262/#264/#266/#268/#270 (this
 session). **Use this command, never a hand count** — a hand-derived figure for this exact
@@ -50,6 +59,33 @@ same pass. See each issue's own tracker comment for which packets are flagged as
 cheapest real next step (`SET_CREATIVE_MODE_SLOT` writes into the exact slot space #408's
 `PlayerInventory` already models; `CLIENT_INFORMATION`/`CLIENT_COMMAND`/`CHUNK_BATCH_RECEIVED`
 are #270's).
+
+### Consumer landed, decode arm still off-limits (2026-08-04)
+
+A follow-up pass this same day built real `lodestone-server` consumers for four of the
+47 `decodes-to-Ignored-only` arms above, without touching the protocol crate (that file
+was explicitly off-limits this pass, owned by a concurrent client-side decode agent):
+
+| packet | `ServerBound` variant | consumer |
+|---|---|---|
+| `SET_CREATIVE_MODE_SLOT` (#266) | `CreativeModeSlotSet { slot, item }` | `apply_creative_mode_slot_set` → `PlayerInventory::apply_menu_slot_change` (the same table `CONTAINER_CLICK` already uses) |
+| `CLIENT_COMMAND` (#270) | `ClientCommand { action }` | `apply_client_command` — `action == 0` (respawn) resets `PlayerVitals` once actually dead and confirms via `encode_set_health`/`encode_air_supply_update`; `action == 2` replies with `WorldAdminState`'s game rules via the existing `encode_game_rule_values` |
+| `CLIENT_INFORMATION` (#270) | `ClientInformationChanged { view_distance }` | `ViewTracker::set_view_radius`, clamped to the server's configured cap |
+| `CHUNK_BATCH_RECEIVED` (#270) | `ChunkBatchAcknowledged { desired_chunks_per_tick }` | closes the real gap this section's own body used to name: `crate::server` now holds at most one unacknowledged chunk batch in flight (`send_view_update`'s queue), instead of starting a fresh one on every `recenter` regardless of any pending ack |
+
+All four are exercised end-to-end through the real `dispatch_play_packet`/`serve_play`
+loop in `crates/lodestone-server/tests/serve_play.rs`, using that file's own hermetic
+`FakeProtocol` (own wire format, `ServerBound` constructed directly in its `decode` —
+the same pattern the pre-existing `difficulty_change_is_confirmed_back_to_the_connection`
+test already used for issue #268). What this **cannot** prove, and what the `connected`
+figure above correctly still reflects as `13/69`: a real vanilla client's bytes still
+decode to `ServerBound::Ignored` for all four, because
+`crates/protocol/v770/src/server_protocol.rs`'s own arms (`server_protocol.rs:1406`,
+`:1610`, `:1614`, `:1618` as of this writing) still discard the parsed fields with
+`let _ = decoded;` and unconditionally return `Ignored`. Flipping that is a small,
+mechanical edit per arm — swap the discarded local for the new `ServerBound` variant —
+but it is a protocol-crate edit, so it is not done here. See #266 and #270's own tracker
+comments for the exact before/after arm text.
 
 `v47`/`v340`/`v735` were **never measured before today** — `xtask`'s connectedness scanner
 had a hard `if family != "v770" { continue; }` while its own header claimed to take
@@ -157,9 +193,9 @@ extrapolation.
 |---|---|---|
 | [#262](https://github.com/matteopolak/lodestone/issues/262) | Server-side decode: movement and player-state (0/11) | **decoded 11/11, connected 3/11** — remaining 8 need new `ServerBound` variants, `lodestone-server` is off-limits right now |
 | [#264](https://github.com/matteopolak/lodestone/issues/264) | Server-side decode: entity actions, combat, interaction (0/9) | **decoded 9/9, connected 3/9** — same blocker |
-| [#266](https://github.com/matteopolak/lodestone/issues/266) | Server-side decode: inventory and container (0/16) | **decoded 17/16, connected 3/16** — cross-checked against `docs/container-clicks.md`; `SET_CREATIVE_MODE_SLOT` is the cheapest next win (writes into #408's `PlayerInventory` window 0) |
+| [#266](https://github.com/matteopolak/lodestone/issues/266) | Server-side decode: inventory and container (0/16) | **decoded 17/16, connected 3/16** — cross-checked against `docs/container-clicks.md`; `SET_CREATIVE_MODE_SLOT` now has a real, tested `PlayerInventory` consumer (see ["Consumer landed"](#consumer-landed-decode-arm-still-off-limits-2026-08-04) above), still counted `Ignored` by the automated figure until the v770 decode arm itself is edited |
 | [#268](https://github.com/matteopolak/lodestone/issues/268) | Server-side decode: world/block-admin (0/13) | **decoded 12/13, connected 3/13** — lowest priority of the five; `TEST_INSTANCE_BLOCK_ACTION` deliberately left undecoded (nested codec this crate has no type for) |
-| [#270](https://github.com/matteopolak/lodestone/issues/270) | Server-side decode: connection-lifecycle and system | **decoded 11/13, connected 1/13** — includes the real chunk-batch flow-control gap; `COOKIE_RESPONSE`/`DEBUG_SUBSCRIPTION_REQUEST` deliberately left undecoded |
+| [#270](https://github.com/matteopolak/lodestone/issues/270) | Server-side decode: connection-lifecycle and system | **decoded 11/13, connected 1/13** — `CLIENT_COMMAND`/`CLIENT_INFORMATION`/`CHUNK_BATCH_RECEIVED` now have real, tested consumers (respawn, view-distance resize, and the actual one-batch-in-flight gate — see ["Consumer landed"](#consumer-landed-decode-arm-still-off-limits-2026-08-04) above), still counted `Ignored` until the v770 decode arms are edited; `COOKIE_RESPONSE`/`DEBUG_SUBSCRIPTION_REQUEST` deliberately left undecoded |
 | [#271](https://github.com/matteopolak/lodestone/issues/271) | Server-side chat: no decode, no verification, no secure-profile enforcement | pairs with #283 (client-side signing) |
 | [#273](https://github.com/matteopolak/lodestone/issues/273) | Server-side login has no encryption or compression | client-side crypto is proven; this is the mirror |
 | [#275](https://github.com/matteopolak/lodestone/issues/275) | Server sends no registries/known-packs/tags during configuration | pairs with #288 (client-side ingestion) — one wire format, ideally |
