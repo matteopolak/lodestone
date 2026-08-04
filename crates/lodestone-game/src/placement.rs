@@ -494,6 +494,23 @@ impl Placement {
         self.next_sequence
     }
 
+    /// Take the next prediction sequence for a **non-block** use-item send
+    /// (`ClientAction::UseItem`, the generic "use the held item in air"
+    /// packet — raising a shield, drawing a bow, drinking a potion — as
+    /// opposed to [`Self::use_on`]'s block-targeted one).
+    ///
+    /// Vanilla shares one monotonic sequence across *every* predictive action
+    /// through `BlockStatePredictionHandler.currentSequence()`
+    /// (`MultiPlayerGameMode.startPrediction`,
+    /// `.cache/mc/26.2/client-src/…/MultiPlayerGameMode.java:293-299`), and
+    /// [`Self::use_on`] already owns that counter for this machine, so the
+    /// generic use borrows the same one rather than starting a second,
+    /// independent count.
+    #[must_use]
+    pub fn take_use_sequence(&mut self) -> i32 {
+        self.take_sequence()
+    }
+
     /// Handle a right-click on a block, mirroring `performUseItemOn`'s ordering.
     ///
     /// 1. If the player is **not** sneaking-with-an-item and the block is
