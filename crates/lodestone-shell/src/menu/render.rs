@@ -56,6 +56,7 @@ use std::sync::Arc;
 
 use lodestone_assets::Image;
 use lodestone_model::command_tree::CommandTree;
+use lodestone_model::text::{TextSpan, TextStyle};
 use lodestone_render::{GpuAtlas, GuiAtlas, GuiSpriteQuad};
 
 use crate::chat::Completion;
@@ -1976,6 +1977,14 @@ pub struct ServerEntryView {
     /// The MOTD, unwrapped and possibly multi-line. Wrapped at draw time,
     /// because the wrap width is measured in the font the draw will use.
     pub motd: String,
+    /// The same MOTD as styled runs, when the server sent one.
+    ///
+    /// Empty for the synthetic MOTDs (`Pinging...`, a connection error), which
+    /// have no server styling and draw in [`SERVER_ENTRY_DIM`] /
+    /// [`SERVER_ENTRY_BAD`] as before. Wrapping still happens on
+    /// [`Self::motd`] — the styles are re-attached to the wrapped lines by
+    /// [`restyle_wrapped`], so there is exactly one wrap implementation.
+    pub motd_spans: Vec<TextSpan>,
     /// Draw the MOTD in [`SERVER_ENTRY_BAD`] — vanilla's `CANT_RESOLVE_TEXT` /
     /// `CANT_CONNECT_TEXT`, which carry their own red component colour.
     pub motd_is_error: bool,
@@ -3489,11 +3498,13 @@ fn server_list_frame(
         .map(|(i, e)| {
             let slot = statuses.get(e);
             let state = slot.state(status::STATUS_PROTOCOL);
-            let (motd, motd_is_error) = match slot {
-                StatusSlot::Idle => (e.address_label(), false),
-                StatusSlot::Pending => (status::PINGING_MOTD.to_string(), false),
-                StatusSlot::Ok(s) => (s.motd.clone(), false),
-                StatusSlot::Failed(why) => (why.clone(), true),
+            // Only a real status carries server styling; the other three MOTDs
+            // are this client's own strings and stay flat by construction.
+            let (motd, motd_is_error, motd_spans) = match slot {
+                StatusSlot::Idle => (e.address_label(), false, Vec::new()),
+                StatusSlot::Pending => (status::PINGING_MOTD.to_string(), false, Vec::new()),
+                StatusSlot::Ok(s) => (s.motd.clone(), false, s.motd_spans.clone()),
+                StatusSlot::Failed(why) => (why.clone(), true, Vec::new()),
             };
             let (status_text, status_is_error) = match (state, slot) {
                 (ServerState::Successful, StatusSlot::Ok(s)) => (s.players.clone(), false),
@@ -3525,6 +3536,7 @@ fn server_list_frame(
                 entry: Some(ServerEntryView {
                     index: i,
                     motd,
+                    motd_spans,
                     motd_is_error,
                     status: status_text,
                     status_is_error,
@@ -4559,17 +4571,38 @@ fn draw_server_entry(
         SERVER_ENTRY_DIM
     };
     let wrap_w = (cw - SERVER_ENTRY_MOTD_INSET).max(0.0);
-    for (line, text) in wrap_measured(b, &view.motd, wrap_w, SERVER_ENTRY_MOTD_LINES)
-        .iter()
-        .enumerate()
-    {
-        b.text(
-            text,
-            text_x,
-            cy + SERVER_ENTRY_MOTD_Y + LINE_H * line as f32,
-            1.0,
-            motd_colour,
-        );
+    let lines = wrap_measured(b, &view.motd, wrap_w, SERVER_ENTRY_MOTD_LINES);
+    if view.motd_spans.is_empty() {
+        // No server styling (a synthetic MOTD, or a server that sent none):
+        // the pre-existing flat draw, unchanged.
+        for (line, text) in lines.iter().enumerate() {
+            b.text(
+                text,
+                text_x,
+                cy + SERVER_ENTRY_MOTD_Y + LINE_H * line as f32,
+                1.0,
+                motd_colour,
+            );
+        }
+    } else {
+        // `motd_colour` becomes the *base*: a run the server left uncoloured
+        // still renders in vanilla's dim grey, and only the runs it coloured
+        // differ. That is what makes this behaviour-preserving for the many
+        // MOTDs that carry no colour at all.
+        let base = [motd_colour[0], motd_colour[1], motd_colour[2]];
+        for (line, runs) in restyle_wrapped(&view.motd_spans, &lines)
+            .iter()
+            .enumerate()
+        {
+            b.text_spans(
+                runs,
+                text_x,
+                cy + SERVER_ENTRY_MOTD_Y + LINE_H * line as f32,
+                1.0,
+                base,
+                motd_colour[3],
+            );
+        }
     }
 
     // The hover overlay (`:364-395`). All three sprites blit at the *same* 32×32
@@ -4647,6 +4680,60 @@ fn wrap_measured(b: &Quads<'_>, s: &str, max_px: f32, max_lines: usize) -> Vec<S
         }
     }
     out.truncate(max_lines);
+    out
+}
+
+/// Re-attach `spans`' per-character styles to the plain lines [`wrap_measured`]
+/// produced.
+///
+/// ## Why this rather than a span-aware wrapper
+///
+/// The obvious move is a `wrap_measured` that understands spans. That means a
+/// second copy of the word-wrap algorithm, and the two would drift — vanilla's
+/// MOTD wrap has several non-obvious rules (per-paragraph line state, a blank
+/// line is a line, an over-wide word starts a line rather than overflowing) that
+/// exist because each was a bug once. One wrapper, one set of rules.
+///
+/// This works because a wrapped line's characters are a **subsequence** of the
+/// source, in order: the wrapper only splits on whitespace and rejoins with a
+/// single space. So walking both in lockstep and skipping the whitespace the
+/// wrapper collapsed re-attaches each character to the style it came with.
+/// Adjacent equal styles are merged so the draw sees runs, not one span per
+/// character.
+fn restyle_wrapped(spans: &[TextSpan], lines: &[String]) -> Vec<Vec<TextSpan>> {
+    let flat: Vec<(char, TextStyle)> = spans
+        .iter()
+        .flat_map(|s| s.text.chars().map(move |c| (c, s.style)))
+        .collect();
+    let mut cursor = 0usize;
+    let mut out = Vec::with_capacity(lines.len());
+    for line in lines {
+        let mut runs: Vec<TextSpan> = Vec::new();
+        for ch in line.chars() {
+            // Skip forward over the whitespace `wrap_measured` dropped. A probe
+            // that runs off the end leaves the style unspecified rather than
+            // mis-assigning one, so a desync degrades to `base` instead of
+            // smearing a wrong colour across the rest of the MOTD.
+            let mut probe = cursor;
+            while probe < flat.len() && flat[probe].0 != ch {
+                probe += 1;
+            }
+            let style = if probe < flat.len() {
+                cursor = probe + 1;
+                flat[probe].1
+            } else {
+                TextStyle::default()
+            };
+            match runs.last_mut() {
+                Some(last) if last.style == style => last.text.push(ch),
+                _ => runs.push(TextSpan {
+                    text: ch.to_string(),
+                    style,
+                }),
+            }
+        }
+        out.push(runs);
+    }
     out
 }
 
@@ -5479,6 +5566,72 @@ impl Quads<'_> {
         }
     }
 
+    /// One list of styled spans at `(x, y)` — [`Quads::text`]'s coloured twin.
+    ///
+    /// `base` is the colour for a span the server left uncoloured, so a MOTD with
+    /// no colour of its own renders exactly as it did before this existed. The
+    /// clipping story is identical to [`Quads::text`]'s and for the same reason:
+    /// every glyph reaches the stream as an axis-aligned quad, so the emitted
+    /// vertices can be cut in NDC afterwards.
+    fn text_spans(
+        &mut self,
+        spans: &[TextSpan],
+        x: f32,
+        y: f32,
+        scale: f32,
+        base: [f32; 3],
+        alpha: f32,
+    ) {
+        if let Some(f) = self.font {
+            let (w, h) = (self.w, self.h);
+            if self.clip.is_none() {
+                f.draw_spans(
+                    &mut ColourStream {
+                        verts: &mut self.verts,
+                        w,
+                        h,
+                    },
+                    spans,
+                    x,
+                    y,
+                    scale,
+                    base,
+                    alpha,
+                );
+                return;
+            }
+            let mut scratch = core::mem::take(&mut self.text_scratch);
+            scratch.clear();
+            f.draw_spans(
+                &mut ColourStream {
+                    verts: &mut scratch,
+                    w,
+                    h,
+                },
+                spans,
+                x,
+                y,
+                scale,
+                base,
+                alpha,
+            );
+            self.append_clipped_ndc_quads(&scratch);
+            self.text_scratch = scratch;
+            return;
+        }
+        // Jar-less debug font: colour per span, fixed advance, as `text` does.
+        let mut cursor = x;
+        for span in spans {
+            let rgb = span
+                .style
+                .color
+                .map_or(base, crate::hud::vanilla_font::text_color_rgb);
+            let c = [rgb[0], rgb[1], rgb[2], alpha];
+            self.text(&span.text, cursor, y, scale, c);
+            cursor += text_px(&span.text, scale);
+        }
+    }
+
     /// A favicon mosaic as a `side`×`side` px square of coloured cells.
     fn mosaic(&mut self, m: &FaviconMosaic, x: f32, y: f32, side: f32) {
         if m.size == 0 {
@@ -6302,6 +6455,9 @@ mod tests {
         let mut statuses = StatusCache::with_probe(std::sync::Arc::new(|_| {
             Ok(ServerStatus {
                 motd: "A LODESTONE SERVER\nsecond line".into(),
+                // No server styling in this fixture: the row must lay out
+                // identically to before the styled path existed.
+                motd_spans: Vec::new(),
                 players: "3/20".into(),
                 version: "26.2".into(),
                 // Our own protocol, so the row resolves to

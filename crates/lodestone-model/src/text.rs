@@ -130,12 +130,62 @@ impl TextColor {
             .map(|(_, code, _)| *code)
     }
 
-    fn from_legacy_code(code: char) -> Option<Self> {
+    /// The named colour for a legacy `§` code (`0`..=`9`, `a`..=`f`, either
+    /// case), or `None` for a format/reset code.
+    ///
+    /// Public so a renderer can reach the sixteen RGB values through
+    /// [`Self::rgb`] instead of keeping its own `§`-keyed copy of the table. The
+    /// shell had exactly such a duplicate, and a second transcription of
+    /// sixteen hex constants is a drift hazard with no upside.
+    #[must_use]
+    pub fn from_legacy_code(code: char) -> Option<Self> {
         let lower = code.to_ascii_lowercase();
         Self::NAMED
             .iter()
             .find(|(_, c, _)| *c == lower)
             .map(|(color, _, _)| *color)
+    }
+
+    /// This colour's 24-bit RGB value, packed as `0x00rrggbb`.
+    ///
+    /// The sixteen named values are vanilla's own, transcribed from
+    /// `TextColor.java:18-33` in 26.2. **Do not look for them in
+    /// `ChatFormatting`**: in 26.2 that enum's constructor is
+    /// `ChatFormatting(final char code)` and carries *no colour at all* — the
+    /// obvious place to check is empty, and its emptiness looks like "vanilla
+    /// has no table" rather than "the table moved". Vanilla writes them in
+    /// decimal (`named("gold", 16755200)`), so each arm below carries the
+    /// decimal alongside, because the hex is the reviewable form and the
+    /// decimal is the citable one.
+    ///
+    /// This is the only bridge from a model colour to a pixel colour. Before it
+    /// existed the sole route was `legacy_code()` → `char` → the renderer's own
+    /// `§`-keyed table, which structurally **cannot** carry [`Self::Rgb`]: a
+    /// hex colour has no legacy code, so `legacy_code()` returned `None` and
+    /// every 1.16+ hex-coloured run silently fell back to the base colour.
+    #[must_use]
+    pub fn rgb(&self) -> u32 {
+        match self {
+            Self::Black => 0x0000_0000,       // 0
+            Self::DarkBlue => 0x0000_00aa,    // 170
+            Self::DarkGreen => 0x0000_aa00,   // 43520
+            Self::DarkAqua => 0x0000_aaaa,    // 43690
+            Self::DarkRed => 0x00aa_0000,     // 11141120
+            Self::DarkPurple => 0x00aa_00aa,  // 11141290
+            Self::Gold => 0x00ff_aa00,        // 16755200
+            Self::Gray => 0x00aa_aaaa,        // 11184810
+            Self::DarkGray => 0x0055_5555,    // 5592405
+            Self::Blue => 0x0055_55ff,        // 5592575
+            Self::Green => 0x0055_ff55,       // 5635925
+            Self::Aqua => 0x0055_ffff,        // 5636095
+            Self::Red => 0x00ff_5555,         // 16733525
+            Self::LightPurple => 0x00ff_55ff, // 16733695
+            Self::Yellow => 0x00ff_ff55,      // 16777045
+            Self::White => 0x00ff_ffff,       // 16777215
+            // `TextColor(final int value)` masks with 16777215 (`TextColor.java:37`),
+            // so a hex colour carrying stray high bits is truncated, not rejected.
+            Self::Rgb(value) => value & 0x00ff_ffff,
+        }
     }
 }
 
@@ -447,6 +497,39 @@ impl Text {
         for child in &self.extra {
             child.collect_spans(&style, translate, out, depth + 1);
         }
+    }
+
+    /// Flattens to styled runs like [`to_spans`](Self::to_spans), and
+    /// additionally expands legacy `§` codes found *inside* literal content.
+    ///
+    /// Both conventions exist in one field, and a server-list MOTD is where they
+    /// collide hardest: `description` arrives as a bare string full of `§c`
+    /// codes, or as a component tree with `color` keys, or — routinely — as a
+    /// component tree whose `text` values *also* contain `§` codes, because the
+    /// server built the string with a legacy formatter and wrapped it in modern
+    /// JSON. Plain [`to_spans`](Self::to_spans) is correct for the second shape
+    /// and leaves the first and third rendering their codes as literal glyphs.
+    ///
+    /// An expanded run inherits the enclosing component's style
+    /// ([`TextStyle::inherit`]), so `{"color":"gold","text":"a§cb"}` yields gold
+    /// `a` then red `b` — the legacy code overrides the colour it names and the
+    /// component's colour still governs the run before it.
+    #[must_use]
+    pub fn to_spans_expanding_legacy(&self) -> Vec<TextSpan> {
+        let mut out = Vec::new();
+        for span in self.to_spans() {
+            if !span.text.contains('\u{00a7}') {
+                out.push(span);
+                continue;
+            }
+            for inner in Self::from_legacy(&span.text).to_spans() {
+                out.push(TextSpan {
+                    text: inner.text,
+                    style: inner.style.inherit(&span.style),
+                });
+            }
+        }
+        out
     }
 
     /// Renders this tree back to a legacy `§`-code string. Colour and each

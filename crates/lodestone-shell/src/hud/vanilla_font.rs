@@ -68,8 +68,29 @@ use lodestone_assets::font::{
     FontLoader, FontOptions, GlyphRaster, MISSING_ADVANCE, RasterFont, metrics as font_metrics,
 };
 use lodestone_assets::{ResourceLocation, ResourceManager, ResourceSource, ZipSource};
+use lodestone_model::text::{TextColor, TextSpan};
 
 use super::item_icon::ColourStream;
+
+/// A [`TextColor`] as the sRGB 0..1 triple the HUD's colour stream takes.
+///
+/// [`TextColor::rgb`] is the single source of truth for the sixteen named
+/// values (transcribed there from vanilla's `TextColor.java`); this only
+/// unpacks it. The division by 255 with **no** transfer function is deliberate
+/// and is the whole colour-management story for text: vanilla is not
+/// colour-managed, so its `0xAA` is written to the framebuffer as the sRGB byte
+/// `0xAA`, and the shadow's quarter (`shadow_of`) is taken on these same gamma
+/// values. Converting to linear here would lighten every named colour and lift
+/// the shadow from vanilla's near-black to a visible grey.
+#[must_use]
+pub fn text_color_rgb(color: TextColor) -> [f32; 3] {
+    let hex = color.rgb();
+    [
+        ((hex >> 16) & 0xff) as f32 / 255.0,
+        ((hex >> 8) & 0xff) as f32 / 255.0,
+        (hex & 0xff) as f32 / 255.0,
+    ]
+}
 
 /// One glyph run's active formatting, tracked across a `§`-coded string.
 ///
@@ -213,6 +234,33 @@ impl VanillaFont {
         self.raster.legacy_width(s) * scale
     }
 
+    /// The width of a styled span list in device pixels at `scale`.
+    ///
+    /// This is the measurement half of [`draw_spans`](Self::draw_spans), and it
+    /// takes the route `Font::legacy_width`'s own doc prescribes for structured
+    /// components: decompose to `(codepoint, bold)` and call
+    /// [`advance_bold`](lodestone_assets::font::Font::advance_bold). Bold is the
+    /// only flag that changes an advance (`+1` per glyph); italic shears in
+    /// place, and underline/strikethrough/obfuscated leave the pen alone.
+    #[must_use]
+    pub fn spans_width(&self, spans: &[TextSpan], scale: f32) -> f32 {
+        let font = self.raster.font();
+        let total: f32 = spans
+            .iter()
+            .map(|span| {
+                let bold = span.style.bold.unwrap_or(false);
+                span.text
+                    .chars()
+                    .map(|ch| {
+                        font.advance_bold(ch as u32, bold)
+                            .unwrap_or(MISSING_ADVANCE + if bold { 1.0 } else { 0.0 })
+                    })
+                    .sum::<f32>()
+            })
+            .sum();
+        total * scale
+    }
+
     /// Draw `s` with its vanilla drop shadow, the string's top-left at `(x, y)`.
     ///
     /// Two passes: the shadow copy first, offset `+1` logical pixel on **both**
@@ -250,6 +298,77 @@ impl VanillaFont {
         let off = font_metrics::SHADOW_OFFSET * scale;
         self.legacy_run(cs, s, x + off, y + off, scale, base, alpha, true);
         self.legacy_run(cs, s, x, y, scale, base, alpha, false);
+    }
+
+    /// Draw a list of styled spans with its drop shadow.
+    ///
+    /// This is the **structured** counterpart to
+    /// [`draw_legacy`](Self::draw_legacy), and the difference is not stylistic.
+    /// `draw_legacy`'s input vocabulary is `§` codes in a `&str`, which can
+    /// express only the sixteen named colours — a server's
+    /// [`TextColor::Rgb`] has no legacy code, so routing a modern component
+    /// through a legacy string silently discards its colour before this module
+    /// ever sees it. Spans carry [`TextColor`] itself, so hex survives.
+    ///
+    /// A span whose `style.color` is `None` draws in `base`. That is
+    /// [`TextStyle::inherit`](lodestone_model::text::TextStyle::inherit)'s
+    /// contract reaching its terminus: `to_spans` has already resolved
+    /// inheritance down the tree, so a `None` here means the colour was
+    /// unspecified all the way to the root and the *surface* decides — white for
+    /// the sidebar title, grey for a server's MOTD.
+    pub(crate) fn draw_spans(
+        &self,
+        cs: &mut ColourStream<'_>,
+        spans: &[TextSpan],
+        x: f32,
+        y: f32,
+        scale: f32,
+        base: [f32; 3],
+        alpha: f32,
+    ) {
+        let off = font_metrics::SHADOW_OFFSET * scale;
+        self.spans_run(cs, spans, x + off, y + off, scale, base, alpha, true);
+        self.spans_run(cs, spans, x, y, scale, base, alpha, false);
+    }
+
+    /// One unshadowed pass over a styled span list. Mirrors
+    /// [`legacy_run`](Self::legacy_run) exactly — same `glyph_styled` primitive,
+    /// same `shadow` colour scaling so both passes walk identical geometry, same
+    /// `position == 0` rule for where an effect bar's left edge starts — and
+    /// differs only in where the style comes from. `position` counts glyphs
+    /// across the whole span *list*, not per span, because vanilla's
+    /// `position == 0` check (`Font.java:274`) is about the first glyph of the
+    /// rendered line and a span boundary is not a line boundary.
+    #[allow(clippy::too_many_arguments)]
+    fn spans_run(
+        &self,
+        cs: &mut ColourStream<'_>,
+        spans: &[TextSpan],
+        x: f32,
+        y: f32,
+        scale: f32,
+        base: [f32; 3],
+        alpha: f32,
+        shadow: bool,
+    ) {
+        let mut cursor = x;
+        let mut position = 0usize;
+        for span in spans {
+            let style = GlyphStyle {
+                bold: span.style.bold.unwrap_or(false),
+                italic: span.style.italic.unwrap_or(false),
+                underline: span.style.underlined.unwrap_or(false),
+                strikethrough: span.style.strikethrough.unwrap_or(false),
+                obfuscated: span.style.obfuscated.unwrap_or(false),
+            };
+            let rgb = span.style.color.map_or(base, text_color_rgb);
+            let c = [rgb[0], rgb[1], rgb[2], alpha];
+            let c = if shadow { shadow_of(c) } else { c };
+            for ch in span.text.chars() {
+                cursor += self.glyph_styled(cs, ch, cursor, y, scale, c, style, position == 0);
+                position += 1;
+            }
+        }
     }
 
     /// Draw `s` with **no** drop shadow, the string's top-left at `(x, y)`.
@@ -1067,6 +1186,246 @@ mod styling_tests {
             in_gap, 0,
             "the space between the two obfuscated letters must stay empty, found \
              {in_gap} ink vertices in x {gap_x0:.1}..{gap_x1:.1}"
+        );
+    }
+}
+
+/// Colour gates for the **real** `draw_spans` path.
+///
+/// ## Why this module exists separately from `tests/text_colour.rs`
+///
+/// It exists because the integration gate, on its own, was **vacuous for this
+/// path** — and that was discovered by running a neuter, not by reading it.
+/// `HudGeometry::build` attaches no [`VanillaFont`] (the font lives on
+/// `HudRenderer`, not on the geometry builder), so every draw it makes takes
+/// `Builder::text_spans`' jar-less fixed-advance fallback. Replacing
+/// `spans_run`'s per-span colour with the base colour outright — the exact
+/// pre-fix defect — left all nine integration tests green, because the neutered
+/// function was never called.
+///
+/// That is the *world* species of vacuous test: the source is fine and the flaw
+/// is in what it was pointed at. A `client.jar` was present the whole time; the
+/// harness simply could not reach the code it was written to check.
+///
+/// So the split is: `tests/text_colour.rs` covers the model, the projections and
+/// the fallback draw with no jar and no adapter, in the default test run; this
+/// module covers the vanilla path that real players see. `#[ignore]`d for the jar,
+/// per the sibling `styling_tests` convention — a missing jar is a **fail-closed**
+/// precondition here, never a skip.
+///
+/// ```text
+/// cargo test -p lodestone-shell --lib -- --ignored --nocapture span_colour_tests
+/// ```
+#[cfg(test)]
+mod span_colour_tests {
+    use super::*;
+    use lodestone_model::text::TextStyle;
+
+    const W: f32 = 400.0;
+    const H: f32 = 200.0;
+
+    /// Vanilla's sixteen, hand-transcribed from `TextColor.java:18-33` (26.2).
+    /// Deliberately **not** built from [`TextColor::rgb`] — that is the code under
+    /// test, and an expectation derived from it would be satisfied by all sixteen
+    /// being wrong together.
+    const VANILLA: [(&str, u32, TextColor); 16] = [
+        ("black", 0x0000_0000, TextColor::Black),
+        ("dark_blue", 0x0000_00aa, TextColor::DarkBlue),
+        ("dark_green", 0x0000_aa00, TextColor::DarkGreen),
+        ("dark_aqua", 0x0000_aaaa, TextColor::DarkAqua),
+        ("dark_red", 0x00aa_0000, TextColor::DarkRed),
+        ("dark_purple", 0x00aa_00aa, TextColor::DarkPurple),
+        ("gold", 0x00ff_aa00, TextColor::Gold),
+        ("gray", 0x00aa_aaaa, TextColor::Gray),
+        ("dark_gray", 0x0055_5555, TextColor::DarkGray),
+        ("blue", 0x0055_55ff, TextColor::Blue),
+        ("green", 0x0055_ff55, TextColor::Green),
+        ("aqua", 0x0055_ffff, TextColor::Aqua),
+        ("red", 0x00ff_5555, TextColor::Red),
+        ("light_purple", 0x00ff_55ff, TextColor::LightPurple),
+        ("yellow", 0x00ff_ff55, TextColor::Yellow),
+        ("white", 0x00ff_ffff, TextColor::White),
+    ];
+
+    /// A real vanilla font, or a loud failure — never a silent skip.
+    fn font() -> VanillaFont {
+        let manager = crate::resources::vanilla_manager().expect(
+            "span colour gate opted in via --ignored but no vanilla client.jar was found; \
+             set LODESTONE_ASSETS to a pack root containing client.jar, or populate \
+             .cache/mc/<ver>/client.jar — do NOT skip, a silent pass here asserts nothing",
+        );
+        VanillaFont::from_manager(&manager).expect("build the vanilla font")
+    }
+
+    /// `round`, not a truncating cast: `170.0 / 255.0 * 255.0` is `169.99999` in
+    /// binary floating point, and truncation would turn every `0xAA` channel into
+    /// `0xA9` and fail every assertion here for a reason unrelated to colour.
+    fn as_byte(v: f32) -> u8 {
+        (v * 255.0).round().clamp(0.0, 255.0) as u8
+    }
+
+    fn unpack(hex: u32) -> (u8, u8, u8) {
+        (
+            ((hex >> 16) & 0xff) as u8,
+            ((hex >> 8) & 0xff) as u8,
+            (hex & 0xff) as u8,
+        )
+    }
+
+    fn span(text: &str, color: Option<TextColor>) -> TextSpan {
+        TextSpan {
+            text: text.to_string(),
+            style: TextStyle {
+                color,
+                ..TextStyle::default()
+            },
+        }
+    }
+
+    /// Draw `spans` through the real [`VanillaFont::draw_spans`] and return every
+    /// emitted vertex as `(x, y, rgb-bytes)` in local pixel space.
+    ///
+    /// Both passes are kept. The shadow is a quarter of its run's colour, and no
+    /// named colour is a quarter of another (`0xAA/4 = 0x2A`, `0xFF/4 = 0x3F`,
+    /// `0x55/4 = 0x15`, and none of `0x00`/`0x55`/`0xAA`/`0xFF` equals any of
+    /// those), so a shadow can never be mistaken for a named colour. Black is its
+    /// own shadow, which is harmless for a presence test.
+    fn emitted(font: &VanillaFont, spans: &[TextSpan], base: [f32; 3]) -> Vec<(f32, f32, (u8, u8, u8))> {
+        let mut verts = Vec::new();
+        {
+            let mut cs = ColourStream {
+                verts: &mut verts,
+                w: W,
+                h: H,
+            };
+            font.draw_spans(&mut cs, spans, 50.0, 50.0, 1.0, base, 1.0);
+        }
+        verts
+            .chunks_exact(6)
+            .map(|v| {
+                (
+                    (v[0] + 1.0) * W * 0.5,
+                    (1.0 - v[1]) * H * 0.5,
+                    (as_byte(v[2]), as_byte(v[3]), as_byte(v[4])),
+                )
+            })
+            .collect()
+    }
+
+    /// Bounding box of every vertex carrying `rgb` — failure output says *where*,
+    /// not what fraction, so a localised blob is distinguishable from a uniform
+    /// miss.
+    fn bbox_of(ink: &[(f32, f32, (u8, u8, u8))], rgb: (u8, u8, u8)) -> Option<(f32, f32, f32, f32)> {
+        let hits: Vec<_> = ink.iter().filter(|(_, _, c)| *c == rgb).collect();
+        if hits.is_empty() {
+            return None;
+        }
+        Some((
+            hits.iter().map(|h| h.0).fold(f32::INFINITY, f32::min),
+            hits.iter().map(|h| h.1).fold(f32::INFINITY, f32::min),
+            hits.iter().map(|h| h.0).fold(f32::NEG_INFINITY, f32::max),
+            hits.iter().map(|h| h.1).fold(f32::NEG_INFINITY, f32::max),
+        ))
+    }
+
+    fn distinct(ink: &[(f32, f32, (u8, u8, u8))]) -> Vec<(u8, u8, u8)> {
+        let mut v: Vec<(u8, u8, u8)> = ink.iter().map(|(_, _, c)| *c).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// **The gate.** All sixteen named colours must reach a quad at vanilla's
+    /// exact bytes, through the font a player actually sees.
+    #[test]
+    #[ignore = "requires the vanilla client.jar"]
+    fn each_named_colour_draws_at_its_exact_vanilla_bytes() {
+        let font = font();
+        // A base colour that is none of the sixteen, so a run that silently fell
+        // back to `base` could not be mistaken for a correctly-coloured one.
+        let base = [0.1, 0.2, 0.3];
+        let spans: Vec<TextSpan> = VANILLA
+            .iter()
+            .map(|(_, _, c)| span("M", Some(*c)))
+            .collect();
+        let ink = emitted(&font, &spans, base);
+        assert!(
+            !ink.is_empty(),
+            "draw_spans emitted no vertices at all, so this gate would pass \
+             vacuously for any colour"
+        );
+
+        let mut missing = Vec::new();
+        for (name, hex, _) in VANILLA {
+            if bbox_of(&ink, unpack(hex)).is_none() {
+                missing.push(format!("{name} #{hex:06x} {:?}", unpack(hex)));
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "these vanilla colours never reached a quad: {missing:?}\n\
+             colours actually emitted: {:?}",
+            distinct(&ink)
+        );
+    }
+
+    /// **Negative control, executed.** The same sixteen expectations against
+    /// uncoloured spans must fail — the detector demonstrating it can say "no".
+    #[test]
+    #[ignore = "requires the vanilla client.jar"]
+    fn control_uncoloured_spans_produce_no_named_colour() {
+        let font = font();
+        let base = [0.1, 0.2, 0.3];
+        let spans: Vec<TextSpan> = (0..16).map(|_| span("M", None)).collect();
+        let ink = emitted(&font, &spans, base);
+        assert!(
+            !ink.is_empty(),
+            "the control must still draw ink, or it fails for the wrong reason"
+        );
+
+        let found: Vec<&str> = VANILLA
+            .iter()
+            .filter(|(_, hex, _)| bbox_of(&ink, unpack(*hex)).is_some())
+            .map(|(name, _, _)| *name)
+            .collect();
+        assert!(
+            found.is_empty(),
+            "uncoloured spans must draw only in `base`, but produced named \
+             colours {found:?}; emitted: {:?}",
+            distinct(&ink)
+        );
+    }
+
+    /// A hex colour reaches its exact bytes. This is the case the legacy `§` path
+    /// structurally cannot express, so a suite built only from the sixteen named
+    /// colours is blind to it.
+    #[test]
+    #[ignore = "requires the vanilla client.jar"]
+    fn a_hex_span_draws_at_its_exact_bytes() {
+        let font = font();
+        let hex = 0x001f_2e3d;
+        let want = unpack(hex);
+        let ink = emitted(&font, &[span("M", Some(TextColor::Rgb(hex)))], [1.0, 1.0, 1.0]);
+        assert!(
+            bbox_of(&ink, want).is_some(),
+            "hex #{hex:06x} {want:?} never reached a quad; emitted: {:?}",
+            distinct(&ink)
+        );
+    }
+
+    /// An uncoloured span draws in `base`, which is what makes the styled path
+    /// behaviour-preserving for text a server never coloured.
+    #[test]
+    #[ignore = "requires the vanilla client.jar"]
+    fn an_uncoloured_span_draws_in_the_base_colour() {
+        let font = font();
+        let base = [1.0, 170.0 / 255.0, 0.0];
+        let ink = emitted(&font, &[span("M", None)], base);
+        let want = (255u8, 170u8, 0u8);
+        assert!(
+            bbox_of(&ink, want).is_some(),
+            "an uncoloured span must draw in base {want:?}; emitted: {:?}",
+            distinct(&ink)
         );
     }
 }

@@ -4348,15 +4348,15 @@ mod tests {
         let empty_lit = lit_pixels(&empty_frame);
 
         let side = Sidebar {
-            title: "Objectives".into(),
+            title: crate::overlay::plain_spans("Objectives"),
             lines: vec![
                 SidebarLine {
-                    label: "Kills".into(),
-                    score: "7".into(),
+                    label: crate::overlay::plain_spans("Kills"),
+                    score: crate::overlay::plain_spans("7"),
                 },
                 SidebarLine {
-                    label: "Deaths".into(),
-                    score: "2".into(),
+                    label: crate::overlay::plain_spans("Deaths"),
+                    score: crate::overlay::plain_spans("2"),
                 },
             ],
         };

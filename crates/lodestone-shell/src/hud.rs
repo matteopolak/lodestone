@@ -37,6 +37,7 @@ use lodestone_render::{
 };
 
 use lodestone_assets::ItemAtlas;
+use lodestone_model::text::{TextColor, TextSpan};
 
 use item_icon::{ColourStream, IconAssets, IconRenderer, IconSink, SpecialIconDraw};
 
@@ -1176,23 +1177,26 @@ impl HudGeometry {
         // right-aligned — vanilla's layout. Absent when nothing is displayed.
         if let Some(side) = frame.sidebar {
             let pad = 4.0;
-            let mut content_w = b.text_width(&side.title, scale);
+            let mut content_w = b.spans_width(&side.title, scale);
             for l in &side.lines {
-                content_w =
-                    content_w.max(b.text_width(&l.label, scale) + 12.0 + b.text_width(&l.score, scale));
+                content_w = content_w
+                    .max(b.spans_width(&l.label, scale) + 12.0 + b.spans_width(&l.score, scale));
             }
             let panel_w = content_w + pad * 2.0;
             let panel_h = (side.lines.len() as f32 + 1.0) * line_h + pad * 2.0;
             let px = b.w - panel_w - margin;
             let py = ((b.h - panel_h) * 0.5).max(margin);
             b.rect_px(px, py, panel_w, panel_h, [0.0, 0.0, 0.0, 0.55]);
-            let title_x = px + (panel_w - b.text_width(&side.title, scale)) * 0.5;
-            b.text(&side.title, title_x, py + pad, scale, [1.0, 1.0, 1.0, 1.0]);
+            // These three colours were the *only* colours the sidebar could ever
+            // show; they are now **base** colours, used for a run the server left
+            // uncoloured and overridden per span wherever it did colour one.
+            let title_x = px + (panel_w - b.spans_width(&side.title, scale)) * 0.5;
+            b.text_spans(&side.title, title_x, py + pad, scale, [1.0, 1.0, 1.0], 1.0);
             for (i, l) in side.lines.iter().enumerate() {
                 let y = py + pad + (i as f32 + 1.0) * line_h;
-                b.text(&l.label, px + pad, y, scale, [0.85, 0.90, 1.0, 1.0]);
-                let sx = px + panel_w - pad - b.text_width(&l.score, scale);
-                b.text(&l.score, sx, y, scale, [0.95, 0.35, 0.35, 1.0]);
+                b.text_spans(&l.label, px + pad, y, scale, [0.85, 0.90, 1.0], 1.0);
+                let sx = px + panel_w - pad - b.spans_width(&l.score, scale);
+                b.text_spans(&l.score, sx, y, scale, [0.95, 0.35, 0.35], 1.0);
             }
         }
 
@@ -1721,31 +1725,14 @@ fn wrap_legacy_with(measure: impl Fn(&str) -> f32, s: &str, max_width_px: f32) -
 /// or `None` for a format/reset code. These are the standard Minecraft chat
 /// foreground colours; the shell paints them locally, which is a rendering
 /// concern (how to colour a run), not protocol knowledge.
+///
+/// This used to hold its own transcription of the sixteen hex constants. It now
+/// delegates to [`TextColor::rgb`], which is the same table sourced from
+/// vanilla's `TextColor.java` — one copy, so the two cannot drift, and so a
+/// `TextColor`-carrying draw path (`vanilla_font::draw_spans`) and this
+/// `§`-carrying one are guaranteed to agree on what "gold" means.
 fn legacy_rgb(code: char) -> Option<[f32; 3]> {
-    let hex: u32 = match code.to_ascii_lowercase() {
-        '0' => 0x000000,
-        '1' => 0x0000aa,
-        '2' => 0x00aa00,
-        '3' => 0x00aaaa,
-        '4' => 0xaa0000,
-        '5' => 0xaa00aa,
-        '6' => 0xffaa00,
-        '7' => 0xaaaaaa,
-        '8' => 0x555555,
-        '9' => 0x5555ff,
-        'a' => 0x55ff55,
-        'b' => 0x55ffff,
-        'c' => 0xff5555,
-        'd' => 0xff55ff,
-        'e' => 0xffff55,
-        'f' => 0xffffff,
-        _ => return None,
-    };
-    Some([
-        ((hex >> 16) & 0xff) as f32 / 255.0,
-        ((hex >> 8) & 0xff) as f32 / 255.0,
-        (hex & 0xff) as f32 / 255.0,
-    ])
+    TextColor::from_legacy_code(code).map(vanilla_font::text_color_rgb)
 }
 
 struct Builder<'a> {
@@ -1808,6 +1795,19 @@ impl<'a> Builder<'a> {
         match self.font {
             Some(f) => f.legacy_width(s, scale),
             None => item_icon::text_w(&strip_legacy(s), scale),
+        }
+    }
+
+    /// Pixel width of a styled span list at `scale` — the measurement partner of
+    /// [`text_spans`](Self::text_spans), so a right-aligned styled cell lands on
+    /// the same pen positions the draw will use.
+    fn spans_width(&self, spans: &[TextSpan], scale: f32) -> f32 {
+        match self.font {
+            Some(f) => f.spans_width(spans, scale),
+            None => spans
+                .iter()
+                .map(|s| item_icon::text_w(&s.text, scale))
+                .sum(),
         }
     }
 
@@ -2055,6 +2055,58 @@ impl<'a> Builder<'a> {
             }
             self.glyph(ch, cursor, y, scale, [rgb[0], rgb[1], rgb[2], alpha]);
             cursor += advance;
+        }
+    }
+
+    /// Emit a list of styled spans as coloured runs — the structured twin of
+    /// [`text_legacy`](Self::text_legacy).
+    ///
+    /// Prefer this over `text_legacy` for anything that starts life as a
+    /// [`Text`](lodestone_model::text::Text). Flattening to a `§` string first
+    /// is lossy in a way that is invisible at the call site: a
+    /// [`TextColor::Rgb`] has no legacy code, so `Text::to_legacy_string`
+    /// silently drops it and the run renders in `base`. Spans keep the
+    /// `TextColor`, so the hex colours modern servers actually send survive to
+    /// the quad.
+    ///
+    /// A span with no colour of its own draws in `base`; `alpha` scales every
+    /// run, for fades.
+    fn text_spans(
+        &mut self,
+        spans: &[TextSpan],
+        x: f32,
+        y: f32,
+        scale: f32,
+        base: [f32; 3],
+        alpha: f32,
+    ) {
+        if let Some(f) = self.font {
+            let (w, h) = (self.w, self.h);
+            f.draw_spans(
+                &mut ColourStream {
+                    verts: &mut self.verts,
+                    w,
+                    h,
+                },
+                spans,
+                x,
+                y,
+                scale,
+                base,
+                alpha,
+            );
+            return;
+        }
+        // Jar-less debug font: fixed advance, colour only. Mirrors
+        // `text_legacy`'s fallback, which likewise cannot style a glyph.
+        let advance = (font::GLYPH_W as f32 + 1.0) * scale;
+        let mut cursor = x;
+        for span in spans {
+            let rgb = span.style.color.map_or(base, vanilla_font::text_color_rgb);
+            for ch in span.text.chars() {
+                self.glyph(ch, cursor, y, scale, [rgb[0], rgb[1], rgb[2], alpha]);
+                cursor += advance;
+            }
         }
     }
 }
@@ -3439,15 +3491,15 @@ mod tests {
         let base_verts = HudGeometry::build(&base, 640, 480).vertex_count();
 
         let side = Sidebar {
-            title: "Objectives".into(),
+            title: crate::overlay::plain_spans("Objectives"),
             lines: vec![
                 SidebarLine {
-                    label: "Kills".into(),
-                    score: "7".into(),
+                    label: crate::overlay::plain_spans("Kills"),
+                    score: crate::overlay::plain_spans("7"),
                 },
                 SidebarLine {
-                    label: "Deaths".into(),
-                    score: "2".into(),
+                    label: crate::overlay::plain_spans("Deaths"),
+                    score: crate::overlay::plain_spans("2"),
                 },
             ],
         };
@@ -3469,15 +3521,15 @@ mod tests {
         // Dropping the scores (blank strings) must reduce the geometry, so a
         // regression that stops rendering scores can't pass this.
         let scoreless = Sidebar {
-            title: "Objectives".into(),
+            title: crate::overlay::plain_spans("Objectives"),
             lines: vec![
                 SidebarLine {
-                    label: "Kills".into(),
-                    score: String::new(),
+                    label: crate::overlay::plain_spans("Kills"),
+                    score: Vec::new(),
                 },
                 SidebarLine {
-                    label: "Deaths".into(),
-                    score: String::new(),
+                    label: crate::overlay::plain_spans("Deaths"),
+                    score: Vec::new(),
                 },
             ],
         };

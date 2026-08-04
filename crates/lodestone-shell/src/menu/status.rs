@@ -53,8 +53,18 @@ use super::servers::ServerEntry;
 /// A decoded status, in the form the list renders.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ServerStatus {
-    /// MOTD, already flattened to plain text.
+    /// MOTD, already flattened to plain text. Used for layout and for the
+    /// one-line [`StatusSlot::summary`]; the *drawn* MOTD is
+    /// [`Self::motd_spans`].
     pub motd: String,
+    /// MOTD as styled runs, carrying the server's colours.
+    ///
+    /// Carried alongside the plain string rather than replacing it because the
+    /// two are wanted in different places — wrapping and truncation reason about
+    /// characters, the draw reasons about colour — and because deriving one from
+    /// the other at each use site is how the flat-colour bug survived: every
+    /// layer had a `String` and none of them had lost anything *locally*.
+    pub motd_spans: Vec<lodestone_model::text::TextSpan>,
     /// Player count, pre-rendered as `online/max`.
     pub players: String,
     /// Server version name, e.g. `"26.2"`.
@@ -289,6 +299,7 @@ pub fn net_probe(protocol: i32) -> Probe {
         let players = s.players_line();
         Ok(ServerStatus {
             motd: s.motd,
+            motd_spans: s.motd_spans,
             players,
             version: s.version.unwrap_or_default(),
             protocol: s.protocol,

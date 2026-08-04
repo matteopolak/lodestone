@@ -9,6 +9,13 @@ workspace = true
 
 [dependencies]
 lodestone-core = { workspace = true }
+# A status response's `description` is a chat component, so decoding it is
+# component parsing — `lodestone-model` already owns that, including legacy
+# `§` codes, nesting and style inheritance. This crate used to hand-roll a
+# flattener that read only `text`/`translate`/`extra` and then *deleted* every
+# `§` pair, which is precisely how server-list MOTDs lost their colour. Pure
+# and wasm-clean, like the rest of these.
+lodestone-model = { workspace = true }
 thiserror = { workspace = true }
 flate2 = { workspace = true }
 tracing = { workspace = true }
