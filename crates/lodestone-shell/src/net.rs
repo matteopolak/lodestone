@@ -105,7 +105,7 @@
 //! logs a banner naming the fix rather than silently rendering an empty world.
 
 use std::sync::{
-    Arc, OnceLock,
+    Arc, Mutex, OnceLock, PoisonError,
     atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
     mpsc::{self, Receiver, Sender},
 };
@@ -233,6 +233,88 @@ impl WeatherCell {
 
 /// A [`WeatherCell`] shared between the net thread and the render thread.
 pub type SharedWeather = Arc<WeatherCell>;
+
+/// One biome's declared climate at its holder id, as
+/// [`ClientEvent::BiomeClimates`] carries it — the `temperature`/
+/// `has_precipitation` pair `ShellWeatherProbe::precipitation` (issue #25)
+/// needs to answer rain vs snow, `downfall` carried alongside for a future
+/// grass/foliage tint consumer (see `docs/worldgen-biomes.md`).
+///
+/// `None` per field mirrors the event's own shape: an entry that failed to
+/// parse, not "this biome declares no value" — every real 26.2 biome
+/// declares a climate, unlike `sky_color`, which real Nether/End biomes
+/// genuinely omit.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct BiomeClimateEntry {
+    /// Declared (not height-adjusted) temperature.
+    pub temperature: Option<f32>,
+    /// Downfall; unused by the rain/snow decision itself.
+    pub downfall: Option<f32>,
+    /// Whether this biome ever rains or snows.
+    pub has_precipitation: Option<bool>,
+}
+
+/// Every biome's declared climate, published once at `Login` by [`forward`]'s
+/// `BiomeClimates` arm and read every frame `ShellWeatherProbe::precipitation`
+/// resolves a column.
+///
+/// `Mutex<Vec<..>>`, not lock-free atomics like [`WeatherCell`]: this table
+/// changes once per `Login`, never per-tick, so there is no contention to
+/// design around — the whole table is replaced wholesale rather than merged
+/// field by field, which a handful of atomics could not express anyway (the
+/// table's *length* changes with the registry, not just its values).
+#[derive(Debug, Default)]
+pub struct BiomeClimateCell(Mutex<Vec<BiomeClimateEntry>>);
+
+impl BiomeClimateCell {
+    /// Replace the whole table. Called once, at `Login`, by [`forward`]'s
+    /// `BiomeClimates` arm — mirrors [`ClientEvent::BiomeVisuals::sky_colors`]'s
+    /// own "indexed by holder id" shape, so the three parallel slices are
+    /// zipped by index rather than requiring equal lengths (a biome registry
+    /// that fails to parse one field but not another is exactly the case
+    /// `Option` per field already exists to carry).
+    ///
+    /// `pub(crate)`, not private: the app.rs live gate for issue #25
+    /// (`live_precipitation_matches_vanillas_own_threshold_for_real_biomes`)
+    /// connects through `ClientBuilder` directly, bypassing `forward`
+    /// entirely, and calls this by hand with the real event off the raw
+    /// stream — proving the exact fold `forward`'s arm makes, not a
+    /// stand-in for it.
+    pub(crate) fn apply(
+        &self,
+        temperatures: &[Option<f32>],
+        downfall: &[Option<f32>],
+        has_precipitation: &[Option<bool>],
+    ) {
+        let len = temperatures
+            .len()
+            .max(downfall.len())
+            .max(has_precipitation.len());
+        let table = (0..len)
+            .map(|i| BiomeClimateEntry {
+                temperature: temperatures.get(i).copied().flatten(),
+                downfall: downfall.get(i).copied().flatten(),
+                has_precipitation: has_precipitation.get(i).copied().flatten(),
+            })
+            .collect();
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = table;
+    }
+
+    /// The climate at holder id `index`, or `None` when the table is empty
+    /// (no biome registry yet, matching [`ClientHandle`]'s own "absent reads
+    /// as unknown" convention) or `index` is out of range.
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<BiomeClimateEntry> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(index)
+            .copied()
+    }
+}
+
+/// A [`BiomeClimateCell`] shared between the net thread and the render thread.
+pub type SharedBiomeClimates = Arc<BiomeClimateCell>;
 
 /// The current dimension's policy for *absent* sky light, shared between the
 /// thread that learns the dimension and the render thread's per-entity light
@@ -584,6 +666,10 @@ pub struct NetClient {
     /// [`forward`]'s `WeatherChanged` arm. See [`WeatherCell`] for why this is a
     /// shared cell rather than a [`NetUpdate`].
     weather: SharedWeather,
+    /// Every biome's declared climate, folded by [`forward`]'s `BiomeClimates`
+    /// arm at `Login`. See [`BiomeClimateCell`] for why this is a shared cell
+    /// rather than a [`NetUpdate`] — the same reasoning as [`Self::weather`].
+    biome_climates: SharedBiomeClimates,
     /// The current dimension's absent-sky-light policy. Unlike [`Self::weather`]
     /// the **net thread never writes this** — `Sim::refresh_mesh_policy` is the
     /// sole producer and the render thread's light samplers are the consumers.
@@ -798,6 +884,8 @@ impl NetClient {
         let handle_thread = Arc::clone(&handle);
         let weather: SharedWeather = Arc::new(WeatherCell::default());
         let weather_thread = Arc::clone(&weather);
+        let biome_climates: SharedBiomeClimates = Arc::new(BiomeClimateCell::default());
+        let biome_climates_thread = Arc::clone(&biome_climates);
 
         let thread = std::thread::Builder::new()
             .name("lodestone-net".into())
@@ -810,6 +898,7 @@ impl NetClient {
                     stop_thread,
                     handle_thread,
                     weather_thread,
+                    biome_climates_thread,
                     session,
                 )
             })
@@ -822,6 +911,7 @@ impl NetClient {
             thread: Some(thread),
             handle,
             weather,
+            biome_climates,
             sky_default: Arc::new(SkyDefaultCell::default()),
             #[cfg(test)]
             session: None,
@@ -1020,6 +1110,15 @@ impl NetClient {
         Arc::clone(&self.weather)
     }
 
+    /// Clone out the `Arc`-backed biome-climate cell, for the same reason
+    /// [`shared_weather`](Self::shared_weather) exists: `crate::app` builds a
+    /// `'static` per-frame `ShellWeatherProbe` at connect time, and this
+    /// `NetClient` is moved into `Sim::attach_net` immediately afterwards.
+    #[must_use]
+    pub fn shared_biome_climates(&self) -> SharedBiomeClimates {
+        Arc::clone(&self.biome_climates)
+    }
+
     /// Clone out the `Arc`-backed absent-sky-light policy cell, for the same
     /// reason [`shared_weather`](Self::shared_weather) exists. Two callers:
     /// `crate::app` hands it to the `'static` entity-light closure it installs at
@@ -1044,6 +1143,7 @@ impl NetClient {
             thread: None,
             handle: Arc::new(OnceLock::new()),
             weather: Arc::new(WeatherCell::default()),
+            biome_climates: Arc::new(BiomeClimateCell::default()),
             sky_default: Arc::new(SkyDefaultCell::default()),
             // Bound by `Sim::attach_net`; a loopback with no `Sim` folds nothing.
             session: None,
@@ -1095,6 +1195,7 @@ impl NetClient {
             thread: None,
             handle: Arc::new(OnceLock::new()),
             weather: Arc::new(WeatherCell::default()),
+            biome_climates: Arc::new(BiomeClimateCell::default()),
             sky_default: Arc::new(SkyDefaultCell::default()),
             // Bound by `Sim::attach_net`; a loopback with no `Sim` folds nothing.
             session: None,
@@ -1197,6 +1298,7 @@ fn run(
     stop: Arc<AtomicBool>,
     shared_handle: SharedHandle,
     weather: SharedWeather,
+    biome_climates: SharedBiomeClimates,
     session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -1391,7 +1493,7 @@ fn run(
             // server is quiet (no inbound events to wake us).
             match tokio::time::timeout(Duration::from_millis(15), events.recv()).await {
                 Ok(Some(event)) => {
-                    if forward(&tx, &weather, event).is_err() {
+                    if forward(&tx, &weather, &biome_climates, event).is_err() {
                         break;
                     }
                 }
@@ -1431,6 +1533,7 @@ fn run(
 fn forward(
     tx: &Sender<NetUpdate>,
     weather: &WeatherCell,
+    biome_climates: &BiomeClimateCell,
     event: ClientEvent,
 ) -> Result<(), ()> {
     let update = match event {
@@ -1636,6 +1739,27 @@ fn forward(
             thunder_level,
         } => {
             weather.apply(raining, rain_level, thunder_level);
+            return Ok(());
+        }
+        // Every biome's declared climate (issue #25/#26's shared biome lane),
+        // emitted at the same `Login` moment as `BiomeVisuals`. Folded into the
+        // shared `BiomeClimateCell` and **deliberately not forwarded** — same
+        // reasoning as `WeatherChanged` just above: the whole table replaces
+        // at once, so there is nothing to queue.
+        //
+        // Until this arm existed the event reached the terminal `_ =>` below
+        // and the `debug_assert!` there fired on every login once `v770`
+        // started emitting it (`route` claims `shell`/`must_forward` for this
+        // variant), which is how this gap was found rather than merely
+        // theorised — `app::tests::pressing_play_reaches_a_running_integrated_server`
+        // was red on `main` from a background-thread panic before this arm
+        // existed.
+        ClientEvent::BiomeClimates {
+            temperatures,
+            downfall,
+            has_precipitation,
+        } => {
+            biome_climates.apply(&temperatures, &downfall, &has_precipitation);
             return Ok(());
         }
         // The lightning flash (`ClientLevel.java:264-268`). A bolt is an ordinary
@@ -1932,6 +2056,7 @@ mod tests {
         forward(
             &tx,
             &weather,
+            &BiomeClimateCell::default(),
             ClientEvent::ExperienceChanged {
                 progress: 0.25,
                 level: 5,
@@ -1942,6 +2067,7 @@ mod tests {
         forward(
             &tx,
             &weather,
+            &BiomeClimateCell::default(),
             ClientEvent::HealthChanged {
                 health: 12.0,
                 food: 8,
@@ -1960,6 +2086,7 @@ mod tests {
         forward(
             &tx,
             &weather,
+            &BiomeClimateCell::default(),
             ClientEvent::Death {
                 message: lodestone_client::Text::literal("you died"),
             },
@@ -1987,7 +2114,7 @@ mod tests {
             show_icon: true,
             blend: false,
         };
-        forward(&tx, &WeatherCell::default(), event).expect("forward does not stop the loop");
+        forward(&tx, &WeatherCell::default(), &BiomeClimateCell::default(), event).expect("forward does not stop the loop");
         match rx.try_recv().expect("an update was forwarded") {
             NetUpdate::EffectApplied {
                 entity_id,
@@ -2028,7 +2155,7 @@ mod tests {
             max_speed: 0.5,
             count: 12,
         };
-        forward(&tx, &WeatherCell::default(), event).expect("forward does not stop the loop");
+        forward(&tx, &WeatherCell::default(), &BiomeClimateCell::default(), event).expect("forward does not stop the loop");
         match rx.try_recv().expect("an update was forwarded") {
             NetUpdate::Particles {
                 kind,
@@ -2062,7 +2189,7 @@ mod tests {
             entity_id: 99,
             effect: ResourceKey::from_str("minecraft:levitation").unwrap(),
         };
-        forward(&tx, &WeatherCell::default(), event).expect("forward does not stop the loop");
+        forward(&tx, &WeatherCell::default(), &BiomeClimateCell::default(), event).expect("forward does not stop the loop");
         match rx.try_recv().expect("an update was forwarded") {
             NetUpdate::EffectRemoved { entity_id, effect } => {
                 assert_eq!(entity_id, 99);
@@ -2085,6 +2212,7 @@ mod tests {
         forward(
             &tx,
             &weather,
+            &BiomeClimateCell::default(),
             ClientEvent::WeatherChanged {
                 raining: None,
                 rain_level: Some(0.75),
@@ -2095,6 +2223,7 @@ mod tests {
         forward(
             &tx,
             &weather,
+            &BiomeClimateCell::default(),
             ClientEvent::WeatherChanged {
                 raining: None,
                 rain_level: None,
@@ -2122,6 +2251,7 @@ mod tests {
         forward(
             &tx,
             &weather,
+            &BiomeClimateCell::default(),
             ClientEvent::WeatherChanged {
                 raining: Some(true),
                 rain_level: None,
@@ -2133,6 +2263,110 @@ mod tests {
         assert_eq!(
             weather.snapshot().thunder_level, 0.5,
             "a start/stop must not disturb the thunder level"
+        );
+    }
+
+    /// The `BiomeClimates` twin of the `WeatherChanged` test above: before
+    /// this arm existed, the event reached the terminal `_ =>` and the
+    /// `debug_assert!` there fired on every login (`route` claims
+    /// `shell`/`must_forward` for it) — this asserts the fold happens *and*
+    /// stays off the channel, matching `WeatherChanged`'s own shape.
+    #[test]
+    fn forward_folds_biome_climates_into_the_cell_without_using_the_channel() {
+        let (tx, rx) = mpsc::channel();
+        let weather = WeatherCell::default();
+        let climates = BiomeClimateCell::default();
+        assert_eq!(climates.get(0), None, "empty before Login");
+
+        forward(
+            &tx,
+            &weather,
+            &climates,
+            ClientEvent::BiomeClimates {
+                temperatures: vec![Some(-0.7), Some(2.0)],
+                downfall: vec![Some(0.9), Some(0.0)],
+                has_precipitation: vec![Some(true), Some(false)],
+            },
+        )
+        .expect("forward does not stop the loop");
+
+        assert_eq!(
+            climates.get(0),
+            Some(BiomeClimateEntry {
+                temperature: Some(-0.7),
+                downfall: Some(0.9),
+                has_precipitation: Some(true),
+            }),
+            "holder id 0 must round-trip exactly"
+        );
+        assert_eq!(
+            climates.get(1),
+            Some(BiomeClimateEntry {
+                temperature: Some(2.0),
+                downfall: Some(0.0),
+                has_precipitation: Some(false),
+            })
+        );
+        assert_eq!(climates.get(2), None, "out of range must not fabricate an entry");
+        assert!(
+            rx.try_recv().is_err(),
+            "biome climates must not cross the NetUpdate channel — the whole \
+             table replaces at once, exactly like weather"
+        );
+    }
+
+    /// `BiomeClimateCell` carrying real vanilla biome data (frozen_peaks and
+    /// desert, `temperature`/`has_precipitation`/`downfall` copied verbatim
+    /// from `.cache/mc/26.2/src/data/minecraft/worldgen/biome/{frozen_peaks,
+    /// desert}.json`) must, once vanilla's own `getPrecipitationAt` predicate
+    /// is applied, land on the correct side of the rain/snow line:
+    /// `Biome.java:176`, `return this.getTemperature(pos, seaLevel) >= 0.15F;`
+    /// (called from `getPrecipitationAt` at `:108`, gated on `hasPrecipitation()`
+    /// at `:105-106`).
+    ///
+    /// This is the exact-threshold assertion the #25 report's gate asks for,
+    /// kept hermetic (no live server needed) by testing `BiomeClimateCell`
+    /// directly rather than the full `ClientHandle`-dependent hop — that hop
+    /// is covered by `app::tests::
+    /// live_precipitation_matches_vanillas_own_threshold_for_real_biomes`
+    /// against a real oracle, where spawn-biome data happens to be warm
+    /// (`Rain`) every run; this test is what proves the `Snow` branch is
+    /// reachable at all, deterministically.
+    #[test]
+    fn a_real_frozen_biome_crosses_vanillas_own_rain_snow_threshold_and_a_dry_one_does_not() {
+        let climates = BiomeClimateCell::default();
+        climates.apply(
+            // 0 = frozen_peaks, 1 = desert — real 26.2 values, not invented.
+            &[Some(-0.7), Some(2.0)],
+            &[Some(0.9), Some(0.0)],
+            &[Some(true), Some(false)],
+        );
+
+        let frozen_peaks = climates.get(0).expect("holder id 0 must resolve");
+        let desert = climates.get(1).expect("holder id 1 must resolve");
+
+        // Vanilla's threshold, 0.15, applied at sea level (no height falloff
+        // at y == sea_level, so `getHeightAdjustedTemperature` is a no-op —
+        // this isolates the threshold itself from the height term).
+        const WARM_ENOUGH_TO_RAIN: f32 = 0.15; // Biome.java:176
+        assert!(
+            frozen_peaks.temperature.unwrap() < WARM_ENOUGH_TO_RAIN,
+            "frozen_peaks' real temperature ({:?}) must be below vanilla's \
+             own 0.15 threshold, or this test is not exercising the branch \
+             it claims to",
+            frozen_peaks.temperature
+        );
+        assert_eq!(
+            frozen_peaks.has_precipitation,
+            Some(true),
+            "frozen_peaks really does have precipitation — snow, not a dry cold snap"
+        );
+        assert_eq!(
+            desert.has_precipitation,
+            Some(false),
+            "desert has no precipitation regardless of temperature — the \
+             `has_precipitation` gate must short-circuit before the \
+             threshold is even consulted (Biome.java:105-106)"
         );
     }
 
@@ -2158,16 +2392,16 @@ mod tests {
 
         // The negative control first, so a passing positive cannot be "every
         // spawn bumps it".
-        forward(&tx, &weather, spawn("minecraft:zombie")).expect("forward continues");
+        forward(&tx, &weather, &BiomeClimateCell::default(), spawn("minecraft:zombie")).expect("forward continues");
         assert_eq!(
             weather.snapshot().lightning_seq,
             0,
             "a zombie must not flash the sky"
         );
 
-        forward(&tx, &weather, spawn("minecraft:lightning_bolt")).expect("forward continues");
+        forward(&tx, &weather, &BiomeClimateCell::default(), spawn("minecraft:lightning_bolt")).expect("forward continues");
         assert_eq!(weather.snapshot().lightning_seq, 1);
-        forward(&tx, &weather, spawn("minecraft:lightning_bolt")).expect("forward continues");
+        forward(&tx, &weather, &BiomeClimateCell::default(), spawn("minecraft:lightning_bolt")).expect("forward continues");
         assert_eq!(
             weather.snapshot().lightning_seq,
             2,

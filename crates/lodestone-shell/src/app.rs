@@ -1051,6 +1051,63 @@ struct ShellWeatherProbe {
     /// Whether any sky light reaches the camera. `false` draws no precipitation at
     /// all, which is the cave case.
     sky_visible: bool,
+    /// The client-owned world, resolved once per frame the same way `packed`
+    /// above is (a plain `Arc` clone out of the `SharedHandle`'s `OnceLock`,
+    /// not a lock held across the frame) — needed for the per-column biome
+    /// lookup [`Self::biome_precipitation`] does. `None` before login.
+    handle: Option<Arc<lodestone_client::ClientHandle>>,
+    /// Every biome's declared climate (issue #25), published once at `Login`
+    /// by [`crate::net::forward`]'s `BiomeClimates` arm. `None` off a live
+    /// connection.
+    biome_climates: Option<crate::net::SharedBiomeClimates>,
+}
+
+impl ShellWeatherProbe {
+    /// Resolve `(x, y, z)`'s standing biome and translate its declared
+    /// climate to a [`lodestone_render::Precipitation`] via vanilla's own
+    /// `getPrecipitationAt` (`Biome.java:104-108`), height-adjusted the same
+    /// way `Biome.getHeightAdjustedTemperature` is (`Biome.java:110-121`).
+    ///
+    /// `None` at any hop — world not loaded, section elided (all-air), the
+    /// climate table still empty, or the biome's own `temperature`/
+    /// `has_precipitation` unresolved — is exactly "the server has not told
+    /// us yet", the same open set `Sim::biome_sky_color`'s doc already
+    /// enumerates for the sky-colour lookup this mirrors. The caller decides
+    /// the fallback.
+    fn biome_precipitation(&self, x: i32, y: i32, z: i32) -> Option<lodestone_render::Precipitation> {
+        let handle = self.handle.as_ref()?;
+        let dims = handle.world_dimensions()?;
+        let chunk = lodestone_client::ChunkPos {
+            x: x.div_euclid(16),
+            z: z.div_euclid(16),
+        };
+        let base_si = dims.min_y.div_euclid(16);
+        let si = y.div_euclid(16) - base_si;
+        if si < 0 || (si as usize) >= dims.section_count() {
+            return None;
+        }
+        let section = handle.section_at(chunk, si as usize)?;
+        let biome = section.biome_at_block(
+            x.rem_euclid(16) as usize,
+            y.rem_euclid(16) as usize,
+            z.rem_euclid(16) as usize,
+        );
+        let climate = self
+            .biome_climates
+            .as_ref()?
+            .get(usize::try_from(biome).ok()?)?;
+        // `worldgen::SEA_LEVEL` (63), not a second `63` constant — see the
+        // #25 report's own note to grep for one before adding a duplicate.
+        let temperature = lodestone_render::weather::height_adjusted_temperature(
+            climate.temperature?,
+            y,
+            crate::worldgen::SEA_LEVEL,
+        );
+        Some(lodestone_render::weather::precipitation_for_temperature(
+            climate.has_precipitation?,
+            temperature,
+        ))
+    }
 }
 
 impl lodestone_render::WeatherProbe for ShellWeatherProbe {
@@ -1058,18 +1115,19 @@ impl lodestone_render::WeatherProbe for ShellWeatherProbe {
         None
     }
 
-    fn precipitation(&self, _x: i32, _y: i32, _z: i32) -> lodestone_render::Precipitation {
-        if self.sky_visible {
-            // Always rain, never snow. This is the honest state of the biome
-            // lane, not a choice: `ClientRegistries` keeps only each biome's
-            // `sky_color`, so there is no `temperature` to decide with. The
-            // predicate itself
-            // (`lodestone_render::precipitation_for_temperature`) is vanilla's and
-            // is unit-tested; it has no caller with real input yet.
-            lodestone_render::Precipitation::Rain
-        } else {
-            lodestone_render::Precipitation::None
+    fn precipitation(&self, x: i32, y: i32, z: i32) -> lodestone_render::Precipitation {
+        if !self.sky_visible {
+            return lodestone_render::Precipitation::None;
         }
+        // Issue #25: the biome climate lane now reaches the client
+        // (`ClientEvent::BiomeClimates`, decoded and folded via
+        // `net::BiomeClimateCell`), so this resolves a real per-column
+        // answer instead of hardcoding `Rain`. Every unresolved hop still
+        // falls back to `Rain` — matching `sky_visible`'s own "absent data
+        // reads as open sky" rule: an unlit fallback here would make the
+        // first rainy frame after joining silently show nothing.
+        self.biome_precipitation(x, y, z)
+            .unwrap_or(lodestone_render::Precipitation::Rain)
     }
 
     fn light(&self, _x: i32, _y: i32, _z: i32) -> f32 {
@@ -2364,6 +2422,8 @@ impl WindowApp {
                         // first rainy frames after a join silently empty, which is
                         // indistinguishable from the pass being unwired.
                         sky_visible: packed.is_none_or(|p| ((p >> 4) & 0x0F) > 0),
+                        handle: self.sim.net().and_then(|n| n.shared_handle().get().cloned()),
+                        biome_climates: self.sim.net().map(crate::net::NetClient::shared_biome_climates),
                     };
                     weather_columns_for_frame(w, &camera, tick, &probe)
                 })
@@ -4957,5 +5017,216 @@ mod tests {
             errors.is_empty(),
             "the session reported errors while starting: {errors:?}"
         );
+    }
+
+    /// Live gate for issue #25: `ShellWeatherProbe::precipitation` must reach
+    /// a real per-column snow/rain decision now that the biome-climate lane
+    /// is wired, not the `Rain` it answered unconditionally before this
+    /// session (`app.rs`'s own history — see the #25 report).
+    ///
+    /// Connects directly through `ClientBuilder`, bypassing `NetClient`'s
+    /// background thread so the raw event stream can be read here: the real
+    /// `ClientEvent::BiomeClimates` is captured off it and folded into a
+    /// `BiomeClimateCell` **by hand, with the same call** `net::forward`'s
+    /// arm makes — proving the fold, not merely trusting it — while every
+    /// other event is drained so the driver's bounded channel never blocks.
+    /// Mirrors `net::tests::live_entity_light_at_distinguishes_loaded_from_unloaded`'s
+    /// shape.
+    ///
+    /// The expected precipitation per sampled column is computed **here**,
+    /// independently of both `ShellWeatherProbe` and `lodestone_render::
+    /// weather` — the raw climate is pulled straight off the `BiomeClimateCell`
+    /// and vanilla's own threshold is applied by hand, quoted from the
+    /// decompiled source rather than from this crate's constant:
+    /// `Biome.java:176`, `return this.getTemperature(pos, seaLevel) >= 0.15F;`
+    /// (`warmEnoughToRain`, called from `getPrecipitationAt` at `:108`). A
+    /// wrong threshold in either implementation would show up as a mismatch
+    /// against this independently-computed expectation rather than agreeing
+    /// with itself — the `decode(encode(x)) == x` trap `CLAUDE.md` warns
+    /// about, avoided by never calling `precipitation_for_temperature`/
+    /// `height_adjusted_temperature` from this test.
+    ///
+    /// ```text
+    /// cargo test -p lodestone-shell --features live --lib \
+    ///     app::tests::live_precipitation_matches_vanillas_own_threshold_for_real_biomes \
+    ///     -- --ignored --nocapture
+    /// ```
+    #[cfg(feature = "live")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires the lodestone-survival server on 127.0.0.1:25565"]
+    async fn live_precipitation_matches_vanillas_own_threshold_for_real_biomes() {
+        use crate::net::BiomeClimateCell;
+        use lodestone_client::{ClientBuilder, LoginProfile, ServerAddress};
+        use lodestone_render::WeatherProbe as _;
+        use lodestone_testsupport::{poll_until, unique_username};
+
+        let user = unique_username();
+        let protocol = 776; // vanilla 26.2 — the `live` feature's compiled-in family
+        let adapter = lodestone_registry::adapter_for_protocol(protocol)
+            .expect("the `live` feature compiles a family in for protocol 776");
+        let (handle, mut events) = ClientBuilder::new(
+            ServerAddress {
+                host: "127.0.0.1".into(),
+                port: 25565,
+            },
+            LoginProfile {
+                username: user.clone(),
+                uuid: uuid::Uuid::new_v4(),
+            },
+            adapter,
+        )
+        .connect()
+        .await
+        .expect("connect to lodestone-survival on 127.0.0.1:25565");
+
+        let climates = Arc::new(BiomeClimateCell::default());
+        let climates_thread = Arc::clone(&climates);
+        let drain = tokio::spawn(async move {
+            while let Some(event) = events.recv().await {
+                if let lodestone_model::ClientEvent::BiomeClimates {
+                    temperatures,
+                    downfall,
+                    has_precipitation,
+                } = event
+                {
+                    // The exact fold `net::forward`'s `BiomeClimates` arm
+                    // makes — called here by hand since this test bypasses
+                    // `forward` entirely to read the raw stream.
+                    climates_thread.apply(&temperatures, &downfall, &has_precipitation);
+                }
+            }
+        });
+
+        assert!(
+            poll_until(
+                Duration::from_secs(30),
+                Duration::from_millis(100),
+                || async {
+                    handle
+                        .players()
+                        .into_iter()
+                        .find(|p| p.name.as_deref() == Some(user.as_str()))
+                }
+            )
+            .await
+            .is_some(),
+            "player {user} never reached Play on the oracle"
+        );
+
+        let dims = poll_until(
+            Duration::from_secs(10),
+            Duration::from_millis(100),
+            || async { handle.world_dimensions() },
+        )
+        .await
+        .expect("world dimensions never arrived");
+
+        let loaded = poll_until(
+            Duration::from_secs(15),
+            Duration::from_millis(200),
+            || async {
+                let chunks = handle.loaded_chunks();
+                if chunks.is_empty() { None } else { Some(chunks) }
+            },
+        )
+        .await
+        .expect("no chunks streamed in within 15s of login");
+
+        // The registry (and with it `BiomeClimates`) lands at `Login`, ahead
+        // of chunk data, but poll rather than assume the ordering: this test
+        // cares about the fold having happened, not about racing it.
+        assert!(
+            poll_until(Duration::from_secs(10), Duration::from_millis(100), || {
+                let climates = Arc::clone(&climates);
+                async move { climates.get(0).map(|_| ()) }
+            })
+            .await
+            .is_some(),
+            "ClientEvent::BiomeClimates never arrived — the climate table is still empty"
+        );
+
+        let handle = Arc::new(handle);
+        let probe = ShellWeatherProbe {
+            light: 1.0,
+            sky_visible: true,
+            handle: Some(Arc::clone(&handle)),
+            biome_climates: Some(Arc::clone(&climates)),
+        };
+
+        // Sample a real column in the middle of a loaded chunk, at mid-build-
+        // height. `checked` and `snow_seen`/`rain_seen` are reported in the
+        // panic message so a failure names the real biome and climate
+        // involved, not just "mismatch".
+        let mut checked = 0usize;
+        let mut mismatches: Vec<String> = Vec::new();
+        for chunk in loaded.iter().take(16) {
+            let y = dims.min_y + (dims.height as i32 / 2);
+            let block_x = chunk.x * 16 + 8;
+            let block_z = chunk.z * 16 + 8;
+            let base_si = dims.min_y.div_euclid(16);
+            let si = y.div_euclid(16) - base_si;
+            if si < 0 || (si as usize) >= dims.section_count() {
+                continue;
+            }
+            let Some(section) = handle.section_at(*chunk, si as usize) else {
+                continue;
+            };
+            let biome = section.biome_at_block(8, y.rem_euclid(16) as usize, 8);
+            let Some(climate) = climates.get(usize::try_from(biome).unwrap_or(usize::MAX)) else {
+                continue;
+            };
+            let (Some(temperature), Some(has_precipitation)) =
+                (climate.temperature, climate.has_precipitation)
+            else {
+                continue;
+            };
+            checked += 1;
+
+            // Independent re-derivation, not a call to `lodestone_render::
+            // weather`: vanilla's own height falloff
+            // (`Biome.getHeightAdjustedTemperature`, `Biome.java:112-121`)
+            // and its own rain/snow threshold (`Biome.java:176`, `0.15F`).
+            let above = (y - crate::worldgen::SEA_LEVEL) as f32;
+            let adjusted = if above > 0.0 {
+                temperature - above * 0.05 / 40.0
+            } else {
+                temperature
+            };
+            let expected = if !has_precipitation {
+                lodestone_render::Precipitation::None
+            } else if adjusted >= 0.15 {
+                lodestone_render::Precipitation::Rain
+            } else {
+                lodestone_render::Precipitation::Snow
+            };
+
+            let actual = probe.precipitation(block_x, y, block_z);
+            println!(
+                "chunk {chunk:?} biome {biome} temperature={temperature} \
+                 has_precipitation={has_precipitation} adjusted={adjusted} -> {expected:?}"
+            );
+            if actual != expected {
+                mismatches.push(format!(
+                    "chunk {chunk:?} biome {biome} temperature={temperature} \
+                     has_precipitation={has_precipitation} adjusted={adjusted}: \
+                     expected {expected:?}, probe returned {actual:?}"
+                ));
+            }
+        }
+
+        assert!(
+            checked > 0,
+            "no loaded column resolved a section + biome + climate — the wiring \
+             chain (section_at → biome_at_block → BiomeClimateCell) never \
+             produced real data to check against"
+        );
+        assert!(
+            mismatches.is_empty(),
+            "{}/{checked} sampled columns disagreed with vanilla's own threshold: \
+             {mismatches:#?}",
+            mismatches.len()
+        );
+
+        drain.abort();
     }
 }
