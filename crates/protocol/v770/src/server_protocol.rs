@@ -1607,17 +1607,41 @@ impl ServerProtocol for V770ServerProtocol {
                 let _ = decode_full::<ResourcePackResponse>(payload);
                 ServerBound::Ignored
             }
+            // Issue #425 investigation (chunk-streaming regression): this
+            // arm and `CHUNK_BATCH_RECEIVED` below used to decode-then-drop
+            // like every other packet in this `Ignored` family, from when
+            // this crate had no consumer for either. Issue #270 later added
+            // `ServerBound::ClientInformationChanged`/`ChunkBatchAcknowledged`
+            // and their consumers in `crate::server` (`ViewTracker::set_view_radius`
+            // and the `awaiting_chunk_batch_ack` flow-control gate), but never
+            // came back to update *this* decode arm — so both variants were
+            // dead code, constructed nowhere, and every view-streaming batch
+            // after the first queued behind a permanently-`true`
+            // `awaiting_chunk_batch_ack` and was never flushed. Reproduced at
+            // committed `main`: `cargo test -p lodestone-v770 --test block_edit
+            // -- dig_and_place_persist_through_forget_and_reload` timed out
+            // waiting for a forgotten chunk to be re-sent after walking back,
+            // and eprintln probing confirmed zero `ChunkBatchAcknowledged`
+            // packets ever reached this match in the whole run.
             State::Play if packet_id == play::serverbound::CLIENT_INFORMATION => {
-                let _ = decode_full::<ClientInformation>(payload);
-                ServerBound::Ignored
+                match decode_full::<ClientInformation>(payload) {
+                    Some(info) => ServerBound::ClientInformationChanged {
+                        view_distance: info.view_distance,
+                    },
+                    None => ServerBound::Ignored,
+                }
             }
             State::Play if packet_id == play::serverbound::CLIENT_COMMAND => {
                 let _ = decode_full::<ClientCommand>(payload);
                 ServerBound::Ignored
             }
             State::Play if packet_id == play::serverbound::CHUNK_BATCH_RECEIVED => {
-                let _ = decode_full::<ChunkBatchReceived>(payload);
-                ServerBound::Ignored
+                match decode_full::<ChunkBatchReceived>(payload) {
+                    Some(p) => ServerBound::ChunkBatchAcknowledged {
+                        desired_chunks_per_tick: p.desired_chunks_per_tick,
+                    },
+                    None => ServerBound::Ignored,
+                }
             }
             // `ServerboundSeenAdvancementsPacket`: a VarInt `Action` ordinal
             // (`0` opened-tab, `1` closed-screen, plain `writeEnum`), then an
@@ -2792,5 +2816,155 @@ mod combat_decode_tests {
         assert_eq!(decoded, ServerBound::PlayerInput { sprint: true });
         let decoded = proto.decode(State::Play, play::serverbound::PLAYER_INPUT, &[0x1F]); // every other flag, not sprint
         assert_eq!(decoded, ServerBound::PlayerInput { sprint: false });
+    }
+}
+
+/// Regression coverage for the #425 investigation's chunk-streaming bug
+/// (see the doc comment on the `CLIENT_INFORMATION`/`CHUNK_BATCH_RECEIVED`
+/// decode arms above): both packet ids used to hit the generic
+/// decode-then-drop `Ignored` family from before this crate had any
+/// consumer for either, and issue #270 later added
+/// `ServerBound::ClientInformationChanged`/`ChunkBatchAcknowledged` plus
+/// `crate::server`'s consumers without ever updating this decode arm to
+/// construct them — so both variants were dead code, and every
+/// view-streaming chunk batch after the connection's first queued behind a
+/// permanently-`true` `awaiting_chunk_batch_ack` and was never flushed.
+/// `cargo test -p lodestone-v770 --test block_edit -- \
+/// dig_and_place_persist_through_forget_and_reload` reproduced this at
+/// committed `main` before the fix (a real player walking back into a
+/// forgotten chunk never got it re-sent) and passes after it.
+#[cfg(test)]
+mod view_streaming_decode_tests {
+    use super::*;
+    use lodestone_core::State;
+    use lodestone_model::{
+        ChatMode, ClientAction, ClientSettings, ConnectionState, DisplayedSkinParts, MainHand,
+        Directive, ParticleStatus, VersionAdapter,
+    };
+    use crate::packets::game::ChunkBatchFinished;
+    use lodestone_world::World;
+
+    fn encode<T: Encode>(packet: &T) -> Vec<u8> {
+        let mut w = Writer::default();
+        packet.encode(&mut w, CTX).expect("well-formed struct encodes");
+        w.into_vec()
+    }
+
+    /// The real client's `SetClientSettings` encoder (the same one a
+    /// render-distance change in the shell's settings screen would send),
+    /// decoded back into [`ServerBound::ClientInformationChanged`]. Before
+    /// the fix this decoded to `ServerBound::Ignored` unconditionally, so
+    /// `crate::server`'s `ViewTracker::set_view_radius` consumer was never
+    /// reached by a real client no matter what it sent.
+    #[test]
+    fn decode_client_information_changed_from_real_client_encoder() {
+        let proto = V770ServerProtocol;
+        let settings = ClientSettings {
+            locale: "en_us".to_owned(),
+            view_distance: 12,
+            chat_mode: ChatMode::Full,
+            chat_colors: true,
+            skin_parts: DisplayedSkinParts {
+                cape: false,
+                jacket: false,
+                left_sleeve: false,
+                right_sleeve: false,
+                left_pants_leg: false,
+                right_pants_leg: false,
+                hat: false,
+            },
+            main_hand: MainHand::Right,
+            text_filtering: false,
+            allow_server_listing: true,
+            particle_status: ParticleStatus::All,
+        };
+        let (packet_id, payload) = crate::adapter()
+            .encode_action(ConnectionState::Play, &ClientAction::SetClientSettings(settings))
+            .expect("encodes")
+            .expect("SetClientSettings always encodes in Play");
+        assert_eq!(packet_id, play::serverbound::CLIENT_INFORMATION);
+        let decoded = proto.decode(State::Play, packet_id, &payload);
+        assert_eq!(decoded, ServerBound::ClientInformationChanged { view_distance: 12 });
+    }
+
+    /// Control: a malformed payload must still drop the packet rather than
+    /// panic on the missing fields.
+    #[test]
+    fn decode_client_information_changed_rejects_a_truncated_payload() {
+        let proto = V770ServerProtocol;
+        let decoded = proto.decode(State::Play, play::serverbound::CLIENT_INFORMATION, &[]);
+        assert_eq!(decoded, ServerBound::Ignored);
+    }
+
+    /// Chains the real *client* chunk-batch-flow-control reply — produced by
+    /// feeding a genuine clientbound `CHUNK_BATCH_FINISHED` through the real
+    /// `V770Adapter::handle_packet` (the same code path
+    /// `crate::server`'s own connection loop drives, per this module's own
+    /// `CHUNK_BATCH_START`/`CHUNK_BATCH_FINISHED` handling) — into this
+    /// module's server-side decoder. This proves the whole
+    /// server-sends-a-batch / client-acks-it / server-reads-the-ack loop
+    /// closes through two independently-written, real production
+    /// encode/decode paths, not a hand-rolled fixture on either end.
+    #[test]
+    fn decode_chunk_batch_acknowledged_from_the_real_client_adapter() {
+        let finished_body = encode(&ChunkBatchFinished { batch_size: 7 });
+        let mut world = World::new();
+        let directives = crate::adapter()
+            .handle_packet(
+                &mut world,
+                ConnectionState::Play,
+                play::clientbound::CHUNK_BATCH_FINISHED,
+                &finished_body,
+            )
+            .expect("a real client must accept its own CHUNK_BATCH_FINISHED body");
+        let (ack_packet_id, ack_payload) = directives
+            .into_iter()
+            .find_map(|d| match d {
+                Directive::Send { packet_id, payload } => Some((packet_id, payload)),
+                _ => None,
+            })
+            .expect("CHUNK_BATCH_FINISHED must produce a CHUNK_BATCH_RECEIVED reply");
+        assert_eq!(ack_packet_id, play::serverbound::CHUNK_BATCH_RECEIVED);
+
+        let proto = V770ServerProtocol;
+        let decoded = proto.decode(State::Play, ack_packet_id, &ack_payload);
+        match decoded {
+            ServerBound::ChunkBatchAcknowledged { desired_chunks_per_tick } => {
+                assert!(
+                    desired_chunks_per_tick > 0.0,
+                    "a real client's desired rate must be positive, got {desired_chunks_per_tick}"
+                );
+            }
+            other => panic!(
+                "expected ServerBound::ChunkBatchAcknowledged (this is exactly the variant that \
+                 was dead code before the fix — see this module's own doc comment), got {other:?}"
+            ),
+        }
+    }
+
+    /// Pins the exact numeric field against a hand-built payload too,
+    /// independent of whatever rate-estimation formula the real client picks
+    /// — a future change to that formula should not silently stop this test
+    /// from noticing a decode regression.
+    #[test]
+    fn decode_chunk_batch_acknowledged_bit_layout() {
+        let proto = V770ServerProtocol;
+        let body = encode(&ChunkBatchReceived {
+            desired_chunks_per_tick: 32.0,
+        });
+        let decoded = proto.decode(State::Play, play::serverbound::CHUNK_BATCH_RECEIVED, &body);
+        assert_eq!(
+            decoded,
+            ServerBound::ChunkBatchAcknowledged { desired_chunks_per_tick: 32.0 }
+        );
+    }
+
+    /// Control: a malformed payload must still drop the packet rather than
+    /// panic.
+    #[test]
+    fn decode_chunk_batch_acknowledged_rejects_a_truncated_payload() {
+        let proto = V770ServerProtocol;
+        let decoded = proto.decode(State::Play, play::serverbound::CHUNK_BATCH_RECEIVED, &[]);
+        assert_eq!(decoded, ServerBound::Ignored);
     }
 }
