@@ -19,7 +19,19 @@ It lives in two places for one reason:
 [`bevy-migration.md`](./bevy-migration.md) §4.1; doing it early would put the
 interpolation clock and the socket behind one lock. Nothing is duplicated across
 them: the net side owns what the server said, the render side owns what is on
-screen this frame, and the only thing crossing is `EntitySnapshot` (below).
+screen this frame.
+
+**Update (issue #36 landed):** for `crate::sim::Sim` specifically, §4.1(c) went
+further and put both tables' components in the *one* `World` `Sim` owns —
+`Sim` runs its own `IngestPlugin` + `EntityInterpPlugin` pair in a single
+`App`, rather than reading a second, already-released copy through
+`lodestone_client::state::SharedState`. `EntitySnapshot`, the version-free
+value type that used to ferry data between the two, is deleted:
+[`fold_entities`](../crates/lodestone-shell/src/entities.rs) reads the ingest
+components straight off that one `World`, inside its own write guard, instead
+of taking a `&[EntitySnapshot]` argument. See "Update, and it changes the
+plan" below for the change that made the deletion safe without also
+reordering the schedule.
 
 ## How it works
 
@@ -127,9 +139,9 @@ this module owns was simply never in that list.
 That is a **second, parallel** entity set from the one `reset_entity_tracks`
 (`lodestone-shell/src/entities.rs`) clears. `reset_entity_tracks` only tears down
 the *render*-side fold (`TrackIndex`, `ItemStacks`, `ExtractedDraws`) — the
-entities `fold_snapshots` spawns from `EntitySnapshot`. It has no reach into
-`EntityIndex` or the components this module documents, because those live one
-layer upstream, in `SharedState`'s own `World`.
+entities `fold_entities` spawns from the ingest component set. It has no reach
+into `EntityIndex` or the components this module documents, because those live
+one layer upstream, in `SharedState`'s own `World`.
 
 The bug this produced: quit, rejoin, and the new server hands out an entirely
 different set of network ids (vanilla never guarantees reuse, and normally
@@ -195,7 +207,7 @@ what the ~25 hermetic tests in `entities.rs` are written against:
 1. `Update` / `FrameSet::Interpolate` → `advance_interp_clocks`
 2. per 20 Hz tick, inside `GameTick`: `TickSet::Physics` → `tick_item_physics`,
    then `TickSet::Animate` → `tick_walk_animation`
-3. `fold_snapshots` (this frame's `EntitySnapshot`s, then the prune)
+3. `fold_entities` (this frame's ingest component state, then the prune)
 4. `Extract` / `ExtractSet::Entities` → `extract_entity_draws`
 
 `draws()` is then a plain read of the `ExtractedDraws` resource. It does not
@@ -224,29 +236,34 @@ a tracked entity and the next extract puts it on screen.
 - **`step_item_physics` and `lodestone_physics::move_entity` stay plain
   functions.** [`bevy-migration.md`](./bevy-migration.md) §8: the ECS owns state
   and scheduling, never verified math. A system calls them.
-- **`tick_item_physics` is now a real system; `fold_snapshots` is the one thing
+- **`tick_item_physics` is now a real system; `fold_entities` is the one thing
   left that is not.** `tick_item_physics` used to be blocked on the same
-  `'static`-resource problem as `fold_snapshots` — a `bevy_ecs` `Resource` must
-  be `'static`, and the workspace denies `unsafe_code`, so a borrowed
-  `&dyn CollisionView` (whose owner was a local in `Sim::update_entities`)
-  could not reach a system. `lodestone_ecs::player::CollisionSource` inverted
-  that: the trait object is `'static` because an implementor owns whatever it
-  borrows from, so `tick_item_physics` now runs in `GameTick`/`TickSet::Physics`
-  against a `PlayerCollision` resource. `fold_snapshots` is blocked on a
-  *different* shape of the same class of problem, not on the collision borrow:
-  its input is a `&[EntitySnapshot]` slice that `sim.rs` owns as a plain `Vec`,
-  not a view an owned adapter could rebuild on demand, so the `CollisionSource`
-  fix does not apply. The snapshot slice disappears only when ingest writes the
-  render components directly, which is when `fold_snapshots` becomes a system.
-  Both functions carry that note at their definition.
+  `'static`-resource problem `fold_entities`' predecessor (`fold_snapshots`)
+  was — a `bevy_ecs` `Resource` must be `'static`, and the workspace denies
+  `unsafe_code`, so a borrowed `&dyn CollisionView` (whose owner was a local in
+  `Sim::update_entities`) could not reach a system. `lodestone_ecs::player::
+  CollisionSource` inverted that: the trait object is `'static` because an
+  implementor owns whatever it borrows from, so `tick_item_physics` now runs
+  in `GameTick`/`TickSet::Physics` against a `PlayerCollision` resource.
+  `fold_entities` staying a hand-called function is now a deliberate choice,
+  not a structural block: issue #36 deleted the `&[EntitySnapshot]` slice that
+  used to be the obstacle (see "Widened, not deleted" below), but turning
+  `fold_entities` into a scheduled system would still mean re-deriving the
+  clocks → ticks → fold ordering the next bullet describes, which the #36
+  fix deliberately did not touch.
 - **The render order is clocks → ticks → fold, which is `Update` before
   `GameTick` and the fold after both** — inverted from the plan's `NetIngest` →
   `GameTick` → `Update` → `Extract`. That is behaviour, not style: every numeric
-  expectation in the interpolation tests depends on it. Reordering belongs in the
-  change that also deletes `EntitySnapshot`.
-- **`RenderKind` (a path `String`) and `EntityKind` (a `ResourceKey`) are two
-  components for the same fact**, because `EntitySnapshot` speaks the bare path
-  the render model set is keyed by. They collapse when `EntitySnapshot` dies.
+  expectation in the interpolation tests depends on it. **This did not change
+  when `EntitySnapshot` was deleted** — see "Update, and it changes the plan"
+  below for why the reorder issue #36's title implied turned out to be a
+  separate, unneeded change.
+- **`RenderKind` (a path `String`) and `EntityKind` (a `ResourceKey`) are still
+  two components for the same fact**, even after `EntitySnapshot`'s deletion:
+  `spawn_track` still populates `RenderKind` from `EntityFacts::type_path`, a
+  bare `String`, because the render model set is keyed by path rather than by
+  `ResourceKey`. Collapsing them is real follow-on debt this pass did not
+  attempt — `EntitySnapshot` dying was necessary but not sufficient for it.
 - **The item-physics gate's discriminating power was measured, not assumed.**
   Disabling the physics step fails exactly three tests —
   `item_pop_follows_a_ballistic_arc_not_a_flat_ease`,
@@ -322,6 +339,21 @@ under bursts; and `update_track` derives the new `InterpFrom` from the currently
 The precedent is already in production: `extract_entity_draws` bridges four
 ingest components to render output via `EntityIndex`, in the same `World`, at
 frame time. The new fold is that pattern applied to the rest.
+
+**Landed.** `fold_entities`/`resolve_entity_facts` (`entities.rs`) and the
+test-only `IngestSnap` builder are in `main`, `EntitySnapshot` and
+`fold_entity_snapshots` are deleted, and every call site — `net.rs`,
+`sim/net_apply.rs`, `sim/tests.rs`, `sim/audio.rs`'s `entity_sound_position`
+(which now reads `Sim::entity_draws()` instead of a `NetClient` passthrough),
+and the entity pixel gates under `crates/lodestone-shell/tests/` — was
+migrated rather than left pointing at a deleted type. `NetClient::entities()`
+survives as a thin passthrough to the raw, version-free `EntityView` list,
+for the handful of live integration tests (`live_entity_render.rs`,
+`live_dropped_item.rs`) that drive a bare `EntityInterpolator` with no
+`IngestPlugin` of its own and so have to translate a view into ingest
+components by hand (see those files' `apply_view`). The schedule stayed
+clocks → ticks → fold, unreordered, exactly as predicted above. Issue #36 is
+closed.
 
 ## Configuration
 
