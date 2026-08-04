@@ -1,0 +1,17 @@
+[package]
+name = "lodestone-command"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+# Deliberately dependency-free: this crate is a standalone Brigadier
+# argument-tree library (issue #118's substrate), not wired into the ECS, the
+# network protocol, or any version family. See `src/lib.rs` for the module
+# doc explaining why it currently has no consumer.
+[dependencies]
+
+[dev-dependencies]
