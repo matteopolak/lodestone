@@ -68,23 +68,32 @@ fn console_path() -> String {
     std::env::var("LODESTONE_V340_CONSOLE").unwrap_or_else(|_| "/w/console".into())
 }
 
-/// Sends one command to the server console FIFO. Panics on a docker failure —
-/// this test has opted in to needing the live container.
+/// Sends one command to the server console FIFO. Panics on a container-exec
+/// failure — this test has opted in to needing the live container.
 fn console(cmd: &str) {
     let redirect = format!("printf '{cmd}\\n' > {}", console_path());
-    let status = Command::new("docker")
+    let status = Command::new("container")
         .args(["exec", &container(), "sh", "-c", &redirect])
         .status()
-        .expect("spawn docker exec for server console");
+        .expect("spawn container exec for server console");
     assert!(status.success(), "server console command failed: {cmd}");
 }
 
-/// Reads the last `secs` seconds of the container log.
-fn logs_since(secs: u32) -> String {
-    let out = Command::new("docker")
-        .args(["logs", "--since", &format!("{secs}s"), &container()])
+/// Reads the last `n` lines of the container log.
+///
+/// Apple's `container logs` has no `--since` — only `-n <lines>` — unlike
+/// Docker, which this used to poll with `--since {secs}s`. This polls by line
+/// count instead of by wall-clock window: `poll_block_is_air` already issues
+/// one `testforblock` per iteration and sleeps 700ms between them, and the
+/// response line lands within a handful of lines of the command that
+/// triggered it even under concurrent world activity, so a generous constant
+/// tail comfortably outlives one round trip without needing to track a
+/// cursor. See docs/oracle-runtimes.md for the trap this rework closes.
+fn logs_tail(n: u32) -> String {
+    let out = Command::new("container")
+        .args(["logs", "-n", &n.to_string(), &container()])
         .output()
-        .expect("spawn docker logs");
+        .expect("spawn container logs");
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
     text
@@ -99,7 +108,7 @@ fn poll_block_is_air(x: i32, y: i32, z: i32, expect_air: bool, timeout: Duration
     loop {
         console(&format!("testforblock {x} {y} {z} minecraft:stone"));
         std::thread::sleep(Duration::from_millis(700));
-        let log = logs_since(6);
+        let log = logs_tail(40);
         // A "Successfully found" line means the block IS stone; an "is Air" line
         // means it is not. We scan for our exact coordinate to avoid picking up a
         // concurrent player's activity elsewhere in the shared world.

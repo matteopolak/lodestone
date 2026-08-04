@@ -23,9 +23,12 @@
 //! 4. assert the server **resumes** streaming chunks afterwards — the one
 //!    property that proves we actually left the death screen.
 //!
-//! RCON is reached by `docker exec lodestone-mc262 perl …` speaking the RCON
+//! RCON is reached by `container exec lodestone-mc262 perl …` speaking the RCON
 //! protocol to the server's in-container listener (the port is not published to
 //! the host). The suite enabling RCON is documented in the task report.
+//! `container exec` takes the same `<container-id> <arguments>` shape Docker's
+//! does, so this is a straight CLI-name swap — no change to the perl or its
+//! invocation.
 
 #![cfg(feature = "live-chunk")]
 
@@ -47,8 +50,8 @@ mod common;
 use common::unique_username;
 
 /// A tiny RCON client run inside the server container (the RCON port is not
-/// published to the host, so we reach it via `docker exec`). Reads password and
-/// command from `@ARGV`, prints the command response.
+/// published to the host, so we reach it via `container exec`). Reads password
+/// and command from `@ARGV`, prints the command response.
 const RCON_PERL: &str = r#"
 use IO::Socket::INET;
 my ($pw,$cmd)=@ARGV;
@@ -60,7 +63,7 @@ print $s pkt(2,2,$cmd); my($i,$t,$b)=rd(); print "$b";
 "#;
 
 async fn rcon(command: &str) -> String {
-    let output = std::process::Command::new("docker")
+    let output = std::process::Command::new("container")
         .args([
             "exec",
             "lodestone-mc262",
@@ -72,7 +75,7 @@ async fn rcon(command: &str) -> String {
             command,
         ])
         .output()
-        .expect("run docker exec perl rcon");
+        .expect("run container exec perl rcon");
     assert!(
         output.status.success(),
         "rcon `{command}` failed: {}",
