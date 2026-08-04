@@ -180,6 +180,19 @@ pub enum ClientAction {
         /// Free-form client brand string, such as `vanilla`.
         brand: String,
     },
+    /// Send an arbitrary plugin message on `channel` (issue #301).
+    ///
+    /// [`ClientAction::SendBrand`] is vanilla's one built-in use of
+    /// `custom_payload`; this is the general case for a mod/plugin-aware
+    /// client that wants to talk on a channel of its own. Valid in the
+    /// Configuration and Play states, matching where `custom_payload` itself
+    /// exists on the wire.
+    SendCustomPayload {
+        /// Plugin channel identifier.
+        channel: ResourceKey,
+        /// Raw payload bytes, opaque to this crate.
+        data: Vec<u8>,
+    },
     /// Reply to a server-initiated ping challenge (distinct from keep-alive).
     PongResponse {
         /// Id echoed back from the corresponding ping challenge.

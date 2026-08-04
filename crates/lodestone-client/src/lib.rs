@@ -78,6 +78,7 @@
 //! ```
 
 mod builder;
+mod channel;
 mod config;
 mod driver;
 mod error;
@@ -88,6 +89,7 @@ mod spawn;
 mod state;
 
 pub use builder::ClientBuilder;
+pub use channel::ChannelRegistry;
 pub use config::{KeepAlivePolicy, PlayerLoadedPolicy, RespawnPolicy};
 pub use error::{BotError, ClientClosed, ClientError, SessionOutcome, WaitError};
 pub use handle::{ClientHandle, EventStream, WalkOutcome};

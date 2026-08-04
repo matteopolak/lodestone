@@ -237,6 +237,8 @@ pub enum ClientActionKind {
     ChangeGameMode,
     /// [`ClientAction::CookieResponse`].
     CookieResponse,
+    /// [`ClientAction::SendCustomPayload`].
+    SendCustomPayload,
 }
 
 impl From<&ClientAction> for ClientActionKind {
@@ -295,6 +297,7 @@ impl From<&ClientAction> for ClientActionKind {
             ClientAction::TeleportToEntity { .. } => Self::TeleportToEntity,
             ClientAction::ChangeGameMode { .. } => Self::ChangeGameMode,
             ClientAction::CookieResponse { .. } => Self::CookieResponse,
+            ClientAction::SendCustomPayload { .. } => Self::SendCustomPayload,
         }
     }
 }
