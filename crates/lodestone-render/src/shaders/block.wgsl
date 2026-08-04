@@ -53,6 +53,28 @@ fn vs_main(@location(0) packed: vec3<u32>) -> VsOut {
     return out;
 }
 
+// sRGB transfer functions (component-wise), ported straight from
+// `model.wgsl` — see that file's copy for the full derivation. Vanilla's
+// shade multiply is a non-colour-managed multiply on gamma bytes, not a
+// linear-light one; this packed path used to skip the round-trip entirely
+// (`tex.rgb * in.shade` in linear space), which is issue #400's third
+// divergence and was not previously recorded anywhere before that issue.
+// Doing the multiply in linear space pulls every shade factor toward 1.0 —
+// at midnight (`light_term = 0.392`) a mid-grey 128 texel reads as **82**
+// once re-encoded, where the gamma-space round-trip below reads **50**: the
+// washed-out look, worst exactly where the scene is darkest.
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    let lo = c * 12.92;
+    let hi = 1.055 * pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055;
+    return select(hi, lo, c <= vec3<f32>(0.0031308));
+}
+
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let lo = c / 12.92;
+    let hi = pow((max(c, vec3<f32>(0.0)) + 0.055) / 1.055, vec3<f32>(2.4));
+    return select(hi, lo, c <= vec3<f32>(0.04045));
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Wrap the tile coordinate into [0,1) and map it into the sprite's atlas
@@ -70,5 +92,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let ddx = dpdx(in.tile) * in.rect.zw;
     let ddy = dpdy(in.tile) * in.rect.zw;
     let tex = textureSampleGrad(atlas_tex, atlas_smp, uv, ddx, ddy);
-    return vec4<f32>(tex.rgb * in.shade, tex.a);
+    // Gamma-space shade multiply, see the doc above `linear_to_srgb`.
+    let lit_srgb = linear_to_srgb(tex.rgb) * in.shade;
+    return vec4<f32>(srgb_to_linear(lit_srgb), tex.a);
 }

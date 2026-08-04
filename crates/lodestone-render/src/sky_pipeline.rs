@@ -41,14 +41,15 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
 use crate::camera::Camera;
+use crate::cloud_mesh::CloudCells;
 use crate::fog::{VoidFog, scale_gamma};
 use crate::sky::{
-    STAR_FIELD_SEED, SUNRISE_MIN_ALPHA, build_star_field,
+    CLOUD_FANCY_RADIUS_CELLS, CloudStatus, STAR_FIELD_SEED, SUNRISE_MIN_ALPHA, build_star_field,
     celestial_quad_positions, celestial_quad_uvs, celestial_rotation_matrix, cloud_color_for_time_of_day,
-    cloud_plane_geometry, fog_color_for_time_of_day, moon_phase_index_for_time_of_day, quad_indices,
-    sky_color_for_time_of_day, sky_disc_indices, sky_disc_positions, star_brightness_for_time_of_day,
-    sunrise_fan_indices, sunrise_fan_positions, sunrise_fan_transform, sunrise_fan_vertex_alphas,
-    sunrise_sunset_color_for_time_of_day,
+    cloud_fancy_max_faces, cloud_plane_geometry, fancy_cloud_geometry, fog_color_for_time_of_day,
+    moon_phase_index_for_time_of_day, quad_indices, sky_color_for_time_of_day, sky_disc_indices,
+    sky_disc_positions, star_brightness_for_time_of_day, sunrise_fan_indices, sunrise_fan_positions,
+    sunrise_fan_transform, sunrise_fan_vertex_alphas, sunrise_sunset_color_for_time_of_day,
 };
 use lodestone_assets::{CelestialAtlas, ResourceManager, SkyAssetError};
 
@@ -624,6 +625,46 @@ impl CloudPipeline {
     }
 }
 
+/// The FANCY cloud pipeline: [`CLOUD_BLEND`], untextured position + baked
+/// colour — the same vertex layout and shader as [`StarPipeline`]/
+/// [`SunrisePipeline`] (see [`SkyVertex`]), because vanilla's FANCY clouds are
+/// shaded per-face by a fixed colour table
+/// (`rendertype_clouds.vsh`'s `faceColors`), not sampled from a texture at
+/// all — the texture only decides *which cells are filled*, which
+/// `crate::cloud_mesh`/`crate::sky::fancy_cloud_geometry` resolve on the CPU
+/// before a single vertex reaches the GPU. No texture bind group, unlike
+/// [`CloudPipeline`]'s FAST quad.
+#[derive(Debug)]
+pub struct FancyCloudPipeline {
+    pipeline: wgpu::RenderPipeline,
+}
+
+impl FancyCloudPipeline {
+    /// Builds the FANCY cloud pipeline, sharing `camera_layout` (group 0)
+    /// with every other sky sub-pipeline.
+    #[must_use]
+    pub fn new(
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+        camera_layout: &wgpu::BindGroupLayout,
+    ) -> Self {
+        const ATTRS: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![
+            0 => Float32x3,
+            1 => Float32x4,
+        ];
+        let pipeline = build_pipeline(
+            device,
+            "lodestone-sky-fancy-cloud-pipeline",
+            PASSTHROUGH_COLOR_WGSL,
+            &[camera_layout],
+            vertex_layout(std::mem::size_of::<SkyVertex>() as u64, &ATTRS),
+            color_format,
+            Some(CLOUD_BLEND),
+        );
+        Self { pipeline }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SkyRenderer: owns GPU resources for all four passes and drives them from a
 // frame's (camera, time_of_day, sky colour).
@@ -643,6 +684,7 @@ pub struct SkyRenderer {
     celestial: CelestialPipeline,
     star: StarPipeline,
     cloud: CloudPipeline,
+    fancy_cloud: FancyCloudPipeline,
     sunrise: SunrisePipeline,
 
     celestial_bind_group: wgpu::BindGroup,
@@ -651,6 +693,11 @@ pub struct SkyRenderer {
     sun_uv: [f32; 4],
     moon_uv: [[f32; 4]; 8],
     cloud_size: (u32, u32),
+    /// The FANCY cell grid, voxelized once from `clouds.png` at construction
+    /// (`crate::cloud_mesh::CloudCells::from_rgba`) — the texture never
+    /// changes at runtime, so there is nothing to rebuild here across frames,
+    /// only the face list [`fancy_cloud_geometry`] walks over it.
+    cloud_cells: CloudCells,
 
     disc_vbuf: wgpu::Buffer,
     disc_ibuf: wgpu::Buffer,
@@ -665,6 +712,14 @@ pub struct SkyRenderer {
 
     cloud_vbuf: wgpu::Buffer,
     cloud_ibuf: wgpu::Buffer,
+
+    /// Sized for [`CLOUD_FANCY_RADIUS_CELLS`] via
+    /// [`crate::sky::cloud_fancy_max_faces`] — the real per-frame face count
+    /// (`fancy_cloud_geometry`'s output) is always `<=` this, so the buffer
+    /// never needs to grow; [`SkyRenderer::render`] draws only the real count.
+    fancy_cloud_vbuf: wgpu::Buffer,
+    fancy_cloud_ibuf: wgpu::Buffer,
+    fancy_cloud_max_faces: u32,
 
     sunrise_vbuf: wgpu::Buffer,
     sunrise_ibuf: wgpu::Buffer,
@@ -777,6 +832,11 @@ pub struct SkyFrame {
     /// client default of 8 chunks is 4x — the whole of #399. Prefer
     /// `with_render_distance` at every site that has the number.
     pub sky_fog_end: f32,
+    /// FAST (one alpha-tested quad) or FANCY (real extruded per-cell
+    /// geometry) — vanilla's own `CloudStatus` option, minus `OFF` (see
+    /// [`CloudStatus`]'s doc for why there is nowhere for a player to have
+    /// chosen that yet). Defaults to `Fancy`, matching vanilla's own default.
+    pub cloud_status: CloudStatus,
 }
 
 impl SkyFrame {
@@ -791,7 +851,15 @@ impl SkyFrame {
             day_fog_color: day_sky_color,
             void_fog: VoidFog::DISABLED,
             sky_fog_end: crate::sky::SKY_FOG_END_DISTANCE,
+            cloud_status: CloudStatus::default(),
         }
+    }
+
+    /// Sets [`cloud_status`](Self::cloud_status) — FAST or FANCY clouds.
+    #[must_use]
+    pub fn with_cloud_status(mut self, cloud_status: CloudStatus) -> Self {
+        self.cloud_status = cloud_status;
+        self
     }
 
     /// Sets the horizon end of the gradient (see
@@ -996,6 +1064,7 @@ impl SkyRenderer {
         let celestial = CelestialPipeline::new(device, color_format, &camera_layout);
         let star = StarPipeline::new(device, color_format, &camera_layout);
         let cloud = CloudPipeline::new(device, color_format, &camera_layout);
+        let fancy_cloud = FancyCloudPipeline::new(device, color_format, &camera_layout);
         let sunrise = SunrisePipeline::new(device, color_format, &camera_layout);
 
         let atlas = celestial_atlas.atlas();
@@ -1121,6 +1190,18 @@ impl SkyRenderer {
         );
         let cloud_ibuf = quad_index_buffer(device, "lodestone-sky-cloud-ibuf", 1);
 
+        // Voxelized once here (the texture is static for the session); the
+        // face *list* is walked fresh every frame in `render` — see
+        // `cloud_cells`'s field doc.
+        let cloud_cells = CloudCells::from_rgba(cloud_image.width, cloud_image.height, &cloud_image.rgba);
+        let fancy_cloud_max_faces = cloud_fancy_max_faces(CLOUD_FANCY_RADIUS_CELLS);
+        let fancy_cloud_vbuf = vertex_buffer(
+            device,
+            "lodestone-sky-fancy-cloud-vbuf",
+            (fancy_cloud_max_faces as u64) * 4 * std::mem::size_of::<SkyVertex>() as u64,
+        );
+        let fancy_cloud_ibuf = quad_index_buffer(device, "lodestone-sky-fancy-cloud-ibuf", fancy_cloud_max_faces);
+
         let sunrise_indices = sunrise_fan_indices();
         let sunrise_index_count = sunrise_indices.len() as u32;
         let sunrise_vbuf = vertex_buffer(
@@ -1142,12 +1223,14 @@ impl SkyRenderer {
             celestial,
             star,
             cloud,
+            fancy_cloud,
             sunrise,
             celestial_bind_group,
             cloud_bind_group,
             sun_uv,
             moon_uv,
             cloud_size: (cloud_image.width, cloud_image.height),
+            cloud_cells,
             disc_vbuf,
             disc_ibuf,
             disc_index_count,
@@ -1158,6 +1241,9 @@ impl SkyRenderer {
             star_quad_count,
             cloud_vbuf,
             cloud_ibuf,
+            fancy_cloud_vbuf,
+            fancy_cloud_ibuf,
+            fancy_cloud_max_faces,
             sunrise_vbuf,
             sunrise_ibuf,
             sunrise_index_count,
@@ -1329,27 +1415,58 @@ impl SkyRenderer {
             queue.write_buffer(&self.star_vbuf, 0, bytemuck::cast_slice(&star_verts));
         }
 
-        let (cloud_pos, cloud_uv) = cloud_plane_geometry(
-            camera.position.to_array(),
-            time_of_day,
-            self.cloud_size.0,
-            self.cloud_size.1,
-            CLOUD_PLANE_HALF_EXTENT,
-        );
         // Resolved by `SkyFrame::resolve_colors` from the real `CLOUD_COLOR`
         // attribute (pure white at alpha 0.8) times the real `CLOUD_COLOR` track
         // — not from the sky colour, and with no invented darkening factor. The
-        // alpha rides through to the fragment stage and needs the pipeline's
-        // `CLOUD_BLEND`; an opaque pipeline would discard it silently.
+        // alpha rides through to the fragment stage and needs each pipeline's
+        // `CLOUD_BLEND`; an opaque pipeline would discard it silently. Shared by
+        // both cloud modes, exactly as vanilla shares one `CloudColor` uniform
+        // between `FLAT_CLOUDS` and `CLOUDS`.
         let cloud_tint = cloud_color;
-        let cloud_verts: Vec<CloudVertex> = (0..4)
-            .map(|i| CloudVertex {
-                position: cloud_pos[i],
-                uv: cloud_uv[i],
-                color: cloud_tint,
-            })
-            .collect();
-        queue.write_buffer(&self.cloud_vbuf, 0, bytemuck::cast_slice(&cloud_verts));
+
+        // FAST/FANCY selection (issue #403) — vanilla's own choice, minus
+        // `OFF` (see `CloudStatus`'s doc). Only the selected mode's vertex
+        // buffer is written; the other pipeline is simply not bound below.
+        let draw_fast_clouds = frame.cloud_status == crate::sky::CloudStatus::Fast;
+        let fancy_face_count = if draw_fast_clouds {
+            let (cloud_pos, cloud_uv) = cloud_plane_geometry(
+                camera.position.to_array(),
+                time_of_day,
+                self.cloud_size.0,
+                self.cloud_size.1,
+                CLOUD_PLANE_HALF_EXTENT,
+            );
+            let cloud_verts: Vec<CloudVertex> = (0..4)
+                .map(|i| CloudVertex {
+                    position: cloud_pos[i],
+                    uv: cloud_uv[i],
+                    color: cloud_tint,
+                })
+                .collect();
+            queue.write_buffer(&self.cloud_vbuf, 0, bytemuck::cast_slice(&cloud_verts));
+            0
+        } else {
+            let verts = fancy_cloud_geometry(&self.cloud_cells, camera.position.to_array(), time_of_day, cloud_tint);
+            debug_assert!(
+                verts.len() as u32 <= self.fancy_cloud_max_faces * 4,
+                "fancy_cloud_geometry produced {} verts, over the {}-face buffer capacity — \
+                 CLOUD_FANCY_RADIUS_CELLS and cloud_fancy_max_faces have drifted apart",
+                verts.len(),
+                self.fancy_cloud_max_faces
+            );
+            let face_count = (verts.len() / 4).min(self.fancy_cloud_max_faces as usize) as u32;
+            if face_count > 0 {
+                let gpu_verts: Vec<SkyVertex> = verts[..(face_count as usize * 4)]
+                    .iter()
+                    .map(|(position, color)| SkyVertex {
+                        position: *position,
+                        color: *color,
+                    })
+                    .collect();
+                queue.write_buffer(&self.fancy_cloud_vbuf, 0, bytemuck::cast_slice(&gpu_verts));
+            }
+            face_count
+        };
 
         let _ = device; // reserved for a future resize/rebuild path
 
@@ -1402,12 +1519,20 @@ impl SkyRenderer {
         pass.set_index_buffer(self.celestial_ibuf.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(0..12, 0, 0..1);
 
-        pass.set_pipeline(&self.cloud.pipeline);
-        pass.set_bind_group(0, &self.camera_bind_group, &[]);
-        pass.set_bind_group(1, &self.cloud_bind_group, &[]);
-        pass.set_vertex_buffer(0, self.cloud_vbuf.slice(..));
-        pass.set_index_buffer(self.cloud_ibuf.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..6, 0, 0..1);
+        if draw_fast_clouds {
+            pass.set_pipeline(&self.cloud.pipeline);
+            pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            pass.set_bind_group(1, &self.cloud_bind_group, &[]);
+            pass.set_vertex_buffer(0, self.cloud_vbuf.slice(..));
+            pass.set_index_buffer(self.cloud_ibuf.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..6, 0, 0..1);
+        } else if fancy_face_count > 0 {
+            pass.set_pipeline(&self.fancy_cloud.pipeline);
+            pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            pass.set_vertex_buffer(0, self.fancy_cloud_vbuf.slice(..));
+            pass.set_index_buffer(self.fancy_cloud_ibuf.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..fancy_face_count * 6, 0, 0..1);
+        }
     }
 }
 
