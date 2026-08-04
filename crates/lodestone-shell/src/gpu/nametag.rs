@@ -164,12 +164,16 @@ const MAX_NAME_TAG_VERTICES: usize = 60_000;
 /// One glyph row's ink run, in local "logical pixel" space: `x` measured from
 /// the start of the string (before centring), `y` measured down from the
 /// string's top.
+///
+/// `pub(super)` (visible to the rest of `crate::gpu`, not beyond): `gpu/
+/// sign_text.rs` reuses this shape and [`layout_ink_runs`] directly rather
+/// than duplicating the ink-run walk a second time — see that module's doc.
 #[derive(Debug, Clone, Copy)]
-struct LocalRect {
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
+pub(super) struct LocalRect {
+    pub(super) x: f32,
+    pub(super) y: f32,
+    pub(super) w: f32,
+    pub(super) h: f32,
 }
 
 /// Walks `text` through `raster` exactly as `VanillaFont::glyph` does (same
@@ -183,7 +187,7 @@ struct LocalRect {
 /// missing-glyph box `VanillaFont` draws is not reproduced here, a minor,
 /// deliberate fidelity loss for a case ordinary custom names/usernames don't
 /// hit (missing-glyph codepoints are rare in practice).
-fn layout_ink_runs(raster: &RasterFont, text: &str) -> (Vec<LocalRect>, f32) {
+pub(super) fn layout_ink_runs(raster: &RasterFont, text: &str) -> (Vec<LocalRect>, f32) {
     let mut cursor = 0.0f32;
     let mut rects = Vec::new();
     for ch in text.chars() {
@@ -609,7 +613,13 @@ impl NameTagRenderer {
 
 /// Loads the vanilla `minecraft:default` font's raster data for world-space
 /// drawing. `None` off a jar-less run — see [`NameTagRenderer::font`].
-fn load_font() -> Option<RasterFont> {
+///
+/// `pub(super)`: `gpu/sign_text.rs` calls this directly rather than
+/// duplicating `jar_manager`/`pack_root` a third time — this module's own
+/// doc already explains why *those* are duplicated from `hud/vanilla_font.rs`
+/// (a different agent's off-limits file at the time), but nothing stops a
+/// sibling `gpu` submodule reusing what is already here.
+pub(super) fn load_font() -> Option<RasterFont> {
     let manager = jar_manager()?;
     let id: lodestone_assets::ResourceLocation = "minecraft:default".parse().ok()?;
     match FontLoader::new(&manager).load_raster(&id, &FontOptions::none()) {

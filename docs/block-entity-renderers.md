@@ -1,8 +1,14 @@
 # Block entity renderers
 
-**Issue:** [#23](https://github.com/matteopolak/lodestone/issues/23) — still open; chest and skull
-are landed (skull's screen half is prepared but not yet wired — see
-[Skull](#skull-skeleton-wither-skeleton-zombie-creeper-player)), the rest are not.
+**Issue:** [#23](https://github.com/matteopolak/lodestone/issues/23) — still open; chest, skull and
+standing/wall sign text are landed and wired (see
+[Skull](#skull-skeleton-wither-skeleton-zombie-creeper-player) and
+[Sign](#sign-standingwall-text)), the rest are not. **The "skull's screen half is prepared but not
+yet wired" line this paragraph used to carry was itself stale** by the time this file was next
+read — `a8068c5` wired it in the same session that sentence was written and nobody came back to fix
+the summary at the top, exactly the staleness class `CLAUDE.md` warns is the most common defect in
+this repo's own written record. Read the per-type sections below, not this paragraph's memory of
+them.
 
 ## The real vanilla scope, from the registration list — not the issue's guess-list
 
@@ -28,8 +34,9 @@ wrong in both directions:
   `vault`, and two 26.x additions, `copper golem statue` and `shelf`.
 
 So the honest count is: **3 of 26 registrations landed** (chest/ender chest/trapped chest all through
-`ChestRenderer`), **1 more built but not yet wired** (skull), and the rest — including signs — still
-absent. Picking the next few should read this list, not the original issue body.
+`ChestRenderer`), **2 more landed and wired** (skull; standing/wall sign text, geometry excepted since
+a sign's board is a real block model), and the rest still absent. Picking the next few should read
+this list, not the original issue body.
 
 ## What it is
 
@@ -335,6 +342,202 @@ checkout:
 cargo test -p lodestone-shell --test skull_block_entity_pixels -- --ignored --nocapture
 ```
 
+## Sign (standing/wall text)
+
+Unlike chest and skull, a sign's board **is** a real block model —
+`assets/minecraft/blockstates/oak_sign.json` maps all 16 `rotation` values to genuine
+`block/oak_sign_rot_N` geometry, and `StandingSignRenderer` declares no model of its own, only text
+transformations (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/blockentity/
+StandingSignRenderer.java`). So there is nothing in `block_entity_models.rs` for a sign and nothing
+in `plan_block_entities`'s batch: this type sits **beside** the chest/skull family
+(`lodestone_render::sign`, not `lodestone_render::block_entity`), not inside it. The only thing this
+session built is the text.
+
+### The typed parse — `lodestone_world::sign_text`
+
+`crates/lodestone-world/src/sign_text.rs`. Parses `front_text`/`back_text`/`is_waxed` out of the
+`BlockEntity.nbt` compound `chest`/skull already proved generic (the shape this doc's earlier probe
+captured, quoted above) into `SignText { front: SignSide, back: SignSide, waxed: bool }`, where
+`SignSide` is `{ lines: [String; 4], glowing: bool, color: SignDyeColor }`.
+
+**The one real surprise: `messages` elements are JSON text, not the NBT-structural component shape**
+`lodestone_core::plain_text_from_nbt_component` already handles (the one every other resolved text in
+this codebase — chat, player-list names, entity metadata — uses). A plain `"LODESTONE PROBE"` line
+arrives as the *18-character NBT string* `"LODESTONE PROBE"` — opening and closing `"` are literal
+payload bytes, not `Debug` escaping, i.e. the JSON serialization of the component stored verbatim
+inside an `Nbt::String` rather than unwrapped into one. `sign_text.rs`'s `resolve_message` parses that
+JSON (via `serde_json`, promoted from a dev-dependency to a real one in `lodestone-world`'s
+`Cargo.toml` for this) and walks it with the same `text`/`extra` recursion
+`plain_text_from_nbt_component` uses, just over a `serde_json::Value` instead of an `Nbt`. This was
+re-confirmed live rather than trusted from the original probe alone: placing a fresh `oak_sign` on the
+creative oracle and reading it back with `/data get block` returned
+`front_text: {has_glowing_text: 1b, color: "blue", messages: ['"LODESTONE LIVE TEST"', '""', '""', '""']}`
+— the same quoted-JSON-inside-a-string shape, on a second, independent capture.
+
+`filtered_messages` (the server's profanity-filter shadow copy) is not parsed — this port has no
+client-side text-filtering setting, and vanilla's own default is off, so `SignSide::lines` always
+reads the unfiltered `messages`.
+
+Where this parse lives is a compromise, not a discovery: `BlockEntity`'s own module doc says the NBT
+*schema* belongs in a version crate, but `crates/protocol/v770/src/server_protocol.rs` was another
+agent's in-flight file for this whole session (`CLAUDE.md`'s file-ownership notes), so the parse went
+into `lodestone-world`, which this task was granted outright, with that tension recorded in the
+module's own doc for whoever moves it later.
+
+### Placement — `lodestone_render::sign`, ported term for term
+
+`crates/lodestone-render/src/sign.rs`, not `block_entity.rs` — see that file's module doc for why a
+sign shares no primitive with the chest/skull family (no `BlockEntityMesh`, no bake, no batch).
+`sign_text_transform(pos, orientation, is_front)` ports `StandingSignRenderer.textTransformation`
+line for line:
+
+```text
+Matrix4f result = new Matrix4f()
+    .translate(0.5F, 0.5F, 0.5F)
+    .rotate(Axis.YP.rotationDegrees(-angle));
+if (attachmentType == WALL) result.translate(0.0F, -0.3125F, -0.4375F);
+if (!isFrontText) result.rotate(Axis.YP.rotationDegrees(180.0F));
+result.translate(TEXT_OFFSET);              // (0, 0.33333334, 0.046666667)
+result.scale(0.010416667F, -0.010416667F, 0.010416667F);
+```
+
+Fed a local point in font-pixel space (`x` right, `y` down from the text block's own top, `z = 0`),
+the result is that point's world position — the `-Y` scale is the *entire* y-flip, with no separate
+step, because font-pixel space is already row-down (the same convention
+`gpu/nametag.rs::layout_ink_runs` returns) and folding the flip into the matrix is what
+`textTransformation` itself does.
+
+**Front and back text are not mirror images through the same origin — they sit on the two opposite
+faces of the board's thin depth**, because the 180° back rotation happens *before* `TEXT_OFFSET` is
+applied, so the offset's own `z` component flips sign along with it: front origin
+`z = 0.5 + 0.046666667`, back origin `z = 0.5 - 0.046666667` (ground sign, angle 0; both hand-computed
+and unit-tested in `sign.rs`). The first draft of that test assumed the origins would coincide and
+watched it fail — a useful reminder that "the back is the front rotated 180°" is true of the rotation
+and false of where the two planes land.
+
+`RotationSegment.convertToDegrees(segment) == segment * 22.5` is the identical formula
+`skull_ground_placement_matrix` already uses for the same block-state property (segment `0` is
+**north**, not `horizontal_facing_yaw`'s south-is-zero convention) — reused as the same expression,
+not re-derived, so the two cannot silently drift apart.
+
+Colour: `AbstractSignRenderer.getDarkColor`/`DyeColor.getTextColor()`/`ARGB.scaleRGB`, transcribed
+into `dye_text_color_rgb` (all sixteen `DyeColor` text-colour constants, from the real jar source) and
+`sign_side_color` (full colour when glowing, `ARGB.scaleRGB(dye, 0.4)` — **integer-truncated**, not a
+float multiply carried through — otherwise). Per `CLAUDE.md`'s rendering constraints this multiply is
+gamma-space, matching every other tint/shade in this codebase.
+
+**Deferred, and named rather than silently missing:**
+
+- The black-dye-glowing outline (`BLACK_TEXT_OUTLINE_COLOR = -988212`, a second offset glyph pass so
+  glowing black text is not literally invisible). One narrow dye combination.
+- Per-glyph world-light modulation for non-glowing text (vanilla's `state.lightCoords`). This pass
+  draws unlit vertex colours unconditionally, the same simplification `gpu/nametag.rs` already
+  documents making for its own text (full-bright regardless of the entity's own dimness) — sign text
+  reads a little brighter than vanilla in the dark, never darker or absent.
+- Line wrapping past `MAX_TEXT_LINE_WIDTH` (90 px). The four stored lines are trusted to already fit,
+  which the vanilla sign-edit screen enforces at typing time; only a modded server or a hand-edited
+  NBT payload could send an over-width line.
+- Rich per-run formatting (colour/bold/italic/click events) inside one line. `resolve_message`
+  extracts plain text only; the whole line draws in the side's own dye colour.
+- **Hanging signs** (`oak_hanging_sign`/`oak_wall_hanging_sign`, 13 woods × 2 attachments) — a
+  different model set again (chains, a bar, its own text transform), out of scope for this pass.
+  `crate::block_entities::is_plain_sign_path` declines every block whose path contains `hanging`
+  rather than drawing one wrong; `hanging_signs_are_present_but_declined` proves the decline against
+  the real 26.2 state table rather than assuming the name pattern holds.
+
+### The GPU pass — `gpu/sign_text.rs`, beside `gpu/nametag.rs`, not inside it
+
+`gpu/nametag.rs` was extended rather than sat beside for its *font loading and ink-run layout*
+(`layout_ink_runs`/`load_font`, now `pub(super)` so `gpu/sign_text.rs` can call them directly instead
+of duplicating a third jar-discovery snippet — that module's own doc already explains why *it*
+duplicates `hud/vanilla_font.rs`'s, and the reasoning does not extend to a sibling file this task
+owns outright). The **pass itself is a new, separate module**, not an extension of
+`NameTagRenderer`, for two reasons that are both real, not stylistic:
+
+- **Not a billboard.** A nametag's whole vertex generation is built around a per-frame
+  camera-facing `right`/`up` basis; sign text has a *fixed* world orientation baked into
+  `sign_text_transform` and needs no camera basis at all beyond the shared `view_proj` uniform.
+  Folding it into `NameTagRenderer::prepare` would mean threading a "is this billboarded" branch
+  through code that currently has no such branch anywhere.
+- **Different depth pipeline.** Nametags are `LessEqual`/no-bias (normal pass) or
+  `Always`/no-write (see-through pass) — see that module's doc. Sign text ports vanilla's
+  `TEXT_POLYGON_OFFSET` instead: `LessEqual`, `depth_write_enabled: true`, and a polygon-offset bias
+  (`constant: -10, slope_scale: -1.0`) so it wins the depth test against the coplanar board without
+  z-fighting — the exact same two numeric constants (`1.0`, `10.0`) `crack_pipeline.rs` already ported
+  from a *different* vanilla pipeline (`writeDepth: false` there, `true` here, which is the whole
+  difference: sign text must occlude itself line over line; a decal overlay must occlude nothing).
+
+Reuses the identical `nametag.wgsl` shader (`view_proj` uniform, flat vertex colour, no texture) —
+a second `.wgsl` file would only be a byte-for-byte copy with nothing to diverge.
+
+### The gather — `crate::block_entities::sign_spawns`
+
+Mirrors `chest_spawns`/`skull_spawns`'s shape (`sign_candidates` → `sign_spawn` → `sign_spawns`,
+sorted by position), with one structural difference: **`sign_candidates` cannot reuse
+`chest_candidates`**, because chest and skull only ever need the block state at a candidate position
+and `chest_candidates` deliberately discards `BlockEntity.nbt`; sign text needs the NBT, so
+`sign_candidates` parses it into a typed `SignText` right there in the gather rather than threading a
+raw `Nbt` value any further than it has to. `is_plain_sign_path`/`sign_kind_for_state` gate on the
+block's registry path (every plain sign ends `_sign`, checked for `hanging` first so a hanging sign's
+shared `_sign` suffix cannot be mistaken for a plain one); `sign_orientation` reads `rotation`
+(ground) or `facing` (wall) off the block state, the identical shape `skull_orientation` already uses
+for the same two property names.
+
+### The whole chain, hop by hop
+
+```text
+level_chunk_with_light / block_update / etc. ─► BlockEntity::decode_list / World::sync_block_entity
+                                                  (unchanged — the chest/skull chain already proved this)
+                                                                 │
+                          lodestone_world::sign_text::SignText::parse(&be.nbt)
+                                       (crate::block_entities::sign_candidates)
+                                                                 │
+                          crate::block_entities::sign_spawn / sign_spawns
+                                                                 │
+                    gpu.rs::render_inner ─► self.sign_source.signs(eye)
+                                                                 │
+                    gpu/sign_text.rs::SignTextRenderer::prepare ─► push_side_quads
+                             (lodestone_render::sign_text_transform, sign_side_color)
+                                                                 │
+                    gpu.rs::render_inner, inside the block pass ─► SignTextRenderer::draw
+```
+
+`ingest::handles_event` needs no arm, for the same reason chest/skull needed none: sign text has no
+per-tick, event-driven state (no lid, no animation) and travels the shell's own gather-per-frame path
+entirely — there is nothing on the wire for a router to forward.
+
+### Status: wired, and proven with real pixels
+
+`crates/lodestone-shell/tests/sign_text_pixels.rs`, three `#[ignore]`d GPU gates, same shape as
+`skull_block_entity_pixels.rs` but adapted for text: a rect **bounds** the whole area one text side's
+local plane can occupy (`MAX_TEXT_LINE_WIDTH` wide, four lines tall, projected through the real
+`sign_text_transform` and `Camera::view_projection` — never a remembered literal) rather than being
+filled to a high percentage the way a solid skull box is, because glyph ink is sparse over its own
+bounding plane. Measured green:
+
+| gate | measurement |
+|---|---|
+| sign draws | expected rect `x121..199 y108..143`; changed bbox `x138..182 y108..113`, entirely inside; 97 non-sky px in-rect |
+| front vs back | changed bbox between a front-only and a back-only frame: `x136..182 y108..113`, 135 px — distinct |
+| arm is elsewhere | arm bbox `x247..319 y169..239`, disjoint from the sign's rect |
+
+```bash
+cargo test -p lodestone-shell --test sign_text_pixels -- --ignored --nocapture
+```
+
+**The negative control was watched failing**, the same discipline the chest/skull gates record:
+commenting out `self.sign_text.draw(&mut pass, sign_text_count)` in `gpu.rs` and re-running produced
+exactly the island shape —
+
+```text
+installing a sign source changed no pixel at all — the pass is dead
+front-only and back-only text produced pixel-identical frames
+```
+
+— while `the_first_person_arm_is_somewhere_else` (which does not depend on the sign drawing at all)
+kept passing, confirming the failure was specific to the neutered line and not a broken harness. The
+line was restored and the suite re-run green before anything was committed.
+
 ## How to change it
 
 ### Adding a block-entity type
@@ -593,18 +796,11 @@ but that is the pure function, not the gate.
 
 Against the real 26-entry registration list (see above), not the issue's original twelve-item guess:
 
-- **Signs** — text only (the board is a block model). NBT arrival is now confirmed on the wire (see
-  above); needs a typed `SignText` parse of the confirmed `Nbt::Compound` shape, then the transforms
-  from `StandingSignRenderer` (`RENDER_SCALE 0.6666667`, `TEXT_OFFSET (0, 0.33333334, 0.046666667)`,
-  scale `±0.010416667`, the wall offset `(0, -0.3125, -0.4375)`, 16 `RotationSegment` steps, front
-  and back), `MAX_TEXT_LINE_WIDTH 90` / `TEXT_LINE_HEIGHT 10`, and the dye rule
-  (`ARGB.scaleRGB(color, 0.4)` normally; full `DyeColor.textColor` plus full-bright plus an outline
-  when glowing, with `BLACK_TEXT_OUTLINE_COLOR = -988212` substituted for black). The substrate
-  exists: `gpu/nametag.rs` already draws world-space text as coloured quads from a `RasterFont`,
-  including its own two depth passes — but that file was another agent's live work all session and
-  could not be touched here. Colour must multiply in **gamma** space.
-- **Skull** — geometry, placement and gather are built and unit-tested (see the section above); not
-  yet wired into `gpu.rs`'s draw call, for the same off-limits-file reason as signs.
+- **Signs — landed** (see the [Sign](#sign-standingwall-text) section above) for standing and wall
+  signs. Still open within sign scope: **hanging signs** (a different model set — chains, a bar, its
+  own text transform), the black-dye-glowing outline, per-glyph world-light modulation, line wrapping
+  past 90px, and rich per-run text formatting — all named and reasoned about in that section rather
+  than silently missing.
 - Banners (layered patterns from the `banner_patterns` atlas — tracked separately as
   [#174](https://github.com/matteopolak/lodestone/issues/174), which also covers the shield item
   sharing the same compositing function), shulker boxes (`shulker_boxes` atlas, 16 dyes), the
@@ -633,11 +829,17 @@ share one light sample, and the `SpecialDates.isExtendedChristmas()` clock behin
 - `lodestone-render` — `entity::{push_part_quads, PartRange}`, `entity_pipeline::{EntityPipeline,
   GpuEntityModel, EntityCameraUniform, upload_instances}`, `camera::Frustum`, `models::ModelVertex`.
 - `lodestone-world` — `BlockEntity`, `LoadedChunk::block_entities`, `ChunkColumn::get_block`,
-  `World::sync_block_entity` / `BlockEntitySync`.
+  `World::sync_block_entity` / `BlockEntitySync`, and (for sign text) `sign_text::{SignText, SignSide,
+  SignDyeColor}` plus a real (non-dev) `serde_json` dependency for the JSON-text message parse.
 - `lodestone-data` — `block_states::{block_name, properties}` for the material and the
   `facing`/`type` properties; `block_entity_types::block_entity_type` for the state→type census the
   block-update path creates records from.
-- `lodestone-shell` — `net::{SharedHandle, entity_light_at}`, `resources::asset_root`.
+- `lodestone-render` (for sign text) — `sign::{SignOrientation, SignSpawn, TEXT_LINE_HEIGHT,
+  dye_text_color_rgb, sign_side_color, sign_text_transform}`, itself depending on `lodestone-world`
+  for `SignSide`/`SignDyeColor` (already a real, non-optional dependency of this crate).
+- `lodestone-shell` — `net::{SharedHandle, entity_light_at}`, `resources::asset_root`, and (for sign
+  text) `gpu/nametag.rs`'s `pub(super) layout_ink_runs`/`load_font`, reused rather than duplicated a
+  third time by `gpu/sign_text.rs`.
 
 ## Related
 

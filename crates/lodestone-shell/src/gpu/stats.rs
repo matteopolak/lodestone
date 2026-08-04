@@ -137,4 +137,14 @@ pub struct RenderStats {
     /// `gpu/block_entities.rs`), so `block_entities_drawn == 0` is ambiguous on
     /// its own. Zero here means no jar; 22 means every stem resolved.
     pub block_entity_sheets_loaded: usize,
+    /// Sign-text vertices uploaded this frame (issue #23), six per glyph ink
+    /// run across both sides of every installed [`lodestone_render::SignSpawn`].
+    /// The exact, non-pixel-based corroboration a pixel gate needs alongside
+    /// [`block_entities_drawn`](Self::block_entities_drawn): a sign's *board*
+    /// already draws through the ordinary terrain pass with no counter of its
+    /// own, so this is the only number that separates "no sign text in view"
+    /// from "sign text can never draw" (no jar, or a blank sign — both are
+    /// `0`, which is why a pixel gate must also install real text to tell
+    /// them apart).
+    pub sign_text_vertices: u32,
 }
