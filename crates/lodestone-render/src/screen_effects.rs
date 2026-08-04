@@ -196,6 +196,19 @@ pub const FIRE_QUAD_OFFSET_Y: f32 = -0.3;
 /// See [`FIRE_QUAD_OFFSET_X`] — vanilla's `Math.PI / 18`, i.e. 10 degrees.
 pub const FIRE_QUAD_TILT_RADIANS: f32 = std::f32::consts::PI / 18.0;
 
+/// Retired by issue #420's fix — [`fire_overlay_triangles`] no longer tiles
+/// and has no fixed strip cap, see [`fire_overlay_vertical_extent`] for the
+/// real predicted extent. **Kept only as an unused compatibility constant**
+/// so `lib.rs`'s public re-export list (a brokered file — this crate's own
+/// `lib.rs` is not owned by whichever pass lands this fix) does not need an
+/// edit to keep compiling; remove both this and [`FIRE_STRIP_TOP`] the next
+/// time `lib.rs`'s `screen_effects::{..}` re-export list is touched anyway.
+#[deprecated(note = "the fire overlay no longer tiles; use fire_overlay_vertical_extent")]
+pub const FIRE_TILE_COUNT: u32 = 4;
+/// See [`FIRE_TILE_COUNT`].
+#[deprecated(note = "the fire overlay no longer uses a fixed strip cap; use fire_overlay_vertical_extent")]
+pub const FIRE_STRIP_TOP: f32 = -0.3;
+
 /// `buildSpriteQuad`'s own local unit-square half-extent and fixed `z`
 /// (`ScreenEffectRenderer.java:184`: `buildSpriteQuad(..., -0.5F, -0.5F,
 /// 0.5F, 0.5F, -0.5F, ...)`).
