@@ -657,6 +657,28 @@ transform cannot produce. Ask *where*, not *what*.
 - **Vanilla is not colour-managed.** Tint *and* shade multiply in **gamma** space
   (`srgb_to_linear(linear_to_srgb(rgb) * tint * shade)`). Doing it in linear pulls every shade
   factor toward 1.0 and washes the image out.
+- **You cannot predict an exact composited byte through `ALPHA_BLENDING` on this backend.** Measured
+  while gating banner pattern layers (#174): on Metal, with an `Rgba8UnormSrgb` target, the
+  *effective* blend alpha is a real, repeatable, **non-trivial** function of the raw fragment alpha
+  byte — not the identity, not `linear_to_srgb(a)`, and not any single power law. An exact-byte
+  prediction from the textbook blend formula therefore cannot be made to hold, and one agent spent a
+  cycle discovering that.
+
+  This does **not** license a direction-only assertion, which is the *magnitude* species of vacuous
+  test. **Predict exactly what you can, bracket the rest, and make at least one assertion that fails
+  under the wrong pipeline.** The shape that worked:
+
+  | alpha | assertion |
+  |---|---|
+  | full | submission order alone decides the winner — byte-identical, no tolerance |
+  | low + high | composite sits >40/255 from the wrong-pipeline hypothesis at both ends |
+  | across | movement is monotonic between them |
+  | mid | differs from **both** anchors by >15/255 |
+
+  That last row is the load-bearing one, and only a control could have shown it: swapping in the
+  ordinary `EntityPipeline` passed every assertion **except** the mid-alpha anchor distance, which
+  measured `d_mid_to_src == 0` exactly. The monotonic inequalities alone are satisfied by a hard
+  discard-then-overwrite, so a gate without the mid-anchor check proves nothing about blending.
 - **Shaders live in `.wgsl` files. Never inline one in Rust again.**
   `crates/lodestone-render/src/shaders/` and `crates/lodestone-shell/src/shaders/`, pulled in with
   `include_str!` — still compile-time, still a `&'static str`, no runtime asset loading. See
