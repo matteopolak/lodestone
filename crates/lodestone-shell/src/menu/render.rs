@@ -5063,6 +5063,12 @@ struct Quads<'a> {
     sprites: Vec<f32>,
     atlas: Option<&'a GuiAtlas>,
     font: Option<&'a VanillaFont>,
+    /// The active clip rect in **logical pixels** as `(x0, y0, x1, y1)`, or
+    /// `None` for unclipped. See [`Quads::with_clip`].
+    clip: Option<(f32, f32, f32, f32)>,
+    /// Scratch buffer for [`Quads::text`]'s clipped path, reused across calls so
+    /// a clipped label does not allocate per frame.
+    text_scratch: Vec<f32>,
 }
 
 impl Quads<'_> {
@@ -5074,7 +5080,119 @@ impl Quads<'_> {
             sprites: Vec::new(),
             atlas: None,
             font: None,
+            clip: None,
+            text_scratch: Vec::new(),
         }
+    }
+
+    /// Run `body` with everything it emits clipped to `(x, y, w, h)` — this
+    /// pipeline's stand-in for vanilla's `enableScissor`/`disableScissor`
+    /// (`AbstractSelectionList.java:242-249`, `:212-214`).
+    ///
+    /// ## Why this is not `set_scissor_rect`
+    ///
+    /// `set_scissor_rect` appears **nowhere** in this workspace, and adding it
+    /// here would mean restructuring the one `"menu-pass"` encoder: it draws the
+    /// entire menu in *four* `pass.draw` calls over two vertex streams, so a
+    /// GPU scissor would need `MenuGeometry` to record range breaks and the pass
+    /// to replay them in order. That is a bigger change than the lists need, and
+    /// the ordering between the two streams is already load-bearing (labels are on
+    /// the colour stream and must land *on* their button sprite).
+    ///
+    /// Clipping on the CPU instead costs nothing at draw time and — the deciding
+    /// reason — **also clips text**, which a scissor split by stream would too,
+    /// but which no cheaper trick does: glyphs bottom out in `ColourStream::rect`
+    /// in `hud/item_icon.rs`, one flat quad per horizontal ink run, so they are
+    /// not addressable as sprites.
+    ///
+    /// ## What it clips, and what it cannot
+    ///
+    /// | primitive | how |
+    /// |---|---|
+    /// | [`Quads::rect`] (and `outline`, `mosaic`) | rect intersection |
+    /// | [`Quads::sprite`] | `dst` **and** `uv` cropped together, both axes |
+    /// | [`Quads::text`] | emitted to a scratch buffer, then clipped in NDC |
+    ///
+    /// The sprite crop is the generalisation of the horizontal-only UV crop the
+    /// XP bar already uses (`hud.rs:1302-1312`); doing it on one axis only would
+    /// **squash** a favicon instead of cutting it, which is the failure mode worth
+    /// naming because it still looks like a picture.
+    ///
+    /// Nesting replaces rather than intersects, matching vanilla — `enableScissor`
+    /// takes absolute bounds and the lists never nest one.
+    fn with_clip(&mut self, x: f32, y: f32, w: f32, h: f32, body: impl FnOnce(&mut Self)) {
+        let prev = self.clip;
+        self.clip = Some((x, y, x + w, y + h));
+        body(self);
+        self.clip = prev;
+    }
+
+    /// Clip a run of already-NDC colour vertices against the active clip and
+    /// append what survives — [`Quads::text`]'s path for the vanilla font.
+    ///
+    /// Reads six vertices at a time (one quad, `FLOATS_PER_VERTEX` each) and takes
+    /// their **bounding box**, which is exact for the axis-aligned quads the font
+    /// emits. Note NDC y is *inverted* relative to pixels — `1 - 2*py/h` — so the
+    /// clip's top edge is the numerically larger y, which is why the two y
+    /// comparisons below look backwards and must stay that way.
+    fn append_clipped_ndc_quads(&mut self, src: &[f32]) {
+        let Some((cx0, cy0, cx1, cy1)) = self.clip else {
+            self.verts.extend_from_slice(src);
+            return;
+        };
+        let (w, h) = (self.w, self.h);
+        let to_ndc_x = |px: f32| 2.0 * px / w - 1.0;
+        let to_ndc_y = |py: f32| 1.0 - 2.0 * py / h;
+        // `cy0` is the clip's *top* in pixels, hence its *maximum* in NDC.
+        let (kx0, kx1) = (to_ndc_x(cx0), to_ndc_x(cx1));
+        let (ky_top, ky_bot) = (to_ndc_y(cy0), to_ndc_y(cy1));
+
+        let stride = FLOATS_PER_VERTEX * 6;
+        for quad in src.chunks_exact(stride) {
+            let xs = (0..6).map(|i| quad[i * FLOATS_PER_VERTEX]);
+            let ys = (0..6).map(|i| quad[i * FLOATS_PER_VERTEX + 1]);
+            let (mut x0, mut x1) = (f32::INFINITY, f32::NEG_INFINITY);
+            for x in xs {
+                x0 = x0.min(x);
+                x1 = x1.max(x);
+            }
+            let (mut y_bot, mut y_top) = (f32::INFINITY, f32::NEG_INFINITY);
+            for y in ys {
+                y_bot = y_bot.min(y);
+                y_top = y_top.max(y);
+            }
+            let nx0 = x0.max(kx0);
+            let nx1 = x1.min(kx1);
+            let ntop = y_top.min(ky_top);
+            let nbot = y_bot.max(ky_bot);
+            if nx1 <= nx0 || ntop <= nbot {
+                continue;
+            }
+            let c = [quad[2], quad[3], quad[4], quad[5]];
+            for (vx, vy) in [
+                (nx0, ntop),
+                (nx1, ntop),
+                (nx1, nbot),
+                (nx0, ntop),
+                (nx1, nbot),
+                (nx0, nbot),
+            ] {
+                self.verts
+                    .extend_from_slice(&[vx, vy, c[0], c[1], c[2], c[3]]);
+            }
+        }
+    }
+
+    /// Intersect a pixel rect with the active clip, or `None` if nothing is left.
+    fn clipped_rect(&self, x: f32, y: f32, w: f32, h: f32) -> Option<(f32, f32, f32, f32)> {
+        let Some((cx0, cy0, cx1, cy1)) = self.clip else {
+            return Some((x, y, w, h));
+        };
+        let x0 = x.max(cx0);
+        let y0 = y.max(cy0);
+        let x1 = (x + w).min(cx1);
+        let y1 = (y + h).min(cy1);
+        (x1 > x0 && y1 > y0).then_some((x0, y0, x1 - x0, y1 - y0))
     }
 
     /// Whether the bound atlas can draw `id` at all. Distinct from "did the
@@ -5093,8 +5211,41 @@ impl Quads<'_> {
             None => return,
         };
         for q in quads {
-            push_sprite_quad(&mut self.sprites, self.w, self.h, q, c);
+            // Each nine-slice piece is cropped independently, against its own
+            // `dst` — the borders and the centre sample different UV spans, so a
+            // single crop applied to the whole sprite would smear one across
+            // another.
+            if let Some(q) = self.crop_sprite_quad(q) {
+                push_sprite_quad(&mut self.sprites, self.w, self.h, q, c);
+            }
         }
+    }
+
+    /// Crop one sprite quad's destination **and** its UVs to the active clip, so
+    /// the texture is cut rather than squashed. See [`Quads::with_clip`].
+    fn crop_sprite_quad(&self, q: GuiSpriteQuad) -> Option<GuiSpriteQuad> {
+        let [dx, dy, dw, dh] = q.dst;
+        if dw <= 0.0 || dh <= 0.0 {
+            return None;
+        }
+        let (nx, ny, nw, nh) = self.clipped_rect(dx, dy, dw, dh)?;
+        if self.clip.is_none() {
+            return Some(q);
+        }
+        // The fraction of the original destination each edge moved by, applied to
+        // the UV span so the visible texels stay put.
+        let [u0, v0] = q.uv_min;
+        let [u1, v1] = q.uv_max;
+        let (su, sv) = (u1 - u0, v1 - v0);
+        let fx0 = (nx - dx) / dw;
+        let fx1 = (nx + nw - dx) / dw;
+        let fy0 = (ny - dy) / dh;
+        let fy1 = (ny + nh - dy) / dh;
+        Some(GuiSpriteQuad {
+            dst: [nx, ny, nw, nh],
+            uv_min: [u0 + su * fx0, v0 + sv * fy0],
+            uv_max: [u0 + su * fx1, v0 + sv * fy1],
+        })
     }
 
     /// Width of `s` in the font this builder will actually *draw* with — the
@@ -5110,6 +5261,11 @@ impl Quads<'_> {
         if w <= 0.0 || h <= 0.0 {
             return;
         }
+        // Clipped in *pixel* space, before the NDC conversion, so the intersection
+        // is stated in the same units the caller reasoned about.
+        let Some((x, y, w, h)) = self.clipped_rect(x, y, w, h) else {
+            return;
+        };
         let to_ndc = |px: f32, py: f32| (2.0 * px / self.w - 1.0, 1.0 - 2.0 * py / self.h);
         let (x0, y0) = to_ndc(x, y);
         let (x1, y1) = to_ndc(x + w, y + h);
@@ -5144,9 +5300,35 @@ impl Quads<'_> {
     fn text(&mut self, s: &str, x: f32, y: f32, scale: f32, c: [f32; 4]) {
         if let Some(f) = self.font {
             let (w, h) = (self.w, self.h);
+            if self.clip.is_none() {
+                f.draw(
+                    &mut ColourStream {
+                        verts: &mut self.verts,
+                        w,
+                        h,
+                    },
+                    s,
+                    x,
+                    y,
+                    scale,
+                    c,
+                );
+                return;
+            }
+            // Clipped: draw into scratch, then cut the emitted quads in NDC.
+            //
+            // `VanillaFont::draw` takes a concrete `ColourStream` (it is a struct,
+            // not a trait — `hud/item_icon.rs:666`), so there is no seam to inject
+            // a clipping stream through, and `hud/` is not this change's to edit.
+            // Post-processing works because every glyph reaches the stream as an
+            // **axis-aligned** quad — one per horizontal ink run per texel row
+            // (`hud/vanilla_font.rs:512-519`) — so a bounding box over its six
+            // vertices reconstructs the rect losslessly.
+            let mut scratch = core::mem::take(&mut self.text_scratch);
+            scratch.clear();
             f.draw(
                 &mut ColourStream {
-                    verts: &mut self.verts,
+                    verts: &mut scratch,
                     w,
                     h,
                 },
@@ -5156,6 +5338,8 @@ impl Quads<'_> {
                 scale,
                 c,
             );
+            self.append_clipped_ndc_quads(&scratch);
+            self.text_scratch = scratch;
             return;
         }
         let mut cursor = x;
@@ -5707,6 +5891,143 @@ mod tests {
             nav.key(ui, MenuKey::Char(c));
         }
         nav.key(ui, MenuKey::Enter);
+    }
+
+    /// Issue #47. Every one of the command block screen's seven interactive
+    /// rows, plus the read-only "Previous Output" row, at its exact vanilla
+    /// rect on a real canvas — not a restatement of `command_block.rs`'s own
+    /// constants, but the actual `MenuFrame`/`row_rect` output a click and a
+    /// draw both go through.
+    ///
+    /// `854x480` is the same seed canvas `nav::SEED_CANVAS` uses, so
+    /// `floor(854/2) == 427` and `floor(480/4) == 120` are the two integer
+    /// divisions every rect below is built from.
+    #[test]
+    fn command_block_rects_match_vanillas_own_arithmetic() {
+        use command_block::{CommandBlockOpen, CommandBlockRow, CommandBlockState};
+
+        let state = CommandBlockState::new(CommandBlockOpen::default());
+        let frame = command_block_frame(&state, None);
+        let (w, h) = (854.0_f32, 480.0_f32);
+        let rect = |row: CommandBlockRow| row_rect(&frame.rows, row as usize, w, h).unwrap();
+
+        // Command field: `width/2 - 150, 50, 300, 20`.
+        assert_eq!(rect(CommandBlockRow::Command), (277.0, 50.0, 300.0, 20.0));
+        // Track Output: `width/2 + 130, 135, 20, 20`.
+        assert_eq!(rect(CommandBlockRow::TrackOutput), (557.0, 135.0, 20.0, 20.0));
+        // Mode/Conditional/Automatic: shared y 165, widths 100.
+        assert_eq!(rect(CommandBlockRow::Mode), (273.0, 165.0, 100.0, 20.0));
+        assert_eq!(rect(CommandBlockRow::Conditional), (377.0, 165.0, 100.0, 20.0));
+        assert_eq!(rect(CommandBlockRow::Automatic), (481.0, 165.0, 100.0, 20.0));
+        // Done/Cancel: `Origin::CommandBlockFooter`'s anchor is
+        // `(427, floor(480/4) + 132) == (427, 252)`.
+        let done = row_rect(&frame.rows, CommandBlockRow::Done as usize, w, h).unwrap();
+        let cancel = row_rect(&frame.rows, CommandBlockRow::Cancel as usize, w, h).unwrap();
+        assert_eq!(done, (273.0, 252.0, 150.0, 20.0));
+        assert_eq!(cancel, (431.0, 252.0, 150.0, 20.0));
+        // Rejected hypothesis: reusing `Origin::TitleTop`'s `floor(h/4) + 48`
+        // (`168`, not `252`) — an 84 px miss, not a rounding difference, so a
+        // wrong-origin bug here cannot pass by accident.
+        assert_ne!(done.1, (h / 4.0).floor() + 48.0);
+
+        // Row 7: the read-only previous-output field, sharing the command
+        // field's x and the track-output row's y.
+        let previous = row_rect(&frame.rows, command_block::PREVIOUS_OUTPUT_ROW, w, h).unwrap();
+        assert_eq!(previous, (277.0, 135.0, 276.0, 20.0));
+
+        // Captions: the default state (fresh `CommandBlockOpen`) is
+        // Redstone/Unconditional/Needs-Redstone/track-output-off, matching
+        // vanilla's own field initialisers.
+        assert_eq!(frame.rows[CommandBlockRow::Mode as usize].label, "Impulse");
+        assert_eq!(
+            frame.rows[CommandBlockRow::Conditional as usize].label,
+            "Unconditional"
+        );
+        assert_eq!(
+            frame.rows[CommandBlockRow::Automatic as usize].label,
+            "Needs Redstone"
+        );
+        assert_eq!(
+            frame.rows[CommandBlockRow::TrackOutput as usize].label,
+            "X"
+        );
+        assert_eq!(frame.rows[CommandBlockRow::Done as usize].label, "Done");
+        assert_eq!(frame.rows[CommandBlockRow::Cancel as usize].label, "Cancel");
+    }
+
+    /// Issue #47's tab-completion popup rect, predicted against vanilla's own
+    /// clamp formula and checked against a rejected hypothesis: forgetting
+    /// the synthetic-slash offset shift (`command_block`'s module doc) would
+    /// place the popup 6 px too far right, not merely "somewhere near".
+    #[test]
+    fn command_block_suggestion_popup_lands_at_the_predicted_clamped_rect() {
+        use command_block::{CommandBlockOpen, CommandBlockRow, CommandBlockState};
+        use lodestone_model::command_tree::{CommandTree, NodeKind, RawCommandNode};
+
+        let nodes = vec![
+            RawCommandNode {
+                kind: NodeKind::Root,
+                children: vec![1],
+                executable: false,
+                restricted: false,
+                redirect: None,
+            },
+            RawCommandNode {
+                kind: NodeKind::Literal {
+                    name: "gamemode".to_string(),
+                },
+                children: vec![2, 3],
+                executable: false,
+                restricted: false,
+                redirect: None,
+            },
+            RawCommandNode {
+                kind: NodeKind::Literal {
+                    name: "creative".to_string(),
+                },
+                children: vec![],
+                executable: true,
+                restricted: false,
+                redirect: None,
+            },
+            RawCommandNode {
+                kind: NodeKind::Literal {
+                    name: "survival".to_string(),
+                },
+                children: vec![],
+                executable: true,
+                restricted: false,
+                redirect: None,
+            },
+        ];
+        let tree = CommandTree::new(nodes, 0).unwrap();
+        let mut state = CommandBlockState::new(CommandBlockOpen::default());
+        state.command.set_value("gamemode c");
+        let frame = command_block_frame(&state, Some(&tree));
+        let (w, h) = (854.0_f32, 480.0_f32);
+
+        // One row past `PREVIOUS_OUTPUT_ROW`: only "creative" matches "c".
+        let popup_row = command_block::PREVIOUS_OUTPUT_ROW + 1;
+        assert_eq!(frame.rows.len(), popup_row + 1, "exactly one candidate");
+        assert_eq!(frame.rows[popup_row].label, "creative");
+
+        // `start == 9` (see `command_block`'s own completion test), advance
+        // 6.0, `BORDER_INSET` 4.0: `unclamped_dx = -150 + 4 + 6*9 = -92`,
+        // `x = 427 - 92 = 335` — comfortably inside `[0, 525]`, so the clamp
+        // itself is not exercised here (a second test would need a command
+        // long enough to push the popup off the right edge).
+        let popup_w = 8.0 * 6.0; // "creative", 8 chars, fixed advance 6.0.
+        let (px, py, pw, ph) = row_rect(&frame.rows, popup_row, w, h).unwrap();
+        assert_eq!((px, py, ph), (335.0, 71.0, 12.0));
+        assert_eq!(pw, popup_w + 1.0);
+
+        // Rejected hypothesis: an adapter that forgot to shift the synthetic
+        // slash's offset back by one would compute `start == 10`, landing at
+        // `427 + (-150 + 4 + 60) == 341` — 6 px right of the real answer, not
+        // an imperceptible rounding difference.
+        let wrong_dx = 427.0 + (-150.0 + 4.0 + 6.0 * 10.0);
+        assert_ne!(px, wrong_dx);
+        assert_eq!(wrong_dx - px, 6.0);
     }
 
     #[test]
