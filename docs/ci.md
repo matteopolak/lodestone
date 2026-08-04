@@ -487,6 +487,24 @@ file's edits:**
   in this run — that claim of red has gone stale; whoever owns them should
   re-check before assuming it still holds.
 
+**A second run on the very next push (`30947402590`, this doc's own commit
+`054e482`) confirms the pattern rather than the specific tests.** `check`,
+`check-all`, and `check-seam` passed again; `xtask-structural-checks` failed
+on the same `lodestone-fuzz` isolation violation. But `test` failed on three
+*different* tests this time —
+`app::tests::the_mouse_path_resolves_the_default_attack_and_use_buttons`,
+`menu::key_binds::tests::every_control_has_a_row_and_every_row_but_the_footer_scrolls_into_view`,
+`menu::key_binds::tests::six_categories_carry_all_twenty_seven_actions` — all
+in `lodestone-shell`, all about a keybinds count (27 vs. an in-flight bump to
+29 for two new verbs) that a same-day commit (`d9e5a9a`, landed *after* this
+push) fixed. Two pushes, two unrelated `test` failures, neither touching
+anything this conversion changed: on a trunk this fast-moving, "which test is
+red" is not a stable signal — "check/check-all/check-seam pass, install-just
++ recipe-dispatch never causes the failure" is the thing actually being
+verified here, and it held both times, from the recipe's own logged command
+line (`cargo test --workspace --no-fail-fast  --target-dir target`, no `-j`,
+no custom target dir) rather than from the pass/fail count.
+
 ## How to extend it
 
 - **Add a check**: add a job, following the existing pattern (checkout →
