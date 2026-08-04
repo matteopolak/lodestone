@@ -327,6 +327,15 @@ pub struct HudFrame<'a> {
     pub health: Option<f32>,
     /// Current food level in `0..=20`, `Some` only on a live survival server.
     pub food: Option<i32>,
+    /// Current food saturation (the hidden reserve that drains before `food`
+    /// itself does), `Some` only on a live survival server. Drives the
+    /// hunger-row wobble while it is empty (`Hud.java:977-979`,
+    /// `getSaturationLevel() <= 0.0`) — `None` is treated as "not empty" (the
+    /// row stays flush), which is also this field's default, so a caller that
+    /// has not wired it through yet (see `docs/hud-animations.md`) draws
+    /// exactly as before this field existed rather than guessing at a real
+    /// saturation value.
+    pub saturation: Option<f32>,
     /// `(air, max_air, eye_in_water)`, `Some` only on a live survival server.
     /// Drives the underwater bubble row (`lodestone_render::bubble_row`) —
     /// `Some` does not by itself mean the row draws; [`bubble_row_visible`]
@@ -418,6 +427,7 @@ impl<'a> HudFrame<'a> {
             boss_bars: &[],
             health: None,
             food: None,
+            saturation: None,
             air: None,
             hotbar: None,
             hotbar_items: None,
@@ -1190,9 +1200,10 @@ fn draw_hotbar_items(b: &mut Builder, frame: &HudFrame) {
 }
 
 /// The per-frame vitals-cluster animation phases [`HudGeometry::build_inner`]
-/// draws with — heart blink/jitter, and (later additions to this type) the
-/// hunger wobble and hotbar pop. See `hud/anim.rs` for the vanilla citations
-/// and `docs/hud-animations.md` for the port notes.
+/// draws with — heart blink/jitter and the hunger wobble (both driven by
+/// `tick` below), and (a later addition to this type) the hotbar pop. See
+/// `hud/anim.rs` for the vanilla citations and `docs/hud-animations.md` for
+/// the port notes.
 ///
 /// [`HudAnim::NONE`] is idle (every field at its settled value) and is what
 /// [`HudGeometry::build`]/[`HudGeometry::build_with_font`]/
@@ -1398,15 +1409,21 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
     }
     if let Some(food) = frame.food {
         let food_f = food.max(0) as f32;
+        // Hunger-empty wobble (`Hud.java:977-979`): `frame.saturation` is
+        // `None` off a build that has not wired it through yet (see
+        // `HudFrame::saturation`'s doc) — treated as "not empty", so the row
+        // stays flush rather than guessing.
+        let saturation = frame.saturation.unwrap_or(1.0);
         for i in 0..10 {
             // Hunger fills right-to-left in vanilla.
             let x = hx + hw - icon - i as f32 * step;
-            b.sprite("hud/food_empty", x, row_y, icon, icon, white);
+            let y = row_y + anim::hunger_wobble(anim.tick, food, saturation, i);
+            b.sprite("hud/food_empty", x, y, icon, icon, white);
             let units = food_f - i as f32 * 2.0;
             if units >= 2.0 {
-                b.sprite("hud/food_full", x, row_y, icon, icon, white);
+                b.sprite("hud/food_full", x, y, icon, icon, white);
             } else if units >= 1.0 {
-                b.sprite("hud/food_half", x, row_y, icon, icon, white);
+                b.sprite("hud/food_half", x, y, icon, icon, white);
             }
         }
     }
