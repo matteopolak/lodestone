@@ -16,18 +16,49 @@ reconciliation).
 
 ## How it works
 
-`FogSettings { color, sky_color, start, end }` is a world-space range from the
-eye. `FogUniform` packs it into three `vec4`s and every world shader applies
+`FogSettings { color, sky_color, start, end, environmental_start,
+environmental_end }` carries **two** world-space ranges from the eye — the
+render-distance term (`start`/`end`) and vanilla's second, independent
+environmental term (`environmental_start`/`environmental_end`; see "Vanilla's
+two terms" below). `FogUniform` packs both into three `vec4`s with no growth
+(the two environmental fields ride `eye.w`/`end_enabled.w`, previously
+unused) and every world shader applies
 
 ```wgsl
-let amount = fog_amount(length(in.world - camera.fog_eye.xyz));
+fn fog_amount(rel: vec3<f32>) -> f32 {
+    let sph = length(rel);
+    let cyl = max(length(rel.xz), abs(rel.y));
+    let env = linear_fog(sph, camera.fog_eye.w, camera.fog_end_enabled.w);
+    let rd = linear_fog(cyl, camera.fog_color_start.w, camera.fog_end_enabled.x);
+    return max(env, rd) * camera.fog_end_enabled.y;
+}
+let amount = fog_amount(in.world - camera.fog_eye.xyz);
 let fogged_srgb = mix(lit_srgb, linear_to_srgb(camera.fog_color_start.rgb), amount);
 return vec4<f32>(srgb_to_linear(fogged_srgb), tex.a);
 ```
 
-`fog::fog_factor` is the CPU twin of `fog_amount` and `fog::apply_fog_gamma` is
+`fog::fog_factor` is the CPU twin of `linear_fog`, `fog::total_fog_factor` is
+the CPU twin of the whole `fog_amount` combine, and `fog::apply_fog_gamma` is
 the CPU twin of the mix, so headless tests describe the shader's behaviour
 exactly.
+
+### The fog *colour* also has a day/night track — and it used to only reach the sky disc
+
+`fog_color_for_time_of_day` (`lodestone-render/src/sky.rs`) ports vanilla's
+`FOG_COLOR` timeline track and was correct from the day it landed, but its
+only consumer in the tree was the sky disc (`sky_pipeline.rs`) — a classic
+island (`CLAUDE.md` rule 1, inverted: the mechanism existed and was tested,
+one of its two consumers was never wired). `gpu.rs::fog_with_clock`, the sole
+producer of the terrain/entity/block-entity fog uniform, stored the flat day
+colour unchanged at every hour, so at midnight distant terrain faded to a
+full-brightness sky blue against a near-black sky disc, with a hard seam at
+the horizon — this is what a player reported as "fog seems a bit too
+extreme". Fixed by applying the track inside `fog_with_clock` itself, to a
+**local copy** of the settings: `self.fog.color` must stay the untracked day
+base, because the sky pass reads that field directly and applies the same
+track to paint the disc, so pre-multiplying the stored base would
+double-apply it there. Gate:
+`gpu::tests::fog_with_clock_carries_the_night_track_gate_a`.
 
 ### The mix is in gamma space, and this was wrong for a long time
 
@@ -167,20 +198,46 @@ this client does not draw at all.
 
 ## What this client does not do yet
 
-Both gaps need a wider `FogUniform` **and** an edit inside three shader bodies
-(`model.wgsl`, `entity.wgsl`, `fluid.wgsl`), so neither was closed by #388.
+Items 1 and 2 below (F2/F3) are now **fixed** — `FogSettings` carries both
+terms, `FogUniform` packs both into its existing three `vec4`s (the two
+previously-unused lanes, `eye.w`/`end_enabled.w`), and all three fogged
+shaders compute the `max` of both metrics. Kept here as history plus the
+gates that now prove it, rather than deleted, per this repo's practice of
+recording what was measured:
 
-1. **No environmental term.** Only one start/end pair reaches the GPU, so the
-   presets above are mutually exclusive rather than `max`-combined. In practice
-   this is exact for the Nether (see `FogSettings::nether`'s doc for why the
-   `max` provably cannot pick the other term at RD ≥ 6) and merely absent for
-   the overworld, where it errs toward *too little* fog.
-2. **Spherical distance where vanilla uses cylindrical.** Every shader takes
-   `length(world - eye)`. Along a ray pitched down 36.87°, cylindrical distance
-   is `0.8 ×` spherical, so at 300 blocks with RD 16 this client is **fully**
-   fogged where vanilla reads **0.375**. That gap is pinned by
-   `spherical_distance_over_fogs_a_pitched_ray_versus_vanillas_cylindrical`; if
-   the shaders gain cylindrical distance, that test fails and points here.
+1. ~~**No environmental term.**~~ Fixed: `FogSettings::for_render_distance`
+   (overworld/End) sets `environmental_start`/`environmental_end` to the
+   registered default `0.0`/`1024.0`; `FogSettings::nether` sets them to the
+   Nether's own `10.0`/`96.0` and restores the *real* render-distance span in
+   `start`/`end` instead of repurposing that pair to hold its short range (the
+   pre-fix approximation this doc used to describe as "exact for the Nether").
+   Gate: `fog.rs`'s `ramp_gate::environmental_term_extends_the_ramp_past_the_old_hard_wall`.
+
+   **`FogSettings::for_view_distance` (water, lava, and the one remaining
+   fraction below) deliberately keeps its range in the render-distance pair**
+   rather than moving it to the environmental one, even though vanilla's
+   `WaterFogEnvironment`/`LavaFogEnvironment` set the environmental attributes.
+   Several `sim.rs` tests compare water/dry fog settings structurally
+   (`a_submerged_eye_selects_short_dense_fog_over_the_sky_fog`), and relocating
+   the range would flip which term wins the shader's `max` for every existing
+   caller. The measurable cost: that lane now reads **cylindrical** distance
+   for these callers instead of spherical, a few percent of a block at the
+   short ranges water/lava use — it does not reach the reported symptom.
+2. ~~**Spherical distance where vanilla uses cylindrical.**~~ Fixed: every
+   fogged shader's `fog_amount` now takes the fragment-relative vector and
+   computes `cyl = max(length(rel.xz), abs(rel.y))` for the render-distance
+   term, `sph = length(rel)` for the environmental one. The mundane case that
+   made this concrete: an eye at `y = 140` looking at a valley floor 110
+   blocks out at `y = 64`, RD 8 — spherical `133.7` fully fogged (wrong);
+   cylindrical `110` correctly misses the render-distance band and falls back
+   to the environmental term, `0.131`. Gate:
+   `fog.rs`'s `ramp_gate::cylindrical_distance_uncovers_the_valley_below_an_ordinary_hilltop`.
+   The old pin on this gap,
+   `spherical_distance_over_fogs_a_pitched_ray_versus_vanillas_cylindrical`,
+   is now `cylindrical_distance_and_the_environmental_term_close_the_pitched_ray_gap`
+   — retargeted through `total_fog_factor` and inverted from "pin the gap open"
+   to "pin it closed", keeping its own negative control (the old single-term
+   path) so the before/after is still visible in one test.
 
 3. **The sky disc's colour mix still ignores the render distance** — *not* its
    gradient end, which #399 fixed. Filed from here because it was found while
@@ -241,11 +298,12 @@ Both gaps need a wider `FogUniform` **and** an edit inside three shader bodies
    the below-horizon void. Worth doing; do it as its own change, with a GPU to run
    those gates on.
 
-`FogUniform` has exactly two free lanes today (`eye.w` and `end_enabled.w` —
-`end_enabled.z` is the sky-darken factor), which is enough for an
-`environmental_start`/`environmental_end` pair without growing the struct.
-Note the 4-bind-group floor in `CLAUDE.md`: fog rides the group-0 camera uniform
-precisely so no fifth group is needed.
+`FogUniform`'s two previously-free lanes (`eye.w` and `end_enabled.w` —
+`end_enabled.z` is the sky-darken factor) now carry `environmental_start`/
+`environmental_end`, so the struct did not grow. Note the 4-bind-group floor
+in `CLAUDE.md`: fog rides the group-0 camera uniform precisely so no fifth
+group is needed, and this fix does not spend the ones the model shader
+already uses for the atlas/palette/anim groups.
 
 ## How to change it
 
@@ -254,16 +312,23 @@ precisely so no fifth group is needed.
   `ramp_gate` module is a hand-written literal taken from the Java above, not a
   call back into our own formula, so changing the implementation will correctly
   fail them.
-- **The one remaining fraction.** `sim::fog_for_render_distance` still calls
-  `for_view_distance(SKY_COLOR, rd * 16.0, gpu::FOG_START_FRACTION)`.
+- **The one remaining fraction — no longer just tidiness.** `sim::fog_for_render_distance`
+  still calls `for_view_distance(SKY_COLOR, rd * 16.0, gpu::FOG_START_FRACTION)`.
   `FOG_START_FRACTION` is `0.9`, which is `1 - span/rd_blocks` wherever the
   clamp is inactive — an algebraic identity, exact for render distances 3
   through 40. Outside that range it loses the 4-block floor and the 64-block
-  cap (RD 2: `28.8` against `28.0`; RD 48: `691.2` against `704.0`). Migrating
-  that call to `FogSettings::for_render_distance(SKY_COLOR, render_distance)`
-  is a one-line change and deletes the constant.
+  cap (RD 2: `28.8` against `28.0`; RD 48: `691.2` against `704.0`).
   `gpu.rs`'s `fog_start_fraction_matches_vanillas_span` pins both the agreement
-  and the divergence.
+  and the divergence. Because `for_view_distance` deliberately does **not**
+  populate the environmental pair (see item 1 above), this un-migrated call
+  site is also why F2/F3 do not yet reach the *live* plain-overworld fog —
+  they are fully implemented and gated in `fog.rs`, but the deployed sky/fog
+  preset still goes through the one-term path. Migrating this one call to
+  `FogSettings::for_render_distance(SKY_COLOR, render_distance)` is a
+  one-line change, deletes the constant, and is what actually wires F2/F3
+  into gameplay. `sim.rs` is a shared, actively-edited file this session, so
+  that migration was handed off rather than made directly — see the fog
+  investigation's report for the exact patch.
 - **Gotcha: a frame average cannot see a ramp defect.** Both models are 0 near
   and 1 at the edge and their frame means sit within a few points of each other;
   only sampling *by location* separates them. `ramp_gate` asserts per-sample and
