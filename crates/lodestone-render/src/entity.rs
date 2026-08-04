@@ -1571,14 +1571,67 @@ pub fn armour_layers(slot: ArmourSlot, item_path: &str) -> &'static [ArmourLayer
 /// The gamma-space RGB a layer multiplies its texel by:
 /// `Dyeable.colorWhenUndyed` for a dyeable layer, white for any other.
 ///
-/// This is `EquipmentLayerRenderer.getColorForLayer` with the stack's own
-/// `minecraft:dyed_color` **absent**, which is currently always: the wire
-/// component is dropped at the shell's `entity_snapshot` boundary, so no dye
-/// value can reach here. See `docs/armour-rendering.md` for the wiring that
-/// would change that; the only thing needed at this seam is a second argument.
+/// This is [`armour_layer_tint_with_dye`] with the stack's own
+/// `minecraft:dyed_color` **absent** — kept as a zero-argument convenience
+/// because every call site today (`gpu.rs::prepare_armour`) has no dye value
+/// to hand it: the wire component is dropped at the shell's
+/// `entity_snapshot` boundary. See `docs/armour-rendering.md` for the wiring
+/// that would change that.
 #[must_use]
 pub fn armour_layer_tint(layer: &ArmourLayer) -> [u8; 3] {
-    layer.dye.unwrap_or([255, 255, 255])
+    armour_layer_tint_with_dye(layer, None)
+}
+
+/// The gamma-space RGB a layer multiplies its texel by, given the wearer
+/// stack's own `minecraft:dyed_color` component if it decoded one.
+///
+/// This is `EquipmentLayerRenderer.getColorForLayer`
+/// (`EquipmentLayerRenderer.java:113-121`), transcribed exactly:
+///
+/// ```java
+/// private static int getColorForLayer(Layer layer, int dyeColor) {
+///    Optional<Dyeable> dyeable = layer.dyeable();
+///    if (dyeable.isPresent()) {
+///       int colorWhenUndyed = dyeable.get().colorWhenUndyed().map(ARGB::opaque).orElse(0);
+///       return dyeColor != 0 ? dyeColor : colorWhenUndyed;
+///    } else {
+///       return -1;
+///    }
+/// }
+/// ```
+///
+/// where `dyeColor` is `DyedItemColor.getOrDefault(itemStack, 0)`
+/// (`DyedItemColor.java:27-30`): `ARGB.opaque(component.rgb())` if the stack
+/// carries the component, `0` (not `colorWhenUndyed` — that fallback lives
+/// here, one call up) if it does not.
+///
+/// A non-dyeable layer (`layer.dye` is [`None`]) ignores `dyed_color`
+/// entirely and returns white (`-1` is `0xFFFFFFFF`, opaque white, i.e. "no
+/// tint") — matching the `else` branch above, which never reads `dyeColor`.
+///
+/// **A leather piece dyed pure black (`0x000000`) is indistinguishable from
+/// an undyed one**, and this is vanilla's own behaviour, not a port bug:
+/// `ARGB.opaque` only forces the alpha byte, so a `0x000000` dye still reads
+/// as `dyeColor == 0` and the `dyeColor != 0 ? dyeColor : colorWhenUndyed`
+/// ternary falls through to [`UNDYED_LEATHER_RGB`](lodestone_assets::equipment::UNDYED_LEATHER_RGB)
+/// exactly as if the component were absent. `dyed_color_zero_reads_as_undyed`
+/// pins this so a future "fix" that special-cases black does not quietly
+/// diverge from the game it is porting.
+#[must_use]
+pub fn armour_layer_tint_with_dye(layer: &ArmourLayer, dyed_color: Option<u32>) -> [u8; 3] {
+    let Some(undyed) = layer.dye else {
+        // `dyeable.isPresent()` false: vanilla returns `-1` unconditionally,
+        // never consulting `dyeColor`.
+        return [255, 255, 255];
+    };
+    // `DyedItemColor.getOrDefault(itemStack, 0)`: `ARGB.opaque` sets only the
+    // alpha byte, so the low 24 bits of `dyed_color` are already the RGB
+    // vanilla reads. `0` (component absent, or present-but-black) falls
+    // through to `colorWhenUndyed`.
+    match dyed_color.filter(|&rgb| rgb & 0x00FF_FFFF != 0) {
+        Some(rgb) => [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8],
+        None => undyed,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2965,6 +3018,70 @@ mod tests {
         assert_eq!(armour_layer_tint(&leather[1]), [255, 255, 255]);
         let diamond = armour_layers(ArmourSlot::Head, "diamond_helmet");
         assert_eq!(armour_layer_tint(&diamond[0]), [255, 255, 255]);
+    }
+
+    /// A real `minecraft:dyed_color` reaches the base leather layer
+    /// unchanged (mod the alpha byte `ARGB.opaque` strips), while the
+    /// non-dyeable overlay layer ignores it exactly as
+    /// `getColorForLayer`'s `else -> -1` branch does — two competing
+    /// hypotheses (dye applied vs. dye ignored) landing on different layers
+    /// of the *same* item, so a broken layer/dye pairing cannot pass by
+    /// accident.
+    #[test]
+    fn a_real_dye_reaches_the_base_layer_but_not_the_overlay() {
+        let leather = armour_layers(ArmourSlot::Chest, "leather_chestplate");
+        // Bright cyan (`0x00FFFF`), chosen only for being nowhere near
+        // `UNDYED_LEATHER_RGB` (`0xA06540`) so a fallback-to-undyed bug is
+        // unmistakable.
+        let dye = Some(0x0000_FFFF_u32);
+        assert_eq!(armour_layer_tint_with_dye(&leather[0], dye), [0x00, 0xFF, 0xFF]);
+        // The overlay has no `dyeable` block: `getColorForLayer` never reads
+        // `dyeColor` for it.
+        assert_eq!(armour_layer_tint_with_dye(&leather[1], dye), [255, 255, 255]);
+    }
+
+    /// `dyed_color: None` (component absent) falls back to
+    /// `Dyeable.colorWhenUndyed`, matching the zero-argument
+    /// [`armour_layer_tint`] this delegates to.
+    #[test]
+    fn absent_dye_falls_back_to_color_when_undyed() {
+        let leather = armour_layers(ArmourSlot::Chest, "leather_chestplate");
+        assert_eq!(
+            armour_layer_tint_with_dye(&leather[0], None),
+            lodestone_assets::equipment::UNDYED_LEATHER_RGB
+        );
+        assert_eq!(
+            armour_layer_tint_with_dye(&leather[0], None),
+            armour_layer_tint(&leather[0])
+        );
+    }
+
+    /// The vanilla quirk pinned in [`armour_layer_tint_with_dye`]'s own
+    /// doc: dyeing leather pure black is indistinguishable from not dyeing
+    /// it at all, because `DyedItemColor.getOrDefault`'s `ARGB.opaque` only
+    /// touches the alpha byte, so a black dye's RGB portion is still `0` and
+    /// `dyeColor != 0` reads false. This is `EquipmentLayerRenderer`'s own
+    /// behaviour (`EquipmentLayerRenderer.java:117`), not a port bug — a
+    /// "fix" that special-cases black would diverge from the game it ports.
+    #[test]
+    fn dyed_color_zero_reads_as_undyed() {
+        let leather = armour_layers(ArmourSlot::Chest, "leather_chestplate");
+        assert_eq!(
+            armour_layer_tint_with_dye(&leather[0], Some(0x0000_0000)),
+            lodestone_assets::equipment::UNDYED_LEATHER_RGB
+        );
+    }
+
+    /// A non-dyeable layer ignores `dyed_color` even when one is present —
+    /// `getColorForLayer`'s `else` branch never reads `dyeColor` at all, so
+    /// a diamond helmet dyed (nonsensically) any colour still draws white.
+    #[test]
+    fn non_dyeable_layers_ignore_a_present_dye() {
+        let diamond = armour_layers(ArmourSlot::Head, "diamond_helmet");
+        assert_eq!(
+            armour_layer_tint_with_dye(&diamond[0], Some(0x00FF_0000)),
+            [255, 255, 255]
+        );
     }
 
     /// The two vanilla anchor values, hand-derived from the real timeline
