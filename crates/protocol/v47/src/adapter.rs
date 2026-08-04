@@ -21,8 +21,8 @@ use crate::packets::entity::{
 };
 use crate::packets::game::{
     BlockDig, BlockPlace, ClientCommand, ClientboundChat, ClientboundPositionLook, EntityAction,
-    JoinGame, KickDisconnect, PlaySetCompression, ServerboundChat, ServerboundPositionLook,
-    Spectate, UseEntity, UseEntityAt,
+    JoinGame, KickDisconnect, PlaySetCompression, Respawn, ServerboundChat, ServerboundPositionLook,
+    Spectate, UpdateHealth, UseEntity, UseEntityAt,
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{EncryptionRequest, LoginDisconnect, LoginSuccess, SetCompression};
@@ -129,6 +129,14 @@ fn decode_body<T: Decode>(payload: &[u8]) -> Result<T, AdapterError> {
 /// lenient [`decode_body`].
 fn decode_body_exact<T: Decode>(payload: &[u8]) -> Result<T, AdapterError> {
     lodestone_core::decode_body_exact(payload, CTX).map_err(AdapterError::Decode)
+}
+
+/// Maps a decode error to the adapter's decode-error variant. Used by the
+/// hand-decoded arms (`entity_status`/`entity_head_rotation`) that read a
+/// [`Reader`] directly rather than going through a derived [`Decode`] body,
+/// mirroring `lodestone-v770`'s own `dec_err` helper.
+fn dec_err(err: impl std::fmt::Display) -> AdapterError {
+    AdapterError::Decode(err.to_string())
 }
 
 /// Builds a [`Directive::Send`] from a packet id and an encodable body.
@@ -603,6 +611,81 @@ impl V47Adapter {
         if packet_id == play::clientbound::SET_COMPRESSION {
             let body: PlaySetCompression = decode_body(payload)?;
             return Ok(vec![Directive::SetCompression(body.threshold)]);
+        }
+        if packet_id == play::clientbound::UPDATE_HEALTH {
+            // f32 health, varint food, f32 saturation — verified against
+            // minecraft-data's 1.8 `packet_update_health` (identical shape at
+            // 1.12.2). `UpdateHealth` already existed in this crate but was
+            // only ever round-tripped in `tests/join_flow.rs`, never wired
+            // into `handle_play` — an island per CLAUDE.md's own definition
+            // (decoded nowhere in production, tested only against our own
+            // encoder).
+            let body: UpdateHealth = decode_body(payload)?;
+            return Ok(vec![Directive::Emit(ClientEvent::HealthChanged {
+                health: body.health,
+                food: body.food,
+                saturation: body.food_saturation,
+            })]);
+        }
+        if packet_id == play::clientbound::RESPAWN {
+            // Signed int dimension, u8 difficulty, u8 game mode, string level
+            // type — verified against minecraft-data's 1.8 `packet_respawn`.
+            // Unlike `join`'s dimension (a signed *byte*), 1.8's `respawn`
+            // widens dimension to a full `i32` on the wire — a genuine
+            // historical inconsistency within 1.8 itself, confirmed against
+            // minecraft-data rather than assumed from `join`'s shape; `Respawn`
+            // (like `UpdateHealth` above) already existed here but was never
+            // wired in. Like `game_mode`'s hardcore bit, the same `dimension_id`
+            // helper is reused after narrowing to `i8` (every real dimension
+            // value fits). Re-recording the dimension matters for the *next*
+            // `map_chunk`: a portal into the nether/end must flip `ChunkShape`
+            // before that column's light arrays are decoded, exactly as `LOGIN`
+            // does on first join.
+            let body: Respawn = decode_body(payload)?;
+            let dimension = i8::try_from(body.dimension).map_err(|_| {
+                AdapterError::Decode(format!(
+                    "respawn dimension {} does not fit in 1.8's byte range",
+                    body.dimension
+                ))
+            })?;
+            self.set_dimension(dimension);
+            return Ok(vec![Directive::Emit(ClientEvent::Respawned {
+                dimension: dimension_id(dimension)?,
+                game_mode: game_mode(body.game_mode)?,
+                previous_game_mode: None,
+                last_death_location: None,
+            })]);
+        }
+        if packet_id == play::clientbound::ENTITY_STATUS {
+            // A raw (non-VarInt) `i32` entity id, then a raw status byte —
+            // verified against minecraft-data's 1.8 `packet_entity_status`
+            // (identical shape at 1.12.2) and matching `lodestone-v770`'s own
+            // `ENTITY_EVENT` decode. Drives hurt/death animation,
+            // totem-of-undying particles, etc. — the consumer interprets
+            // `status` per the entity's own type, exactly as the modern decode
+            // already documents.
+            let mut reader = Reader::new(payload);
+            let entity_id = reader.i32().map_err(dec_err)?;
+            let status = reader.u8().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::EntityStatus {
+                entity_id,
+                status,
+            })]);
+        }
+        if packet_id == play::clientbound::ENTITY_HEAD_ROTATION {
+            // VarInt entity id, then a packed signed-byte yaw (256 steps per
+            // circle, the same packing `unpack_degrees` already handles for
+            // body rotation) — verified against minecraft-data's 1.8
+            // `packet_entity_head_rotation`.
+            let mut reader = Reader::new(payload);
+            let entity_id = reader.var_i32().map_err(dec_err)?;
+            let packed = reader.i8().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::EntityHeadRotation {
+                entity_id,
+                head_yaw: unpack_degrees(packed),
+            })]);
         }
         // Everything else in play is intentionally ignored for now.
         Ok(Vec::new())
