@@ -189,34 +189,33 @@ place (see `crates/lodestone-worldgen/src/overworld.rs`'s "Badlands" section).
 
 ## What could not be isolated, and why
 
-- **Ore/vegetation features**: not composed into `ComposedChunkOracle.java`.
-  `FeatureOracle.java` already isolates the ore-feature engine (placement
-  modifiers, RNG order) against a fixed biome via a `WorldGenLevel` built from
-  a JDK dynamic proxy — extending it to run inside this harness's real
-  per-column biome, then folding its output into a third `postfeatures`
-  fixture stage, is the natural next increment. Not attempted here to keep
-  one Docker run's scope bounded, and because per-biome feature-list
-  resolution needs the same kind of biome-source rewiring
-  `applyCarvers` needed here, freshly built rather than reused.
-  **A #295 architecture review found a second, sharper reason this extension
-  is required before composing ore features into `OverworldGenerator`, not
-  merely a nice-to-have**: `FeatureOracle.java`'s own header states it
-  "deliberately does NOT model ore spill from the 8 neighbouring chunks into
-  the centre (a 3×3 driver, analogous to the carver 17×17 driver)," and
-  `crate::feature::OreInput`'s `get_height`/`in_center` wrap/drop edge probes
-  to match that oracle rather than vanilla's real `blockStateWriteRadius(1)`
-  (`ChunkPyramid.java:32-35`). `feature_parity`'s "whole-chunk exact both
-  directions" agreement therefore proves the Rust port matches the oracle's
-  chosen simplification, not that the simplification is vanilla's — the
-  authored-oracle trap in a subtle form (the oracle shares the very
-  simplification it's validating). Composing on top of this today would bake
-  a wrong ~4-block edge band into every chunk with no gate able to see it
-  (this harness has no `postfeatures` stage yet). The fix is the same
-  extension named above (real 3×3 driver + real neighbour `OCEAN_FLOOR_WG`
-  heightmaps) plus a matching `OreInput` change — tracked as #295's next
-  increment; carvers/the real aquifer do not have this problem (their
-  neighbourhoods — 17×17 source chunks for carvers, the aquifer's own padded
-  grid — were already real in both the oracle and the Rust port).
+- **Vegetation features**: not composed into `ComposedChunkOracle.java` and
+  not built anywhere in this crate's Rust (epic #404 Phase 3). No isolated
+  oracle for it exists yet in `scripts/worldgen-oracle/` either.
+- **Ore features (composition into `OverworldGenerator::column`)**: the
+  *oracle* side of this is now fixed (see "Known gap" below for what it still
+  approximates) — `FeatureOracle.java` drives a real 3×3 chunk neighbourhood
+  and `ComposedChunkOracle.java` has a `postfeatures` stage — but composing
+  `crate::feature::apply_ore_step_3x3` into `OverworldGenerator::column`
+  itself remains the next increment of #295, deliberately not attempted in
+  this pass. **The reason to fix the oracle first, separately from
+  composition, is itself worth recording**: a #295 architecture review found
+  that `FeatureOracle.java` used to share the very simplification it was
+  supposed to be checking. Its header used to say it "deliberately does NOT
+  model ore spill from the 8 neighbouring chunks into the centre (a 3×3
+  driver, analogous to the carver 17×17 driver)," and
+  `crate::feature::OreInput`'s `get_height`/`in_center` used to wrap/drop edge
+  probes to match that oracle rather than vanilla's real
+  `blockStateWriteRadius(1)` (`ChunkPyramid.java:32-35`). The old
+  `feature_parity`'s "whole-chunk exact both directions" agreement therefore
+  proved the Rust port matched the oracle's chosen simplification, not that
+  the simplification was vanilla's — the authored-oracle trap in a subtle
+  form (the oracle shares the very simplification it's validating). Composing
+  ore features into `OverworldGenerator` on top of *that* oracle would have
+  baked a wrong edge band into every chunk with no gate able to see it. Fixing
+  the oracle first, and leaving composition for a follow-on, keeps that
+  ordering honest: the oracle `feature_parity`/`chunk_parity` now measure
+  against is no longer the thing being validated.
 - **Structures**: unbuilt anywhere in this repo's Rust (`#136`: "do not start
   implementation against this issue" until core worldgen has *any* structure
   concept). Nothing to compare them against yet, so `postcarve` is honestly
@@ -244,6 +243,80 @@ id for `"minecraft:water"` with no properties happens to already resolve to
 the default (`level=0`) state, so it is very unlikely to be player-visible,
 but it is not nothing, and a future contributor extending fluid handling
 (e.g. flowing water) should know this gap exists rather than rediscover it.
+
+## Known gap: the 3×3 ore driver's residual beyond its own neighbourhood
+
+`FeatureOracle.java` and `crate::feature::OreInput`/`apply_ore_step_3x3` now
+drive a real 3×3 chunk neighbourhood (the centre plus its 8 immediate
+neighbours) for ore composition, each with its own origin and its own
+`decorationSeed`, matching vanilla's real `blockStateWriteRadius(1)` spill —
+this replaces the old "wrap every out-of-chunk probe into the centre"
+approximation, which was wrong for effectively every edge case, not just a
+rare one.
+
+Vanilla's largest overworld blob ores (`size=64`:
+`ore_andesite`/`ore_diorite`/`ore_granite`/`ore_tuff` — common features, not
+rare ones) can, in boundary-adjacent cases, probe or write up to ~13 blocks
+beyond the chunk they originate in (`spread_xy = size/8 = 8`,
+`max_radius = ceil((size/16*2+1)/2) = 5`, probe half-width
+`ceil(spread_xy) + max_radius = 13`). A source chunk at the edge of the
+driven 3×3 neighbourhood can therefore reach up to ~13 blocks into a chunk
+*two* away from the centre — outside the 3×3 footprint. **Which chunks get
+to place ore features** stays exactly 3×3 regardless (that is a real,
+enforced vanilla limit — `blockStateWriteRadius(1)` — not an approximation);
+what this section is about is how far a *read* during one of those 9 chunks'
+own placement (a heightmap probe, a block-state/adjacency check) can reach.
+
+**The two sides handle this differently, and that asymmetry is deliberate.**
+`FeatureOracle.java`'s `getChunk`/`getHeight` are **not** clamped: they
+lazily generate (and memoise) whatever additional chunk a read actually
+touches, so the oracle's own answer for the centre's post-feature state is
+the true vanilla value, bounded only by the ore blob's own geometry, never by
+an artificial cap. An earlier version of this method *did* clamp reads to
+the 3×3 footprint, and that clamp is what caused the JVM deadlock described
+in `FeatureOracle.java`'s own header comment: two different real chunk
+coordinates that both clamp to the same edge alias onto the same memoised
+chunk, and vanilla's own `BulkSectionAccess` (used by `OreFeature.doPlace`)
+does not know about that aliasing — it can try to acquire the same
+`LevelChunkSection`'s non-reentrant semaphore twice within one placement and
+hang forever. Measured directly: `jstack` on the hung process showed the main
+thread parked in `ThreadingDetector.checkAndLock`, called from
+`OreFeature.doPlace`, after 10+ minutes at ~0% CPU.
+
+Rust's `OreInput::region_local`, by contrast, **is** clamped — necessarily,
+because the *fixture* `FeatureOracle.java` dumps (`inrun.`/`ofh.`) is itself
+bounded to the 3×3 region (`REGION_MIN..REGION_MAX`, `-16..32`): an unbounded
+terrain dump has no natural size limit, so there is nothing further out for
+Rust to read even if it wanted to. This means the oracle's own answer can be
+*more* correct than Rust's reconstruction of it in this specific residual —
+a real, narrow, understood gap, not a shared approximation as an earlier
+draft of this section claimed.
+
+This has not been measured to produce any parity difference in the two named
+fixture chunks (`(0,0)`, `(-120,-120)`) — the size-64 blob ores are common,
+but landing exactly at the few blocks of a chunk edge where this residual
+would fire is not — but it is a real, understood limitation rather than an
+unknown one, and a future contributor chasing a stray single-digit ore
+mismatch near a chunk boundary should check here before assuming a bug in the
+placement engine itself.
+
+## Known gap: `ComposedChunkOracle.java`'s `postfeatures` stage is single-source only
+
+Unlike `FeatureOracle.java` (fixed single biome, so the real 3×3 driver above
+is cheap: every one of the 9 source chunks shares one feature list),
+`ComposedChunkOracle.java` runs the real `MultiNoiseBiomeSource`, so a
+faithful 3×3 ore driver here would need 8 more *real, per-quart-biome* chunks
+generated (their own `fillFromNoise`/`buildSurface`/17×17-carve passes) —
+a significant expansion of an already-heavy single-chunk Docker run.
+`postfeatures` therefore only runs the **centre chunk's own** ore step (its
+own origin, its own seed, its own biome's feature list) against the real
+composed `postcarve` terrain above it — no neighbour spill modelled here at
+all, unlike `FeatureOracle.java`'s fixture. `FeatureOracle.java` remains the
+authoritative check on the ore *engine* (RNG order, placement, and now real
+3×3 spill); `postfeatures` exists to show what composing the centre's own ore
+step looks like against real biome variety (useful for the count-band
+predictions below), not as a fully vanilla-accurate edge band. Extending this
+oracle to the real 3×3 model is a further increment, not attempted here.
 
 ## How to add a stage
 

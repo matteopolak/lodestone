@@ -42,6 +42,18 @@ fn main() {
             |lx, y, lz| f.postcarve.get(lx, y, lz).to_string(),
         );
         print!("{}", report_full.summary(8));
+
+        println!(
+            "-- currently-composed subset (no ore composition yet) vs. vanilla postfeatures — \
+             the gap ore composition (#295's next increment) needs to close --"
+        );
+        let report_features = diff_field(
+            f.min_y,
+            f.height,
+            |lx, y, lz| generated.block_state(lx as usize, y, lz as usize).to_string(),
+            |lx, y, lz| f.postfeatures.get(lx, y, lz).to_string(),
+        );
+        print!("{}", report_features.summary(8));
         println!();
     }
 }

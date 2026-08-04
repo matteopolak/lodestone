@@ -116,6 +116,12 @@ pub struct ChunkFixture {
     /// Post-`applyCarvers`: the full non-feature/non-structure vanilla
     /// chunk — the honest "how far are we" target once #295 lands.
     pub postcarve: BlockField,
+    /// Post ore-only decoration of the CENTRE chunk (`ComposedChunkOracle
+    /// .java`'s `postfeatures` stage) — narrower than `FeatureOracle.java`'s
+    /// own isolated ore fixture (single-source, no 3x3 neighbour spill; see
+    /// that Java file's `postfeatures` doc comment for the exact scope).
+    /// Vegetation features and structures are still entirely absent.
+    pub postfeatures: BlockField,
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +150,7 @@ pub fn parse_raw_dump(text: &str) -> Vec<ChunkFixture> {
     let mut biome_quarts: [(String, i32); 16] = std::array::from_fn(|_| (String::new(), 0));
     let mut postsurface = BlockField::new(0, 0);
     let mut postcarve = BlockField::new(0, 0);
+    let mut postfeatures = BlockField::new(0, 0);
 
     for line in text.lines() {
         let Some((key, rest)) = line.split_once(' ') else {
@@ -160,6 +167,9 @@ pub fn parse_raw_dump(text: &str) -> Vec<ChunkFixture> {
         } else if let Some(coords) = key.strip_prefix("postsurface.") {
             let (lx, y, lz) = parse_xyz(coords);
             postsurface.set(lx, y, lz, rest.to_string());
+        } else if let Some(coords) = key.strip_prefix("postfeatures.") {
+            let (lx, y, lz) = parse_xyz(coords);
+            postfeatures.set(lx, y, lz, rest.to_string());
         } else if let Some(coords) = key.strip_prefix("postcarve.") {
             let (lx, y, lz) = parse_xyz(coords);
             postcarve.set(lx, y, lz, rest.to_string());
@@ -172,11 +182,13 @@ pub fn parse_raw_dump(text: &str) -> Vec<ChunkFixture> {
                     min_y = rest.trim().parse().expect("minY");
                     postsurface.min_y = min_y;
                     postcarve.min_y = min_y;
+                    postfeatures.min_y = min_y;
                 }
                 "meta.height" => {
                     height = rest.trim().parse().expect("height");
                     postsurface.height = height;
                     postcarve.height = height;
+                    postfeatures.height = height;
                 }
                 "meta.seaLevel" => sea_level = rest.trim().parse().expect("seaLevel"),
                 "meta.done" => {
@@ -190,6 +202,7 @@ pub fn parse_raw_dump(text: &str) -> Vec<ChunkFixture> {
                         biome_quarts: biome_quarts.clone(),
                         postsurface: std::mem::replace(&mut postsurface, BlockField::new(0, 0)),
                         postcarve: std::mem::replace(&mut postcarve, BlockField::new(0, 0)),
+                        postfeatures: std::mem::replace(&mut postfeatures, BlockField::new(0, 0)),
                     });
                 }
                 _ => {} // presurface.*, meta.carveExceptions, meta.carveEx — not needed by the compact fixture
@@ -229,7 +242,11 @@ pub fn encode_compact(fixtures: &[ChunkFixture]) -> String {
         for (i, (id, y)) in f.biome_quarts.iter().enumerate() {
             writeln!(out, "biome {} {} {} {}", i % 4, i / 4, id, y).unwrap();
         }
-        for (label, field) in [("postsurface", &f.postsurface), ("postcarve", &f.postcarve)] {
+        for (label, field) in [
+            ("postsurface", &f.postsurface),
+            ("postcarve", &f.postcarve),
+            ("postfeatures", &f.postfeatures),
+        ] {
             writeln!(out, "stage {label}").unwrap();
             for lz in 0..16i32 {
                 for lx in 0..16i32 {
@@ -305,8 +322,8 @@ pub fn parse_compact(text: &str) -> Vec<ChunkFixture> {
             biome_quarts[(qz * 4 + qx) as usize] = (id, y);
         }
 
-        let mut fields = Vec::with_capacity(2);
-        for _ in 0..2 {
+        let mut fields = Vec::with_capacity(3);
+        for _ in 0..3 {
             let line = lines.next().expect("stage line");
             let _label = line.strip_prefix("stage ").expect("stage prefix");
             let mut field = BlockField::new(min_y, height);
@@ -341,6 +358,7 @@ pub fn parse_compact(text: &str) -> Vec<ChunkFixture> {
             }
             fields.push(field);
         }
+        let postfeatures = fields.pop().expect("postfeatures field");
         let postcarve = fields.pop().expect("postcarve field");
         let postsurface = fields.pop().expect("postsurface field");
 
@@ -354,6 +372,7 @@ pub fn parse_compact(text: &str) -> Vec<ChunkFixture> {
             biome_quarts,
             postsurface,
             postcarve,
+            postfeatures,
         });
     }
     out
@@ -584,6 +603,9 @@ postsurface.0,-62,0 minecraft:air
 postcarve.0,-64,0 minecraft:stone
 postcarve.0,-63,0 minecraft:air
 postcarve.0,-62,0 minecraft:air
+postfeatures.0,-64,0 minecraft:stone
+postfeatures.0,-63,0 minecraft:air
+postfeatures.0,-62,0 minecraft:iron_ore
 meta.done 0,0
 ";
         let fixtures = parse_raw_dump(raw);
@@ -598,8 +620,11 @@ meta.done 0,0
         assert_eq!(f.postsurface.get(0, -62, 0), "minecraft:air");
         assert_eq!(f.postcarve.get(0, -64, 0), "minecraft:stone");
         assert_eq!(f.postcarve.get(0, -63, 0), "minecraft:air");
+        assert_eq!(f.postfeatures.get(0, -64, 0), "minecraft:stone");
+        assert_eq!(f.postfeatures.get(0, -62, 0), "minecraft:iron_ore");
         // Untouched position not in the raw dump reads as air on both sides.
         assert_eq!(f.postsurface.get(5, 5, 5), "minecraft:air");
+        assert_eq!(f.postfeatures.get(5, 5, 5), "minecraft:air");
     }
 
     #[test]

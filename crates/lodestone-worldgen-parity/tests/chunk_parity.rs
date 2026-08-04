@@ -56,6 +56,12 @@ fn fixtures_are_non_vacuous() {
             f.chunk_x,
             f.chunk_z
         );
+        assert!(
+            f.postfeatures.non_air_count() > total / 4,
+            "chunk ({},{}) postfeatures is suspiciously empty",
+            f.chunk_x,
+            f.chunk_z
+        );
         // At least 2 distinct biome quarts across the pair of fixture chunks
         // combined would be a weak floor; per-chunk each fixture on its own
         // must show real biome resolution (a non-placeholder id), not every
@@ -144,6 +150,150 @@ fn control_mutate_one_block_is_caught() {
     let (min, max) = report.bounding_box().expect("bbox must exist");
     assert_eq!(min, (mutated_lx, mutated_y, mutated_lz));
     assert_eq!(max, (mutated_lx, mutated_y, mutated_lz));
+}
+
+/// Same two controls as [`control_self_diff_is_exact`]/
+/// [`control_mutate_one_block_is_caught`], run again against the
+/// `postfeatures` stage specifically — `diff_field` is stage-agnostic, but
+/// per `CLAUDE.md`'s evidence standards a control is "run, not described" for
+/// the stage it is actually gating, not inferred from a different field
+/// happening to share the same comparator.
+#[test]
+fn control_postfeatures_self_diff_is_exact_and_mutation_is_caught() {
+    let f = &fixtures()[0];
+
+    let self_report = diff_field(
+        f.min_y,
+        f.height,
+        |lx, y, lz| f.postfeatures.get(lx, y, lz).to_string(),
+        |lx, y, lz| f.postfeatures.get(lx, y, lz).to_string(),
+    );
+    assert_eq!(self_report.total, 16 * 16 * f.height as usize);
+    assert_eq!(
+        self_report.mismatches.len(),
+        0,
+        "chunk ({},{}) postfeatures self-diff found mismatches:\n{}",
+        f.chunk_x,
+        f.chunk_z,
+        self_report.summary(5)
+    );
+
+    let mutated_lx = 4i32;
+    let mutated_y = f.min_y + 20;
+    let mutated_lz = 11i32;
+    let original = f.postfeatures.get(mutated_lx, mutated_y, mutated_lz).to_string();
+    let bogus = if original == "minecraft:__parity_control_probe__" {
+        "minecraft:__parity_control_probe_2__".to_string()
+    } else {
+        "minecraft:__parity_control_probe__".to_string()
+    };
+    let mutate_report = diff_field(
+        f.min_y,
+        f.height,
+        |lx, y, lz| {
+            if lx == mutated_lx && y == mutated_y && lz == mutated_lz {
+                bogus.clone()
+            } else {
+                f.postfeatures.get(lx, y, lz).to_string()
+            }
+        },
+        |lx, y, lz| f.postfeatures.get(lx, y, lz).to_string(),
+    );
+    assert_eq!(mutate_report.mismatches.len(), 1);
+    let m = &mutate_report.mismatches[0];
+    assert_eq!((m.lx, m.y, m.lz), (mutated_lx, mutated_y, mutated_lz));
+    assert_eq!(m.got, bogus);
+    assert_eq!(m.expected, original);
+}
+
+/// Anti-vacuity for the `postfeatures` stage itself: it must actually differ
+/// from `postcarve` (the oracle's ore step wrote *something*), or every
+/// comparison against it would trivially "pass" by measuring the carve stage
+/// twice under a different name.
+#[test]
+fn postfeatures_actually_differs_from_postcarve() {
+    for f in &fixtures() {
+        let report = diff_field(
+            f.min_y,
+            f.height,
+            |lx, y, lz| f.postfeatures.get(lx, y, lz).to_string(),
+            |lx, y, lz| f.postcarve.get(lx, y, lz).to_string(),
+        );
+        let real = report.real_mismatches().len();
+        assert!(
+            real > 0,
+            "chunk ({},{}) postfeatures is byte-identical to postcarve — the oracle's ore \
+             step did not write anything, so this fixture cannot be used as an ore-composition \
+             gap measurement",
+            f.chunk_x,
+            f.chunk_z
+        );
+        eprintln!(
+            "[parity] chunk ({}, {}): postfeatures vs postcarve real mismatches = {real} \
+             (blocks the centre chunk's own ore step actually placed)",
+            f.chunk_x,
+            f.chunk_z
+        );
+    }
+}
+
+/// The "how far from ore composition are we" number, measured and reported
+/// rather than guessed. `OverworldGenerator::column` does not compose ore
+/// features yet (issue #295's next increment, deliberately not attempted in
+/// this pass — see `crates/lodestone-worldgen/src/overworld.rs`'s doc
+/// comment), so this is expected to show a real, non-zero gap wherever the
+/// oracle placed ore: this test's job is to put a *number* on that gap so
+/// the follow-on work can watch it shrink to zero, not to pass/fail on it.
+/// The only assertion is a floor (no regression in the non-ore-related
+/// portion of the composed pipeline); the ore gap itself is reported, not
+/// asserted away.
+#[test]
+fn ore_composition_gap_is_measured_and_reported() {
+    for f in &fixtures() {
+        let generator = lodestone_server::overworld_generator(f.seed);
+        let generated = generator.column(f.chunk_x, f.chunk_z);
+        let report = diff_field(
+            f.min_y,
+            f.height,
+            |lx, y, lz| generated.block_state(lx as usize, y, lz as usize).to_string(),
+            |lx, y, lz| f.postfeatures.get(lx, y, lz).to_string(),
+        );
+        assert_eq!(report.total, 16 * 16 * f.height as usize);
+
+        // Floor: composing ores can only ever *shrink* the real-mismatch
+        // count from here, never grow it, without a regression in an
+        // earlier (already-composed) stage. Measured at the time this stage
+        // was added (see docs/worldgen-parity.md for the exact numbers) —
+        // this is deliberately generous (5% headroom) because the ore
+        // oracle itself (`ComposedChunkOracle.java`'s `postfeatures` stage)
+        // is a single-source-only approximation (see that file's own doc
+        // comment) and its own ore count can shift slightly on a data
+        // refresh without indicating a Rust-side regression.
+        let floor = match (f.chunk_x, f.chunk_z) {
+            (0, 0) => 0,
+            (-120, -120) => 0,
+            other => panic!("no measured floor recorded for fixture chunk {other:?} — add one"),
+        };
+        assert!(
+            report.match_count() >= floor,
+            "chunk ({},{}) match count vs vanilla postfeatures dropped to {} (floor {floor})",
+            f.chunk_x,
+            f.chunk_z,
+            report.match_count()
+        );
+
+        eprintln!(
+            "[parity] chunk ({}, {}): {}/{} match ({:.2}%) vs vanilla postfeatures (no ore \
+             composition yet); {} real mismatches (the ore-composition gap), {} property-only",
+            f.chunk_x,
+            f.chunk_z,
+            report.match_count(),
+            report.total,
+            report.match_fraction() * 100.0,
+            report.real_mismatches().len(),
+            report.representation_only_mismatches().len(),
+        );
+    }
 }
 
 /// Reference gate against vanilla's **pre-carve** `postsurface` stage.
