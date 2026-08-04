@@ -84,7 +84,13 @@
 //! from vanilla by a glyph at the right edge. **Do not "fix" it by giving the
 //! box a font**; give it a measurement seam if it ever matters, and note that
 //! the advance must match the *scale the text is drawn at* (see
-//! [`MENU_TEXT_ADVANCE`]), not vanilla's scale-1 advance.
+//! [`MENU_TEXT_ADVANCE`]) — which, for this widget specifically, **is**
+//! vanilla's own scale-1 advance, unlike every other menu string in this
+//! shell. `render.rs`'s `draw_edit_box` draws at `EDIT_TEXT_SCALE = 1.0`, not
+//! the `TEXT_SCALE = 2.0` every other row uses, because an `EditBox` sits
+//! beside vanilla-positioned buttons that already draw at scale 1 and a
+//! mismatched scale there is what the input-box-text-too-big report turned
+//! out to be.
 //!
 //! ## How to change it
 //!
@@ -167,13 +173,19 @@ pub const CURSOR_BLINK_INTERVAL_MS: u64 = 300;
 /// One character's width, in the units this shell's menu text is actually drawn
 /// in.
 ///
-/// **Not vanilla's advance.** Vanilla's font advances 6 px for most ASCII at
-/// scale 1; `super::render` draws menu body text at `TEXT_SCALE = 2.0`, so a
-/// character occupies 12 logical pixels of the row it is measured against. The
-/// number that matters to [`EditBox`] is the one the *draw* uses, because
-/// `displayPos` exists to keep the caret inside the drawn rect — a box measuring
-/// at 6 while drawing at 12 would scroll half a field too late.
-pub const MENU_TEXT_ADVANCE: f32 = 12.0;
+/// **Matches vanilla's own advance, and that is deliberate.** `super::render`
+/// draws every other menu string at `TEXT_SCALE = 2.0`, but an `EditBox`'s
+/// *own* text draws at `EDIT_TEXT_SCALE = 1.0` — the same ratio
+/// `draw_widget`'s vanilla-positioned siblings use, and the fix for the
+/// input-box-text-too-big report (`render.rs`'s `2cd7c58`: a `14` px glyph in
+/// vanilla's own `20` px box read as roughly double both vanilla's ratio and
+/// this box's own neighbouring buttons'). At scale 1 the bitmap font's advance
+/// is `(GLYPH_W + 1) * 1.0 = 6`, so this constant moved from `12.0` with it.
+/// The number that matters to [`EditBox`] is still the one the *draw* uses,
+/// because `displayPos` exists to keep the caret inside the drawn rect — a box
+/// measuring at one value while drawing at another would scroll at the wrong
+/// point.
+pub const MENU_TEXT_ADVANCE: f32 = 6.0;
 
 /// `StringUtil.isAllowedChatCharacter` (`StringUtil.java:62-64`): the *only*
 /// input filter `EditBox` has.
@@ -1001,7 +1013,7 @@ mod tests {
     use super::*;
 
     /// A field wide enough that nothing scrolls, so cursor tests are not also
-    /// `displayPos` tests. `inner_width` = 400 - 8 = 392, /12 = 32 visible.
+    /// `displayPos` tests. `inner_width` = 400 - 8 = 392, /6 = 65 visible.
     fn field() -> EditBox {
         let mut b = EditBox::new(0.0, 0.0, 400.0, 20.0, "Address");
         b.widget.focused = true;
@@ -1284,11 +1296,11 @@ mod tests {
 
     #[test]
     fn display_pos_scrolls_to_keep_the_caret_inside_the_field() {
-        // A narrow box: inner width 12*4 = 48 -> exactly 4 characters visible.
-        let mut b = EditBox::new(0.0, 0.0, 48.0 + 2.0 * BORDER_INSET, 20.0, "narrow");
+        // A narrow box: inner width 6*4 = 24 -> exactly 4 characters visible.
+        let mut b = EditBox::new(0.0, 0.0, 24.0 + 2.0 * BORDER_INSET, 20.0, "narrow");
         b.widget.focused = true;
         b.set_max_length(64);
-        assert_eq!(b.inner_width(), 48.0);
+        assert_eq!(b.inner_width(), 24.0);
         typed(&mut b, "abcd");
         assert_eq!(b.display_position(), 0, "still fits");
         assert_eq!(b.displayed(), "abcd");
@@ -1337,8 +1349,8 @@ mod tests {
         let at_end = b.draw_state(None);
         assert_eq!(at_end.before, "abc");
         assert_eq!(at_end.after, "");
-        // 4 (inset) + 3 chars * 12 + 1 (vanilla's gap after the first half).
-        assert_eq!(at_end.cursor_x, 4.0 + 36.0 + 1.0);
+        // 4 (inset) + 3 chars * 6 + 1 (vanilla's gap after the first half).
+        assert_eq!(at_end.cursor_x, 4.0 + 18.0 + 1.0);
         assert!(at_end.highlight.is_none());
 
         b.move_cursor_to(1, false);
@@ -1348,8 +1360,8 @@ mod tests {
             mid.insert_cursor,
             "a caret before the end is the 1 px bar, not the underscore"
         );
-        // 4 + 1*12 + 1, then `cursorX--` for insert mode.
-        assert_eq!(mid.cursor_x, 4.0 + 12.0 + 1.0 - 1.0);
+        // 4 + 1*6 + 1, then `cursorX--` for insert mode.
+        assert_eq!(mid.cursor_x, 4.0 + 6.0 + 1.0 - 1.0);
         assert!(
             mid.cursor_x < at_end.cursor_x,
             "the caret moved left between two draws — the two positions #395 \
@@ -1362,7 +1374,7 @@ mod tests {
         let (from, to) = selected.highlight.expect("a selection must draw");
         assert!(from < to, "got ({from}, {to})");
         assert!(
-            (to - from - 2.0 * 12.0).abs() <= 2.0,
+            (to - from - 2.0 * 6.0).abs() <= 2.0,
             "two selected characters is about two advances wide, got {}",
             to - from
         );
@@ -1393,9 +1405,9 @@ mod tests {
     fn a_click_lands_the_caret_on_the_clicked_character() {
         let mut b = field();
         typed(&mut b, "abcdef");
-        // text_x is 4; each character is 12 wide. A click 2.5 characters in
+        // text_x is 4; each character is 6 wide. A click 2.5 characters in
         // lands after the second.
-        b.click_at(4.0 + 30.0, false);
+        b.click_at(4.0 + 15.0, false);
         assert_eq!(b.cursor_position(), 2);
         // Past the right edge clamps to the end of the *visible* text, not past
         // it (`findClickedPositionInText`'s `Math.min(.., getInnerWidth())`).
@@ -1406,7 +1418,7 @@ mod tests {
         assert_eq!(b.cursor_position(), 0);
         // And through the focus trait, a click both moves the caret and reports
         // itself consumed, which is what makes the container focus the box.
-        assert!(FocusTarget::mouse_clicked(&mut b, 4.0 + 30.0, 10.0));
+        assert!(FocusTarget::mouse_clicked(&mut b, 4.0 + 15.0, 10.0));
         assert_eq!(b.cursor_position(), 2);
         assert!(
             !FocusTarget::mouse_clicked(&mut b, 4.0, 500.0),
