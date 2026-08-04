@@ -17,12 +17,14 @@
 //!
 //! # Honest scope
 //!
-//! [`OverworldGenerator`] composes shape + a sea-level aquifer approximation +
-//! surface rules + real multi-noise biome assignment (issue #405) — real
-//! terrain shape, surface, and biome variety, verified block-for-block (and,
-//! for biome, exact-id) against a JVM in isolation. It does **not** yet run
-//! carvers, the full aquifer, or features (no caves/ores/trees — issue #295 /
-//! epic #404's Phase 2). See [`lodestone_worldgen::overworld`].
+//! [`OverworldGenerator`] composes shape + the **real** aquifer + surface
+//! rules + real multi-noise biome assignment (issue #405) + real carvers
+//! (issue #295) — real terrain shape, surface, biome variety, and caves/
+//! ravines, verified block-for-block (and, for biome, exact-id) against a
+//! JVM (`docs/worldgen-parity.md`'s harness measures the composed subset
+//! directly). It does **not** yet run ore/vegetation features — deferred
+//! pending a real neighbour-aware `FeatureOracle.java` driver, see
+//! [`lodestone_worldgen::overworld`]'s module doc — or structures.
 
 use std::sync::OnceLock;
 
@@ -60,6 +62,28 @@ impl EmbeddedResolver {
     fn json(&self, key: &str) -> Value {
         serde_json::from_str(self.raw(key))
             .unwrap_or_else(|e| panic!("parsing embedded '{key}': {e}"))
+    }
+
+    /// Like [`Self::raw`], but a missing key returns `None` instead of
+    /// panicking — for the issue #295 composition lookups
+    /// (`biome_document`/`configured_carver`/`configured_feature`/
+    /// `placed_feature`/`block_tag`), where a name absent from the embedded
+    /// table (e.g. a `mineable/*` tool tag never bundled, or a biome id the
+    /// parameter table names that this bundle didn't ship) is expected and
+    /// should resolve to "no data" per `Resolver`'s own documented default,
+    /// not abort chunk generation.
+    fn try_raw(&self, key: &str) -> Option<&'static str> {
+        EMBEDDED_WORLDGEN
+            .binary_search_by(|(id, _)| (*id).cmp(key))
+            .ok()
+            .map(|i| EMBEDDED_WORLDGEN[i].1)
+    }
+
+    fn try_json(&self, key: &str) -> Value {
+        self.try_raw(key).map_or(Value::Null, |raw| {
+            serde_json::from_str(raw)
+                .unwrap_or_else(|e| panic!("parsing embedded '{key}': {e}"))
+        })
     }
 }
 
@@ -102,6 +126,48 @@ impl Resolver for EmbeddedResolver {
     /// files — no oracle needed for this one, see that file's own header).
     fn biome_temperatures(&self) -> Value {
         self.json("biome_parameters/overworld_temperature")
+    }
+
+    /// Full `worldgen/biome/<name>.json` documents (issue #295 composition):
+    /// carvers + `UNDERGROUND_ORES` feature lists, for
+    /// `crate::worldgen_data`'s bundled generator to compose carvers into
+    /// [`OverworldGenerator::column`]. 66 files, copied verbatim from
+    /// `.cache/mc/26.2/src/data/minecraft/worldgen/biome/` (Mojang's own
+    /// generated data, CLAUDE.md data-source #1).
+    fn biome_document(&self, id: &str) -> Value {
+        let name = id.strip_prefix("minecraft:").unwrap_or(id);
+        self.try_json(&format!("biome/{name}"))
+    }
+
+    /// `worldgen/configured_carver/<name>.json` — 4 files (`cave`,
+    /// `cave_extra_underground`, `canyon`, `nether_cave`; only the first
+    /// three are ever referenced by an overworld biome).
+    fn configured_carver(&self, id: &str) -> Value {
+        let name = id.strip_prefix("minecraft:").unwrap_or(id);
+        self.try_json(&format!("configured_carver/{name}"))
+    }
+
+    /// `worldgen/configured_feature/<name>.json`. Not yet bundled (issue
+    /// #295's ore-feature composition is deferred pending a real
+    /// `FeatureOracle.java` 3×3 driver — see `crate::overworld`'s module
+    /// doc) — returns `Value::Null` for every id, matching
+    /// [`Resolver::configured_feature`]'s own "no data supplied" default
+    /// until that lands.
+    fn configured_feature(&self, _id: &str) -> Value {
+        Value::Null
+    }
+
+    /// `worldgen/placed_feature/<name>.json`. Not yet bundled — see
+    /// [`Self::configured_feature`].
+    fn placed_feature(&self, _id: &str) -> Value {
+        Value::Null
+    }
+
+    /// `tags/block/<name>.json` — 261 files, needed to resolve
+    /// `#overworld_carver_replaceables`' recursive closure (issue #295).
+    fn block_tag(&self, id: &str) -> Value {
+        let name = id.strip_prefix("minecraft:").unwrap_or(id);
+        self.try_json(&format!("tags/block/{name}"))
     }
 }
 
