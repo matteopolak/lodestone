@@ -169,6 +169,18 @@ pub struct SectionSnapshot {
     /// [`SkyDefault::None`] outside the overworld so absent sky stays `0`
     /// rather than defaulting up to daylight in the Nether/End.
     sky_default: SkyDefault,
+    /// A snapshot of the live biome registry's ordered entry names
+    /// (`net::BiomeNameCell::snapshot`), or empty when none is known (no
+    /// connection, no `registry_data` yet, or a version/server that sends
+    /// none). Empty is a real, cheap `Arc<[]>` — see [`Self::with_biome_names`].
+    ///
+    /// Baked into the snapshot itself, rather than threaded into
+    /// [`MeshScheduler`]'s workers separately, because that is what already
+    /// happens to [`Self::sky_default`]: both are per-connection facts a
+    /// worker thread cannot ask a live `Sim`/`NetClient` for (it only ever
+    /// sees the jobs on its channel), and both are cheap to carry along —
+    /// `Arc::clone`, not a copy of the strings.
+    biome_names: Arc<[&'static str]>,
 }
 
 impl SectionSnapshot {
@@ -219,7 +231,27 @@ impl SectionSnapshot {
             sections: self.sections.clone(),
             lights: (0..self.sections.len()).map(|_| None).collect(),
             sky_default: self.sky_default,
+            biome_names: Arc::clone(&self.biome_names),
         }
+    }
+
+    /// Attach a live biome-registry-names snapshot (issue #96's follow-up),
+    /// overriding the empty default every constructor otherwise leaves in
+    /// place. In production the sole caller is [`TerrainMesh::mesh_column`]/
+    /// [`TerrainMesh::mesh_section`], which have a `Sim`-derived
+    /// `net::SharedBiomeNames` to read; every other caller (every hermetic
+    /// test, `crate::gpu`'s gates, the offline demo world) has none and an
+    /// empty table correctly falls back to `FALLBACK_BIOME_NAMES` in
+    /// [`biome_name_at`] — those callers' existing, unmodified behaviour
+    /// depends on that default. `pub`, not `pub(crate)`, so a live gate in
+    /// `tests/` (a separate crate) can build a fixture registry order and
+    /// prove the live table is genuinely consulted rather than merely
+    /// plumbed — see `tests/biome_tint_live_mesh.rs`'s
+    /// `live_mesh_snapshot_models_resolves_biome_names_from_the_live_registry_not_the_fallback_table`.
+    #[must_use]
+    pub fn with_biome_names(mut self, names: Arc<[&'static str]>) -> Self {
+        self.biome_names = names;
+        self
     }
 }
 
@@ -311,6 +343,23 @@ impl SnapshotOutcome {
         match self {
             SnapshotOutcome::Ready(snap) | SnapshotOutcome::Deferred(snap) => Some(snap),
             SnapshotOutcome::Empty => None,
+        }
+    }
+
+    /// Thread a live biome-registry-names snapshot into whichever
+    /// [`SectionSnapshot`] this outcome carries, leaving [`Self::Empty`]
+    /// untouched (there is nothing to mesh, so nothing to attach it to). See
+    /// [`SectionSnapshot::with_biome_names`].
+    #[must_use]
+    pub fn with_biome_names(self, names: Arc<[&'static str]>) -> Self {
+        match self {
+            SnapshotOutcome::Ready(snap) => {
+                SnapshotOutcome::Ready(snap.with_biome_names(names))
+            }
+            SnapshotOutcome::Deferred(snap) => {
+                SnapshotOutcome::Deferred(snap.with_biome_names(names))
+            }
+            SnapshotOutcome::Empty => SnapshotOutcome::Empty,
         }
     }
 }
@@ -451,6 +500,10 @@ pub fn snapshot_section_in(
         sections,
         lights,
         sky_default,
+        // Every caller of this function gets the fallback table in
+        // `biome_name_at` unless it opts in with `with_biome_names` — see
+        // that method's doc for exactly who does.
+        biome_names: Arc::from([]),
     };
     if awaiting_columns {
         SnapshotOutcome::Deferred(snapshot)
@@ -896,8 +949,22 @@ fn biome_name_at(snapshot: &SectionSnapshot, pos: BlockPos) -> Option<&'static s
     if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dy) || !(-1..=1).contains(&dz) {
         return None;
     }
-    let id = snapshot.at(dx, dy, dz).biome_at_block(lx, ly, lz);
-    FALLBACK_BIOME_NAMES.get(id as usize).copied()
+    let id = snapshot.at(dx, dy, dz).biome_at_block(lx, ly, lz) as usize;
+    // The live registry order wins whenever one is known (issue #96's
+    // follow-up): `snapshot.biome_names` is only ever non-empty when
+    // `TerrainMesh::mesh_column`/`mesh_section` attached a real `Login`-time
+    // `registry_data` sync via `with_biome_names` — see that method's doc.
+    // Empty (no connection yet, an offline/demo world, a version/server that
+    // sends no biome registry, or every test and hermetic gate that builds a
+    // `SectionSnapshot` without opting in) falls back to the alphabetical
+    // table, which is correct only against this project's own server — see
+    // `FALLBACK_BIOME_NAMES`'s own doc for why that is a known, provisional
+    // gap rather than an oversight.
+    if snapshot.biome_names.is_empty() {
+        FALLBACK_BIOME_NAMES.get(id).copied()
+    } else {
+        snapshot.biome_names.get(id).copied()
+    }
 }
 
 impl ModelSectionView for SnapshotModelView<'_> {
@@ -1457,6 +1524,16 @@ pub struct TerrainMesh {
     pub deferred: u64,
     /// The session facts meshing cannot read off the store.
     pub policy: MeshPolicy,
+    /// The live biome registry's ordered entry names (issue #96's follow-up),
+    /// refreshed alongside [`Self::policy`] by `Sim::refresh_mesh_policy` and
+    /// attached to every section this pool snapshots
+    /// ([`SnapshotOutcome::with_biome_names`]) so `mesher::biome_name_at`
+    /// resolves against the *real* server registry instead of the
+    /// alphabetical `FALLBACK_BIOME_NAMES` table. Empty before any
+    /// `registry_data` (no connection, the offline demo world, or a
+    /// version/server that sends none) — [`biome_name_at`] treats that as
+    /// "use the fallback", never as "holder id 0".
+    pub biome_names: Arc<[&'static str]>,
 }
 
 impl TerrainMesh {
@@ -1472,6 +1549,7 @@ impl TerrainMesh {
             drops: 0,
             deferred: 0,
             policy: MeshPolicy::default(),
+            biome_names: Arc::from([]),
         }
     }
 
@@ -1568,7 +1646,8 @@ impl TerrainMesh {
                         Some(extent.section_count),
                         self.policy.sky_default,
                         self.column_source,
-                    ),
+                    )
+                    .with_biome_names(Arc::clone(&self.biome_names)),
                 ));
             }
         }
@@ -1607,6 +1686,7 @@ impl TerrainMesh {
                 self.policy.sky_default,
                 self.column_source,
             )
+            .with_biome_names(Arc::clone(&self.biome_names))
         };
         self.route(key, outcome);
     }
@@ -2300,6 +2380,7 @@ mod tests {
             sections,
             lights,
             sky_default: SkyDefault::Full,
+            biome_names: Arc::from([]),
         }
     }
 
@@ -2649,6 +2730,7 @@ mod tests {
             sections,
             lights,
             sky_default: SkyDefault::Full,
+            biome_names: Arc::from([]),
         }
     }
 
