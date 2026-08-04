@@ -534,6 +534,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   is the "not Minecraft" tell issue
   [#22](https://github.com/matteopolak/lodestone/issues/22) named: flat per-block
   light plus directional shade, with no darkening in corners and crevices.
+- [Which settings actually do something, and what the rest are waiting on](./options-consumption-census.md) —
+  A consumption audit of the settings tree: for every option
+  `crates/lodestone-shell/src/menu/options.rs` puts on screen, whether the value
+  reaches anything. The tree carries **143 controls**; **40 rows work** and the rest
+  are present and greyed. This doc records *why* each greyed group is greyed — i.e.
+  which subsystem it is waiting on — so the next person wiring an option can tell a
+  five-minute threading job from a new renderer feature.
 - [Oracle runtimes: Apple `container`](./oracle-runtimes.md) — All six JVM-oracle
   scripts under `scripts/live-oracles/` and `scripts/worldgen-oracle/`, plus the three
   Rust test files that used to shell out to `docker` directly, now run their real
@@ -745,8 +752,8 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   was deleting the **double fold** that doc's §1.1 measured.
 - [The settings tree, with unsupported controls disabled](./settings-screen.md) —
   `crates/lodestone-shell/src/menu/options.rs` — vanilla's `OptionsScreen` tree as a
-  **table plus arithmetic**: nine `OptionsList` pages, **143 controls**, of which **28
-  or 29 work** (see below) **and the rest are present and greyed out** — plus four
+  **table plus arithmetic**: nine `OptionsList` pages, **143 controls**, of which **39
+  or 40 work** (see below) **and the rest are present and greyed out** — plus four
   more pages that are not `OptionsList` at all and are counted separately (see below):
   Key Binds, and, since issue #415, Language, Telemetry and Resource Packs. Reached
   from the title screen's Options button and from the pause menu's, on
