@@ -975,3 +975,361 @@ fn creeper_with_no_target_and_never_ignited_never_primes_or_detonates() {
     assert_eq!(creeper.swell(), 0, "swell must stay at 0 with no direction ever set positive");
     assert_eq!(creeper.swell_dir(), -1, "swell_dir must stay at vanilla's own default");
 }
+
+// =====================================================================
+// Issue #441 — perception starvation, and the breeding feed that closes
+// #234/#237's landed island.
+//
+// `NavigatingMob`'s `impl MobController` left eight perception methods at
+// their trait defaults, so six goals had a constant-false `can_use` in
+// production and two more read fields `MobSim::tick` never populated. Every
+// affected goal nonetheless had a *green* unit test, because those drive
+// `ScriptMob`, a fake that overrides all eight — CLAUDE.md's `world` species
+// of vacuous test, where the defect is in which controller the test was
+// pointed at.
+//
+// So the gates below are deliberately **behavioural and through the public
+// `MobSim` API**: a real production `MobSim::tick`, and an assertion about
+// state a player would see (a child exists; the mob jumps; the mob's target
+// became its attacker), never about a `can_use` return value. The
+// `can_use`-level gates live in `navigating_mob.rs` alongside the seam.
+// =====================================================================
+
+/// Flat solid floor with its surface at `y=0`, wide enough for a herd.
+fn breeding_pen() -> ChunkWorld {
+    let mut world = ChunkWorld::new(-4, 24);
+    for x in -16..=16 {
+        for z in -16..=16 {
+            world.set_solid(x, -1, z, true);
+        }
+    }
+    world
+}
+
+/// Vanilla `Animal.PARENT_AGE_AFTER_BREEDING`
+/// (`.cache/mc/26.2/src/net/minecraft/world/entity/animal/Animal.java:44`).
+const PARENT_AGE_AFTER_BREEDING: i32 = 6000;
+
+#[test]
+fn two_cows_in_love_produce_a_real_baby_and_both_parents_take_the_cooldown() {
+    // `BreedGoal` was one of the two goals that *were* overridden on
+    // `NavigatingMob` but never fed: `MobSim::tick` populated no
+    // partner candidate and never drained `take_bred()`, so breeding could not
+    // happen in the running game no matter how many cows were in love.
+    //
+    // Predict the *population*, not the flag. The seam's `take_bred()` already
+    // returned `true` before this fix without any child existing, so asserting
+    // on it is exactly the vacuous shape to avoid.
+    let world = breeding_pen();
+    let mut sim = MobSim::new(&world);
+
+    // Two blocks apart: inside `BreedGoal`'s 8.0 partner search
+    // (`ai/goal/BreedGoal.java:11`) *and* inside the 9.0 squared distance at
+    // which the child actually spawns (`:57`).
+    let a = sim.spawn_species(rk("minecraft:cow"), Vec3::new(0.0, 0.0, 0.0)).id();
+    let b = sim.spawn_species(rk("minecraft:cow"), Vec3::new(2.0, 0.0, 0.0)).id();
+
+    // Vanilla `BreedGoal` is not installed by the current roster, so install it
+    // at vanilla's own cow priority 2 (`animal/cow/AbstractCow.java:41-48`).
+    // Installing the goal is the roster's job (plan unit B2); what this gate
+    // proves is that once installed it can *act*, which is A1/A2's job.
+    for id in [a, b] {
+        sim.get_mut(id)
+            .expect("just spawned")
+            .set_in_love()
+            .add_goal(2, Box::new(lodestone_entity::ai::goals::BreedGoal::new(1.0)));
+    }
+
+    assert_eq!(sim.len(), 2, "precondition: exactly the two parents");
+
+    // `BreedGoal` needs 60 ticks of proximity (`ai/goal/BreedGoal.java:57`,
+    // `loveTime >= adjustedTickDelay(60)`); 200 is generous headroom without
+    // outliving `LOVE_TICKS` (600).
+    let mut ticks = 0;
+    while sim.len() < 3 && ticks < 200 {
+        sim.tick();
+        ticks += 1;
+    }
+
+    assert_eq!(
+        sim.len(),
+        3,
+        "two in-love cows within breed range must produce a third mob within \
+         200 ticks; got {} after {ticks}",
+        sim.len()
+    );
+
+    // The new mob must be a baby cow, not just "a mob".
+    let child = sim
+        .iter()
+        .find(|m| m.id() != a && m.id() != b)
+        .expect("a third mob exists per the assertion above");
+    assert!(
+        child.is_baby(),
+        "the child must be a baby (age < 0), got age {}",
+        child.age()
+    );
+    assert_eq!(child.entity_type().path(), "cow", "the child must be a cow");
+    assert!(
+        child.goal_count() > 0,
+        "the child must have inherited a goal set — a child that cannot act \
+         would be a fresh island"
+    );
+
+    // Both parents take the cooldown and leave love mode
+    // (`animal/Animal.java:225-228`). The age counts *down* one per tick from
+    // 6000, so allow for the ticks elapsed since the birth rather than
+    // asserting an exact 6000 the timer has already moved off.
+    for id in [a, b] {
+        let parent = sim.get(id).expect("parents must survive breeding");
+        assert!(
+            parent.age() > 0 && parent.age() <= PARENT_AGE_AFTER_BREEDING,
+            "parent {id} must hold a positive post-breeding cooldown at or below \
+             PARENT_AGE_AFTER_BREEDING ({PARENT_AGE_AFTER_BREEDING}), got {}",
+            parent.age()
+        );
+        assert!(
+            !parent.is_in_love(),
+            "parent {id} must leave love mode after breeding"
+        );
+    }
+}
+
+#[test]
+fn cows_beyond_breed_range_never_produce_a_child() {
+    // The negative control the population assertion above needs: identical
+    // setup, identical goal, identical tick budget — only the *distance*
+    // changed, to just outside `BreedGoal`'s 8.0 partner search
+    // (`ai/goal/BreedGoal.java:11`). The population must not grow.
+    //
+    // Without this, "a third mob appeared" is satisfied by any code path that
+    // spawns something per tick.
+    let world = breeding_pen();
+    let mut sim = MobSim::new(&world);
+
+    let a = sim.spawn_species(rk("minecraft:cow"), Vec3::new(0.0, 0.0, 0.0)).id();
+    let b = sim.spawn_species(rk("minecraft:cow"), Vec3::new(12.0, 0.0, 0.0)).id();
+    for id in [a, b] {
+        sim.get_mut(id)
+            .expect("just spawned")
+            .set_in_love()
+            .add_goal(2, Box::new(lodestone_entity::ai::goals::BreedGoal::new(1.0)));
+    }
+
+    for _ in 0..200 {
+        sim.tick();
+    }
+
+    assert_eq!(
+        sim.len(),
+        2,
+        "cows 12 blocks apart are outside the 8.0 partner search and must not breed"
+    );
+    for id in [a, b] {
+        assert_eq!(
+            sim.get(id).expect("both cows alive").age(),
+            0,
+            "an un-bred cow must take no post-breeding cooldown"
+        );
+    }
+}
+
+#[test]
+fn a_baby_cow_is_fed_its_parent_and_an_orphan_is_not() {
+    // `FollowParentGoal` was the other overridden-but-never-fed goal:
+    // `parent_candidate` had no writer anywhere in the crate.
+    //
+    // Vanilla searches `getBoundingBox().inflate(8.0, 4.0, 8.0)` for a
+    // same-class animal with `getAge() >= 0` (`ai/goal/FollowParentGoal.java:29`
+    // and `:34`).
+    let world = breeding_pen();
+    let mut sim = MobSim::new(&world);
+
+    let adult = sim.spawn_species(rk("minecraft:cow"), Vec3::new(5.0, 0.0, 0.0)).id();
+    let baby = sim.spawn_species(rk("minecraft:cow"), Vec3::new(0.0, 0.0, 0.0)).id();
+    sim.get_mut(baby)
+        .expect("just spawned")
+        .set_age(lodestone_entity::ai::navigating_mob::BABY_START_AGE);
+
+    sim.tick();
+
+    assert!(sim.get(baby).expect("alive").is_baby());
+    assert_eq!(
+        sim.get(baby).expect("alive").parent_candidate(),
+        Some(Vec3::new(5.0, 0.0, 0.0)),
+        "a baby must be fed the nearest adult of its own species"
+    );
+
+    // Control 1: the adult is not a baby, so it must be fed no parent at all —
+    // vanilla returns early on `getAge() >= 0` (`FollowParentGoal.java:23`).
+    assert_eq!(
+        sim.get(adult).expect("alive").parent_candidate(),
+        None,
+        "an adult must never be given a parent"
+    );
+
+    // Control 2: species must matter. A baby cow beside a pig has no parent.
+    let mut sim2 = MobSim::new(&world);
+    let pig = sim2.spawn_species(rk("minecraft:pig"), Vec3::new(1.0, 0.0, 0.0)).id();
+    let calf = sim2.spawn_species(rk("minecraft:cow"), Vec3::new(0.0, 0.0, 0.0)).id();
+    sim2.get_mut(calf)
+        .expect("just spawned")
+        .set_age(lodestone_entity::ai::navigating_mob::BABY_START_AGE);
+    sim2.tick();
+    assert_eq!(
+        sim2.get(calf).expect("alive").parent_candidate(),
+        None,
+        "a pig is not a calf's parent — if this passes, the species filter is \
+         not being applied and every baby would follow any adult"
+    );
+    let _ = pig;
+}
+
+#[test]
+fn a_player_attack_makes_a_mob_retaliate_through_the_production_path() {
+    // The strongest end-to-end claim available in this commit, because it
+    // needs **no new producer**: `MobSim::attack` already took `attacker_pos`
+    // (for knockback direction) and its only production caller is
+    // `crate::server::apply_attack`, reached from the real `ATTACK` packet.
+    // So this is the actual path a player's swing travels.
+    //
+    // Before #441 the hit landed, damage applied, and the mob had no idea who
+    // hit it: `last_hurt_by()` was the trait default `None`, so
+    // `HurtByTargetGoal::can_use` was false forever.
+    let world = breeding_pen();
+    let mut sim = MobSim::new(&world);
+    let zombie = sim.spawn_species(rk("minecraft:zombie"), Vec3::new(0.0, 0.0, 0.0)).id();
+    sim.get_mut(zombie)
+        .expect("just spawned")
+        .add_goal(-5, Box::new(lodestone_entity::ai::goals::HurtByTargetGoal::new()));
+
+    // Control first: an unhurt zombie must have no attacker and no target.
+    sim.tick();
+    assert_eq!(sim.get(zombie).expect("alive").last_hurt_by(), None);
+    assert_eq!(sim.get(zombie).expect("alive").attack_target_id(), None);
+
+    let attacker_pos = Vec3::new(3.0, 0.0, 0.0);
+    let outcome = sim
+        .attack(zombie, attacker_pos, 2.0, DamageFlags::default(), 0.0)
+        .expect("the zombie is alive, so the attack must resolve");
+    assert!(
+        outcome.damage_dealt > 0.0,
+        "precondition: the hit must land, not be swallowed by i-frames"
+    );
+
+    assert_eq!(
+        sim.get(zombie).expect("alive").last_hurt_by(),
+        Some(attacker_pos),
+        "a player's hit must record the attacker for retaliation"
+    );
+    assert!(
+        sim.get(zombie).expect("alive").is_panicking(),
+        "a hit also opens the panic window (PanicGoal reads the damage source, \
+         not the attacking mob)"
+    );
+
+    // Now the observable retaliation: run the real tick and assert the
+    // scheduler moved the mob's attack target onto the attacker.
+    sim.tick();
+    assert_eq!(
+        sim.get(zombie).expect("alive").attack_target(),
+        Some(attacker_pos),
+        "HurtByTargetGoal must adopt the attacker as the attack target"
+    );
+}
+
+#[test]
+fn a_mob_standing_in_water_is_driven_to_jump_and_one_on_dry_land_is_not() {
+    // `FloatGoal` is the one perception method that needs **no injection at
+    // all** — `in_water` reads the `PathWorld` `NavigatingMob` already
+    // borrows. So this gate runs entirely through production code: real
+    // `ChunkWorld` block states, real `path_types` classification, real
+    // `MobSim::tick`.
+    let mut world = breeding_pen();
+    // The canonical state string `ChunkColumn` stores, resolved through
+    // `lodestone_data::block_states` to the id `path_types` classifies.
+    world.set_block(0, 0, 0, "minecraft:water[level=0]");
+
+    let mut sim = MobSim::new(&world);
+    let id = sim.spawn_species(rk("minecraft:cow"), Vec3::new(0.5, 0.0, 0.5)).id();
+
+    // Precondition asserted, never skipped: if the block string did not
+    // resolve to `PathType::Water` this test would silently prove nothing.
+    assert!(
+        sim.get(id).expect("alive").in_water(),
+        "precondition: the mob's feet cell must classify as water — if this \
+         fails the block-state string is wrong, not the perception seam"
+    );
+    assert!(
+        !sim.get(id).expect("alive").in_lava(),
+        "water must not also read as lava"
+    );
+
+    sim.get_mut(id)
+        .expect("alive")
+        .add_goal(-9, Box::new(lodestone_entity::ai::goals::FloatGoal));
+
+    let mut jumped = false;
+    for _ in 0..40 {
+        sim.tick();
+        if sim.get(id).expect("alive").is_jumping() {
+            jumped = true;
+            break;
+        }
+    }
+    assert!(
+        jumped,
+        "a cow standing in water must be driven to jump by FloatGoal through \
+         the production MobSim::tick"
+    );
+
+    // Control: the identical sim over dry ground must never jump. Without it,
+    // "is_jumping became true" could come from anything.
+    let dry = breeding_pen();
+    let mut dry_sim = MobSim::new(&dry);
+    let dry_id = dry_sim
+        .spawn_species(rk("minecraft:cow"), Vec3::new(0.5, 0.0, 0.5))
+        .id();
+    assert!(!dry_sim.get(dry_id).expect("alive").in_water());
+    dry_sim
+        .get_mut(dry_id)
+        .expect("alive")
+        .add_goal(-9, Box::new(lodestone_entity::ai::goals::FloatGoal));
+    for _ in 0..40 {
+        dry_sim.tick();
+        assert!(
+            !dry_sim.get(dry_id).expect("alive").is_jumping(),
+            "a cow on dry land must never be driven to jump"
+        );
+    }
+}
+
+#[test]
+fn no_action_time_crosses_the_seam_instead_of_staying_on_the_sim_record() {
+    // The seventh case, and the only one whose default was wrong in the
+    // *permissive* direction: `SimMob` has always incremented `no_action_time`,
+    // but only on its own record — it never crossed the `MobController` seam,
+    // so `RandomStrollGoal`'s idle suppression
+    // (`ai/goal/RandomStrollGoal.java:43`, `>= 100`) read the trait default `0`
+    // and never fired. No dead-code warning could ever have shown this.
+    let world = breeding_pen();
+    let mut sim = MobSim::new(&world);
+    let id = sim.spawn_species(rk("minecraft:cow"), Vec3::new(0.0, 0.0, 0.0)).id();
+
+    for _ in 0..150 {
+        sim.tick();
+    }
+
+    let mob = sim.get(id).expect("alive");
+    assert!(
+        mob.no_action_time() >= 100,
+        "precondition: the sim's own record must have climbed past vanilla's threshold"
+    );
+    assert_eq!(
+        mob.mob_no_action_time(),
+        mob.no_action_time(),
+        "the sim record must be visible *through the MobController seam* — these \
+         being equal is the whole fix; before it the right-hand side climbed and \
+         the left stayed 0"
+    );
+}

@@ -71,6 +71,7 @@ use lodestone_data::{block_states, collision_shapes, entity_dimensions, entity_t
 use lodestone_entity::ai::goals::{
     MeleeAttackGoal, RandomLookAroundGoal, RandomStrollGoal, SwellGoal,
 };
+use lodestone_entity::ai::navigating_mob::{BABY_START_AGE, PARENT_AGE_AFTER_BREEDING};
 use lodestone_entity::ai::{Goal, GoalSelector, MobController, NavigatingMob};
 use lodestone_entity::attribute::default_attributes;
 use lodestone_entity::explosion::Aabb as ExplosionAabb;
@@ -509,6 +510,92 @@ fn is_hostile_species(entity_type: &ResourceKey) -> bool {
     )
 }
 
+/// Vanilla `Attributes.TEMPT_RANGE`'s default value
+/// (`.cache/mc/26.2/src/net/minecraft/world/entity/ai/attributes/Attributes.java:107`,
+/// `register("tempt_range", new RangedAttribute(…, 10.0, 0.0, 2048.0))`), the
+/// radius `TemptGoal` searches for a tempting player
+/// (`ai/goal/TemptGoal.java:57` passes it into the targeting conditions).
+///
+/// This one lives in the *feed* rather than in the goal because vanilla keeps
+/// it on the mob as an attribute; the other ranges below are per-goal-instance
+/// constructor arguments and stay with the goal.
+const TEMPT_RANGE: f64 = 10.0;
+
+/// The radius every vanilla `AvoidEntityGoal` registration in the roster's
+/// species uses — `6.0F` at `monster/Creeper.java:67-68` (Ocelot, Cat),
+/// `monster/skeleton/AbstractSkeleton.java:79` (Wolf) and
+/// `monster/spider/Spider.java:59` (Armadillo).
+const AVOID_RANGE: f64 = 6.0;
+
+/// The vertical half-extent of `AvoidEntityGoal`'s search box:
+/// `getBoundingBox().inflate(maxDist, 3.0, maxDist)`
+/// (`ai/goal/AvoidEntityGoal.java:72`) — note the Y extent is a flat `3.0`,
+/// *not* `maxDist`, so a threat directly overhead is out of range sooner than
+/// one to the side.
+const AVOID_RANGE_Y: f64 = 3.0;
+
+/// `BreedGoal`'s partner-search radius
+/// (`ai/goal/BreedGoal.java:11`, `PARTNER_TARGETING = …range(8.0)…`, applied to
+/// `getBoundingBox().inflate(8.0)` at `:64`).
+const BREED_RANGE: f64 = 8.0;
+
+/// How close two parents must be for `BreedGoal` to actually produce a child
+/// (`ai/goal/BreedGoal.java:57`, `this.animal.distanceToSqr(this.partner) < 9.0`).
+/// Reused here to identify *which* other mob was the partner when resolving a
+/// [`NavigatingMob::take_bred`] event, since by then both parents' love state
+/// has already been cleared by `breed()` itself.
+const BREED_DISTANCE_SQR: f64 = 9.0;
+
+/// `FollowParentGoal`'s search box, `getBoundingBox().inflate(8.0, 4.0, 8.0)`
+/// (`ai/goal/FollowParentGoal.java:29`) — horizontal, then vertical.
+const FOLLOW_PARENT_RANGE: f64 = 8.0;
+const FOLLOW_PARENT_RANGE_Y: f64 = 4.0;
+
+/// The species a given species flees, i.e. the `avoidClass` of each vanilla
+/// `AvoidEntityGoal` registration. This is **perception data, not a goal set** —
+/// it answers "is that thing a threat to me", which is what
+/// [`MobController::avoid_threat`] needs; assembling the goals themselves is
+/// the roster's job (plan units B1/B4), not this feed's.
+///
+/// Deliberately only the registrations that exist in 26.2 for species this sim
+/// can currently spawn. An unknown species yields an empty slice, so
+/// `AvoidEntityGoal` stays correctly inert for it rather than silently fleeing
+/// everything.
+fn avoided_species(species: &str) -> &'static [&'static str] {
+    match species {
+        // `monster/Creeper.java:67-68` — two separate goals, one per class.
+        "creeper" => &["ocelot", "cat"],
+        // `monster/skeleton/AbstractSkeleton.java:79`, inherited by every
+        // skeleton variant.
+        "skeleton" | "stray" | "wither_skeleton" | "bogged" => &["wolf"],
+        // `monster/spider/Spider.java:59`. Vanilla additionally requires
+        // `!armadillo.isScared()`; nothing here models an armadillo's scared
+        // state, so that filter is a disclosed omission rather than a silent
+        // one — it can only make a spider flee slightly more often.
+        "spider" | "cave_spider" => &["armadillo"],
+        _ => &[],
+    }
+}
+
+/// What [`MobSim`] needs to know about one connected player in order to feed
+/// mob perception. See [`MobSim::set_players`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlayerPerception {
+    /// The player's current position.
+    pub position: Vec3,
+    /// Whether the player is holding an item that tempts animals.
+    ///
+    /// The *caller* decides this, not this crate, and that split is
+    /// deliberate: in 26.2 the predicate is a per-species item **tag**
+    /// (`sheep_food` is 1 item, `pig_food` is 3, `chicken_food` is 6 —
+    /// `.cache/mc/26.2/src/data/minecraft/tags/item/*.json`), so resolving it
+    /// needs generated tag data that belongs with the per-species roster
+    /// rather than here. Until that lands this flag is coarser than vanilla:
+    /// it tempts *every* animal rather than the ones whose tag matches. See
+    /// `docs/mob-perception.md` for the consequence.
+    pub holding_tempt_item: bool,
+}
+
 /// Vanilla `Creeper.DEFAULT_EXPLOSION_RADIUS`
 /// (`.cache/mc/26.2/src/net/minecraft/world/entity/monster/Creeper.java:52`,
 /// `private static final byte DEFAULT_EXPLOSION_RADIUS = 3;`), used flat by
@@ -593,6 +680,152 @@ impl<'w> SimMob<'w> {
     /// Sets the mob's current attack target (what a `MeleeAttackGoal` chases).
     pub fn set_attack_target(&mut self, target: Option<Vec3>) {
         self.mob.set_attack_target(target);
+    }
+
+    /// Puts this animal into love mode for
+    /// [`LOVE_TICKS`](lodestone_entity::ai::navigating_mob::LOVE_TICKS)
+    /// (vanilla `Animal::setInLove`, `animal/Animal.java:174`) — what feeding
+    /// it a breeding item does. [`MobSim::tick`]'s partner search only
+    /// considers mobs in this state.
+    pub fn set_in_love(&mut self) -> &mut Self {
+        self.mob.set_in_love();
+        self
+    }
+
+    /// Whether this animal is currently in love mode.
+    #[must_use]
+    pub fn is_in_love(&self) -> bool {
+        self.mob.is_in_love()
+    }
+
+    /// Remaining love-mode ticks (vanilla `Animal.getInLoveTime`).
+    #[must_use]
+    pub fn love_time(&self) -> i32 {
+        self.mob.love_time()
+    }
+
+    /// The mob's age timer: negative while a baby (counting up to `0`),
+    /// positive as the post-breeding parent cooldown (counting down to `0`).
+    #[must_use]
+    pub fn age(&self) -> i32 {
+        self.mob.age()
+    }
+
+    /// Sets the age timer — e.g.
+    /// [`BABY_START_AGE`](lodestone_entity::ai::navigating_mob::BABY_START_AGE)
+    /// to spawn this mob as a baby.
+    pub fn set_age(&mut self, age: i32) -> &mut Self {
+        self.mob.set_age(age);
+        self
+    }
+
+    /// Whether this mob is a baby (`age < 0`), which is what gates
+    /// `FollowParentGoal` and excludes it from breeding.
+    #[must_use]
+    pub fn is_baby(&self) -> bool {
+        self.mob.is_baby()
+    }
+
+    /// Whether this mob is inside its post-damage panic window
+    /// ([`PANIC_DAMAGE_TICKS`](lodestone_entity::ai::navigating_mob::PANIC_DAMAGE_TICKS)).
+    #[must_use]
+    pub fn is_panicking(&self) -> bool {
+        self.mob.is_panicking()
+    }
+
+    /// The position of whatever most recently hurt this mob, while inside the
+    /// retaliation window
+    /// ([`LAST_HURT_BY_TICKS`](lodestone_entity::ai::navigating_mob::LAST_HURT_BY_TICKS)).
+    #[must_use]
+    pub fn last_hurt_by(&self) -> Option<Vec3> {
+        self.mob.last_hurt_by()
+    }
+
+    /// Whether the mob's feet cell holds water, read from the world (never
+    /// injected) — what drives `FloatGoal`.
+    #[must_use]
+    pub fn in_water(&self) -> bool {
+        self.mob.in_water()
+    }
+
+    /// Whether the mob's feet cell holds lava.
+    #[must_use]
+    pub fn in_lava(&self) -> bool {
+        self.mob.in_lava()
+    }
+
+    /// The nearest-player position [`MobSim::tick`] last fed this mob, if any.
+    /// `None` when no player is known — including when nothing has ever called
+    /// [`MobSim::set_players`], which is still the case in production; see that
+    /// method's doc comment.
+    #[must_use]
+    pub fn nearest_player(&self) -> Option<Vec3> {
+        self.mob.nearest_player()
+    }
+
+    /// The tempting-entity position [`MobSim::tick`] last fed this mob.
+    #[must_use]
+    pub fn temptation(&self) -> Option<Vec3> {
+        self.mob.temptation()
+    }
+
+    /// The threat position [`MobSim::tick`] last fed this mob, from
+    /// [`avoided_species`]'s table.
+    #[must_use]
+    pub fn avoid_threat(&self) -> Option<Vec3> {
+        self.mob.avoid_threat()
+    }
+
+    /// The nearest-adult position [`MobSim::tick`] last fed this mob, which is
+    /// what `FollowParentGoal` follows. Always `None` for an adult.
+    #[must_use]
+    pub fn parent_candidate(&self) -> Option<Vec3> {
+        self.mob.parent_position()
+    }
+
+    /// The breeding-partner position [`MobSim::tick`] last fed this mob, which
+    /// is what `BreedGoal` pursues.
+    #[must_use]
+    pub fn partner_candidate(&self) -> Option<Vec3> {
+        self.mob.love_partner_position()
+    }
+
+    /// The mob's current attack-target *position* (what a `MeleeAttackGoal`
+    /// chases), as distinct from
+    /// [`attack_target_id`](SimMob::attack_target_id)'s entity identity. This
+    /// is the state `HurtByTargetGoal` writes when it retaliates.
+    #[must_use]
+    pub fn attack_target(&self) -> Option<Vec3> {
+        self.mob.attack_target()
+    }
+
+    /// Whether a goal has this mob holding jump this tick — the observable
+    /// effect of `FloatGoal`, i.e. what floating actually looks like.
+    #[must_use]
+    pub fn is_jumping(&self) -> bool {
+        self.mob.is_jumping()
+    }
+
+    /// `no_action_time` **as the goals see it**, through the
+    /// [`MobController`] seam.
+    ///
+    /// Deliberately separate from [`no_action_time`](SimMob::no_action_time),
+    /// which reads the sim's own record. The two being equal is exactly what
+    /// issue #441 fixed: the sim incremented its record every tick and never
+    /// pushed it across the seam, so goals read the trait default `0` forever.
+    /// Keeping both readable is what lets a test assert the equality rather
+    /// than assume it.
+    #[must_use]
+    pub fn mob_no_action_time(&self) -> i32 {
+        MobController::no_action_time(&self.mob)
+    }
+
+    /// How many goals are installed on this mob. Used to assert a
+    /// [`MobSim::tick`]-spawned child inherited a goal set rather than arriving
+    /// inert.
+    #[must_use]
+    pub fn goal_count(&self) -> usize {
+        self.goals.len()
     }
 
     /// Marks the mob ignited (vanilla `Creeper.ignite()`), forcing a
@@ -724,6 +957,20 @@ impl<'w> SimMob<'w> {
         let outcome = lodestone_entity::apply_reductions(amount, &self.defenses, flags);
         self.defenses.absorption = outcome.remaining_absorption;
         self.health = (self.health - outcome.to_health).max(0.0);
+        // Issue #441: every hit that is not swallowed by i-frames opens the
+        // panic window, because vanilla's `PanicGoal.shouldPanic` reads the
+        // damage *source* rather than the attacking mob
+        // (`ai/goal/PanicGoal.java:61-63`) — so fall damage and drowning panic
+        // an animal exactly as a wolf bite does. The attacker half of the
+        // record is added by whichever caller knows the attacker's position
+        // ([`MobSim::attack`] and [`MobSim::tick`]'s melee resolution); the
+        // ones that do not (an explosion, a future environmental source) leave
+        // the mob panicking with nothing to retaliate against, which is the
+        // correct vanilla outcome rather than a gap.
+        //
+        // Placed here, in the single funnel every damage path already goes
+        // through, so a new damage source cannot forget it.
+        self.mob.note_hurt(None);
         outcome.to_health
     }
 
@@ -952,6 +1199,14 @@ pub struct MobSim<'w> {
     /// for why draining, not just reading, is what keeps a detonation from
     /// being broadcast twice.
     pending_detonations: Vec<Detonation>,
+    /// Every connected player's perception-relevant state, refreshed by a
+    /// driver through [`set_players`](Self::set_players) and consumed by
+    /// [`tick`](Self::tick) to feed each mob's `nearest_player`/`temptation`.
+    ///
+    /// This crate had **no player-position feed at all** before issue #441 —
+    /// see [`set_players`](Self::set_players) for why that made two of the
+    /// eight perception methods unreachable, and which one line closes it.
+    players: Vec<PlayerPerception>,
 }
 
 /// One detonation [`MobSim::tick`] triggered this tick, for
@@ -995,7 +1250,41 @@ impl<'w> MobSim<'w> {
             next_id: 1,
             tick_count: 0,
             pending_detonations: Vec::new(),
+            players: Vec::new(),
         }
+    }
+
+    /// Replaces the set of players mob perception can see, for
+    /// [`tick`](Self::tick) to consume.
+    ///
+    /// # Why this exists, and what still has to call it
+    ///
+    /// Before issue #441 nothing in this crate knew where a player was.
+    /// `MobSim::tick` takes no arguments and `run_tick_loop`
+    /// (`crate::tick`) receives no player position either — the gap
+    /// [`run_mob_tick_loop`]'s own doc comment already discloses for
+    /// [`despawn_pass`](Self::despawn_pass). So
+    /// [`MobController::nearest_player`] and
+    /// [`MobController::temptation`] had no possible source, which is half of
+    /// why `LookAtPlayerGoal` and `TemptGoal` were structurally dead.
+    ///
+    /// The producer is **one line in `crate::server::dispatch_play_packet`'s
+    /// `ServerBound::PlayerMoved` arm**, which already holds both the new
+    /// position and a `MobHandle` in the same scope. That line is not in this
+    /// commit — `server.rs` is another agent's file this session — so until it
+    /// lands these two methods are fed only by tests, and every other one of
+    /// the eight is fed from state this crate already owns. That asymmetry is
+    /// recorded in `docs/mob-perception.md` rather than left for the next
+    /// author to rediscover.
+    pub fn set_players(&mut self, players: Vec<PlayerPerception>) -> &mut Self {
+        self.players = players;
+        self
+    }
+
+    /// The players mob perception currently sees.
+    #[must_use]
+    pub fn players(&self) -> &[PlayerPerception] {
+        &self.players
     }
 
     /// Overrides the id the next [`spawn`](Self::spawn) call assigns (and
@@ -1155,29 +1444,69 @@ impl<'w> MobSim<'w> {
     /// `Vec`. A mob whose health reaches `0.0` is removed at the end of the
     /// tick that killed it (vanilla's immediate death removal).
     pub fn tick(&mut self) {
-        let mut hits: Vec<(Option<i32>, f32)> = Vec::new();
+        // Issue #441 (plan unit A2): feed every mob's perception inputs before
+        // its goals run. Without this pass `NavigatingMob` reports the trait
+        // defaults for `nearest_player`/`temptation`/`avoid_threat`/
+        // `no_action_time`, and `partner_candidate`/`parent_candidate` stay
+        // `None` forever — which made eight of the thirteen implemented goals
+        // structurally incapable of firing in production. Ordering is
+        // load-bearing: it must run *before* `m.mob.tick(&mut m.goals)` below,
+        // because that call is what evaluates `can_use`.
+        //
+        // `no_action_time` ages *before* the feed, not after the goals, because
+        // that is vanilla's own order: `Mob.serverAiStep()` opens with
+        // `this.noActionTime++` and only then ticks the selectors
+        // (`.cache/mc/26.2/src/net/minecraft/world/entity/Mob.java:715-717`), so
+        // a goal sees the already-incremented value. Getting this backwards
+        // costs exactly one tick of idle time — small, invisible to any
+        // `cargo check`, and caught here only because
+        // `no_action_time_crosses_the_seam_instead_of_staying_on_the_sim_record`
+        // asserts the two readings are *equal* rather than merely both climbing.
+        for m in &mut self.mobs {
+            m.no_action_time = m.no_action_time.saturating_add(1);
+        }
+        self.feed_perception();
+
+        let mut hits: Vec<(Option<i32>, f32, Vec3)> = Vec::new();
         let mut detonations: Vec<(i32, Vec3)> = Vec::new();
+        let mut bred: Vec<(i32, Vec3, ResourceKey)> = Vec::new();
         for m in &mut self.mobs {
             // Vanilla ages `invulnerableTime`/`hurtTime` every tick regardless
             // of whether the mob was hit this tick.
             m.hurt_cooldown.tick();
             m.mob.tick(&mut m.goals);
-            m.no_action_time = m.no_action_time.saturating_add(1);
             if !m.mob.take_new_attacks().is_empty() {
-                hits.push((m.attack_target_id, m.attack_damage));
+                // Carry the attacker's own position too, so the victim can
+                // retaliate: vanilla's `hurt` sets `lastHurtByMob` from the
+                // damage source's attacker (`LivingEntity.java:1358`), which is
+                // what `HurtByTargetGoal` reads. Before #441 this tuple was
+                // `(target, damage)` only, so a mob struck by another mob had
+                // no way to learn who hit it and `HurtByTargetGoal` could never
+                // fire even once the perception seam existed.
+                hits.push((m.attack_target_id, m.attack_damage, m.position()));
             }
             if m.mob.take_detonated() {
                 detonations.push((m.id, m.position()));
             }
+            // Drain the "a `BreedGoal` connected this tick" flag. `breed()`
+            // itself only records the *event* — the seam has no notion of the
+            // partner's identity or of creating an entity — so resolving it
+            // into a real child is this driver's job, and the step commit
+            // `7bf2873` explicitly deferred to here.
+            if m.mob.take_bred() {
+                bred.push((m.id, m.position(), m.entity_type().clone()));
+            }
         }
-        for (target_id, raw_damage) in hits {
+        for (target_id, raw_damage, attacker_pos) in hits {
             if let Some(target_id) = target_id
                 && let Some(target) = self.mobs.iter_mut().find(|m| m.id == target_id)
             {
                 target.apply_damage(raw_damage, DamageFlags::default());
+                target.mob.note_hurt(Some(attacker_pos));
             }
         }
         self.mobs.retain(|m| m.health > 0.0);
+        self.resolve_breeding(bred);
 
         // Issue #213: `explode`'s exposure/damage maths was already correct
         // and already unit-tested, but had zero production callers anywhere
@@ -1220,6 +1549,186 @@ impl<'w> MobSim<'w> {
         }
 
         self.tick_count += 1;
+    }
+
+    /// Populates every mob's [`MobController`] perception inputs from this
+    /// sim's own census plus [`set_players`](Self::set_players)' player list.
+    ///
+    /// Two passes, and the split is a borrow-checker necessity rather than a
+    /// style choice: deciding mob `i`'s threat/partner/parent means reading
+    /// every *other* mob, so the decisions are computed under shared borrows
+    /// first and applied under a mutable one second. It is the same shape
+    /// [`tick`](Self::tick) already uses for melee resolution.
+    ///
+    /// Nothing here is species-*goal* knowledge — that is the roster's job.
+    /// The only species table it consults is [`avoided_species`], which answers
+    /// "is that a threat to me", a perception question.
+    fn feed_perception(&mut self) {
+        let n = self.mobs.len();
+        let mut nearest_player = vec![None; n];
+        let mut temptation = vec![None; n];
+        let mut threat = vec![None; n];
+        let mut partner = vec![None; n];
+        let mut parent = vec![None; n];
+
+        for i in 0..n {
+            let me = &self.mobs[i];
+            let pos = me.position();
+            let species = me.entity_type().path().to_owned();
+
+            // --- nearest player -------------------------------------------
+            // Fed with **no range cut**, deliberately: vanilla's range for this
+            // lives in the *goal*'s targeting conditions (`LookAtPlayerGoal`
+            // takes a `lookDistance`, 6.0F or 8.0F per species —
+            // `ai/goal/LookAtPlayerGoal.java:44-46`), not on the mob, and our
+            // `LookAtPlayerGoal::can_use` applies exactly that cut itself
+            // (`goals.rs`). Cutting here as well would silently take the
+            // minimum of two ranges and make the goal's own parameter a lie.
+            nearest_player[i] = nearest_by(&self.players, pos, |p| p.position, |_| true, None);
+
+            // --- temptation -----------------------------------------------
+            // The range *is* on the mob here (`Attributes.TEMPT_RANGE`), so it
+            // belongs in the feed. See `TEMPT_RANGE`.
+            temptation[i] = nearest_by(
+                &self.players,
+                pos,
+                |p| p.position,
+                |p| p.holding_tempt_item,
+                Some((TEMPT_RANGE, TEMPT_RANGE)),
+            );
+
+            // --- avoid threat ---------------------------------------------
+            let avoided = avoided_species(&species);
+            if !avoided.is_empty() {
+                threat[i] = nearest_by(
+                    &self.mobs,
+                    pos,
+                    SimMob::position,
+                    |other| other.id != me.id && avoided.contains(&other.entity_type().path()),
+                    Some((AVOID_RANGE, AVOID_RANGE_Y)),
+                );
+            }
+
+            // --- breeding partner -----------------------------------------
+            // Vanilla `Animal.canMate` (`animal/Animal.java:202-206`): the
+            // partner must be the *same class* and both must be in love. A
+            // baby cannot breed (`Animal.canFallInLove` gates on age), and
+            // `BreedGoal.canContinueToUse` additionally requires the partner
+            // not be panicking (`ai/goal/BreedGoal.java:43`) — enforced here
+            // too, since feeding a panicking partner would start the goal only
+            // for it to abort on the next tick.
+            if me.is_in_love() && !me.is_baby() {
+                partner[i] = nearest_by(
+                    &self.mobs,
+                    pos,
+                    SimMob::position,
+                    |other| {
+                        other.id != me.id
+                            && other.entity_type() == me.entity_type()
+                            && other.is_in_love()
+                            && !other.is_baby()
+                            && !other.is_panicking()
+                    },
+                    Some((BREED_RANGE, BREED_RANGE)),
+                );
+            }
+
+            // --- parent ---------------------------------------------------
+            // `ai/goal/FollowParentGoal.java:23` (`getAge() >= 0` → no goal)
+            // and `:34` (candidate must itself have `getAge() >= 0`, i.e. be an
+            // adult), searched over `inflate(8.0, 4.0, 8.0)` at `:29`.
+            if me.is_baby() {
+                parent[i] = nearest_by(
+                    &self.mobs,
+                    pos,
+                    SimMob::position,
+                    |other| {
+                        other.id != me.id
+                            && other.entity_type() == me.entity_type()
+                            && !other.is_baby()
+                    },
+                    Some((FOLLOW_PARENT_RANGE, FOLLOW_PARENT_RANGE_Y)),
+                );
+            }
+        }
+
+        for (i, m) in self.mobs.iter_mut().enumerate() {
+            m.mob
+                .set_nearest_player(nearest_player[i])
+                .set_temptation(temptation[i])
+                .set_avoid_threat(threat[i])
+                // The sim has incremented this every tick since long before
+                // #441, but only on its own record — it never crossed the
+                // `MobController` seam, so `RandomStrollGoal`'s idle
+                // suppression read the trait default `0` and never fired.
+                .set_no_action_time(m.no_action_time)
+                .set_love_partner_candidate(partner[i])
+                .set_parent_candidate(parent[i]);
+        }
+    }
+
+    /// Turns each drained [`NavigatingMob::take_bred`] event into a real child
+    /// mob and applies vanilla's post-breeding cooldown to **both** parents.
+    ///
+    /// Vanilla `Animal.finalizeSpawnChildFromBreeding`
+    /// (`.cache/mc/26.2/src/net/minecraft/world/entity/animal/Animal.java:225-228`)
+    /// does three things: `setAge(PARENT_AGE_AFTER_BREEDING)` on both parents,
+    /// `resetLove()` on both, and spawns the child. `NavigatingMob::breed` can
+    /// only do the love reset on the mob that ran the goal — it has no notion
+    /// of the partner or of creating an entity — so the other two are here.
+    ///
+    /// Identifying the partner is the interesting part: by the time this runs,
+    /// `breed()` has already cleared the breeder's love state, so "the other
+    /// mob still in love" is not a usable key. It uses proximity instead —
+    /// vanilla only breeds when the pair is within
+    /// [`BREED_DISTANCE_SQR`](BREED_DISTANCE_SQR) (`ai/goal/BreedGoal.java:57`),
+    /// so the nearest same-species adult inside that radius *is* the partner.
+    fn resolve_breeding(&mut self, bred: Vec<(i32, Vec3, ResourceKey)>) {
+        if bred.is_empty() {
+            return;
+        }
+        // A mob already consumed as someone else's partner must not breed
+        // again this tick. Both animals of a pair can legitimately reach
+        // `loveTime >= 60` on the same tick — each holds the other as its
+        // partner candidate — and without this guard one mating produces two
+        // children, doubling the population every time.
+        let mut consumed: std::collections::HashSet<i32> = std::collections::HashSet::new();
+        for (breeder_id, breeder_pos, species) in bred {
+            if consumed.contains(&breeder_id) {
+                continue;
+            }
+            let partner_id = self
+                .mobs
+                .iter()
+                .filter(|m| {
+                    m.id != breeder_id
+                        && m.entity_type().path() == species.path()
+                        && !m.is_baby()
+                        && !consumed.contains(&m.id)
+                        && dist_sqr(m.position(), breeder_pos) < BREED_DISTANCE_SQR
+                })
+                .min_by(|a, b| {
+                    dist_sqr(a.position(), breeder_pos)
+                        .total_cmp(&dist_sqr(b.position(), breeder_pos))
+                })
+                .map(SimMob::id);
+
+            consumed.insert(breeder_id);
+            for id in [Some(breeder_id), partner_id].into_iter().flatten() {
+                consumed.insert(id);
+                if let Some(m) = self.get_mut(id) {
+                    m.set_age(PARENT_AGE_AFTER_BREEDING);
+                    m.mob.reset_love();
+                }
+            }
+
+            // The child spawns through `spawn_species`, not `spawn_with_type`,
+            // so it inherits the same goal set and category any other mob of
+            // its species gets — a child that could not act would be a fresh
+            // island of exactly the kind this issue exists to close.
+            let child = self.spawn_species(species, breeder_pos);
+            child.set_age(BABY_START_AGE);
+        }
     }
 
     /// Runs [`tick`](MobSim::tick) `n` times.
@@ -1345,6 +1854,13 @@ impl<'w> MobSim<'w> {
         let (health, velocity, damage_dealt) = {
             let mob = self.get_mut(target_id)?;
             let damage_dealt = mob.apply_damage(raw_damage, flags);
+            // Issue #441: the retaliation half of the damage record. This is
+            // the *player's* attack path (`crate::server::apply_attack` is its
+            // only production caller), so this one line is what makes a mob hit
+            // by a player actually turn on them through `HurtByTargetGoal` —
+            // and it needs no new plumbing, because `attacker_pos` was already
+            // a parameter here for knockback direction.
+            mob.mob.note_hurt(Some(attacker_pos));
             if knockback_power > 0.0 && mob.health() > 0.0 {
                 let target_pos = mob.position();
                 let dx = target_pos.x - attacker_pos.x;
@@ -1692,10 +2208,157 @@ fn dist_sqr(a: Vec3, b: Vec3) -> f64 {
     dx * dx + dy * dy + dz * dz
 }
 
+/// The position of the nearest `accept`ed item to `from`, optionally restricted
+/// to an axis-aligned box of `(horizontal, vertical)` half-extents.
+///
+/// This is vanilla's two-step shape, kept as two steps on purpose: every
+/// perception search in `ai/goal/` filters by a *box* (`getEntitiesOfClass(…,
+/// getBoundingBox().inflate(dx, dy, dz))`) and only then picks the nearest by
+/// squared distance (`getNearestEntity`). Collapsing it into a single radius
+/// test would be wrong in the corners — most visibly for
+/// [`AVOID_RANGE_Y`](AVOID_RANGE_Y), where vanilla's vertical extent is a flat
+/// `3.0` regardless of the horizontal one.
+fn nearest_by<T>(
+    items: &[T],
+    from: Vec3,
+    position: impl Fn(&T) -> Vec3,
+    accept: impl Fn(&T) -> bool,
+    range: Option<(f64, f64)>,
+) -> Option<Vec3> {
+    items
+        .iter()
+        .filter(|item| accept(item))
+        .map(|item| position(item))
+        .filter(|pos| match range {
+            None => true,
+            Some((horizontal, vertical)) => {
+                (pos.x - from.x).abs() <= horizontal
+                    && (pos.z - from.z).abs() <= horizontal
+                    && (pos.y - from.y).abs() <= vertical
+            }
+        })
+        .min_by(|a, b| dist_sqr(*a, from).total_cmp(&dist_sqr(*b, from)))
+}
+
 // NOTE: this module owns `ChunkWorld` + `MobSim`; the acceptance gate lives in
 // `tests/mob_sim.rs` so it drives them through the crate's *public* API — the
 // same discipline the rest of the project uses (a consumer that is only a
 // `#[cfg(test)]` fake proves nothing about the public seam).
+
+/// The one exception to the discipline stated immediately above, and it is a
+/// *visibility* exception rather than a design one.
+///
+/// [`PlayerPerception`] is declared here but `mod mobs;` is private
+/// (`lib.rs:113`) and the crate re-exports an explicit list (`lib.rs:156`) that
+/// does not yet include it. `lib.rs` is a brokered choke point this session, so
+/// the one-word addition is handed to the orchestrator rather than made here —
+/// which means `tests/mob_sim.rs` **cannot name the type yet** and the player
+/// half of the perception feed would otherwise ship with no gate at all.
+///
+/// Everything else about the feed *is* gated through the public API in
+/// `tests/mob_sim.rs`. **Move these two tests there once `PlayerPerception` is
+/// re-exported** — they need no other change.
+#[cfg(test)]
+mod player_feed_tests {
+    use super::*;
+
+    fn flat_world() -> ChunkWorld {
+        let mut world = ChunkWorld::new(-4, 24);
+        for x in -12..=12 {
+            for z in -12..=12 {
+                world.set_solid(x, -1, z, true); // floor, surface at y=0
+            }
+        }
+        world
+    }
+
+    fn cow() -> ResourceKey {
+        ResourceKey::from_str("minecraft:cow").expect("valid key")
+    }
+
+    #[test]
+    fn a_player_position_reaches_the_mob_and_a_bare_hand_does_not_tempt() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim.spawn_species(cow(), Vec3::new(0.0, 0.0, 0.0)).id();
+
+        // Before any feed: both must be `None`. This is the control that shows
+        // the assertions below are reading the feed rather than some default
+        // that happened to be a position.
+        sim.tick();
+        assert_eq!(sim.get(id).unwrap().nearest_player(), None);
+        assert_eq!(sim.get(id).unwrap().temptation(), None);
+
+        // A player 4 blocks away, empty-handed.
+        sim.set_players(vec![PlayerPerception {
+            position: Vec3::new(4.0, 0.0, 0.0),
+            holding_tempt_item: false,
+        }]);
+        sim.tick();
+        assert_eq!(
+            sim.get(id).unwrap().nearest_player(),
+            Some(Vec3::new(4.0, 0.0, 0.0)),
+            "the fed player position must reach the mob's perception"
+        );
+        assert_eq!(
+            sim.get(id).unwrap().temptation(),
+            None,
+            "an empty-handed player must not tempt — otherwise `holding_tempt_item` \
+             is being ignored and every player would lead every animal"
+        );
+
+        // Same player, now holding food: temptation appears, and only then.
+        sim.set_players(vec![PlayerPerception {
+            position: Vec3::new(4.0, 0.0, 0.0),
+            holding_tempt_item: true,
+        }]);
+        sim.tick();
+        assert_eq!(
+            sim.get(id).unwrap().temptation(),
+            Some(Vec3::new(4.0, 0.0, 0.0))
+        );
+    }
+
+    #[test]
+    fn temptation_respects_tempt_range_while_nearest_player_does_not() {
+        // The two feeds are deliberately gated differently — `TEMPT_RANGE` is a
+        // mob *attribute* in vanilla (`Attributes.java:107`) so the feed applies
+        // it, whereas `LookAtPlayerGoal`'s range is a goal constructor argument
+        // so the feed must not. A test that only ever used a nearby player
+        // could not tell those apart.
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let id = sim.spawn_species(cow(), Vec3::new(0.0, 0.0, 0.0)).id();
+
+        let far = Vec3::new(TEMPT_RANGE + 5.0, 0.0, 0.0);
+        sim.set_players(vec![PlayerPerception {
+            position: far,
+            holding_tempt_item: true,
+        }]);
+        sim.tick();
+        assert_eq!(
+            sim.get(id).unwrap().temptation(),
+            None,
+            "a tempting player beyond TEMPT_RANGE ({TEMPT_RANGE}) must not tempt"
+        );
+        assert_eq!(
+            sim.get(id).unwrap().nearest_player(),
+            Some(far),
+            "nearest_player must be fed uncut, so the goal's own lookDistance \
+             stays the single place that range is decided"
+        );
+
+        // Just inside the range: the same player now tempts. Predicting the
+        // boundary rather than asserting a direction.
+        let near = Vec3::new(TEMPT_RANGE - 0.5, 0.0, 0.0);
+        sim.set_players(vec![PlayerPerception {
+            position: near,
+            holding_tempt_item: true,
+        }]);
+        sim.tick();
+        assert_eq!(sim.get(id).unwrap().temptation(), Some(near));
+    }
+}
 
 /// A live [`EntitySource`] fed by a background-ticked [`MobSim`] (issue
 /// #217). [`IntegratedServer::open_in_memory_with_mobs`](crate::IntegratedServer::open_in_memory_with_mobs)
