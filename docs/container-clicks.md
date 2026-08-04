@@ -502,8 +502,151 @@ zero tests of its own today — the positive-case suite is in
 `tests/crafting_menu.rs`), while `menu.rs`'s `mod tests` holds the
 negative-control suite this doc's own header describes. Corrected below.
 
+## The shell layer's own verb table (issues #376, #378 tail)
+
+The `doClick` table above audits the **machine**. This section is the audit the
+table's own postscript said did not exist: `AbstractContainerScreen`'s
+press/drag/release/**keyPressed** protocol, against
+`crates/lodestone-shell/src/container.rs`'s `MenuInput`. It is a separate layer
+and it has its own defect class — the machine can be perfect while no packet is
+ever sent.
+
+| vanilla entry point | 26.2 location | our location | state |
+| --- | --- | --- | --- |
+| `mouseClicked` | `AbstractContainerScreen.java:280-339` | `MenuInput::press` | covered |
+| `mouseDragged` + `shouldAddSlotToQuickCraft` | `:361-370`, `:554-561` | `MenuInput::dragged` | covered (#378 part 1) |
+| `mouseReleased` incl. `quickCraftToSlots` | `:373-435`, `:563-571` | `MenuInput::release` | covered |
+| `checkHotbarKeyPressed` (`SWAP`, hotbar + off-hand) | `:506-522` | `app.rs`'s `KeyOutcome::ContainerSwap` | covered (`43692c5`, `1585e69`) |
+| **`keyPressed`'s `THROW`/`CLONE`** | **`:495-501`** | **`MenuInput::key_pressed`** | **producer added; needs one `app.rs` binding** |
+| `checkHotbarMouseClicked` | `:341-355` | — | **not modelled** (see below) |
+| `mouseScrolled` (`ItemSlotMouseAction`) | `:140-151` | — | not modelled; bundles only |
+
+### `Q` inside an inventory did nothing, and it was an island in both directions
+
+The most expensive finding of this pass, and it is invisible to every test that
+exists. `Click::drop_one`/`drop_stack`, `do_throw` and its `can_drop` gate were
+all added and tested by the #27 audit above — the `THROW` rows say "covered", and
+they are, *as machine branches*. They had **zero producers anywhere outside
+`crates/protocol/`**, which is `ClientAction::SetFlying`'s shape exactly.
+`ContainerInput::Throw` was reachable only at `OUTSIDE_SLOT`, and `doClick`'s own
+`slotIndex >= 0` guard (`AbstractContainerMenu.java:513`) drops that — so the
+whole THROW-from-a-slot branch could not execute in the real game, at all.
+
+`MenuInput::key_pressed` is the missing producer. Three details are transcribed
+rather than reasoned about, because each reads as a bug:
+
+* **The gate is `hoveredSlot.hasItem()`, not an empty cursor.** Unlike
+  `checkHotbarKeyPressed` (`:507`), this branch never consults the carried stack;
+  `doClick` does. Copying that guard one method too far withholds a packet
+  vanilla sends, which is a desync in the direction nothing corrects — the server
+  simply never sees it. Control: adding a `cursor_loaded` guard turned
+  `the_drop_key_needs_an_item_in_the_slot_but_not_an_empty_cursor` red at
+  `left: [], right: [Click { slot: 9, button: 0, input: Throw }]`.
+* **`PickItem` is not gated on infinite materials**, where `press`'s middle-click
+  equivalent is. Not an inconsistency: `mouseClicked` (`:285`) uses
+  `hasInfiniteMaterials` to decide *which mouse button means clone*, while the
+  permission lives in `doClick`'s CLONE arm (`:508`). A key has no such
+  ambiguity, so vanilla sends it in survival and the menu drops it.
+* **`else if`, not two `if`s** — a key bound to both actions clones only.
+
+**The second direction: there is no `InputAction::Drop` in `keybinds.rs` at all.**
+`key.drop` is on that module's deliberate "absent rather than listed and dead"
+list, so `key_pressed` is not yet called and this is not finished. The binding is
+worth more than it looks, because `ClientAction::DropSelectedItem` /
+`DropSelectedItemStack` are a **second** island behind the same key — encoded,
+round-trip tested, exercised by an `#[ignore]`d live gate, and produced by
+nothing. One `Q` binding closes both, which is why this is not the "half a
+feature" that `43692c5` correctly refused for the off-hand key.
+
+### `checkHotbarMouseClicked` is not modelled, and that is a real gap
+
+`:341-355` runs the hotbar/off-hand `SWAP` off a **mouse** button that is neither
+left, right, nor pick — a side button someone has bound to `key.swapOffhand` or a
+hotbar slot. `MenuButton` has only three variants, so there is nowhere for it to
+arrive. Low value (it needs a rebind to reach) but recorded rather than left to
+be rediscovered.
+
+## Hover highlight and empty-slot placeholders (issue #376)
+
+Two things reported from play, neither of which was the kind of gap it looked
+like.
+
+**The highlight is two sprites, not one.** `slot_highlight_back` and
+`slot_highlight_front`, both blitted at `(slot.x - 4, slot.y - 4, 24, 24)`
+(`AbstractContainerScreen.java:155`, `:161`), with `extractSlots` between them —
+one under the hovered slot's item and one over it. So `ContainerGeometry`'s
+`bg_verts` now draws in **two ranges** split at `bg_slot_vertex_count`, and
+`ContainerRenderer` replays the second after the item passes. A single highlight
+appended with the panel art looks *almost* right and is what the naive version
+produces; that was the watched-failing control.
+
+**A belief this deleted:** `MenuInput::is_dragging`'s doc said the screen "should
+draw the drag preview rather than a hover highlight". Measured false — both blits
+are gated on `hoveredSlot != null && isHighlightable()` and on nothing else, *not*
+on `isQuickCrafting`, so vanilla draws highlight and preview together mid-drag.
+The wrong claim is kept in place, corrected, rather than deleted.
+
+`isHighlightable()` is not restated in our code: base `Slot` returns `true` and
+the only 26.2 override is `NonInteractiveResultSlot` (the crafter, the recipe-book
+ghost), which no menu this client models uses. A crafting table's `ResultSlot`
+does **not** override it, so the result slot *is* highlighted — worth stating
+because so many other branches special-case that slot.
+
+**The placeholders were neither an asset nor a data problem.**
+`tests/container_slot_sprites.rs` had already measured all seven sprites present
+in the GUI atlas and concluded the remainder was "a pipeline/bind-group job".
+It was not: they are ordinary textures with an ordinary `.png.mcmeta`, so they
+stitch into `ContainerBackground`'s **existing** atlas and reuse the bind group
+and pipeline `attach_background` already builds. `AtlasBuilder` needed no new
+capability. That note is now stale in the useful direction and is recorded here
+rather than silently overtaken.
+
+Two measured details worth keeping:
+
+* The ids come off `Slot::no_item_icon`, never a positional rule. Replacing that
+  with `match menu_index { 5..=8 => … }` went red twice: the off-hand (slot 45)
+  stops drawing *and* a chest starts painting helmets into its sixth slot — the
+  exact trap `lodestone-game/tests/no_item_icons.rs` was written to name.
+* The highlight mcmeta declares `nine_slice` with border 4, but the sprite is
+  natively 24×24 and the blit is 24×24, so **that path never stretches
+  anything**. Implementing nine-slice for it is work with no observable effect.
+
+Everything here is gated on a background being attached, so the jar-less
+fallback draws none of it — honest, and the negative control the tests use.
+
+## Title anchors for the screens `label_layout` does not model
+
+`label_layout` has two anchors; nine real screens fell through to `Generic`'s
+`(8, 6)` and were wrong there. `menu_type_title_anchor` (`container.rs`) carries
+vanilla's values keyed on the wire `menu_type`, and `build_inner` lets it override
+`label_layout`'s result.
+
+**`MenuKind` was the wrong lever, and `label_layout`'s own doc comment said
+otherwise for two commits.** It claimed the centred furnace title was "not
+modelled" because "there is no furnace `MenuKind` yet". A furnace needs none: the
+anchor keys off `menu_type`, which the server already sends and
+`OpenMenuSnapshot::menu_type` already carries — and growing `MenuKind` is
+constrained against anyway, since `slot_layout` matches it exhaustively.
+
+**Three of the nine are decrements, not absolutes.** `LoomScreen.java:68` and
+`CartographyTableScreen.java:29` are `titleLabelY -= 2`; `StonecutterScreen.java:45`
+is `titleLabelY--`. They resolve to 4/4/5 *only because* the inherited
+`titleLabelY` is 6. If `label_layout`'s `title_y` ever stops being 6, all three go
+wrong and nothing else would say so.
+
+Beacon and merchant are excluded deliberately: different `imageWidth` (230/276),
+their own background art, and `MerchantScreen.extractLabels` composes trade-level
+text into the title rather than moving an anchor. Neither has a case in
+`background_kind` or `slot_layout`, so an anchor alone would put correct text over
+a still-wrong-shaped panel.
+
 ## How to change it
 
+- **The screen's press/drag/release/key protocol** —
+  `crates/lodestone-shell/src/container.rs`'s `MenuInput`. Audit against
+  `AbstractContainerScreen`, not `AbstractContainerMenu`; the two tables in this
+  doc are separate for that reason, and a symptom that reaches no pixels usually
+  lives here rather than in the machine.
 - **Click dispatch and the drag machine** — `crates/lodestone-game/src/click.rs`.
 - **Menu shape, quick-move orders, `move_item_stack_to`** —
   `crates/lodestone-game/src/menu.rs`.
