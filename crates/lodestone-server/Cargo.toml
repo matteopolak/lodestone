@@ -10,6 +10,24 @@ description = "Lodestone integrated server (singleplayer + open-to-LAN) over the
 workspace = true
 
 [dependencies]
+# The server's own `bevy_ecs::World` (issue #433, `docs/server-ecs.md`;
+# Phase 0 of `docs/plans/server-ecs-migration.md`). Pinned through the same
+# `[workspace.dependencies]` entries `lodestone-ecs` already builds against —
+# `version = "0.19", default-features = false, features = ["std"]`, so no
+# `bevy_reflect` and, load-bearingly, never `multi_threaded`: that omission is
+# what keeps this migration free of a second threading model, and it is why
+# bevy dispatches these systems as direct calls rather than through a task pool.
+#
+# Deliberately NOT `lodestone-ecs`, despite `docs/server-ecs.md`'s title. Two
+# `World`s means a shared `ScheduleLabel` type buys nothing at runtime, while
+# linking that crate would drag the entire *client* vocabulary (`LocalPlayer`,
+# `FrameClock`, `SessionMenus`) plus `lodestone-physics`/`-game`/`-world` into
+# this graph — and into the browser bundle, which links `lodestone-server` and
+# links neither bevy nor `lodestone-ecs` today. The decision record already
+# names the substrate/client-vocabulary split as the fix and already calls it a
+# follow-up rather than a prerequisite. See `src/ecs/schedules.rs`'s own doc.
+bevy_app = { workspace = true }
+bevy_ecs = { workspace = true }
 lodestone-core = { path = "../lodestone-core" }
 lodestone-net = { path = "../lodestone-net" }
 lodestone-worldgen = { path = "../lodestone-worldgen" }

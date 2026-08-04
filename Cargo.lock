@@ -2521,6 +2521,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "lodestone-client",
+ "lodestone-data",
  "lodestone-model",
  "lodestone-registry",
  "lodestone-testsupport",
@@ -2613,6 +2614,7 @@ dependencies = [
  "hickory-resolver",
  "js-sys",
  "lodestone-core",
+ "lodestone-model",
  "rand 0.8.7",
  "rsa",
  "serde_json",
@@ -2698,6 +2700,8 @@ dependencies = [
 name = "lodestone-server"
 version = "0.1.0"
 dependencies = [
+ "bevy_app",
+ "bevy_ecs",
  "lodestone-client",
  "lodestone-core",
  "lodestone-data",
