@@ -1436,6 +1436,23 @@ impl WindowApp {
         if want != self.grabbed {
             self.set_grab(want);
         }
+
+        // Issue #189: keep the Social Interactions roster live.
+        // `social::entries_from_tablist` was pure and tested with **no
+        // production caller** — this is the queued call
+        // `docs/social-interactions.md`'s "How to change it" names. Only
+        // `Screen::Social` ever reads `MenuNav::social()`, but this runs every
+        // frame regardless of which screen is open (matching every other
+        // reconciliation in this function) rather than gating on the screen:
+        // a `TabList` clone plus a short `Vec` build is cheap, and refreshing
+        // only-while-open would mean the roster the player sees the instant
+        // they open it is one frame stale.
+        if self.sim.session_phase() == crate::sim::SessionPhase::Connected {
+            let tab_list = self.sim.tab_list();
+            let entries =
+                crate::menu::social::entries_from_tablist(&tab_list, self.sim.local_uuid());
+            self.nav.refresh_social(entries);
+        }
     }
 
     /// Staged Singleplayer entry point. Vanilla's singleplayer starts an
@@ -5016,6 +5033,89 @@ mod tests {
         assert!(
             errors.is_empty(),
             "the session reported errors while starting: {errors:?}"
+        );
+    }
+
+    /// **Issue #189's queued patch, exercised through production code.**
+    ///
+    /// `crate::menu::social::entries_from_tablist` was pure and unit-tested
+    /// with **no caller anywhere in the shell** — `docs/social-interactions.md`'s
+    /// own "Decorative" section. This does not call it a second time by hand
+    /// (that would just be the existing unit test again, which proves
+    /// nothing about production); it drives the actual chain: a real
+    /// `WindowApp`, a `SessionTabList` folded through the same `NetIngest`
+    /// schedule the net thread runs, and `drive_ui_from_session` itself —
+    /// the method `redraw()` calls every frame.
+    #[test]
+    fn drive_ui_from_session_refreshes_the_social_roster_from_the_real_tab_list() {
+        use crate::net::NetUpdate;
+        use lodestone_client::{ClientEvent, GameMode, PlayerListEntry};
+        use uuid::Uuid;
+
+        let mut app = WindowApp::new(Config {
+            mode: Mode::Headless,
+            ..Config::default()
+        });
+        let (net, _actions, feed) = NetClient::loopback_with_feed();
+        app.sim.attach_net(net);
+        // `drive_ui_from_session`'s refresh is guarded on `SessionPhase::Connected`
+        // — reach it the same way `sim/tests.rs`'s own tab-list test does,
+        // through a real `NetUpdate`, not by poking a private field.
+        feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
+        app.sim.step(1.0 / 20.0);
+        assert_eq!(
+            app.sim.session_phase(),
+            crate::sim::SessionPhase::Connected,
+            "precondition: the refresh guard reads this, so it must actually be live"
+        );
+
+        let alice = Uuid::from_u128(1);
+        let bob = Uuid::from_u128(2);
+        app.sim
+            .net()
+            .expect("net attached above")
+            .ingest_session_event(ClientEvent::PlayerListUpdate {
+                entries: vec![
+                    PlayerListEntry {
+                        uuid: bob,
+                        name: Some("Bob".into()),
+                        game_mode: Some(GameMode::Creative),
+                        latency: Some(20),
+                        display_name: None,
+                        listed: Some(true),
+                    },
+                    PlayerListEntry {
+                        uuid: alice,
+                        name: Some("Alice".into()),
+                        game_mode: Some(GameMode::Survival),
+                        latency: Some(10),
+                        display_name: None,
+                        listed: Some(true),
+                    },
+                ],
+            });
+
+        // Precondition: nothing has refreshed the screen model yet — proves the
+        // assertion below actually exercises `drive_ui_from_session`, not some
+        // earlier call this test forgot about.
+        assert!(
+            app.nav.social().entries().is_empty(),
+            "precondition: the roster must still be empty before the real call runs"
+        );
+
+        app.drive_ui_from_session();
+
+        let names: Vec<&str> = app
+            .nav
+            .social()
+            .entries()
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Alice", "Bob"],
+            "the roster must reflect the real folded tab list, in vanilla's display order"
         );
     }
 

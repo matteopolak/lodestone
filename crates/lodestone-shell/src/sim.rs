@@ -1747,6 +1747,27 @@ impl Sim {
         crate::tablist::player_rows(&list, self.translator().as_ref())
     }
 
+    /// The same folded tab list [`Self::player_rows`] formats, unformatted —
+    /// issue #189's Social Interactions roster needs the raw entries
+    /// (`crate::menu::social::entries_from_tablist`), not pre-rendered strings.
+    #[must_use]
+    pub fn tab_list(&self) -> lodestone_game::tablist::TabList {
+        self.read(|w| {
+            w.get::<lodestone_ecs::SessionTabList>(self.local)
+                .map(|list| list.0.clone())
+                .unwrap_or_default()
+        })
+    }
+
+    /// The connecting session's local player UUID, or `None` off a live
+    /// session or before [`NetClient::local_uuid`] has published one. See
+    /// that method's doc for why this identity has to travel through
+    /// `NetClient` at all rather than living on a component.
+    #[must_use]
+    pub fn local_uuid(&self) -> Option<uuid::Uuid> {
+        self.net.as_ref()?.local_uuid()
+    }
+
     /// The scoreboard sidebar to draw, or `None` when none is displayed (or off
     /// a live server). Folded through [`lodestone_game::scoreboard::Scoreboard`].
     #[must_use]
