@@ -70,6 +70,23 @@ const HIGHLIGHT: f32 = 24.0;
 /// cell origin.
 const HIGHLIGHT_INSET: f32 = 4.0;
 
+/// The furnace family's two progress sprites (issue #28), one pair per
+/// texture — `AbstractFurnaceScreen.java:17-18` takes them as constructor
+/// parameters, and `FurnaceScreen`/`BlastFurnaceScreen`/`SmokerScreen` each
+/// supply their own rather than sharing one id.
+const FURNACE_LIT_PROGRESS: &str = "container/furnace/lit_progress";
+const FURNACE_BURN_PROGRESS: &str = "container/furnace/burn_progress";
+const BLAST_FURNACE_LIT_PROGRESS: &str = "container/blast_furnace/lit_progress";
+const BLAST_FURNACE_BURN_PROGRESS: &str = "container/blast_furnace/burn_progress";
+const SMOKER_LIT_PROGRESS: &str = "container/smoker/lit_progress";
+const SMOKER_BURN_PROGRESS: &str = "container/smoker/burn_progress";
+
+/// The brewing stand's three progress sprites (issue #28),
+/// `BrewingStandScreen.java:12-14`.
+const BREWING_FUEL_LENGTH: &str = "container/brewing_stand/fuel_length";
+const BREWING_BREW_PROGRESS: &str = "container/brewing_stand/brew_progress";
+const BREWING_BUBBLES: &str = "container/brewing_stand/bubbles";
+
 /// Every GUI sprite [`ContainerBackground`] stitches alongside the three panel
 /// sheets: the hover-highlight pair and the five empty-slot placeholders the
 /// player inventory declares.
@@ -85,6 +102,18 @@ const GUI_SPRITES: &[&str] = &[
     lodestone_game::menu::EMPTY_ARMOR_SLOT_LEGGINGS,
     lodestone_game::menu::EMPTY_ARMOR_SLOT_BOOTS,
     lodestone_game::menu::EMPTY_ARMOR_SLOT_SHIELD,
+    // Furnace family + brewing stand progress widgets (issue #28) — real
+    // container_set_data-driven bars, not slot placeholders, but they ride
+    // the same atlas for the same reason the highlight pair does.
+    FURNACE_LIT_PROGRESS,
+    FURNACE_BURN_PROGRESS,
+    BLAST_FURNACE_LIT_PROGRESS,
+    BLAST_FURNACE_BURN_PROGRESS,
+    SMOKER_LIT_PROGRESS,
+    SMOKER_BURN_PROGRESS,
+    BREWING_FUEL_LENGTH,
+    BREWING_BREW_PROGRESS,
+    BREWING_BUBBLES,
 ];
 
 /// A GUI sprite id (`container/slot/helmet`) as the texture location it lives at
@@ -578,6 +607,17 @@ pub struct ContainerBackground {
     grindstone: ResourceLocation,
     smithing: ResourceLocation,
     enchantment: ResourceLocation,
+    furnace: ResourceLocation,
+    blast_furnace: ResourceLocation,
+    smoker: ResourceLocation,
+    brewing_stand: ResourceLocation,
+    loom: ResourceLocation,
+    stonecutter: ResourceLocation,
+    cartography_table: ResourceLocation,
+    /// Shared by the dispenser **and** the dropper — see
+    /// [`SpecialLayout::Dispenser`]'s doc comment.
+    dispenser: ResourceLocation,
+    hopper: ResourceLocation,
 }
 
 /// Which vanilla `container/*.png` sheet a menu's background draws from, and
@@ -593,32 +633,58 @@ enum BackgroundKind {
     Grindstone,
     Smithing,
     Enchantment,
+    Furnace,
+    BlastFurnace,
+    Smoker,
+    Brewing,
+    Loom,
+    Stonecutter,
+    Cartography,
+    Dispenser,
+    /// `176×133`, not `166` — see [`SpecialLayout::Hopper`]'s doc comment.
+    Hopper,
 }
 
 /// Mirrors [`slot_layout`]'s own dispatch, **including** its
-/// [`Menu::special_layout`] check (issues #253-#255): the anvil, grindstone,
-/// smithing table and enchanting table each get their own real
-/// `container/*.png` sheet, checked *before* the plain `MenuKind` dispatch for
-/// the same reason `slot_layout` checks it before `craft_layout` — a menu with
-/// a `special_layout` is mechanically a [`MenuKind::Generic`] and would
+/// [`Menu::special_layout`] check (issues #253-#255, extended by #28 to the
+/// furnace family, brewing stand, loom, stonecutter, cartography table and
+/// dispenser/dropper): each of these gets its own real `container/*.png`
+/// sheet, checked *before* the plain `MenuKind` dispatch for the same reason
+/// `slot_layout` checks it before `craft_layout` — a menu with a
+/// `special_layout` is mechanically a [`MenuKind::Generic`] and would
 /// otherwise fall into the plain chest case. Everything else without one:
 /// [`Menu::craft_layout`] draws the crafting table's background regardless of
 /// container size (today always the 3×3 table), everything else generic draws
 /// the chest sheet at its own row count, and [`MenuKind::Player`] draws the
 /// player inventory sheet.
 ///
-/// All four `special_layout` sheets are a single whole-panel `176×166` blit at
-/// the sheet's origin, exactly like
+/// Every `special_layout` sheet but one is a single whole-panel `176×166`
+/// blit at the sheet's origin, exactly like
 /// [`BackgroundKind::Inventory`]/[`BackgroundKind::Crafting`]
 /// (`AnvilScreen.java:30`-adjacent `blit` calls; every one of these screens'
 /// `blit(texture, x, y, 0, 0, imageWidth, imageHeight)` uses the vanilla
-/// `176×166` default, none override `imageWidth`/`imageHeight`).
+/// `176×166` default, none override `imageWidth`/`imageHeight` — re-verified
+/// against `AbstractContainerScreen.java:57-59`'s own default constructor for
+/// the six added by #28, not merely assumed to match the first four). The one
+/// exception is [`BackgroundKind::Hopper`]: `HopperScreen`'s constructor
+/// explicitly passes `176, 133` (`HopperScreen.java:15`), so its blit is
+/// `176×133`, not `166` — [`ContainerBackground::quads`] special-cases it
+/// rather than reusing the `whole_panel` closure's hardcoded size.
 fn background_kind(menu: &Menu) -> BackgroundKind {
     match menu.special_layout() {
         Some(SpecialLayout::Anvil) => return BackgroundKind::Anvil,
         Some(SpecialLayout::Grindstone) => return BackgroundKind::Grindstone,
         Some(SpecialLayout::Smithing) => return BackgroundKind::Smithing,
         Some(SpecialLayout::Enchanting) => return BackgroundKind::Enchantment,
+        Some(SpecialLayout::Furnace) => return BackgroundKind::Furnace,
+        Some(SpecialLayout::BlastFurnace) => return BackgroundKind::BlastFurnace,
+        Some(SpecialLayout::Smoker) => return BackgroundKind::Smoker,
+        Some(SpecialLayout::Brewing) => return BackgroundKind::Brewing,
+        Some(SpecialLayout::Loom) => return BackgroundKind::Loom,
+        Some(SpecialLayout::Stonecutter) => return BackgroundKind::Stonecutter,
+        Some(SpecialLayout::Cartography) => return BackgroundKind::Cartography,
+        Some(SpecialLayout::Dispenser) => return BackgroundKind::Dispenser,
+        Some(SpecialLayout::Hopper) => return BackgroundKind::Hopper,
         None => {}
     }
     match menu.kind() {
@@ -652,6 +718,31 @@ impl ContainerBackground {
             .expect("hardcoded location is always valid");
         let enchantment = ResourceLocation::new("minecraft", "gui/container/enchanting_table")
             .expect("hardcoded location is always valid");
+        // The six more added by issue #28: same family, one whole-panel sheet
+        // each. `dispenser` is loaded once and shared by the dropper too —
+        // see `SpecialLayout::Dispenser`'s doc comment for why there is no
+        // separate `dropper` sheet to load.
+        let furnace = ResourceLocation::new("minecraft", "gui/container/furnace")
+            .expect("hardcoded location is always valid");
+        let blast_furnace = ResourceLocation::new("minecraft", "gui/container/blast_furnace")
+            .expect("hardcoded location is always valid");
+        let smoker = ResourceLocation::new("minecraft", "gui/container/smoker")
+            .expect("hardcoded location is always valid");
+        let brewing_stand = ResourceLocation::new("minecraft", "gui/container/brewing_stand")
+            .expect("hardcoded location is always valid");
+        let loom = ResourceLocation::new("minecraft", "gui/container/loom")
+            .expect("hardcoded location is always valid");
+        let stonecutter = ResourceLocation::new("minecraft", "gui/container/stonecutter")
+            .expect("hardcoded location is always valid");
+        let cartography_table =
+            ResourceLocation::new("minecraft", "gui/container/cartography_table")
+                .expect("hardcoded location is always valid");
+        let dispenser = ResourceLocation::new("minecraft", "gui/container/dispenser")
+            .expect("hardcoded location is always valid");
+        // Not one of #28's own named containers — found while writing this
+        // list's doc comment (see `SpecialLayout::Hopper`).
+        let hopper = ResourceLocation::new("minecraft", "gui/container/hopper")
+            .expect("hardcoded location is always valid");
         let mut builder = AtlasBuilder::new();
         builder.load(manager, &generic)?;
         builder.load(manager, &crafting)?;
@@ -660,6 +751,15 @@ impl ContainerBackground {
         builder.load(manager, &grindstone)?;
         builder.load(manager, &smithing)?;
         builder.load(manager, &enchantment)?;
+        builder.load(manager, &furnace)?;
+        builder.load(manager, &blast_furnace)?;
+        builder.load(manager, &smoker)?;
+        builder.load(manager, &brewing_stand)?;
+        builder.load(manager, &loom)?;
+        builder.load(manager, &stonecutter)?;
+        builder.load(manager, &cartography_table)?;
+        builder.load(manager, &dispenser)?;
+        builder.load(manager, &hopper)?;
         // The hover highlight and the empty-slot placeholders (issue #376) ride
         // in this same atlas rather than a second one. They are ordinary
         // textures with an ordinary `.png.mcmeta`, so `AtlasBuilder` needs no
@@ -688,6 +788,15 @@ impl ContainerBackground {
             grindstone,
             smithing,
             enchantment,
+            furnace,
+            blast_furnace,
+            smoker,
+            brewing_stand,
+            loom,
+            stonecutter,
+            cartography_table,
+            dispenser,
+            hopper,
         })
     }
 
@@ -725,6 +834,46 @@ impl ContainerBackground {
         })
     }
 
+    /// A **sub-rectangle** of a static GUI sprite, sampled at `local`
+    /// (`[lx, ly, lw, lh]`, in the sprite's own native pixel space) and drawn
+    /// at `dst` (`[x, y, w, h]`).
+    ///
+    /// [`sprite_quad`](Self::sprite_quad) always samples the *whole* sprite,
+    /// which is right for the highlight pair and the empty-slot placeholders
+    /// but wrong for the furnace family's lit/burn bars and the brewing
+    /// stand's fuel/brew/bubble bars (issue #28): vanilla grows every one of
+    /// those from a partial `blitSprite` sub-rectangle of a larger sprite —
+    /// e.g. `AbstractFurnaceScreen.java:56-67`'s lit flame samples a `14×n`
+    /// window of a `14×14` sprite, offset from the *bottom*. Mirrors the
+    /// `uv` closure [`quads`](Self::quads) already uses for the three/eleven
+    /// whole-panel sheets, generalised to any sprite in the atlas rather than
+    /// the panel sheets specifically.
+    #[must_use]
+    fn sprite_subregion_quad(
+        &self,
+        id: &str,
+        local: [f32; 4],
+        dst: [f32; 4],
+    ) -> Option<GuiSpriteQuad> {
+        let loc = sprite_location(id)?;
+        let sprite = self.atlas.sprite(&loc)?;
+        let (aw, ah) = (self.atlas.width as f32, self.atlas.height as f32);
+        let [lx, ly, lw, lh] = local;
+        let uv_min = [
+            (sprite.x as f32 + lx) / aw,
+            (sprite.y as f32 + ly) / ah,
+        ];
+        let uv_max = [
+            (sprite.x as f32 + lx + lw) / aw,
+            (sprite.y as f32 + ly + lh) / ah,
+        ];
+        Some(GuiSpriteQuad {
+            dst,
+            uv_min,
+            uv_max,
+        })
+    }
+
     #[must_use]
     fn quads(&self, menu: &Menu, x: f32, y: f32) -> Option<Vec<GuiSpriteQuad>> {
         let (aw, ah) = (self.atlas.width as f32, self.atlas.height as f32);
@@ -740,11 +889,23 @@ impl ContainerBackground {
             ))
         };
         // A whole-panel `176x166` blit at the sheet's origin — the shape every
-        // one of these single-image screens shares.
+        // one of these single-image screens shares, except the hopper (see
+        // `whole_panel_sized` below).
         let whole_panel = |loc: &ResourceLocation| -> Option<Vec<GuiSpriteQuad>> {
             let (uv_min, uv_max) = uv(loc, [0.0, 0.0, 176.0, 166.0])?;
             Some(vec![GuiSpriteQuad {
                 dst: [x, y, 176.0, 166.0],
+                uv_min,
+                uv_max,
+            }])
+        };
+        // As `whole_panel`, but at an explicit size — the hopper's `176×133`
+        // (`HopperScreen.java:15`), the one screen in this whole family that
+        // is not vanilla's usual `166` tall.
+        let whole_panel_sized = |loc: &ResourceLocation, w: f32, h: f32| -> Option<Vec<GuiSpriteQuad>> {
+            let (uv_min, uv_max) = uv(loc, [0.0, 0.0, w, h])?;
+            Some(vec![GuiSpriteQuad {
+                dst: [x, y, w, h],
                 uv_min,
                 uv_max,
             }])
@@ -756,6 +917,15 @@ impl ContainerBackground {
             BackgroundKind::Grindstone => whole_panel(&self.grindstone),
             BackgroundKind::Smithing => whole_panel(&self.smithing),
             BackgroundKind::Enchantment => whole_panel(&self.enchantment),
+            BackgroundKind::Furnace => whole_panel(&self.furnace),
+            BackgroundKind::BlastFurnace => whole_panel(&self.blast_furnace),
+            BackgroundKind::Smoker => whole_panel(&self.smoker),
+            BackgroundKind::Brewing => whole_panel(&self.brewing_stand),
+            BackgroundKind::Loom => whole_panel(&self.loom),
+            BackgroundKind::Stonecutter => whole_panel(&self.stonecutter),
+            BackgroundKind::Cartography => whole_panel(&self.cartography_table),
+            BackgroundKind::Dispenser => whole_panel(&self.dispenser),
+            BackgroundKind::Hopper => whole_panel_sized(&self.hopper, 176.0, 133.0),
             BackgroundKind::Generic { rows } => {
                 let top_h = (rows * 18 + 17) as f32;
                 let (top_min, top_max) = uv(&self.generic, [0.0, 0.0, 176.0, top_h])?;
@@ -1002,6 +1172,120 @@ impl ContainerGeometry {
                 layout.height - 6.0,
                 [0.22, 0.20, 0.17, 0.70],
             );
+        }
+        // The furnace family's lit-flame and burn-progress bars, and the
+        // brewing stand's fuel/brew/bubble bars (issue #28). Vanilla draws
+        // both in `extractBackground`, immediately after the panel blit and
+        // before any slot content, so they belong in this same "under
+        // items" bucket — gated on a background being attached for the same
+        // reason the highlight pair above is (no sprite to draw without
+        // one). The properties come straight off `frame.cost_data`, which is
+        // `OpenMenuSnapshot::data` — the same `container_set_data` feed the
+        // anvil/enchanting cost lines already read, so no new wiring is
+        // needed to reach it from `app.rs`.
+        if let Some(bg) = background {
+            let data = |property: i32| -> i32 {
+                frame
+                    .cost_data
+                    .iter()
+                    .find(|(p, _)| *p == property)
+                    .map_or(0, |(_, v)| *v)
+            };
+            match menu.special_layout() {
+                Some(
+                    kind @ (SpecialLayout::Furnace
+                    | SpecialLayout::BlastFurnace
+                    | SpecialLayout::Smoker),
+                ) => {
+                    // `AbstractFurnaceMenu`: data[0] litTime, data[1]
+                    // litDuration, data[2] cookingProgress, data[3]
+                    // cookingTotalTime (`AbstractFurnaceMenu.java:143-156`).
+                    let (lit_sprite, burn_sprite) = match kind {
+                        SpecialLayout::BlastFurnace => {
+                            (BLAST_FURNACE_LIT_PROGRESS, BLAST_FURNACE_BURN_PROGRESS)
+                        }
+                        SpecialLayout::Smoker => (SMOKER_LIT_PROGRESS, SMOKER_BURN_PROGRESS),
+                        _ => (FURNACE_LIT_PROGRESS, FURNACE_BURN_PROGRESS),
+                    };
+                    let lit_time = data(0);
+                    if lit_time > 0 {
+                        let lit_duration = if data(1) == 0 { 200 } else { data(1) };
+                        let lit_progress =
+                            (lit_time as f32 / lit_duration as f32).clamp(0.0, 1.0);
+                        // `Mth.ceil(litProgress * 13.0F) + 1` (`:55`), which
+                        // is `1..=14` for `litProgress` in `0.0..=1.0`.
+                        let lit_h = (lit_progress * 13.0).ceil() + 1.0;
+                        if let Some(q) = bg.sprite_subregion_quad(
+                            lit_sprite,
+                            [0.0, 14.0 - lit_h, 14.0, lit_h],
+                            [x + 56.0, y + 36.0 + 14.0 - lit_h, 14.0, lit_h],
+                        ) {
+                            b.bg_sprite(q);
+                        }
+                    }
+                    let (cooking_progress, cooking_total) = (data(2), data(3));
+                    let burn_progress = if cooking_total != 0 && cooking_progress != 0 {
+                        (cooking_progress as f32 / cooking_total as f32).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    let burn_w = (burn_progress * 24.0).ceil();
+                    if burn_w > 0.0
+                        && let Some(q) = bg.sprite_subregion_quad(
+                            burn_sprite,
+                            [0.0, 0.0, burn_w, 16.0],
+                            [x + 79.0, y + 34.0, burn_w, 16.0],
+                        )
+                    {
+                        b.bg_sprite(q);
+                    }
+                }
+                Some(SpecialLayout::Brewing) => {
+                    // `BrewingStandMenu`: data[0] brewingTicks, data[1] fuel
+                    // (`BrewingStandMenu.java:117-123`).
+                    let fuel = data(1);
+                    let fuel_len = ((18 * fuel + 19) / 20).clamp(0, 18);
+                    if fuel_len > 0
+                        && let Some(q) = bg.sprite_subregion_quad(
+                            BREWING_FUEL_LENGTH,
+                            [0.0, 0.0, fuel_len as f32, 4.0],
+                            [x + 60.0, y + 44.0, fuel_len as f32, 4.0],
+                        )
+                    {
+                        b.bg_sprite(q);
+                    }
+                    let tick_count = data(0);
+                    if tick_count > 0 {
+                        let brew_len = (28.0 * (1.0 - tick_count as f32 / 400.0)) as i32;
+                        if brew_len > 0
+                            && let Some(q) = bg.sprite_subregion_quad(
+                                BREWING_BREW_PROGRESS,
+                                [0.0, 0.0, 9.0, brew_len as f32],
+                                [x + 97.0, y + 16.0, 9.0, brew_len as f32],
+                            )
+                        {
+                            b.bg_sprite(q);
+                        }
+                        const BUBBLE_LENGTHS: [i32; 7] = [29, 24, 20, 16, 11, 6, 0];
+                        let bubble_len = BUBBLE_LENGTHS[(tick_count / 2 % 7) as usize];
+                        if bubble_len > 0
+                            && let Some(q) = bg.sprite_subregion_quad(
+                                BREWING_BUBBLES,
+                                [0.0, (29 - bubble_len) as f32, 12.0, bubble_len as f32],
+                                [
+                                    x + 63.0,
+                                    y + 14.0 + (29 - bubble_len) as f32,
+                                    12.0,
+                                    bubble_len as f32,
+                                ],
+                            )
+                        {
+                            b.bg_sprite(q);
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
         // Which slot the pointer is over — vanilla's `hoveredSlot`, set from
         // `getHoveredSlot(mouseX, mouseY)` every frame
@@ -1613,7 +1897,7 @@ pub fn slot_layout(menu: &Menu) -> SlotLayout {
     }
 }
 
-/// Vanilla's real slot layout for the four menus that have a
+/// Vanilla's real slot layout for the menus that have a
 /// [`Menu::special_layout`]. Positions are vanilla's slot constructor
 /// arguments, re-read from the decompile rather than taken from a summary:
 ///
@@ -1623,13 +1907,28 @@ pub fn slot_layout(menu: &Menu) -> SlotLayout {
 /// | `Grindstone` | `0@49,19` `1@49,40` `2@129,34` | `GrindstoneMenu.java:48-60` |
 /// | `Smithing` | `0@8,48` `1@26,48` `2@44,48` `3@98,48` | `SmithingMenu.java:25-29,58-61` |
 /// | `Enchanting` | `0@15,47` `1@35,47` | `EnchantmentMenu.java:55-61` |
+/// | `Furnace`/`BlastFurnace`/`Smoker` | `0@56,17` `1@56,53` `2@116,35` | `AbstractFurnaceMenu.java:63-65` |
+/// | `Brewing` | `0@56,51` `1@79,58` `2@102,51` `3@79,17` `4@17,17` | `BrewingStandMenu.java:48-52` |
+/// | `Loom` | `0@13,26` `1@33,26` `2@23,45` `3@143,57` | `LoomMenu.java:64-82` |
+/// | `Stonecutter` | `0@20,33` `1@143,33` | `StonecutterMenu.java:54-55` |
+/// | `Cartography` | `0@15,15` `1@15,52` `2@145,39` | `CartographyTableMenu.java:49-61` |
+/// | `Dispenser` | `0..9` a 3×3 grid from `62,17`, step `18` | `DispenserMenu.java:26,30-37` |
+/// | `Hopper` | `0..5` a row from `44,20`, step `18` | `HopperMenu.java:24` |
 ///
-/// All four call vanilla's standard `addStandardInventorySlots(inventory, 8,
-/// 84)` for the player section (`ItemCombinerMenu.java:48`,
-/// `EnchantmentMenu.java:72`) — a **fixed** `main_y = 84`, not derived from the
-/// top section the way [`generic_layout`]/[`crafting_layout`] compute it from
-/// their own row count, because these four screens' top sections don't stack
-/// rows the way a chest or crafting grid does.
+/// Every one of these calls vanilla's standard `addStandardInventorySlots`
+/// for the player section (`ItemCombinerMenu.java:48`,
+/// `EnchantmentMenu.java:72`, and — re-read individually rather than assumed
+/// to match — `AbstractFurnaceMenu.java:66`, `BrewingStandMenu.java:54`,
+/// `LoomMenu.java:106`, `StonecutterMenu.java:84`,
+/// `CartographyTableMenu.java:89`, `DispenserMenu.java:27`) with a **fixed**
+/// `main_y`, not derived from the top section the way
+/// [`generic_layout`]/[`crafting_layout`] compute it from their own row
+/// count, because none of these screens' top sections stack rows the way a
+/// chest or crafting grid does. `main_y` is `84` for every one of them
+/// **except** the hopper, whose own call is `addStandardInventorySlots(inventory,
+/// 8, 51)` (`HopperMenu.java:27`) — its panel is genuinely shorter
+/// (`imageHeight = 133`, not `166`), so restating `84` here would silently
+/// overlap the hopper's own five slots with the top of the main inventory.
 ///
 /// `None` for a menu with no [`Menu::special_layout`], or (defensively) if the
 /// menu's `container_size` does not match what the real screen has — the same
@@ -1667,9 +1966,69 @@ fn special_layout_positions(menu: &Menu) -> Option<SlotLayout> {
             slots.push(slot(0, 15.0, 47.0));
             slots.push(slot(1, 35.0, 47.0));
         }
+        // All three furnace-family menus share these coordinates
+        // (`AbstractFurnaceMenu` is the common constructor); only the
+        // background art differs, which `background_kind` selects on.
+        (SpecialLayout::Furnace | SpecialLayout::BlastFurnace | SpecialLayout::Smoker, 3) => {
+            slots.push(slot(0, 56.0, 17.0));
+            slots.push(slot(1, 56.0, 53.0));
+            slots.push(slot(2, 116.0, 35.0));
+        }
+        (SpecialLayout::Brewing, 5) => {
+            slots.push(slot(0, 56.0, 51.0));
+            slots.push(slot(1, 79.0, 58.0));
+            slots.push(slot(2, 102.0, 51.0));
+            slots.push(slot(3, 79.0, 17.0));
+            slots.push(slot(4, 17.0, 17.0));
+        }
+        (SpecialLayout::Loom, 4) => {
+            slots.push(slot(0, 13.0, 26.0));
+            slots.push(slot(1, 33.0, 26.0));
+            slots.push(slot(2, 23.0, 45.0));
+            slots.push(slot(3, 143.0, 57.0));
+        }
+        (SpecialLayout::Stonecutter, 2) => {
+            slots.push(slot(0, 20.0, 33.0));
+            slots.push(slot(1, 143.0, 33.0));
+        }
+        (SpecialLayout::Cartography, 3) => {
+            slots.push(slot(0, 15.0, 15.0));
+            slots.push(slot(1, 15.0, 52.0));
+            slots.push(slot(2, 145.0, 39.0));
+        }
+        // A 3×3 square, not `generic_layout`'s flat 9-wide row — the one
+        // thing that actually distinguishes a dispenser/dropper's screen
+        // from a plain 9-slot chest.
+        (SpecialLayout::Dispenser, 9) => {
+            for i in 0..9 {
+                slots.push(slot(
+                    i,
+                    62.0 + (i % 3) as f32 * SLOT,
+                    17.0 + (i / 3) as f32 * SLOT,
+                ));
+            }
+        }
+        (SpecialLayout::Hopper, 5) => {
+            for i in 0..5 {
+                slots.push(slot(i, 44.0 + i as f32 * SLOT, 20.0));
+            }
+        }
         _ => return None,
     }
-    let hotbar_y = append_main_inventory(&mut slots, container_size, 84.0);
+    // Every one of these calls `addStandardInventorySlots(inventory, 8,
+    // main_y)` with a **fixed** `main_y` — `84.0` for every screen except the
+    // hopper, whose real panel is *shorter* (`imageHeight = 133`, not `166`)
+    // and whose own constructor passes `51` (`HopperMenu.java:27`), not `84`.
+    // Getting this one wrong is exactly the "plausible but transposed"
+    // failure mode this whole function warns about: `84.0` would still
+    // produce a valid-looking layout, just one that overlaps the hopper's
+    // own five slots.
+    let main_y = if special == SpecialLayout::Hopper {
+        51.0
+    } else {
+        84.0
+    };
+    let hotbar_y = append_main_inventory(&mut slots, container_size, main_y);
     Some(SlotLayout {
         width: 176.0,
         height: hotbar_y + 24.0,
@@ -4275,6 +4634,104 @@ mod tests {
         );
     }
 
+    /// The six more `special_layout` menus issue #28 added — same proof as
+    /// [`background_kind_recognises_the_four_special_layout_menus`], plus a
+    /// control that the two size-9 special layouts (dispenser/dropper vs. a
+    /// plain 9-slot chest) are told apart by `special_layout`, not size.
+    #[test]
+    fn background_kind_recognises_the_six_menus_issue_28_added() {
+        assert_eq!(
+            background_kind(&Menu::furnace(SpecialLayout::Furnace)),
+            BackgroundKind::Furnace
+        );
+        assert_eq!(
+            background_kind(&Menu::furnace(SpecialLayout::BlastFurnace)),
+            BackgroundKind::BlastFurnace
+        );
+        assert_eq!(
+            background_kind(&Menu::furnace(SpecialLayout::Smoker)),
+            BackgroundKind::Smoker
+        );
+        assert_eq!(
+            background_kind(&Menu::brewing_stand()),
+            BackgroundKind::Brewing
+        );
+        assert_eq!(background_kind(&Menu::loom()), BackgroundKind::Loom);
+        assert_eq!(
+            background_kind(&Menu::stonecutter()),
+            BackgroundKind::Stonecutter
+        );
+        assert_eq!(
+            background_kind(&Menu::cartography_table()),
+            BackgroundKind::Cartography
+        );
+        assert_eq!(
+            background_kind(&Menu::dispenser()),
+            BackgroundKind::Dispenser
+        );
+        // Control: a plain 9-slot generic container (same size as the
+        // dispenser/dropper, no `special_layout`) still draws one row of the
+        // ordinary chest background.
+        assert_eq!(
+            background_kind(&Menu::generic(9)),
+            BackgroundKind::Generic { rows: 1 }
+        );
+    }
+
+    /// The hopper — not one of issue #28's own named containers, but found
+    /// while documenting the family it was almost mistaken for already
+    /// covering (see `SpecialLayout::Hopper`'s doc comment). The control
+    /// proves it is keyed on `special_layout`, not merely on size: a
+    /// same-sized (`5`) generic container is also what the brewing stand
+    /// happens to be, and the two must not collide.
+    #[test]
+    fn background_kind_recognises_the_hopper_as_a_shorter_panel_not_a_generic_row() {
+        assert_eq!(background_kind(&Menu::hopper()), BackgroundKind::Hopper);
+        assert_eq!(
+            background_kind(&Menu::brewing_stand()),
+            BackgroundKind::Brewing,
+            "a hopper and a brewing stand are both container_size 5 — \
+             special_layout, not size, must tell them apart"
+        );
+        assert_eq!(
+            background_kind(&Menu::generic(5)),
+            BackgroundKind::Generic { rows: 1 }
+        );
+    }
+
+    /// The hopper's own panel is genuinely shorter than every other special
+    /// layout — `176×133`, not `166` (`HopperScreen.java:15`) — because its
+    /// `addStandardInventorySlots` call uses `main_y = 51`, not `84`
+    /// (`HopperMenu.java:27`). The wrong hypothesis this rules out: reusing
+    /// the other special layouts' fixed `84.0` would still produce a
+    /// plausible-looking layout, just one 33px taller than the real panel,
+    /// with the hopper's own five slots overlapping the top of the main
+    /// inventory rows.
+    #[test]
+    fn hopper_slots_land_at_vanillas_real_positions_on_a_shorter_panel() {
+        let hopper = Menu::hopper();
+        let layout = slot_layout(&hopper);
+        assert_eq!(layout.width, 176.0);
+        assert_eq!(
+            layout.height, 133.0,
+            "expected vanilla's real 133 — the wrong hypothesis (reusing \
+             main_y = 84 like every other special layout) would give 166"
+        );
+        let at = |i: usize| {
+            layout
+                .slots
+                .iter()
+                .find(|s| s.menu_index == i)
+                .map(|s| (s.x, s.y))
+        };
+        for i in 0..5 {
+            assert_eq!(at(i), Some((44.0 + i as f32 * SLOT, 20.0)), "slot {i}");
+        }
+        // Main storage starts at y=51, not y=84 — the first main-storage
+        // slot (menu index 5) is the clearest witness.
+        assert_eq!(at(5), Some((8.0, 51.0)));
+    }
+
     /// The anvil's three slots land at vanilla's real positions
     /// (`AnvilMenu.java:42-45`), not [`generic_layout`]'s plain left-to-right
     /// row — and the panel is the real `176x166`, not whatever height a
@@ -4503,6 +4960,86 @@ mod tests {
         assert_eq!(at(&enchanting, 1), Some((35.0, 47.0)));
     }
 
+    /// The six menus issue #28 added, checked against the same vanilla slot
+    /// constructor arguments cited in `special_layout_positions`'s own doc
+    /// table (`AbstractFurnaceMenu.java:63-65`, `BrewingStandMenu.java:48-52`,
+    /// `LoomMenu.java:64-82`, `StonecutterMenu.java:54-55`,
+    /// `CartographyTableMenu.java:49-61`, `DispenserMenu.java:26,30-37`).
+    ///
+    /// The wrong hypothesis this rules out: before `special_layout_positions`
+    /// grew these arms, every one of them fell through to `generic_layout`'s
+    /// plain left-to-right row — e.g. the furnace's fuel slot would have
+    /// landed at `(26.0, 18.0)` (index 1 in a 9-wide row starting at `(8,
+    /// 18)`) instead of `(56.0, 53.0)`, and the panel would size itself to
+    /// `114 + 1*18 = 132` tall instead of the real `166`. Both wrong values
+    /// are far enough from the real ones that a transposed-but-plausible
+    /// layout (the exact trap issue #28 itself warns about) cannot pass this
+    /// by accident.
+    #[test]
+    fn the_six_menus_issue_28_added_match_their_menu_constructors() {
+        let at = |layout: &SlotLayout, i: usize| {
+            layout
+                .slots
+                .iter()
+                .find(|s| s.menu_index == i)
+                .map(|s| (s.x, s.y))
+        };
+
+        for layout_kind in [
+            SpecialLayout::Furnace,
+            SpecialLayout::BlastFurnace,
+            SpecialLayout::Smoker,
+        ] {
+            let furnace = slot_layout(&Menu::furnace(layout_kind));
+            assert_eq!(furnace.width, 176.0);
+            assert_eq!(furnace.height, 166.0);
+            assert_eq!(at(&furnace, 0), Some((56.0, 17.0)), "{layout_kind:?} ingredient");
+            assert_eq!(at(&furnace, 1), Some((56.0, 53.0)), "{layout_kind:?} fuel");
+            assert_eq!(at(&furnace, 2), Some((116.0, 35.0)), "{layout_kind:?} result");
+            // Wrong hypothesis: a plain 9-wide generic row starting at (8,18)
+            // would put the fuel slot (index 1) at (26.0, 18.0) — 30px away
+            // in x and 35px in y from the real position.
+            assert_ne!(at(&furnace, 1), Some((26.0, 18.0)));
+        }
+
+        let brewing = slot_layout(&Menu::brewing_stand());
+        assert_eq!(brewing.width, 176.0);
+        assert_eq!(brewing.height, 166.0);
+        assert_eq!(at(&brewing, 0), Some((56.0, 51.0)));
+        assert_eq!(at(&brewing, 1), Some((79.0, 58.0)));
+        assert_eq!(at(&brewing, 2), Some((102.0, 51.0)));
+        assert_eq!(at(&brewing, 3), Some((79.0, 17.0)));
+        assert_eq!(at(&brewing, 4), Some((17.0, 17.0)));
+
+        let loom = slot_layout(&Menu::loom());
+        assert_eq!(at(&loom, 0), Some((13.0, 26.0)));
+        assert_eq!(at(&loom, 1), Some((33.0, 26.0)));
+        assert_eq!(at(&loom, 2), Some((23.0, 45.0)));
+        assert_eq!(at(&loom, 3), Some((143.0, 57.0)));
+
+        let stonecutter = slot_layout(&Menu::stonecutter());
+        assert_eq!(at(&stonecutter, 0), Some((20.0, 33.0)));
+        assert_eq!(at(&stonecutter, 1), Some((143.0, 33.0)));
+
+        let cartography = slot_layout(&Menu::cartography_table());
+        assert_eq!(at(&cartography, 0), Some((15.0, 15.0)));
+        assert_eq!(at(&cartography, 1), Some((15.0, 52.0)));
+        assert_eq!(at(&cartography, 2), Some((145.0, 39.0)));
+
+        // The dispenser/dropper's whole point: a 3x3 square, not a 9-wide row.
+        let dispenser = slot_layout(&Menu::dispenser());
+        for i in 0..9 {
+            let want = (62.0 + (i % 3) as f32 * SLOT, 17.0 + (i / 3) as f32 * SLOT);
+            assert_eq!(at(&dispenser, i), Some(want), "dispenser slot {i}");
+        }
+        // Wrong hypothesis: `generic_layout(9)` puts every one of these nine
+        // slots on a single row at y=18.0. Slot 3 (the grid's second row,
+        // first column) is the clearest divergence: a flat row would put it
+        // at (8 + 3*18, 18) = (62.0, 18.0), one row above the real (62.0,
+        // 35.0).
+        assert_ne!(at(&dispenser, 3), Some((62.0, 18.0)));
+    }
+
     /// [`slot_layout`] is what both drawing (`build_inner`, above) and
     /// [`hit_test`] consult — proven here by calling `hit_test` itself rather
     /// than re-deriving the coordinates, so a future refactor that moves the
@@ -4523,6 +5060,29 @@ mod tests {
             hit,
             MenuHit::Slot(1),
             "a click on the anvil's second input slot must hit menu index 1 — \
+             if this fails, hit_test and the draw path have desynced"
+        );
+    }
+
+    /// Same proof as [`hit_test_agrees_with_the_anvil_layout_it_was_never_told_about`],
+    /// for the dispenser/dropper's 3×3 grid — the one issue #28 shape most
+    /// likely to desync, because it is the only new layout that reorders
+    /// slots into a **square** rather than merely repositioning a handful of
+    /// them. Slot 4 is the grid's centre cell (row 1, col 1): a click there
+    /// must not resolve to slot 3 or 5 (its row neighbours) or to whatever
+    /// index a flat 9-wide row would have put at that pixel.
+    #[test]
+    fn hit_test_agrees_with_the_dispenser_grid_it_was_never_told_about() {
+        let dispenser = Menu::dispenser();
+        let layout = slot_layout(&dispenser);
+        let (px, py) = panel_origin_with_scale(&layout, 1, VIEW.0, VIEW.1);
+        let x = px + 62.0 + SLOT + SLOT * 0.5;
+        let y = py + 17.0 + SLOT + SLOT * 0.5;
+        let hit = hit_test_with_scale(&dispenser, 1, VIEW.0, VIEW.1, x, y);
+        assert_eq!(
+            hit,
+            MenuHit::Slot(4),
+            "a click on the dispenser's centre cell must hit menu index 4 — \
              if this fails, hit_test and the draw path have desynced"
         );
     }
@@ -4554,6 +5114,15 @@ mod tests {
             "grindstone",
             "smithing",
             "enchanting_table",
+            "furnace",
+            "blast_furnace",
+            "smoker",
+            "brewing_stand",
+            "loom",
+            "stonecutter",
+            "cartography_table",
+            "dispenser",
+            "hopper",
         ] {
             src.insert(
                 format!("assets/minecraft/textures/gui/container/{name}.png"),
@@ -4566,14 +5135,35 @@ mod tests {
         // the same const the loader walks, so a sprite added there cannot be
         // forgotten here — `ContainerBackground::build` would fail instead.
         for id in GUI_SPRITES {
-            let size = if *id == SLOT_HIGHLIGHT_BACK || *id == SLOT_HIGHLIGHT_FRONT {
-                HIGHLIGHT as u32
+            // The furnace/brewing progress sprites (issue #28) are sized at
+            // their own real vanilla dimensions rather than folded into the
+            // `CELL` default, so a test reading back a sub-region through
+            // `sprite_subregion_quad` is exercising the same native size
+            // vanilla's own sprite is, not a same-sized stand-in.
+            let (w, h) = if *id == SLOT_HIGHLIGHT_BACK || *id == SLOT_HIGHLIGHT_FRONT {
+                (HIGHLIGHT as u32, HIGHLIGHT as u32)
+            } else if *id == FURNACE_LIT_PROGRESS
+                || *id == BLAST_FURNACE_LIT_PROGRESS
+                || *id == SMOKER_LIT_PROGRESS
+            {
+                (14, 14)
+            } else if *id == FURNACE_BURN_PROGRESS
+                || *id == BLAST_FURNACE_BURN_PROGRESS
+                || *id == SMOKER_BURN_PROGRESS
+            {
+                (24, 16)
+            } else if *id == BREWING_FUEL_LENGTH {
+                (18, 4)
+            } else if *id == BREWING_BREW_PROGRESS {
+                (9, 28)
+            } else if *id == BREWING_BUBBLES {
+                (12, 29)
             } else {
-                CELL as u32
+                (CELL as u32, CELL as u32)
             };
             src.insert(
                 format!("assets/minecraft/textures/gui/sprites/{id}.png"),
-                solid_png(size, size),
+                solid_png(w, h),
             );
         }
         let manager = ResourceManager::new(vec![Box::new(src) as Box<dyn ResourceSource>]);
@@ -4783,6 +5373,137 @@ mod tests {
             None,
             Some(&bg),
         )
+    }
+
+    /// As [`geo_with_background`], with `container_set_data` properties
+    /// attached — the feed the furnace/brewing progress bars (issue #28)
+    /// read through `frame.cost_data`.
+    fn geo_with_background_and_data(menu: &Menu, data: &[(i32, i32)]) -> ContainerGeometry {
+        let bg = synthetic_background();
+        let frame = ContainerFrame::new(Some(menu), "Title").with_cost_context(data, false, 0);
+        ContainerGeometry::build_inner(
+            &frame,
+            VIEW.0,
+            VIEW.1,
+            crate::config::AUTO_GUI_SCALE,
+            &IconAssets {
+                items: None,
+                models: None,
+            },
+            None,
+            Some(&bg),
+        )
+    }
+
+    /// The furnace family's lit-flame and burn-progress bars
+    /// (`AbstractFurnaceScreen.java:53-72`), driven entirely by
+    /// `frame.cost_data` — the same `container_set_data` feed the
+    /// anvil/enchanting cost lines already read, so this needs no new
+    /// wiring to reach `app.rs`. `data[0]` litTime `100`, `data[1]`
+    /// litDuration `200` gives `litProgress = 0.5`, so
+    /// `litProgressHeight = ceil(0.5 * 13) + 1 = 8`; `data[2]` cookingProgress
+    /// `12`, `data[3]` cookingTotalTime `24` gives `burnProgress = 0.5`, so
+    /// `burnProgressWidth = ceil(0.5 * 24) = 12`.
+    #[test]
+    fn furnace_burn_and_lit_bars_draw_from_container_data() {
+        let menu = Menu::furnace(SpecialLayout::Furnace);
+        let geo =
+            geo_with_background_and_data(&menu, &[(0, 100), (1, 200), (2, 12), (3, 24)]);
+        let rects = bg_rects(&geo, crate::config::AUTO_GUI_SCALE);
+        let layout = slot_layout(&menu);
+        let (px, py) = panel_origin(&layout, VIEW.0, VIEW.1);
+
+        let has = |want: [f32; 4]| {
+            rects
+                .iter()
+                .any(|r| r.iter().zip(want).all(|(a, b)| (a - b).abs() < 0.01))
+        };
+        assert!(
+            has([px + 56.0, py + 42.0, 14.0, 8.0]),
+            "expected the lit-flame bar at (56, 42, 14, 8) local; background \
+             quads were {rects:?}"
+        );
+        assert!(
+            has([px + 79.0, py + 34.0, 12.0, 16.0]),
+            "expected the burn-progress bar at (79, 34, 12, 16) local; \
+             background quads were {rects:?}"
+        );
+    }
+
+    /// Control for the above: with no `container_set_data` at all (the
+    /// honest all-zero state — an unlit, empty furnace, not a bug), neither
+    /// bar draws. Both `isLit()` (`data[0] > 0`) and `getBurnProgress`'s
+    /// `total != 0 && current != 0` guard are false against an all-zero
+    /// default, so this is also the every-existing-caller path (nothing
+    /// regressed for anvil/enchanting/chest screens, which never populated
+    /// these four properties anyway).
+    #[test]
+    fn control_an_unlit_furnace_with_no_container_data_draws_neither_bar() {
+        let menu = Menu::furnace(SpecialLayout::Furnace);
+        let geo = geo_with_background_and_data(&menu, &[]);
+        let rects = bg_rects(&geo, crate::config::AUTO_GUI_SCALE);
+        let layout = slot_layout(&menu);
+        let (px, py) = panel_origin(&layout, VIEW.0, VIEW.1);
+        let has = |want: [f32; 4]| {
+            rects
+                .iter()
+                .any(|r| r.iter().zip(want).all(|(a, b)| (a - b).abs() < 0.01))
+        };
+        assert!(!has([px + 56.0, py + 42.0, 14.0, 8.0]));
+        assert!(!has([px + 79.0, py + 34.0, 12.0, 16.0]));
+    }
+
+    /// The brewing stand's three progress widgets
+    /// (`BrewingStandScreen.java:34-51`). `data[1]` fuel `15` gives
+    /// `fuelLength = (18*15+19)/20 = 14`; `data[0]` brewingTicks `100` gives
+    /// `brewLength = floor(28*(1 - 100/400)) = 21` and
+    /// `bubbleLength = BUBBLELENGTHS[(100/2) % 7] = BUBBLELENGTHS[1] = 24`.
+    #[test]
+    fn brewing_stand_fuel_brew_and_bubble_bars_draw_from_container_data() {
+        let menu = Menu::brewing_stand();
+        let geo = geo_with_background_and_data(&menu, &[(0, 100), (1, 15)]);
+        let rects = bg_rects(&geo, crate::config::AUTO_GUI_SCALE);
+        let layout = slot_layout(&menu);
+        let (px, py) = panel_origin(&layout, VIEW.0, VIEW.1);
+        let has = |want: [f32; 4]| {
+            rects
+                .iter()
+                .any(|r| r.iter().zip(want).all(|(a, b)| (a - b).abs() < 0.01))
+        };
+        assert!(
+            has([px + 60.0, py + 44.0, 14.0, 4.0]),
+            "expected the fuel-length bar at (60, 44, 14, 4) local; \
+             background quads were {rects:?}"
+        );
+        assert!(
+            has([px + 97.0, py + 16.0, 9.0, 21.0]),
+            "expected the brew-progress bar at (97, 16, 9, 21) local; \
+             background quads were {rects:?}"
+        );
+        assert!(
+            has([px + 63.0, py + 19.0, 12.0, 24.0]),
+            "expected the bubbles bar at (63, 19, 12, 24) local; background \
+             quads were {rects:?}"
+        );
+    }
+
+    /// Control for the above: an empty, unlit brewing stand (no
+    /// `container_set_data`) draws none of the three bars.
+    #[test]
+    fn control_an_idle_brewing_stand_with_no_container_data_draws_no_bars() {
+        let menu = Menu::brewing_stand();
+        let geo = geo_with_background_and_data(&menu, &[]);
+        let rects = bg_rects(&geo, crate::config::AUTO_GUI_SCALE);
+        let layout = slot_layout(&menu);
+        let (px, py) = panel_origin(&layout, VIEW.0, VIEW.1);
+        let has = |want: [f32; 4]| {
+            rects
+                .iter()
+                .any(|r| r.iter().zip(want).all(|(a, b)| (a - b).abs() < 0.01))
+        };
+        assert!(!has([px + 60.0, py + 44.0, 14.0, 4.0]));
+        assert!(!has([px + 97.0, py + 16.0, 9.0, 21.0]));
+        assert!(!has([px + 63.0, py + 19.0, 12.0, 24.0]));
     }
 
     /// `AbstractContainerScreen.java:155`/`:161` —
