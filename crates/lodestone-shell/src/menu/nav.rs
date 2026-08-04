@@ -151,6 +151,19 @@ impl Default for FormField {
 pub const NAME_FIELD: usize = 0;
 /// [`EditForm`]'s address field. See [`NAME_FIELD`].
 pub const ADDRESS_FIELD: usize = 1;
+/// `ManageServerScreen`'s `manageServer.resourcePack` cycle button
+/// (`ManageServerScreen.java:43-54`). **Present and inactive**: `ServerEntry`
+/// has no `pack_status` field to cycle (see that struct's docs), so wiring
+/// this row would be exactly the fabricated persistence `CLAUDE.md`'s
+/// evidence standards warn against — same rule as every inactive settings row.
+pub const RESOURCE_PACK_ROW: usize = 2;
+/// `CommonComponents.GUI_DONE` (`ManageServerScreen.java:55-57`) — saves the
+/// form. A real, clickable row alongside the existing Enter/Tab keyboard path
+/// (see [`MenuNav::click`]'s `Screen::ServerEdit` arm).
+pub const DONE_ROW: usize = 3;
+/// `CommonComponents.GUI_CANCEL` (`ManageServerScreen.java:58-62`) — discards
+/// the form. See [`DONE_ROW`].
+pub const CANCEL_ROW: usize = 4;
 
 /// The logical canvas [`EditForm`]'s boxes are seeded against.
 ///
@@ -252,6 +265,13 @@ pub struct EditForm {
     focus: FocusSet,
     /// Index being edited, or `None` when adding a new entry.
     pub editing: Option<usize>,
+    /// Which of [`RESOURCE_PACK_ROW`]/[`DONE_ROW`]/[`CANCEL_ROW`] the mouse is
+    /// over, if any — separate from [`Self::field`] the same way
+    /// `WorldSelectNav::hovered` is separate from its own focus, and for the
+    /// same reason: those three rows are buttons, not text fields, so a mouse
+    /// hovering one must not steal keyboard focus out of whichever field it
+    /// was in. See [`super::render::MenuFrame::hovered`].
+    hovered: Option<usize>,
 }
 
 impl Default for EditForm {
@@ -298,6 +318,7 @@ impl EditForm {
             fields,
             focus,
             editing: None,
+            hovered: None,
         }
     }
 
@@ -397,6 +418,32 @@ impl EditForm {
         if row == NAME_FIELD || row == ADDRESS_FIELD {
             self.focus.set_focused(&mut self.fields, Some(row));
         }
+    }
+
+    /// The mouse moved over row `row` (issue: the screen's framework
+    /// conversion added three button rows this form has no `FocusTarget` for).
+    ///
+    /// A text field is still focused exactly as [`Self::focus_row`] does —
+    /// hover and focus are the same question there, as they always were. A
+    /// button row ([`RESOURCE_PACK_ROW`]/[`DONE_ROW`]/[`CANCEL_ROW`]) records
+    /// *only* [`Self::hovered`] and leaves keyboard focus untouched, which is
+    /// what lets the mouse travel to Done without pulling the caret out of the
+    /// address field the player is still typing into.
+    pub fn hover_row(&mut self, row: usize) {
+        match row {
+            NAME_FIELD | ADDRESS_FIELD => {
+                self.focus_row(row);
+                self.hovered = None;
+            }
+            RESOURCE_PACK_ROW | DONE_ROW | CANCEL_ROW => self.hovered = Some(row),
+            _ => {}
+        }
+    }
+
+    /// The button row the mouse is over, for [`super::render::MenuFrame::hovered`].
+    #[must_use]
+    pub fn hovered_button(&self) -> Option<usize> {
+        self.hovered
     }
 
     /// A click at logical `(x, y)`, dispatched through
@@ -1250,10 +1297,13 @@ impl MenuNav {
             // across the footer would pull the keyboard out of the search field.
             // See `world_select::WorldSelectNav::hovered`.
             Screen::WorldSelect => self.world_select.hover(row),
-            // `focus_row` *is* `ContainerEventHandler.setFocused(child)` — real
-            // focus, not a highlight index — because the row indices and
-            // `EditForm`'s focus ids are the same numbers (see [`NAME_FIELD`]).
-            Screen::ServerEdit => self.form.focus_row(row),
+            // `hover_row` is `ContainerEventHandler.setFocused(child)` for the
+            // two text fields — real focus, not a highlight index, because the
+            // row indices and `EditForm`'s focus ids are the same numbers (see
+            // [`NAME_FIELD`]) — and plain hover tracking for the three button
+            // rows the screen's framework conversion added (see
+            // [`EditForm::hover_row`]).
+            Screen::ServerEdit => self.form.hover_row(row),
             // The settings tree now *has* a cursor (issue #55), so hover moves
             // it — this arm's absence is what let #391 happen, because a screen
             // with no hover arm had to route a click through `Enter`. Row indices
@@ -1310,8 +1360,22 @@ impl MenuNav {
         // still typing into, and without one it flashed "AN ADDRESS IS REQUIRED"
         // at someone who had just clicked the field to fix that.
         if ui.screen() == Screen::ServerEdit {
-            self.form.focus_row(row);
-            return MenuAction::None;
+            return match row {
+                NAME_FIELD | ADDRESS_FIELD => {
+                    self.form.focus_row(row);
+                    MenuAction::None
+                }
+                // Vanilla's Done/Cancel (`ManageServerScreen.java:55-62`), now
+                // real clickable rows since the screen's framework conversion
+                // — see `save_entry`/`cancel_edit`, also reached by
+                // Enter/Escape so the two paths cannot disagree.
+                DONE_ROW => self.save_entry(ui),
+                CANCEL_ROW => self.cancel_edit(ui),
+                // `RESOURCE_PACK_ROW` (present, inactive — see its doc) and
+                // anything past the five rows this screen has: a click does
+                // nothing, same as every other inactive control.
+                _ => MenuAction::None,
+            };
         }
         // The third screen where it is wrong, and the reason the parent issue
         // insists every cursorless screen gets its own arm (issue #397): here a
@@ -1674,44 +1738,56 @@ impl MenuNav {
     fn key_edit(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         match self.form.handle_key(key) {
             FormOutcome::Handled => MenuAction::None,
-            FormOutcome::Cancel => {
-                // Cancel: the form is discarded, the list is untouched.
-                ui.close_server_edit();
-                MenuAction::None
+            FormOutcome::Cancel => self.cancel_edit(ui),
+            FormOutcome::Save => self.save_entry(ui),
+        }
+    }
+
+    /// Discards the form; the list is untouched. Vanilla's `CommonComponents.GUI_CANCEL`
+    /// (`ManageServerScreen.java:58-62`) and Escape's own meaning on this
+    /// screen ([`FormOutcome::Cancel`]) — shared by [`key_edit`](Self::key_edit)
+    /// and [`Self::click`]'s [`CANCEL_ROW`] arm so the button and the key do
+    /// the exact same thing rather than two copies that could drift apart.
+    fn cancel_edit(&mut self, ui: &mut UiState) -> MenuAction {
+        ui.close_server_edit();
+        MenuAction::None
+    }
+
+    /// Validates and saves the form, exactly as `Enter` does
+    /// ([`FormOutcome::Save`]) — shared with [`Self::click`]'s [`DONE_ROW`]
+    /// arm (vanilla's `CommonComponents.GUI_DONE`,
+    /// `ManageServerScreen.java:55-57`) for the same reason
+    /// [`Self::cancel_edit`] is shared.
+    fn save_entry(&mut self, ui: &mut UiState) -> MenuAction {
+        if !self.form.is_valid() {
+            // Refuse rather than saving a row that cannot be dialed. Vanilla
+            // reaches the same outcome by disabling the Done button instead
+            // (`ManageServerScreen.java:92-93`); this screen has no per-row
+            // `active` flag to disable it with, so refusing on activation is
+            // the equivalent it can express.
+            return MenuAction::None;
+        }
+        let entry = self.form.to_entry();
+        let previous = self.form.editing.and_then(|i| self.list.get(i)).cloned();
+        match self.form.editing {
+            Some(i) => {
+                self.list.update(i, entry.clone());
             }
-            FormOutcome::Save => {
-                if !self.form.is_valid() {
-                    // Refuse rather than saving a row that cannot be dialed.
-                    return MenuAction::None;
+            None => {
+                if let Some(i) = self.list.add(entry.clone()) {
+                    self.server = i;
                 }
-                let entry = self.form.to_entry();
-                let previous = self
-                    .form
-                    .editing
-                    .and_then(|i| self.list.get(i))
-                    .cloned();
-                match self.form.editing {
-                    Some(i) => {
-                        self.list.update(i, entry.clone());
-                    }
-                    None => {
-                        if let Some(i) = self.list.add(entry.clone()) {
-                            self.server = i;
-                        }
-                    }
-                }
-                self.persist();
-                ui.close_server_edit();
-                self.clamp_server();
-                // An edit that changed the address orphans the old row's cached
-                // status; the app forgets it, then probes the new address.
-                if let Some(old) = previous.filter(|p| p.host != entry.host || p.port != entry.port)
-                {
-                    return MenuAction::Forget(old);
-                }
-                MenuAction::Reprobe(Some(entry))
             }
         }
+        self.persist();
+        ui.close_server_edit();
+        self.clamp_server();
+        // An edit that changed the address orphans the old row's cached
+        // status; the app forgets it, then probes the new address.
+        if let Some(old) = previous.filter(|p| p.host != entry.host || p.port != entry.port) {
+            return MenuAction::Forget(old);
+        }
+        MenuAction::Reprobe(Some(entry))
     }
 
     /// The world-select screen (issue #397). **Every key goes through
@@ -2552,9 +2628,11 @@ mod tests {
             &mut crate::menu::render::FaviconCache::new(),
         )
         .expect("the edit form owns its frame");
-        assert_eq!(frame.rows.len(), 2);
-        assert_eq!(frame.rows[NAME_FIELD].detail, "NAME");
-        assert!(frame.rows[ADDRESS_FIELD].detail.starts_with("ADDRESS"));
+        // Two fields plus the framework-conversion's three button rows —
+        // Resource Packs, Done, Cancel (`ManageServerScreen.java:43-62`).
+        assert_eq!(frame.rows.len(), 5);
+        assert_eq!(frame.rows[NAME_FIELD].detail, "Server Name");
+        assert_eq!(frame.rows[ADDRESS_FIELD].detail, "Server Address");
         // A hover on row 1 must focus the *address* field, and the frame's own
         // `selected` must follow it.
         nav.hover(&ui, ADDRESS_FIELD);
@@ -2567,6 +2645,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame.selected, ADDRESS_FIELD);
+        // A hover on the Done row must **not** steal focus from the address
+        // field — it is a different question, carried on `hovered` (#391's
+        // shape averted a second way: a button hover must not silently move
+        // the caret).
+        nav.hover(&ui, DONE_ROW);
+        assert_eq!(
+            nav.form().field(),
+            FormField::Address,
+            "hovering a button must not move text focus"
+        );
+        assert_eq!(nav.form().hovered_button(), Some(DONE_ROW));
         // Out of range does nothing rather than clamping onto a real field.
         nav.hover(&ui, 7);
         assert_eq!(nav.form().field(), FormField::Address);
