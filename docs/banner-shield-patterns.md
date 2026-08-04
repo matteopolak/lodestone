@@ -86,7 +86,14 @@ built speculatively:
    this task's file ownership assigns to the cost-screens agent, not here.
    **This prerequisite does not block the block-entity consumer** — see
    below.
-2. **No banner/shield mesh.** Building it is explicitly issue #23's scope — the issue that owns this
+2. **No banner/shield mesh, resolver, shell wiring, or pixel gate.** Steps A
+   and B below (tint plumbing onto block entities; the `banner_layer_pipeline`
+   pipeline variant) landed this session and are **not** this prerequisite —
+   they removed a *different* blocker (see "A third prerequisite" below) that
+   turned out to be smaller than originally scoped. The mesh/resolver/shell
+   wiring/pixel gate remain a separate task, deliberately not started here
+   because the mesh needs assets work that would collide with a concurrent
+   agent. Building it is explicitly issue #23's scope — the issue that owns this
    one says so directly: "the in-world banner block entity rendering itself
    is #23's scope... land the shared compositing function here and have
    #23's banner work consume it." This doc and module are that hand-off
@@ -147,36 +154,81 @@ block-entity one — the next attempt at #23's banner work should start from
 the block-entity NBT path, not wait on the item-component work to land
 first.
 
-### A third prerequisite, found while landing bell: no per-instance tint
+### A third prerequisite — corrected: per-instance tint already existed, and is now on block entities too
 
-Not named by the original scoping, because it only becomes visible once you
-try to actually wire a consumer rather than read the compositing function's
-signature. `lodestone_render::block_entity::BlockEntityInstance`/
-`BlockEntityBatch` (the shared batching type chest/skull/bell all go through)
-carry **one texture stem and no tint** per instance — batching is keyed on
-`(model, texture)` alone, and every instance in a batch shares one draw with
-no per-instance colour multiply. That is sufficient for chest (material
-changes the *texture*, never a tint) and skull (no tint at all) and bell
-(same), but `banner_pattern_layers`/`shield_pattern_layers` hand back a
-`Vec<PatternLayer>` where **every layer is the same handful of mask sprites
-re-tinted by a different `DyeColor`** — a base layer plus up to sixteen
-pattern layers, each needing its *own* gamma-space tint over a shared mask.
-Vanilla itself draws this as N separate `submitModel` calls, one per layer,
-each with a different `diffuseColor` argument
-(`BannerRenderer.submitPatternLayer`) — there is no way to fold sixteen
-different tints into the current one-texture-per-instance batch shape.
+**This section previously claimed "no per-instance tint" and estimated a
+wide-blast-radius `EntityPipeline` change to add one. A Fable architecture
+review caught that the premise was false before any of that speculative work
+started, and it is worth recording exactly how, because the wrong claim was
+specific and confident-sounding, not a vague guess:**
 
-So a real consumer needs `BlockEntityInstance`/`BlockEntityBatch` widened
-with a per-instance tint (parallel to the existing per-instance `light: u8`
-that already exists for exactly this reason — see that struct's field),
-**and** the GPU-side vertex/instance format `EntityPipeline` uses would need
-a matching per-instance colour slot threaded through to the shader's tint
-multiply. `EntityPipeline` is shared with every mob and every other block
-entity, so this is a wider-blast-radius change than adding one more
-`(model, texture)` entry was for bell — it is the real reason a banner
-consumer is a bigger lift than "port the mesh and call the function", and it
-is worth checking this doc before assuming the compositing function alone is
-the missing piece.
+Per-instance gamma-space tint has existed **since before this doc's original
+scoping pass**, at shader location 9:
+`lodestone_render::entity_pipeline::EntityInstanceRaw::tint` packs
+`AARRGGBB` — bits 0–23 the gamma-space tint, bits 24–31 the hurt-overlay
+alpha — with `with_tint`/`InstanceTint`/`upload_instances_tinted` all `pub`
+and already in production use for sheep wool, dyed leather armour, the hurt
+overlay and the creeper flash. `entity.wgsl:269` already does the multiply in
+**gamma** space, per this repo's "vanilla is not colour-managed" rule. The
+"no per-instance tint" claim was checked against `BlockEntityInstance`/
+`BlockEntityBatch` alone (correctly — those *did* carry no tint field) and
+the finding was generalised to "the engine has no per-instance tint",
+which does not follow: the entity path already had it, block entities simply
+had not been plumbed onto the same mechanism yet.
+
+**That plumbing gap is closed as of this session (issue #174 step A):**
+`BlockEntityInstance` gained `tint: [u8; 3]` (all three resolvers —
+`resolve_chest`/`resolve_skull`/`resolve_bell` — pass white,
+`[255, 255, 255]`, i.e. `InstanceTint::NONE`'s rgb half) and
+`BlockEntityBatch` gained `tints: Vec<InstanceTint>`, filled by
+`plan_block_entities` in lockstep with the existing per-instance `lights`.
+`lodestone_shell::gpu::RenderState::prepare_block_entities` now uploads
+through `upload_instances_tinted` instead of the plain `upload_instances`.
+Chest/skull/bell are provably unaffected — white tint packs to exactly the
+same `EntityInstanceRaw` bits `upload_instances` produced (`with_tint([255,
+255, 255])` on an already-`NO_TINT` word is a no-op; `with_hurt_overlay(false)`
+and `with_creeper_white_overlay(0)` likewise), and all three block-entity
+pixel gates plus `placed_chest_block_entity_pixels` stayed green. **So the
+mechanism a banner base colour or a pattern-layer tint would use already
+reaches block entities**; no `EntityPipeline`-widening was needed, because
+the tint lives in the *instance buffer*, not the pipeline.
+
+**What genuinely does need a pipeline change — and step B built it** —
+is the *pipeline state* the original entry below correctly identified, which
+tint has nothing to do with: vanilla's `RenderPipelines.BANNER_PATTERN`
+(`RenderPipelines.java:311-318`) draws the flag opaque and then each mask
+layer with **translucent blend, depth write off, no alpha cutout**, at equal
+depth, while `EntityPipeline`'s mob/armour pipelines are `blend: None,
+depth_write: true` with an unconditional cutout `discard`. `build_entity_pipeline`
+(`crates/lodestone-render/src/entity_pipeline.rs`) is now parameterised by
+`blend: Option<wgpu::BlendState>` and `depth_write: bool` in addition to the
+`depth_compare` it already took, and `EntityPipeline::banner_layer_pipeline()`
+requests `LessEqual` (vanilla's `GREATER_THAN_OR_EQUAL` under this engine's
+`[0,1]` depth, per `CLAUDE.md`), `Some(BlendState::ALPHA_BLENDING)`,
+`depth_write: false`. Both existing callers (`EntityPipeline::new`,
+`armour_pipeline`) pass `None, true` explicitly — the same hardcoded values
+`build_entity_pipeline` used before this change — so this is zero behaviour
+change for mobs and armour; only `entity_pipeline`'s own hermetic unit tests
+plus a `lodestone-render`/`lodestone-shell` compile were re-run to confirm
+that (there is no pixel gate to add yet — nothing constructs a banner mesh to
+draw through it).
+
+**The alpha-cutout `discard` is still there and still unconditional.**
+`banner_layer_pipeline` changes the pipeline's blend/depth state, not the
+shader program — `entity.wgsl`'s `fs_main` discards below alpha 0.5
+regardless of which pipeline invokes it, so a mask layer's antialiased edge
+texels would still be lost rather than blended, which vanilla's own
+no-cutout draw does not do. A `fs_main_no_cutout` entry point is the fix and
+is **deferred**, not built, in this pass — see "Still missing" below.
+
+The order-dependency finding this section originally reached is still
+correct and unaffected by the tint correction: because translucent
+depth-write-off draws must submit in the item's stored pattern order, they
+still cannot ride `plan_block_entities`' `(model, texture)` batching (two
+banners reusing the same two sprites in opposite orders could not both be
+right), so a real consumer still wants the opaque flag/pole/bar through the
+existing batcher and the tinted layers through a small separate ordered draw
+list, not atlas stitching.
 
 ## How to change it, and the gotchas
 
