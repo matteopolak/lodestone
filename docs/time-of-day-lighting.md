@@ -3,12 +3,22 @@
 ## What it is
 
 The one number that makes terrain and mobs darker at night: the factor the **sky**
-half of the lightmap is scaled by. Both the model (terrain/fluid) and entity
-shaders compute
+half of the lightmap is scaled by. **This doc's original scope was the clock
+feed alone** — the paragraphs below describing `lightmap_term` and "Decision:
+not built" are the historical record of that scope, kept per this repo's
+practice of writing down what was measured rather than deleting it once
+overtaken. **The colour half described as declined is now built** — see
+["`SKY_LIGHT_COLOR`: now built" below](#sky_light_color-now-built-n1n2n3) for
+what changed and why the objections below stopped applying.
+
+The clock feed still lands in the same lane. Before the colour work, the model
+(terrain/fluid) and entity shaders computed a single scalar:
 
 ```wgsl
-// `lightmap_term`, identical in model.wgsl / entity.wgsl / fluid.wgsl,
-// mirrored in Rust by `lodestone_render::light` — see light-ramp.md
+// `lightmap_term`, retired — see the colour section below. Identical in
+// model.wgsl / entity.wgsl / fluid.wgsl, mirrored in Rust by
+// `lodestone_render::light::light_term`/`light_term_from_levels` — see
+// light-ramp.md. Still used by GUI/particle callers, unaudited.
 let c = clamp(max(light_brightness(sky) * sky_darken(), light_brightness(block)), 0.0, 1.0);
 light_term = mix(c, not_gamma_grey(c), BRIGHTNESS_FACTOR);
 ```
@@ -363,12 +373,70 @@ it. Read from the jar rather than assumed:
   touches the one formula every terrain and mob pixel on screen currently
   runs through.
 
-**Decision: not built.** The factor is the well-bounded, high-value half and
-is done. The colour half is a real shading-model change spanning two shaders
-and several existing gates, not a value to plumb through an existing lane —
-exactly the "changing several consumers" case where a half-wired version
-would be worse than none. Left as a scoped follow-up with the ground-truth
-data (`sky_light_timeline_jvm.txt`'s third column) already captured.
+**Decision at the time: not built.** The factor was the well-bounded,
+high-value half and was done. The colour half was assessed as a real
+shading-model change spanning two shaders and several existing gates, not a
+value to plumb through an existing lane. That assessment is preserved above
+because most of it held — the shading-model change genuinely happened. What
+turned out to be wrong was the **uniform-budget** half of the objection: see
+the section below.
+
+## `SKY_LIGHT_COLOR`: now built (N1/N2/N3)
+
+**This reverses the "not built" decision above.** A later investigation
+(prompted by a player report that "at night the shadow is supposed to be a
+different colour") re-examined the blocker and found it did not hold:
+
+* **N3 — no new uniform lane needed, contrary to this doc's own costing.**
+  This doc's "uniform-lane budget" bullet above correctly noted two free
+  `f32` lanes (`eye.w`/`end_enabled.w`) but concluded a *packed* 24-bit RGB
+  lane would still be needed and dismissed that as not the real blocker
+  anyway. What was missed: `SKY_LIGHT_COLOR` and `SKY_LIGHT_FACTOR`
+  (`sky_darken`) share **identical keyframe ticks** — `730 / 11270 / 13140 /
+  22860` (`Timelines.java:71-80`) — and neither track calls
+  `.setEasing(...)`, so both interpolate linearly on the same parameter.
+  The colour is therefore **algebraically recoverable from `sky_darken`
+  alone**: `t = clamp((1 - sky_darken) / (1 - 0.24), 0, 1)`, then
+  `srgbLerp(t, white, 0x7A7AFF)` with `Mth.lerpInt`'s floor. No uniform
+  change, no bind-group change, no packed lane — `crate::light::
+  sky_light_color_from_darken`, verified byte-exact against
+  `sky_light_timeline_jvm.txt`'s third column (the "already captured" data
+  this doc mentioned) at ticks 0, 12000, 13000, 13140.
+* **N1 — the shading-model rewrite this doc scoped correctly.** `model.wgsl`/
+  `fluid.wgsl`'s `VsOut.shade` and `entity.wgsl`'s `VsOut.light_term` are now
+  `vec3<f32>`, computed by `lightmap_color`/`crate::light::
+  light_color_from_levels` — the real `notGamma` (`maxScaled/maxComponent`,
+  not the grey specialisation), sky and block computed and tinted
+  separately, then added, exactly as this doc's "structurally different"
+  bullet above said would be required.
+* **N2 — the additive combine, `BlockFactor`, and the warm tint**, all part
+  of the same change: `light_color_from_levels` adds the sky and block
+  contributions (rather than `max`) and scales block by `BLOCK_FACTOR = 1.4`
+  with `BLOCK_LIGHT_TINT = (1.0, 216/255, 140/255)` mixed toward white by
+  the parabolic factor `(2·level - 1)²`.
+* **The blast-radius bullet was largely right about which files would need
+  re-baselining, and largely wrong about the risk being prohibitive.** The
+  retained scalar `light_term`/`light_term_from_levels` (GUI/particle
+  callers, unaudited) keep the pixel gates this doc worried about
+  byte-identical, since they were not touched. The genuinely daylight-only
+  claim held exactly as predicted: `SKY_LIGHT_COLOR` is white across the
+  whole `[730, 11270)` plateau, so `light.rs`'s
+  `daylight_vec3_reduces_to_the_existing_scalar_when_block_light_is_absent`
+  pins that every pure-sky-lit packed byte is unchanged, written *before*
+  the shader edit as the cheapest possible guard on this exact risk.
+
+Why the original scalar gate (`midnight_lands_on_vanillas_value_and_not_on_
+either_wrong_one`) never caught the hue gap: `not_gamma_grey`'s grey
+specialisation is algebraically identical to the real `notGamma` whenever
+the input's max component is the one being measured, and blue is the max
+component at night — so the scalar gate's `0.504652` is exactly vanilla's
+**blue** channel, and a scalar model cannot be wrong about the one channel
+it happens to reproduce. `light.rs`'s
+`midnight_blue_matches_the_old_scalar_gate_but_red_does_not` is the direct
+correction, and the ratio-of-ratios gate (`ratio_of_ratios_lands_on_vanillas_
+hue_not_grey`) is the one CLAUDE.md specifies for this exact failure mode —
+see `docs/fog.md`'s twin fix (the fog colour's own day/night track) for the
+sibling investigation this one shipped alongside.
 
 ## The ramp was linear where vanilla's is a curve (issues #383, #386 — fixed)
 
@@ -432,12 +500,15 @@ that stops agreeing with the terrain it stands on. What it cost, which gates mov
 and which were unmoved because both curves are exactly `1.0` at full light is in
 [light-ramp.md](./light-ramp.md).
 
-Still unported, and belonging to the `SKY_LIGHT_COLOR` change above rather than to
-the curve: the **additive combine** (`curve(sky)*skyFactor + curve(block)*BlockFactor`
-where we still take `max`), `BlockFactor = blockLightFlicker + 1.4` (torchlight
-flickers and exceeds 1.0), and `AmbientColor` (black in the overworld, non-zero in
-the Nether/End). The combine cannot be done without the colour work: `BLOCK_LIGHT_TINT`
-is not white, so an additive combine makes the light term a `vec3`.
+**Now ported** (see "`SKY_LIGHT_COLOR`: now built" above), except one piece:
+the **additive combine** and `BlockFactor = 1.4` (a flat constant, not
+`blockLightFlicker + 1.4` — the flicker term is still unmodelled, a visible
+torch shimmer tracked as its own follow-up) are in
+`crate::light::light_color_from_levels`. `AmbientColor` was already modelled
+before this change (see [light-ramp.md](./light-ramp.md)); it is grey in the
+overworld and stays a scalar constant, while the Nether's `0x302821` and the
+End's `0x3F473F` are not and remain unported, part of the same per-dimension
+colour pass as the Nether/End's own fog colours (`docs/fog.md`).
 
 ## Gates
 
@@ -451,6 +522,8 @@ Kept deliberately separate so a pass on one cannot mask the other.
 | `crates/lodestone-render/tests/entity_night_pixels.rs` | the entity shader responds to a `sky_darken` it is *handed* | where that value comes from |
 | `crates/lodestone-render/tests/grass_light_response_gate.rs` | the model shader responds to a light byte it is *handed* | where that value comes from |
 | `crates/lodestone-render/tests/sky_light_factor_timeline.rs` | **the curve shape**: `sky_darken_for_time_of_day` against a JVM dump of the real timeline at all 24000 ticks, including a negative control proving the scan would have failed the retired cosine port | the runtime feed (that's `live_time_of_day.rs`'s job) or pixels |
+| `crates/lodestone-render/src/light.rs` (`sky_light_color_matches_the_jvm_oracle_byte_exact`) | **N3's colour derivation**: `sky_light_color_from_darken` against the same JVM oracle's third column, at ticks 0/12000/13000/13140 | the runtime feed, or that the shaders actually consume it (that is the naga gate plus the shader edit's own review) |
+| `crates/lodestone-render/src/light.rs` (`ratio_of_ratios_lands_on_vanillas_hue_not_grey`, `three_populations_in_one_frame_disagree_the_way_vanilla_does`, `midnight_blue_matches_the_old_scalar_gate_but_red_does_not`) | **N1/N2's hue**: the vec3 lightmap against hand-derived vanilla values, per CLAUDE.md's ratio-of-ratios pattern, with a cave population as the control against a global night tint and a torch population as the control against a hue-only fix that missed `BlockFactor`/the additive combine | pixels — these are hermetic, not a screen-rect gate |
 
 The live gate carries the control this defect specifically needs. On a *fresh*
 world the world age and the day clock coincide, so a broken feed and a working one
@@ -489,6 +562,10 @@ None. No flags, no env vars. Two things are worth knowing:
   oracle for the `SKY_LIGHT_FACTOR`/`SKY_LIGHT_COLOR` timeline, and
   `crates/lodestone-render/tests/support/sky_light_timeline_jvm.txt`, its
   committed dump.
+* `crates/lodestone-render/src/light.rs` — `light_color_from_levels`,
+  `sky_light_color_from_darken`, `not_gamma_vec3` (N1/N2/N3, the colour
+  lightmap). `crates/lodestone-render/src/shaders/{model,entity,fluid}.wgsl`
+  — `lightmap_color`, the three-way-duplicated shader copy.
 * Behavioural reference: `.cache/mc/26.2/src/net/minecraft/world/clock/*`,
   `world/timeline/Timelines.java`, `world/attribute/EnvironmentAttributes.java`,
   `util/{Keyframe,KeyframeTrack,KeyframeTrackSampler,EasingType}.java`,
