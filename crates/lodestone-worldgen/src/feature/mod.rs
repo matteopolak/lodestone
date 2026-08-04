@@ -54,6 +54,12 @@ use serde_json::Value;
 use crate::math;
 use crate::rng::{RandomSource, WorldgenRandom};
 
+/// Grass/flower/tree placement (issue #406) — a separate engine from the
+/// rest of this module (ores), sharing only [`BlockPos`]/[`IntProvider`]/
+/// [`canon_state`] and the [`STEP_VEGETAL_DECORATION`] constant below. See
+/// its own module doc for scope and named gaps.
+pub mod vegetation;
+
 /// `GenerationStep.Decoration.UNDERGROUND_ORES.ordinal()`.
 pub const STEP_UNDERGROUND_ORES: i32 = 6;
 
