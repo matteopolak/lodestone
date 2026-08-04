@@ -9,7 +9,7 @@
 //! encoders/decoders (plan §3).
 
 use lodestone_core::State;
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ResourceKey, Rotation, Vec3};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Difficulty, ResourceKey, Rotation, Vec3};
 use uuid::Uuid;
 
 use crate::chunk::ChunkColumn;
@@ -152,6 +152,36 @@ pub enum ServerBound {
         /// [`BlockAction::sequence`](Self::BlockAction) for why it is
         /// decoded but not yet acted on).
         sequence: i32,
+    },
+    /// The client requested a difficulty change
+    /// (`ServerboundChangeDifficultyPacket`, issue #268). This crate has no
+    /// permission/operator model, so `crate::server`'s consumer always
+    /// accepts it — see that consumer's own doc comment for the vanilla
+    /// permission check this replaces and why.
+    DifficultyChanged {
+        /// The requested difficulty.
+        difficulty: Difficulty,
+    },
+    /// The client requested locking/unlocking difficulty
+    /// (`ServerboundLockDifficultyPacket`, issue #268).
+    DifficultyLockChanged {
+        /// Whether difficulty should now be locked (further
+        /// [`DifficultyChanged`](Self::DifficultyChanged) requests still
+        /// decode and update the tracked value — vanilla does not reject a
+        /// change while locked at the packet layer either; the lock is a UI
+        /// affordance in the vanilla client, not a server-side veto).
+        locked: bool,
+    },
+    /// The client requested one or more game-rule value changes
+    /// (`ServerboundSetGameRulePacket`, issue #268). Each entry is `(rule
+    /// key, raw string value)`, exactly as sent — this crate has no
+    /// `GameRules` registry to validate a key or parse a value's real type
+    /// against, so nothing here rejects an unknown key or a malformed value
+    /// (vanilla itself just logs a warning and skips the entry; see
+    /// `crate::server`'s consumer).
+    GameRuleChanged {
+        /// `(rule key, raw value)` pairs, in wire order.
+        entries: Vec<(String, String)>,
     },
     /// A packet the loop does not need to act on (chunk-batch
     /// acknowledgements, teleport confirmations, look-only or status-only
@@ -389,6 +419,32 @@ pub trait ServerProtocol: Send + Sync {
         let _ = health;
         ServerDirective::None
     }
+
+    /// Encodes a difficulty confirmation (vanilla
+    /// `ClientboundChangeDifficultyPacket`, wire id `change_difficulty`),
+    /// sent back to the requesting connection after
+    /// [`ServerBound::DifficultyChanged`]/[`DifficultyLockChanged`](ServerBound::DifficultyLockChanged)
+    /// (issue #268). `locked` is always the connection's *current* lock
+    /// state, not necessarily what this particular request changed — see
+    /// `crate::server`'s consumer, which always passes both fields together
+    /// regardless of which of the two `ServerBound` variants triggered the
+    /// call. The default emits nothing.
+    fn encode_change_difficulty(&self, difficulty: Difficulty, locked: bool) -> ServerDirective {
+        let _ = (difficulty, locked);
+        ServerDirective::None
+    }
+
+    /// Encodes a game-rule confirmation (vanilla
+    /// `ClientboundGameRuleValuesPacket`, wire id `game_rule_values`) for
+    /// exactly the entries a [`ServerBound::GameRuleChanged`] request just
+    /// set (issue #268) — not vanilla's full current-rule-table broadcast,
+    /// since this crate models no default rule set to broadcast the rest of;
+    /// see `crate::server`'s consumer for the full scope note. The default
+    /// emits nothing.
+    fn encode_game_rule_values(&self, entries: &[(String, String)]) -> ServerDirective {
+        let _ = entries;
+        ServerDirective::None
+    }
 }
 
 /// Forwards every method to the boxed implementor, so a **trait object** can be
@@ -494,6 +550,14 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
     fn encode_set_health(&self, health: f32) -> ServerDirective {
         (**self).encode_set_health(health)
     }
+
+    fn encode_change_difficulty(&self, difficulty: Difficulty, locked: bool) -> ServerDirective {
+        (**self).encode_change_difficulty(difficulty, locked)
+    }
+
+    fn encode_game_rule_values(&self, entries: &[(String, String)]) -> ServerDirective {
+        (**self).encode_game_rule_values(entries)
+    }
 }
 
 #[cfg(test)]
@@ -577,6 +641,12 @@ mod tests {
         fn encode_set_health(&self, health: f32) -> ServerDirective {
             send(health as i32)
         }
+        fn encode_change_difficulty(&self, difficulty: Difficulty, locked: bool) -> ServerDirective {
+            send(difficulty as i32 * 10 + i32::from(locked))
+        }
+        fn encode_game_rule_values(&self, entries: &[(String, String)]) -> ServerDirective {
+            send(entries.len() as i32)
+        }
     }
 
     fn snapshot(id: i32) -> EntitySnapshot {
@@ -595,7 +665,7 @@ mod tests {
     /// `Box<dyn ServerProtocol>` and through the concrete value.
     ///
     /// This is the control for the forwarding impl above, and the reason it is
-    /// worth writing is that **thirteen of the eighteen methods have defaults**:
+    /// worth writing is that **fifteen of the twenty methods have defaults**:
     /// forgetting to forward one is not a compile error, it silently answers
     /// `ServerDirective::None`. That failure only ever shows up in a boxed
     /// server — i.e. only in singleplayer, which is exactly the path with no
@@ -658,6 +728,15 @@ mod tests {
             direct.encode_air_supply_update(19)
         );
         assert_eq!(boxed.encode_set_health(4.0), direct.encode_set_health(4.0));
+        assert_eq!(
+            boxed.encode_change_difficulty(Difficulty::Hard, true),
+            direct.encode_change_difficulty(Difficulty::Hard, true)
+        );
+        let rules = [("doDaylightCycle".to_string(), "false".to_string())];
+        assert_eq!(
+            boxed.encode_game_rule_values(&rules),
+            direct.encode_game_rule_values(&rules)
+        );
 
         // -- control ---------------------------------------------------------
         // Every assertion above compares two answers, so it would also pass if
@@ -666,5 +745,10 @@ mod tests {
         // defaulted method would produce.
         assert_ne!(direct.encode_keep_alive(11), ServerDirective::None);
         assert_ne!(direct.welcome_message(), Vec::<ServerDirective>::new());
+        assert_ne!(
+            direct.encode_change_difficulty(Difficulty::Hard, true),
+            ServerDirective::None
+        );
+        assert_ne!(direct.encode_game_rule_values(&rules), ServerDirective::None);
     }
 }

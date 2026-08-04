@@ -741,6 +741,98 @@ pub struct SetCarriedItem {
     pub slot: i16,
 }
 
+/// Serverbound `change_difficulty` packet (issue #268).
+///
+/// Wire layout: a single VarInt difficulty ordinal
+/// (`ServerboundChangeDifficultyPacket`, `Difficulty.STREAM_CODEC` —
+/// `ByteBufCodecs.idMapper`, a raw VarInt of the ordinal, not the
+/// `#[mc(varint)]`-tagged *typed* int this crate elsewhere reserves for
+/// packet-prediction sequence numbers; same wire shape either way — see
+/// `.cache/mc/26.2/src/net/minecraft/world/Difficulty.java`: `0` peaceful,
+/// `1` easy, `2` normal, `3` hard).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:change_difficulty", state = Play, bound = Server)]
+pub struct ChangeDifficultyServerbound {
+    /// Difficulty ordinal, `0..=3`.
+    #[mc(varint)]
+    pub difficulty: i32,
+}
+
+/// Clientbound `change_difficulty` packet — the confirmation
+/// [`crate::server_protocol::V770ServerProtocol::encode_change_difficulty`]
+/// sends back (issue #268).
+///
+/// Wire layout: VarInt difficulty ordinal, then a `locked` bool
+/// (`ClientboundChangeDifficultyPacket`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:change_difficulty", state = Play, bound = Client)]
+pub struct ChangeDifficultyClientbound {
+    /// Difficulty ordinal, `0..=3`.
+    #[mc(varint)]
+    pub difficulty: i32,
+    /// Whether difficulty is locked (further client-side UI affordance;
+    /// vanilla does not reject a `ChangeDifficultyServerbound` while locked
+    /// at the packet layer).
+    pub locked: bool,
+}
+
+/// Serverbound `lock_difficulty` packet (issue #268).
+///
+/// Wire layout: a single bool (`ServerboundLockDifficultyPacket`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:lock_difficulty", state = Play, bound = Server)]
+pub struct LockDifficulty {
+    /// Whether difficulty should now be locked.
+    pub locked: bool,
+}
+
+/// One `(rule key, raw string value)` pair, shared by [`SetGameRule`]
+/// (serverbound) and [`GameRuleValues`] (clientbound) — both wire formats are
+/// a VarInt-prefixed list of this same pair shape
+/// (`ServerboundSetGameRulePacket.Entry`'s `(ResourceKey<GameRule<?>>,
+/// String)`, whose `ResourceKey` stream codec is `Identifier.STREAM_CODEC` —
+/// a plain `namespace:path` string, the same wire shape `GameLogin::levels`
+/// already uses for dimension keys — so `key` here is that string verbatim,
+/// not a registry sync id).
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+pub struct GameRuleEntry {
+    /// The rule's identifier, e.g. `"minecraft:doDaylightCycle"`.
+    pub key: String,
+    /// The rule's raw string value, e.g. `"false"` or `"64"` — unparsed
+    /// against any rule-specific type (this crate has no `GameRules`
+    /// registry to parse against; see `crate::server`'s consumer).
+    pub value: String,
+}
+
+/// Serverbound `set_game_rule` packet (issue #268).
+///
+/// Wire layout: a VarInt-prefixed list of [`GameRuleEntry`]
+/// (`ServerboundSetGameRulePacket`).
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:set_game_rule", state = Play, bound = Server)]
+pub struct SetGameRule {
+    /// The rule changes requested, in wire order.
+    pub entries: Vec<GameRuleEntry>,
+}
+
+/// Clientbound `game_rule_values` packet — the confirmation
+/// [`crate::server_protocol::V770ServerProtocol::encode_game_rule_values`]
+/// sends back (issue #268). Vanilla's own struct carries the *whole* current
+/// rule table as a map (`ClientboundGameRuleValuesPacket`); this crate has no
+/// default rule set to include the rest of, so
+/// `V770ServerProtocol::encode_game_rule_values` only ever sends the entries
+/// that were just changed — same wire shape (a VarInt-prefixed list of
+/// key/value pairs reads identically whether or not it happens to be the
+/// full table), just a documented narrower *content*.
+///
+/// Wire layout: a VarInt-prefixed list of [`GameRuleEntry`].
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:game_rule_values", state = Play, bound = Client)]
+pub struct GameRuleValues {
+    /// The rule entries being confirmed.
+    pub entries: Vec<GameRuleEntry>,
+}
+
 /// Serverbound `player_input` packet (movement-input bitset).
 ///
 /// Wire layout: a single flag byte — bit `1` forward, `2` backward, `4` left,
