@@ -30,6 +30,7 @@
 //! skips `Drop`), and a server list that survives only a graceful quit is one
 //! that silently loses the entry the player just added.
 
+use super::command_block;
 use super::edit_box::EditBox;
 use super::focus::{self, FocusChildren, FocusSet, FocusTarget, KeyEvent, KeyOutcome};
 use super::servers::{MAX_NAME_CHARS, ServerEntry, ServerList, servers_path};
@@ -128,6 +129,14 @@ pub enum MenuAction {
     /// just resubmits the same request — harmless, since `Sim::respawn` is a
     /// no-op once `Sim::is_dead` has already gone false.
     Respawn,
+    // A `SetCommandBlock(command_block::CommandBlockSubmit)` variant belongs
+    // here — issue #47's Done button already computes exactly that payload
+    // (`CommandBlockState::to_submit`, fully tested) — but adding it now
+    // would break `app.rs`'s exhaustive `match action` (a brokered file this
+    // crate cannot edit) with no compiling counterpart on the other side.
+    // Left out rather than landed half-broken; see #436 and
+    // `activate_command_block_row`'s `Done` arm for the exact two-file patch
+    // this needs, applied together.
 }
 
 /// Which field of the add/edit form has focus.
@@ -1039,6 +1048,16 @@ pub struct MenuNav {
     /// the *differences* `DoubleClickTracker` computes matter, so nothing
     /// needs rearming.
     click_clock: std::time::Instant,
+    /// The command block edit screen's widgets and toggles (issue #47), held
+    /// for the same reason [`Self::form`] is: it owns a real [`EditBox`] that
+    /// cannot be rebuilt per frame. `None` whenever
+    /// [`Screen::CommandBlockEdit`](super::Screen::CommandBlockEdit) is not
+    /// showing — unlike [`Self::form`], which always has *some* value because
+    /// [`Screen::ServerEdit`](super::Screen::ServerEdit) is always reached
+    /// through a button that seeds one first, this screen has no such
+    /// producer yet (see [`command_block`]'s module doc), so there is no
+    /// non-empty default to construct eagerly.
+    command_block: Option<command_block::CommandBlockState>,
 }
 
 impl Default for MenuNav {
@@ -1119,6 +1138,7 @@ impl MenuNav {
             create_world: crate::menu::create_world::CreateWorldNav::new(),
             double_click: super::focus::DoubleClickTracker::new(),
             click_clock: std::time::Instant::now(),
+            command_block: None,
         }
     }
 
@@ -1424,6 +1444,39 @@ impl MenuNav {
         &self.form
     }
 
+    /// The command block edit screen's state (issue #47), or `None` when
+    /// [`Screen::CommandBlockEdit`] is not showing — see [`Self::command_block`]'s
+    /// own field doc for why this is the one screen-state field that is not
+    /// eagerly non-empty.
+    #[must_use]
+    pub fn command_block(&self) -> Option<&command_block::CommandBlockState> {
+        self.command_block.as_ref()
+    }
+
+    /// Opens the command block edit screen (issue #47) with `open`'s data —
+    /// which a right-click handler would read off the block entity's NBT; see
+    /// [`command_block`]'s module doc for why nothing does that yet. Only from
+    /// [`Screen::Playing`], matching [`UiState::open_command_block`]'s own
+    /// guard (this method drives both: the widget state here, the screen
+    /// there, in that order — mirroring [`Self::form`]'s
+    /// `EditForm::adding`-then-`ui.open_server_edit()` pairing at every one of
+    /// its call sites).
+    pub fn open_command_block(&mut self, ui: &mut UiState, open: command_block::CommandBlockOpen) {
+        if ui.screen() == Screen::Playing {
+            self.command_block = Some(command_block::CommandBlockState::new(open));
+            ui.open_command_block();
+        }
+    }
+
+    /// Closes the command block edit screen without sending anything — Cancel,
+    /// or Escape. [`Self::activate_command_block_row`]'s `Done` arm is the
+    /// other way out, and it sends [`command_block::CommandBlockState::
+    /// to_action`] before calling this same method.
+    pub fn close_command_block(&mut self, ui: &mut UiState) {
+        self.command_block = None;
+        ui.close_command_block();
+    }
+
     /// The last persistence failure, if any.
     #[must_use]
     pub fn save_error(&self) -> Option<&str> {
@@ -1519,6 +1572,16 @@ impl MenuNav {
             // arm above: without this, a click would have to route through
             // `Enter`, which is #391's exact trap one screen further.
             Screen::Social => self.social.hover_row(row),
+            // The command block edit screen (issue #47) — plain hover
+            // tracking, like `Screen::Paused`/`Screen::Death` above: this
+            // screen has no keyboard-focus cursor to move (see
+            // `command_block::CommandBlockState`'s own doc), only a mouse
+            // highlight.
+            Screen::CommandBlockEdit => {
+                if let Some(state) = self.command_block.as_mut() {
+                    state.hovered = Some(row);
+                }
+            }
             _ => {}
         }
     }
@@ -1650,6 +1713,13 @@ impl MenuNav {
         // row, which vanilla reserves for the join icon and the double-click.
         if ui.screen() == Screen::ServerList {
             return self.click_list(ui, row);
+        }
+        // The command block edit screen (issue #47) — #391's fix once more: a
+        // click on `CommandBlockRow::Command` is caret placement (a no-op
+        // here, see `activate_command_block_row`'s own doc), and a click on
+        // any other row is a button press, never routed through `Enter`.
+        if ui.screen() == Screen::CommandBlockEdit {
+            return self.activate_command_block_row(ui, row);
         }
         self.hover(ui, row);
         self.key(ui, MenuKey::Enter)
@@ -1868,6 +1938,11 @@ impl MenuNav {
             // arm calls `close_statistics`), but keeping Up/Down/Escape in
             // one function is the established pattern here.
             Screen::Statistics => self.key_statistics(ui, key),
+            // The command block edit screen (issue #47) — its own arm for the
+            // same reason `Screen::ServerEdit`'s is: a text field needs every
+            // keystroke routed to it, which the catch-all below (Escape only)
+            // cannot do.
+            Screen::CommandBlockEdit => self.key_command_block(ui, key),
             // Escape is the only menu key that means anything on the world and
             // loading screens, and `UiState` already owns it.
             _ => {
@@ -2102,6 +2177,113 @@ impl MenuNav {
             return MenuAction::Forget(old);
         }
         MenuAction::Reprobe(Some(entry))
+    }
+
+    /// The command block edit screen (issue #47).
+    ///
+    /// Unlike [`Self::key_edit`], this does **not** route every key through a
+    /// shared `handle_key` first: the screen has exactly one keyboard focus
+    /// target (see [`command_block::CommandBlockState`]'s own doc on why
+    /// "Previous Output" is not a second one), so there is no focus layer to
+    /// arbitrate — every key already knows where it goes. Left/Right/Home/End
+    /// are not handled for the same reason [`Self::key_edit`]'s doc already
+    /// names: `app.rs` does not produce them from `MenuKey` yet.
+    fn key_command_block(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        let Some(state) = self.command_block.as_mut() else {
+            return MenuAction::None;
+        };
+        match key {
+            // Vanilla's `AbstractCommandBlockEditScreen.keyPressed`: Escape
+            // is `Screen`'s own `shouldCloseOnEsc()` path (`:129`, unguarded —
+            // unlike `Screen::Death`'s override), which is Cancel here.
+            MenuKey::Escape => {
+                self.close_command_block(ui);
+                MenuAction::None
+            }
+            // `event.isConfirmation() -> this.onDone()` (`:134-136`), reached
+            // only when the (currently always-empty, see the module doc)
+            // suggestion list did not consume Enter first.
+            MenuKey::Enter => self.activate_command_block_row(
+                ui,
+                command_block::CommandBlockRow::Done as usize,
+            ),
+            MenuKey::Char(ch) => {
+                state.handle_char(ch);
+                MenuAction::None
+            }
+            MenuKey::Backspace => {
+                state.handle_key(KeyEvent::new(focus::KEY_BACKSPACE));
+                MenuAction::None
+            }
+            MenuKey::Delete => {
+                state.handle_key(KeyEvent::new(focus::KEY_DELETE));
+                MenuAction::None
+            }
+            // Vanilla cycles the suggestion list with Tab/Up/Down
+            // (`CommandSuggestions.SuggestionsList.keyPressed`). With no
+            // command tree ever reaching this client yet (see
+            // `command_block`'s module doc and #436), there is nothing to
+            // cycle — left as a documented no-op rather than wiring input
+            // that has no data to act on.
+            MenuKey::Tab | MenuKey::Up | MenuKey::Down | MenuKey::Refresh => MenuAction::None,
+        }
+    }
+
+    /// What one [`command_block::CommandBlockRow`] does when clicked or
+    /// activated by Enter — shared by [`Self::click`]'s `CommandBlockEdit`
+    /// arm and [`Self::key_command_block`]'s `Enter` arm, matching
+    /// [`Self::save_entry`]/[`Self::cancel_edit`]'s "button and key do the
+    /// same thing" rule.
+    fn activate_command_block_row(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
+        use command_block::CommandBlockRow;
+        let Some(cb_row) = command_block::COMMAND_BLOCK_ROWS.get(row).copied() else {
+            // `PREVIOUS_OUTPUT_ROW` and anything past it: not a control, see
+            // `command_block`'s module doc on why "Previous Output" is
+            // display-only.
+            return MenuAction::None;
+        };
+        let Some(state) = self.command_block.as_mut() else {
+            return MenuAction::None;
+        };
+        match cb_row {
+            // The command field itself is not a button; a click on it is
+            // caret placement, which — like `Screen::ServerEdit`'s own two
+            // fields — is `app.rs`'s to translate from a physical click
+            // position via `EditBox::click_at`, not something `Enter`/this
+            // method can express as "activation".
+            CommandBlockRow::Command => MenuAction::None,
+            CommandBlockRow::TrackOutput => {
+                state.toggle_track_output();
+                MenuAction::None
+            }
+            CommandBlockRow::Mode => {
+                state.cycle_mode();
+                MenuAction::None
+            }
+            CommandBlockRow::Conditional => {
+                state.toggle_conditional();
+                MenuAction::None
+            }
+            CommandBlockRow::Automatic => {
+                state.toggle_automatic();
+                MenuAction::None
+            }
+            CommandBlockRow::Done => {
+                // `state.to_submit()` is the real, tested payload
+                // (`ClientAction::SetCommandBlock`'s `Eq`-able subset) —
+                // nothing sends it yet. See `MenuAction`'s own doc comment
+                // on why a `SetCommandBlock` variant is not landed here
+                // until the matching `app.rs` arm lands with it; #436 tracks
+                // the pair.
+                let _submit = state.to_submit();
+                self.close_command_block(ui);
+                MenuAction::None
+            }
+            CommandBlockRow::Cancel => {
+                self.close_command_block(ui);
+                MenuAction::None
+            }
+        }
     }
 
     /// The world-select screen (issue #397). **Every key goes through
@@ -2479,7 +2661,68 @@ impl MenuNav {
                 self.cycle_mouse_wheel_sensitivity(1);
                 MenuAction::None
             }
+            // The eight chat/text-background options. Each one steps its
+            // `UnitDouble` by [`crate::config::UNIT_DOUBLE_STEP`] and persists,
+            // and `app.rs` already copies all eight into
+            // `hud_frame.chat_options` from `self.nav.options()` every frame —
+            // so no threading is needed beyond the mutation here.
+            SettingsOutcome::Cycle(LiveOption::ChatScale) => {
+                self.step_chat_option(|o| &mut o.chat_scale, 1);
+                MenuAction::None
+            }
+            SettingsOutcome::Cycle(LiveOption::ChatWidth) => {
+                self.step_chat_option(|o| &mut o.chat_width, 1);
+                MenuAction::None
+            }
+            SettingsOutcome::Cycle(LiveOption::ChatHeightFocused) => {
+                self.step_chat_option(|o| &mut o.chat_height_focused, 1);
+                MenuAction::None
+            }
+            SettingsOutcome::Cycle(LiveOption::ChatHeightUnfocused) => {
+                self.step_chat_option(|o| &mut o.chat_height_unfocused, 1);
+                MenuAction::None
+            }
+            SettingsOutcome::Cycle(LiveOption::ChatLineSpacing) => {
+                self.step_chat_option(|o| &mut o.chat_line_spacing, 1);
+                MenuAction::None
+            }
+            SettingsOutcome::Cycle(LiveOption::ChatOpacity) => {
+                self.step_chat_option(|o| &mut o.chat_opacity, 1);
+                MenuAction::None
+            }
+            SettingsOutcome::Cycle(LiveOption::TextBackgroundOpacity) => {
+                self.step_chat_option(|o| &mut o.chat_background_opacity, 1);
+                MenuAction::None
+            }
+            SettingsOutcome::Cycle(LiveOption::ChatColors) => {
+                self.toggle_chat_colors();
+                MenuAction::None
+            }
         }
+    }
+
+    /// Steps one `UnitDouble`-backed chat option and persists it eagerly.
+    ///
+    /// Takes a field selector rather than being written out eight times: every
+    /// one of these options has an identical `[0, 1]` domain and an identical
+    /// wrap, so the only thing that varies is which field is being moved. The
+    /// per-option *semantics* (the pixel and percent mappings, the OFF caption)
+    /// live in `menu::options::live_value`, where the vanilla stringifier they
+    /// come from is cited.
+    fn step_chat_option(
+        &mut self,
+        field: impl FnOnce(&mut Options) -> &mut f32,
+        delta: i32,
+    ) {
+        let slot = field(&mut self.options);
+        *slot = crate::config::step_unit_double(*slot, delta);
+        self.persist_options();
+    }
+
+    /// Flips `options.chat.color`, the one non-slider chat option.
+    fn toggle_chat_colors(&mut self) {
+        self.options.chat_colors = !self.options.chat_colors;
+        self.persist_options();
     }
 
     /// The account list: entirely delegated to [`accounts::AccountsNav`],
