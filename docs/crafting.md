@@ -139,14 +139,13 @@ directory, and the corpus here lives inside a zip. `WindowApp` (`app.rs`)
 loads it once at GPU bring-up into a `recipe_book: Option<RecipeBook>` field.
 
 **Requires the `json` feature on `lodestone-game`'s dependency edge from
-`lodestone-shell`**, which is *not yet enabled* in
-`crates/lodestone-shell/Cargo.toml` (still `lodestone-game = { workspace =
-true }`, no `features = ["json"]`) — `recipe_json` is behind that feature and
-gates on the *depending* crate's own Cargo.toml, not a runtime check. Until
-that one line is added, `resources.rs` does not compile at all, let alone load
-recipes. This is a deliberate, narrow gap: it was left for review rather than
-made by the same change that added `load_recipe_book`, per that session's file
-scope.
+`lodestone-shell`.** This section previously said that edge was *not yet
+enabled* and named the exact missing line — stale as of issue #163:
+`crates/lodestone-shell/Cargo.toml:35` is now `lodestone-game = { workspace =
+true, features = ["json"] }`. `resources.rs::load_recipe_book` compiles and
+the corpus really does load into the running client; verify with `grep -n
+'features = \["json"\]' crates/lodestone-shell/Cargo.toml` before trusting
+this paragraph either, per this repo's own staleness rule.
 
 The loaded book feeds two things, both additive and neither touching the
 result slot's server authority:
@@ -173,9 +172,153 @@ Remaining gaps:
   `recipe_book_change_settings` and `recipe_book_seen_recipe` packets, but
   decodes **none** of the clientbound recipe packets (`update_recipes`,
   `recipe_book_add`/`remove`/`settings`, `place_ghost_recipe`). There is no
-  `ClientEvent` for them yet.
-- No recipe-book UI (the "what can I make" browser) exists; the local corpus
-  is currently consumed only by the ghost preview and the debug counter above.
+  `ClientEvent` for them yet. **Confirmed again for issue #163**: `grep -n
+  "PLACE_GHOST_RECIPE\|RECIPE_BOOK_ADD\|RECIPE_BOOK_REMOVE\|RECIPE_BOOK_SETTINGS\|UPDATE_RECIPES"
+  crates/protocol/v770/src/adapter.rs` returns zero hits, even though the
+  packet-id constants themselves exist in `generated/packet_ids.rs` (that
+  file only proves the *id* is known, not that anything decodes it — see
+  `docs/README.md`'s own connectedness caveats). This is why "recipe-unlock
+  tracking" below is real scaffolding with no live producer yet.
+
+## Recipe-book UI (issue #163)
+
+The browsing/unlock UI layered on top of the matcher above, entirely in
+`lodestone-game` (`recipe.rs`, `menu.rs`) and `lodestone-shell`
+(`container.rs`). It does **not** duplicate `RecipeBook::match_grid` — see
+"Auto-fill" below, which reuses it via a new inverse operation
+(`Recipe::placement`), not a second matcher.
+
+### Categories and browsing — `recipe.rs`
+
+`RecipeCategory` (`Building`/`Redstone`/`Equipment`/`Food`/`Blocks`/`Misc`)
+captures each recipe JSON's own `"category"` field — real per-recipe data
+(694 of 1585 recipes in 26.2 carry one; `recipe_json.rs`'s `parse_category`
+parses it), not a heuristic. `tabs_for(RecipeBookType)` is vanilla's own
+per-book tab list in **declaration order**
+(`RecipeBookCategories.java:7-19`), which is not alphabetical and is not
+symmetric across appliances: `BlastFurnace` has no `Food` tab and `Smoker`
+has *only* `Food`. `RecipeBook::visible_tabs` filters that list down to
+categories with at least one loaded recipe, mirroring
+`RecipeBookTabButton.updateVisibility`.
+
+`RecipeBook::browse(book_type, category, search)` returns matching recipe
+ids in the corpus's own id order. **This is a deliberate simplification**,
+not vanilla's real search: vanilla fuzzy-matches a `SearchTree` built from
+the resolved item's tooltip/display name
+(`ClientPacketListener.searchTrees()`); this client has no resolved-name
+index to build one from, so `browse` substring-matches the **result item's
+id** (namespace and bare path) instead. A query like `"planks"` still finds
+every planks recipe, just not by its translated display name.
+
+### Panel geometry — `container.rs`
+
+`RecipeBookPanelLayout`/`recipe_book_panel_layout[_with_scale]` and
+`RecipeBookPanelHit`/`recipe_book_panel_hit_test[_with_scale]` mirror every
+other pair in this module (`panel_origin`/`hit_test`): pure functions, no
+GPU/asset dependency, unit-tested with predicted rects. Every constant is
+transcribed from `RecipeBookComponent`/`RecipeBookPage`/`RecipeBookTabButton`/
+`RecipeButton.java` with a `file:line` citation in the source.
+
+**One gap, kept deliberately unfixed**: vanilla shifts the *main* container
+screen rightward when the book opens
+(`RecipeBookComponent.updateScreenPosition`, `:173-182`) so the two panels
+never overlap. Replicating that would mean threading an "is the book open"
+flag through `panel_origin`/`hit_test`/`ContainerGeometry::build_inner` —
+functions every container screen calls, not just these two — for a change
+scoped to one feature. Instead the book panel's left edge is clamped to a
+`4px` floor and may overlap the main panel at narrow canvases rather than
+displacing it. Visible, bounded, and documented rather than fixed by
+touching shared rendering code with no isolated way to verify the blast
+radius.
+
+`recipe_book_panel_contents` is the separate data query (`RecipeBook` in,
+`RecipeBookPanelContents` out: visible tabs, this page's ids, page count) —
+kept apart from the layout function on purpose, so geometry never needs a
+loaded `RecipeBook` and the data query never needs a viewport size.
+
+### Recipe-unlock tracking — `RecipeUnlockState` (`recipe.rs`)
+
+**Nothing populates this today.** The server signal is
+`recipe_book_add`/`recipe_book_remove`, and per the "Remaining gaps" section
+above, `v770`'s adapter decodes neither — confirmed by grep, not assumed —
+nor does `lodestone-model` have a `ClientEvent` for them. Both are outside
+this change's owned files (`crates/protocol/**`); see "Brokered work" below.
+
+Until that lands, `RecipeUnlockState::is_unlocked` reports **every** recipe
+as unlocked, so the browsable panel shows the full local corpus rather than
+an empty one — a visible, honest stand-in for missing data, not a silently
+fake "everything is unlocked" that would survive real data arriving. The
+moment a single `unlock`/`remove` call is made (`has_data()` flips true) it
+switches to the real per-id answer. `unlock`/`remove`/`take_new` (for the
+toast, next) are implemented and unit-tested against direct calls; nothing
+in the running client calls them yet.
+
+### Unlock toast — `RecipeToastQueue` (`recipe.rs`)
+
+Pure timing data mirroring `RecipeToast.java`: `RECIPE_TOAST_DISPLAY_MS =
+5000` (`:17`, **100 ticks** at the fixed 50ms tick), width `160`/height `32`
+(`Toast.java:14-15`). Multiple recipes unlocked within the window merge into
+one toast that **cycles** through them (`displayed_entry`, mirroring
+`RecipeToast.java:49-51`'s formula) rather than stacking separate toasts.
+Nothing calls `push` from live data yet — same blocker as unlock tracking —
+and nothing renders it: that is `hud.rs`, brokered (below).
+
+### Auto-fill — `Recipe::placement` + `plan_auto_fill` (`recipe.rs`), `Menu::plan_recipe_auto_fill` (`menu.rs`)
+
+Reuses the existing matcher's own data (`Ingredient`/`TagResolver`), not a
+new one. `Recipe::placement(grid_w, grid_h)` is the **inverse** of
+`match_grid`: given a recipe, which ingredient goes in which cell — always
+top-left, never mirrored (vanilla places at the position its own
+`RecipeDisplay` carries, which is not decoded here — a documented
+simplification, not a guess dressed up as the real position).
+`plan_auto_fill` then greedily matches each required cell against a
+caller-supplied inventory snapshot, one physical stack per cell, never
+overdrawing a stack past its own count, and refusing (`None`) rather than
+partially filling a grid it cannot complete. It deliberately does **not**
+model `use_max_items` (shift-click "craft as many as possible").
+
+`Menu::plan_recipe_auto_fill` is the thin per-menu wrapper: it reads the
+menu's own `craft_layout`/`special_layout` to know whether this is a
+crafting-table grid or a furnace-family single ingredient slot, scans
+**main storage and hotbar only** (never armour/off-hand — matching
+vanilla's own `PlaceRecipeHelper`, which only ever walks
+`Inventory.items`), and returns steps already offset to absolute menu-slot
+indices.
+
+**What still turns a plan into pixels is brokered, not done**: the plan is a
+`Vec<PlacementStep>` (`{cell: menu_slot, source_slot: menu_slot}`), not a
+network action. There is no existing "move exactly one item from slot A to
+slot B" primitive without introducing wire-level stack accounting, so the
+dispatch loop (issue two `ContainerClick`s per step, using the same
+per-click prediction/dispatch every other manual slot click already goes
+through) belongs in `app.rs`/`sim.rs` — see "Brokered work" below. Sending
+vanilla's own `PlaceRecipe` action instead is not an option today: its wire
+field is a **`RecipeDisplayId`**, a server-session-assigned integer from the
+undecoded `recipe_book_add` packet, not this corpus's `Identifier` — so this
+client cannot construct a correct one without that same decode.
+
+### Brokered work
+
+None of the following is implemented — `crates/protocol/**` is off-limits to
+this change, and `app.rs`/`sim.rs`/`hud.rs` are choke-point files this repo
+brokers through file-owner review rather than editing directly:
+
+1. **Protocol decode** (`crates/protocol/v770/src/adapter.rs`): clientbound
+   arms for `recipe_book_add`/`recipe_book_remove`/`recipe_book_settings`,
+   plus a `ClientEvent` variant in `lodestone-model` to decode into and a
+   `net.rs`/ingest consumer that calls `RecipeUnlockState::unlock`/`remove`.
+2. **Toggle wiring** (`app.rs`): one bool (or small struct, see
+   `container.rs`'s `RecipeBookPanelLayout`) for panel-open state, a call to
+   `recipe_book_panel_hit_test_with_scale` alongside the existing
+   `hit_test_with_scale` call, and drawing the panel's own geometry.
+3. **Click-to-fill dispatch** (`app.rs`/`sim.rs`): turning a
+   `Menu::plan_recipe_auto_fill` plan into a sequence of `ContainerClick`
+   actions through the existing single-click pipeline.
+4. **Toast rendering** (`hud.rs`): `RecipeToastQueue::displayed_entry` into
+   an on-screen toast, at the size/position `Toast.java`'s own
+   `xPos`/`yPos`/`width`/`height` describe.
+
+Tracked on [#436](https://github.com/matteopolak/lodestone/issues/436).
 
 ## Dependencies
 
