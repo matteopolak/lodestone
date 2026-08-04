@@ -1136,62 +1136,112 @@ fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value) -> Configu
 /// why this is chunk-local rather than the ore engine's centre-±1 region.
 #[derive(Debug)]
 pub struct VegGrid {
+    /// Keyed by **local** `(0..16, y, 0..16)` — every public accessor takes
+    /// **absolute world** coordinates (matching every `BlockPos` this
+    /// engine's placement modifiers compute — noise sampling, the decoration
+    /// seed, `RandomOffset`'s scatter, all of it is absolute-coordinate
+    /// arithmetic, not local) and converts via `origin_x`/`origin_z`
+    /// internally. Getting this translation wrong is exactly the bug this
+    /// comment exists to prevent from recurring: an earlier version of this
+    /// struct stored *and exposed* local coordinates, silently accepting the
+    /// engine's absolute-coordinate `BlockPos`es and comparing them against
+    /// a `0..16` bound that was almost always false — every placement
+    /// attempt for any chunk other than `(0, 0)` failed `in_bounds`/`get`'s
+    /// implicit "must already be local" assumption, so vegetation composed,
+    /// ran, and reached zero blocks in every real served chunk. Caught by
+    /// `lodestone_server::worldgen_data::tests::diagnostic_vegetation_counts_over_plains_sweep`
+    /// measuring **zero** grass/flowers/logs/leaves over a 64-chunk plains
+    /// sweep — this module's own hermetic unit tests never caught it because
+    /// every one of them happened to place at `origin = BlockPos { x: 8, ...
+    /// z: 8 }`, which is coincidentally already "local" (chunk (0,0)'s own
+    /// footprint), the exact island CLAUDE.md's rule 1 describes: a unit
+    /// test can be green while the real integration seam is broken.
     blocks: HashMap<(i32, i32, i32), String>,
-    /// Positions actually written by `set_if_in_bounds`, in write order —
-    /// a `Vec`, not a re-iterated `HashMap`, specifically so a caller
-    /// folding this back into a dense grid (`OverworldGenerator`'s
-    /// vegetation stage) has a *deterministic* order to replay, the same
-    /// discipline `docs/worldgen-parity.md`'s "Performance" section
-    /// describes fixing for `surface_diff` (point lookups inside a fixed
-    /// loop, never a raw `HashMap` iteration) — here achieved even more
-    /// directly, since insertion order into a `Vec` carries no ambiguity to
-    /// begin with. Lets the fold-back touch only the (typically small)
-    /// written subset instead of rewriting all `16 × height × 16` cells.
+    /// Positions actually written by `set_if_in_bounds`, **local** (see
+    /// `blocks`' doc), in write order — a `Vec`, not a re-iterated
+    /// `HashMap`, specifically so a caller folding this back into a dense
+    /// grid (`OverworldGenerator`'s vegetation stage) has a *deterministic*
+    /// order to replay, the same discipline `docs/worldgen-parity.md`'s
+    /// "Performance" section describes fixing for `surface_diff` (point
+    /// lookups inside a fixed loop, never a raw `HashMap` iteration) — here
+    /// achieved even more directly, since insertion order into a `Vec`
+    /// carries no ambiguity to begin with. Lets the fold-back touch only the
+    /// (typically small) written subset instead of rewriting all
+    /// `16 × height × 16` cells.
     dirty: Vec<(i32, i32, i32)>,
+    origin_x: i32,
+    origin_z: i32,
     min_y: i32,
     height: i32,
 }
 
 impl VegGrid {
+    /// `origin_x`/`origin_z` are the chunk's own **absolute** block origin
+    /// (`chunk_x * 16`, `chunk_z * 16`) — every other method on this type
+    /// takes absolute world coordinates and translates through these.
     #[must_use]
-    pub fn new(min_y: i32, height: i32) -> Self {
+    pub fn new(min_y: i32, height: i32, origin_x: i32, origin_z: i32) -> Self {
         Self {
             blocks: HashMap::new(),
             dirty: Vec::new(),
+            origin_x,
+            origin_z,
             min_y,
             height,
         }
     }
 
     /// Positions written by `set_if_in_bounds` since construction, in write
-    /// order, each paired with the state currently at that position (i.e.
-    /// the *final* state if the same cell was written more than once, not
-    /// an intermediate one) — what a caller should fold back into a wider
-    /// grid.
+    /// order, **as absolute world coordinates**, each paired with the state
+    /// currently at that position (i.e. the *final* state if the same cell
+    /// was written more than once, not an intermediate one) — what a caller
+    /// should fold back into a wider grid, with no further translation
+    /// needed.
     pub fn dirty_cells(&self) -> impl Iterator<Item = (i32, i32, i32, &str)> {
-        self.dirty.iter().map(|&(x, y, z)| {
+        self.dirty.iter().map(|&(lx, y, lz)| {
             (
-                x,
+                self.origin_x + lx,
                 y,
-                z,
-                self.blocks.get(&(x, y, z)).map_or("minecraft:air", String::as_str),
+                self.origin_z + lz,
+                self.blocks.get(&(lx, y, lz)).map_or("minecraft:air", String::as_str),
             )
         })
     }
 
-    fn in_bounds(x: i32, z: i32) -> bool {
-        (0..16).contains(&x) && (0..16).contains(&z)
+    fn in_bounds_local(lx: i32, lz: i32) -> bool {
+        (0..16).contains(&lx) && (0..16).contains(&lz)
     }
 
-    fn clamp(&self, x: i32, z: i32) -> (i32, i32) {
-        (x.clamp(0, 15), z.clamp(0, 15))
+    /// Absolute world `(x, z)` -> local `(0..16, 0..16)`, **clamped** into
+    /// range — used only by read paths, which must always answer something.
+    fn to_local_clamped(&self, x: i32, z: i32) -> (i32, i32) {
+        ((x - self.origin_x).clamp(0, 15), (z - self.origin_z).clamp(0, 15))
     }
 
-    /// Seeds one column position from the post-ore composed grid. Callers
-    /// fill every `(x, y, z)` in `0..16 × min_y..min_y+height × 0..16`
-    /// before running vegetal decoration.
+    /// Absolute world `(x, z)` -> local, **unclamped** — used only by the
+    /// write path, which must know whether the position genuinely falls
+    /// inside this chunk's own footprint rather than silently relocating a
+    /// write to the nearest edge.
+    fn to_local_exact(&self, x: i32, z: i32) -> (i32, i32) {
+        (x - self.origin_x, z - self.origin_z)
+    }
+
+    /// Seeds one column position (absolute world coordinates) from the
+    /// post-ore composed grid. Callers fill every `(x, y, z)` in this
+    /// chunk's own `16 × height × 16` footprint before running vegetal
+    /// decoration.
     pub fn seed(&mut self, x: i32, y: i32, z: i32, state: String) {
-        self.blocks.insert((x, y, z), state);
+        let (lx, lz) = self.to_local_exact(x, z);
+        self.blocks.insert((lx, y, lz), state);
+    }
+
+    fn get_local(&self, lx: i32, y: i32, lz: i32) -> &str {
+        if y < self.min_y || y >= self.min_y + self.height {
+            return "minecraft:air";
+        }
+        self.blocks
+            .get(&(lx, y, lz))
+            .map_or("minecraft:air", String::as_str)
     }
 
     /// Reads always succeed (clamped into bounds) — a read past the local
@@ -1199,13 +1249,8 @@ impl VegGrid {
     /// panicking or returning a sentinel the caller has to special-case.
     #[must_use]
     pub fn get(&self, x: i32, y: i32, z: i32) -> &str {
-        if y < self.min_y || y >= self.min_y + self.height {
-            return "minecraft:air";
-        }
-        let (lx, lz) = self.clamp(x, z);
-        self.blocks
-            .get(&(lx, y, lz))
-            .map_or("minecraft:air", String::as_str)
+        let (lx, lz) = self.to_local_clamped(x, z);
+        self.get_local(lx, y, lz)
     }
 
     /// Writes past the local `0..16` footprint (or outside the vertical
@@ -1214,9 +1259,10 @@ impl VegGrid {
     /// clamping a write would fabricate a block on the wrong column.
     /// Returns whether the write actually landed.
     pub fn set_if_in_bounds(&mut self, x: i32, y: i32, z: i32, state: String) -> bool {
-        if Self::in_bounds(x, z) && y >= self.min_y && y < self.min_y + self.height {
-            self.blocks.insert((x, y, z), state);
-            self.dirty.push((x, y, z));
+        let (lx, lz) = self.to_local_exact(x, z);
+        if Self::in_bounds_local(lx, lz) && y >= self.min_y && y < self.min_y + self.height {
+            self.blocks.insert((lx, y, lz), state);
+            self.dirty.push((lx, y, lz));
             true
         } else {
             false
@@ -1225,14 +1271,14 @@ impl VegGrid {
 
     /// `Heightmap.Types.WORLD_SURFACE`/`WORLD_SURFACE_WG` — topmost non-air,
     /// scanned live against the current (possibly already-modified-this-step)
-    /// grid. Returns `min_y` (not `min_y - 1`) for an all-air column, matching
-    /// vanilla's `y + 1` convention with `y` floored at one below the lowest
-    /// placeable block.
+    /// grid. `x`/`z` are absolute world coordinates. Returns `min_y` (not
+    /// `min_y - 1`) for an all-air column, matching vanilla's `y + 1`
+    /// convention with `y` floored at one below the lowest placeable block.
     #[must_use]
     pub fn height_world_surface(&self, x: i32, z: i32) -> i32 {
-        let (lx, lz) = self.clamp(x, z);
+        let (lx, lz) = self.to_local_clamped(x, z);
         for y in (self.min_y..self.min_y + self.height).rev() {
-            let base = base_id(self.get(lx, y, lz));
+            let base = base_id(self.get_local(lx, y, lz));
             if !is_air(base) {
                 return y + 1;
             }
@@ -1241,12 +1287,12 @@ impl VegGrid {
     }
 
     /// `Heightmap.Types.OCEAN_FLOOR`/`OCEAN_FLOOR_WG` — topmost non-air,
-    /// non-fluid.
+    /// non-fluid. `x`/`z` are absolute world coordinates.
     #[must_use]
     pub fn height_ocean_floor(&self, x: i32, z: i32) -> i32 {
-        let (lx, lz) = self.clamp(x, z);
+        let (lx, lz) = self.to_local_clamped(x, z);
         for y in (self.min_y..self.min_y + self.height).rev() {
-            let base = base_id(self.get(lx, y, lz));
+            let base = base_id(self.get_local(lx, y, lz));
             if !is_air(base) && !is_fluid(base) {
                 return y + 1;
             }
@@ -1535,7 +1581,7 @@ mod tests {
     use crate::rng::{LegacyRandomSource, XoroshiroRandomSource};
 
     fn grid_with_flat_ground(min_y: i32, height: i32, ground_y: i32) -> VegGrid {
-        let mut grid = VegGrid::new(min_y, height);
+        let mut grid = VegGrid::new(min_y, height, 0, 0);
         for x in 0..16 {
             for z in 0..16 {
                 for y in min_y..=ground_y {
@@ -1566,7 +1612,7 @@ mod tests {
 
     #[test]
     fn writes_outside_chunk_footprint_are_dropped_not_clamped() {
-        let mut grid = VegGrid::new(-64, 384);
+        let mut grid = VegGrid::new(-64, 384, 0, 0);
         assert!(!grid.set_if_in_bounds(-1, 70, 5, "minecraft:oak_log".to_string()));
         assert!(!grid.set_if_in_bounds(16, 70, 5, "minecraft:oak_log".to_string()));
         assert!(grid.set_if_in_bounds(0, 70, 5, "minecraft:oak_log".to_string()));
@@ -1575,7 +1621,7 @@ mod tests {
 
     #[test]
     fn dirty_cells_only_reports_in_bounds_writes_in_write_order() {
-        let mut grid = VegGrid::new(-64, 384);
+        let mut grid = VegGrid::new(-64, 384, 0, 0);
         assert!(!grid.set_if_in_bounds(-1, 70, 5, "minecraft:oak_log".to_string()));
         assert!(grid.set_if_in_bounds(3, 70, 5, "minecraft:oak_log".to_string()));
         assert!(grid.set_if_in_bounds(4, 71, 5, "minecraft:oak_leaves".to_string()));
@@ -1784,7 +1830,7 @@ mod tests {
 
     #[test]
     fn grass_patch_survives_only_on_supports_vegetation() {
-        let mut grid = VegGrid::new(-64, 384);
+        let mut grid = VegGrid::new(-64, 384, 0, 0);
         grid.seed(5, 69, 5, "minecraft:grass_block".to_string());
         grid.seed(5, 70, 5, "minecraft:air".to_string());
         grid.seed(5, 69, 6, "minecraft:stone".to_string());
