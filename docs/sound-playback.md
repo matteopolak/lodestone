@@ -186,6 +186,29 @@ still **unimplemented**: `explosionParticle`'s registry id is recognised only
 to stay byte-aligned past it, never spawned. The player's own report ("or
 whatever") plausibly includes these; only the sound is fixed here.
 
+**Correction:** neither registry id needs the shared `ParticleOptions` decoder —
+both are `SimpleParticleType` with no payload at all
+(`ParticleTypes.java:57-58`), which `docs/particle-catalogue.md` previously
+lumped in with `dust`/`firework` (which do carry a real payload). The missing
+piece is a render-side `emit::`/dispatch arm, not a decoder; see that doc's
+correction for detail. The genuinely-blocked field is `blockParticles` (a
+`WeightedList<ExplosionParticleInfo>`, each entry with its own particle-options
+payload), which is not decoded at all.
+
+**Verification depth:** `decode_explode` has three layers of coverage, from
+weakest to strongest isolation-proof: a hand-assembled byte-accurate fixture
+(`sound_particle_screen.rs`, transcribed from the stream-codec spec, not our
+own encoder); a real vanilla 26.2 server capture
+(`live_creeper_explosion.rs`, `#[ignore]`d, feeds the server's *actual*
+`explode` bytes through the adapter); and
+`net::tests::a_real_explode_packet_forwards_the_correct_explosion_sound`
+(`crates/lodestone-shell/src/net.rs`, `#[cfg(feature = "live")]`, no server
+needed), which is the one that proves the decoded event survives the hop
+through the real, production `forward()` function into the exact
+`NetUpdate::Sound` value `sim/net_apply.rs`'s arm hands to
+`ShellAudio::play_sound` — the two protocol-layer tests stop at
+`ClientEvent::Sound` and never call `forward` at all.
+
 ### What is still missing, and the exact seam
 
 The live predicted break. Its debris sibling is emitted in

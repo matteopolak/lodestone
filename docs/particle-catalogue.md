@@ -113,12 +113,24 @@ emit.rs` doc comments on `note`/`heart`/`angry_villager`/`happy_villager`/`witch
 - `Behaviour::Spell` (`witch`) reuses `AshSmoke`'s per-tick `set_sprite_from_age()` call but
   needs its own layer (`Translucent`, not `Opaque`).
 
-**Explicitly blocked, not attempted:** `explosion_emitter`/`explosion`, `firework`, and
-`dust` all carry a `ParticleOptions` payload (`DustParticleOptions`, `FireworkExplosion`, an
-implicit colour/scale for explosion) that this workspace has no generic decoder for — the
-same blocker #26 already named for the explosion particle. Building one of these without the
-shared decoder would mean hand-rolling a second, narrower one; flagged rather than
-special-cased, per the brief for this pass.
+**Explicitly blocked, not attempted:** `firework` and `dust` carry a real `ParticleOptions`
+payload (`FireworkExplosion`, `DustParticleOptions`) that this workspace has no generic
+decoder for. Building one of these without the shared decoder would mean hand-rolling a
+second, narrower one; flagged rather than special-cased, per the brief for this pass.
+
+**Correction (creeper explosion sound fix, `7025d90`): `explosion_emitter`/`explosion` are
+*not* in this bucket.** Both are `SimpleParticleType`
+(`.cache/mc/26.2/client-src/net/minecraft/core/particles/ParticleTypes.java:57-58`), whose own
+stream codec reads no further bytes — there is no payload to decode, so nothing here is
+blocked on the shared `ParticleOptions` codec. `crates/protocol/v770/src/adapter.rs`'s
+`decode_explode` already distinguishes the two registry ids (29/30) for exactly this reason.
+What is still missing is the *render* side: nothing calls `Particles::spawn_one` for either
+name, so the `explosionParticle` field is recognised only to stay byte-aligned, never spawned
+— an unbuilt `emit::`/`Behaviour` and dispatch arm, the same shape as any other unwired type
+in this catalogue, not a decoder gap. (The real blocker in the `explode` packet is
+`blockParticles`, a `WeightedList<ExplosionParticleInfo>` whose *entries* do each carry a real
+particle-options payload — typically a block state for the flying debris — which is not
+decoded at all and is the accurate target for issue #26's blocker.)
 
 **#178 (ambient/environmental): not started this pass.** Every type on its checklist needs
 either a bespoke `Behaviour` (`portal`, `soul`, `end_rod`, `gust`, `sonic_boom` each have a

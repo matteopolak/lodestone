@@ -2366,6 +2366,108 @@ mod tests {
         }
     }
 
+    /// Player report: "the creeper has a hiss but no explosion sound."
+    /// `decode_explode` (`crates/protocol/v770/src/adapter.rs`) already turns
+    /// the `explode` packet into a `ClientEvent::Sound`, and that decode is
+    /// proven twice over in `lodestone-v770`'s own tests — once against a
+    /// hand-assembled fixture transcribed from `ClientboundExplodePacket`'s
+    /// wire spec, once against a real vanilla 26.2 server's actual detonation
+    /// (`live_creeper_explosion.rs`, `#[ignore]`d). Neither of those calls
+    /// `forward`, which is the function `run()` actually calls in production
+    /// and the one every other `forward_translates_*` test in this module
+    /// pins — so nothing proved the shell's own namespace-stripping survives
+    /// the hop into the exact `NetUpdate::Sound` value
+    /// `sim/net_apply.rs`'s `NetUpdate::Sound` arm hands to
+    /// `ShellAudio::play_sound`.
+    ///
+    /// This closes that gap without a live server: the packet bytes are fed
+    /// to the *real*, registry-resolved `V770Adapter` (the same
+    /// `lodestone_registry::adapter_for_protocol` call `run()` makes), and the
+    /// decoded event is run through the real `forward()` — no hand-built
+    /// `ClientEvent` anywhere in this test, unlike the other
+    /// `forward_translates_*` gates.
+    #[cfg(feature = "live")]
+    #[test]
+    fn a_real_explode_packet_forwards_the_correct_explosion_sound() {
+        use lodestone_client::{ConnectionState, Directive};
+
+        let adapter = lodestone_registry::adapter_for_protocol(776)
+            .expect("the `live` feature compiles a family in for protocol 776");
+
+        // `ClientboundExplodePacket`'s wire order: center (3×f64), radius
+        // (f32), blockCount (i32), playerKnockback (Optional<Vec3>),
+        // explosionParticle (ParticleOptions), explosionSound
+        // (Holder<SoundEvent>). Packet id 36 is `minecraft:explode`'s
+        // protocol-776 registration
+        // (`crates/protocol/v770/src/generated/packet_ids.rs:193,336`, itself
+        // generated from Mojang's `packets.json`). explosionSound holder id
+        // `700` (VarInt bytes `0xBC, 0x05`) references
+        // `minecraft:sound_event` registry index `699`, verified against
+        // `.cache/mc/26.2/generated/reports/registries.json`'s own
+        // `protocol_id` for `minecraft:entity.generic.explode`. These are the
+        // identical wire bytes `sound_particle_screen.rs`'s `explode_bytes()`
+        // fixture uses at the adapter layer, transcribed from the spec, not
+        // encoded with our own writer.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&8.0f64.to_be_bytes()); // center.x
+        payload.extend_from_slice(&64.0f64.to_be_bytes()); // center.y
+        payload.extend_from_slice(&8.0f64.to_be_bytes()); // center.z
+        payload.extend_from_slice(&3.0f32.to_be_bytes()); // radius
+        payload.extend_from_slice(&0i32.to_be_bytes()); // blockCount
+        payload.push(0x00); // playerKnockback absent
+        payload.push(29); // explosionParticle: explosion_emitter
+        payload.push(0xBC); // explosionSound holder id 700, byte 1
+        payload.push(0x05); // explosionSound holder id 700, byte 2
+
+        let mut world = lodestone_world::World::new();
+        let directives = adapter
+            .handle_packet(&mut world, ConnectionState::Play, 36, &payload)
+            .expect("a byte-accurate explode payload must decode");
+        assert_eq!(directives.len(), 1, "exactly one directive from an explode packet");
+        let Directive::Emit(event) = directives.into_iter().next().unwrap() else {
+            panic!("expected an Emit directive");
+        };
+
+        let (tx, rx) = mpsc::channel();
+        forward(
+            &tx,
+            &WeatherCell::default(),
+            &BiomeClimateCell::default(),
+            &BiomeNameCell::default(),
+            event,
+        )
+        .expect("forward does not stop the loop");
+
+        match rx.try_recv().expect("a Sound NetUpdate must cross the channel") {
+            NetUpdate::Sound {
+                name,
+                category,
+                volume,
+                pitch,
+                ..
+            } => {
+                assert_eq!(
+                    name, "entity.generic.explode",
+                    "namespace must be stripped, matching the NetUpdate::Sound \
+                     convention `sim/net_apply.rs`'s arm and `ShellAudio::play_sound` \
+                     both assume"
+                );
+                assert_eq!(category, SoundCategory::Block, "SoundSource.BLOCKS");
+                assert_eq!(
+                    volume, 4.0,
+                    "ClientPacketListener.handleExplosion's client-side constant \
+                     (`.cache/mc/26.2/client-src/.../ClientPacketListener.java:1368`)"
+                );
+                assert!(
+                    (0.56..=0.84).contains(&pitch),
+                    "pitch {pitch} outside vanilla's (1.0 +/- 0.2) * 0.7 band \
+                     (ClientPacketListener.java:1369)"
+                );
+            }
+            other => panic!("expected NetUpdate::Sound, got {other:?}"),
+        }
+    }
+
     #[test]
     fn forward_translates_mob_effect_removed_and_carries_any_entity() {
         use lodestone_client::ResourceKey;
