@@ -490,6 +490,14 @@ pub struct Sim {
     /// teardown/reconnect the way `RespawnCount` and the other session-lifetime
     /// state in `lodestone_ecs::session` do.
     death_message: Option<String>,
+    /// Set once `NetUpdate::WinGame` (issue #192) has arrived — the local
+    /// player exited the End through the exit portal after the dragon fight.
+    /// Latched rather than transient for the same reason [`Self::death_message`]
+    /// is a plain field, not an ECS component: exactly one consumer reads it
+    /// (`app.rs`'s per-frame UI reconciliation, `drive_ui_from_session`), and
+    /// there is no per-session state to fold it into. Reset by
+    /// [`Self::end_session`] so a later session starts un-won.
+    won: bool,
     /// Live audio, or `None` when disabled (no asset root, no device — see
     /// [`ShellAudio::from_env`]). The whole audio path is `if let Some`, so a
     /// disabled engine is simply silent, never a crash.
@@ -830,6 +838,7 @@ impl Sim {
             asset_banner: resources.banner,
             recover_from_death: true,
             death_message: None,
+            won: false,
             audio: ShellAudio::from_env(),
             third_person: false,
             body_pose: EntityPose::new(feet[0], feet[2], player.yaw, false),
@@ -1143,9 +1152,25 @@ impl Sim {
             sky_default,
             id_spaces_agree,
         };
+        // The live biome registry's ordered entry names (issue #96's
+        // follow-up), refreshed the same way and for the same reason as
+        // `sky_default` just above: a mesh worker thread only ever sees the
+        // jobs on its channel, never a live `Sim`/`NetClient`, so the current
+        // value has to be read here and carried along on the `SectionSnapshot`
+        // itself (`TerrainMesh::mesh_column`/`mesh_section`'s
+        // `with_biome_names` call). `None`/no connection or no registry yet
+        // resolves to empty, which `mesher::biome_name_at` already treats as
+        // "fall back to `FALLBACK_BIOME_NAMES`" — never as "holder id 0".
+        let biome_names: Arc<[&'static str]> = match &self.net {
+            Some(net) => Arc::from(net.shared_biome_names().snapshot()),
+            None => Arc::from([]),
+        };
         self.terrain_mut(|terrain| {
             if terrain.policy != policy {
                 terrain.policy = policy;
+            }
+            if *terrain.biome_names != *biome_names {
+                terrain.biome_names = Arc::clone(&biome_names);
             }
         });
     }
@@ -1475,6 +1500,10 @@ impl Sim {
         // line (see its doc comment on why it lives here rather than in
         // `lodestone_ecs::session`).
         self.death_message = None;
+        // The credits screen (issue #192) must not survive into the next
+        // session either, for the same reason `death_message` does not: a
+        // quit-to-title and reconnect must start un-won.
+        self.won = false;
 
         // §4.1(c): the entity interpolator no longer owns a `World` to throw away,
         // so its tracks are cleared explicitly. Replacing the whole interpolator
@@ -1612,6 +1641,15 @@ impl Sim {
     #[must_use]
     pub fn death_message(&self) -> Option<&str> {
         self.death_message.as_deref()
+    }
+
+    /// Whether `NetUpdate::WinGame` (issue #192) has arrived this session —
+    /// the ground truth `app.rs`'s `drive_ui_from_session` reconciles into the
+    /// credits screen, the same way [`Self::is_dead`] is reconciled into the
+    /// death screen. See [`Self::won`]'s field doc.
+    #[must_use]
+    pub fn has_won(&self) -> bool {
+        self.won
     }
 
     /// Submit a manual respawn request (`ClientAction::Respawn`) — the death

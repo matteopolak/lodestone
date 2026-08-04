@@ -314,6 +314,14 @@ impl Sim {
                     });
                     self.status = "respawned".into();
                 }
+                NetUpdate::WinGame => {
+                    // Issue #192: a pure latch. `app.rs`'s `drive_ui_from_session`
+                    // notices `Sim::has_won()` the same way it notices
+                    // `Sim::is_dead()` for the death screen, and opens the
+                    // credits screen exactly once (guarded there on the
+                    // screen not already being `Credits`).
+                    self.won = true;
+                }
                 NetUpdate::Sound {
                     name,
                     category,
