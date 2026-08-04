@@ -188,7 +188,15 @@ The pattern is the same each time: the class list came from `grep -l`, which
 tells you *which files* override the method and nothing about what they return or
 how wide each family is.
 
-**2. The AO neighbourhood is centred on the wrong cell for partial quads.**
+**2. ~~The AO neighbourhood is centred on the wrong cell for partial quads.~~
+Fixed** — see [The light-position rule](#the-light-position-rule) below for
+what shipped. That section also covers the *flat*-path half of the same fork,
+which this doc previously missed entirely: the bug is not confined to the AO
+ring, and it is what caused the reported "grass/ferns/sunflowers are
+sometimes black on one side" — cross plants take the flat
+(`tesselateFlat`) path, not the AO one. The description of the *bug* below is
+kept verbatim because it is the clearest statement of the two-cell fork.
+
 `prepareQuadAmbientOcclusion` (`BlockModelLighter.java:39`):
 
 ```java
@@ -229,6 +237,91 @@ holding `sky << 4 | block`. The error is bounded by half a light level per verte
 GPU still interpolates smoothly *between* vertices, so this is a corner-value offset, not
 banding across a face). Widening it means widening the vertex format, so it is a real but
 low-priority cost, recorded here so nobody re-derives it.
+
+### The light-position rule
+
+Vanilla samples a quad's light from **one of two cells**, and which one is a
+*quad-level* decision, not a per-block one. `mesh_models` used to get this
+wrong for **every** quad — not only the AO-ring ones divergence 2 above
+described — because it also reaches the *flat* (`tesselateFlat`) path, which
+is the one every cross-plant model takes (`cross.json`,
+`tinted_cross.json`, `sunflower_top.json` all set `"ambientocclusion": false`).
+
+`ModelBlockRenderer.tesselateFlat` (`:157-190`) buckets a block's quads by
+`cullface` — `QuadCollection.getQuads(direction)` for a culled quad,
+`getQuads(null)` for an unculled one — and `BlockModelLighter.prepareQuadFlat`
+(`:197-216`) picks the sample cell per bucket. `prepareQuadAmbientOcclusion`
+(`:39`, `:117`) expresses the identical fork for the smooth-lit ring and its
+centre:
+
+| quad | light sample cell |
+| --- | --- |
+| has a `cullface` `C` | `pos + C` — the cell `C` opens into, unconditionally |
+| no `cullface`, plane flush with the block boundary on its own facing axis (`faceCubic`) | `pos + quad.direction()` |
+| no `cullface`, plane *not* on the boundary | `pos` — the block's **own** cell |
+| no `cullface`, state is a full collision cube (the `faceCubic` `\|\|` clause) | `pos + quad.direction()` |
+
+A cross blade is unculled and its plane is diagonal (`cross.json`'s
+`"angle": 45` element rotation), so it fails both the boundary test and the
+full-cube test — vanilla lights it from the **block's own cell**. The old
+`mesh_models` sampled `pos + quad.direction` for *every* quad regardless of
+`cullface` or boundary, which for a cross blade next to a solid neighbour
+reads the *interior* of that neighbour — the light engine's stored `0` there
+— instead of the plant's own, usually-lit cell. That is the reported
+"grass/ferns/sunflowers are sometimes black on one side if there's a block".
+The face is not literally `0,0,0` — vanilla's `AmbientColor` floor
+(`DimensionTypes.java:36`) keeps a sky-`0` sample at `~0.0935` of daylight —
+but it reads as black next to a fully-lit blade.
+
+The fix is `quad_is_on_face_boundary` (beside `quad_is_full_face`) plus a
+`sample_dir` selection in `mesh_models` that reproduces the table above
+exactly, including the culled-bucket row: `sample_dir` prefers `cullface` over
+`quad.direction`, which differ for e.g. `powder_snow`'s east shell — see
+`block_models.rs:2031`. `own_is_full_cube` (`view.occludes_at` on the block's
+*own* cell) stands in for `isCollisionShapeFullBlock`, since this trait has no
+collision-shape table; the approximation only differs from vanilla for a
+non-opaque full collision cube (slime, spawner, ice), where it falls to the
+own cell instead — which for a non-opaque cell holds real light, so it errs
+bright rather than black.
+
+The tie-break that makes the report read as "*sometimes*, on *one side*": a
+45°-about-`Y` cross rotation puts every quad's baked normal exactly on a
+North/South-vs-East/West tie (`lodestone_assets::bake::calculate_facing`,
+tie-broken by `DIRECTIONS`' `Down, Up, North, South, East, West` order), so
+all four cross-plant quads bake to `North` or `South`, two each — a solid
+block to the north or south darkens two blades, and one to the east or west
+has **no effect at all**. Simulated in float32 and gated directly (see below).
+
+Gated by `crates/lodestone-render/tests/cross_plant_light_position_gate.rs`
+(real baked `short_grass`/`stone` geometry from the jar, `#[ignore]`d on a
+fetched `client.jar`; run with `cargo test -p lodestone-render --test
+cross_plant_light_position_gate -- --ignored --nocapture`):
+
+- the North/South tie-break prediction, checked directly against the real
+  baked quads;
+- the exact predicted histogram for a real cross plant next to a solid north
+  neighbour (`{0xF0: 16}`, not the pre-fix `{0xF0: 8, 0x00: 8}`) — an exact
+  histogram, not a "did it get brighter" check, because both hypotheses are
+  precisely known and only one of them is what asserting equality accepts;
+- a control that a real `stone` cube's culled `North` quad still reads its
+  *neighbour* and not its own distinguishable cell — this is the control that
+  rejects the naive "always sample the own cell" fix, which would pass the
+  histogram assertion above and re-break `fda948f` (a uniformly dark world);
+- a control that cloning the same blade quads with `z` snapped onto the
+  boundary flips the sample to the neighbour — proving the predicate is
+  sensitive to sample *position*, not merely to which value happens to be
+  bright.
+
+Both controls were executed against a temporary "always own cell" neuter of
+`mesh_models` and observed to fail, then the fix was restored and re-verified
+green — see the gate file's own doc comment for the exact predicted vs.
+observed values.
+
+The same fork applies to any unculled, off-boundary quad, not only cross
+plants: `fence_post.json`'s four side faces (`[6,0,6]`–`[10,16,10]`, no
+`cullface`) and `template_torch.json`'s carry the identical bug and are fixed
+by the same change, with no extra code needed — the fix lives in the generic
+`sample_dir` selection, not in anything cross-plant-specific.
 
 ### The `ambientocclusion` gate
 
@@ -281,7 +374,9 @@ model JSON "ambientocclusion"
   -> BlockModels::ambient_occlusion(state_id) -> bool   (new accessor)
   -> ModelSectionView::ambient_occlusion_at(x, y, z) -> bool   (new trait method, default `true`)
   -> mesh_models: branches once per block between quad_corner_sample and a flat
-     (1.0, light) fallback, matching tesselateFlat exactly (models.rs)
+     (1.0, light) fallback, matching tesselateFlat's AO/no-AO split (models.rs).
+     This branch alone is not "matching tesselateFlat exactly" — the flat
+     branch has its own light-*position* fork, see "The light-position rule"
 ```
 
 The branch is **per block**, not per quad — `parts.getFirst()` in vanilla applies
@@ -425,6 +520,15 @@ each tinted source's *plains* colour — which changes hue, not brightness.
 - The flag is already wired into live rendering — `2b96bbb` added the
   `ambient_occlusion_at` override to the shell (see the data-path section above).
   This bullet used to say it still needed doing.
+- **The light-position fork (which cell a quad samples) lives entirely in
+  `mesh_models`** — `quad_is_on_face_boundary` and the `sample_dir` selection
+  just above the `quad_corner_sample` call, both in `models.rs`. Do not touch
+  `crates/lodestone-shell/src/mesher.rs`'s `light_at`/`SnapshotFluidView` for
+  this: those back `mesh_fluids`, a genuinely different "no single facing"
+  case (see `mesher.rs:861-865`'s doc comment), not the cross-plant one.
+  `crates/lodestone-render/tests/cross_plant_light_position_gate.rs` is the
+  gate; its own doc comment explains why AO is deliberately disabled in its
+  view (isolating this fork from the already-covered AO-averaging math).
 
 ## Configuration
 
