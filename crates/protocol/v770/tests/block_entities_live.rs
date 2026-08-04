@@ -26,8 +26,8 @@ use lodestone_data::block_states::{block_name, properties};
 use lodestone_model::{BlockFace, ClientAction, ContainerClickType, ContainerSlotChange, ItemStack, Vec3f};
 use lodestone_net::{Connection, memory_pair};
 use lodestone_server::{
-    BlockEntity, BlockEntityHandle, ChunkColumn, ChunkSource, Furnace, FurnaceKind, NoEntities,
-    serve_connection,
+    BlockEntity, BlockEntityHandle, ChunkColumn, ChunkSource, Furnace, FurnaceKind, MobHandle,
+    NoEntities, serve_connection,
 };
 use lodestone_v770::{V770ServerProtocol, adapter};
 
@@ -165,6 +165,7 @@ async fn real_client_places_a_furnace_and_the_server_registers_it() {
             &NoEntities,
             view_radius,
             &server_block_entities,
+            &MobHandle::default(),
         )
         .await
     });
@@ -297,6 +298,7 @@ async fn placing_with_an_empty_hand_still_falls_back_to_stone_and_registers_noth
             &NoEntities,
             view_radius,
             &server_block_entities,
+            &MobHandle::default(),
         )
         .await
     });
@@ -395,6 +397,7 @@ async fn real_client_opens_a_placed_furnace_and_loads_it_via_container_click() {
             &NoEntities,
             view_radius,
             &server_block_entities,
+            &MobHandle::default(),
         )
         .await
     });
@@ -581,6 +584,7 @@ async fn opening_a_furnace_does_not_reset_its_already_loaded_contents() {
             &NoEntities,
             view_radius,
             &server_block_entities,
+            &MobHandle::default(),
         )
         .await
     });

@@ -136,7 +136,7 @@ pub use mob_spawn::{
     DespawnOutcome, MAGIC_NUMBER, MobCategory, SpawnCandidate, SpawnCandidateSource, SpawnRng,
     SpawnState, check_despawn, resolve_mob_shape,
 };
-pub use mobs::{ChunkWorld, LiveMobSource, MobSim, SimMob};
+pub use mobs::{AttackOutcome, ChunkWorld, LiveMobSource, MobHandle, MobSim, SimMob};
 pub use protocol::{EntitySnapshot, ServerBound, ServerDirective, ServerProtocol};
 pub use server::{EntitySource, NoEntities, ServeSummary, ServerError, serve_connection};
 pub use vitals::{DROWN_DAMAGE, EYE_HEIGHT, MAX_AIR_SUPPLY, MAX_HEALTH, PlayerVitals, VitalsTick};

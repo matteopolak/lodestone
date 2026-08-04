@@ -246,6 +246,41 @@ pub enum ServerBound {
         /// The window id the client reports closing.
         window_id: i32,
     },
+    /// The client attacked an entity with its currently held item
+    /// (`ServerboundAttackPacket`, issue #12). 26.2 split this out of the old
+    /// combined interact packet — the wire body carries only the target
+    /// entity id, no hand/location/secondary-action data (see this variant's
+    /// consumer, `crate::server::apply_attack`, for the damage/knockback
+    /// pipeline this drives). The generic `minecraft:interact` packet
+    /// (`ServerboundInteractPacket`, used for right-click entity interactions
+    /// like taming/feeding/mounting) is deliberately *not* given a variant
+    /// here: this crate has no interaction model for any of those, so
+    /// decoding it into a new `ServerBound` case with nothing to do with it
+    /// would be exactly the manufactured decode-only island `CLAUDE.md`
+    /// warns against — it stays [`Ignored`](Self::Ignored) via the wildcard
+    /// decode arm, the same treatment `BlockAction`'s own doc comment
+    /// documents for the item-action ordinals this crate has no inventory
+    /// model to act on either.
+    Attack {
+        /// Target entity id.
+        entity_id: i32,
+    },
+    /// The client's movement-input flags for the current tick
+    /// (`ServerboundPlayerInputPacket`, issue #12). Decoded for exactly one
+    /// reason: `sprint` is half of vanilla's melee knockback-bonus gate
+    /// (`Player.attack`'s `isSprinting() && fullStrengthAttack` — see
+    /// `crate::server::apply_attack`'s own doc comment for the other half,
+    /// which this crate cannot track). The other six flags
+    /// (forward/backward/left/right/jump/shift) are decoded off the wire by
+    /// [`ServerProtocol::decode`] but not threaded through here — nothing in
+    /// this crate's server-authoritative model needs them yet, the same
+    /// "decode what the loop needs, not the whole packet" convention
+    /// [`PlayerMoved`](Self::PlayerMoved)'s own doc comment already
+    /// establishes for its two fields.
+    PlayerInput {
+        /// Whether the client reports itself as sprinting this tick.
+        sprint: bool,
+    },
     /// A packet the loop does not need to act on (chunk-batch
     /// acknowledgements, teleport confirmations, look-only or status-only
     /// movement). The loop ignores these but stays connected.

@@ -47,6 +47,21 @@ the rest of #12's genuine remainder:
   degree of freedom, a cross-cutting change out of this pass's scope. See
   "`bobHurt`, still blocked" below.
 
+**Landed in a later pass, closing #12's real remainder** — everything above
+this bullet is about the *client*: swinging, sending the attack packet,
+taking knockback. None of it made attacking a mob **on our own server** do
+anything, because `lodestone-server` never decoded the attack packet at all.
+See "The integrated-server melee-damage gap" below for the full account:
+`ServerBound::Attack`/`PlayerInput` decode, `MobHandle` (the mutation handle
+issue #12's own census said was missing), `MobSim::attack` (damage +
+knockback in one call), and a real client proving the exact predicted health
+and knockback position land. Mob-on-player damage gets a real, tested
+`PlayerVitals::apply_damage` entry point but **not** a live trigger — no AI
+in this workspace gives a mob the player's position to attack, a separate,
+larger feature; see that section's own scope note. Shield blocking remains
+entirely unbuilt (unrelated to `damage.rs`'s pipeline — needs an item-data
+model this workspace does not have).
+
 ## How it works
 
 ### Swing dispatch (`Sim::begin_attack`, `crates/lodestone-shell/src/sim.rs`)
@@ -815,6 +830,196 @@ a single agent picking it up mid-flight. `ViewBob::hurt`/
 `BobFrame::hurt_roll_degrees` stay exactly where they were: implemented,
 unit-tested, called only by their own tests.
 
+### The integrated-server melee-damage gap: player attacks now deal damage (issue #12)
+
+Everything above this section is client-side: swinging, sending the
+`Attack`/`Interact` packet, taking server-sent knockback. This repo also
+hosts its own **server** (`lodestone-server`, singleplayer and open-to-LAN),
+and until this pass, punching a mob there did nothing — `ServerBound` had no
+`Attack` variant at all, so the packet was never decoded, `SimMob::apply_damage`
+was reached only by AI-driven `MeleeAttackGoal` hits and explosions, and
+`lodestone-physics/src/knockback.rs`'s `knockback_impulse`/`attack_direction`
+had zero callers anywhere. Two prior passes (recorded on issue #12) found and
+scoped this precisely, and named the real blocker: *"there is no way to reach
+a live mob's health from a connection's own task"* — `MobSim` was ticked
+entirely inside its own background task with no shared, lockable handle, the
+way `BlockEntityHandle` already gives block entities.
+
+**What this pass builds, in wire order:**
+
+```text
+ClientAction::InteractEntity { interaction: Attack, .. }   (already sent in production,
+  -> Sim::attack_entity, lodestone-shell — see "Sending the attack" above)
+  -> minecraft:attack (v770 ATTACK packet id 1)
+  -> V770ServerProtocol::decode -> ServerBound::Attack { entity_id }
+  -> dispatch_play_packet -> crate::server::apply_attack
+  -> MobHandle::with(|sim| sim.attack(..))
+     -> SimMob::apply_damage (pre-existing, real, jar-verified — HurtCooldown + apply_reductions)
+     -> lodestone_physics::knockback::knockback_impulse (pre-existing, real, jar-verified)
+     -> NavigatingMob::apply_knockback (new: one-tick position displacement)
+  -> (no reply packet — the real wire shape) the *existing* EntityStreamer::sync,
+     called on every inbound packet, carries the resulting position/health to
+     every connection tracking the mob
+```
+
+**`MobHandle`** (`crates/lodestone-server/src/mobs.rs`) is the missing
+mutation handle, the exact `BlockEntityHandle` pattern
+(`Arc<Mutex<_>>` + a single funnel method, `with`) reused rather than
+reinvented. The one real wrinkle `BlockEntityRegistry` did not have:
+`MobSim<'w>` *borrows* its `ChunkWorld`, but a handle shared with a
+separately-`tokio::spawn`ed connection task must be `'static`.
+`MobHandle::new` resolves this with `Box::leak` — the `ChunkWorld` a caller
+hands in is leaked once, for the process's remaining lifetime, rather than
+borrowed for one task's own stack frame the way the pre-handle
+`run_mob_tick_loop` did. This is a **deliberate, bounded** leak: that
+function's own doc comment already discloses its `ChunkWorld` snapshot is
+static for the sim's whole lifetime (a fixed area around the mob-spawn
+center, never widened) — leaking only changes *whose* lifetime "static" is
+measured against, for the one `MobSim` a running `IntegratedServer`
+constructs per call to `open_in_memory_with_mobs`. `MobHandle::seeded` is
+the direct replacement for what `run_mob_tick_loop` used to do at its own
+top (`set_next_id(1000)` + `seed_demo_mobs`); `run_mob_tick_loop` itself now
+just ticks and republishes a handle it is handed, rather than owning the
+sim outright. `IntegratedServer::open_in_memory_with_mobs` builds the
+handle **synchronously**, before either task spawns, and clones it into
+both — the connection task mutates it on an `Attack` packet, the tick-loop
+task ticks and republishes it, both against the identical `MobSim`.
+`MobHandle` also implements `EntitySource` directly (`self.with(MobSim::snapshots)`),
+useful for a caller (or a test) that mutates the sim itself and does not
+need a separate ticking population.
+
+`ServerBound::Attack { entity_id }` decodes `minecraft:attack` (a 26.2-only
+split of the old combined interact packet — wire body is just a VarInt
+entity id, no hand/location/secondary-action bit, matching
+`ServerboundAttackPacket`'s real record). `ServerBound::PlayerInput { sprint }`
+decodes `minecraft:player_input`'s single flags byte, reading only bit
+`0x40` — the other six movement flags are decoded off the wire (so a
+malformed byte still fails cleanly) but dropped, the same "decode what the
+loop needs" convention `PlayerMoved`'s own two fields already establish.
+
+**`minecraft:interact` (a plain right-click, not `Attack`) deliberately gets
+no `ServerBound` variant at all.** This crate has no interaction model for
+anything it would carry — taming, feeding, mounting — so adding a decode-only
+variant with nothing to consume it would be exactly the manufactured island
+CLAUDE.md warns against (the same call the previous scoping pass on this
+issue already made, for the same reason). It decodes to `Ignored` via the
+wildcard arm, pinned by `decode_plain_interact_from_the_real_client_encoder_is_ignored`
+in `server_protocol.rs` so a future agent adding taming/feeding changes that
+test deliberately rather than discovering the gap by accident.
+
+**Damage.** `PLAYER_BARE_HAND_ATTACK_DAMAGE = 1.0` — `Player.createAttributes()`'s
+own `.add(Attributes.ATTACK_DAMAGE, 1.0)` (`Player.java:208`), **not**
+`LivingEntity`'s generic `2.0` a player would otherwise inherit. This crate
+has no item/weapon-attribute model for the player (`lodestone_entity::damage`'s
+own module doc already names this gap for issue #261) and no server-tracked
+attack-strength ticker (`Player.attack`'s `baseDamageScaleFactor()`,
+cooldown-scaled damage, is client-cosmetic-prediction-only here — see the
+crit-particle section above), so every hit is the flat constant, full
+strength, no crit, no weapon bonus — all pre-existing, disclosed gaps, not
+new ones this pass introduces.
+
+**Knockback.** `lodestone_physics::knockback::knockback_impulse` needs a
+horizontal push *direction* — real vanilla uses the **attacker's facing**
+(`attack_direction(yaw)`), but nothing server-side tracks player rotation at
+all (only `x`/`y`/`z`/`on_ground` — see `ServerBound::PlayerMoved`'s own doc
+comment for why look-only movement stays `Ignored`). `apply_attack` uses the
+horizontal vector from the attacker's last known position to the target
+instead. This is a smaller divergence than it sounds: a melee attack
+requires the crosshair to already be on the target, so facing and
+attacker→target are nearly always the same vector in practice — and it is
+literally the only vector this crate has. `NavigatingMob` has no
+persistent-velocity/drag model to blend an impulse into (it is "kinematic...
+not the physics integrator" — every tick recomputes fresh from path
+following), so `apply_knockback` applies the impulse as an immediate
+one-tick position displacement rather than an ongoing velocity that would
+need new decay machinery this composition was never built to carry — the
+same "disclosed one-shot simplification" trade the crit-particle burst
+above already makes (one tick's worth instead of vanilla's three-tick
+`TrackingEmitter`).
+
+**Knockback power, and why it is genuinely `0.0` for the common case.**
+`Player.attack`'s real formula is `getKnockback(...) + (isSprinting() &&
+fullStrengthAttack ? 0.5F : 0.0F)`. `getKnockback` resolves to the attacker's
+own `minecraft:attack_knockback` attribute (registry default `0.0`,
+`Attributes.java:18`) — zero for a bare hand, since this crate has no
+weapon/enchantment model to add to it. So a **non-sprinting** attack's total
+knockback power is exactly `0.0` — not a placeholder, the literal jar
+formula for the one case this crate can model. `sprinting` *is* tracked
+(`ServerBound::PlayerInput`, one new bool of state per connection), so a
+**sprinting** attack correctly applies `SPRINT_ATTACK_KNOCKBACK_POWER = 0.5`
+— `fullStrengthAttack` is assumed true throughout (no cooldown ticker
+server-side, same disclosed gap as damage above). `combat_live.rs`'s live
+gate (below) exercises the sprinting, nonzero-power case specifically so the
+primitive's wiring is provably real, not just correctly inert.
+
+**Mob-on-player damage: an entry point, not a live trigger.**
+`PlayerVitals::apply_damage` (`crates/lodestone-server/src/vitals.rs`) is now
+a real, unit-tested, jar-verified generic damage entry point — the
+`HurtCooldown` + `apply_reductions` pipeline `SimMob::apply_damage` already
+runs for a mob, given to the player for the first time (previously only
+`tick`/drowning and `apply_fall_damage` existed, neither gated by an
+i-frame). **Nothing calls it in production.** Making a mob actually attack
+the connected player needs player-position-aware targeting AI that does not
+exist anywhere in this workspace: `crate::mobs`'s own module doc already
+scopes real player-targeting (`NearestAttackableTargetGoal`'s population
+search) as a separate, larger feature, and `run_mob_tick_loop` has no
+player-position feed into the sim at all — `MobSim::despawn_pass`'s own "no
+despawn pass" scope note names the identical missing input. Disclosed here
+rather than silently left unfindable, the same shape `ViewBob::hurt`/`bobHurt`
+is tracked in elsewhere in this doc: real, tested, a documented reason
+nothing calls it yet.
+
+**Shield blocking: confirmed, again, out of scope.** `LivingEntity.applyItemBlocking`
+(`:1308-1345`) is a separate angle-gated reduction keyed off the held item's
+`BlocksAttacks` data component — this workspace has no item-data model for
+it anywhere (the same prerequisite gap issue #261 already names for
+per-item armour). Not started.
+
+**No hurt-flash/red-overlay visual for a damaged-but-alive mob.**
+`ServerProtocol` has no `encode_damage_event`/`encode_hurt_animation`
+method, and this pass does not add one — vanilla's `hasRedOverlay` cue
+(issue #98's "per-entity hurt/death red overlay" section above) needs a
+`ClientboundDamageEventPacket`/`ClientboundHurtAnimationPacket` this server
+never sends. What **does** reach the client already, through the pre-existing
+entity-snapshot stream, needs no new encoder: the mob's position (knockback)
+and its removal (death). A real client observes both — see the live gate
+below. Building the visual cue is a real, disclosed remainder, not
+attempted here (it is genuinely new server-side wire work, not "wiring
+existing pieces").
+
+**Verification.**
+
+- Hermetic: `crates/lodestone-server/tests/mob_attack.rs` (8 tests) drives
+  `MobSim::attack` through the crate's public API — exact predicted health
+  after the live-verified diamond-armour reduction (`3.0` from a raw `10.0`
+  hit, the same RCON-verified number `damage.rs`'s own test cites), exact
+  predicted knockback velocity (`(-0.5, 0.4, 0.0)`, hand-derived from the
+  jar formula and cross-checked against calling `knockback_impulse`
+  directly), a full-resistance no-op control, an i-frame-ignored-follow-up
+  control, and immediate death removal. `crates/lodestone-server/src/vitals.rs`
+  gains matching tests for `apply_damage`.
+- Decode: `server_protocol.rs`'s `combat_decode_tests` module (6 tests) —
+  `Attack`/`PlayerInput` round-tripped through the **real client encoder**
+  (`crate::adapter().encode_action(..)`), not a hand-built wire body, plus
+  the plain-`Interact`-is-`Ignored` pin and two truncated-payload controls.
+- **Live, real client**: `crates/protocol/v770/tests/combat_live.rs`.
+  `real_client_attacks_a_live_mob_and_the_server_applies_damage_and_knockback`
+  drives a real `lodestone-client` through `serve_connection` directly
+  (the same "hold my own `MobHandle` clone, `IntegratedServer` builds one
+  internally with no accessor" reasoning `block_entities_live.rs` already
+  established for `BlockEntityHandle`) against a zombie spawned 1 block from
+  the attacker, sprinting. It asserts the server's own `MobHandle` reaches
+  the exact predicted health (`max_health - 0.94`, the zombie-armour
+  reduction hand-derived from the jar in the test's own doc comment) **and**
+  that the real client's own read model (`ClientHandle::entity`)
+  independently converges on the exact predicted post-knockback position
+  (`(0.5, 64.4, 0.0)`) — proving the result reaches a real client over the
+  real wire, not just server-internal state. `no_attack_means_no_movement`
+  is the negative control: ordinary connection traffic (movement, chat)
+  with no `Attack` packet must never move or damage the mob. Both run
+  hermetically (in-memory transport, no real sockets or wall-clock waits)
+  and are **not** `#[ignore]`d.
+
 ## What is deliberately not built here
 
 **`bobHurt`'s production wiring** — see "`bobHurt`, still blocked" above.
@@ -835,6 +1040,24 @@ or this component's — confirmed against #58's own checklist, which already
 names `bobHurt`/`hurtTime`/`hurtDir` as its scope. There is no vanilla
 full-screen colour overlay or camera shake for taking damage at all — see
 issue #98's section above for the jar evidence.
+
+**Mob-on-player autonomous damage** — see "Mob-on-player damage: an entry
+point, not a live trigger" above. `PlayerVitals::apply_damage` exists,
+tested, jar-verified; nothing calls it, because no AI in this workspace
+gives a mob the player's position to target. Needs player-position-aware
+mob AI, a materially larger feature than this pass's "reach a live mob's
+health" scope.
+
+**Shield blocking** — confirmed out of scope again this pass; see that
+section above. Needs an item-data model (`BlocksAttacks`) this workspace
+does not have anywhere, the same prerequisite class as issue #261's armour
+feed.
+
+**A server-side hurt-flash/red-overlay visual cue for a damaged-but-alive
+mob** — `ServerProtocol` has no `encode_damage_event`/`encode_hurt_animation`
+method; not added this pass (genuinely new wire work, not existing-piece
+wiring). Position (knockback) and death already reach the client through the
+pre-existing entity-snapshot stream with no new encoder.
 
 ## Configuration
 
@@ -862,6 +1085,14 @@ issue #98's section above for the jar evidence.
   vanilla's `TrackingEmitter.tick()` loop bound (`TrackingEmitter.java:29`).
   Not configurable; see "Crit particles" above for why this is one tick's
   worth rather than `TrackingEmitter`'s real three.
+- `crates/lodestone-server/src/server.rs::PLAYER_BARE_HAND_ATTACK_DAMAGE` —
+  `1.0`, `Player.createAttributes()`'s bare-hand `ATTACK_DAMAGE`
+  (`Player.java:208`). Not weapon-aware; see "Damage" above.
+- `crates/lodestone-server/src/server.rs::SPRINT_ATTACK_KNOCKBACK_POWER` —
+  `0.5`, `Player.attack`'s `knockbackAttack` bonus (`Player.java:963-966,
+  987-988`). A non-sprinting attack's power is exactly `0.0` (the attacker's
+  `attack_knockback` attribute default, no placeholder) — see "Knockback
+  power" above.
 
 ## Dependencies
 
@@ -907,6 +1138,23 @@ issue #98's section above for the jar evidence.
 - `lodestone_model::ClientAction::{DropSelectedItem, DropSelectedItemStack}`
   — the drop key's gameplay route, encoded by all four protocol adapters
   already.
+- `lodestone_server::{MobHandle, AttackOutcome, ServerBound::{Attack,
+  PlayerInput}}` — the server-side wiring this pass adds (issue #12).
+  `MobHandle` is the shared mutation handle onto the live `MobSim`; see "The
+  integrated-server melee-damage gap" above for the full design (why it
+  leaks its `ChunkWorld`, why it also implements `EntitySource`).
+- `lodestone_physics::knockback::{knockback_impulse, attack_direction}` — now
+  has a real caller (`MobSim::attack`). `lodestone-server`'s `Cargo.toml`
+  gained a `lodestone-physics` dependency for this; zero cycle risk, since
+  that crate depends on nothing.
+- `lodestone_entity::ai::navigating_mob::NavigatingMob::apply_knockback` —
+  new: the one-tick position-displacement mechanic knockback needed, absent
+  before this pass because nothing had ever applied an external impulse to a
+  `NavigatingMob`.
+- `lodestone_entity::{apply_reductions, HurtCooldown, Defenses, DamageFlags}`
+  — now also used by `PlayerVitals::apply_damage`
+  (`crates/lodestone-server/src/vitals.rs`), the identical pipeline
+  `SimMob::apply_damage` already ran, given to the player.
 
 ## How to change it
 
@@ -965,6 +1213,44 @@ issue #98's section above for the jar evidence.
   (`Sim::update_target` calls `update_entity_target` with the exact `origin`/
   `dir`/`block_hit` it just used) — computing them independently would let the
   two disagree about, e.g., a diagonal look direction.
+- **Getting a real attacker-facing knockback direction** (instead of the
+  attacker→target stand-in `apply_attack` uses): needs player rotation
+  tracked server-side at all. The cheapest route is decoding
+  `move_player_pos_rot`/`move_player_rot`'s yaw/pitch fields (currently
+  discarded — `ServerBound::PlayerMoved`'s own doc comment names exactly
+  this as the reason look-only movement stays `Ignored`) into a new tracked
+  `player_yaw: Option<f32>` alongside `player_pos`, then feed it through
+  `lodestone_physics::knockback::attack_direction` in `apply_attack` instead
+  of the position-delta vector. Not attempted here — a real, separate
+  change, not a one-line swap, since it also touches the decode side for two
+  more packets.
+- **Wiring the cooldown-scaled damage/crit-bonus formula server-side**:
+  needs an attack-strength ticker tracked *server*-side (today it is
+  client-only, for the cosmetic crosshair indicator) plus a weapon/item
+  model to derive `baseDamage`/critical eligibility from. Both are named,
+  disclosed gaps in `lodestone_entity::damage`'s own module doc (issue
+  #261); `PLAYER_BARE_HAND_ATTACK_DAMAGE`'s own doc comment names the exact
+  same blocker.
+- **Wiring mob-on-player damage for real** (not just the entry point):
+  give `run_mob_tick_loop`/`MobSim` a live feed of the connected player's
+  position (the same missing input `MobSim::despawn_pass`'s own "no despawn
+  pass" scope note names), then a target-acquisition goal
+  (`NearestAttackableTargetGoal`-equivalent) for hostile species so a
+  `MeleeAttackGoal` connecting against the player calls
+  `PlayerVitals::apply_damage` instead of (or alongside) another `SimMob`.
+  `crate::mobs`'s own module doc already flags this as future, separate
+  work — not a quick follow-up to this pass.
+- **Adding the hurt-flash/red-overlay visual for a server-damaged mob**:
+  add `ServerProtocol::encode_damage_event`/`encode_hurt_animation` (new
+  trait methods, defaulted to `ServerDirective::None`/empty like every other
+  optional encoder — see `protocol.rs`'s own doc comment on why a boxed
+  protocol must forward every one), implement them in `V770ServerProtocol`
+  against real `ClientboundDamageEventPacket`/`ClientboundHurtAnimationPacket`
+  wire shapes, and send one from `apply_attack` when a hit lands. The
+  client-side consumer (`ClientEvent::EntityDamaged`/`EntityHurtAnimation`
+  → `HurtTime` → the render overlay) already exists end to end — see "The
+  per-entity hurt/death red overlay" above — so this is purely a new
+  server-side encoder plus one new call site, not a new mechanic.
 
 ## The hurt-overlay gate, and what it printed (issue #98)
 

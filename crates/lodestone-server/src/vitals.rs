@@ -173,6 +173,14 @@ impl VitalsTick {
 pub struct PlayerVitals {
     air_supply: i32,
     health: f32,
+    /// The invulnerability-frame gate [`apply_damage`](Self::apply_damage)
+    /// consults — **not** shared with drowning ([`tick`](Self::tick)) or
+    /// fall damage ([`apply_fall_damage`](Self::apply_fall_damage)), which
+    /// both predate this field and stay exactly as documented elsewhere in
+    /// this file (drowning's own 20-tick reset cadence *is* its i-frame
+    /// gate, fall bypasses one entirely). A future pass unifying all three
+    /// under one cooldown is out of this change's scope.
+    hurt_cooldown: lodestone_entity::HurtCooldown,
 }
 
 impl Default for PlayerVitals {
@@ -184,6 +192,7 @@ impl Default for PlayerVitals {
         Self {
             air_supply: MAX_AIR_SUPPLY,
             health: MAX_HEALTH,
+            hurt_cooldown: lodestone_entity::HurtCooldown::default(),
         }
     }
 }
@@ -273,6 +282,62 @@ impl PlayerVitals {
                 ..Default::default()
             },
         );
+        self.health = (self.health - outcome.to_health).max(0.0);
+        Some(outcome.to_health)
+    }
+
+    /// Applies a generic incoming hit (issue #12: "mob-on-player damage needs
+    /// a `PlayerVitals` entry point") through the same two-stage pipeline
+    /// [`crate::SimMob::apply_damage`] already runs for a mob: the
+    /// invulnerability-frame gate ([`HurtCooldown::on_hurt`]), then
+    /// [`lodestone_entity::apply_reductions`]. Unlike
+    /// [`apply_fall_damage`](Self::apply_fall_damage) (which bypasses the
+    /// gate entirely, matching fall's own `bypasses_cooldown`-style
+    /// omission — see this module's own doc comment), a generic hit is
+    /// gated by [`hurt_cooldown`](Self::hurt_cooldown), matching
+    /// `LivingEntity.hurt`'s real i-frame behaviour for anything that is not
+    /// specifically exempted.
+    ///
+    /// Returns `None` if the player is already dead or the hit was fully
+    /// ignored by the i-frame gate — the same "landed vs not" distinction
+    /// [`crate::SimMob::apply_damage`] draws, so a caller can tell "no
+    /// effect" from "not alive to hit" only by checking [`health`](Self::health)
+    /// separately if it needs to.
+    ///
+    /// # Status: a real, tested entry point with **no production caller yet**
+    ///
+    /// This closes the gap `lodestone_entity::damage`'s own module doc names
+    /// ("`PlayerVitals` only has `tick` (drowning) and `apply_fall_damage` —
+    /// no generic melee/mob-damage entry point"), but it does not by itself
+    /// make a mob attack the player: no AI in this workspace gives a hostile
+    /// [`crate::SimMob`] the connected player's position as an
+    /// [`attack_target`](crate::SimMob::set_attack_target) at all —
+    /// `crate::mobs`'s own module doc already scopes real player-targeting
+    /// AI (`NearestAttackableTargetGoal`'s population search) as a separate,
+    /// larger feature, and `run_mob_tick_loop` has no player-position feed
+    /// into the sim to begin with (`MobSim::despawn_pass`'s own "no despawn
+    /// pass" scope note names the identical missing input). Wiring that is a
+    /// materially larger change than this task's "reach a live mob's health
+    /// from a connection" scope — disclosed here rather than silently
+    /// left unfindable, matching this project's convention for a real,
+    /// unit-tested piece with a documented reason nothing calls it yet
+    /// (the same shape `ViewBob::hurt`/`camera_rig.rs`'s `bobHurt` is
+    /// tracked in, per `docs/combat.md`).
+    pub fn apply_damage(
+        &mut self,
+        raw_damage: f32,
+        defenses: &lodestone_entity::Defenses,
+        flags: lodestone_entity::DamageFlags,
+    ) -> Option<f32> {
+        if self.health <= 0.0 {
+            return None;
+        }
+        let amount = match self.hurt_cooldown.on_hurt(raw_damage, flags) {
+            lodestone_entity::HurtDecision::Ignored => return None,
+            lodestone_entity::HurtDecision::Full { amount }
+            | lodestone_entity::HurtDecision::Topup { amount } => amount,
+        };
+        let outcome = lodestone_entity::apply_reductions(amount, defenses, flags);
         self.health = (self.health - outcome.to_health).max(0.0);
         Some(outcome.to_health)
     }
@@ -440,5 +505,59 @@ mod tests {
         let dealt = v.apply_fall_damage(5.0);
         assert_eq!(dealt, None, "a dead player must not take more damage");
         assert_eq!(v.health(), 0.0);
+    }
+
+    // ---- `apply_damage` (issue #12's "mob-on-player" entry point) --------
+
+    /// The full reduction pipeline runs, with the same live-verified
+    /// diamond-armour number `mob_attack.rs` (`lodestone-server`'s own
+    /// acceptance gate for `MobSim::attack`) pins for a mob — proving this
+    /// entry point is not a second, independently-drifting formula.
+    #[test]
+    fn apply_damage_runs_the_full_armour_reduction_pipeline() {
+        let mut v = PlayerVitals::default();
+        let defenses = lodestone_entity::Defenses {
+            armor: 20.0,
+            armor_toughness: 8.0,
+            ..Default::default()
+        };
+        let dealt = v.apply_damage(10.0, &defenses, lodestone_entity::DamageFlags::default());
+        assert_eq!(dealt, Some(3.0));
+        assert_eq!(v.health(), MAX_HEALTH - 3.0);
+    }
+
+    /// The invulnerability-frame gate is real and **separate** from
+    /// drowning's/fall's own cadence: a weaker follow-up inside the 20-tick
+    /// window is ignored (`None`, health untouched), the identical
+    /// `HurtCooldown` behaviour `lodestone-entity`'s own tests pin.
+    #[test]
+    fn apply_damage_ignores_a_weaker_followup_inside_the_iframe_window() {
+        let mut v = PlayerVitals::default();
+        let defenses = lodestone_entity::Defenses::default();
+        let flags = lodestone_entity::DamageFlags::default();
+
+        let first = v.apply_damage(8.0, &defenses, flags);
+        assert_eq!(first, Some(8.0));
+
+        let second = v.apply_damage(5.0, &defenses, flags);
+        assert_eq!(second, None, "a weaker follow-up must be ignored inside i-frames");
+        assert_eq!(v.health(), MAX_HEALTH - 8.0, "health must not drop again");
+    }
+
+    /// **Control**: a dead player takes no further generic damage either —
+    /// the third damage source now sharing the identical `health <= 0.0`
+    /// guard [`dead_vitals_do_not_tick`]/[`dead_player_takes_no_further_fall_damage`]
+    /// already prove for the other two.
+    #[test]
+    fn dead_player_takes_no_further_generic_damage() {
+        let mut v = PlayerVitals::default();
+        v.apply_fall_damage(999.0);
+        assert_eq!(v.health(), 0.0);
+        let dealt = v.apply_damage(
+            1.0,
+            &lodestone_entity::Defenses::default(),
+            lodestone_entity::DamageFlags::default(),
+        );
+        assert_eq!(dealt, None, "a dead player must not take more damage");
     }
 }

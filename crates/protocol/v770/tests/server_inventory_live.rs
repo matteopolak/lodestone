@@ -34,7 +34,9 @@ use std::time::Duration;
 use lodestone_client::{ClientBuilder, LoginProfile, ServerAddress};
 use lodestone_model::{ClientAction, ContainerClickType, ContainerSlotChange, ItemStack};
 use lodestone_net::{Connection, memory_pair};
-use lodestone_server::{BlockEntityHandle, ChunkColumn, ChunkSource, NoEntities, serve_connection};
+use lodestone_server::{
+    BlockEntityHandle, ChunkColumn, ChunkSource, MobHandle, NoEntities, serve_connection,
+};
 use lodestone_v770::{V770ServerProtocol, adapter};
 use uuid::Uuid;
 
@@ -84,6 +86,7 @@ async fn real_client_hotbar_select_and_container_click_reach_the_server_model() 
             &NoEntities,
             0,
             &BlockEntityHandle::default(),
+            &MobHandle::default(),
         )
         .await
     });

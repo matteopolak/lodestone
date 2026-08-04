@@ -287,6 +287,32 @@ impl<'w> NavigatingMob<'w> {
         self.velocity
     }
 
+    /// Applies an external velocity impulse — e.g. melee/explosion knockback
+    /// (`lodestone_physics::knockback::knockback_impulse`) — as an immediate
+    /// one-tick position displacement, and reports it as this tick's
+    /// [`velocity`](Self::velocity) until the next [`advance`] overwrites it
+    /// from path-following.
+    ///
+    /// This follower has no drag/persistent-velocity model to blend an
+    /// impulse into: it is explicitly "kinematic... not the physics
+    /// integrator" (see this struct's own doc comment) — every tick's motion
+    /// comes from stepping toward the current waypoint, recomputed from
+    /// scratch, with no notion of "current speed" surviving between ticks
+    /// beyond what [`advance`] just derived. So rather than adding an ongoing
+    /// impulse-decay state this composition was never built to carry, the
+    /// impulse is applied once, directly to position — the same "one-shot
+    /// simplification, disclosed rather than silent" trade `docs/combat.md`
+    /// already makes for the crit-particle burst (one tick's worth instead of
+    /// vanilla's three-tick `TrackingEmitter`). The next `advance()` call
+    /// (path-following) is unaffected: it recomputes fresh from the
+    /// post-impulse position, exactly as if the mob had walked there itself.
+    pub fn apply_knockback(&mut self, impulse: Vec3) {
+        self.pos.x += impulse.x;
+        self.pos.y += impulse.y;
+        self.pos.z += impulse.z;
+        self.velocity = impulse;
+    }
+
     /// The mob's body yaw in degrees (vanilla `yBodyRot`), derived from its
     /// movement direction and retained while idle.
     #[must_use]
@@ -1202,6 +1228,55 @@ mod tests {
         assert!(
             baby.path_searches() >= 1,
             "FollowParentGoal must have driven a real A* search"
+        );
+    }
+
+    // ---- Knockback (issue #12) --------------------------------------------
+
+    #[test]
+    fn apply_knockback_displaces_position_and_reports_the_impulse_as_velocity() {
+        let world = Arena {
+            walls: HashSet::new(),
+        };
+        let shape = MobShape::land(0.6, 1.95);
+        let start = Vec3::new(5.0, 0.0, 5.0);
+        let mut mob = NavigatingMob::new(&world, shape, start, 0.25, 400);
+
+        let impulse = Vec3::new(-0.6, 0.4, 0.2);
+        mob.apply_knockback(impulse);
+
+        assert_eq!(
+            mob.position(),
+            Vec3::new(start.x + impulse.x, start.y + impulse.y, start.z + impulse.z),
+            "knockback must displace position by exactly the impulse"
+        );
+        assert_eq!(
+            mob.velocity(),
+            impulse,
+            "velocity() must report the impulse itself until the next advance()"
+        );
+    }
+
+    #[test]
+    fn advance_after_knockback_recomputes_fresh_from_the_post_impulse_position() {
+        // Control: a subsequent `advance()` with no goal/path set must not
+        // "remember" the impulse — velocity resets to zero, matching the
+        // struct's own "no drag/persistent-velocity model" contract. This is
+        // the control that proves the impulse is a one-shot displacement, not
+        // a leaked ongoing velocity nothing ever decays.
+        let world = Arena {
+            walls: HashSet::new(),
+        };
+        let shape = MobShape::land(0.6, 1.95);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400);
+        mob.apply_knockback(Vec3::new(1.0, 0.0, 0.0));
+        assert_eq!(mob.velocity(), Vec3::new(1.0, 0.0, 0.0));
+
+        mob.advance();
+        assert_eq!(
+            mob.velocity(),
+            Vec3::new(0.0, 0.0, 0.0),
+            "with no path, advance() must not perpetuate the knockback velocity"
         );
     }
 }
