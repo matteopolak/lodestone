@@ -74,7 +74,7 @@ capability exists, concretely stated what's missing) · **gap** (nothing exists)
 |---|---|---|---|
 | `runTaskLater` / `runTaskTimer` | gap | only the fixed 20 Hz `GameTick`; no delayed/repeating primitive | [#113](https://github.com/matteopolak/lodestone/issues/113) |
 | `runTaskAsynchronously` + main-thread hand-back | partial | the pattern exists once, hand-built, for `lodestone-nav`'s search (owned snapshot, dedicated thread, never touches the `World` lock); no general API | [#114](https://github.com/matteopolak/lodestone/issues/114) |
-| Folia-style region threading | ceiling (today) | one `World`, one thread, one clock, by design (`world-unification.md`) — not a gap so much as a different, simpler contract; the decision needs to be on record | [#116](https://github.com/matteopolak/lodestone/issues/116) (design) |
+| Folia-style region threading | **ceiling, permanently** | one `World`, one thread, one clock, by design (`world-unification.md`) — not a gap, a decided permanent contract; see "Decision records" below | [#116](https://github.com/matteopolak/lodestone/issues/116) (closed) |
 
 ### Commands
 
@@ -192,6 +192,67 @@ section below).
 | `EcsHandle` reentrancy — **unrepresentable** for a plugin author who never read the docs | gap | this is the brief's own top-priority ask, and it is a real design question with no clean answer yet (a plugin can always `Arc::clone` around any wrapper) | [#177](https://github.com/matteopolak/lodestone/issues/177) (design) |
 | A test harness a third-party plugin author can run against their own plugin | gap | one bespoke test (`mining_deadlock.rs`) pins one historical bug; nothing reusable | [#179](https://github.com/matteopolak/lodestone/issues/179) |
 | `ActionQueue` (shipped) vs. `MessageWriter<SendAction>` (specified) | open question | both work; the shape decision affects every downstream outbound-action issue (#157, #109) | [#181](https://github.com/matteopolak/lodestone/issues/181) (design) |
+
+## Decision records
+
+Closed design questions, written down once so they are not re-derived. Each quotes the owner's own
+words rather than paraphrasing them, per this repo's own standard for what counts as a decision on
+record.
+
+### #116 — Folia-style region threading is not a goal; closed
+
+[#116](https://github.com/matteopolak/lodestone/issues/116) asked, as a decision record rather
+than code: is region-based parallelism ever a goal for this project, and if not, say so on the
+record so nobody reopens it. The answer already existed, split across two sibling issues in the
+same epic, and this section is that answer collected in one place.
+
+**[#341](https://github.com/matteopolak/lodestone/issues/341)'s scope decision** (Java plugin
+compatibility, targeting Paper) states it directly, as the owner's own issue comment:
+
+> **Do not target Folia.** It is a separate fork with regionised multi-threading, and its
+> threading model conflicts directly with our single `RwLock<World>` — see the reentrancy
+> constraint in the issue body, which is already the hardest part of this design. Folia would
+> multiply it rather than help.
+
+That settles the *plugin-compatibility* question: a Folia-authored plugin that assumes
+region-sharded scheduling is out of scope, the same way a plugin too old for modern Paper is out of
+scope by the same issue's own reasoning.
+
+**[#342](https://github.com/matteopolak/lodestone/issues/342) (regionised server ticking, filed as
+a later performance track) records the internal counterpart**, and is explicit that the two
+statements are not in tension:
+
+> #341 says do **not** target Folia as a *plugin-compatibility* target. That is a different
+> statement, and both hold:
+>
+> - **Supporting Folia's plugin threading contract** — plugins written to assume regionised
+>   scheduling. Out of scope; it multiplies #341's hardest problem.
+> - **Our own server adopting regionised ticking** — an internal performance architecture. This
+>   issue, and legitimate.
+>
+> They interact in a useful direction: our single `RwLock<World>` is what blocks both today. If
+> this lands, Folia-style plugin threading becomes *possible* to reconsider, where today it is
+> structurally excluded.
+
+So: two separate axes, correctly not conflated. **This project may, later and for measured
+performance reasons (§342's own sequencing: tick loop → single-threaded parity → benchmarks →
+profile → only then decide), regionise its own server tick loop internally.** That is unrelated to
+whether this project ever backs Folia's plugin-facing threading contract, which it will not.
+
+**Reaffirmed as permanent for the plugin ABI, independent of whether #342 ever lands:** one
+`bevy_ecs::World`, one `GameTick` schedule, one 20 Hz accumulator
+(`docs/world-unification.md`'s §4.1(c): "It now holds **one** [`World`]... and that one `World`
+carries **one** `GameTick` schedule driven by **one** 20 Hz accumulator"). Every clause in this
+doc's doctrine — and every clause in [`../plugin-api.md`](../plugin-api.md)'s intent doctrine —
+is written assuming a single writer, a single schedule, and a single ordered tick. §342's own
+"what it costs" section is explicit that regionisation would need either one `World` per region or
+a provably-partitioned single `World`, and that "global ordering disappears" is one of the costs,
+not a side effect it avoids. If #342 ever lands, it changes the **server's own** internal ticking
+architecture; it does not retroactively change what a plugin can assume about the client-side
+`GameTick` this framework is built on, and it does not reopen #341's Folia answer. A contributor
+reading #342 as a reason to revisit either should read this record first.
+
+**Closed:** [#116](https://github.com/matteopolak/lodestone/issues/116), pointing here.
 
 ## Port-feasibility analysis
 
