@@ -42,19 +42,45 @@ use lodestone_net::{Connection, memory_pair};
 use tokio::io::DuplexStream;
 use tokio::sync::Notify;
 
-use crate::block_entities::{BlockEntityHandle, run_block_entity_tick_loop};
+use crate::block_entities::BlockEntityHandle;
 use crate::chunk::ChunkSource;
-use crate::mobs::{LiveMobSource, MobHandle, run_mob_tick_loop};
+use crate::mobs::{LiveMobSource, MobHandle};
 use crate::protocol::ServerProtocol;
 use crate::server::{EntitySource, NoEntities, serve_connection};
 use crate::spawn::{Task, spawn};
+use crate::tick::{TickClock, TickStats};
+// `run_tick_loop` (like `open_in_memory_with_mobs`, its one caller) is
+// `#[cfg(not(target_arch = "wasm32"))]`-gated in `tick.rs` — this import must
+// carry the identical `cfg`, or it is an unresolved-import hard error on
+// wasm32 regardless of whether the name is ever reached at that target.
+// **This was already broken on `main` before this change**: the two
+// functions this loop replaces (`mobs::run_mob_tick_loop`,
+// `block_entities::run_block_entity_tick_loop`) were imported by this same
+// file with no such gate, so `cargo build -p lodestone-server --target
+// wasm32-unknown-unknown` (the check `scripts/wasm-check.sh` runs) was
+// already red — re-verified directly in a throwaway worktree at this
+// crate's own pre-#284 `HEAD`, not assumed. Fixed here rather than left,
+// since this refactor already touches every one of these imports.
+#[cfg(not(target_arch = "wasm32"))]
+use crate::tick::run_tick_loop;
 
 /// Spawns `fut` racing against `shutdown`'s notification — whichever finishes
-/// first ends the task. Both background tick loops
+/// first ends the task. The unified background tick loop
 /// [`open_in_memory_with_mobs`](IntegratedServer::open_in_memory_with_mobs)
-/// starts (`run_mob_tick_loop`, `run_block_entity_tick_loop`) need exactly
-/// this shape, so it exists once here rather than once per call site. Native
-/// only, like the tick loops themselves and every caller of this function.
+/// starts (`tick::run_tick_loop`, issue #284) needs exactly this shape, so it
+/// exists once here rather than once per call site.
+///
+/// # History: this used to be shared by *two* tick tasks, not one
+///
+/// Before #284, this helper backed two separate spawn sites
+/// (`mobs::run_mob_tick_loop` and `block_entities::run_block_entity_tick_loop`,
+/// unified behind this one function in `a6cc60a`). #284 went one step
+/// further and merged the two *loops themselves* into
+/// [`crate::tick::run_tick_loop`], so there is now only one call site left —
+/// this helper still earns its keep as the one place the shutdown-race
+/// wrapper is written, rather than because it is shared by several callers
+/// today. Native only, like the tick loop itself and every caller of this
+/// function.
 #[cfg(not(target_arch = "wasm32"))]
 fn spawn_tick_task<F>(shutdown: &Arc<Notify>, fut: F) -> Task
 where
@@ -80,19 +106,18 @@ pub struct IntegratedServer {
     local_addr: Option<std::net::SocketAddr>,
     shutdown: Arc<Notify>,
     task: Task,
-    /// The mob-simulation tick task, present only when this handle was built
-    /// by [`open_in_memory_with_mobs`](Self::open_in_memory_with_mobs). Kept
+    /// The unified world-tick task (issue #284: mob sim + block entities, one
+    /// loop), present only when this handle was built by
+    /// [`open_in_memory_with_mobs`](Self::open_in_memory_with_mobs). Kept
     /// separate from `task` (rather than folded into the same future) because
-    /// the sim is meant to keep ticking independently of any one connection —
-    /// see that constructor's own doc comment.
-    mob_task: Option<Task>,
-    /// The block-entity tick task — the direct analogue of `mob_task`, for
-    /// [`crate::BlockEntityRegistry`] rather than [`crate::MobSim`]. Present
-    /// only when this handle was built by
-    /// [`open_in_memory_with_mobs`](Self::open_in_memory_with_mobs); see that
-    /// constructor's own doc comment for why this is the one constructor
-    /// that ticks it (`docs/block-entities.md`'s first named gap).
-    block_entity_task: Option<Task>,
+    /// the world is meant to keep ticking independently of any one
+    /// connection — see that constructor's own doc comment. Before #284 this
+    /// was two separate fields (`mob_task`, `block_entity_task`) for two
+    /// separate loops; merging the loops made the second field redundant.
+    tick_task: Option<Task>,
+    /// MSPT/TPS/overrun accounting for `tick_task` (issue #285) — `Some` iff
+    /// `tick_task` is, and read through [`tick_stats`](Self::tick_stats).
+    clock: Option<Arc<TickClock>>,
 }
 
 impl IntegratedServer {
@@ -167,8 +192,8 @@ impl IntegratedServer {
                 local_addr: None,
                 shutdown,
                 task,
-                mob_task: None,
-                block_entity_task: None,
+                tick_task: None,
+                clock: None,
             },
             client_end,
         )
@@ -177,10 +202,13 @@ impl IntegratedServer {
     /// Like [`open_in_memory_with_entities`](Self::open_in_memory_with_entities),
     /// but the entity source is a real, live-ticked [`crate::MobSim`] (issue
     /// #217) rather than a caller-supplied [`EntitySource`]: this constructor
-    /// also spawns the tick-loop task that owns the sim
-    /// (`mobs::run_mob_tick_loop`), so dropping the returned handle stops
-    /// *both* the connection task and the simulation task, and shutdown waits
-    /// on both.
+    /// also spawns the unified tick-loop task that owns the sim *and* every
+    /// block entity (`tick::run_tick_loop`, issue #284 — see that module's own
+    /// doc comment for why one loop now covers both), so dropping the
+    /// returned handle stops *both* the connection task and the world-tick
+    /// task, and shutdown waits on both. Also builds this server's
+    /// [`TickClock`] (issue #285), readable through
+    /// [`tick_stats`](Self::tick_stats).
     ///
     /// `world_source` is a **second, independent instance** of whatever
     /// [`ChunkSource`] `source` also is — not the same value, and not shared.
@@ -195,7 +223,7 @@ impl IntegratedServer {
     /// the scope note on `mobs::run_mob_tick_loop`). `mob_center` is the block
     /// `(x, z)` mobs are seeded around; `mob_count` is how many.
     ///
-    /// Native only, like [`bind`](Self::bind) — the sim's tick timer needs
+    /// Native only, like [`bind`](Self::bind) — the tick loop's timer needs
     /// `tokio::time`, unavailable on `wasm32` (see `mobs::run_mob_tick_loop`'s
     /// doc comment).
     #[cfg(not(target_arch = "wasm32"))]
@@ -220,9 +248,11 @@ impl IntegratedServer {
         let live_mobs = LiveMobSource::default();
         // Shared with the tick task spawned below, the same way `live_mobs`
         // is — this is the constructor `docs/block-entities.md` named as the
-        // one with somewhere to hang a `run_block_entity_tick_loop` off of.
+        // one with somewhere to hang the unified tick loop's block-entity work
+        // off of (issue #284; before that, a separate
+        // `run_block_entity_tick_loop`).
         let block_entities = BlockEntityHandle::default();
-        // Issue #12: built *synchronously*, here, before either task spawns —
+        // Issue #12: built *synchronously*, here, before the tick task spawns —
         // not inside `run_mob_tick_loop`'s own future the way the pre-handle
         // version built its `ChunkWorld`/`MobSim` — so the exact same handle
         // (cloned below) can be shared by the connection task (which mutates
@@ -252,9 +282,11 @@ impl IntegratedServer {
             }
         });
 
-        let mob_task = spawn_tick_task(&shutdown, run_mob_tick_loop(mob_handle, live_mobs));
-        let block_entity_task =
-            spawn_tick_task(&shutdown, run_block_entity_tick_loop(block_entities));
+        let clock = Arc::new(TickClock::new());
+        let tick_task = spawn_tick_task(
+            &shutdown,
+            run_tick_loop(mob_handle, live_mobs, block_entities, Arc::clone(&clock)),
+        );
 
         (
             Self {
@@ -262,8 +294,8 @@ impl IntegratedServer {
                 local_addr: None,
                 shutdown,
                 task,
-                mob_task: Some(mob_task),
-                block_entity_task: Some(block_entity_task),
+                tick_task: Some(tick_task),
+                clock: Some(clock),
             },
             client_end,
         )
@@ -303,7 +335,7 @@ impl IntegratedServer {
         // above) rather than one per connection, so two LAN players placing
         // and interacting with the same furnace see the same state — no
         // tick loop is spawned for it here, though (see the struct's
-        // `block_entity_task` doc comment for why only the mobs constructor
+        // `tick_task` doc comment for why only the mobs constructor
         // does that); a block entity placed over LAN exists and holds state
         // but does not advance on its own, the same real-but-static gap
         // `open_in_memory_with_entities` has. Same reasoning for `mobs`: no
@@ -344,8 +376,8 @@ impl IntegratedServer {
             local_addr,
             shutdown,
             task,
-            mob_task: None,
-            block_entity_task: None,
+            tick_task: None,
+            clock: None,
         })
     }
 
@@ -355,6 +387,17 @@ impl IntegratedServer {
     #[must_use]
     pub fn local_addr(&self) -> Option<std::net::SocketAddr> {
         self.local_addr
+    }
+
+    /// A snapshot of this server's MSPT/TPS/overrun accounting (issue #285),
+    /// or `None` for a handle with no unified tick loop — every constructor
+    /// except [`open_in_memory_with_mobs`](Self::open_in_memory_with_mobs),
+    /// the only one that starts [`crate::tick::run_tick_loop`] today (the same
+    /// scope the struct's own `tick_task` field already had before this
+    /// accessor existed).
+    #[must_use]
+    pub fn tick_stats(&self) -> Option<TickStats> {
+        self.clock.as_deref().map(TickClock::stats)
     }
 
     /// Signals the serving task to stop without awaiting it. Idempotent.
@@ -371,16 +414,13 @@ impl IntegratedServer {
         // Await the task(s) without moving the fields (the handle also has a
         // `Drop` impl). Natively this joins the tokio task; on wasm the task
         // is not joinable, so this returns once the `Notify` has been fired
-        // above. `mob_task` is only `Some` for a handle built by
+        // above. `tick_task` is only `Some` for a handle built by
         // `open_in_memory_with_mobs`; the same one `notify_waiters()` call
         // above already signalled it (both tasks `select!` on clones of the
         // same `Arc<Notify>`).
         self.task.join().await;
-        if let Some(mut mob_task) = self.mob_task.take() {
-            mob_task.join().await;
-        }
-        if let Some(mut block_entity_task) = self.block_entity_task.take() {
-            block_entity_task.join().await;
+        if let Some(mut tick_task) = self.tick_task.take() {
+            tick_task.join().await;
         }
     }
 }
@@ -391,11 +431,8 @@ impl Drop for IntegratedServer {
         // case a task is parked somewhere the signal cannot reach.
         self.shutdown.notify_waiters();
         self.task.abort();
-        if let Some(mob_task) = &self.mob_task {
-            mob_task.abort();
-        }
-        if let Some(block_entity_task) = &self.block_entity_task {
-            block_entity_task.abort();
+        if let Some(tick_task) = &self.tick_task {
+            tick_task.abort();
         }
     }
 }

@@ -395,10 +395,23 @@ impl BlockEntityHandle {
 /// task is aborted (by [`crate::IntegratedServer`]'s shutdown/drop, exactly
 /// like the mob tick task).
 ///
+/// # Superseded as of issue #284 — no longer what production spawns
+///
+/// Same situation as [`crate::mobs::run_mob_tick_loop`], its analogue: production
+/// (`crate::IntegratedServer::open_in_memory_with_mobs`) used to spawn this
+/// function side-by-side with that one, and now spawns
+/// [`crate::tick::run_tick_loop`] instead — one loop, ticking both, with MSPT/
+/// TPS/overrun accounting (issue #285). This function is unchanged and still
+/// covered by its own test below; see `crate::tick`'s module doc for why one
+/// loop replaced two.
+///
 /// Native only, like `run_mob_tick_loop` — `tokio::time::interval` is
 /// unavailable on `wasm32` (see that function's own doc comment for the
 /// established reasoning this repeats).
 #[cfg(not(target_arch = "wasm32"))]
+// Same reasoning as `run_mob_tick_loop`'s own `#[allow(dead_code)]`: no
+// caller left outside this file's own `#[cfg(test)]` module since #284.
+#[allow(dead_code)]
 pub(crate) async fn run_block_entity_tick_loop(handle: BlockEntityHandle) {
     // 50ms, matching vanilla's 20 TPS and this crate's other tick intervals
     // (`server.rs`'s `VITALS_TICK_INTERVAL`, `mobs.rs`'s `MOB_TICK_INTERVAL`) —

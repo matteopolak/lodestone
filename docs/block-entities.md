@@ -60,13 +60,18 @@ of the three gaps named below:
    handle that lets a connection's own task (placement) and a background
    tick-loop task (advancing every entry) share one registry — the exact
    shape `crate::mobs::LiveMobSource` already established for the mob
-   simulation. `BlockEntityRegistry::tick_all` advances every entry once;
-   `block_entities::run_block_entity_tick_loop` is the async driver
-   [`IntegratedServer::open_in_memory_with_mobs`] now spawns alongside the
-   existing mob tick task (`mob_task`/`block_entity_task` are siblings on
-   the handle, joined/aborted together) — this is the constructor a real
-   singleplayer session uses (`lodestone-shell/src/net.rs`), so a furnace
-   placed there really does tick every 50ms, not just in a test.
+   simulation. `BlockEntityRegistry::tick_all` advances every entry once.
+   **Update (issue #284):** the async driver is now `tick::run_tick_loop` —
+   a single unified 20Hz loop that ticks block entities *and* the mob sim
+   together, with MSPT/TPS/overrun accounting (issue #285; see
+   [`docs/server-tick-loop.md`](server-tick-loop.md)). Before #284 this was
+   `block_entities::run_block_entity_tick_loop`, a second loop spawned
+   side-by-side with the mob tick task (`mob_task`/`block_entity_task` were
+   separate sibling fields on the handle); that function still exists and is
+   still covered by its own test, but is no longer what
+   [`IntegratedServer::open_in_memory_with_mobs`] spawns — this is still the
+   constructor a real singleplayer session uses (`lodestone-shell/src/net.rs`),
+   so a furnace placed there really does tick every 50ms, not just in a test.
 2. **Placement now honours the held item, for these four blocks.**
    `crate::server::apply_use_item_on` now consults
    `PlayerInventory::selected_item()` through `block_entity_for_item`: a
