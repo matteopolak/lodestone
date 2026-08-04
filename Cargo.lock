@@ -2765,6 +2765,7 @@ dependencies = [
  "lodestone-testsupport",
  "lodestone-world",
  "lodestone-worldgen",
+ "rand 0.8.7",
  "serde_json",
  "tokio",
  "tracing",

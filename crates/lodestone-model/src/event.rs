@@ -399,6 +399,26 @@ pub struct EntityMetadataUpdate {
     /// Current air supply in ticks, when present (`Entity.DATA_AIR_SUPPLY_ID`).
     /// Feeds the HUD's underwater bubble row (`docs/sky-and-air-bubbles.md`).
     pub air_supply: Option<i32>,
+    /// A creeper's fuse direction (`Creeper.DATA_SWELL_DIR`), when present and
+    /// the entity is known to be a creeper: `-1` while idle or backing off,
+    /// `1` while counting up to detonation. The counter itself
+    /// (`Creeper.swell`/`oldSwell`) is never sent — only the direction is, and
+    /// a consumer integrates it client-side one tick at a time, exactly as
+    /// vanilla's own client does (`Creeper.java:139`). See
+    /// `lodestone_render::entity_anim::pose_swelling`'s docs for why the split
+    /// between "synced direction" and "locally integrated counter" exists.
+    pub creeper_swell_dir: Option<i32>,
+    /// Whether a creeper is charged (lightning-struck), when present and the
+    /// entity is known to be a creeper (`Creeper.DATA_IS_POWERED`). Doubles the
+    /// explosion radius and drops a charged mob's head; set once and never
+    /// cleared.
+    pub creeper_powered: Option<bool>,
+    /// Whether a creeper's fuse has been lit (flint-and-steel or fire charge),
+    /// when present and the entity is known to be a creeper
+    /// (`Creeper.DATA_IS_IGNITED`). Set once and never cleared — distinct from
+    /// [`creeper_swell_dir`](Self::creeper_swell_dir) alone being positive,
+    /// which also happens from proximity (`SwellGoal`) without ever igniting.
+    pub creeper_ignited: Option<bool>,
 }
 
 impl EntityMetadataUpdate {
@@ -416,6 +436,9 @@ impl EntityMetadataUpdate {
             && self.variant.is_none()
             && !self.item.is_reported()
             && self.air_supply.is_none()
+            && self.creeper_swell_dir.is_none()
+            && self.creeper_powered.is_none()
+            && self.creeper_ignited.is_none()
     }
 }
 

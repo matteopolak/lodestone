@@ -186,6 +186,7 @@ fn world_with_bow_carrying_mobs(feet: glam::Vec3) -> World {
         variant: None,
         count: 1,
         name_tag: None,
+        creeper_swell_dir: None,
     };
     fold_entity_snapshots(
         &mut world,

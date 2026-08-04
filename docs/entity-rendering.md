@@ -89,23 +89,83 @@ lift scales too and the creeper grows *upward out of the floor*. Scaling about
 the model origin instead — the obvious implementation — sinks the feet ~0.16
 blocks at full swell. `swollen_creeper_keeps_its_feet_on_the_ground` pins it.
 
-**Not yet wired, and nothing sets `swell` above zero.** The chain stops in the
-protocol layer: `Creeper.DATA_SWELL_DIR` is metadata index 16 (a `VarInt`, `-1`
-or `1`), `v770`'s `read_entity_metadata` decodes that serializer correctly but
-drops the value at its "decoded for alignment, not surfaced" arm because
-`EntityMetadataUpdate` has no field for it. Reaching a live creeper needs, in
-order: a field on `EntityMetadataUpdate`; a class-guarded arm in
-`packets/metadata.rs` (index 16 collides with `IDX_BABY`, so it needs a
-`MetadataClass::Creeper` guard, and index 17's powered flag collides likewise);
-`apply_metadata` in `state.rs`; a per-entity `swell` counter on `entities.rs`'s
-`Track`, since `getSwelling` is a *client-side integral* of the synced direction
-(`swell += swellDir` each tick, divided by 28) and not a synced value; and a
-`swell` field on `AnimInput` to carry it the last hop.
+**Now decoded and integrated as far as the protocol/render seam goes; still an
+island one hop short of production, in a crate this agent does not own.**
+Live player report: "the creeper has a hiss but no explosion sound, and it
+doesnt expand/turn white or blink or whatever." Three fixes, landed
+incrementally:
 
-One known gap once it is wired: `EntityMesh::local_min`/`local_max` come from
-`rest_pose()`, so a swelling creeper is drawn up to 41% wider than its own
-culling box and will clip at the frame edge. `MAX_SWELL_SCALE` is exported for
-whoever widens the creeper's local bounds.
+* **The protocol decode.** `v770`'s `packets/metadata.rs` now has
+  `MetadataClass::Creeper` and three class-guarded arms:
+  `Creeper.DATA_SWELL_DIR` (index 16, `INT`), `DATA_IS_POWERED` (17,
+  `BOOLEAN`), `DATA_IS_IGNITED` (18, `BOOLEAN`) — all three collide with
+  *other* mobs' unrelated fields at the same index (a warden's anger level is
+  also an `INT` at 16; see that module's `every_metadata_index_constant_
+  matches_the_jar_dump` and its accompanying collision test), so the class
+  guard is load-bearing, not decoration, exactly like the sheep/horse variant
+  guards above it. `EntityMetadataUpdate` carries the three as
+  `creeper_swell_dir`/`creeper_powered`/`creeper_ignited`. `handle_add_entity`
+  synthesizes vanilla's own idle defaults (`-1`/`false`/`false`) at spawn for
+  the same reason the sheep-wool fix does: `SynchedEntityData` never puts a
+  field on the wire that is already at its accessor default, so an ordinary
+  unlit creeper's spawn packet never mentions any of the three.
+* **The per-tick integration.** `lodestone-shell`'s `entities.rs` has a
+  `CreeperFuse` component (`swell_dir`/`old_swell`/`swell`), present only on
+  entities whose `RenderKind` is `"creeper"`, and a `tick_creeper_fuse` system
+  in `GameTick`/`TickSet::Animate` that does exactly `Creeper.java:139`'s
+  `this.swell += swellDir`, clamped `0..=30`. `extract_entity_draws` lerps
+  `old_swell`/`swell` by the frame's partial tick and divides by 28 (not 30 —
+  see `MAX_SWELL`'s doc) into `EntityDraw::creeper_swelling`, which feeds
+  *both* the scale above and the white-flash overlay below.
+* **The white-flash overlay.** `entity_anim::creeper_white_overlay_progress`
+  transcribes `CreeperRenderer.getWhiteOverlayProgress` — a **blink**, not a
+  fade: `swelling` buckets into steps of `0.1`, odd-numbered buckets are "on"
+  at a strength clamped to `0.5..=1.0`, even-numbered buckets are fully off.
+  It reuses the hurt overlay's mechanism as predicted rather than building a
+  parallel path, but needed its own **channel**: `EntityInstanceRaw` gained a
+  `white_overlay: u32` attribute (location 10) alongside the existing
+  `tint`/hurt-overlay word, because vanilla's red and white overlays are
+  different rows of one `OverlayTexture` lookup and the tint word's spare byte
+  was already fully claimed by the boolean red gate.
+  `entity_pipeline::creeper_overlay_alpha_from_progress` transcribes
+  `OverlayTexture`'s alpha derivation (`u = floor(progress*15)`, `alpha = (1 -
+  u/15*0.75)*255`), and `entity.wgsl`'s `fs_main` blends white only when the
+  red (hurt) overlay is **absent** — vanilla's `v == 3` row is flat red
+  regardless of `u`, so a creeper that is somehow both hurt and swelling shows
+  red, never a mix of the two.
+  `creeper_white_overlay_pixels.rs` is a **magnitude** gate, not a direction
+  one — CLAUDE.md's own retrospective on the hurt overlay (issue #371: a
+  direction-only check passed 3440/3440 while the shader rendered 70% red
+  where vanilla renders 30%) is exactly the trap this was written not to
+  repeat. It renders a flat-**black**-textured mob (so `shaded` is a hard
+  zero regardless of lighting) with fog disabled, predicts the *exact* output
+  byte from `OverlayTexture`'s formula and the shader's own documented
+  `srgb_to_linear`, and separately predicts the swapped-argument hypothesis
+  (issue #371's exact bug shape, reproduced) — the measurement must land on
+  the correct prediction and clearly miss the swapped one. Measured: byte 133
+  vs. predicted-correct 133, predicted-swapped 13.
+
+**The remaining hop, and why this agent could not close it.** All of the
+above only ever *produces* a value if something *populates*
+`EntitySnapshot::creeper_swell_dir` before `fold_entity_snapshots` runs — and
+that requires a component in `lodestone-ecs` (`crates/lodestone-ecs/src/
+entity.rs` + an `ingest.rs` arm folding `EntityMetadataUpdate::creeper_*`
+into it), a field on `lodestone-client`'s `EntityView` (`state.rs`'s
+`entity_view()` reads components, by that module's own explicit rule: "do not
+add a field here without adding the component it is read from"), and one line
+in `sim.rs` where `EntityView` becomes `EntitySnapshot`. `lodestone-ecs` is
+another agent's assigned cluster and `sim.rs` is brokered, so this agent's
+patch stops at `EntitySnapshot`'s own field and `entities.rs`'s consumption of
+it — the field exists and is wired end-to-end on this side, but nothing yet
+writes into it in production. See the patch spec this agent left for exactly
+those three files.
+
+One known gap that predates this change and is still open:
+`EntityMesh::local_min`/`local_max` come from `rest_pose()`, so a swelling
+creeper is drawn up to 41% wider than its own culling box and will clip at the
+frame edge. `MAX_SWELL_SCALE` is exported for whoever widens the creeper's
+local bounds; this pass deliberately left it alone rather than guess at the
+right conjugated-scale math under time pressure with no dedicated pixel test.
 
 ### Walk cycle
 

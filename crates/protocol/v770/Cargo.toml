@@ -19,6 +19,10 @@ lodestone-world = { workspace = true }
 lodestone-data = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+# `decode_explode`'s pitch: the `explode` packet carries no pitch (vanilla
+# rolls it client-side in `ClientPacketListener.handleExplosion`), so decoding
+# it faithfully means rolling the same die here.
+rand = { workspace = true }
 # Direct path dep (not a workspace alias) so the addition stays inside this
 # crate's manifest — this is the `V770ServerProtocol` seam: it implements the
 # version-free `lodestone_server::ServerProtocol` trait so `lodestone-server`
@@ -149,6 +153,14 @@ live-tool = []
 # fixtures still match the live wire. Off by default and `#[ignore]`d so
 # `cargo test -p lodestone-v770` stays hermetic.
 live-item-entity = []
+
+# Enables the live creeper-explosion gate (`live_creeper_explosion`): joins the
+# real vanilla 26.2 survival oracle (game :25565, RCON :25566), summons a
+# pre-ignited creeper, and captures the real `set_entity_data` (fuse
+# direction/powered/ignited) and `explode` packets it sends — then replays
+# both through the public adapter seam. Off by default and `#[ignore]`d so
+# `cargo test -p lodestone-v770` stays hermetic.
+live-creeper-explosion = []
 
 # Enables the live `level_event` 2001 gate (`live_destroy_block_event`): joins
 # the flat creative 26.2 oracle (game :25570, RCON :25571), stands a torch on a

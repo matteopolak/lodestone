@@ -152,6 +152,12 @@ struct VsOut {
     // hurt/death overlay is a hard per-tick gate, not a fade — see
     // `HURT_OVERLAY_ALPHA_BYTE`'s doc.
     @location(4) @interpolate(flat) overlay: f32,
+    // Flat: a creeper's white-flash overlay alpha (`OverlayTexture`'s white
+    // row), 0.0 when absent. Independent of `overlay` above — vanilla's red
+    // and white overlays are different rows of one lookup texture, selected
+    // by `hasRedOverlay`, never blended together. See
+    // `EntityInstanceRaw::white_overlay`'s doc.
+    @location(5) @interpolate(flat) white_overlay: f32,
 };
 
 @vertex
@@ -164,6 +170,7 @@ fn vs_main(
     @location(7) m3: vec4<f32>,
     @location(8) light: u32,
     @location(9) tint: u32,
+    @location(10) white_overlay: u32,
 ) -> VsOut {
     let model = mat4x4<f32>(m0, m1, m2, m3);
     let world = model * vec4<f32>(position, 1.0);
@@ -187,6 +194,9 @@ fn vs_main(
     ) / 255.0;
     // Bits 24-31: the hurt/death overlay alpha (0 or HURT_OVERLAY_ALPHA_BYTE).
     out.overlay = f32((tint >> 24u) & 255u) / 255.0;
+    // Bits 0-7 of the separate `white_overlay` attribute: a creeper's
+    // white-flash alpha, 0 when absent.
+    out.white_overlay = f32(white_overlay & 255u) / 255.0;
     return out;
 }
 
@@ -285,7 +295,25 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Hence: `overlay` stays vanilla's alpha with 0 meaning absent, and the red
     // weight is its complement, taken only when the overlay is actually present.
     let red_weight = select(0.0, 1.0 - in.overlay, in.overlay > 0.0);
-    let overlaid = mix(shaded, vec3<f32>(1.0, 0.0, 0.0), red_weight);
+    var overlaid = mix(shaded, vec3<f32>(1.0, 0.0, 0.0), red_weight);
+    // A creeper's white-flash overlay (`OverlayTexture`'s white row,
+    // `CreeperRenderer.getWhiteOverlayProgress`). Unlike the red overlay this
+    // is a genuine `mix(white, colour, alpha)` with no polarity inversion to
+    // account for: our sentinel (`white_overlay == 0` means "absent") already
+    // agrees with vanilla's own no-overlay edge (`alpha == 1.0` at `progress
+    // == 0`, where `mix(white, colour, 1.0)` is a no-op) on what "no effect"
+    // looks like, so the blend is written exactly as vanilla's `entity.fsh`
+    // has it, only gated on the sentinel rather than always applied.
+    //
+    // **Only applied when the red overlay is absent** — vanilla's
+    // `OverlayTexture` puts red and white on different rows of one lookup
+    // (`v == 3` for hurt is a flat red regardless of `u`), so a creeper that
+    // is somehow both hurt and swelling in the same frame shows red, never a
+    // blend of the two. `red_weight > 0.0` is exactly "the red overlay is
+    // active", the same condition `in.overlay > 0.0` gates above.
+    if (red_weight <= 0.0 && in.white_overlay > 0.0) {
+        overlaid = mix(vec3<f32>(1.0, 1.0, 1.0), overlaid, in.white_overlay);
+    }
     // Fade toward the fog colour by view distance, on the same curve as terrain,
     // so a mob at the render-distance edge or under water dissolves with the
     // blocks around it instead of hanging in front of them.

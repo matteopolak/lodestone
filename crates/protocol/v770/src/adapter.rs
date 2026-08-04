@@ -1371,6 +1371,96 @@ fn decode_sound_entity(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     })])
 }
 
+/// The `explosion_emitter`/`explosion` particle registry ids — the two
+/// "simple" (argument-less) particle types every `Level.explode` call site
+/// passes as `explosionParticle` (`Level.java:593,619,645`, all
+/// `ParticleTypes.EXPLOSION_EMITTER`; `ServerExplosion`'s small/large split
+/// can also choose `ParticleTypes.EXPLOSION`).
+/// `ParticleTypes.STREAM_CODEC` dispatches on a registry id
+/// (`ByteBufCodecs.registry(Registries.PARTICLE_TYPE)`, a plain 0-based
+/// VarInt — **not** the `id + 1` "holder" scheme [`read_sound_holder`] and the
+/// villager-data field use), and a `SimpleParticleType`'s own stream codec
+/// reads no further bytes. Recognising just these two ids and rejecting
+/// everything else is therefore sufficient to stay byte-aligned through this
+/// field without modelling the full particle-options codec (dust colour,
+/// block state, item stack, …) that `metadata.rs`'s `SER_PARTICLE`/
+/// `SER_PARTICLES` already reject for the identical reason.
+const PARTICLE_ID_EXPLOSION_EMITTER: i32 = 29;
+const PARTICLE_ID_EXPLOSION: i32 = 30;
+
+/// Decodes `explode` (protocol id 36): a creeper/TNT/bed/respawn-anchor
+/// detonation, `ClientboundExplodePacket`.
+///
+/// # Server-sent, not client-predicted
+///
+/// Unlike a player's own block break (`e2544b9`: no level event is ever sent
+/// at all, and the sound is predicted), an explosion's sound rides explicitly
+/// on this packet's `explosionSound` field, and
+/// `ClientPacketListener.handleExplosion` (`ClientPacketListener.java:1357`)
+/// does nothing but play exactly what the server sent, at a
+/// **client-rolled** pitch:
+///
+/// ```text
+/// playLocalSound(center, packet.explosionSound(), SoundSource.BLOCKS, 4.0F,
+///     (1.0F + (random.nextFloat() - random.nextFloat()) * 0.2F) * 0.7F, false)
+/// ```
+///
+/// `volume` (`4.0`) is a client-side constant, never on the wire. `pitch` is
+/// rolled by vanilla's own client from local randomness and is not on the
+/// wire either — so this decoder rolls the identical die rather than
+/// inventing a fixed pitch. A real client's explosion pitch already varies
+/// run to run; a constant here would be *less* faithful, not more.
+///
+/// # What this does not decode
+///
+/// `radius`, `blockCount` and `playerKnockback` are consumed for wire
+/// alignment only — no consumer today. `explosionParticle` is consumed via
+/// the narrow allowlist above. `blockParticles` (the flying-debris
+/// `WeightedList<ExplosionParticleInfo>`) is **not** decoded at all:
+/// `explosionSound` is the second-to-last field the packet carries, so once
+/// it is read there is nothing left this seam needs, and modelling
+/// `ExplosionParticleInfo`'s own nested particle-options codec would cost
+/// real complexity for zero consumers. This is therefore one of the packets
+/// that does not run the trailing-bytes misparse check — like `metadata.rs`'s
+/// partial item-stack decode, deliberately, not an oversight.
+///
+/// The explosion shockwave/smoke visual and the flying block-debris particles
+/// are consequently both unimplemented — `explosionParticle` is recognised
+/// only to skip it, never spawned, and `blockParticles` is never reached.
+fn decode_explode(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    let mut reader = Reader::new(payload);
+    let x = reader.f64().map_err(dec_err)?;
+    let y = reader.f64().map_err(dec_err)?;
+    let z = reader.f64().map_err(dec_err)?;
+    let _radius = reader.f32().map_err(dec_err)?;
+    let _block_count = reader.i32().map_err(dec_err)?;
+    if reader.bool().map_err(dec_err)? {
+        // `playerKnockback: Optional<Vec3>` — consumed, not applied yet.
+        reader.f64().map_err(dec_err)?;
+        reader.f64().map_err(dec_err)?;
+        reader.f64().map_err(dec_err)?;
+    }
+    let particle_id = reader.var_i32().map_err(dec_err)?;
+    if particle_id != PARTICLE_ID_EXPLOSION_EMITTER && particle_id != PARTICLE_ID_EXPLOSION {
+        return Err(AdapterError::Decode(format!(
+            "explode: unmodeled explosionParticle registry id {particle_id} (only \
+             explosion_emitter/explosion are simple enough to skip byte-accurately)"
+        )));
+    }
+    let (name, fixed_range) = read_sound_holder(&mut reader)?;
+    // `blockParticles` follows and is deliberately not decoded — see the
+    // function doc above. No `reader.ensure_empty()` call here on purpose.
+    Ok(vec![Directive::Emit(ClientEvent::Sound {
+        sound: parse_key(&name, "sound")?,
+        category: SoundCategory::Block,
+        pos: Vec3::new(x, y, z),
+        volume: 4.0,
+        pitch: (1.0 + (rand::random::<f32>() - rand::random::<f32>()) * 0.2) * 0.7,
+        fixed_range,
+        seed: rand::random(),
+    })])
+}
+
 /// Decodes `open_screen`: a container id, a `minecraft:menu` registry id, and an
 /// NBT text-component title.
 fn decode_open_screen(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
@@ -1865,6 +1955,26 @@ fn handle_add_entity(
                     color: 0,
                     sheared: false,
                 }),
+                ..EntityMetadataUpdate::default()
+            },
+        }));
+    }
+
+    // Same synthesis, same reason, for a creeper's three fields
+    // (`Creeper.java:100-102`: `entityData.define(DATA_SWELL_DIR, -1)` /
+    // `DATA_IS_POWERED, false` / `DATA_IS_IGNITED, false`). An ordinary,
+    // uncharged, unlit creeper is *entirely* at its accessors' defaults, so a
+    // real spawn's initial `set_entity_data` never mentions any of the three —
+    // without this, a fresh creeper's `creeper_swell_dir` stays `None` forever
+    // rather than the vanilla-true `Some(-1)`, until the moment it primes
+    // changes it to a non-default value the wire actually carries.
+    if tracked.class == Some(MetadataClass::Creeper) {
+        directives.push(Directive::Emit(ClientEvent::EntityMetadataUpdated {
+            entity_id,
+            metadata: EntityMetadataUpdate {
+                creeper_swell_dir: Some(-1),
+                creeper_powered: Some(false),
+                creeper_ignited: Some(false),
                 ..EntityMetadataUpdate::default()
             },
         }));
@@ -3438,6 +3548,9 @@ impl V770Adapter {
                 max_speed: particles.max_speed,
                 count: particles.count,
             })]);
+        }
+        if packet_id == play::clientbound::EXPLODE {
+            return decode_explode(payload);
         }
         if packet_id == play::clientbound::SOUND {
             return decode_sound(payload);

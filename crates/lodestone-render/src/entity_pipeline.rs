@@ -24,8 +24,9 @@
 //! * **Vertex buffer 0**: [`ModelVertex`] (locations 0–3; the shader reads
 //!   position and UV).
 //! * **Vertex buffer 1**: [`EntityInstanceRaw`] (locations 4–7 = the four columns
-//!   of the model matrix, location 8 = the packed light byte), stepped per
-//!   instance.
+//!   of the model matrix, location 8 = the packed light byte, location 9 = the
+//!   packed dye tint + hurt-overlay word, location 10 = the creeper white-flash
+//!   overlay byte), stepped per instance.
 //!
 //! # Shading: world light per instance, direction per fragment
 //!
@@ -131,6 +132,24 @@ pub struct EntityInstanceRaw {
     /// blends the overlay in that same gamma-space stage. Doing either in linear
     /// light pulls the factor toward 1.0 and washes the result out.
     pub tint: u32,
+    /// A creeper's white-flash overlay alpha byte (low 8 bits; the rest are
+    /// unused today), `0` when absent. This is a **separate** attribute from
+    /// [`tint`](Self::tint)'s hurt-overlay byte rather than a third meaning
+    /// packed into the same word, because the two are genuinely independent
+    /// channels on vanilla's own `OverlayTexture`: the red (hurt) row and the
+    /// white (flash) row are different `v` coordinates into the same lookup
+    /// texture, selected by `hasRedOverlay`, and `tint`'s spare byte was
+    /// already fully claimed by the boolean red gate. See
+    /// [`crate::entity_anim::creeper_white_overlay_progress`] for the value
+    /// this is derived from and
+    /// [`creeper_overlay_alpha_from_progress`] for the derivation.
+    ///
+    /// **Mutually exclusive with the red overlay, and the shader enforces
+    /// it**: vanilla's `OverlayTexture` puts red and white on different rows
+    /// of one lookup (`y < 8` is always flat red regardless of `u`), so a
+    /// creeper that is somehow both hurt and swelling in the same frame shows
+    /// red, never a blend of the two — exactly `entity.wgsl`'s priority order.
+    pub white_overlay: u32,
 }
 
 /// The `tint` value meaning "leave the texel alone": opaque white, no overlay.
@@ -173,6 +192,7 @@ impl EntityInstanceRaw {
             model: m.to_cols_array_2d(),
             light,
             tint: NO_TINT,
+            white_overlay: 0,
         }
     }
 
@@ -209,11 +229,25 @@ impl EntityInstanceRaw {
         self
     }
 
+    /// Set or clear the creeper white-flash overlay (see [`Self::white_overlay`]).
+    /// `alpha_byte` is vanilla's `OverlayTexture` alpha — `0` clears it; a
+    /// non-zero byte is what [`creeper_overlay_alpha_from_progress`] returns for
+    /// an active blink. Builder-style, like [`with_tint`]/[`with_hurt_overlay`].
+    ///
+    /// [`with_tint`]: Self::with_tint
+    #[must_use]
+    pub fn with_creeper_white_overlay(mut self, alpha_byte: u8) -> Self {
+        self.white_overlay = u32::from(alpha_byte);
+        self
+    }
+
     /// The instance-stepped vertex-buffer layout: four `Float32x4` columns at
-    /// shader locations 4–7, then the packed light `Uint32` at location 8.
+    /// shader locations 4–7, the packed light `Uint32` at location 8, the
+    /// packed tint/hurt-overlay `Uint32` at location 9, and the creeper
+    /// white-overlay `Uint32` at location 10.
     #[must_use]
     pub const fn instance_layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRS: [wgpu::VertexAttribute; 6] = [
+        const ATTRS: [wgpu::VertexAttribute; 7] = [
             wgpu::VertexAttribute {
                 format: wgpu::VertexFormat::Float32x4,
                 offset: 0,
@@ -244,6 +278,11 @@ impl EntityInstanceRaw {
                 offset: 68,
                 shader_location: 9,
             },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Uint32,
+                offset: 72,
+                shader_location: 10,
+            },
         ];
         wgpu::VertexBufferLayout {
             array_stride: core::mem::size_of::<EntityInstanceRaw>() as wgpu::BufferAddress,
@@ -251,6 +290,39 @@ impl EntityInstanceRaw {
             attributes: &ATTRS,
         }
     }
+}
+
+/// Derives vanilla's `OverlayTexture` alpha byte from a creeper's white-flash
+/// progress (`0.0..=1.0`, [`crate::entity_anim::creeper_white_overlay_progress`]).
+///
+/// Transcribed from the decompiled 26.2 client's `OverlayTexture` constructor:
+/// the white row (`y >= 8`) at column `x` holds alpha
+/// `(1.0 - x / 15.0 * 0.75) * 255.0`, and `OverlayTexture.u(progress)` selects
+/// `x = (int)(progress * 15.0)` — so this is that same two-step quantise then
+/// derive, not a continuous formula in `progress`. The quantisation matters:
+/// vanilla's overlay is a **16-column lookup texture**, not a shader-computed
+/// gradient, so a real client's alpha visibly steps between 15 discrete levels
+/// rather than fading continuously, and reproducing that stepping (rather than
+/// deriving alpha straight from `progress` with no floor) is what makes this
+/// byte-match a real frame instead of merely "close".
+///
+/// `progress == 0.0` returns `0`, which this crate's convention (matching
+/// [`EntityInstanceRaw::with_hurt_overlay`]) reads as "absent" rather than the
+/// literal vanilla alpha at `x = 0` (`255`, fully transparent white / no
+/// visible tint) — the two are visually identical (`mix(white, colour, 1.0) ==
+/// colour` either way), so collapsing them costs nothing and gives the shader
+/// one sentinel instead of two representations of "no effect".
+/// [`crate::entity_anim::creeper_white_overlay_progress`] never returns a value
+/// in `(0.0, 0.5)` (the "off" bucket of the blink is exactly `0.0`), so this
+/// collapse never discards a real non-zero-but-near-zero progress.
+#[must_use]
+pub fn creeper_overlay_alpha_from_progress(progress: f32) -> u8 {
+    if progress <= 0.0 {
+        return 0;
+    }
+    let u = (progress.clamp(0.0, 1.0) * 15.0) as i32;
+    let alpha = (1.0 - f32::from(u as i16) / 15.0 * 0.75) * 255.0;
+    alpha.round().clamp(1.0, 255.0) as u8
 }
 
 /// GPU-resident geometry for one entity model type: a vertex buffer, an index
@@ -451,6 +523,15 @@ pub struct InstanceTint {
     /// ([`HURT_OVERLAY_ALPHA_BYTE`]). Boolean, not a fade, per
     /// [`EntityInstanceRaw::with_hurt_overlay`].
     pub hurt: bool,
+    /// A creeper's white-flash overlay alpha byte, `0` when absent — see
+    /// [`EntityInstanceRaw::white_overlay`] and
+    /// [`creeper_overlay_alpha_from_progress`]. A separate field from
+    /// [`hurt`](Self::hurt) rather than a third `enum` state, because the
+    /// caller ([`lodestone_shell::entities`]'s draw-extraction) computes both
+    /// independently off different source data (`HurtTime` vs. a creeper's
+    /// integrated swell) and the two are mutually exclusive only by
+    /// *vanilla's* rule, enforced in the shader — not by construction here.
+    pub creeper_white_overlay: u8,
 }
 
 impl InstanceTint {
@@ -458,12 +539,17 @@ impl InstanceTint {
     pub const NONE: Self = Self {
         rgb: [255, 255, 255],
         hurt: false,
+        creeper_white_overlay: 0,
     };
 
     /// A dye tint with no overlay.
     #[must_use]
     pub const fn rgb(rgb: [u8; 3]) -> Self {
-        Self { rgb, hurt: false }
+        Self {
+            rgb,
+            hurt: false,
+            creeper_white_overlay: 0,
+        }
     }
 
     /// The same tint with the hurt/death overlay set or cleared.
@@ -473,10 +559,20 @@ impl InstanceTint {
         self
     }
 
-    /// Fold both halves into one instance's packed `tint` word.
+    /// The same tint with the creeper white-flash overlay alpha set (`0`
+    /// clears it).
+    #[must_use]
+    pub const fn with_creeper_white_overlay(mut self, alpha_byte: u8) -> Self {
+        self.creeper_white_overlay = alpha_byte;
+        self
+    }
+
+    /// Fold all three channels into one instance's packed words.
     #[must_use]
     fn apply(self, inst: EntityInstanceRaw) -> EntityInstanceRaw {
-        inst.with_tint(self.rgb).with_hurt_overlay(self.hurt)
+        inst.with_tint(self.rgb)
+            .with_hurt_overlay(self.hurt)
+            .with_creeper_white_overlay(self.creeper_white_overlay)
     }
 }
 
@@ -892,22 +988,26 @@ mod tests {
 
     #[test]
     fn instance_raw_is_four_columns_plus_a_light_and_a_tint_word() {
-        assert_eq!(core::mem::size_of::<EntityInstanceRaw>(), 72);
+        assert_eq!(core::mem::size_of::<EntityInstanceRaw>(), 76);
         let layout = EntityInstanceRaw::instance_layout();
-        assert_eq!(layout.array_stride, 72);
+        assert_eq!(layout.array_stride, 76);
         assert_eq!(layout.step_mode, wgpu::VertexStepMode::Instance);
-        assert_eq!(layout.attributes.len(), 6);
+        assert_eq!(layout.attributes.len(), 7);
         // Instance attributes start at location 4, past ModelVertex's 0..=3.
         assert_eq!(layout.attributes[0].shader_location, 4);
         assert_eq!(layout.attributes[3].shader_location, 7);
         assert_eq!(layout.attributes[3].offset, 48);
-        // The light word sits immediately after the matrix, the tint after it.
+        // The light word sits immediately after the matrix, the tint after it,
+        // and the creeper white-overlay word after that.
         assert_eq!(layout.attributes[4].shader_location, 8);
         assert_eq!(layout.attributes[4].offset, 64);
         assert_eq!(layout.attributes[4].format, wgpu::VertexFormat::Uint32);
         assert_eq!(layout.attributes[5].shader_location, 9);
         assert_eq!(layout.attributes[5].offset, 68);
         assert_eq!(layout.attributes[5].format, wgpu::VertexFormat::Uint32);
+        assert_eq!(layout.attributes[6].shader_location, 10);
+        assert_eq!(layout.attributes[6].offset, 72);
+        assert_eq!(layout.attributes[6].format, wgpu::VertexFormat::Uint32);
     }
 
     /// A tint must round-trip its bytes in `0x00RRGGBB` order, and an instance
@@ -993,6 +1093,91 @@ mod tests {
         assert_eq!(raw(hurt_only) & 0x00FF_FFFF, NO_TINT);
         assert_eq!(raw(hurt_only) >> 24, HURT_OVERLAY_ALPHA_BYTE);
         assert_eq!(raw(hurt_only.with_hurt(false)), NO_TINT);
+    }
+
+    /// The creeper white-overlay word is a genuinely separate attribute from
+    /// `tint`, so setting it must not perturb the tint/hurt word at all, and
+    /// vice versa — the two channels have to compose freely because
+    /// [`InstanceTint`] carries both.
+    #[test]
+    fn creeper_white_overlay_lives_in_its_own_word() {
+        let m = glam::Mat4::IDENTITY;
+
+        let plain = EntityInstanceRaw::new(m, 0);
+        assert_eq!(plain.white_overlay, 0);
+
+        let flashing = EntityInstanceRaw::new(m, 0).with_creeper_white_overlay(200);
+        assert_eq!(flashing.white_overlay, 200);
+        assert_eq!(flashing.tint, NO_TINT, "the tint word must be untouched");
+
+        // Compose with a hurt overlay and a dye tint — three independent bits
+        // of state, none of which may bleed into another.
+        let leather = lodestone_assets::equipment::UNDYED_LEATHER_RGB;
+        let combined = EntityInstanceRaw::new(m, 0)
+            .with_tint(leather)
+            .with_hurt_overlay(true)
+            .with_creeper_white_overlay(100);
+        assert_eq!(combined.tint & 0x00FF_FFFF, 0x00A0_6540);
+        assert_eq!((combined.tint >> 24) & 0xFF, HURT_OVERLAY_ALPHA_BYTE);
+        assert_eq!(combined.white_overlay, 100);
+
+        // Clearing (0) must return exactly to the untouched value.
+        assert_eq!(flashing.with_creeper_white_overlay(0).white_overlay, 0);
+    }
+
+    /// [`InstanceTint`] threads the white-overlay alpha the same way it threads
+    /// `hurt` — through `apply`, into the dedicated word.
+    #[test]
+    fn instance_tint_carries_the_white_overlay_alpha() {
+        let m = glam::Mat4::IDENTITY;
+        let raw = |t: InstanceTint| t.apply(EntityInstanceRaw::new(m, 0));
+
+        assert_eq!(raw(InstanceTint::NONE).white_overlay, 0);
+        let flashing = InstanceTint::NONE.with_creeper_white_overlay(150);
+        assert_eq!(raw(flashing).white_overlay, 150);
+        // And it does not disturb the packed tint/hurt word.
+        assert_eq!(raw(flashing).tint, NO_TINT);
+    }
+
+    /// [`creeper_overlay_alpha_from_progress`]: hand-evaluated from
+    /// `OverlayTexture`'s constructor (`(1 - x/15*0.75) * 255`, `x =
+    /// (int)(progress * 15)`), not read back off this implementation.
+    #[test]
+    fn creeper_overlay_alpha_transcribes_the_vanilla_lookup_texture() {
+        assert_eq!(
+            creeper_overlay_alpha_from_progress(0.0),
+            0,
+            "0.0 is the absent sentinel"
+        );
+        for progress in [0.5f32, 0.6, 0.75, 0.9, 1.0] {
+            let x = (progress * 15.0) as i32;
+            let want = ((1.0 - x as f32 / 15.0 * 0.75) * 255.0).round() as u8;
+            assert_eq!(
+                creeper_overlay_alpha_from_progress(progress),
+                want,
+                "progress {progress}"
+            );
+        }
+    }
+
+    /// The alpha must strictly decrease as progress increases (more of the
+    /// entity's own colour survives at low progress, less at high progress —
+    /// i.e. *more* white shows through as the fuse burns down), and never hits
+    /// the `0` sentinel for any progress this crate's blink actually produces
+    /// (`0.5..=1.0`).
+    #[test]
+    fn creeper_overlay_alpha_decreases_and_never_hits_the_sentinel_in_the_blinks_active_range() {
+        let mut prev = 256u16;
+        for step in 0..=20 {
+            let progress = 0.5 + 0.5 * (step as f32 / 20.0);
+            let alpha = creeper_overlay_alpha_from_progress(progress);
+            assert_ne!(alpha, 0, "progress {progress} hit the absent sentinel");
+            assert!(
+                u16::from(alpha) <= prev,
+                "alpha rose from {prev} to {alpha} between steps, at progress {progress}"
+            );
+            prev = u16::from(alpha);
+        }
     }
 
     /// The uniform the entity shader's `Camera` struct maps onto: 80 bytes of
