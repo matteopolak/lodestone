@@ -40,6 +40,7 @@
 pub mod accounts;
 pub mod edit_box;
 pub mod focus;
+pub mod key_binds;
 pub mod layout;
 pub mod nav;
 pub mod options;

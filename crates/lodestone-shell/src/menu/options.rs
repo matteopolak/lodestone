@@ -596,7 +596,10 @@ static VIDEO: &[Entry] = &[
 static CONTROLS: &[Entry] = &[
     pair(
         nav("Mouse Settings...", SettingsPage::Mouse),
-        no_screen("Key Binds..."),
+        // `controls.keybinds` (issue #15). No longer `no_screen`: the
+        // rebindable layer (`crate::keybinds`) has had no screen in front of
+        // it since it landed; `SettingsPage::KeyBinds` is that screen.
+        nav("Key Binds...", SettingsPage::KeyBinds),
     ),
     pair(
         live_cycle("toggleCrouch", "Sneak", LiveOption::ToggleSneak),
@@ -869,14 +872,13 @@ static ROOT_GRID: &[Cell] = &[
 
 /// One screen of the options tree.
 ///
-/// Nine of vanilla's thirteen. The four that are **not** here are absent
+/// Ten of vanilla's thirteen. The three that are **not** here are absent
 /// because each needs a *different list widget*, not because their options were
 /// skipped — and each is reachable as a present-and-inactive nav button, which
 /// is what keeps the parent screen's shape honest:
 ///
 /// | vanilla screen | why not built |
 /// |---|---|
-/// | `KeyBindsScreen` | `KeyBindsList`, not `OptionsList`: `getRowWidth()` 340, two widgets per row (a 150 px bind button plus a 20 px per-row Reset), and a live key-capture mode. That is #15's own piece of work. |
 /// | `LanguageSelectScreen` | a scrolling `ObjectSelectionList` of languages, and this client loads exactly one language table (`resources.rs`). `FontOptionsScreen`'s two options hang off it and are unreachable without it. |
 /// | `PackSelectionScreen` | two drag-between `ObjectSelectionList`s over a `PackRepository`. |
 /// | `TelemetryInfoScreen` | prose and external links, no options at all. |
@@ -885,10 +887,14 @@ static ROOT_GRID: &[Cell] = &[
 /// this stops being one mechanism; #396 and #397 are landing that shape
 /// concurrently for the server and world lists.
 ///
-/// `OnlineOptionsScreen` **was** in that table and is not any more: it needs no
-/// new list widget (it is a plain `OptionsList` screen like the other eight),
-/// so the only reason it was absent was that the root's header button was
-/// permanently inactive. See [`SettingsPage::Online`].
+/// `OnlineOptionsScreen` and `KeyBindsScreen` **were** in that table and are
+/// not any more. `OnlineOptionsScreen` needed no new list widget at all — it
+/// is a plain `OptionsList` screen like eight others, absent only because the
+/// root's header button was permanently inactive (see
+/// [`SettingsPage::Online`]). `KeyBindsScreen` **did** need a different list
+/// widget — `KeyBindsList`, not `OptionsList` — and got one: see
+/// [`SettingsPage::KeyBinds`] and [`super::key_binds`], the second list-widget
+/// kind #392's plan always said this tree would eventually need.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsPage {
     /// `OptionsScreen` — the root, and the only page that is **not** an
@@ -927,6 +933,17 @@ pub enum SettingsPage {
     /// stays inactive, exactly as it always has. See [`controls`]'s
     /// `Placement::Root(2)` branch and [`SettingsNav::in_world`].
     Online,
+    /// `controls/KeyBindsScreen` (issue #15) — **not** an `OptionsList` page.
+    /// [`SettingsNav`] delegates every query and every input to
+    /// [`super::key_binds::KeyBindsNav`] whenever `page == SettingsPage::KeyBinds`,
+    /// the same way it special-cases [`SettingsPage::Root`] for a tree with no
+    /// list at all. [`Self::entries`]/[`Self::footer`] therefore never run for
+    /// this variant in practice; their arms return an empty/placeholder shape
+    /// only so the match stays total.
+    ///
+    /// Reached from the Controls page's own "Key Binds..." button — vanilla's
+    /// own wiring (`ControlsScreen.java:36`), not the root grid.
+    KeyBinds,
 }
 
 impl SettingsPage {
@@ -944,6 +961,12 @@ impl SettingsPage {
             SettingsPage::Skin => "Skin Customization",
             // `options.online.title` (`en_us.json`).
             SettingsPage::Online => "Online Options",
+            // `controls.keybinds.title` (`en_us.json`). Unreachable in
+            // practice — `super::key_binds::frame` builds this page's title
+            // label itself rather than through `settings_frame`'s generic
+            // path — but kept accurate rather than a placeholder, since
+            // nothing stops a future caller reaching it.
+            SettingsPage::KeyBinds => "Key Binds",
         }
     }
 
@@ -971,6 +994,8 @@ impl SettingsPage {
             SettingsPage::Accessibility => ACCESSIBILITY,
             SettingsPage::Skin => SKIN,
             SettingsPage::Online => ONLINE,
+            // Never actually read — see `SettingsPage::KeyBinds`'s doc.
+            SettingsPage::KeyBinds => &[],
         }
     }
 
@@ -1541,6 +1566,12 @@ pub struct SettingsNav {
     /// stays open, which is the whole lifetime this field needs to be right
     /// for.
     in_world: bool,
+    /// The Key Binds screen's own cursor/scroll/capture state (issue #15) —
+    /// live only while [`Self::page`] is [`SettingsPage::KeyBinds`], but kept
+    /// unconditionally (like every other field here) rather than boxed away,
+    /// since it is a few `usize`s and an `Option<InputAction>`. See
+    /// [`super::key_binds::KeyBindsNav`] and [`Self::key_binds`].
+    key_binds: super::key_binds::KeyBindsNav,
 }
 
 impl Default for SettingsNav {
@@ -1559,7 +1590,38 @@ impl SettingsNav {
             cursor: 0,
             first: 0,
             in_world: false,
+            key_binds: super::key_binds::KeyBindsNav::default(),
         }
+    }
+
+    /// Borrow the Key Binds screen's own cursor for [`super::render::frame_for`]'s
+    /// `SettingsPage::KeyBinds` branch — see [`settings_frame`].
+    #[must_use]
+    pub fn key_binds(&self) -> &super::key_binds::KeyBindsNav {
+        &self.key_binds
+    }
+
+    /// Mutably borrow the Key Binds screen's own cursor — `super::nav::MenuNav`'s
+    /// `Screen::Settings` input arms use this instead of [`Self::hover_row`]/
+    /// [`Self::click_row`]/[`Self::enter`]/[`Self::escape`] whenever
+    /// [`Self::page`] is [`SettingsPage::KeyBinds`], the same way `app.rs`
+    /// already branches per `Screen` rather than forcing every screen's input
+    /// through one shared method. See [`super::key_binds::KeyBindsNav`] for
+    /// what it exposes.
+    pub fn key_binds_mut(&mut self) -> &mut super::key_binds::KeyBindsNav {
+        &mut self.key_binds
+    }
+
+    /// Leave [`SettingsPage::KeyBinds`] for whichever page pushed it — always
+    /// Controls, since that nav button is the only way here. Exposed
+    /// separately from [`Self::escape`]/[`Self::click_row`] because
+    /// `KeyBindsOutcome::Back` needs the page-stack pop directly, not a
+    /// second interpretation of a [`Cell`] this screen's rows do not have.
+    /// Clears any in-progress key capture first, so returning to Controls
+    /// then back into Key Binds never resumes mid-capture.
+    pub fn leave_key_binds(&mut self) -> SettingsOutcome {
+        self.key_binds.reset();
+        self.back()
     }
 
     /// Back to the root with nothing scrolled, and [`Self::in_world`] set —
@@ -1748,6 +1810,14 @@ impl SettingsNav {
                 self.page = page;
                 self.cursor = 0;
                 self.first = 0;
+                // A fresh `KeyBindsNav` on every entry, matching vanilla
+                // building a new `KeyBindsScreen` each time — the same rule
+                // `reset` already applies to the outer cursor, one page
+                // deeper. Harmless to run when `page` is not `KeyBinds`: the
+                // field just sits at its default until it is.
+                if page == SettingsPage::KeyBinds {
+                    self.key_binds.reset();
+                }
                 SettingsOutcome::None
             }
             Cell::Nav { page: None, .. } => SettingsOutcome::None,
@@ -1792,6 +1862,27 @@ pub fn settings_frame(
     options: &crate::config::Options,
     save_error: Option<&str>,
 ) -> MenuFrame<'static> {
+    // `SettingsPage::KeyBinds` (issue #15) is not an `OptionsList` page — see
+    // that variant's own doc — so it builds its frame in a different module
+    // entirely rather than falling through the `Cell`/`Control` path below.
+    // The error label is appended here rather than in `key_binds::frame`
+    // itself so there is exactly one place in this crate that knows how to
+    // draw a save-error line, not two copies that could drift.
+    if nav.page() == SettingsPage::KeyBinds {
+        let mut frame = super::key_binds::frame(nav.key_binds(), &options.keybinds);
+        if let Some(error) = save_error {
+            frame.labels.push(MenuLabel {
+                text: error.to_string(),
+                origin: Origin::ScreenBottom,
+                dx: 0.0,
+                dy: -(FOOTER_HEIGHT + HEADER_LINE_HEIGHT + 2.0),
+                align: Align::Centre,
+                colour: ERROR_COLOUR,
+                scale: 1.0,
+            });
+        }
+        return frame;
+    }
     let page = nav.page();
     let visible = nav.visible();
     let selected = nav.selected_row();
@@ -1996,12 +2087,12 @@ mod tests {
             "and the same predicate must answer true for one that is"
         );
         // The count itself, not just the ratio's ingredients: 7 live options +
-        // 9 Done buttons (one per page, always live) + 9 working nav buttons
+        // 9 Done buttons (one per page, always live) + 10 working nav buttons
         // (Skin/Sound/Video/Controls/Chat/Accessibility from the root grid,
-        // Accessibility -> Controls, Controls -> Mouse, and — the new one —
-        // the root's Online button, live outside a world). A change that adds
-        // or removes a live row anywhere must say so here.
-        assert_eq!(live.len(), 25, "outside a world: {live:?}");
+        // Accessibility -> Controls, Controls -> Mouse, Controls -> Key
+        // Binds, and the root's own Online button, live outside a world).
+        // A change that adds or removes a live row anywhere must say so here.
+        assert_eq!(live.len(), 26, "outside a world: {live:?}");
     }
 
     /// The companion to [`the_disabled_majority_is_the_point_and_it_is_measured`]:
@@ -2023,8 +2114,8 @@ mod tests {
             .flat_map(|&p| all_controls(p, true))
             .filter(|c| c.is_live())
             .collect();
-        assert_eq!(outside.len(), 25);
-        assert_eq!(inside.len(), 24, "one fewer: the root's Online button");
+        assert_eq!(outside.len(), 26);
+        assert_eq!(inside.len(), 25, "one fewer: the root's Online button");
         assert!(
             outside.contains(&nav("Online...", SettingsPage::Online)),
             "outside a world the root links to Online"

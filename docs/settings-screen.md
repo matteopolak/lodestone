@@ -3,10 +3,11 @@
 ## What it is
 
 `crates/lodestone-shell/src/menu/options.rs` — vanilla's `OptionsScreen` tree as
-a **table plus arithmetic**: nine pages, **143 controls**, of which **24 or 25
-work** (see below) **and the rest are present and greyed out**. Reached from
-the title screen's Options button and from the pause menu's, on
-`Screen::Settings`.
+a **table plus arithmetic**: nine `OptionsList` pages, **143 controls**, of
+which **25 or 26 work** (see below) **and the rest are present and greyed
+out** — plus a tenth page, Key Binds, which is not an `OptionsList` at all and
+is counted separately (see below). Reached from the title screen's Options
+button and from the pause menu's, on `Screen::Settings`.
 
 **Updated since #55 landed:** #200/#202/#203 (`docs/input-options.md`) made five
 more Controls/Mouse-page rows live — `toggleCrouch`/`toggleSprint`/
@@ -15,16 +16,25 @@ removing any row, so the 135-control census that stood at the time was
 unchanged by that pass; only the live/inactive split moved.
 
 **Updated again for the Online settings page (task `task_036bd7b9`):** the
-ninth page, `SettingsPage::Online`, is now built — vanilla's
+ninth `OptionsList` page, `SettingsPage::Online`, is now built — vanilla's
 `OnlineOptionsScreen`, 8 controls including its own Done. The census is now
-**143**, and the live count is **context-dependent for the first time**: the
-root's second header button (`Placement::Root(2)`) is a live link to Online
-when the screen was opened from the title (`!in_world`, **25** live) and the
-same inactive "World Options..." placeholder it always was when opened from
-the pause menu (`in_world`, **24** live) — see "What is actually live" below
-and [`docs/ui-framework.md`](./ui-framework.md)'s "What we persist". The rest
-of this doc's per-page tables were not re-audited for either update; see this
-doc's "What is actually live" section for the current authoritative list.
+**143**, and the live count became **context-dependent for the first time**:
+the root's second header button (`Placement::Root(2)`) is a live link to
+Online when the screen was opened from the title (`!in_world`) and the same
+inactive "World Options..." placeholder it always was when opened from the
+pause menu (`in_world`).
+
+**Updated again for Key Binds (issue #15):** `SettingsPage::KeyBinds` is
+built — vanilla's `KeyBindsScreen`/`KeyBindsList`, the second list-widget kind
+this tree needed and the one #392's plan always said was coming. It is
+reached from the *Controls* page's own "Key Binds..." button (not the root
+grid), and it is not an `OptionsList` page, so it is not part of the
+143-control census — see "The Key Binds page" below for its own count. Making
+its nav button live add a tenth working nav button unconditionally (it does
+not depend on `in_world`), so the live counts above move from 25/24 to
+**26/25**. The rest of this doc's per-page tables were not re-audited for any
+of these three updates; see "What is actually live" below for the current
+authoritative counts.
 
 This is issue #55, the settings branch of the menu-framework epic #392.
 [`ui-framework.md`](./ui-framework.md) is the plan of record;
@@ -59,7 +69,7 @@ call sites — which is why the whole tree here is `static` tables of `Entry` an
 | `Cell::Act` | `Done`, the accessibility guide link, Credits |
 | `Placement` | *where* a widget is, resolved at draw time |
 
-### The nine pages, and the four that are not here
+### The nine `OptionsList` pages, plus Key Binds, and the three that are not here
 
 | page | controls | vanilla |
 |---|---|---|
@@ -74,28 +84,34 @@ call sites — which is why the whole tree here is `static` tables of `Entry` an
 | Online | 8 | `OnlineOptionsScreen`, three headers |
 
 Counts include each page's own footer, which is how #55's census counted the
-root's Done. Total: **143** (`13+32+10+8+17+19+27+9+8`).
+root's Done. Total: **143** (`13+32+10+8+17+19+27+9+8`). Key Binds is not in
+this table — it is not an `OptionsList` page, so "controls" does not mean the
+same thing there; see "The Key Binds page" below for its own count (56).
 
-Four vanilla screens are **not built**, and each is reachable as a
+Three vanilla screens are **not built**, and each is reachable as a
 present-and-inactive nav button so the parent screen's shape stays honest. The
 reason is uniform: every one of them needs a *different list widget*, not more
 options.
 
 | screen | why not |
 |---|---|
-| `KeyBindsScreen` | `KeyBindsList`, not `OptionsList`: `getRowWidth()` 340, two widgets per row (a 150 px bind button plus a 20 px per-row Reset), and a live key-capture mode. That is #15. |
 | `LanguageSelectScreen` | a scrolling `ObjectSelectionList` of languages, and this client loads exactly one language table. `FontOptionsScreen`'s two options hang off it and are unreachable without it. |
 | `PackSelectionScreen` | two drag-between `ObjectSelectionList`s over a `PackRepository`. |
 | `TelemetryInfoScreen` | prose and external links; no options at all. |
 
-Building a second and third selection-list type in the same change is where this
-stops being one mechanism. #396 and #397 are landing that shape concurrently.
-
-`OnlineOptionsScreen` **used to be in this table** — it is the cheap win the
-Online-settings follow-up landed: it needs no new list widget, so the only
-reason it was absent was that the root's own header button
-(`Placement::Root(2)`) was permanently inactive regardless of context. See
-"The root's Online button, and `in_world`" below.
+`OnlineOptionsScreen` and `KeyBindsScreen` **used to be in this table** and are
+not any more. `OnlineOptionsScreen` needed no new list widget at all — it is
+the cheap win the Online-settings follow-up landed: the only reason it was
+absent was that the root's own header button (`Placement::Root(2)`) was
+permanently inactive regardless of context (see "The root's Online button, and
+`in_world`" below). `KeyBindsScreen` **did** need a different list widget —
+`KeyBindsList`, not `OptionsList`: `getRowWidth()` 340 (not 310), a flat 20 px
+row height with no header-padding rule, two right-anchored buttons per action
+row (a 75 px bind button and a 50 px reset button, 5 px apart) instead of
+`OptionsList`'s left-anchored columns, and a live key-capture mode. Issue #15
+built it — see "The Key Binds page" below and
+[`crates/lodestone-shell/src/menu/key_binds.rs`](../crates/lodestone-shell/src/menu/key_binds.rs)'s
+own module docs for the full geometry derivation.
 
 ### The `OnlineOptionsScreen` page, and what is wired on it
 
@@ -146,6 +162,52 @@ keyboard** (`SettingsNav::activate`/`enter`/`click_row`) — the row was drawn
 correctly and did nothing either way, so the gap was invisible until something
 was actually put behind it.
 
+### The Key Binds page (issue #15)
+
+`SettingsPage::KeyBinds` — vanilla's `KeyBindsScreen`/`KeyBindsList`. Reached
+from the *Controls* page's "Key Binds..." button, not the root grid (vanilla's
+own wiring: `ControlsScreen.java:36`).
+
+**Structure is a pure function of the model, not of any live binding.**
+[`Category::SORT_ORDER`](../crates/lodestone-shell/src/keybinds.rs) walked
+through [`Keybinds::in_category`] gives the row order; only the *label* and
+whether Reset/Reset Keys are clickable depend on the live table. Six of
+vanilla's eight categories appear — **Creative and Spectator never do**,
+because this client has zero `InputAction`s in either (no consumer, so no
+table row, per the module's own "absent rather than listed and dead" rule) —
+so a header over zero rows never gets a chance to exist.
+
+| what | count |
+|---|---|
+| categories (headers) | 6 |
+| actions | 27 |
+| controls per action | 2 (bind, reset) |
+| footer | 2 (Reset Keys, Done) |
+| **total focusable controls** | **56** (`27×2 + 2`) |
+
+**Wired**: reaching the page and back (Escape/Done → Controls), every one of
+the 56 controls, per-row Reset, Reset Keys, and *starting* a rebind (a bind
+button click always works and always latches capture — see
+[`docs/keybindings.md`](./keybindings.md)). **Decorative until one more hop
+lands**: *finishing* a rebind needs a raw key/mouse event `app.rs` does not
+yet forward to `MenuNav::capture_binding` — see that doc's "Wiring the
+Controls menu" section for the exact two-arm patch. Nothing about this page
+persists a stale or self-inflicted bad value: a rebind either completes
+through `capture_binding` (which persists immediately) or the capture is
+still pending when the player leaves the page, in which case nothing was ever
+written and the old binding is exactly what shows next time — there is no
+partially-applied state to worry about self-healing.
+
+The `Pause`-unbind hazard this doc's sibling already named ("nothing enforces
+that yet") is now enforced, in `capture_binding`: capturing `Unbound` for
+`InputAction::Pause` is refused, because that action is the only gameplay
+route to the pause screen and so to Quit to Title, and it is not a real
+vanilla `KeyMapping` vanilla itself has any equivalent guard for. Escape while
+capturing *any* action cancels the capture without changing its binding at
+all (not even to `Unbound`) — a deliberate divergence from vanilla's own
+`keyPressed`, which sets `InputConstants.UNKNOWN` unconditionally
+(`KeyBindsScreen.java:73-74`); see `capture_binding`'s own doc for why.
+
 ### What is actually live — and a correction to the census
 
 **Seven options**, as of #200/#202/#203 (up from the two #55 landed with):
@@ -160,21 +222,26 @@ was actually put behind it.
 | `invertMouseX` | Mouse | `config::Options::invert_mouse_x` |
 | `invertMouseY` | Mouse | `config::Options::invert_mouse_y` |
 
-Plus nine `Done` buttons (one per page, always live) and either nine or eight
-working nav buttons, depending on `in_world`:
+Plus nine `Done` buttons (one per page, always live) and either ten or nine
+working nav buttons, depending on `in_world` (these counts are still only the
+143-control `OptionsList` census — Key Binds' own 56 controls are counted
+separately, above, and are not part of either number):
 
 - **Outside a world** (opened from the title): Skin, Sound, Video, Controls,
   Chat, Accessibility (the root grid), Accessibility → Controls, Controls →
-  Mouse, and now the root → **Online**. **25 live, 118 inactive.**
-- **Inside a world** (opened from the pause menu): the same eight, minus the
-  root's Online link (it is the inactive World Options placeholder instead).
-  **24 live, 119 inactive.**
+  Mouse, Controls → **Key Binds**, and the root → **Online**. **26 live, 118
+  inactive.**
+- **Inside a world** (opened from the pause menu): the same nine minus the
+  root's Online link (it is the inactive World Options placeholder instead) —
+  Key Binds' own nav button is unconditionally live either way. **25 live,
+  119 inactive.**
 
 Both counts are asserted directly —
-`options::tests::the_disabled_majority_is_the_point_and_it_is_measured` (25,
+`options::tests::the_disabled_majority_is_the_point_and_it_is_measured` (26,
 outside a world, the canonical/title-screen baseline) and
 `options::tests::the_root_online_button_is_the_one_row_that_changes_with_in_world`
-(both, and that the delta is exactly the Online row).
+(both, and that the delta between them is exactly the Online row — Key
+Binds' contributes to both equally, so it is not the row that test is about).
 
 #55's census comment and `ui-framework.md` both say **"4 of 93"**, listing
 `render_distance` and `sensitivity` alongside those two. That is wrong, and it is
@@ -384,6 +451,22 @@ is claimed, a control:
 settings tests drive the tree with nothing but the keys a player has — reaching
 GUI Scale by pressing Down is what proves the row is reachable at all.
 
+**Key Binds (issue #15)** has its own test file section, `key_binds.rs`'s own
+`mod tests` plus `nav.rs`'s integration tests, following the same rules:
+`six_categories_carry_all_twenty_seven_actions` and
+`actions_walk_registration_order_not_declaration_order` are the census and
+ordering guards (the latter's control is deliberately named: walking
+`InputAction::ALL` directly instead of `Category::SORT_ORDER` passes every
+*other* test in that file and still renders the categories in the wrong
+relative order); `a_click_acts_on_the_row_it_landed_on_and_nothing_else` is
+#391's shape again, one screen further; and `nav.rs`'s
+`clicking_a_bind_button_then_capturing_a_key_rebinds_and_persists`/
+`escape_while_capturing_cancels_without_changing_the_binding`/
+`capturing_pause_refuses_to_leave_it_unbound` drive `MenuNav::capture_binding`
+directly — the same call `app.rs`'s still-outstanding patch is specified to
+make — so persistence, cancellation and the `Pause` hazard are all proved on
+this crate's side of that hop before the patch exists to close it.
+
 `widget.rs`'s `a_slider_has_a_track_but_no_disabled_track` earned its place: the
 first version of `SLIDER_SPRITES` used the 2-argument collapse, which puts the
 *focused* sprite in `disabledFocused`, and it reported
@@ -410,9 +493,14 @@ purpose (departure 4).
   `GridLayout`, `LinearLayout`, `LayoutSettings`, `widget_rects`, `ipx`.
 - `menu/widget.rs` — `Widget`, `WidgetSprites`, `BUTTON_SPRITES`,
   `SLIDER_SPRITES`, the grey `-6250336`.
-- `menu/render.rs` — `Origin::Settings`, `MenuRow::slider`, `draw_widget`.
-- `menu/nav.rs` — `MenuNav::settings`, `key_settings`, `apply_settings`, and the
-  eager persistence rule.
+- `menu/render.rs` — `Origin::Settings`, `Origin::KeyBinds`, `MenuRow::slider`,
+  `draw_widget`.
+- `menu/nav.rs` — `MenuNav::settings`, `key_settings`, `apply_settings`,
+  `key_key_binds`, `apply_key_binds`, `awaiting_key_capture`,
+  `capture_binding`, and the eager persistence rule.
+- `menu/key_binds.rs` (issue #15) — the Key Binds page's own model, geometry
+  and `KeyBindsNav`; see that module's own docs and
+  [`docs/keybindings.md`](./keybindings.md) for the layer underneath it.
 - The 26.2 jar at `.cache/mc/26.2/{client-src,client.jar}` — behavioural reference
   only, and `assets/minecraft/lang/en_us.json` for every caption verbatim.
 
@@ -425,5 +513,5 @@ purpose (departure 4).
 - [Main menu](./main-menu.md), [Pause menu](./pause-menu.md) — the two entry
   points.
 - [View bobbing](./view-bobbing.md) — one of the two live options, and #391.
-- [Keybindings](./keybindings.md) — what a real Key Binds screen (#15) would
-  drive.
+- [Keybindings](./keybindings.md) — the model Key Binds (#15) is a screen over,
+  and the one raw-input hop `app.rs` still needs to patch.
