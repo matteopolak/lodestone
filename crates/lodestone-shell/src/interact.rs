@@ -142,6 +142,29 @@ pub struct EntityRayTarget(pub Option<i32>);
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct Attacking(pub bool);
 
+/// Whether the use (right) button has been pressed and not yet released.
+///
+/// The client-side mirror of vanilla's `Minecraft.java:1914`,
+/// `this.player.isUsingItem()`, which gates whether releasing `key.use` sends
+/// `RELEASE_USE_ITEM` (`:1916`, `gameMode.releaseUsingItem`). Vanilla's own
+/// flag comes from a held item's `use()` running identically client- and
+/// server-side (a bow's `use()` calls `LivingEntity.startUsingItem` on both),
+/// which this client has no local simulation of — there is no item registry
+/// here that can say "yes, that bow just started a held use." So this is an
+/// **input-state** mirror instead: true from [`crate::sim::Sim::use_item`]'s
+/// live press until its release counterpart's release, a superset of
+/// vanilla's real gate rather than an exact match.
+///
+/// That gap is inert, not a wrong state transition: `LivingEntity
+/// .releaseUsingItem` (`.cache/mc/26.2/src/…/LivingEntity.java:3602-3613`)
+/// already no-ops whenever the server itself has no `useItem` in progress, so
+/// a `RELEASE_USE_ITEM` sent while nothing was really being used is a
+/// harmless duplicate. Same shape as [`Attacking`] — a plain press/release
+/// mirror the click handlers set directly — but this one is consulted by the
+/// *release* edge to decide whether to send at all, not by a per-tick system.
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct UsingItem(pub bool);
+
 /// The live block-mining predictor (`START`/`STOP`/`ABORT` + swing), owning its
 /// own prediction-sequence counter and post-break cooldown.
 #[derive(Resource, Debug, Default)]
@@ -582,6 +605,7 @@ impl Plugin for InteractPlugin {
         app.init_resource::<RayTarget>();
         app.init_resource::<EntityRayTarget>();
         app.init_resource::<Attacking>();
+        app.init_resource::<UsingItem>();
         app.init_resource::<MiningPredictor>();
         app.init_resource::<PlacementPredictor>();
         app.init_resource::<NetHandle>();

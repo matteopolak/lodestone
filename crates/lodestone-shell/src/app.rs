@@ -262,7 +262,15 @@ pub(crate) enum KeyOutcome {
     SwapOffhand,
     /// Begin (`true`) or end (`false`) a dig.
     Attack(bool),
-    Use,
+    /// Press (`true`) or release (`false`) the use/place button.
+    ///
+    /// Both edges matter, the same reason `Attack`'s do: a release with no
+    /// producer is exactly how `ClientAction::ReleaseUseItem` stayed a
+    /// serverbound island (encoded by all four protocol adapters, called by
+    /// nothing in this shell) — bow, crossbow and shield are all
+    /// `useOnRelease()`-gated and cannot complete without it. See
+    /// `Sim::end_use`.
+    Use(bool),
     /// Set a movement action's held state on the controller.
     Movement(Action, bool),
 }
@@ -390,9 +398,10 @@ pub(crate) fn resolve_key(
         // mouse button; the mouse path is what fires out of the box. Both edges
         // matter — mining is hold-to-dig.
         Some(KeyOutcome::Attack(pressed))
-    } else if binds.is(InputAction::Use, code) && pressed && gate.gameplay {
-        // As above: dormant under the default mouse binding.
-        Some(KeyOutcome::Use)
+    } else if binds.is(InputAction::Use, code) && gate.gameplay {
+        // As above: dormant under the default mouse binding. Both edges
+        // matter here too, not just on press — see `KeyOutcome::Use`'s docs.
+        Some(KeyOutcome::Use(pressed))
     } else if let Some(action) = movement_action_for(binds, code)
         && gate.gameplay
     {
@@ -2827,6 +2836,9 @@ impl ApplicationHandler for WindowApp {
                         (Some(InputAction::Use), ElementState::Pressed) => {
                             self.sim.use_item();
                         }
+                        (Some(InputAction::Use), ElementState::Released) => {
+                            self.sim.end_use();
+                        }
                         // A movement action bound to a mouse button still drives
                         // the controller, on both edges.
                         (Some(action), _) => {
@@ -2984,7 +2996,8 @@ impl ApplicationHandler for WindowApp {
                     Some(KeyOutcome::SwapOffhand) => self.send_offhand_swap(),
                     Some(KeyOutcome::Attack(true)) => self.sim.begin_attack(),
                     Some(KeyOutcome::Attack(false)) => self.sim.end_attack(),
-                    Some(KeyOutcome::Use) => self.sim.use_item(),
+                    Some(KeyOutcome::Use(true)) => self.sim.use_item(),
+                    Some(KeyOutcome::Use(false)) => self.sim.end_use(),
                     Some(KeyOutcome::Movement(action, held)) => {
                         self.sim.input_mut(|i| i.set(action, held));
                     }
@@ -4129,7 +4142,14 @@ mod tests {
         );
         assert_eq!(
             resolve_key(&binds, playing(), Some(KeyCode::KeyV), true),
-            Some(KeyOutcome::Use)
+            Some(KeyOutcome::Use(true))
+        );
+        // The release edge must arrive too, or `ReleaseUseItem` never sends —
+        // the exact bug this test's sibling assertions exist to catch (a bow
+        // or shield cannot complete a use without it).
+        assert_eq!(
+            resolve_key(&binds, playing(), Some(KeyCode::KeyV), false),
+            Some(KeyOutcome::Use(false))
         );
     }
 

@@ -57,7 +57,7 @@ use crate::gpu::ThirdPersonBodyState;
 use crate::hud::{DebugStats, process_rss_bytes};
 use crate::interact::{
     Attacking, EntityRayTarget, InteractPlugin, MiningPredictor, NetHandle, ParticleSim,
-    PlacementPredictor, RayTarget,
+    PlacementPredictor, RayTarget, UsingItem,
 };
 use crate::mesher::{MeshPolicy, MeshScheduler, Meshed, SectionKey, TerrainMesh, TerrainPlugin};
 use crate::net::{NetClient, NetUpdate};
@@ -2089,6 +2089,7 @@ impl Sim {
             w.insert_resource(MiningPredictor(Mining::new()));
             w.insert_resource(PlacementPredictor(Placement::new()));
             w.insert_resource(Attacking(false));
+            w.insert_resource(UsingItem(false));
             w.insert_resource(NetHandle(None));
         });
 
@@ -3865,6 +3866,61 @@ impl Sim {
         }
     }
 
+    /// Release the use button — vanilla's `Minecraft.java:1914-1917`:
+    ///
+    /// ```text
+    /// if (this.player.isUsingItem()) {
+    ///    if (!this.options.keyUse.isDown()) {
+    ///       this.gameMode.releaseUsingItem(this.player);
+    ///    }
+    ///    ...
+    /// }
+    /// ```
+    ///
+    /// which itself lowers to `MultiPlayerGameMode.releaseUsingItem`
+    /// (`:513-517`) sending a bare `ServerboundPlayerActionPacket`
+    /// (`RELEASE_USE_ITEM`) — [`ClientAction::ReleaseUseItem`] here, encoded
+    /// by all four protocol adapters already
+    /// (`crates/protocol/{v47,v340,v735,v770}/src/adapter.rs`) but with no
+    /// producer anywhere in this shell before this method. Bow, crossbow and
+    /// shield are all `useOnRelease() == true`
+    /// (`LivingEntity.java:3471-3475,3602-3616`) and structurally cannot
+    /// complete a use without this packet — food and potions are
+    /// `useOnRelease() == false` and auto-complete on the server's own tick
+    /// count, which is exactly why this gap went unnoticed: eating and
+    /// drinking still worked.
+    ///
+    /// A no-op on the demo world (nothing there tracks an in-progress use).
+    pub fn end_use(&mut self) {
+        if self.is_live() {
+            self.end_use_live();
+        }
+    }
+
+    /// The live half of [`Self::end_use`], split out the same way
+    /// [`Self::begin_attack_live`] is — reachable directly from a test with no
+    /// `vanilla_atlas`, since the swing/send logic itself needs no GPU asset.
+    ///
+    /// A no-op if [`UsingItem`] is already `false`: no button was ever pressed
+    /// down (via [`Self::use_item_live`]) for this to be the release edge of.
+    /// Sending `RELEASE_USE_ITEM` in that case would still be harmless —
+    /// `LivingEntity.releaseUsingItem`
+    /// (`.cache/mc/26.2/src/…/LivingEntity.java:3602-3613`) no-ops whenever
+    /// the server has no `useItem` in progress — but there is nothing to
+    /// justify sending it for.
+    fn end_use_live(&mut self) {
+        let was_using = self.write(|w| {
+            let mut using = w.resource_mut::<UsingItem>();
+            std::mem::replace(&mut using.0, false)
+        });
+        if !was_using {
+            return;
+        }
+        if let Some(net) = &self.net {
+            net.send_action(ClientAction::ReleaseUseItem);
+        }
+    }
+
     /// Lower a live right-click into the server's `use_item_on` action **and
     /// predict the placement locally** (issue #381).
     ///
@@ -3914,6 +3970,15 @@ impl Sim {
         if self.is_dead() {
             return;
         }
+        // Marks [`UsingItem`] so a later [`Self::end_use`] knows the button
+        // was actually pressed — see that resource's own docs for why this is
+        // an input-state mirror rather than vanilla's real `isUsingItem()`.
+        // Set unconditionally here rather than in every branch below: vanilla
+        // arms `player.isUsingItem()` from the held item's own `use()` call,
+        // which can happen inside any of this method's block/entity/generic
+        // branches, and this client has no equivalent per-item hook to mark
+        // it from.
+        self.write(|w| w.resource_mut::<UsingItem>().0 = true);
         // **Entity before block, and this branch is the whole of "get in a boat".**
         // Vanilla's `Minecraft.startUseItem` switches on `hitResult.getType()` and
         // `case ENTITY` comes first (`Minecraft.java`'s `useItem`), the identical
@@ -8544,6 +8609,84 @@ mod tests {
         sim.begin_attack_live();
         let peak = peak_swing_over(&mut sim, 10);
         assert_eq!(peak, 0.0, "a dead player must not swing on attack");
+    }
+
+    /// Puts `item` into the local player's main-hand hotbar slot (native
+    /// index 0, [`Sim::selected_slot`]'s default) via the same
+    /// [`lodestone_ecs::SessionMenus`] fold a real `ContainerSetSlot`
+    /// packet drives — the pattern
+    /// `closing_a_server_menu_clears_it_locally_without_waiting_for_the_server`
+    /// already established for writing menu state directly in a hermetic
+    /// test.
+    fn give_main_hand_item(sim: &mut Sim, item: &str) {
+        let local = sim.local;
+        sim.write(|w| {
+            if let Some(mut menus) = w.get_mut::<lodestone_ecs::SessionMenus>(local) {
+                menus.0.apply(&lodestone_model::ClientEvent::InventorySlotChanged {
+                    slot: 0,
+                    item: Some(lodestone_model::ItemStack::new(
+                        item.parse().expect("valid item id"),
+                        1,
+                    )),
+                });
+            }
+        });
+    }
+
+    /// Finding 1: [`Sim::end_use_live`] must send `ReleaseUseItem` when a use
+    /// was actually in progress — the packet that was a serverbound island
+    /// (encoded by all four protocol adapters, zero producers anywhere in
+    /// this shell). Bow, crossbow and shield are all `useOnRelease() ==
+    /// true` (`LivingEntity.java:3471-3475,3602-3616`) and cannot complete a
+    /// use without it.
+    #[test]
+    fn end_use_live_sends_release_use_item_after_a_use_press() {
+        let (net, actions, _feed) = NetClient::loopback_with_feed();
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        sim.attach_net(net);
+        give_main_hand_item(&mut sim, "minecraft:bow");
+        assert!(sim.target().is_none());
+        assert!(sim.entity_target().is_none());
+
+        // The press: arms `UsingItem` (and, incidentally, sends the draw).
+        sim.use_item_live();
+        let _ = std::iter::from_fn(|| actions.try_recv().ok()).count();
+
+        sim.end_use_live();
+        let sent: Vec<ClientAction> = std::iter::from_fn(|| actions.try_recv().ok()).collect();
+        assert_eq!(
+            sent,
+            vec![ClientAction::ReleaseUseItem],
+            "releasing after a press must send exactly one ReleaseUseItem, got {sent:?}"
+        );
+    }
+
+    /// Negative control: releasing with **no** prior press must send
+    /// nothing — proving `end_use_live` is actually gated on [`UsingItem`]
+    /// and not just "always send on release," which would pass the test
+    /// above vacuously.
+    #[test]
+    fn end_use_live_sends_nothing_with_no_prior_press() {
+        let (net, actions, _feed) = NetClient::loopback_with_feed();
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        sim.attach_net(net);
+
+        sim.end_use_live();
+
+        let sent: Vec<ClientAction> = std::iter::from_fn(|| actions.try_recv().ok()).collect();
+        assert!(
+            sent.is_empty(),
+            "a release with no press before it must send nothing, got {sent:?}"
+        );
+
+        // And a second release right after the first (both with no press) is
+        // still silent — the flag does not get "stuck on".
+        sim.end_use_live();
+        let sent_again: Vec<ClientAction> =
+            std::iter::from_fn(|| actions.try_recv().ok()).collect();
+        assert!(sent_again.is_empty(), "still nothing on a repeated release");
     }
 
     /// Vanilla's `getCurrentItemAttackStrengthDelay`/`getAttackStrengthScale`
