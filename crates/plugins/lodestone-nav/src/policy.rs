@@ -25,6 +25,18 @@ pub struct NavPolicy {
     /// sprint-through-a-descent overshoot rules are M2/M3. A sprinting M1 bot would
     /// move faster and be wrong in a way that looks like a physics bug.
     pub allow_sprint: bool,
+    /// The greatest surface-height drop, in blocks, a `Drop` edge may land —
+    /// **not** a cell count, a real `to_surface`-relative distance, because
+    /// that is the unit vanilla's own damage rule uses.
+    ///
+    /// Default is vanilla's own `SAFE_FALL_DISTANCE` attribute default (`3.0`,
+    /// `Attributes.java:87`), so a *default* policy never takes fall damage at
+    /// all — `search::Search::edge_cost` still computes and charges
+    /// [`Self::damage_cost`] for whatever this is raised to, per
+    /// `docs/baritone-port.md` §4.4's "legality is separate" rule, but the
+    /// zero-damage default is deliberate: relaxing it is a policy decision a
+    /// caller makes with a concrete number in mind, not a silent default.
+    pub max_fall_blocks: f64,
 
     // --- cost weights ---
     /// Additional cost per 90° of heading change, in ticks.
@@ -34,6 +46,18 @@ pub struct NavPolicy {
     /// a stand-in for one: it buys smoother-looking routes where two are equally
     /// fast. Raise for smoother paths, lower if the bot refuses reasonable detours.
     pub turn_penalty: f64,
+    /// Additional cost of a `StepUp`, in ticks, on top of its simulated duration.
+    ///
+    /// `docs/baritone-port.md` §4.4: jumps are the least reliable movement class,
+    /// so this is a *preference* toward walking around one where a walk-around
+    /// exists, not a correction to a measurement. Set to `0` only after
+    /// measuring the bot's own jump success rate.
+    pub jump_penalty: f64,
+    /// Ticks charged per half-heart of a `Drop`'s expected fall damage, from the
+    /// real rule (`floor(delta + 1e-6 - SAFE_FALL_DISTANCE)`,
+    /// `LivingEntity.java:1856`) — makes fall damage trade against time instead
+    /// of being boolean, on top of [`Self::max_fall_blocks`]'s hard legality cap.
+    pub damage_cost: f64,
 
     // --- search tuning ---
     /// `f = g + w·h`. `1.0` is exact and explores terrain that cannot help; the
@@ -96,7 +120,10 @@ impl Default for NavPolicy {
     fn default() -> Self {
         Self {
             allow_sprint: false,
+            max_fall_blocks: crate::graph::SAFE_FALL_DISTANCE,
             turn_penalty: 1.0,
+            jump_penalty: 2.0,
+            damage_cost: 10.0,
             heuristic_weight: 1.25,
             search_budget_nodes: 20_000,
             edge_of_world_strikes: 50,

@@ -89,18 +89,29 @@ pub fn compute_plan(
 /// edge must not brake (it would stutter once per block instead of walking
 /// continuously).
 ///
-/// M1 only: every [`Edge::kind`](lodestone_nav::MoveKind) `lodestone-nav`
-/// admits today is [`lodestone_nav::MoveKind::Walk`], so this has nothing to
-/// match on yet. When `WalkDiagonal`/`StepUp`/`Descend`/… land (M2+), this is
-/// the one place that grows a second arm.
+/// # M2: `Walk`/`StepUp`/`Descend`/`Drop` all still fit one script
+///
+/// `lodestone-nav`'s M1 comment here said this `match` would need a new arm
+/// the moment a second `MoveKind` landed, as a forcing function against
+/// silently mis-driving a kind `WalkDrive` cannot express. It was right to
+/// force the check, and the answer for M2's three new kinds turned out to be
+/// "no new script needed": `StepUp`/`Descend`/`Drop` all still aim at the
+/// destination cell's centre and either brake or don't exactly like `Walk` —
+/// the only physical difference is whether a jump is needed to clear the
+/// ascent, which `WalkDrive::jump` already carries as a plain flag. A kind
+/// that needs genuinely different keys — `Climb`, holding a direction key
+/// against a ladder rather than aiming at a cell centre — is the one that will
+/// actually need a second script, and *that* is the arm this match should grow
+/// next.
 #[must_use]
 pub fn edge_drive(edge: &Edge, last: bool) -> WalkDrive {
-    let lodestone_nav::MoveKind::Walk(_) = edge.kind;
+    let jump = matches!(edge.kind, lodestone_nav::MoveKind::StepUp(_));
     WalkDrive {
         cell: [edge.to.x, edge.to.y, edge.to.z],
         surface: edge.to_surface,
         brake: last,
         sprint: false,
         steer: true,
+        jump,
     }
 }

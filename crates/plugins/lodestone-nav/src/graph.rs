@@ -26,6 +26,100 @@ pub const STEP_HEIGHT: f64 = lodestone_physics::EntityDimensions::PLAYER.step_he
 /// The player's height, for the head-clearance check.
 pub const BODY_HEIGHT: f64 = lodestone_physics::EntityDimensions::PLAYER.height as f64;
 
+/// Vanilla's `Attributes.SAFE_FALL_DISTANCE` default, in blocks
+/// (`Attributes.java:87`: `new RangedAttribute(…, 3.0, …)`). Fall damage is
+/// `floor(fallDistance + 1e-6 - SAFE_FALL_DISTANCE)` half-hearts
+/// (`LivingEntity.java:1856`), so this is the real number below which a fall
+/// deals zero damage — [`crate::policy::NavPolicy::max_fall_blocks`]'s default.
+pub const SAFE_FALL_DISTANCE: f64 = 3.0;
+
+/// Apex height of an unassisted vertical jump, in blocks above the surface it
+/// began from — **derived by simulation**, not by formula
+/// (`docs/baritone-port.md` §4.4's rule applied to a legality bound rather than
+/// a cost): it runs `lodestone_physics::tick` with jump held against a flat
+/// floor and measures the highest point reached, against the default
+/// `mc_1_21` profile. `docs/baritone-port.md` §4.3 records the same figure
+/// (~1.2522 blocks) computed the same way, and it is why a 1-block `StepUp`
+/// (delta `1.0`) clears and a 1.5-block one (a fence, two slabs) does not.
+///
+/// Cached in a [`std::sync::OnceLock`] rather than threaded as a parameter:
+/// legality here does not yet vary by policy or status effect (jump-boost-aware
+/// legality is a later milestone, matching the cost model's own `EffectClass`
+/// gap), so one computed value for the crate's lifetime is honest rather than a
+/// simplification that hides a real dependency.
+#[must_use]
+pub fn jump_apex_height() -> f64 {
+    static APEX: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *APEX.get_or_init(|| {
+        use lodestone_physics::{
+            Aabb, CollisionView, FluidCell, FluidKind, HorizontalDir, MovementInput,
+            PhysicsProfile, PlayerState, Vec3d, tick,
+        };
+
+        /// A single full-cube floor at `y = 0`: everything this measurement needs
+        /// and nothing that could bias it.
+        #[derive(Debug)]
+        struct Floor;
+        impl CollisionView for Floor {
+            fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<Aabb>) {
+                if y == 0 {
+                    out.push(Aabb::new(
+                        f64::from(x),
+                        0.0,
+                        f64::from(z),
+                        f64::from(x) + 1.0,
+                        1.0,
+                        f64::from(z) + 1.0,
+                    ));
+                }
+            }
+            fn collision_top(&self, _x: i32, y: i32, _z: i32) -> f64 {
+                if y == 0 { 1.0 } else { 0.0 }
+            }
+            fn blocks_motion(&self, _x: i32, y: i32, _z: i32) -> bool {
+                y == 0
+            }
+            fn fluid_at(&self, _x: i32, _y: i32, _z: i32) -> Option<FluidCell> {
+                None
+            }
+            fn is_solid_face(
+                &self,
+                _x: i32,
+                y: i32,
+                _z: i32,
+                _dir: HorizontalDir,
+                _kind: FluidKind,
+            ) -> bool {
+                y == 0
+            }
+        }
+
+        let profile = PhysicsProfile::mc_1_21();
+        let world = Floor;
+        let mut state = PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0);
+        state.on_ground = true;
+        let mut apex = 0.0_f64;
+        // One tick with jump held to leave the ground, then ride it out.
+        tick(
+            &mut state,
+            MovementInput {
+                jump: true,
+                ..MovementInput::NONE
+            },
+            &world,
+            &profile,
+        );
+        for _ in 0..40 {
+            apex = apex.max(state.position.y - 1.0);
+            if state.on_ground {
+                break;
+            }
+            tick(&mut state, MovementInput::NONE, &world, &profile);
+        }
+        apex
+    })
+}
+
 /// Tolerance on surface comparisons. Shapes are exact in `f32`, so this only
 /// absorbs the `f32 -> f64` widening and the `y as f64` arithmetic around it.
 ///
@@ -234,20 +328,58 @@ impl NavNode {
 }
 
 /// One movement kind. Direction is a parameter, not a separate type.
+///
+/// # M2 additions
+///
+/// `StepUp`, `Descend` and `Drop` are M2 (`docs/baritone-port.md` §4.3, §9).
+/// `Descend` and `Drop` are the same physical act — falling until the first
+/// standable surface below is reached — split into two *names* because the
+/// design table gives them separately, not two *searches*: [`fall_step`] finds
+/// the one real landing and classifies it by how far down it was, exactly as
+/// vanilla's own physics would (a body cannot fall past a surface it would
+/// land on, so there is only ever one candidate per direction, never a family
+/// of "try n = 2, 3, 4…").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MoveKind {
     /// A same-cell-height step to an orthogonal neighbour, including a step up or
     /// down within [`STEP_HEIGHT`] — which is what makes bottom slabs, soul sand
     /// (top `0.875`), farmland and snow layers work.
     Walk(Dir4),
+    /// +1 Y: a step up too tall for the 0.6 auto-step, which therefore needs a
+    /// jump. Legal only when the destination surface is within
+    /// [`jump_apex_height`] of the source (`docs/baritone-port.md` §4.3: this is
+    /// the number, not a rule of thumb, that decides it — a 1.0 ascend clears,
+    /// a 1.5 one does not).
+    StepUp(Dir4),
+    /// −1 Y onto solid ground: the nearest standable surface below is exactly
+    /// one cell down. Never damaging — the resulting surface delta is always
+    /// under vanilla's `SAFE_FALL_DISTANCE` (3.0 blocks,
+    /// `Attributes.java:87`), so unlike [`Self::Drop`] this has no
+    /// damage-vs-health legality to apply.
+    Descend(Dir4),
+    /// Fall more than one cell onto solid ground, landing on the block whose top
+    /// is `n` cells below the source surface. Legality from expected damage vs
+    /// [`crate::policy::NavPolicy::max_fall_blocks`] lives in the search's edge
+    /// cost (`docs/baritone-port.md` §4.4), not here — this type only proves
+    /// *where* the fall lands, which [`fall_step`] derives from the same real
+    /// jar rule (`LivingEntity.java:1856`:
+    /// `fallDistance + 1e-6 - SAFE_FALL_DISTANCE`) the damage check itself uses.
+    Drop(Dir4, u8),
 }
 
 impl MoveKind {
-    /// Dense id, for the template key.
+    /// Dense id, for the template key. **Not** a full identity for [`Self::Drop`]
+    /// — its fall distance is a separate [`crate::cost::TemplateKey`] field,
+    /// because two drops of different height are not the same equivalence
+    /// class and memoising them together would cost a shorter fall's edge the
+    /// ticks a longer one actually takes.
     #[must_use]
     pub const fn id(self) -> u8 {
         match self {
             Self::Walk(_) => 0,
+            Self::StepUp(_) => 1,
+            Self::Descend(_) => 2,
+            Self::Drop(_, _) => 3,
         }
     }
 
@@ -255,7 +387,7 @@ impl MoveKind {
     #[must_use]
     pub const fn dir(self) -> Dir4 {
         match self {
-            Self::Walk(dir) => dir,
+            Self::Walk(dir) | Self::StepUp(dir) | Self::Descend(dir) | Self::Drop(dir, _) => dir,
         }
     }
 
@@ -266,16 +398,74 @@ impl MoveKind {
     /// fact into a committed plan's witness set (`docs/baritone-port.md` §4.5).
     /// Recording witnesses *during* the search would add a hash insert per cell
     /// read per expanded node, which is exactly the wrong place to spend.
+    ///
+    /// [`Self::StepUp`]/[`Self::Descend`]/[`Self::Drop`] build theirs once per
+    /// direction, lazily, via [`column_stencil`] rather than as hand-transcribed
+    /// literals like [`WALK_EAST`] and its rotations: the ranges are wide enough
+    /// (a `Drop`'s covers [`FALL_SCAN_CELLS`] plus head-room margin) that
+    /// hand-writing four rotations of each would be the same class of
+    /// transcription risk `docs/baritone-port.md`'s own evidence standards warn
+    /// about, for no benefit — a stencil is read, never hot, so the one-time
+    /// `Box::leak` per direction is free.
     #[must_use]
-    pub const fn stencil(self) -> &'static [[i32; 3]] {
+    pub fn stencil(self) -> &'static [[i32; 3]] {
         match self {
             Self::Walk(Dir4::North) => &WALK_NORTH,
             Self::Walk(Dir4::East) => &WALK_EAST,
             Self::Walk(Dir4::South) => &WALK_SOUTH,
             Self::Walk(Dir4::West) => &WALK_WEST,
+            Self::StepUp(dir) => step_up_stencil(dir),
+            Self::Descend(dir) => descend_stencil(dir),
+            Self::Drop(dir, _) => drop_stencil(dir),
         }
     }
 }
+
+/// Build and leak a two-column stencil spanning `y_lo..=y_hi` relative to the
+/// source cell, for the source column `(0, y, 0)` and the destination column
+/// `(dx, y, dz)`. Leaked rather than owned because [`MoveKind::stencil`]
+/// contracts `&'static`; called at most once per direction per kind (cached by
+/// the caller in a [`std::sync::OnceLock`]), so the one-time leak is a few
+/// dozen bytes for the process lifetime, not a growth.
+fn column_stencil(dx: i32, dz: i32, y_lo: i32, y_hi: i32) -> &'static [[i32; 3]] {
+    let mut cells = Vec::with_capacity(((y_hi - y_lo + 1) * 2) as usize);
+    for y in y_lo..=y_hi {
+        cells.push([0, y, 0]);
+        cells.push([dx, y, dz]);
+    }
+    Vec::leak(cells)
+}
+
+/// Lazily-built, cached-per-direction stencil for a kind whose cells are a
+/// [`column_stencil`] over a fixed `y_lo..=y_hi`. One [`std::sync::OnceLock`]
+/// per kind holds all four directions' `Box::leak`ed slices, computed once.
+macro_rules! column_stencil_fn {
+    ($name:ident, $y_lo:expr, $y_hi:expr) => {
+        fn $name(dir: Dir4) -> &'static [[i32; 3]] {
+            static CACHE: std::sync::OnceLock<[&'static [[i32; 3]]; 4]> = std::sync::OnceLock::new();
+            let table = CACHE.get_or_init(|| {
+                Dir4::ALL.map(|d| {
+                    let (dx, dz) = d.delta();
+                    column_stencil(dx, dz, $y_lo, $y_hi)
+                })
+            });
+            table[dir.index() as usize]
+        }
+    };
+}
+
+// `StepUp`: source column from one below its support to comfortably above the
+// jump apex; destination column the same, since the higher surface is the one
+// that needs the taller headroom check.
+column_stencil_fn!(step_up_stencil, -1, 4);
+// `Descend`: destination surface can be a "below" support (needs `ty - 1`) or
+// an "inside" partial block pushing the head into `ty + 2` — `-2..=1`
+// covers both with margin.
+column_stencil_fn!(descend_stencil, -2, 1);
+// `Drop`: generous enough to cover every `n` up to `FALL_SCAN_CELLS` regardless
+// of which one a specific edge landed at — over-covering a witness set is safe
+// (`docs/baritone-port.md` §4.5), under-covering is not.
+column_stencil_fn!(drop_stencil, -(FALL_SCAN_CELLS + 2), 2);
 
 /// `Walk`'s stencil: the source column's support/body/head cells and the
 /// destination column's. The four rotations are spelled out because the stencil
@@ -476,6 +666,13 @@ pub fn successors(view: &dyn NavView, from: NavNode, out: &mut Vec<Step>) {
     for dir in Dir4::ALL {
         if let Some(step) = walk_step(view, from, from_surface, dir) {
             out.push(step);
+            continue;
+        }
+        if let Some(step) = step_up_step(view, from, from_surface, dir) {
+            out.push(step);
+        }
+        if let Some(step) = fall_step(view, from, from_surface, dir) {
+            out.push(step);
         }
     }
 }
@@ -519,6 +716,149 @@ pub fn walk_step(view: &dyn NavView, from: NavNode, from_surface: f64, dir: Dir4
         }
         return Some(Step {
             kind: MoveKind::Walk(dir),
+            to: NavNode {
+                x: tx,
+                y: ty,
+                z: tz,
+                arrival: Arrival::Walking(dir),
+            },
+            from_surface,
+            to_surface,
+        });
+    }
+    None
+}
+
+/// `StepUp(dir)` out of `from`, or `None` when illegal.
+///
+/// Target cell is pinned to `from.y + 1` — an ascend, unlike [`walk_step`]'s
+/// three-candidate search, only ever means *one* cell up; a taller ascend is
+/// not a single `StepUp` at all (nothing in real Minecraft lets a body jump
+/// more than [`jump_apex_height`] above where it started).
+///
+/// Legality is **geometric only** here: the surface delta must exceed
+/// [`STEP_HEIGHT`] (otherwise [`walk_step`] already owns it) and not exceed
+/// [`jump_apex_height`], and the source column needs the same head clearance up
+/// to the destination's higher surface, since the body is briefly over the
+/// source column at close to the destination's height while jumping. Whether
+/// the jump *actually* covers the horizontal distance in that time is the
+/// cost model's question, not this one — `cost::TemplateTable`'s simulated
+/// `Template.ok` is the authority on physical feasibility, exactly as it
+/// already is for `Walk` (`docs/baritone-port.md` §4.4): a static predicate
+/// cannot see the obstruction-free stencil world the cost model measures
+/// against, but it also cannot invent a distance the simulation cannot
+/// achieve, so leaving the fine physics to simulation is correct here, not a
+/// shortcut.
+#[must_use]
+pub fn step_up_step(view: &dyn NavView, from: NavNode, from_surface: f64, dir: Dir4) -> Option<Step> {
+    let (dx, dz) = dir.delta();
+    let (tx, tz) = (from.x + dx, from.z + dz);
+    let ty = from.y + 1;
+    let to_surface = standable(view, tx, ty, tz)?;
+    let delta = to_surface - from_surface;
+    if delta <= STEP_HEIGHT + SURFACE_EPS || delta > jump_apex_height() + SURFACE_EPS {
+        return None;
+    }
+    // The source column needs clearance up to the *destination's* surface: the
+    // body passes over the source cell at close to that height while airborne,
+    // and `standable`'s own destination-local head-room check cannot see back
+    // across the boundary.
+    if !head_room(view, from.x, from.y, from.z, to_surface) {
+        return None;
+    }
+    Some(Step {
+        kind: MoveKind::StepUp(dir),
+        to: NavNode {
+            x: tx,
+            y: ty,
+            z: tz,
+            arrival: Arrival::Walking(dir),
+        },
+        from_surface,
+        to_surface,
+    })
+}
+
+/// How many cells below the source a [`fall_step`] scan will look for the
+/// first standable surface before giving up. Real free-fall has no such limit
+/// — this only bounds how far the *graph* looks; the real, policy-driven
+/// damage-vs-health cap on how far a `Drop` may legally land lives in
+/// `search::Search::edge_cost` (`docs/baritone-port.md` §4.4), which sees
+/// [`crate::policy::NavPolicy::max_fall_blocks`] and this function does not.
+pub const FALL_SCAN_CELLS: i32 = 8;
+
+/// `Descend(dir)`/`Drop(dir, n)` out of `from`, or `None` when there is no
+/// standable surface within [`FALL_SCAN_CELLS`].
+///
+/// # Why `Descend` and `Drop` are one search, not two
+///
+/// A falling body stops at the **first** surface it reaches — it cannot pass
+/// through a landing to reach a deeper one — so for a given direction there is
+/// exactly one candidate, never a family of "try landing 2, 3, 4 cells down".
+/// This scans downward in increasing `n` and returns the first standable cell,
+/// classifying it as [`MoveKind::Descend`] when `n == 1` and
+/// [`MoveKind::Drop`] otherwise. `n == 0`, i.e. a surface within the auto-step,
+/// is [`walk_step`]'s job: reaching one here means the *first* landing was
+/// close enough that this was never a fall to begin with, so the scan aborts
+/// rather than reporting a movement `walk_step` already covers.
+///
+/// # Hazards in the fall path, not only at the landing
+///
+/// Lava, fire and the rest of [`crate::facts::MUST_NOT_ENTER`] are `passable`
+/// — they do not stop a fall — so a body can pass *through* one on the way to
+/// a perfectly good landing further down. Every cell scanned is checked for
+/// `must_not_enter` before it is considered as a landing candidate, which
+/// refuses the whole direction the moment one is found: routing a plan through
+/// a column that burns the bot on the way down is exactly the "must not walk
+/// into" rule `docs/baritone-port.md` §2.3 makes a first-class concept.
+///
+/// # Slabs are excluded as `Drop` landings
+///
+/// `docs/baritone-port.md` §2.3/§4.4: landing on a bottom slab from a genuine
+/// fall is glitchy and deals *more* damage than the height predicts, so a
+/// landing whose support is the "inside a partial block" case (rather than a
+/// full-height block one cell below) is refused for `n > 1`. `Descend`
+/// (`n == 1`) is exempt — its surfaces are the same ones `walk_step` already
+/// stands on every day at zero fall distance, and refusing them would make an
+/// ordinary one-block step down onto a slab illegal for no reason.
+#[must_use]
+pub fn fall_step(view: &dyn NavView, from: NavNode, from_surface: f64, dir: Dir4) -> Option<Step> {
+    let (dx, dz) = dir.delta();
+    let (tx, tz) = (from.x + dx, from.z + dz);
+    for n in 1..=FALL_SCAN_CELLS {
+        let ty = from.y - n;
+        if ty < view.min_y() {
+            return None;
+        }
+        let facts = view.facts_at(tx, ty, tz)?;
+        if facts.must_not_enter {
+            // The whole column below this point is a wall to us: a real fall
+            // cannot skip over a hazard to reach a safe landing beneath it.
+            return None;
+        }
+        let Some(to_surface) = standable(view, tx, ty, tz) else {
+            continue;
+        };
+        let delta = from_surface - to_surface;
+        if delta <= STEP_HEIGHT + SURFACE_EPS {
+            // The nearest landing is within the auto-step: `walk_step` already
+            // owns this case, and nothing further down is reachable — a body
+            // stops at the first surface it meets.
+            return None;
+        }
+        #[allow(clippy::cast_sign_loss)]
+        let is_slab_like = (to_surface - f64::from(ty)).abs() > SURFACE_EPS;
+        if n > 1 && is_slab_like {
+            return None;
+        }
+        let kind = if n == 1 {
+            MoveKind::Descend(dir)
+        } else {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            MoveKind::Drop(dir, n as u8)
+        };
+        return Some(Step {
+            kind,
             to: NavNode {
                 x: tx,
                 y: ty,
@@ -814,5 +1154,177 @@ mod tests {
         assert_eq!(Dir4::East.turns_to(Dir4::South), 1);
         assert_eq!(Dir4::East.turns_to(Dir4::West), 2);
         assert_eq!(Dir4::East.turns_to(Dir4::North), 3);
+    }
+
+    // --- M2: StepUp ---
+
+    /// The number `docs/baritone-port.md` §4.3 cites (~1.2522 blocks), reproduced
+    /// here by the same means (simulating a jump) rather than trusting the design
+    /// doc's transcription of it.
+    #[test]
+    fn jump_apex_matches_the_design_docs_derived_figure() {
+        let apex = jump_apex_height();
+        assert!(
+            (apex - 1.2522).abs() < 0.01,
+            "apex {apex}, design doc says ~1.2522"
+        );
+        assert!(apex > STEP_HEIGHT, "or nothing could ever StepUp at all");
+    }
+
+    /// The classic one-block ascend: a block one cell taller than the floor
+    /// beside it. This is the case no scene in the tree could exercise before
+    /// `StepUp` existed at all.
+    #[test]
+    fn a_one_block_ascend_is_a_legal_step_up() {
+        let mut view = flat();
+        view.set(1, 1, 0, FixtureCensus::STONE);
+        let step = step_up_step(&view, NavNode::still(0, 1, 0), 1.0, Dir4::East).expect("legal");
+        assert_eq!(step.kind, MoveKind::StepUp(Dir4::East));
+        assert_eq!((step.to.x, step.to.y, step.to.z), (1, 2, 0));
+        assert!((step.to_surface - 2.0).abs() < 1e-9, "{}", step.to_surface);
+    }
+
+    /// The negative control: a floating partial block placed a full cell higher
+    /// than an ordinary one-block ascend can reach — 1.875 blocks up, comfortably
+    /// past [`jump_apex_height`] (~1.2522) — must be refused. Without this,
+    /// "a one-block ascend is legal" could be satisfied by a rule that accepts
+    /// any upward neighbour at all.
+    #[test]
+    fn an_ascend_taller_than_the_jump_apex_is_refused() {
+        let mut view = flat();
+        // Soul sand's 0.875 top, floating at y=2 rather than resting on a floor
+        // at y=1 — surface 2.875 against a source surface of 1.0.
+        view.set(1, 2, 0, FixtureCensus::SOUL_SAND);
+        assert!(
+            step_up_step(&view, NavNode::still(0, 1, 0), 1.0, Dir4::East).is_none(),
+            "1.875 blocks exceeds the jump apex; a jump cannot reach it"
+        );
+    }
+
+    /// `StepUp` and `walk_step` must not both claim the same one-block ascend —
+    /// `walk_step` already refuses it (the auto-step is 0.6, not 1.0), and this
+    /// pins that the two legality rules stay partitioned rather than overlapping.
+    #[test]
+    fn a_one_block_ascend_is_not_also_a_walk() {
+        let mut view = flat();
+        view.set(1, 1, 0, FixtureCensus::STONE);
+        assert!(walk_step(&view, NavNode::still(0, 1, 0), 1.0, Dir4::East).is_none());
+    }
+
+    // --- M2: Descend/Drop (`fall_step`) ---
+
+    /// A one-cell drop onto solid ground is `Descend`, never damaging (the
+    /// resulting delta is always under `SAFE_FALL_DISTANCE`).
+    #[test]
+    fn a_one_cell_drop_onto_solid_ground_is_a_legal_descend() {
+        let mut view = flat();
+        view.set(1, 0, 0, FixtureCensus::AIR);
+        view.set(1, -1, 0, FixtureCensus::STONE);
+        let step = fall_step(&view, NavNode::still(0, 1, 0), 1.0, Dir4::East).expect("legal");
+        assert_eq!(step.kind, MoveKind::Descend(Dir4::East));
+        assert_eq!((step.to.x, step.to.y, step.to.z), (1, 0, 0));
+        assert!((step.to_surface - 0.0).abs() < 1e-9, "{}", step.to_surface);
+    }
+
+    /// A two-cell drop is named `Drop`, carrying `n`, and lands where the real
+    /// first-standable-surface scan says it must.
+    #[test]
+    fn a_two_cell_drop_onto_solid_ground_is_a_legal_drop_of_two() {
+        let mut view = flat();
+        view.set(1, 0, 0, FixtureCensus::AIR);
+        view.set(1, -1, 0, FixtureCensus::AIR);
+        view.set(1, -2, 0, FixtureCensus::STONE);
+        let step = fall_step(&view, NavNode::still(0, 1, 0), 1.0, Dir4::East).expect("legal");
+        assert_eq!(step.kind, MoveKind::Drop(Dir4::East, 2));
+        assert_eq!((step.to.x, step.to.y, step.to.z), (1, -1, 0));
+        assert!((step.to_surface - -1.0).abs() < 1e-9, "{}", step.to_surface);
+    }
+
+    /// The unreachable control this repo's evidence standards ask for: a real
+    /// hazard sitting *in the fall path*, with genuine solid ground beneath it,
+    /// must refuse the whole direction rather than "falling past" the lava to
+    /// land safely — a passable hazard does not stop a fall physically, but
+    /// routing a plan through it is exactly what
+    /// `docs/baritone-port.md` §2.3's "must not walk into" rule forbids.
+    #[test]
+    fn a_fall_through_lava_is_refused_even_though_solid_ground_is_further_down() {
+        let mut view = flat();
+        view.set(1, 0, 0, FixtureCensus::AIR);
+        view.set(1, -1, 0, FixtureCensus::LAVA);
+        view.set(1, -2, 0, FixtureCensus::STONE);
+        assert!(
+            fall_step(&view, NavNode::still(0, 1, 0), 1.0, Dir4::East).is_none(),
+            "solid ground two cells down must not make a lava-filled path legal"
+        );
+    }
+
+    /// The control that proves the scan actually looks — an unbroken column of
+    /// air all the way past [`FALL_SCAN_CELLS`] must fail closed, not silently
+    /// invent a landing at the scan's edge.
+    #[test]
+    fn a_bottomless_column_past_the_scan_limit_has_no_legal_fall() {
+        let mut view = flat();
+        for n in 1..=(FALL_SCAN_CELLS + 2) {
+            view.set(1, 1 - n, 0, FixtureCensus::AIR);
+        }
+        assert!(fall_step(&view, NavNode::still(0, 1, 0), 1.0, Dir4::East).is_none());
+    }
+
+    /// The negative control for [`fall_step`]'s slab exclusion: a `Drop` of more
+    /// than one cell landing on a bottom slab — an "inside a partial block"
+    /// support rather than a full block one cell below — must be refused, even
+    /// though the geometry is otherwise a perfectly ordinary landing. Without
+    /// this, "Drop lands correctly" could be satisfied by a rule that accepts
+    /// every standable surface indiscriminately.
+    #[test]
+    fn dropping_two_cells_onto_a_bottom_slab_is_refused_as_a_landing() {
+        let mut view = flat();
+        view.set(1, 0, 0, FixtureCensus::AIR);
+        view.set(1, -1, 0, FixtureCensus::SLAB);
+        assert!(
+            fall_step(&view, NavNode::still(0, 1, 0), 1.0, Dir4::East).is_none(),
+            "a slab landing must be excluded for a genuine multi-cell drop"
+        );
+    }
+
+    /// `Descend` (`n == 1`) is exempt from the slab exclusion — refusing it would
+    /// make an everyday one-block step down onto a slab illegal for no physical
+    /// reason. This needs an elevated source surface to produce a delta past
+    /// `STEP_HEIGHT` at all (see the module docs on why `n == 1` onto an
+    /// ordinary-height slab is just a `Walk`): standing on a slab one cell up
+    /// (surface `1.5`) and stepping down onto a bare stone floor (surface `0.0`)
+    /// is a `0.6`-plus drop that must land as `Descend`, not be refused.
+    #[test]
+    fn descending_from_a_slab_is_exempt_from_the_landing_exclusion() {
+        let mut view = flat();
+        view.set(0, 1, 0, FixtureCensus::SLAB);
+        // A slab one cell down too, so the landing itself is the "inside a
+        // partial block" case `fall_step`'s slab exclusion targets — but at
+        // `n == 1`, which the exclusion does not apply to.
+        view.set(1, 0, 0, FixtureCensus::SLAB);
+        let from = NavNode::still(0, 1, 0);
+        let from_surface = standable(&view, from.x, from.y, from.z).expect("standing on the slab");
+        assert!((from_surface - 1.5).abs() < 1e-9, "{from_surface}");
+        let step = fall_step(&view, from, from_surface, Dir4::East).expect("legal");
+        assert_eq!(step.kind, MoveKind::Descend(Dir4::East));
+        assert!((step.to_surface - 0.5).abs() < 1e-9, "{}", step.to_surface);
+    }
+
+    /// [`MoveKind::stencil`] for the new kinds actually builds distinct,
+    /// non-empty slices per direction — the control that the lazily-built
+    /// stencils are wired at all, not silently sharing one array across every
+    /// direction.
+    #[test]
+    fn m2_stencils_are_built_per_direction_and_are_not_empty() {
+        for kind_of in [
+            (|d| MoveKind::StepUp(d)) as fn(Dir4) -> MoveKind,
+            |d| MoveKind::Descend(d),
+            |d| MoveKind::Drop(d, 2),
+        ] {
+            let east = kind_of(Dir4::East).stencil();
+            let north = kind_of(Dir4::North).stencil();
+            assert!(!east.is_empty());
+            assert_ne!(east, north, "each direction must translate, not repeat +X");
+        }
     }
 }

@@ -189,6 +189,16 @@ pub struct TemplateKey {
     pub speed: SpeedClass,
     /// Whether the script holds sprint.
     pub sprint: bool,
+    /// For [`MoveKind::Drop`] only: how many cells the fall covers. `0` for
+    /// every other kind.
+    ///
+    /// **Not folded into [`MoveKind::id`].** A drop of 2 cells and a drop of 5
+    /// are not the same equivalence class — they take genuinely different
+    /// numbers of ticks — and collapsing them under one `id` would memoise the
+    /// *first* drop simulated and silently cost every other fall height its
+    /// ticks, which is exactly the "search believes 6, executor needs 14"
+    /// failure `docs/baritone-port.md` §4.4 exists to make impossible.
+    pub drop_n: u8,
 }
 
 /// A memoised simulation result.
@@ -306,7 +316,10 @@ impl TemplateTable {
         if let Some(hit) = self.steady.get(&(surface, speed, sprint)) {
             return *hit;
         }
-        let world = StencilWorld::new(surface, speed);
+        // `rise: 0` — steady-state is the approach speed *before* an edge is
+        // committed to, always measured on flat ground of the source surface,
+        // regardless of what the edge itself eventually does.
+        let world = StencilWorld::new(surface, speed, 0);
         let mut state = start_state(&world, Vec3d::new(0.5, 1.0, 0.5), sprint, &self.profile);
         // Aim far along +X so the drive never brakes and never turns.
         let drive = WalkDrive {
@@ -318,6 +331,7 @@ impl TemplateTable {
             // measured the way the plugin executes -- which is the point of
             // deriving cost by simulation rather than by formula.
             steer: true,
+            jump: false,
         };
         for _ in 0..SETTLE_TICKS {
             self.advance(&mut state, &drive, &world, sprint);
@@ -369,25 +383,44 @@ impl TemplateTable {
     }
 
     /// Run one movement's script and count ticks.
+    ///
+    /// # `rise`, and why the canonical frame moves vertically too
+    ///
+    /// `Walk` always has `rise == 0` (flat). `StepUp` rises `+1`; `Descend`
+    /// falls `1`; `Drop` falls `key.drop_n` (`docs/baritone-port.md` §4.4's
+    /// simulate-don't-formula rule applies just as much to a vertical
+    /// movement as a horizontal one — the tick count for a jump or a fall
+    /// comes from running the same integrator, never from `sqrt(2h/g)`). The
+    /// destination cell and target surface both shift by `rise`, and
+    /// [`StencilWorld`]'s own floor does too, so the simulated body is
+    /// climbing or falling a **real** step of that height, not a flat walk
+    /// with a cosmetic label.
     fn simulate(&mut self, key: TemplateKey) -> Template {
         self.simulations += 1;
-        let Some(MoveKind::Walk(_)) = decode_kind(key.kind) else {
+        let Some(kind) = decode_kind(key.kind, key.drop_n) else {
             return Template {
                 ticks: Ticks::IMPOSSIBLE,
                 ok: false,
             };
         };
-        let world = StencilWorld::new(key.surface, key.speed);
+        let rise: i32 = match kind {
+            MoveKind::Walk(_) => 0,
+            MoveKind::StepUp(_) => 1,
+            MoveKind::Descend(_) => -1,
+            MoveKind::Drop(_, n) => -i32::from(n),
+        };
+        let world = StencilWorld::new(key.surface, key.speed, rise);
         // The **stored** velocity, not the displacement rate: this is going straight
         // into `PlayerState::velocity`, whose semantics are post-drag. See
         // `steady_speed`'s docs for why the two differ by `friction × 0.91`.
         let steady = self.steady_state(key.surface, key.speed, key.sprint).velocity;
         let along = (steady.x * steady.x + steady.z * steady.z).sqrt();
 
-        // Canonical frame: source cell (0, 1, 0), destination (1, 1, 0), moving +X.
-        // Entry position and velocity are the entry class made concrete — the player
-        // is placed where crossing into the source cell would have left them, with the
-        // velocity that crossing would have carried.
+        // Canonical frame: source cell (0, 1, 0), destination (1, 1 + rise, 0),
+        // moving +X. Entry position and velocity are the entry class made
+        // concrete — the player is placed where crossing into the source cell
+        // would have left them, with the velocity that crossing would have
+        // carried.
         //
         // **The distances differ per entry class, and that is correct.** A body that
         // walked in along +X entered at the source cell's `-X` face and must cross a
@@ -402,13 +435,14 @@ impl TemplateTable {
         let mut state = start_state(&world, position, key.sprint, &self.profile);
         state.velocity = velocity;
         let drive = WalkDrive {
-            cell: [1, 1, 0],
-            surface: 1.0,
+            cell: [1, 1 + rise, 0],
+            surface: 1.0 + f64::from(rise),
             brake: false,
             sprint: key.sprint,
             // `steer`: `simulate` drives through `advance`, which does
             // `state.yaw = step.yaw` before `lodestone_physics::tick`.
             steer: true,
+            jump: matches!(kind, MoveKind::StepUp(_)),
         };
 
         let mut ticks = 0u32;
@@ -416,6 +450,10 @@ impl TemplateTable {
             let before = state.position;
             self.advance(&mut state, &drive, &world, key.sprint);
             ticks += 1;
+            // A fall that drops the body below the destination surface without
+            // ever registering `done` (e.g. it clipped past the landing) is a
+            // script bug, not a slow edge — `SIM_TICK_CAP` below already turns
+            // that into `IMPOSSIBLE`, so no extra check is needed here.
             if drive.done(&state) {
                 // Sub-tick refinement: the boundary was crossed *during* this tick,
                 // so charging a whole tick over-counts by up to 1.0 — which, chained
@@ -525,40 +563,60 @@ fn start_state(
     state
 }
 
-/// `MoveKind` from its dense id. Direction is irrelevant to a canonical-frame
-/// simulation, so `East` stands for all four.
-const fn decode_kind(id: u8) -> Option<MoveKind> {
+/// `MoveKind` from its dense id (plus, for `Drop`, the fall distance the key
+/// itself carried, since [`MoveKind::id`] cannot see it). Direction is
+/// irrelevant to a canonical-frame simulation, so `East` stands for all four.
+const fn decode_kind(id: u8, drop_n: u8) -> Option<MoveKind> {
     match id {
         0 => Some(MoveKind::Walk(Dir4::East)),
+        1 => Some(MoveKind::StepUp(Dir4::East)),
+        2 => Some(MoveKind::Descend(Dir4::East)),
+        3 if drop_n > 0 => Some(MoveKind::Drop(Dir4::East, drop_n)),
         _ => None,
     }
 }
 
-/// The synthetic world a template simulation runs against: an unbounded floor of
-/// full cubes at `y = 0` with one friction and one speed factor, and nothing else.
+/// The synthetic world a template simulation runs against: an unbounded floor
+/// that steps once, at `x = 1`, from `y = 0` (the source cell's support) to
+/// `y = rise` (the destination's) — flat when `rise == 0` (`Walk`), one cell
+/// higher for `StepUp`, and one or more cells lower for `Descend`/`Drop`. One
+/// friction and one speed factor, on whichever side is `y == rise`; the
+/// *source* side (`x < 1`) is deliberately always plain full-height stone at
+/// `friction 0.6`/`speed_factor 1.0` regardless of `surface`/`speed`, matching
+/// `edge_cost`'s own rule that a movement is costed by the surface **being
+/// walked onto**, not the one it started from.
 ///
 /// Deliberately **not** a `SnapshotView` over a fabricated chunk. The template is a
-/// property of a *surface class*, not of a place, and building it from real terrain
-/// would make the cost of walking depend on which patch of ground the key happened
-/// to be derived from.
+/// property of a *surface class* (and, now, a *rise*), not of a place, and building
+/// it from real terrain would make the cost of walking depend on which patch of
+/// ground the key happened to be derived from.
 #[derive(Debug)]
 struct StencilWorld {
     friction: f32,
     speed_factor: f32,
+    /// The destination-side floor's block-occupied `y`. `x < 1` is always the
+    /// source side, floored at `y = 0`.
+    rise: i32,
 }
 
 impl StencilWorld {
-    const fn new(surface: SurfaceClass, speed: SpeedClass) -> Self {
+    const fn new(surface: SurfaceClass, speed: SpeedClass, rise: i32) -> Self {
         Self {
             friction: surface.friction(),
             speed_factor: speed.factor(),
+            rise,
         }
+    }
+
+    /// The block-occupied `y` of the floor under column `x`.
+    const fn floor_y(&self, x: i32) -> i32 {
+        if x < 1 { 0 } else { self.rise }
     }
 }
 
 impl CollisionView for StencilWorld {
     fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<Aabb>) {
-        if y == 0 {
+        if y == self.floor_y(x) {
             out.push(Aabb::new(
                 f64::from(x),
                 f64::from(y),
@@ -570,28 +628,34 @@ impl CollisionView for StencilWorld {
         }
     }
 
-    fn collision_top(&self, _x: i32, y: i32, _z: i32) -> f64 {
-        if y == 0 { 1.0 } else { 0.0 }
+    fn collision_top(&self, x: i32, y: i32, _z: i32) -> f64 {
+        if y == self.floor_y(x) { 1.0 } else { 0.0 }
     }
 
-    fn friction(&self, _x: i32, y: i32, _z: i32) -> f32 {
-        if y == 0 { self.friction } else { 0.6 }
+    /// The tested surface class applies on **whichever side's floor** `y` is —
+    /// source or destination, both, same as `Walk` always did when the two
+    /// sides were the same height. This is what keeps `steady_state` (rise
+    /// always `0`, so both sides are the same cell) measuring the surface it
+    /// was asked to, and what makes `StepUp`/`Descend`/`Drop`'s destination
+    /// side carry it too.
+    fn friction(&self, x: i32, y: i32, _z: i32) -> f32 {
+        if y == self.floor_y(x) { self.friction } else { 0.6 }
     }
 
-    fn speed_factor(&self, _x: i32, y: i32, _z: i32) -> f32 {
-        if y == 0 { self.speed_factor } else { 1.0 }
+    fn speed_factor(&self, x: i32, y: i32, _z: i32) -> f32 {
+        if y == self.floor_y(x) { self.speed_factor } else { 1.0 }
     }
 
-    fn blocks_motion(&self, _x: i32, y: i32, _z: i32) -> bool {
-        y == 0
+    fn blocks_motion(&self, x: i32, y: i32, _z: i32) -> bool {
+        y == self.floor_y(x)
     }
 
     fn fluid_at(&self, _x: i32, _y: i32, _z: i32) -> Option<FluidCell> {
         None
     }
 
-    fn is_solid_face(&self, _x: i32, y: i32, _z: i32, _dir: HorizontalDir, _kind: FluidKind) -> bool {
-        y == 0
+    fn is_solid_face(&self, x: i32, y: i32, _z: i32, _dir: HorizontalDir, _kind: FluidKind) -> bool {
+        y == self.floor_y(x)
     }
 }
 
@@ -610,7 +674,21 @@ mod tests {
             surface,
             speed: SpeedClass::Normal,
             sprint: false,
+            drop_n: 0,
         })
+    }
+
+    /// A canonical [`MoveKind`] template key at a given entry/surface, for the
+    /// new M2 kinds — mirrors [`walk`] above.
+    fn key_for(kind: MoveKind, entry: EntryRel, surface: SurfaceClass) -> TemplateKey {
+        TemplateKey {
+            kind: kind.id(),
+            entry,
+            surface,
+            speed: SpeedClass::Normal,
+            sprint: false,
+            drop_n: if let MoveKind::Drop(_, n) = kind { n } else { 0 },
+        }
     }
 
     /// The steady-state walk speed falls out of the integrator rather than being
@@ -715,6 +793,7 @@ mod tests {
             surface: SurfaceClass::Normal,
             speed: SpeedClass::Slow,
             sprint: false,
+            drop_n: 0,
         });
         assert!(slow.ok);
         assert!(
@@ -753,6 +832,7 @@ mod tests {
                             surface,
                             speed,
                             sprint,
+                            drop_n: 0,
                         });
                     }
                 }

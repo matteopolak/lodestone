@@ -400,13 +400,27 @@ impl Search {
         self.scratch = scratch;
     }
 
-    /// Whether any of a node's four `Walk` stencils reads outside the snapshot.
+    /// Whether any of a node's movement stencils, in any direction, reads
+    /// outside the snapshot.
+    ///
+    /// `Drop`'s representative `n = 2` is just that — a representative, since
+    /// [`MoveKind::stencil`] ignores `n` and every `Drop` in a direction shares
+    /// one generous, `n`-independent stencil (`drop_stencil` in `graph.rs`).
     fn touches_unknown(&self, node: NavNode) -> bool {
         crate::graph::Dir4::ALL.iter().any(|dir| {
-            MoveKind::Walk(*dir).stencil().iter().any(|cell| {
-                self.view
-                    .state_at(node.x + cell[0], node.y + cell[1], node.z + cell[2])
-                    .is_none()
+            [
+                MoveKind::Walk(*dir),
+                MoveKind::StepUp(*dir),
+                MoveKind::Descend(*dir),
+                MoveKind::Drop(*dir, 2),
+            ]
+            .iter()
+            .any(|kind| {
+                kind.stencil().iter().any(|cell| {
+                    self.view
+                        .state_at(node.x + cell[0], node.y + cell[1], node.z + cell[2])
+                        .is_none()
+                })
             })
         })
     }
@@ -446,15 +460,38 @@ impl Search {
             surface: SurfaceClass::of(facts.friction),
             speed: SpeedClass::of(facts.speed_factor),
             sprint: self.policy.allow_sprint,
+            drop_n: if let MoveKind::Drop(_, n) = step.kind { n } else { 0 },
         };
         let template = self.templates.get(key);
         if !template.ok {
             return None;
         }
-        let turn = Ticks::from_f64(
-            f64::from(entry.quarter_turns()) * self.policy.turn_penalty,
-        );
-        Some(template.ticks.saturating_add(turn))
+        let turn = Ticks::from_f64(f64::from(entry.quarter_turns()) * self.policy.turn_penalty);
+        let mut extra = turn;
+        match step.kind {
+            MoveKind::StepUp(_) => {
+                extra = extra.saturating_add(Ticks::from_f64(self.policy.jump_penalty));
+            }
+            MoveKind::Drop(_, _) => {
+                let delta = step.from_surface - step.to_surface;
+                // The hard legality cap: `docs/baritone-port.md` §4.4's "legality
+                // is separate" — refuse rather than route a plan through a fall it
+                // is not willing to take, regardless of how the cost model would
+                // otherwise price it.
+                if delta > self.policy.max_fall_blocks {
+                    return None;
+                }
+                // The real damage rule (`LivingEntity.java:1856`), priced rather
+                // than merely gated: `max_fall_blocks` alone would make every
+                // legal drop free, and a policy that raises the cap should still
+                // prefer a shorter fall over a longer, dearer one.
+                let half_hearts =
+                    (delta + 1e-6 - crate::graph::SAFE_FALL_DISTANCE).floor().max(0.0);
+                extra = extra.saturating_add(Ticks::from_f64(half_hearts * self.policy.damage_cost));
+            }
+            MoveKind::Walk(_) | MoveKind::Descend(_) => {}
+        }
+        Some(template.ticks.saturating_add(extra))
     }
 
     /// Insert or improve a successor.
@@ -693,6 +730,7 @@ mod tests {
                 sprint: false,
                 // `steer`: the loop below adopts `step.yaw` before ticking.
                 steer: true,
+                jump: matches!(edge.kind, MoveKind::StepUp(_)),
             };
             let mut edge_ticks = 0;
             while !drive.done(&state) && edge_ticks < 60 {
