@@ -168,4 +168,12 @@ pub struct RenderStats {
     /// `0`, which is why a pixel gate must also install real text to tell
     /// them apart).
     pub sign_text_vertices: u32,
+    /// Mining-crack overlays actually drawn this frame (issue #410) — one per
+    /// [`CrackTarget`](crate::gpu::CrackTarget) in the slice passed to
+    /// [`RenderState::render_with_crack`](crate::gpu::RenderState::render_with_crack)
+    /// whose target block resolved to real geometry. Before #410 the pipeline
+    /// accepted at most one target, so this could never exceed `1`; a live
+    /// frame with two players digging different blocks now reports `2`, which
+    /// is the number a single-target regression cannot produce.
+    pub cracks_drawn: usize,
 }

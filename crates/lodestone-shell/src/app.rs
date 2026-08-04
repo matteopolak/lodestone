@@ -2440,31 +2440,40 @@ impl WindowApp {
             nausea_intensity: 0.0,
             portal_intensity: 0.0,
         };
-        // Route the progressive-mining crack overlay when a dig is in flight,
-        // otherwise take the plain path (avoids building the crack buffer while
-        // idle). `crack_target()` reads the live mining state, so it is `None`
-        // off a server and on the demo path.
-        let stats = match self.sim.crack_target() {
-            Some(crack) => render.render_with_crack_and_effects(
-                device,
-                queue,
-                frame.view(),
-                &render_camera,
-                outline,
-                &entity_draws,
-                crack,
-                screen_effects,
-            ),
-            None => render.render_with_effects(
-                device,
-                queue,
-                frame.view(),
-                &render_camera,
-                outline,
-                &entity_draws,
-                screen_effects,
-            ),
-        };
+        // Route the progressive-mining crack overlay(s): the local player's own
+        // dig via `crack_target()` (`None` off a server and on the demo path),
+        // plus — per issue #410 — a slot for every *other* player's overlay the
+        // server has reported. `CrackPipeline`/`render_with_crack_and_effects`
+        // now accept any number of targets in one pass instead of at most one,
+        // which was the whole defect: `SessionBlockDestruction` already carried
+        // other players' digs and had nowhere to draw them.
+        //
+        // Only the local target is folded in today. Enumerating every other
+        // player's overlay needs `Sim` to walk
+        // `SessionBlockDestruction`/`BlockDestructionOverlays`'s active entries,
+        // and that collection currently exposes only a single-position probe
+        // (`Sim::block_destruction_stage_at`) — enumerating all of them needs a
+        // small additive accessor on `lodestone_game::mining::
+        // BlockDestructionOverlays` itself, which is outside this pass's file
+        // ownership (`lodestone-game` — see the #410 report for the exact
+        // three-line patch). An empty `cracks` slice beyond the local entry
+        // costs nothing extra (`render_inner` skips the shared camera-uniform
+        // write when there is nothing to draw), so this is a correct, if
+        // partial, wiring: identical local-player behaviour to before, through
+        // the new N-target call shape, ready for the second producer to plug
+        // straight in.
+        let mut cracks: Vec<crate::gpu::CrackTarget> = Vec::new();
+        cracks.extend(self.sim.crack_target());
+        let stats = render.render_with_crack_and_effects(
+            device,
+            queue,
+            frame.view(),
+            &render_camera,
+            outline,
+            &entity_draws,
+            &cracks,
+            screen_effects,
+        );
 
         // Fold GPU counters + timing into the debug overlay.
         let frame_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
@@ -2483,6 +2492,10 @@ impl WindowApp {
         self.sim.stats.particles_unresolved = particle_frame.unresolved;
         self.sim.stats.frame_ms = frame_ms;
         self.sim.stats.fps = self.fps_ema;
+        // Issue #411: `ServerDifficulty` reached a real, tested ECS fold but
+        // nothing in the shell read it — this is that last hop, onto the F3
+        // debug overlay's own `DIFFICULTY` line (`hud.rs`'s `DebugStats::lines`).
+        self.sim.stats.difficulty = self.sim.difficulty();
 
         // The baked 3-D item geometry, shared by the container screen below and the
         // HUD hotbar further down. It borrows `self.sim`, so it cannot be hoisted
