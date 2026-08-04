@@ -492,6 +492,20 @@ impl HeldItemHighlight {
         }
     }
 
+    /// The name to draw — the same already-resolved string [`Self::tick`] was
+    /// last called with, `Some` only while [`Self::alpha`] would be positive.
+    /// `tick`'s caller passes the fully styled (translated, italic-coded)
+    /// hover name as the identity string, so this doubles as both the
+    /// retrigger key and the exact text to draw — no second resolution
+    /// needed at read time.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        if self.timer <= 0 {
+            return None;
+        }
+        self.last.as_ref().map(|(_, name)| name.as_str())
+    }
+
     /// The current opacity, `0.0..=1.0`. `0.0` means "draw nothing" — the
     /// state the initial highlight and an empty selected slot both settle
     /// into (`self.timer == 0`).
@@ -686,6 +700,36 @@ mod fold_tests {
         hi.tick(Some((&item("diamond_sword"), "Diamond Sword")));
         hi.tick(None);
         assert_eq!(hi.alpha(), 0.0);
+        // The control this gate exists for: `name()` must obey the same
+        // guard as `alpha()`, not just the caller's own `alpha > 0` filter —
+        // an initial `HeldItemHighlight::new()` with nothing ever ticked
+        // must also report no name.
+        assert_eq!(hi.name(), None);
+        assert_eq!(HeldItemHighlight::new().name(), None);
+    }
+
+    /// `name()` must return exactly the identity string [`tick`](HeldItemHighlight::tick)
+    /// was called with, so a caller that resolves the styled name once and
+    /// feeds it to `tick` gets it back unchanged at read time rather than
+    /// needing a second resolution — the property `Sim::held_item_overlay`
+    /// depends on.
+    #[test]
+    fn name_reflects_the_last_ticked_identity_while_visible() {
+        let mut hi = HeldItemHighlight::new();
+        assert_eq!(hi.name(), None, "control: nothing selected yet");
+        hi.tick(Some((&item("diamond_sword"), "Diamond Sword")));
+        assert_eq!(hi.name(), Some("Diamond Sword"));
+        // Reselecting an identical item keeps counting down but must not
+        // blank the name out from under the fading label.
+        for _ in 0..HeldItemHighlight::TIMER_TICKS {
+            hi.tick(Some((&item("diamond_sword"), "Diamond Sword")));
+        }
+        assert_eq!(hi.alpha(), 0.0, "control: timer must have run out");
+        assert_eq!(
+            hi.name(),
+            None,
+            "name must go back to None exactly when alpha does, not linger"
+        );
     }
 
     #[test]

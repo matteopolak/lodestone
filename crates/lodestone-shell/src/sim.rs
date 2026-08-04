@@ -2470,6 +2470,35 @@ impl Sim {
         Some((self.resolve_text(text).to_legacy_string(), state.alpha()))
     }
 
+    /// The held-item name highlight (issue #126) as `(styled name, alpha)`,
+    /// `Some` while a selected item's name is showing. Ticked in
+    /// [`lodestone_ecs::session::tick_hud_overlays`], keyed on the selected
+    /// stack's *identity* rather than slot — see
+    /// [`lodestone_ecs::session::HeldItemOverlay`]'s doc.
+    #[must_use]
+    pub fn held_item_overlay(&self) -> Option<(String, f32)> {
+        self.read(|w| {
+            let overlay = w
+                .get::<lodestone_ecs::session::HeldItemOverlay>(self.local)
+                .expect("the local player always carries HeldItemOverlay");
+            let name = overlay.0.name()?;
+            Some((name.to_owned(), overlay.0.alpha()))
+        })
+    }
+
+    /// `Player.hasInfiniteMaterials()` — `Abilities.instabuild`
+    /// (`Player.java`; `AnvilMenu.mayPickup` and
+    /// `EnchantmentScreen.java:111` both gate on it). Used by
+    /// `app.rs`'s `ContainerFrame::with_cost_context` for the anvil/enchanting
+    /// affordability colours — see `docs/container-cost-screens.md`.
+    #[must_use]
+    pub fn has_infinite_materials(&self) -> bool {
+        self.read(|w| {
+            w.get::<lodestone_ecs::session::Abilities>(self.local)
+                .is_some_and(|a| a.instabuild)
+        })
+    }
+
     /// The local player's active status effects, for the top-right HUD overlay.
     /// Empty until a server applies one; ticked down in [`Sim::step`].
     #[must_use]
@@ -2508,6 +2537,7 @@ impl Sim {
                 menu_type: menus.opened_menu_type()?.clone(),
                 title: menus.opened_title()?.clone(),
                 menu: menus.opened()?.clone(),
+                data: menus.opened_data().to_vec(),
             })
         })
     }
@@ -7861,6 +7891,80 @@ mod tests {
         );
     }
 
+    /// The held-item name highlight (issue #126) end to end: selecting an
+    /// item's name reaches [`Sim::held_item_overlay`] — the accessor
+    /// `app.rs`'s `hud_frame.held_item = self.sim.held_item_overlay()` reads
+    /// every frame — and, the property `docs/held-item-name-tooltip.md`
+    /// calls out as the one non-obvious constraint, switching between two
+    /// hotbar slots that hold the **same** item does not retrigger it.
+    #[test]
+    fn held_item_overlay_reaches_pixels_and_keys_on_identity_not_slot() {
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        assert_eq!(
+            sim.held_item_overlay(),
+            None,
+            "control: nothing selected at spawn must show no overlay"
+        );
+
+        // Identical dirt in both hotbar slot 0 (selected by default) and
+        // slot 1.
+        give_main_hand_item(&mut sim, "minecraft:dirt");
+        let local = sim.local;
+        sim.write(|w| {
+            if let Some(mut menus) = w.get_mut::<lodestone_ecs::SessionMenus>(local) {
+                menus.0.apply(&lodestone_model::ClientEvent::InventorySlotChanged {
+                    slot: 1,
+                    item: Some(lodestone_model::ItemStack::new(
+                        "minecraft:dirt".parse().expect("valid item id"),
+                        1,
+                    )),
+                });
+            }
+        });
+
+        sim.step(1.0 / 20.0);
+        let (name, alpha) = sim
+            .held_item_overlay()
+            .expect("selecting an item must show its name — the pixel this feature draws");
+        assert_eq!(name, "Dirt");
+        assert_eq!(
+            alpha, 1.0,
+            "Hud.java:639: a freshly triggered highlight is at full opacity, no fade-in"
+        );
+
+        // Run past the hold phase into the fade so alpha is measurably below
+        // 1.0 before the slot switch below — otherwise a retrigger bug could
+        // hide behind "alpha was already 1.0 anyway".
+        for _ in 0..35 {
+            sim.step(1.0 / 20.0);
+        }
+        let faded_alpha = sim
+            .held_item_overlay()
+            .map(|(_, a)| a)
+            .expect("control: must still be showing (fading, not yet expired)");
+        assert!(
+            (0.0..1.0).contains(&faded_alpha),
+            "control: must be mid-fade before the slot switch, got {faded_alpha}"
+        );
+
+        // The subject: selecting slot 1, which holds the identical item,
+        // must not restart the timer.
+        sim.select_slot(1);
+        sim.step(1.0 / 20.0);
+        let after_switch = sim
+            .held_item_overlay()
+            .map(|(_, a)| a)
+            .expect("still showing: the countdown continues, it does not vanish");
+        assert!(
+            after_switch <= faded_alpha,
+            "switching between two slots holding the same item must not restart the \
+             timer (Hud.java:1194-1196's item-and-hover-name identity check, not slot \
+             equality) — alpha went from {faded_alpha} to {after_switch}, which only \
+             happens if it retriggered"
+        );
+    }
+
     /// The read-through the shell now depends on: it folds nothing itself, so
     /// the rows must come out of the **client's** one `SessionTabList`.
     ///
@@ -10211,6 +10315,7 @@ mod tests {
             velocity: None,
             on_ground: true,
             equipment: Vec::new(),
+            equipment_dye: Vec::new(),
             variant: None,
             count: 1,
             // `EntitySnapshot::name_tag` (issue #100) — irrelevant to this

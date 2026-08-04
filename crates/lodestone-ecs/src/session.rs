@@ -87,7 +87,7 @@ use bevy_ecs::world::World;
 use lodestone_model::{ClientEvent, DimensionId, DimensionTypeInfo, GameMode};
 
 use crate::ingest::{IngestBatch, IngestQueuePlugin};
-use crate::player::LocalPlayer;
+use crate::player::{LocalPlayer, SelectedSlot};
 use crate::schedules::{GameTick, NetIngest};
 use crate::sets::{IngestSet, TickSet};
 
@@ -883,6 +883,15 @@ pub struct TitleOverlay(pub lodestone_game::player_state::TitleState);
 #[derive(Component, Debug, Clone, Default, PartialEq)]
 pub struct ActionBarOverlay(pub lodestone_game::player_state::ActionBar);
 
+/// The held-item name highlight (issue #126): vanilla's `Hud.tick`
+/// (`Hud.java:1190-1203`) timer for the label that appears above the hotbar
+/// when the selected item's *identity* changes. See
+/// [`lodestone_game::player_state::HeldItemHighlight`]'s own doc for why this
+/// is keyed on item id + hover name rather than slot index — switching
+/// between two slots holding the same item must not retrigger it.
+#[derive(Component, Debug, Clone, Default, PartialEq)]
+pub struct HeldItemOverlay(pub lodestone_game::player_state::HeldItemHighlight);
+
 /// The local player's active status effects for the HUD stack.
 ///
 /// Distinct from `PhysicsState`'s `effects`, which is the *physics* view (only
@@ -923,14 +932,53 @@ pub struct SessionChat(pub lodestone_game::chat::ChatLog);
 /// fast at 120 fps as at 60.
 pub fn tick_hud_overlays(
     mut players: Query<
-        (&mut TitleOverlay, &mut ActionBarOverlay, &mut HudEffects),
+        (
+            &mut TitleOverlay,
+            &mut ActionBarOverlay,
+            &mut HudEffects,
+            &mut HeldItemOverlay,
+            Option<&SelectedSlot>,
+            Option<&SessionMenus>,
+        ),
         With<LocalPlayer>,
     >,
 ) {
-    for (mut title, mut action_bar, mut effects) in &mut players {
+    for (mut title, mut action_bar, mut effects, mut held_item, selected_slot, menus) in &mut players
+    {
         title.0.tick(1);
         action_bar.0.tick(1);
         effects.0.tick(1);
+        // `SelectedSlot`/`SessionMenus` are `Option` here, not required
+        // query terms: this module's own docs establish that
+        // `SessionHudPlugin` and `SessionPlugin` are separate plugins a
+        // harness can install independently (`SessionHudPlugin` alone, as
+        // `a_game_tick_run_expires_the_action_bar` does), so a required term
+        // would have silently stopped every other overlay in this same
+        // system from ageing at all on such a harness — the query simply
+        // would not have matched the entity.
+        //
+        // The selected hotbar stack's identity, resolved through the same
+        // `Menus::player_native` this module's own doc names as the
+        // "borrow-friendly counterpart... the HUD's held item" — reading the
+        // native index directly rather than cloning a whole `Menu`.
+        // Translation is `|_| None` here: no language table reaches this
+        // crate, matching `styled_hover_name`'s own documented gap. Identity
+        // is unaffected — the same untranslated key always resolves the same
+        // way, so retrigger detection stays correct even though the drawn
+        // text is the best-effort fallback rather than a localised string.
+        let selected = selected_slot.zip(menus).and_then(|(slot, menus)| {
+            menus
+                .0
+                .player_native(slot.0)
+                .filter(|stack| !stack.is_empty())
+        });
+        let identity = selected.map(|stack| {
+            let name = lodestone_game::item::styled_hover_name(stack, &|_| None);
+            (stack.item().clone(), name)
+        });
+        held_item
+            .0
+            .tick(identity.as_ref().map(|(item, name)| (item, name.as_str())));
     }
 }
 
@@ -945,6 +993,7 @@ pub fn insert_hud_components(world: &mut World, entity: bevy_ecs::entity::Entity
             Phase::default(),
             TitleOverlay::default(),
             ActionBarOverlay::default(),
+            HeldItemOverlay::default(),
             HudEffects::default(),
             RespawnCount::default(),
             // Stage 5. Reset with the rest rather than by hand in the driver's

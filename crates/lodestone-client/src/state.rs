@@ -312,6 +312,12 @@ pub struct OpenMenuSnapshot {
     pub title: Text,
     /// Predicted menu contents to render.
     pub menu: Menu,
+    /// Menu-local `container_set_data` properties (`(property_id, value)`) —
+    /// the anvil's XP cost, the enchanting table's three level costs. `Menus`
+    /// already decodes and folds this (`Menus::opened_data`); this was the
+    /// one hop that dropped it before it ever reached a snapshot — see
+    /// `docs/container-cost-screens.md`'s "What is not yet wired" section.
+    pub data: Vec<(i32, i32)>,
 }
 
 /// A cheap, cloneable handle to the maintained read-model.
@@ -966,6 +972,7 @@ impl SharedState {
             menu_type: menus.opened_menu_type()?.clone(),
             title: menus.opened_title()?.clone(),
             menu: menus.opened()?.clone(),
+            data: menus.opened_data().to_vec(),
         })
     }
 
