@@ -977,6 +977,11 @@ pub enum BossAction {
 
 /// Things that happen to the client after a version adapter lifts a packet into
 /// the canonical model.
+///
+/// **Adding a variant here is not enough to make it reach anything.** Every new
+/// variant must also be given an arm in [`route`], which is an exhaustive match
+/// in this same crate and therefore a *compile error* until you write it. See
+/// [`Route`] and `docs/event-routing.md`.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientEvent {
@@ -1908,4 +1913,495 @@ pub enum ClientEvent {
         /// biome's colour by a slot.
         sky_colors: Vec<Option<u32>>,
     },
+}
+
+/// Which of the client's event routers claim a [`ClientEvent`].
+///
+/// # Why this lives in `lodestone-model` and not next to the routers
+///
+/// [`ClientEvent`] is `#[non_exhaustive]`, which means **no downstream crate can
+/// write an exhaustive match over it** — every consumer is *forced* to end in a
+/// `_ =>` arm, and a terminal wildcard is indistinguishable from a decision. That
+/// attribute is exactly why a new variant used to compile with zero routing arms
+/// anywhere and reach nothing. Inside the defining crate the attribute does not
+/// bind, so [`route`] can be exhaustive here while the attribute keeps protecting
+/// external plugin code. The layering cost is real and accepted: the leaf model
+/// crate names its consumers. It buys the one property nothing else can — a
+/// **compile error** when a variant is added and not routed.
+///
+/// # Why booleans and not an enum
+///
+/// The claims are **not exclusive**, so an enum would force a false choice and
+/// the table would begin by losing information:
+///
+/// * [`ClientEvent::Login`] is folded by `lodestone_ecs::ingest` (the entity id
+///   and the `EntityIndex` entry), *and* by `lodestone_ecs::session` (the session
+///   scalars), *and* forwarded to the shell as `NetUpdate::LoggedIn`.
+/// * [`ClientEvent::EntityPassengersChanged`] is `ingest` (the
+///   `Passengers`/`Vehicle` component pair) *and* `session` (the local player's
+///   own `Riding` scalar).
+///
+/// Three disjoint writes off one event is normal here. A double *fold* of the
+/// same state is the thing to avoid, and no boolean can tell you that — only
+/// reading the two systems can.
+///
+/// # What each flag is worth
+///
+/// | flag | enforced by |
+/// |---|---|
+/// | [`ingest`](Route::ingest) | `lodestone_ecs::ingest::handles_event` *is* this flag — a live derivation |
+/// | [`session`](Route::session) | `lodestone_ecs::session::handles_event` *is* this flag — a live derivation |
+/// | [`shell`](Route::shell) | a `debug_assert!` on the catch-all of `lodestone_shell::net::forward` |
+/// | [`shell_conditional`](Route::shell_conditional) | nothing; it exists only to keep that assert correct |
+/// | [`client`](Route::client) | nothing; documentation, so that [`Route::NOWHERE`] means what it says |
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Route {
+    /// `lodestone_ecs::ingest` folds it: **per-entity ECS state** — components
+    /// hanging off an entity in the client-owned world.
+    pub ingest: bool,
+    /// `lodestone_ecs::session` folds it: **local-player and session scalars** —
+    /// vitals, xp, abilities, game mode, menus, scoreboard, tab list, boss bars.
+    pub session: bool,
+    /// `lodestone_shell`'s `net::forward` has an arm for it: **block and world
+    /// state**, plus anything the renderer, HUD or audio reads off the shell's own
+    /// `NetUpdate` stream. Such events need no `handles_event` arm at all.
+    pub shell: bool,
+    /// The shell's arm is **conditional** — a match guard or a literal field
+    /// pattern — so some values of this variant legitimately fall through to
+    /// `forward`'s catch-all and the `debug_assert!` there must not fire.
+    ///
+    /// Two variants only, and both are a property of `net.rs` as it stands rather
+    /// than of the event: `LevelEvent` (only sub-event `2001` is consumed) and
+    /// `EntitySpawned` (only `lightning_bolt`, to count flashes). If either arm
+    /// ever becomes unconditional, clear this and the assert gets stricter for
+    /// free.
+    pub shell_conditional: bool,
+    /// Consumed inside `lodestone-client` itself by something that is **not** one
+    /// of the three routers, so [`Route::NOWHERE`] can mean "nothing anywhere"
+    /// rather than "nothing I happened to check". Exactly three such places:
+    ///
+    /// * `Driver::emit`'s auto-response switch (keep-alive, chat acknowledgement,
+    ///   `player_loaded`, auto-respawn) — a protocol reply, not screen state.
+    /// * `LocalEcho::apply`, which is down to `TeleportPlayer` alone.
+    /// * `SharedState::apply`'s own `TimeChanged` arm, which writes `WorldTime`
+    ///   ahead of consulting either `handles_event`.
+    ///
+    /// Chunk payloads are a fourth path but not a router: the version adapter
+    /// writes them straight through the `lodestone_world::WorldSink`, and the
+    /// event is only a dirty-region signal.
+    pub client: bool,
+}
+
+impl Route {
+    /// Claimed by nothing. A legal, and sometimes correct, answer — see
+    /// [`route`]'s note on what it costs to write it.
+    pub const NOWHERE: Self = Self {
+        ingest: false,
+        session: false,
+        shell: false,
+        shell_conditional: false,
+        client: false,
+    };
+
+    /// `true` when `lodestone_shell::net::forward` must have an **unconditional**
+    /// arm for this event. The `debug_assert!` on that function's catch-all reads
+    /// exactly this.
+    #[must_use]
+    pub const fn must_forward(self) -> bool {
+        self.shell && !self.shell_conditional
+    }
+
+    /// `true` when nothing in the tree consumes the event: decoded, tested, and
+    /// reaching zero pixels. Not a bug by itself — plenty of packets are decoded
+    /// ahead of a consumer — but it is the shape `CLAUDE.md` §1 calls an island,
+    /// and it is what `docs/event-routing.md` keeps a list of.
+    #[must_use]
+    pub const fn is_island(self) -> bool {
+        !self.ingest && !self.session && !self.shell && !self.client
+    }
+}
+
+/// Which routers claim `event`, as a single exhaustive table.
+///
+/// # The convention, which is the whole decision this match exists to force
+///
+/// * **per-entity state** → `ingest`. Components on an ECS entity: position,
+///   metadata, equipment, hurt animation.
+/// * **local-player scalars** → `session`. Anything scoped to *this* session:
+///   health, xp, abilities, open menus, the scoreboard.
+/// * **block and world state** → `shell`. It travels the shell's own `NetUpdate`
+///   stream and needs no `handles_event` arm at all — the chest-lid work needed
+///   none.
+///
+/// Guessing the `ingest`/`session` fork wrong has cost work twice
+/// (`DimensionTypeChanged`, `AbilitiesChanged`): both compile, both unit-test
+/// green, and neither runs, because `SharedState::apply` forwards only what one of
+/// the two predicates lists.
+///
+/// # The trade
+///
+/// Adding a `ClientEvent` variant now costs **one mandatory one-line arm here**,
+/// and in exchange it **cannot** island silently. Before this table it cost
+/// nothing and risked silence. [`Route::NOWHERE`] is still available, but it has
+/// to be typed on purpose, with a reason next to it — which is the difference
+/// between a decision and the defect.
+///
+/// # This table describes what the code does, not what it should do
+///
+/// It was transcribed from the three routers, arm for arm. Where it says
+/// [`Route::NOWHERE`] and a fold nevertheless exists somewhere, that is a finding
+/// recorded in `docs/event-routing.md`, **not** something this function quietly
+/// fixes: changing a route here changes runtime behaviour and belongs in its own
+/// reviewable commit.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn route(event: &ClientEvent) -> Route {
+    const INGEST: Route = Route {
+        ingest: true,
+        ..Route::NOWHERE
+    };
+    const SESSION: Route = Route {
+        session: true,
+        ..Route::NOWHERE
+    };
+    const SHELL: Route = Route {
+        shell: true,
+        ..Route::NOWHERE
+    };
+    // The shell has an arm but it is guarded; see `Route::shell_conditional`.
+    const SHELL_PARTIAL: Route = Route {
+        shell: true,
+        shell_conditional: true,
+        ..Route::NOWHERE
+    };
+    const CLIENT: Route = Route {
+        client: true,
+        ..Route::NOWHERE
+    };
+
+    match event {
+        // ---- the local player's arrival, claimed by everything ----------------
+        //
+        // `ingest` takes the entity id and the `EntityIndex` entry, `session`
+        // takes the game mode / dimension / alive scalars, the shell takes
+        // `NetUpdate::LoggedIn`, and the driver arms its `player_loaded` latch.
+        // Four disjoint writes, one event.
+        ClientEvent::Login { .. } => Route {
+            ingest: true,
+            session: true,
+            shell: true,
+            client: true,
+            ..Route::NOWHERE
+        },
+        // `Respawned` is the same shape minus `ingest`: no entity id is reassigned.
+        ClientEvent::Respawned { .. } => Route {
+            session: true,
+            shell: true,
+            client: true,
+            ..Route::NOWHERE
+        },
+        // `Death` drives the death screen (shell), the `alive` scalar (session),
+        // and the driver's automatic respawn.
+        ClientEvent::Death { .. } => Route {
+            session: true,
+            shell: true,
+            client: true,
+            ..Route::NOWHERE
+        },
+
+        // ---- per-entity ECS state -------------------------------------------
+        ClientEvent::EntityMoved { .. }
+        | ClientEvent::EntityVelocity { .. }
+        | ClientEvent::EntityRemoved { .. }
+        | ClientEvent::EntityHeadRotation { .. }
+        | ClientEvent::EntityMetadataUpdated { .. }
+        | ClientEvent::EntityAttributesUpdated { .. }
+        | ClientEvent::EntityEquipmentUpdated { .. }
+        | ClientEvent::EntityDamaged { .. }
+        | ClientEvent::EntityHurtAnimation { .. }
+        | ClientEvent::EntityAnimation { .. } => INGEST,
+        // Riding is genuinely both halves — the component pair one side, the local
+        // player's own `Riding` scalar the other.
+        ClientEvent::EntityPassengersChanged { .. } => Route {
+            ingest: true,
+            session: true,
+            ..Route::NOWHERE
+        },
+        // `ingest` spawns the entity; the shell arm is guarded on
+        // `lightning_bolt` and only counts flashes, so every other spawn
+        // legitimately reaches `forward`'s catch-all.
+        ClientEvent::EntitySpawned { .. } => Route {
+            ingest: true,
+            shell: true,
+            shell_conditional: true,
+            ..Route::NOWHERE
+        },
+
+        // ---- local-player and session scalars --------------------------------
+        ClientEvent::HealthChanged { .. }
+        | ClientEvent::ExperienceChanged { .. }
+        | ClientEvent::GameModeChanged { .. }
+        | ClientEvent::AbilitiesChanged { .. }
+        | ClientEvent::DimensionTypeChanged { .. }
+        | ClientEvent::BiomeVisuals { .. } => SESSION,
+        // scoreboard, tab list, boss bars
+        ClientEvent::ObjectiveUpdate { .. }
+        | ClientEvent::DisplayObjective { .. }
+        | ClientEvent::ScoreUpdate { .. }
+        | ClientEvent::ScoreReset { .. }
+        | ClientEvent::TeamUpdate { .. }
+        | ClientEvent::PlayerListUpdate { .. }
+        | ClientEvent::PlayerListRemove { .. }
+        | ClientEvent::BossBarUpdate { .. } => SESSION,
+        // menus / containers
+        ClientEvent::ScreenOpened { .. }
+        | ClientEvent::ScreenClosed { .. }
+        | ClientEvent::ContainerContent { .. }
+        | ClientEvent::ContainerSlot { .. }
+        | ClientEvent::ContainerData { .. }
+        | ClientEvent::CursorItemChanged { .. }
+        | ClientEvent::InventorySlotChanged { .. } => SESSION,
+
+        // ---- the shell's own stream ------------------------------------------
+        ClientEvent::Disconnect { .. }
+        | ClientEvent::Particles { .. }
+        | ClientEvent::Sound { .. }
+        | ClientEvent::EntitySound { .. }
+        | ClientEvent::MobEffectApplied { .. }
+        | ClientEvent::MobEffectRemoved { .. }
+        | ClientEvent::TitleText { .. }
+        | ClientEvent::SubtitleText { .. }
+        | ClientEvent::TitlesAnimation { .. }
+        | ClientEvent::TitlesCleared { .. }
+        | ClientEvent::SectionBlocksChanged { .. }
+        | ClientEvent::BlockEvent { .. }
+        | ClientEvent::ItemPickup { .. }
+        | ClientEvent::WeatherChanged { .. } => SHELL,
+        // Chat reaches the shell feed *and* the driver's signed-message
+        // acknowledgement valve.
+        ClientEvent::Chat { .. } => Route {
+            shell: true,
+            client: true,
+            ..Route::NOWHERE
+        },
+        // The shell camera adopts the authoritative pose; `LocalEcho` keeps the
+        // read-model's `position()` honest; the driver consumes its
+        // `player_loaded` latch on the first one after entering the world.
+        ClientEvent::TeleportPlayer { .. } => Route {
+            shell: true,
+            client: true,
+            ..Route::NOWHERE
+        },
+        // A dirty-region signal to the shell; the payload was already written
+        // through the `WorldSink` by the adapter.
+        ClientEvent::ChunkLoaded { .. } => Route {
+            shell: true,
+            client: true,
+            ..Route::NOWHERE
+        },
+        // Only sub-event 2001 (block-break effect) is consumed; the rest fall
+        // through on purpose, so adding a consumer later is a new arm and not a
+        // new packet.
+        ClientEvent::LevelEvent { .. } => SHELL_PARTIAL,
+
+        // ---- consumed inside `lodestone-client` ------------------------------
+        // Answered by `Driver::emit`, and the tick surrogate that flushes pending
+        // chat acknowledgements.
+        ClientEvent::KeepAlive { .. } => CLIENT,
+        // `SharedState::apply`'s own arm, ahead of both `handles_event` calls:
+        // straight into the `WorldTime` resource.
+        ClientEvent::TimeChanged { .. } => CLIENT,
+        // The adapter has already dropped the column through the `WorldSink`, so
+        // the event is a notification with nothing left to do.
+        ClientEvent::ChunkUnloaded { .. } => CLIENT,
+
+        // ---- claimed by nothing ---------------------------------------------
+        //
+        // Decoded and tested, consumed nowhere. Each line here is a candidate
+        // island; `docs/event-routing.md` records which ones already have a fold
+        // sitting unwired behind them (`BlockDestruction`, `HeldSlotChanged` and
+        // `DifficultyChanged` do) versus which are simply ahead of a consumer.
+        //
+        // Do not "fix" one by flipping a flag: the flag only says who is *asked*,
+        // and a router that is asked but has no system for the event drops it just
+        // as silently. Write the system, then the flag, in one commit.
+        ClientEvent::Ping { .. }
+        | ClientEvent::SpawnPositionChanged { .. }
+        | ClientEvent::BlockDestruction { .. }
+        | ClientEvent::BlockChangedAck { .. }
+        | ClientEvent::ChunkCacheCenterChanged { .. }
+        | ClientEvent::ChunkCacheRadiusChanged { .. }
+        | ClientEvent::SimulationDistanceChanged { .. }
+        | ClientEvent::EntityStatus { .. }
+        | ClientEvent::EntityLeashed { .. }
+        | ClientEvent::VehicleMoved { .. }
+        | ClientEvent::HeldSlotChanged { .. }
+        | ClientEvent::ItemCooldown { .. }
+        | ClientEvent::DifficultyChanged { .. }
+        | ClientEvent::PlayerRotationSet { .. }
+        | ClientEvent::CameraSet { .. }
+        | ClientEvent::BookOpened { .. }
+        | ClientEvent::SoundStopped { .. }
+        | ClientEvent::TabListChanged { .. }
+        | ClientEvent::WorldBorderCenterChanged { .. }
+        | ClientEvent::WorldBorderSizeLerping { .. }
+        | ClientEvent::WorldBorderSizeChanged { .. }
+        | ClientEvent::WorldBorderWarningDelayChanged { .. }
+        | ClientEvent::WorldBorderWarningDistanceChanged { .. }
+        | ClientEvent::WorldBorderInitialized { .. }
+        | ClientEvent::PlayerCombatEntered
+        | ClientEvent::PlayerCombatEnded { .. }
+        | ClientEvent::SignEditorOpened { .. }
+        | ClientEvent::AdvancementsTabSelected { .. }
+        | ClientEvent::ProjectilePowerChanged { .. }
+        | ClientEvent::MountScreenOpened { .. }
+        | ClientEvent::GameRulesChanged { .. }
+        | ClientEvent::TransferRequested { .. }
+        | ClientEvent::CookieRequested { .. }
+        | ClientEvent::CookieStored { .. }
+        | ClientEvent::ResourcePackPushed { .. }
+        | ClientEvent::ResourcePackPopped { .. }
+        | ClientEvent::CustomPayload { .. }
+        | ClientEvent::ServerDataReceived { .. }
+        | ClientEvent::PongReceived { .. }
+        | ClientEvent::ChatMessageDeleted { .. }
+        | ClientEvent::PlayerLookAt { .. } => Route::NOWHERE,
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::{ClientEvent, Route, route};
+    use crate::math::BlockPos;
+
+    /// **The guard that protects the guard.**
+    ///
+    /// [`route`]'s whole value is that a new [`ClientEvent`] variant is a compile
+    /// error (`E0004`) until it is routed. The obvious wrong way to silence that
+    /// error is the one rustc itself suggests — `_ => todo!()`, or its friendlier
+    /// cousin `_ => Route::NOWHERE`. Either one restores the exact wildcard that
+    /// `#[non_exhaustive]` forces on every *other* consumer, deletes the guarantee
+    /// in one line, and leaves a green tree behind. So the absence of a catch-all
+    /// is asserted, not assumed.
+    ///
+    /// Reads this file's own source, in the spirit of
+    /// `lodestone_shell`'s `no_wgsl_is_inlined_in_rust_sources`.
+    #[test]
+    fn route_has_no_catch_all_arm() {
+        let source = include_str!("event.rs");
+        let body = source
+            .split_once("pub fn route(event: &ClientEvent) -> Route {")
+            .expect("route() must exist in this file")
+            .1;
+        let body = body
+            .split_once("\n#[cfg(test)]")
+            .map_or(body, |(before, _)| before);
+
+        let found = catch_all_lines(body);
+        assert!(
+            found.is_empty(),
+            "`route` has a catch-all arm ({found:?}), which restores the wildcard \
+             `#[non_exhaustive]` forces everywhere else and deletes the compile \
+             error that is this function's entire purpose. Write the arm instead — \
+             `Route::NOWHERE` is a legal answer, but per variant and on purpose."
+        );
+
+        // The control, per `CLAUDE.md`: an assertion of an absence is worth only
+        // as much as the evidence the detector fires. These are the two spellings
+        // rustc's own `E0004` help text suggests.
+        assert_eq!(
+            catch_all_lines("        _ => Route::NOWHERE,\n").len(),
+            1,
+            "the detector must see a bare wildcard arm"
+        );
+        assert_eq!(
+            catch_all_lines("        _ => todo!(),\n").len(),
+            1,
+            "the detector must see rustc's suggested `todo!()` wildcard"
+        );
+        // …and must not fire on the `{ .. }` in every ordinary arm, which also
+        // contains a `..` before a `=>`.
+        assert!(
+            catch_all_lines("        ClientEvent::Ping { .. } => Route::NOWHERE,\n").is_empty(),
+            "the detector must not read an ordinary struct pattern as a wildcard"
+        );
+    }
+
+    /// Lines that would make [`route`]'s match exhaustive by accident.
+    fn catch_all_lines(body: &str) -> Vec<&str> {
+        body.lines()
+            .map(str::trim)
+            .filter(|line| {
+                let stripped = line.strip_prefix('|').unwrap_or(line).trim_start();
+                stripped == "_" || stripped.starts_with("_ =>") || stripped.starts_with("_ if")
+            })
+            .collect()
+    }
+
+    /// The reason [`Route`] is four booleans and not an enum, asserted rather than
+    /// asserted-in-prose: one event is genuinely claimed by two routers at once.
+    ///
+    /// `ingest` folds the per-entity `Passengers`/`Vehicle` pair; `session` folds
+    /// the local player's own `Riding` scalar. An enum would have forced one of
+    /// those two folds to be dropped from the table on day one, and whichever half
+    /// lost would have become an island with a green unit test behind it.
+    #[test]
+    fn one_event_can_be_claimed_by_two_routers_at_once() {
+        let riding = ClientEvent::EntityPassengersChanged {
+            vehicle_id: 1,
+            passenger_ids: vec![2],
+        };
+        let r = route(&riding);
+        assert!(r.ingest, "the component pair is per-entity ECS state");
+        assert!(r.session, "the local player's own ride state is a session scalar");
+        assert!(!r.is_island());
+    }
+
+    /// `shell_conditional` exists for exactly this: `LevelEvent`'s arm in
+    /// `net::forward` matches the literal sub-event `2001`, so every *other*
+    /// level event legitimately reaches the terminal `_ =>` — and the
+    /// `debug_assert!` there must not fire on it.
+    #[test]
+    fn a_guarded_shell_arm_is_not_required_to_forward() {
+        let level = ClientEvent::LevelEvent {
+            event: 1234,
+            pos: BlockPos::new(0, 0, 0),
+            data: 0,
+            global: false,
+        };
+        let r = route(&level);
+        assert!(r.shell, "the shell does consume one sub-event of this variant");
+        assert!(r.shell_conditional);
+        assert!(
+            !r.must_forward(),
+            "a guarded arm must not be asserted on, or every non-2001 level event \
+             trips the assert in `net::forward`"
+        );
+
+        // The contrast that gives the flag meaning: an unconditional shell arm.
+        let cleared = ClientEvent::TitlesCleared { reset_times: true };
+        assert!(route(&cleared).must_forward());
+    }
+
+    /// `Route::NOWHERE` means nothing anywhere — including nothing in
+    /// `lodestone-client`, which is what the `client` flag is for. Without that
+    /// flag `TimeChanged` would read as an island while in fact
+    /// `SharedState::apply` folds it into `WorldTime` ahead of both predicates.
+    #[test]
+    fn the_client_flag_keeps_nowhere_honest() {
+        let time = ClientEvent::TimeChanged {
+            world_age: 1,
+            time_of_day: 2,
+        };
+        let r = route(&time);
+        assert!(!r.ingest && !r.session && !r.shell, "no router claims it");
+        assert!(r.client, "but `SharedState::apply` has its own arm for it");
+        assert!(!r.is_island(), "so it is not an island");
+
+        assert!(
+            route(&ClientEvent::PlayerCombatEntered).is_island(),
+            "combat-entered really is decoded and consumed nowhere"
+        );
+        assert_eq!(Route::NOWHERE, Route::default());
+    }
 }

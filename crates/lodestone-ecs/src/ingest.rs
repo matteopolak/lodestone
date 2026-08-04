@@ -102,52 +102,33 @@ impl IngestBatch {
 /// Whether an event is folded by the systems in this module.
 ///
 /// The caller-side switch that lets `lodestone-client` route entity events to
-/// the ECS and everything else to its remaining scalar fold. It is a `match`
-/// over the same variants the systems below handle, kept next to them so the
-/// two cannot drift: an event that returns `true` here and is handled by no
-/// system is silently dropped, which is exactly the failure this function
-/// exists to make greppable.
+/// the ECS and everything else to its remaining scalar fold.
+///
+/// # This used to be the list, and that was the bug
+///
+/// It was a `matches!` over the variants the systems below handle — and because
+/// `ClientEvent` is `#[non_exhaustive]`, a `matches!` in *this* crate can never be
+/// exhaustive, so a new variant simply returned `false` here and `false` in
+/// `crate::session::handles_event` and reached nothing. Four separate islands were
+/// found that way (`EntityDamaged`/`EntityHurtAnimation`, air supply,
+/// `DimensionTypeChanged`, `AbilitiesChanged`), each with a correct decode and a
+/// green hermetic test.
+///
+/// The list now lives in [`lodestone_model::event::route`], next to the enum,
+/// where the match **is** exhaustive and a new variant is a compile error until it
+/// is routed. This function is one line so the predicate and the table cannot
+/// drift apart.
+///
+/// # What it still does not prove
+///
+/// That a *claimed* event has a system behind it. `SharedState::apply` forwards on
+/// this predicate, and a forwarded event no system folds is dropped just as
+/// silently as an unrouted one. That half is
+/// `tests::handles_event_covers_exactly_the_variants_with_a_system`'s job — the
+/// table proves the decision was made, the coverage test proves the system exists.
 #[must_use]
 pub fn handles_event(event: &ClientEvent) -> bool {
-    matches!(
-        event,
-        // `Login` is claimed by [`apply_local_player_login`], and *also* by
-        // `crate::session::apply_local_player_state`. Both is correct and not a
-        // double fold: they write disjoint state off the same event (this side
-        // the index and the entity id component, that side the session scalars),
-        // and `SharedState::apply` routes on `ingest::handles_event(e) ||
-        // session::handles_event(e)`, so the event reaches the one schedule once
-        // either way.
-        ClientEvent::Login { .. }
-            | ClientEvent::EntitySpawned { .. }
-            | ClientEvent::EntityRemoved { .. }
-            | ClientEvent::EntityMoved { .. }
-            | ClientEvent::EntityVelocity { .. }
-            | ClientEvent::EntityHeadRotation { .. }
-            | ClientEvent::EntityMetadataUpdated { .. }
-            | ClientEvent::EntityAttributesUpdated { .. }
-            | ClientEvent::EntityEquipmentUpdated { .. }
-            | ClientEvent::EntityDamaged { .. }
-            | ClientEvent::EntityHurtAnimation { .. }
-            | ClientEvent::EntityAnimation { .. }
-            // `EntityPassengersChanged` (Tier 1 item 8). **This arm is the whole
-            // wiring**, exactly as the four islands above it were: the decode has
-            // been correct and tested since v770 landed, and without this line
-            // `SharedState::apply` routes the event to the dead legacy fallback and
-            // `apply_entity_passengers` never runs in production however green a
-            // hermetic test that calls it directly happens to be.
-            //
-            // It belongs *here* and not in `crate::session::handles_event` because
-            // "which entity is riding which" is per-entity ECS state — the
-            // `Passengers`/`Vehicle` component pair. The **local player's own**
-            // ride state is the session-scoped half of the same packet and is
-            // claimed by `session::handles_event` as well, the same
-            // deliberate double-claim `Login` documents at the top of this
-            // `matches!`: two disjoint writes off one event, and
-            // `SharedState::apply` unions the two switches so the event still
-            // reaches the schedule exactly once.
-            | ClientEvent::EntityPassengersChanged { .. }
-    )
+    lodestone_model::event::route(event).ingest
 }
 
 /// `IngestSet::Drain`: moves [`IngestQueue`] into [`IngestBatch`].
