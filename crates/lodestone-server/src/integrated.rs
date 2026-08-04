@@ -42,6 +42,7 @@ use lodestone_net::{Connection, memory_pair};
 use tokio::io::DuplexStream;
 use tokio::sync::Notify;
 
+use crate::block_entities::{BlockEntityHandle, run_block_entity_tick_loop};
 use crate::chunk::ChunkSource;
 use crate::mobs::{LiveMobSource, run_mob_tick_loop};
 use crate::protocol::ServerProtocol;
@@ -65,6 +66,13 @@ pub struct IntegratedServer {
     /// the sim is meant to keep ticking independently of any one connection —
     /// see that constructor's own doc comment.
     mob_task: Option<Task>,
+    /// The block-entity tick task — the direct analogue of `mob_task`, for
+    /// [`crate::BlockEntityRegistry`] rather than [`crate::MobSim`]. Present
+    /// only when this handle was built by
+    /// [`open_in_memory_with_mobs`](Self::open_in_memory_with_mobs); see that
+    /// constructor's own doc comment for why this is the one constructor
+    /// that ticks it (`docs/block-entities.md`'s first named gap).
+    block_entity_task: Option<Task>,
 }
 
 impl IntegratedServer {
@@ -108,6 +116,13 @@ impl IntegratedServer {
         let (client_end, server_end) = memory_pair();
         let shutdown = Arc::new(Notify::new());
         let signal = shutdown.clone();
+        // A fresh, empty registry for this one connection's lifetime. Nothing
+        // ticks it here — only `open_in_memory_with_mobs` spawns the tick
+        // loop (see that constructor's doc comment) — so a block entity
+        // placed through this constructor exists and holds state, but never
+        // advances on its own. Still real: `apply_use_item_on` can insert
+        // into it and a later `CONTAINER_CLICK`/read could observe it.
+        let block_entities = BlockEntityHandle::default();
 
         let task = spawn(async move {
             let mut conn = Connection::new(server_end);
@@ -116,7 +131,7 @@ impl IntegratedServer {
             // thus the client's read side) is dropped on the way out.
             tokio::select! {
                 _ = signal.notified() => {}
-                _ = serve_connection(&mut conn, &protocol, &source, &entities, view_radius) => {}
+                _ = serve_connection(&mut conn, &protocol, &source, &entities, view_radius, &block_entities) => {}
             }
         });
 
@@ -127,6 +142,7 @@ impl IntegratedServer {
                 shutdown,
                 task,
                 mob_task: None,
+                block_entity_task: None,
             },
             client_end,
         )
@@ -176,14 +192,19 @@ impl IntegratedServer {
         let (client_end, server_end) = memory_pair();
         let shutdown = Arc::new(Notify::new());
         let mobs = LiveMobSource::default();
+        // Shared with the tick task spawned below, the same way `mobs` is —
+        // this is the constructor `docs/block-entities.md` named as the one
+        // with somewhere to hang a `run_block_entity_tick_loop` off of.
+        let block_entities = BlockEntityHandle::default();
 
         let conn_signal = shutdown.clone();
         let conn_entities = mobs.clone();
+        let conn_block_entities = block_entities.clone();
         let task = spawn(async move {
             let mut conn = Connection::new(server_end);
             tokio::select! {
                 _ = conn_signal.notified() => {}
-                _ = serve_connection(&mut conn, &protocol, &source, &conn_entities, view_radius) => {}
+                _ = serve_connection(&mut conn, &protocol, &source, &conn_entities, view_radius, &conn_block_entities) => {}
             }
         });
 
@@ -197,6 +218,14 @@ impl IntegratedServer {
             }
         });
 
+        let block_entity_signal = shutdown.clone();
+        let block_entity_task = spawn(async move {
+            tokio::select! {
+                _ = block_entity_signal.notified() => {}
+                _ = run_block_entity_tick_loop(block_entities) => {}
+            }
+        });
+
         (
             Self {
                 #[cfg(not(target_arch = "wasm32"))]
@@ -204,6 +233,7 @@ impl IntegratedServer {
                 shutdown,
                 task,
                 mob_task: Some(mob_task),
+                block_entity_task: Some(block_entity_task),
             },
             client_end,
         )
@@ -239,6 +269,15 @@ impl IntegratedServer {
         let source = Arc::new(source);
         let shutdown = Arc::new(Notify::new());
         let signal = shutdown.clone();
+        // Shared across every accepted connection (like `protocol`/`source`
+        // above) rather than one per connection, so two LAN players placing
+        // and interacting with the same furnace see the same state — no
+        // tick loop is spawned for it here, though (see the struct's
+        // `block_entity_task` doc comment for why only the mobs constructor
+        // does that); a block entity placed over LAN exists and holds state
+        // but does not advance on its own, the same real-but-static gap
+        // `open_in_memory_with_entities` has.
+        let block_entities = BlockEntityHandle::default();
 
         let task = spawn(async move {
             loop {
@@ -248,6 +287,7 @@ impl IntegratedServer {
                         let Ok((socket, _peer)) = accepted else { break };
                         let protocol = protocol.clone();
                         let source = source.clone();
+                        let block_entities = block_entities.clone();
                         // Fire-and-forget: route through the same `spawn` seam so
                         // all task spawning stays confined to `crate::spawn`, and
                         // detach by dropping the returned handle (a tokio
@@ -256,6 +296,7 @@ impl IntegratedServer {
                             let mut conn = Connection::new(socket);
                             let _ = serve_connection(
                                 &mut conn, &*protocol, &*source, &NoEntities, view_radius,
+                                &block_entities,
                             )
                             .await;
                         }));
@@ -269,6 +310,7 @@ impl IntegratedServer {
             shutdown,
             task,
             mob_task: None,
+            block_entity_task: None,
         })
     }
 
@@ -302,6 +344,9 @@ impl IntegratedServer {
         if let Some(mut mob_task) = self.mob_task.take() {
             mob_task.join().await;
         }
+        if let Some(mut block_entity_task) = self.block_entity_task.take() {
+            block_entity_task.join().await;
+        }
     }
 }
 
@@ -313,6 +358,9 @@ impl Drop for IntegratedServer {
         self.task.abort();
         if let Some(mob_task) = &self.mob_task {
             mob_task.abort();
+        }
+        if let Some(block_entity_task) = &self.block_entity_task {
+            block_entity_task.abort();
         }
     }
 }

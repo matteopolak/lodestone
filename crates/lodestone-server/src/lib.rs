@@ -70,6 +70,18 @@
 //!   comment for why trusting the diff, rather than re-deriving vanilla's
 //!   full `doClick` state machine server-side, is the deliberate scope for
 //!   this landing).
+//! * [`BlockEntityRegistry`] / [`BlockEntityHandle`] — the `BlockPos`-keyed
+//!   home for the four block-entity simulations (`composter`/`furnace`/
+//!   `hopper`/`brewing`, `docs/block-entities.md`), closing that doc's first
+//!   named gap. [`crate::server`]'s `apply_use_item_on` is the producer
+//!   (placing a furnace/composter/hopper/brewing-stand item inserts a fresh
+//!   entry instead of always writing stone — the doc's second named gap);
+//!   [`IntegratedServer::open_in_memory_with_mobs`] spawns
+//!   `block_entities::run_block_entity_tick_loop` alongside the existing mob
+//!   tick task, so a furnace placed in a real singleplayer session actually
+//!   ticks. The doc's third named gap (container packets so a client can
+//!   *see* inside one) is not closed by this landing; see that doc for the
+//!   current state.
 //!
 //! Wiring a real vanilla client to this server end-to-end requires the version
 //! crate to provide client-bound *encoders* (join game, registry data,
@@ -80,6 +92,7 @@
 //!
 //! [`Transport`]: lodestone_net::Transport
 
+mod block_entities;
 mod brewing;
 mod chunk;
 mod composter;
@@ -96,6 +109,7 @@ mod spawn;
 mod vitals;
 mod worldgen_data;
 
+pub use block_entities::{BlockEntity, BlockEntityHandle, BlockEntityRegistry, block_entity_for_item};
 pub use brewing::{
     BREW_TIME_TICKS, Bottle, BottleKind, BrewTick, BrewingStand, FUEL_USES, has_mix, is_ingredient,
     mix_bottle,

@@ -139,6 +139,18 @@ impl Hopper {
         &self.items
     }
 
+    /// A mutable view of the same 5 slots as a flat slice — what
+    /// [`crate::block_entities::BlockEntityRegistry::tick_hopper`] hands to
+    /// *another* hopper's [`tick`](Self::tick) call as its `above`/`below`
+    /// container, mirroring vanilla's `Container` interface every adjacent
+    /// container implements generically. Kept `pub(crate)` rather than fully
+    /// public: it exposes the raw array with no bounds/count invariants
+    /// enforced, appropriate for the one in-crate caller that already owns
+    /// the whole `Hopper` and is porting vanilla's own slot-by-slot access.
+    pub(crate) fn slots_mut(&mut self) -> &mut [Option<ItemStack>] {
+        &mut self.items
+    }
+
     pub fn set_slot(&mut self, index: usize, item: Option<ItemStack>) {
         if let Some(slot) = self.items.get_mut(index) {
             *slot = item;

@@ -49,47 +49,99 @@ transfers", "swapping the ingredient mid-brew aborts it") has a control that is
 run and observed to actually exercise the gate, per CLAUDE.md's evidence
 standard.
 
-## The declared island: nothing in production calls any of these yet
+## Update: gaps 1 and 2 are closed — a furnace now exists and ticks in a real world
 
-**State plainly: this is the server-side simulation half only.** All four types
-compile, are unit-tested, and are exported — and **nothing outside their own
-test modules constructs or ticks one.** This is a disclosed island, not an
-oversight; CLAUDE.md's rule 1 explicitly permits landing one when the missing
-hop is named. Here it is, precisely:
+**`crates/lodestone-server/src/block_entities.rs`** (new) closes the first two
+of the three gaps named below:
 
-1. **No tick loop drives them.** `crates/lodestone-server/src/integrated.rs`'s
-   `IntegratedServer::open_in_memory_with_mobs` (`:162-210`) spawns a second
-   task, `mobs::run_mob_tick_loop`, that owns a `MobSim` and ticks it every
-   50 ms — this is the exact, directly-copyable pattern a
-   `run_block_entity_tick_loop` would follow. It was not added here: a
-   `BlockEntityRegistry` keyed by world position needs somewhere to live
-   (there is no `HashMap<BlockPos, T>` anywhere in this crate's chunk model —
-   `chunk.rs`'s `ChunkColumn` stores only a block-state palette, confirmed by
-   reading it directly), and building one *without* a real consumer able to
-   populate it (see the next point) would be exactly the "looks wired but
-   isn't" trap CLAUDE.md warns is worse than an honest declared gap — a hopper
-   ticked forever with `above: None, below: None` passed in produces zero
-   observable behaviour, ever, and a registry that only ever does that is not
-   meaningfully more wired than no registry at all.
-2. **No decoded packet can create one.** `crates/lodestone-server/src/server.rs`'s
-   `apply_use_item_on` (`:550-576`) always places `minecraft:stone` regardless
-   of the item held — its own doc comment already says so ("this crate has no
-   inventory model to resolve a real item from"). Even though `PlayerInventory`
-   (issue #408, `18c682d`) now exists and *could* answer "what item is the
-   player holding", `apply_use_item_on` was not updated to consult it — that is
-   a real gap but a different one from this issue's scope (it would let a
-   furnace/composter block exist in the world at all; still says nothing about
-   opening or ticking one).
-3. **No client screen threads cost/progress data.** `container_set_data` is
+1. **The registry now exists.** [`BlockEntityRegistry`] is a
+   `HashMap<BlockPos, BlockEntity>` (`BlockEntity` an enum over the four
+   types), and [`BlockEntityHandle`] is the `Arc<Mutex<_>>`-backed, `Clone`
+   handle that lets a connection's own task (placement) and a background
+   tick-loop task (advancing every entry) share one registry — the exact
+   shape `crate::mobs::LiveMobSource` already established for the mob
+   simulation. `BlockEntityRegistry::tick_all` advances every entry once;
+   `block_entities::run_block_entity_tick_loop` is the async driver
+   [`IntegratedServer::open_in_memory_with_mobs`] now spawns alongside the
+   existing mob tick task (`mob_task`/`block_entity_task` are siblings on
+   the handle, joined/aborted together) — this is the constructor a real
+   singleplayer session uses (`lodestone-shell/src/net.rs`), so a furnace
+   placed there really does tick every 50ms, not just in a test.
+2. **Placement now honours the held item, for these four blocks.**
+   `crate::server::apply_use_item_on` now consults
+   `PlayerInventory::selected_item()` through `block_entity_for_item`: a
+   furnace/smoker/blast-furnace/composter/hopper/brewing-stand item writes
+   its own block (still bare, no `facing`/`lit` properties — no per-block
+   orientation model exists, unchanged from before) and inserts a fresh
+   `BlockEntity` into the registry at the placement position; anything else,
+   including an empty hand, still falls back to `minecraft:stone` exactly as
+   before. This is a narrow, additive extension of `docs/block-edit.md`'s
+   existing scope cut, not a general item→block registry.
+
+**Gap 3 (container packets) is still open** — see its own section below,
+unchanged from the original write-up. Closing 1 and 2 already makes the
+following true: `crates/protocol/v770/tests/block_entities_live.rs`'s
+`real_client_places_a_furnace_and_the_server_registers_it` drives a **real**
+`lodestone-client` through a `CONTAINER_CLICK` (a furnace lands in hotbar
+slot 0, native slot 0 via menu slot 36) then `USE_ITEM_ON`, and asserts both
+that the
+wire confirms a real `minecraft:furnace` block (not the old always-stone
+fallback) at the target cell, and that the server's own `BlockEntityRegistry`
+holds a real `BlockEntity::Furnace` there afterward — with a negative control
+(an empty hand still places stone and registers nothing) run and observed to
+pass. `block_entities.rs`'s own `run_block_entity_tick_loop_actually_advances_a_registered_furnace_over_time`
+(`#[tokio::test(start_paused = true)]`, the same precedent
+`tests/serve_play.rs` set) proves the *background async loop* — not just a
+synchronous `tick_all` call — really ticks a furnace: loaded with coal and
+iron ore, it is lit after the very first real tick the loop performs, and
+holds a real `minecraft:iron_ingot` in its output slot by 10 (virtual)
+seconds — predicting the exact values `furnace.rs`'s own
+`iron_ore_smelts_into_one_ingot_at_exactly_tick_200` test already pins, not
+just that "something changed."
+
+**What still isn't possible without gap 3**: nobody can *see* inside a placed
+furnace — no client screen, no progress arrow, no way to load fuel/ingredient
+into one at all (the registry can only ever hold what a placement inserts:
+an empty block entity). So today's furnace ticks forever empty unless a test
+reaches into the registry directly (as the async-loop test above does) —
+real, observable ticking in a shipped session still waits on gap 3.
+
+**Two scope cuts worth being explicit about**, found while wiring the tick
+loop:
+
+* **Hopper adjacency only resolves another hopper.** `BlockEntity::hopper_slots_mut`
+  answers `None` for every non-hopper variant — a hopper next to a furnace or
+  composter never transfers anything, the same "no `Container` seam over the
+  furnace's three separate slots" gap the original write-up predicted below.
+  Two hoppers stacked *do* transfer, and — proven by
+  `tick_all_moves_two_items_between_a_stacked_hopper_pair_on_the_first_tick`,
+  run and its outcome checked rather than assumed — they move **two** items
+  on the first tick, not one: each hopper's own tick independently attempts
+  both a push and a pull, so a stacked pair gets vanilla's real "double
+  hopper" 2x throughput for free, an artifact of ticking each entity once
+  rather than a bug.
+* **No visual sync.** A lit furnace or a ready composter does not change
+  what a client is streamed — ticking mutates the registry only, never
+  `ChunkSource::set_block`. `block_entities.rs`'s own module doc comment
+  states this as a real, separate gap.
+
+## The remaining named gap: no client can see inside one yet
+
+Gaps 1 ("no tick loop drives them") and 2 ("no decoded packet can create
+one") from the original write-up are closed — see the update section above.
+What is still open:
+
+1. **No client screen threads cost/progress data.** `container_set_data` is
    already decoded into `Menus::container_data` (`crates/lodestone-game/src/menus.rs`)
    and unit-tested against a hand-built furnace menu — but nothing in
    `crates/lodestone-shell/src/sim.rs` reads it, and `server_protocol.rs` has
    **no** encoder for `CONTAINER_SET_DATA`/`OPEN_SCREEN`/`CONTAINER_SET_CONTENT`/
    `CONTAINER_SET_SLOT` at all (checked directly: zero hits in
-   `crates/protocol/v770/src/server_protocol.rs`). This half is explicitly
-   **not this issue's** — `sim.rs` is brokered, and the task that dispatched
-   this work named it as another agent's follow-up.
-4. **The brewing stand's `Bottle` is not a real `ItemStack`.**
+   `crates/protocol/v770/src/server_protocol.rs`, still true as of this
+   update). This half is explicitly **not this landing's** either — `sim.rs`
+   is brokered, and another agent was reported to be wiring
+   `Menus::container_data`'s consumer concurrently with this session's work.
+2. **The brewing stand's `Bottle` is not a real `ItemStack`.**
    `lodestone_model::ItemStack`'s `ItemComponents` has no potion-contents
    field (checked directly: `custom_name`/`damage`/`enchantments`/
    `dyed_color`/`tool`/`max_stack_size`/`max_damage`/`equippable`/
@@ -97,25 +149,24 @@ hop is named. Here it is, precisely:
    `Bottle { kind, potion }` type instead of expanding the shared model, which
    is out of this issue's file ownership.
 
-**What *would* close each hop**, for whoever picks this up next:
+**What would close gap 3**, for whoever picks this up next:
 
-- A `HashMap<BlockPos, BlockEntityState>` (an enum over the four types here,
-  or four separate maps) added to `IntegratedServer` or a new sibling struct,
-  ticked from a `run_block_entity_tick_loop` spawned the same way
-  `run_mob_tick_loop` is.
-- `apply_use_item_on` consulting `PlayerInventory::selected_item` and, when it
-  names a block-entity block (`minecraft:furnace`, `minecraft:composter`,
-  `minecraft:hopper`, `minecraft:brewing_stand`), inserting a fresh entry into
-  that registry at the placement position instead of always writing stone.
-- `V770ServerProtocol` encoders for the four container packets named above,
-  and `sim.rs` reading `container_data` into whatever draws the furnace flame/
-  arrow (tracked separately, per the dispatching brief).
-- Hopper adjacency specifically needs a way to ask "what's the container (if
-  any) at world position P" — the registry above, keyed by position, answers
-  this for free once it exists; `hopper::try_move_one_item` and
-  `Hopper::tick` already take arbitrary `&mut [Option<ItemStack>]` slices, so
-  no change is needed there, only a caller that resolves the two adjacent
-  positions into slices before calling `tick`.
+- `V770ServerProtocol` encoders for the four container packets named above
+  (`OPEN_SCREEN`, `CONTAINER_SET_CONTENT`, `CONTAINER_SET_SLOT`,
+  `CONTAINER_SET_DATA`) — `crates/protocol/v770/src/server_protocol.rs` still
+  has zero hits for any of the four.
+- A `ServerBound` decode + `crate::server` consumer for whatever serverbound
+  packet opens a window against a block entity (today `apply_container_clicked`
+  only ever applies against `window_id == 0`, the player's own inventory —
+  see `docs/server-inventory.md`'s own "a new window" note, which this
+  landing does not change).
+- `sim.rs` (brokered) reading `container_data` into whatever draws the
+  furnace flame/arrow.
+- Once a window can be opened, a way to *load* a furnace/composter/hopper/
+  brewing-stand with fuel/ingredients from a client's own inventory — today
+  the registry can only ever hold what `apply_use_item_on` inserts at
+  placement time (an empty block entity), since nothing else can reach into
+  one yet.
 
 ## How to change it
 
@@ -155,6 +206,9 @@ cargo test -p lodestone-server --lib --no-fail-fast -- composter::
 cargo test -p lodestone-server --lib --no-fail-fast -- furnace::
 cargo test -p lodestone-server --lib --no-fail-fast -- hopper::
 cargo test -p lodestone-server --lib --no-fail-fast -- brewing::
+cargo test -p lodestone-server --lib --no-fail-fast -- block_entities::
+cargo test -p lodestone-v770 --test block_entities_live
+cargo test -p lodestone-v770 --test server_inventory_live
 cargo check -p lodestone-server -p lodestone-v770 --all-targets
 ```
 
@@ -172,6 +226,10 @@ which live in code the decompile already exposes directly. Cross-checking
 against a live oracle remains valuable *evidence-independence* per
 CLAUDE.md's evidence standard (two sources, one code-derived and one
 behavioural, agreeing is stronger than either alone) and is real follow-up
-work, not done here — and there is nothing in a running game to point one at
-yet regardless (see the declared-island section above), since no served
-world can construct one of these block entities today.
+work, not done here. Note this is now stale in one respect: a served world
+*can* construct a (real but permanently empty, per the update section above)
+block entity today via placement, so "no server crate" is no longer why an
+RCON cross-check has not been run — it simply has not been run, and would
+mostly test placement/registry plumbing rather than the tick-count constants
+this paragraph is actually about, since gap 3 still blocks loading fuel or an
+ingredient into one from a real client.
