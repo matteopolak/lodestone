@@ -59,7 +59,7 @@
 use super::edit_box::EditBox;
 use super::focus::{FocusChildren, FocusSet, FocusTarget, KeyEvent, KeyOutcome};
 use super::nav::MenuKey;
-use super::render::{Align, MenuFrame, MenuLabel, MenuNotice, MenuRow, Origin, Slot};
+use super::render::{Align, MenuFrame, MenuLabel, MenuRow, Origin, Slot};
 use super::widget::Widget;
 
 // -- vanilla captions, verbatim from en_us.json --------------------------
@@ -68,9 +68,14 @@ use super::widget::Widget;
 pub const NAME_LABEL: &str = "World Name";
 /// `selectWorld.newWorld` — the default value, not a hint.
 pub const DEFAULT_NAME: &str = "New World";
-/// `selectWorld.enterSeed` (the field's own label) /
-/// `selectWorld.seedInfo` (helper text below it).
+/// `selectWorld.enterSeed` — the seed field's own visible label, drawn above
+/// it exactly like [`NAME_LABEL`] (`CreateWorldScreen.java:752,791`, via
+/// `CommonLayouts.labeledElement`).
 pub const SEED_LABEL: &str = "Seed for the world generator";
+/// `selectWorld.seedInfo` — the seed field's `EditBox.hint` ghost text,
+/// shown only while the box is empty and unfocused
+/// (`CreateWorldScreen.java:753,788`). Not a second permanent label; see
+/// [`frame`]'s own doc on the notice this constant used to also feed.
 pub const SEED_INFO: &str = "Leave blank for a random seed";
 /// `selectWorld.gameMode` / `selectWorld.mapFeatures` / `options.difficulty`
 /// / `selectWorld.bonusItems` / `selectWorld.allowCommands`.
@@ -479,18 +484,43 @@ fn toggle_label(caption: &str, on: bool) -> String {
 }
 
 /// Builds the whole World Creation frame.
+///
+/// ## The Name/Seed fields used to reach no pixels at all
+///
+/// `rows` used to start at [`GAME_MODE_ROW`] and never mention
+/// [`NAME_FIELD`]/[`SEED_FIELD`] — an island of exactly the shape `CLAUDE.md`
+/// warns about: [`CreateWorldWidgets::name`]/`seed` are real, focusable,
+/// typeable `EditBox`es (every test above this function drives them and
+/// passes), but nothing in the render output ever carried one, so the screen
+/// drew two floating labels over an otherwise blank strip and the actual
+/// boxes — background, typed text, caret, hint — never appeared. Fixed by
+/// giving each field its own [`MenuRow`] with a real `edit: Some(..)`, the
+/// same shape [`super::Screen::ServerEdit`]'s form already uses.
 #[must_use]
 pub fn frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
     let focused = nav.focused();
-    let is_focused = |row: usize| focused == Some(row);
     let widget_row = |w: &Widget, row: usize| MenuRow {
         label: w.message.clone(),
         enabled: w.active,
         slot: Some(row_slot(row)),
         ..Default::default()
     };
+    // Mirrors `Screen::ServerEdit`'s own field rows (`render.rs`'s
+    // `manage_server_slot` arm): a live `EditBox` clone, `field: true`, and
+    // `slot` rather than the generic stack — `draw_edit_box` reads the box's
+    // own state (value, caret, selection, hint) and decides nothing here.
+    let field_row = |edit: &EditBox, row: usize| MenuRow {
+        label: edit.value().to_string(),
+        enabled: true,
+        field: true,
+        edit: Some(edit.clone()),
+        slot: Some(row_slot(row)),
+        ..Default::default()
+    };
 
     let rows = vec![
+        field_row(&nav.widgets.name, NAME_FIELD),
+        field_row(&nav.widgets.seed, SEED_FIELD),
         widget_row(&nav.widgets.game_mode, GAME_MODE_ROW),
         widget_row(&nav.widgets.difficulty, DIFFICULTY_ROW),
         widget_row(&nav.widgets.structures, STRUCTURES_ROW),
@@ -499,29 +529,14 @@ pub fn frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
         widget_row(&nav.widgets.create, CREATE_ROW),
         widget_row(&nav.widgets.cancel, CANCEL_ROW),
     ];
-    // `rows`' own order below, so a widget's position in it is always the
-    // right index — no restated list to drift from it.
-    const BUTTON_ROWS: [usize; 7] = [
-        GAME_MODE_ROW,
-        DIFFICULTY_ROW,
-        STRUCTURES_ROW,
-        BONUS_CHEST_ROW,
-        ALLOW_CHEATS_ROW,
-        CREATE_ROW,
-        CANCEL_ROW,
-    ];
-    // The two text fields draw their own caret instead of a row highlight
-    // (`draw_edit_box`, the same convention `Screen::ServerEdit`'s form
-    // uses) — `usize::MAX` highlights nothing, matching
-    // `MenuFrame::selected`'s own "out-of-range highlights nothing" doc.
-    let selected = if is_focused(NAME_FIELD) || is_focused(SEED_FIELD) {
-        usize::MAX
-    } else {
-        BUTTON_ROWS
-            .iter()
-            .position(|&r| Some(r) == focused)
-            .unwrap_or(usize::MAX)
-    };
+    // Every focus id used above (`NAME_FIELD == 0` through `CANCEL_ROW == 8`,
+    // see their own doc comments) is *also* its row's index in `rows`, so the
+    // row cursor and the widget cursor are one number — no restated list to
+    // drift from it. A field row's own highlight is its caret, drawn by
+    // `draw_edit_box` off the box's `focused` flag rather than off
+    // `MenuFrame::selected`, so this needs no special case for it the way the
+    // pre-fix version did.
+    let selected = focused.unwrap_or(usize::MAX);
 
     MenuFrame {
         rows,
@@ -537,6 +552,10 @@ pub fn frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
                 colour: super::widget::ACTIVE_LABEL,
                 scale: 1.0,
             },
+            // `CommonLayouts.labeledElement` draws a real, visible label above
+            // each field in vanilla (`CreateWorldScreen.java:652,791`) — this is
+            // that label, not narration. `10.0` above the field's own `dy`
+            // mirrors the offset already used for the name field below.
             MenuLabel {
                 text: NAME_LABEL.to_string(),
                 origin: Origin::ScreenTop,
@@ -546,16 +565,29 @@ pub fn frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
                 colour: super::widget::ACTIVE_LABEL,
                 scale: 1.0,
             },
+            // The seed field's own visible label — `SEED_LABEL`
+            // (`selectWorld.enterSeed`, "Seed for the world generator"). This
+            // used to be missing entirely: only the *hint* text
+            // (`SEED_INFO`/`selectWorld.seedInfo`) was drawn, and as a
+            // permanent notice rather than vanilla's `EditBox.hint` ghost text
+            // — see the removed `notice` field below.
+            MenuLabel {
+                text: SEED_LABEL.to_string(),
+                origin: Origin::ScreenTop,
+                dx: -100.0,
+                dy: 44.0,
+                align: Align::Left,
+                colour: super::widget::ACTIVE_LABEL,
+                scale: 1.0,
+            },
         ],
-        notice: Some(MenuNotice {
-            text: SEED_INFO.to_string(),
-            origin: Origin::ScreenTop,
-            dx: -100.0,
-            dy: 32.0 + 22.0 * 2.0 + 2.0,
-            w: 200.0,
-            bottom: super::options::WIDGET_H * 2.0 + 20.0,
-            colour: super::widget::INACTIVE_LABEL,
-        }),
+        // No `notice` here any more. Vanilla shows `SEED_INFO` in exactly one
+        // place — `seedEdit.setHint(SEED_EMPTY_HINT)`
+        // (`CreateWorldScreen.java:788`), ghost text drawn only while the box
+        // is empty and unfocused. `CreateWorldNav::new` already sets
+        // `seed.hint`, so a permanent notice here was drawing the same string
+        // vanilla only ever shows conditionally — a duplicate, not a second
+        // real label.
         ..Default::default()
     }
 }
@@ -701,6 +733,71 @@ mod tests {
         nav.click_row(STRUCTURES_ROW);
         assert!(!nav.config().generate_structures);
         assert!(!nav.config().bonus_chest, "neighbour untouched");
+    }
+
+    #[test]
+    fn the_name_and_seed_fields_reach_the_frame_as_real_edit_boxes() {
+        // The island this fixes: `frame()` used to build its `rows` starting
+        // at `GAME_MODE_ROW`, so neither field ever carried an `edit` and
+        // `draw_edit_box` never ran for either of them — the boxes were
+        // focusable and typeable in every test above, and invisible on
+        // screen. Positive assertion on the fields, negative control on a
+        // button row right next to them, per `CLAUDE.md`'s "a gate that only
+        // checks the border exists would have passed while this bug shipped"
+        // — the control here is the thing that would have caught it.
+        let mut nav = CreateWorldNav::new();
+        nav.widgets.seed.set_value("1234");
+        let f = frame(&nav);
+        assert_eq!(f.rows.len(), ROW_COUNT, "one row per focus id, 1:1");
+        assert!(f.rows[NAME_FIELD].field, "row 0 is a text field");
+        assert!(f.rows[SEED_FIELD].field, "row 1 is a text field");
+        let name_edit = f.rows[NAME_FIELD]
+            .edit
+            .as_ref()
+            .expect("the name row must carry its EditBox, or nothing draws");
+        assert_eq!(name_edit.value(), "New World");
+        let seed_edit = f.rows[SEED_FIELD]
+            .edit
+            .as_ref()
+            .expect("the seed row must carry its EditBox, or nothing draws");
+        assert_eq!(seed_edit.value(), "1234");
+        // The control: a button row must not spuriously carry one too, or
+        // this assertion would be vacuously satisfied by every row.
+        assert!(
+            f.rows[GAME_MODE_ROW].edit.is_none(),
+            "a button row must not carry an EditBox"
+        );
+        assert!(!f.rows[GAME_MODE_ROW].field);
+    }
+
+    #[test]
+    fn both_fields_get_their_own_vanilla_label_and_the_seed_hint_is_not_duplicated() {
+        // `CreateWorldScreen.java:652,791` wraps each field in
+        // `CommonLayouts.labeledElement` — a real, drawn label, not
+        // narration. Both must be present, in vanilla's own strings.
+        let nav = CreateWorldNav::new();
+        let f = frame(&nav);
+        assert!(
+            f.labels.iter().any(|l| l.text == NAME_LABEL),
+            "missing the name field's own label"
+        );
+        assert!(
+            f.labels.iter().any(|l| l.text == SEED_LABEL),
+            "missing the seed field's own label — this used to be absent \
+             entirely, with only the *hint* text drawn"
+        );
+        // `SEED_INFO` must appear as the box's own hint, and *not* also as a
+        // second, permanent label/notice — vanilla shows it in exactly one
+        // place (`EditBox.hint`, conditional on empty+unfocused).
+        assert_eq!(nav.widgets.seed.hint.as_deref(), Some(SEED_INFO));
+        assert!(
+            !f.labels.iter().any(|l| l.text == SEED_INFO),
+            "the hint text must not also be drawn as a permanent label"
+        );
+        assert!(
+            f.notice.is_none(),
+            "no permanent notice either — that was the pre-fix duplicate"
+        );
     }
 
     #[test]
