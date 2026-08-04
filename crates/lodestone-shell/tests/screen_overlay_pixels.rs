@@ -44,7 +44,9 @@
 
 use lodestone::gpu::{RenderState, ScreenEffects};
 use lodestone_assets::{MemorySource, ResourceManager};
-use lodestone_render::{Camera, GpuContext, HeadlessTarget, RenderTarget, ScreenEffectRenderer};
+use lodestone_render::{
+    Camera, GpuContext, HeadlessTarget, RenderTarget, ScreenEffectRenderer, fire_overlay_vertical_extent,
+};
 
 const W: u32 = 256;
 const H: u32 = 256;
@@ -265,13 +267,16 @@ fn underwater_overlay_reaches_the_screen_through_render_with_effects() {
     );
 }
 
-/// The fire overlay covers only the bottom strip (`FIRE_STRIP_TOP = -0.3`,
-/// ~35% of the frame height), so this checks a bounding box, not a
-/// frame-average — the same discipline `CLAUDE.md` asks for after the sky/HUD
-/// gates were fooled by a percentage once each.
+/// The fire overlay, through the real `render_with_effects` path, must
+/// change rows matching its real two-quad geometry's predicted vertical
+/// extent (`fire_overlay_vertical_extent`, issue #420) — not the retired
+/// hardcoded bottom-35% strip — and must leave rows above that extent
+/// unchanged. Checks row bands against a predicted boundary, not a
+/// frame-average — the same discipline `CLAUDE.md` asks for after the
+/// sky/HUD gates were fooled by a percentage once each.
 #[test]
 #[ignore = "requires a GPU adapter"]
-fn fire_overlay_reaches_only_the_bottom_strip_through_render_with_effects() {
+fn fire_overlay_reaches_its_predicted_extent_through_render_with_effects() {
     let ctx = ctx();
     let (device, queue) = (ctx.device(), ctx.queue());
     let format = wgpu::TextureFormat::Rgba8Unorm;
@@ -308,26 +313,48 @@ fn fire_overlay_reaches_only_the_bottom_strip_through_render_with_effects() {
         not_burning.render_with_effects(device, queue, frame.view(), &cam, None, &[], ScreenEffects::default());
     let not_burning_pixels = target.read_texels(device, queue);
 
-    // Row bands: `FIRE_STRIP_TOP = -0.3` NDC is 35% of the way up from the
-    // bottom of the frame, i.e. the bottom 35% of rows.
-    let strip_rows = ((H as f64) * 0.35) as u32;
-    let top_rows = H - strip_rows;
+    // Row bands, predicted from the real geometry's own constants rather
+    // than a restated decimal (issue #420 replaced a hardcoded
+    // `FIRE_STRIP_TOP = -0.3` bottom-35% strip with vanilla's real two-quad
+    // transform).
+    let (_predicted_min_ndc, predicted_max_ndc) = fire_overlay_vertical_extent();
+    let frac_from_bottom = (f64::from(predicted_max_ndc) + 1.0) / 2.0;
+    let predicted_top_row = ((H as f64) * (1.0 - frac_from_bottom)) as u32;
+    const MARGIN_ROWS: u32 = 2;
+    let untouched_rows = predicted_top_row.saturating_sub(MARGIN_ROWS);
+    let lit_from_row = predicted_top_row + MARGIN_ROWS;
+    // The old design's own top edge (35% up from the bottom) — the rejected
+    // hypothesis this test falsifies via the "reclaimed" band below.
+    let old_design_top_row = ((H as f64) * 0.65) as u32;
+    assert!(
+        untouched_rows < old_design_top_row,
+        "sanity: the real extent's top ({untouched_rows}) must sit above the old \
+         strip's top ({old_design_top_row}), or this test cannot tell the two apart"
+    );
 
     let top_frac = differs_fraction(
-        &burning_pixels[..(top_rows * W * 4) as usize],
-        &not_burning_pixels[..(top_rows * W * 4) as usize],
+        &burning_pixels[..(untouched_rows * W * 4) as usize],
+        &not_burning_pixels[..(untouched_rows * W * 4) as usize],
     );
     let bottom_frac = differs_fraction(
-        &burning_pixels[(top_rows * W * 4) as usize..],
-        &not_burning_pixels[(top_rows * W * 4) as usize..],
+        &burning_pixels[(lit_from_row * W * 4) as usize..],
+        &not_burning_pixels[(lit_from_row * W * 4) as usize..],
+    );
+    // The band the *old* bottom-35%-only strip could never have touched but
+    // the real predicted extent now reaches.
+    let reclaimed_frac = differs_fraction(
+        &burning_pixels[(untouched_rows * W * 4) as usize..(old_design_top_row * W * 4) as usize],
+        &not_burning_pixels[(untouched_rows * W * 4) as usize..(old_design_top_row * W * 4) as usize],
     );
 
     eprintln!("=== fire overlay pixel gate (through RenderState::render_with_effects) ===");
     eprintln!(
-        "on_fire=true: fire_overlay_drawn={}, top rows differ {:.1}%, bottom rows differ {:.1}%",
+        "on_fire=true: fire_overlay_drawn={}, top rows differ {:.1}%, bottom rows differ {:.1}%, \
+         reclaimed band differs {:.1}%",
         burning_stats.fire_overlay_drawn,
         top_frac * 100.0,
-        bottom_frac * 100.0
+        bottom_frac * 100.0,
+        reclaimed_frac * 100.0
     );
     eprintln!(
         "control (installed, on_fire=false): fire_overlay_drawn={}",
@@ -350,10 +377,22 @@ fn fire_overlay_reaches_only_the_bottom_strip_through_render_with_effects() {
         "expected the fire overlay to change the bottom strip, only {:.1}% differed",
         bottom_frac * 100.0
     );
+    // The rejected hypothesis, made numeric: under the retired
+    // bottom-35%-only strip, this band would be forced to ~0% difference,
+    // because the old geometry structurally never reached it.
+    assert!(
+        reclaimed_frac > 0.1,
+        "expected the band between the real top edge (row {untouched_rows}) and the old \
+         strip's top edge (row {old_design_top_row}) to now differ from the control — only \
+         {:.1}%, indistinguishable from the retired bottom-35%-only hypothesis, which \
+         predicts ~0% here",
+        reclaimed_frac * 100.0
+    );
     assert!(
         top_frac < 0.01,
-        "fire overlay must not paint above its strip: {:.1}% of the top rows differ \
-         (bounding-box check per CLAUDE.md — a frame-average could not have caught this)",
+        "fire overlay must not paint above its real predicted extent: {:.1}% of the rows \
+         above it differ (bounding-box check per CLAUDE.md — a frame-average could not \
+         have caught this)",
         top_frac * 100.0
     );
 }
