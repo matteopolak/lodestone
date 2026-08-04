@@ -1449,6 +1449,15 @@ impl MenuNav {
             Screen::Settings if self.settings.page() == crate::menu::options::SettingsPage::KeyBinds => {
                 self.settings.key_binds_mut().hover_row(row);
             }
+            // Language (issue #415) — same reasoning, one row index space
+            // over: row 0 is the search field (always focused, never
+            // hovered — see `menu::language::frame`'s doc), so only rows
+            // past it move the cursor.
+            Screen::Settings if self.settings.page() == crate::menu::options::SettingsPage::Language => {
+                if let Some(row) = row.checked_sub(1) {
+                    self.settings.language_mut().hover_row(row);
+                }
+            }
             Screen::Settings => self.settings.hover_row(row),
             // Social Interactions (#189) — same reasoning as the Settings
             // arm above: without this, a click would have to route through
@@ -1544,6 +1553,16 @@ impl MenuNav {
                     .key_binds_mut()
                     .click_row(row, &self.options.keybinds);
                 return self.apply_key_binds(ui, outcome);
+            }
+            // Language (issue #415) again — row 0 is the always-focused
+            // search field, so a click there is a no-op (there is nothing to
+            // move focus *to* — see `hover`'s matching guard).
+            if self.settings.page() == crate::menu::options::SettingsPage::Language {
+                let outcome = match row.checked_sub(1) {
+                    Some(row) => self.settings.language_mut().click_row(row),
+                    None => crate::menu::language::LanguageOutcome::None,
+                };
+                return self.apply_language(ui, outcome);
             }
             // A click that hit-tested onto a row this page does not have does
             // nothing at all (`SettingsNav::click_row` returns `None` for an
@@ -2089,6 +2108,10 @@ impl MenuNav {
         if self.settings.page() == crate::menu::options::SettingsPage::KeyBinds {
             return self.key_key_binds(ui, key);
         }
+        // Language (issue #415) — same reasoning.
+        if self.settings.page() == crate::menu::options::SettingsPage::Language {
+            return self.key_language(ui, key);
+        }
         let outcome = match key {
             MenuKey::Up => {
                 self.settings.step(false);
@@ -2164,6 +2187,60 @@ impl MenuNav {
                 self.options.keybinds.reset_all();
                 self.persist_options();
                 MenuAction::None
+            }
+        }
+    }
+
+    /// [`Self::key_settings`]'s Language half (issue #415). Up/Down/Enter
+    /// move the list+footer cursor; typed characters always go to the search
+    /// box regardless of where that cursor is — see
+    /// [`crate::menu::language::LanguageNav`]'s module doc on why the two are
+    /// independent.
+    fn key_language(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        let outcome = match key {
+            MenuKey::Up => {
+                self.settings.language_mut().step(false);
+                return MenuAction::None;
+            }
+            MenuKey::Down => {
+                self.settings.language_mut().step(true);
+                return MenuAction::None;
+            }
+            MenuKey::Enter => self.settings.language_mut().enter(),
+            MenuKey::Escape => self.settings.language_mut().escape(),
+            // The search box is always the keyboard's text target on this
+            // page (see `LanguageNav`'s doc) — routed here rather than
+            // falling into the catch-all below, which is exactly the island
+            // this would otherwise be: `LanguageNav::type_char`/`backspace`
+            // would compile, be unit-tested, and never run.
+            MenuKey::Char(ch) => {
+                self.settings.language_mut().type_char(ch);
+                return MenuAction::None;
+            }
+            MenuKey::Backspace => {
+                self.settings.language_mut().backspace();
+                return MenuAction::None;
+            }
+            _ => return MenuAction::None,
+        };
+        self.apply_language(ui, outcome)
+    }
+
+    /// What a [`crate::menu::language::LanguageOutcome`] asks of the shell —
+    /// mirrors [`Self::apply_key_binds`]'s reason for living here (it can
+    /// reach the real `ui.close_settings()` fallback [`SettingsNav::
+    /// leave_language`]'s doc names, not a throwaway one).
+    fn apply_language(
+        &mut self,
+        ui: &mut UiState,
+        outcome: crate::menu::language::LanguageOutcome,
+    ) -> MenuAction {
+        use crate::menu::language::LanguageOutcome;
+        match outcome {
+            LanguageOutcome::None => MenuAction::None,
+            LanguageOutcome::Back => {
+                let outcome = self.settings.leave_language();
+                self.apply_settings(ui, outcome)
             }
         }
     }

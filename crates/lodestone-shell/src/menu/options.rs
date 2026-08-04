@@ -862,7 +862,9 @@ static ROOT_GRID: &[Cell] = &[
     nav("Music & Sounds...", SettingsPage::Sound),
     nav("Video Settings...", SettingsPage::Video),
     nav("Controls...", SettingsPage::Controls),
-    no_screen("Language..."),
+    // Issue #415 — the first of the three unbuilt sub-screens to get its own
+    // list widget. See `SettingsPage::Language`'s own doc.
+    nav("Language...", SettingsPage::Language),
     nav("Chat Settings...", SettingsPage::Chat),
     no_screen("Resource Packs..."),
     nav("Accessibility Settings...", SettingsPage::Accessibility),
@@ -872,24 +874,22 @@ static ROOT_GRID: &[Cell] = &[
 
 /// One screen of the options tree.
 ///
-/// Ten of vanilla's thirteen. The three that are **not** here are absent
-/// because each needs a *different list widget*, not because their options were
-/// skipped — and each is reachable as a present-and-inactive nav button, which
-/// is what keeps the parent screen's shape honest:
+/// Eleven of vanilla's thirteen. The two that are **not** here are absent
+/// because each needs a *different list widget* than either this client
+/// already has — and each is reachable as a present-and-inactive nav button,
+/// which is what keeps the parent screen's shape honest:
 ///
 /// | vanilla screen | why not built |
 /// |---|---|
-/// | `LanguageSelectScreen` | a scrolling `ObjectSelectionList` of languages, and this client loads exactly one language table (`resources.rs`). `FontOptionsScreen`'s two options hang off it and are unreachable without it. |
 /// | `PackSelectionScreen` | two drag-between `ObjectSelectionList`s over a `PackRepository`. |
 /// | `TelemetryInfoScreen` | prose and external links, no options at all. |
 ///
-/// Building a second and third selection-list type in the same change is where
-/// this stops being one mechanism; #396 and #397 are landing that shape
-/// concurrently for the server and world lists.
-///
-/// `OnlineOptionsScreen` and `KeyBindsScreen` **were** in that table and are
-/// not any more. `OnlineOptionsScreen` needed no new list widget at all — it
-/// is a plain `OptionsList` screen like eight others, absent only because the
+/// `LanguageSelectScreen` **used to be in this table** and is not any more —
+/// see [`SettingsPage::Language`] and [`super::language`], the third
+/// list-widget kind #392's plan always said this tree would eventually need
+/// (issue #415). `OnlineOptionsScreen` and `KeyBindsScreen` **were** in it
+/// too. `OnlineOptionsScreen` needed no new list widget at all — it is a
+/// plain `OptionsList` screen like eight others, absent only because the
 /// root's header button was permanently inactive (see
 /// [`SettingsPage::Online`]). `KeyBindsScreen` **did** need a different list
 /// widget — `KeyBindsList`, not `OptionsList` — and got one: see
@@ -944,6 +944,18 @@ pub enum SettingsPage {
     /// Reached from the Controls page's own "Key Binds..." button — vanilla's
     /// own wiring (`ControlsScreen.java:36`), not the root grid.
     KeyBinds,
+    /// `LanguageSelectScreen` (issue #415) — **not** an `OptionsList` page,
+    /// same reason as [`SettingsPage::KeyBinds`]: [`SettingsNav`] delegates to
+    /// [`super::language::LanguageNav`] whenever `page ==
+    /// SettingsPage::Language`, so [`Self::entries`]/[`Self::footer`] never
+    /// actually run for it either — see [`super::language`]'s module docs for
+    /// the whole screen.
+    ///
+    /// Reached from the **root grid**, unlike `KeyBinds` — vanilla's own
+    /// wiring (`OptionsScreen.java:74`, `helper.addChild(this.openScreenButton(
+    /// LANGUAGE, ...))`, the same `helper.addChild` sequence [`ROOT_GRID`]
+    /// mirrors).
+    Language,
 }
 
 impl SettingsPage {
@@ -967,6 +979,10 @@ impl SettingsPage {
             // path — but kept accurate rather than a placeholder, since
             // nothing stops a future caller reaching it.
             SettingsPage::KeyBinds => "Key Binds",
+            // `options.language.title` (`en_us.json`). Unreachable in
+            // practice for the same reason `KeyBinds`' arm above is — see
+            // `super::language::frame`.
+            SettingsPage::Language => "Language",
         }
     }
 
@@ -996,6 +1012,8 @@ impl SettingsPage {
             SettingsPage::Online => ONLINE,
             // Never actually read — see `SettingsPage::KeyBinds`'s doc.
             SettingsPage::KeyBinds => &[],
+            // Never actually read — same reason.
+            SettingsPage::Language => &[],
         }
     }
 
@@ -1545,7 +1563,14 @@ pub enum SettingsOutcome {
 /// consulting a `parent()` on [`SettingsPage`], because the tree is a *graph*
 /// and not a tree: Accessibility links to Controls, which the root also links
 /// to, so "where did I come from" is history and not structure.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// **`Eq`, not just `PartialEq`, since issue #415**: [`Self::language`] holds
+/// a real [`super::edit_box::EditBox`] (for the search box), and `EditBox`
+/// cannot derive `Eq` — it carries `f32` fields the same way
+/// [`super::key_binds::KeyBindsNav`]'s sibling fields do not. `assert_eq!`
+/// only needs `PartialEq` + `Debug`, both still here, so nothing that already
+/// compared two `SettingsNav`s loses anything.
+#[derive(Debug, Clone, PartialEq)]
 pub struct SettingsNav {
     page: SettingsPage,
     stack: Vec<SettingsPage>,
@@ -1572,6 +1597,10 @@ pub struct SettingsNav {
     /// since it is a few `usize`s and an `Option<InputAction>`. See
     /// [`super::key_binds::KeyBindsNav`] and [`Self::key_binds`].
     key_binds: super::key_binds::KeyBindsNav,
+    /// The Language screen's own cursor/search/filter state (issue #415) —
+    /// live only while [`Self::page`] is [`SettingsPage::Language`], kept
+    /// unconditionally for the same reason as [`Self::key_binds`].
+    language: super::language::LanguageNav,
 }
 
 impl Default for SettingsNav {
@@ -1591,6 +1620,7 @@ impl SettingsNav {
             first: 0,
             in_world: false,
             key_binds: super::key_binds::KeyBindsNav::default(),
+            language: super::language::LanguageNav::default(),
         }
     }
 
@@ -1621,6 +1651,26 @@ impl SettingsNav {
     /// then back into Key Binds never resumes mid-capture.
     pub fn leave_key_binds(&mut self) -> SettingsOutcome {
         self.key_binds.reset();
+        self.back()
+    }
+
+    /// Borrow the Language screen's own cursor — mirrors [`Self::key_binds`].
+    #[must_use]
+    pub fn language(&self) -> &super::language::LanguageNav {
+        &self.language
+    }
+
+    /// Mutably borrow the Language screen's own cursor — mirrors
+    /// [`Self::key_binds_mut`].
+    pub fn language_mut(&mut self) -> &mut super::language::LanguageNav {
+        &mut self.language
+    }
+
+    /// Leave [`SettingsPage::Language`] for whichever page pushed it — always
+    /// Root — mirrors [`Self::leave_key_binds`], resetting the search/cursor
+    /// state so re-entering never resumes mid-filter.
+    pub fn leave_language(&mut self) -> SettingsOutcome {
+        self.language.reset();
         self.back()
     }
 
@@ -1818,6 +1868,9 @@ impl SettingsNav {
                 if page == SettingsPage::KeyBinds {
                     self.key_binds.reset();
                 }
+                if page == SettingsPage::Language {
+                    self.language.reset();
+                }
                 SettingsOutcome::None
             }
             Cell::Nav { page: None, .. } => SettingsOutcome::None,
@@ -1870,6 +1923,23 @@ pub fn settings_frame(
     // draw a save-error line, not two copies that could drift.
     if nav.page() == SettingsPage::KeyBinds {
         let mut frame = super::key_binds::frame(nav.key_binds(), &options.keybinds);
+        if let Some(error) = save_error {
+            frame.labels.push(MenuLabel {
+                text: error.to_string(),
+                origin: Origin::ScreenBottom,
+                dx: 0.0,
+                dy: -(FOOTER_HEIGHT + HEADER_LINE_HEIGHT + 2.0),
+                align: Align::Centre,
+                colour: ERROR_COLOUR,
+                scale: 1.0,
+            });
+        }
+        return frame;
+    }
+    // `SettingsPage::Language` (issue #415) is not an `OptionsList` page
+    // either — same reason and same shape as the `KeyBinds` branch above.
+    if nav.page() == SettingsPage::Language {
+        let mut frame = super::language::frame(nav.language());
         if let Some(error) = save_error {
             frame.labels.push(MenuLabel {
                 text: error.to_string(),
@@ -2087,12 +2157,13 @@ mod tests {
             "and the same predicate must answer true for one that is"
         );
         // The count itself, not just the ratio's ingredients: 7 live options +
-        // 9 Done buttons (one per page, always live) + 10 working nav buttons
-        // (Skin/Sound/Video/Controls/Chat/Accessibility from the root grid,
-        // Accessibility -> Controls, Controls -> Mouse, Controls -> Key
-        // Binds, and the root's own Online button, live outside a world).
+        // 9 Done buttons (one per page, always live) + 11 working nav buttons
+        // (Skin/Sound/Video/Controls/Chat/Accessibility/**Language** from the
+        // root grid — issue #415 — Accessibility -> Controls, Controls ->
+        // Mouse, Controls -> Key Binds, and the root's own Online button,
+        // live outside a world).
         // A change that adds or removes a live row anywhere must say so here.
-        assert_eq!(live.len(), 26, "outside a world: {live:?}");
+        assert_eq!(live.len(), 27, "outside a world: {live:?}");
     }
 
     /// The companion to [`the_disabled_majority_is_the_point_and_it_is_measured`]:
@@ -2114,8 +2185,8 @@ mod tests {
             .flat_map(|&p| all_controls(p, true))
             .filter(|c| c.is_live())
             .collect();
-        assert_eq!(outside.len(), 26);
-        assert_eq!(inside.len(), 25, "one fewer: the root's Online button");
+        assert_eq!(outside.len(), 27);
+        assert_eq!(inside.len(), 26, "one fewer: the root's Online button");
         assert!(
             outside.contains(&nav("Online...", SettingsPage::Online)),
             "outside a world the root links to Online"
@@ -2376,15 +2447,29 @@ mod tests {
             SettingsPage::Accessibility,
             "the stack is history, not structure"
         );
-        // A nav button to a screen we do not build must be inert.
+        // A nav button to a screen we do not build must be inert. Language
+        // used to be this test's example (issue #415 built it); Resource
+        // Packs is the same shape today.
+        let mut nav = SettingsNav::new();
+        let packs = all_controls(SettingsPage::Root, false)
+            .iter()
+            .position(|c| matches!(c, Cell::Nav { label: "Resource Packs...", page: None }))
+            .expect("Resource Packs is present and unbuilt");
+        nav.cursor = packs;
+        assert_eq!(nav.enter(), SettingsOutcome::None);
+        assert_eq!(nav.page(), SettingsPage::Root, "and must not move");
+        // Root -> Language (issue #415), and back — the third list-widget
+        // kind, reached from the root grid rather than a sub-page.
         let mut nav = SettingsNav::new();
         let language = all_controls(SettingsPage::Root, false)
             .iter()
-            .position(|c| matches!(c, Cell::Nav { label: "Language...", page: None }))
-            .expect("Language is present and unbuilt");
+            .position(|c| matches!(c, Cell::Nav { page: Some(SettingsPage::Language), .. }))
+            .expect("the root links to Language");
         nav.cursor = language;
         assert_eq!(nav.enter(), SettingsOutcome::None);
-        assert_eq!(nav.page(), SettingsPage::Root, "and must not move");
+        assert_eq!(nav.page(), SettingsPage::Language);
+        nav.escape();
+        assert_eq!(nav.page(), SettingsPage::Root);
         // The new one: Root -> Online, live only outside a world.
         let mut nav = SettingsNav::new();
         assert!(!nav.in_world, "precondition: outside a world by default");

@@ -4,10 +4,11 @@
 
 `crates/lodestone-shell/src/menu/options.rs` — vanilla's `OptionsScreen` tree as
 a **table plus arithmetic**: nine `OptionsList` pages, **143 controls**, of
-which **25 or 26 work** (see below) **and the rest are present and greyed
-out** — plus a tenth page, Key Binds, which is not an `OptionsList` at all and
-is counted separately (see below). Reached from the title screen's Options
-button and from the pause menu's, on `Screen::Settings`.
+which **26 or 27 work** (see below) **and the rest are present and greyed
+out** — plus two more pages that are not `OptionsList` at all and are counted
+separately (see below): Key Binds and, since issue #415, Language. Reached
+from the title screen's Options button and from the pause menu's, on
+`Screen::Settings`.
 
 **Updated since #55 landed:** #200/#202/#203 (`docs/input-options.md`) made five
 more Controls/Mouse-page rows live — `toggleCrouch`/`toggleSprint`/
@@ -32,9 +33,22 @@ grid), and it is not an `OptionsList` page, so it is not part of the
 143-control census — see "The Key Binds page" below for its own count. Making
 its nav button live add a tenth working nav button unconditionally (it does
 not depend on `in_world`), so the live counts above move from 25/24 to
-**26/25**. The rest of this doc's per-page tables were not re-audited for any
-of these three updates; see "What is actually live" below for the current
-authoritative counts.
+26/25.
+
+**Updated again for the Language screen (issue #415):** `SettingsPage::Language`
+is built — vanilla's `LanguageSelectScreen`, the *third* list-widget kind
+#392's plan always said this tree would eventually need (a scrollable,
+single-select `ObjectSelectionList`, alongside `OptionsList` and
+`KeyBindsList`). Unlike Key Binds it is reached from the **root grid**
+directly — the same "Language..." cell that used to be a permanently inactive
+`no_screen` placeholder is now `nav("Language...", SettingsPage::Language)` —
+so this adds an **eleventh** working nav button unconditionally, moving the
+live counts from 26/25 to **27/26**. See
+[`language-screen.md`](./language-screen.md) for the whole screen; it is not
+part of the 143-control census either, for the same reason Key Binds is not.
+The rest of this doc's per-page tables were not re-audited for any of these
+four updates; see "What is actually live" below for the current authoritative
+counts.
 
 This is issue #55, the settings branch of the menu-framework epic #392.
 [`ui-framework.md`](./ui-framework.md) is the plan of record;
@@ -84,27 +98,31 @@ call sites — which is why the whole tree here is `static` tables of `Entry` an
 | Online | 8 | `OnlineOptionsScreen`, three headers |
 
 Counts include each page's own footer, which is how #55's census counted the
-root's Done. Total: **143** (`13+32+10+8+17+19+27+9+8`). Key Binds is not in
-this table — it is not an `OptionsList` page, so "controls" does not mean the
-same thing there; see "The Key Binds page" below for its own count (56).
+root's Done. Total: **143** (`13+32+10+8+17+19+27+9+8`). Key Binds and
+Language are not in this table — neither is an `OptionsList` page, so
+"controls" does not mean the same thing for either; see "The Key Binds page"
+below for its own count (56) and [`language-screen.md`](./language-screen.md)
+for Language's.
 
-Three vanilla screens are **not built**, and each is reachable as a
+Two vanilla screens are **not built**, and each is reachable as a
 present-and-inactive nav button so the parent screen's shape stays honest. The
 reason is uniform: every one of them needs a *different list widget*, not more
 options.
 
 | screen | why not |
 |---|---|
-| `LanguageSelectScreen` | a scrolling `ObjectSelectionList` of languages, and this client loads exactly one language table. `FontOptionsScreen`'s two options hang off it and are unreachable without it. |
-| `PackSelectionScreen` | two drag-between `ObjectSelectionList`s over a `PackRepository`. |
-| `TelemetryInfoScreen` | prose and external links; no options at all. |
+| `PackSelectionScreen` | two drag-between `ObjectSelectionList`s over a `PackRepository`, a filesystem watcher and a pack detector — this client has none of that. |
+| `TelemetryInfoScreen` | a live `TelemetryEventWidget` plus external links; this client collects no telemetry to show one. |
 
-`OnlineOptionsScreen` and `KeyBindsScreen` **used to be in this table** and are
-not any more. `OnlineOptionsScreen` needed no new list widget at all — it is
-the cheap win the Online-settings follow-up landed: the only reason it was
-absent was that the root's own header button (`Placement::Root(2)`) was
-permanently inactive regardless of context (see "The root's Online button, and
-`in_world`" below). `KeyBindsScreen` **did** need a different list widget —
+`OnlineOptionsScreen`, `KeyBindsScreen` and `LanguageSelectScreen` **used to be
+in this table** and are not any more. `OnlineOptionsScreen` needed no new list
+widget at all — it is the cheap win the Online-settings follow-up landed: the
+only reason it was absent was that the root's own header button
+(`Placement::Root(2)`) was permanently inactive regardless of context (see "The
+root's Online button, and `in_world`" below). `LanguageSelectScreen` (issue
+#415) needed the third list-widget kind and got one — see
+[`language-screen.md`](./language-screen.md). `KeyBindsScreen` **did** need a
+different list widget —
 `KeyBindsList`, not `OptionsList`: `getRowWidth()` 340 (not 310), a flat 20 px
 row height with no header-padding rule, two right-anchored buttons per action
 row (a 75 px bind button and a 50 px reset button, 5 px apart) instead of
@@ -222,22 +240,22 @@ all (not even to `Unbound`) — a deliberate divergence from vanilla's own
 | `invertMouseX` | Mouse | `config::Options::invert_mouse_x` |
 | `invertMouseY` | Mouse | `config::Options::invert_mouse_y` |
 
-Plus nine `Done` buttons (one per page, always live) and either ten or nine
+Plus nine `Done` buttons (one per page, always live) and either eleven or ten
 working nav buttons, depending on `in_world` (these counts are still only the
-143-control `OptionsList` census — Key Binds' own 56 controls are counted
-separately, above, and are not part of either number):
+143-control `OptionsList` census — Key Binds' own 56 controls and Language's
+own count are counted separately, above, and are not part of either number):
 
 - **Outside a world** (opened from the title): Skin, Sound, Video, Controls,
   Chat, Accessibility (the root grid), Accessibility → Controls, Controls →
-  Mouse, Controls → **Key Binds**, and the root → **Online**. **26 live, 118
-  inactive.**
-- **Inside a world** (opened from the pause menu): the same nine minus the
+  Mouse, Controls → **Key Binds**, the root → **Online**, and the root →
+  **Language** (issue #415). **27 live, 116 inactive.**
+- **Inside a world** (opened from the pause menu): the same ten minus the
   root's Online link (it is the inactive World Options placeholder instead) —
-  Key Binds' own nav button is unconditionally live either way. **25 live,
-  119 inactive.**
+  Key Binds' and Language's own nav buttons are unconditionally live either
+  way. **26 live, 117 inactive.**
 
 Both counts are asserted directly —
-`options::tests::the_disabled_majority_is_the_point_and_it_is_measured` (26,
+`options::tests::the_disabled_majority_is_the_point_and_it_is_measured` (27,
 outside a world, the canonical/title-screen baseline) and
 `options::tests::the_root_online_button_is_the_one_row_that_changes_with_in_world`
 (both, and that the delta between them is exactly the Online row — Key

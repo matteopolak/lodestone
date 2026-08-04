@@ -42,6 +42,7 @@ pub mod create_world;
 pub mod edit_box;
 pub mod focus;
 pub mod key_binds;
+pub mod language;
 pub mod layout;
 pub mod nav;
 pub mod options;

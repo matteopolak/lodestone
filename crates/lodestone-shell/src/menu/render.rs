@@ -482,6 +482,12 @@ pub enum Origin {
     /// `OptionsList` geometry either (a name label plus two right-anchored
     /// buttons, not `OptionsList`'s two-column captions).
     Social(super::social::SocialPlacement),
+    /// A widget of the Language screen (issue #415), resolved by
+    /// [`super::language::placement_anchor`]. A fourth data-carrying variant
+    /// for the same reason [`Origin::Social`] is one — this screen's rows are
+    /// a third geometry entirely (a single centred line per row, not
+    /// `OptionsList`'s or `KeyBindsList`'s shapes).
+    Language(super::language::LanguagePlacement),
 }
 
 impl Origin {
@@ -515,6 +521,9 @@ impl Origin {
                 super::key_binds::placement_anchor(placement, width, height)
             }
             Origin::Social(placement) => super::social::placement_anchor(placement, width, height),
+            Origin::Language(placement) => {
+                super::language::placement_anchor(placement, width, height)
+            }
         }
     }
 }
