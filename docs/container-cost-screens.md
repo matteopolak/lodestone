@@ -10,10 +10,13 @@ and #255 (smithing table): decoding, modelling and drawing the four
 cost, the enchanting table's three offers, and the smithing/grindstone
 results; none of that logic lives here or should. What this covers: the wire
 packets are decoded, the menu models the right slot *kinds* and *positions*,
-the screen draws with vanilla's real layout and background art, and clicks
-hit-test correctly. See "What is not yet wired" below for the gap that
-remains — the numeric costs themselves do not reach pixels yet, and closing
-that gap needs a change outside this crate's files.
+the screen draws with vanilla's real layout and background art, clicks
+hit-test correctly, and — see "The cost numbers: wired" below — the anvil's
+XP-cost text and the enchanting table's three per-row costs also reach
+pixels. What is genuinely still missing on the client side is the input-slot
+`mayPlace` predicates (smithing's recipe check, the grindstone's
+damageable/enchanted check) and the enchanting names' cipher font; see
+"Deliberately not modelled" below.
 
 ## How it works
 
@@ -112,32 +115,43 @@ checks `menu.special_layout()` first, mirroring `slot_layout`'s own dispatch,
 so the same `Menu` naturally selects both its real slot positions and its
 real background with no separate wiring.
 
-## What is not yet wired: the cost numbers
+## The cost numbers: wired (this section used to say otherwise)
 
-The anvil's level-cost text, and the enchanting table's three per-row costs
-(plus the level-requirement clue and the seed used to pick which enchant a
-row offers), arrive as `container_set_data` (`ClientboundSetContainerDataPacket`
-— `EnchantmentMenu`'s ten `DataSlot`s, `AnvilMenu`'s one). That packet **is**
-decoded (`ClientEvent::ContainerData` in `crates/protocol/v770/src/adapter.rs`)
-and **is** folded (`Menus::container_data(property) -> Option<i32>` in
-`crates/lodestone-game/src/menus.rs`) — this was already true before this
-session's work, for the furnace's burn/cook progress.
+**Stale as of issue #28 — re-verified rather than assumed.** This section
+used to describe the anvil/enchanting cost feed as an island: decoded
+(`ClientEvent::ContainerData`) and folded (`Menus::container_data`), but with
+`lodestone_client::state::OpenMenuSnapshot` carrying no `data` field and
+`Sim::open_menu` never populating one, so nothing in `lodestone-shell` could
+reach it. That gap is closed — `OpenMenuSnapshot::data: Vec<(i32, i32)>`
+exists (`crates/lodestone-client/src/state.rs:320`), `Sim::open_menu` fills it
+from `menus.opened_data().to_vec()` (`crates/lodestone-shell/src/sim.rs:2068`),
+and `app.rs`'s `ContainerFrame::with_cost_context` call already reads
+`open_menu.data.as_slice()` through to `ContainerFrame::cost_data`. Re-checked
+directly against the current source rather than trusted from this doc's own
+prior claim — the exact staleness class `CLAUDE.md`'s rule 2 warns about.
 
-It is an island past that point: nothing in `lodestone-shell` reads
-`Menus::container_data`. The chain breaks at
-`lodestone_client::state::OpenMenuSnapshot` (`crates/lodestone-client/src/state.rs`),
-which carries `window_id`/`menu_type`/`title`/`menu` but no `data`, and at
-`Sim::open_menu` (`crates/lodestone-shell/src/sim.rs:2490-2500`), which builds
-that snapshot. Both would need a `data: Vec<(i32, i32)>`-shaped field added and
-copied through before `app.rs`'s one `ContainerFrame` call site could carry it
-to a draw. `sim.rs` is outside this doc's author's file ownership for this
-session (combat-agent territory) — flagged here rather than edited.
+That same feed is what let issue #28's furnace-family lit/burn bars and
+brewing-stand fuel/brew/bubble bars (`container-screen.md`'s "The six more
+`special_layout` screens" section) draw with **zero** further `app.rs`/`sim.rs`
+changes: `frame.cost_data` was already the live `container_set_data` properties
+by the time that work started, so `AbstractFurnaceMenu`'s `litTime`/
+`litDuration`/`cookingProgress`/`cookingTotalTime` (properties `0..4`) and
+`BrewingStandMenu`'s `brewingTicks`/`fuel` (properties `0..2`) needed only a
+`menu.special_layout()` match in `container.rs`'s `build_inner`, the same place
+the anvil/enchanting cost lines already read from.
 
-Once that plumbing exists, drawing the numbers is comparatively small: the
-anvil's cost is `container_data(0)` after `Menu::special_layout() ==
-Some(Anvil)`; the enchanting costs are `container_data(0..3)`. Both would draw
-with the same `VanillaFont`/`Builder::text_plain` machinery
-[`vanilla-hud-text.md`](vanilla-hud-text.md) documents.
+**Drawing the numbers themselves is also done, not merely "comparatively
+small" — a second stale claim in this same section, caught the same way.**
+`draw_anvil_cost`/`draw_enchanting_costs` (`container.rs:1675`, `:1737`) are
+real, non-stub implementations: the anvil's is/isn't-affordable colouring
+(`AnvilMenu::mayPickup`), its `>= 40` "Too Expensive!" branch, and the right-
+aligned backdrop text at `AnvilScreen.java:112-115`'s own `tx`/`ty`; the
+enchanting table's three per-row costs at `EnchantmentScreen.java:96-134`'s
+positions, deliberately **not** drawing the enchantment-name cipher text
+(`EnchantmentNames`' Standard Galactic Alphabet font is a separate,
+unstarted subsystem). Both read `frame.cost_data` — the now-confirmed-live
+feed above — and both draw with the `VanillaFont`/`Builder::shadowed_label`
+machinery [`vanilla-hud-text.md`](vanilla-hud-text.md) documents.
 
 ## How to change it
 

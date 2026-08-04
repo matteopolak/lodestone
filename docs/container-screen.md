@@ -69,6 +69,13 @@ anywhere, and none should be reintroduced:
 | anvil / grindstone | a `Generic { 3 }`: `0`, `1` input, `2` result (take-only), `3..=29` main, `30..=38` hotbar |
 | smithing table | a `Generic { 4 }`: `0` template, `1` base, `2` addition, `3` result (take-only), `4..=30` main, `31..=39` hotbar |
 | enchanting table | a `Generic { 2 }`: `0` item, `1` lapis-only, `2..=28` main, `29..=37` hotbar |
+| furnace/blast furnace/smoker | a `Generic { 3 }`: `0` ingredient, `1` fuel, `2` result (take-only), `3..=29` main, `30..=38` hotbar |
+| brewing stand | a `Generic { 5 }`: `0..=2` potions, `3` ingredient, `4` fuel, `5..=31` main, `32..=40` hotbar |
+| loom | a `Generic { 4 }`: `0` banner, `1` dye, `2` pattern, `3` result (take-only), `4..=30` main, `31..=39` hotbar |
+| stonecutter | a `Generic { 2 }`: `0` input, `1` result (take-only), `2..=28` main, `29..=37` hotbar |
+| cartography table | a `Generic { 3 }`: `0` map, `1` additional, `2` result (take-only), `3..=29` main, `30..=38` hotbar |
+| dispenser/dropper | a `Generic { 9 }`: `0..=8` a 3×3 grid, `9..=35` main, `36..=44` hotbar |
+| hopper | a `Generic { 5 }`: `0..=4` a row, `5..=31` main, `32..=40` hotbar |
 
 `crafting_layout` uses vanilla's `crafting_table.png` slot origins for the 3×3
 case — grid at `(30, 17)`, result at `(124, 35)`, main at `(8, 84)`, hotbar at
@@ -83,6 +90,63 @@ computed from the top section's own row count. See
 position table, the background art, and what these screens' "cost" (the anvil's
 level-cost number, the enchanting table's three offer costs) does and does not
 reach yet.
+
+### The six more `special_layout` screens (issue #28), plus a seventh found while writing this
+
+Issue #28 ("container screens: the whole family") extended the same
+`SpecialLayout`/`background_kind` pattern to the furnace family (`Furnace`,
+`BlastFurnace`, `Smoker` — one variant per texture, all three sharing the same
+three slot coordinates), the brewing stand, the loom, the stonecutter, the
+cartography table and the dispenser/dropper (`Dispenser`, shared by both —
+vanilla ships no `dropper.png` or `DropperScreen` at all). Every one of them
+is mechanically a plain `Menu::generic` — same "accept anything, let the
+server's own `container_set_slot`/quick-move correct a wrong guess" order the
+anvil/grindstone/smithing family already established — with only a take-only
+result slot marked where one exists (furnace, loom, stonecutter, cartography
+table) and a `SpecialLayout` attached for the real pixel positions and
+background sheet. `special_layout_positions`'s own doc comment in
+`container.rs` has the full position table with `file:line` citations; it is
+not repeated here to avoid a second copy that can drift.
+
+**A seventh, `Hopper`, was found while writing that doc comment — not one of
+#28's own named containers.** The comment being drafted claimed hoppers drew
+`generic_54`'s ordinary chest sheet correctly, which turned out to be false:
+`HopperScreen` is a real, dedicated screen at `imageHeight = 133`, not `166`
+(`HopperScreen.java:15`), with five slots at `(44, 20)` step `18`
+(`HopperMenu.java:24`) and `main_y = 51`, not `84`
+(`HopperMenu.java:27`). Before this, a hopper silently drew a taller,
+wrong-shaped chest panel — exactly the "plausible but transposed" defect
+class this whole family of code exists to avoid, just discovered by writing
+the documentation rather than by looking at a screenshot.
+
+**Three of the six #28 screens knowingly draw fewer slots than vanilla's real
+UI**, because the missing piece is a whole button-driven sub-feature this
+tree has no data for, not a slot position: the loom's banner-pattern
+selection grid, the stonecutter's recipe-selection scroll list (both need a
+registry this tree does not decode, plus a `ContainerButtonClick` producer
+that does not exist yet), and — a gap #28 did **not** close — the beacon and
+the villager's trade screen are not modelled at all (different `imageWidth`,
+no slot layout, and for the villager an entire undecoded trade-offer packet
+family). See `SpecialLayout::Loom`/`SpecialLayout::Stonecutter`'s doc
+comments for the specifics. This is a deliberate, honest degrade: the three
+core slots each screen *does* draw are fully functional (place an item, take
+the result once the server computes and sends it), and nothing is drawn that
+looks clickable but silently does nothing.
+
+**The furnace family and the brewing stand draw real, live progress
+bars — not a degrade.** `AbstractFurnaceMenu`'s `litTime`/`litDuration`/
+`cookingProgress`/`cookingTotalTime` and `BrewingStandMenu`'s
+`brewingTicks`/`fuel` arrive as ordinary `container_set_data` properties,
+the same feed `container-cost-screens.md`'s anvil/enchanting cost lines
+already read through `ContainerFrame::cost_data` — so this needed no new
+`app.rs`/`sim.rs` wiring, only a `menu.special_layout()` match in
+`build_inner` computing the same sub-rectangle blits
+`AbstractFurnaceScreen.java:53-72`/`BrewingStandScreen.java:29-52` do.
+`ContainerBackground::sprite_subregion_quad` is the new primitive this
+needed: every existing sprite draw in this file blits a sprite *whole*
+(`sprite_quad`), but these bars grow from a partial window of a larger
+sprite (e.g. the lit flame samples a `14×n` slice of a `14×14` sprite,
+offset from the bottom) — see its own doc comment.
 
 ### The title goes through the language table (issue #52)
 
@@ -173,22 +237,33 @@ constant `translatable("container.inventory")` (`Inventory.java:55`), so there i
 no server component to resolve. A container's *title* is the opposite case and
 must always come from the packet.
 
-Not modelled: `AbstractFurnaceScreen.java:39` centres its title
-(`(imageWidth - font.width(title)) / 2`), the only vanilla anchor that depends on
-the text itself. There is no furnace `MenuKind` yet (issue #28) — a furnace
-arrives as a `Generic` and gets `x = 8`. Adding that branch means giving
-`label_layout` the font, which it deliberately does not take today.
+**Stale as of issue #28 (was: "not modelled").** This used to say
+`AbstractFurnaceScreen.java:39`'s centred title needed a furnace `MenuKind`
+that did not exist. It never did: `menu_type_title_anchor`'s own doc comment
+(`container.rs`) keys off the wire `menu_type` string directly, independent
+of `MenuKind` or `SpecialLayout`, and it has carried the furnace family's
+centred anchor (and eight more screens') since before #28's slot-layout work
+landed. What #28 *did* add is `SpecialLayout::{Furnace,BlastFurnace,Smoker}`,
+which gives the furnace family real slot positions and background art on top
+of the title anchor it already had; see "The six more `special_layout`
+screens (issue #28)" below.
 
 ### The panel is real vanilla art now (issue #51)
 
-`ContainerBackground` (`container.rs`) loads and stitches vanilla's three real
+`ContainerBackground` (`container.rs`) loads and stitches vanilla's real
 `textures/gui/container/*.png` sheets — `generic_54`, `crafting_table`,
-`inventory` — and `ContainerRenderer::attach_background` binds them, exactly
-the "is a thing attached" pattern `attach_items`/`attach_item_models` already
-use. Covers every menu `slot_layout` already lays out (`MenuKind::Player`,
-plain `Generic`, and `Generic` with a `craft_layout`); it does **not** add
-furnace/hopper/anvil/etc. backgrounds, because this crate has no slot layout
-for those screens yet (issue #28).
+`inventory`, plus (issues #253-#255 and #28) `anvil`, `grindstone`,
+`smithing`, `enchanting_table`, `furnace`, `blast_furnace`, `smoker`,
+`brewing_stand`, `loom`, `stonecutter`, `cartography_table` and `dispenser`
+(shared by the dropper too — see "The six more `special_layout` screens"
+below) — and `ContainerRenderer::attach_background` binds them, exactly the
+"is a thing attached" pattern `attach_items`/`attach_item_models` already
+use. **Stale as of issue #28** (was: "does not add furnace/hopper/anvil/etc.
+backgrounds, because this crate has no slot layout for those screens yet") —
+hoppers and shulker boxes still draw the plain `generic_54` sheet, correctly:
+vanilla itself draws a hopper as an oddly-shaped **generic** container
+background, not a dedicated sheet (`HopperMenu` declares no
+`Screen`/texture override), so there was never a gap there to close.
 
 These three PNGs are **not** `GuiAtlas` material: they live at
 `textures/gui/container/**`, not `textures/gui/sprites/**`, carry no sibling
