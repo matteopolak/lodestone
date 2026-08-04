@@ -1073,7 +1073,10 @@ impl Plugin for SessionHudPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lodestone_model::event::{DisplaySlot, ObjectiveMode};
+    use lodestone_model::event::{
+        CollisionRule, DisplaySlot, ObjectiveMode, TeamAction, TeamColor, TeamParameters,
+        Visibility,
+    };
     use lodestone_model::{BossAction, BossColor, BossOverlay, GameMode, PlayerListEntry, Text};
     use uuid::Uuid;
 
@@ -2312,5 +2315,431 @@ mod tests {
             },
         );
         assert_eq!(app.world().get::<Riding>(entity).copied(), Some(Riding(None)));
+    }
+
+    // ---- the menu family, real-schedule coverage --------------------------
+    //
+    // `apply_menus` is registered in `SessionPlugin`'s `NetIngest` chain and
+    // `lodestone_game::menus::Menus::apply` is exhaustively unit-tested in
+    // `lodestone-game`, but until this test nothing in *this* crate ever fed
+    // `ScreenOpened`/`ContainerContent`/`ContainerSlot`/`ContainerData`/
+    // `CursorItemChanged`/`InventorySlotChanged` through the real schedule —
+    // the exact closed-loop shape `CLAUDE.md` names: a fold can be correct and
+    // green in its own crate while the wiring one layer up is untested and
+    // could be silently broken.
+
+    fn key(s: &str) -> lodestone_model::ids::ResourceKey {
+        s.parse().expect("valid resource key")
+    }
+
+    fn ms(item: &str, count: u32) -> lodestone_model::ItemStack {
+        lodestone_model::ItemStack::new(key(item), count)
+    }
+
+    #[test]
+    fn menu_family_events_reach_session_menus_through_the_real_schedule() {
+        let (mut app, entity) = session_app();
+
+        // Pre-condition: nothing open yet.
+        assert_eq!(
+            app.world().get::<SessionMenus>(entity).unwrap().0.opened_window_id(),
+            None
+        );
+
+        fold(
+            &mut app,
+            ClientEvent::ScreenOpened {
+                window_id: 5,
+                menu_type: key("minecraft:generic_9x3"),
+                title: Text::literal("Chest"),
+            },
+        );
+        // `ScreenOpened` alone only records a *pending* open — `opened` stays
+        // `None` until the content packet arrives. Asserting that here is what
+        // proves the value actually came from `ScreenOpened`'s own fold rather
+        // than being some other default: if this fold never ran, the metadata
+        // below (title / menu type) could not appear either.
+        assert_eq!(
+            app.world().get::<SessionMenus>(entity).unwrap().0.opened_window_id(),
+            None,
+            "ScreenOpened must not open a menu by itself"
+        );
+
+        // A 9x3 chest: 27 container slots + 36 player-inventory slots.
+        let mut items = vec![None; 63];
+        items[0] = Some(ms("minecraft:gold_ingot", 5));
+        fold(
+            &mut app,
+            ClientEvent::ContainerContent {
+                window_id: 5,
+                state_id: 1,
+                items,
+                carried_item: None,
+            },
+        );
+        {
+            let menus = &app.world().get::<SessionMenus>(entity).unwrap().0;
+            assert_eq!(menus.opened_window_id(), Some(5));
+            assert_eq!(menus.opened_title(), Some(&Text::literal("Chest")));
+            assert_eq!(menus.opened_menu_type(), Some(&key("minecraft:generic_9x3")));
+            assert!(
+                menus.opened().unwrap().slot_item(0).is_some(),
+                "the gold ingot from ContainerContent must have landed"
+            );
+        }
+
+        fold(
+            &mut app,
+            ClientEvent::ContainerSlot {
+                window_id: 5,
+                state_id: 1,
+                slot: 1,
+                item: Some(ms("minecraft:diamond", 1)),
+            },
+        );
+        assert!(
+            app.world()
+                .get::<SessionMenus>(entity)
+                .unwrap()
+                .0
+                .opened()
+                .unwrap()
+                .slot_item(1)
+                .is_some(),
+            "ContainerSlot must reach the open menu"
+        );
+
+        fold(
+            &mut app,
+            ClientEvent::ContainerData {
+                window_id: 5,
+                property: 0,
+                value: 42,
+            },
+        );
+        assert_eq!(
+            app.world()
+                .get::<SessionMenus>(entity)
+                .unwrap()
+                .0
+                .container_data(0),
+            Some(42),
+            "ContainerData must reach the open menu's properties"
+        );
+
+        fold(
+            &mut app,
+            ClientEvent::CursorItemChanged {
+                item: Some(ms("minecraft:apple", 1)),
+            },
+        );
+        assert!(
+            app.world()
+                .get::<SessionMenus>(entity)
+                .unwrap()
+                .0
+                .opened()
+                .unwrap()
+                .carried()
+                .is_some(),
+            "CursorItemChanged must reach the carried-item slot"
+        );
+
+        fold(
+            &mut app,
+            ClientEvent::InventorySlotChanged {
+                slot: 0,
+                item: Some(ms("minecraft:stone", 32)),
+            },
+        );
+        assert!(
+            app.world()
+                .get::<SessionMenus>(entity)
+                .unwrap()
+                .0
+                .player_native(0)
+                .is_some(),
+            "InventorySlotChanged must reach the player-inventory native slots"
+        );
+
+        fold(&mut app, ClientEvent::ScreenClosed { window_id: 5 });
+        assert_eq!(
+            app.world().get::<SessionMenus>(entity).unwrap().0.opened_window_id(),
+            None,
+            "ScreenClosed must close the menu"
+        );
+    }
+
+    // ---- scoreboard: the two members with no dedicated schedule test ------
+
+    fn red_team_params() -> Box<TeamParameters> {
+        Box::new(TeamParameters {
+            display_name: Text::literal("Red Team"),
+            prefix: Text::literal("["),
+            suffix: Text::literal("]"),
+            name_tag_visibility: Visibility::HideForOtherTeams,
+            collision_rule: CollisionRule::PushOwnTeam,
+            color: Some(TeamColor::Red),
+            friendly_fire: false,
+            see_friendly_invisibles: true,
+        })
+    }
+
+    /// `ScoreUpdate`/`ObjectiveUpdate`/`DisplayObjective` already have a
+    /// real-schedule test above (`a_net_ingest_run_folds_a_scoreboard_objective
+    /// _onto_the_component`); `ScoreReset` and `TeamUpdate` shared the same
+    /// `apply_scoreboard` system but had no schedule-level test of their own.
+    #[test]
+    fn score_reset_and_team_update_reach_the_scoreboard_through_the_real_schedule() {
+        let (mut app, entity) = session_app();
+        fold(
+            &mut app,
+            ClientEvent::ObjectiveUpdate {
+                name: "kills".into(),
+                mode: ObjectiveMode::Add,
+                display_name: Some(Text::literal("Kills")),
+                render_type: None,
+                number_format: None,
+            },
+        );
+        fold(
+            &mut app,
+            ClientEvent::ScoreUpdate {
+                holder: "Alice".into(),
+                objective: "kills".into(),
+                value: 7,
+                display: None,
+                number_format: None,
+            },
+        );
+        assert_eq!(
+            app.world()
+                .get::<SessionScoreboard>(entity)
+                .unwrap()
+                .0
+                .score("kills", "Alice")
+                .map(|e| e.value),
+            Some(7),
+            "precondition: the score exists before it is reset"
+        );
+
+        fold(
+            &mut app,
+            ClientEvent::ScoreReset {
+                holder: "Alice".into(),
+                objective: Some("kills".into()),
+            },
+        );
+        assert_eq!(
+            app.world()
+                .get::<SessionScoreboard>(entity)
+                .unwrap()
+                .0
+                .score("kills", "Alice")
+                .map(|e| e.value),
+            None,
+            "ScoreReset must reach the scoreboard through the real schedule"
+        );
+
+        fold(
+            &mut app,
+            ClientEvent::TeamUpdate {
+                name: "red".into(),
+                action: TeamAction::Create {
+                    params: red_team_params(),
+                    members: vec!["Bob".into()],
+                },
+            },
+        );
+        let board = &app.world().get::<SessionScoreboard>(entity).unwrap().0;
+        assert_eq!(board.team_of("Bob").map(|t| t.name.as_str()), Some("red"));
+    }
+
+    // ---- the consolidated coverage table -----------------------------------
+
+    /// The `session`-side twin of
+    /// `crate::ingest::tests::handles_event_covers_exactly_the_variants_with_a_system`.
+    ///
+    /// Until this test, `ingest` had a single table enumerating every variant
+    /// it claims and proving a system runs behind each one; `session` had the
+    /// same route-table guarantee (a variant is a compile error until routed)
+    /// but no analogous *runtime* enumeration — coverage of individual
+    /// families was scattered across many separate tests, so a future variant
+    /// routed `session: true` with no fold could compile, leave every existing
+    /// test green, and still drop silently. This is that missing table.
+    ///
+    /// Every arm below is `assert!(handles_event(...))`, i.e. the routing
+    /// claim; the comment beside each names the test elsewhere in this module
+    /// that proves a *system* actually consumes it through the real schedule
+    /// (`fold()` + `NetIngest`), which is the half `handles_event` alone
+    /// cannot prove.
+    #[test]
+    fn handles_event_covers_exactly_the_session_claimed_variants() {
+        // Login / Respawned / Death — apply_local_player_state; see
+        // `respawning_clears_the_ride_state` and the vitals tests above.
+        assert!(handles_event(&ClientEvent::Login {
+            entity_id: 1,
+            game_mode: GameMode::Survival,
+            dimension: dim("overworld"),
+        }));
+        assert!(handles_event(&ClientEvent::Respawned {
+            dimension: dim("overworld"),
+            game_mode: GameMode::Survival,
+            previous_game_mode: None,
+            last_death_location: None,
+        }));
+        assert!(handles_event(&ClientEvent::Death {
+            message: Text::literal("died")
+        }));
+        // HealthChanged / ExperienceChanged / GameModeChanged / AbilitiesChanged
+        // / DimensionTypeChanged / BiomeVisuals — apply_local_player_state; see
+        // the dedicated vitals/xp/abilities/dimension-type/biome tests above.
+        assert!(handles_event(&ClientEvent::HealthChanged {
+            health: 20.0,
+            food: 20,
+            saturation: 5.0,
+        }));
+        assert!(handles_event(&ClientEvent::ExperienceChanged {
+            progress: 0.0,
+            level: 0,
+            total: 0,
+        }));
+        assert!(handles_event(&ClientEvent::GameModeChanged {
+            game_mode: GameMode::Creative,
+        }));
+        assert!(handles_event(&ClientEvent::AbilitiesChanged {
+            invulnerable: false,
+            flying: false,
+            can_fly: false,
+            instabuild: false,
+            flying_speed: 0.05,
+            walking_speed: 0.1,
+        }));
+        assert!(handles_event(&ClientEvent::DimensionTypeChanged {
+            holder_id: 0,
+            dimension_type: None,
+        }));
+        assert!(handles_event(&ClientEvent::BiomeVisuals {
+            sky_colors: Vec::new(),
+        }));
+        // HeldSlotChanged / DifficultyChanged — the two ex-`HudState` islands;
+        // see the dedicated tests below this one in the file.
+        assert!(handles_event(&ClientEvent::HeldSlotChanged { slot: 0 }));
+        assert!(handles_event(&ClientEvent::DifficultyChanged {
+            difficulty: Difficulty::Normal,
+            locked: false,
+        }));
+        // BlockDestruction — apply_block_destruction; see the dedicated tests
+        // above this one.
+        assert!(handles_event(&ClientEvent::BlockDestruction {
+            entity_id: 1,
+            pos: lodestone_model::math::BlockPos::new(0, 0, 0),
+            progress: 0,
+        }));
+        // EntityPassengersChanged — claimed by *both* routers; the ingest-side
+        // assertion pinning that is
+        // `ingest::tests::handles_event_covers_exactly_the_variants_with_a_system`.
+        assert!(handles_event(&ClientEvent::EntityPassengersChanged {
+            vehicle_id: 1,
+            passenger_ids: vec![2],
+        }));
+        // Scoreboard family — apply_scoreboard; see
+        // `a_net_ingest_run_folds_a_scoreboard_objective_onto_the_component` and
+        // `score_reset_and_team_update_reach_the_scoreboard_through_the_real_schedule`.
+        assert!(handles_event(&ClientEvent::ObjectiveUpdate {
+            name: "kills".into(),
+            mode: ObjectiveMode::Add,
+            display_name: None,
+            render_type: None,
+            number_format: None,
+        }));
+        assert!(handles_event(&ClientEvent::DisplayObjective {
+            slot: DisplaySlot::Sidebar,
+            objective: None,
+        }));
+        assert!(handles_event(&ClientEvent::ScoreUpdate {
+            holder: "Alice".into(),
+            objective: "kills".into(),
+            value: 0,
+            display: None,
+            number_format: None,
+        }));
+        assert!(handles_event(&ClientEvent::ScoreReset {
+            holder: "Alice".into(),
+            objective: None,
+        }));
+        assert!(handles_event(&ClientEvent::TeamUpdate {
+            name: "red".into(),
+            action: TeamAction::Remove,
+        }));
+        // Tab list / boss bars — apply_tab_list / apply_boss_bars; see
+        // `a_player_who_leaves_is_removed_from_the_tab_list` and
+        // `a_boss_bar_add_reaches_the_component_in_render_order`.
+        assert!(handles_event(&ClientEvent::PlayerListUpdate {
+            entries: Vec::new()
+        }));
+        assert!(handles_event(&ClientEvent::PlayerListRemove {
+            profile_ids: Vec::new()
+        }));
+        assert!(handles_event(&ClientEvent::BossBarUpdate {
+            id: Uuid::from_u128(1),
+            action: BossAction::Remove,
+        }));
+        // Menu family — apply_menus; see
+        // `menu_family_events_reach_session_menus_through_the_real_schedule`.
+        assert!(handles_event(&ClientEvent::ScreenOpened {
+            window_id: 1,
+            menu_type: key("minecraft:generic_9x1"),
+            title: Text::literal("T"),
+        }));
+        assert!(handles_event(&ClientEvent::ScreenClosed { window_id: 1 }));
+        assert!(handles_event(&ClientEvent::ContainerContent {
+            window_id: 1,
+            state_id: 1,
+            items: Vec::new(),
+            carried_item: None,
+        }));
+        assert!(handles_event(&ClientEvent::ContainerSlot {
+            window_id: 1,
+            state_id: 1,
+            slot: 0,
+            item: None,
+        }));
+        assert!(handles_event(&ClientEvent::ContainerData {
+            window_id: 1,
+            property: 0,
+            value: 0,
+        }));
+        assert!(handles_event(&ClientEvent::CursorItemChanged { item: None }));
+        assert!(handles_event(&ClientEvent::InventorySlotChanged {
+            slot: 0,
+            item: None,
+        }));
+
+        // ---- the negative controls: ingest-only and client-only events ----
+        //
+        // Mirrors `ingest`'s own cross-checks, from the other side: an event
+        // this module must NOT claim, or a router-fork mistake (the exact class
+        // `CLAUDE.md` records costing work twice) compiles and drops silently.
+        let entity_moved = ClientEvent::EntityMoved {
+            entity_id: 1,
+            movement: lodestone_model::event::EntityMovement::Absolute(lodestone_model::Vec3::new(
+                0.0, 0.0, 0.0,
+            )),
+            rotation: None,
+            on_ground: true,
+        };
+        assert!(
+            !handles_event(&entity_moved),
+            "per-entity ECS state belongs to ingest, not session"
+        );
+        assert!(
+            crate::ingest::handles_event(&entity_moved),
+            "…and ingest must actually claim it, or the event reaches neither router"
+        );
+        assert!(
+            !handles_event(&ClientEvent::KeepAlive { id: 1 }),
+            "KeepAlive is answered inside lodestone-client, not by a session fold"
+        );
     }
 }
