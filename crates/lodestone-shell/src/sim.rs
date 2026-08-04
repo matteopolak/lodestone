@@ -240,9 +240,25 @@ mod placement;
 // through the move. See `sim/placement.rs`'s own module doc for why this
 // block moved out at all.
 pub use placement::{predicted_placement_state, write_predicted_block};
-use placement::{
-    PlacementFacts, block_states_of, is_air_state, is_interactable_state,
-    orientation_for_placement, state_for_placement,
+use placement::is_air_state;
+// `#[cfg(test)]`, unlike `is_air_state` above: `sim/tests.rs`'s own
+// `PlacementFacts { .. }` literals and `is_interactable_state(..)` calls are
+// the only remaining callers now that `placement_facts` (the free function in
+// `sim/placement.rs`) moved the real call site out of `sim/actions.rs`
+// entirely — same "dead code in a `--lib`-only build" reasoning `#[cfg(test)]
+// use meshing::dirty_sections_for_blocks;` already documents a few hundred
+// lines down.
+#[cfg(test)]
+use placement::{PlacementFacts, is_interactable_state};
+// `pub(crate)`, not a plain `use`: `crate::interact::drive_placement` is a
+// sibling module of `sim`, not a descendant, so it names these as
+// `crate::sim::{placement_facts, block_intersects_player, block_states_of,
+// orientation_for_placement, state_for_placement}` rather than inheriting
+// them through `sim::actions`'s `use super::*;` the way every `sim/*.rs` seam
+// file does. See `sim/placement.rs`'s own doc.
+pub(crate) use placement::{
+    block_intersects_player, block_states_of, orientation_for_placement, placement_facts,
+    state_for_placement,
 };
 
 
@@ -305,10 +321,18 @@ pub(crate) fn particle_face(face: BlockFace) -> particle_emit::Face {
 /// server uses to pick a slab's half, a stair's orientation and which side of a
 /// block a torch attaches to — so the approximation is gone rather than
 /// documented.
-fn hit_cursor(hit: RayHit) -> Vec3f {
+pub(crate) fn hit_cursor(hit: RayHit) -> Vec3f {
     let [x, y, z] = hit.cursor();
     Vec3f::new(x, y, z)
 }
+
+/// Native player-inventory index of the off-hand slot
+/// (`lodestone_game::menu`'s table: hotbar `0..=8`, off-hand `40`).
+///
+/// Shared between `Sim::use_item_live`'s off-hand `haveSomethingInOurHands`
+/// check and `crate::interact::drive_placement`'s identical one, rather than
+/// two copies of a bare `40` agreeing only by coincidence.
+pub(crate) const OFFHAND_NATIVE_INDEX: usize = 40;
 
 /// The [`ChunkWorld`] store, adapted to the ECS's [`CollisionSource`].
 ///
@@ -3187,6 +3211,12 @@ use meshing::dirty_sections_for_blocks;
 // matching the item's own visibility before it moved. Not `pub use`: nothing
 // outside this crate names it.
 pub(crate) use camera::fog_for_render_distance;
+
+// Same reasoning as `fog_for_render_distance` just above: `crate::interact::
+// drive_placement` names this by full path, and it is a sibling of `sim`, not
+// a descendant, so the plain `use` inside `sim/audio.rs`'s own `impl Sim`
+// method is not enough on its own — needs `pub(crate)` here too.
+pub(crate) use audio::block_sound_seed;
 
 impl Sim {
 
