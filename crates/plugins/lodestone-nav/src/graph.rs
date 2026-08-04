@@ -392,6 +392,38 @@ pub fn head_room(view: &dyn NavView, x: i32, y: i32, z: i32, surface: f64) -> bo
 
 /// A cell the navigator will put the body in: standable, with head room, and
 /// carrying no hazard anywhere the body occupies.
+///
+/// # The support-block check only applies to [`stand_surface`]'s "below" branch
+///
+/// This function used to check `facts_at(x, y - 1, z)` unconditionally, on the
+/// reasoning in the comment below: the body-sweep loop starts at cell `y`, so a
+/// **full-cube** support — which sits at `y - 1`, one cell the sweep never
+/// reaches — needs its own explicit hazard check (the magma-block case the
+/// comment names).
+///
+/// That reasoning does not hold for [`stand_surface`]'s other branch. When the
+/// feet rest **inside** cell `y` itself — a partial block: a bottom slab
+/// (`0.5`), soul sand (`0.875`), farmland, a snow layer — that block *is* cell
+/// `y`, already covered by the sweep loop above (which starts at `y`, not
+/// `y + 1`). Checking `y - 1` in that case inspects a cell the stand does not
+/// depend on at all, and this was two bugs at once, both only reachable with a
+/// **partial** support, neither exercised by any fixture in this crate's own
+/// tests (every one keeps its floor mid-column, `flat()`'s `-64..320`, so
+/// `y - 1` was always in range and never a hazard):
+///
+/// - **False refusals near a snapshot's vertical edge.** A slab sitting at the
+///   very bottom of a loaded region (a session's world floor, or — found by
+///   `crates/plugins/lodestone-autopilot/tests/drives_to_goal.rs`'s real-jar-data
+///   gate, which is what a synthetic fixture cannot reach — a `SnapshotView`
+///   whose loaded column starts exactly at the slab) has no `y - 1` to answer
+///   with: `facts_at` returns `None` there, and the old unconditional `?`
+///   propagated that `None` out of `standable` for a cell that is otherwise
+///   completely ordinary to stand on.
+/// - **False refusals from an irrelevant hazard.** A slab (or soul sand,
+///   farmland, a snow layer) fully seals the player from whatever is beneath
+///   it; a hazard one cell further down — lava under a soul-sand floor, say —
+///   must not veto standing on the block that seals it off, but the
+///   unconditional check vetoed it anyway.
 #[must_use]
 pub fn standable(view: &dyn NavView, x: i32, y: i32, z: i32) -> Option<f64> {
     let surface = stand_surface(view, x, y, z)?;
@@ -408,7 +440,13 @@ pub fn standable(view: &dyn NavView, x: i32, y: i32, z: i32) -> Option<f64> {
         }
         cell += 1;
     }
-    if view.facts_at(x, y - 1, z)?.must_not_enter {
+    // Only the "below" branch of `stand_surface` leaves the support block
+    // unswept by the loop above — `surface == y` exactly identifies it, since
+    // the "inside" branch always returns a surface strictly between `y` and
+    // `y + 1` (see the doc comment above and `stand_surface`'s own two
+    // branches).
+    let support_is_below = (surface - f64::from(y)).abs() <= SURFACE_EPS;
+    if support_is_below && view.facts_at(x, y - 1, z)?.must_not_enter {
         return None;
     }
     Some(surface)

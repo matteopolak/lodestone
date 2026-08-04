@@ -43,3 +43,22 @@ lodestone-world = { workspace = true }
 # graph.
 bevy_ecs = { workspace = true }
 bevy_app = { workspace = true }
+
+[dev-dependencies]
+# Dev-only, per `docs/plugin-api.md`'s "how to change it": a plugin *may*
+# legally depend on version-derived data at the cost of version-locking, and
+# this is that cost paid on purpose, in tests only. `lodestone-data` is not a
+# version crate (it lives outside `crates/protocol/`, generated straight from
+# the real 26.2 server's own block-state/collision/solidity census, issue
+# #361) so this is not even the `SharedDependsOnVersion` isolation warning —
+# `cargo xtask check-isolation` treats it as an ordinary shared-crate edge.
+# Used by `tests/drives_to_goal.rs` to build a `VersionAdapter` and a
+# `CollisionView` over **genuine jar-derived collision shapes** (a real
+# `minecraft:stone` full cube and a real bottom `minecraft:oak_slab`, height
+# 0.5, not a hand-rolled 1×1×1 box) rather than the two-block synthetic
+# `FixtureAdapter`/`FlatFloor` the other tests in that file use. A flat plane
+# built from a toy census is the "world" species of vacuous test CLAUDE.md
+# warns about: it cannot exercise the geometry the search and physics code
+# exist to handle, because the input never contains a non-cube shape.
+lodestone-data = { workspace = true }
+
