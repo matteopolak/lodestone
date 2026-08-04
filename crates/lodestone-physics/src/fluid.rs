@@ -187,7 +187,9 @@ pub fn get_flow(view: &dyn CollisionView, x: i32, y: i32, z: i32, cell: FluidCel
         for dir in HorizontalDir::ALL {
             let nx = x + dir.step_x();
             let nz = z + dir.step_z();
-            if view.is_solid_face(nx, y, nz, dir) || view.is_solid_face(nx, y + 1, nz, dir) {
+            if view.is_solid_face(nx, y, nz, dir, cell.kind)
+                || view.is_solid_face(nx, y + 1, nz, dir, cell.kind)
+            {
                 flow = flow.normalize().add(Vec3d::new(0.0, -6.0, 0.0));
                 break;
             }

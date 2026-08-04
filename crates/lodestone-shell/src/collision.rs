@@ -342,6 +342,22 @@ fn climbable_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> bool {
     physics_at(v, x, y, z).climbable
 }
 
+/// [`CollisionView::is_scaffolding`] — `state.is(Blocks.SCAFFOLDING)`, the one
+/// vanilla conjunct [`climbable_at`]'s tag membership cannot express. Named
+/// directly rather than routed through [`physics_at`]'s `BlockPhysics` table:
+/// it is a single-block identity check, not a `Properties`/tag fold shared
+/// with anything else `physics_at` already answers.
+fn is_scaffolding_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> bool {
+    matches!(v.name_of(v.state_at(x, y, z)), Some("minecraft:scaffolding"))
+}
+
+/// [`CollisionView::is_powder_snow`] — `state.is(Blocks.POWDER_SNOW)`, for the
+/// freezing mechanic. Named directly for the same reason as
+/// [`is_scaffolding_at`]: it is a block identity, not a shared physics fold.
+fn is_powder_snow_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> bool {
+    matches!(v.name_of(v.state_at(x, y, z)), Some("minecraft:powder_snow"))
+}
+
 /// [`CollisionView::bubble_column`] — the `DRAG_DOWN` property of the bubble column
 /// at this cell, if it is one.
 ///
@@ -418,21 +434,35 @@ fn blocks_motion_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> bool {
 }
 
 /// `FlowingFluid.isSolidFace` (`FlowingFluid.java:105-115`), horizontal case:
-/// `false` if the cell holds the same fluid, `false` for ice, else
-/// `isFaceSturdy(FULL)` = [`shape_face_is_full`].
+/// `false` if the cell holds **the same fluid as `kind`** (the fluid asking —
+/// see [`CollisionView::is_solid_face`]'s doc for why that is not the cell's own
+/// fluid), `false` for ice, else `isFaceSturdy(FULL)` = [`shape_face_is_full`].
 ///
-/// Two approximations, both narrowing:
-/// * the seam does not say *which* fluid is flowing, so **any** fluid in the cell
-///   answers `false` (vanilla only excludes the same fluid — so water beside lava
-///   loses the jet);
-/// * `isFaceSturdy` is the under-approximating [`shape_face_is_full`].
+/// One narrowing approximation remains: `isFaceSturdy` is the
+/// under-approximating [`shape_face_is_full`]. The "any fluid → false"
+/// shortcut this used to take is gone — a *different*-fluid neighbour (e.g. a
+/// waterlogged solid block asked by a falling lava jet) now falls through to
+/// the sturdy-face check instead of being forced to `false`.
 ///
 /// Vanilla's `direction == UP -> true` branch is unreachable here: the seam is
 /// typed [`HorizontalDir`], so the vertical case cannot be asked.
-fn is_solid_face_at(v: &impl BlockView, x: i32, y: i32, z: i32, dir: HorizontalDir) -> bool {
+fn is_solid_face_at(
+    v: &impl BlockView,
+    x: i32,
+    y: i32,
+    z: i32,
+    dir: HorizontalDir,
+    kind: lodestone_physics::FluidKind,
+) -> bool {
     let state = v.state_at(x, y, z);
-    if v.fluid_kind_of(state).is_some() {
-        return false;
+    if let Some(neighbour_kind) = v.fluid_kind_of(state) {
+        let neighbour_kind = match neighbour_kind {
+            FluidKind::Water => lodestone_physics::FluidKind::Water,
+            FluidKind::Lava => lodestone_physics::FluidKind::Lava,
+        };
+        if neighbour_kind == kind {
+            return false;
+        }
     }
     // `IceBlock` covers ice, frosted ice and blue ice; packed ice is a plain
     // `Block`, so it is *not* excluded (`IceBlock` subclasses only).
@@ -641,12 +671,20 @@ impl CollisionView for WorldCollision<'_> {
         climbable_at(self, x, y, z)
     }
 
+    fn is_scaffolding(&self, x: i32, y: i32, z: i32) -> bool {
+        is_scaffolding_at(self, x, y, z)
+    }
+
     fn is_lava(&self, x: i32, y: i32, z: i32) -> bool {
         is_lava_at(self, x, y, z)
     }
 
     fn stuck_multiplier(&self, x: i32, y: i32, z: i32) -> Option<Vec3d> {
         stuck_at(self, x, y, z)
+    }
+
+    fn is_powder_snow(&self, x: i32, y: i32, z: i32) -> bool {
+        is_powder_snow_at(self, x, y, z)
     }
 
     fn fluid_at(&self, x: i32, y: i32, z: i32) -> Option<FluidCell> {
@@ -657,8 +695,15 @@ impl CollisionView for WorldCollision<'_> {
         blocks_motion_at(self, x, y, z)
     }
 
-    fn is_solid_face(&self, x: i32, y: i32, z: i32, dir: HorizontalDir) -> bool {
-        is_solid_face_at(self, x, y, z, dir)
+    fn is_solid_face(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        dir: HorizontalDir,
+        kind: lodestone_physics::FluidKind,
+    ) -> bool {
+        is_solid_face_at(self, x, y, z, dir, kind)
     }
 
     fn bounce_restitution(&self, x: i32, y: i32, z: i32) -> f32 {
@@ -1283,12 +1328,20 @@ impl CollisionView for LiveCollision {
         climbable_at(self, x, y, z)
     }
 
+    fn is_scaffolding(&self, x: i32, y: i32, z: i32) -> bool {
+        is_scaffolding_at(self, x, y, z)
+    }
+
     fn is_lava(&self, x: i32, y: i32, z: i32) -> bool {
         is_lava_at(self, x, y, z)
     }
 
     fn stuck_multiplier(&self, x: i32, y: i32, z: i32) -> Option<Vec3d> {
         stuck_at(self, x, y, z)
+    }
+
+    fn is_powder_snow(&self, x: i32, y: i32, z: i32) -> bool {
+        is_powder_snow_at(self, x, y, z)
     }
 
     fn fluid_at(&self, x: i32, y: i32, z: i32) -> Option<FluidCell> {
@@ -1299,8 +1352,15 @@ impl CollisionView for LiveCollision {
         blocks_motion_at(self, x, y, z)
     }
 
-    fn is_solid_face(&self, x: i32, y: i32, z: i32, dir: HorizontalDir) -> bool {
-        is_solid_face_at(self, x, y, z, dir)
+    fn is_solid_face(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        dir: HorizontalDir,
+        kind: lodestone_physics::FluidKind,
+    ) -> bool {
+        is_solid_face_at(self, x, y, z, dir, kind)
     }
 
     fn bounce_restitution(&self, x: i32, y: i32, z: i32) -> f32 {
@@ -2636,6 +2696,165 @@ mod tests {
         assert!(
             below.under_water(),
             "an eye below the surface is submerged: {below:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Issues #210 / #216: name-keyed scaffolding/powder-snow hooks, and
+    // `is_solid_face`'s same-fluid distinction. A minimal synthetic
+    // `BlockView` — no vanilla pack needed, so these run in every ordinary
+    // `cargo test`, unlike the `--features live` gates above.
+    // -----------------------------------------------------------------------
+
+    /// Per-cell facts for [`TestBlocks`]: just enough of [`BlockView`]'s
+    /// surface for the tests below to control directly.
+    #[derive(Clone, Default)]
+    struct Facts {
+        name: Option<&'static str>,
+        fluid: Option<FluidKind>,
+        shape: &'static [BlockAabb],
+    }
+
+    #[derive(Default)]
+    struct TestBlocks {
+        ids: HashMap<(i32, i32, i32), u32>,
+        facts: Vec<Facts>,
+    }
+
+    impl TestBlocks {
+        fn set(&mut self, x: i32, y: i32, z: i32, f: Facts) {
+            let id = u32::try_from(self.facts.len()).unwrap();
+            self.facts.push(f);
+            self.ids.insert((x, y, z), id);
+        }
+    }
+
+    impl BlockView for TestBlocks {
+        fn state_at(&self, x: i32, y: i32, z: i32) -> u32 {
+            // No entry = air: `u32::MAX` deliberately indexes nothing in
+            // `facts`, so every other method's `.get()` falls through to its
+            // "unknown" default, exactly as an out-of-world query must.
+            self.ids.get(&(x, y, z)).copied().unwrap_or(u32::MAX)
+        }
+        fn shape_of(&self, state: u32) -> &'static [BlockAabb] {
+            self.facts
+                .get(state as usize)
+                .map_or(NO_COLLISION, |f| f.shape)
+        }
+        fn fluid_kind_of(&self, state: u32) -> Option<FluidKind> {
+            self.facts.get(state as usize).and_then(|f| f.fluid)
+        }
+        fn fluid_cell_of(&self, _state: u32) -> Option<FluidCell> {
+            None
+        }
+        fn name_of(&self, state: u32) -> Option<&'static str> {
+            self.facts.get(state as usize).and_then(|f| f.name)
+        }
+        fn blocks_motion_of(&self, _state: u32) -> Option<bool> {
+            None
+        }
+        fn bubble_column_of(&self, _state: u32) -> Option<bool> {
+            None
+        }
+    }
+
+    #[test]
+    fn scaffolding_and_powder_snow_are_told_apart_by_name() {
+        let mut w = TestBlocks::default();
+        w.set(
+            0,
+            0,
+            0,
+            Facts {
+                name: Some("minecraft:scaffolding"),
+                ..Facts::default()
+            },
+        );
+        w.set(
+            0,
+            0,
+            1,
+            Facts {
+                name: Some("minecraft:powder_snow"),
+                ..Facts::default()
+            },
+        );
+        w.set(
+            0,
+            0,
+            2,
+            Facts {
+                name: Some("minecraft:stone"),
+                ..Facts::default()
+            },
+        );
+
+        assert!(is_scaffolding_at(&w, 0, 0, 0));
+        assert!(
+            !is_powder_snow_at(&w, 0, 0, 0),
+            "scaffolding is not powder snow"
+        );
+        assert!(is_powder_snow_at(&w, 0, 0, 1));
+        assert!(
+            !is_scaffolding_at(&w, 0, 0, 1),
+            "powder snow is not scaffolding"
+        );
+        assert!(
+            !is_scaffolding_at(&w, 0, 0, 2) && !is_powder_snow_at(&w, 0, 0, 2),
+            "control: stone is neither"
+        );
+        // Control: an unqueried cell (no `Facts` at all) must not spuriously
+        // report either — proves the match isn't defaulting to true.
+        assert!(!is_scaffolding_at(&w, 9, 9, 9));
+        assert!(!is_powder_snow_at(&w, 9, 9, 9));
+    }
+
+    #[test]
+    fn is_solid_face_distinguishes_same_fluid_from_a_different_one() {
+        // A waterlogged solid block: a real full-cube shape *and* a fluid.
+        // Vanilla's `isSolidFace` only excludes the fluid asking the question
+        // (`FlowingFluid.java:108`), so a *different* fluid's falling jet must
+        // still see the sturdy face — the exact case the old "any fluid
+        // present -> false" shortcut got wrong (#216).
+        const FULL_CUBE_LOCAL: &[BlockAabb] = &[BlockAabb {
+            min: [0.0, 0.0, 0.0],
+            max: [1.0, 1.0, 1.0],
+        }];
+        let mut w = TestBlocks::default();
+        w.set(
+            1,
+            0,
+            0,
+            Facts {
+                name: Some("minecraft:stone"),
+                fluid: Some(FluidKind::Water),
+                shape: FULL_CUBE_LOCAL,
+            },
+        );
+
+        assert!(
+            !is_solid_face_at(
+                &w,
+                1,
+                0,
+                0,
+                HorizontalDir::West,
+                lodestone_physics::FluidKind::Water
+            ),
+            "water's own flow must not see itself as a solid face"
+        );
+        assert!(
+            is_solid_face_at(
+                &w,
+                1,
+                0,
+                0,
+                HorizontalDir::West,
+                lodestone_physics::FluidKind::Lava
+            ),
+            "a falling lava jet must see the waterlogged block's sturdy face — \
+             this is the case the pre-#216 'any fluid -> not solid' shortcut \
+             answered false"
         );
     }
 }

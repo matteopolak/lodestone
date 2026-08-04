@@ -95,9 +95,10 @@ pub const POSE_FIT_DEFLATION: f64 = 1.0E-7;
 /// The subset of `net.minecraft.world.entity.Pose` a player driven by this crate
 /// can hold.
 ///
-/// The four modelled poses are the four `Player.getDesiredPose`
+/// The five modelled poses are the five `Player.getDesiredPose`
 /// (`Player.java:359-371`) can return from state this crate has: swimming,
-/// fall-flying, and the shift-key crouch/stand pair.
+/// fall-flying, spin-attack (riptide, issue #208), and the shift-key
+/// crouch/stand pair.
 ///
 /// **Deliberately absent**, with vanilla's dimensions recorded so adding one is
 /// mechanical rather than research (all from `Avatar.POSES`, `Avatar.java:24-37`):
@@ -105,7 +106,6 @@ pub const POSE_FIT_DEFLATION: f64 = 1.0E-7;
 /// | pose | dimensions | why it is not here |
 /// |---|---|---|
 /// | `SLEEPING` | `LivingEntity.SLEEPING_DIMENSIONS` = `fixed(0.2, 0.2)`, eye `0.2` | no bed/sleep state in this crate; `getDesiredPose` tests it **first**, so a driver adding sleep must add the pose too |
-/// | `SPIN_ATTACK` | `scalable(0.6, 0.6)`, eye `0.4` — identical to [`Self::Swimming`] | no riptide |
 /// | `DYING` | `fixed(0.2, 0.2)`, eye `1.62` | set by the death handler, never by `updatePlayerPose` |
 ///
 /// Note `SLEEPING` and `DYING` are `fixed`, so the `SCALE`-attribute fold
@@ -129,6 +129,14 @@ pub enum Pose {
     /// gap. Kept a distinct variant because `getDesiredPose` distinguishes them
     /// and because a caller reading the pose for animation must be able to.
     FallFlying,
+    /// `Pose.SPIN_ATTACK` — the riptide-trident pose, entered by
+    /// [`crate::player::apply_riptide`] (issue #208). Same `scalable(0.6, 0.6)` /
+    /// eye `0.4` record as [`Self::Swimming`]/[`Self::FallFlying`]; kept a
+    /// distinct variant for the same reason those two are — `getDesiredPose`
+    /// distinguishes it (it is checked *after* `FALL_FLYING`, so gliding wins a
+    /// tick where both would otherwise apply) and an animation reader needs to
+    /// tell it apart from a swim.
+    SpinAttack,
 }
 
 impl Pose {
@@ -141,7 +149,7 @@ impl Pose {
         let height = match self {
             Self::Standing => 1.8,
             Self::Crouching => 1.5,
-            Self::Swimming | Self::FallFlying => 0.6,
+            Self::Swimming | Self::FallFlying | Self::SpinAttack => 0.6,
         };
         EntityDimensions::new(0.6, height, EntityDimensions::PLAYER.step_height)
     }
@@ -156,7 +164,7 @@ impl Pose {
         match self {
             Self::Standing => crate::player::DEFAULT_EYE_HEIGHT,
             Self::Crouching => 1.27,
-            Self::Swimming | Self::FallFlying => 0.4,
+            Self::Swimming | Self::FallFlying | Self::SpinAttack => 0.4,
         }
     }
 
@@ -211,13 +219,18 @@ pub fn can_player_fit_within_blocks_and_entities_when(
 /// before the fit gate has a say.
 ///
 /// Vanilla's order is `SLEEPING > SWIMMING > FALL_FLYING > SPIN_ATTACK >
-/// CROUCHING/STANDING`; the two absent branches are documented on [`Pose`].
+/// CROUCHING/STANDING`; the one absent branch (`SLEEPING`) is documented on
+/// [`Pose`].
 ///
-/// Two terms deserve their citations:
+/// Three terms deserve their citations:
 ///
 /// * `isSwimming()` is [`PlayerState::swimming`] — `Entity.updateSwimming`'s
 ///   sprint-swim flag, maintained by [`crate::player::tick`]. It is **not** "in
 ///   water": a walking player in a pond is `STANDING`.
+/// * `isAutoSpinAttack()` is `state.auto_spin_attack_ticks > 0`
+///   ([`PlayerState::is_auto_spin_attack`]) — set by
+///   [`crate::player::apply_riptide`] and decremented once per tick, exactly
+///   like vanilla's `autoSpinAttackTicks` countdown.
 /// * the crouch term is `isShiftKeyDown() && !this.abilities.flying`, i.e. the
 ///   **raw shift key** (the same input `isStayingOnGroundSurface` reads for the
 ///   edge back-off, `Player.java:300-302`) and not `isCrouching()`, which is
@@ -231,6 +244,8 @@ pub fn desired_pose(state: &PlayerState, input: MovementInput) -> Pose {
         Pose::Swimming
     } else if state.fall_flying {
         Pose::FallFlying
+    } else if state.is_auto_spin_attack() {
+        Pose::SpinAttack
     } else if input.sneak && !state.flying {
         // `Player.getDesiredPose()` (`Player.java:369`):
         // `isShiftKeyDown() && !this.abilities.flying ? CROUCHING : STANDING`.

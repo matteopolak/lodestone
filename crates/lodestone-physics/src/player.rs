@@ -428,6 +428,29 @@ pub struct PlayerState {
     /// in any test where the player never leaves the ground, and it is exactly the
     /// input this field exists for.
     pub fall_distance: f64,
+    /// `Entity.DATA_TICKS_FROZEN` (`TicksFrozen`) — ticks accumulated standing in
+    /// powder snow, `0..=`[`Self::TICKS_REQUIRED_TO_FREEZE`]. Maintained by
+    /// [`tick`] (`update_freezing`, issue #212): `+1` (capped) each tick the
+    /// swept movement segment finds `CollisionView::is_powder_snow`, `-2`
+    /// (floored at `0`) every other tick — `LivingEntity.aiStep`'s freezing
+    /// block, `LivingEntity.java:3139-3151`. See [`Self::is_freezing`],
+    /// [`Self::is_fully_frozen`], [`Self::percent_frozen`] and
+    /// [`Self::should_apply_freeze_damage`] for what a driver reads it through.
+    pub frozen_ticks: u32,
+    /// `LivingEntity.autoSpinAttackTicks` — the riptide-trident spin-attack
+    /// countdown (issue #208), started at `20` by [`apply_riptide`]
+    /// (`TridentItem.releaseUsing`: `player.startAutoSpinAttack(20, 8.0F,
+    /// itemStack)`, `TridentItem.java:100`) and decremented by [`tick`] every
+    /// tick thereafter (`LivingEntity.java:3158-3159`), unconditionally — no
+    /// `!flying` gate, matching vanilla. `> 0` is
+    /// `LivingEntity.isAutoSpinAttack()` ([`Self::is_auto_spin_attack`]), which
+    /// [`crate::pose::desired_pose`] reads to select [`Pose::SpinAttack`].
+    ///
+    /// **Not modelled**: the attack-damage side (`autoSpinAttackDmg`,
+    /// `autoSpinAttackItemStack`, `checkAutoSpinAttack`'s entity-hit sweep) —
+    /// this crate applies no damage anywhere, matching [`Self::frozen_ticks`]'s
+    /// scope note.
+    pub auto_spin_attack_ticks: u32,
 }
 
 impl PlayerState {
@@ -463,6 +486,8 @@ impl PlayerState {
             // far easier to see than a silently frozen one.
             flying_speed: 0.05,
             fall_distance: 0.0,
+            frozen_ticks: 0,
+            auto_spin_attack_ticks: 0,
         }
     }
 
@@ -499,6 +524,70 @@ impl PlayerState {
     /// "Not modelled" list on [`Self::fall_distance`].
     pub fn reset_fall_distance(&mut self) {
         self.fall_distance = 0.0;
+    }
+
+    /// `Entity.getTicksRequiredToFreeze()` (`Entity.java:2838-2840`) /
+    /// `Entity.BASE_TICKS_REQUIRED_TO_FREEZE` (`Entity.java:203`) — `140`, and
+    /// unconditionally so for a player: `LivingEntity` does not override the
+    /// getter, and vanilla only ever varies it per living-entity subclass (none
+    /// of which this crate models).
+    pub const TICKS_REQUIRED_TO_FREEZE: u32 = 140;
+
+    /// Returns a copy of this state with [`Self::frozen_ticks`] set — a test/
+    /// resume seed, not something a normal driver calls per tick (`tick` owns
+    /// the field once movement starts).
+    #[must_use]
+    pub fn with_frozen_ticks(mut self, value: u32) -> Self {
+        self.frozen_ticks = value;
+        self
+    }
+
+    /// `Entity.isFreezing()` (`Entity.java:3890-3892`): `getTicksFrozen() > 0`.
+    #[must_use]
+    pub fn is_freezing(&self) -> bool {
+        self.frozen_ticks > 0
+    }
+
+    /// `Entity.isFullyFrozen()` (`Entity.java:2834-2836`):
+    /// `getTicksFrozen() >= getTicksRequiredToFreeze()`.
+    #[must_use]
+    pub fn is_fully_frozen(&self) -> bool {
+        self.frozen_ticks >= Self::TICKS_REQUIRED_TO_FREEZE
+    }
+
+    /// `Entity.getPercentFrozen()` (`Entity.java:2829-2832`):
+    /// `min(ticksFrozen, ticksToFreeze) / ticksToFreeze`, as an `f32` — the
+    /// freezing-overlay vignette's `0..1` ramp. The `min` is redundant given
+    /// [`Self::frozen_ticks`] is already capped at [`Self::TICKS_REQUIRED_TO_FREEZE`]
+    /// by [`tick`], but kept to mirror the vanilla expression exactly rather than
+    /// rely on that invariant holding for every future writer of the field.
+    #[must_use]
+    pub fn percent_frozen(&self) -> f32 {
+        (self.frozen_ticks.min(Self::TICKS_REQUIRED_TO_FREEZE) as f32)
+            / (Self::TICKS_REQUIRED_TO_FREEZE as f32)
+    }
+
+    /// `LivingEntity.aiStep`'s freeze-damage trigger
+    /// (`LivingEntity.java:3147-3149`): `tickCount % 40 == 0 && isFullyFrozen()
+    /// && canFreeze()`. `canFreeze()` is unconditionally `true` for a player —
+    /// see [`Self::frozen_ticks`]'s "not modelled" note — so this reduces to the
+    /// two terms this crate can actually answer, plus the one input it cannot
+    /// own: `tick_count` is vanilla's `Entity.tickCount`, an absolute count
+    /// against the world's clock that this crate has no field for (every timer
+    /// it owns is a countdown). Pass the driver's own tick counter; this
+    /// function applies no damage itself — see [`Self::frozen_ticks`]'s doc for
+    /// why the amount and its application are out of this crate's scope
+    /// entirely.
+    #[must_use]
+    pub fn should_apply_freeze_damage(&self, tick_count: u64) -> bool {
+        tick_count % 40 == 0 && self.is_fully_frozen()
+    }
+
+    /// `LivingEntity.isAutoSpinAttack()` (`LivingEntity.java:3278-3280`):
+    /// `autoSpinAttackTicks > 0`.
+    #[must_use]
+    pub fn is_auto_spin_attack(&self) -> bool {
+        self.auto_spin_attack_ticks > 0
     }
 
     /// Returns a copy of this state with the
@@ -1139,6 +1228,80 @@ fn can_fall_at_least(
 }
 
 /// `LivingEntity.jumpFromGround()` including the sprint boost.
+/// `TridentItem.releaseUsing`'s riptide impulse (`TridentItem.java:88-104`),
+/// issue #208.
+///
+/// # What this function is, and is not, responsible for
+///
+/// Vanilla reaches this arithmetic only after three gates this function does
+/// **not** evaluate, because none of them is physics state:
+/// `EnchantmentHelper.getTridentSpinAttackStrength(itemStack, player) > 0.0F`
+/// (equipment/enchantment data), `timeHeld >= THROW_THRESHOLD_TIME` (`10` ticks
+/// — item-use duration, owned by the interaction layer), and
+/// `player.isInWaterOrRain()` (fluid presence **or** weather — this crate's
+/// [`CollisionView::is_water`] answers the first half but has no weather
+/// concept for the second). A driver must evaluate all three itself and call
+/// this only once, on the release edge, with `strength` already resolved to
+/// the enchantment's value (`> 0.0`).
+///
+/// What *is* physics, and what this function does:
+///
+/// 1. **The impulse.** `xd/yd/zd` from yaw/pitch via the sine table
+///    (`Mth.sin`/`Mth.cos`, bit-exact — see [`mth`]), normalised and scaled by
+///    `strength`, added to velocity via `Entity.push` (a plain add,
+///    `Entity.java:1919-1924`).
+/// 2. **The spin-attack state.** `startAutoSpinAttack(20, 8.0F, itemStack)`
+///    reduces, for this crate, to setting
+///    [`PlayerState::auto_spin_attack_ticks`] to `20` — the damage/held-item
+///    half is not modelled (see that field's doc).
+/// 3. **The on-ground pop-up.** `if (player.onGround()) player.move(SELF, (0,
+///    1.1999999, 0))` — a real collision-resolving move (so a riptide launched
+///    under a low ceiling stops at the ceiling), reproduced via
+///    [`move_entity`] with a synthetic, zeroed `stuck_speed_multiplier`: this
+///    is a one-off supplementary move outside the tick's own, so nothing
+///    tick-pending should be consumed by it, and vanilla's raw `move()` call
+///    here is likewise independent of `travel()`'s own stuck-multiplier
+///    handling.
+pub fn apply_riptide(
+    state: &mut PlayerState,
+    view: &dyn CollisionView,
+    profile: &PhysicsProfile,
+    strength: f32,
+) {
+    let yaw_rad = f64::from(state.yaw) * (core::f64::consts::PI / 180.0);
+    let pitch_rad = f64::from(state.pitch) * (core::f64::consts::PI / 180.0);
+    let mut xd = -mth::sin(yaw_rad) * mth::cos(pitch_rad);
+    let mut yd = -mth::sin(pitch_rad);
+    let mut zd = mth::cos(yaw_rad) * mth::cos(pitch_rad);
+    let dist = (xd * xd + yd * yd + zd * zd).sqrt();
+    xd *= strength / dist;
+    yd *= strength / dist;
+    zd *= strength / dist;
+    state.velocity = state
+        .velocity
+        .add(Vec3d::new(f64::from(xd), f64::from(yd), f64::from(zd)));
+
+    state.auto_spin_attack_ticks = 20;
+
+    if state.on_ground {
+        let mut motion = EntityMotion {
+            position: state.position,
+            velocity: Vec3d::new(0.0, 1.199_999_9, 0.0),
+            on_ground: state.on_ground,
+            horizontal_collision: state.horizontal_collision,
+            stuck_speed_multiplier: Vec3d::ZERO,
+        };
+        move_entity(
+            &mut motion,
+            state.dimensions(),
+            view,
+            profile,
+            MoveContext::default(),
+        );
+        state.position = motion.position;
+    }
+}
+
 fn jump_from_ground(state: &mut PlayerState, view: &dyn CollisionView, profile: &PhysicsProfile) {
     // getJumpPower(): JUMP_STRENGTH * multiplier(1) * getBlockJumpFactor() + getJumpBoostPower().
     // The block-jump-factor product and the boost are separate terms in one
@@ -2013,41 +2176,202 @@ pub fn tick_elytra(
     accumulate_fall_distance(state, state.position.y - old_y, false);
 }
 
-/// `Entity.checkInsideBlocks` → `Block.entityInside` → `makeStuckInBlock`: after
-/// the tick's movement, record the stuck-speed multiplier of whatever block the
-/// (deflated) bounding box is now inside, for the *next* move to consume. This is
-/// what produces the observable one-tick lag between entering a cobweb and being
-/// grabbed by it.
+/// `FireworkRocketEntity.tick`'s glide-boost impulse
+/// (`FireworkRocketEntity.java:122-137`), issue #206 — the elytra speed boost
+/// from using a firework rocket while gliding.
 ///
-/// Vanilla walks the swept movement segment with the target bounding box deflated
-/// by `1.0E-5`; we sample that resting overlap at the final position, which is
-/// exact for the stationary/slow case (standing in, or walking into, a web) — the
-/// same coarse approximation the water/lava hooks document, and the common case
-/// for cobweb (mineshaft corridors) and powder snow. Blocks are *assigned* in
-/// vanilla, not accumulated, so the last intersected block wins; for the uniform
-/// volumes these blocks form, iteration order is immaterial.
-fn update_stuck_multiplier(
-    state: &mut PlayerState,
-    view: &dyn CollisionView,
-    profile: &PhysicsProfile,
-) {
-    let bb = state.bounding_box(profile);
-    let min_x = mth::floor(bb.min_x + 1.0e-5);
-    let max_x = mth::floor(bb.max_x - 1.0e-5);
-    let min_y = mth::floor(bb.min_y + 1.0e-5);
-    let max_y = mth::floor(bb.max_y - 1.0e-5);
-    let min_z = mth::floor(bb.min_z + 1.0e-5);
-    let max_z = mth::floor(bb.max_z - 1.0e-5);
-    let mut found = Vec3d::ZERO;
+/// # What this function is, and is not, responsible for
+///
+/// Vanilla applies this every tick a firework rocket entity is **attached** to
+/// a fall-flying player (`attachedToEntity != null && attachedToEntity.isFallFlying()`,
+/// `FireworkRocketEntity.java:122-123`). The rocket is its own entity, ticked
+/// independently by the level's normal entity loop — spawning it on right-
+/// click, tracking the attachment, and its `life` counter (which decides how
+/// many ticks the boost lasts before the rocket explodes,
+/// `FireworkRocketEntity.java:186-215`) are entity/item state this crate has
+/// no model of and does not attempt here. A driver must spawn/track the
+/// rocket (or an equivalent per-use counter) and call this once per tick for
+/// as long as vanilla's attached rocket would still be ticking, with
+/// [`PlayerState::fall_flying`] already `true` — this function does not check
+/// it, the same way [`tick_elytra`] is only ever reached through its caller's
+/// own `fall_flying` dispatch.
+///
+/// **Ordering vanilla does not pin either.** The rocket ticks as an ordinary
+/// entity in the level's entity-iteration order, which is not defined relative
+/// to the player's own tick — so there is no "before or after `tick_elytra`"
+/// answer to reproduce; call this whenever the driver's own entity-tick order
+/// places the rocket.
+///
+/// What *is* physics, reproduced exactly: `movement.add(lookAngle * 0.1 +
+/// (lookAngle * 1.5 - movement) * 0.5)`, component-wise, all in `double`
+/// (`Vec3` arithmetic — no `float` narrowing anywhere in the source line).
+/// `lookAngle` is `Entity.getLookAngle()` = [`calculate_view_vector`] at the
+/// player's current pitch/yaw.
+pub fn apply_firework_boost(state: &mut PlayerState) {
+    let look = calculate_view_vector(state.pitch, state.yaw);
+    let m = state.velocity;
+    state.velocity = m.add(Vec3d::new(
+        look.x * 0.1 + (look.x * 1.5 - m.x) * 0.5,
+        look.y * 0.1 + (look.y * 1.5 - m.y) * 0.5,
+        look.z * 0.1 + (look.z * 1.5 - m.z) * 0.5,
+    ));
+}
+
+/// `AABB.collidedAlongVector` (`AABB.java:401-417`), specialised to one unit
+/// cell and to a **boolean** result: vanilla returns the hit point
+/// (`Optional<Vec3>`), but every caller here only ever asks "did it collide" —
+/// `Entity.collidedWithShapeMovingFrom` immediately reduces it to
+/// `.isPresent()`-shaped logic, and that is the only vanilla caller relevant to
+/// the blocks this module's swept scan cares about (every stuck-multiplier and
+/// powder-snow cell presents `Shapes.block()` to `getEntityInsideCollisionShape`,
+/// so `insideBlock` reduces to exactly this segment test).
+///
+/// `from`/`to` are the entity's **box centres** at the start and end of the
+/// move — equal to `AABB.collidedAlongVector`'s own `this.getCenter()` /
+/// `from.add(vector)`, since `vector = to_pos - from_pos` and the box is rigidly
+/// attached to the entity position, so translating the centre by the position
+/// delta is the same point as the centre of a box built at the new position.
+/// `half` is the entity's own half-extents (`getXsize() * 0.5` etc.).
+///
+/// Implemented as the standard box-slab test rather than porting
+/// `AABB.getDirection`'s face-by-face walk: the two compute the same boolean
+/// (intersect / no-intersect) over the same inflated box, and no caller here
+/// reads *which* face or *where* the hit point was — the one thing
+/// `getDirection` computes that this does not.
+fn segment_hits_cell(from: Vec3d, to: Vec3d, half: Vec3d, x: i32, y: i32, z: i32) -> bool {
+    // `inflate(size * 0.5 - 1.0E-7)`.
+    const EPS: f64 = 1.0e-7;
+    let min_x = f64::from(x) - (half.x - EPS);
+    let max_x = f64::from(x) + 1.0 + (half.x - EPS);
+    let min_y = f64::from(y) - (half.y - EPS);
+    let max_y = f64::from(y) + 1.0 + (half.y - EPS);
+    let min_z = f64::from(z) - (half.z - EPS);
+    let max_z = f64::from(z) + 1.0 + (half.z - EPS);
+
+    let d = to.subtract(from);
+    let mut t_min = 0.0f64;
+    let mut t_max = 1.0f64;
+    for (d_a, from_a, lo, hi) in [
+        (d.x, from.x, min_x, max_x),
+        (d.y, from.y, min_y, max_y),
+        (d.z, from.z, min_z, max_z),
+    ] {
+        if d_a.abs() < EPS {
+            // A stationary (or single-axis-flat) segment: the boolean test
+            // degenerates to plain containment on this axis, which subsumes
+            // vanilla's separate `inflated.contains(to) || inflated.contains(from)`
+            // pre-check — no need to special-case `from == to` above this loop.
+            if from_a < lo || from_a > hi {
+                return false;
+            }
+        } else {
+            let inv = 1.0 / d_a;
+            let (t1, t2) = {
+                let a = (lo - from_a) * inv;
+                let b = (hi - from_a) * inv;
+                if a <= b { (a, b) } else { (b, a) }
+            };
+            t_min = t_min.max(t1);
+            t_max = t_max.min(t2);
+            if t_min > t_max {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Enumerates the cells `Entity.checkInsideBlocks(from, to, …)` visits, for
+/// every consumer of that one vanilla sweep in this module
+/// ([`update_stuck_multiplier`], [`update_freezing`]).
+///
+/// Vanilla walks a 3D DDA from `from` to `to` (`BlockGetter.forEachBlockIntersectedBetween`,
+/// capped at 16 iterations) and tests each visited cell with
+/// [`segment_hits_cell`]-equivalent logic. Porting the DDA itself buys nothing a
+/// caller here needs — every block these two functions ask about
+/// (`stuck_multiplier`, `is_powder_snow`) is a single-cell yes/no answer, order-
+/// independent for the uniform volumes they occupy (see
+/// [`update_stuck_multiplier`]'s "last one wins" note). So this scans the
+/// **union** of the pre- and post-move bounding boxes instead: a conservative
+/// superset of the cells the DDA would reach (same start box, same end box,
+/// every intermediate cell along a straight segment between two boxes is
+/// spatially between them), narrowed to the cells the entity's box *actually*
+/// swept through via [`segment_hits_cell`] rather than accepted just for being
+/// in that superset's bounds.
+///
+/// This is what closes the defect the resting-box-only version had: a mover
+/// fast enough to pass *through* a thin stuck-in-block layer or powder-snow
+/// pocket without ever resting inside it is now caught, because the swept
+/// centre-to-centre segment crosses the cell even though neither endpoint box
+/// does.
+fn for_each_swept_cell(old_bb: Aabb, new_bb: Aabb, mut f: impl FnMut(i32, i32, i32)) {
+    let half = Vec3d::new(
+        (new_bb.max_x - new_bb.min_x) * 0.5,
+        (new_bb.max_y - new_bb.min_y) * 0.5,
+        (new_bb.max_z - new_bb.min_z) * 0.5,
+    );
+    let from_center = Vec3d::new(
+        (old_bb.min_x + old_bb.max_x) * 0.5,
+        (old_bb.min_y + old_bb.max_y) * 0.5,
+        (old_bb.min_z + old_bb.max_z) * 0.5,
+    );
+    let to_center = Vec3d::new(
+        (new_bb.min_x + new_bb.max_x) * 0.5,
+        (new_bb.min_y + new_bb.max_y) * 0.5,
+        (new_bb.min_z + new_bb.max_z) * 0.5,
+    );
+    // Same `1.0e-5` deflation as the resting-box version this replaces, and as
+    // `apply_bubble_column` still uses independently — see that function's
+    // "Divergences" note for why the constant is shared but the enumeration no
+    // longer is.
+    let min_x = mth::floor(old_bb.min_x.min(new_bb.min_x) + 1.0e-5);
+    let max_x = mth::floor(old_bb.max_x.max(new_bb.max_x) - 1.0e-5);
+    let min_y = mth::floor(old_bb.min_y.min(new_bb.min_y) + 1.0e-5);
+    let max_y = mth::floor(old_bb.max_y.max(new_bb.max_y) - 1.0e-5);
+    let min_z = mth::floor(old_bb.min_z.min(new_bb.min_z) + 1.0e-5);
+    let max_z = mth::floor(old_bb.max_z.max(new_bb.max_z) - 1.0e-5);
     for x in min_x..=max_x {
         for y in min_y..=max_y {
             for z in min_z..=max_z {
-                if let Some(m) = view.stuck_multiplier(x, y, z) {
-                    found = m;
+                if segment_hits_cell(from_center, to_center, half, x, y, z) {
+                    f(x, y, z);
                 }
             }
         }
     }
+}
+
+/// `Entity.checkInsideBlocks` → `Block.entityInside` → `makeStuckInBlock`: after
+/// the tick's movement, record the stuck-speed multiplier of whatever block the
+/// swept movement segment intersects, for the *next* move to consume. This is
+/// what produces the observable one-tick lag between entering a cobweb and being
+/// grabbed by it.
+///
+/// **Sweeps the segment, via [`for_each_swept_cell`], rather than sampling only
+/// the final resting position.** #216: the old version floored/ceiled the
+/// post-move box alone, so a mover fast enough to pass through a cobweb or
+/// powder-snow cell without ending inside it took no impulse at all — the
+/// resting-box-only approximation the `apply_bubble_column` "Divergences" note
+/// used to describe as deliberately shared between the two. It no longer is;
+/// see that note.
+///
+/// Blocks are *assigned* in vanilla, not accumulated, so the last intersected
+/// block wins; for the uniform volumes these blocks form, iteration order is
+/// immaterial.
+fn update_stuck_multiplier(
+    state: &mut PlayerState,
+    view: &dyn CollisionView,
+    profile: &PhysicsProfile,
+    pre_move_position: Vec3d,
+) {
+    let new_bb = state.bounding_box(profile);
+    let old_bb = state.dimensions().bounding_box(pre_move_position);
+    let mut found = Vec3d::ZERO;
+    for_each_swept_cell(old_bb, new_bb, |x, y, z| {
+        if let Some(m) = view.stuck_multiplier(x, y, z) {
+            found = m;
+        }
+    });
     // `Entity.makeStuckInBlock`: `resetFallDistance(); this.stuckSpeedMultiplier =
     // speedMultiplier;` (`Entity.java:2945-2947`) — the reset rides along with
     // every call that finds a stuck-triggering block (cobweb, powder snow, sweet
@@ -2057,6 +2381,63 @@ fn update_stuck_multiplier(
         state.fall_distance = 0.0;
     }
     state.stuck_speed_multiplier = found;
+}
+
+/// Issue #212. `LivingEntity.aiStep`'s freezing block (`LivingEntity.java:3139-3151`)
+/// plus the increment half of `InsideBlockEffectType.FREEZE`
+/// (`InsideBlockEffectType.java:6-11`, reached from
+/// `PowderSnowBlock.entityInside`, `PowderSnowBlock.java:63-83`, via the same
+/// `checkInsideBlocks` sweep [`update_stuck_multiplier`] models):
+///
+/// ```text
+/// FREEZE effect, applied once per tick the swept segment finds powder snow:
+///   setIsInPowderSnow(true);
+///   if (canFreeze()) ticksFrozen = min(ticksRequiredToFreeze, ticksFrozen + 1);
+///
+/// end-of-tick, unconditional:
+///   if (!isInPowderSnow || !canFreeze()) ticksFrozen = max(0, ticksFrozen - 2);
+/// ```
+///
+/// Collapsed into one function because this crate has no per-tick "flag set
+/// earlier, read later" bookkeeping to spare: `is_in_powder_snow` is computed
+/// and consumed in the same call, which is equivalent since nothing else reads
+/// it between the two vanilla call sites.
+///
+/// `canFreeze()` is `!is(EntityTypeTags.FREEZE_IMMUNE_ENTITY_TYPES)`
+/// (`Entity.java:3886-3888`); the player entity type is never a member (only
+/// certain mobs — striders, blazes, snow golems and others — are), so it is
+/// unconditionally `true` for every [`PlayerState`] and not modelled as a
+/// field.
+///
+/// **What this does not do: apply freeze damage.** Vanilla's own trigger,
+/// `tickCount % 40 == 0 && isFullyFrozen() && canFreeze()`
+/// (`LivingEntity.java:3147-3149`), needs an absolute server tick count this
+/// crate has no notion of — every other timer here is a countdown
+/// ([`PlayerState::no_jump_delay`], [`PlayerState::fall_distance`]'s resets),
+/// never a count against a global clock, and this crate applies no damage
+/// anywhere (fall damage is server-owned too; see [`PlayerState::fall_distance`]'s
+/// doc). [`PlayerState::should_apply_freeze_damage`] exposes the *predicate* —
+/// correct, tested, and ready for a driver that does own a tick counter — so
+/// the only missing piece is the counter itself, not the rule.
+fn update_freezing(
+    state: &mut PlayerState,
+    view: &dyn CollisionView,
+    profile: &PhysicsProfile,
+    pre_move_position: Vec3d,
+) {
+    let new_bb = state.bounding_box(profile);
+    let old_bb = state.dimensions().bounding_box(pre_move_position);
+    let mut in_powder_snow = false;
+    for_each_swept_cell(old_bb, new_bb, |x, y, z| {
+        if view.is_powder_snow(x, y, z) {
+            in_powder_snow = true;
+        }
+    });
+    state.frozen_ticks = if in_powder_snow {
+        (state.frozen_ticks + 1).min(PlayerState::TICKS_REQUIRED_TO_FREEZE)
+    } else {
+        state.frozen_ticks.saturating_sub(2)
+    };
 }
 
 /// `BubbleColumnBlock.entityInside` → `Entity.onInsideBubbleColumn` /
@@ -2118,23 +2499,31 @@ fn update_stuck_multiplier(
 ///
 /// # Divergences, deliberate
 ///
-/// * **Cell enumeration is the post-move box, not the swept path.** Vanilla walks
+/// * **Cell enumeration is the post-move box, not the swept path — no longer
+///   shared with [`update_stuck_multiplier`].** Vanilla walks
 ///   `forEachBlockIntersectedBetween(from, to, …)`, so a player moving fast enough
 ///   to pass *through* a column cell without ending inside it still takes that
-///   cell's impulse. This function enumerates the cells of the post-move bounding
-///   box only — which is exactly the approximation
-///   [`update_stuck_multiplier`] has always made for the *same* vanilla call
-///   (`applyEffectsFromBlocks`), so the two stay consistent rather than one being
-///   quietly better than the other. It is unobservable for the case the feature
-///   exists to serve (a player riding a column, whose per-tick displacement is at
-///   most `0.7`, well under a cell); it would matter for a player launched through
-///   the top of a column at `1.8`/tick.
+///   cell's impulse. This function still enumerates the cells of the post-move
+///   bounding box only. **This used to be "exactly the approximation
+///   `update_stuck_multiplier` makes for the same vanilla call", deliberately kept
+///   consistent; it no longer is.** #216 gave `update_stuck_multiplier` (and
+///   [`update_freezing`]) a real swept-segment test via
+///   [`for_each_swept_cell`], because a fast mover grazing a cobweb or a thin
+///   powder-snow layer without resting inside it is the exact defect a resting-box
+///   sample cannot see — and bubble columns were left as they were, since nothing
+///   in this issue asked for them and the case this function serves (a player
+///   *riding* a column, displacement at most `0.7`/tick, well under a cell) does
+///   not need it. So as of #216 this is a **known, not a deliberately mirrored**,
+///   approximation — worth revisiting with the same fix if a launched-through-a-
+///   column case ever needs it.
 /// * **The deflation constant is `1.0e-5`, not vanilla's widened `1.0E-5F`.**
 ///   Vanilla deflates the target box by a *float* literal, which widens to
 ///   `1.0000000116860974e-5`. This function uses the `f64` `1.0e-5` that
-///   [`update_stuck_multiplier`] already uses, for the same reason: they model one
-///   vanilla sweep and must not disagree. The difference can only change an answer
-///   when a box edge lies within `1.2e-13` of a cell boundary.
+///   [`update_stuck_multiplier`] and [`for_each_swept_cell`] also use, for the
+///   same reason: they all model the same vanilla sweep and must not gratuitously
+///   disagree on the constant, even though the enumeration itself has now
+///   diverged. The difference from vanilla's widened float can only change an
+///   answer when a box edge lies within `1.2e-13` of a cell boundary.
 /// * **`Player`'s `!abilities.flying` gate is not applied.** Both overrides
 ///   (`Player.java:310-321`) skip the impulse entirely for a flying player. This
 ///   crate has no abilities state, so the conjunct is vacuously true — see
@@ -2245,6 +2634,13 @@ fn travel_and_check_inside_blocks(
     view: &dyn CollisionView,
     profile: &PhysicsProfile,
 ) {
+    // The position *before* this tick's travel dispatch moves it — the "from"
+    // half of vanilla's `checkInsideBlocks(from, to, …)` segment, needed by
+    // [`update_stuck_multiplier`] and [`update_freezing`] to sweep the tick's
+    // movement instead of sampling only where it ends. Captured here, ahead of
+    // every branch below, because every one of them can write `state.position`.
+    let pre_move_position = state.position;
+
     // `Entity.baseTick` computes the fluid summary from the *pre-move* box, before
     // `travel` reads `isInWater`/`isInLava`. Do the same: one source of truth for
     // eye/box submersion, recorded on the state for the swimming pose and for the
@@ -2374,7 +2770,26 @@ fn travel_and_check_inside_blocks(
     // player is neither lifted by a soul-sand column nor grabbed by a cobweb.
     if !state.flying {
         apply_bubble_column(state, view, profile);
-        update_stuck_multiplier(state, view, profile);
+        update_stuck_multiplier(state, view, profile, pre_move_position);
+    }
+    // `LivingEntity.aiStep`'s freezing block (`LivingEntity.java:3139-3151`), run
+    // unconditionally — **not** inside the `!flying` gate above. Vanilla's
+    // `Player.makeStuckInBlock` override is what suppresses the two calls above
+    // while flying; nothing overrides `InsideBlockEffectType.FREEZE`
+    // (`InsideBlockEffectType.java:6-11`), which `PowderSnowBlock.entityInside`
+    // applies to every `LivingEntity` standing in the block regardless of
+    // `abilities.flying`. A creative-flying player drifting through powder snow
+    // still accumulates `frozen_ticks`, even with no stuck-multiplier drag.
+    update_freezing(state, view, profile, pre_move_position);
+
+    // `LivingEntity.aiStep`'s "push" block: `if (autoSpinAttackTicks > 0)
+    // autoSpinAttackTicks--;` (`LivingEntity.java:3158-3159`), unconditional —
+    // no `!flying` gate in vanilla either, so a riptide launch that carries a
+    // player into creative flight still counts down normally. The
+    // entity-hit sweep (`checkAutoSpinAttack`) that runs alongside it is not
+    // modelled — see [`PlayerState::auto_spin_attack_ticks`]'s scope note.
+    if state.auto_spin_attack_ticks > 0 {
+        state.auto_spin_attack_ticks -= 1;
     }
 }
 

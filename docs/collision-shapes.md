@@ -91,18 +91,38 @@ pathfinder asks it for every candidate cell.
 `WorldCollision` and `LiveCollision` are two implementations of one trait, so a
 disagreement between them is a bug that hides — tests pass against one while the
 game misbehaves against the other. They are kept consistent **structurally**: every
-one of the 13 answers is computed once, in a free function over a private
+one of the 16 answers is computed once, in a free function over a private
 `BlockView` trait, and each `impl CollisionView` block is nothing but one-line
 delegation. The only things an adapter supplies differently are the state id at a
 cell, the shape of a state, its fluid, and its vanilla block name — and the demo
 palette maps its 10 ids onto real vanilla names so that even the name-keyed tables
 are one shared code path rather than a stub on one side.
 
-### Status of the 13 methods
+### Status of the 16 methods
 
-Real (11): `collision_boxes`, `collision_top`, `friction`, `speed_factor`,
+(Was 13 as of the original fix this doc describes; `bubble_column` (#199),
+`is_scaffolding` and `is_powder_snow` (#210/#212) were added since — same
+structure, so they are folded into the counts and tables below rather than
+kept as a separate history.)
+
+Real (13): `collision_boxes`, `collision_top`, `friction`, `speed_factor`,
 `jump_factor`, `is_water`, `is_climbable`, `is_lava`, `stuck_multiplier`,
-`bounce_restitution`, `blocks_motion`.
+`bounce_restitution`, `blocks_motion`, `is_scaffolding`, `is_powder_snow`.
+
+- **`is_scaffolding`** and **`is_powder_snow`** are name-keyed identity checks
+  (`is_scaffolding_at`/`is_powder_snow_at` in `collision.rs`, matching
+  `v.name_of(state) == Some("minecraft:scaffolding"|"minecraft:powder_snow")`),
+  not routed through `physics_at`'s `BlockPhysics` table like the other
+  name-keyed answers — each is a single-block identity, not a `Properties`/tag
+  fold shared with anything else `physics_at` returns. `is_scaffolding` exists
+  because `is_climbable` cannot: scaffolding and a ladder share the same
+  `BlockTags.CLIMBABLE` membership but differ in one downstream behaviour
+  (`LivingEntity.handleOnClimbable`'s sneak-to-hold clamp — see
+  `PlayerState`'s `entity.rs::travel_in_air` climbing block). `is_powder_snow`
+  exists because `stuck_multiplier` answers a different vanilla question over
+  the same block — see `CollisionView::is_powder_snow`'s doc for why the two
+  cannot be collapsed into one (a flying player keeps freezing in powder snow
+  even though the stuck-multiplier drag is suppressed).
 
 - **`blocks_motion`** was itself a derived approximation until `24af787`. It is
   now dumped per state — `BlockState.blocksMotion()`
@@ -141,9 +161,13 @@ Real with a stated approximation (2):
   fabricating "source, amount 8" would invent a current in flat demo lakes.
 - **`is_solid_face`** — `isFaceSturdy(FULL)` is approximated by "does any *single*
   box cover the whole face", where vanilla unions the shape first. No false
-  positives, possible false negatives. Also, the seam does not say which fluid is
-  flowing, so any fluid in the cell answers `false` (vanilla only excludes the
-  same fluid). One consumer: a falling fluid's downward jet.
+  positives, possible false negatives. One consumer: a falling fluid's downward
+  jet. **Fixed in #216**: the seam now carries `kind`, the fluid asking the
+  question (`FlowingFluid.isSolidFace` is an instance method on the flowing
+  fluid, not a free function over the neighbour cell), so only a neighbour
+  holding the *same* fluid answers `false` — a waterlogged solid block asked by
+  a *different* fluid's falling jet now correctly falls through to the
+  sturdy-face check instead of being forced to `false` by "any fluid present".
 
 ## How to change it
 
