@@ -49,6 +49,26 @@ use crate::protocol::ServerProtocol;
 use crate::server::{EntitySource, NoEntities, serve_connection};
 use crate::spawn::{Task, spawn};
 
+/// Spawns `fut` racing against `shutdown`'s notification — whichever finishes
+/// first ends the task. Both background tick loops
+/// [`open_in_memory_with_mobs`](IntegratedServer::open_in_memory_with_mobs)
+/// starts (`run_mob_tick_loop`, `run_block_entity_tick_loop`) need exactly
+/// this shape, so it exists once here rather than once per call site. Native
+/// only, like the tick loops themselves and every caller of this function.
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_tick_task<F>(shutdown: &Arc<Notify>, fut: F) -> Task
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let signal = shutdown.clone();
+    spawn(async move {
+        tokio::select! {
+            _ = signal.notified() => {}
+            _ = fut => {}
+        }
+    })
+}
+
 /// A running integrated server that owns its serving task(s).
 ///
 /// Dropping the handle signals shutdown and aborts the task, so a server can
@@ -232,21 +252,9 @@ impl IntegratedServer {
             }
         });
 
-        let sim_signal = shutdown.clone();
-        let mob_task = spawn(async move {
-            tokio::select! {
-                _ = sim_signal.notified() => {}
-                _ = run_mob_tick_loop(mob_handle, live_mobs) => {}
-            }
-        });
-
-        let block_entity_signal = shutdown.clone();
-        let block_entity_task = spawn(async move {
-            tokio::select! {
-                _ = block_entity_signal.notified() => {}
-                _ = run_block_entity_tick_loop(block_entities) => {}
-            }
-        });
+        let mob_task = spawn_tick_task(&shutdown, run_mob_tick_loop(mob_handle, live_mobs));
+        let block_entity_task =
+            spawn_tick_task(&shutdown, run_block_entity_tick_loop(block_entities));
 
         (
             Self {
