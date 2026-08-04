@@ -1231,6 +1231,34 @@ pre-existing entity-snapshot stream with no new encoder.
   disclosed gaps in `lodestone_entity::damage`'s own module doc (issue
   #261); `PLAYER_BARE_HAND_ATTACK_DAMAGE`'s own doc comment names the exact
   same blocker.
+- **The sweep arc's own multi-entity damage loop is a distinct, still-fully
+  unbuilt mechanic — not merely "sweep does bonus damage to the one target
+  already hit".** Re-checked directly against the jar rather than assumed,
+  because every existing mention of "sweep" in this doc (and in issue #12's
+  own history) is about the *particle*: vanilla's `Player.doSweepAttack`
+  (`.cache/mc/26.2/src/net/minecraft/world/entity/player/Player.java:1163-1189`)
+  is called only when `isSweepAttack` holds (`:1043-1052` — full-strength,
+  not a crit, not a knockback-bonus hit, attacker on ground, attacker's
+  recent horizontal speed under `getSpeed() * 2.5`, main-hand item tagged
+  `#minecraft:swords`) and then loops
+  `level().getEntitiesOfClass(LivingEntity.class,
+  entity.getBoundingBox().inflate(1.0, 0.25, 1.0))` — i.e. every living
+  entity in a box around the *original target*, not the attacker — and
+  damages **each one** (excluding the attacker, the original target, allies,
+  and marker armour stands, plus a `distanceToSqr(nearby) < 9.0` clamp) with
+  `1.0 + sweeping_damage_ratio_attribute * baseDamage` (`Attributes.
+  SWEEPING_DAMAGE_RATIO`) scaled by `attackStrengthScale`, applying its own
+  separate `0.4F`-power knockback to
+  every entity it hits. This is a real, structurally separate hit-multiple-
+  targets-in-one-swing mechanic, and `crates/lodestone-server/src/mobs.rs`
+  has no code resembling it at all (confirmed by grep: zero hits for
+  `sweep`/`Sweep` anywhere combat-related in that crate). It needs the same
+  attack-strength-ticker-server-side and sword-item-tag prerequisites the
+  bullet above already names, so it belongs under #261 rather than as new
+  scope here — recorded explicitly because the existing #261 body's
+  "critical-hit/sweep-attack bonus damage" phrase reads as a damage-number
+  tweak and could understate that the actual missing piece is an
+  entity-query loop with its own knockback, not a multiplier.
 - **Wiring mob-on-player damage for real** (not just the entry point):
   give `run_mob_tick_loop`/`MobSim` a live feed of the connected player's
   position (the same missing input `MobSim::despawn_pass`'s own "no despawn
