@@ -84,9 +84,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `crates/lodestone-server/src/`, each a line-by-line port of the corresponding
   vanilla `BlockEntity`/`Block` class:
 - [Block entity renderers](./block-entity-renderers.md) — The cuboid rigs vanilla's
-  `BlockEntityRenderer`s draw for blocks whose **block model does not describe them**.
-  Today: chests (single, double left, double right; every material; the lid animation)
-  and skull/head geometry (five of vanilla's seven types).
+  `BlockEntityRenderer`s draw for blocks whose block model **does not fully describe
+  them**. Chest and skull are the total-absence case — their block models have zero
+  elements, so before this work they were a hole in the world. Bell is the partial
+  case: its block model has real geometry for the attachment frame, but the swinging
+  body/rim comes from `BellRenderer` alone, same as chest and skull in kind, just not
+  in degree. Today: chests (single, double left, double right; every material; the lid
+  animation), skull/head geometry (five of vanilla's seven types), and the bell
+  body/rim (see [Bell](#bell)).
 - [Block outline and interaction shapes](./block-outline-shapes.md) —
   Per-block-state `BlockStateBase.getShape` (the **outline**) and
   `BlockStateBase.getInteractionShape`, for protocol 776 (Minecraft 26.2), dumped from
