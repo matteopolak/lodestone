@@ -5,8 +5,9 @@
 //! /summon item → ADD_ENTITY + SET_ENTITY_DATA
 //!   → v770 metadata decode (index 8, SER_ITEM_STACK)
 //!   → EntityMetadataUpdate::item → EntityView::item
-//!   → NetClient::entity_snapshots()  (type_path == "item", item == Some(..))
-//!   → EntityInterpolator → EntityDraw → RenderState::render → GPU pixels
+//!   → NetClient::entities()  (type_path == "item", item == Some(..))
+//!   → apply_view (ingest components) → EntityInterpolator → EntityDraw
+//!   → RenderState::render → GPU pixels
 //! ```
 //!
 //! # Nothing here is faked
@@ -48,8 +49,68 @@ use lodestone::entities::{EntityDraw, EntityInterpolator, ITEM_ENTITY_TYPE_PATH}
 use lodestone::gpu::RenderState;
 use lodestone::resources::BlockResources;
 use lodestone_assets::ResourceLocation;
+use lodestone_client::EntityView;
+use lodestone_ecs::entity::{
+    CreeperSwellDir, CustomName, CustomNameVisible, DisplayItem, Equipment, EntityFlags,
+    EntityIndex, EntityKind, EntityUuid, HeadYaw, MinecraftEntityId, OnGround, Position, Rotation,
+    Variant, Velocity,
+};
+use lodestone_model::Reported;
 use lodestone_render::{Camera, GpuContext, HeadlessTarget, RenderTarget};
 use lodestone_testsupport::RconClient;
+
+/// Translates a raw, version-free [`EntityView`] into the ingest components
+/// the live path itself reads (`entities.rs`'s `resolve_entity_facts`),
+/// upserting `view.entity_id`'s ingest entity in `world` — issue #36's
+/// replacement for feeding a hand-built `EntitySnapshot` straight to a
+/// now-deleted `fold_entity_snapshots`. Identical to
+/// `live_entity_render.rs`'s own `apply_view` — see that copy's doc for why
+/// this is duplicated rather than shared: [`EntityInterpolator::new`]
+/// installs no `IngestPlugin`, so there is no production "apply this whole
+/// view" entry point either file could call instead.
+fn apply_view(world: &mut bevy_ecs::world::World, view: &EntityView) {
+    let entity = match world.resource::<EntityIndex>().get(view.entity_id) {
+        Some(existing) => existing,
+        None => {
+            let entity = world.spawn(MinecraftEntityId(view.entity_id)).id();
+            world.resource_mut::<EntityIndex>().insert(view.entity_id, entity);
+            entity
+        }
+    };
+    let mut e = world.entity_mut(entity);
+    e.insert((
+        EntityKind(view.entity_type.clone()),
+        Position(view.position),
+        Rotation(view.rotation),
+        HeadYaw(view.head_yaw),
+        OnGround(view.on_ground),
+        Equipment(view.equipment.clone()),
+    ));
+    if let Some(uuid) = view.uuid {
+        e.insert(EntityUuid(uuid));
+    }
+    if let Some(v) = view.velocity {
+        e.insert(Velocity(v));
+    }
+    if let Reported::Reported(item) = &view.item {
+        e.insert(DisplayItem(item.clone()));
+    }
+    if let Some(variant) = &view.variant {
+        e.insert(Variant(variant.clone()));
+    }
+    if let Some(dir) = view.creeper_swell_dir {
+        e.insert(CreeperSwellDir(dir));
+    }
+    if let Reported::Reported(name) = &view.custom_name {
+        e.insert(CustomName(name.clone()));
+    }
+    if let Some(visible) = view.custom_name_visible {
+        e.insert(CustomNameVisible(visible));
+    }
+    if let Some(flags) = view.flags {
+        e.insert(EntityFlags(flags));
+    }
+}
 
 const GAME_HOST: &str = "127.0.0.1";
 const GAME_PORT: u16 = 25565;
@@ -134,7 +195,10 @@ fn wait_for_drop(
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
         let _ = net.poll();
-        interp.update(&net.entity_snapshots(), 1.0);
+        for view in net.entities() {
+            apply_view(interp.world_mut(), &view);
+        }
+        interp.update(1.0);
         let nearest = interp
             .draws()
             .into_iter()
@@ -188,7 +252,7 @@ fn a_server_spawned_drop_knows_which_item_it_is_and_reaches_pixels() {
     let mut in_world = false;
     while Instant::now() < ready {
         let _ = net.poll();
-        if !net.loaded_chunks().is_empty() || !net.entity_snapshots().is_empty() {
+        if !net.loaded_chunks().is_empty() || !net.entities().is_empty() {
             in_world = true;
             break;
         }

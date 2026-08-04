@@ -40,14 +40,15 @@ impl Sim {
     /// back to the player's current position if the entity is unknown (so the
     /// sound is still heard rather than dropped) — the same "audible, not
     /// silent" preference the live gate encodes.
+    ///
+    /// Issue #36: there is no `NetClient::entity_snapshots()` any more — the
+    /// render-side fold this now reads, [`Self::entity_draws`], is the same
+    /// `fold_entities` output every entity pixel gate reads, so a missing id
+    /// (no connection, or a track the fold has not spawned yet) falls through
+    /// to the player position exactly as before.
     pub(crate) fn entity_sound_position(&self, entity_id: i32) -> glam::Vec3 {
-        if let Some(net) = &self.net
-            && let Some(snap) = net
-                .entity_snapshots()
-                .into_iter()
-                .find(|s| s.id == entity_id)
-        {
-            return snap.feet + glam::Vec3::new(0.0, 0.5, 0.0);
+        if let Some(draw) = self.entity_draws().into_iter().find(|d| d.id == entity_id) {
+            return draw.feet + glam::Vec3::new(0.0, 0.5, 0.0);
         }
         let p = self.player().position;
         glam::Vec3::new(p.x as f32, p.y as f32, p.z as f32)

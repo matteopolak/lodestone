@@ -59,12 +59,12 @@
 //! ```
 
 use bevy_ecs::world::World;
-use lodestone::entities::{EntityDraw, EntityInterpPlugin, EntitySnapshot, extracted_entity_draws, fold_entity_snapshots};
+use lodestone::entities::{EntityDraw, EntityInterpPlugin, extracted_entity_draws, fold_entities};
 use lodestone::gpu::{RenderState, SKY_COLOR};
 use lodestone_ecs::app::App;
 use lodestone_ecs::ingest::{IngestPlugin, IngestQueue};
 use lodestone_ecs::{Extract, GameTick, NetIngest};
-use lodestone_model::{AnimationAction, ClientEvent, Reported, Rotation, Vec3 as ModelVec3};
+use lodestone_model::{AnimationAction, ClientEvent, Rotation, Vec3 as ModelVec3};
 use lodestone_render::{AnimInput, Camera, GpuContext, HeadlessTarget, RenderTarget};
 
 const W: u32 = 320;
@@ -107,25 +107,10 @@ fn world_with_two_tracked_zombies(feet: glam::Vec3) -> World {
         world.run_schedule(NetIngest);
     }
 
-    let snapshot = |id: i32| EntitySnapshot {
-        id,
-        type_path: "zombie".into(),
-        feet,
-        yaw: 0.0,
-        head_yaw: 0.0,
-        pitch: 0.0,
-        scale: 1.0,
-        item: Reported::Unreported,
-        velocity: None,
-        on_ground: true,
-        equipment: Vec::new(),
-        equipment_dye: Vec::new(),
-        variant: None,
-        count: 1,
-        name_tag: None,
-        creeper_swell_dir: None,
-    };
-    fold_entity_snapshots(&mut world, &[snapshot(1), snapshot(2)]);
+    // Issue #36: read the ingest components `apply_entity_spawn` already wrote
+    // directly, rather than a hand-built `EntitySnapshot` — same as
+    // `Sim::fold_entities` does live.
+    fold_entities(&mut world);
     world
 }
 

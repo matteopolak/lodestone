@@ -6,8 +6,9 @@
 //! the **server** spawned survives the whole shell chain:
 //!
 //! ```text
-//! live ADD_ENTITY → ClientHandle::entities() → NetClient::entity_snapshots()
-//!   → EntityInterpolator → EntityDraw → RenderState::render → GPU pixels
+//! live ADD_ENTITY → ClientHandle::entities() → NetClient::entities()
+//!   → apply_view (ingest components) → EntityInterpolator::update
+//!   → EntityDraw → RenderState::render → GPU pixels
 //! ```
 //!
 //! This test closes that gap. It connects the shell's own [`NetClient`] to the
@@ -34,8 +35,74 @@ use std::time::{Duration, Instant};
 use lodestone::net::NetClient;
 use lodestone::entities::{EntityDraw, EntityInterpolator};
 use lodestone::gpu::RenderState;
+use lodestone_client::EntityView;
+use lodestone_ecs::entity::{
+    CreeperSwellDir, CustomName, CustomNameVisible, DisplayItem, Equipment, EntityFlags,
+    EntityIndex, EntityKind, EntityUuid, HeadYaw, MinecraftEntityId, OnGround, Position, Rotation,
+    Variant, Velocity,
+};
+use lodestone_model::Reported;
 use lodestone_render::{Camera, GpuContext, HeadlessTarget, RenderTarget};
 use lodestone_testsupport::RconClient;
+
+/// Translates a raw, version-free [`EntityView`] into the ingest components
+/// [`crate::entities::resolve_entity_facts`] (the live path's own reader)
+/// expects, upserting `view.entity_id`'s ingest entity in `world` — issue
+/// #36's replacement for feeding a hand-built `EntitySnapshot` straight to a
+/// now-deleted `fold_entity_snapshots`.
+///
+/// This exists here, rather than reusing a shared helper, because the
+/// production translation (`lodestone_ecs::ingest`'s per-`ClientEvent`
+/// systems) works from the wire event, not from an already-derived
+/// `EntityView` — there is no version-free "apply this whole view" entry
+/// point in production to call instead. [`EntityInterpolator::new`]
+/// deliberately installs no `IngestPlugin`/`NetIngest` schedule (see that
+/// method's own doc), so this test drives the `World` it built the same way
+/// `entities.rs`'s own `IngestSnap` test helper does: upsert components
+/// directly, never remove one that `view` stays silent about.
+fn apply_view(world: &mut bevy_ecs::world::World, view: &EntityView) {
+    let entity = match world.resource::<EntityIndex>().get(view.entity_id) {
+        Some(existing) => existing,
+        None => {
+            let entity = world.spawn(MinecraftEntityId(view.entity_id)).id();
+            world.resource_mut::<EntityIndex>().insert(view.entity_id, entity);
+            entity
+        }
+    };
+    let mut e = world.entity_mut(entity);
+    e.insert((
+        EntityKind(view.entity_type.clone()),
+        Position(view.position),
+        Rotation(view.rotation),
+        HeadYaw(view.head_yaw),
+        OnGround(view.on_ground),
+        Equipment(view.equipment.clone()),
+    ));
+    if let Some(uuid) = view.uuid {
+        e.insert(EntityUuid(uuid));
+    }
+    if let Some(v) = view.velocity {
+        e.insert(Velocity(v));
+    }
+    if let Reported::Reported(item) = &view.item {
+        e.insert(DisplayItem(item.clone()));
+    }
+    if let Some(variant) = &view.variant {
+        e.insert(Variant(variant.clone()));
+    }
+    if let Some(dir) = view.creeper_swell_dir {
+        e.insert(CreeperSwellDir(dir));
+    }
+    if let Reported::Reported(name) = &view.custom_name {
+        e.insert(CustomName(name.clone()));
+    }
+    if let Some(visible) = view.custom_name_visible {
+        e.insert(CustomNameVisible(visible));
+    }
+    if let Some(flags) = view.flags {
+        e.insert(EntityFlags(flags));
+    }
+}
 
 const GAME_HOST: &str = "127.0.0.1";
 /// The purpose-built summon+observe oracle: game on :25567, RCON on :25575.
@@ -96,7 +163,7 @@ fn server_sent_mob_reaches_pixels_through_shell() {
     let mut in_world = false;
     while Instant::now() < ready_deadline {
         let _ = net.poll();
-        if !net.loaded_chunks().is_empty() || !net.entity_snapshots().is_empty() {
+        if !net.loaded_chunks().is_empty() || !net.entities().is_empty() {
             in_world = true;
             break;
         }
@@ -151,10 +218,12 @@ fn server_sent_mob_reaches_pixels_through_shell() {
     let find_deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < find_deadline {
         let _ = net.poll();
-        let snaps = net.entity_snapshots();
+        for view in net.entities() {
+            apply_view(interp.world_mut(), &view);
+        }
         // Advance the real interpolation seam with a full tick so draws() lands
         // on the current server pose rather than an easing midpoint.
-        interp.update(&snaps, 1.0);
+        interp.update(1.0);
         let nearest = interp
             .draws()
             .into_iter()
@@ -180,7 +249,7 @@ fn server_sent_mob_reaches_pixels_through_shell() {
             r.cmd(&format!("kill @e[type=pig,tag={PROBE_TAG}]"));
         }
         panic!(
-            "the summoned pig never crossed the shell's entity path (net → entity_snapshots → \
+            "the summoned pig never crossed the shell's entity path (net → apply_view → \
              interpolator → EntityDraw) within the timeout. The server registered it (RCON \
              summon returned), so this is a real gap in the shell/client entity wiring, not a \
              harness fault."
