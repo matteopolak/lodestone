@@ -143,22 +143,46 @@ reviewable commit, not as a drive-by while landing something else.
 
 ## Islands: variants this table found reaching nothing
 
-41 of 98 variants are `Route::NOWHERE`. Most are simply decoded ahead of a consumer,
-which is a normal state for a from-scratch client. **Three are different — a fold
-exists, is unit-tested, and nothing feeds it**, which is the island shape exactly:
+38 of 98 variants are `Route::NOWHERE`. Most are simply decoded ahead of a consumer,
+which is a normal state for a from-scratch client.
 
-| variant | the fold that never runs |
-|---|---|
-| `BlockDestruction` | `lodestone_game::mining::BlockCrackOverlay::apply` — other players' crack overlay. No caller outside its own file and tests. |
-| `HeldSlotChanged` | `lodestone_game::player_state::HudState::apply` — server-driven hotbar selection (`/item`, creative). No caller outside its own file and tests. |
-| `DifficultyChanged` | the same `HudState::apply`. |
+**Three were different — a fold existed, was unit-tested, and nothing fed it.**
+That shape is fixed as of this writing:
+
+| variant | the fold that used to never run | now routed to | fixed by |
+|---|---|---|---|
+| `BlockDestruction` | `lodestone_game::mining::BlockDestructionOverlays::apply` — other players' crack overlay. No caller outside its own file and tests. | `session` → `lodestone_ecs::session::SessionBlockDestruction`, folded by `apply_block_destruction` | the routing commit that closed this table's own note |
+| `HeldSlotChanged` | `lodestone_game::player_state::HudState::apply`'s `select_slot` arm — server-driven hotbar selection (`/item`, creative). No caller outside its own file and tests. | `session` → `crate::player::SelectedSlot`, folded by `apply_local_player_state` | same |
+| `DifficultyChanged` | the same `HudState::apply`. | `session` → `lodestone_ecs::session::ServerDifficulty`, folded by `apply_local_player_state` | same |
 
 `HudState` was superseded by the `lodestone-ecs` session components (see
 `session.rs`'s note on `Vitals`: `HudState` has no "unreported" bit, so Stage 3 did
-not adopt it), which is *why* it has no caller — but the two events it folds were
-never re-homed onto a component, so they now reach nothing at all.
+not adopt it), which is *why* it had no caller for these two — but the events they
+fold were never re-homed onto a component, so they reached nothing at all. The fix
+was new session components (`SelectedSlot` already existed for the local-input
+half and gained a second, server-authoritative writer; `ServerDifficulty` is new),
+**not** reviving `HudState::apply` — that function stays dead code.
 
-The remaining 38, listed for the record and not as a defect claim:
+`BlockDestruction` is a different shape from the other two: it is about *other
+players'* blocks, which reads at first like "block/world state" and a candidate
+for `shell` (the way the chest-lid `BlockEvent` is, needing no `handles_event` arm
+at all). It is routed `session` instead, because
+`BlockDestructionOverlays` is a per-*session* collection keyed by the breaking
+entity's id — the same shape as `SessionBossBars`/`SessionTabList` just above it in
+`route()`, not a world-geometry fact the mesher owns.
+
+**Routing is not the same as drawing.** `HeldSlotChanged` reaches pixels for free —
+`lodestone_shell::sim::Sim::selected_slot()` already reads `SelectedSlot` and
+`app.rs`'s hotbar highlight already calls it, so wiring the fold was the whole fix.
+`BlockDestruction` and `DifficultyChanged` do not: nothing in the shell reads
+`SessionBlockDestruction` or `ServerDifficulty` yet, and for `BlockDestruction`
+specifically, the renderer's `CrackTarget`/`CrackPipeline`
+(`lodestone_shell::gpu`) only ever draws *one* target — the local player's own
+dig — so painting other players' cracks needs that pipeline to accept more than
+one, which is a rendering change outside this table's scope. Both are tracked as
+separate follow-up issues; see the routing commit's issue links.
+
+The remaining 35, listed for the record and not as a defect claim:
 
 `Ping`, `SpawnPositionChanged`, `BlockChangedAck`, `ChunkCacheCenterChanged`,
 `ChunkCacheRadiusChanged`, `SimulationDistanceChanged`, `EntityStatus`,

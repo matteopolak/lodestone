@@ -479,7 +479,7 @@ fn swing() -> ClientAction {
 /// keyed on the breaking entity: a given entity breaks at most one block at a
 /// time, so a new position for an entity supersedes its previous one. This holds
 /// the current stage per position for the renderer to consume.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct BlockDestructionOverlays {
     entries: Vec<Overlay>,
 }

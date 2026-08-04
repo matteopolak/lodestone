@@ -2144,6 +2144,26 @@ pub fn route(event: &ClientEvent) -> Route {
         | ClientEvent::AbilitiesChanged { .. }
         | ClientEvent::DimensionTypeChanged { .. }
         | ClientEvent::BiomeVisuals { .. } => SESSION,
+        // Two of the three `HudState`-shaped islands this table found
+        // (`docs/event-routing.md`): a fold existed and was unit-tested, but
+        // `lodestone_game::player_state::HudState` itself has no production
+        // caller (Stage 3 superseded it with the session components above and
+        // never re-homed these two onto one). Both are local-player scalars,
+        // so `session` is correct either way — the fix was writing
+        // `crate::player::SelectedSlot` / `ServerDifficulty` from
+        // `apply_local_player_state`, not reviving `HudState::apply`.
+        | ClientEvent::HeldSlotChanged { .. }
+        | ClientEvent::DifficultyChanged { .. } => SESSION,
+        // The third: `lodestone_game::mining::BlockDestructionOverlays::apply`
+        // existed and was unit-tested with no caller anywhere. This is about
+        // *other players'* blocks, so it is tempting to read it as "block/world
+        // state" and route it `shell` the way the chest-lid `BlockEvent` is —
+        // but `BlockDestructionOverlays` is a per-session collection keyed by
+        // breaking-entity id (one entity breaks one block at a time), the same
+        // shape as `SessionBossBars`/`SessionTabList` just above, not a
+        // world-geometry fact the mesher owns. Folded into
+        // `SessionBlockDestruction` alongside them.
+        ClientEvent::BlockDestruction { .. } => SESSION,
         // scoreboard, tab list, boss bars
         ClientEvent::ObjectiveUpdate { .. }
         | ClientEvent::DisplayObjective { .. }
@@ -2218,16 +2238,16 @@ pub fn route(event: &ClientEvent) -> Route {
         // ---- claimed by nothing ---------------------------------------------
         //
         // Decoded and tested, consumed nowhere. Each line here is a candidate
-        // island; `docs/event-routing.md` records which ones already have a fold
-        // sitting unwired behind them (`BlockDestruction`, `HeldSlotChanged` and
-        // `DifficultyChanged` do) versus which are simply ahead of a consumer.
+        // island; `docs/event-routing.md` records which of these are simply
+        // ahead of a consumer. The three that had a fold sitting unwired behind
+        // them (`BlockDestruction`, `HeldSlotChanged`, `DifficultyChanged`) were
+        // fixed above and are no longer in this list.
         //
         // Do not "fix" one by flipping a flag: the flag only says who is *asked*,
         // and a router that is asked but has no system for the event drops it just
         // as silently. Write the system, then the flag, in one commit.
         ClientEvent::Ping { .. }
         | ClientEvent::SpawnPositionChanged { .. }
-        | ClientEvent::BlockDestruction { .. }
         | ClientEvent::BlockChangedAck { .. }
         | ClientEvent::ChunkCacheCenterChanged { .. }
         | ClientEvent::ChunkCacheRadiusChanged { .. }
@@ -2235,9 +2255,7 @@ pub fn route(event: &ClientEvent) -> Route {
         | ClientEvent::EntityStatus { .. }
         | ClientEvent::EntityLeashed { .. }
         | ClientEvent::VehicleMoved { .. }
-        | ClientEvent::HeldSlotChanged { .. }
         | ClientEvent::ItemCooldown { .. }
-        | ClientEvent::DifficultyChanged { .. }
         | ClientEvent::PlayerRotationSet { .. }
         | ClientEvent::CameraSet { .. }
         | ClientEvent::BookOpened { .. }
@@ -2271,7 +2289,7 @@ pub fn route(event: &ClientEvent) -> Route {
 
 #[cfg(test)]
 mod route_tests {
-    use super::{ClientEvent, Route, route};
+    use super::{ClientEvent, Difficulty, Route, route};
     use crate::math::BlockPos;
 
     /// **The guard that protects the guard.**
@@ -2354,6 +2372,40 @@ mod route_tests {
         let r = route(&riding);
         assert!(r.ingest, "the component pair is per-entity ECS state");
         assert!(r.session, "the local player's own ride state is a session scalar");
+        assert!(!r.is_island());
+    }
+
+    /// The three `HudState`-shaped islands this table found
+    /// (`docs/event-routing.md`) are fixed: each now reaches `session`, and
+    /// none is an island any more. This is the routing half only — the
+    /// control that the *fold* actually runs lives in
+    /// `lodestone_ecs::session`'s own tests.
+    #[test]
+    fn the_three_hudstate_islands_are_fixed() {
+        let held_slot = ClientEvent::HeldSlotChanged { slot: 3 };
+        let r = route(&held_slot);
+        assert!(r.session, "held-slot is a local-player scalar");
+        assert!(!r.is_island());
+
+        let difficulty = ClientEvent::DifficultyChanged {
+            difficulty: Difficulty::Hard,
+            locked: false,
+        };
+        let r = route(&difficulty);
+        assert!(r.session);
+        assert!(!r.is_island());
+
+        let block_destruction = ClientEvent::BlockDestruction {
+            entity_id: 7,
+            pos: BlockPos::new(1, 2, 3),
+            progress: 4,
+        };
+        let r = route(&block_destruction);
+        assert!(
+            r.session,
+            "a per-session collection keyed by breaking-entity id, the same \
+             shape as the scoreboard/tab-list/boss-bar family"
+        );
         assert!(!r.is_island());
     }
 

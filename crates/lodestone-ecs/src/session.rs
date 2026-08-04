@@ -84,7 +84,7 @@ use bevy_ecs::component::Component;
 use bevy_ecs::prelude::{Query, Res, With};
 use bevy_ecs::schedule::{IntoScheduleConfigs, SystemSet};
 use bevy_ecs::world::World;
-use lodestone_model::{ClientEvent, DimensionId, DimensionTypeInfo, GameMode};
+use lodestone_model::{ClientEvent, Difficulty, DimensionId, DimensionTypeInfo, GameMode};
 
 use crate::ingest::{IngestBatch, IngestQueuePlugin};
 use crate::player::{LocalPlayer, SelectedSlot};
@@ -131,6 +131,27 @@ pub struct SessionBossBars(pub lodestone_game::bossbar::BossBarSet);
 /// the component itself.
 #[derive(Component, Debug, Clone, Default)]
 pub struct SessionMenus(pub lodestone_game::menus::Menus);
+
+/// The active *other-players'* block-crack overlays, folded from
+/// [`ClientEvent::BlockDestruction`].
+///
+/// `lodestone_game::mining::BlockDestructionOverlays::apply` was one of the
+/// three islands `docs/event-routing.md` found with a fold sitting unwired
+/// behind them — unit-tested, and consumed nowhere outside its own file and
+/// tests. This is the routing fix: the event now reaches a real fold through
+/// the ordinary `NetIngest` path, the same per-session collection shape as
+/// [`SessionBossBars`]/[`SessionTabList`] above (it is keyed internally by
+/// the breaking entity's id, not by *this* session, but there is exactly one
+/// copy of it client-side, same as a boss-bar set).
+///
+/// **Drawing it is a separate piece of work.** The renderer's single-target
+/// `CrackTarget`/`CrackPipeline` (`lodestone_shell::gpu`) only ever draws the
+/// local player's own dig; painting *other* players' cracks needs that
+/// pipeline to accept more than one target, which is a rendering change, not
+/// a routing one. [`stage_at`](lodestone_game::mining::BlockDestructionOverlays::stage_at)
+/// is the read side ready for whoever picks that up.
+#[derive(Component, Debug, Clone, Default)]
+pub struct SessionBlockDestruction(pub lodestone_game::mining::BlockDestructionOverlays);
 
 /// Server-reported vitals: the local player's health, food and saturation.
 ///
@@ -219,6 +240,19 @@ pub struct ServerEntityId(pub Option<i32>);
 /// [`ServerDimension`] documents for portal travel.
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ServerGameMode(pub Option<GameMode>);
+
+/// The world difficulty as the server last reported it, plus whether it is
+/// locked from further changes in the options UI
+/// (`ClientboundChangeDifficultyPacket` / [`ClientEvent::DifficultyChanged`]).
+///
+/// `None` before the first report — one of the two `HudState`-shaped islands
+/// this table found: `HudState::apply` folded this correctly and was
+/// unit-tested, but `HudState` has no production caller (see this module's
+/// note on the Stage 3 collapse), so the event reached nothing at all until
+/// this component. The pre-report state is represented honestly rather than
+/// guessed as `Normal`, the same convention [`Vitals`]/[`ServerGameMode`] use.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ServerDifficulty(pub Option<(Difficulty, bool)>);
 
 /// The local player's server-granted **abilities** — `Abilities.Packed` on the
 /// wire, `ClientboundPlayerAbilitiesPacket`.
@@ -492,10 +526,23 @@ pub fn apply_menus(batch: Res<IngestBatch>, mut menus: Query<&mut SessionMenus>)
     }
 }
 
+/// `IngestSet::Apply`: `BlockDestruction` → [`SessionBlockDestruction`].
+pub fn apply_block_destruction(
+    batch: Res<IngestBatch>,
+    mut overlays: Query<&mut SessionBlockDestruction>,
+) {
+    for event in batch.events() {
+        for mut set in &mut overlays {
+            let _ = set.0.apply(event);
+        }
+    }
+}
+
 /// `IngestSet::Apply`: the local player's own server-reported state →
 /// [`Vitals`], [`Xp`], [`ServerEntityId`], [`ServerGameMode`],
 /// [`ServerDimension`], [`ServerDimensionType`], [`ServerBiomeSkyColors`],
-/// [`ServerAlive`], [`Abilities`].
+/// [`ServerAlive`], [`Abilities`], [`ServerDifficulty`],
+/// [`SelectedSlot`](crate::player::SelectedSlot).
 ///
 /// # Why this is one system over five event families and not five systems
 ///
@@ -526,6 +573,14 @@ pub fn apply_local_player_state(
             &mut ServerAlive,
             &mut Abilities,
             &mut Riding,
+            &mut ServerDifficulty,
+            // `Option`, not required: `crate::player::SelectedSlot` is inserted
+            // by `spawn_local_player`, not by `insert_session_components`, so a
+            // harness that installs `SessionPlugin` alone (`spawn_session`, with
+            // no player-input components at all) must not stop every *other*
+            // field in this query from folding — the same reasoning
+            // `tick_hud_overlays` documents for its own `Option<&SelectedSlot>`.
+            Option<&mut SelectedSlot>,
         ),
         With<LocalPlayer>,
     >,
@@ -542,6 +597,8 @@ pub fn apply_local_player_state(
             mut alive,
             mut abilities,
             mut riding,
+            mut difficulty,
+            mut selected_slot,
         ) in &mut players
         {
             match event {
@@ -705,6 +762,31 @@ pub fn apply_local_player_state(
                         riding.0 = None;
                     }
                 }
+                // One of the two `HudState`-shaped islands (see
+                // [`ServerDifficulty`]). Assigned as a whole record, same reason
+                // `AbilitiesChanged` above is: one packet reports both fields
+                // together, so there is no way to receive a stale `locked` next
+                // to a fresh `difficulty`.
+                ClientEvent::DifficultyChanged { difficulty: d, locked } => {
+                    difficulty.0 = Some((*d, *locked));
+                }
+                // The other. `HudState::select_slot`'s clamp, reproduced here:
+                // an out-of-range wire value (negative, or `>= 9`) is ignored
+                // rather than corrupting the selection with a value the hotbar
+                // has no slot for. `selected_slot` is `None` only on a harness
+                // that installs `SessionPlugin` without the player-input
+                // component set (see the query's own doc) — on the real client
+                // `spawn_local_player` always inserts
+                // `SelectedSlot`(crate::player::SelectedSlot) first.
+                ClientEvent::HeldSlotChanged { slot } => {
+                    if let Some(sel) = &mut selected_slot {
+                        if let Ok(s) = u8::try_from(*slot) {
+                            if s < 9 {
+                                sel.0 = s as usize;
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -748,6 +830,9 @@ pub fn insert_session_components(world: &mut World, entity: bevy_ecs::entity::En
             // boat.
             Riding::default(),
         ));
+        // A second `insert` call: `Bundle` tuple impls stop at arity 15 and the
+        // set above is already at that ceiling, not a meaningful grouping.
+        entity.insert((ServerDifficulty::default(), SessionBlockDestruction::default()));
     }
 }
 
@@ -763,7 +848,7 @@ pub fn spawn_session(world: &mut World) -> bevy_ecs::entity::Entity {
     entity
 }
 
-/// Registers the shared-fold half: the four session components' `NetIngest`
+/// Registers the shared-fold half: the session components' `NetIngest`
 /// systems.
 ///
 /// Deliberately **not** part of [`crate::CorePlugin`], and deliberately not
@@ -789,6 +874,7 @@ impl Plugin for SessionPlugin {
                 apply_tab_list,
                 apply_boss_bars,
                 apply_menus,
+                apply_block_destruction,
                 apply_local_player_state,
             )
                 .chain()
@@ -1893,6 +1979,119 @@ mod tests {
         assert_eq!(
             app.world().get::<ServerGameMode>(entity).unwrap().0,
             Some(GameMode::Creative)
+        );
+    }
+
+    /// The first of the three `HudState`-shaped islands
+    /// (`docs/event-routing.md`): `HeldSlotChanged` reached
+    /// `lodestone_game::player_state::HudState::select_slot`, which nothing
+    /// called in production. Drives the real `NetIngest` schedule, not
+    /// `HudState::apply` directly — a closed loop over the fold would have
+    /// passed the whole time this was an island.
+    #[test]
+    fn held_slot_changed_reaches_selected_slot_through_the_real_schedule() {
+        let (mut app, entity) = session_app();
+        // `SelectedSlot` is inserted by `spawn_local_player`
+        // (`lodestone-ecs::player`), not `insert_session_components` — added
+        // by hand here to exercise the write path. The real client always
+        // carries both on one entity; `held_slot_changed_is_a_no_op_without_
+        // selected_slot_present` below is the control for a harness that does
+        // not.
+        app.world_mut().entity_mut(entity).insert(SelectedSlot(0));
+
+        fold(&mut app, ClientEvent::HeldSlotChanged { slot: 5 });
+        assert_eq!(app.world().get::<SelectedSlot>(entity).unwrap().0, 5);
+
+        // Vanilla ignores an out-of-range wire value rather than corrupting
+        // the selection — `HudState::select_slot`'s clamp, reproduced here.
+        fold(&mut app, ClientEvent::HeldSlotChanged { slot: 9 });
+        assert_eq!(
+            app.world().get::<SelectedSlot>(entity).unwrap().0,
+            5,
+            "an out-of-range slot must be ignored, not miscast into a wrong \
+             in-range value"
+        );
+        fold(&mut app, ClientEvent::HeldSlotChanged { slot: -1 });
+        assert_eq!(app.world().get::<SelectedSlot>(entity).unwrap().0, 5);
+    }
+
+    /// The control for the `Option<&mut SelectedSlot>` term: a harness with no
+    /// `SelectedSlot` at all — the real shape `spawn_session` alone
+    /// produces — must not panic, and every *other* field in the same query
+    /// must still fold (proven by the game-mode/difficulty tests running
+    /// against the same `session_app()` with no `SelectedSlot` either).
+    #[test]
+    fn held_slot_changed_is_a_no_op_without_selected_slot_present() {
+        let (mut app, entity) = session_app();
+        fold(&mut app, ClientEvent::HeldSlotChanged { slot: 5 });
+        assert!(app.world().get::<SelectedSlot>(entity).is_none());
+    }
+
+    /// The second `HudState`-shaped island: `DifficultyChanged` reached
+    /// `HudState::apply`'s difficulty arm, which nothing called.
+    #[test]
+    fn difficulty_changed_reaches_server_difficulty_through_the_real_schedule() {
+        let (mut app, entity) = session_app();
+        assert_eq!(
+            app.world().get::<ServerDifficulty>(entity).unwrap().0,
+            None,
+            "precondition: unreported before the first packet"
+        );
+        fold(
+            &mut app,
+            ClientEvent::DifficultyChanged {
+                difficulty: Difficulty::Hard,
+                locked: true,
+            },
+        );
+        assert_eq!(
+            app.world().get::<ServerDifficulty>(entity).unwrap().0,
+            Some((Difficulty::Hard, true))
+        );
+    }
+
+    /// The third: `BlockDestruction` reached
+    /// `lodestone_game::mining::BlockDestructionOverlays::apply`, which
+    /// nothing called outside its own file and tests.
+    #[test]
+    fn block_destruction_reaches_the_session_overlay_through_the_real_schedule() {
+        let (mut app, entity) = session_app();
+        let p = lodestone_model::math::BlockPos::new(3, 64, 3);
+        fold(
+            &mut app,
+            ClientEvent::BlockDestruction {
+                entity_id: 7,
+                pos: p,
+                progress: 4,
+            },
+        );
+        assert_eq!(
+            app.world()
+                .get::<SessionBlockDestruction>(entity)
+                .unwrap()
+                .0
+                .stage_at(p),
+            Some(4)
+        );
+
+        // A stage >= 10 clears the overlay, matching vanilla
+        // (`LevelRenderer.setBlockBreakProgress`) — proven through the same
+        // real schedule run, not by calling `BlockDestructionOverlays::apply`.
+        fold(
+            &mut app,
+            ClientEvent::BlockDestruction {
+                entity_id: 7,
+                pos: p,
+                progress: 10,
+            },
+        );
+        assert_eq!(
+            app.world()
+                .get::<SessionBlockDestruction>(entity)
+                .unwrap()
+                .0
+                .stage_at(p),
+            None
         );
     }
 
