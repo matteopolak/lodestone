@@ -2229,6 +2229,15 @@ impl WindowApp {
             render.set_sign_source(f);
         }
 
+        // Bells. Same per-frame install as the three above — the render pass,
+        // the GPU-side wiring in `gpu.rs` and the CPU-side gather
+        // (`Sim::bell_source`) were all already landed; this call site was
+        // the one remaining hop before a live client draws a bell at all
+        // (`docs/block-entity-renderers.md`'s Bell section).
+        if let Some(f) = self.sim.bell_source() {
+            render.set_bell_source(f);
+        }
+
         // Reconcile fog with the player's bit-exact fluid state each frame,
         // re-uploading only when it changes (crossing a water/lava surface) so a
         // submerged eye dissolves terrain into short water/lava fog and the

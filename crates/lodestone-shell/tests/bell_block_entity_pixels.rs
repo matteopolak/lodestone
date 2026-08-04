@@ -64,14 +64,21 @@
 //! # What this gate does *not* prove
 //!
 //! `RenderState::set_bell_source` exists and this gate calls it directly, the
-//! same way `chest_block_entity_pixels.rs` calls `set_block_entity_source`.
-//! **Nothing installs a bell source from the live per-frame path** —
-//! `crate::block_entities::bell_spawns` is written and unit-tested, but the
-//! `sim.rs`/`app.rs` call site that would feed it to `set_bell_source` every
-//! frame is outside this change's file ownership (see
-//! `docs/block-entity-renderers.md`'s Bell section for the exact remaining
-//! hop). So this gate proves the render pass is correct and reachable, not
-//! that a real client draws a bell today.
+//! same way `chest_block_entity_pixels.rs` calls `set_block_entity_source`,
+//! with a hand-built closure rather than `Sim::bell_source()`'s. **The
+//! `app.rs` install call is landed** (`if let Some(f) = self.sim.bell_source()
+//! { render.set_bell_source(f); }`, mirroring skull/sign exactly — see
+//! `docs/block-entity-renderers.md`'s Bell section), and
+//! `sim::tests::bell_source_tracks_connection_state_and_is_safe_before_login`
+//! proves that accessor tracks connection state and is panic-safe before
+//! login. What remains unproven **by any gate in this crate, for chest, skull,
+//! sign or bell alike** is a real client actually drawing one through a live
+//! `ClientHandle`: that needs a real login handshake plus a chunk carrying
+//! both a `minecraft:bell` block state and a recorded block-entity entry, and
+//! no test double here builds one yet. So this gate proves the render pass is
+//! correct and reachable, not that a real client draws a bell today — but
+//! that gap is pre-existing test-infrastructure scope, not something this
+//! change introduced or could close by itself.
 //!
 //! ```text
 //! cargo test -p lodestone-shell --test bell_block_entity_pixels -- --ignored --nocapture
