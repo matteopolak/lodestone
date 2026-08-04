@@ -165,6 +165,34 @@ pub fn pushes_players(id: i32) -> Option<bool> {
         .and_then(|index| ENTITY_PUSHES_PLAYERS.get(index).copied())
 }
 
+/// The widest and tallest base hitbox among entity types that can push the
+/// player (issue #19).
+///
+/// A consumer sizing a coarse "is this candidate even close enough to check"
+/// filter — e.g. `lodestone_shell::sim`'s `NEARBY_ENTITY_RADIUS` — needs the
+/// bound to follow from *this* census rather than restate its maxima as a
+/// literal, which is exactly how that constant went stale before: it was
+/// `4.0`, sized for "a happy-ghast-sized neighbour" back when every candidate
+/// was compared against the player's own `0.6 × 1.8` box, and stayed `4.0`
+/// long after wider pushers existed in the census.
+///
+/// Returns `None` only if no entity type in the census currently pushes
+/// players — i.e. the census itself is degenerate — so a caller can fail
+/// closed (or fall back to a floor) rather than silently filter with `(0.0,
+/// 0.0)`.
+#[must_use]
+pub fn pusher_max_dimensions() -> Option<(f32, f32)> {
+    (0..TYPE_COUNT as i32)
+        .filter(|&id| pushes_players(id) == Some(true))
+        .filter_map(crate::entity_dimensions::base_dimensions)
+        .fold(None, |acc, dims| {
+            Some(match acc {
+                Some((width, height)) => (width.max(dims.width), height.max(dims.height)),
+                None => (dims.width, dims.height),
+            })
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,5 +318,36 @@ mod tests {
         let zombie = entity_type_id("minecraft:zombie").expect("zombie is real");
         let dims = base_dimensions(zombie).expect("zombie has dimensions");
         assert_eq!((dims.width, dims.height), (0.6, 1.95));
+    }
+
+    #[test]
+    fn pusher_max_dimensions_matches_the_known_widest_and_tallest() {
+        use crate::entity_dimensions::base_dimensions;
+
+        // The two claimants documented at `lodestone_shell::sim::NEARBY_ENTITY_RADIUS`:
+        // `ender_dragon` is the widest pusher (16.0) and `giant` is the tallest
+        // (12.0), both `LivingEntity` with no push-suppressing override. Pinned
+        // by name so a census update that changes either maximum fails here
+        // first, rather than silently shrinking a consumer's derived radius.
+        assert!(by_name("minecraft:ender_dragon"));
+        assert!(by_name("minecraft:giant"));
+        let dragon = base_dimensions(entity_type_id("minecraft:ender_dragon").unwrap()).unwrap();
+        let giant = base_dimensions(entity_type_id("minecraft:giant").unwrap()).unwrap();
+        assert_eq!(dragon.width, 16.0, "ender_dragon is expected to be the widest pusher");
+        assert_eq!(giant.height, 12.0, "giant is expected to be the tallest pusher");
+
+        let (max_width, max_height) =
+            pusher_max_dimensions().expect("the push census is non-empty");
+        assert_eq!(max_width, dragon.width, "widest pusher width should win the fold");
+        assert_eq!(max_height, giant.height, "tallest pusher height should win the fold");
+    }
+
+    #[test]
+    fn pusher_max_dimensions_is_none_only_for_a_degenerate_census() {
+        // Control for the `None` branch a consumer must handle: it can only
+        // occur if the census has no pushers at all. The real table has 90 (see
+        // `the_census_is_neither_all_true_nor_all_false`), so this is a live
+        // assertion the table is not that degenerate, not a description.
+        assert!(pusher_max_dimensions().is_some());
     }
 }
