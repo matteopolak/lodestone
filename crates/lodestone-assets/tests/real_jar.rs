@@ -2653,3 +2653,113 @@ fn arrow_fletching_patch_is_fully_symmetric() {
         );
     }
 }
+
+/// Issue #174's remaining gap: the real banner-pattern mask atlas, measured
+/// against the real jar rather than assumed from the module doc's own
+/// `client.jar` listing (`docs/banner-shield-patterns.md`'s "the jar ships
+/// individual sprite PNGs" section). Counts and cross-checks are exact —
+/// this is a data census, not a coverage estimate.
+#[test]
+#[ignore = "requires a fetched vanilla client.jar"]
+fn banner_pattern_atlas_matches_the_real_jars_registry_and_pngs() {
+    use lodestone_assets::BannerPatternAtlas;
+
+    let manager = manager();
+    let (atlas, report) = BannerPatternAtlas::load_reported(&manager)
+        .expect("atlases/banner_patterns.json must be present in a real jar");
+
+    assert!(report.missing_textures.is_empty(), "missing: {:?}", report.missing_textures);
+    assert!(report.decode_errors.is_empty(), "decode errors: {:?}", report.decode_errors);
+
+    // 44 real PNGs live under `entity/banner/` (measured directly against
+    // client.jar with `zipfile`, cross-checked against every
+    // `data/minecraft/banner_pattern/*.json` registry entry's own
+    // `asset_id` — all 43 have a matching PNG, none are orphaned either
+    // way): `banner_base.png` (the plain cloth texture, excluded — see the
+    // module doc) plus 43 real pattern masks (`base` plus 42 named
+    // patterns).
+    assert_eq!(
+        atlas.len(),
+        43,
+        "expected 43 real pattern masks (43 `banner_pattern` registry entries, each with a \
+         PNG; `banner_base` is deliberately excluded, see the module doc), got {}: {:?}",
+        atlas.len(),
+        {
+            let mut ids: Vec<&str> = atlas.pattern_ids().collect();
+            ids.sort_unstable();
+            ids
+        }
+    );
+    assert!(atlas.get("banner_base").is_none(), "the plain cloth texture is not a pattern");
+
+    // Every registered pattern id from the real jar's own data-driven
+    // registry — not a hand-transcribed subset — must resolve. Spot the
+    // registry directly rather than trusting a remembered list, per
+    // `CLAUDE.md`'s "re-verify before routing around" rule.
+    let registry_ids: Vec<String> = manager
+        .list("data/minecraft/banner_pattern/")
+        .into_iter()
+        .filter(|p| p.ends_with(".json"))
+        .map(|p| {
+            p.rsplit('/')
+                .next()
+                .expect("path has a final segment")
+                .trim_end_matches(".json")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(registry_ids.len(), 43, "expected 43 banner_pattern registry entries");
+    for id in &registry_ids {
+        assert!(
+            atlas.get(id).is_some(),
+            "registry pattern {id:?} (data/minecraft/banner_pattern/{id}.json) has no \
+             matching decoded sprite in the atlas"
+        );
+    }
+
+    // `base` is real, 64x64 (`BANNER_SHEET`'s own canvas size). It is
+    // *not* opaque over the whole 64x64 canvas — measured directly, the
+    // real PNG has 2,376 zero-alpha texels outside the region any face
+    // actually samples (a `(0,0)` corner texel among them) — but it is
+    // fully opaque over both texel rects the flag's own box-UV unwrap
+    // samples (`bake_entity_parts`'s NORTH/SOUTH face formula,
+    // `crates/lodestone-assets/src/entity.rs`: `u1=xo+d, v1=yo+d,
+    // u2=xo+d+w, v2=yo+d+h` for NORTH, offset by one more `w` for SOUTH;
+    // for the flag's `addBox(-10,0,-2,20,40,1)` at `texOffs(0,0)` that is
+    // x∈[1,21) / x∈[22,42), y∈[1,41) for both), which is what makes it a
+    // faithful "always-present, always-opaque" base layer in practice.
+    let base = atlas.base().expect("base mask must always be present");
+    assert_eq!((base.width, base.height), (64, 64));
+    for (x0, x1) in [(1u32, 21), (22, 42)] {
+        for y in 1..41 {
+            for x in x0..x1 {
+                assert_eq!(
+                    base.pixel(x, y)[3],
+                    255,
+                    "base.png must be fully opaque within the flag's sampled UV rects; \
+                     ({x},{y}) is not"
+                );
+            }
+        }
+    }
+
+    // `creeper` is real, 64x64, and — measured directly against the real
+    // PNG, not assumed — carries exactly three distinct alpha values
+    // (`0`, `191`, `255`): a binary mask plus one antialiased-edge
+    // coverage level, which is what makes it useful as a real-sprite
+    // partial-alpha fixture for a translucency pixel gate.
+    let creeper = atlas.get("creeper").expect("creeper pattern must be present");
+    assert_eq!((creeper.width, creeper.height), (64, 64));
+    let mut alphas: BTreeSet<u8> = BTreeSet::new();
+    for y in 0..creeper.height {
+        for x in 0..creeper.width {
+            alphas.insert(creeper.pixel(x, y)[3]);
+        }
+    }
+    assert_eq!(
+        alphas,
+        BTreeSet::from([0u8, 191, 255]),
+        "creeper.png's real alpha histogram changed from the measured {{0,191,255}} — a \
+         gate anchored to those exact values needs re-measuring, not blind updating"
+    );
+}
