@@ -721,6 +721,18 @@ impl Furnace {
         self.fuel = item;
     }
 
+    /// Writes the output slot (slot 2) directly, with no recipe-driven side
+    /// effect (unlike [`set_input`](Self::set_input), vanilla's `setItem`
+    /// slot-2 branch does nothing but the assignment — `:291-302` only
+    /// special-cases slot 0). This is the counterpart a `container_click`
+    /// consumer needs to apply the client's own predicted diff verbatim (see
+    /// `docs/server-inventory.md`'s "applies the client's diff directly"
+    /// scope note) when that diff clears or shrinks the result slot — the
+    /// normal way a real client empties a cooked item out of a furnace.
+    pub fn set_output(&mut self, item: Option<ItemStack>) {
+        self.output = item;
+    }
+
     /// Takes up to `count` items from the output slot (slot 2), shrinking or
     /// clearing it. Does **not** bank experience — vanilla pays that out
     /// separately, on menu close (`awardUsedRecipesAndPopExperience`); see
