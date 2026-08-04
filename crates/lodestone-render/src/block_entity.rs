@@ -75,9 +75,11 @@
 //!   the same match, so add the arm and the list entry together.
 
 use glam::{Mat4, Vec3};
+use lodestone_assets::ResourceLocation;
 use lodestone_assets::block_entity_models::{BLOCK_ENTITY_MODELS, BlockEntityModelEntry};
 use lodestone_assets::entity::{EntityModelDef, PartPose, bake_entity_parts};
 
+use crate::banner_pattern::{DyeColor, StoredPatternLayer, banner_pattern_layers};
 use crate::camera::Frustum;
 use crate::entity::{ENTITY_FULLBRIGHT, PartRange, push_part_quads};
 use crate::entity_pipeline::InstanceTint;
@@ -492,6 +494,99 @@ pub fn skull_wall_placement_matrix(pos: [i32; 3], facing_yaw_deg: f32) -> Mat4 {
         * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0))
 }
 
+/// The world placement transform for a ground/standing banner —
+/// `BannerRenderer.modelTransformation`/`createGroundTransformation`
+/// (`BannerRenderer.java:243-249`):
+///
+/// ```text
+/// MODEL_TRANSLATION = (0.5, 0.0, 0.5)
+/// MODEL_SCALE       = (0.6666667, -0.6666667, -0.6666667)
+/// Transformation(MODEL_TRANSLATION, Axis.YP.rotationDegrees(-angle), MODEL_SCALE, null)
+/// angle = RotationSegment.convertToDegrees(segment)   // segment * 22.5
+/// ```
+///
+/// # A third placement shape, not a variant of the other two
+///
+/// [`block_entity_placement_matrix`]/[`skull_ground_placement_matrix`] both
+/// exist because chest/skull geometry is baked *corner*-anchored, so rotating
+/// it in place needs a pivot: `translate(pivot) · rotate · translate(-pivot)`.
+/// A banner's model space is **not** corner-anchored — `BannerFlagModel`'s own
+/// `PartPose::offset` already positions the flag relative to an origin the
+/// same way an entity's skeleton does — so vanilla itself uses a straight
+/// `T · R · S` here instead, confirmed against `com.mojang.math.Transformation`'s
+/// own `compose` (`translation(t)` then `.rotate(leftRotation)` then
+/// `.scale(scale)`, with `rightRotation` unused since this call passes `null`
+/// for it): `M = T * R * S`, scale applied to the model first, then rotated,
+/// then translated to the block. [`banner_flag_placement_verifies_against_the_transformation_compose_formula`]
+/// pins this against that literal formula rather than against this function's
+/// own arithmetic restated.
+///
+/// # The `2/3` scale and the Y/Z flip are both real
+///
+/// `BannerModel`/`BannerFlagModel` are shared with the banner **item**'s
+/// GUI/held-item render (`SIZE = 0.6666667` is the same constant vanilla's
+/// item-in-hand code uses elsewhere), so this in-world path re-applies that
+/// same correction on top of otherwise entity-style baked geometry. Skipping
+/// the flip renders the flag upside down and mirrored on Z; skipping the
+/// scale renders it 1.5× too large. Both signs are negative (`-2/3` on Y
+/// *and* Z), so — like [`skull_ground_placement_matrix`]'s single-axis flip
+/// being paired with a second one — the *product* of the flips is positive
+/// and this placement does not reverse a quad's winding, even though it does
+/// mirror geometry on two axes; see
+/// [`banner_ground_placement_preserves_orientation`] for the measurement.
+///
+/// Only ground/standing is ported — this issue's own scope
+/// (`docs/banner-shield-patterns.md`'s "Steps D–F" section). A wall banner is
+/// `createWallTransformation`, the same `MODEL_TRANSLATION`/`MODEL_SCALE`
+/// with `direction.toYRot()` in place of the rotation-segment angle and *no*
+/// extra offset (unlike [`skull_wall_placement_matrix`]'s `0.25` push away
+/// from the wall) — a natural second entry with this same shape, not built
+/// here.
+#[must_use]
+pub fn banner_ground_placement_matrix(pos: [i32; 3], rotation_segment: u8) -> Mat4 {
+    let origin = Vec3::new(pos[0] as f32, pos[1] as f32, pos[2] as f32);
+    let segment_deg = f32::from(rotation_segment) * (360.0 / 16.0);
+    Mat4::from_translation(origin)
+        * Mat4::from_translation(Vec3::new(0.5, 0.0, 0.5))
+        * Mat4::from_rotation_y(-segment_deg.to_radians())
+        * Mat4::from_scale(Vec3::new(2.0 / 3.0, -2.0 / 3.0, -2.0 / 3.0))
+}
+
+/// Per-block-position phase offset for a banner's cloth sway —
+/// `BannerRenderer.extractRenderState` (`BannerRenderer.java:93`):
+///
+/// ```text
+/// phase = (floorMod(x*7 + y*9 + z*13 + gameTime, 100) + partialTicks) / 100
+/// ```
+///
+/// So neighbouring banners do not sway in lockstep, and the phase advances
+/// one step per game tick, wrapping every 100 ticks. `game_time` is the
+/// world's raw tick counter (`Level.getGameTime()`); `partial_tick` is the
+/// usual sub-tick interpolation fraction, `0.0..1.0`.
+#[must_use]
+pub fn banner_phase(pos: [i32; 3], game_time: i64, partial_tick: f32) -> f32 {
+    let sum = i64::from(pos[0]) * 7 + i64::from(pos[1]) * 9 + i64::from(pos[2]) * 13 + game_time;
+    // `floorMod`, not Rust's `%` (which truncates toward zero): a negative
+    // block coordinate must still wrap into `0..100`, not go negative.
+    let wrapped = sum.rem_euclid(100);
+    (wrapped as f32 + partial_tick) / 100.0
+}
+
+/// The flag part's `x_rot` override for a given phase —
+/// `BannerFlagModel.setupAnim` (`BannerFlagModel.java:32-35`):
+///
+/// ```text
+/// flag.xRot = (-0.0125 + 0.01 * cos(2*PI*phase)) * PI
+/// ```
+///
+/// A single per-part rotation, not per-vertex cloth animation — see
+/// `docs/banner-shield-patterns.md`'s "Steps D–F" section for why an earlier
+/// pass through that doc wrongly assumed the latter.
+#[must_use]
+pub fn banner_flag_x_rot(phase: f32) -> f32 {
+    (-0.0125 + 0.01 * (2.0 * std::f32::consts::PI * phase).cos()) * std::f32::consts::PI
+}
+
 /// A CPU block-entity mesh: part-local vertices plus the part hierarchy needed
 /// to rebuild transforms with per-part overrides each frame.
 ///
@@ -718,17 +813,46 @@ pub fn bell_shake_angle(direction: Option<BellShakeDirection>, ticks: f32) -> (f
     }
 }
 
+/// Model name of a standing banner's pole+bar body.
+pub const BANNER_BODY: &str = "banner_body";
+/// Model name of a standing banner's flag.
+pub const BANNER_FLAG: &str = "banner_flag";
+
+/// The jar sheet a banner's *body* (pole/bar) and *flag* both draw with for
+/// their opaque pass — `Sheets.BANNER_BASE` (`Sheets.java:52`), i.e.
+/// `Sheets.BANNER_MAPPER.defaultNamespaceApply("banner_base")` ->
+/// `entity/banner/banner_base`. This is the plain wood/cloth texture, never a
+/// pattern mask: `BannerRenderer.submitBanner` passes this one `SpriteId` to
+/// *both* `submitModel` calls (model and flagModel) before `submitPatterns`
+/// draws anything coloured over the flag a second time.
+pub const BANNER_BASE_TEXTURE_STEM: &str = "entity/banner/banner_base";
+
+/// The one banner sheet stem, for [`block_entity_texture_stems`] — mirrors
+/// [`bell_texture_stems`]'s shape: one stem shared by both banner models.
+#[must_use]
+pub fn banner_texture_stems() -> Vec<&'static str> {
+    vec![BANNER_BASE_TEXTURE_STEM]
+}
+
 /// Every sheet stem across every block-entity family — what the shell's
 /// texture loader preloads. Union of [`chest_texture_stems`],
-/// [`skull_texture_stems`] and [`bell_texture_stems`] rather than the shell
-/// iterating each list itself, so a fourth family only has to update this one
-/// function to reach the loader (see the module doc's "How to change it" —
-/// this is the "entry in the preload list" step, generalised past chest).
+/// [`skull_texture_stems`], [`bell_texture_stems`] and
+/// [`banner_texture_stems`] rather than the shell iterating each list
+/// itself, so a fifth family only has to update this one function to reach
+/// the loader (see the module doc's "How to change it" — this is the "entry
+/// in the preload list" step, generalised past chest).
+///
+/// **Does not include a banner's pattern-mask sprites.** Those are a wholly
+/// separate resource (the banner-pattern atlas, `lodestone-assets` work not
+/// yet done — see `docs/banner-shield-patterns.md`'s "jar ships individual
+/// sprite PNGs" section) and a wholly separate draw list
+/// ([`BannerLayerDraw`]), not a stem this preload list can name.
 #[must_use]
 pub fn block_entity_texture_stems() -> Vec<&'static str> {
     let mut stems = chest_texture_stems();
     stems.extend(skull_texture_stems());
     stems.extend(bell_texture_stems());
+    stems.extend(banner_texture_stems());
     stems
 }
 
@@ -893,6 +1017,87 @@ impl BlockEntityModelSet {
             tint: [255, 255, 255],
         })
     }
+
+    /// Resolves one ground/standing banner into its opaque body+flag
+    /// instances plus its ordered, translucent pattern-layer draw list, or
+    /// `None` if either model is not in the corpus.
+    ///
+    /// # Two meshes, three draws — see the module's banner section
+    ///
+    /// Vanilla's `submitBanner` draws the pole+bar opaque, the flag opaque
+    /// (both with `Sheets.BANNER_BASE`), then `submitPatterns`: the base
+    /// mask tinted by `base_color` plus every stored pattern layer, all
+    /// through `RenderTypes::bannerPattern`
+    /// (`EntityPipeline::banner_layer_pipeline`). The first two ride the
+    /// ordinary [`plan_block_entities`] batcher via
+    /// [`BannerInstances::body`]/[`BannerInstances::flag`]; the third is
+    /// [`BannerInstances::layers`], a flat ordered list a caller draws
+    /// directly, one draw per entry, in order — never re-batched by texture,
+    /// since these draws are translucent and depth-write-off and so must
+    /// submit in the item's own stored order (two banners reusing the same
+    /// two sprites in opposite orders could not both be right).
+    ///
+    /// # The flag's own transform, reused by every layer
+    ///
+    /// Every pattern mask paints over the *posed* flag (the same sway
+    /// [`banner_flag_x_rot`] applies to the opaque flag draw), never the
+    /// pole/bar — `submitPatterns` is called with the same `flagModel`
+    /// [`submitBanner`] already posed. [`BannerLayerDraw::transform`] is
+    /// therefore the flag part's own world matrix, computed once and shared
+    /// by all `1 + patterns.len().min(MAX_PATTERN_LAYERS)` layers.
+    #[must_use]
+    pub fn resolve_banner(&self, spawn: &BannerSpawn) -> Option<BannerInstances> {
+        let body_mesh = self.get(BANNER_BODY)?;
+        let flag_mesh = self.get(BANNER_FLAG)?;
+        let placement = banner_ground_placement_matrix(spawn.pos, spawn.rotation_segment);
+
+        let body_transforms = body_mesh.part_transforms(placement, &[]);
+        let (body_min, body_max) =
+            transformed_aabb(&placement, body_mesh.local_min, body_mesh.local_max);
+        let body = BlockEntityInstance {
+            model: BANNER_BODY,
+            texture: BANNER_BASE_TEXTURE_STEM,
+            transform: placement,
+            part_transforms: body_transforms,
+            aabb_min: body_min,
+            aabb_max: body_max,
+            light: spawn.light,
+            tint: [255, 255, 255],
+        };
+
+        // The one override: the flag's own sway, the same mechanism the
+        // chest lid and the bell body already use.
+        let x_rot = banner_flag_x_rot(spawn.phase);
+        let flag_index = flag_mesh.index_of("flag")?;
+        let mut pose = flag_mesh.part_rest[flag_index];
+        pose.x_rot = x_rot;
+        let flag_transforms = flag_mesh.part_transforms(placement, &[(flag_index, pose)]);
+        let (flag_min, flag_max) =
+            transformed_aabb(&placement, flag_mesh.local_min, flag_mesh.local_max);
+        let flag_world = flag_transforms[flag_index];
+        let flag = BlockEntityInstance {
+            model: BANNER_FLAG,
+            texture: BANNER_BASE_TEXTURE_STEM,
+            transform: placement,
+            part_transforms: flag_transforms,
+            aabb_min: flag_min,
+            aabb_max: flag_max,
+            light: spawn.light,
+            tint: [255, 255, 255],
+        };
+
+        let layers = banner_pattern_layers(spawn.base_color, &spawn.patterns)
+            .into_iter()
+            .map(|layer| BannerLayerDraw {
+                transform: flag_world,
+                sprite: layer.sprite,
+                color: layer.color,
+                light: spawn.light,
+            })
+            .collect();
+
+        Some(BannerInstances { body, flag, layers })
+    }
 }
 
 impl Default for BlockEntityModelSet {
@@ -1019,6 +1224,59 @@ impl BellSpawn {
     }
 }
 
+/// The version-free description of one ground/standing banner to draw this
+/// frame.
+///
+/// The caller owns every field, the same contract as [`ChestSpawn`]: the
+/// `ROTATION` block-state property → `rotation_segment`; the banner
+/// **block's own** colour (`AbstractBannerBlock.getColor()` — one banner
+/// block per dye colour, there is no `type`-style state property, so this is
+/// not read off block state the way [`ChestSpawn::material`] is) →
+/// `base_color`; the block entity's own NBT `"patterns"` key
+/// (`docs/banner-shield-patterns.md`'s "Prerequisite 1 does not block the
+/// block-entity consumer" section — this is *not* an item component) →
+/// `patterns`; the world clock → `phase` (see [`banner_phase`]); world light
+/// → `light`.
+///
+/// Only ground/standing — see [`banner_ground_placement_matrix`]'s doc for
+/// why a wall banner is a natural, separate second entry rather than a
+/// variant of this one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BannerSpawn {
+    /// Block position.
+    pub pos: [i32; 3],
+    /// The `ROTATION` block-state property, `0..16` — vanilla's
+    /// `RotationSegment` (segment `0` is north; see
+    /// [`banner_ground_placement_matrix`]'s doc for why this is not
+    /// [`horizontal_facing_yaw`]'s four-direction convention).
+    pub rotation_segment: u8,
+    /// The banner block's own dye colour.
+    pub base_color: DyeColor,
+    /// The block entity's stored pattern layers, in stack order.
+    pub patterns: Vec<StoredPatternLayer>,
+    /// This frame's cloth-sway phase, `0.0..1.0` — see [`banner_phase`].
+    pub phase: f32,
+    /// Packed sky/block light. Pass [`ENTITY_FULLBRIGHT`] only when there is
+    /// genuinely no world to sample.
+    pub light: u8,
+}
+
+impl BannerSpawn {
+    /// A resting (`phase = 0`), full-bright, segment-`0`, pattern-less white
+    /// banner at `pos` — the minimum a hermetic gate needs.
+    #[must_use]
+    pub fn at(pos: [i32; 3]) -> Self {
+        BannerSpawn {
+            pos,
+            rotation_segment: 0,
+            base_color: DyeColor::White,
+            patterns: Vec::new(),
+            phase: 0.0,
+            light: ENTITY_FULLBRIGHT,
+        }
+    }
+}
+
 /// One resolved block entity, ready to batch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BlockEntityInstance {
@@ -1047,6 +1305,57 @@ pub struct BlockEntityInstance {
     /// is tinted yet); a future banner base-colour or shulker-box dye reads
     /// this field instead of widening the pipeline.
     pub tint: [u8; 3],
+}
+
+/// One resolved translucent pattern-mask layer, ready for a caller to draw
+/// directly through `EntityPipeline::banner_layer_pipeline` — the "small
+/// separate ordered draw list" `docs/banner-shield-patterns.md` calls for.
+///
+/// **Deliberately not batched.** These draws are translucent and
+/// depth-write-off, so they must submit in the item's own stored order —
+/// [`plan_block_entities`]'s `(model, texture)` batching would let two
+/// banners reusing the same two sprites in opposite orders interleave
+/// incorrectly. Banners are rare, so a handful of unbatched draw calls per
+/// banner costs nothing; a caller draws [`BannerInstances::layers`] in
+/// order, one instance per draw.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BannerLayerDraw {
+    /// World transform for the flag part this layer paints over — the same
+    /// value for every layer of one banner, since masks paint over the
+    /// (posed, swaying) flag, never the pole/bar.
+    pub transform: Mat4,
+    /// The mask sprite to sample: `entity/banner/base` for the always-present
+    /// base layer, then `entity/banner/<pattern-asset-id>` per stored
+    /// pattern, in the item's own order. See
+    /// [`crate::banner_pattern::PatternLayer::sprite`]'s doc — this is a full
+    /// [`ResourceLocation`], not a bare asset id.
+    pub sprite: ResourceLocation,
+    /// Gamma-space `[r, g, b]` in `0.0..=1.0` to tint this layer's sampled
+    /// texel by (see `crate::banner_pattern`'s gamma-space note — **do not**
+    /// convert this to linear before multiplying the sampled texel).
+    pub color: [f32; 3],
+    /// Packed sky/block light — identical to the flag's own.
+    pub light: u8,
+}
+
+/// Everything one ground/standing banner draws this frame: the opaque
+/// body/flag (through the ordinary [`plan_block_entities`] batcher, same as
+/// every other block-entity type in this module) plus the ordered,
+/// translucent pattern-layer draw list (drawn separately, through
+/// `EntityPipeline::banner_layer_pipeline`, in order) — see
+/// [`BlockEntityModelSet::resolve_banner`]'s doc for the full draw-order
+/// derivation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BannerInstances {
+    /// The pole+bar, opaque, `entity/banner/banner_base`.
+    pub body: BlockEntityInstance,
+    /// The flag, opaque, same sheet as `body` — the plain cloth/wood pass,
+    /// *not* a pattern. Already posed with this frame's sway.
+    pub flag: BlockEntityInstance,
+    /// The base-colour mask plus every stored pattern layer, in draw order —
+    /// `1 + patterns.len().min(MAX_PATTERN_LAYERS)` entries, never empty
+    /// (the base layer always draws, even with zero stored patterns).
+    pub layers: Vec<BannerLayerDraw>,
 }
 
 /// One draw batch: every instance sharing a model **and** a texture.
@@ -1175,7 +1484,11 @@ mod tests {
     #[test]
     fn every_ported_model_bakes_with_geometry_and_parts() {
         let set = set();
-        assert_eq!(set.len(), 6, "3 chest layers + 2 skull canvases + bell");
+        assert_eq!(
+            set.len(),
+            8,
+            "3 chest layers + 2 skull canvases + bell + 2 banner parts (body, flag)"
+        );
         for (name, mesh) in set.iter() {
             assert!(mesh.quad_count() > 0, "{name} baked no quads");
             assert_eq!(mesh.parts.len(), mesh.part_names.len());
@@ -1194,6 +1507,11 @@ mod tests {
         let bell = set.get(BELL).unwrap();
         assert!(bell.index_of("bell_body").is_some(), "bell has no bell_body part");
         assert!(bell.index_of("bell_base").is_some(), "bell has no bell_base part");
+        let banner_body = set.get(BANNER_BODY).unwrap();
+        assert!(banner_body.index_of("pole").is_some(), "banner body has no pole part");
+        assert!(banner_body.index_of("bar").is_some(), "banner body has no bar part");
+        let banner_flag = set.get(BANNER_FLAG).unwrap();
+        assert!(banner_flag.index_of("flag").is_some(), "banner flag has no flag part");
     }
 
     /// The rest AABB must land in `0..1` on Y for the chest layers — the
@@ -1817,6 +2135,223 @@ mod tests {
             frame.batches.len(),
             3,
             "a chest, a skull and a bell must not share a batch"
+        );
+    }
+
+    // --- banner -----------------------------------------------------------
+
+    /// `banner_ground_placement_matrix`'s scale flips **two** axes (Y and Z),
+    /// like `skull_ground_placement_matrix`'s single-axis flip is paired with
+    /// the rotation's own handedness — the product of an even number of sign
+    /// flips preserves orientation. Measured, not assumed: this is the same
+    /// "measure the determinant, don't assert it" discipline
+    /// `placement_preserves_orientation` already holds the chest placement
+    /// to, generalised to a matrix whose magnitude is `(2/3)^3`, not `1`, so
+    /// the assertion is on the *sign* of the determinant, not its value.
+    #[test]
+    fn banner_ground_placement_preserves_orientation() {
+        for segment in [0u8, 1, 4, 8, 12, 15] {
+            let m = banner_ground_placement_matrix([3, 64, -7], segment);
+            assert!(
+                m.determinant() > 0.0,
+                "segment {segment}: det {} should be positive (two axis flips cancel)",
+                m.determinant()
+            );
+        }
+    }
+
+    /// The two flips are real, individually — not merely a determinant that
+    /// happens to be positive by some other route. `+Y` and `+Z` must each
+    /// reverse under the placement's linear part, the mirror image of
+    /// `placement_does_not_flip_or_lift`'s "chest does not flip" assertion.
+    #[test]
+    fn banner_ground_placement_flips_y_and_z_but_not_x() {
+        let m = banner_ground_placement_matrix([0, 0, 0], 0);
+        let up = m.transform_vector3(Vec3::Y);
+        let fwd = m.transform_vector3(Vec3::Z);
+        let right = m.transform_vector3(Vec3::X);
+        assert!(up.y < 0.0, "expected a Y flip, got {up}");
+        assert!(fwd.z < 0.0, "expected a Z flip, got {fwd}");
+        assert!(right.x > 0.0, "X must not flip, got {right}");
+        // Magnitude is the real `2/3` scale, not `1` — skipping it would
+        // render a banner 1.5x too large.
+        assert!((up.length() - 2.0 / 3.0).abs() < 1e-5, "up length {}", up.length());
+    }
+
+    /// `banner_phase`'s exact `floorMod` formula: zero at the origin with no
+    /// game time, wraps every 100 ticks, and a negative-leaning block
+    /// coordinate sum still lands in `0..1` rather than going negative
+    /// (Rust's `%` truncates toward zero and would fail this).
+    #[test]
+    fn banner_phase_matches_the_floor_mod_formula_and_wraps() {
+        assert_eq!(banner_phase([0, 0, 0], 0, 0.0), 0.0);
+        // sum = 7 (x=1), game_time 93 -> 100 -> floorMod 0.
+        assert_eq!(banner_phase([1, 0, 0], 93, 0.0), 0.0);
+        // Partial tick folds in additively, still divided by 100.
+        let with_partial = banner_phase([0, 0, 0], 0, 0.5);
+        assert!((with_partial - 0.005).abs() < 1e-6, "{with_partial}");
+        // A coordinate sum that goes negative must still wrap into 0..100,
+        // not produce a negative phase.
+        let negative = banner_phase([-5, 0, 0], 0, 0.0);
+        assert!((0.0..1.0).contains(&negative), "{negative}");
+        // 7 * -5 = -35; floorMod(-35, 100) = 65 -> phase 0.65.
+        assert!((negative - 0.65).abs() < 1e-6, "{negative}");
+    }
+
+    /// `banner_flag_x_rot`'s exact formula at three phases — a magnitude
+    /// prediction, not merely "the sign changes" (`CLAUDE.md`'s "predict the
+    /// value" rule). `cos` is exactly `1`, `0` and `-1` at these three
+    /// phases, so every intermediate multiply is exact rather than
+    /// approximate.
+    #[test]
+    fn banner_flag_x_rot_matches_the_exact_vanilla_formula() {
+        let pi = std::f32::consts::PI;
+        // phase 0: cos(0) = 1 -> (-0.0125 + 0.01) * pi = -0.0025 * pi.
+        assert!((banner_flag_x_rot(0.0) - (-0.0025 * pi)).abs() < 1e-5);
+        // phase 0.25: cos(pi/2) = 0 -> -0.0125 * pi exactly.
+        assert!((banner_flag_x_rot(0.25) - (-0.0125 * pi)).abs() < 1e-5);
+        // phase 0.5: cos(pi) = -1 -> (-0.0125 - 0.01) * pi = -0.0225 * pi.
+        assert!((banner_flag_x_rot(0.5) - (-0.0225 * pi)).abs() < 1e-5);
+    }
+
+    /// The base mask is always present and first, even with zero stored
+    /// patterns, and every stored pattern follows in its own order —
+    /// `resolve_banner` reaching all the way to `banner_pattern_layers`'
+    /// own contract (`no_patterns_still_draws_the_base_layer`/
+    /// `pattern_order_is_preserved_exactly` in `banner_pattern.rs`), not
+    /// re-deriving it.
+    #[test]
+    fn resolve_banner_produces_the_base_layer_plus_every_pattern_in_order() {
+        let set = set();
+        let patterns = vec![
+            StoredPatternLayer {
+                pattern_asset_id: "creeper".to_string(),
+                color: DyeColor::Lime,
+            },
+            StoredPatternLayer {
+                pattern_asset_id: "stripe_top".to_string(),
+                color: DyeColor::Black,
+            },
+        ];
+        let banner = set
+            .resolve_banner(&BannerSpawn {
+                base_color: DyeColor::Red,
+                patterns,
+                ..BannerSpawn::at([0, 0, 0])
+            })
+            .expect("banner_body and banner_flag must both be in the corpus");
+        assert_eq!(banner.layers.len(), 3, "base + 2 patterns");
+        assert_eq!(banner.layers[0].color, DyeColor::Red.gamma_rgb());
+        assert_eq!(banner.layers[1].color, DyeColor::Lime.gamma_rgb());
+        assert_eq!(banner.layers[2].color, DyeColor::Black.gamma_rgb());
+        assert!(
+            banner.layers[0].sprite.path().ends_with("banner/base"),
+            "{:?}",
+            banner.layers[0].sprite
+        );
+        assert!(
+            banner.layers[1].sprite.path().ends_with("banner/creeper"),
+            "{:?}",
+            banner.layers[1].sprite
+        );
+    }
+
+    /// Every layer reuses the *flag's* posed transform, never the body's —
+    /// pattern masks paint over the cloth, not the pole/bar, and a wrong
+    /// wiring here would have every mask draw at the pole's own (much
+    /// smaller, differently pivoted) rect instead of the flag's.
+    #[test]
+    fn resolve_banner_layers_share_the_flag_transform_not_the_body() {
+        let set = set();
+        let banner = set.resolve_banner(&BannerSpawn::at([0, 0, 0])).unwrap();
+        let flag_mesh = set.get(BANNER_FLAG).unwrap();
+        let flag_index = flag_mesh.index_of("flag").unwrap();
+        let expected = banner.flag.part_transforms[flag_index];
+        for (i, layer) in banner.layers.iter().enumerate() {
+            assert_eq!(layer.transform, expected, "layer {i} transform must equal the flag's");
+        }
+        assert_ne!(
+            banner.layers[0].transform, banner.body.transform,
+            "the layer transform must not be the bare placement (the body's)"
+        );
+    }
+
+    /// The sway moves the flag's own transform, and every layer moves with
+    /// it — the same "does it move geometry, not just produce a different
+    /// number" standard `opening_moves_the_lid_and_lock_and_leaves_the_bottom_alone`
+    /// holds the chest lid to, and `shaking_the_body_moves_the_rim_too_because_it_is_a_child`
+    /// holds the bell rim to.
+    #[test]
+    fn resolve_banner_sway_moves_the_flag_and_every_layer_with_it() {
+        let set = set();
+        let resting = set
+            .resolve_banner(&BannerSpawn {
+                patterns: vec![StoredPatternLayer {
+                    pattern_asset_id: "creeper".to_string(),
+                    color: DyeColor::Lime,
+                }],
+                ..BannerSpawn::at([0, 0, 0])
+            })
+            .unwrap();
+        let swaying = set
+            .resolve_banner(&BannerSpawn {
+                phase: 0.5,
+                patterns: vec![StoredPatternLayer {
+                    pattern_asset_id: "creeper".to_string(),
+                    color: DyeColor::Lime,
+                }],
+                ..BannerSpawn::at([0, 0, 0])
+            })
+            .unwrap();
+        assert_ne!(
+            resting.flag.part_transforms, swaying.flag.part_transforms,
+            "the flag itself must move"
+        );
+        assert_eq!(
+            resting.body.part_transforms, swaying.body.part_transforms,
+            "the pole/bar must not move — only the flag sways"
+        );
+        assert_ne!(
+            resting.layers[0].transform, swaying.layers[0].transform,
+            "every pattern layer must move with the flag"
+        );
+        assert_ne!(
+            resting.layers[1].transform, swaying.layers[1].transform,
+            "including the base layer"
+        );
+    }
+
+    #[test]
+    fn banner_texture_stem_is_shared_by_body_and_flag_and_in_the_preload_list() {
+        let set = set();
+        let banner = set.resolve_banner(&BannerSpawn::at([0, 0, 0])).unwrap();
+        assert_eq!(banner.body.texture, BANNER_BASE_TEXTURE_STEM);
+        assert_eq!(banner.flag.texture, BANNER_BASE_TEXTURE_STEM);
+        assert_eq!(banner_texture_stems(), vec![BANNER_BASE_TEXTURE_STEM]);
+        assert!(block_entity_texture_stems().contains(&BANNER_BASE_TEXTURE_STEM));
+    }
+
+    /// A banner's opaque body+flag batch independently from a chest — the
+    /// same coverage `bells_batch_independently_from_chests_and_skulls`
+    /// gives bells, now for the fourth family. The banner's own translucent
+    /// `layers` are not part of `plan_block_entities` at all (by design —
+    /// see `BannerInstances`' doc), so only `body`/`flag` go into this call.
+    #[test]
+    fn banner_body_and_flag_batch_independently_from_a_chest() {
+        let set = set();
+        let chest = set.resolve_chest(&ChestSpawn::at([2, 0, 0])).unwrap();
+        let banner = set.resolve_banner(&BannerSpawn::at([0, 0, 0])).unwrap();
+        let cam = looking_at_origin();
+        let frame = plan_block_entities(
+            &[chest, banner.body, banner.flag],
+            &Frustum::from_view_projection(cam.view_projection()),
+        );
+        assert_eq!(frame.stats.drawn, 3);
+        assert_eq!(
+            frame.batches.len(),
+            3,
+            "chest, banner body and banner flag must all batch independently \
+             (different model *and* different model between body/flag)"
         );
     }
 }

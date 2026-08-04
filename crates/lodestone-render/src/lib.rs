@@ -98,15 +98,17 @@ pub use banner_pattern::{
 };
 pub use block::{BlockPipeline, CameraUniform, DEPTH_FORMAT, DepthBuffer, GpuMesh};
 pub use block_entity::{
-    BELL, BELL_TEXTURE_STEM, BellShakeDirection, BellSpawn, BlockEntityBatch,
-    BlockEntityCullStats, BlockEntityFrame, BlockEntityInstance, BlockEntityMesh,
-    BlockEntityModelSet, CHEST_LEFT, CHEST_MATERIALS, CHEST_RIGHT, CHEST_SINGLE, ChestHalf,
-    ChestMaterial, ChestSpawn, SKULL_HUMANOID, SKULL_MOB, SKULL_TYPES, SkullOrientation,
-    SkullSpawn, SkullType, bell_shake_angle, bell_texture_stems, block_entity_placement_matrix,
-    block_entity_texture_stems, chest_lid_openness, chest_lid_x_rot, chest_material_with_season,
-    chest_texture_stem, chest_texture_stems, horizontal_facing_yaw, plan_block_entities,
-    skull_ground_placement_matrix, skull_texture_stem, skull_texture_stems,
-    skull_wall_placement_matrix,
+    BANNER_BASE_TEXTURE_STEM, BANNER_BODY, BANNER_FLAG, BELL, BELL_TEXTURE_STEM,
+    BannerInstances, BannerLayerDraw, BannerSpawn, BellShakeDirection, BellSpawn,
+    BlockEntityBatch, BlockEntityCullStats, BlockEntityFrame, BlockEntityInstance,
+    BlockEntityMesh, BlockEntityModelSet, CHEST_LEFT, CHEST_MATERIALS, CHEST_RIGHT,
+    CHEST_SINGLE, ChestHalf, ChestMaterial, ChestSpawn, SKULL_HUMANOID, SKULL_MOB, SKULL_TYPES,
+    SkullOrientation, SkullSpawn, SkullType, banner_flag_x_rot, banner_ground_placement_matrix,
+    banner_phase, banner_texture_stems, bell_shake_angle, bell_texture_stems,
+    block_entity_placement_matrix, block_entity_texture_stems, chest_lid_openness,
+    chest_lid_x_rot, chest_material_with_season, chest_texture_stem, chest_texture_stems,
+    horizontal_facing_yaw, plan_block_entities, skull_ground_placement_matrix,
+    skull_texture_stem, skull_texture_stems, skull_wall_placement_matrix,
 };
 pub use block_models::{
     BlockModels, BlockModelsError, CRACK_STAGE_COUNT, DRY_FOLIAGE_TINT_SLOT, FOLIAGE_TINT_SLOT,
