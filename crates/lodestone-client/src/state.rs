@@ -1209,8 +1209,8 @@ mod tests {
     use super::*;
     use lodestone_ecs::player::SelectedSlot;
     use lodestone_ecs::session::{
-        ServerDifficulty, SessionBlockDestruction, SessionGameRules, SessionSpawnPoint,
-        SessionTabList, SessionWorldBorder,
+        ServerDifficulty, SessionBlockDestruction, SessionGameRules, SessionRecipeBookSettings,
+        SessionSpawnPoint, SessionTabList, SessionWorldBorder,
     };
     use lodestone_model::Difficulty;
 
@@ -1504,6 +1504,48 @@ mod tests {
             rules.bool_rule("minecraft:keep_inventory"),
             None,
             "an unreported rule must not read as false"
+        );
+    }
+
+    /// `RecipeBookSettingsChanged` — the only one of these whose *packet* was
+    /// undecoded rather than merely unrouted. `ClientAction::SetRecipeBookSettings`
+    /// was already encoded, so before this the round trip was half-open: our book
+    /// state could go out and the server's could never come back.
+    #[test]
+    fn apply_routes_recipe_book_settings_through_the_real_path() {
+        use lodestone_model::{RecipeBookType, RecipeBookTypeSettings};
+        let state = SharedState::default();
+        {
+            let ecs = state.ecs.read();
+            assert!(
+                !ecs.get::<SessionRecipeBookSettings>(state.session)
+                    .unwrap()
+                    .0
+                    .reported,
+                "precondition: unreported"
+            );
+        }
+        state.apply(&ClientEvent::RecipeBookSettingsChanged {
+            crafting: RecipeBookTypeSettings { open: true, filtering: true },
+            furnace: RecipeBookTypeSettings { open: false, filtering: true },
+            blast_furnace: RecipeBookTypeSettings { open: true, filtering: false },
+            smoker: RecipeBookTypeSettings { open: false, filtering: false },
+        });
+        let ecs = state.ecs.read();
+        let s = ecs
+            .get::<SessionRecipeBookSettings>(state.session)
+            .unwrap()
+            .0;
+        assert!(s.reported);
+        assert_eq!(
+            s.for_type(RecipeBookType::Crafting),
+            RecipeBookTypeSettings { open: true, filtering: true },
+            "RecipeBookSettingsChanged must reach the fold through the real path"
+        );
+        assert_eq!(
+            s.for_type(RecipeBookType::BlastFurnace),
+            RecipeBookTypeSettings { open: true, filtering: false },
+            "and each book must keep its own pair"
         );
     }
 

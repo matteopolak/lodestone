@@ -146,6 +146,17 @@ pub struct SessionSpawnPoint(pub lodestone_game::levelstate::SpawnPoint);
 #[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionGameRules(pub lodestone_game::levelstate::GameRuleValues);
 
+/// The server's stored per-book recipe-book UI state, from
+/// `ClientEvent::RecipeBookSettingsChanged`.
+///
+/// The packet had **no decode at all** before this — the id was registered, which
+/// proves only that the id is known. `ClientAction::SetRecipeBookSettings` was
+/// already encoded, so the round trip was half-open: our state could go out and
+/// the server's could never come back. See
+/// [`lodestone_game::recipe::RecipeBookSettings`].
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionRecipeBookSettings(pub lodestone_game::recipe::RecipeBookSettings);
+
 /// The active boss bars, in server insertion (render) order.
 ///
 /// `lodestone_game::bossbar::BossBarSet` was a fully implemented, unit-tested
@@ -594,6 +605,18 @@ pub fn apply_spawn_point(batch: Res<IngestBatch>, mut spawns: Query<&mut Session
     }
 }
 
+/// `IngestSet::Apply`: `RecipeBookSettingsChanged` → [`SessionRecipeBookSettings`].
+pub fn apply_recipe_book_settings(
+    batch: Res<IngestBatch>,
+    mut settings: Query<&mut SessionRecipeBookSettings>,
+) {
+    for event in batch.events() {
+        for mut books in &mut settings {
+            let _ = books.0.apply(event);
+        }
+    }
+}
+
 /// `IngestSet::Apply`: `GameRulesChanged` → [`SessionGameRules`].
 pub fn apply_game_rules(batch: Res<IngestBatch>, mut rules: Query<&mut SessionGameRules>) {
     for event in batch.events() {
@@ -939,6 +962,7 @@ pub fn insert_session_components(world: &mut World, entity: bevy_ecs::entity::En
             SessionWorldBorder::default(),
             SessionSpawnPoint::default(),
             SessionGameRules::default(),
+            SessionRecipeBookSettings::default(),
         ));
     }
 }
@@ -985,6 +1009,7 @@ impl Plugin for SessionPlugin {
                 apply_world_border,
                 apply_spawn_point,
                 apply_game_rules,
+                apply_recipe_book_settings,
                 apply_local_player_state,
             )
                 .chain()
@@ -2855,6 +2880,54 @@ mod tests {
         assert_eq!(rules.bool_rule("minecraft:keep_inventory"), None);
     }
 
+    /// Every book gets a *distinct* pair, so a fold that mapped all four to one
+    /// value — or transposed two of them — could not pass.
+    #[test]
+    fn recipe_book_settings_reach_the_fold_through_the_real_schedule() {
+        use lodestone_model::{RecipeBookType, RecipeBookTypeSettings};
+        let (mut app, entity) = session_app();
+        assert!(
+            !app.world()
+                .get::<SessionRecipeBookSettings>(entity)
+                .unwrap()
+                .0
+                .reported,
+            "precondition: unreported"
+        );
+        fold(
+            &mut app,
+            ClientEvent::RecipeBookSettingsChanged {
+                crafting: RecipeBookTypeSettings { open: true, filtering: false },
+                furnace: RecipeBookTypeSettings { open: false, filtering: true },
+                blast_furnace: RecipeBookTypeSettings { open: true, filtering: true },
+                smoker: RecipeBookTypeSettings { open: false, filtering: false },
+            },
+        );
+        let s = app
+            .world()
+            .get::<SessionRecipeBookSettings>(entity)
+            .unwrap()
+            .0;
+        assert!(s.reported);
+        assert_eq!(
+            s.for_type(RecipeBookType::Crafting),
+            RecipeBookTypeSettings { open: true, filtering: false }
+        );
+        assert_eq!(
+            s.for_type(RecipeBookType::Furnace),
+            RecipeBookTypeSettings { open: false, filtering: true },
+            "furnace must not pick up crafting's pair"
+        );
+        assert_eq!(
+            s.for_type(RecipeBookType::BlastFurnace),
+            RecipeBookTypeSettings { open: true, filtering: true }
+        );
+        assert_eq!(
+            s.for_type(RecipeBookType::Smoker),
+            RecipeBookTypeSettings { open: false, filtering: false }
+        );
+    }
+
     /// The reset path. `insert_session_components` is what
     /// `Sim::end_session` calls, so this proves a quit-to-title cannot carry a
     /// previous server's border into the next session — the one failure mode of
@@ -3125,6 +3198,14 @@ mod tests {
         // `game_rules_reach_the_fold_through_the_real_schedule`.
         assert!(handles_event(&ClientEvent::GameRulesChanged {
             values: Vec::new(),
+        }));
+        // RecipeBookSettingsChanged — apply_recipe_book_settings; see
+        // `recipe_book_settings_reach_the_fold_through_the_real_schedule`.
+        assert!(handles_event(&ClientEvent::RecipeBookSettingsChanged {
+            crafting: lodestone_model::RecipeBookTypeSettings::default(),
+            furnace: lodestone_model::RecipeBookTypeSettings::default(),
+            blast_furnace: lodestone_model::RecipeBookTypeSettings::default(),
+            smoker: lodestone_model::RecipeBookTypeSettings::default(),
         }));
 
         // ---- the negative controls: ingest-only and client-only events ----

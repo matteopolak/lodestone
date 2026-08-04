@@ -143,7 +143,7 @@ reviewable commit, not as a drive-by while landing something else.
 
 ## Islands: variants this table found reaching nothing
 
-**29 of 103** variants are `Route::NOWHERE`. Most are simply decoded ahead of a
+**29 of 104** variants are `Route::NOWHERE`. Most are simply decoded ahead of a
 consumer, which is a normal state for a from-scratch client.
 
 > **On these two numbers, because both have been wrong in the record.** This line
@@ -174,6 +174,58 @@ found nine more. All twelve are fixed:
 | the six `WorldBorder*` | none — new `lodestone_game::worldborder::WorldBorder` | `session` → `SessionWorldBorder`, folded by `apply_world_border` | same |
 | `SpawnPositionChanged` | none — new `lodestone_game::levelstate::SpawnPoint` | `session` → `SessionSpawnPoint`, folded by `apply_spawn_point` | same |
 | `GameRulesChanged` | none — new `lodestone_game::levelstate::GameRuleValues` | `session` → `SessionGameRules`, folded by `apply_game_rules` | same |
+| `RecipeBookSettingsChanged` | **the packet had no decode at all** — a new variant, not an un-stranded one | `session` → `SessionRecipeBookSettings`, folded by `apply_recipe_book_settings` | same |
+
+### One step earlier in the pipeline: id registered, never decoded
+
+`RecipeBookSettingsChanged` is a different defect from the other eleven and worth
+separating, because this table cannot see the difference. The others were *decoded
+and unrouted*. This packet had **no decode arm in
+`crates/protocol/v770/src/adapter.rs` at all** — only a registered packet id, which
+proves nothing except that the id is known. `cargo xtask connectedness` is the
+instrument for that axis, not this one.
+
+It was worth doing because the *outbound* half already existed:
+`ClientAction::SetRecipeBookSettings` has been encoded by the adapters for some
+time, so the client could tell the server its recipe-book state and could never be
+told it back. The round trip was half-open.
+
+**Four sibling packets remain undecoded and are deliberately not attempted here**,
+because the cost is not in the packets:
+
+| packet | blocked on |
+|---|---|
+| `RECIPE_BOOK_ADD` (74) | the full `RecipeDisplay`+`SlotDisplay` tree, plus `holderSet<Item>`, the `recipe_book_category` registry, and `OPTIONAL_VAR_INT` |
+| `PLACE_GHOST_RECIPE` (63) | the same tree (small arm on top of it) |
+| `UPDATE_RECIPES` (133) | the same tree, less obviously — via `SelectableRecipe.noRecipeCodec()`'s `SlotDisplay` in the stonecutter set |
+| `RECIPE_BOOK_REMOVE` (75) | nothing technically — but see below |
+
+The shared prerequisite is a recursive `SlotDisplay` decoder (**11 registry-dispatched
+variants**, including `item_stack` carrying a `DataComponentPatch` with a field order
+*different* from `ItemStack.OPTIONAL_STREAM_CODEC`, and `smithing_trim` carrying a
+`Holder<TrimPattern>` whose `0` discriminator means an inline definition follows
+containing a full chat `Component`) plus a `RecipeDisplay` dispatcher (5 variants).
+**None of it exists in `crates/protocol/` or `crates/lodestone-model/` today — not one
+line.** Measured: 4 grep hits for `SlotDisplay`/`RecipeDisplay`, all prose in doc
+comments. Realistically 400–600 lines of codec and model types. Recursion is unbounded
+on the wire (`composite` of `with_remainder` of `dyed` of …) and vanilla does not bound
+it, so a depth cap is required.
+
+`RECIPE_BOOK_REMOVE` is cheap to decode — a VarInt count and N VarInts, codec
+`StreamCodec<ByteBuf, _>`, no registry — and **useless on its own**, because the
+`RecipeDisplayId` → recipe mapping arrives only in `RECIPE_BOOK_ADD`. Decoding it
+alone would produce integers nothing can resolve.
+
+**And there is a design blocker ahead of the codec that is easy to miss.**
+`RecipeUnlockState::unlock`/`remove` (`lodestone-game/src/recipe.rs`) key on
+`Identifier`. The wire carries `RecipeDisplayId`, a *server-session-assigned integer
+index*, and a `RecipeDisplay` contains no recipe id at all — only slot displays, from
+which at best an item stack can be resolved. So decoding `RECIPE_BOOK_ADD` does **not**
+by itself let anything call `unlock`: either the event carries the index plus a
+resolved result and something owns the index→`Identifier` map, or `RecipeUnlockState`
+gains an index-keyed path. That decision belongs with whoever owns the recipe book, and
+it is why "the consumer is already built" is only half true — the *toast renderer* is
+built and `hud.rs`/`app.rs` are wired, but the unlock key type does not match the wire.
 
 ### The world-state sweep's nine, and what the router fork cost
 

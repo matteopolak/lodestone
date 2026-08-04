@@ -675,3 +675,70 @@ fn player_look_at_rejects_truncated_payload() {
     // missing y, z, at_entity flag
     expect_err(&adapter, play::clientbound::PLAYER_LOOK_AT, &payload);
 }
+
+// ---- recipe_book_settings (76) -------------------------------------------
+//
+// Previously **undecoded entirely**, not merely unrouted: `cargo xtask
+// connectedness` counted the packet id as registered with no decode arm, and no
+// `ClientEvent` variant existed to decode into. `ClientAction::
+// SetRecipeBookSettings` was already encoded, so the round trip was half-open.
+//
+// Wire form, from `RecipeBookSettings.STREAM_CODEC` in the 26.2 decompile: four
+// `TypeSettings` in the fixed order crafting, furnace, blast furnace, smoker, each
+// `(bool open, bool filtering)`. Eight bytes, no length prefix, no discriminator.
+// That the codec is `StreamCodec<FriendlyByteBuf, _>` rather than
+// `RegistryFriendlyByteBuf` is the structural evidence nothing else is on the wire.
+
+/// The golden vector is **asymmetric across both axes**, which is the whole point.
+///
+/// A pair-order confusion (`filtering` read before `open`) is invisible to a
+/// round-trip through our own encoder and invisible to any fixture where the two
+/// booleans agree. Here `crafting` is `(true, false)` and `furnace` is
+/// `(false, true)`, so transposing the pair makes those two books swap values and
+/// the assertions below fail. Likewise all four books differ, so a fold that
+/// mapped every book to one pair cannot pass.
+#[test]
+fn recipe_book_settings_wire_order_is_open_then_filtering() {
+    let adapter = V770Adapter::new();
+    let payload = [
+        1u8, 0, // crafting:      open, not filtering
+        0, 1, // furnace:       not open, filtering
+        1, 1, // blast furnace: open, filtering
+        0, 0, // smoker:        neither
+    ];
+    let directives = handle(&adapter, play::clientbound::RECIPE_BOOK_SETTINGS, &payload);
+    let settings = |open, filtering| lodestone_model::RecipeBookTypeSettings { open, filtering };
+    assert_eq!(
+        directives,
+        vec![Directive::Emit(ClientEvent::RecipeBookSettingsChanged {
+            crafting: settings(true, false),
+            furnace: settings(false, true),
+            blast_furnace: settings(true, true),
+            smoker: settings(false, false),
+        })]
+    );
+}
+
+#[test]
+fn recipe_book_settings_rejects_truncated_payload() {
+    let adapter = V770Adapter::new();
+    // Seven bytes: the smoker's `filtering` is missing.
+    expect_err(
+        &adapter,
+        play::clientbound::RECIPE_BOOK_SETTINGS,
+        &[0u8, 0, 0, 0, 0, 0, 0],
+    );
+}
+
+#[test]
+fn recipe_book_settings_rejects_trailing_bytes() {
+    let adapter = V770Adapter::new();
+    // Nine bytes. The packet is fixed-length, so a ninth byte means we have
+    // misread the shape -- `ensure_empty` must catch it rather than silently
+    // ignoring the remainder.
+    expect_err(
+        &adapter,
+        play::clientbound::RECIPE_BOOK_SETTINGS,
+        &[0u8, 0, 0, 0, 0, 0, 0, 0, 1],
+    );
+}
