@@ -988,6 +988,10 @@ pub struct MenuNav {
     /// The Statistics screen's own scroll cursor (issue #188). No persisted
     /// state of its own — see [`crate::menu::stats::StatsNav`]'s doc.
     stats: crate::menu::stats::StatsNav,
+    /// The World Creation screen's own widgets, focus and collected config
+    /// (issue #190). Held here for the same reason [`Self::form`] is: it owns
+    /// real [`EditBox`] state that cannot be rebuilt per frame.
+    create_world: crate::menu::create_world::CreateWorldNav,
 }
 
 impl Default for MenuNav {
@@ -1065,6 +1069,7 @@ impl MenuNav {
             settings: crate::menu::options::SettingsNav::new(),
             social: crate::menu::social::SocialNav::with_path(hidden_players_path),
             stats: crate::menu::stats::StatsNav::default(),
+            create_world: crate::menu::create_world::CreateWorldNav::new(),
         }
     }
 
@@ -1171,6 +1176,12 @@ impl MenuNav {
     #[must_use]
     pub fn stats(&self) -> &crate::menu::stats::StatsNav {
         &self.stats
+    }
+
+    /// The World Creation screen's own state (issue #190).
+    #[must_use]
+    pub fn create_world(&self) -> &crate::menu::create_world::CreateWorldNav {
+        &self.create_world
     }
 
     /// Whether a Key Binds bind button is mid-capture (issue #15) — a click
@@ -1514,7 +1525,13 @@ impl MenuNav {
         // Play Selected World is the one that does something — it launches (#287).
         if ui.screen() == Screen::WorldSelect {
             let outcome = self.world_select.click_row(row);
-            return Self::apply_world_select(ui, outcome);
+            return self.apply_world_select(ui, outcome);
+        }
+        // World Creation (issue #190) — #391's shape again: a click focuses a
+        // field or presses a button, never "hover then Enter".
+        if ui.screen() == Screen::CreateWorld {
+            let outcome = self.create_world.click_row(row);
+            return self.apply_create_world(ui, outcome);
         }
         if ui.screen() == Screen::Settings {
             // Key Binds (issue #15) again — see `hover`'s matching guard.
@@ -1695,6 +1712,9 @@ impl MenuNav {
             Screen::ServerList => self.key_list(ui, key),
             Screen::ServerEdit => self.key_edit(ui, key),
             Screen::WorldSelect => self.key_world_select(ui, key),
+            // World Creation (issue #190) — same reasoning as
+            // `Screen::WorldSelect`'s own arm above.
+            Screen::CreateWorld => self.key_create_world(ui, key),
             Screen::Settings => self.key_settings(ui, key),
             Screen::Accounts => self.key_accounts(ui, key),
             // Unlike the other arms above, the pause menu is not an
@@ -1971,14 +1991,17 @@ impl MenuNav {
     /// fight it.
     fn key_world_select(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         let outcome = self.world_select.handle_key(key);
-        Self::apply_world_select(ui, outcome)
+        self.apply_world_select(ui, outcome)
     }
 
-    /// The one thing a [`super::world_select::WorldSelectOutcome`] can ask of the
-    /// screen. An associated function rather than a method because it touches no
-    /// `MenuNav` state — which is also what lets [`Self::click`] call it while
-    /// still holding the outcome of a `&mut self.world_select` call.
+    /// The one thing a [`super::world_select::WorldSelectOutcome`] can ask of
+    /// the screen. Used to be an associated function that touched no
+    /// `MenuNav` state; issue #190's `CreateWorld` arm needs to reset
+    /// [`Self::create_world`] on entry (the same "fresh screen, not a
+    /// resumed one" rule every other `open_*`/`reset` pair in this file
+    /// follows), so it is a method now.
     fn apply_world_select(
+        &mut self,
         ui: &mut UiState,
         outcome: crate::menu::world_select::WorldSelectOutcome,
     ) -> MenuAction {
@@ -1997,7 +2020,36 @@ impl MenuNav {
             // compiled in) has to be able to show its error over a screen the
             // player recognises rather than over a blank one.
             WorldSelectOutcome::Play => MenuAction::Singleplayer,
+            // Issue #190.
+            WorldSelectOutcome::CreateWorld => {
+                self.create_world = crate::menu::create_world::CreateWorldNav::new();
+                ui.open_create_world();
+                MenuAction::None
+            }
         }
+    }
+
+    /// The World Creation screen (issue #190). Every key is routed through
+    /// [`crate::menu::create_world::CreateWorldNav::handle_key`], which
+    /// already implements vanilla's `Screen.keyPressed` order (Escape, then
+    /// the focused field, then Tab/arrow navigation, then Enter on whatever
+    /// is focused) — this arm only decides what leaving the screen means.
+    fn key_create_world(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        let outcome = self.create_world.handle_key(key);
+        self.apply_create_world(ui, outcome)
+    }
+
+    /// What a [`crate::menu::create_world::CreateWorldOutcome`] means at the
+    /// `UiState` level.
+    fn apply_create_world(
+        &mut self,
+        ui: &mut UiState,
+        outcome: crate::menu::create_world::CreateWorldOutcome,
+    ) -> MenuAction {
+        if outcome == crate::menu::create_world::CreateWorldOutcome::Cancel {
+            ui.close_create_world();
+        }
+        MenuAction::None
     }
 
     /// The settings tree (issue #55). Up/Down move the cursor, Enter activates
@@ -3888,7 +3940,7 @@ mod tests {
 
         // The disabled buttons first, so a stray activation would be visible as a
         // screen change before Back is ever pressed.
-        for button in [B::Create, B::Edit, B::Delete, B::ReCreate] {
+        for button in [B::Edit, B::Delete, B::ReCreate] {
             assert_eq!(nav.click(&mut ui, button.row()), MenuAction::None);
             assert_eq!(
                 ui.screen(),
@@ -3896,6 +3948,13 @@ mod tests {
                 "clicking {button:?} must do nothing at all"
             );
         }
+        // Create is live now (issue #190) and does do something: it opens
+        // World Creation. Checked and reversed here rather than folded into
+        // the disabled loop above.
+        assert_eq!(nav.click(&mut ui, B::Create.row()), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::CreateWorld, "clicking Create must open it");
+        assert_eq!(nav.key(&mut ui, MenuKey::Escape), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::WorldSelect, "Escape returns to the world list");
         // Clicking the search field must not activate the screen either — the
         // `ServerEdit` bug one screen over.
         assert_eq!(

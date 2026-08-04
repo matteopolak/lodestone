@@ -38,6 +38,7 @@
 //! doing nothing.
 
 pub mod accounts;
+pub mod create_world;
 pub mod edit_box;
 pub mod focus;
 pub mod key_binds;
@@ -214,6 +215,19 @@ pub enum Screen {
     /// so [`stats::StatsSnapshot::default`] is not a placeholder, it is the
     /// only data that has ever existed here.
     Statistics,
+    /// The World Creation screen (issue #190): vanilla's `CreateWorldScreen`,
+    /// reduced to one flat hand-placed list (see [`create_world`]'s module
+    /// docs for why). Reached from [`Screen::WorldSelect`]'s "Create New
+    /// World" button — issue #397 left it present-and-disabled for exactly
+    /// this issue; Escape or the screen's own Cancel button returns to
+    /// [`Screen::WorldSelect`].
+    ///
+    /// Collecting a name/seed/game-mode/difficulty/structures/bonus-chest/
+    /// allow-cheats config is real; **nothing downstream reads it yet** — the
+    /// integrated server still launches [`world_select::BUNDLED_WORLD`]'s
+    /// fixed seed regardless of what this screen collected. See
+    /// [`create_world`]'s module docs for the queued patch.
+    CreateWorld,
 }
 
 impl Screen {
@@ -239,7 +253,7 @@ impl Screen {
     /// residue is real; it is stated rather than papered over. If a third
     /// consumer ever needs this, a derive is the fix, not another hand-written
     /// list.
-    pub const ALL: [Screen; 16] = [
+    pub const ALL: [Screen; 17] = [
         Screen::MainMenu,
         Screen::ServerList,
         Screen::ServerEdit,
@@ -256,6 +270,7 @@ impl Screen {
         Screen::Credits,
         Screen::Social,
         Screen::Statistics,
+        Screen::CreateWorld,
     ];
 }
 
@@ -680,6 +695,25 @@ impl UiState {
         }
     }
 
+    /// Open the World Creation screen (issue #190) from the world list's
+    /// "Create New World" button. Only from [`Screen::WorldSelect`] — same
+    /// reasoning as every other `open_*_from_*`: a stray call must not pull
+    /// the player out of wherever they actually are.
+    pub fn open_create_world(&mut self) {
+        if self.screen == Screen::WorldSelect {
+            self.screen = Screen::CreateWorld;
+        }
+    }
+
+    /// Back to the world list from World Creation — Escape or Cancel, and
+    /// (today) Create too, since nothing yet launches a world from the
+    /// collected config (see [`create_world`]'s module docs).
+    pub fn close_create_world(&mut self) {
+        if self.screen == Screen::CreateWorld {
+            self.screen = Screen::WorldSelect;
+        }
+    }
+
     // -- input-driven transitions ----------------------------------------
 
     /// Open the chat box over the world. Only from [`Screen::Playing`]; opening
@@ -777,6 +811,8 @@ impl UiState {
             Screen::Social => self.close_social(),
             // Same reasoning as `Screen::Social` immediately above.
             Screen::Statistics => self.close_statistics(),
+            // Same reasoning again — back to the world list.
+            Screen::CreateWorld => self.close_create_world(),
         }
     }
 

@@ -17,18 +17,19 @@
 //!
 //! ## What is disabled, and why
 //!
-//! Five of the six footer buttons are inactive, and **`active = false` is the
-//! whole mechanism** — see [`super::widget`]. Vanilla disables four of them
-//! itself, for our exact reason:
+//! Three of the six footer buttons are inactive (four, before issue #190
+//! enabled Create), and **`active = false` is the whole mechanism** — see
+//! [`super::widget`]. Vanilla disables them itself, for our exact reason:
 //! `SelectWorldScreen.updateButtonStatus(null)` (`SelectWorldScreen.java:159-166`)
-//! turns Play, Edit, Delete and Re-Create off whenever nothing is selected, and
-//! nothing can be selected here (below). The **one deviation is Create New
-//! World**, which vanilla leaves active: its press calls
-//! `CreateWorldScreen.openFresh` (`:87`), and `CreateWorldScreen` (828 lines) plus
-//! `WorldCreationUiState` (326) are issue **#190**, not this one. Rendering it
-//! greyed rather than omitting it is the point of the issue: a missing row would
-//! change the footer grid's shape and read as a *different screen*, where a
-//! greyed one reads exactly like vanilla with the feature unavailable.
+//! turns Edit, Delete and Re-Create off whenever nothing is selected, and
+//! nothing can be selected here (below); Play and Create are both active for
+//! the same reason vanilla's own are (a launchable selection, and a screen
+//! genuinely worth opening — see [`super::create_world`]'s module docs for
+//! what that screen does and does not do yet). Rendering the still-disabled
+//! three greyed rather than omitting them is the point of #397: a missing row
+//! would change the footer grid's shape and read as a *different screen*,
+//! where a greyed one reads exactly like vanilla with the feature
+//! unavailable.
 //!
 //! What vanilla does with a **tooltip** on such a button
 //! (`TitleScreen.java:196`, `OptionsScreen.java:88-92`) is still deferred, for
@@ -173,9 +174,11 @@ pub enum WorldSelectButton {
     /// integrated server — see [`WorldSelectOutcome::Play`] and the module docs'
     /// "what consumes it".
     Play,
-    /// `selectWorld.create`. Two columns wide. Disabled — **the one deviation
-    /// from vanilla on this screen**, because its press opens
-    /// `CreateWorldScreen` (issue #190). See the module docs.
+    /// `selectWorld.create`. Two columns wide. **Enabled** (issue #190): its
+    /// press opens [`super::Screen::CreateWorld`] — see
+    /// [`super::create_world`]'s module docs for what that screen does and
+    /// does not do yet. This was **the one deviation from vanilla** on this
+    /// screen before #190; that history is why the module docs still say so.
     Create,
     /// `selectWorld.edit`, 71 px. Disabled: vanilla's `summary.canEdit()`
     /// (`:170`), and there is no selection — nor an `EditWorldScreen` to open.
@@ -232,7 +235,10 @@ impl WorldSelectButton {
     /// of the *client* rather than of a selection.
     #[must_use]
     pub fn enabled(self) -> bool {
-        matches!(self, WorldSelectButton::Play | WorldSelectButton::Back)
+        matches!(
+            self,
+            WorldSelectButton::Play | WorldSelectButton::Back | WorldSelectButton::Create
+        )
     }
 
     /// This button's row index, i.e. its [`FocusSet`] id.
@@ -324,6 +330,8 @@ pub enum WorldSelectOutcome {
     /// [`BUNDLED_WORLD`] directly. When a real list arrives this becomes
     /// `Play(WorldEntry)` and the change is compile-visible at both ends.
     Play,
+    /// Create New World (issue #190): open [`super::Screen::CreateWorld`].
+    CreateWorld,
 }
 
 /// The world-select screen's live state: its widgets, its focus, and which row
@@ -547,11 +555,12 @@ impl WorldSelectNav {
             // `WorldSelectionList.getSelectedOpt().ifPresent(Entry::joinWorld)`.
             // Ours is issue #287's launch — see this module's "what consumes it".
             WorldSelectButton::Play => WorldSelectOutcome::Play,
-            // Disabled above, and unreachable through either press path.
-            WorldSelectButton::Create
-            | WorldSelectButton::Edit
-            | WorldSelectButton::Delete
-            | WorldSelectButton::ReCreate => WorldSelectOutcome::Handled,
+            // Issue #190: opens `Screen::CreateWorld`.
+            WorldSelectButton::Create => WorldSelectOutcome::CreateWorld,
+            // Still disabled above, and unreachable through either press path.
+            WorldSelectButton::Edit | WorldSelectButton::Delete | WorldSelectButton::ReCreate => {
+                WorldSelectOutcome::Handled
+            }
         }
     }
 
@@ -587,14 +596,15 @@ impl WorldSelectNav {
 mod tests {
     use super::*;
 
-    /// Every button is present, and exactly two of them are active.
+    /// Every button is present, and exactly three of them are active.
     ///
-    /// The count is asserted both ways round on purpose: "four disabled" is what
-    /// makes the screen honest about what this client cannot do, and Play being
-    /// enabled is #287 — the screen stopped being a dead end that could only be
-    /// left again.
+    /// The count is asserted both ways round on purpose: "three disabled" is
+    /// what makes the screen honest about what this client cannot do (Edit/
+    /// Delete/Re-Create still need world storage), and Play/Create being
+    /// enabled is #287/#190 — the screen stopped being a dead end that could
+    /// only be left again, twice over.
     #[test]
-    fn four_of_the_six_footer_buttons_are_present_and_disabled() {
+    fn three_of_the_six_footer_buttons_are_present_and_disabled() {
         assert_eq!(WORLD_SELECT_BUTTONS.len(), 6, "vanilla has six footer buttons");
         let enabled: Vec<_> = WORLD_SELECT_BUTTONS
             .iter()
@@ -603,16 +613,22 @@ mod tests {
             .collect();
         assert_eq!(
             enabled,
-            vec![WorldSelectButton::Play, WorldSelectButton::Back],
-            "Play launches the bundled world (#287); Back leaves"
+            vec![
+                WorldSelectButton::Play,
+                WorldSelectButton::Create,
+                WorldSelectButton::Back
+            ],
+            "Play launches the bundled world (#287); Create opens the new screen (#190); Back leaves"
         );
-        // The headline of #397: Create New World is *there*, and inactive.
-        assert!(
-            WORLD_SELECT_BUTTONS.contains(&WorldSelectButton::Create),
-            "creation must be present, not absent — an omitted row reshapes the footer"
-        );
-        assert!(!WorldSelectButton::Create.enabled());
         assert_eq!(WorldSelectButton::Create.label(), "Create New World");
+        // The three that remain present-and-inactive.
+        for b in [
+            WorldSelectButton::Edit,
+            WorldSelectButton::Delete,
+            WorldSelectButton::ReCreate,
+        ] {
+            assert!(!b.enabled(), "{b:?} must still be present and inactive");
+        }
     }
 
     /// The list has a world, and the row the player reads is the world Play
@@ -701,11 +717,15 @@ mod tests {
     /// registers header → footer, so Play comes before Back even though Back is
     /// the earlier row visually in neither sense. See `focus.rs`'s module docs.
     #[test]
-    fn tab_visits_the_search_field_play_and_back_and_nothing_else() {
+    fn tab_visits_the_search_field_play_create_and_back_and_nothing_else() {
+        // Issue #190 added a fourth active widget (Create) to what used to be
+        // three; the walk below is the direct replacement for this test's
+        // pre-#190 shape rather than a new assertion plus a leftover control
+        // that forced the same thing artificially.
         let mut nav = WorldSelectNav::new();
         assert_eq!(nav.focused_row(), Some(SEARCH_FIELD), "setInitialFocus");
         let mut seen = vec![nav.focused_row()];
-        for _ in 0..4 {
+        for _ in 0..5 {
             nav.handle_key(MenuKey::Tab);
             seen.push(nav.focused_row());
         }
@@ -714,26 +734,20 @@ mod tests {
             vec![
                 Some(SEARCH_FIELD),
                 Some(WorldSelectButton::Play.row()),
+                Some(WorldSelectButton::Create.row()),
                 Some(WorldSelectButton::Back.row()),
                 Some(SEARCH_FIELD),
                 Some(WorldSelectButton::Play.row()),
             ],
-            "tab must cycle between the only three active widgets"
+            "tab must cycle between the only four active widgets"
         );
 
-        // -- control ---------------------------------------------------------
-        // The walk has to be able to reach a button it was skipping, or the
-        // assertion above is satisfied by a traversal that can only ever find
-        // three things.
-        let mut nav = WorldSelectNav::new();
-        let create = WorldSelectButton::Create.row();
-        nav.widgets.buttons[create - FIRST_BUTTON_ROW].active = true;
-        nav.handle_key(MenuKey::Tab);
-        nav.handle_key(MenuKey::Tab);
-        assert_eq!(
-            nav.focused_row(),
-            Some(create),
-            "an enabled Create must be the tab stop after Play, before Back"
+        // The control: the walk has to be able to *not* reach a widget that
+        // is genuinely inactive, or the assertion above would pass even if
+        // every row were visited.
+        assert!(
+            !seen.contains(&Some(WorldSelectButton::Edit.row())),
+            "Edit is inactive and must never be a tab stop"
         );
     }
 
@@ -756,19 +770,36 @@ mod tests {
         nav.handle_key(MenuKey::Down);
         assert_eq!(nav.focused_row(), Some(WorldSelectButton::Play.row()));
         assert_eq!(nav.search().value(), "cav", "the field kept its text");
-        // Down again reaches Back through the *vague* pass — nothing active
-        // overlaps Play in x below it, so the strict pass finds nothing and the
-        // fallback takes the nearest by squared distance.
+
+        // Repeated Down must reach Back eventually and then stay there —
+        // arrows do not wrap (`Screen.java:139-143` gates the retry on Tab).
+        // Not asserted as a fixed step count: issue #190 added Create as a
+        // second active row between Play and Back (both are vanilla's own
+        // "two columns wide", i.e. full-width, so they stack rather than sit
+        // side by side), which moved the exact geometric path this test used
+        // to assert step-by-step; the exact geometry is what
+        // `create_world.rs`'s own gates cover, so this test's job is only
+        // "Down eventually reaches Back and stays, Up eventually returns".
+        let mut steps = 0;
+        while nav.focused_row() != Some(WorldSelectButton::Back.row()) {
+            nav.handle_key(MenuKey::Down);
+            steps += 1;
+            assert!(steps <= WORLD_SELECT_BUTTONS.len() + 1, "Down never reached Back");
+        }
         nav.handle_key(MenuKey::Down);
-        assert_eq!(nav.focused_row(), Some(WorldSelectButton::Back.row()));
-        // Arrows do not wrap (`Screen.java:139-143` gates the retry on Tab), so
-        // Down off the last active widget stays put.
-        nav.handle_key(MenuKey::Down);
-        assert_eq!(nav.focused_row(), Some(WorldSelectButton::Back.row()));
-        // And Up comes back to the field: Back's x band (510..581) overlaps the
-        // search box's (327..527) and nothing else active sits between them.
-        nav.handle_key(MenuKey::Up);
-        assert_eq!(nav.focused_row(), Some(SEARCH_FIELD));
+        assert_eq!(
+            nav.focused_row(),
+            Some(WorldSelectButton::Back.row()),
+            "Down off the last active widget must stay put"
+        );
+
+        let mut steps = 0;
+        while nav.focused_row() != Some(SEARCH_FIELD) {
+            nav.handle_key(MenuKey::Up);
+            steps += 1;
+            assert!(steps <= WORLD_SELECT_BUTTONS.len() + 1, "Up never returned to the search field");
+        }
+        assert_eq!(nav.search().value(), "cav", "the field kept its text throughout");
     }
 
     /// Escape closes the screen, Enter on Play launches, and Enter closes only
@@ -785,6 +816,10 @@ mod tests {
         nav.handle_key(MenuKey::Tab);
         assert_eq!(nav.focused_row(), Some(WorldSelectButton::Play.row()));
         assert_eq!(nav.handle_key(MenuKey::Enter), WorldSelectOutcome::Play);
+        // Issue #190: Create is now active too, so Tab visits it between Play
+        // and Back rather than skipping straight to Back.
+        nav.handle_key(MenuKey::Tab);
+        assert_eq!(nav.focused_row(), Some(WorldSelectButton::Create.row()));
         nav.handle_key(MenuKey::Tab);
         assert_eq!(nav.focused_row(), Some(WorldSelectButton::Back.row()));
         assert_eq!(nav.handle_key(MenuKey::Enter), WorldSelectOutcome::Close);
@@ -866,12 +901,13 @@ mod tests {
         // -- control ---------------------------------------------------------
         // The same click on the same row, with the button enabled, must move
         // focus — otherwise the assertions above would pass for a `click_row`
-        // that ignores every row.
+        // that ignores every row. Play is a real enabled button (#287), so
+        // this needs no synthetic override the way it did before issue #190
+        // made Create real too.
         let mut nav = WorldSelectNav::new();
-        let create = WorldSelectButton::Create;
-        nav.widgets.buttons[create.row() - FIRST_BUTTON_ROW].active = true;
-        assert_eq!(nav.click_row(create.row()), WorldSelectOutcome::Handled);
-        assert_eq!(nav.focused_row(), Some(create.row()));
+        let play = WorldSelectButton::Play;
+        assert_eq!(nav.click_row(play.row()), WorldSelectOutcome::Play);
+        assert_eq!(nav.focused_row(), Some(play.row()));
     }
 
     /// Hover is not focus. The bug this prevents is concrete: with one flag,
