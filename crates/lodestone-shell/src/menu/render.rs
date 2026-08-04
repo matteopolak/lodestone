@@ -240,6 +240,9 @@ const ROW_SEL: [f32; 4] = [0.36, 0.40, 0.48, 1.0];
 const ROW_OFF: [f32; 4] = [0.16, 0.16, 0.18, 1.0];
 /// Primary text.
 const FG: [f32; 4] = [0.94, 0.94, 0.94, 1.0];
+/// `AbstractSliderButton.HANDLE_WIDTH` (`AbstractSliderButton.java:26`): the
+/// handle is always 8 px wide, whatever the track's own width is.
+const SLIDER_HANDLE_WIDTH: f32 = 8.0;
 /// Secondary text (MOTD, address, hints).
 const FG_DIM: [f32; 4] = [0.66, 0.68, 0.72, 1.0];
 /// Failure text.
@@ -1728,12 +1731,28 @@ pub struct MenuRow {
     /// A settings screen's numeric options are sliders and its enums and
     /// booleans are `CycleButton`s (`OptionInstance.java:127-135`), and the two
     /// look nothing alike — a slider track has no bevel and no disabled variant.
-    /// A `bool` rather than a value, because **no live option in this client is a
-    /// slider**: `guiScale` is a `ClampingLazyMaxIntRange`, whose
-    /// `createCycleButton()` is `true`, so it is a cycle button. Every slider we
-    /// draw is therefore inactive and has no handle to place; see
-    /// [`super::widget::Widget::slider`].
+    ///
+    /// This used to say "no live option in this client is a slider", citing
+    /// `guiScale`'s `ClampingLazyMaxIntRange` — true when written, false since
+    /// issue #203 gave `mouseWheelSensitivity` a real live value (see
+    /// [`Self::slider_value`]). Kept as its own `bool` rather than folded into
+    /// that field because a non-slider row still needs to say "not a slider" and
+    /// `Option<f32>` already carries that (`None`); this is `is_slider`, not
+    /// `has_a_known_value`.
     pub slider: bool,
+    /// The `[0, 1]` fraction along the track where the handle sits —
+    /// `AbstractSliderButton.value` (`AbstractSliderButton.java:28,69-77`) —
+    /// or `None` when [`Self::slider`] is `true` but this client holds no
+    /// value for the option at all yet.
+    ///
+    /// Meaningless unless [`Self::slider`] is also `true`; nothing reads it
+    /// otherwise. See [`super::options::Cell::slider_fraction`] for where a
+    /// `Some` comes from — either the real live config value
+    /// (`mouseWheelSensitivity`) or vanilla's own default double for a
+    /// `UnitDouble`-based option this client does not wire, which is not a
+    /// fabricated value: it is the same constant a fresh vanilla install
+    /// boots with.
+    pub slider_value: Option<f32>,
     /// The live [`EditBox`] this row draws — a **clone**, taken per frame from
     /// [`super::nav::EditForm`]'s persistent widgets.
     ///
@@ -2064,6 +2083,17 @@ impl FaviconCache {
 /// `Screen::Paused` here would stop the world rendering for as long as the
 /// game is paused, which is exactly the regression [`super::Screen::Paused`]'s
 /// own doc comment warns against.
+///
+/// **This function does not have the one exception `frame_for` does.**
+/// `Screen::Settings` stays in the set unconditionally, because every caller
+/// here is about input routing (mouse/keyboard treated as menu rows) and that
+/// is true whether or not a world is loaded behind Options. `frame_for`
+/// itself returns `None` for `Screen::Settings` when [`super::UiState::
+/// settings_in_world`] — see its arm's own doc — so the "agrees with
+/// `frame_for`" test only walks screens reached the way `open_settings`
+/// (title) does, not `open_settings_from_pause`; see
+/// `frame_for_defers_to_an_overlay_for_in_world_settings` for the case this
+/// leaves uncovered by that walk.
 #[must_use]
 pub fn owns_frame(screen: super::Screen) -> bool {
     use super::Screen;
@@ -3478,11 +3508,34 @@ pub fn frame_for<'a>(
         // sits, and — since the Online page — whether the root's header button
         // is even a link at all — belongs to `super::options`; this arm only
         // supplies the two things that live outside it (`nav`, `options`).
-        Screen::Settings => Some(super::options::settings_frame(
+        //
+        // **`None` when `ui.settings_in_world()`** — a player report
+        // (2026-08-04) caught that opening Options from the pause menu showed
+        // the panorama instead of the paused world, because this arm always
+        // returned `Some` and `owns_frame`'s `Clear` pass (`app.rs::draw_menu`)
+        // has no idea a world is loaded behind it. The panorama is
+        // `Screen::MainMenu`'s background alone (`panorama.rs`'s module docs);
+        // in-world Options is vanilla's `OptionsScreen` opened over the paused
+        // level, same shape as `Screen::Paused`/`Screen::Death`. Returning
+        // `None` here routes it through the *world* render path in `app.rs`'s
+        // `redraw` instead of `draw_menu`'s Clear pass — exactly like Paused
+        // and Death — where a **new overlay block** (not yet landed; this is
+        // the render-side half, app.rs's half is brokered) must draw this same
+        // `settings_frame` with `MenuRenderer::render_overlay` after the world
+        // paints, or the screen goes blank in-world until that block exists.
+        // `owns_frame(Screen::Settings)` is deliberately left `true` regardless
+        // — every non-render caller (mouse/keyboard routing) still wants
+        // Settings treated as a menu-row screen whether or not a world is
+        // behind it, so `the_root_title_is_centred_on_the_header_block`'s
+        // sibling invariant, "`owns_frame` agrees with `frame_for`", now has
+        // its one documented exception: see
+        // `frame_for_defers_to_an_overlay_for_in_world_settings`.
+        Screen::Settings if !ui.settings_in_world() => Some(super::options::settings_frame(
             nav.settings(),
             nav.options(),
             nav.options_save_error(),
         )),
+        Screen::Settings => None,
         // The account list (issue #66). `pump` is called here, on every
         // frame this screen is showing, rather than from an `app.rs` hook —
         // see `accounts.rs`'s module docs on why that module is written to
@@ -4504,6 +4557,24 @@ fn draw_widget(
         }
     }
 
+    // `AbstractSliderButton.extractWidgetRenderState` blits the handle right
+    // after the track and before the label (`AbstractSliderButton.java:67-78`):
+    // `getX() + (int)(this.value * (this.width - 8))`, width 8, full row
+    // height. `row.slider_value` is `None` for a slider this client holds no
+    // value for at all (see its doc) — that slider keeps drawing bare, exactly
+    // as it did before this existed, rather than getting a fabricated handle.
+    // Gated on `has_sprite` like the track above: no atlas, no handle, same
+    // jar-less fallback discipline.
+    if row.slider {
+        if let Some(fraction) = row.slider_value {
+            let handle_sprite = widget.slider_handle_sprite();
+            if b.has_sprite(handle_sprite) {
+                let hx = x + (fraction.clamp(0.0, 1.0) * (w - SLIDER_HANDLE_WIDTH)).floor();
+                b.sprite(handle_sprite, hx, y, SLIDER_HANDLE_WIDTH, h, LABEL);
+            }
+        }
+    }
+
     if let Some(icon) = widget.icon {
         // `spriteOffset` is zero at every call site, so this is a plain centre.
         let (ix, iy) = widget.icon_rect(ICON_SPRITE);
@@ -4978,114 +5049,23 @@ impl MenuRenderer {
         queue: &wgpu::Queue,
         atlas: Arc<GuiAtlas>,
     ) {
-        let gpu = GpuAtlas::from_atlas(device, queue, atlas.atlas());
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("menu-sprite-shader"),
-            source: wgpu::ShaderSource::Wgsl(MENU_SPRITE_WGSL.into()),
-        });
-        let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("menu-sprite-bgl"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("menu-sprite-layout"),
-            bind_group_layouts: &[Some(&bind_layout)],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("menu-sprite-pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: (SPRITE_FLOATS_PER_VERTEX * 4) as wgpu::BufferAddress,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 8,
-                            shader_location: 1,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x4,
-                            offset: 16,
-                            shader_location: 2,
-                        },
-                    ],
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: self.color_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("menu-sprite-bind"),
-            layout: &bind_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&gpu.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&gpu.sampler),
-                },
-            ],
-        });
-        let capacity_floats = 1 << 14;
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("menu-sprite-verts"),
-            size: (capacity_floats * 4) as wgpu::BufferAddress,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let sp = crate::hud::item_icon::build_sprite_pipeline(
+            device,
+            queue,
+            atlas.atlas(),
+            MENU_SPRITE_WGSL,
+            self.color_format,
+            1 << 14,
+            "menu-sprite",
+        );
         self.gui_attempted = true;
         self.sprites = Some(MenuSprites {
             atlas,
-            gpu,
-            pipeline,
-            bind_group,
-            buffer,
-            capacity_floats,
+            gpu: sp.gpu,
+            pipeline: sp.pipeline,
+            bind_group: sp.bind_group,
+            buffer: sp.buffer,
+            capacity_floats: sp.capacity_floats,
         });
     }
 
@@ -7297,6 +7277,48 @@ mod tests {
         // entirely — the pause menu would work, but the game behind it would
         // stop rendering for as long as it was up.
         assert!(!owns_frame(Screen::Paused));
+    }
+
+    #[test]
+    fn frame_for_defers_to_an_overlay_for_in_world_settings() {
+        // The player report this exists for: Options opened from the pause
+        // menu must show the paused *world* behind it, not the main-menu
+        // panorama. `frame_for` returning `Some` unconditionally for
+        // `Screen::Settings` was exactly the bug — `draw_menu` took the
+        // `Clear` pass and the world (and its HUD/container passes) never
+        // drew at all.
+        //
+        // Two controls in one test, by construction rather than assertion:
+        // the title-screen route still gets a frame at all (a regression that
+        // made *every* Options entry return `None` would still pass a
+        // negative-only check), and `owns_frame` staying `true` for both
+        // routes is what proves the two are meant to diverge here, not drift
+        // apart by accident.
+        let nav = test_nav("settings-overlay");
+        let mut fav = FaviconCache::new();
+        let statuses = StatusCache::with_probe(unavailable_probe());
+
+        let mut from_title = UiState::new();
+        from_title.open_settings();
+        assert!(!from_title.settings_in_world());
+        assert!(
+            frame_for(&from_title, &nav, &statuses, &mut fav).is_some(),
+            "Options from the title screen must still own the frame — it has \
+             no world to show behind it"
+        );
+
+        let mut from_pause = UiState::new();
+        from_pause.enter_dev_world();
+        from_pause.pause();
+        from_pause.open_settings_from_pause();
+        assert!(from_pause.settings_in_world());
+        assert!(
+            frame_for(&from_pause, &nav, &statuses, &mut fav).is_none(),
+            "in-world Options must defer to an overlay over the still-\
+             rendering world, not the Clear pass"
+        );
+        // `owns_frame` itself is unchanged either way — see its doc.
+        assert!(owns_frame(Screen::Settings));
     }
 
     #[test]

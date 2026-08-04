@@ -85,7 +85,9 @@ use glam::Mat4;
 // with vanilla's own constant (`COUNT_TOP`), so nothing in this module needs the
 // font's metrics any more — see `COUNT_RIGHT`'s doc comment for why a derived
 // anchor was the defect rather than the off-by-one.
-use lodestone_assets::{DisplaySlot, DisplayTransform, IconPart, ItemAtlas, ResourceLocation};
+use lodestone_assets::{
+    Atlas, DisplaySlot, DisplayTransform, IconPart, ItemAtlas, ResourceLocation,
+};
 use lodestone_render::{
     BlockEntityModelSet, BlockModels, CHEST_SINGLE, CameraUniform, ChestHalf, ChestMaterial,
     EntityCameraUniform, EntityPipeline, GpuAtlas, GpuEntityModel, GuiSpriteQuad, ModelPipeline,
@@ -888,6 +890,163 @@ fn entity_sheet_texture(
     texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
+/// The GPU objects behind a textured-quad sprite pass: an uploaded atlas, an
+/// alpha-blended pipeline for `color_format`, its bind group, and a dynamic
+/// vertex buffer sized for `capacity_floats` floats.
+///
+/// Returned by [`build_sprite_pipeline`] rather than assembled into a caller's
+/// own struct, because the caller's struct also carries an `atlas: Arc<_>`
+/// field of a type ([`GuiAtlas`](lodestone_render::GuiAtlas) vs [`ItemAtlas`])
+/// that differs per call site and is not this function's concern.
+pub(crate) struct SpritePipeline {
+    pub(crate) gpu: GpuAtlas,
+    pub(crate) pipeline: wgpu::RenderPipeline,
+    pub(crate) bind_group: wgpu::BindGroup,
+    pub(crate) buffer: wgpu::Buffer,
+    pub(crate) capacity_floats: usize,
+}
+
+/// Build a textured-quad sprite pipeline over `atlas`: upload it, create the
+/// bind-group layout, pipeline layout, render pipeline and bind group it
+/// needs, and allocate a `capacity_floats`-float dynamic vertex buffer.
+///
+/// Shared by [`crate::hud::HudRenderer::attach_gui`],
+/// [`crate::menu::render::MenuRenderer::attach_gui`] and
+/// [`IconRenderer::attach_items`] below — the three GUI-sprite `attach_*`
+/// paths that were, before this function existed, ~30 lines of hand-copied
+/// `wgpu` descriptors apiece, differing only in shader source, target format,
+/// buffer capacity and label.
+///
+/// **This is a code dedup, not a resource one.** Every call still builds its
+/// own bind-group layout, pipeline and bind group from scratch — `wgpu` does
+/// not deduplicate structurally-equal layouts (`docs/armour-rendering.md`),
+/// and nothing before this function shared an instance across the three call
+/// sites either, so that property carries over unchanged.
+///
+/// `label` is reused verbatim for every descriptor (shader, layout, pipeline,
+/// bind group, buffer alike) rather than threading six distinct per-resource
+/// labels through the signature. `attach_gui`'s two callers used to give each
+/// object its own suffixed label (`"hud-sprite-bgl"`, `"hud-sprite-pipeline"`,
+/// …); that granularity is debugger-only, invisible to every pixel this crate
+/// draws, and already how [`IconRenderer::attach_items`]'s pre-existing
+/// `label: &'static str` parameter worked for its own two callers.
+pub(crate) fn build_sprite_pipeline(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    atlas: &Atlas,
+    shader_wgsl: &str,
+    color_format: wgpu::TextureFormat,
+    capacity_floats: usize,
+    label: &'static str,
+) -> SpritePipeline {
+    let gpu = GpuAtlas::from_atlas(device, queue, atlas);
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(label),
+        source: wgpu::ShaderSource::Wgsl(shader_wgsl.into()),
+    });
+    let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(label),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(label),
+        bind_group_layouts: &[Some(&bind_layout)],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: (SPRITE_FLOATS_PER_VERTEX * 4) as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 0,
+                        shader_location: 0,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 8,
+                        shader_location: 1,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x4,
+                        offset: 16,
+                        shader_location: 2,
+                    },
+                ],
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: color_format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    });
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout: &bind_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&gpu.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&gpu.sampler),
+            },
+        ],
+    });
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: (capacity_floats * 4) as wgpu::BufferAddress,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    SpritePipeline {
+        gpu,
+        pipeline,
+        bind_group,
+        buffer,
+        capacity_floats,
+    }
+}
+
 /// The GPU half of the item-icon pass, held by every screen that draws slots.
 ///
 /// Both halves start detached. `attach_items` gives flat icons somewhere to
@@ -954,113 +1113,22 @@ impl IconRenderer {
         atlas: Arc<ItemAtlas>,
         label: &'static str,
     ) {
-        let gpu = GpuAtlas::from_atlas(device, queue, atlas.atlas());
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(label),
-            source: wgpu::ShaderSource::Wgsl(HUD_SPRITE_WGSL.into()),
-        });
-        let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some(label),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some(label),
-            bind_group_layouts: &[Some(&bind_layout)],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(label),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: (SPRITE_FLOATS_PER_VERTEX * 4) as wgpu::BufferAddress,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 8,
-                            shader_location: 1,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x4,
-                            offset: 16,
-                            shader_location: 2,
-                        },
-                    ],
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: color_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some(label),
-            layout: &bind_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&gpu.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&gpu.sampler),
-                },
-            ],
-        });
-        let capacity_floats = 4096;
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(label),
-            size: (capacity_floats * 4) as wgpu::BufferAddress,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let sp = build_sprite_pipeline(
+            device,
+            queue,
+            atlas.atlas(),
+            HUD_SPRITE_WGSL,
+            color_format,
+            4096,
+            label,
+        );
         self.sprites = Some(SpriteIcons {
             atlas,
-            gpu,
-            pipeline,
-            bind_group,
-            buffer,
-            capacity_floats,
+            gpu: sp.gpu,
+            pipeline: sp.pipeline,
+            bind_group: sp.bind_group,
+            buffer: sp.buffer,
+            capacity_floats: sp.capacity_floats,
         });
     }
 
