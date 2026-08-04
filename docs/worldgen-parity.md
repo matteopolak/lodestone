@@ -281,7 +281,7 @@ at this session's own changes. This is a **different** bug from the one
 not generation content; see `docs/server-chunk-generation-parallelism.md`,
 not this doc, for that one) — noted here only so the two aren't conflated,
 not duplicated. A permanent, threading-free regression control,
-`lodestone_server::worldgen_data::tests::column_is_byte_identical_across_two_independent_sequential_calls`,
+`lodestone_server::worldgen_data::tests::column_is_byte_identical_across_two_independently_constructed_generators`,
 narrowed it further: two *sequential*, single-threaded `column()` calls for
 the same chunk already produced different bytes, which meant the bug was a
 pure logic error (palette order depending on `HashMap` iteration), not a

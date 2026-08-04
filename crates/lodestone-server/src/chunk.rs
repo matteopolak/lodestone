@@ -531,23 +531,55 @@ mod tests {
     /// `available_parallelism` worker batches, to make an off-by-one batch
     /// boundary bug visible if one existed.
     ///
+    /// **Made vacuous by `6509a97`'s pre-ore memoisation cache, now fixed.**
+    /// The cache lives on `OverworldGenerator` (per-instance, keyed by exact
+    /// `(cx, cz)`, capped at 512 entries, never evicted below that). This
+    /// test used to build **one** `source` and reuse it for the serial
+    /// baseline *and* all 8 parallel repeats — so the serial pass warmed
+    /// every coordinate's cache entry, and every parallel repeat after it
+    /// was a pure cache hit, never touching the real generation path at all.
+    /// It still proved ordering (the `Vec` comes back aligned to `coords`)
+    /// and it still proved the ore stage itself is deterministic (the
+    /// cached pre-ore result feeds a fresh `ore_stage` call each time), but
+    /// it stopped proving **recomputation** determinism — the exact thing a
+    /// server restart, or a cache eviction under load, actually needs — and
+    /// it never exercised a concurrent cache *miss* despite spawning
+    /// multiple threads over the same coordinates repeatedly.
+    ///
+    /// Fixed by building a fresh, **independently constructed**
+    /// `overworld_chunk_source(42)` for the serial baseline and for *every*
+    /// one of the 8 parallel repeats — each starts from a cold cache, so
+    /// each repeat's `generate_columns_parallel` call is a genuine
+    /// concurrent-miss race across `available_parallelism` threads writing
+    /// into a fresh `Mutex`-protected cache, not a replay of one already
+    /// populated. A byte match across all 9 independent constructions is
+    /// real cross-construction determinism, not a shared cache artifact.
+    ///
     /// Deliberately small (2×3 = 6 columns) and a modest repeat count: this
     /// runs the real generator, which is not cheap, and this test executes
     /// in debug mode as part of the ordinary crate test suite on a shared,
     /// loaded machine.
     #[test]
     fn parallel_generation_is_deterministic_and_matches_serial() {
-        let source = crate::overworld_chunk_source(42);
         let coords: Vec<(i32, i32)> = vec![(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1), (2, -1)];
 
+        // Independent construction: its own generator, its own empty
+        // pre-ore cache. Not reused below, so it cannot warm anything the
+        // parallel repeats then hit.
+        let serial_source = crate::overworld_chunk_source(42);
         let serial: Vec<Vec<u8>> = coords
             .iter()
-            .map(|&(cx, cz)| column_bytes(&source.column(cx, cz)))
+            .map(|&(cx, cz)| column_bytes(&serial_source.column(cx, cz)))
             .collect();
 
         const REPEATS: usize = 8;
         for rep in 0..REPEATS {
-            let parallel = generate_columns_parallel(&source, &coords);
+            // Fresh, independently constructed source *every* repeat — a
+            // cold cache each time, so every repeat is a real concurrent
+            // miss across the parallel workers, not a hit against a cache
+            // some earlier repeat (or the serial baseline) already filled.
+            let parallel_source = crate::overworld_chunk_source(42);
+            let parallel = generate_columns_parallel(&parallel_source, &coords);
             assert_eq!(
                 parallel.len(),
                 coords.len(),
@@ -557,8 +589,10 @@ mod tests {
                 parallel.iter().map(column_bytes).collect();
             assert_eq!(
                 parallel_bytes, serial,
-                "repeat {rep}: parallel generation diverged from the serial baseline \
-                 — a scheduling-dependent RNG desync would show up here"
+                "repeat {rep}: parallel generation from an independently constructed source \
+                 diverged from the serial baseline's independently constructed source — a \
+                 scheduling-dependent RNG desync or a cross-construction non-determinism bug \
+                 would show up here"
             );
         }
     }
