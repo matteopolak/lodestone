@@ -122,6 +122,58 @@
 > out bigger than the plan accounted for. What remains is exactly what the
 > plan below says should: the struct, lifecycle (`new`/`build`/`connect`/
 > `attach_net`/`end_session`), the accessor facade, and `step`.
+>
+> **The field count in "What is left on `Sim`, and why" below is stale in the
+> optimistic direction, and has been since seams 4–7 landed.** It says 15.
+> A fresh count against `sim.rs:377-597`, taken for a later architecture
+> review (issue-tracker-independent work, `PlaceIntent`/re-mesh-seam/audio
+> triage), found **28** — regrowth had outpaced dissolution, not the other
+> way round. None of the 28 are seam-4-through-7 leftovers; they are fields
+> added *after* those seams landed, each for a real single-consumer reason
+> recorded in its own doc comment: `particle_atlas`, `death_message`, `won`,
+> `third_person`, `body_pose`, `eye_height_smoother`, `view_bob`,
+> `view_bobbing`, `invert_mouse_x`/`invert_mouse_y`, `toggle_sneak`/
+> `toggle_sprint`, `chest_lids`, `pickups` — camera/animation/HUD-adjacent
+> state that Stage 5 never looked at, plus two options-menu bools and two
+> issue-driven additions (`chest_lids` for #23, `pickups` for #365). **Not
+> all rot** — several are the deliberate, documented single-consumer shape
+> this doc's own "Not blocked, just not done" table already describes for
+> `config`/`stats`/`status` — but the count itself was wrong for as long as
+> this doc went unread against the file.
+>
+> **Seam 8 landed the same session**: `audio: Option<ShellAudio>` moved out
+> of the struct entirely into an [`AudioEngine`] resource
+> (`crate::sim::AudioEngine`, defined in `sim.rs` just above `impl Sim`),
+> bringing the count to **27**. This one *is* a Stage-5-shaped move —
+> everything else in "What did **not** become a system, deliberately" and
+> the accessor-facade pattern below still describes it — but it landed late
+> because nothing needed it to be a resource rather than a private field
+> until now: a `GameTick` **system** (a free function over `&mut World`, not
+> a `Sim` method) cannot reach a private `Sim` field at all, and
+> `f6ab384`'s `PlaceIntent`-blocked note names exactly that gap. `Self::audio`/
+> `Self::audio_mut` in `sim.rs` (beside `Self::mining`/`Self::terrain`) read
+> the resource under the guard, so every existing call site in
+> `sim/audio.rs` and `sim/net_apply.rs` kept its shape — only the two direct
+> `&self.audio`/`&mut self.audio` field reads changed. New:
+> `Sim::play_local_sound` (`sim/audio.rs`), the public, non-networked play
+> path — the direct motivation, since `crate::interact::drive_placement`'s
+> plugin-driven placement sound and `app.rs`'s recorded `RainAmbience`
+> island (`app.rs`'s `WindowApp::weather` doc: "no producer, because the
+> only `ShellAudio` in the process is a private field on `Sim` with no
+> public play method") both need to play a sound from somewhere that is not
+> a `NetUpdate` arm.
+>
+> **The `RainAmbience` island itself is still open.** This move removes the
+> blocker its own doc named, but does not wire the producer: driving
+> `lodestone_render::RainAmbience::tick` needs a heightmap "landing" sample
+> and a "roof above the player" check, and — checked directly, not assumed —
+> **nothing in the tree reads `lodestone_world::LoadedChunk::heightmaps` at
+> all** (`grep -rn heightmaps crates/lodestone-client crates/lodestone-world`
+> finds only the storage type and its own tests). That accessor would be new
+> work in `net.rs` (a chunk-lock-only read, the same shape as
+> `NetHandle::block_at`), and the per-frame tick call belongs in `app.rs`'s
+> `WindowApp::redraw`, both files owned elsewhere in this session. Left
+> named rather than built around, same as the original gap.
 
 ## What it is
 
@@ -153,6 +205,7 @@ driver loop.
 | `drive_mining()` | `drive_mining`, a `TickSet::Send` system | `lodestone-shell/src/interact.rs` |
 | `drive_interaction()` | **deleted** — the `Egress` resource is the gate it used to write by hand | — |
 | `last_step` + `step_realtime()` | **deleted** — `step_realtime` had zero callers anywhere in the tree | — |
+| `audio: Option<ShellAudio>` (seam 8, later session) | `AudioEngine` resource | `lodestone-shell/src/sim.rs` (type + `Self::audio`/`Self::audio_mut` accessors), `sim/audio.rs` (call sites + new `Self::play_local_sound`) |
 
 ### The clock and the chat log had to move together
 
@@ -303,7 +356,7 @@ rodio-backed engine would be `!Send` is wrong here. **`NetClient` is the only
 | `language: Option<Arc<Language>>` | Asset, `Arc`, free. |
 | `teleport_count`, `collide_against_live_world`, `recover_from_death` | Three diagnostics/test switches. `collide_against_live_world` in particular must be a resource before `tick_collision` can be a system. |
 | `asset_banner: Option<String>` | Asset, free. |
-| `audio: Option<ShellAudio>` | `Send + Sync` (measured). Free. |
+| `audio: Option<ShellAudio>` | **Moved** — seam 8, see the note at the top of this doc. Was `Send + Sync` (measured). Now `AudioEngine`, a resource. |
 
 ### Was §4.1(c) required?
 

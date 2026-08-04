@@ -8,6 +8,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use bevy_ecs::entity::Entity;
+use bevy_ecs::resource::Resource;
 use bevy_ecs::world::World as EcsWorld;
 use lodestone_assets::{Language, ResourceLocation};
 use lodestone_client::{BlockPos, ClientAction, Hand, OpenMenuSnapshot, Rotation};
@@ -498,10 +499,6 @@ pub struct Sim {
     /// there is no per-session state to fold it into. Reset by
     /// [`Self::end_session`] so a later session starts un-won.
     won: bool,
-    /// Live audio, or `None` when disabled (no asset root, no device — see
-    /// [`ShellAudio::from_env`]). The whole audio path is `if let Some`, so a
-    /// disabled engine is simply silent, never a crash.
-    audio: Option<ShellAudio>,
     /// The camera mode: `false` is first person (the only mode that existed
     /// before this field), `true` is third person. There is deliberately no
     /// richer enum — [`RenderState::set_third_person_body_source`]'s own doc
@@ -595,6 +592,34 @@ pub struct Sim {
     /// reason.
     pickups: lodestone_game::mining::PickupFeed,
 }
+
+/// The live audio engine, promoted from a private `Sim` field to a bevy
+/// [`Resource`] — see `docs/sim-dissolution.md`'s audio section.
+///
+/// `None` when disabled (no asset root, no device — see [`ShellAudio::from_env`]);
+/// the whole audio path is `if let Some`, so a disabled engine is simply
+/// silent, never a crash. `Send + Sync` was already measured for `ShellAudio`
+/// itself (`docs/sim-dissolution.md`'s scratch probe); this is a pure move,
+/// not a new guarantee, which is what makes it safe to do with no behaviour
+/// change.
+///
+/// # Why this had to move
+///
+/// A private `Sim` field is invisible to a `GameTick` **system** — only a
+/// `Sim` *method* could reach it, and a system is a free function over
+/// `&mut World`, not a method. That is the whole reason `docs/plugin-api.md`
+/// recorded `PlaceIntent` as blocked rather than built (`f6ab384`'s commit
+/// message): a plugin-driven placement's local write is reachable from
+/// `ChunkWorld` alone, but playing its placement sound the same way a human
+/// placement does needs the audio engine from *inside* a system
+/// (`crate::interact::drive_placement`), which a private field on a
+/// `sim.rs`-only type can never be. It also frees a second, already-recorded
+/// gap: `app.rs`'s `WindowApp::weather` doc names `lodestone_render::RainAmbience`
+/// as having "no producer, because the only `ShellAudio` in the process is a
+/// private field on `Sim` with no public play method" — this resource plus
+/// [`Sim::play_local_sound`] is the fix for both at once.
+#[derive(Debug, Default, Resource)]
+pub struct AudioEngine(pub Option<ShellAudio>);
 
 impl Sim {
     /// Build the simulation for a **real client session**: no offline world.
@@ -805,6 +830,11 @@ impl Sim {
         // block-id space that store holds.
         ecs.insert_resource(chunk_world);
         ecs.insert_resource(terrain);
+        // Config-scoped, not session-scoped — see `AudioEngine`'s own doc and
+        // `Sim::end_session`'s hand-written reset list, which must never gain a
+        // line for this: a reconnect must not silence (or re-probe) the audio
+        // device.
+        ecs.insert_resource(AudioEngine(ShellAudio::from_env()));
         // Physics-walk is the default everywhere, including live: the shell
         // collides against the live client-owned world (see `LiveCollision` /
         // `Sim::tick_collision`), so the player stands on the server's ground.
@@ -839,7 +869,6 @@ impl Sim {
             recover_from_death: true,
             death_message: None,
             won: false,
-            audio: ShellAudio::from_env(),
             third_person: false,
             body_pose: EntityPose::new(feet[0], feet[2], player.yaw, false),
             // Seeded from the spawn pose so the very first frame does not ease up
@@ -1086,6 +1115,16 @@ impl Sim {
     /// Read the live mining predictor.
     fn mining<R>(&self, f: impl FnOnce(&Mining) -> R) -> R {
         self.read(|w| f(&w.resource::<MiningPredictor>().0))
+    }
+
+    /// Read the audio engine, under the guard. See [`AudioEngine`].
+    fn audio<R>(&self, f: impl FnOnce(&Option<ShellAudio>) -> R) -> R {
+        self.read(|w| f(&w.resource::<AudioEngine>().0))
+    }
+
+    /// The mutable form of [`Self::audio`].
+    fn audio_mut<R>(&mut self, f: impl FnOnce(&mut Option<ShellAudio>) -> R) -> R {
+        self.write(|w| f(&mut w.resource_mut::<AudioEngine>().0))
     }
 
     /// Read terrain-meshing state (worker pool, dirty set, removal queue, drops).
