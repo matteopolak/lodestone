@@ -58,19 +58,23 @@ use lodestone_data::menus::menu_id;
 use lodestone_data::mob_effects::mob_effect_name;
 use crate::packet_ids::{configuration, handshaking, login, play};
 use crate::packets::chunk::ChunkShape;
-use crate::packets::common::{KeepAlive, TeleportToEntity};
+use crate::packets::common::{
+    BrandPayload, ClientInformation, KeepAlive, PingRequest, Pong, ResourcePackResponse,
+    TeleportToEntity,
+};
 use crate::packets::configuration::FinishConfiguration;
 use crate::packets::entity::{pack_degrees, read_lp_vec3, write_lp_vec3};
 use crate::packets::game::{
-    AcceptTeleportation, Attack, ChangeDifficultyClientbound, ChangeDifficultyServerbound,
-    ChangeGameMode, ClientTickEnd, ConfigurationAcknowledged, ContainerButtonClick,
-    ContainerSlotStateChanged, EditBook, GameLogin, GameRuleEntry, GameRuleValues, GlobalPos,
-    JigsawGenerate, LockDifficulty, MOVE_FLAG_ON_GROUND, MovePlayerPos, MovePlayerPosRot,
-    MovePlayerRot, MovePlayerStatusOnly, MoveVehicle, PaddleBoat, PickItemFromBlock,
-    PickItemFromEntity, PlaceRecipe, PlayerAction, PlayerCommand, PlayerLoaded,
-    RecipeBookChangeSettings, RecipeBookSeenRecipe, RenameItem, SERVERBOUND_ABILITY_FLAG_FLYING,
-    SelectBundleItem, SelectTrade, ServerboundPlayerAbilities, SetCarriedItem, SetCommandBlock,
-    SetCommandMinecart, SetDefaultSpawnPosition, SetGameRule, SetHealth, SetJigsawBlock,
+    AcceptTeleportation, Attack, BlockEntityTagQuery, ChangeDifficultyClientbound,
+    ChangeDifficultyServerbound, ChangeGameMode, ChunkBatchReceived, ClientCommand, ClientTickEnd,
+    ConfigurationAcknowledged, ContainerButtonClick, ContainerSlotStateChanged, EditBook,
+    EntityTagQuery, GameLogin, GameRuleEntry, GameRuleValues, GlobalPos, JigsawGenerate,
+    LockDifficulty, MOVE_FLAG_ON_GROUND, MovePlayerPos, MovePlayerPosRot, MovePlayerRot,
+    MovePlayerStatusOnly, MoveVehicle, PaddleBoat, PickItemFromBlock, PickItemFromEntity,
+    PlaceRecipe, PlayerAction, PlayerCommand, PlayerLoaded, RecipeBookChangeSettings,
+    RecipeBookSeenRecipe, RenameItem, SERVERBOUND_ABILITY_FLAG_FLYING, SelectBundleItem,
+    SelectTrade, ServerboundPlayerAbilities, SetCarriedItem, SetCommandBlock, SetCommandMinecart,
+    SetDefaultSpawnPosition, SetGameRule, SetHealth, SetJigsawBlock,
     SetStructureBlock, SetTestBlock, SignUpdate, Swing, UseItem, UseItemOn,
 };
 use crate::packets::handshake::Intention;
@@ -1564,6 +1568,89 @@ impl ServerProtocol for V770ServerProtocol {
             // not implement at all. Left for whoever adds game-test
             // support, at which point the real `Data` type will exist to
             // decode into anyway.
+
+            // Issue #270 (connection-lifecycle/system), remaining packets
+            // beyond `KEEP_ALIVE` above. `PONG`/`PING_REQUEST` already have
+            // structs exercised by this crate's client encoder; the rest
+            // follow the same field-verified-against-decompiled-source
+            // convention as the other four families above.
+            State::Play if packet_id == play::serverbound::PING_REQUEST => {
+                let _ = decode_full::<PingRequest>(payload);
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::PONG => {
+                let _ = decode_full::<Pong>(payload);
+                ServerBound::Ignored
+            }
+            // `ServerboundCustomPayloadPacket`: a channel identifier then a
+            // channel-specific payload; vanilla dispatches on the channel
+            // and falls back to `DiscardedPayload` (read-and-drop) for any
+            // channel it does not recognize. This crate models only the
+            // `minecraft:brand` channel client info actually sends
+            // (`BrandPayload`, already used by the clientbound direction of
+            // the same channel) — any other channel, or a `brand` payload
+            // that fails to parse, is treated exactly like vanilla's
+            // `DiscardedPayload` fallback and dropped.
+            State::Play if packet_id == play::serverbound::CUSTOM_PAYLOAD => {
+                let _ = decode_full::<BrandPayload>(payload);
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::RESOURCE_PACK => {
+                let _ = decode_full::<ResourcePackResponse>(payload);
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::CLIENT_INFORMATION => {
+                let _ = decode_full::<ClientInformation>(payload);
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::CLIENT_COMMAND => {
+                let _ = decode_full::<ClientCommand>(payload);
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::CHUNK_BATCH_RECEIVED => {
+                let _ = decode_full::<ChunkBatchReceived>(payload);
+                ServerBound::Ignored
+            }
+            // `ServerboundSeenAdvancementsPacket`: a VarInt `Action` ordinal
+            // (`0` opened-tab, `1` closed-screen, plain `writeEnum`), then an
+            // identifier tab id present **only** when the action is
+            // opened-tab — not a generic bool-prefixed optional, so this is
+            // hand-decoded rather than a derived `Option<String>` field
+            // (which would read a spurious extra bool/byte for the common
+            // `closed_screen` case).
+            State::Play if packet_id == play::serverbound::SEEN_ADVANCEMENTS => {
+                let mut r = Reader::new(payload);
+                let decoded = (|| -> lodestone_core::Result<()> {
+                    let action = r.var_i32()?;
+                    if action == 0 {
+                        let _tab = r.string(32767)?;
+                    }
+                    r.ensure_empty()
+                })();
+                let _ = decoded;
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::ENTITY_TAG_QUERY => {
+                let _ = decode_full::<EntityTagQuery>(payload);
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::BLOCK_ENTITY_TAG_QUERY => {
+                let _ = decode_full::<BlockEntityTagQuery>(payload);
+                ServerBound::Ignored
+            }
+            // Deliberately left undecoded (fall through to the wildcard
+            // below), unlike the rest of this issue's family:
+            // - `COOKIE_RESPONSE`: this crate's client cannot send this
+            //   either (see "Cookies and transfers are dead ends," the
+            //   completeness epic) — there is no existing encoder to
+            //   cross-check a hand-decode against, and no cookie this crate
+            //   ever sets to receive a response about.
+            // - `DEBUG_SUBSCRIPTION_REQUEST`: its body is a
+            //   registry-keyed (`Registries.DEBUG_SUBSCRIPTION`) set with no
+            //   VarInt-id table in this crate to resolve against — an F3
+            //   debug-sample-graph subscription with no gameplay effect,
+            //   the same "low priority, file for completeness" packet this
+            //   issue's own text already flags.
             _ => ServerBound::Ignored,
         }
     }
