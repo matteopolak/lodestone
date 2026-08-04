@@ -403,12 +403,28 @@ Oracles (not part of repo state — recreate them):
   So, when many agents are live: **pass `-- --test-threads=2` to `cargo test`** (test threads each
   hold their own fixtures — that is the knob that actually caps peak RSS), **prefer `cargo check`
   when you only need to know it compiles**, and **never run two cargo commands concurrently or
-  background one and start another**. Before a long run, check
-  `vm_stat | grep -E "Pages free|compressor"` and `sysctl -n vm.loadavg`; **free pages under ~50,000
-  or a compressor above ~200,000 pages is the state that preceded the freeze** — wait rather than
-  start. Note load average alone is a poor proxy: right after a reboot it sat at **31** purely from
-  Spotlight/ML reindexing (`mds_stores`, `mediaanalysisd`, `ANECompilerService`) while memory was 85%
-  free with zero swapouts.
+  background one and start another**.
+
+  **`Pages free` is NOT headroom, and a threshold on it is actively harmful.** This entry first said
+  "free pages under ~50,000 → wait", and that gate **stalled an agent** which correctly obeyed it:
+  macOS deliberately keeps `free` low and reclaims from `inactive`, so a reading of 33,550 free pages
+  (~137 MB) sat alongside ~1.1 GB of reclaimable `inactive` and **zero swapouts**. There was no
+  pressure at all. Measured minutes later: free 343 MB, inactive 1,146 MB, `vm.swapusage` total
+  **0.00M** — the machine had not swapped once since boot.
+
+  The signals that actually mean pressure, in order: **`sysctl -n vm.swapusage` showing non-zero
+  `used`**, **`Swapouts` in `vm_stat` climbing**, and **`memory_pressure`'s own "System-wide memory
+  free percentage"** (it was 85% during the supposed danger). Compressor *growth* over successive
+  readings matters; a single absolute value does not. **Load average is the worst proxy of all** —
+  right after a reboot it sat at **31** purely from Spotlight/ML reindexing (`mds_stores`,
+  `mediaanalysisd`, `ANECompilerService`) while memory was 85% free.
+
+  And **"wait" must never mean arming a background monitor.** An agent that stops to wait for a
+  monitor is marked complete by the harness and its notification is discarded — that is the most
+  repeated operational failure in this repo (**nine instances across seven agents in one session**),
+  and a memory gate that tells agents to wait without saying *how* manufactures it. If you must
+  wait, re-read `vm_stat` a bounded number of times **inside one shell invocation**, or just run the
+  cheaper command (`check` instead of `test`, one crate instead of the workspace) and move on.
 - **Do not kill Bitwarden.** It hosts the **ssh-agent that authenticates GitHub**, so killing it to
   reclaim memory breaks every push in the session, including other agents'. It is the one desktop
   application on this machine that is load-bearing for the repo. Docker and its VM are fair game
