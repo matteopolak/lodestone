@@ -102,13 +102,20 @@ const RANDOM_TICK_BEHAVIOR_SEED: u64 = 0x5EED_5678;
 /// connection calls [`drain_all`](BlockTickFeed::drain_all) first consumes
 /// every pending change, and a second concurrent consumer would see nothing.
 /// This is correct for [`crate::IntegratedServer::open_in_memory_with_mobs`]
-/// today because it spawns **exactly one** connection task per feed instance
-/// (the in-memory singleplayer duplex) — [`IntegratedServer::bind`] (LAN,
-/// multiple connections) does not spawn a tick loop at all, so it never
-/// constructs one of these. If a future change spawns this loop for a
-/// multi-connection server, promote this to a per-connection cursor over a
-/// shared append-only log (the same fix `LiveMobSource`'s own doc comment
-/// would point at) before relying on it there.
+/// because it spawns **exactly one** connection task per feed instance (the
+/// in-memory singleplayer duplex).
+///
+/// **[`IntegratedServer::bind`] (LAN) now does spawn a tick loop** — issue
+/// #439; this doc comment previously said it did not, and that it therefore
+/// never constructed one of these. It does. It does *not*, however, hand the
+/// same instance to several connections, which is what would actually break:
+/// each LAN connection gets its **own** feed pair and a relay arm in `bind`'s
+/// accept loop drains the tick loop's hub feed and re-publishes into all of
+/// them. That is a fan-out in front of this type rather than the
+/// per-connection cursor over a shared append-only log this comment used to
+/// recommend — the cursor is still the better shape (it needs no copy per
+/// subscriber), and it is what to build if the subscriber count ever grows
+/// past a handful.
 #[derive(Debug, Clone, Default)]
 pub struct BlockTickFeed(Arc<Mutex<Vec<(i32, i32, i32, String)>>>);
 
@@ -143,9 +150,10 @@ impl BlockTickFeed {
 /// real `EXPLODE` packet, the same way it already forwards
 /// [`BlockTickFeed`]'s random-tick changes.
 ///
-/// Same single-consumer caveat as [`BlockTickFeed`]: safe today because
-/// [`crate::IntegratedServer::open_in_memory_with_mobs`] spawns exactly one
-/// connection task per feed instance.
+/// Same single-consumer caveat as [`BlockTickFeed`], and the same resolution
+/// for LAN (issue #439): singleplayer has exactly one connection task per feed
+/// instance, and `IntegratedServer::bind` gives each connection its own
+/// instance behind a relay. See [`BlockTickFeed`]'s doc comment.
 #[derive(Debug, Clone, Default)]
 pub struct ExplosionFeed(Arc<Mutex<Vec<Detonation>>>);
 

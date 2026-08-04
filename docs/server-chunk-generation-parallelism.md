@@ -51,6 +51,65 @@ different coordinate-ordering stories:
   order variance on top of that. Fixed by sorting `added` before generating —
   see the comment at the call site in `server.rs`.
 
+## Parallel is not the same as non-blocking (issue #293)
+
+`generate_columns_parallel` closed the **throughput** axis and nothing else. Its
+final `std::thread::scope` join blocks the calling thread until every worker
+finishes, and the shell builds the server's runtime with
+`tokio::runtime::Builder::new_current_thread()`
+(`crates/lodestone-shell/src/net.rs`) — so the connection task and
+`tick::run_tick_loop` share **one** thread. Blocking it blocked every task in the
+process, and every chunk-boundary crossing in singleplayer dropped one or more
+50 ms world ticks.
+
+`chunk.rs`'s `generate_columns_offloaded` closes the **latency** axis by wrapping
+the same fan-out in `tokio::task::spawn_blocking`.
+
+**Do not "simplify" it to `tokio::task::block_in_place`.** That needs no
+signature change and looks strictly cheaper. It **panics** on a current-thread
+runtime, which is the runtime production builds — so it would panic in
+singleplayer, not merely fail a test. Measured directly on a
+`new_current_thread` runtime rather than read off the docs:
+
+| call | result |
+|---|---|
+| `block_in_place` | panics: `can call blocking only when running on the multi-threaded runtime` |
+| `spawn_blocking` | `Ok` |
+| 10 ms timer ticks during a 300 ms `spawn_blocking` | **25** |
+| 10 ms timer ticks during a 300 ms inline block | **0** |
+
+`spawn_blocking` works on a current-thread runtime because the blocking pool is a
+separate set of threads from the core thread, and it stays correct on a
+multi-thread runtime — so issue #281's eventual thread split cannot invalidate
+it.
+
+### `SourceRef`, and why the public API did not change
+
+`spawn_blocking` requires a `'static` closure, so the source cannot be borrowed
+across it. The obvious consequence is changing `serve_connection`'s `source: &S`
+to `Arc<S>` — which would break every off-limits `crates/protocol/v770/tests/*`
+call site, the same constraint that already produced three differently-named
+`serve_connection*` wrappers in `server.rs`.
+
+`server.rs`'s `SourceRef<'a, S>` avoids that. It is a two-variant enum threaded
+through the private dispatch chain, so both shapes share one body:
+
+| arm | generation | used by |
+|---|---|---|
+| `Shared(&'a Arc<S>)` | offloaded, never blocks the runtime | every production caller in `integrated.rs` |
+| `Borrowed(&'a S)` | blocking, pre-#293 behaviour | `&S`-shaped test call sites |
+
+Two consequences worth keeping:
+
+- **`mod server` is private and `lib.rs` re-exports only `serve_connection`**, so
+  the new `serve_connection_shared` / `serve_connection_with_mob_events_shared`
+  entry points are `pub(crate)` and #293 cost **no public API change and no
+  `lib.rs` patch at all**.
+- **The `Borrowed` arm is the permanent negative control.** It is not dead
+  weight: `chunk.rs`'s `offloaded_generation_lets_a_timer_task_keep_running`
+  drives the blocking path as its second arm and requires it to starve the timer
+  completely. Delete the arm and the gate stops distinguishing anything.
+
 ## How to change it
 
 - The fan-out lives entirely in `chunk.rs`'s `generate_columns_parallel`; both
@@ -65,7 +124,10 @@ different coordinate-ordering stories:
   determinism test below exists to catch a caller that gets this wrong.
 - `generate_columns_parallel` is `pub(crate)` — it's an internal detail of how
   this crate serves chunks, not a public API `lodestone-server`'s consumers
-  should call directly.
+  should call directly. Same for `generate_columns_offloaded`.
+- **New batch call sites should reach generation through `SourceRef::generate`,
+  not either function directly.** That is what keeps a caller on the offloaded
+  path automatically instead of depending on whoever wired it remembering to.
 - Do not touch `lodestone-worldgen` to "help" this — the RNG-determinism
   property this relies on already lives there, in the generator's own
   positional seeding, and it needed no change for this to be safe.

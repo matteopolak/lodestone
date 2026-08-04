@@ -37,7 +37,7 @@
 //! not every column ever requested.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use lodestone_worldgen::density::{Context, Density};
 use lodestone_worldgen::overworld::{GeneratedColumn, OverworldGenerator};
@@ -302,6 +302,75 @@ pub(crate) fn generate_columns_parallel<S: ChunkSource>(
             .flat_map(|h| h.join().expect("worldgen worker thread panicked"))
             .collect()
     })
+}
+
+/// [`generate_columns_parallel`], moved off the async runtime's core thread
+/// (issue #293).
+///
+/// # Why this exists when generation is already parallel
+///
+/// [`generate_columns_parallel`] (issue #414) fixed *throughput*: the batch is
+/// fanned out over scoped OS threads. It did nothing about *latency*, because
+/// its final `std::thread::scope` join blocks the calling thread until every
+/// worker finishes. Parallel is not the same as non-blocking, and the
+/// distinction is total rather than academic here: the shell builds the
+/// server's runtime with `tokio::runtime::Builder::new_current_thread()`
+/// (`crates/lodestone-shell/src/net.rs`), so the connection task and
+/// [`crate::tick::run_tick_loop`] share **one** thread. Blocking it blocks
+/// *every* task in the process — the world tick included — so before this
+/// function every chunk-boundary crossing in singleplayer dropped one or more
+/// 50 ms ticks.
+///
+/// # Why `spawn_blocking` and not `block_in_place`
+///
+/// [`tokio::task::block_in_place`] needs no signature change and is the
+/// obvious-looking fix. It **panics** on a current-thread runtime —
+/// `can call blocking only when running on the multi-threaded runtime` —
+/// which is exactly the runtime production builds, so it would panic in
+/// singleplayer rather than merely fail a test. Measured, on a
+/// `new_current_thread` runtime:
+///
+/// | call | result |
+/// |---|---|
+/// | `block_in_place` | panics |
+/// | `spawn_blocking` | `Ok` |
+/// | 10 ms timer ticks during a 300 ms `spawn_blocking` | **25** |
+/// | 10 ms timer ticks during a 300 ms inline block | **0** |
+///
+/// `spawn_blocking` is correct on a current-thread runtime because the
+/// blocking pool is a separate set of threads from the core thread, and it
+/// stays correct on a multi-thread runtime — so nothing here has to be
+/// revisited if issue #281's thread split ever lands.
+///
+/// # Why `Arc<S>` rather than `&S`
+///
+/// `spawn_blocking` requires a `'static` closure, so the source cannot be
+/// borrowed across it. Callers thread the shared handle they already hold
+/// (`crate::integrated` builds `Arc::new(source)` for exactly this reason);
+/// `crate::server::SourceRef` is the wrapper that lets a borrow-shaped
+/// caller keep the old blocking path without duplicating any of
+/// `serve_connection`'s body.
+///
+/// # wasm32
+///
+/// `wasm32-unknown-unknown` has no blocking pool (and no OS threads for
+/// `generate_columns_parallel`'s scope either), so there it calls straight
+/// through — unchanged behaviour on a target that never had a second thread
+/// to protect.
+pub(crate) async fn generate_columns_offloaded<S: ChunkSource + 'static>(
+    source: Arc<S>,
+    coords: Vec<(i32, i32)>,
+) -> Vec<ChunkColumn> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        generate_columns_parallel(&*source, &coords)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        tokio::task::spawn_blocking(move || generate_columns_parallel(&*source, &coords))
+            .await
+            .expect("worldgen blocking task panicked")
+    }
 }
 
 /// The real terrain source: the composed, JVM-verified overworld generator.
@@ -595,5 +664,220 @@ mod tests {
                  would show up here"
             );
         }
+    }
+
+    /// A source whose every column costs a fixed amount of *blocking*
+    /// wall-clock, which is the one property of real worldgen issue #293 is
+    /// about. Deliberately hand-written rather than
+    /// [`crate::overworld_chunk_source`]: the real generator carries a
+    /// 512-entry memo cache that would absorb a second request for the same
+    /// `(cx, cz)` and make any count- or duration-based gate vacuous — the
+    /// exact trap already found and fixed in
+    /// `parallel_generation_is_deterministic_and_matches_serial` just above.
+    /// This source has no cache, so both arms below pay the same cost.
+    struct SleepyChunkSource {
+        per_column: std::time::Duration,
+    }
+
+    impl ChunkSource for SleepyChunkSource {
+        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            std::thread::sleep(self.per_column);
+            ChunkColumn::new(-64, 32)
+        }
+    }
+
+    /// The world tick's period, scaled down so the gate runs in well under a
+    /// second. `run_tick_loop` uses 50 ms (`crate::tick::TICK_PERIOD`); the
+    /// shape that matters — a task parked on `sleep`/`sleep_until` — is
+    /// identical.
+    const GATE_TICK_PERIOD: std::time::Duration = std::time::Duration::from_millis(10);
+
+    /// Issue #293: chunk generation must not block the async runtime.
+    ///
+    /// # What this measures, and what it would miss
+    ///
+    /// `generate_columns_parallel` (issue #414) made generation *parallel*,
+    /// which is a throughput property. This gate is about *latency*: whether a
+    /// task that is supposed to run every `GATE_TICK_PERIOD` still gets to run
+    /// while a generation burst is in flight. A test that only checked the
+    /// returned columns were correct could not see this at all — both arms
+    /// below return byte-identical output.
+    ///
+    /// The stakes are not theoretical. `crates/lodestone-shell/src/net.rs`
+    /// builds the server's runtime with
+    /// `tokio::runtime::Builder::new_current_thread()`, so the connection task
+    /// and `crate::tick::run_tick_loop` share **one** thread; blocking it
+    /// stalls every task in the process. Before this, every chunk-boundary
+    /// crossing in singleplayer dropped one or more 50 ms world ticks.
+    ///
+    /// # The negative control is the second arm, permanently
+    ///
+    /// `generate_columns_parallel` stays in the tree (it is what
+    /// `SourceRef::Borrowed` still uses), so the pre-fix behaviour is
+    /// measurable here forever rather than only during a temporary neuter. The
+    /// control must record **zero** ticks. Measured when this landed:
+    /// offloaded 20 ticks over 214 ms, blocking 0 ticks over 209 ms.
+    ///
+    /// # Predicting the value, not just the sign
+    ///
+    /// Asserting merely "more ticks than the control" would be satisfied by a
+    /// single tick, so the two competing hypotheses are computed from the
+    /// measured wall-clock instead: if generation is genuinely offloaded the
+    /// count is about `elapsed / GATE_TICK_PERIOD`; if it silently still
+    /// blocks, it is 0. Those are far enough apart that a halved tolerance on
+    /// the first cannot be met by the second.
+    ///
+    /// # Duration species
+    ///
+    /// The counter is created inside this test and read as an absolute over a
+    /// bracketed operation, so nothing outlives the gate. `crate::tick::TickClock`
+    /// would have been the wrong instrument for exactly that reason: it
+    /// accumulates MSPT/TPS/overrun over a whole server lifetime, so it cannot
+    /// distinguish "no stall now" from "the stall already averaged away."
+    #[tokio::test]
+    async fn offloaded_generation_lets_a_timer_task_keep_running() {
+        // Load-bearing, not decoration. Under `flavor = "multi_thread"` a
+        // second worker thread would poll the timer while the core thread
+        // blocked, so the control arm would pass too and this gate would
+        // measure nothing. Current-thread is also the production flavour.
+        assert_eq!(
+            tokio::runtime::Handle::current().runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::CurrentThread,
+            "this gate is only meaningful on a current-thread runtime — on a \
+             multi-thread runtime the blocking control below passes too"
+        );
+
+        // 96 columns at 20 ms each: long enough that a correctly-offloaded
+        // burst spans many tick periods at any plausible worker count, and
+        // short enough to keep the test well under a second.
+        let coords: Vec<(i32, i32)> = (0..96).map(|i| (i % 16, i / 16)).collect();
+        let per_column = std::time::Duration::from_millis(20);
+
+        // --- Arm 1: offloaded (the fix). ---
+        let ticks = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let ticker = {
+            let ticks = Arc::clone(&ticks);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(GATE_TICK_PERIOD).await;
+                    ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            })
+        };
+        // Let the ticker reach its first await point before the clock starts,
+        // so arm 1 and arm 2 begin from the same state.
+        tokio::task::yield_now().await;
+        let started = std::time::Instant::now();
+        let offloaded = generate_columns_offloaded(
+            Arc::new(SleepyChunkSource { per_column }),
+            coords.clone(),
+        )
+        .await;
+        let offloaded_elapsed = started.elapsed();
+        // Read before any further await, so a catch-up burst of timer wakeups
+        // cannot inflate the count after the operation ended.
+        let offloaded_ticks = ticks.load(std::sync::atomic::Ordering::Relaxed);
+        ticker.abort();
+
+        // --- Arm 2: the permanent negative control, blocking. ---
+        let control_ticks_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let control_ticker = {
+            let ticks = Arc::clone(&control_ticks_counter);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(GATE_TICK_PERIOD).await;
+                    ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            })
+        };
+        tokio::task::yield_now().await;
+        let control_started = std::time::Instant::now();
+        let blocking = generate_columns_parallel(
+            &SleepyChunkSource { per_column },
+            &coords,
+        );
+        let control_elapsed = control_started.elapsed();
+        let control_ticks = control_ticks_counter.load(std::sync::atomic::Ordering::Relaxed);
+        control_ticker.abort();
+
+        // Both arms must actually have taken long enough to be worth
+        // measuring — otherwise the tick counts below are trivially satisfied
+        // and this whole gate is a precondition-species vacuity. Failing
+        // rather than skipping, deliberately.
+        assert!(
+            offloaded_elapsed >= GATE_TICK_PERIOD * 4,
+            "offloaded burst finished in {offloaded_elapsed:?}, too fast to say anything \
+             about stalling — raise `per_column` or the column count"
+        );
+        assert!(
+            control_elapsed >= GATE_TICK_PERIOD * 4,
+            "control burst finished in {control_elapsed:?}, too fast to be a control"
+        );
+
+        // The two competing hypotheses, derived from the measured wall-clock
+        // rather than hardcoded: offloaded ⇒ ~elapsed/period, still-blocking
+        // ⇒ 0. Halved to absorb scheduling jitter and the timer's own
+        // coarseness; the wrong hypothesis is nowhere near it.
+        let expected = (offloaded_elapsed.as_millis() / GATE_TICK_PERIOD.as_millis()) as u64;
+        let floor = (expected / 2).max(3);
+        assert!(
+            offloaded_ticks >= floor,
+            "the timer task ran {offloaded_ticks} times during a {offloaded_elapsed:?} \
+             offloaded generation burst; expected at least {floor} (≈{expected} periods of \
+             {GATE_TICK_PERIOD:?}). A count near 0 means generation is still blocking the \
+             runtime — i.e. `spawn_blocking` is not being reached"
+        );
+
+        // The control. If this is ever non-zero, `generate_columns_parallel`
+        // has stopped being synchronous and the arm above is no longer
+        // measuring a difference.
+        assert_eq!(
+            control_ticks, 0,
+            "the blocking control let the timer task run {control_ticks} times over \
+             {control_elapsed:?} — it is supposed to starve it completely, so this gate is \
+             no longer distinguishing the two paths"
+        );
+    }
+
+    /// The property the two arms above must **share**: offloading changes when
+    /// generation runs, never what it produces. Without this, a
+    /// `generate_columns_offloaded` that silently returned the wrong columns
+    /// (or the right columns in the wrong order) would still pass the
+    /// stall gate, since that one only counts timer wakeups.
+    #[tokio::test]
+    async fn offloading_does_not_change_the_columns_or_their_order() {
+        let coords: Vec<(i32, i32)> = vec![(3, -7), (0, 0), (-2, 5), (11, 11), (-9, -9)];
+        // A fresh, independent source per arm — same reasoning as
+        // `SleepyChunkSource`'s doc comment and as the determinism test above.
+        let serial: Vec<String> = coords
+            .iter()
+            .map(|&(cx, cz)| {
+                let source = WorldgenChunkSource::new(floor_density(), -64, 128);
+                source.column(cx, cz).block_state(0, -1, 0).to_string()
+            })
+            .collect();
+
+        let offloaded = generate_columns_offloaded(
+            Arc::new(WorldgenChunkSource::new(floor_density(), -64, 128)),
+            coords.clone(),
+        )
+        .await;
+
+        assert_eq!(
+            offloaded.len(),
+            coords.len(),
+            "offloaded generation returned {} columns for {} coordinates",
+            offloaded.len(),
+            coords.len()
+        );
+        let offloaded_states: Vec<String> = offloaded
+            .iter()
+            .map(|column| column.block_state(0, -1, 0).to_string())
+            .collect();
+        assert_eq!(
+            offloaded_states, serial,
+            "offloaded generation must hand back columns aligned index-for-index with \
+             `coords` — the wire order depends on it (see `generate_columns_parallel`)"
+        );
     }
 }

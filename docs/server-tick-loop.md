@@ -241,7 +241,10 @@ derivation.
 ### Islands, and what actually consumes this
 
 Per CLAUDE.md's "nothing is done until something on screen changes":
-`run_tick_loop` is spawned exactly once, from
+`run_tick_loop` is spawned from two constructors — see
+[One loop per world, not per connection](#one-loop-per-world-not-per-connection)
+below for the LAN one (issue #439), which is newer than the rest of this
+section. The singleplayer chain is
 `IntegratedServer::open_in_memory_with_mobs`
 (`crates/lodestone-server/src/integrated.rs`), which is the constructor
 `crates/lodestone-shell/src/net.rs`'s `run()` calls for `Origin::Integrated`
@@ -263,8 +266,9 @@ net.rs::run() (shell, unchanged)
 ```
 
 `TickStats` itself is consumed through
-[`IntegratedServer::tick_stats`] — `None` for every constructor except
-`open_in_memory_with_mobs`, `Some` there. No shell UI reads it yet (out of
+[`IntegratedServer::tick_stats`] — `Some` for `open_in_memory_with_mobs` and
+(since #439) `bind`, `None` for the remaining in-memory constructors. No shell
+UI reads it yet (out of
 this task's scope: the shell files this task touches are `net.rs`, and no
 debug HUD/command surface exists in this crate to plug it into today); the
 accessor exists so a future debug overlay or `/tps`-style admin command has
@@ -276,8 +280,98 @@ gate for this crate is `tick.rs`'s own test module plus
 `open_in_memory_with_mobs` continuing to prove the mob/block-entity wiring
 end to end.
 
+### One loop per world, not per connection (issue #439)
+
+For a long time `run_tick_loop` had exactly **one** caller,
+`open_in_memory_with_mobs`. `IntegratedServer::bind` — the open-to-LAN path —
+never spawned it, and conceded as much in a comment. So over LAN block entities
+held state but never advanced, scheduled and fluid ticks never drained, random
+ticks never fired, mobs never ticked, and `game_tick` never incremented, while
+join, keep-alives, chunk streaming and entity movement all looked perfectly
+healthy. `bind` now spawns it.
+
+**The count is the hard part, not the spawn.** "Spawn a tick loop" has an
+obvious wrong implementation — spawn it inside the accept arm, i.e. once per
+connection — which yields a world advancing at N× speed with N players. That
+reads as a physics bug (mobs too fast, furnaces too quick) for a long time
+before anyone suspects the loop count, and it is exactly the straddle
+[`server-ecs.md`](./server-ecs.md) forbids: a *world* concern living on a
+*connection*.
+
+So the loop is spawned once, **outside** the accept loop, over the same
+`Arc<S>` source and the same `BlockEntityHandle`/`MobHandle` every connection
+shares. Note it is per-`IntegratedServer`, **not** global: `bind` and
+`open_in_memory_with_mobs` build different worlds over different sources, so
+"both entry points share one loop" would be wrong.
+
+**`tick_stats()` cannot detect a duplicated loop, and that is worth
+internalising.** A per-connection loop would carry its own `TickClock`, so the
+server handle's stats would report a healthy 20 TPS while the world ran at 40.
+`tests/lan_world_tick.rs` therefore uses a second, independent instrument: a
+counting `ChunkSource` whose probe chunk sits inside the tick area and outside
+every connection's view, so its `column()` count is attributable purely to tick
+loops — all of them, whichever clock they report to. The assertion is a **ratio**
+between a zero-connection and a two-connection measurement taken moments apart
+in the same process, which makes it immune to build profile and machine speed.
+Observed, `--release`:
+
+| arm | probe visits/s |
+|---|---|
+| 0 connections | 19.30 |
+| 2 connections (correct fix) | 19.97 — ratio 1.04 |
+| 2 connections (per-connection loop control) | 59.98 — ratio 3.11, gate fails |
+
+The 3.11 is 1 world loop + 2 connection loops, exactly as predicted.
+
+**The achieved rate is a build-profile property, not a #439 one.** Because
+`run_tick_loop` re-generates every column in its area from the source on *every*
+tick (the documented #289 gap), the same code measured **2.66** probe visits/s
+unoptimised and **19.29** under `--release`. The gate deliberately does not
+assert an absolute rate; doing so would be a debug-vs-release flake that says
+nothing about the loop count.
+
+**LAN's tick area is a fixed constant, `integrated::LAN_TICK_RADIUS = 2`**
+(a 5×5 chunk square around the origin), because this crate still has no
+loaded-chunk registry to derive one from. That is conservative rather than
+arbitrary: singleplayer already passes `view_radius.clamp(1, 3)`, i.e. up to
+7×7, with the *real* generator. `docs/plans/chunk-lifecycle.md` (#289) is what
+replaces it with a ticket-driven set. `bind`'s public signature deliberately did
+not grow a parameter for it.
+
+#### The feed fan-out LAN needs and singleplayer does not
+
+`BlockTickFeed` and `ExplosionFeed` are append-and-**drain-all**: the first
+consumer takes everything and a second sees nothing. Singleplayer has exactly
+one connection per feed instance, so this never mattered. For LAN both obvious
+options are defects:
+
+- hand every connection the *same* feed → every player but one silently misses
+  random-tick block updates;
+- hand the tick loop a feed nobody drains → unbounded growth while the server
+  idles with zero clients.
+
+So each LAN connection gets its **own** feed pair, and a relay drains the tick
+loop's hub feed and re-publishes into all live subscribers. The relay is a third
+arm of `bind`'s existing accept `select!` rather than a fourth task, which is
+what keeps it free: no extra `Task` field, it cannot outlive `shutdown`, and the
+subscriber list is touched by that one task alone so it needs no lock.
+`LiveMobSource` needs none of this — it is a replace-latest-snapshot cache every
+connection diffs independently, so it is already multi-consumer safe and is
+shared directly.
+
+Gotcha found while writing it: `LanSubscriber`'s `Default` is **hand-written**,
+because `Arc<AtomicBool>::default()` is `false` — a derived `Default` would mark
+every new subscriber dead and the relay would prune it before publishing
+anything. A fan-out that silently delivers nothing, and no compile error.
+
+The better long-term shape is still the per-connection cursor over a shared
+append-only log that `BlockTickFeed`'s own doc comment recommends: it needs no
+copy per subscriber. Build that if the subscriber count grows past a handful.
+
 ## Configuration
 
+- `integrated::LAN_TICK_RADIUS` (2) — the LAN tick area's Chebyshev radius; see
+  above for why it is a constant and not a `bind` parameter.
 - `tick::MILLIS_PER_TICK` / `tick::TICK_PERIOD` — the 20Hz period. Not the
   same constant as `server.rs`'s own private `MILLIS_PER_TICK`; see
   `tick.rs`'s own module doc for why the two are allowed to independently
