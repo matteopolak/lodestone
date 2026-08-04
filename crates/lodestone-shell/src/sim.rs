@@ -20,8 +20,9 @@ use lodestone_ecs::player::{
     SelectedSlot, Submersion, reset_local_player, spawn_local_player,
 };
 use lodestone_ecs::session::{
-    ActionBarOverlay, HudEffects, Phase, RespawnCount, ServerEntityId, SessionChat,
-    SessionHudPlugin, TitleOverlay, Vitals, Xp, insert_hud_components,
+    ActionBarOverlay, HudEffects, Phase, RespawnCount, ServerDifficulty, ServerEntityId,
+    SessionBlockDestruction, SessionChat, SessionHudPlugin, TitleOverlay, Vitals, Xp,
+    insert_hud_components,
 };
 use lodestone_ecs::{
     ChunkWorld, CorePlugin, EcsHandle, Extract, FrameClock, GameTick, Update, VersionData,
@@ -3218,6 +3219,51 @@ impl Sim {
             block,
             state_id,
             stage: (stage as u8).min(9),
+        })
+    }
+
+    /// The world difficulty and lock state, as the server last reported it
+    /// (issue #411). `None` until the first `ClientEvent::DifficultyChanged`
+    /// arrives — off a server, and briefly after login before the packet lands.
+    ///
+    /// Mirrors [`Self::selected_slot`]'s shape: a plain read of the local
+    /// player's own `ServerDifficulty` session component, folded by
+    /// `lodestone_ecs::session::apply_local_player_state` through the ordinary
+    /// `NetIngest` path. See `crates/lodestone-ecs/src/session.rs`'s doc on
+    /// [`ServerDifficulty`] for why this was an island until now: the fold was
+    /// real and tested, but nothing in the shell read it.
+    #[must_use]
+    pub fn difficulty(&self) -> Option<(lodestone_model::Difficulty, bool)> {
+        self.read(|w| {
+            w.get::<ServerDifficulty>(self.local)
+                .expect("the local player always carries ServerDifficulty")
+                .0
+        })
+    }
+
+    /// The crack-overlay stage another player is showing at `pos`, if any
+    /// (issue #410). Reads [`SessionBlockDestruction`], folded from
+    /// `ClientEvent::BlockDestruction` by
+    /// `lodestone_ecs::session::apply_block_destruction`.
+    ///
+    /// This is a single-position probe, not an enumeration: `stage_at` is the
+    /// only read `lodestone_game::mining::BlockDestructionOverlays` exposes
+    /// today, so a caller must already know which position to ask about. The
+    /// real per-frame render loop needs the opposite shape — every currently
+    /// active overlay, with no position known in advance — which needs a small
+    /// additive accessor on `BlockDestructionOverlays` itself
+    /// (`lodestone-game`, out of this pass's file ownership); see the #410
+    /// report for the exact patch. This accessor is still real and still used
+    /// today wherever a specific block position is already in hand (e.g. a
+    /// block being drawn by the terrain/block-entity passes that could show a
+    /// crack overlay on top of it).
+    #[must_use]
+    pub fn block_destruction_stage_at(&self, pos: lodestone_model::math::BlockPos) -> Option<u8> {
+        self.read(|w| {
+            w.get::<SessionBlockDestruction>(self.local)
+                .expect("the local player always carries SessionBlockDestruction")
+                .0
+                .stage_at(pos)
         })
     }
 
