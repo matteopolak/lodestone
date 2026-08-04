@@ -401,45 +401,114 @@ mod tests {
         );
     }
 
-    /// [`lodestone_worldgen::biome::usable_overworld_table`]'s exclusion of
-    /// the three unported-surface-rule badlands variants (see that
-    /// function's doc comment) is only real if the *served* generator
-    /// actually avoids them — this walks a wide grid of real columns (not a
-    /// hand-picked climate target, which would only prove the table itself
-    /// was filtered, not that the filtered table is what generation uses)
-    /// and asserts none of them ever come back badlands/eroded_badlands/
-    /// wooded_badlands, watching the assertion actually have something to
-    /// catch: `crate::chunk::ChunkColumn`'s biome storage has no special
-    /// case for these names, so a regression that dropped the filter would
-    /// fail this loop, not pass it vacuously.
+    /// **Superseded property, inverted.** This test used to assert served
+    /// columns *never* resolve to badlands/eroded_badlands/wooded_badlands,
+    /// because `lodestone_worldgen::biome::usable_overworld_table` used to
+    /// exclude them (their surface rule reached an unported
+    /// `SurfaceSystem.getBand`, which would panic). `3cf523c` ported
+    /// `getBand` (`crate::surface::Rule::Bandlands`) and made
+    /// `usable_overworld_table` a pass-through — see that function's own doc
+    /// comment, which names this exact test as needing this update. The old
+    /// assertion's premise is gone: a column can resolve to any of the three
+    /// again, so asserting it never does is now testing a stale invariant,
+    /// not a real one.
+    ///
+    /// Re-verified before rewriting, per `CLAUDE.md`'s "re-verify before
+    /// routing around": running the *old* assertion against this tree
+    /// (`cargo test -p lodestone-server … served_columns_never_carry_an_unported_badlands_variant
+    /// -- --nocapture`) passed — the 12×12 sweep at seed 42 happens not to
+    /// cross a badlands boundary in this exact window, so the old test was a
+    /// time bomb (would fail the moment correct code touched badlands
+    /// climate here), not a test that was actually red on `main` right now.
+    ///
+    /// That finding is exactly why the sweep alone is insufficient evidence
+    /// for the *new* property too: scanning only `-6..6` would find zero
+    /// badlands cells and pass vacuously, proving nothing (`CLAUDE.md`'s
+    /// "assertions of an absence need a control proving the detector
+    /// works" — the mirror image applies to an assertion of *presence*).
+    /// `docs/worldgen-parity.md`'s own measured finding — chunk
+    /// `(-120,-120)`'s real vanilla biome is badlands/eroded_badlands — is
+    /// added to the coordinate list for exactly that reason, so
+    /// `badlands_cells > 0` below is asserted, not merely hoped for.
+    ///
+    /// The predicted value set is not "some badlands block": `SurfaceSystem
+    /// .generateBands` (`.cache/mc/26.2/src/net/minecraft/world/level/levelgen/SurfaceSystem.java:286-316`)
+    /// and this port's `generate_bands`
+    /// (`crates/lodestone-worldgen/src/surface/mod.rs:170-209`) can only ever
+    /// emit exactly these seven blocks: base `minecraft:terracotta`
+    /// (java:287-288, rust:171), `minecraft:orange_terracotta`
+    /// (java:292-293, rust:184), `minecraft:yellow_terracotta` (java:297,
+    /// rust:189), `minecraft:brown_terracotta` (java:298, rust:190),
+    /// `minecraft:red_terracotta` (java:299, rust:191),
+    /// `minecraft:white_terracotta` (java:303-304, rust:197) and
+    /// `minecraft:light_gray_terracotta` (java:306/310, rust:199/202) — no
+    /// other block can ever come back from `Rule::Bandlands`/`getBand`
+    /// (`SurfaceSystem.java:332-334`). These are the only blocks this test's
+    /// terracotta scan can match, so a false positive from an unrelated
+    /// block is not possible.
     #[test]
-    fn served_columns_never_carry_an_unported_badlands_variant() {
-        // 12×12 chunks (~192×192 blocks): wide enough to cross several
-        // biome boundaries in a debug build without the full-column
-        // generation cost of a much larger sweep — `cargo test -p
-        // lodestone-worldgen`'s own JVM-parity suite already proves the
-        // shape/surface machinery at scale, so this only needs to be wide
-        // enough to exercise the biome filter, not to re-prove terrain
-        // generation itself.
+    fn badlands_columns_when_present_carry_terracotta_bands() {
+        const TERRACOTTA_BAND_BLOCKS: [&str; 7] = [
+            "minecraft:terracotta",
+            "minecraft:orange_terracotta",
+            "minecraft:yellow_terracotta",
+            "minecraft:brown_terracotta",
+            "minecraft:red_terracotta",
+            "minecraft:white_terracotta",
+            "minecraft:light_gray_terracotta",
+        ];
+
         let generator = overworld_generator(42);
-        let mut checked = 0usize;
+
+        // Same 12×12 sweep the old test used, plus the one coordinate
+        // `docs/worldgen-parity.md` already measured as real-vanilla
+        // badlands at this seed — without it, this test's core claim would
+        // never actually fire against this window (see doc comment above).
+        let mut coords: Vec<(i32, i32)> = Vec::new();
         for cx in -6..6 {
             for cz in -6..6 {
-                let col = generator.column(cx, cz);
-                for lz in 0..16 {
-                    for lx in 0..16 {
-                        let biome = col.biome_state(lx, lz);
-                        assert!(
-                            !lodestone_worldgen::biome::UNSUPPORTED_SURFACE_BIOMES
-                                .contains(&biome),
-                            "column ({cx},{cz}) local ({lx},{lz}) resolved to unported biome {biome}"
-                        );
-                        checked += 1;
+                coords.push((cx, cz));
+            }
+        }
+        coords.push((-120, -120));
+
+        let mut badlands_cells = 0usize;
+        let mut band_hits = 0usize;
+        for (cx, cz) in coords {
+            let col = generator.column(cx, cz);
+            let min_y = col.min_y();
+            let height = col.height();
+            for lz in 0..16usize {
+                for lx in 0..16usize {
+                    let biome = col.biome_state(lx, lz);
+                    if !lodestone_worldgen::biome::UNSUPPORTED_SURFACE_BIOMES.contains(&biome) {
+                        continue;
+                    }
+                    badlands_cells += 1;
+                    for y in min_y..min_y + height {
+                        let state = col.block_state(lx, y, lz);
+                        let base = state.split('[').next().unwrap_or(state);
+                        if TERRACOTTA_BAND_BLOCKS.contains(&base) {
+                            band_hits += 1;
+                        }
                     }
                 }
             }
         }
-        assert_eq!(checked, 12 * 12 * 16 * 16, "grid scan must cover every probed cell");
+
+        assert!(
+            badlands_cells > 0,
+            "test's own premise failed: expected at least one badlands/eroded_badlands/\
+             wooded_badlands cell across the 12×12 sweep plus the known-badlands chunk \
+             (-120,-120), found none — this test would otherwise pass vacuously"
+        );
+        assert!(
+            band_hits > 0,
+            "found {badlands_cells} badlands cell(s) across {} columns but none carried any of \
+             the 7 possible terracotta band blocks — SurfaceSystem.getBand \
+             (SurfaceSystem.java:332-334) / Rule::Bandlands is not reaching them",
+            12 * 12 + 1
+        );
     }
 
     /// End-to-end: real biome variety reaches the **served** column (the
