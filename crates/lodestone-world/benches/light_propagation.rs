@@ -26,13 +26,16 @@
 //! — a healthy-looking number that proves nothing. `lighting.rs` names this
 //! exact trap in its own doc comment for [`light_exercises_propagation`] ("on a
 //! superflat world... sky light never spreads horizontally"), and ships the
-//! function to detect it. This bench's fixture is `tests/memory.rs`'s
-//! `realistic_terrain_column` shape: a solid stone floor, a *varied* surface
-//! band forcing real per-cell opacity differences, open sky above — and each
-//! bench function below asserts `light_exercises_propagation` on its own
-//! computed output *before* any timing starts, so a future fixture regression
-//! (someone "simplifying" the terrain to flat stone to speed up the bench)
-//! fails loudly instead of quietly reporting a fast, meaningless number.
+//! function to detect it. This bench's fixture is
+//! `lodestone_testsupport::bench_fixtures::synthetic_overworld_column` (issue
+//! #80's shared Tier 2 terrain fixture, consolidated from this file's and
+//! `tests/memory.rs`'s previously-separate `realistic_terrain_column`
+//! duplicates): a solid stone floor, a *varied* surface band forcing real
+//! per-cell opacity differences, open sky above — and each bench function
+//! below asserts `light_exercises_propagation` on its own computed output
+//! *before* any timing starts, so a future fixture regression (someone
+//! "simplifying" the terrain to flat stone to speed up the bench) fails
+//! loudly instead of quietly reporting a fast, meaningless number.
 //!
 //! # Duration species
 //!
@@ -50,46 +53,11 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use criterion::{Criterion, criterion_group, criterion_main};
+use lodestone_testsupport::bench_fixtures::synthetic_overworld_column;
 use lodestone_world::{
-    ChunkColumn, LightProperties, Neighbourhood, PaletteKind, compute_column_light,
-    compute_column_light_with_neighbours, light_exercises_propagation,
+    LightProperties, Neighbourhood, compute_column_light, compute_column_light_with_neighbours,
+    light_exercises_propagation,
 };
-
-const MIN_Y: i32 = -64;
-const SECTIONS: usize = 24; // 1.18+ overworld: y = -64..320.
-
-/// Same shape as `tests/memory.rs`'s `realistic_terrain_column` — duplicated
-/// here rather than shared, because `tests/` is a separate compilation target
-/// a `benches/` binary cannot link against. Keep the two in sync by
-/// inspection if either changes; they encode the same claim ("this is what a
-/// player is actually standing in"), not a shared implementation detail.
-fn realistic_terrain_column() -> ChunkColumn {
-    let mut col = ChunkColumn::new(
-        MIN_Y,
-        SECTIONS,
-        PaletteKind::block_states(),
-        PaletteKind::biomes(),
-        0,
-        0,
-    );
-    let stone = 1u32;
-    for y in MIN_Y..40 {
-        for z in 0..16 {
-            for x in 0..16 {
-                col.set_block(x, y, z, stone);
-            }
-        }
-    }
-    for y in 40..48 {
-        for z in 0..16 {
-            for x in 0..16 {
-                let id = 1 + ((x + z + (y as usize)) % 6) as u32;
-                col.set_block(x, y, z, id);
-            }
-        }
-    }
-    col
-}
 
 /// Same opacity/emission table as `tests/memory.rs`'s `TimingProps`: anything
 /// non-air is opaque, one id is glass-like transparent, one id emits like a
@@ -110,7 +78,7 @@ impl LightProperties for TimingProps {
 }
 
 fn bench_single_column(c: &mut Criterion) {
-    let col = realistic_terrain_column();
+    let col = synthetic_overworld_column(0);
     let props = TimingProps;
 
     // Anti-vacuity control: prove the fixture actually exercises horizontal
@@ -155,8 +123,8 @@ fn bench_single_column(c: &mut Criterion) {
 }
 
 fn bench_neighbourhood(c: &mut Criterion) {
-    let center = realistic_terrain_column();
-    let n = realistic_terrain_column();
+    let center = synthetic_overworld_column(0);
+    let n = synthetic_overworld_column(0);
     let props = TimingProps;
     let hood = Neighbourhood::new(&center)
         .with(-1, 0, &n)

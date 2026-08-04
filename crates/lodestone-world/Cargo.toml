@@ -17,6 +17,17 @@ thiserror = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+# Issue #80's shared bench/test terrain fixture (`bench_fixtures::
+# synthetic_overworld_column`), reused here by `tests/memory.rs` and
+# `benches/light_propagation.rs` in place of each file's own hand-rolled
+# `realistic_terrain_column` duplicate. Plain default features only (no
+# `worldgen`): both call sites use the fast synthetic tier, not the real
+# generator. `lodestone-testsupport` is already a *normal* (non-dev)
+# dependency of `lodestone-shell` and depends on `lodestone-world` itself
+# (normal dep, not dev) -- a dev-dependency cycle back from here is fine
+# (Cargo only forbids cycles in the normal/library graph; this edge only
+# ever compiles for this crate's own test/bench targets).
+lodestone-testsupport = { workspace = true }
 # Path dev-dependency, test-only: `tests/pool_footprint.rs` (issue #362) needs
 # real, JVM-verified overworld terrain rather than hand-built uniform sections
 # to measure the chunk-memory-pool question honestly. `lodestone-worldgen` has
