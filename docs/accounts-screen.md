@@ -194,6 +194,12 @@ canvas-derived, which needs `frame_for` to know the canvas.
 - **`WorkerMsg::Prompt` opens the browser.** `pump` turns it into an effect and the
   render thread launches the browser from it. Do not add a second opener; that
   already shipped a double-open once.
+- **And therefore: a *test* that sends a `Prompt` and pumps opens a real browser.**
+  That shipped too — see [the unrequested browser window](#the-unrequested-browser-window)
+  below. `open_in_browser` is now a `cfg(test)`/`cfg(not(test))` **fork**, so no unit
+  test can reach the OS handoff. Do not collapse it back into one function with a
+  `cfg!(test)` early return: the fork is what makes the interception assertable.
+  Use `.invalid` hostnames in fixtures regardless.
 - **No field on this screen may hold a credential.** The user code and the
   verification URL are the only strings it displays; sign-in happens on
   Microsoft's own page.
@@ -215,6 +221,52 @@ canvas-derived, which needs `frame_for` to know the canvas.
   on-screen string is transient and uncopyable, so this line is the only thing that
   makes a failure diagnosable after the fact.
 
+## The unrequested browser window
+
+Reported twice from play: `https://login.live.com/oauth20_remoteconnect.srf` kept
+opening in the owner's browser, unprompted, with no visit to the accounts screen.
+
+**It was the test suite, not the game.**
+`add_account_button_starts_the_flow_and_a_prompt_message_shows_it` fed the state
+machine a `WorkerMsg::Prompt` whose `verification_uri` was the literal
+`https://microsoft.com/link`, then called `pump` — and `pump` performs the open as
+an *effect*, through `std::process::Command::new("open")`. From the OS's point of
+view a unit test and a player pressing **Add account** are the same event. So every
+`cargo test -p lodestone-shell` launched a browser window, and with several agents
+running that suite continuously the windows arrived at random while the owner
+played. `microsoft.com/link` 301s to `login.live.com/oauth20_remoteconnect.srf`,
+which is why the URL was Microsoft's **device-code** page even though production
+has used the loopback flow since `c33e325` and `run_device_code_login` has no
+callers at all.
+
+Three things in this made it hard to see, and each is the general lesson:
+
+- **The URL pointed at a flow that does not run.** The device-code endpoint is
+  reachable *only* from a test fixture string. An earlier pass reasoned from the
+  URL to "the owner must be on a stale binary" — and the owner had reported a
+  loopback-flow bug that same morning, so they demonstrably were not.
+- **Nothing re-entered `Requesting`.** The frequency looked like a per-frame loop,
+  and there is none: `activate_button(BUTTON_ADD)` is the only entry, `Failed` and
+  `Idle` are terminal, and no error or timeout path restarts. The repetition was
+  *one* open per test run, many test runs.
+- **Microsoft was never contacted.** The fixture path hand-feeds a channel, so no
+  device code was ever requested and there is no rate-limit exposure — the OS
+  handoff was the entire cost.
+
+Measured, with a shim named `open` placed first on `PATH` so no window could
+actually appear: before, one `OPEN_CALLED https://microsoft.com/link` per lib-test
+run; after, the shim log does not exist across all 955 lib tests.
+
+`super::telemetry`'s **Privacy Statement** and **Give Feedback** buttons call the
+same function and were a latent second instance — they had simply never been
+activated by a test. The fork covers them.
+
+A second, smaller instance of the same symptom was fixed alongside it:
+`run_browser_login` sends its `Prompt` *before* the loop that first checks the
+cancel flag, so pressing Cancel in that window still opened a window the user had
+just refused. `pump_locked` now suppresses the URL effect when `cancel` is already
+set; the worker's `Cancelled` still returns the screen to `Idle`.
+
 ## How it is proved
 
 - **The overflow, by location.** A 396-character message with **no whitespace in
@@ -235,6 +287,13 @@ canvas-derived, which needs `frame_for` to know the canvas.
   its own formula, with both premises asserted (some rows fit, not all do) and a
   full-size canvas as the control.
 - **The row order** the click path assumes, against the frame the draw builds.
+- **At most one browser open per user action**, counted across 50 `pump` calls with
+  two controls: 20 empty pumps must open nothing (so the count is not "one per
+  frame"), and a *second* Add account must be allowed its own single open (so
+  "still exactly one" cannot pass on a permanently dead recorder). Plus
+  `the_real_browser_handoff_is_unreachable_from_a_unit_test`, which asserts the
+  `cfg(test)` arm is the one compiled — the gate that would have caught the
+  report above.
 
 Not proved: nothing here has been through a GPU gate or a live sign-in. The
 frames, the geometry and the wrap are all hermetic; what a real Microsoft failure
