@@ -1023,6 +1023,31 @@ pub trait FluidSectionView {
         let _ = (x, y, z);
         None
     }
+
+    /// The neighbour's outline shape at `(x, y, z)`, reduced to the one case
+    /// this crate can evaluate exactly: a single box spanning the full `x`/`z`
+    /// footprint of its cell — `dirt_path`, `farmland`, slabs, snow layers,
+    /// and every other "flat, height-only-reduced" shape. Returns its
+    /// `(min_y, max_y)` in block-local `0.0..=1.0`, from
+    /// [`lodestone_assets::fluid::full_footprint_y_range`].
+    ///
+    /// This is the still-open half of `FluidRenderer.isFaceOccludedByState`'s
+    /// three-way branch (`Shapes.java:244`'s `blockOccludes`/`getFaceShape`):
+    /// [`occludes_at`](Self::occludes_at) already handles the `Shapes.block()`
+    /// fast path (a genuinely full, opaque cube) and `Shapes.empty()` (nothing
+    /// occludes); this covers the `else` branch's *scoped* subset. A shape
+    /// with holes, steps or a partial footprint (stairs, fences, walls,
+    /// multi-box shapes) is out of scope — see `docs/fluid-rendering.md`'s
+    /// "Known gaps" — and should answer `None` here exactly as air would,
+    /// falling back to today's boolean-only culling.
+    ///
+    /// Defaults to `None` everywhere, which reproduces the pre-fix behaviour
+    /// exactly (a partial occluder never culls a fluid side face) — existing
+    /// [`FluidSectionView`] implementations need no change to keep compiling.
+    fn partial_occluder_y_range_at(&self, x: i32, y: i32, z: i32) -> Option<(f32, f32)> {
+        let _ = (x, y, z);
+        None
+    }
 }
 
 /// Water and lava geometry meshed from a section, on their two separate passes:
@@ -1121,9 +1146,14 @@ fn should_render_backward_up_face(
 /// a full solid neighbour only culls the top surface when every corner height
 /// is already `1.0` (a same-fluid column stacked one cell short of the ceiling)
 /// — which is why water under a solid block still draws its surface into the
-/// `1/9`-block gap. See `docs/fluid-rendering.md`'s "Known gaps" for why this
-/// stays a boolean-`occludes_at` approximation rather than the full
-/// partial-occluder shape test vanilla's `else` branch performs.
+/// `1/9`-block gap.
+///
+/// A **side** face additionally checks [`FluidSectionView::partial_occluder_y_range_at`]
+/// against `max` of the two corners on that edge — `dirt_path`/`farmland` banks
+/// and other full-footprint, height-reduced neighbours now cull the way vanilla's
+/// `blockOccludes` general branch does for that scoped shape family. See
+/// `docs/fluid-rendering.md`'s "Known gaps" for what is still unmodelled (shapes
+/// with holes, steps, or a partial footprint — stairs, fences, walls).
 #[must_use]
 pub fn mesh_fluids(view: &dyn FluidSectionView) -> FluidMeshes {
     let mut out = FluidMeshes::default();
@@ -1161,13 +1191,28 @@ pub fn mesh_fluids(view: &dyn FluidSectionView) -> FluidMeshes {
                 // (`Shapes.block()`) also has `height == 1.0`, which needs every
                 // corner at a full column — not merely a solid block above.
                 let up_occluded = view.occludes_at(xi, yi + 1, zi) && corners.iter().all(|&h| h >= 1.0);
+                // A side face's `isFaceOccludedByNeighbor(dir, max(h0, h1), state)`
+                // general branch (`Shapes.blockOccludes`, non-full-cube occluder):
+                // for the scoped single-box, full-`x`/`z`-footprint case this
+                // collapses to "does the occluder's own y-range fully cover
+                // `[0, face_height]`?" — the same derivation
+                // `docs/fluid-rendering.md`'s "Known gaps" walks through. `corners`
+                // is `[NW, NE, SE, SW]`.
+                let side_occluded = |dx: i32, dz: i32, face_height: f32| {
+                    view.occludes_at(xi + dx, yi, zi + dz)
+                        || view
+                            .partial_occluder_y_range_at(xi + dx, yi, zi + dz)
+                            .is_some_and(|(min_y, max_y)| {
+                                min_y <= 1e-4 && max_y + 1e-4 >= face_height
+                            })
+                };
                 let faces = FaceSet {
                     up: !same(0, 1, 0) && !up_occluded,
                     down: emit(0, -1, 0),
-                    north: emit(0, 0, -1),
-                    south: emit(0, 0, 1),
-                    east: emit(1, 0, 0),
-                    west: emit(-1, 0, 0),
+                    north: !same(0, 0, -1) && !side_occluded(0, -1, corners[0].max(corners[1])),
+                    south: !same(0, 0, 1) && !side_occluded(0, 1, corners[2].max(corners[3])),
+                    east: !same(1, 0, 0) && !side_occluded(1, 0, corners[1].max(corners[2])),
+                    west: !same(-1, 0, 0) && !side_occluded(-1, 0, corners[0].max(corners[3])),
                 };
 
                 let tint_index = match kind {
@@ -1945,6 +1990,11 @@ mod tests {
         /// rect at all — `None` reproduces a fluid with no overlay material
         /// (lava), even if `overlays` is non-empty.
         overlay_sprite: Option<()>,
+        /// Cells that answer `partial_occluder_y_range_at` with a real
+        /// `(min_y, max_y)` — a stand-in for a `dirt_path`/`farmland`-shaped
+        /// full-footprint, height-reduced neighbour. Empty by default,
+        /// matching the trait's `None` default.
+        partial_occluders: HashMap<(i32, i32, i32), (f32, f32)>,
     }
     impl FakeFluidView {
         fn with_overlay_material(mut self) -> Self {
@@ -1953,6 +2003,11 @@ mod tests {
         }
         fn overlay(&mut self, x: i32, y: i32, z: i32) {
             self.overlays.insert((x, y, z));
+        }
+        /// Marks `(x, y, z)` as a full-footprint, height-reduced occluder
+        /// spanning `min_y..=max_y`.
+        fn partial_occluder(&mut self, x: i32, y: i32, z: i32, min_y: f32, max_y: f32) {
+            self.partial_occluders.insert((x, y, z), (min_y, max_y));
         }
         fn water(&mut self, x: i32, y: i32, z: i32, state: FluidState) {
             self.fluids.insert(
@@ -1992,6 +2047,9 @@ mod tests {
         }
         fn overlay_at(&self, x: i32, y: i32, z: i32) -> bool {
             self.overlays.contains(&(x, y, z))
+        }
+        fn partial_occluder_y_range_at(&self, x: i32, y: i32, z: i32) -> Option<(f32, f32)> {
+            self.partial_occluders.get(&(x, y, z)).copied()
         }
     }
 
@@ -2216,6 +2274,87 @@ mod tests {
             !pre_fix_up_emitted,
             "control premise: the pre-fix whole-occludes rule must in fact cull \
              this face, or this test cannot distinguish the fix from a no-op"
+        );
+    }
+
+    // --- Known-gap closure: partial occluders (dirt_path/farmland banks) ---
+
+    /// Gap: "partial occluders are not modelled" — a `dirt_path`/`farmland`
+    /// bank (full `x`/`z` footprint, reduced height) still drew a spurious
+    /// side face because the old test was purely `occludes_at`'s whole-block
+    /// boolean, which such a bank never satisfies. `partial_occluder_y_range_at`
+    /// closes the scoped case: a tall-enough full-footprint neighbour now culls
+    /// the touching side exactly as `Shapes.blockOccludes`'s general branch
+    /// would.
+    #[test]
+    fn a_tall_full_footprint_bank_culls_the_side_face_it_fully_covers() {
+        let mut v = FakeFluidView::default();
+        v.water(8, 8, 8, FluidState::source());
+        // Not a full cube (occludes_at stays false) but tall enough (min 0,
+        // max 1) to cover any face height a lone source can produce.
+        v.partial_occluder(9, 8, 8, 0.0, 1.0); // east bank
+
+        let m = mesh_fluids(&v);
+        assert!(
+            !v.occludes_at(9, 8, 8),
+            "control premise: the bank must not be a whole-block occluder, or \
+             this test cannot tell the new mechanism from the old one"
+        );
+        let east_face_present = m.water.vertices.chunks(4).any(|q| {
+            q.iter()
+                .all(|vx| (vx.position[0] - 9.0).abs() < 0.01)
+        });
+        assert!(
+            !east_face_present,
+            "a full-footprint bank taller than the fluid's own face height must \
+             cull that side face, matching vanilla's blockOccludes general branch"
+        );
+    }
+
+    /// Negative control, magnitude-checked rather than direction-only: a bank
+    /// with the *same* full footprint but too short to reach the fluid's face
+    /// height must leave the face un-culled — the height comparison has to be
+    /// real, not merely "some occluder is present".
+    #[test]
+    fn a_short_full_footprint_bank_does_not_cull_the_side_face() {
+        let mut v = FakeFluidView::default();
+        v.water(8, 8, 8, FluidState::source());
+        // Full footprint, but only 0.1 blocks tall — far short of a lone
+        // source's corner heights (which sit well above 0.1 once averaged).
+        v.partial_occluder(9, 8, 8, 0.0, 0.1);
+
+        let m = mesh_fluids(&v);
+        let east_face_present = m.water.vertices.chunks(4).any(|q| {
+            q.iter()
+                .all(|vx| (vx.position[0] - 9.0).abs() < 0.01)
+        });
+        assert!(
+            east_face_present,
+            "a bank too short to cover the fluid's face height must not cull it \
+             — otherwise this mechanism culls on presence alone, not height"
+        );
+    }
+
+    /// A second negative control: a full-footprint occluder that is tall
+    /// enough at its *top* but floats above the cell base (`min_y > 0`) must
+    /// not cull either — vanilla's `blockOccludes` requires the occluder to
+    /// reach the near boundary (`min(axis) == 0`), matching a real
+    /// `dirt_path`/`farmland` shape but not a raised platform.
+    #[test]
+    fn a_raised_full_footprint_occluder_does_not_cull_the_side_face() {
+        let mut v = FakeFluidView::default();
+        v.water(8, 8, 8, FluidState::source());
+        v.partial_occluder(9, 8, 8, 0.5, 1.0); // floats above y=0
+
+        let m = mesh_fluids(&v);
+        let east_face_present = m.water.vertices.chunks(4).any(|q| {
+            q.iter()
+                .all(|vx| (vx.position[0] - 9.0).abs() < 0.01)
+        });
+        assert!(
+            east_face_present,
+            "an occluder that does not reach the cell's base must not cull the \
+             side face — the near-boundary condition in blockOccludes is real"
         );
     }
 
