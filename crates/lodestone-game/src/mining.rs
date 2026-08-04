@@ -551,6 +551,20 @@ impl BlockDestructionOverlays {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Every currently active overlay, as `(position, stage)` pairs, one per
+    /// breaking entity.
+    ///
+    /// [`stage_at`](Self::stage_at) answers "what's shown at a position I
+    /// already know" — the terrain/block-entity draw passes' shape. The
+    /// per-frame crack-render loop has the opposite problem (issue #410): it
+    /// does not know any position in advance and has to draw *every* active
+    /// overlay, which `stage_at`'s single-position probe cannot serve. This is
+    /// that enumeration, added with no change to the existing probe or its
+    /// dedupe-by-entity behaviour.
+    pub fn iter(&self) -> impl Iterator<Item = (BlockPos, u8)> + '_ {
+        self.entries.iter().map(|o| (o.pos, o.stage))
+    }
 }
 
 /// A single item-pickup animation event: an item entity flew into a collector
@@ -1044,6 +1058,36 @@ mod tests {
         });
         assert_eq!(o.stage_at(p), None);
         assert!(o.is_empty());
+    }
+
+    #[test]
+    fn iter_enumerates_every_active_entity_with_no_position_known_in_advance() {
+        // Two different entities breaking two different blocks: `iter()` must
+        // surface both, unlike `stage_at`, which needs the position handed in.
+        let mut o = BlockDestructionOverlays::new();
+        let a = pos(1, 64, 1);
+        let b = pos(9, 64, 9);
+        o.apply(&ClientEvent::BlockDestruction {
+            entity_id: 101,
+            pos: a,
+            progress: 3,
+        });
+        o.apply(&ClientEvent::BlockDestruction {
+            entity_id: 202,
+            pos: b,
+            progress: 7,
+        });
+        let mut entries: Vec<_> = o.iter().collect();
+        entries.sort_by_key(|(p, _)| (p.x, p.y, p.z));
+        assert_eq!(entries, vec![(a, 3), (b, 7)]);
+
+        // Clearing one (stage >= 10) leaves only the other enumerable.
+        o.apply(&ClientEvent::BlockDestruction {
+            entity_id: 101,
+            pos: a,
+            progress: 10,
+        });
+        assert_eq!(o.iter().collect::<Vec<_>>(), vec![(b, 7)]);
     }
 
     #[test]

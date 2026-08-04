@@ -189,16 +189,22 @@ Both were tracked as separate follow-up issues (#410, #411), closed as follows:
   now take `cracks: &[CrackTarget]` instead of `Option<CrackTarget>`, so the
   render pass itself can paint any number of simultaneous crack overlays (proved
   by `lodestone-shell/tests/crack_multi_target_pixels.rs`, two targets at two
-  screen positions in one call). `app.rs` folds in the local player's own
-  `Sim::crack_target()` through the new shape unconditionally. **Not yet wired**:
-  a second producer for *other* players' overlays. `Sim::block_destruction_stage_at`
-  reads `SessionBlockDestruction` at a single known position (mirroring
-  `selected_slot()`), but the real per-frame loop needs the opposite shape —
-  every currently active overlay, with no position known in advance — and
-  `lodestone_game::mining::BlockDestructionOverlays` exposes no enumeration, only
-  `stage_at`/`len`/`is_empty`. Adding one (`lodestone-game`, outside the render
-  pass's own file ownership) is the one remaining hop from "the pipeline can draw
-  N targets" to "other players' digs actually appear".
+  screen positions in one call). **Now fully wired.**
+  `lodestone_game::mining::BlockDestructionOverlays` gained `iter()`, enumerating
+  every active `(BlockPos, u8)` entry with no position known in advance —
+  `stage_at`'s single-position probe (`Sim::block_destruction_stage_at`) could not
+  serve the per-frame loop, which does not know a position to ask about. The
+  gather itself is `lodestone_shell::gpu::gather_crack_targets` (pure, version/
+  `Sim`-agnostic: local target + `overlays.iter()` + a `resolve(BlockPos) ->
+  Option<u32>` callback), unit-tested directly against a real
+  `BlockDestructionOverlays` fold in `gpu/outline.rs`'s `gather_tests`, and proved
+  reaching pixels for two different breaking entities in
+  `lodestone-shell/tests/crack_live_gather_pixels.rs` (through the live gather,
+  not a hand-built `Vec<CrackTarget>` — the distinction
+  `crack_multi_target_pixels.rs` cannot draw). `Sim`'s per-frame call
+  (`Sim::crack_targets`, wiring `crack_target()` + the local/live `resolve`
+  split into `gather_crack_targets`) and `app.rs`'s one-line call site are the
+  brokered choke-point patch that lands alongside this doc update.
 
 The remaining 35, listed for the record and not as a defect claim:
 
