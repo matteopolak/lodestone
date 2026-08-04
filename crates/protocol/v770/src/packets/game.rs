@@ -1187,3 +1187,35 @@ pub struct SetTestBlock {
     /// Free-form message shown by `log`/`fail`/`accept` modes.
     pub message: String,
 }
+
+/// Serverbound `entity_tag_query` packet (F3+I-style debug NBT inspection
+/// request for an entity).
+///
+/// Wire layout: VarInt transaction id, then VarInt entity id
+/// (`ServerboundEntityTagQueryPacket`, decompiled `.cache/mc/26.2/src`). No
+/// clientbound `tag_query` encoder exists yet to answer it — see this
+/// struct's decode-side consumer for why it is decoded but not acted on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Decode)]
+pub struct EntityTagQuery {
+    /// Transaction id echoed back in the reply.
+    #[mc(varint)]
+    pub transaction_id: i32,
+    /// Queried entity's network id.
+    #[mc(varint)]
+    pub entity_id: i32,
+}
+
+/// Serverbound `block_entity_tag_query` packet (F3+I-style debug NBT
+/// inspection request for a block entity).
+///
+/// Wire layout: VarInt transaction id, then a packed `BlockPos` long
+/// (`ServerboundBlockEntityTagQueryPacket`). Same "decoded, no reply
+/// encoder yet" situation as [`EntityTagQuery`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Decode)]
+pub struct BlockEntityTagQuery {
+    /// Transaction id echoed back in the reply.
+    #[mc(varint)]
+    pub transaction_id: i32,
+    /// Packed `BlockPos` long of the queried block.
+    pub pos: i64,
+}
