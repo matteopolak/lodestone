@@ -13,7 +13,7 @@ use lodestone_assets::{Language, ResourceLocation};
 use lodestone_client::{BlockPos, ClientAction, Hand, OpenMenuSnapshot, Rotation};
 use lodestone_controller::{ControllerPlugin, InputState, RawInput, apply_look};
 pub use lodestone_ecs::SessionPhase;
-use lodestone_ecs::entity::{Attributes, EntityKind, MinecraftEntityId, Position};
+use lodestone_ecs::entity::{Attributes, EntityIndex, EntityKind, MinecraftEntityId, Position};
 use lodestone_ecs::player::{
     ActionQueue, AttackStrengthTicker, CollisionSource, Dead, Egress, LocalPlayerPlugin,
     MovementIntent, NearbyEntities, PhysicsState, PlayerCollision, PrevPosition, Profile,
@@ -2417,9 +2417,22 @@ impl Sim {
     /// accessors either (see [`Self::health`]/[`Self::xp`]).
     #[must_use]
     pub fn attack_strength_scale(&self) -> f32 {
+        self.attack_strength_scale_at(0.0)
+    }
+
+    /// `getAttackStrengthScale(a)` (`Player.java:1826-1828`) with the partial
+    /// tick argument exposed, because vanilla itself calls this with two
+    /// different values for two different purposes: `0.0F` for the crosshair
+    /// indicator ([`Self::attack_strength_scale`], `Hud.java:448`) and `0.5F`
+    /// for `Player.attack`'s own `fullStrengthAttack` gate
+    /// (`Player.java:956,962`), which [`Self::maybe_spawn_crit_particles`]
+    /// needs. One private helper rather than two public accessors that would
+    /// otherwise duplicate the ticker read and delay computation.
+    #[must_use]
+    fn attack_strength_scale_at(&self, a: f32) -> f32 {
         let delay = self.attack_strength_delay();
         let ticker = self.read(|w| w.get::<AttackStrengthTicker>(self.local).map_or(0, |t| t.0));
-        (ticker as f32 / delay).clamp(0.0, 1.0)
+        ((ticker as f32 + a) / delay).clamp(0.0, 1.0)
     }
 
     /// The title/subtitle overlay as `(title, subtitle, alpha)`, `Some` while a
@@ -2908,6 +2921,19 @@ impl Sim {
     {
         let handle = self.net.as_ref()?.shared_handle();
         Some(move |eye: glam::Vec3| crate::block_entities::skull_spawns(&handle, eye))
+    }
+
+    /// The sign sibling of [`Self::skull_source`] — see
+    /// `crate::block_entities::sign_spawns`. Captures no partial tick and no
+    /// animation state, for the same reason skulls do not: sign text does not
+    /// animate.
+    #[must_use]
+    pub fn sign_source(
+        &self,
+    ) -> Option<impl Fn(glam::Vec3) -> Vec<lodestone_render::SignSpawn> + Send + Sync + 'static>
+    {
+        let handle = self.net.as_ref()?.shared_handle();
+        Some(move |eye: glam::Vec3| crate::block_entities::sign_spawns(&handle, eye))
     }
 
     /// How many chest lids are currently animating or open — for the debug
@@ -3808,11 +3834,6 @@ impl Sim {
         // already told the server this tick's crouch state is.
         let sneaking = self.movement_intent().sneak;
         let local = self.local;
-        self.write(|w| {
-            if let Some(mut ticker) = w.get_mut::<AttackStrengthTicker>(local) {
-                ticker.0 = 0;
-            }
-        });
         if let Some(net) = &self.net {
             net.send_action(ClientAction::InteractEntity {
                 entity_id,
@@ -3820,6 +3841,133 @@ impl Sim {
                 sneaking,
             });
         }
+        // Vanilla's own order (`MultiPlayerGameMode.attack`,
+        // `MultiPlayerGameMode.java:427-429`): the packet, then the
+        // client-side `player.attack(entity)` prediction — whose crit
+        // condition reads `attackStrengthTicker` **before** it is reset — and
+        // only then `resetAttackStrengthTicker()`. Reading the ticker after
+        // zeroing it here would make `fullStrengthAttack` false on every
+        // attack, including the one that just landed at full charge, so this
+        // call must stay above the reset below.
+        self.maybe_spawn_crit_particles(entity_id);
+        self.write(|w| {
+            if let Some(mut ticker) = w.get_mut::<AttackStrengthTicker>(local) {
+                ticker.0 = 0;
+            }
+        });
+    }
+
+    /// Vanilla's local-only crit-particle prediction — `Player.attack`'s
+    /// `criticalAttack = fullStrengthAttack && canCriticalAttack(entity)`
+    /// (`Player.java:970-971,1032-1041`), whose visual half is
+    /// `attackVisualEffects`' `this.crit(entity)` call (`Player.java:1063-1066`,
+    /// `LocalPlayer.crit` → `ParticleEngine.createTrackingEmitter`,
+    /// `LocalPlayer.java:664-665`).
+    ///
+    /// # This is real vanilla dual simulation, not an approximation invented
+    /// for this port
+    ///
+    /// `MultiPlayerGameMode.attack` runs the **client's own copy** of
+    /// `player.attack(entity)` (`MultiPlayerGameMode.java:428`) independently
+    /// of, and before, the server's authoritative copy of the same method —
+    /// the server computes the real damage, the client predicts only the
+    /// cosmetic trigger (sound + particle) so it does not wait a round trip to
+    /// see feedback on its own swing. The wire `Attack` packet itself carries
+    /// no damage or crit flag (`docs/combat.md`); nothing here affects what
+    /// the server decides.
+    ///
+    /// # Condition, checked against the jar rather than assumed
+    ///
+    /// `canCriticalAttack` (`Player.java:1032-1041`): `fallDistance > 0.0 &&
+    /// !onGround && !onClimbable && !isInWater && !isMobilityRestricted &&
+    /// !isPassenger && entity is LivingEntity && !isSprinting`.
+    /// `fullStrengthAttack = getAttackStrengthScale(0.5F) > 0.9F`
+    /// (`Player.java:956,962`) is the caller's own gate, not part of
+    /// `canCriticalAttack` — hence [`Self::attack_strength_scale_at`] rather
+    /// than reusing [`Self::attack_strength_scale`]'s `a = 0.0`, which is a
+    /// different call site's (the crosshair's) partial-tick argument.
+    ///
+    /// Two vanilla clauses are not modelled, and the divergence is small and
+    /// explained rather than silent:
+    /// - **`!onClimbable` is not read separately.** This engine resets
+    ///   `fall_distance` to `0.0` the instant `tick_air` finds a climbable —
+    ///   `LivingEntity.handleOnClimbable`, folded into `tick_air` per
+    ///   [`lodestone_physics::player::PlayerState::fall_distance`]'s own
+    ///   "Climbable reset" bullet — so `fall_distance > 0.0` already implies
+    ///   not-on-climbable in this port's physics model. Checked against that
+    ///   source rather than guessed.
+    /// - **`!isMobilityRestricted`/`!isPassenger`, and the outer `baseDamage >
+    ///   0.0F || magicBoost > 0.0F` gate, are not modelled.** This shell has
+    ///   no riding state (`docs/combat.md`'s knockback section notes the same
+    ///   absence for a different mechanic) and no local weapon-damage/
+    ///   enchantment computation to derive `baseDamage`/`magicBoost` from —
+    ///   the identical gap [`Self::attack_strength_delay`]'s own doc names for
+    ///   `lodestone-data` carrying no per-item attack-speed census. The only
+    ///   case this can diverge on is an attack that deals zero base damage
+    ///   (an already-broken or damage-less item), which vanilla itself treats
+    ///   as "nothing happens" at the outer `if` — the crit particle is cosmetic
+    ///   and no damage number depends on it either way.
+    ///
+    /// # The particle burst: one tick of `TrackingEmitter`, not three
+    ///
+    /// `TrackingEmitter` (`TrackingEmitter.java:29-41`) runs for **3 ticks**,
+    /// spawning up to 16 candidates per tick (filtered to a unit sphere,
+    /// ~52% pass) that track the entity's *current* position each tick. This
+    /// shell's particle system has no per-attack persistent emitter — every
+    /// existing local spawn ([`crate::particles::Particles::destroy_block`]/
+    /// `breaking_block`) is a one-shot burst — so this spawns **one** tick's
+    /// worth (16 candidates, same unit-sphere filter) at the target's
+    /// position at the moment of the attack, rather than adding new
+    /// multi-tick emitter machinery for a purely cosmetic burst. The
+    /// per-candidate position/velocity formula (`Entity.getX(double)` etc.,
+    /// `Entity.java:3770-3811`) and the emitted particle's own physics
+    /// (`lodestone_particle::emit::crit`) are both exact; only the tick count
+    /// is a disclosed simplification.
+    fn maybe_spawn_crit_particles(&mut self, entity_id: i32) {
+        if self.attack_strength_scale_at(0.5) <= 0.9 {
+            return;
+        }
+        let Some((feet, width, height)) = self.read(|w| {
+            let target = w.resource::<EntityIndex>().get(entity_id)?;
+            let pos = w.get::<Position>(target)?;
+            let kind = w.get::<EntityKind>(target)?;
+            let facts = w.resource::<VersionData>().entity_facts(&kind.0)?;
+            let type_id = lodestone_data::entity_types::entity_type_id_parts(
+                kind.0.namespace(),
+                kind.0.path(),
+            )?;
+            lodestone_data::entity_census::is_living(type_id)
+                .unwrap_or(false)
+                .then_some((pos.0, facts.dimensions.width, facts.dimensions.height))
+        }) else {
+            return;
+        };
+        let local = self.local;
+        let (fall_distance, on_ground) = self.read(|w| {
+            w.get::<PhysicsState>(local)
+                .map_or((0.0, true), |s| (s.0.fall_distance, s.0.on_ground))
+        });
+        if fall_distance <= 0.0 || on_ground {
+            return;
+        }
+        if self.fluid_state().in_water() || self.movement_intent().sprint {
+            return;
+        }
+        self.particles_mut(|p| {
+            let engine = p.engine_mut();
+            for _ in 0..16 {
+                let xa = f64::from(engine.rng().next_float()) * 2.0 - 1.0;
+                let ya = f64::from(engine.rng().next_float()) * 2.0 - 1.0;
+                let za = f64::from(engine.rng().next_float()) * 2.0 - 1.0;
+                if xa * xa + ya * ya + za * za > 1.0 {
+                    continue;
+                }
+                let x = f64::from(feet.x) + f64::from(width) * (xa / 4.0);
+                let y = f64::from(feet.y) + f64::from(height) * (0.5 + ya / 4.0);
+                let z = f64::from(feet.z) + f64::from(width) * (za / 4.0);
+                particle_emit::crit(engine, x, y, z, xa, ya + 0.2, za);
+            }
+        });
     }
 
     /// Send the serverbound **use-on-entity** for `entity_id` — vanilla's
@@ -8976,6 +9124,205 @@ mod tests {
             sim.attack_strength_scale(),
             0.0,
             "attacking an entity must reset the ticker before the next tick, not after it"
+        );
+    }
+
+    // -- crit particles ------------------------------------------------------
+    //
+    // `Sim::maybe_spawn_crit_particles`, reached only through the real
+    // production entry point (`begin_attack_live`), never called directly —
+    // proving the wiring, not just the private helper in isolation.
+
+    /// Spawns a real, ingested entity (through the same `ClientEvent` path
+    /// production uses, not a hand-built ECS component set) at `feet + (2,
+    /// 0, 0)`, so it is both a valid attack target and, via [`EntityIndex`],
+    /// resolvable by [`Sim::maybe_spawn_crit_particles`].
+    fn spawn_crit_test_target(sim: &mut Sim, entity_id: i32, kind: &str) {
+        let feet = sim.player().position;
+        ingest(
+            sim,
+            lodestone_client::ClientEvent::EntitySpawned {
+                entity_id,
+                uuid: None,
+                entity_type: kind.parse().expect("valid entity type key"),
+                pos: lodestone_model::Vec3::new(feet.x + 2.0, feet.y, feet.z),
+                rotation: Rotation::new(0.0, 0.0),
+                velocity: None,
+            },
+        );
+    }
+
+    /// Charges the attack-strength ticker to full (5 ticks, unarmed) with
+    /// `sprint` held throughout — stepping is required for a sprint key to
+    /// reach [`MovementIntent`] at all, so the charge and the sprint intent
+    /// are established together rather than in two passes that could disagree
+    /// about which ticks actually ran. `Forward` is held alongside `Sprint`
+    /// because vanilla's own sprint gate requires forward movement intent —
+    /// holding the sprint key alone (watched failing) never sets
+    /// `MovementIntent::sprint`, the same gate `submerged_and_sprinting_
+    /// enters_the_swim_pose`'s existing setup already relies on.
+    fn reach_full_strength(sim: &mut Sim, sprint: bool) {
+        if sprint {
+            sim.input_mut(|i| i.set(lodestone_controller::Action::Forward, true));
+            sim.input_mut(|i| i.set(lodestone_controller::Action::Sprint, true));
+        }
+        for _ in 0..5 {
+            sim.step(1.0 / 20.0);
+        }
+        assert_eq!(
+            sim.attack_strength_scale(),
+            1.0,
+            "test setup must reach full attack strength before the assertions below mean \
+             anything"
+        );
+    }
+
+    fn crit_particle_count(sim: &mut Sim) -> usize {
+        sim.particles_mut(|p| p.engine_mut().particles().len())
+    }
+
+    /// The positive case: full strength, airborne (falling, not grounded),
+    /// not sprinting, not submerged, target is a `LivingEntity` — vanilla's
+    /// `canCriticalAttack` (`Player.java:1032-1041`) is satisfied on every
+    /// clause this port models, so the attack must spawn crit particles.
+    #[test]
+    fn a_full_strength_airborne_hit_on_a_living_target_spawns_crit_particles() {
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        spawn_crit_test_target(&mut sim, 77, "minecraft:pig");
+        reach_full_strength(&mut sim, false);
+        let local = sim.local;
+        sim.write(|w| {
+            let mut state = w.get_mut::<PhysicsState>(local).expect("local player");
+            state.0.fall_distance = 3.0;
+            state.0.on_ground = false;
+        });
+
+        let before = crit_particle_count(&mut sim);
+        sim.write(|w| w.resource_mut::<EntityRayTarget>().0 = Some(77));
+        sim.begin_attack_live();
+        let after = crit_particle_count(&mut sim);
+
+        assert!(
+            after > before,
+            "a full-strength airborne hit on a living target must spawn crit particles, \
+             before={before} after={after}"
+        );
+    }
+
+    /// **Negative control, watched failing.** With the identical setup above
+    /// except `on_ground = true`, vanilla's `!onGround` clause fails and no
+    /// particles must spawn — proving the positive test is not vacuously
+    /// green (e.g. from particles some *other* code path already emits).
+    #[test]
+    fn crit_particles_do_not_spawn_while_grounded() {
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        spawn_crit_test_target(&mut sim, 78, "minecraft:pig");
+        reach_full_strength(&mut sim, false);
+        let local = sim.local;
+        sim.write(|w| {
+            let mut state = w.get_mut::<PhysicsState>(local).expect("local player");
+            state.0.fall_distance = 3.0;
+            state.0.on_ground = true;
+        });
+
+        let before = crit_particle_count(&mut sim);
+        sim.write(|w| w.resource_mut::<EntityRayTarget>().0 = Some(78));
+        sim.begin_attack_live();
+        let after = crit_particle_count(&mut sim);
+
+        assert_eq!(
+            after, before,
+            "a grounded hit must not spawn crit particles even at full strength and \
+             fall_distance > 0"
+        );
+    }
+
+    /// **Negative control.** Sprinting fails vanilla's `!isSprinting` clause.
+    #[test]
+    fn crit_particles_do_not_spawn_while_sprinting() {
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        spawn_crit_test_target(&mut sim, 79, "minecraft:pig");
+        reach_full_strength(&mut sim, true);
+        let local = sim.local;
+        sim.write(|w| {
+            let mut state = w.get_mut::<PhysicsState>(local).expect("local player");
+            state.0.fall_distance = 3.0;
+            state.0.on_ground = false;
+        });
+        assert!(
+            sim.movement_intent().sprint,
+            "test setup must actually be sprinting, or this control tests nothing"
+        );
+
+        let before = crit_particle_count(&mut sim);
+        sim.write(|w| w.resource_mut::<EntityRayTarget>().0 = Some(79));
+        sim.begin_attack_live();
+        let after = crit_particle_count(&mut sim);
+
+        assert_eq!(
+            after, before,
+            "a sprinting hit must not spawn crit particles"
+        );
+    }
+
+    /// **Negative control.** A dropped item is not a `LivingEntity`
+    /// (`Player.java:1039`'s `entity instanceof LivingEntity` clause) —
+    /// vanilla never plays a crit sparkle on a punched item stack.
+    #[test]
+    fn crit_particles_do_not_spawn_against_a_non_living_target() {
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        spawn_crit_test_target(&mut sim, 80, "minecraft:item");
+        reach_full_strength(&mut sim, false);
+        let local = sim.local;
+        sim.write(|w| {
+            let mut state = w.get_mut::<PhysicsState>(local).expect("local player");
+            state.0.fall_distance = 3.0;
+            state.0.on_ground = false;
+        });
+
+        let before = crit_particle_count(&mut sim);
+        sim.write(|w| w.resource_mut::<EntityRayTarget>().0 = Some(80));
+        sim.begin_attack_live();
+        let after = crit_particle_count(&mut sim);
+
+        assert_eq!(
+            after, before,
+            "a hit on a non-living entity must not spawn crit particles"
+        );
+    }
+
+    /// **Negative control.** Below `fullStrengthAttack`'s `> 0.9F` threshold,
+    /// vanilla's outer gate in `Player.attack` never reaches
+    /// `canCriticalAttack` at all — this is the ticker axis, not the
+    /// fall/ground/sprint/water axis the other controls cover.
+    #[test]
+    fn crit_particles_do_not_spawn_below_full_attack_strength() {
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        spawn_crit_test_target(&mut sim, 81, "minecraft:pig");
+        // One tick in: well under the 5-tick unarmed delay, so
+        // `attack_strength_scale_at(0.5)` is nowhere near `0.9`.
+        sim.step(1.0 / 20.0);
+        assert!(sim.attack_strength_scale() < 0.9);
+        let local = sim.local;
+        sim.write(|w| {
+            let mut state = w.get_mut::<PhysicsState>(local).expect("local player");
+            state.0.fall_distance = 3.0;
+            state.0.on_ground = false;
+        });
+
+        let before = crit_particle_count(&mut sim);
+        sim.write(|w| w.resource_mut::<EntityRayTarget>().0 = Some(81));
+        sim.begin_attack_live();
+        let after = crit_particle_count(&mut sim);
+
+        assert_eq!(
+            after, before,
+            "an attack well under full strength must not spawn crit particles"
         );
     }
 

@@ -31,6 +31,23 @@ mechanic (confirmed by grepping `client-src` for `[Ss]hake`, one unrelated
 hit in `ItemInHandRenderer.java`) — noted here so this doc does not repeat a
 stale claim #12 itself still carries.
 
+**Landed in the pass that added this paragraph**, closing issues #16/#27 and
+the rest of #12's genuine remainder:
+
+- **The `Q`/`Ctrl+Q` drop key** — two proven serverbound/click islands
+  (`ClientAction::DropSelectedItem`/`DropSelectedItemStack`, and
+  `Click::drop_one`/`drop_stack`/`do_throw`) closed by one binding. See "The
+  drop key (`Q`)" below.
+- **Crit particles**, as local-only prediction in `Sim::attack_entity`. See
+  "Crit particles" below.
+- **The sweep-attack particle was investigated and confirmed *not* wired**,
+  correcting this doc's own previous "deliberately not built" entry, which
+  guessed it might already partly render — it does not, and the gap is larger
+  than a missing dispatch arm. See "The sweep-attack particle" below.
+- **`bobHurt` was re-confirmed still blocked** on `Camera` gaining a roll
+  degree of freedom, a cross-cutting change out of this pass's scope. See
+  "`bobHurt`, still blocked" below.
+
 ## How it works
 
 ### Swing dispatch (`Sim::begin_attack`, `crates/lodestone-shell/src/sim.rs`)
@@ -568,20 +585,221 @@ that happens to correlate everywhere except the case under test" mistake
 `CLAUDE.md`'s magnitude/world test-species entries already name, just with
 "arrow existence" standing in for the wrong proxy this time.
 
+### The drop key (`Q`)
+
+Two islands, one binding, closing #16/#27. Both were fully built and tested
+before this landed, with zero producers:
+
+- **`ClientAction::DropSelectedItem`/`DropSelectedItemStack`** — encoded by
+  all four protocol adapters (`PLAYER_ACTION` action ids `4`/`3`), round-trip
+  tested, never constructed anywhere in `lodestone-shell`.
+- **`Click::drop_one`/`drop_stack`/`do_throw`** (`lodestone-game`, issue #27)
+  — `ContainerInput::Throw` only ever reached `OUTSIDE_SLOT` in practice,
+  where `doClick`'s own `slot_index >= 0` guard drops it, so the
+  slot-drop branch could never execute. **`MenuInput::key_pressed`'s `Drop`
+  arm already existed** (`crates/lodestone-shell/src/container.rs`, landed in
+  `3ccbbb1` concurrently with the research that found this gap) — it was not
+  the missing piece by the time this landed, only its one production caller
+  was. Worth recording because the research this pass started from said
+  otherwise; re-verify a "missing producer" claim against the current tree
+  before assuming which hop is actually missing.
+
+**`InputAction::Drop`** (`keybinds.rs`), default `Q` (`Options.java:664`,
+GLFW keysym `81`), category `Inventory` — the twelfth vanilla inventory
+mapping this table now implements. Vanilla's own gate
+(`AbstractContainerScreen.java:495-501`) is `hoveredSlot != null &&
+hoveredSlot.hasItem()`, **not** an empty cursor (`doClick` applies that
+itself once the click reaches it, `AbstractContainerMenu.java:513`); `Ctrl`
+selects drop-stack (button `1`) over drop-one (button `0`), and it is `else
+if`, not two independent `if`s — the same three details `PickItem`'s own
+handling already gets right in `key_pressed`, transcribed rather than
+re-derived.
+
+**Same two-mechanism shape as `key.swapOffhand`** (see that section above),
+and the two contexts ask their checks in the vanilla order:
+
+| context | mechanism | our route |
+|---|---|---|
+| container open, slot hovered | `ContainerInput::Throw`, button `0`/`1` (`AbstractContainerScreen.java:495-501`) | `KeyOutcome::ContainerDrop { ctrl }` → `MenuInput::key_pressed` → `Click::drop_one`/`drop_stack` |
+| no screen, normal play | bare `PLAYER_ACTION`/`DROP_ITEM`\|`DROP_ALL_ITEMS` (`Minecraft.java:1907-1911`) | `KeyOutcome::Drop { ctrl }` → `ClientAction::DropSelectedItem`/`DropSelectedItemStack` |
+
+`resolve_key` gained a fifth parameter, `ctrl: bool`, per this task's own
+brief rather than reading the modifier at the driver's `match` arm: the
+threading was **not** invasive — one new parameter, one new tracked field
+(`WindowApp::ctrl_held`, mirroring the pre-existing `shift_held`), and every
+existing call site took a mechanical `, false` (or `, true` for the two new
+tests that need it). No call site needed restructuring.
+
+`send_container_drop` goes through `MenuInput::key_pressed` rather than
+building a `Click` directly the way `send_container_swap` does, because
+`key_pressed` already carries the `hoveredSlot.hasItem()` guard —
+duplicating it would be a second copy that can drift.
+`send_drop_selected`/`drop_selected_action` mirror `send_offhand_swap`/
+`offhand_swap_action`'s shape exactly, including the one guard
+(`!player.isSpectator()`, `Minecraft.java:1908`).
+
+**Live gate.** The item-count drop (5 → 4) this task's brief cites as already
+proven is `crates/lodestone-game/tests/live_inventory.rs`, which sends
+`ClientAction::DropSelectedItem` through `ClientHandle::send_action` directly
+— it proves the wire format and the server's acceptance of the action, not
+this pass's own contribution (the `app.rs` dispatch that reaches that call
+from a real key press). This pass added the dispatch and its hermetic
+`app.rs` tests (`q_drops_one_while_playing_and_ctrl_q_drops_the_stack`,
+`q_issues_a_container_drop_while_a_container_is_open`, and the wire/spectator
+pair mirroring the off-hand key's own tests); it did not re-run the live
+oracle, since the wire format and server acceptance were already proven and
+nothing about that half changed.
+
+### Crit particles
+
+Vanilla's `criticalAttack = fullStrengthAttack && canCriticalAttack(entity)`
+(`Player.java:970-971,1032-1041`), whose visual half is
+`attackVisualEffects`' `this.crit(entity)` call
+(`Player.java:1063-1066` → `LocalPlayer.crit`, `LocalPlayer.java:664-665`).
+
+**This is real vanilla dual simulation, not an invented approximation.**
+`MultiPlayerGameMode.attack` runs the client's own copy of
+`player.attack(entity)` (`MultiPlayerGameMode.java:428`) independently of,
+and before, the server's authoritative copy of the same method — the server
+computes the real damage, the client predicts only the cosmetic sound and
+particle trigger so the swing has feedback without a round trip. The wire
+`Attack` packet carries no damage or crit flag either way (see above); this
+prediction cannot disagree with the server about anything that matters.
+
+`Sim::maybe_spawn_crit_particles`, called from `Sim::attack_entity` **before**
+the attack-strength ticker resets — vanilla's own order
+(`MultiPlayerGameMode.attack`: send, then `player.attack(entity)`, then
+`resetAttackStrengthTicker()`); reading the ticker after the reset would make
+`fullStrengthAttack` false on every attack, including the one that just
+landed at full charge, so this is a correctness-load-bearing ordering, not a
+style choice.
+
+**Condition, checked against the jar:**
+`fallDistance > 0.0 && !onGround && !onClimbable && !isInWater &&
+!isMobilityRestricted && !isPassenger && entity is LivingEntity &&
+!isSprinting`, gated by the caller's own `fullStrengthAttack =
+getAttackStrengthScale(0.5F) > 0.9F` — note the `0.5F` partial-tick argument,
+**not** the crosshair indicator's `0.0F` (`Hud.java:448`). `Sim::
+attack_strength_scale` was refactored into a private `attack_strength_scale_at(a)`
+so both call sites share the ticker read and delay computation instead of
+duplicating it; the public accessor is now a one-line call with `a = 0.0`,
+observably unchanged.
+
+Two clauses are not modelled, both disclosed rather than silent:
+
+- **`!onClimbable`** is not read separately. This engine already resets
+  `fall_distance` to `0.0` the instant `tick_air` finds a climbable
+  (`LivingEntity.handleOnClimbable`, folded into `tick_air` — see
+  `lodestone_physics::player::PlayerState::fall_distance`'s own "Climbable
+  reset" bullet), so `fall_distance > 0.0` already implies not-on-climbable
+  in this port's physics model. Derived from that source, not guessed.
+- **`!isMobilityRestricted`/`!isPassenger`**, and the outer `baseDamage >
+  0.0F || magicBoost > 0.0F` gate, are not modelled — this shell has no
+  riding state and no local weapon-damage/enchantment computation to derive
+  `baseDamage`/`magicBoost` from (the identical gap `attack_strength_delay`'s
+  own doc names for `lodestone-data` carrying no per-item attack-speed
+  census). The only divergence this can produce is a crit particle on an
+  attack that deals zero base damage, which vanilla itself already treats as
+  "nothing happens" one level up — cosmetic only, no damage number depends on
+  it.
+
+**The burst is one tick of `TrackingEmitter`, not three.** Vanilla's
+`TrackingEmitter` (`TrackingEmitter.java:29-41`) runs for 3 ticks, spawning
+up to 16 candidates per tick (filtered to a unit sphere, ~52% pass) that
+track the entity's *current* position each tick. This shell's particle
+system has no per-attack persistent emitter — every existing local spawn
+(`Particles::destroy_block`/`breaking_block`) is a one-shot burst — so
+`maybe_spawn_crit_particles` spawns one tick's worth (16 candidates, the same
+unit-sphere filter and the same `Entity.getX(double)`-style position formula,
+`Entity.java:3770-3811`) at the target's position at the moment of the
+attack, rather than adding new multi-tick emitter machinery for a purely
+cosmetic burst. The per-candidate physics
+(`lodestone_particle::emit::crit`) is exact; only the tick count is a
+disclosed simplification. Target-entity resolution goes through
+`EntityIndex` (server id → ECS entity) and the `LivingEntity` check through
+`lodestone_data::entity_types::entity_type_id_parts` +
+`entity_census::is_living` — the same census `docs/backlog.md`/`CLAUDE.md`
+already document for the metadata-index-8/15 collisions, reused here rather
+than re-derived.
+
+**The gate** is five hermetic `sim.rs` tests reached only through
+`begin_attack_live` (the real production entry point, not the private
+helper called directly): a positive case (full strength, airborne, not
+sprinting, not grounded, living target) and four negative controls, each
+run and watched to actually distinguish (grounded, sprinting, non-living
+target, below full strength) — all against a particle-count delta from
+`Particles::engine_mut().particles().len()`, the same instrument the file's
+pre-existing particle tests already use.
+
+### The sweep-attack particle
+
+**Confirmed not wired, correcting this doc's own previous guess.** The
+combat-scoping pass that investigated this before said it "may already
+partly work" because `minecraft:sweep_attack` is a registered particle type
+id and the generic server-particle pipeline is real. That turned out to be
+the wrong instrument to check first: `Particles::spawn_one`
+(`crates/lodestone-shell/src/particles.rs`) dispatches by **kind string**,
+and its `match` has arms for exactly `"flame"`, `"smoke"`, `"large_smoke"`,
+`"crit"`, `"splash"` and `"bubble"` — `"sweep_attack"` is not one of them, so
+it falls into the `other => tracing::debug!(...)` arm and is silently
+dropped. One level deeper, `lodestone_particle::emit` has no sweep-particle
+function at all (`terrain_particle`, `destroy_block_effect`,
+`breaking_block_effect`, `crit`, `smoke`, `flame`, `bubble`, `splash` are the
+whole module), and `lodestone_particle::Sheet` has no `SweepAttack` variant
+either — there is no atlas entry to sample even if a caller reached one.
+
+So this is not a missing dispatch line the way crit's ticker read was; it is
+an **unbuilt rendering path**: a new `Sheet` variant (`sweep_0.png` …
+`sweep_7.png`, 8 frames, `assets/minecraft/particles/sweep_attack.json` /
+`AttackSweepParticle.java`), atlas stitching, a new `emit::sweep_attack`
+function, and the one-line `particles.rs` dispatch addition — noticeably more
+than crit needed, because crit reused an emitter and a sheet that already
+existed end to end.
+
+**Out of this pass's file scope.** `lodestone-particle` is a separate crate
+and `crates/lodestone-shell/src/particles.rs` is neither in this task's
+`sim.rs`/`app.rs`/`keybinds.rs`/`interact.rs`/`camera_rig.rs` allowlist nor
+explicitly brokered the way `lodestone-game` was for the drop key. Building
+it would mean editing shared, unclaimed files with no sign-off, so it stays
+unbuilt here and is flagged as its own follow-up rather than rushed into this
+commit.
+
+### `bobHurt`, still blocked
+
+Re-confirmed, not re-derived: `camera_rig.rs`'s own `bobbed_camera` doc
+comment already has the precise cost, and reading it against the current
+tree shows it is not stale. `BobFrame::eye_transform`/`hurt_roll_degrees`
+compute the correct roll matrix, but `bobbed_camera` folds the result back
+into a `Camera` by decomposing a view matrix into `position`/`yaw`/`pitch` —
+two rotational degrees of freedom recovered from three, because
+`Camera::view_matrix` hardcodes `Vec3::Y` as up. The pure-roll component of
+`bobHurt`'s tilt is the one thing that decomposition structurally cannot
+carry (the table in `bobbed_camera`'s own doc: walk-bob roll and the
+hurt-tilt roll both land in the "not carried" row).
+
+Giving `Camera` a real roll field (or an equivalent `Mat4` hook on
+`view_projection`) is not a local change: `bobbed_camera`'s doc counts 48
+`Camera { .. }` struct literals across ~40 files, six inside
+`crates/lodestone-shell/src/gpu.rs` and one in
+`crates/lodestone-render/src/entity.rs`. Those are three other agents'
+exclusive territory at once for this task
+(`crates/lodestone-render/`/sky-cloud agent, `gpu.rs`/`gpu/*.rs`/sign agent,
+`entity.rs`/creeper agent) — a change too large and too cross-cutting to land
+inside this pass, and one that needs the orchestrator to sequence rather than
+a single agent picking it up mid-flight. `ViewBob::hurt`/
+`BobFrame::hurt_roll_degrees` stay exactly where they were: implemented,
+unit-tested, called only by their own tests.
+
 ## What is deliberately not built here
 
-**Vanilla's crit condition and the sweep-attack condition.** These are real
-per-hit vanilla mechanics (`Player.java:951-1053`'s `attack()`), but both
-exist only to trigger **local** sound/particle feedback — the damage number
-itself is server-authoritative, and the wire `Attack` packet carries none of
-it. Their consumer is `entities.rs`/asset work (particles, sounds), out of
-`lodestone-shell/src/{sim.rs,interact.rs,hud.rs}`'s scope for this pass, and
-they need real particle-emitter and sound-cue plumbing this shell does not
-have wired to combat yet. Building either now — with the ticker/indicator
-already landed as the natural place a crit read would plug into
-(`Sim::attack_entity`'s call site) — would still orphan the sound/particle
-half, so they stay unbuilt rather than half-started. Whoever adds the sweep
-sound or the crit particle burst is the natural owner.
+**The sweep-attack particle rendering path** — see "The sweep-attack
+particle" above. Confirmed unbuilt (no `Sheet::SweepAttack`, no
+`emit::sweep_attack`, no `particles.rs` dispatch arm), and out of this pass's
+file scope rather than half-started.
+
+**`bobHurt`'s production wiring** — see "`bobHurt`, still blocked" above.
+Blocked on `Camera` gaining a roll degree of freedom, a change spanning three
+other agents' exclusive territory for this task.
 
 **`HurtTime` now reaches pixels** (issue #98, the entity half) — the chain and
 its three design decisions are in "The per-entity hurt/death red overlay"
@@ -618,6 +836,12 @@ issue #98's section above for the jar evidence.
 - `crates/lodestone-shell/src/hud.rs`'s crosshair block hardcodes the
   indicator's native size (`16x4`) and offset (`cx - 8, cy + 9`) — vanilla's
   own constants (`Hud.java:457-458`), not configurable.
+- `crates/lodestone-shell/src/keybinds.rs`'s `InputAction::Drop` default —
+  `KeyCode::KeyQ`, vanilla's `key.drop` (`Options.java:664`, GLFW `81`).
+- `Sim::maybe_spawn_crit_particles`'s per-tick candidate count — `16`,
+  vanilla's `TrackingEmitter.tick()` loop bound (`TrackingEmitter.java:29`).
+  Not configurable; see "Crit particles" above for why this is one tick's
+  worth rather than `TrackingEmitter`'s real three.
 
 ## Dependencies
 
@@ -642,15 +866,51 @@ issue #98's section above for the jar evidence.
   — the per-entity hurt/death overlay's render-side mechanism (issue #98).
   Currently reached only by `crates/lodestone-render/tests/
   entity_hurt_overlay_pixels.rs`; not yet called from `lodestone-shell`.
+- `lodestone_ecs::entity::EntityIndex` — server entity id → ECS `Entity`,
+  used by `maybe_spawn_crit_particles` to resolve the attack target's
+  `Position`/`EntityKind`.
+- `lodestone_data::entity_types::entity_type_id_parts` +
+  `lodestone_data::entity_census::is_living` — the `LivingEntity` check for
+  the crit condition's target clause; the same per-type census
+  `docs/backlog.md`'s metadata-index-8/15 collision notes and
+  `crates/protocol/v770/src/adapter.rs`'s `TrackedEntity` already depend on,
+  reused rather than re-derived.
+- `lodestone_particle::emit::crit` and `Particles::engine_mut`/
+  `ParticleEngine::rng` — the crit particle's own physics and the RNG draws
+  `maybe_spawn_crit_particles` uses for its 16-candidate scatter. Both
+  pre-existing; this is their first local-prediction caller from combat.
+- `crate::container::{MenuInput, MenuKey, MenuContext}` (imported as
+  `ContainerMenuKey` in `app.rs` to avoid colliding with `menu::nav::MenuKey`)
+  — the drop key's container-open route. `MenuKey::Drop`/`key_pressed`'s
+  handling of it were already built in `container.rs`; this pass added the
+  one caller.
+- `lodestone_model::ClientAction::{DropSelectedItem, DropSelectedItemStack}`
+  — the drop key's gameplay route, encoded by all four protocol adapters
+  already.
 
 ## How to change it
 
-- Adding crit/sweep sound-and-particle feedback: start from
-  `Sim::attack_entity` (`sim.rs`) — that is where the outbound send already
-  happens and where `AttackStrengthTicker`/`attack_strength_scale` are
-  already read, so a `criticalAttack`/`fullStrengthAttack`/`sweepAttack`
-  decision has everything it needs except the particle-emitter/sound-cue
-  plumbing. See "What is deliberately not built here" above.
+- Adding the sweep-attack particle: needs a new `lodestone_particle::Sheet`
+  variant (`sweep_0.png`…`sweep_7.png`), atlas stitching, a new
+  `emit::sweep_attack` function (`AttackSweepParticle.java` is the reference,
+  distinct from every existing emitter — vanilla's sweep quad is oriented by
+  swing direction, not a billboard), and one dispatch arm in
+  `Particles::spawn_one` (`crates/lodestone-shell/src/particles.rs`) for
+  `"sweep_attack"`. See "The sweep-attack particle" above for why this is a
+  real build, not a wiring fix, and why it was not attempted in this pass
+  (file scope).
+- Adding sweep/crit *sound*: both are ordinary server-broadcast sounds
+  (`Player.java:965,1064`, `playServerSideSound`) — already covered by the
+  generic sound pipeline (`docs/sound-playback.md`), no client work needed,
+  confirmed under "Already checked and confirmed correct" in the scoping
+  pass this section descends from.
+- Wiring `bobHurt`: give `Camera` a roll degree of freedom (or an equivalent
+  `Mat4` hook on `view_projection`) first — see "`bobHurt`, still blocked"
+  above for the exact cost and why it spans three other agents' files. Once
+  that lands, `Sim::render_camera`'s hardcoded `damage_tilt_strength = 0.0`
+  becomes a real value driven by the local player's own `HurtTime`/
+  `EntityHurtAnimation` yaw, and `ViewBob::hurt` already has everything else
+  it needs.
 - Adding the hotbar-style attack indicator or the `AttackIndicatorStatus`
   options toggle: `HudFrame::attack_cooldown` already carries the fraction;
   the missing half is an `Options`-driven read gating which of
