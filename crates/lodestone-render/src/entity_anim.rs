@@ -686,23 +686,39 @@ impl Skeleton {
     /// something close to it, so passing it costs nothing and no non-creeper
     /// caller has to care.
     ///
-    /// # This is a separate method, and that is the honest shape today
+    /// # This is a separate method, not a field on `AnimInput` — and that is
+    /// still deliberate, just no longer for the reason once written here
     ///
-    /// The natural home for `swell` is a field on [`AnimInput`], which is
-    /// already threaded from the shell all the way to this call. It is not one
-    /// yet for a concrete reason: **no swell value exists to put in it.** The
-    /// wire carries `Creeper.DATA_SWELL_DIR` (an `int`, `-1` or `1`) at metadata
-    /// index 16, and `v770`'s metadata reader decodes that serializer correctly
-    /// but drops the value — `EntityMetadataUpdate` has no field to carry it, so
-    /// it falls to the "decoded for alignment, not surfaced" arm. Even once it
-    /// is surfaced, `swelling` is not the synced value: vanilla integrates
-    /// `swell += swellDir` client-side every tick and divides by 28, so the
-    /// shell's per-entity tick track has to own a counter.
+    /// This section used to say **"no swell value exists to put in it."**
+    /// That is false as of the chain landing, and it is worth recording
+    /// exactly what closed it so the next reader does not have to re-derive
+    /// it (a stale "still missing" claim here almost cost a wasted
+    /// investigation once already): metadata index 16
+    /// (`Creeper.DATA_SWELL_DIR`, decoded as `CreeperSwellDir`) reaches
+    /// `ingest.rs:754`, folds into per-entity state at `state.rs:1128`,
+    /// crosses the shell boundary at `net.rs:2108`, and lands on
+    /// `entities.rs`' `CreeperFuse` component (`entities.rs:1832`/`1888`),
+    /// which `tick_creeper_fuse` (`entities.rs:839`) integrates every tick —
+    /// `swell += swell_dir` — exactly vanilla's `Creeper.getSwelling`
+    /// client-side accumulation. `extract_entity_draws` (`entities.rs:1612`)
+    /// reads that counter and is the caller that threads it into this
+    /// method. `docs/entity-rendering.md` records the chain as closed.
     ///
-    /// Until then, adding the field would mean widening a struct literal in
-    /// `lodestone-shell` to pass a constant `0.0` — a wired-up-looking channel
-    /// carrying nothing. This method is the same computation with the gap left
-    /// visible.
+    /// The "divide by 28" this method's own [`MAX_SWELL`] encodes is not a
+    /// second, conflicting constant next to "`maxSwell` is 30" — they are the
+    /// same fact: `Creeper.java`'s `maxSwell = 30`, and the client divides
+    /// the accumulated counter by `maxSwell - 2 = 28`
+    /// (`MAX_SWELL = 30.0 / (30.0 - 2.0)`, above).
+    ///
+    /// So a real, live-tested value exists and reaches this call. This stays
+    /// a separate method rather than a field on [`AnimInput`] anyway: that
+    /// struct is shared by every animated model, and threading a
+    /// creeper-only scalar through it would widen every other caller's
+    /// literal for a value only one rig uses — the current per-call
+    /// parameter costs nothing and needs no such widening. Do not restructure
+    /// `AnimInput` to add this field without a reason beyond tidiness; the
+    /// current threading (`pose_swelling`/`creeper_swell_scale`, both already
+    /// gated and tested) works.
     #[must_use]
     pub fn pose_swelling(&self, input: &AnimInput, swell: f32) -> Vec<Mat4> {
         self.compose_from(&self.posed(input), swell_root_affine(swell))
