@@ -569,6 +569,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `minecraft:world_clock`. This is what replaced three hardcoded, level-name-keyed
   guesses — chunk column height, sky-light presence, and which world clock is "the"
   day clock — with values the server actually declared.
+- [Resource Packs screen](./resource-packs-screen.md) —
+  `SettingsPage::ResourcePacks` (issue #415): vanilla's `PackSelectionScreen`, reached
+  from the root settings grid's own "Resource Packs..." button (flipped from
+  `no_screen` to `nav()`). Landed as a **deliberately reduced** selection list rather
+  than vanilla's own drag-between-two-lists screen — this client's asset-loading
+  layer has no `PackRepository` analogue at all, and #415 itself invited "land a
+  simpler selection list and declare the divergence" as the honest alternative to
+  leaving it unbuilt.
 - [Riding](./riding.md) — `ClientboundSetPassengersPacket` tells the client which
   entities are riding which. Before this change it was a **complete island**: decoded
   at `crates/protocol/v770/src/adapter.rs`'s `SET_PASSENGERS` arm, round-tripped by
@@ -659,11 +667,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   was deleting the **double fold** that doc's §1.1 measured.
 - [The settings tree, with unsupported controls disabled](./settings-screen.md) —
   `crates/lodestone-shell/src/menu/options.rs` — vanilla's `OptionsScreen` tree as a
-  **table plus arithmetic**: nine `OptionsList` pages, **143 controls**, of which **26
-  or 27 work** (see below) **and the rest are present and greyed out** — plus two
+  **table plus arithmetic**: nine `OptionsList` pages, **143 controls**, of which **28
+  or 29 work** (see below) **and the rest are present and greyed out** — plus four
   more pages that are not `OptionsList` at all and are counted separately (see below):
-  Key Binds and, since issue #415, Language. Reached from the title screen's Options
-  button and from the pause menu's, on `Screen::Settings`.
+  Key Binds, and, since issue #415, Language, Telemetry and Resource Packs. Reached
+  from the title screen's Options button and from the pause menu's, on
+  `Screen::Settings`.
 - [Shaders](./shaders.md) — Every WGSL shader in the client lives in its own `.wgsl`
   file under `crates/<crate>/src/shaders/`, pulled into the binary at compile time
   with `include_str!`. There is no runtime file loading, no asset path and nothing to
@@ -701,6 +710,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   sprint-swimming didn't work even though the client believed it was sprinting the
   whole time. Landed in `13a1d3a` ("kelp is breakable again, and swimming actually
   swims").
+- [Telemetry Data screen](./telemetry-screen.md) — `SettingsPage::Telemetry` (issue
+  #415): vanilla's `TelemetryInfoScreen`, reached from the root settings grid's own
+  "Telemetry Data..." button (flipped from `no_screen` to `nav()`). Built as an honest
+  prose screen: a title, a two-paragraph description, and four buttons — two of them
+  real.
 - [The third-person player body](./third-person-player-body.md) — The render-side
   path that turns the local player's own state into a drawable third-person avatar —
   full rig, both skin layers, walking/head-look animation — reusing the same code

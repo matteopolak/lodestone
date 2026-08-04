@@ -1458,6 +1458,16 @@ impl MenuNav {
                     self.settings.language_mut().hover_row(row);
                 }
             }
+            // Telemetry (issue #415) — no search field here, so (unlike
+            // Language) row indices need no offset.
+            Screen::Settings if self.settings.page() == crate::menu::options::SettingsPage::Telemetry => {
+                self.settings.telemetry_mut().hover_row(row);
+            }
+            // Resource Packs (issue #415) — same reasoning as Telemetry, no
+            // search field, no offset.
+            Screen::Settings if self.settings.page() == crate::menu::options::SettingsPage::ResourcePacks => {
+                self.settings.packs_mut().hover_row(row);
+            }
             Screen::Settings => self.settings.hover_row(row),
             // Social Interactions (#189) — same reasoning as the Settings
             // arm above: without this, a click would have to route through
@@ -1563,6 +1573,16 @@ impl MenuNav {
                     None => crate::menu::language::LanguageOutcome::None,
                 };
                 return self.apply_language(ui, outcome);
+            }
+            // Telemetry (issue #415) again — no search field, no offset.
+            if self.settings.page() == crate::menu::options::SettingsPage::Telemetry {
+                let outcome = self.settings.telemetry_mut().click_row(row);
+                return self.apply_telemetry(ui, outcome);
+            }
+            // Resource Packs (issue #415) again.
+            if self.settings.page() == crate::menu::options::SettingsPage::ResourcePacks {
+                let outcome = self.settings.packs_mut().click_row(row);
+                return self.apply_packs(ui, outcome);
             }
             // A click that hit-tested onto a row this page does not have does
             // nothing at all (`SettingsNav::click_row` returns `None` for an
@@ -2112,6 +2132,14 @@ impl MenuNav {
         if self.settings.page() == crate::menu::options::SettingsPage::Language {
             return self.key_language(ui, key);
         }
+        // Telemetry (issue #415) — same reasoning.
+        if self.settings.page() == crate::menu::options::SettingsPage::Telemetry {
+            return self.key_telemetry(ui, key);
+        }
+        // Resource Packs (issue #415) — same reasoning.
+        if self.settings.page() == crate::menu::options::SettingsPage::ResourcePacks {
+            return self.key_packs(ui, key);
+        }
         let outcome = match key {
             MenuKey::Up => {
                 self.settings.step(false);
@@ -2240,6 +2268,82 @@ impl MenuNav {
             LanguageOutcome::None => MenuAction::None,
             LanguageOutcome::Back => {
                 let outcome = self.settings.leave_language();
+                self.apply_settings(ui, outcome)
+            }
+        }
+    }
+
+    /// [`Self::key_settings`]'s Telemetry half (issue #415). Up/Down/Enter/
+    /// Escape only — no text field on this page, unlike Language.
+    fn key_telemetry(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        let outcome = match key {
+            MenuKey::Up => {
+                self.settings.telemetry_mut().step(false);
+                return MenuAction::None;
+            }
+            MenuKey::Down => {
+                self.settings.telemetry_mut().step(true);
+                return MenuAction::None;
+            }
+            MenuKey::Enter => self.settings.telemetry_mut().enter(),
+            MenuKey::Escape => self.settings.telemetry_mut().escape(),
+            _ => return MenuAction::None,
+        };
+        self.apply_telemetry(ui, outcome)
+    }
+
+    /// What a [`crate::menu::telemetry::TelemetryOutcome`] asks of the shell
+    /// — mirrors [`Self::apply_language`]. Opening a URL is not one of
+    /// these outcomes: `TelemetryNav::activate` performs it directly (see
+    /// that module's own doc), so the only thing this ever asks for is
+    /// leaving the page.
+    fn apply_telemetry(
+        &mut self,
+        ui: &mut UiState,
+        outcome: crate::menu::telemetry::TelemetryOutcome,
+    ) -> MenuAction {
+        use crate::menu::telemetry::TelemetryOutcome;
+        match outcome {
+            TelemetryOutcome::None => MenuAction::None,
+            TelemetryOutcome::Back => {
+                let outcome = self.settings.leave_telemetry();
+                self.apply_settings(ui, outcome)
+            }
+        }
+    }
+
+    /// [`Self::key_settings`]'s Resource Packs half (issue #415). Up/Down/
+    /// Enter/Escape only — no text field, same shape as
+    /// [`Self::key_telemetry`].
+    fn key_packs(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        let outcome = match key {
+            MenuKey::Up => {
+                self.settings.packs_mut().step(false);
+                return MenuAction::None;
+            }
+            MenuKey::Down => {
+                self.settings.packs_mut().step(true);
+                return MenuAction::None;
+            }
+            MenuKey::Enter => self.settings.packs_mut().enter(),
+            MenuKey::Escape => self.settings.packs_mut().escape(),
+            _ => return MenuAction::None,
+        };
+        self.apply_packs(ui, outcome)
+    }
+
+    /// What a [`crate::menu::packs::PacksOutcome`] asks of the shell —
+    /// mirrors [`Self::apply_telemetry`].
+    fn apply_packs(
+        &mut self,
+        ui: &mut UiState,
+        outcome: crate::menu::packs::PacksOutcome,
+    ) -> MenuAction {
+        use crate::menu::packs::PacksOutcome;
+        match outcome {
+            PacksOutcome::None => MenuAction::None,
+            PacksOutcome::Back => {
+                let outcome = self.settings.leave_packs();
                 self.apply_settings(ui, outcome)
             }
         }
