@@ -58,9 +58,36 @@ pub mod metrics {
     /// Bold extra advance: bold text advances `+1` px per glyph (the glyph is
     /// also drawn a second time offset by this to thicken it).
     pub const BOLD_OFFSET: f32 = 1.0;
-    /// Italic shear: the top of each glyph is sheared `+1` px relative to the
-    /// bottom (vanilla shears by 1 over the glyph height).
+    /// Italic shear intercept: `BakedSheetGlyph.shearTop`/`shearBottom`
+    /// (`BakedSheetGlyph.java:144-150`) are both `1.0F - 0.25F * v`, where `v`
+    /// is a glyph edge's logical-pixel offset from the line's top (the same
+    /// quantity [`super::GlyphRaster::top`] returns for the glyph's top edge).
+    /// This is the `1.0F` term; [`ITALIC_SHEAR_SLOPE`] is the `0.25F` term. For
+    /// the ascii sheet (`up = 0`, `down = 8`) that resolves to the top edge
+    /// shifting `+1` px and the bottom edge shifting `-1` px — a 2 px lean
+    /// across an 8 px-tall glyph, not a 1 px one.
     pub const ITALIC_SHEAR: f32 = 1.0;
+    /// Italic shear slope: the `0.25F` multiplying `v` in
+    /// `BakedSheetGlyph.shearTop`/`shearBottom` (`BakedSheetGlyph.java:144-150`).
+    /// A row at logical-pixel offset `v` from the line's top shears by
+    /// `ITALIC_SHEAR - ITALIC_SHEAR_SLOPE * v`.
+    pub const ITALIC_SHEAR_SLOPE: f32 = 0.25;
+    /// Strikethrough bar: a 1 px-tall bar whose **bottom** edge sits this many
+    /// logical px below the line's top (`Font.java:289`,
+    /// `y + 4.5F - 1.0F` .. `y + 4.5F`).
+    pub const STRIKETHROUGH_Y: f32 = 4.5;
+    /// Underline bar: a 1 px-tall bar whose **bottom** edge sits this many
+    /// logical px below the line's top (`Font.java:297`,
+    /// `y + 9.0F - 1.0F` .. `y + 9.0F`).
+    pub const UNDERLINE_Y: f32 = 9.0;
+    /// Thickness of the underline/strikethrough bar, in logical px
+    /// (`Font.java:289,297`: the bar spans exactly `1.0F`).
+    pub const EFFECT_THICKNESS: f32 = 1.0;
+    /// The underline/strikethrough bar for the **first** glyph of a run starts
+    /// this many logical px to the left of that glyph's pen position
+    /// (`Font.java:274`, `effectX0 = position == 0 ? this.x - 1.0F : this.x`).
+    /// Every later glyph's bar starts exactly at its own pen position.
+    pub const EFFECT_LEAD_IN: f32 = 1.0;
     /// The bearing-top a glyph is measured against when placing its bitmap:
     /// `GlyphBitmap.getTop() == 7.0 - bearingTop`, and a bitmap glyph's
     /// `bearingTop` is its provider's `ascent`. So the ascii sheet (`ascent: 7`)
