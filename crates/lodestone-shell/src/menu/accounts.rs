@@ -691,6 +691,28 @@ pub fn describe_auth_error(e: &lodestone_auth::AuthError) -> String {
     }
 }
 
+/// Describes a failure from [`lodestone_auth::login::finish_interactive`],
+/// which now does what `run_device_code_login`/`finish_ms_token` used to
+/// hand-roll as two separate calls (deriving the session, then saving the
+/// refresh token) — see issue #73 and `docs/accounts.md`. Keeping the same
+/// two distinct messages those two calls used to produce, rather than
+/// collapsing to one, because `secrets.save_refresh_token` can only ever fail
+/// with [`lodestone_auth::AuthError::Keychain`]/[`lodestone_auth::AuthError::Cache`]
+/// (a filesystem/keychain error), and every other variant can only have come
+/// from deriving the session itself — so the variant alone tells us which
+/// step failed, with no need to keep the two calls separate to distinguish
+/// them.
+#[must_use]
+fn describe_finish_interactive_failure(e: &lodestone_auth::AuthError) -> String {
+    use lodestone_auth::AuthError as E;
+    match e {
+        E::Keychain(_) | E::Cache(_) => {
+            format!("signed in, but could not save the credential: {e}")
+        }
+        other => describe_auth_error(other),
+    }
+}
+
 /// Runs the full device-code → Xbox Live → XSTS → Minecraft-services chain on
 /// its own thread with its own single-threaded runtime, mirroring
 /// `menu/status.rs`'s per-probe thread. The keychain save happens here, on
@@ -743,21 +765,29 @@ fn run_device_code_login(tx: Sender<WorkerMsg>, cancel: Arc<AtomicBool>) {
             match pending.poll_once(&client, &client_id).await {
                 Ok(None) => continue,
                 Ok(Some(ms_token)) => {
-                    let session =
-                        match lodestone_auth::flow::session_from_ms_token(&client, &ms_token.access_token).await {
-                            Ok(s) => s,
-                            Err(e) => {
-                                let _ = tx.send(WorkerMsg::Failed(describe_auth_error(&e)));
-                                return;
-                            }
-                        };
+                    // Was two hand-rolled calls (`session_from_ms_token` then
+                    // `secrets.save_refresh_token`) duplicating
+                    // `login::finish_interactive`'s own composition — issue #73.
+                    // The `metadata` argument is scratch: this thread's real
+                    // metadata lives on the render thread and is written back
+                    // through `AccountsNav::pump`, not here, so the upsert
+                    // `finish_interactive` performs on it is simply discarded.
                     let secrets = lodestone_auth::AccountSecrets::open();
-                    if let Err(e) = secrets.save_refresh_token(session.profile.id, &ms_token.refresh_token) {
-                        let _ = tx.send(WorkerMsg::Failed(format!(
-                            "signed in, but could not save the credential: {e}"
-                        )));
-                        return;
-                    }
+                    let mut scratch = AccountsMetadata::default();
+                    let session = match lodestone_auth::login::finish_interactive(
+                        &client,
+                        &ms_token,
+                        &secrets,
+                        &mut scratch,
+                    )
+                    .await
+                    {
+                        Ok(s) => s,
+                        Err(e) => {
+                            let _ = tx.send(WorkerMsg::Failed(describe_finish_interactive_failure(&e)));
+                            return;
+                        }
+                    };
                     let now = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .map(|d| d.as_secs())
@@ -884,31 +914,39 @@ async fn finish_ms_token(
     client: &reqwest::Client,
     ms_token: lodestone_auth::flow::MsToken,
 ) {
+    // Was two hand-rolled calls (`session_from_ms_token` then
+    // `secrets.save_refresh_token`) duplicating `login::finish_interactive`'s
+    // own composition — issue #73. `scratch` is discarded for the same reason
+    // `run_device_code_login` discards its own: this thread's real metadata
+    // lives on the render thread and is written back through
+    // `AccountsNav::pump`, never here.
+    let secrets = lodestone_auth::AccountSecrets::open();
+    let mut scratch = AccountsMetadata::default();
     let session =
-        match lodestone_auth::flow::session_from_ms_token(client, &ms_token.access_token).await {
+        match lodestone_auth::login::finish_interactive(client, &ms_token, &secrets, &mut scratch).await {
             Ok(s) => s,
             Err(e) => {
                 // **This is the arm a real sign-in failure takes**, and its
-                // silence is why a failed attempt left no log line for the
-                // failing step: `run_browser_login`'s `poll_once` arm logs, but
-                // that one only fires before the browser hands the code back.
-                // `AuthError`'s `Debug` carries the step and the untruncated
-                // response body that `describe_auth_error` flattens to one
-                // sentence for display, and the on-screen string is transient
-                // and uncopyable — so this line is the only thing that makes a
-                // failure diagnosable after the fact.
-                tracing::warn!(target: "auth", error = ?e, "sign-in failed after the browser step");
-                let _ = tx.send(WorkerMsg::Failed(describe_auth_error(&e)));
+                // silence used to be why a failed attempt left no log line for
+                // the failing step: `run_browser_login`'s `poll_once` arm logs,
+                // but that one only fires before the browser hands the code
+                // back. `AuthError`'s `Debug` carries the step and the
+                // untruncated response body that `describe_finish_interactive_failure`
+                // flattens to one sentence for display, and the on-screen
+                // string is transient and uncopyable — so this line is the
+                // only thing that makes a session-derivation failure
+                // diagnosable after the fact. A credential-*save* failure
+                // (`AuthError::Keychain`/`AuthError::Cache`) does not warn here,
+                // matching the pre-#73 behaviour where that step had no log
+                // line of its own.
+                use lodestone_auth::AuthError as E;
+                if !matches!(e, E::Keychain(_) | E::Cache(_)) {
+                    tracing::warn!(target: "auth", error = ?e, "sign-in failed after the browser step");
+                }
+                let _ = tx.send(WorkerMsg::Failed(describe_finish_interactive_failure(&e)));
                 return;
             }
         };
-    let secrets = lodestone_auth::AccountSecrets::open();
-    if let Err(e) = secrets.save_refresh_token(session.profile.id, &ms_token.refresh_token) {
-        let _ = tx.send(WorkerMsg::Failed(format!(
-            "signed in, but could not save the credential: {e}"
-        )));
-        return;
-    }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

@@ -285,6 +285,31 @@ impl AccountSecrets {
     }
 }
 
+/// Issue #73: without this, `AccountSecrets` — the façade every real caller
+/// actually holds — could not be handed to [`crate::login::finish_interactive`]
+/// or [`crate::login::try_cached_session`], both of which take
+/// `secrets: &dyn SecretStore`. That gap is exactly why `menu/accounts.rs`
+/// hand-rolled a second copy of `finish_interactive`'s
+/// derive-session-then-save-token composition instead of calling it; see
+/// `docs/accounts.md`'s "`finish_interactive`, not a hand-rolled copy (issue
+/// #73)" for the history. The body here is identical to the inherent methods
+/// above (both simply forward to `self.backend`), so this adds no new
+/// behaviour — it only makes the existing behaviour reachable through the
+/// trait object callers need.
+impl SecretStore for AccountSecrets {
+    fn save_refresh_token(&self, profile: Uuid, token: &str) -> Result<()> {
+        self.backend.save_refresh_token(profile, token)
+    }
+
+    fn load_refresh_token(&self, profile: Uuid) -> Result<Option<String>> {
+        self.backend.load_refresh_token(profile)
+    }
+
+    fn delete_refresh_token(&self, profile: Uuid) -> Result<()> {
+        self.backend.delete_refresh_token(profile)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,6 +344,32 @@ mod tests {
         store.save_refresh_token(id, "r-token").unwrap();
         store.delete_refresh_token(id).unwrap();
         assert_eq!(store.load_refresh_token(id).unwrap(), None);
+    }
+
+    /// Issue #73's actual gap: this must *compile* — `AccountSecrets` did not
+    /// implement `SecretStore` before this test existed, so nothing could pass
+    /// one to `login::finish_interactive`/`try_cached_session`, both of which
+    /// take `secrets: &dyn SecretStore`. Also checks the trait path and the
+    /// inherent-method path agree, which they must since both simply forward
+    /// to the same boxed backend.
+    #[test]
+    fn account_secrets_is_usable_as_a_dyn_secret_store() {
+        let secrets = AccountSecrets::with_backend(Box::new(MemoryStore::new()), StorageMode::Keychain);
+        let id = Uuid::new_v4();
+
+        fn save_through_trait_object(store: &dyn SecretStore, profile: Uuid, token: &str) {
+            store.save_refresh_token(profile, token).unwrap();
+        }
+        save_through_trait_object(&secrets, id, "r-token");
+
+        // The inherent method (used by every direct caller in this crate and
+        // in `menu/accounts.rs`) sees the same write the trait-object call made.
+        assert_eq!(secrets.load_refresh_token(id).unwrap().as_deref(), Some("r-token"));
+
+        let as_trait: &dyn SecretStore = &secrets;
+        assert_eq!(as_trait.load_refresh_token(id).unwrap().as_deref(), Some("r-token"));
+        as_trait.delete_refresh_token(id).unwrap();
+        assert_eq!(secrets.load_refresh_token(id).unwrap(), None);
     }
 
     #[test]

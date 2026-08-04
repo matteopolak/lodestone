@@ -15,7 +15,8 @@ wiring" below for what changed and exactly what is and isn't verified.
 draws the account list — every saved account plus an always-present offline
 entry — and drives its own device-code sign-in flow. See "The account list
 screen" below for how it fits alongside `login`'s composition layer above
-(it does not call into `login` — see that section for why) and for the
+(it now calls straight into `login::finish_interactive` rather than
+hand-rolling a second copy — issue #73, see that section) and for the
 offline-selection convention it establishes that `login::try_cached_session`
 already happens to handle correctly.
 
@@ -115,9 +116,23 @@ was written. The metadata file's entire point is to sit *beside*
 `servers.json`/`options.json`, so approximating the directory instead of
 copying it exactly would silently defeat that. **If the shell's `data_dir()`
 ever changes, this copy must change with it** — there is no test that can
-catch drift between two independent implementations in two crates; a shared
-`lodestone-paths`-style crate would remove the duplication entirely and
-should be the actual fix once `config.rs` is no longer held.
+catch drift between two independent implementations in two crates.
+
+**Issue #67 re-diagnosed:** it proposed hoisting this to `lodestone-core`
+because "both crates already depend on it" — checked against the committed
+`Cargo.toml`s, false: `lodestone-core` is a narrowly-scoped protocol-codec
+crate with no platform-directory business, and neither crate depended on it
+anyway. What *is* true is simpler: `lodestone-shell` depends on
+`lodestone-auth` (see `crates/lodestone-shell/Cargo.toml`), so
+[`paths::data_dir`] is already the correct single-implementation home — no
+third crate needed. The two copies were confirmed **byte-for-byte identical**
+today (`crates/lodestone-auth/src/paths.rs` vs.
+`crates/lodestone-shell/src/menu/servers.rs`'s `data_dir`/`data_dir_from`), so
+there is no live drift to fix, only the duplication itself. The remaining
+work — deleting `menu/servers.rs`'s copy and its two `config.rs` call sites
+(`options_path`/`hidden_players_path`) in favour of calling
+[`paths::data_dir`] — lives entirely in `crates/lodestone-shell/**`, outside
+this crate's ownership; see the issue for the prepared patch.
 
 [`paths::profiles_path()`] is `data_dir().join("profiles.json")`.
 [`paths::legacy_token_cache_path()`] is `data_dir().join("ms_token.json")` —
@@ -357,30 +372,47 @@ synthetic offline entry always appended last — and drives Add/Select/Remove/
 Cancel plus its own device-code sign-in sub-flow. See `docs/main-menu.md` for
 where the screen sits in the menu state machine and how it's rendered.
 
-### Why it does not call `login::try_cached_session`/`finish_interactive`
+### `finish_interactive`, not a hand-rolled copy (issue #73)
 
 It doesn't need `try_cached_session` at all — that resumes an *existing*
 selected account's session for a connect attempt, which is issue #65's job
-(net.rs/sim.rs), not this screen's. For "Add account" it hand-rolls the
-equivalent of `finish_interactive` (`session_from_ms_token` +
-`secrets.save_refresh_token` + upserting `AccountProfile`) instead of calling
-it, for one concrete reason: **`finish_interactive` and `migrate_legacy_cache`
-both take `secrets: &dyn SecretStore`, but `AccountSecrets` — the façade
+(net.rs/sim.rs), not this screen's.
+
+For "Add account", both worker threads (`run_device_code_login` and the
+loopback flow's `finish_ms_token`) now call
+[`login::finish_interactive`] directly, rather than hand-rolling its
+`session_from_ms_token` + `secrets.save_refresh_token` composition a second
+time. That used to be impossible for one concrete reason, now fixed:
+**`finish_interactive` and `migrate_legacy_cache` both take
+`secrets: &dyn SecretStore`, but `AccountSecrets` — the façade
 [`store::AccountSecrets::open()`] returns, which is what decides
-keychain-vs-session-only-fallback — does not implement `SecretStore` and does
-not expose its inner boxed backend.** There is currently no way to hold an
-`AccountSecrets` and also hand a caller the `&dyn SecretStore` these
-composition functions want. `menu/accounts.rs` works around this by calling
-`AccountSecrets`'s own three methods directly rather than going through
-`login`, which costs a small amount of duplicated glue (persisting the
-refresh token, deriving the session) but not much: the real value of
-`finish_interactive` is the metadata upsert, and this screen was going to do
-that itself anyway, funnelled through one call ([`AccountsNav::pump`]) so a
-background sign-in thread's write can never race a foreground Remove.
-**Fixing the seam** — adding `impl SecretStore for AccountSecrets` that
-delegates to the inner backend, or changing `login`'s functions to accept
-`&AccountSecrets` — would let a future caller (this screen, or #65's connect
-path) use `login`'s composition directly instead of each hand-rolling it.
+keychain-vs-session-only-fallback — did not implement `SecretStore` and did
+not expose its inner boxed backend.** `store.rs` now has
+`impl SecretStore for AccountSecrets`, forwarding to the same boxed backend
+its own inherent methods already used — see
+`store::tests::account_secrets_is_usable_as_a_dyn_secret_store` for the
+(mostly compile-time) proof.
+
+Each worker still passes `finish_interactive` a throwaway
+`AccountsMetadata::default()`: the upsert it performs is discarded, because
+this screen's *real* metadata lives on the render thread and is written back
+through [`AccountsNav::pump`] — one funnel, so a background sign-in thread's
+write can never race a foreground Remove. Only the returned `Session` and the
+keychain write (which `finish_interactive` performs internally now, instead
+of the worker calling `secrets.save_refresh_token` itself) matter to the
+caller.
+
+**One deliberate seam kept, not merged:** a credential-*save* failure
+(`AuthError::Keychain`/`AuthError::Cache`) and a session-*derivation* failure
+used to render two different messages ("signed in, but could not save the
+credential: …" vs. the general `describe_auth_error`), and `finish_ms_token`
+only logged a `tracing::warn!` for the latter. Collapsing both steps into one
+`Result` did not have to collapse that distinction: `describe_auth_error`'s
+sibling `describe_finish_interactive_failure` (`menu/accounts.rs`) branches on
+the error *variant* instead — `save_refresh_token` can only fail with
+`Keychain`/`Cache`, and deriving the session can't produce either of those —
+so both call sites keep their original two messages and `finish_ms_token`
+keeps warning on exactly the same arm it always did.
 
 ### The offline entry and `AccountsMetadata::selected`
 
