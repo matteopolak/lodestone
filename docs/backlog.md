@@ -145,9 +145,20 @@ recurring defect classes, not because they are generically useful — see
    - `smoothBlend`'s sky-inherit branch and vanilla's sub-nibble (0..240) smooth-light
      precision are not ported; `getLightEmission() == 0` still has no data source; the
      Nether `CardinalLighting` shade table is still Overworld's.
-2. **Block entity renderers.** Chest has landed end to end (`docs/block-entity-renderers.md`);
-   still absent are beds, banners (layered patterns), item frames, shulkers,
-   enchanting-table book, bells, conduits, end crystals and decorated pots.
+2. **Block entity renderers.** Chest has landed end to end; skull (skeleton, wither skeleton,
+   zombie, creeper, player) is built and tested but not yet wired into `gpu.rs` — see
+   `docs/block-entity-renderers.md`. **"Beds", "item frames" and "end crystals" were never real
+   items for this issue**: a bed is a plain block model (no `BedRenderer` exists), and item frames /
+   end crystals are entities (`EntityRenderer`), not block entities — checked against the real
+   `BlockEntityRenderers.java` registration list, which is the authority here, not this bullet's
+   memory of one. Still absent, in descending rough player-visibility order: banners (layered
+   patterns, tracked with the shield item as #174), shulkers, bells (animated — a `BLOCK_EVENT`
+   shake, different `b0` than chest's), enchanting-table book (a full client-tick animation state
+   machine, not a static model), mob spawner (a miniature spinning entity inside the cage), decorated
+   pots (needs up to four independently-textured sides per instance from NBT — the current
+   `(model, texture)`-per-instance batch key cannot express that as one instance), conduits, piston
+   head, campfire, brushable block, trial spawner, vault, and two 26.x additions (copper golem
+   statue, shelf).
 
    **This entry used to say "start with chest and sign — the two a player notices first", and
    the sign half was wrong.** In 26.2 signs *are* real block models — `oak_sign_rot_0..3` carry
@@ -155,6 +166,13 @@ recurring defect classes, not because they are generically useful — see
    transforms. The board already meshes through the ordinary block path, so porting "sign
    geometry" would draw a second board inside the real one. Sign is a **text pass**, a different
    subsystem sharing the `gpu/nametag.rs` substrate, and it does not belong beside chest.
+
+   **The NBT-reaches-us question is now settled, on the wire, not just from reading the decode
+   path.** A throwaway probe joined the creative oracle, placed a real `oak_sign` with text over
+   RCON, and read the resulting record straight out of a live `World`: it arrives as a full
+   `front_text`/`back_text`/`is_waxed` compound, decoded generically by the same `BlockEntity.nbt`
+   path chest already uses. So the remaining sign work is exactly what it looked like from the code
+   alone — a typed parse plus the render pass — never a missing wire decode.
 
    Chest was the right first pick for a reason worth keeping: `block/chest.json` in the real jar
    is `{"textures":{"particle":"block/oak_planks"}}` — **zero elements** — so a chest was not a

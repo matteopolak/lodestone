@@ -249,7 +249,7 @@ pub fn load_block_entity_textures()
         return out;
     };
 
-    for stem in lodestone_render::chest_texture_stems() {
+    for stem in lodestone_render::block_entity_texture_stems() {
         let path = format!("assets/minecraft/textures/{stem}.png");
         let Some(png) = manager.read(&path) else {
             tracing::warn!(target: "assets", "missing block-entity sheet {path}");

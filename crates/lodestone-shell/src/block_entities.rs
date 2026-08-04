@@ -107,7 +107,10 @@
 use std::collections::HashMap;
 
 use glam::Vec3;
-use lodestone_render::{ChestHalf, ChestMaterial, ChestSpawn, horizontal_facing_yaw};
+use lodestone_render::{
+    ChestHalf, ChestMaterial, ChestSpawn, SkullOrientation, SkullSpawn, SkullType,
+    horizontal_facing_yaw,
+};
 use lodestone_world::{ChunkPos, World};
 
 use crate::net::{SharedHandle, entity_light_at};
@@ -403,6 +406,119 @@ pub fn chest_spawns(
     out
 }
 
+/// Reads a skull/head block state's orientation — `rotation` (`0..16`, floor
+/// placement) or `facing` (wall placement) — into the renderer's fields.
+///
+/// A real skull state carries exactly one of the two (see
+/// `assets/minecraft/blockstates/skeleton_skull.json` vs
+/// `.../skeleton_wall_skull.json` in the real jar): floor skulls have
+/// `rotation`, wall skulls have `facing`. `None` for a state with neither,
+/// which cannot happen for a real skull and for anything else means the
+/// caller pointed this at a block that is not one.
+#[must_use]
+fn skull_orientation(state_id: u32) -> Option<SkullOrientation> {
+    let props = lodestone_data::block_states::properties(state_id)?;
+    for (name, value) in props {
+        match *name {
+            "rotation" => {
+                return value
+                    .parse::<u8>()
+                    .ok()
+                    .map(|rotation_segment| SkullOrientation::Floor { rotation_segment });
+            }
+            "facing" => {
+                return horizontal_facing_yaw(value)
+                    .map(|facing_yaw_deg| SkullOrientation::Wall { facing_yaw_deg });
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Resolves one block state id into a skull/head type, or `None` if it is not
+/// one of the five ported types (see
+/// [`lodestone_render::SkullType::from_block_path`] for what is declined) —
+/// including not being a skull at all.
+#[must_use]
+fn skull_type_for_state(state_id: u32) -> Option<SkullType> {
+    let name = lodestone_data::block_states::block_name(state_id)?;
+    let path = name.strip_prefix("minecraft:").unwrap_or(name);
+    SkullType::from_block_path(path)
+}
+
+/// One candidate resolved into a [`SkullSpawn`], or `None` if the state at
+/// that position is not a ported skull type.
+///
+/// Same shape as [`chest_spawn`]: the block **state** is the truth about
+/// appearance, the block-entity record only says the position is worth
+/// looking at, so a stale or orphan record whose state is not a skull draws
+/// nothing.
+#[must_use]
+pub fn skull_spawn(block: [i32; 3], state_id: u32, light: u8) -> Option<SkullSpawn> {
+    let skull_type = skull_type_for_state(state_id)?;
+    let orientation = skull_orientation(state_id)?;
+    Some(SkullSpawn {
+        pos: block,
+        orientation,
+        skull_type,
+        light,
+    })
+}
+
+/// Every skull/head to draw this frame, gathered from the client-owned
+/// world's block-entity records.
+///
+/// Reuses [`chest_candidates`] rather than a second scan of
+/// `chunk.block_entities`: that gather is already generic over block-entity
+/// *type* (it filters by distance and returns the raw state id, never
+/// touching anything chest-specific), so a second copy here would only be
+/// able to drift from it. Everything this adds on top is skull-specific
+/// resolution and the light sample, the same division [`chest_spawns`] keeps.
+///
+/// No lid-style animation state: none of the five ported skull types pose
+/// their head (see [`lodestone_render::BlockEntityModelSet::resolve_skull`]'s
+/// doc), so there is nothing here to tick.
+#[must_use]
+pub fn skull_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<SkullSpawn> {
+    let Some(client) = handle.get() else {
+        return Vec::new();
+    };
+    let store = client.chunk_world();
+
+    // Same lock-ordering rule as `chest_spawns`: `loaded_chunks()` takes its
+    // own read lock, so it must not be called from inside the guard below.
+    let chunks = client.loaded_chunks();
+
+    let candidates = {
+        let world = store.read();
+        chest_candidates(
+            &world,
+            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            eye,
+        )
+    };
+
+    let sky_default = {
+        let player = client.player();
+        crate::mesher::sky_default_for_dimension(
+            player.dimension.as_ref(),
+            player.dimension_type.as_ref(),
+        )
+    };
+
+    let mut out = Vec::new();
+    for (block, state_id) in candidates {
+        let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
+            .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
+        if let Some(spawn) = skull_spawn(block, state_id, light) {
+            out.push(spawn);
+        }
+    }
+    out.sort_by_key(|s| s.pos);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,5 +704,136 @@ mod tests {
         let handle: SharedHandle = std::sync::Arc::new(std::sync::OnceLock::new());
         let lids = ChestLids::new();
         assert!(chest_spawns(&handle, &lids, Vec3::ZERO, 0.0).is_empty());
+    }
+}
+
+/// Kept as its own module rather than folded into `tests` above so it never
+/// has to touch that block's interior — this file is shared with the chest
+/// lid/gather work and a separate module is the lowest-collision way to add
+/// coverage alongside it.
+#[cfg(test)]
+mod skull_tests {
+    use super::*;
+
+    /// Orientation comes from the real 26.2 state table, not a fixture — the
+    /// check that the property *names* are right and that both the floor
+    /// (`rotation`) and wall (`facing`) shapes are reachable. Mirrors
+    /// `chest_states_resolve_facing_and_half_from_the_real_table`.
+    #[test]
+    fn skull_states_resolve_orientation_from_the_real_table() {
+        let mut floor_segments = std::collections::BTreeSet::new();
+        let mut wall_yaws = std::collections::BTreeSet::new();
+        let mut floor_states = 0usize;
+        let mut wall_states = 0usize;
+        for id in 0..lodestone_data::block_states::STATE_COUNT {
+            match lodestone_data::block_states::block_name(id) {
+                Some("minecraft:skeleton_skull") => {
+                    floor_states += 1;
+                    match skull_orientation(id).expect("a floor skull must have an orientation") {
+                        SkullOrientation::Floor { rotation_segment } => {
+                            floor_segments.insert(rotation_segment);
+                        }
+                        SkullOrientation::Wall { .. } => panic!("skeleton_skull resolved as wall"),
+                    }
+                }
+                Some("minecraft:skeleton_wall_skull") => {
+                    wall_states += 1;
+                    match skull_orientation(id).expect("a wall skull must have an orientation") {
+                        SkullOrientation::Wall { facing_yaw_deg } => {
+                            wall_yaws.insert(facing_yaw_deg as i32);
+                        }
+                        SkullOrientation::Floor { .. } => {
+                            panic!("skeleton_wall_skull resolved as floor")
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(floor_states > 0, "no floor skeleton_skull states at all");
+        assert!(wall_states > 0, "no wall skeleton_wall_skull states at all");
+        assert_eq!(
+            floor_segments,
+            (0..16).collect(),
+            "all sixteen rotation segments must be reachable"
+        );
+        assert_eq!(
+            wall_yaws,
+            [0, 90, 180, 270].into_iter().collect(),
+            "all four wall facings must be reachable"
+        );
+    }
+
+    #[test]
+    fn every_ported_skull_block_in_the_real_table_resolves() {
+        for path in [
+            "skeleton_skull",
+            "skeleton_wall_skull",
+            "wither_skeleton_skull",
+            "wither_skeleton_wall_skull",
+            "zombie_head",
+            "zombie_wall_head",
+            "creeper_head",
+            "creeper_wall_head",
+            "player_head",
+            "player_wall_head",
+        ] {
+            let name = format!("minecraft:{path}");
+            let found = (0..lodestone_data::block_states::STATE_COUNT)
+                .find(|id| lodestone_data::block_states::block_name(*id) == Some(name.as_str()));
+            let id = found.unwrap_or_else(|| panic!("{name} is not in the 26.2 state table"));
+            assert!(
+                skull_type_for_state(id).is_some(),
+                "{name} (state {id}) resolved to no skull type"
+            );
+            assert!(
+                skull_orientation(id).is_some(),
+                "{name} (state {id}) resolved no orientation"
+            );
+        }
+    }
+
+    /// The two real skull types this renderer declines — dragon and piglin —
+    /// must still be *present* in the state table (so this is testing the
+    /// decline, not a stale block name) and must resolve to no skull type.
+    #[test]
+    fn declined_skull_types_are_present_but_resolve_to_nothing() {
+        for path in ["dragon_head", "dragon_wall_head", "piglin_head", "piglin_wall_head"] {
+            let name = format!("minecraft:{path}");
+            let found = (0..lodestone_data::block_states::STATE_COUNT)
+                .find(|id| lodestone_data::block_states::block_name(*id) == Some(name.as_str()));
+            let id = found.unwrap_or_else(|| panic!("{name} is not in the 26.2 state table"));
+            assert_eq!(
+                skull_type_for_state(id),
+                None,
+                "{name} unexpectedly resolved a skull type"
+            );
+        }
+    }
+
+    /// A non-skull block entity with a `facing` property (a furnace) must not
+    /// resolve — the control on the type filter, mirroring
+    /// `a_non_chest_block_entity_resolves_to_no_material`.
+    #[test]
+    fn a_non_skull_block_entity_resolves_to_no_skull_type() {
+        for path in ["furnace", "chest", "barrel", "bell"] {
+            let name = format!("minecraft:{path}");
+            let Some(id) = (0..lodestone_data::block_states::STATE_COUNT)
+                .find(|id| lodestone_data::block_states::block_name(*id) == Some(name.as_str()))
+            else {
+                continue;
+            };
+            assert_eq!(
+                skull_type_for_state(id),
+                None,
+                "{name} matched a skull type"
+            );
+        }
+    }
+
+    #[test]
+    fn skull_spawns_before_login_is_empty_rather_than_a_panic() {
+        let handle: SharedHandle = std::sync::Arc::new(std::sync::OnceLock::new());
+        assert!(skull_spawns(&handle, Vec3::ZERO).is_empty());
     }
 }
