@@ -74,8 +74,8 @@ pub use drive::{DriveTick, WalkDrive, axes_for_world_dir, yaw_towards};
 pub use facts::{AdapterCensus, BlockCensus, BlockFacts, FactsTable, MUST_NOT_ENTER};
 pub use goal::{AtBlock, AtColumn, Goal, Rates};
 pub use graph::{
-    Arrival, BODY_HEIGHT, Dir4, MoveKind, NavNode, STEP_HEIGHT, Step, seed_node, stand_surface,
-    standable, successors,
+    Arrival, BODY_HEIGHT, ClimbDir, Dir4, MoveKind, NavNode, STEP_HEIGHT, Step, climb_step,
+    seed_node, stand_surface, standable, successors,
 };
 pub use plan::{Edge, Plan, PlanError};
 pub use policy::NavPolicy;

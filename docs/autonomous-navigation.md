@@ -6,18 +6,17 @@ Two crates under [`crates/plugins/`](../crates/plugins/) implementing M1 and par
 [`docs/baritone-port.md`](./baritone-port.md)'s Baritone-class navigation design:
 
 - [`lodestone-nav`](../crates/plugins/lodestone-nav) — the version-free search core. A plain library:
-  no bevy, no ECS, no threads. `(snapshot, start, goal, policy, budget) → plan`, plus `WalkDrive`,
-  "given a plan edge and a `PlayerState`, what keys do I press this tick".
+  no bevy, no ECS, no threads. `(snapshot, start, goal, policy, budget) → plan`, plus `WalkDrive` and
+  `ClimbDrive`, "given a plan edge and a `PlayerState`, what keys do I press this tick".
 - [`lodestone-autopilot`](../crates/plugins/lodestone-autopilot) — the bevy plugin wrapping it: a
   goal resource in, `MovementIntent`/`LookIntent` components out, through the exact same seam
   documented in [`docs/plugin-api.md`](./plugin-api.md).
 
-**Where this stands, honestly:** `lodestone-nav` implements `Walk`, `StepUp`, `Descend`, `Drop` and
-`WalkDiagonal` (M2's real-terrain kinds bar climbing — see §"M2, so far" below) plus segmentation
-(a journey longer than one snapshot no longer stalls at the boundary). `Climb` is **not**
-implemented and is stopped deliberately rather than rushed (see "`Climb`: stopped, and why" below);
-breaking and placing are M4/M5. Point the plugin at a reachable block — now including one a block
-or two up, down, or off a short drop, or one a 45° corner-cut away — and it walks, jumps or falls
+**Where this stands, honestly:** `lodestone-nav` implements `Walk`, `StepUp`, `Descend`, `Drop`,
+`WalkDiagonal` and now `Climb` — all of M2's real-terrain kinds — plus segmentation (a journey
+longer than one snapshot no longer stalls at the boundary). Breaking and placing are M4/M5. Point
+the plugin at a reachable block — now including one a block or two up, down, or off a short drop, up
+or down a ladder or a vine, or one a 45° corner-cut away — and it walks, jumps, falls or climbs
 there, planning the next leg while still walking the current one if the goal is further than one
 snapshot away. That is still deliberately not a finished bot.
 
@@ -128,48 +127,132 @@ reachable through this test if a second search actually ran and its plan was act
   `bevy_ecs`, `bevy_app`) is a version crate, so the workspace dependency does not compromise the
   version seam.
 
-### `Climb`: stopped, and why
+### `Climb`: landed, and what the two hard parts actually needed
 
-`docs/baritone-port.md` §9 names `Climb` as the other M2 kind alongside `WalkDiagonal`. It is
-**not implemented**, and this was a deliberate stop rather than a rushed third generalisation, made
-after `WalkDiagonal` landed and was gated — following exactly the brief this pass was handed
-("stopping with a written scope is a good outcome here; a rushed third frame is not").
+`docs/baritone-port.md` §9 names `Climb` as the other M2 kind alongside `WalkDiagonal`. Two
+predecessors stopped short of it and recorded exactly two hard parts up front: a genuinely different
+input script (holding a direction key against a climbable column, not aiming at a cell centre) and a
+third cost-model frame (vertical). Both stops were correct — neither part turned out to be small —
+and this section replaces the former "stopped, and why" note with what each one actually needed.
 
-The reason is structural, not a time-boxing excuse: **`Climb` needs a real second *script*, not
-just a second cost-model frame.** Every kind implemented so far — `Walk`, `StepUp`, `Descend`,
-`Drop`, `WalkDiagonal` — shares one physical shape: aim at the destination cell's horizontal centre
-and either brake or don't (`docs/baritone-port.md` §4.8, and this crate's own "`MoveKind` has five
-variants now" entry above records that `WalkDiagonal` needed zero changes to `drive::edge_drive`
-because of it). Climbing a ladder or a vine is not that shape at all — `docs/baritone-port.md` §2.3's
-own catalogue says as much: "pressing forward while airborne beside a climbable block makes you
-grab and climb it instead of moving forward", and holding a direction key against a climbable
-column is the entire mechanism, with no horizontal aiming involved once mounted. `WalkDrive`'s
-`target()`/`inside_cell()`/`arrived()` are all expressed in terms of a horizontal destination cell
-and a single surface height; a ladder's own "are we done" question is about a *column* and a
-*vertical* position, which is a different completion test, not a parameter to the existing one.
+**Check-before-building paid off once, immediately.** `lodestone-physics` already fully models
+climbable ascent: `LivingEntity.handleOnClimbable`'s velocity clamp and `travel_in_air`'s
+"steady climb-up" override (`entity.rs`) are both there, unconditional on the block at the feet
+position — nothing about them is specific to a deliberate climb versus, say, brushing past a ladder.
+So this pass's job really was legality, cost and drive, never a physics change, exactly as the brief
+predicted.
 
-Concretely, `Climb` would need at minimum:
+**The drive: `ClimbDrive`, and why jump beats forward.** Ascending holds jump every tick, never
+forward/strafe — `travel_in_air`'s override fires on `ctx.jumping` alone, with no collision required,
+which is the one script that works for both a ladder (which has a wall to press into) and a
+free-hanging vine strand (which may not). Descending holds nothing at all: `handle_on_climbable`'s
+own velocity floor (`-0.15`) already caps the fall. `ClimbDrive::done` is deliberately **not**
+`WalkDrive::done` with a parameter — the brief's own framing ("a climb is entirely vertical, so
+'arrived' cannot mean an in-cell horizontal test at all") is exactly right: it is a vertical
+cell-boundary crossing, gated on `on_ground` only when the destination is real ground, never when it
+is another climbable cell mid-column (a clinging body is never grounded, and requiring it there would
+hang the executor forever).
 
-- **A second `DriveTick` producer** (`docs/autonomous-navigation.md`'s own "`MoveKind` has five
-  variants now" entry already flagged this as the next thing that should grow `edge_drive`'s
-  `match` for real) — one that holds a direction key rather than solving `(forward, strafe)` from a
-  world-space direction, and mounts/dismounts a `Climb` edge as two phases the way `Break`/`Place`
-  are already documented as two-phase in `docs/baritone-port.md` §4.8.
-- **A vertical cost-model frame.** `TemplateTable::simulate`'s two existing frames are `+x`
-  (cardinal) and `+x, -z` (diagonal, this pass); a ladder's own frame is `+y` (or `-y` descending,
-  capped at a different rate per `docs/baritone-port.md` §4.3's own worked table: `0.2` b/t up,
-  `0.15` b/t down). Nothing here suggests that frame is hard to build — the stencil-world and
-  entry-state machinery both generalise the same way `WalkDiagonal`'s did — but it is real,
-  additional, untested work, not a parameter to the frame this pass already built.
-- **A real legality predicate** over `BlockFacts::climbable`, including mounting (approaching a
-  climbable column while grounded, per the airborne-grab trap above) and dismounting (stepping off
-  the top or bottom onto ordinary ground).
+**The frame: a real, separate `ClimbStencilWorld`, and a real, separate `simulate_climb` — not a
+`rise` parameter.** `TemplateTable::simulate`'s existing frame is "a floor that steps once in `x`";
+climbing has no floor at all (the body clings, never stands) and no horizontal displacement, so
+neither the existing stencil world nor `WalkDrive` applies. The vertical frame needed its own
+`CollisionView` (climbable everywhere in one column, solid nowhere) and its own drive, confirming the
+predecessors' concern that this was real, additional work, not a small edit.
 
-None of this is started. `MoveKind` has no `Climb` variant, `BlockFacts::climbable` is read by
-nothing in this crate yet, and no stencil, legality rule or template key exists for it. This is
-recorded here rather than left to be rediscovered, exactly as `WalkDiagonal`'s own former "not
-implemented" note (removed from `## What it is` above now that it is done) was recorded by the
-predecessor who stopped short of it.
+**Whether the vertical frame admits `WalkDiagonal`'s entry-class collapse: yes for costing, no for
+node identity — and those are genuinely different questions.** For *costing*, `Climb` needs no entry
+classification at all, not even the diagonal's three-way one: the script presses no forward/strafe,
+so there is no horizontal momentum for any `EntryRel` variant to describe, and every call site fixes
+`EntryRel::Still` unconditionally (`search::Search::expand`'s own comment). That is a *stronger*
+collapse than the diagonal's. But `Arrival` — the node's own identity, not a costing input — needed a
+sixth variant, `Climbing`, for a reason that has nothing to do with cost: the executor's `ClimbDrive`
+must know whether an edge's destination is a dismount onto real ground (requires `on_ground`) or
+another climbable cell mid-column (never grounded), and `to_surface` cannot tell the two apart — a
+full-block dismount's surface is numerically identical to a continuing climb's nominal cell-floor
+reference. `Arrival::Climbing` carries no direction (climbing has no horizontal heading), so it still
+costs a following edge identically to `Still` — the collapse holds exactly where it mattered for
+costing, and the one place it does not hold is a fact about the *executor*, not about ticks.
+
+**Two real, previously-latent bugs found in `graph::stand_surface`/`head_room`, both invisible until
+a climbable cell existed in any fixture.** A ladder's real collision shape is full-height (`top ==
+1.0`, thin only against the wall — `Block.boxZ(16.0, 13.0, 16.0)`, cross-checked against
+`lodestone_model::adapter::block_blocks_motion`'s own `0.7291666666666666` mean-extent figure) but
+`blocks_motion == false` (`forceSolidOff`). Two functions that had never had to reconcile "real shape"
+with "does not actually support anything" both got it wrong:
+
+- `stand_surface`'s "inside" branch read `top == 1.0` as "filled, refuse" — the same refusal a solid
+  wall gets — so standing *in* a ladder's own cell, i.e. mounting it at all, was refused outright.
+- `stand_surface`'s "below" branch read a climbable one cell under a candidate stand cell as a full
+  support, letting a body appear to stand *on top of* a ladder or vine from above, which real
+  collision never permits.
+- `head_room`'s sweep read the ladder's nonzero shape as `!passable` for every cell within a body's
+  height of one — including the climbable's own stand cell checking the rung directly above it, so a
+  `Climb` chain could not even mount the bottom rung.
+
+All three are fixed by treating a climbable cell as `AIR` for support/headroom purposes specifically
+— never a floor to stand on, in, or under, always something to look past — while leaving its
+`climbable` fact and its real (thin) shape intact for physics. None of `lodestone-nav`'s 75
+pre-`Climb` unit tests exercises this path (no fixture had a nonzero-shape, non-full-cube,
+non-blocking block before), which is the same "world" species of vacuous test the real-collision
+gates below exist to close.
+
+**One measured number that contradicts `docs/baritone-port.md` §4.3's own worked table, recorded
+rather than reconciled.** That table gives climb-up `0.2` b/t (5.0 ticks/block) and climb-down
+`0.15` b/t (6.67 ticks/block) — i.e. up faster than down. Simulating the real integrator gives the
+**opposite ordering**: steady climb-**up** is `(0.2 − gravity) × vertical_air_drag = (0.2 − 0.08) ×
+0.98 = 0.1176` b/t (~8.5 ticks/block), and climb-**down** is exactly `handle_on_climbable`'s own
+`0.15` floor (~6.67 ticks/block, matching the table). The reason is mechanical, not a modelling
+choice: `travel_in_air`'s climb override sets a **raw**, pre-gravity `0.2` target every tick, and
+real vanilla's own gravity subtraction reduces it *before* it ever reaches `move_entity` — the
+design doc's `0.2` describes the override's input, not its simulated output. Down has no
+symmetric reduction because `handle_on_climbable`'s clamp is a floor applied directly to the
+pre-move velocity, not a target subject to a further subtraction. `cost::tests::climb_up_steady_rate_matches_the_gravity_and_drag_derived_formula`
+and its `climb_down_...` counterpart pin both numbers against those cited constants directly, and
+`climbing_down_costs_fewer_ticks_than_climbing_up` records the resulting, real, surprising ordering
+— the same kind of finding `WalkDiagonal`'s own `1.17×`/`0.89×` (against a design estimate of "a hair
+below `sqrt(2)`") already established for this crate: simulate, then report what the design doc got
+wrong, never silently "correct" the measurement to match the doc.
+
+**A real entry-position bug in the vertical frame's own simulation, found by the admissibility check
+going strongly negative — the same failure class `WalkDiagonal`'s `cheapest_ticks_per_block` gap
+was.** The first version of `simulate_climb` seeded every direction at the source cell's exact
+integer floor (`y = 1.0`). For `Up` that is correct (a genuine `1.0`-block climb to `y = 2.0`); for
+`Down` it is a near-zero-distance start, because `floor(1.0) == 1` already, so any downward drift at
+all immediately satisfied "reached cell `0`" — measured **one tick per block**, which briefly made
+climbing the fastest movement in the entire template table and collapsed `cheapest_ticks_per_block`'s
+heuristic to the bare deflation constant. Fixed by seeding each direction "just crossed into the
+source cell in the direction of travel" (`Up` at `1.001`, `Down` at `1.999`) — the same convention
+`entry_state`'s `Straight` already uses on the horizontal axis, applied to `y`. The one case this
+does not model precisely — a body that freshly mounted the *top* of a ladder and immediately
+descends genuinely starts nearer the boundary than this seeding assumes — is a documented, bounded,
+safe-direction exception: it makes that one edge's template an overestimate, never an underestimate,
+the same shape as the ground-jump-hop exception below.
+
+**A second, bounded, safe-direction exception: the simulation never seeds `on_ground = true`.** Real
+mounting sometimes begins on solid ground (walking into a ladder's own footprint at floor level), in
+which case vanilla's ordinary ground-jump impulse (`0.42`) fires on the very first tick alongside the
+climb override. Modelling that exactly would need a second climb template (mount-from-ground vs.
+continue-while-clinging) for a one-tick effect; instead every template seeds `on_ground = false`
+throughout, which is correct for every edge but the very first `Climb(Up)` in a chain and, for that
+one, makes the real executor finish a hair faster than the template predicts — never slower. Recorded
+in `TemplateTable::simulate_climb`'s own doc comment rather than hidden.
+
+**One change `Climb` forced onto a kind that predates it: `graph::fall_step` now refuses a direction
+whose landing scan passes through a climbable cell.** Real `travel_in_air` arrests a fall the instant
+the feet cross into a climbable cell, unconditionally — not only while deliberately climbing — so
+`Descend`/`Drop`'s plain-gravity `StencilWorld` would silently disagree with real physics for any
+column containing one. `graph::tests::a_fall_through_a_climbable_column_is_refused` is the gate.
+
+**Real-collision gates, both directions.** `lodestone-autopilot/tests/drives_to_goal.rs`'s
+`real_collision` module gained `a_real_ladder_is_climbed_from_the_ground_to_a_real_platform` (a real
+`minecraft:ladder` state, through the real `VersionAdapter → AdapterCensus → FactsTable` chain,
+predicting the exact plan — `Walk, Climb(Up), Climb(Up), Walk` — through `compute_plan`) and its
+unreachable control, `a_real_ladder_with_no_platform_at_the_top_cannot_reach_a_goal_there` (the same
+ladder with nothing to dismount onto; `compute_plan` returns `None`, watched to fail rather than
+merely asserted). `search::tests::the_planned_cost_matches_what_executing_a_climb_plan_costs`
+replays a full mount-climb-dismount plan through the real integrator end to end, the strongest gate
+available here, mirroring `WalkDiagonal`'s own precedent.
 
 ## How to change it, and the gotchas
 
@@ -182,8 +265,12 @@ predecessor who stopped short of it.
   *and* `z`, unconditionally) and brakes-or-doesn't identically regardless of how many axes moved;
   the only physical difference across all five variants is `WalkDrive::jump`, a plain bool set for
   `StepUp` only. `edge_drive` needed **zero** changes to add `WalkDiagonal` — the entire executor
-  layer generalised for free. `Climb` is the one that will not: see "`Climb`: stopped, and why"
-  below.
+  layer generalised for free. `Climb` is the one that did not: see "`Climb`: landed, and what the
+  two hard parts actually needed" above — `crate::drive::edge_drive` (in `lodestone-autopilot`) now
+  returns an `EdgeDrive` enum (`Walk(WalkDrive)` / `Climb(ClimbDrive)`) rather than a bare
+  `WalkDrive`, and `MoveKind` itself has seven variants (`Climb(ClimbDir)`, `ClimbDir` being `Up`/
+  `Down`, folded into two separate `id()`s rather than one, because — unlike a cardinal `Dir4` —
+  the climb direction is genuinely cost-relevant).
 - **`WalkDiagonal` generalised cleanly in three places and needed real new work in two — knowing
   which was which is the actual deliverable, not just the code.** Clean generalisations, each
   reusing an existing mechanism verbatim: the **executor** (`drive.rs`, above); the **legality

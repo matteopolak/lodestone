@@ -1749,16 +1749,18 @@ Witness-set invalidation plus per-edge re-verification and the look-ahead window
 - **Gate:** a ≥300-block traversal on the terrain oracle with the correction counter flat, zero
   `Stalled` aborts, plan well-formedness asserted, and the cost histogram inside tolerance (§6).
 
-**Status, this pass (updated — `WalkDiagonal` landed in a later pass than the note below
-describes):** `StepUp`, `Descend`/`Drop`, segmentation and **`WalkDiagonal` (including the
-corner-cutting rule)** are landed (`crates/plugins/lodestone-nav`, `crates/plugins/lodestone-autopilot`);
-see [`docs/autonomous-navigation.md`](./autonomous-navigation.md) for the detail, including the
-"`Climb`: stopped, and why" section. **Not landed:** `Climb`, prefix trimming, tail truncation,
+**Status, this pass (updated — `WalkDiagonal` and `Climb` both landed in later passes than the note
+below describes):** `StepUp`, `Descend`/`Drop`, segmentation, **`WalkDiagonal` (including the
+corner-cutting rule)** and **`Climb`** are landed (`crates/plugins/lodestone-nav`,
+`crates/plugins/lodestone-autopilot`); see [`docs/autonomous-navigation.md`](./autonomous-navigation.md)
+for the detail, including the "`Climb`: landed, and what the two hard parts actually needed" section
+(the two hard parts two predecessors correctly flagged before stopping — a genuinely different input
+script and a third, vertical cost-model frame — plus what neither predecessor could have known ahead
+of time: two previously-latent bugs in `graph::stand_surface`/`head_room`'s treatment of any
+non-full-cube, non-blocking shape, a real entry-position bug in the new frame's own simulation found
+by the admissibility check, and a measured climb rate that contradicts this document's own §4.3
+worked table — see that section for the numbers). **Not landed:** prefix trimming, tail truncation,
 witness-set invalidation, per-edge re-verification, the look-ahead window, and the debug overlay.
-`Climb` is stopped deliberately — it needs a genuinely different *script* (holding a direction key
-against a climbable column, not aiming at a cell centre), not merely another cost-model frame, and
-the brief for this pass explicitly preferred a documented stop over a rushed third generalisation
-in one sitting.
 
 The paragraph below is kept for the record of what *StepUp/Descend/Drop's own* pass found and
 scoped; `WalkDiagonal` needed a real generalisation of the cost model's canonical simulation frame

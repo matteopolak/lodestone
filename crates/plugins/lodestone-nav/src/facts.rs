@@ -368,7 +368,23 @@ impl FixtureCensus {
     pub const FENCE: u32 = 6;
     /// Lava.
     pub const LAVA: u32 = 7;
+    /// A ladder: `BlockTags.CLIMBABLE`, `forceSolidOff` (`blocks_motion` is
+    /// `false` despite a nonzero collision shape — see `graph::stand_surface`'s
+    /// own doc comment on why that shape must never be read as a stand
+    /// surface).
+    pub const LADDER: u32 = 8;
 }
+
+/// A real ladder's collision shape: `LadderBlock.SHAPES`
+/// (`.cache/mc/26.2/src/net/minecraft/world/level/block/LadderBlock.java:29`),
+/// `Block.boxZ(16.0, 13.0, 16.0)` — full `x`/`y`, a thin `z`-slab hugging one
+/// face. The exact face is irrelevant to every legality rule in this crate
+/// (`graph::stand_surface`'s fix reads only `climbable`, never this shape), so
+/// one representative orientation is enough for a fixture.
+const FIXTURE_LADDER: &[BlockAabb] = &[BlockAabb {
+    min: [0.0, 0.0, 0.8125],
+    max: [1.0, 1.0, 1.0],
+}];
 
 const FIXTURE_SLAB: &[BlockAabb] = &[BlockAabb {
     min: [0.0, 0.0, 0.0],
@@ -393,6 +409,7 @@ impl BlockCensus for FixtureCensus {
             Self::SLAB => FIXTURE_SLAB,
             Self::SOUL_SAND => FIXTURE_SOUL_SAND,
             Self::FENCE => FIXTURE_FENCE,
+            Self::LADDER => FIXTURE_LADDER,
             _ => return None,
         })
     }
@@ -407,12 +424,18 @@ impl BlockCensus for FixtureCensus {
             Self::BLUE_ICE => "minecraft:blue_ice",
             Self::FENCE => "minecraft:oak_fence",
             Self::LAVA => "minecraft:lava",
+            Self::LADDER => "minecraft:ladder",
             _ => return None,
         })
     }
 
     fn blocks_motion(&self, state: u32) -> Option<bool> {
-        Some(!matches!(state, Self::AIR | Self::WATER | Self::LAVA))
+        // `forceSolidOff`: a ladder never blocks motion despite its nonzero
+        // collision shape (`graph::stand_surface`'s doc comment).
+        Some(!matches!(
+            state,
+            Self::AIR | Self::WATER | Self::LAVA | Self::LADDER
+        ))
     }
 }
 
@@ -423,9 +446,25 @@ mod tests {
     #[test]
     fn the_table_stops_at_the_end_of_the_census() {
         let table = FactsTable::build(&FixtureCensus);
-        assert_eq!(table.resolved(), 8);
-        assert_eq!(table.len(), 8);
+        assert_eq!(table.resolved(), 9);
+        assert_eq!(table.len(), 9);
         assert!(!table.is_empty());
+    }
+
+    /// The tag-membership constant reaches the fixture, exactly like the
+    /// other name-keyed constants below — this is what makes a `Climb` gate
+    /// against `FixtureCensus::LADDER` a real exercise of `climbable` rather
+    /// than an assumption that it is wired.
+    #[test]
+    fn the_ladder_fixture_is_climbable_and_does_not_block_motion() {
+        let table = FactsTable::build(&FixtureCensus);
+        let facts = table.get(FixtureCensus::LADDER);
+        assert!(facts.climbable);
+        assert!(
+            !facts.blocks_motion,
+            "forceSolidOff: a ladder never blocks motion despite a nonzero shape"
+        );
+        assert!(facts.top > 0.0, "the shape itself is real, just not a support");
     }
 
     #[test]

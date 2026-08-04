@@ -1030,4 +1030,135 @@ mod real_collision {
             "sanity: Walk and WalkDiagonal are mutually exclusive kinds"
         );
     }
+
+    // --- M2: `Climb` over real, jar-derived collision ---
+    //
+    // `lodestone_nav::graph`'s own unit tests (`ladder_from_floor` and its
+    // gates) prove mounting, continuing, dismounting and the two unreachable
+    // controls against `FixtureCensus` — the same "world" species of
+    // vacuous test the diagonal and step-up gates above already exist to
+    // close for their own kinds. This closes it for `Climb`: a real
+    // `minecraft:ladder` state, through the real `VersionAdapter` ->
+    // `AdapterCensus` -> `FactsTable` chain (`climbable` comes from
+    // `lodestone_model::block_physics`, keyed on the real canonical name
+    // `RealDataAdapter::block_name` returns — not a second, hand-maintained
+    // copy of the tag), and through `lodestone_autopilot::compute_plan`
+    // itself, so the exact resulting plan is inspectable rather than merely
+    // inferred from where the player ends up.
+
+    const LADDER_X: i32 = 3;
+    const LADDER_Z: i32 = 0;
+    const LADDER_TOP: i32 = 3;
+
+    /// Real flat `minecraft:stone` at world `y = 0` everywhere — the ground
+    /// every column stands on, `Climb` included: a real ladder never floats
+    /// free of `canSurvive`'s own support requirement, and this crate trusts
+    /// a persisted block's own tag membership rather than re-deriving it
+    /// (`lodestone_nav::graph::climb_step`'s own doc comment). A ladder
+    /// occupies `(LADDER_X, 1..=LADDER_TOP, LADDER_Z)`; when `platform` is
+    /// `true`, a single real stone block at `(LADDER_X + 1, LADDER_TOP - 1,
+    /// LADDER_Z)` gives the top rung a real landing to dismount onto —
+    /// exactly `graph::tests::ladder_from_floor`'s fixture, in real jar data.
+    fn ladder_world(radius: i32, stone: u32, air: u32, ladder: u32, platform: bool) -> World {
+        let mut world = World::new();
+        let block_kind = PaletteKind::block_states();
+        let biome_kind = PaletteKind::biomes();
+        const SECTION_COUNT: usize = 4;
+
+        for cx in -radius..=radius {
+            for cz in -radius..=radius {
+                let mut column = ChunkColumn::new(0, SECTION_COUNT, block_kind, biome_kind, air, 0);
+                for lx in 0..16i32 {
+                    for lz in 0..16i32 {
+                        let wx = cx * 16 + lx;
+                        let wz = cz * 16 + lz;
+                        column.set_block(lx as usize, 0, lz as usize, stone);
+                        if wx == LADDER_X && wz == LADDER_Z {
+                            for y in 1..=LADDER_TOP {
+                                column.set_block(lx as usize, y, lz as usize, ladder);
+                            }
+                        }
+                        if platform && wx == LADDER_X + 1 && wz == LADDER_Z {
+                            column.set_block(lx as usize, LADDER_TOP - 1, lz as usize, stone);
+                        }
+                    }
+                }
+                let light = ColumnLight::new(SECTION_COUNT);
+                let chunk = LoadedChunk::new(column, light, Heightmaps::default(), Vec::new());
+                world.load(ChunkPos::new(cx, cz), chunk);
+            }
+        }
+        world
+    }
+
+    /// Predicted plan, from right beside the ladder: mount (`Walk` onto the
+    /// bottom rung — real per-state census data, through `graph::stand_surface`'s
+    /// climbable fix, is what makes this an ordinary ground step rather than a
+    /// refusal), two `Climb(Up)` edges to the top rung, then a `Walk` off it
+    /// sideways onto the real stone platform — exactly the sequence
+    /// `graph::tests`' own fixture-based gates predict, now over real jar data
+    /// and through the plugin's own `compute_plan`.
+    #[test]
+    fn a_real_ladder_is_climbed_from_the_ground_to_a_real_platform() {
+        let stone = real_state_id("minecraft:stone");
+        let air = real_state_id("minecraft:air");
+        let ladder = real_state_id("minecraft:ladder");
+        let world = ladder_world(3, stone, air, ladder, true);
+
+        let plan = compute_plan(
+            &world,
+            Vec3d::new(f64::from(LADDER_X) - 0.5, 1.0, 0.5),
+            BlockPos::new(LADDER_X + 1, LADDER_TOP, LADDER_Z),
+            real_facts(),
+            3,
+            NavPolicy::default(),
+            10_000,
+        )
+        .expect("a real ladder with a real platform at the top must be climbable");
+
+        let kinds: Vec<_> = plan.edges().iter().map(|e| e.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                MoveKind::Walk(lodestone_nav::Dir4::East),
+                MoveKind::Climb(lodestone_nav::ClimbDir::Up),
+                MoveKind::Climb(lodestone_nav::ClimbDir::Up),
+                MoveKind::Walk(lodestone_nav::Dir4::East),
+            ],
+            "{:?}",
+            plan.edges()
+        );
+        assert_eq!(
+            (plan.terminal().x, plan.terminal().y, plan.terminal().z),
+            (LADDER_X + 1, LADDER_TOP, LADDER_Z)
+        );
+    }
+
+    /// The unreachable control: the same real ladder, with no platform at the
+    /// top — nowhere to dismount, and nothing above the top rung to keep
+    /// climbing into (real `minecraft:air`, unsupported). `compute_plan`
+    /// must refuse the goal outright, watched to fail rather than merely
+    /// asserted: a bot that found *some* plan here would be inventing a
+    /// landing this real geometry does not have.
+    #[test]
+    fn a_real_ladder_with_no_platform_at_the_top_cannot_reach_a_goal_there() {
+        let stone = real_state_id("minecraft:stone");
+        let air = real_state_id("minecraft:air");
+        let ladder = real_state_id("minecraft:ladder");
+        let world = ladder_world(3, stone, air, ladder, false);
+
+        let plan = compute_plan(
+            &world,
+            Vec3d::new(f64::from(LADDER_X) - 0.5, 1.0, 0.5),
+            BlockPos::new(LADDER_X + 1, LADDER_TOP, LADDER_Z),
+            real_facts(),
+            3,
+            NavPolicy::default(),
+            10_000,
+        );
+        assert!(
+            plan.is_none(),
+            "no platform exists at the top of this real ladder to dismount onto: {plan:?}"
+        );
+    }
 }
