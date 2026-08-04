@@ -290,10 +290,10 @@ fn run_fixture(label: &str, surface_text: &str, carver_text: &str) {
 
     // Rebuild the surface rule so carvers can re-cap dirt exposed beneath a
     // carved grass block via `topMaterial`. plains is not cold enough to snow.
-    let surface = SurfaceSystem::new(&settings, &builder, &si.biome, &si.canon, false);
+    let surface = SurfaceSystem::new(&settings, &builder, &si.canon);
     let hm_fn = |x: i32, z: i32| -> i32 { *si.hm.get(&(x, z)).expect("heightmap") };
     let top_material = |x: i32, y: i32, z: i32, under_fluid: bool| -> Option<String> {
-        surface.top_material(x, y, z, under_fluid, &hm_fn)
+        surface.top_material(x, y, z, under_fluid, &hm_fn, &si.biome, false)
     };
 
     // Build the world-keyed input grid from the post-surface column.

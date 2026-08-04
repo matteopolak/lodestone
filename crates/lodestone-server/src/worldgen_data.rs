@@ -18,9 +18,11 @@
 //! # Honest scope
 //!
 //! [`OverworldGenerator`] composes shape + a sea-level aquifer approximation +
-//! surface rules — real terrain shape and surface, verified block-for-block
-//! against a JVM in isolation. It does **not** yet run carvers, the full
-//! aquifer, or features (no caves/ores/trees). See [`lodestone_worldgen::overworld`].
+//! surface rules + real multi-noise biome assignment (issue #405) — real
+//! terrain shape, surface, and biome variety, verified block-for-block (and,
+//! for biome, exact-id) against a JVM in isolation. It does **not** yet run
+//! carvers, the full aquifer, or features (no caves/ores/trees — issue #295 /
+//! epic #404's Phase 2). See [`lodestone_worldgen::overworld`].
 
 use std::sync::OnceLock;
 
@@ -30,8 +32,12 @@ use serde_json::Value;
 
 include!(concat!(env!("OUT_DIR"), "/embedded_worldgen.rs"));
 
-/// The fixed biome generation runs under until the multi-noise biome source
-/// exists. Plains has snow disabled, matching `cold_enough_to_snow == false`.
+/// The fallback biome [`OverworldGenerator`] would use if [`EmbeddedResolver`]
+/// supplied no biome-parameter table — it does (see [`EmbeddedResolver::biome_parameters`]),
+/// so real per-column biome variety (issue #405) is what this generator
+/// actually produces; these two constants only document "what it used to
+/// always be" and are the value a future resolver with no biome data still
+/// gets. Plains has snow disabled, matching `cold_enough_to_snow == false`.
 const DEFAULT_BIOME: &str = "minecraft:plains";
 const DEFAULT_BIOME_SNOWS: bool = false;
 
@@ -78,6 +84,24 @@ impl Resolver for EmbeddedResolver {
                 .map(|a| a.as_f64().expect("amplitude"))
                 .collect(),
         }
+    }
+
+    /// Real multi-noise biome assignment (issue #405). Overriding this
+    /// (default is an empty array, per [`Resolver::biome_parameters`]'s own
+    /// doc) is what switches [`OverworldGenerator`] from its old
+    /// single-fixed-biome behaviour to real per-column variety — see
+    /// `biome_parameters/overworld.json`'s own header for provenance
+    /// (`scripts/worldgen-oracle/BiomeOracle.java`, `table` mode, 7594 rows).
+    fn biome_parameters(&self) -> Value {
+        self.json("biome_parameters/overworld")
+    }
+
+    /// Per-biome `temperature`, used to derive `cold_enough_to_snow` per
+    /// sampled column (`biome_parameters/overworld_temperature.json`, read
+    /// directly from vanilla's own `data/minecraft/worldgen/biome/*.json`
+    /// files — no oracle needed for this one, see that file's own header).
+    fn biome_temperatures(&self) -> Value {
+        self.json("biome_parameters/overworld_temperature")
     }
 }
 
@@ -223,6 +247,153 @@ mod tests {
             surface > 0,
             "served chunk has no surface material — surface stage lost"
         );
+    }
+
+    /// Exact biome-id parity against vanilla's own `RandomState.sampler()` +
+    /// `MultiNoiseBiomeSourceParameterList.findValueBruteForce` (issue #405).
+    ///
+    /// Ground truth: `scripts/worldgen-oracle/BiomeOracle.java` `sample`
+    /// mode, seed 42, at each column's own quart-aligned corner and its own
+    /// generated terrain surface height (`y` rounded down to a multiple of 4
+    /// — see [`lodestone_worldgen::overworld::OverworldGenerator::biome_stage`]'s
+    /// doc comment for why *both* axes need quart-rounding, found the hard
+    /// way: getting either wrong flips a real dark_forest/river boundary at
+    /// world `(0, 0)`, one of the fixtures below). This is a *predicted
+    /// value*, not a "some variety appeared" check — CLAUDE.md's "predict
+    /// the value, not the sign": a climate-band-boundary-off-by-one bug would
+    /// still show *some* biome, so only an exact match against vanilla's own
+    /// answer catches it.
+    #[test]
+    fn biome_matches_vanilla_at_known_coordinates_seed_42() {
+        let seed = 42;
+        let generator = overworld_generator(seed);
+
+        // (world x, world z, vanilla's own answer at that column's quart
+        // corner and generated surface height).
+        let cases: &[(i32, i32, &str)] = &[
+            (0, 0, "minecraft:dark_forest"),
+            (8, 8, "minecraft:river"),
+            (-8, 8, "minecraft:dark_forest"),
+            (500, 500, "minecraft:deep_ocean"),
+            (-500, 500, "minecraft:beach"),
+            (2000, -1500, "minecraft:swamp"),
+            (10000, 10000, "minecraft:deep_ocean"),
+            (300, -800, "minecraft:plains"),
+            (-4000, 100, "minecraft:lukewarm_ocean"),
+            (1000, 0, "minecraft:deep_cold_ocean"),
+            (0, 1000, "minecraft:beach"),
+            (5000, 5000, "minecraft:warm_ocean"),
+            (-10000, -10000, "minecraft:plains"),
+            (120, 4564, "minecraft:river"),
+            (776, -780, "minecraft:frozen_peaks"),
+            (64, 64, "minecraft:beach"),
+            (-2500, 3200, "minecraft:savanna"),
+        ];
+
+        let mut distinct = std::collections::BTreeSet::new();
+        for &(x, z, want) in cases {
+            let cx = x.div_euclid(16);
+            let cz = z.div_euclid(16);
+            let lx = x.rem_euclid(16) as usize;
+            let lz = z.rem_euclid(16) as usize;
+            let col = generator.column(cx, cz);
+            let got = col.biome_state(lx, lz);
+            assert_eq!(got, want, "biome mismatch at world ({x}, {z})");
+            distinct.insert(got.to_string());
+        }
+        // Anti-vacuity floor, per CLAUDE.md's "magnitude" vacuous-test
+        // species: a table/search bug that happened to return one constant
+        // biome for every probed *coordinate* would still fail the loop
+        // above at 16/17 cases — but a bug that returns one constant biome
+        // whenever asked (ignoring climate entirely) needs a *count* check
+        // to catch, since it could theoretically pass every exact-match
+        // assertion if all 17 fixtures shared their expected biome (they do
+        // not, by construction — this asserts that fact rather than
+        // assuming it). 10 is derived from this exact probe set's own
+        // distinct answers above, not guessed.
+        assert!(
+            distinct.len() >= 10,
+            "expected wide biome variety across the probe set, got only {distinct:?}"
+        );
+    }
+
+    /// Control for [`biome_matches_vanilla_at_known_coordinates_seed_42`]'s
+    /// implicit claim that the search can return *different* answers for
+    /// different inputs: run it and watch a single chunk (0, 0) — which
+    /// straddles the `dark_forest`/`river` boundary the fixture above
+    /// already names — actually produce both biomes across its 16 quarts,
+    /// not one biome copy-pasted 16 times.
+    #[test]
+    fn a_single_chunk_can_carry_more_than_one_biome() {
+        let generator = overworld_generator(42);
+        let col = generator.column(0, 0);
+        assert!(
+            col.distinct_biome_count() >= 2,
+            "chunk (0,0) at seed 42 is known (BiomeOracle) to straddle a \
+             dark_forest/river boundary; got only one biome across all 16 quarts"
+        );
+    }
+
+    /// [`lodestone_worldgen::biome::usable_overworld_table`]'s exclusion of
+    /// the three unported-surface-rule badlands variants (see that
+    /// function's doc comment) is only real if the *served* generator
+    /// actually avoids them — this walks a wide grid of real columns (not a
+    /// hand-picked climate target, which would only prove the table itself
+    /// was filtered, not that the filtered table is what generation uses)
+    /// and asserts none of them ever come back badlands/eroded_badlands/
+    /// wooded_badlands, watching the assertion actually have something to
+    /// catch: `crate::chunk::ChunkColumn`'s biome storage has no special
+    /// case for these names, so a regression that dropped the filter would
+    /// fail this loop, not pass it vacuously.
+    #[test]
+    fn served_columns_never_carry_an_unported_badlands_variant() {
+        // 12×12 chunks (~192×192 blocks): wide enough to cross several
+        // biome boundaries in a debug build without the full-column
+        // generation cost of a much larger sweep — `cargo test -p
+        // lodestone-worldgen`'s own JVM-parity suite already proves the
+        // shape/surface machinery at scale, so this only needs to be wide
+        // enough to exercise the biome filter, not to re-prove terrain
+        // generation itself.
+        let generator = overworld_generator(42);
+        let mut checked = 0usize;
+        for cx in -6..6 {
+            for cz in -6..6 {
+                let col = generator.column(cx, cz);
+                for lz in 0..16 {
+                    for lx in 0..16 {
+                        let biome = col.biome_state(lx, lz);
+                        assert!(
+                            !lodestone_worldgen::biome::UNSUPPORTED_SURFACE_BIOMES
+                                .contains(&biome),
+                            "column ({cx},{cz}) local ({lx},{lz}) resolved to unported biome {biome}"
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 12 * 12 * 16 * 16, "grid scan must cover every probed cell");
+    }
+
+    /// End-to-end: real biome variety reaches the **served** column (the
+    /// column `ServerProtocol::encode_chunk` sends), not just the raw
+    /// generator — closing the island CLAUDE.md's rule 1 warns about. Two
+    /// adjacent-ish chunks at seed 42 are known (the fixtures above) to
+    /// carry different biomes; this proves that survives the
+    /// `OverworldChunkSource` wrapper the wire encoder actually reads from.
+    #[test]
+    fn served_chunk_source_carries_real_biome_variety() {
+        use crate::ChunkSource;
+
+        let seed = 42;
+        let source = overworld_chunk_source(seed);
+
+        // world (0, 0) -> chunk (0,0) local (0,0): dark_forest.
+        let a = source.column(0, 0);
+        assert_eq!(a.biome_state(0, 0), "minecraft:dark_forest");
+        // world (500, 500) -> chunk (31,31) local (4,4): deep_ocean.
+        let b = source.column(31, 31);
+        assert_eq!(b.biome_state(4, 4), "minecraft:deep_ocean");
     }
 
     /// The design question `docs/block-edit.md` answers: before edit support,

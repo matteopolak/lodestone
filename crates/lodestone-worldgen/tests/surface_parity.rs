@@ -147,9 +147,7 @@ fn run_fixture(label: &str, text: &str) {
     assert_eq!(r.biome, "minecraft:plains", "fixture biome");
 
     let builder = Builder::new(SEED, &resolver);
-    // plains is not "cold enough to snow"; the temperature condition is only
-    // reached inside snowy/frozen biome branches, none of which match plains.
-    let surface = SurfaceSystem::new(&settings, &builder, &r.biome, &r.canon, false);
+    let surface = SurfaceSystem::new(&settings, &builder, &r.canon);
 
     let pre_fn = |x: i32, y: i32, z: i32| -> String {
         r.pre
@@ -158,6 +156,12 @@ fn run_fixture(label: &str, text: &str) {
             .unwrap_or_else(|| "minecraft:air".to_string())
     };
     let hm_fn = |x: i32, z: i32| -> i32 { *r.hm.get(&(x, z)).expect("heightmap") };
+    // plains is not "cold enough to snow"; the temperature condition is only
+    // reached inside snowy/frozen biome branches, none of which match plains.
+    // Fixed for the whole fixture (issue #405 made biome a runtime input, but
+    // this fixture — like the JVM dump it compares against — only ever ran
+    // under one biome).
+    let biome_at = |_x: i32, _z: i32| -> (String, bool) { (r.biome.clone(), false) };
 
     // `build_surface` now returns a sparse diff (only positions a surface rule
     // actually rewrote — see its doc comment); a position absent from it is
@@ -165,7 +169,7 @@ fn run_fixture(label: &str, text: &str) {
     // still compares the reconstructed *full* column against the JVM dump
     // block-for-block, same as before the diff change — only how the "no
     // rewrite" case is looked up differs.
-    let result = surface.build_surface(&pre_fn, &hm_fn, r.chunk_x * 16, r.chunk_z * 16);
+    let result = surface.build_surface(&pre_fn, &hm_fn, &biome_at, r.chunk_x * 16, r.chunk_z * 16);
 
     let mut total = 0usize;
     let mut matching = 0usize;
