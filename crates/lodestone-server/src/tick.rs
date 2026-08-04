@@ -299,19 +299,33 @@ pub struct TickStats {
 ///
 /// # Overrun handling
 ///
-/// Mirrors vanilla's `MinecraftServer::runServer` behind
-/// [`overload_threshold`]/[`overload_warning_interval`]: this loop tracks
-/// `next_tick_at`, the wall-clock instant the *next* tick should start. Each
+/// Mirrors vanilla's `MinecraftServer::runServer` exactly, including the part
+/// an earlier read of it got only half right: **vanilla does catch up, just
+/// not indefinitely.** `next_tick_at` tracks the wall-clock instant the next
+/// tick should start; `next_tick_at += TICK_PERIOD` happens unconditionally
+/// every iteration (vanilla: `this.nextTickTimeNanos += thisTickNanos;`,
+/// `MinecraftServer.java:752`), and `tokio::time::sleep_until` for an
+/// already-past instant resolves immediately with no artificial delay — so
+/// while only mildly behind, consecutive iterations run back-to-back at full
+/// speed with no sleep between them, exactly matching vanilla's own
+/// `waitUntilNextTick`/`haveTime` (`:846-863`), which does not park at all
+/// once `Util.getNanos() >= nextTickTimeNanos`. *That* is vanilla's catch-up
+/// mechanism, and this loop already has it for free from `sleep_until`'s own
+/// semantics — no separate code path needed.
+///
+/// The forgiveness branch below is not the catch-up mechanism; it is what
+/// happens once catching up the normal way would take too long. Each
 /// iteration, if `now` is more than [`overload_threshold`] past
-/// `next_tick_at`, the loop **does not** run the missed ticks to catch up —
-/// it logs a rate-limited warning and jumps `next_tick_at` forward by however
-/// many tick periods it was behind, exactly like vanilla's
-/// `this.nextTickTimeNanos += ticks * thisTickNanos;`
+/// `next_tick_at` (2 real seconds — see that function's own doc comment), the
+/// loop gives up: it logs a rate-limited warning and jumps `next_tick_at`
+/// forward by however many tick periods it was behind, exactly like
+/// vanilla's `this.nextTickTimeNanos += ticks * thisTickNanos;`
 /// (`MinecraftServer.java:741`). The world tick body still runs exactly once
-/// per loop iteration, both before and after this adjustment — the backlog is
-/// forgiven, never replayed. A tick that never ran is never counted by
-/// [`TickClock::record_tick`], so `tick_count` reflects real work done, not
-/// wall-clock elapsed / 50ms.
+/// per loop iteration, both before and after this adjustment — that backlog,
+/// specifically, is forgiven rather than replayed; smaller backlogs are
+/// still replayed by the back-to-back iterations described above. A tick
+/// that never ran is never counted by [`TickClock::record_tick`], so
+/// `tick_count` reflects real work done, not wall-clock elapsed / 50ms.
 ///
 /// # wasm32
 ///
