@@ -57,16 +57,31 @@
 //! (`CollectingNeighborUpdater.java:78-80`) — [`NeighborPropagator::propagate`]
 //! mirrors this with `max_chained`.
 //!
-//! # What this module does not yet have a real producer for
+//! # Production status, corrected
 //!
-//! No block in this crate implements a real `neighborChanged`/`updateShape`
-//! response yet (redstone, gravity blocks, and friends are #311/#314-322,
-//! downstream of this issue). [`NeighborPropagator`] is exercised end to end
-//! today by `crate::random_tick`'s grass/dirt conversion, which calls it
-//! after every block it mutates (mirroring vanilla's `setBlockAndUpdate`
-//! always notifying neighbours), with a currently-empty `notify` closure —
-//! real per-block reactions plug into that closure's implementation as they
-//! land, without changing this module's ordering contract.
+//! An earlier version of this doc comment said [`NeighborPropagator`] was
+//! "exercised end to end today by `crate::random_tick`'s grass/dirt
+//! conversion, which calls it ... with a currently-empty `notify` closure."
+//! That was aspirational, not actual: as of the #307/#308 landing this
+//! module shipped in, `crate::random_tick` called nothing here at all —
+//! `docs/tick-scheduling.md`'s own "what this module does not yet have a
+//! real producer for" section had it right, this inline comment did not.
+//! Verified directly (`grep -rn "NeighborPropagator" crates/lodestone-server/src/`
+//! returned only this module's own definition) before writing this
+//! correction, per this repo's own "re-verify before routing around 'X
+//! doesn't exist yet'" rule — the mistake here ran the other direction, a
+//! claim that something *did* exist when it did not.
+//!
+//! **As of issue #311, it is true.** `crate::random_tick::RandomTickScheduler
+//! ::tick_randomly_ticking_block` calls [`NeighborPropagator::propagate`] on
+//! every position any of its four mutation families (grass↔dirt, and #310's
+//! crop growth/sapling growth/leaf decay) just changed, mirroring vanilla's
+//! `setBlockAndUpdate` always notifying neighbours. The `notify` closure is
+//! no longer empty either: `crate::gravity_tick`'s sand/gravel settle check
+//! is the one real reaction today. Redstone (#314-#322) is the next
+//! consumer of this same call site, inheriting the depth-first ordering
+//! contract unchanged — see `crate::gravity_tick`'s own module doc for the
+//! full citation and the two named deviations that landing accepts.
 
 use lodestone_model::BlockPos;
 
