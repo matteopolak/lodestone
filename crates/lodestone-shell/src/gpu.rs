@@ -621,10 +621,39 @@ impl RenderState {
     /// other is worse than wiring neither: at midnight it makes mobs darker than
     /// the blocks they stand on, which reads as a mob-rendering bug rather than a
     /// missing feature.
+    ///
+    /// Also folds in the `FOG_COLOR` day/night track
+    /// (`lodestone_render::fog_color_for_time_of_day`), which until this existed
+    /// only reached the sky disc (`sky_pipeline.rs`) — terrain and entity fog
+    /// rendered a full-brightness day colour at any hour, so at midnight distant
+    /// chunks faded to a bright sky blue against a near-black sky. **This is the
+    /// only place that may apply the track**: `self.fog.color` must stay the
+    /// untracked day base, because the sky pass (`gpu.rs`'s sky-frame call site)
+    /// reads `self.fog.color` directly and applies the same track itself to
+    /// paint the disc's horizon. Pre-multiplying the stored base here or in
+    /// `set_fog` would double-apply the track to the sky disc.
     fn fog_with_clock(&self, eye: glam::Vec3) -> FogUniform {
-        let mut fog = FogUniform::new(&self.fog, [eye.x, eye.y, eye.z]);
-        fog.end_enabled[2] = self.sky_darken.value();
-        fog
+        Self::fog_uniform_for(&self.fog, self.time_of_day.value(), self.sky_darken.value(), [
+            eye.x, eye.y, eye.z,
+        ])
+    }
+
+    /// Pure core of [`fog_with_clock`](Self::fog_with_clock), taking the
+    /// frame's sourced values as plain arguments rather than reading `self`, so
+    /// it is testable without a GPU device — `RenderState::new` requires one,
+    /// and this crate's GPU gates are `#[ignore]`d, so a hermetic test of this
+    /// logic needs a path that never constructs a `RenderState`.
+    fn fog_uniform_for(
+        fog: &FogSettings,
+        time_of_day: i64,
+        sky_darken: f32,
+        eye: [f32; 3],
+    ) -> FogUniform {
+        let mut settings = *fog;
+        settings.color = lodestone_render::fog_color_for_time_of_day(time_of_day, fog.color);
+        let mut u = FogUniform::new(&settings, eye);
+        u.end_enabled[2] = sky_darken;
+        u
     }
 
     pub fn set_sky_darken_source(&mut self, f: impl Fn() -> Option<f32> + Send + Sync + 'static) {
@@ -2826,6 +2855,89 @@ fn transparent_placeholder_atlas(device: &wgpu::Device, queue: &wgpu::Queue) -> 
 mod tests {
     use super::*;
     use lodestone_render::{HeadlessTarget, RenderTarget};
+
+    /// **Gate A (F1).** The terrain/entity fog colour must carry the
+    /// `FOG_COLOR` day/night track, not just the sky disc. Before this fix
+    /// `fog_with_clock` returned `self.fog`'s flat day colour unchanged at every
+    /// hour — a full-brightness `#87B5EB` terrain fog at midnight against a
+    /// near-black sky disc.
+    ///
+    /// Expected bytes are hand-derived from vanilla, not from this crate's own
+    /// formula: `NIGHT_FOG_COLOR_MULTIPLIER_START = ARGB.colorFromFloat(1.0,
+    /// 0.05, 0.05, 0.09)` and `..._END = colorFromFloat(1.0, 0.09, 0.09, 0.09)`
+    /// (`Timelines.java:33-34`), where `as8BitChannel` **floors**
+    /// (`ARGB.java:229-231`: `Mth.floor(value * 255.0F)`) — `0.05*255=12.75`
+    /// floors to `12`, `0.09*255=22.95` floors to `22`, giving multiplier
+    /// keyframes `(12,12,22)` at tick 13670 and `(22,22,22)` at tick 22330, not
+    /// the `(13,13,22)` an earlier draft of this investigation misread from a
+    /// rounded guess. At tick 18000 (exactly the segment midpoint, `alpha =
+    /// 4330/8660 = 0.5`) `Mth.lerpInt`'s floor gives `(17,17,22)`.
+    /// `ARGB.multiply` is truncating integer division
+    /// (`ARGB.java:80-86`: `red(lhs) * red(rhs) / 255`), so against our day
+    /// base `SKY_COLOR` (`#87B5EB` = `(135,181,235)`):
+    ///
+    /// | tick | multiplier | predicted (exact integer) |
+    /// |---|---|---|
+    /// | 6000 (noon) | `(255,255,255)` (flat white region) | `(135,181,235)` unchanged |
+    /// | 18000 (midnight) | `(17,17,22)` | `(9,12,20)` |
+    /// | 13670 (dusk, on-keyframe) | `(12,12,22)` | `(6,8,20)` |
+    ///
+    /// This client's `multiply_gamma` round-trips through the continuous
+    /// piecewise sRGB transfer function rather than vanilla's raw truncating
+    /// byte division, so a **2-byte** tolerance is used — the same allowance
+    /// this repo's other gamma-space gates use for that reason.
+    #[test]
+    fn fog_with_clock_carries_the_night_track_gate_a() {
+        let fog = FogSettings::for_render_distance(SKY_COLOR, 8);
+        let to_bytes = |c: [f32; 3]| {
+            c.map(|v| (lodestone_render::fog::linear_to_srgb_f32(v) * 255.0).round() as i32)
+        };
+        let byte_of = |u: &FogUniform| {
+            to_bytes([u.color_start[0], u.color_start[1], u.color_start[2]])
+        };
+
+        let assert_close = |label: &str, got: [i32; 3], want: [i32; 3]| {
+            for i in 0..3 {
+                assert!(
+                    (got[i] - want[i]).abs() <= 2,
+                    "{label}: channel {i} got {} want {} (±2), full got {got:?} want {want:?}",
+                    got[i],
+                    want[i]
+                );
+            }
+        };
+
+        // Noon: the track's flat white region, so our own base colour must
+        // survive untouched. This is the discriminating row that a fix which
+        // darkens fog at *every* tick (not just night) would fail.
+        let noon = RenderState::fog_uniform_for(&fog, 6000, 1.0, [0.0, 0.0, 0.0]);
+        assert_close("noon", byte_of(&noon), [135, 181, 235]);
+
+        // Midnight: the "too extreme" complaint's root cause.
+        let midnight = RenderState::fog_uniform_for(&fog, 18000, 0.24, [0.0, 0.0, 0.0]);
+        assert_close("midnight", byte_of(&midnight), [9, 12, 20]);
+
+        // Dusk, exactly on the first night keyframe.
+        let dusk = RenderState::fog_uniform_for(&fog, 13670, 0.5, [0.0, 0.0, 0.0]);
+        assert_close("dusk", byte_of(&dusk), [6, 8, 20]);
+
+        // The sky-darken lane is untouched by this change and must still ride
+        // through in end_enabled[2] — proves the fix is additive, not a
+        // replacement of the existing clock plumbing.
+        assert_eq!(midnight.end_enabled[2], 0.24);
+
+        // Negative control, executed and observed to fail: the pre-fix
+        // behaviour (`FogUniform::new` with no clock at all) must land on the
+        // flat day colour at midnight, i.e. the detector actually fires on the
+        // bug this test exists to catch.
+        let unclocked = FogUniform::new(&fog, [0.0, 0.0, 0.0]);
+        assert_close("control (no clock)", byte_of(&unclocked), [135, 181, 235]);
+        let diff = (byte_of(&unclocked)[2] - byte_of(&midnight)[2]).abs();
+        assert!(
+            diff > 100,
+            "control must clearly disagree with the fixed midnight value: {diff}"
+        );
+    }
 
     /// Issue #388. [`FOG_START_FRACTION`] is the shell's last fraction-shaped
     /// fog knob — `sim::fog_for_render_distance` still multiplies by it instead
