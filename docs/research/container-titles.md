@@ -1,5 +1,15 @@
 # Diagnosis: container screen titles (names, capitalisation, placement, named containers)
 
+## What it is
+
+Three of the four reported container-title problems are already fixed and pixel-gated: the
+wire string, its capitalisation, and named-container resolution all trace correctly through
+the live language table and both event routers. The one real, still-open gap is placement —
+`label_layout` only models vanilla's `titleLabelX`/`titleLabelY` anchor for 3 of its ~20
+container screens, so 10 more (furnace family, brewing stand, anvil, loom, stonecutter,
+cartography table, dispenser/dropper, crafter) draw their title at the wrong default `(8, 6)`
+anchor. §5 below is a ready-to-apply, additive patch spec for exactly that gap.
+
 **Read-only investigation. No repo files were edited.** Everything below is either a confirmed
 existing behaviour (with evidence) or a patch specification for something genuinely missing.
 

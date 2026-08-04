@@ -1,5 +1,17 @@
 # Scoping: Tier 1 item 7, "combat feel"
 
+## What it is
+
+Headline finding: the shield and the bow are functionally dead in combat, for two
+independent, already-diagnosed reasons. `ClientAction::ReleaseUseItem` is encoded by all
+four protocol adapters but constructed nowhere in `lodestone-shell` (a serverbound island,
+the same shape as the documented `SetFlying` case), so a drawn bow can never fire and a
+raised shield can never be intentionally lowered. Separately, `Sim::use_item_live`
+short-circuits on any entity target even after a failed interact, so aiming at a hostile
+mob — the common case in combat — never reaches the generic use-item path at all. Also
+corrects three stale claims in `docs/backlog.md` item 7 (two already-shipped features, one
+mechanic that was never real).
+
 Read first: `docs/backlog.md` item 7, `docs/combat.md` (the existing record —
 attack/knockback/attack-strength-ticker/hurt-overlay all landed under issues
 #12/#72/#98/#121), `docs/view-bobbing.md`. Vanilla source is `.cache/mc/26.2/{src,client-src}`,

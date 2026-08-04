@@ -1,5 +1,16 @@
 # Diagnosis: view bobbing and distant water blockiness
 
+## What it is
+
+Two read-only diagnoses. **View bobbing**: not a bug — issue #391's fix is intact and
+unchanged in every relevant file; the report's own install simply has the option
+persisted off, which correctly never auto-heals on its own. **Distant water
+blockiness**: two causes, one already fixed (#389's air-vs-unloaded chunk-seam
+conflation) and one newly found here — the singleplayer integrated server never pads
+its `view_radius` by the `+1` ring vanilla's `ChunkTrackingView` always sends, so the
+outermost ring's neighbour section never arrives and that ring's mesh (water and
+everything else) stays permanently deferred.
+
 Investigation is read-only. All line numbers are against the working tree as of
 this session (`HEAD b065021`, plus the usual uncommitted item-variant work in
 other files that does not touch anything below).

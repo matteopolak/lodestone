@@ -1,5 +1,18 @@
 # Diagnosis: "fog too extreme / longer dropoff" + "at night the shadow is a different colour"
 
+## What it is
+
+Two read-only diagnoses, each with a specific, previously-unrecorded root cause. **Fog**:
+three real divergences from vanilla — the terrain/entity fog colour never receives vanilla's
+day/night colour track (an island: the mechanism exists and is already wired to the sky disc,
+just not to terrain), the overworld's `linear(0, 1024)` environmental fog term is missing
+entirely (the "longer dropoff"), and the render-distance term uses spherical distance where
+vanilla uses cylindrical, erasing valleys under nearby hills. **Night shadow colour**: not a
+brightness bug — the scalar lightmap this client computes is exactly vanilla's blue channel,
+so red and green read 1.8x too bright; vanilla's lightmap is a genuine RGB colour (blue
+moonlight, warm torchlight) that this client renders as flat grey. §4 gives minimal, low-risk
+fixes for both, cheapest first.
+
 Read-only investigation. Every vanilla number below is quoted from
 `.cache/mc/26.2/{src,client-src}` with `file:line`. No repository file was modified.
 

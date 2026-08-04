@@ -843,22 +843,52 @@ of these caught the *brief* being wrong rather than the code.
   a from-zero plan. Section 0 documents the correction with evidence; sections 1–8
   answer the brief's numbered questions against that corrected baseline.
 - [Diagnosis: view bobbing and distant water blockiness](./research/bobbing-and-water.md) —
-  Investigation is read-only. All line numbers are against the working tree as of this
-  session (`HEAD b065021`, plus the usual uncommitted item-variant work in other files
-  that does not touch anything below).
-- [Scoping: Tier 1 item 7, "combat feel"](./research/combat-scope.md) — Read first:
-  `docs/backlog.md` item 7, `docs/combat.md` (the existing record —
-  attack/knockback/attack-strength-ticker/hurt-overlay all landed under issues
-  #12/#72/#98/#121), `docs/view-bobbing.md`. Vanilla source is
-  `.cache/mc/26.2/{src,client-src}`, all `file:line` below read directly, not from
-  memory.
+  Two read-only diagnoses. **View bobbing**: not a bug — issue #391's fix is intact
+  and unchanged in every relevant file; the report's own install simply has the option
+  persisted off, which correctly never auto-heals on its own. **Distant water
+  blockiness**: two causes, one already fixed (#389's air-vs-unloaded chunk-seam
+  conflation) and one newly found here — the singleplayer integrated server never
+  pads its `view_radius` by the `+1` ring vanilla's `ChunkTrackingView` always sends,
+  so the outermost ring's neighbour section never arrives and that ring's mesh (water
+  and everything else) stays permanently deferred.
+- [Scoping: Tier 1 item 7, "combat feel"](./research/combat-scope.md) — Headline
+  finding: the shield and the bow are functionally dead in combat, for two
+  independent, already-diagnosed reasons. `ClientAction::ReleaseUseItem` is encoded by
+  all four protocol adapters but constructed nowhere in `lodestone-shell` (a
+  serverbound island, the same shape as the documented `SetFlying` case), so a drawn
+  bow can never fire and a raised shield can never be intentionally lowered.
+  Separately, `Sim::use_item_live` short-circuits on any entity target even after a
+  failed interact, so aiming at a hostile mob — the common case in combat — never
+  reaches the generic use-item path at all. Also corrects three stale claims in
+  `docs/backlog.md` item 7 (two already-shipped features, one mechanic that was never
+  real).
 - [Diagnosis: container screen titles (names, capitalisation, placement, named containers)](./research/container-titles.md) —
-  **Read-only investigation. No repo files were edited.** Everything below is either a
-  confirmed existing behaviour (with evidence) or a patch specification for something
-  genuinely missing.
+  Three of the four reported container-title problems are already fixed and
+  pixel-gated: the wire string, its capitalisation, and named-container resolution all
+  trace correctly through the live language table and both event routers. The one
+  real, still-open gap is placement — `label_layout` only models vanilla's
+  `titleLabelX`/`titleLabelY` anchor for 3 of its ~20 container screens, so 10 more
+  (furnace family, brewing stand, anvil, loom, stonecutter, cartography table,
+  dispenser/dropper, crafter) draw their title at the wrong default `(8, 6)` anchor.
+  §5 below is a ready-to-apply, additive patch spec for exactly that gap.
 - [Diagnosis: cross-plant faces go dark against a solid neighbour](./research/cross-model-light.md) —
-  **Status:** root cause established by reading both sources plus one f32 simulation
-  of our own baker. Read-only investigation — nothing in the repo was edited.
+  Root cause of "cross-plant faces go dark next to a solid neighbour": `mesh_models`
+  samples light from `pos + quad.direction` unconditionally, but vanilla only samples
+  the neighbour when a quad's plane is flush with the block boundary (`faceCubic`) or
+  the quad carries a `cullface`. A cross blade's plane is diagonal and carries no
+  `cullface`, so vanilla lights it from the plant's own cell; this client instead
+  reads the interior of the adjacent solid block, which the light engine stores as 0.
+  A per-quad fix and its mesh-level proof gate are specified in §5–6 below; nothing
+  in the repo has been edited by this read-only investigation.
 - [Diagnosis: "fog too extreme / longer dropoff" + "at night the shadow is a different colour"](./research/fog-and-night-shadow.md) —
-  Read-only investigation. Every vanilla number below is quoted from
-  `.cache/mc/26.2/{src,client-src}` with `file:line`. No repository file was modified.
+  Two read-only diagnoses, each with a specific, previously-unrecorded root cause.
+  **Fog**: three real divergences from vanilla — the terrain/entity fog colour never
+  receives vanilla's day/night colour track (an island: the mechanism exists and is
+  already wired to the sky disc, just not to terrain), the overworld's `linear(0,
+  1024)` environmental fog term is missing entirely (the "longer dropoff"), and the
+  render-distance term uses spherical distance where vanilla uses cylindrical, erasing
+  valleys under nearby hills. **Night shadow colour**: not a brightness bug — the
+  scalar lightmap this client computes is exactly vanilla's blue channel, so red and
+  green read 1.8x too bright; vanilla's lightmap is a genuine RGB colour (blue
+  moonlight, warm torchlight) that this client renders as flat grey. §4 gives
+  minimal, low-risk fixes for both, cheapest first.
