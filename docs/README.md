@@ -260,7 +260,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   [`ProjectileRegistry`](../crates/lodestone-entity/src/projectile.rs) for ballistic
   motion (arrows, snowballs, ender pearls, …) and
   [`ItemEntityRegistry`](../crates/lodestone-entity/src/item_entity.rs) for
-  dropped-item age/pickup-delay/merge.
+  dropped-item age/pickup-delay/merge. Both are now constructed and ticked in
+  production by [`MobSim`](../crates/lodestone-server/src/mobs.rs) — see "Production
+  wiring" below; this doc's earlier revision described them as unwired, which is no
+  longer true and is corrected here rather than left to mislead the next reader.
 - [Event routing — making a mis-routed `ClientEvent` a compile error](./event-routing.md) —
   `lodestone_model::event::route` is a single **exhaustive** table saying which of the
   client's event routers claim each `ClientEvent` variant. It exists so that adding a
@@ -429,6 +432,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   one production `MobController` implementor,
   [`NavigatingMob`](../crates/lodestone-entity/src/ai/navigating_mob.rs) — the same
   "goal exists, effect doesn't" shape #225's triage sweep found for all four defaults.
+- [Species-aware mob spawning (issue #205)](./mob-species-spawning.md) —
+  `MobSim::spawn_species` (`crates/lodestone-server/src/mobs.rs`), a spawn entry point
+  that resolves a mob's body, combat stats, and baseline goal set from its real
+  vanilla species instead of the universal `minecraft:zombie` placeholder
+  `MobSim::spawn` used to hand every caller. Before this, `SimMob::entity_type`
+  defaulted to `minecraft:zombie` unconditionally and a freshly spawned mob's
+  `GoalSelector` started empty, so two different species were behaviourally and
+  nominally identical — a `minecraft:pig` and a `minecraft:zombie` were, on the wire
+  and in the sim, the same mob.
 - [Smooth lighting / ambient occlusion on the model path](./model-smooth-lighting.md) —
   Per-corner ambient occlusion and light smoothing for baked block-model geometry —
   vanilla's `ModelBlockRenderer.AmbientOcclusionFace`, ported to
