@@ -63,10 +63,20 @@ smaller spot-check, which is kept only because it also happens to pass.
 
 ## What is still missing (why this lands unwired)
 
+**Re-checked this session (Batch G, #23 + #174), not assumed stale.** Before
+touching anything, `grep -rn "banner_pattern_layers\|shield_pattern_layers"`
+across the whole tree was run again: the only hits are `lib.rs`'s re-export
+and this module's own `#[cfg(test)]` block. **Confirmed still an island** —
+nothing outside this crate calls either function, exactly as this doc
+already claimed. That grep is the whole basis for treating #174 as a
+last-hop problem rather than a maths problem; see `docs/block-entity-renderers.md`'s
+Bell section for what *was* built instead this session and why.
+
 Two prerequisites, both outside this task's file ownership, so neither was
 built speculatively:
 
-1. **No typed decode of the pattern data.** `minecraft:banner_patterns` and
+1. **No typed decode of the pattern data** — for the **item** (GUI icon,
+   held-item) consumer specifically. `minecraft:banner_patterns` and
    `minecraft:base_color` are item data components. Item components this
    codebase has not given a dedicated typed variant land as
    `lodestone_game::item::ComponentValue::Opaque(Vec<u8>)` — structurally
@@ -74,18 +84,77 @@ built speculatively:
    colour/pattern list; `ItemComponents::get_int`/`get_str` cannot read them.
    Adding a typed variant means editing `lodestone-game/src/item.rs`, which
    this task's file ownership assigns to the cost-screens agent, not here.
+   **This prerequisite does not block the block-entity consumer** — see
+   below.
 2. **No banner/shield mesh.** Vanilla's flag mesh (`BannerFlagModel`) has
    per-vertex cloth-wave animation this codebase has never ported, and
    building it is explicitly issue #23's scope — the issue that owns this
    one says so directly: "the in-world banner block entity rendering itself
    is #23's scope... land the shared compositing function here and have
    #23's banner work consume it." This doc and module are that hand-off
-   point.
+   point. **Still true**: this session built the bell body/rim instead (a
+   single static box vs. an animated cloth mesh with a base layer plus up to
+   16 further tinted layers — a materially larger effort, and correctly
+   triaged as lower value for the "player survives an hour" bar than closing
+   a total hole is), so the mesh remains unbuilt.
 
 Shield's first-person hand and third-person held item (this issue's other
 named scope) are blocked on the same two prerequisites — there is no shield
 pattern to draw until both land, regardless of which draw call would host
 it.
+
+### Prerequisite 1 does not actually block the block-entity consumer — checked, not assumed
+
+A banner **block entity**'s pattern list is not an item component at all.
+`BannerBlockEntity.saveAdditional`/`loadAdditional`
+(`.cache/mc/26.2/client-src/net/minecraft/world/level/block/entity/BannerBlockEntity.java:49-63`)
+stores it under NBT key `"patterns"` (`BannerPatternLayers.CODEC`), and the
+base colour comes from the **block itself**
+(`AbstractBannerBlock.getColor()`, one banner block per dye colour — there is
+no `minecraft:white_banner` vs `minecraft:red_banner` *state property*, they
+are sixteen separate blocks), not from any component. `BlockEntity.nbt` is
+already generic and already proven to carry a block entity's real payload —
+`docs/block-entity-renderers.md`'s Sign section captured this NBT shape for a
+sign and it holds for any block entity type alike. So a `BannerSpawn`
+gather could parse `"patterns"` directly out of the world's own
+`BlockEntity.nbt`, the same way `lodestone_world::sign_text::SignText::parse`
+does for a sign, **without touching `lodestone-game` at all**. Prerequisite 1
+is real for the item-icon/held-item consumers (they start from an
+`ItemStack`, which *does* carry these as components) but not for the
+block-entity one — the next attempt at #23's banner work should start from
+the block-entity NBT path, not wait on the item-component work to land
+first.
+
+### A third prerequisite, found while landing bell: no per-instance tint
+
+Not named by the original scoping, because it only becomes visible once you
+try to actually wire a consumer rather than read the compositing function's
+signature. `lodestone_render::block_entity::BlockEntityInstance`/
+`BlockEntityBatch` (the shared batching type chest/skull/bell all go through)
+carry **one texture stem and no tint** per instance — batching is keyed on
+`(model, texture)` alone, and every instance in a batch shares one draw with
+no per-instance colour multiply. That is sufficient for chest (material
+changes the *texture*, never a tint) and skull (no tint at all) and bell
+(same), but `banner_pattern_layers`/`shield_pattern_layers` hand back a
+`Vec<PatternLayer>` where **every layer is the same handful of mask sprites
+re-tinted by a different `DyeColor`** — a base layer plus up to sixteen
+pattern layers, each needing its *own* gamma-space tint over a shared mask.
+Vanilla itself draws this as N separate `submitModel` calls, one per layer,
+each with a different `diffuseColor` argument
+(`BannerRenderer.submitPatternLayer`) — there is no way to fold sixteen
+different tints into the current one-texture-per-instance batch shape.
+
+So a real consumer needs `BlockEntityInstance`/`BlockEntityBatch` widened
+with a per-instance tint (parallel to the existing per-instance `light: u8`
+that already exists for exactly this reason — see that struct's field),
+**and** the GPU-side vertex/instance format `EntityPipeline` uses would need
+a matching per-instance colour slot threaded through to the shader's tint
+multiply. `EntityPipeline` is shared with every mob and every other block
+entity, so this is a wider-blast-radius change than adding one more
+`(model, texture)` entry was for bell — it is the real reason a banner
+consumer is a bigger lift than "port the mesh and call the function", and it
+is worth checking this doc before assuming the compositing function alone is
+the missing piece.
 
 ## How to change it, and the gotchas
 

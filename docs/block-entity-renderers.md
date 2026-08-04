@@ -1,14 +1,24 @@
 # Block entity renderers
 
-**Issue:** [#23](https://github.com/matteopolak/lodestone/issues/23) — still open; chest, skull and
-standing/wall sign text are landed and wired (see
-[Skull](#skull-skeleton-wither-skeleton-zombie-creeper-player) and
-[Sign](#sign-standingwall-text)), the rest are not. **The "skull's screen half is prepared but not
-yet wired" line this paragraph used to carry was itself stale** by the time this file was next
-read — `a8068c5` wired it in the same session that sentence was written and nobody came back to fix
-the summary at the top, exactly the staleness class `CLAUDE.md` warns is the most common defect in
-this repo's own written record. Read the per-type sections below, not this paragraph's memory of
-them.
+**Issue:** [#23](https://github.com/matteopolak/lodestone/issues/23) — still open; chest, skull,
+standing/wall sign text, and the bell body/rim are landed and wired (see
+[Skull](#skull-skeleton-wither-skeleton-zombie-creeper-player),
+[Sign](#sign-standingwall-text) and [Bell](#bell)), the rest are not. **The "skull's screen half is
+prepared but not yet wired" line this paragraph used to carry was itself stale** by the time this
+file was next read — `a8068c5` wired it in the same session that sentence was written and nobody
+came back to fix the summary at the top, exactly the staleness class `CLAUDE.md` warns is the most
+common defect in this repo's own written record. Read the per-type sections below, not this
+paragraph's memory of them.
+
+**Bell's own wiring has a real, named gap, unlike the other three: it is not installed from the
+live per-frame path.** `RenderState::set_bell_source`/`prepare_block_entities`'s bell half exist and
+are proven by a real GPU pixel gate (see [Bell](#bell)), but no `sim.rs`/`app.rs` call site feeds
+them a world-driven source the way chest/skull/sign have — that installer sits outside this
+session's file ownership (both files are off-limits: two other agents were mid-flight in them). So
+today a bell in a live game still shows only its block model's attachment frame, with nothing hanging
+in it, exactly as before this session. The render pass reaching pixels in a hermetic test is proven;
+a real client drawing one is not, and the doc says so at the one place ([Bell](#bell)) rather than
+letting the top-line summary overclaim it.
 
 ## The real vanilla scope, from the registration list — not the issue's guess-list
 
@@ -34,15 +44,20 @@ wrong in both directions:
   `vault`, and two 26.x additions, `copper golem statue` and `shelf`.
 
 So the honest count is: **3 of 26 registrations landed** (chest/ender chest/trapped chest all through
-`ChestRenderer`), **2 more landed and wired** (skull; standing/wall sign text, geometry excepted since
-a sign's board is a real block model), and the rest still absent. Picking the next few should read
-this list, not the original issue body.
+`ChestRenderer`), **3 more landed and wired** (skull; standing/wall sign text, geometry excepted since
+a sign's board is a real block model; and the bell body/rim, wired as a render pass but not installed
+from the live per-frame path — see [Bell](#bell)), and the rest still absent. Picking the next few
+should read this list, not the original issue body.
 
 ## What it is
 
-The cuboid rigs vanilla's `BlockEntityRenderer`s draw for blocks whose **block model does not
-describe them**. Today: chests (single, double left, double right; every material; the lid
-animation) and skull/head geometry (five of vanilla's seven types).
+The cuboid rigs vanilla's `BlockEntityRenderer`s draw for blocks whose block model **does not fully
+describe them**. Chest and skull are the total-absence case — their block models have zero elements,
+so before this work they were a hole in the world. Bell is the partial case: its block model has real
+geometry for the attachment frame, but the swinging body/rim comes from `BellRenderer` alone, same as
+chest and skull in kind, just not in degree. Today: chests (single, double left, double right; every
+material; the lid animation), skull/head geometry (five of vanilla's seven types), and the bell
+body/rim (see [Bell](#bell)).
 
 This is not a nice-to-have layer over an existing box. A 26.2 chest has **no block model at all** —
 `assets/minecraft/blockstates/chest.json` points at `block/chest`, and that file is verbatim:
@@ -538,6 +553,127 @@ front-only and back-only text produced pixel-identical frames
 kept passing, confirming the failure was specific to the neutered line and not a broken harness. The
 line was restored and the suite re-run green before anything was committed.
 
+## Bell
+
+Bell is the **partial**-hole case, unlike chest/skull's total one. `assets/minecraft/models/block/bell.json`
+has real geometry for the attachment frame (the post/mount), so before this landed a bell was not
+invisible — it just had nothing hanging in it, which is easy to mistake for "looks about right" in a
+quick screenshot and much easier to miss than a chest-shaped hole. Every visible triangle of the
+swinging body and its flared rim comes from `BellRenderer`/`BellModel`
+(`.cache/mc/26.2/client-src/net/minecraft/client/renderer/blockentity/BellRenderer.java`,
+`.../client/model/object/bell/BellModel.java`).
+
+### Geometry — one box, one nested child, 32×32
+
+`BellModel.createBodyLayer()`:
+
+```text
+bell_body  texOffs(0,  0)  box(-3, -6, -3,  6, 7, 6)  pose offset(8, 12, 8)
+  bell_base  texOffs(0, 13)  box(4, 4, 4,  8, 2, 8)  pose offset(-8, -12, -8)  (child of bell_body)
+```
+
+`bell_base` (the flared bottom rim) is nested **inside** `bell_body` in the real jar, not a sibling
+under root — its local pose exactly cancels `bell_body`'s own pivot, so the rim's world pivot lands
+at the block's own corner and the box itself sits directly below the tapered body, touching at the
+seam. `lodestone_assets::block_entity_models::bell_model`'s own test
+(`bell_base_sits_just_below_bell_body`) measures this through the real transform chain rather than
+restating the texel arithmetic, and a second test
+(`bell_base_is_nested_inside_bell_body_not_a_sibling`) pins the nesting itself — getting that backwards
+(making them siblings) would double-apply `bell_body`'s pivot and put the rim at the wrong height
+while every other check on the box's own dimensions stayed green.
+
+Authored **block-space-up**, the same convention chest uses and unlike skull:
+`BellRenderer.submit` applies no `scale(-1, -1, 1)` flip, so `CubeDef` origins and `PartPose`s add
+directly with no sign flip.
+
+### Placement needs no facing at all — the one surprise here
+
+Unlike chest (`rotationAround(-facing.toYRot(), …)`) and skull (a full ground/wall transform pair),
+`BellRenderer.submit` applies **no rotation of its own** before submitting the model. Every
+`FACING`/`ATTACHMENT` combination poses the body identically; only the block's own attachment-frame
+*model* (drawn by the ordinary block mesher, already real geometry) differs per attachment.
+`BlockEntityModelSet::resolve_bell` therefore calls the **existing** `block_entity_placement_matrix`
+with a fixed `facing_yaw_deg` of `0.0` — reusing chest's placement function unchanged rather than
+adding a bell-specific one, because vanilla itself has nothing bell-specific to port here.
+
+### The shake — a real formula, ported and predicted, but not triggered
+
+`BellModel.setupAnim`:
+
+```text
+baseRot = sin(ticks / PI) / (4 + ticks / 3)
+NORTH: xRot = -baseRot   SOUTH: xRot = +baseRot
+EAST:  zRot = -baseRot   WEST:  zRot = +baseRot
+```
+
+Ported as `lodestone_render::bell_shake_angle(direction: Option<BellShakeDirection>, ticks: f32)`.
+`lodestone-render`'s own unit test picks `ticks = pi^2 / 2` specifically because it makes
+`sin(ticks / pi) == 1` exactly, turning the remaining unknown into one division — a magnitude
+prediction from constants outside the function under test, not a sign check, per `CLAUDE.md`'s
+evidence standard. `bell_block_entity_pixels.rs`'s GPU gate reuses the same `ticks` value to prove
+the angle actually reaches the rendered mesh (see below), which the render-crate unit test cannot see
+on its own.
+
+**What is not wired: the trigger.** Vanilla starts a shake from `BellBlockEntity.triggerEvent`
+(`BLOCK_EVENT` with `b0 == 1`, the swing direction packed into `b1`) — a **different** `b0` meaning
+than chest's own `b0 == 1` (chest lid open/close vs. bell shake direction), so a router keyed only on
+`b0` would need the block type too, not just the byte. Nothing in this workspace decodes that trigger
+into a bell-specific tick clock yet (the `ChestLids`-shaped map this module's own "How to change it"
+section already anticipated: "a bell's swing... wants its own map alongside `ChestLids`, not a field
+on it"). `crate::block_entities::bell_spawn` always resolves `BellSpawn::shake` to `None`, so a live
+bell draws — correctly, at rest — but never shakes. That is a real, named gap, not a design choice;
+closing it needs a `BellShakes`-shaped tick map plus a `BLOCK_EVENT` arm that distinguishes bell from
+chest by block type, both outside this session's scope.
+
+### Status: the render pass is wired and gated; the live install is not
+
+Same generic path chest/skull/sign already proved: `BellSpawn` → `BlockEntityModelSet::resolve_bell`
+→ `plan_block_entities` → the existing `EntityPipeline` draw, with **zero changes** needed to
+`gpu/block_entities.rs`'s texture loader or the draw loop itself (both are already generic over
+`BLOCK_ENTITY_MODELS`/`block_entity_texture_stems()` — adding the `"bell"` entry to each was
+sufficient). `gpu.rs` gained a `BellSource` field, a `set_bell_source` setter and one more
+`filter_map` in `prepare_block_entities`, exactly mirroring `SkullSource`'s own three call sites.
+
+**What genuinely is missing, and is a different gap from anything chest/skull/sign had**: no
+`sim.rs`/`app.rs` call site installs a bell source from the live per-frame path.
+`crate::block_entities::bell_spawns` (the gather) exists and is unit-tested against the real 26.2
+state table, but both files that would call `RenderState::set_bell_source` every frame were another
+agent's in-flight work for this entire session (both are on this workspace's off-limits list), so the
+five-file pattern chest/skull used — CPU-side geometry proven first, GPU wiring handed to the session
+orchestrator once ready — stops one file short of that handoff: the wiring inside `gpu.rs` itself
+*is* applied (it is a small, additive, three-call-site change with no plausible collision), but the
+`sim.rs`/`app.rs` install is not, and is the one remaining hop before a real client draws a bell.
+
+`crates/lodestone-shell/tests/bell_block_entity_pixels.rs` is the proof this pass reaches pixels
+without that install — it calls `RenderState::set_bell_source` directly, the same way
+`chest_block_entity_pixels.rs` calls `set_block_entity_source` without any `sim.rs` involvement.
+Measured green:
+
+| gate | measurement |
+|---|---|
+| bell draws | rect `x136..184 y96..148` (2703 px); fill **74.5%**; changed bbox `x137..182 y96..147`, entirely inside |
+| shaking moves real pixels | resting-vs-shaking changed bbox `x137..190 y94..150` (1123 px), inside the rect padded 10px for the rotation's own reach |
+| arm is elsewhere | arm bbox `x247..319 y169..239`, disjoint from the bell rect |
+
+```bash
+cargo test -p lodestone-shell --test bell_block_entity_pixels -- --ignored --nocapture
+```
+
+**The negative control was watched failing**: commenting out the `resolve_bell` `filter_map` in
+`gpu.rs`'s `prepare_block_entities` and re-running produced exactly the island shape —
+
+```text
+assertion `left == right` failed: the source is installed and the bell is in front of the camera
+  left: 0
+ right: 1
+a resting and a shaking bell produced pixel-identical frames — the shake angle is computed but
+never reaches the mesh
+```
+
+— while `the_first_person_arm_is_somewhere_else` kept passing, confirming the failure was specific to
+the neutered line. The line was restored and the suite re-run green (matching the measurements above
+exactly) before anything was committed.
+
 ## How to change it
 
 ### Adding a block-entity type
@@ -665,7 +801,9 @@ Nothing user-facing. The values that matter are all ported constants:
 | `block_entities::VIEW_DISTANCE` | `64.0` blocks | `BlockEntityRenderer.getViewDistance()`, compared against `Vec3.atCenterOf(pos)` — the block **centre**, not its corner |
 | `LID_SPEED` | `0.1` / tick | `ChestLidController.tickLid()` |
 | chest sheet size | 64×64 | all three `ChestModel` layers' `LayerDefinition.create(mesh, 64, 64)` |
-| `EXPECTED_SHEETS` (gate) | `22` | derived from `chest_texture_stems()` |
+| bell sheet size | 32×32 | `BellModel.createBodyLayer`'s `LayerDefinition.create(mesh, 32, 32)` |
+| bell shake denominator | `4.0 + ticks / 3.0` | `BellModel.setupAnim` |
+| expected sheet count (gates) | **derived**, not a literal | `block_entity_texture_stems().len()` — a hardcoded `22` (chest-only) already went stale once when skull landed; see `skull_block_entity_pixels.rs`'s `expected_sheets` doc |
 
 Sheets load from `client.jar` via `resources::load_block_entity_textures`, fail-open: no pack means
 chests **draw nothing** rather than a synthetic placeholder. That asymmetry with mob sheets (which do
@@ -801,14 +939,20 @@ Against the real 26-entry registration list (see above), not the issue's origina
   own text transform), the black-dye-glowing outline, per-glyph world-light modulation, line wrapping
   past 90px, and rich per-run text formatting — all named and reasoned about in that section rather
   than silently missing.
+- **Bell — the body/rim geometry, placement and shake formula are landed** (see [Bell](#bell)
+  above), wired through a real GPU pixel gate. **Still open within bell scope: the `BLOCK_EVENT`
+  trigger** (`b0 == 1`, a **different** `b0` meaning than chest's own `b0 == 1` — direction packed
+  into `b1` rather than a viewer count) is not decoded into a tick clock anywhere, and no
+  `sim.rs`/`app.rs` call site installs the render source from the live per-frame path — both named
+  explicitly in that section rather than silently missing. A bell in a live game today still shows
+  only its (real) attachment-frame block model, unchanged from before this session.
 - Banners (layered patterns from the `banner_patterns` atlas — tracked separately as
   [#174](https://github.com/matteopolak/lodestone/issues/174), which also covers the shield item
-  sharing the same compositing function), shulker boxes (`shulker_boxes` atlas, 16 dyes), the
-  enchanting-table book (a full animation state machine — `open`/`flip`/`rot`/`time`, all
-  client-simulated, none of it on the wire, closer in scope to the chest lid than to a static model),
-  bells (also animated — a shake driven by `BLOCK_EVENT` `b0 == 1`, a **different** `b0` meaning than
-  chest's own `b0 == 1`; the block's own attachment frame already has real geometry, only the
-  swinging body box is missing), mob spawner (draws a miniature spinning entity inside the cage —
+  sharing the same compositing function; see `docs/banner-shield-patterns.md` for why that
+  compositing function is a confirmed island and what actually blocks a consumer), shulker boxes
+  (`shulker_boxes` atlas, 16 dyes), the enchanting-table book (a full animation state machine —
+  `open`/`flip`/`rot`/`time`, all client-simulated, none of it on the wire, closer in scope to the
+  chest lid than to a static model), mob spawner (draws a miniature spinning entity inside the cage —
   reuses full entity rendering, not a simple cuboid rig), piston head, campfire, brushable block,
   decorated pot (`decorated_pot` atlas; its sides need **up to four independently textured sprites
   per instance** from NBT `sherds`, which the current `(model, texture)` single-texture-per-instance
@@ -846,7 +990,13 @@ share one light sample, and the `SpecialDates.isExtendedChristmas()` clock behin
 - [`entity-rendering.md`](./entity-rendering.md) — the cuboid-rig machinery this reuses.
 - [`gpu-module-layout.md`](./gpu-module-layout.md) — the bind-group budget and pass ordering.
 - Vanilla reference: `.cache/mc/26.2/client-src/net/minecraft/client/{model/object/{chest/ChestModel,
-  skull/SkullModel},renderer/blockentity/{BlockEntityRenderers,ChestRenderer,SkullBlockRenderer,
-  BlockEntityRenderDispatcher,AbstractSignRenderer,StandingSignRenderer},renderer/Sheets}.java`.
+  skull/SkullModel,bell/BellModel},renderer/blockentity/{BlockEntityRenderers,ChestRenderer,
+  SkullBlockRenderer,BlockEntityRenderDispatcher,AbstractSignRenderer,StandingSignRenderer,
+  BellRenderer},renderer/Sheets}.java`, plus
+  `net/minecraft/world/level/block/{BellBlock,entity/BellBlockEntity}.java` for the block-state
+  properties and the `BLOCK_EVENT` trigger bell does not yet decode.
   `BlockEntityRenderers.java` is the registration list itself — read it directly rather than trusting
   any summary of it, including this doc's, the next time the scope needs re-deriving.
+- [`banner-shield-patterns.md`](./banner-shield-patterns.md) — issue #174's compositing function,
+  confirmed still an island this session (grep evidence there), and what its next consumer actually
+  needs.
