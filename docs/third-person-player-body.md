@@ -260,10 +260,15 @@ reachable in principle, but on the one path a shipped binary actually runs.
   `entities` slice `prepare_item_geometry` reads, the local player's own held
   item renders through `merge_held_items` exactly like a mob's does — no
   separate held-item path was added for the third-person case.
-  `Sim::third_person_body_state` resolves both `MainHand` (selected hotbar
-  slot) and `OffHand` (native inventory index `40`) into
-  `ThirdPersonBodyState::equipment`; armour is deliberately not carried, same
-  as every other entity's `EntityDraw::equipment`.
+  `Sim::third_person_body_state` resolves `MainHand` (selected hotbar slot),
+  `OffHand` (native inventory index `40`), and all four armour slots (native
+  indices `39/38/37/36` for head/chest/legs/feet) into
+  `ThirdPersonBodyState::equipment` — see
+  [`armour-rendering.md`](./armour-rendering.md) for the slot table and why the
+  native indices run backwards. This line previously said armour was
+  deliberately not carried; that was true when written and stale by the time
+  it was re-read for #armour-rendering's follow-up pass — the local player's
+  own armour draws as of `22dc0ee`.
 
 ## Configuration
 
