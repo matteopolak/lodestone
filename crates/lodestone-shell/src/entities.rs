@@ -2590,8 +2590,8 @@ fn lerp_angle(a: f32, b: f32, t: f32) -> f32 {
 mod tests {
     use super::*;
     use lodestone_ecs::entity::{
-        CreeperSwellDir, DisplayItem, Equipment, EntityKind, HeadYaw, OnGround, Position,
-        Rotation, Variant, Velocity,
+        CreeperSwellDir, CustomName, CustomNameVisible, DisplayItem, Equipment, EntityKind,
+        EntityUuid, HeadYaw, OnGround, Position, Rotation, Variant, Velocity,
     };
 
     /// Test-only ingest builder replacing the deleted `EntitySnapshot` (issue
@@ -2709,6 +2709,448 @@ mod tests {
         let ids: Vec<i32> = world.resource::<EntityIndex>().iter().map(|(id, _)| id).collect();
         for id in ids {
             forget(world, id);
+        }
+    }
+
+    /// Builds a minimal ingest entity for [`resolve_entity_facts`] tests —
+    /// only the components that function actually reads need real values,
+    /// the rest are "never reported" by omission. The net.rs-era sibling of
+    /// this was `bare_entity_view`, building an `EntityView` for the now-
+    /// deleted `entity_snapshot` (issue #36): that boundary is now ingest
+    /// components -> [`EntityFacts`], and [`resolve_entity_facts`] is called
+    /// directly with an explicit id and an `EntityRef` rather than through
+    /// [`EntityIndex`], the same way [`fold_entities`] calls it per tracked
+    /// id — so these tests need no [`EntityIndex`]/[`MinecraftEntityId`] at
+    /// all, unlike [`IngestSnap`].
+    fn bare_entity(world: &mut World) -> Entity {
+        world
+            .spawn((
+                EntityKind("minecraft:item".parse().expect("valid type key")),
+                Position(to_model_vec3(Vec3::new(1.0, 64.0, 2.0))),
+                Rotation(lodestone_model::Rotation { yaw: 0.0, pitch: 0.0 }),
+                HeadYaw(0.0),
+                OnGround(true),
+            ))
+            .id()
+    }
+
+    /// Resolves `entity` the same way [`fold_entities`] resolves a tracked
+    /// id — id `9` throughout, matching the old `bare_entity_view`'s
+    /// `entity_id: 9`, since nothing here asserts on [`EntityFacts::id`].
+    fn facts_for(
+        world: &World,
+        entity: Entity,
+        tab_list: &lodestone_game::tablist::TabList,
+    ) -> EntityFacts {
+        resolve_entity_facts(9, world.entity(entity), tab_list)
+            .expect("bare_entity always carries the four required components")
+    }
+
+    /// The gap this fix closed: `SET_ENTITY_MOTION`/`add_entity` already
+    /// decoded into a [`Velocity`] component, and [`OnGround`] has always
+    /// been tracked — but the old `entity_snapshot` dropped both on the
+    /// floor before they ever reached `EntitySnapshot`, so
+    /// `EntityInterpolator` had no way to know a dropped item's velocity
+    /// even though the wire data was sitting right there.
+    #[test]
+    fn resolve_entity_facts_carries_velocity_and_on_ground_through() {
+        let mut world = World::new();
+        let entity = bare_entity(&mut world);
+        world.entity_mut(entity).insert((
+            Velocity(to_model_vec3(Vec3::new(0.08, 0.2, 0.0))),
+            OnGround(false),
+        ));
+        let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
+        assert_eq!(
+            facts.velocity,
+            Some(Vec3::new(0.08, 0.2, 0.0)),
+            "the decoded velocity must survive the ingest-components -> EntityFacts boundary"
+        );
+        assert!(!facts.on_ground);
+
+        let mut world = World::new();
+        let entity = bare_entity(&mut world);
+        let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
+        assert_eq!(
+            facts.velocity, None,
+            "a never-reported velocity must stay None, not collapse to zero"
+        );
+        assert!(facts.on_ground);
+    }
+
+    /// The same shape of gap as the velocity fix above, one field over:
+    /// `SET_EQUIPMENT` already folds into the [`Equipment`] component and the
+    /// old `entity_snapshot` dropped it, so `EntityInterpolator` could never
+    /// learn that a mob was holding anything.
+    #[test]
+    fn resolve_entity_facts_carries_equipment_through() {
+        let mut world = World::new();
+        let entity = bare_entity(&mut world);
+        world.entity_mut(entity).insert(Equipment(vec![
+            lodestone_model::EntityEquipment {
+                slot: EquipmentSlot::MainHand,
+                item: Some(lodestone_model::ItemStack::new(
+                    "minecraft:diamond_sword".parse().expect("valid item key"),
+                    1,
+                )),
+            },
+            // An explicit clear: present in the list, empty in the slot. This
+            // must survive as `Some(slot, None)`, not vanish.
+            lodestone_model::EntityEquipment {
+                slot: EquipmentSlot::Head,
+                item: None,
+            },
+        ]));
+        let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
+        assert_eq!(
+            facts.equipment.len(),
+            2,
+            "both an occupied and an explicitly-cleared slot must cross the boundary"
+        );
+        let main = facts
+            .equipment
+            .iter()
+            .find(|(slot, _)| *slot == EquipmentSlot::MainHand)
+            .expect("main hand survived");
+        assert_eq!(
+            main.1.as_ref().map(ToString::to_string).as_deref(),
+            Some("minecraft:diamond_sword")
+        );
+        let head = facts
+            .equipment
+            .iter()
+            .find(|(slot, _)| *slot == EquipmentSlot::Head)
+            .expect("head slot survived");
+        assert_eq!(
+            head.1, None,
+            "an explicitly-empty slot must stay present-and-empty, not be dropped"
+        );
+
+        // Control: a mob the server has said nothing about carries nothing, so
+        // a consumer cannot mistake "no data" for "empty hands confirmed".
+        let mut bare_world = World::new();
+        let bare_entity_id = bare_entity(&mut bare_world);
+        let bare = facts_for(
+            &bare_world,
+            bare_entity_id,
+            &lodestone_game::tablist::TabList::new(),
+        );
+        assert!(bare.equipment.is_empty());
+    }
+
+    /// The last hop of `docs/armour-rendering.md`'s dye chain. The old
+    /// `entity_snapshot` passed `Vec::new()` for the dye list unconditionally,
+    /// so every leather item rendered undyed while the wire data sat inside
+    /// the `Equipment` component's own `ItemStack`s.
+    ///
+    /// The expected value comes from outside our code: vanilla's own default
+    /// leather RGB is the literal `10511680` in
+    /// `ItemStackComponentizationFix.java:250`, which writes it as
+    /// `dyed_color`'s `rgb` when an old stack carries no explicit colour.
+    /// That is `0x00A06540`.
+    #[test]
+    fn resolve_entity_facts_carries_equipment_dye_through() {
+        const VANILLA_DEFAULT_LEATHER: u32 = 0x00A0_6540;
+
+        let dyed = |path: &str, colour: Option<u32>| {
+            let mut stack =
+                lodestone_model::ItemStack::new(path.parse().expect("valid item key"), 1);
+            stack.components.dyed_color = colour;
+            stack
+        };
+
+        let mut world = World::new();
+        let entity = bare_entity(&mut world);
+        world.entity_mut(entity).insert(Equipment(vec![
+            lodestone_model::EntityEquipment {
+                slot: EquipmentSlot::Chest,
+                item: Some(dyed(
+                    "minecraft:leather_chestplate",
+                    Some(VANILLA_DEFAULT_LEATHER),
+                )),
+            },
+            // An undyeable item in an occupied slot must contribute no entry
+            // at all — not a zero, which would read as "dyed pure black".
+            lodestone_model::EntityEquipment {
+                slot: EquipmentSlot::Head,
+                item: Some(dyed("minecraft:iron_helmet", None)),
+            },
+        ]));
+        let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
+        assert_eq!(
+            facts.equipment_dye,
+            vec![(EquipmentSlot::Chest, VANILLA_DEFAULT_LEATHER)],
+            "only the dyed slot contributes, and it carries vanilla's exact RGB"
+        );
+        assert_eq!(
+            facts.equipment.len(),
+            2,
+            "narrowing the dye list must not narrow `equipment` itself"
+        );
+
+        // Control: the same item with the dye component absent must produce
+        // an empty list, so the assertion above cannot pass on a build that
+        // simply forwards every occupied slot with some placeholder colour.
+        let mut undyed_world = World::new();
+        let undyed_entity = bare_entity(&mut undyed_world);
+        undyed_world.entity_mut(undyed_entity).insert(Equipment(vec![
+            lodestone_model::EntityEquipment {
+                slot: EquipmentSlot::Chest,
+                item: Some(dyed("minecraft:leather_chestplate", None)),
+            },
+        ]));
+        let undyed = facts_for(
+            &undyed_world,
+            undyed_entity,
+            &lodestone_game::tablist::TabList::new(),
+        );
+        assert!(
+            undyed.equipment_dye.is_empty(),
+            "no dye component reported means no dye, never a default"
+        );
+    }
+
+    /// A third instance of the velocity/equipment gap: [`Variant`] was
+    /// already fully decoded and the old `entity_snapshot` simply never read
+    /// it. This is the fix `docs/entity-rendering.md`'s "Render layers: sheep
+    /// wool" section describes as the missing last hop.
+    #[test]
+    fn resolve_entity_facts_carries_variant_through() {
+        let mut world = World::new();
+        let entity = bare_entity(&mut world);
+        world.entity_mut(entity).insert(Variant(EntityVariant::Dyed {
+            color: 14,
+            sheared: false,
+        }));
+        let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
+        assert_eq!(
+            facts.variant,
+            Some(EntityVariant::Dyed {
+                color: 14,
+                sheared: false
+            }),
+            "a decoded variant must survive the ingest-components -> EntityFacts boundary"
+        );
+
+        // Control: a mob the server has never sent a variant for must read as
+        // `None`, not as some default variant.
+        let mut bare_world = World::new();
+        let bare_entity_id = bare_entity(&mut bare_world);
+        let bare = facts_for(
+            &bare_world,
+            bare_entity_id,
+            &lodestone_game::tablist::TabList::new(),
+        );
+        assert_eq!(bare.variant, None);
+    }
+
+    /// The last hop of the creeper-swell chain `docs/entity-rendering.md`'s
+    /// "Creeper swell" section names: [`CreeperSwellDir`] is fully decoded —
+    /// the old `entity_snapshot` was the one place that dropped it on the
+    /// floor, hardcoding `None` regardless of what the server actually
+    /// reported.
+    #[test]
+    fn resolve_entity_facts_carries_creeper_swell_dir_through() {
+        let mut world = World::new();
+        let entity = bare_entity(&mut world);
+        world.entity_mut(entity).insert(CreeperSwellDir(1));
+        let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
+        assert_eq!(
+            facts.creeper_swell_dir,
+            Some(1),
+            "a decoded swell direction must survive the ingest-components -> EntityFacts boundary"
+        );
+
+        // Control: an entity the server has never reported a swell direction
+        // for (i.e. every non-creeper) must read as `None`, not some default
+        // "growing" or "shrinking" direction.
+        let mut bare_world = World::new();
+        let bare_entity_id = bare_entity(&mut bare_world);
+        let bare = facts_for(
+            &bare_world,
+            bare_entity_id,
+            &lodestone_game::tablist::TabList::new(),
+        );
+        assert_eq!(bare.creeper_swell_dir, None);
+    }
+
+    /// The visible half of the stack-count gap `docs/dropped-items.md`
+    /// describes: [`DisplayItem::count`](lodestone_model::ItemStack::count)
+    /// was decoded all the way to the component and the old `entity_snapshot`
+    /// dropped it exactly at this conversion, so a stack of 64 diamonds and a
+    /// single diamond were indistinguishable past this point.
+    #[test]
+    fn resolve_entity_facts_carries_item_count_through() {
+        let mut world = World::new();
+        let entity = bare_entity(&mut world);
+        world.entity_mut(entity).insert(DisplayItem(Some(
+            lodestone_model::ItemStack::new(
+                "minecraft:diamond".parse().expect("valid item key"),
+                64,
+            ),
+        )));
+        let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
+        assert_eq!(facts.count, 64);
+
+        // Control: no stack at all must read as the neutral `1`, not `0` — a
+        // consumer that multiplies by count must never draw zero copies of
+        // nothing.
+        let mut bare_world = World::new();
+        let bare_entity_id = bare_entity(&mut bare_world);
+        let bare = facts_for(
+            &bare_world,
+            bare_entity_id,
+            &lodestone_game::tablist::TabList::new(),
+        );
+        assert_eq!(bare.count, 1);
+    }
+
+    /// Issue #100's two nametag rules, each pinned directly against
+    /// [`resolve_entity_facts`]'s real boundary rather than against the
+    /// render path — the render-level pixel gate (`tests/nametag_pixels.rs`)
+    /// proves the wiring end to end, this proves the *resolution logic* in
+    /// isolation. Moved from `net.rs`'s now-deleted `entity_snapshot` tests
+    /// (issue #36): the boundary these pin is ingest components ->
+    /// `EntityFacts`, not `EntityView` -> `EntitySnapshot`.
+    mod name_tag {
+        use uuid::Uuid;
+
+        use super::*;
+
+        fn bare_player_entity(world: &mut World, uuid: Uuid) -> Entity {
+            let entity = bare_entity(world);
+            world.entity_mut(entity).insert((
+                EntityKind("minecraft:player".parse().expect("valid type key")),
+                EntityUuid(uuid),
+            ));
+            entity
+        }
+
+        /// A player's tag is always its tab-list display name —
+        /// `Player.shouldShowName()` returns `true` unconditionally
+        /// (`Player.java:1637`), never gated on any metadata flag.
+        #[test]
+        fn a_player_entitys_tag_is_its_tab_list_display_name() {
+            let id = Uuid::from_u128(1);
+            let mut tabs = lodestone_game::tablist::TabList::new();
+            tabs.insert(lodestone_game::tablist::PlayerListEntry::new(
+                lodestone_game::tablist::GameProfile::new(id, "Steve"),
+            ));
+
+            let mut world = World::new();
+            let entity = bare_player_entity(&mut world, id);
+            let facts = facts_for(&world, entity, &tabs);
+            assert_eq!(
+                facts.name_tag.map(|t| t.text),
+                Some("Steve".to_string()),
+                "a player entity must show its tab-list name unconditionally"
+            );
+        }
+
+        /// The other half: no matching tab-list entry (the player left, or a
+        /// synthetic/demo entity claiming to be a player) draws nothing
+        /// rather than a blank or placeholder tag.
+        #[test]
+        fn a_player_entity_with_no_tab_list_entry_has_no_tag() {
+            let mut world = World::new();
+            let entity = bare_player_entity(&mut world, Uuid::from_u128(2));
+            let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
+            assert_eq!(facts.name_tag, None);
+        }
+
+        /// Every other entity's tag is its `CUSTOM_NAME`, gated on
+        /// `CUSTOM_NAME_VISIBLE` — `LivingEntity.shouldShowName() =
+        /// isCustomNameVisible()` (`LivingEntity.java:2364`/`:2365`), unlike
+        /// a player.
+        #[test]
+        fn a_mob_with_a_visible_custom_name_shows_it() {
+            let mut world = World::new();
+            let entity = bare_entity(&mut world);
+            world.entity_mut(entity).insert((
+                CustomName(Some("Babe".to_string())),
+                CustomNameVisible(true),
+            ));
+            let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
+            assert_eq!(facts.name_tag.map(|t| t.text), Some("Babe".to_string()));
+        }
+
+        /// The gate the base `Entity.shouldShowName()` predicate is: a
+        /// custom name with `CUSTOM_NAME_VISIBLE` unset (or `false`) shows
+        /// nothing, even though the name itself is known.
+        #[test]
+        fn a_mob_with_a_custom_name_but_not_visible_shows_nothing() {
+            let mut world = World::new();
+            let entity = bare_entity(&mut world);
+            world.entity_mut(entity).insert((
+                CustomName(Some("Babe".to_string())),
+                CustomNameVisible(false),
+            ));
+            let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
+            assert_eq!(
+                facts.name_tag, None,
+                "CUSTOM_NAME_VISIBLE=false must suppress the tag even though a name is known"
+            );
+
+            // Same for "never reported" — the common case for most mobs.
+            let mut bare_world = World::new();
+            let bare_entity_id = bare_entity(&mut bare_world);
+            let bare = facts_for(
+                &bare_world,
+                bare_entity_id,
+                &lodestone_game::tablist::TabList::new(),
+            );
+            assert_eq!(bare.name_tag, None);
+        }
+
+        /// An explicitly empty custom name must not draw a zero-width
+        /// visible tag — same rule the issue's scope names ("a non-empty
+        /// custom name").
+        #[test]
+        fn a_mob_with_an_empty_custom_name_shows_nothing_even_if_visible() {
+            let mut world = World::new();
+            let entity = bare_entity(&mut world);
+            world.entity_mut(entity).insert((
+                CustomName(Some(String::new())),
+                CustomNameVisible(true),
+            ));
+            let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
+            assert_eq!(facts.name_tag, None);
+        }
+
+        /// `Entity.isDiscrete()` (`isShiftKeyDown()`, bit 1 of the shared
+        /// flags byte) gates the see-through pass off while sneaking
+        /// (`SubmitNodeCollection.java:109`).
+        #[test]
+        fn sneaking_suppresses_see_through_but_not_the_tag_itself() {
+            let mut world = World::new();
+            let entity = bare_entity(&mut world);
+            world.entity_mut(entity).insert((
+                CustomName(Some("Babe".to_string())),
+                CustomNameVisible(true),
+                EntityFlags(0x02), // FLAG_SHIFT_KEY_DOWN
+            ));
+            let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
+            let tag = facts.name_tag.expect("the tag itself must still draw while sneaking");
+            assert_eq!(tag.text, "Babe");
+            assert!(!tag.see_through, "sneaking must suppress the see-through pass");
+        }
+
+        /// The default (no metadata reported yet) must not suppress
+        /// see-through — most entities aren't sneaking.
+        #[test]
+        fn unknown_flags_default_to_see_through_enabled() {
+            let mut world = World::new();
+            let entity = bare_entity(&mut world);
+            world.entity_mut(entity).insert((
+                CustomName(Some("Babe".to_string())),
+                CustomNameVisible(true),
+            ));
+            assert!(
+                world.entity(entity).get::<EntityFlags>().is_none(),
+                "control: this test is about the unreported case"
+            );
+            let facts = facts_for(&world, entity, &lodestone_game::tablist::TabList::new());
+            assert!(facts.name_tag.expect("tag must draw").see_through);
         }
     }
 
