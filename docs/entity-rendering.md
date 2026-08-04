@@ -291,9 +291,11 @@ Grepped for the producer across the whole tree, not just a consumer in one file
 (per `CLAUDE.md`'s rule on stale absence claims):
 
 * `crates/protocol/v770/src/packets/metadata.rs` decodes the sheep wool
-  metadata byte (index 17) into `EntityVariant::Dyed { color, sheared }`
+  metadata byte (index 18 — corrected from an initial hand-count of 17 that
+  missed `AgeableMob.AGE_LOCKED`; see `IDX_SHEEP_WOOL`'s own doc comment) into
+  `EntityVariant::Dyed { color, sheared }`
   (`color` low nibble, `sheared` bit `0x10`), guarded on `MetadataClass::Sheep`
-  so it cannot collide with another mob's byte-valued index 17.
+  so it cannot collide with another mob's byte-valued index 18.
   `lodestone-model/src/event.rs` carries both fields on the shared
   `EntityVariant::Dyed` arm.
 * `lodestone-client/src/state.rs`'s `entity_view` reads a `Variant` ECS
@@ -440,6 +442,168 @@ than the only proof anything works at all.
 * **`sheep_wool_undercoat.png` / `SheepWoolUndercoatLayer`.** A second overlay
   that only draws for a jeb_ sheep or a non-white one; not built, since it
   depends on the same unwired dye plumbing as the primary layer.
+
+**A second, independent bug in this subsystem: a naturally white sheep
+rendered with no wool at all** (player report: "White sheep render with no
+wool. A brown sheep had wool properly."). Everything above — the mesh, the
+tint table, the fold through `EntitySnapshot`, the pixel gates — was correct
+and landed; the bug was one layer further down, in what the wire ever tells
+the decoder in the first place.
+
+**Root cause, confirmed against the real 26.2 jar, not assumed.** Vanilla's
+`SynchedEntityData` only ever puts a field on the wire when it differs from
+the accessor's own default:
+
+```java
+// SynchedEntityData.DataItem — .cache/mc/26.2/src/net/minecraft/network/syncher/SynchedEntityData.java:207-209
+public boolean isSetToDefault() {
+   return this.initialValue.equals(this.value);
+}
+```
+
+```java
+// SynchedEntityData.getNonDefaultValues — same file, :92-106
+public @Nullable List<SynchedEntityData.DataValue<?>> getNonDefaultValues() {
+   ...
+   for (SynchedEntityData.DataItem<?> dataItem : this.itemsById) {
+      if (!dataItem.isSetToDefault()) { ... }
+   }
+   ...
+}
+```
+
+and `getNonDefaultValues()` — not `packDirty()` — is what a spawn's *initial*
+`ClientboundSetEntityDataPacket` is built from, and what every later resend
+(`addPairing`) uses too:
+
+```java
+// ServerEntity — .cache/mc/26.2/src/net/minecraft/server/level/ServerEntity.java:87 and :282-283
+this.trackedDataValues = entity.getEntityData().getNonDefaultValues();
+...
+if (this.trackedDataValues != null) {
+   broadcast.accept(new ClientboundSetEntityDataPacket(this.entity.getId(), this.trackedDataValues));
+}
+```
+
+`Sheep` defines its wool accessor with default byte `0`:
+
+```java
+// Sheep.java:63, :114
+private static final EntityDataAccessor<Byte> DATA_WOOL_ID = SynchedEntityData.defineId(Sheep.class, EntityDataSerializers.BYTE);
+...
+entityData.define(DATA_WOOL_ID, (byte)0);
+```
+
+and byte `0` decodes to `DyeColor.byId(0 & 15)` = **white**, sheared bit
+(`0x10`) unset — `Sheep.java:228,258`. So a naturally white, unsheared sheep
+never puts metadata index 18 on the wire, at spawn or ever. This is not a
+decode bug: `read_entity_metadata` in
+`crates/protocol/v770/src/packets/metadata.rs` was decoding correctly all
+along — there was simply nothing in the byte stream to decode. `variant`
+stayed `None`, `entities::sheep_wool` (which matches only
+`Some(EntityVariant::Dyed { .. })`) returned `None`, and the wool layer never
+drew. A dyed or sheared sheep worked throughout, because that state is
+non-default and therefore always on the wire — exactly matching both
+sightings in the report ("a brown sheep had wool properly").
+
+**Live confirmation attempted, not obtained — recorded rather than silently
+dropped.** The briefing stated a creative oracle was running on `:25570`/
+`:25571`; at the time this fix was verified, the game port was closed, no
+matching Java process was running, and the Docker daemon backing
+`scripts/live-oracles/creative.sh` was not up on this machine. Bringing it up
+was judged not worth the session budget for a claim the jar already proves
+outside our own code (`decode(encode(x)) == x` is explicitly not good enough
+per `CLAUDE.md`, but *vanilla source* is; see "Data sources, in order"). If
+this needs re-confirming on the wire, `creative.sh` plus
+`rcon-op.py … "summon minecraft:sheep …"` against a fresh entity, inspected
+before it can be dyed, is the way — remember a freshly summoned entity is not
+selector-visible until the next server tick.
+
+**The fix, and where it lives.** `crates/lodestone-shell/src/entities.rs` was
+off-limits (another agent's in-flight change), and the model layer's own
+[`EntityMetadataUpdate::variant`] doc comment already specifies the intended
+contract — "`None` means the packet did not carry a variant field; a consumer
+treats that as the type's vanilla default, not 'unknown'" — so the fix
+belongs at the point that first learns an entity is a sheep, not the point
+that consumes the fold. `crates/protocol/v770/src/adapter.rs`'s
+`handle_add_entity` already computes `TrackedEntity { class:
+metadata_class(name), .. }` at spawn — the exact "what the server said
+becomes what the entity is" seam — so for a `MetadataClass::Sheep` spawn it
+now also emits a synthetic `ClientEvent::EntityMetadataUpdated` carrying
+`EntityVariant::Dyed { color: 0, sheared: false }`, through the **same**
+channel a real `set_entity_data` uses. A later real `set_entity_data` naming
+index 18 (dye, shear) decodes afterward in packet order and overwrites this
+default exactly as it would overwrite any other value — no downstream
+consumer (the ECS fold, the shell snapshot) needs a special case for
+"unreported".
+
+**A plausible-looking alternative that would have been wrong, recorded rather
+than tried and reverted.** The tempting simpler fix is inside
+`read_entity_metadata` itself: "if `class == Sheep` and index 18 never
+appeared in this packet's list, default it." That is wrong, and the wrongness
+is invisible from reading the decoder alone — `EntityMetadataUpdate` is
+documented as *cumulative*: `None` means "this packet did not mention it",
+consumed by folding only non-`None` fields into persisted state. The decoder
+has no notion of "this is the entity's first packet" versus "the fortieth
+unrelated update" (health, pose, air supply, …); defaulting inside it would
+silently reset an already-dyed sheep back to white on every later packet that
+happens not to mention wool. Defaulting must happen exactly once, at spawn.
+`crates/protocol/v770/tests/sheep_wool_default.rs`'s
+`the_raw_decoder_never_invents_a_default_only_spawn_does` pins this boundary
+directly: an empty metadata list decoded for a `Sheep`-classed entity must
+report `variant: None`, not a default — proof the raw decoder stays pure and
+the synthesis lives only in `handle_add_entity`.
+
+**Verification.** `crates/protocol/v770/tests/sheep_wool_default.rs`:
+`sheep_spawn_with_no_metadata_packet_still_reports_default_wool` decodes only
+an `add_entity` packet (no `set_entity_data` at all — the fixture is a
+structurally genuine absence, not an explicit byte `0`, to avoid the "world"
+species of vacuous test) and asserts the synthesized `Dyed { color: 0,
+sheared: false }` is present; `non_sheep_spawn_synthesizes_no_wool_variant` is
+the gating control (a pig spawn synthesizes nothing).
+**Negative control, run and observed to fail:** the gate on
+`tracked.class == Some(MetadataClass::Sheep)` in `handle_add_entity` was
+temporarily replaced with `false && …`, reproducing the reported bug exactly:
+
+```text
+thread 'sheep_spawn_with_no_metadata_packet_still_reports_default_wool' panicked:
+assertion `left == right` failed: ...
+  left: None
+ right: Some(Dyed { color: 0, sheared: false })
+```
+
+— restored immediately after, and `cargo test -p lodestone-v770
+--no-fail-fast` reconfirmed all 63 test binaries green.
+`crates/lodestone-render/tests/sheep_wool_pixels.rs` gained
+`the_synthesized_default_wool_colour_renders_visibly` (`#[ignore]`d, GPU),
+proving the render-side half: the exact colour the seam now picks
+(`sheep_wool_tint(0)`) is a real, visible wool colour, not a sentinel —
+measured `10151`/`65536` px differing from a bare sheep on this machine,
+matching the existing gate's own figures for the same colour.
+
+**Census: the same hole exists for every other `EntityVariant` arm, but
+nothing else reaches a pixel today, so nothing else was fixed.** Grepped for
+every producer and consumer of `lodestone_model::EntityVariant` across the
+whole tree (not a named file):
+
+| arm | vanilla accessor & default (jar-confirmed) | decoded today? | reaches a pixel today? |
+|---|---|---|---|
+| `Dyed` (sheep) | `Sheep.DATA_WOOL_ID`, byte `0` = white/unsheared | yes | **yes, now** (this fix) |
+| `Horse { color, markings }` | `Horse.DATA_ID_TYPE_VARIANT`, int `0` = `Variant.WHITE`/no markings (`Horse.java:41,62`, `equine/Variant.java:12`) | yes (`IDX_HORSE_VARIANT`) | no — `EntityVariant::Horse` has no consumer outside `metadata.rs`'s own tests; `lodestone-assets`' `EntityVariant::HorseColor` is a *different*, unrelated enum in a different crate |
+| `Villager { kind, profession, level }` | `Villager.DATA_VILLAGER_DATA`, `VillagerData(PLAINS, NONE, 1)` (`Villager.java:465,469-472`, `VillagerData.java:16`) | yes | no — no consumer outside `metadata.rs`'s own tests |
+| `Keyed(id)` (registry-holder: pig/cow/chicken temperature, cat coat, wolf coat, frog, …) | one registry default per mob, e.g. `PigVariants.DEFAULT` (`Pig.java:117`), `CatVariants.BLACK` (`Cat.java:84,207`), `WolfVariants.DEFAULT` (`Wolf.java:224`) — same "never on the wire at default" shape, per mob | yes, by serializer (self-identifying, no class needed) | no — `lodestone-assets`' `EntityVariant::Temperature`/`Cat`/`Wolf`/… are again a separate enum; nothing bridges the two today |
+
+Recommendation: **do not fix the other three arms yet.** Doing so now would
+mean guessing at a default that has no pixel consumer to prove against —
+exactly the risk `CLAUDE.md`'s evidence standards warn about ("an expected
+value must originate outside the code under test"), and the sheep case had
+the live report *and* the jar to cross-check against. The moment any of
+`Horse`/`Villager`/`Keyed` grows a real renderer (the same
+`WoolMesh`/`prepare_wool`-shaped work `entity.rs`/`gpu.rs` need for horses,
+villagers or biome-variant animals), whoever lands it should add the matching
+`handle_add_entity` synthesis at the same time, following this fix as the
+template — and reuse `the_raw_decoder_never_invents_a_default_only_spawn_does`'s
+shape as the boundary pin for whichever class they add.
 
 ### Other render layers (surveyed, not landed)
 
