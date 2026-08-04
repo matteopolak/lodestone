@@ -97,6 +97,24 @@ pub struct DebugStats {
     pub particles_unresolved: usize,
     /// A short connection/status line ("local world", "connecting…", …).
     pub status: String,
+    /// The world difficulty and lock state, as the server last reported it
+    /// (`Sim::difficulty`) — `None` until the first report arrives (issue
+    /// #411). `ServerDifficulty` reached a real, tested ECS fold in `44485e4`
+    /// but nothing in the shell read it; this is that last hop.
+    pub difficulty: Option<(lodestone_model::Difficulty, bool)>,
+}
+
+/// All-caps display name for a [`lodestone_model::Difficulty`], matching the
+/// debug overlay's own `LODESTONE`/`XYZ`/`FACING`-style convention rather than
+/// vanilla's `options.difficulty.*` translation strings (this overlay has no
+/// translation table to draw from — see the module doc's "jar-less" path).
+fn difficulty_name(d: lodestone_model::Difficulty) -> &'static str {
+    match d {
+        lodestone_model::Difficulty::Peaceful => "PEACEFUL",
+        lodestone_model::Difficulty::Easy => "EASY",
+        lodestone_model::Difficulty::Normal => "NORMAL",
+        lodestone_model::Difficulty::Hard => "HARD",
+    }
 }
 
 impl DebugStats {
@@ -159,6 +177,14 @@ impl DebugStats {
                 self.world_bytes / 1024,
                 self.rss_bytes / (1024 * 1024)
             ),
+            match self.difficulty {
+                Some((d, locked)) => format!(
+                    "DIFFICULTY {}{}",
+                    difficulty_name(d),
+                    if locked { " (LOCKED)" } else { "" }
+                ),
+                None => "DIFFICULTY -".to_string(),
+            },
             self.status.to_uppercase(),
         ]
     }
@@ -2021,6 +2047,63 @@ mod tests {
         assert_eq!(s.facing(), "east (+X)");
         s.yaw = -90.0;
         assert_eq!(s.facing(), "east (+X)");
+    }
+
+    /// Issue #411: `ServerDifficulty` reaches a real, tested ECS fold
+    /// (`lodestone-client`'s `apply_routes_difficulty_changed_through_the_real_path`)
+    /// but the F3 overlay drew nothing for it. This pins the exact text so a
+    /// regression back to "no line at all" or a swapped lock state is visible
+    /// in a diff, not just "some line changed somewhere".
+    #[test]
+    fn debug_overlay_shows_difficulty_and_lock_state() {
+        // Found by content, not position: `lines()` is a growing list of
+        // independent facts (`DIFFICULTY` sits between the VRAM/RSS line and
+        // the status line, not at a fixed index), so pinning an index here
+        // would make this test brittle to an unrelated line being added or
+        // reordered, which is exactly the kind of accidental coupling
+        // `CLAUDE.md` warns a gate should not have.
+        fn difficulty_line(stats: &DebugStats) -> String {
+            stats
+                .lines()
+                .into_iter()
+                .find(|l| l.starts_with("DIFFICULTY"))
+                .expect("the F3 overlay must always carry a DIFFICULTY line")
+        }
+
+        let no_report = DebugStats::default();
+        assert_eq!(
+            difficulty_line(&no_report),
+            "DIFFICULTY -",
+            "before the server's first report, the line must say so plainly rather \
+             than defaulting to a difficulty the server never sent"
+        );
+
+        let unlocked = DebugStats {
+            difficulty: Some((lodestone_model::Difficulty::Easy, false)),
+            ..Default::default()
+        };
+        assert_eq!(difficulty_line(&unlocked), "DIFFICULTY EASY");
+
+        let locked = DebugStats {
+            difficulty: Some((lodestone_model::Difficulty::Hard, true)),
+            ..Default::default()
+        };
+        assert_eq!(difficulty_line(&locked), "DIFFICULTY HARD (LOCKED)");
+
+        // Every variant name, so a mis-mapped match arm (e.g. Peaceful reading
+        // as Easy) cannot hide behind only testing one value.
+        for (d, name) in [
+            (lodestone_model::Difficulty::Peaceful, "PEACEFUL"),
+            (lodestone_model::Difficulty::Easy, "EASY"),
+            (lodestone_model::Difficulty::Normal, "NORMAL"),
+            (lodestone_model::Difficulty::Hard, "HARD"),
+        ] {
+            let stats = DebugStats {
+                difficulty: Some((d, false)),
+                ..Default::default()
+            };
+            assert_eq!(difficulty_line(&stats), format!("DIFFICULTY {name}"));
+        }
     }
 
     #[test]
