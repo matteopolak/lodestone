@@ -2423,10 +2423,44 @@ mod tests {
         let directives = adapter
             .handle_packet(&mut world, ConnectionState::Play, 36, &payload)
             .expect("a byte-accurate explode payload must decode");
-        assert_eq!(directives.len(), 1, "exactly one directive from an explode packet");
-        let Directive::Emit(event) = directives.into_iter().next().unwrap() else {
-            panic!("expected an Emit directive");
-        };
+        // Two directives since #416 (`bf18817`): the particle emitter first,
+        // then the sound. This assertion used to read `len() == 1` and broke
+        // when the particle arm landed — which is the point of asserting the
+        // set rather than a count. A `count` alone cannot say *which*
+        // directives are present, so it fails on a correct addition and would
+        // equally pass if the sound were replaced by a second particle.
+        assert_eq!(
+            directives.len(),
+            2,
+            "an explode packet emits both a particle and a sound"
+        );
+        let mut sound_event = None;
+        let mut saw_particles = false;
+        for directive in directives {
+            let Directive::Emit(event) = directive else {
+                panic!("expected only Emit directives");
+            };
+            match event {
+                // Guards the #416 chain: the renderer for `explosion_emitter`
+                // is built and reaches pixels, but was fed by nothing until
+                // `decode_explode` emitted this. If it regresses, an explosion
+                // goes silent-visual again and only this line notices.
+                ClientEvent::Particles { ref particle, .. } => {
+                    // `particle` is an `Identifier`, so compare the path —
+                    // `assert_eq!(particle, "explosion_emitter")` does not
+                    // compile (`Identifier` has no `PartialEq<str>`).
+                    assert_eq!(
+                        particle.path(),
+                        "explosion_emitter",
+                        "the seed particle vanilla spawns for an explosion"
+                    );
+                    saw_particles = true;
+                }
+                other => sound_event = Some(other),
+            }
+        }
+        assert!(saw_particles, "the explosion particle directive must be emitted");
+        let event = sound_event.expect("the explosion sound directive must be emitted");
 
         let (tx, rx) = mpsc::channel();
         forward(
