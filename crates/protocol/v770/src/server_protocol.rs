@@ -43,15 +43,17 @@
 use std::collections::HashMap;
 
 use lodestone_core::{Ctx, Decode, Encode, Nbt, Reader, Writer, write_network_nbt};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Difficulty};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack};
 use lodestone_server::{
-    ChunkColumn as ServerChunkColumn, EntitySnapshot, ServerBound, ServerDirective, ServerProtocol,
+    ChunkColumn as ServerChunkColumn, EntitySnapshot, HOTBAR_SIZE, ServerBound, ServerDirective,
+    ServerProtocol,
 };
 use lodestone_world::{ChunkColumn as WorldChunkColumn, ChunkSection, ColumnLight, Heightmaps};
 use uuid::Uuid;
 
 use lodestone_data::block_states::{block_name, properties};
 use lodestone_data::entity_types::entity_type_id;
+use lodestone_data::items::item_name;
 use crate::packet_ids::{configuration, handshaking, login, play};
 use crate::packets::chunk::ChunkShape;
 use crate::packets::common::KeepAlive;
@@ -60,7 +62,8 @@ use crate::packets::entity::{pack_degrees, write_lp_vec3};
 use crate::packets::game::{
     ChangeDifficultyClientbound, ChangeDifficultyServerbound, GameLogin, GameRuleEntry,
     GameRuleValues, GlobalPos, LockDifficulty, MOVE_FLAG_ON_GROUND, MovePlayerPos,
-    MovePlayerPosRot, PlayerAction, SetDefaultSpawnPosition, SetGameRule, SetHealth, UseItemOn,
+    MovePlayerPosRot, PlayerAction, SetCarriedItem, SetDefaultSpawnPosition, SetGameRule,
+    SetHealth, UseItemOn,
 };
 use crate::packets::handshake::Intention;
 use crate::packets::login::{LoginFinished, LoginHello};
@@ -307,6 +310,90 @@ fn decode_full<T: Decode>(payload: &[u8]) -> Option<T> {
     let value = T::decode(&mut reader, CTX).ok()?;
     reader.ensure_empty().ok()?;
     Some(value)
+}
+
+/// Decodes one serverbound container-click item written as a `HashedStack`
+/// (`ByteBufCodecs.optional(HashedStack.ActualItem.STREAM_CODEC)`), the
+/// inverse of the client-side encoder of the same name
+/// (`crate::adapter::write_hashed_stack`): a bool presence flag, then, only
+/// if present, the item registry id (VarInt), the count (VarInt), and two
+/// VarInt component-patch entry counts (added, removed).
+///
+/// Our own client always writes `0`/`0` for the two patch counts — see
+/// `write_hashed_stack`'s own doc comment, which notes creative slot-set with
+/// custom components is out of scope for that encoder too. A **nonzero**
+/// count here is therefore either a future client carrying real
+/// component-patch entries this decoder has no byte-accurate per-entry
+/// layout for, or a malformed packet; either way the safest response is to
+/// fail the whole decode rather than guess a skip length and misalign every
+/// byte that follows (the same "malformed packet drops the packet, not the
+/// connection" convention this module already follows elsewhere).
+///
+/// Returns `None` on any decode failure, `Some(None)` for an explicitly
+/// empty slot, `Some(Some(stack))` for a resolved item. An item id with no
+/// entry in the generated table, or a name the wire item-key vocabulary does
+/// not accept, is treated as a decode failure for the same reason.
+fn read_hashed_stack(r: &mut Reader) -> Option<Option<ItemStack>> {
+    if !r.bool().ok()? {
+        return Some(None);
+    }
+    let item_id = r.var_i32().ok()?;
+    let count = r.var_i32().ok()?;
+    let added = r.var_i32().ok()?;
+    let removed = r.var_i32().ok()?;
+    if added != 0 || removed != 0 {
+        return None;
+    }
+    let name = item_name(item_id)?;
+    let item = name.parse().ok()?;
+    let count = u32::try_from(count).ok()?;
+    Some(Some(ItemStack::new(item, count)))
+}
+
+/// Decodes the serverbound `container_click` packet body into
+/// [`ServerBound::ContainerClicked`].
+///
+/// Wire layout (`ServerboundContainerClickPacket`, mirrors the client-side
+/// encoder `crate::adapter::encode_container_click` exactly): VarInt
+/// container id, VarInt state id, big-endian `short` slot, big-endian `byte`
+/// button, `ContainerInput` ordinal (VarInt), a changed-slots map (VarInt
+/// entry count, then per entry a big-endian `short` slot key and a
+/// [`read_hashed_stack`] value), then the carried cursor stack, also a
+/// [`read_hashed_stack`].
+///
+/// The clicked slot/button/click-type fields are decoded (so the reader
+/// advances correctly) but not carried into [`ServerBound`] — see that
+/// variant's own doc comment for why `changed_slots` alone is what this
+/// crate's consumer needs: the client has already run the full `doClick`
+/// locally and this packet's changed-slots map **is** its predicted result,
+/// not raw button input to re-interpret.
+fn decode_container_click(payload: &[u8]) -> Option<ServerBound> {
+    let mut r = Reader::new(payload);
+    let window_id = r.var_i32().ok()?;
+    let state_id = r.var_i32().ok()?;
+    let _slot = r.i16().ok()?;
+    let _button = r.i8().ok()?;
+    let _click_type = r.var_i32().ok()?;
+    let count = r.var_i32().ok()?;
+    let count = usize::try_from(count).ok()?;
+    // No `Vec::with_capacity(count)`: `count` is attacker-controlled and
+    // unrelated to `payload`'s actual length until each entry is read, so
+    // pre-allocating it would let a short, malformed packet request an
+    // enormous allocation before the first bounds check ever fails.
+    let mut changed_slots = Vec::new();
+    for _ in 0..count {
+        let slot = i32::from(r.i16().ok()?);
+        let item = read_hashed_stack(&mut r)?;
+        changed_slots.push((slot, item));
+    }
+    let carried_item = read_hashed_stack(&mut r)?;
+    r.ensure_empty().ok()?;
+    Some(ServerBound::ContainerClicked {
+        window_id,
+        state_id,
+        changed_slots,
+        carried_item,
+    })
 }
 
 /// Packs a block position into vanilla's `BlockPos.asLong` form: `x` in the
@@ -807,6 +894,22 @@ impl ServerProtocol for V770ServerProtocol {
                     },
                     None => ServerBound::Ignored,
                 }
+            }
+            // Server-authoritative inventory model: the prerequisite `#266`
+            // itself asked for, and the two packets that unblock it end to
+            // end — see `lodestone_server::inventory`'s module doc comment.
+            State::Play if packet_id == play::serverbound::SET_CARRIED_ITEM => {
+                match decode_full::<SetCarriedItem>(payload).and_then(|p| u8::try_from(p.slot).ok())
+                {
+                    // Mirrors vanilla's `Inventory.isHotbarSlot` guard
+                    // (`Inventory.java:70-76`) at the decode boundary, per
+                    // `ServerBound::CarriedItemChanged`'s own doc comment.
+                    Some(slot) if slot < HOTBAR_SIZE => ServerBound::CarriedItemChanged { slot },
+                    _ => ServerBound::Ignored,
+                }
+            }
+            State::Play if packet_id == play::serverbound::CONTAINER_CLICK => {
+                decode_container_click(payload).unwrap_or(ServerBound::Ignored)
             }
             _ => ServerBound::Ignored,
         }
@@ -1519,5 +1622,192 @@ mod world_admin_tests {
             }
             other => panic!("expected Send, got {other:?}"),
         }
+    }
+}
+
+/// Server-authoritative inventory: `SET_CARRIED_ITEM`/`CONTAINER_CLICK`
+/// decode. Where possible the expected wire bytes come from the **real**
+/// client-side encoder (`crate::adapter`'s `V770Adapter::encode_action`),
+/// not a hand-authored fixture — this is the same "real client already sends
+/// this packet in ordinary singleplayer play" encoder the #266 investigation
+/// found already existed with zero server-side consumer, so decoding what it
+/// actually produces (rather than a bespoke test-only byte layout) is the
+/// strongest hermetic evidence available that this module's decoder agrees
+/// with production. The two malformed-input controls below (nonzero
+/// component-patch counts, an out-of-range hotbar slot) *are* hand-built,
+/// deliberately, because the real encoder can never produce them — they are
+/// the negative-control class CLAUDE.md's evidence standard asks for, run
+/// and watched failing (`ServerBound::Ignored`, not a panic or a
+/// misdecoded slot).
+#[cfg(test)]
+mod inventory_decode_tests {
+    use super::*;
+    use lodestone_core::State;
+    use lodestone_model::{
+        ClientAction, ConnectionState, ContainerClickType, ContainerSlotChange, VersionAdapter,
+    };
+
+    fn encode<T: Encode>(packet: &T) -> Vec<u8> {
+        let mut w = Writer::default();
+        packet.encode(&mut w, CTX).expect("well-formed struct encodes");
+        w.into_vec()
+    }
+
+    fn stack(name: &str, count: u32) -> ItemStack {
+        ItemStack::new(name.parse().expect("valid resource key"), count)
+    }
+
+    /// The real client's `SetCarriedItem` encoder, decoded back into
+    /// [`ServerBound::CarriedItemChanged`].
+    #[test]
+    fn decode_set_carried_item_from_real_client_encoder() {
+        let proto = V770ServerProtocol;
+        let (packet_id, payload) = crate::adapter()
+            .encode_action(ConnectionState::Play, &ClientAction::SetCarriedItem { slot: 4 })
+            .expect("encodes")
+            .expect("SetCarriedItem always encodes in Play");
+        assert_eq!(packet_id, play::serverbound::SET_CARRIED_ITEM);
+        let decoded = proto.decode(State::Play, packet_id, &payload);
+        assert_eq!(decoded, ServerBound::CarriedItemChanged { slot: 4 });
+    }
+
+    /// Control: a slot outside `0..HOTBAR_SIZE` must drop the packet
+    /// (`ServerBound::Ignored`), never alias into some other hotbar slot —
+    /// mirrors `decode_change_difficulty_rejects_out_of_range_ordinal`'s
+    /// pattern above. The real client encoder can never produce this (it
+    /// only ever selects a real hotbar key), so this is hand-built directly
+    /// against the wire struct.
+    #[test]
+    fn decode_set_carried_item_rejects_out_of_range_slot() {
+        let proto = V770ServerProtocol;
+        let body = encode(&SetCarriedItem { slot: 9 });
+        let decoded = proto.decode(State::Play, play::serverbound::SET_CARRIED_ITEM, &body);
+        assert_eq!(decoded, ServerBound::Ignored);
+    }
+
+    /// The real client's `ContainerClick` encoder (a hotbar-swap style
+    /// click predicting one changed slot and an empty cursor), decoded back
+    /// into [`ServerBound::ContainerClicked`] — the packet's changed-slots
+    /// map, which is what this crate's consumer actually applies, survives
+    /// the round trip through the real production wire layout.
+    #[test]
+    fn decode_container_click_from_real_client_encoder() {
+        let proto = V770ServerProtocol;
+        let action = ClientAction::ContainerClick {
+            window_id: 0,
+            state_id: 7,
+            slot: 36,
+            button: 0,
+            click_type: ContainerClickType::Pickup,
+            changed_slots: vec![ContainerSlotChange {
+                slot: 36,
+                item: Some(stack("minecraft:diamond_pickaxe", 1)),
+            }],
+            carried_item: None,
+        };
+        let (packet_id, payload) = crate::adapter()
+            .encode_action(ConnectionState::Play, &action)
+            .expect("encodes")
+            .expect("ContainerClick always encodes in Play");
+        assert_eq!(packet_id, play::serverbound::CONTAINER_CLICK);
+        let decoded = proto.decode(State::Play, packet_id, &payload);
+        assert_eq!(
+            decoded,
+            ServerBound::ContainerClicked {
+                window_id: 0,
+                state_id: 7,
+                changed_slots: vec![(36, Some(stack("minecraft:diamond_pickaxe", 1)))],
+                carried_item: None,
+            }
+        );
+    }
+
+    /// The same real-encoder round trip, but with a non-empty carried
+    /// (cursor) stack and two changed slots — proves the loop over multiple
+    /// entries and the trailing carried-item read both land correctly, not
+    /// just the single-entry case above.
+    #[test]
+    fn decode_container_click_carries_cursor_stack_and_multiple_changes() {
+        let proto = V770ServerProtocol;
+        let action = ClientAction::ContainerClick {
+            window_id: 0,
+            state_id: 12,
+            slot: 9,
+            button: 0,
+            click_type: ContainerClickType::Swap,
+            changed_slots: vec![
+                ContainerSlotChange {
+                    slot: 9,
+                    item: Some(stack("minecraft:cobblestone", 32)),
+                },
+                ContainerSlotChange { slot: 40, item: None },
+            ],
+            carried_item: Some(stack("minecraft:torch", 16)),
+        };
+        let (packet_id, payload) = crate::adapter()
+            .encode_action(ConnectionState::Play, &action)
+            .expect("encodes")
+            .expect("ContainerClick always encodes in Play");
+        let decoded = proto.decode(State::Play, packet_id, &payload);
+        assert_eq!(
+            decoded,
+            ServerBound::ContainerClicked {
+                window_id: 0,
+                state_id: 12,
+                changed_slots: vec![
+                    (9, Some(stack("minecraft:cobblestone", 32))),
+                    (40, None),
+                ],
+                carried_item: Some(stack("minecraft:torch", 16)),
+            }
+        );
+    }
+
+    /// Control: a `HashedStack` carrying a nonzero added-component count is
+    /// something the real client encoder can never produce (it always
+    /// writes `0`/`0`, `write_hashed_stack`'s own doc comment), so this is
+    /// hand-built directly against the documented wire layout — a container
+    /// id, state id, slot, button, click type, one changed-slot entry whose
+    /// item claims one added component. [`read_hashed_stack`]'s guard must
+    /// fail the *whole* decode rather than silently misalign the reader on
+    /// the (nonexistent, in this crate) per-component bytes that would
+    /// follow.
+    #[test]
+    fn decode_container_click_rejects_nonzero_component_patch() {
+        let proto = V770ServerProtocol;
+        let mut w = Writer::default();
+        w.var_i32(0); // window id
+        w.var_i32(0); // state id
+        w.i16(0); // slot
+        w.i8(0); // button
+        w.var_i32(0); // click type: pickup
+        w.var_i32(1); // one changed slot
+        w.i16(9); // slot 9
+        w.bool(true); // present
+        w.var_i32(0); // item id 0 (whatever it resolves to; irrelevant, decode must fail first)
+        w.var_i32(1); // count
+        w.var_i32(1); // added components: nonzero
+        w.var_i32(0); // removed components
+        w.bool(false); // carried item: empty
+        let body = w.into_vec();
+        let decoded = proto.decode(State::Play, play::serverbound::CONTAINER_CLICK, &body);
+        assert_eq!(decoded, ServerBound::Ignored);
+    }
+
+    /// Control: a truncated payload (claims one changed slot but supplies no
+    /// bytes for it) must drop the packet, not panic or read garbage.
+    #[test]
+    fn decode_container_click_rejects_truncated_payload() {
+        let proto = V770ServerProtocol;
+        let mut w = Writer::default();
+        w.var_i32(0);
+        w.var_i32(0);
+        w.i16(0);
+        w.i8(0);
+        w.var_i32(0);
+        w.var_i32(1); // claims one changed slot, but the packet ends here
+        let body = w.into_vec();
+        let decoded = proto.decode(State::Play, play::serverbound::CONTAINER_CLICK, &body);
+        assert_eq!(decoded, ServerBound::Ignored);
     }
 }
