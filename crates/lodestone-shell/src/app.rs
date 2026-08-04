@@ -882,16 +882,77 @@ pub(crate) fn launch_singleplayer(
     protocol: i32,
     view_radius: i32,
     session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
+    seed: i64,
 ) -> Result<NetClient, LaunchError> {
     let server_protocol = lodestone_registry::server_protocol_for_protocol(protocol)
         .ok_or(LaunchError::NoVersionFamily { protocol })?;
     Ok(NetClient::open_singleplayer(
         server_protocol,
         protocol,
-        crate::menu::world_select::BUNDLED_WORLD.seed,
+        seed,
         view_radius,
         session,
     ))
+}
+
+/// Vanilla's own seed rule (issue #190's queued patch) —
+/// `WorldOptions.parseSeed`/`randomSeed()`
+/// (`.cache/mc/26.2/client-src/net/minecraft/world/level/levelgen/
+/// WorldOptions.java:75-89`): trim, empty means a fresh random `i64`, a valid
+/// `i64` literal is used verbatim, and anything else — vanilla accepts
+/// free-text seeds rather than rejecting them — falls back to Java's own
+/// `String.hashCode()` widened (sign-extended) to `i64`.
+///
+/// `None` means "use the bundled world's own seed" (`Screen::WorldSelect`'s
+/// **Play Selected World**, which collects no seed of its own); `Some(cfg)`
+/// is `Screen::CreateWorld`'s **Create** button, carrying whatever the player
+/// typed into the Seed field (`WorldCreationConfig::seed`, empty by default).
+fn resolve_launch_seed(config: Option<&crate::menu::create_world::WorldCreationConfig>) -> i64 {
+    match config {
+        Some(cfg) => parse_seed(&cfg.seed),
+        None => crate::menu::world_select::BUNDLED_WORLD.seed,
+    }
+}
+
+fn parse_seed(raw: &str) -> i64 {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return random_seed();
+    }
+    if let Ok(n) = trimmed.parse::<i64>() {
+        return n;
+    }
+    i64::from(java_string_hash_code(trimmed))
+}
+
+/// `RandomSource.create().nextLong()` — vanilla asks for *some* fresh long,
+/// with no algorithm this port needs to match (a world seed is opaque once
+/// generated); `std::collections::hash_map::RandomState` already draws a
+/// fresh random key from the OS per instance for exactly this reason, so
+/// hashing a timestamp through one needs no new dependency for a value this
+/// crate treats as a black box.
+fn random_seed() -> i64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    hasher.write_u128(nanos);
+    hasher.finish() as i64
+}
+
+/// Java's `String.hashCode()`: `s[0]*31^(n-1) + … + s[n-1]`, over UTF-16 code
+/// units (not bytes, not `char`s) with wrapping 32-bit arithmetic — the exact
+/// formula `WorldOptions.parseSeed`'s catch arm calls. Widening the result to
+/// `i64` (its caller's job, not this function's) is sign-extending, matching
+/// Java's own `int`→`long` widening.
+fn java_string_hash_code(s: &str) -> i32 {
+    let mut h: i32 = 0;
+    for unit in s.encode_utf16() {
+        h = h.wrapping_mul(31).wrapping_add(i32::from(unit));
+    }
+    h
 }
 
 /// Whether argv asked for a connection, i.e. whether to bypass the main menu.
@@ -1522,8 +1583,9 @@ impl WindowApp {
     /// `NetClient::open_singleplayer` into `ClientBuilder::ecs` (§4.1(c)).
     /// Attaching without it is the silent failure `Sim::connect`'s docs warn
     /// about — every HUD accessor would read an empty default.
-    fn begin_singleplayer(&mut self) {
+    fn begin_singleplayer(&mut self, config: Option<crate::menu::create_world::WorldCreationConfig>) {
         self.ui.begin(crate::menu::SessionKind::Singleplayer);
+        let seed = resolve_launch_seed(config.as_ref());
         let session = Some((self.sim.ecs().clone(), self.sim.local_player()));
         // Vanilla streams `simulationDistance`/`viewDistance` chunks around the
         // player; ours is the same number the camera's far plane and the mesher
@@ -1545,7 +1607,7 @@ impl WindowApp {
         let view_radius = i32::try_from(self.config.render_distance)
             .unwrap_or(i32::MAX)
             .saturating_add(1);
-        match launch_singleplayer(self.config.protocol, view_radius, session) {
+        match launch_singleplayer(self.config.protocol, view_radius, session, seed) {
             Ok(net) => {
                 self.sim.attach_net(net);
                 self.install_session_render_sources();
@@ -1928,7 +1990,21 @@ impl WindowApp {
                 // this button used to be the entry point for. Singleplayer now
                 // takes the *same* path a join does, so there is only ever one
                 // world and it always came off the wire.
-                self.begin_singleplayer();
+                //
+                // `None`: `Screen::WorldSelect`'s Play Selected World collects no
+                // seed of its own, so this resolves to `BUNDLED_WORLD.seed` via
+                // `resolve_launch_seed`. Issue #190's `Screen::CreateWorld` Create
+                // button is meant to produce `Some(config)` here instead — the
+                // rest of this seam (`begin_singleplayer`, `resolve_launch_seed`,
+                // `launch_singleplayer`) is already built and tested for that
+                // shape (see this file's `resolved_seeds_from_different_world_
+                // creation_configs_generate_different_terrain`), but wiring the
+                // *producer* needs `MenuAction::Singleplayer` to carry
+                // `Option<WorldCreationConfig>` and `menu/nav.rs`'s
+                // `apply_create_world` to produce it on the Create button —
+                // both in `menu/`, brokered for this batch (see issue #190's own
+                // report for the exact, verified patch).
+                self.begin_singleplayer(None);
             }
             MenuAction::Connect(entry) => {
                 self.connect_to(entry.host.clone(), entry.effective_port());
@@ -3671,6 +3747,129 @@ fn run_connect(config: Config) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    /// Java's `String.hashCode()`, computed by hand from the well-known
+    /// public algorithm — an oracle that lives outside this file, per
+    /// `CLAUDE.md`'s evidence standard. `"hello"`: `h = 0`, then
+    /// `104, 3325, 103183, 3198781, 99162322` after `'h','e','l','l','o'`
+    /// (`h = h*31 + c` each step) — a commonly-cited constant, reproduced
+    /// here from the formula rather than trusted from memory alone.
+    #[test]
+    fn java_string_hash_code_matches_the_known_constant() {
+        assert_eq!(java_string_hash_code("hello"), 99_162_322);
+        assert_eq!(java_string_hash_code(""), 0);
+    }
+
+    /// `WorldOptions.parseSeed` (issue #190): a valid `i64` literal is used
+    /// verbatim (vanilla tries `Long.parseLong` first), whitespace is
+    /// trimmed, and non-numeric text falls back to the Java hash — not a new
+    /// rule, just `parse_seed` calling straight through to the constant test
+    /// above.
+    #[test]
+    fn parse_seed_follows_vanillas_own_rule() {
+        assert_eq!(parse_seed("12345"), 12345);
+        assert_eq!(parse_seed("-42"), -42);
+        assert_eq!(parse_seed("  42  "), 42, "vanilla trims before parsing");
+        assert_eq!(
+            parse_seed("hello"),
+            99_162_322,
+            "non-numeric text must hash exactly like Java's own String.hashCode, \
+             not this crate's own notion of a hash"
+        );
+    }
+
+    /// An empty seed means "random" (`WorldOptions.defaultWithRandomSeed`) —
+    /// asserted by absence of a fixed answer, the only honest assertion for
+    /// "random": two draws must not collide (astronomically unlikely for a
+    /// real `i64` random source, impossible for a constant-returning bug).
+    #[test]
+    fn empty_seed_is_random_not_a_fixed_fallback() {
+        let a = parse_seed("");
+        let b = parse_seed("   ");
+        assert_ne!(
+            a, b,
+            "two empty-seed draws must not produce the same i64 — a constant \
+             here would silently make every \"random\" world identical"
+        );
+    }
+
+    /// Issue #190's queued patch, driven end to end: two different
+    /// `WorldCreationConfig`s (the exact type `Screen::CreateWorld` collects)
+    /// resolved through the *production* `resolve_launch_seed` must generate
+    /// **different real terrain** at the same coordinate — not merely
+    /// different `i64`s, which `parse_seed`'s own tests above already cover
+    /// and which would be the isolated-unit species of this gate. And the
+    /// same config must reproduce identical terrain.
+    ///
+    /// `lodestone_server::overworld_generator` is exactly what
+    /// `crate::net::run`'s `Origin::Integrated` arm calls with this
+    /// function's resolved seed (`net.rs:1354` at the time of writing) — so
+    /// this proves the seed that would reach the wire, not a stand-in.
+    #[test]
+    fn resolved_seeds_from_different_world_creation_configs_generate_different_terrain() {
+        let config_a = crate::menu::create_world::WorldCreationConfig {
+            seed: "100".to_string(),
+            ..Default::default()
+        };
+        let config_b = crate::menu::create_world::WorldCreationConfig {
+            seed: "999999".to_string(),
+            ..Default::default()
+        };
+
+        let seed_a = resolve_launch_seed(Some(&config_a));
+        let seed_b = resolve_launch_seed(Some(&config_b));
+        assert_eq!(seed_a, 100);
+        assert_eq!(seed_b, 999_999);
+
+        let column_a = lodestone_server::overworld_generator(seed_a).column(0, 0);
+        let column_b = lodestone_server::overworld_generator(seed_b).column(0, 0);
+
+        let mut differences = 0usize;
+        for lz in 0..16usize {
+            for lx in 0..16usize {
+                for y in (column_a.min_y()..column_a.min_y() + column_a.height()).step_by(4) {
+                    if column_a.block_state(lx, y, lz) != column_b.block_state(lx, y, lz) {
+                        differences += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            differences > 0,
+            "two different entered seeds must generate different terrain \
+             somewhere in the same column — the config's seed is reaching \
+             nowhere if this is 0"
+        );
+
+        // Reproducibility: the same config, resolved and generated twice,
+        // must be byte-identical — `overworld_generator` is a pure function
+        // of its seed, and this is the exact call `net.rs::run` makes, called
+        // twice rather than reimplemented.
+        let seed_a_again = resolve_launch_seed(Some(&config_a));
+        assert_eq!(seed_a_again, seed_a, "the same typed seed must resolve identically");
+        let column_a_again = lodestone_server::overworld_generator(seed_a_again).column(0, 0);
+        for lz in 0..16usize {
+            for lx in 0..16usize {
+                for y in column_a.min_y()..column_a.min_y() + column_a.height() {
+                    assert_eq!(
+                        column_a.block_state(lx, y, lz),
+                        column_a_again.block_state(lx, y, lz),
+                        "the same seed must reproduce identical terrain at ({lx},{y},{lz})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `None` (`Screen::WorldSelect`'s Play Selected World) must still resolve
+    /// to the bundled world's own seed — the pre-#190 behaviour, unchanged.
+    #[test]
+    fn no_config_resolves_to_the_bundled_worlds_seed() {
+        assert_eq!(
+            resolve_launch_seed(None),
+            crate::menu::world_select::BUNDLED_WORLD.seed
+        );
+    }
+
     /// A cheap sim: headless mode with the smallest render distance that still
     /// generates real terrain, so physics ticks do real collision work.
     fn pacing_sim() -> Sim {
@@ -4966,7 +5165,7 @@ mod tests {
     ///
     /// The button half is `menu::nav`'s
     /// `play_selected_world_asks_the_app_to_start_singleplayer`, which asserts the
-    /// click produces `MenuAction::Singleplayer`; `apply_menu_action`'s arm
+    /// click produces `MenuAction::Singleplayer(None)`; `apply_menu_action`'s arm
     /// between the two is a single call this file can be read for. The seam
     /// *without* the shell is `crates/protocol/v770/tests/singleplayer_seam.rs`.
     ///
@@ -4984,7 +5183,8 @@ mod tests {
     #[test]
     fn pressing_play_reaches_a_running_integrated_server() {
         let protocol = Config::default().protocol;
-        let net = match launch_singleplayer(protocol, 0, None) {
+        let seed = crate::menu::world_select::BUNDLED_WORLD.seed;
+        let net = match launch_singleplayer(protocol, 0, None, seed) {
             Ok(net) => net,
             Err(e) => {
                 // A build with no hostable family must *report*, which is the
