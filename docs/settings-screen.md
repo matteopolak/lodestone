@@ -4,7 +4,7 @@
 
 `crates/lodestone-shell/src/menu/options.rs` — vanilla's `OptionsScreen` tree as
 a **table plus arithmetic**: nine `OptionsList` pages, **143 controls**, of
-which **28 or 29 work** (see below) **and the rest are present and greyed
+which **39 or 40 work** (see below) **and the rest are present and greyed
 out** — plus four more pages that are not `OptionsList` at all and are
 counted separately (see below): Key Binds, and, since issue #415, Language,
 Telemetry and Resource Packs. Reached from the title screen's Options button
@@ -53,7 +53,8 @@ inactive `Cell::Nav` in the whole tree is the root's own header button
 *inside* a world, where it is the World Options placeholder — see "The
 root's Online button" below, unchanged by this update). This adds three
 unconditional working nav buttons, moving the live counts from 26/25 to
-**29/28**. None of the three is part of the 143-control census, for the same
+**29/28** (the chat batch later took them to **40/39** — see "What is actually
+live" below). None of the three is part of the 143-control census, for the same
 reason Key Binds is not:
 
 - [`language-screen.md`](./language-screen.md) — the *third* list-widget
@@ -292,7 +293,8 @@ all (not even to `Unbound`) — a deliberate divergence from vanilla's own
 
 ### What is actually live — and a correction to the census
 
-**Seven options**, as of #200/#202/#203 (up from the two #55 landed with):
+**Fifteen options** on **eighteen rows**, as of #200/#202/#203 and the chat
+batch (up from the two #55 landed with):
 
 | option | page | field |
 |---|---|---|
@@ -303,6 +305,21 @@ all (not even to `Unbound`) — a deliberate divergence from vanilla's own
 | `mouseWheelSensitivity` | Mouse, as "Scroll Sensitivity" | `config::Options::mouse_wheel_sensitivity` |
 | `invertMouseX` | Mouse | `config::Options::invert_mouse_x` |
 | `invertMouseY` | Mouse | `config::Options::invert_mouse_y` |
+| `chatColors` | Chat, as "Colors" | `config::Options::chat_colors` |
+| `chatScale` | Chat, as "Chat Text Size" | `config::Options::chat_scale` |
+| `chatWidth` | Chat, as "Width" | `config::Options::chat_width` |
+| `chatHeightFocused` | Chat | `config::Options::chat_height_focused` |
+| `chatHeightUnfocused` | Chat | `config::Options::chat_height_unfocused` |
+| `chatLineSpacing` | Chat **and** Accessibility | `config::Options::chat_line_spacing` |
+| `chatOpacity` | Chat **and** Accessibility | `config::Options::chat_opacity` |
+| `textBackgroundOpacity` | Chat **and** Accessibility | `config::Options::chat_background_opacity` |
+
+The last three sit on **two pages each**, which is vanilla's own shape (one
+`OptionInstance` placed on both `ChatOptionsScreen` and
+`AccessibilityOptionsScreen`), so fifteen options occupy eighteen rows and
+editing either row moves the other's label too. See
+[`options-consumption-census.md`](./options-consumption-census.md) for what the
+remaining greyed rows are each waiting on.
 
 Plus nine `Done` buttons (one per page, always live) and either thirteen or
 twelve working nav buttons, depending on `in_world` (these counts are still
@@ -314,14 +331,14 @@ and are not part of either number):
   Chat, Accessibility (the root grid), Accessibility → Controls, Controls →
   Mouse, Controls → **Key Binds**, the root → **Online**, and the root →
   **Language**/**Telemetry**/**Resource Packs** (issue #415 — every root
-  grid button now opens something). **29 live, 114 inactive.**
+  grid button now opens something). **40 live, 103 inactive.**
 - **Inside a world** (opened from the pause menu): the same twelve minus the
   root's Online link (it is the inactive World Options placeholder instead)
   — Key Binds', Language's, Telemetry's and Resource Packs' own nav buttons
-  are unconditionally live either way. **28 live, 115 inactive.**
+  are unconditionally live either way. **39 live, 104 inactive.**
 
 Both counts are asserted directly —
-`options::tests::the_disabled_majority_is_the_point_and_it_is_measured` (29,
+`options::tests::the_disabled_majority_is_the_point_and_it_is_measured` (40,
 outside a world, the canonical/title-screen baseline) and
 `options::tests::the_root_online_button_is_the_one_row_that_changes_with_in_world`
 (both, and that the delta between them is exactly the Online row — Key
@@ -592,8 +609,9 @@ purpose (departure 4).
 ## Configuration
 
 - `crates/lodestone-shell/src/config.rs` — `Options` (`options.json`): the
-  seven live settings (see [`LiveOption`] in `options.rs`). `MIN_SCALED_HEIGHT`
-  is public because `LIST_WINDOW_PX` is derived from it.
+  fifteen live settings (see [`LiveOption`] in `options.rs`), plus
+  `UNIT_DOUBLE_STEP`, how far one click moves a `UnitDouble` slider.
+  `MIN_SCALED_HEIGHT` is public because `LIST_WINDOW_PX` is derived from it.
 - `crates/lodestone-shell/src/resources.rs` — `load_menu_gui_atlas()` supplies
   `widget/button*` and `widget/slider*`. Without a pack the rows fall back to flat
   fills, which is what the jar-less and headless paths see.
