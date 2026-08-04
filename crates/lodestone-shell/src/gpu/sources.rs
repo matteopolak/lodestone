@@ -215,6 +215,14 @@ impl ThirdPersonBodyState {
             type_path: player_model_name(self.slim).to_string(),
             item: None,
             equipment: self.equipment,
+            // The local player's own dye colours are not plumbed to
+            // `ThirdPersonBodyState` yet — a separate gap from the network
+            // path's, since this body's armour comes from the player's own
+            // inventory slots (`sim.rs`'s `ARMOUR_NATIVE_SLOTS`), not
+            // `EntitySnapshot::equipment_dye`. Empty by construction, not
+            // omission: our own third-person leather armour draws undyed
+            // until that source is wired too.
+            equipment_dye: Vec::new(),
             feet: self.feet,
             yaw: self.body_yaw_deg,
             // Absolute head yaw, for API parity with a network `EntityDraw`

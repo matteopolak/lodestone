@@ -163,6 +163,7 @@ fn world_with_two_tracked_zombies(feet: glam::Vec3) -> World {
         velocity: None,
         on_ground: true,
         equipment: Vec::new(),
+        equipment_dye: Vec::new(),
         variant: None,
         count: 1,
         name_tag: None,

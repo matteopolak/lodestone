@@ -183,6 +183,7 @@ fn world_with_bow_carrying_mobs(feet: glam::Vec3) -> World {
             EquipmentSlot::MainHand,
             Some("minecraft:bow".parse().expect("valid item key")),
         )],
+        equipment_dye: Vec::new(),
         variant: None,
         count: 1,
         name_tag: None,

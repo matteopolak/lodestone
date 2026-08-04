@@ -952,6 +952,13 @@ fn read_component_patch(
             Some("minecraft:tool") => {
                 components.tool = ToolPatch::Set(read_tool(reader)?);
             }
+            // `DyedItemColor.STREAM_CODEC` is a bare `ByteBufCodecs.INT`
+            // (`DyedItemColor.java:24`) — fixed-width, not a `VarInt` like
+            // every other scalar component here, so this is the one `i32()`
+            // read in this match rather than `var_i32()`.
+            Some("minecraft:dyed_color") => {
+                components.dyed_color = Some(reader.i32().map_err(dec_err)? as u32);
+            }
             // Both of these are `ByteBufCodecs.VAR_INT` (`DataComponents.java:110-115`)
             // and both *override* the prototype value seeded above. They are
             // decoded rather than treated as unmodeled not because servers send

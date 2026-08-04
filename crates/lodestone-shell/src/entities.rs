@@ -429,8 +429,24 @@ pub struct EntitySnapshot {
     /// record wholesale — unlike [`Self::item`], which arrives once and must
     /// never be cleared by silence.
     ///
-    /// Only `MainHand`/`OffHand` reach a pixel today; see [`EntityDraw::equipment`].
+    /// Armour slots reach a pixel too — `RenderState`'s `prepare_armour` walks
+    /// `ArmourSlot::ALL` against this same list.
     pub equipment: Vec<(EquipmentSlot, Option<ResourceLocation>)>,
+    /// Per-slot `minecraft:dyed_color`, alongside [`Self::equipment`] rather
+    /// than folded into it — see `docs/armour-rendering.md`'s "hop 2" for why
+    /// this is additive rather than a wider tuple: [`Self::equipment`]'s shape
+    /// is depended on by several call sites in this module and in `gpu.rs`,
+    /// none of which need to change just because a dye is now readable.
+    ///
+    /// A slot **absent** here means "no dye reported for this slot" (either
+    /// the slot holds nothing, or it holds an item with no
+    /// `minecraft:dyed_color` patch) — `lodestone_render::entity::
+    /// armour_layer_tint_with_dye` already treats a missing dye and a
+    /// zero-valued one identically (`dyed_color_zero_reads_as_undyed`), so
+    /// there is no information lost by not distinguishing "never reported"
+    /// from "reported, and it was zero" the way [`Self::equipment`] does for
+    /// item identity.
+    pub equipment_dye: Vec<(EquipmentSlot, u32)>,
     /// The entity's decoded cosmetic variant (sheep dye/shear, villager type,
     /// horse markings, …), as last reported.
     ///
@@ -557,21 +573,21 @@ pub struct EntityDraw {
     /// have something in them: an entry here means "there is an item in this
     /// slot", so the renderer needs no second `Option` check.
     ///
-    /// **Only `MainHand` and `OffHand` can reach a pixel.** The renderer poses
-    /// those off the arm part matrix
-    /// ([`lodestone_render::entity::held_item_matrix`]) and deliberately leaves
-    /// the six armour/`Body`/`Saddle` slots unhandled rather than faking them:
-    /// vanilla draws armour from a *separate humanoid mesh set* baked at two
-    /// inflations (`HumanoidArmorModel`'s inner/outer `CubeDeformation`), plus
-    /// trim overlays and leather dye tinting. The `entity_models` corpus has 81
-    /// models and no armour layer at all, so there is no geometry to hang a
-    /// helmet on — an armour slot needs new meshes, not new plumbing. Passing
-    /// them through here anyway keeps the *data* honest and makes the gap
-    /// visible at the point of use.
+    /// **Stale note, kept for history:** this used to say only `MainHand`/
+    /// `OffHand` could reach a pixel, because the `entity_models` corpus had
+    /// no armour layer at all. `docs/armour-rendering.md` landed a *separate*
+    /// humanoid mesh set since — `RenderState::prepare_armour` in `gpu.rs`
+    /// now walks `ArmourSlot::ALL` against this same list, so every humanoid
+    /// slot draws, not just the two hand slots.
     ///
     /// Order follows [`EquipmentSlot::ALL`] only by accident of what the server
     /// sent; treat it as an unordered set.
     pub equipment: Vec<(EquipmentSlot, ResourceLocation)>,
+    /// Per-slot `minecraft:dyed_color`, mirroring
+    /// [`EntitySnapshot::equipment_dye`] narrowed the same way `equipment`
+    /// narrows [`EntitySnapshot::equipment`] — see that field's doc for why
+    /// this is additive rather than folded into `equipment`'s own tuple.
+    pub equipment_dye: Vec<(EquipmentSlot, u32)>,
     /// This entity's wool state, when [`Self::type_path`] is `"sheep"` and a
     /// variant has been reported — `None` for every other entity type
     /// unconditionally, per [`sheep_wool`]'s gate.
@@ -836,6 +852,13 @@ pub fn tick_creeper_fuse(mut fuses: Query<&mut CreeperFuse>) {
 /// it for free.
 #[derive(Component, Debug, Clone, Default, PartialEq)]
 pub struct RenderEquipment(pub Vec<(EquipmentSlot, ResourceLocation)>);
+
+/// Per-slot `minecraft:dyed_color`, narrowed from
+/// [`EntitySnapshot::equipment_dye`] — a separate component from
+/// [`RenderEquipment`] rather than a wider tuple inside it, for the same
+/// reason the snapshot field is additive; see that field's doc.
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
+pub struct RenderEquipmentDye(pub Vec<(EquipmentSlot, u32)>);
 
 /// This entity's sheep-wool state, narrowed from [`EntitySnapshot::variant`] by
 /// [`sheep_wool`].
@@ -1143,6 +1166,7 @@ pub fn extract_pickup_draws(
             item: Some(pickup.item.clone()),
             count: pickup.count,
             equipment: Vec::new(),
+            equipment_dye: Vec::new(),
             wool: None,
             feet,
             yaw: 0.0,
@@ -1521,6 +1545,7 @@ pub fn extract_entity_draws(
         &InterpClock,
         &WalkAnim,
         &RenderEquipment,
+        &RenderEquipmentDye,
         &RenderWool,
         &RenderNameTag,
         // `Option`, not `&CreeperFuse` bare: present only on creepers, same
@@ -1536,7 +1561,9 @@ pub fn extract_entity_draws(
     // player with, which is the point of §4.1(c).
     let partial_tick = clock.interp_alpha.clamp(0.0, 1.0);
     out.0.clear();
-    for (id, kind, scale, from, to, clock, walk, equipment, wool, name_tag, fuse) in &tracks {
+    for (id, kind, scale, from, to, clock, walk, equipment, equipment_dye, wool, name_tag, fuse) in
+        &tracks
+    {
         // One lookup, not two: `item` and `count` both come from the same
         // recorded stack, and a drop with no stack yet must not manufacture a
         // count out of nowhere.
@@ -1593,6 +1620,7 @@ pub fn extract_entity_draws(
             item: stack.map(|s| s.id.clone()),
             count: stack.map_or(1, |s| s.count),
             equipment: equipment.0.clone(),
+            equipment_dye: equipment_dye.0.clone(),
             wool: wool.0,
             feet: render_feet(from, to, clock),
             yaw: render_yaw(from, to, clock),
@@ -1793,6 +1821,7 @@ fn spawn_track(world: &mut World, snap: &EntitySnapshot) {
             last_feet: snap.feet,
         },
         RenderEquipment(occupied_equipment(&snap.equipment)),
+        RenderEquipmentDye(snap.equipment_dye.clone()),
         RenderWool(sheep_wool(&snap.type_path, snap.variant.as_ref())),
         RenderNameTag(snap.name_tag.clone()),
     ));
@@ -1835,6 +1864,9 @@ fn update_track(world: &mut World, entity: Entity, snap: &EntitySnapshot) {
     let occupied = occupied_equipment(&snap.equipment);
     if let Some(mut equipment) = entity.get_mut::<RenderEquipment>() {
         equipment.0 = occupied;
+    }
+    if let Some(mut dye) = entity.get_mut::<RenderEquipmentDye>() {
+        dye.0.clone_from(&snap.equipment_dye);
     }
     // Same reasoning as equipment, outside the `moved || turned` gate: a sheep
     // can be sheared, or a plugin can dye one, while it stands still.
@@ -2439,6 +2471,7 @@ mod tests {
             velocity: None,
             on_ground: false,
             equipment: Vec::new(),
+            equipment_dye: Vec::new(),
             variant: None,
             count: 1,
             name_tag: None,
@@ -3066,6 +3099,7 @@ mod tests {
             velocity: None,
             on_ground: false,
             equipment: Vec::new(),
+            equipment_dye: Vec::new(),
             variant: None,
             count: 1,
             name_tag: None,
