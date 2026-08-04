@@ -10,9 +10,14 @@ as a masked sprite tinted by its own dye colour. `lodestone_render::banner_patte
 `banner_pattern_layers`/`shield_pattern_layers`, which turn a base colour
 plus a pattern list into the exact ordered draw list vanilla itself builds.
 
-**This module does not draw anything yet.** It is pure, GPU-free colour and
-ordering logic — see "What is still missing" below for the two reasons
-nothing calls it yet, and why that is a scoping finding, not an oversight.
+**This module is pure, GPU-free colour and ordering logic, and it is now
+genuinely consumed.** `lodestone_render::block_entity::BlockEntityModelSet::resolve_banner`
+calls `banner_pattern_layers` directly and its result reaches a real GPU
+pipeline (`EntityPipeline::banner_layer_pipeline`), exercised end to end by
+`crates/lodestone-render/tests/banner_pattern_layer_pixels.rs` — see "Steps
+D–F: landed" below for what that closed and what is still missing (a real
+consumer wired into the live client from world state, and the real
+pattern-mask atlas).
 
 ## How it works
 
@@ -61,19 +66,17 @@ against the *decimal* literals (a second, independently-typed source) in one
 pass and is what actually caught it. Kept as the test to trust over the
 smaller spot-check, which is kept only because it also happens to pass.
 
-## What is still missing (why this lands unwired)
+## What is still missing (historical — see "Steps D–F: landed" for the current state)
 
-**Re-checked this session (Batch G, #23 + #174), not assumed stale.** Before
-touching anything, `grep -rn "banner_pattern_layers\|shield_pattern_layers"`
-across the whole tree was run again: the only hits are `lib.rs`'s re-export
-and this module's own `#[cfg(test)]` block. **Confirmed still an island** —
-nothing outside this crate calls either function, exactly as this doc
-already claimed. That grep is the whole basis for treating #174 as a
-last-hop problem rather than a maths problem; see `docs/block-entity-renderers.md`'s
-Bell section for what *was* built instead this session and why.
+**This section is a record of a past scoping decision, kept for the reasoning,
+not a claim about the tree today.** `grep -rn "banner_pattern_layers"` now
+also hits `lodestone_render::block_entity::BlockEntityModelSet::resolve_banner`
+and that function's own tests — `banner_pattern_layers` is no longer an
+island for the block-entity path (the item-icon/held-item paths below are
+unaffected; they still route through `lodestone-game`, not built here).
 
-Two prerequisites, both outside this task's file ownership, so neither was
-built speculatively:
+Two prerequisites were identified at the time, both outside that session's
+file ownership, so neither was built speculatively then:
 
 1. **No typed decode of the pattern data** — for the **item** (GUI icon,
    held-item) consumer specifically. `minecraft:banner_patterns` and
@@ -86,19 +89,17 @@ built speculatively:
    this task's file ownership assigns to the cost-screens agent, not here.
    **This prerequisite does not block the block-entity consumer** — see
    below.
-2. **No banner/shield mesh, resolver, shell wiring, or pixel gate.** Steps A
-   and B below (tint plumbing onto block entities; the `banner_layer_pipeline`
-   pipeline variant) landed this session and are **not** this prerequisite —
-   they removed a *different* blocker (see "A third prerequisite" below) that
-   turned out to be smaller than originally scoped. The mesh/resolver/shell
-   wiring/pixel gate remain a separate task, deliberately not started here
-   because the mesh needs assets work that would collide with a concurrent
-   agent. Building it is explicitly issue #23's scope — the issue that owns this
-   one says so directly: "the in-world banner block entity rendering itself
-   is #23's scope... land the shared compositing function here and have
-   #23's banner work consume it." This doc and module are that hand-off
-   point. **Still true**: this session built the bell body/rim instead, so the
-   mesh remains unbuilt.
+2. **No banner/shield mesh, resolver, shell wiring, or pixel gate — at the
+   time this was written.** Steps A and B (tint plumbing onto block
+   entities; the `banner_layer_pipeline` pipeline variant) landed in an
+   earlier session and were **not** this prerequisite — they removed a
+   *different* blocker (see "A third prerequisite" below). Steps D
+   (mesh)/E (resolver)/F (pixel gate) landed in a later session — see
+   "Steps D–F: landed" above — leaving only the shell installer and the
+   NBT gather (both squarely issue #23's scope: "the in-world banner block
+   entity rendering itself is #23's scope... land the shared compositing
+   function here and have #23's banner work consume it") plus the real
+   pattern-mask atlas (`lodestone-assets` work, independent of #23).
 
    **Corrected, because the old wording overstated this by a lot.** This entry
    used to claim `BannerFlagModel` needs "per-vertex cloth-wave animation this
@@ -313,21 +314,108 @@ None — pure, deterministic function of its inputs.
 None of the three exist today; this module is what all three will share
 instead of each re-deriving `submitPatterns`' layer math independently.
 
-## Steps D–F: handoff, with the vanilla data already extracted
+## Steps D–F: landed
 
-Not built this pass. Read before starting, because every number below came
-from re-reading the actual 26.2 decompiled sources rather than being
-assumed, and re-deriving them a second time is wasted work.
+Built this pass (issue #174), following the handoff research below almost
+unchanged — re-verified against `.cache/mc/26.2/client-src/` line by line
+before trusting it, per `CLAUDE.md`'s "re-verify before routing around"
+rule, and every claim in the original handoff held up.
 
-**Why this stopped here, honestly.** Steps D (mesh)/E (resolver)/F (pixel
-gate) need a placement transform this session could not pixel-verify — no
-live oracle or existing banner screenshot to check a guess against, and
-`CLAUDE.md`'s own recent history (`a27230c`'s `Less`→`LessEqual` fix, the
-hurt-overlay 70%-vs-30% red bug) is specifically about wrong render math
-that looked plausible and shipped anyway. Landing an unverified transform
-here would be exactly that pattern. What follows is the research, not the
-implementation — so the next pass starts at "write the code" rather than
-"read four Java files".
+- **D (mesh).** `lodestone_assets::block_entity_models::banner_body_model`/
+  `banner_flag_model` — the standing pole+bar and the flag, exactly the
+  `BannerModel.createBodyLayer(true)`/`BannerFlagModel.createFlagLayer(true)`
+  box coordinates below, baked through the existing `CubeDef`/`PartDef`/
+  `bake_entity_parts` pipeline with two new `BLOCK_ENTITY_MODELS` entries
+  (`"banner_body"`, `"banner_flag"`). Fourteen new tests in that crate pin
+  the part hierarchy, the sheet size and — measured through the real baked
+  quads, not the literal `addBox` arguments restated — that pole, bar and
+  flag stack contiguously along the model's Y-down staff axis.
+- **E (resolver).** `lodestone_render::block_entity::banner_ground_placement_matrix`
+  (the `T * R * S` composition below, verified against `Transformation.compose`'s
+  literal `translation().rotate().scale()` sequence in
+  `com.mojang.math.Transformation`, not assumed), `banner_phase`/
+  `banner_flag_x_rot` (the sway formulas, unit-tested as exact-value
+  predictions — `cos` is exactly `1`/`0`/`-1` at three chosen phases, so
+  every intermediate multiply is exact rather than approximate), and
+  `BlockEntityModelSet::resolve_banner` returning a new `BannerInstances`
+  (`body`/`flag` — opaque, ride the ordinary `plan_block_entities` batcher —
+  plus `layers: Vec<BannerLayerDraw>`, the small ordered translucent draw
+  list this doc always said the pattern masks would need). Only
+  ground/standing; wall is a natural second entry with the same shape (see
+  `banner_ground_placement_matrix`'s own doc) and was not built — no more
+  reason to build it now than when this doc first named it as a follow-up.
+- **F (pixel gate).** `crates/lodestone-render/tests/banner_pattern_layer_pixels.rs`,
+  `#[ignore]`d, drawing the **real** `resolve_banner` flag mesh/transform
+  through the **real** `EntityPipeline::banner_layer_pipeline`, with
+  directly-constructed 1×1 solid-colour fallback textures standing in for
+  real pattern-mask sprites (the real banner-pattern atlas — see "The jar
+  ships individual sprite PNGs" above — is still not built; nothing in this
+  pass claims otherwise). Two tests: submission order decides the visible
+  colour at full alpha (and each survivor is byte-identical to that colour
+  drawn alone — the coincident-depth gate's own anti-vacuity shape); and a
+  partial-alpha layer's composite moves monotonically from the layer beneath
+  it toward its own colour as alpha rises, landing meaningfully far
+  (`> 40` of `255`) from what the *ordinary* opaque/cutout pipeline would
+  produce instead. **Verified failing**, not just passing: swapping
+  `banner_layer_pipeline` for the ordinary `EntityPipeline`'s pipeline in
+  that file and re-running caught exactly one thing — a step-function
+  discard-then-overwrite can satisfy every non-strict monotonic inequality,
+  which is why the gate also requires the *mid*-alpha sample to differ from
+  **both** anchors by more than rounding noise, not just be monotonically
+  ordered between them. That control is recorded in the test's own doc
+  comment (`the_composite_moves_from_destination_toward_source_as_alpha_rises`),
+  not only in this file, so it survives the next person reading the test in
+  isolation.
+
+**A real, measured surprise, worth keeping regardless of what built it.**
+The first attempt at the pixel gate tried to predict an exact composited
+byte from `ALPHA_BLENDING`'s textbook formula (`src·a + dst·(1-a)` in linear
+light) using the fragment's raw alpha byte. It was wrong: on this machine's
+backend (Metal), a 12-point sweep showed the *effective* linear-space mixing
+factor is a real, repeatable, monotonic function of the raw alpha byte, but
+not the identity, not `linear_to_srgb(raw)`, and not any single power law
+tried against it — raw `0.502` behaves like `~0.76`, raw `0.251` like
+`~0.44`, raw `0.031` like `~0.08`. Something in this backend's SRGB-target
+blend path reshapes the alpha factor before applying it. The gate that
+landed does not depend on knowing that curve's exact shape — see its own
+doc comment for why — but whoever next tunes a real antialiased mask edge's
+alpha should expect its *effective* coverage in the final image to run
+ahead of its raw stored byte, and should re-measure on their own machine
+rather than trust either backend-implied number above.
+
+**Still not built, on purpose — this is now squarely issue #23's remaining
+scope, not #174's.** Everything above is real, pixel-verified render
+plumbing with no game-state producer wired to it yet:
+
+1. **No shell installer.** `RenderState` has no `set_banner_source`
+   (`crates/lodestone-shell/src/gpu.rs`) — the exact shape
+   `set_bell_source`/`set_skull_source` already are. Adding one is small:
+   accept `impl Fn(Vec3) -> Vec<BannerSpawn>`, resolve through
+   `resolve_banner` inside `prepare_block_entities` (append `body`/`flag`
+   into the same `instances` list chests/skulls/bells already share — the
+   batcher is already generic over model name), and issue the
+   `banner_layer_pipeline` draws for `layers` as their own pass, in order,
+   **not** batched (see `BannerLayerDraw`'s own doc for why).
+2. **No NBT gather.** A `BannerSpawn` needs a base colour (the *block's*
+   colour, `AbstractBannerBlock.getColor()` — one banner block per dye
+   colour, not a state property) and a pattern list (`BlockEntity.nbt`'s
+   `"patterns"` key, `BannerPatternLayers.CODEC`). This doc's own
+   "Prerequisite 1 does not block the block-entity consumer" section above
+   already worked out that this needs no `lodestone-game` item-component
+   work at all — it is a direct NBT parse, the same shape
+   `lodestone_world::sign_text::SignText::parse` already is for a sign.
+   Nothing in this pass built that parse.
+3. **No real pattern-mask atlas.** `entity/banner/*.png` (~40 files) is
+   still unloaded; the pixel gate's fallback textures are explicitly not a
+   substitute — see "The jar ships individual sprite PNGs" above for the
+   loader shape to follow (stem-list-plus-loader, mirroring
+   `chest_texture_stems`/`skull_texture_stems`).
+
+None of these three block the other two — the shell installer and the mesh
+work with a hand-built `BannerSpawn` (a hermetic pixel gate for the real
+end-to-end shell path could exist today, using the same fallback-texture
+trick this doc's own gate does, before the atlas lands), and the atlas is
+pure `lodestone-assets` work independent of either.
 
 ### The two model classes, decompiled directly
 
@@ -418,16 +506,15 @@ entity path re-applies that same correction on top of otherwise
 entity-style baked geometry. Skipping the flip renders the flag upside down
 and mirrored; skipping the scale renders it 1.5x too large.
 
-**This transform has no pixel gate yet and untested matrix code is exactly
-the trap this repo's own history warns about** (a positive-determinant
-guess shipped an inside-out block once). Write
-`banner_ground_placement_matrix`/`banner_wall_placement_matrix` mirroring
-`skull_ground_placement_matrix`'s shape, but derive a
-`placement_matches_vanillas_transformation_composition_order` test that
-checks the matrix against the literal `T*R*S` formula above — the same
-"measure the determinant, don't assert it" discipline
-`placement_preserves_orientation` already holds `block_entity_placement_matrix`
-to — before trusting any screenshot of it.
+**Landed as `banner_ground_placement_matrix`** (ground only —
+`banner_wall_placement_matrix` is still not built, same shape, see "Steps
+D–F: landed" above). Untested matrix code is exactly the trap this repo's
+own history warns about (a positive-determinant guess shipped an inside-out
+block once), so it shipped with `banner_ground_placement_preserves_orientation`
+(measuring the determinant's *sign*, not asserting it — the two axis flips
+above are individually real and confirmed by
+`banner_ground_placement_flips_y_and_z_but_not_x`, and their product is what
+keeps the sign positive) rather than only a screenshot.
 
 ### Draw order and pipeline routing (step F)
 
@@ -446,16 +533,19 @@ counts as entry 0), each reusing the flag part's own transform (masks paint
 over the flag, not the pole/bar).
 
 Real mask sprites need the banner-pattern atlas
-(`assets/minecraft/textures/entity/banner/*.png`, ~40 files —
-`docs/README.md`'s "The jar ships individual sprite PNGs" section above has
-the loader shape to follow) — that is `lodestone-assets` work, outside this
-task's ownership. A pixel gate can still exist without it: inject a
-directly-constructed 1x1 solid-colour texture per layer (the same "an
-unresolved sheet particle draws nothing rather than garbage" shape
-`crate::gpu::RenderState::install_particle_sheet_atlas`'s fallback already
-uses one crate over) and assert (a) the blend is genuinely translucent —
-predict the composited colour from the two layers' tints and the
-`ALPHA_BLENDING` formula, not merely "some pixels changed" — and (b) two
-layers submitted in opposite orders produce different composited colour
-where they overlap, which is the concrete, measurable form of "these draws
-are order-dependent" this doc has argued from the start.
+(`assets/minecraft/textures/entity/banner/*.png`, ~40 files — "The jar
+ships individual sprite PNGs" above has the loader shape to follow) —
+still not built; see "Steps D–F: landed" above. The pixel gate that landed
+instead injects a directly-constructed 1×1 solid-colour texture per layer
+(the same "an unresolved sheet particle draws nothing rather than garbage"
+shape `RenderState::install_particle_sheet_atlas`'s fallback uses one crate
+over) and asserts (a) the blend is genuinely translucent — a partial-alpha
+composite moves monotonically between the two layers' own tints as alpha
+rises, landing far from what the *ordinary* opaque pipeline would produce
+instead, not merely "some pixels changed" — and (b) two layers submitted in
+opposite orders produce different composited colour where they overlap,
+the concrete, measurable form of "these draws are order-dependent" this
+doc argued from the start. See `banner_pattern_layer_pixels.rs`'s own doc
+comment for why the original plan (predict an exact composited byte from
+the textbook `ALPHA_BLENDING` formula) had to change: this backend's
+effective blend alpha is measurably not the raw fragment alpha byte.
