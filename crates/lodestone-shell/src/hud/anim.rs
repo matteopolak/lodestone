@@ -3,9 +3,10 @@
 //! `docs/hud-animations.md` for the full citation-by-citation notes.
 //!
 //! This module currently carries the heart row's flash (blink) and
-//! critical-health jitter on a health change (issue #30). The hunger-row
-//! wobble and the hotbar item "pop" land in their own follow-up commits,
-//! reusing the same wall-clock tick and `jitter` helper defined here.
+//! critical-health jitter on a health change, and the hunger-row wobble
+//! while saturation is empty (issue #30). The hotbar item "pop" lands in its
+//! own follow-up commit, reusing the same wall-clock tick and `jitter` helper
+//! defined here.
 //!
 //! ## Why a wall clock, not the server's game tick
 //!
@@ -149,6 +150,24 @@ pub(super) fn heart_jitter(tick: i64, container: usize) -> f32 {
     jitter(tick, 0xBEEF_0000_u64 ^ container as u64, 2) as f32
 }
 
+/// The hunger-row wobble while saturation is empty (`Hud.java:977-979`):
+/// `getSaturationLevel() <= 0.0 && tickCount % (food * 3 + 1) == 0` gates a
+/// fresh `-1..=1`px offset per pip; any other tick draws flush (no
+/// cross-frame memory needed — unlike the heart row, this is a pure function
+/// of the current tick, food and saturation). Vanilla draws each of the ten
+/// pips with an independently-drawn offset on a gated tick; `pip` keys that
+/// same independence here.
+pub(super) fn hunger_wobble(tick: i64, food: i32, saturation: f32, pip: usize) -> f32 {
+    if saturation > 0.0 {
+        return 0.0;
+    }
+    let period = i64::from(food.max(0) * 3 + 1);
+    if tick % period != 0 {
+        return 0.0;
+    }
+    jitter(tick, 0xF00D_0000_u64 ^ pip as u64, 3) as f32 - 1.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,6 +276,51 @@ mod tests {
         assert!(
             vals.iter().any(|&v| v != vals[0]),
             "containers must not all draw the same jitter at one tick: {vals:?}"
+        );
+    }
+
+    #[test]
+    fn hunger_wobble_is_zero_with_any_saturation() {
+        assert_eq!(hunger_wobble(0, 20, 0.1, 0), 0.0);
+        assert_eq!(hunger_wobble(0, 20, 5.0, 0), 0.0);
+    }
+
+    #[test]
+    fn hunger_wobble_zero_food_gates_every_tick() {
+        // food=0 → period = 0*3+1 = 1, so *every* tick is gated: a floor case
+        // worth pinning since `food.max(0)*3` would otherwise be 0 and the
+        // modulus would divide by 1, not panic — but it is the boundary where
+        // an off-by-one in `period` is most visible.
+        for t in 0..10 {
+            let w = hunger_wobble(t, 0, 0.0, 0);
+            assert!((-1.0..=1.0).contains(&w));
+        }
+    }
+
+    #[test]
+    fn hunger_wobble_period_matches_the_vanilla_formula() {
+        // Predicted value: at food=3, period = food*3+1 = 10. Ticks 0, 10, 20
+        // are gated (offset in -1..=1); ticks 1..=9 must be exactly 0 (flush).
+        for t in 1..10 {
+            assert_eq!(
+                hunger_wobble(t, 3, 0.0, 0),
+                0.0,
+                "tick {t} is not a multiple of the period 10 and must be flush"
+            );
+        }
+        let gated = hunger_wobble(10, 3, 0.0, 0);
+        assert!(
+            (-1.0..=1.0).contains(&gated),
+            "gated tick must draw a -1..=1 offset, got {gated}"
+        );
+    }
+
+    #[test]
+    fn hunger_wobble_pips_are_independent() {
+        let vals: Vec<f32> = (0..10).map(|p| hunger_wobble(10, 3, 0.0, p)).collect();
+        assert!(
+            vals.iter().any(|&v| v != vals[0]),
+            "pips must not all draw the same offset: {vals:?}"
         );
     }
 }
