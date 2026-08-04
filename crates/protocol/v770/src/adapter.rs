@@ -41,8 +41,8 @@ use lodestone_data::mob_effects::{mob_effect_id, mob_effect_name};
 use crate::packet_ids::{configuration, handshaking, login, play};
 use crate::packets::chunk::{ChunkShape, LevelChunkWithLight};
 use crate::packets::common::{
-    BrandPayload, ClientInformation, KeepAlive, PingRequest, Pong, ResourcePackResponse,
-    TeleportToEntity,
+    BrandPayload, ClientInformation, CookieResponse, KeepAlive, PingRequest, Pong,
+    ResourcePackResponse, TeleportToEntity,
 };
 use crate::packets::configuration::{
     AcceptCodeOfConduct, FinishConfiguration, ServerboundKnownPacks,
@@ -65,8 +65,8 @@ use crate::packets::game::{
 };
 use crate::packets::handshake::Intention;
 use crate::packets::login::{
-    EncryptionRequest, EncryptionResponse, LoginAcknowledged, LoginCompression, LoginDisconnect,
-    LoginFinished,
+    CustomQueryAnswer, EncryptionRequest, EncryptionResponse, LoginAcknowledged, LoginCompression,
+    LoginDisconnect, LoginFinished,
 };
 use crate::packets::metadata::{
     MetadataClass, TrackedEntity, metadata_class, read_entity_metadata, read_update_attributes,
@@ -1546,6 +1546,152 @@ fn decode_damage_event(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     })])
 }
 
+/// The `minecraft:block` registry's wire key
+/// (`Registries.BLOCK = createRegistryKey("block")`), matching the
+/// `minecraft:worldgen/biome` precedent in `packets/registry.rs`'s
+/// `ClientRegistries::BIOME` — the registry's own resource key, not a name we
+/// invent.
+const BLOCK_REGISTRY_KEY: &str = "minecraft:block";
+
+/// Decodes `update_tags` (issue #296), shared by the Configuration and Play
+/// states — `ClientboundUpdateTagsPacket` is a `ClientCommonPacketListener`
+/// packet with one wire shape used in both
+/// (`.cache/mc/26.2/src/net/minecraft/network/protocol/common/ClientboundUpdateTagsPacket.java`):
+///
+/// ```text
+/// VarInt registry_count
+/// registry_count * {
+///     String registry_key           // e.g. "minecraft:block"
+///     VarInt tag_count
+///     tag_count * {
+///         String tag_name           // without the leading '#'
+///         VarInt id_count
+///         id_count * VarInt element_id
+///     }
+/// }
+/// ```
+///
+/// (`FriendlyByteBuf::readMap`/`TagNetworkSerialization.NetworkPayload::read`/
+/// `readIntIdList`.) Every registry's tags are consumed to stay byte-aligned
+/// through the whole packet — including ones this crate has no census for,
+/// e.g. `minecraft:item` (see `lodestone-data`'s `tool.rs` module docs: there
+/// is no `ITEM_TAGS` table today, so nothing consumes an item-tag override
+/// yet) — but only the `minecraft:block` registry's decoded table is
+/// installed anywhere, via [`lodestone_data::tool::set_block_tag_overrides`].
+/// Vanilla always sends the complete non-empty tag set per registry, never a
+/// delta, so a decoded `minecraft:block` entry replaces the whole override
+/// table; a packet that does not mention `minecraft:block` at all leaves
+/// whatever was installed before untouched.
+fn decode_update_tags(payload: &[u8]) -> Result<(), AdapterError> {
+    let mut reader = Reader::new(payload);
+    let registry_count = reader.var_i32().map_err(dec_err)?;
+    let registry_count = usize::try_from(registry_count)
+        .map_err(|_| AdapterError::Decode(format!("invalid registry count {registry_count}")))?;
+    for _ in 0..registry_count {
+        let registry_key = reader.string(32767).map_err(dec_err)?;
+        let is_block_registry = registry_key == BLOCK_REGISTRY_KEY;
+        let tag_count = reader.var_i32().map_err(dec_err)?;
+        let tag_count = usize::try_from(tag_count)
+            .map_err(|_| AdapterError::Decode(format!("invalid tag count {tag_count}")))?;
+        let mut block_tags = is_block_registry.then(HashMap::new);
+        for _ in 0..tag_count {
+            let tag_name = reader.string(32767).map_err(dec_err)?;
+            let id_count = reader.var_i32().map_err(dec_err)?;
+            let id_count = usize::try_from(id_count)
+                .map_err(|_| AdapterError::Decode(format!("invalid tag id count {id_count}")))?;
+            // Read every id as `i32` regardless of registry, to stay
+            // byte-aligned through registries this crate does not model
+            // (`minecraft:item` and friends); only the block registry's ids
+            // are ever narrowed to `u16` (`block_tag_members`'s key space),
+            // and a raw id too large for that (never observed in a real
+            // registry, which tops out in the low thousands) is dropped from
+            // that one tag rather than failing the whole packet.
+            let mut raw_ids = Vec::with_capacity(id_count.min(4096));
+            for _ in 0..id_count {
+                raw_ids.push(reader.var_i32().map_err(dec_err)?);
+            }
+            if let Some(map) = block_tags.as_mut() {
+                let mut ids: Vec<u16> = raw_ids
+                    .into_iter()
+                    .filter_map(|raw| u16::try_from(raw).ok())
+                    .collect();
+                ids.sort_unstable();
+                map.insert(tag_name, ids);
+            }
+        }
+        if let Some(map) = block_tags {
+            lodestone_data::tool::set_block_tag_overrides(map);
+        }
+    }
+    reader.ensure_empty().map_err(dec_err)?;
+    Ok(())
+}
+
+/// Decodes a clientbound `custom_payload`: a channel identifier followed by
+/// however many bytes remain in the packet (`ClientboundCustomPayloadPacket`).
+/// Shared by the Configuration and Play states — issue #301 found
+/// Configuration had no arm for this at all; only Play did.
+///
+/// Only `minecraft:brand` gets a specially-typed codec in vanilla (a single
+/// UTF-8 string); every other channel is `DiscardedPayload`, which just
+/// consumes whatever bytes remain in the packet. Carrying the raw bytes for
+/// every channel (rather than special-casing brand) loses nothing and avoids
+/// guessing at channel-specific shapes this adapter cannot verify.
+fn decode_custom_payload(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    let mut reader = Reader::new(payload);
+    let channel = reader.string(32767).map_err(dec_err)?;
+    let channel = parse_key(&channel, "custom payload channel")?;
+    let remaining = reader.remaining();
+    let data = reader.bytes(remaining).map_err(dec_err)?.to_vec();
+    reader.ensure_empty().map_err(dec_err)?;
+    Ok(vec![Directive::Emit(ClientEvent::CustomPayload {
+        channel,
+        data,
+    })])
+}
+
+/// Decodes a clientbound `custom_query` (Login state only): a VarInt
+/// transaction id, a channel identifier, then however many bytes remain
+/// (`ClientboundCustomQueryPacket`). This is the older, pre-`custom_payload`
+/// plugin-message mechanism (historically Forge/FML's login handshake); even
+/// vanilla's own reference client never interprets a payload — every channel
+/// decodes to `DiscardedQueryPayload`, which just skips the remaining bytes —
+/// and unconditionally answers with no payload
+/// (`ClientHandshakePacketListenerImpl.handleCustomQuery`:
+/// `new ServerboundCustomQueryAnswerPacket(transactionId, null)`, no channel
+/// check, no UI). This mirrors that exactly: decode to stay byte-aligned,
+/// answer `None`, surface no event — there is nothing to observe that
+/// vanilla itself does not already discard silently.
+fn decode_custom_query(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    let mut reader = Reader::new(payload);
+    let transaction_id = reader.var_i32().map_err(dec_err)?;
+    let _channel = reader.string(32767).map_err(dec_err)?;
+    let remaining = reader.remaining();
+    reader.bytes(remaining).map_err(dec_err)?;
+    reader.ensure_empty().map_err(dec_err)?;
+    Ok(vec![send(
+        login::serverbound::CUSTOM_QUERY_ANSWER,
+        &CustomQueryAnswer {
+            transaction_id,
+            payload: None,
+        },
+    )?])
+}
+
+/// Decodes a clientbound `cookie_request`: a single identifier key, no other
+/// fields (`ClientboundCookieRequestPacket`, `ClientCookiePacketListener`).
+/// Shared by the Login, Configuration and Play states — issue #291's
+/// "aren't handled in `handle_login` at all" applied equally to
+/// `handle_configuration`, which also had no arm for this before now, only
+/// `handle_play` did.
+fn decode_cookie_request(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    let mut reader = Reader::new(payload);
+    let key = reader.string(32767).map_err(dec_err)?;
+    let key = parse_key(&key, "cookie")?;
+    reader.ensure_empty().map_err(dec_err)?;
+    Ok(vec![Directive::Emit(ClientEvent::CookieRequested { key })])
+}
+
 /// Builds a [`Directive::Send`] from a packet id and an encodable body.
 fn send<T: Encode>(packet_id: i32, packet: &T) -> Result<Directive, AdapterError> {
     Ok(Directive::Send {
@@ -2332,6 +2478,17 @@ impl V770Adapter {
             let body: LoginDisconnect = decode_body(payload)?;
             return Ok(vec![Directive::Disconnect(Text::literal(body.reason))]);
         }
+        if packet_id == login::clientbound::COOKIE_REQUEST {
+            // Issue #291: this state had no arm at all before now, a
+            // different code path from the Play-state one below.
+            return decode_cookie_request(payload);
+        }
+        if packet_id == login::clientbound::CUSTOM_QUERY {
+            // Issue #301: zero decode existed for this at all. See
+            // `decode_custom_query`'s own doc for why the reply is
+            // unconditionally empty, matching vanilla's own client.
+            return decode_custom_query(payload);
+        }
         Ok(Vec::new())
     }
 
@@ -2380,6 +2537,29 @@ impl V770Adapter {
         if packet_id == configuration::clientbound::PING {
             let ping: Pong = decode_body(payload)?;
             return Ok(vec![Directive::Emit(ClientEvent::Ping { id: ping.id })]);
+        }
+        if packet_id == configuration::clientbound::UPDATE_TAGS {
+            // Issue #296: block/item tags were always hardcoded from the
+            // vanilla census; this installs the server's own `minecraft:block`
+            // tag set as an override — see `decode_update_tags`'s own doc for
+            // the wire shape and `lodestone_data::tool`'s module docs for why
+            // the override is process-wide.
+            decode_update_tags(payload)?;
+            return Ok(Vec::new());
+        }
+        if packet_id == configuration::clientbound::COOKIE_REQUEST {
+            // Issue #291: also missing here, not just in `handle_login` — the
+            // issue named Login and Play explicitly; Configuration had the
+            // identical gap.
+            return decode_cookie_request(payload);
+        }
+        if packet_id == configuration::clientbound::CUSTOM_PAYLOAD {
+            // Issue #301: only `handle_play` decoded this before now; a
+            // server that sends plugin messages during Configuration (the
+            // vanilla mod-handshake window, before `minecraft:brand` is even
+            // announced by some servers) hit the fall-through below and lost
+            // the message entirely.
+            return decode_custom_payload(payload);
         }
         if packet_id == configuration::clientbound::CODE_OF_CONDUCT {
             return Ok(vec![send(
@@ -3924,11 +4104,7 @@ impl V770Adapter {
             })]);
         }
         if packet_id == play::clientbound::COOKIE_REQUEST {
-            let mut reader = Reader::new(payload);
-            let key = reader.string(32767).map_err(dec_err)?;
-            let key = parse_key(&key, "cookie")?;
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(ClientEvent::CookieRequested { key })]);
+            return decode_cookie_request(payload);
         }
         if packet_id == play::clientbound::STORE_COOKIE {
             let mut reader = Reader::new(payload);
@@ -3975,22 +4151,7 @@ impl V770Adapter {
             return Ok(vec![Directive::Emit(ClientEvent::ResourcePackPopped { id })]);
         }
         if packet_id == play::clientbound::CUSTOM_PAYLOAD {
-            // Only `minecraft:brand` gets a specially-typed codec in vanilla
-            // (a single UTF-8 string); every other channel is
-            // `DiscardedPayload`, which just consumes whatever bytes remain
-            // in the packet. Carrying the raw bytes for every channel (rather
-            // than special-casing brand) loses nothing and avoids guessing at
-            // channel-specific shapes this adapter cannot verify.
-            let mut reader = Reader::new(payload);
-            let channel = reader.string(32767).map_err(dec_err)?;
-            let channel = parse_key(&channel, "custom payload channel")?;
-            let remaining = reader.remaining();
-            let data = reader.bytes(remaining).map_err(dec_err)?.to_vec();
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(ClientEvent::CustomPayload {
-                channel,
-                data,
-            })]);
+            return decode_custom_payload(payload);
         }
         if packet_id == play::clientbound::SERVER_DATA {
             let mut reader = Reader::new(payload);
@@ -4058,6 +4219,33 @@ impl V770Adapter {
                 target: Vec3 { x, y, z },
                 at_entity,
             })]);
+        }
+        if packet_id == play::clientbound::UPDATE_TAGS {
+            // Same wire shape and override as the Configuration-state arm
+            // (issue #296) — vanilla can resend tags in Play too (e.g. a
+            // reload), and `ClientCommonPacketListener::handleUpdateTags` is
+            // shared by both states in the decompiled source.
+            decode_update_tags(payload)?;
+            return Ok(Vec::new());
+        }
+        if packet_id == play::clientbound::BUNDLE_DELIMITER {
+            // No fields: `ClientboundBundleDelimiterPacket` extends
+            // `BundleDelimiterPacket`, which overrides neither a reader nor a
+            // writer (`.cache/mc/26.2/client-src/net/minecraft/network/protocol/
+            // BundleDelimiterPacket.java`) — vanilla's own pipeline
+            // (`BundlerInfo.java`) never puts a body on the wire for it either;
+            // it is purely a toggle the pipeline uses to group the packets
+            // between two delimiters into one atomic apply. Issue #299: before
+            // this arm, `BUNDLE_DELIMITER` fell through to the catch-all below
+            // and decoded to zero directives, silently and safely (each real
+            // packet is still independently length-framed by the transport, so
+            // nothing about framing was ever at risk) — the actual gap was that
+            // the atomicity guarantee itself did not exist. See
+            // `Directive::BundleDelimiter`'s own doc for why pairing the two
+            // delimiters happens above this crate, not here.
+            let reader = Reader::new(payload);
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::BundleDelimiter]);
         }
         // Everything else in play is intentionally ignored for now.
         Ok(Vec::new())
@@ -4432,6 +4620,29 @@ impl VersionAdapter for V770Adapter {
                 };
                 Ok(Some((packet_id, encode_body(&body)?)))
             }
+            // Issue #301: the general case `SendBrand` above is vanilla's one
+            // built-in instance of. `custom_payload`'s wire body is just
+            // channel + raw bytes (`ClientboundCustomPayloadPacket`'s
+            // `DiscardedPayload`, mirrored on the serverbound side), so this
+            // needs no dedicated packet struct — `BrandPayload`'s two-string
+            // shape doesn't fit arbitrary bytes, but `send` only needs an
+            // `Encode` body, and a `(String, Vec<u8>)`-shaped write is exactly
+            // what `custom_payload` is on every channel that isn't `brand`.
+            ClientAction::SendCustomPayload { channel, data }
+                if matches!(
+                    state,
+                    ConnectionState::Configuration | ConnectionState::Play
+                ) =>
+            {
+                let mut writer = Writer::default();
+                writer.string(&channel.to_string());
+                writer.bytes(data);
+                let packet_id = match state {
+                    ConnectionState::Configuration => configuration::serverbound::CUSTOM_PAYLOAD,
+                    _ => play::serverbound::CUSTOM_PAYLOAD,
+                };
+                Ok(Some((packet_id, writer.into_vec())))
+            }
             ClientAction::PongResponse { id }
                 if matches!(
                     state,
@@ -4717,6 +4928,23 @@ impl VersionAdapter for V770Adapter {
                     play::serverbound::CHANGE_GAME_MODE,
                     encode_body(&body)?,
                 )))
+            }
+            // Issue #291: `cookie_response` exists in Login, Configuration and
+            // Play alike (`ServerCookiePacketListener` is common to all
+            // three), so this is one arm with a per-state packet id rather
+            // than three separate ones.
+            ClientAction::CookieResponse { key, payload } => {
+                let packet_id = match state {
+                    ConnectionState::Login => login::serverbound::COOKIE_RESPONSE,
+                    ConnectionState::Configuration => configuration::serverbound::COOKIE_RESPONSE,
+                    ConnectionState::Play => play::serverbound::COOKIE_RESPONSE,
+                    ConnectionState::Handshaking | ConnectionState::Status => return Ok(None),
+                };
+                let body = CookieResponse {
+                    key: key.to_string(),
+                    payload: payload.clone(),
+                };
+                Ok(Some((packet_id, encode_body(&body)?)))
             }
             _ => Ok(None),
         }
