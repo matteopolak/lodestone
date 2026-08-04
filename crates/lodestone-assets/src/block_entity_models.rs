@@ -80,6 +80,12 @@ use crate::entity::{CubeDef, EntityModelDef, PartDef, PartPose};
 /// `lodestone-assets/tests/real_jar.rs`.
 const CHEST_SHEET: (u32, u32) = (64, 64);
 
+/// The bell sheet is 32×32 (`BellModel.createBodyLayer`'s
+/// `LayerDefinition.create(mesh, 32, 32)`) — smaller than every chest/skull
+/// canvas so far, which is why [`bell_model`]'s own test does not reuse
+/// [`CHEST_SHEET`].
+const BELL_SHEET: (u32, u32) = (32, 32);
+
 /// `entity::FACE_ORDER` index of the `West` face — see the module doc on why
 /// this is not `Direction as usize`.
 const FACE_WEST: usize = 2;
@@ -137,6 +143,11 @@ pub const BLOCK_ENTITY_MODELS: &[BlockEntityModelEntry] = &[
         name: "skull_humanoid",
         texture: "entity/zombie/zombie",
         build: skull_humanoid_model,
+    },
+    BlockEntityModelEntry {
+        name: "bell",
+        texture: "entity/bell/bell_body",
+        build: bell_model,
     },
 ];
 
@@ -326,6 +337,49 @@ pub fn skull_humanoid_model() -> EntityModelDef {
     }
 }
 
+/// A bell's swinging body and its flared bottom rim —
+/// `BellModel.createBodyLayer()`:
+///
+/// ```text
+/// bell_body  texOffs(0,  0)  box(-3, -6, -3,  6, 7, 6)  pose offset(8, 12, 8)
+///   bell_base  texOffs(0, 13)  box(4, 4, 4,  8, 2, 8)  pose offset(-8, -12, -8)  (child of bell_body)
+/// ```
+///
+/// `bell_base` is **nested inside** `bell_body` in the real jar
+/// (`bellBody.addOrReplaceChild("bell_base", …)`), not a sibling under root.
+/// Its own local pose `(-8, -12, -8)` exactly cancels `bell_body`'s pivot
+/// `(8, 12, 8)`, so the flared rim's *world* pivot lands at the block's own
+/// corner `(0, 0, 0)` — the rim (`4..12, 4..6, 4..12` texels there) then sits
+/// directly below the tapered body (`5..11, 6..13, 5..11` texels once
+/// `bell_body`'s own pivot is folded in), which is exactly what a bell's
+/// flared bottom skirt should do. The nesting also matters for the
+/// animation: `BellModel.setupAnim` only ever poses `bellBody.xRot`/`zRot`
+/// (see [`crate::block_entity_models`]'s sibling doc in `lodestone-render`'s
+/// `bell_shake_angle`) and the rim swings with it *because* it is a child,
+/// the same "shared handle" reasoning [`chest_single_model`]'s doc gives for
+/// why `lid`/`lock` share a pivot rather than nesting one inside the other —
+/// here the correct shape is the opposite: nested, not siblings, because
+/// vanilla itself nests them.
+///
+/// Authored **block-space-up**, the same convention [`chest_single_model`]
+/// uses and unlike [`skull_head_part`]: `BellRenderer.submit` applies no
+/// `scale(-1, -1, 1)` flip (unlike `SkullBlockRenderer`), so `CubeDef::origin`
+/// and `PartPose` add directly with no sign flip.
+#[must_use]
+pub fn bell_model() -> EntityModelDef {
+    let bell_base = PartDef::new(PartPose::offset(-8.0, -12.0, -8.0))
+        .with_cube(CubeDef::new([4.0, 4.0, 4.0], [8.0, 2.0, 8.0], [0.0, 13.0]));
+    let bell_body = PartDef::new(PartPose::offset(8.0, 12.0, 8.0))
+        .with_cube(CubeDef::new([-3.0, -6.0, -3.0], [6.0, 7.0, 6.0], [0.0, 0.0]))
+        .with_child("bell_base", bell_base);
+    let root = PartDef::new(PartPose::ZERO).with_child("bell_body", bell_body);
+    EntityModelDef {
+        texture_width: BELL_SHEET.0,
+        texture_height: BELL_SHEET.1,
+        root,
+    }
+}
+
 /// `[true; 6]` with one `entity::FACE_ORDER` index cleared.
 fn hide_face(index: usize) -> [bool; 6] {
     let mut faces = [true; 6];
@@ -455,9 +509,14 @@ mod tests {
     fn every_entry_builds_and_resolves_by_name() {
         for entry in BLOCK_ENTITY_MODELS {
             let def = (entry.build)();
-            // 64 wide on every canvas so far; height varies (see
-            // `skull_mob_model`'s doc for why 32 and 64 are both real).
-            assert_eq!(def.texture_width, 64, "{}", entry.name);
+            // 64 wide on every chest/skull canvas; the bell sheet is the first
+            // to be narrower (32×32 — see `bell_model`'s doc).
+            assert!(
+                def.texture_width == 32 || def.texture_width == 64,
+                "{}: unexpected canvas width {}",
+                entry.name,
+                def.texture_width
+            );
             assert!(
                 def.texture_height == 32 || def.texture_height == 64,
                 "{}: unexpected canvas height {}",
@@ -468,6 +527,88 @@ mod tests {
             assert_eq!(block_entity_model(entry.name).map(|e| e.name), Some(entry.name));
         }
         assert!(block_entity_model("no_such_model").is_none());
+    }
+
+    /// The bell's own part hierarchy, in bake (pre-order) order:
+    /// `bell_base` is a child of `bell_body`, not a sibling under root — see
+    /// `bell_model`'s doc for why the nesting itself (not just the pivot
+    /// arithmetic) is load-bearing.
+    #[test]
+    fn bell_base_is_nested_inside_bell_body_not_a_sibling() {
+        let def = bell_model();
+        let parts = bake_entity_parts(&def);
+        assert_eq!(
+            part_names(&def),
+            vec![String::new(), "bell_body".to_string(), "bell_base".to_string()]
+        );
+        let body = parts.iter().position(|p| p.name == "bell_body").unwrap();
+        let base = parts.iter().find(|p| p.name == "bell_base").unwrap();
+        assert_eq!(
+            base.parent,
+            Some(body),
+            "bell_base must be a child of bell_body, not the root"
+        );
+    }
+
+    /// The rim (`bell_base`) sits just below the tapered body (`bell_body`) in
+    /// world/block space, touching at the seam — the physical shape of a
+    /// bell's flared bottom skirt. This is the assertion that would catch the
+    /// child's local pose sign flipped (which would send the rim flying up
+    /// through the body instead of hanging just under it) or the two parts
+    /// accidentally swapped to siblings (which would double-apply
+    /// `bell_body`'s own pivot and put the rim at the wrong height entirely).
+    #[test]
+    fn bell_base_sits_just_below_bell_body() {
+        let def = bell_model();
+        let quads = crate::entity::bake_entity(&def);
+        assert!(!quads.is_empty());
+
+        // `bake_entity_parts` deliberately leaves the pivot chain for the
+        // caller to apply (see its own doc — that is what lets an animator
+        // move a joint), so this rebuilds the same chain
+        // `BlockEntityMesh::part_transforms` does: `Affine::of_pose` per
+        // part, composed through the parent index.
+        let baked = bake_entity_parts(&def);
+        let mut chain: Vec<crate::entity::Affine> = Vec::with_capacity(baked.len());
+        for part in &baked {
+            let local = crate::entity::Affine::of_pose(&part.rest);
+            let world = match part.parent {
+                Some(p) => chain[p].compose(&local),
+                None => local,
+            };
+            chain.push(world);
+        }
+
+        let mut body_min_y = f32::MAX;
+        let mut base_max_y = f32::MIN;
+        for (i, part) in baked.iter().enumerate() {
+            for quad in &part.quads {
+                for p in &quad.positions {
+                    let world = chain[i].apply(*p);
+                    if part.name == "bell_body" {
+                        body_min_y = body_min_y.min(world[1]);
+                    } else if part.name == "bell_base" {
+                        base_max_y = base_max_y.max(world[1]);
+                    }
+                }
+            }
+        }
+        // body spans 6..13 texels (5..11? see doc — y range specifically):
+        // pivot 12 + local -6..1 = 6..13 texels = 0.375..0.8125 blocks.
+        assert!(
+            (body_min_y - 6.0 / 16.0).abs() < 1e-4,
+            "bell_body min y {body_min_y}"
+        );
+        // base spans 4..6 texels = 0.25..0.375 blocks, touching the body's
+        // bottom exactly (6/16).
+        assert!(
+            (base_max_y - 6.0 / 16.0).abs() < 1e-4,
+            "bell_base max y {base_max_y} should touch bell_body's bottom"
+        );
+        assert!(
+            base_max_y <= body_min_y + 1e-5,
+            "the rim must not poke up into the body: base_max {base_max_y} body_min {body_min_y}"
+        );
     }
 
     /// The skull box is identical on both canvases — only the declared sheet
