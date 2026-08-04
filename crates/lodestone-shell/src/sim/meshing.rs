@@ -32,6 +32,13 @@
 //! `on_column_arrived` and `mark_column_dirty` from both `sim/net_apply.rs`
 //! and `sim/tests.rs`. `remesh_section` stays private: its only callers
 //! (`remesh_around`, `remesh_changed_blocks`) moved here with it.
+//!
+//! **`remesh_around`'s own body later moved again**, out of `sim` entirely
+//! and into [`TerrainMesh::remesh_around`](crate::mesher::TerrainMesh::remesh_around)
+//! — it had reduced to pure `ChunkWorld`/`TerrainMesh` math with nothing else
+//! of `Sim`'s in it, once its World-guard plumbing is factored through
+//! [`Sim::terrain_and_world`]. What is left here is the one-line delegation;
+//! `remesh_section` is unaffected and still backs `remesh_changed_blocks`.
 
 use super::*;
 
@@ -155,38 +162,15 @@ impl Sim {
     /// neighbour section that shares the boundary the block sits on (a face on a
     /// section edge changes the neighbour's mesh via culling/AO). Sections that
     /// became all-air are queued for GPU removal instead.
+    ///
+    /// A one-line delegation through [`Sim::terrain_and_world`] since the
+    /// re-mesh seam moved: the 3×3×3 boundary filter and extent math that used
+    /// to live here touched only [`ChunkWorld`] and [`TerrainMesh`] and no
+    /// other `Sim` state, so it moved to [`TerrainMesh::remesh_around`]
+    /// (`mesher.rs`) — see that method's doc for why this is where it stops
+    /// (never a plugin-callable primitive).
     pub(crate) fn remesh_around(&mut self, block: [i32; 3]) {
-        let Some(extent) = self.chunk_world().extent() else {
-            return;
-        };
-        let (min_y, section_count) = (extent.min_y, extent.section_count);
-        let cx = block[0].div_euclid(16);
-        let cz = block[2].div_euclid(16);
-        let lx = block[0].rem_euclid(16);
-        let lz = block[2].rem_euclid(16);
-        let si = (block[1] - min_y).div_euclid(16);
-        let ly = (block[1] - min_y).rem_euclid(16);
-
-        for dx in -1..=1 {
-            for dy in -1..=1 {
-                for dz in -1..=1 {
-                    if (dx == -1 && lx != 0) || (dx == 1 && lx != 15) {
-                        continue;
-                    }
-                    if (dy == -1 && ly != 0) || (dy == 1 && ly != 15) {
-                        continue;
-                    }
-                    if (dz == -1 && lz != 0) || (dz == 1 && lz != 15) {
-                        continue;
-                    }
-                    let nsi = si + dy;
-                    if nsi < 0 || nsi as usize >= section_count {
-                        continue;
-                    }
-                    self.remesh_section(cx + dx, cz + dz, nsi as usize, min_y, section_count);
-                }
-            }
-        }
+        self.terrain_and_world(|store, terrain| terrain.remesh_around(store, block));
     }
 
     /// Re-snapshot and re-schedule one section. A section that snapshots to

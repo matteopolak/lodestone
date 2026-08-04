@@ -1717,6 +1717,62 @@ impl TerrainMesh {
         }
     }
 
+    /// Re-snapshot and re-schedule the section holding `block`, plus any
+    /// neighbour section that shares the boundary the block sits on (a face on
+    /// a section edge changes the neighbour's mesh via culling/AO). Sections
+    /// that became all-air are queued for GPU removal instead — `mesh_section`
+    /// already routes that through [`Self::pending_removals`].
+    ///
+    /// Moved here from `Sim::remesh_around` (`sim/meshing.rs`), which had
+    /// reduced to pure `ChunkWorld`/`TerrainMesh` math and no other `Sim`
+    /// state — see `docs/plugin-api.md`'s re-mesh-seam note. `Sim::remesh_around`
+    /// is now a one-line delegation through `Sim::terrain_and_world`; this is
+    /// the version usable from anywhere that already holds a `&ChunkWorld`
+    /// and a `&mut TerrainMesh` and nothing else, which is deliberately as far
+    /// as this reaches: **not** a `RemeshRequest` resource or event a plugin
+    /// could call — re-meshing stays a consequence of a sanctioned world
+    /// write, never a plugin-callable verb (`docs/plugin-api.md`'s "what not
+    /// to build" note).
+    pub fn remesh_around(&mut self, store: &ChunkWorld, block: [i32; 3]) {
+        let Some(extent) = store.extent() else {
+            return;
+        };
+        let (min_y, section_count) = (extent.min_y, extent.section_count);
+        let cx = block[0].div_euclid(16);
+        let cz = block[2].div_euclid(16);
+        let lx = block[0].rem_euclid(16);
+        let lz = block[2].rem_euclid(16);
+        let si = (block[1] - min_y).div_euclid(16);
+        let ly = (block[1] - min_y).rem_euclid(16);
+
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    if (dx == -1 && lx != 0) || (dx == 1 && lx != 15) {
+                        continue;
+                    }
+                    if (dy == -1 && ly != 0) || (dy == 1 && ly != 15) {
+                        continue;
+                    }
+                    if (dz == -1 && lz != 0) || (dz == 1 && lz != 15) {
+                        continue;
+                    }
+                    let nsi = si + dy;
+                    if nsi < 0 || nsi as usize >= section_count {
+                        continue;
+                    }
+                    let key = SectionKey {
+                        cx: cx + dx,
+                        cz: cz + dz,
+                        si: nsi as usize,
+                        min_y,
+                    };
+                    self.mesh_section(store, key, section_count);
+                }
+            }
+        }
+    }
+
     /// Collect finished meshes for the caller to upload, recording each key into
     /// [`Self::uploaded_sections`].
     pub fn drain_meshes(&mut self) -> Vec<Meshed> {
