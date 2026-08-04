@@ -1,8 +1,16 @@
 //! The random-tick scheduler (issue #307): which block positions get picked
-//! for a random tick, how many per section per world tick, and — the one
-//! block wired all the way through today — grass turning to dirt (and back)
-//! so at least one random tick reaches a real client (CLAUDE.md's own
-//! "nothing is done until something on screen changes").
+//! for a random tick, how many per section per world tick, and the selection
+//! loop every per-block-family handler dispatches from — grass turning to
+//! dirt (and back), the block modeled here directly, plus crop growth,
+//! sapling growth, and leaf decay (issue #310, `crate::growth_tick`), which
+//! [`RandomTickScheduler::tick_chunk`]'s dispatch (see
+//! `tick_randomly_ticking_block`) fans out to. Every one of these reaches a
+//! real client through the same [`RandomTickEvent`]/`BlockTickFeed` path —
+//! see this module's own "what reaches a client" note on
+//! [`RandomTickScheduler::tick_chunk`] and `crate::growth_tick`'s module doc
+//! for why crop/sapling/leaf blocks specifically have no *natural* producer
+//! in this crate's worldgen yet, unlike grass (CLAUDE.md's own "nothing is
+//! done until something on screen changes").
 //!
 //! # Selection, cited directly
 //!
@@ -114,6 +122,7 @@
 //! regardless of how many of the four attempts actually hit a propagatable
 //! neighbour.
 
+use crate::growth_tick;
 use crate::mob_spawn::SpawnRng;
 
 /// Vanilla's own default for the `random_tick_speed` gamerule
@@ -152,11 +161,16 @@ pub fn is_air_variant(state: &str) -> bool {
 
 /// `true` iff `block_state` is one this crate models a random tick for.
 /// Mirrors `BlockState.isRandomlyTicking()`
-/// (`BlockBehaviour.java:401-402`) restricted to the one block modeled here
-/// — see [`GRASS_BLOCK`]'s doc comment for why dirt is deliberately excluded.
+/// (`BlockBehaviour.java:401-402`) — grass/mycelium-family spreading (see
+/// [`GRASS_BLOCK`]'s doc comment for why dirt is deliberately excluded), plus
+/// the three families issue #310 added: crop growth, sapling growth, and
+/// leaf decay, all cited in `crate::growth_tick`'s own module doc comment.
 #[must_use]
 pub fn is_randomly_ticking(block_state: &str) -> bool {
     base_name(block_state) == GRASS_BLOCK
+        || growth_tick::is_growable_crop(block_state)
+        || growth_tick::is_sapling(block_state)
+        || growth_tick::leaves_should_decay(block_state)
 }
 
 /// The position-pick LCG, verbatim from `Level.getBlockRandomPos`
@@ -296,6 +310,13 @@ impl RandomTickScheduler {
     /// [`RandomTickEvent`] so the caller can persist it through
     /// [`crate::chunk::ChunkSource::set_block`] and notify a connected
     /// client — `column` alone is not persisted by this function.
+    ///
+    /// The per-position dispatch (`tick_randomly_ticking_block`) fans out to
+    /// grass (this module) or crop/sapling/leaves (`crate::growth_tick`,
+    /// issue #310) — every family returns through this same `Vec`, so this
+    /// function's caller (`tick::run_tick_loop`) needed zero changes to gain
+    /// the new families: it already forwards whatever `tick_chunk` hands
+    /// back, generically, one block-state string at a time.
     pub fn tick_chunk(
         &mut self,
         column: &mut crate::chunk::ChunkColumn,
@@ -321,12 +342,139 @@ impl RandomTickScheduler {
                     if !is_randomly_ticking(&state) {
                         continue;
                     }
-                    events.extend(self.tick_grass_block(column, min_x, min_z, x, y, z, &state));
+                    events.extend(self.tick_randomly_ticking_block(column, min_x, min_z, x, y, z, &state));
                 }
             }
             section_min_y += 16;
         }
         events
+    }
+
+    /// Dispatches a position already confirmed eligible by
+    /// [`is_randomly_ticking`] to the right per-block-family handler — grass
+    /// (this module) or crop/sapling/leaves (`crate::growth_tick`, issue
+    /// #310). One dispatch point keeps `tick_chunk`'s own selection loop
+    /// ignorant of which families exist, exactly like vanilla's single
+    /// `blockState.randomTick(...)` virtual call fanning out to whichever
+    /// `Block` subclass is actually at that position.
+    fn tick_randomly_ticking_block(
+        &mut self,
+        column: &mut crate::chunk::ChunkColumn,
+        min_x: i32,
+        min_z: i32,
+        x: i32,
+        y: i32,
+        z: i32,
+        state: &str,
+    ) -> Vec<RandomTickEvent> {
+        let base = base_name(state);
+        if base == GRASS_BLOCK {
+            return self.tick_grass_block(column, min_x, min_z, x, y, z, state);
+        }
+        if growth_tick::crop_max_age(base).is_some() {
+            return self.tick_crop_block(column, min_x, min_z, x, y, z, state, base);
+        }
+        if growth_tick::is_sapling(state) {
+            return self.tick_sapling_block(column, min_x, min_z, x, y, z, state, base);
+        }
+        if growth_tick::is_leaves(state) {
+            return self.tick_leaves_block(column, min_x, min_z, x, y, z, state);
+        }
+        Vec::new()
+    }
+
+    /// Crop growth (issue #310) — see `crate::growth_tick`'s module doc for
+    /// the jar citation. Reads the block directly above as the light-check
+    /// proxy (same convention grass uses), draws through the shared
+    /// `behavior_rng`, and on a hit persists the new age into `column`.
+    fn tick_crop_block(
+        &mut self,
+        column: &mut crate::chunk::ChunkColumn,
+        min_x: i32,
+        min_z: i32,
+        x: i32,
+        y: i32,
+        z: i32,
+        state: &str,
+        base: &str,
+    ) -> Vec<RandomTickEvent> {
+        let lx = x - min_x;
+        let lz = z - min_z;
+        let above = column.block_state(lx, y + 1, lz).to_string();
+        let above_is_air = is_air_variant(&above);
+        let age = growth_tick::get_age(state);
+        match growth_tick::crop_random_tick(base, age, above_is_air, &mut self.behavior_rng) {
+            growth_tick::CropOutcome::Grew(new_age) => {
+                let new_state = growth_tick::set_age(base, new_age);
+                column.set_block(lx, y, lz, &new_state);
+                vec![RandomTickEvent {
+                    pos: (x, y, z),
+                    from: state.to_string(),
+                    to: new_state,
+                }]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Sapling growth (issue #310) — see `crate::growth_tick`'s module doc
+    /// for the jar citation, including why an already-stage-1 hit is a
+    /// named no-op (no tree feature exists in this crate to grow into).
+    fn tick_sapling_block(
+        &mut self,
+        column: &mut crate::chunk::ChunkColumn,
+        min_x: i32,
+        min_z: i32,
+        x: i32,
+        y: i32,
+        z: i32,
+        state: &str,
+        base: &str,
+    ) -> Vec<RandomTickEvent> {
+        let lx = x - min_x;
+        let lz = z - min_z;
+        let above = column.block_state(lx, y + 1, lz).to_string();
+        let above_is_air = is_air_variant(&above);
+        let stage = growth_tick::get_stage(state);
+        match growth_tick::sapling_random_tick(above_is_air, stage, &mut self.behavior_rng) {
+            growth_tick::SaplingOutcome::AdvancedToStage1 => {
+                let new_state = growth_tick::set_stage(base, 1);
+                column.set_block(lx, y, lz, &new_state);
+                vec![RandomTickEvent {
+                    pos: (x, y, z),
+                    from: state.to_string(),
+                    to: new_state,
+                }]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Leaf decay (issue #310) — see `crate::growth_tick`'s module doc for
+    /// why this draws **zero** RNG values: `is_randomly_ticking` already
+    /// proved `leaves_should_decay`, and vanilla's own `randomTick` for
+    /// `LeavesBlock` has no `random.nextInt` call at all, only the
+    /// deterministic `decaying(state)` check. Removes the block (sets it to
+    /// air); item-drop spawning (`dropResources`) is out of scope — see the
+    /// module doc's own note.
+    fn tick_leaves_block(
+        &mut self,
+        column: &mut crate::chunk::ChunkColumn,
+        min_x: i32,
+        min_z: i32,
+        x: i32,
+        y: i32,
+        z: i32,
+        state: &str,
+    ) -> Vec<RandomTickEvent> {
+        let lx = x - min_x;
+        let lz = z - min_z;
+        column.set_block(lx, y, lz, crate::chunk::AIR);
+        vec![RandomTickEvent {
+            pos: (x, y, z),
+            from: state.to_string(),
+            to: crate::chunk::AIR.to_string(),
+        }]
     }
 
     /// Applies [`grass_random_tick`] at world position `(x, y, z)` against
@@ -698,5 +846,151 @@ mod tests {
     #[test]
     fn default_random_tick_speed_is_three() {
         assert_eq!(DEFAULT_RANDOM_TICK_SPEED, 3);
+    }
+
+    // # Issue #310 end-to-end: crop growth, sapling growth, leaf decay
+    // through `tick_chunk` against a real `ChunkColumn` — the same level of
+    // proof `a_covered_grass_block_becomes_dirt_after_one_tick_chunk_call`
+    // gives grass, above. The pure per-branch draw-pattern proofs live in
+    // `crate::growth_tick`'s own test module; these tests are about the
+    // DISPATCH (`is_randomly_ticking` selecting the position, then routing
+    // to the right handler) actually wiring into `tick_chunk`.
+
+    /// An air-exposed, sub-max-age wheat crop eventually grows by exactly
+    /// one age step — proven the same probabilistic-but-bounded way the
+    /// existing grass tests are (loop until observed, with an astronomically
+    /// small false-negative probability), not a single lucky seed.
+    #[test]
+    fn an_air_exposed_wheat_crop_eventually_grows_one_age() {
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block(4, 5, 4, "minecraft:wheat[age=0]");
+        // Above is air by construction (ChunkColumn::new is all-air).
+        let mut scheduler = RandomTickScheduler::new(21, 21);
+        let mut grew = false;
+        for _ in 0..3000 {
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 200);
+            if events.iter().any(|e| e.pos == (4, 5, 4) && e.to == "minecraft:wheat[age=1]") {
+                grew = true;
+                break;
+            }
+        }
+        assert!(grew, "an air-exposed sub-max-age wheat crop must eventually grow");
+        assert_eq!(column.block_state(4, 5, 4), "minecraft:wheat[age=1]");
+    }
+
+    /// Negative control for the assertion above: a crop already at max age
+    /// must NEVER grow (or even get selected — `is_randomly_ticking` gates
+    /// it out entirely), however many ticks run.
+    #[test]
+    fn a_max_age_wheat_crop_never_grows_further() {
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block(4, 5, 4, "minecraft:wheat[age=7]");
+        let mut scheduler = RandomTickScheduler::new(21, 21);
+        for _ in 0..500 {
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 8);
+            assert!(events.is_empty(), "a max-age crop must never be selected for a random tick at all");
+        }
+        assert_eq!(column.block_state(4, 5, 4), "minecraft:wheat[age=7]");
+    }
+
+    /// Negative control, the light-gated half: a wheat crop covered by stone
+    /// (not air-exposed) must never grow, however many ticks run — proving
+    /// the light proxy actually gates growth rather than being decorative.
+    #[test]
+    fn a_covered_wheat_crop_never_grows() {
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block(4, 5, 4, "minecraft:wheat[age=0]");
+        column.set_block(4, 6, 4, "minecraft:stone"); // covers it
+        let mut scheduler = RandomTickScheduler::new(21, 21);
+        for _ in 0..500 {
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 8);
+            assert!(events.is_empty(), "a covered wheat crop must never grow (or draw at all)");
+        }
+        assert_eq!(column.block_state(4, 5, 4), "minecraft:wheat[age=0]");
+    }
+
+    /// An air-exposed oak sapling at stage 0 eventually advances to stage 1.
+    #[test]
+    fn an_air_exposed_sapling_eventually_advances_to_stage_one() {
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block(2, 5, 2, "minecraft:oak_sapling[stage=0]");
+        let mut scheduler = RandomTickScheduler::new(9, 9);
+        let mut advanced = false;
+        for _ in 0..3000 {
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 200);
+            if events.iter().any(|e| e.pos == (2, 5, 2) && e.to == "minecraft:oak_sapling[stage=1]") {
+                advanced = true;
+                break;
+            }
+        }
+        assert!(advanced, "an air-exposed sapling must eventually advance to stage 1");
+        assert_eq!(column.block_state(2, 5, 2), "minecraft:oak_sapling[stage=1]");
+    }
+
+    /// A stage-1 sapling never produces an event at all: the "grow a tree"
+    /// branch is a named no-op (`growth_tick::SaplingOutcome::TreeGrowthNotModeled`),
+    /// not a silent mutation — pinned here at the `tick_chunk` level so a
+    /// future tree feature landing changes this test, loudly, rather than
+    /// this crate quietly starting to fabricate trees unnoticed.
+    #[test]
+    fn a_stage_one_sapling_never_produces_an_event() {
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block(2, 5, 2, "minecraft:oak_sapling[stage=1]");
+        let mut scheduler = RandomTickScheduler::new(9, 9);
+        for _ in 0..3000 {
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 200);
+            assert!(events.is_empty(), "a stage-1 sapling must never mutate — no tree feature exists");
+        }
+        assert_eq!(column.block_state(2, 5, 2), "minecraft:oak_sapling[stage=1]");
+    }
+
+    /// A distance-7, non-persistent leaf decays to air on the very first
+    /// tick it is selected for — zero draws means zero probabilistic delay,
+    /// so (unlike grass/crops) this needs no retry loop, only enough ticks
+    /// to guarantee the position LCG lands on it at least once.
+    #[test]
+    fn a_decaying_leaf_becomes_air() {
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block(6, 5, 6, "minecraft:oak_leaves[distance=7,persistent=false]");
+        let mut scheduler = RandomTickScheduler::new(4, 4);
+        let mut decayed = false;
+        for _ in 0..3000 {
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 200);
+            if events.iter().any(|e| e.pos == (6, 5, 6) && e.to == "minecraft:air") {
+                decayed = true;
+                break;
+            }
+        }
+        assert!(decayed, "a distance-7 non-persistent leaf must eventually decay");
+        assert_eq!(column.block_state(6, 5, 6), "minecraft:air");
+    }
+
+    /// Negative control: a persistent leaf at the same distance never
+    /// decays, however many ticks run — proving `persistent` actually gates
+    /// selection (via `is_randomly_ticking`), not just the action.
+    #[test]
+    fn a_persistent_leaf_never_decays() {
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block(6, 5, 6, "minecraft:oak_leaves[distance=7,persistent=true]");
+        let mut scheduler = RandomTickScheduler::new(4, 4);
+        for _ in 0..500 {
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 8);
+            assert!(events.is_empty(), "a persistent leaf must never be selected for a random tick");
+        }
+        assert_eq!(column.block_state(6, 5, 6), "minecraft:oak_leaves[distance=7,persistent=true]");
+    }
+
+    /// Negative control: a leaf within range of a log (`distance < 7`) never
+    /// decays, however many ticks run.
+    #[test]
+    fn a_leaf_within_range_of_a_log_never_decays() {
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block(6, 5, 6, "minecraft:oak_leaves[distance=3,persistent=false]");
+        let mut scheduler = RandomTickScheduler::new(4, 4);
+        for _ in 0..500 {
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 8);
+            assert!(events.is_empty(), "a leaf within range of a log must never be selected for a random tick");
+        }
+        assert_eq!(column.block_state(6, 5, 6), "minecraft:oak_leaves[distance=3,persistent=false]");
     }
 }
