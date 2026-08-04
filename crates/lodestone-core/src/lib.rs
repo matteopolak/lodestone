@@ -1130,6 +1130,49 @@ fn encode_string(value: &str, w: &mut Writer) -> Result<()> {
     Ok(())
 }
 
+/// Encodes a packet body into a fresh byte buffer.
+///
+/// Shared plumbing for every version crate's adapter: each crate wraps this in
+/// a same-named local `encode_body` that maps the `String` error into its own
+/// `AdapterError::Encode`, because `AdapterError` lives in `lodestone-model`
+/// and `lodestone-core` cannot depend on it (`lodestone-model` already depends
+/// on `lodestone-core`; the reverse edge would be a cycle). The stringified
+/// error keeps the wrapper a one-line `.map_err` with no behavior change.
+pub fn encode_body<T: Encode>(packet: &T, ctx: Ctx) -> std::result::Result<Vec<u8>, String> {
+    let mut writer = Writer::default();
+    packet.encode(&mut writer, ctx).map_err(|err| err.to_string())?;
+    Ok(writer.into_vec())
+}
+
+/// Decodes a packet body from raw bytes.
+///
+/// See [`encode_body`] for why callers wrap this rather than depending on it
+/// directly with an `AdapterError`-typed return.
+pub fn decode_body<T: Decode>(payload: &[u8], ctx: Ctx) -> std::result::Result<T, String> {
+    let mut reader = Reader::new(payload);
+    T::decode(&mut reader, ctx).map_err(|err| err.to_string())
+}
+
+/// Like [`decode_body`] but additionally requires the payload to be fully
+/// consumed. Used for packets whose whole body is decoded (e.g. an entity
+/// destroy id list), where trailing bytes signal a wrong layout and must be
+/// rejected rather than silently ignored. Packets that deliberately leave a
+/// tail unread (metadata terminators, fields not yet modeled) keep using the
+/// lenient [`decode_body`].
+pub fn decode_body_exact<T: Decode>(payload: &[u8], ctx: Ctx) -> std::result::Result<T, String> {
+    let mut reader = Reader::new(payload);
+    let body = T::decode(&mut reader, ctx).map_err(|err| err.to_string())?;
+    reader.ensure_empty().map_err(|err| err.to_string())?;
+    Ok(body)
+}
+
+/// Converts a signed-byte angle to degrees. The wire packs a full circle into
+/// 256 steps, so a byte of `64` is 90 degrees.
+#[must_use]
+pub fn unpack_degrees(packed: i8) -> f32 {
+    f32::from(packed) * 360.0 / 256.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1893,5 +1936,40 @@ mod tests {
         assert_eq!(plain_text_from_nbt_component(&nested), "hi there!!");
 
         assert_eq!(plain_text_from_nbt_component(&Nbt::Compound(vec![])), "");
+    }
+
+    #[test]
+    fn encode_decode_body_round_trip() {
+        let ctx = Ctx { version: 0 };
+        let encoded = encode_body(&42_i32, ctx).expect("encode succeeds");
+        let decoded: i32 = decode_body(&encoded, ctx).expect("decode succeeds");
+        assert_eq!(decoded, 42);
+    }
+
+    #[test]
+    fn decode_body_exact_rejects_trailing_bytes() {
+        let ctx = Ctx { version: 0 };
+        let encoded = encode_body(&7_i32, ctx).expect("encode succeeds");
+        let mut with_tail = encoded.clone();
+        with_tail.push(0xff);
+
+        let exact: i32 = decode_body_exact(&encoded, ctx).expect("exact decode of clean payload");
+        assert_eq!(exact, 7);
+
+        let err = decode_body_exact::<i32>(&with_tail, ctx)
+            .expect_err("trailing byte must be rejected");
+        assert!(err.contains("trailing"), "unexpected error: {err}");
+
+        // decode_body, unlike decode_body_exact, is lenient about the tail.
+        let lenient: i32 = decode_body(&with_tail, ctx).expect("lenient decode succeeds");
+        assert_eq!(lenient, 7);
+    }
+
+    #[test]
+    fn unpack_degrees_matches_vanilla_256_step_circle() {
+        assert_eq!(unpack_degrees(0), 0.0);
+        assert_eq!(unpack_degrees(64), 90.0);
+        assert_eq!(unpack_degrees(-64), -90.0);
+        assert_eq!(unpack_degrees(-128), -180.0);
     }
 }
