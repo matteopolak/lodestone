@@ -286,49 +286,22 @@ fn entry_from_json(v: &serde_json::Value) -> Option<ServerEntry> {
 /// The directory Lodestone keeps user state in.
 ///
 /// `LODESTONE_DATA_DIR` overrides the platform default; see the module docs.
+///
+/// **This is an accessor, not an implementation** (issue #67). The platform
+/// lookup lives once, in [`lodestone_auth::paths::data_dir`], and this crate
+/// already depends on `lodestone-auth` for the login chain — so a second copy
+/// here bought nothing and risked the two drifting apart. They were verified
+/// byte-for-byte identical when this was consolidated, which is *why* the
+/// deletion was safe: there was no live disagreement to preserve, only future
+/// drift to prevent. The env-injection seam and its per-platform tests live
+/// beside the real implementation.
+///
+/// The accessor stays because [`servers_path`] and `crate::config` both want a
+/// shell-side name for it; that this lives in the *server-list* module is a
+/// separate tidy-up, not part of #67.
 #[must_use]
 pub fn data_dir() -> PathBuf {
-    data_dir_from(
-        std::env::var_os("LODESTONE_DATA_DIR").as_deref(),
-        std::env::var_os("HOME").as_deref(),
-        std::env::var_os("APPDATA").as_deref(),
-        std::env::var_os("XDG_DATA_HOME").as_deref(),
-    )
-}
-
-/// The platform lookup [`data_dir`] performs, with the environment injected.
-///
-/// Split out purely so it is **testable without mutating the process
-/// environment**. `std::env::set_var` is `unsafe` from the 2024 edition and this
-/// workspace is `deny(unsafe_code)`, but the deeper reason is that it is shared
-/// mutable state: the whole test binary is one process, so a test that sets
-/// `HOME` or `LODESTONE_DATA_DIR` is racing every other test that reads it.
-fn data_dir_from(
-    override_dir: Option<&std::ffi::OsStr>,
-    home: Option<&std::ffi::OsStr>,
-    appdata: Option<&std::ffi::OsStr>,
-    xdg: Option<&std::ffi::OsStr>,
-) -> PathBuf {
-    if let Some(dir) = override_dir {
-        return PathBuf::from(dir);
-    }
-    let home = home.map(PathBuf::from);
-    if cfg!(target_os = "macos") {
-        if let Some(h) = home {
-            return h.join("Library/Application Support/lodestone");
-        }
-    } else if cfg!(target_os = "windows") {
-        if let Some(app) = appdata {
-            return PathBuf::from(app).join("lodestone");
-        }
-    } else if let Some(x) = xdg {
-        return PathBuf::from(x).join("lodestone");
-    } else if let Some(h) = home {
-        return h.join(".local/share/lodestone");
-    }
-    // Last resort: a namespaced directory under the working directory, so the
-    // game still starts on a machine with no HOME at all.
-    PathBuf::from(".lodestone")
+    lodestone_auth::paths::data_dir()
 }
 
 /// Full path to the saved server list.
@@ -500,65 +473,24 @@ mod tests {
     }
 
     #[test]
-    fn the_data_dir_honours_the_override_and_is_namespaced_otherwise() {
-        // The override is what keeps tests off the developer's real list. It is
-        // exercised through `data_dir_from` rather than by setting the variable:
-        // `set_var` is `unsafe` under this workspace's `deny(unsafe_code)`, and
-        // it is also *shared mutable state* — tests share one process, so
-        // another test reading HOME concurrently would observe the mutation.
-        let o = OsString::from("/tmp/lodestone-test-dir");
+    fn the_shell_data_dir_is_the_auth_one_and_not_a_second_copy() {
+        // This is the guard against issue #67 recurring. The per-platform
+        // branches, the `LODESTONE_DATA_DIR` override and the no-environment
+        // fallback are all tested beside the real implementation, in
+        // `lodestone-auth`'s `paths` module — duplicating those assertions here
+        // would recreate exactly the drift #67 was about, one layer up.
+        //
+        // What only *this* crate can assert is that it has not grown a second
+        // implementation again: if someone reintroduces a local platform lookup,
+        // the two accessors diverge on some machine and this fails. Comparing
+        // the accessors (rather than a hardcoded path) is what makes the check
+        // hold on every platform without a `cfg!` ladder.
         assert_eq!(
-            data_dir_from(Some(&o), None, None, None),
-            PathBuf::from("/tmp/lodestone-test-dir")
+            data_dir(),
+            lodestone_auth::paths::data_dir(),
+            "the shell must not carry its own platform lookup — see issue #67"
         );
-
-        // Without the override we must still land somewhere plausible and
-        // per-user, on this platform and on the others.
-        let home = OsString::from("/home/someone");
-        let d = data_dir_from(None, Some(&home), None, None);
-        assert!(
-            d.starts_with(&home),
-            "the default must live under HOME: {d:?}"
-        );
-        assert!(
-            d.to_string_lossy().contains("lodestone"),
-            "data dir should be namespaced: {d:?}"
-        );
-
-        // The real accessor agrees on the namespace, whatever this machine's
-        // environment happens to be.
-        assert!(data_dir().to_string_lossy().contains("lodestone"));
         assert!(servers_path().ends_with("servers.json"));
-    }
-
-    #[test]
-    fn every_platform_branch_lands_somewhere_per_user() {
-        // XDG wins over the HOME fallback on non-mac/non-Windows, and each
-        // branch is namespaced. `cfg!` picks one arm at compile time, so only
-        // the arm for *this* platform is asserted concretely; the rest is a
-        // shape check that still fails if a branch returns the bare env value.
-        let xdg = OsString::from("/xdg/data");
-        let home = OsString::from("/home/someone");
-        let appdata = OsString::from(r"C:\Users\someone\AppData\Roaming");
-        let d = data_dir_from(None, Some(&home), Some(&appdata), Some(&xdg));
-        assert_ne!(
-            d,
-            PathBuf::from(&xdg),
-            "must append the app name, not use the base dir directly"
-        );
-        assert!(d.to_string_lossy().contains("lodestone"), "{d:?}");
-        if cfg!(target_os = "macos") {
-            assert_eq!(d, PathBuf::from("/home/someone/Library/Application Support/lodestone"));
-        } else if cfg!(target_os = "windows") {
-            assert_eq!(d, PathBuf::from(r"C:\Users\someone\AppData\Roaming").join("lodestone"));
-        } else {
-            assert_eq!(d, PathBuf::from("/xdg/data/lodestone"));
-        }
-
-        // Nothing at all in the environment must still yield a usable path
-        // rather than an empty one — the game has to start.
-        let last = data_dir_from(None, None, None, None);
-        assert!(!last.as_os_str().is_empty());
-        assert!(last.to_string_lossy().contains("lodestone"), "{last:?}");
+        assert!(servers_path().starts_with(data_dir()));
     }
 }

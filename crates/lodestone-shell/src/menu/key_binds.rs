@@ -783,6 +783,12 @@ pub fn action_caption(action: InputAction) -> &'static str {
         InputAction::Inventory => "Open/Close Inventory",
         InputAction::SwapOffhand => "Swap Item With Off Hand",
         InputAction::Drop => "Drop Selected Item",
+        // `key.pickItem` and `key.screenshot`, verbatim from `en_us.json` like
+        // every caption above. Added with the verbs themselves (issue #16); this
+        // match is exhaustive on purpose, so a new `InputAction` cannot reach the
+        // Key Binds screen without a real caption.
+        InputAction::PickItem => "Pick Block",
+        InputAction::Screenshot => "Take Screenshot",
         InputAction::Hotbar1 => "Hotbar Slot 1",
         InputAction::Hotbar2 => "Hotbar Slot 2",
         InputAction::Hotbar3 => "Hotbar Slot 3",
