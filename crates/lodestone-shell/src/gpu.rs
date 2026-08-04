@@ -40,7 +40,7 @@ use lodestone_render::{
     fog::{FogSettings, FogUniform},
     model_anim_buffer, model_camera_buffer, model_shared_camera_buffer, plan_block_entities,
     plan_entities, spinning_effect_angle_degrees, update_model_anim_buffer,
-    update_model_shared_camera_buffer, upload_instances, upload_instances_tinted,
+    update_model_shared_camera_buffer, upload_instances_tinted,
     vertex::vram_bytes,
 };
 
@@ -2975,10 +2975,20 @@ impl RenderState {
                 // One buffer per part, for the reason `prepare_entities` gives:
                 // vertices are part-local, so the lid only moves if its own
                 // matrices are uploaded separately from the bottom's.
+                //
+                // `_tinted`, not the plain `upload_instances`: block entities
+                // now carry a per-instance `InstanceTint` (Job 2 step A,
+                // `lodestone_render::block_entity::BlockEntityBatch::tints`),
+                // the same plumbing sheep wool/dyed armour/the hurt overlay
+                // already use. Every resolver still passes white
+                // (`[255, 255, 255]`, `InstanceTint::NONE`'s rgb), so this is
+                // a no-op today — proved by the chest/skull/bell pixel gates
+                // coming out byte-identical — and the hook the next tinted
+                // block-entity type (e.g. a banner base colour) plugs into.
                 parts: batch
                     .parts
                     .iter()
-                    .map(|p| upload_instances(device, p, &batch.lights))
+                    .map(|p| upload_instances_tinted(device, p, &batch.lights, &batch.tints))
                     .collect(),
             })
             .collect()
