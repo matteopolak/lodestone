@@ -147,20 +147,21 @@ impl Resolver for EmbeddedResolver {
         self.try_json(&format!("configured_carver/{name}"))
     }
 
-    /// `worldgen/configured_feature/<name>.json`. Not yet bundled (issue
-    /// #295's ore-feature composition is deferred pending a real
-    /// `FeatureOracle.java` 3×3 driver — see `crate::overworld`'s module
-    /// doc) — returns `Value::Null` for every id, matching
-    /// [`Resolver::configured_feature`]'s own "no data supplied" default
-    /// until that lands.
-    fn configured_feature(&self, _id: &str) -> Value {
-        Value::Null
+    /// `worldgen/configured_feature/<name>.json` — 226 files, copied
+    /// verbatim from `.cache/mc/26.2/src/data/minecraft/worldgen/
+    /// configured_feature/` (issue #295's ore-composition increment; the
+    /// non-ore entries are bundled too, ready for epic #404 Phase 3's
+    /// vegetation features rather than filtered out here).
+    fn configured_feature(&self, id: &str) -> Value {
+        let name = id.strip_prefix("minecraft:").unwrap_or(id);
+        self.try_json(&format!("configured_feature/{name}"))
     }
 
-    /// `worldgen/placed_feature/<name>.json`. Not yet bundled — see
+    /// `worldgen/placed_feature/<name>.json` — 262 files, same provenance as
     /// [`Self::configured_feature`].
-    fn placed_feature(&self, _id: &str) -> Value {
-        Value::Null
+    fn placed_feature(&self, id: &str) -> Value {
+        let name = id.strip_prefix("minecraft:").unwrap_or(id);
+        self.try_json(&format!("placed_feature/{name}"))
     }
 
     /// `tags/block/<name>.json` — 261 files, needed to resolve
@@ -507,5 +508,42 @@ mod tests {
             Some("minecraft:deepslate"),
             "editing (0,-50,0) must not affect its untouched neighbour"
         );
+    }
+
+    /// **Diagnostic control** for `crate::chunk::tests
+    /// ::parallel_generation_is_deterministic_and_matches_serial` (issue
+    /// #414), which failed after issue #295's ore composition landed. That
+    /// test compares serialised bytes (palette order included) across
+    /// independent `column()` calls, so a byte mismatch could mean either
+    /// "the actual blocks differ" or "the same blocks, a different palette
+    /// assignment order" — this isolates which, for the exact chunks that
+    /// test uses, with no threading involved at all (two *sequential* calls
+    /// on one thread). If this passes, `OverworldGenerator::column` is a
+    /// pure function of `(self, cx, cz)` as designed and the #414 failure is
+    /// not a value-determinism bug in ore composition itself.
+    #[test]
+    fn column_is_byte_identical_across_two_independent_sequential_calls() {
+        let generator = overworld_generator(42);
+        for &(cx, cz) in &[(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1), (2, -1)] {
+            let a = generator.column(cx, cz);
+            let b = generator.column(cx, cz);
+            let (a_min_y, a_height, a_palette, a_blocks, a_biomes) = a.into_raw();
+            let (b_min_y, b_height, b_palette, b_blocks, b_biomes) = b.into_raw();
+            assert_eq!(a_min_y, b_min_y, "chunk ({cx},{cz}) min_y differs between two sequential calls");
+            assert_eq!(a_height, b_height, "chunk ({cx},{cz}) height differs between two sequential calls");
+            assert_eq!(
+                a_palette, b_palette,
+                "chunk ({cx},{cz}) palette differs between two sequential calls — a non-determinism \
+                 bug or a palette-assignment-order difference, not threading"
+            );
+            assert_eq!(
+                a_blocks, b_blocks,
+                "chunk ({cx},{cz}) block indices differ between two sequential calls"
+            );
+            assert_eq!(
+                a_biomes, b_biomes,
+                "chunk ({cx},{cz}) biome quarts differ between two sequential calls"
+            );
+        }
     }
 }
