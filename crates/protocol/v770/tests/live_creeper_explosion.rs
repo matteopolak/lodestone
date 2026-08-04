@@ -270,12 +270,27 @@ async fn a_pre_ignited_creeper_syncs_its_fuse_and_detonates_with_sound() {
             &capture.explode,
         )
         .expect("replaying a real explode packet must not error");
-    assert_eq!(directives.len(), 1, "exactly one directive from a real explode packet");
+    // Issue #416: a leading `Particles` directive (the shockwave/smoke
+    // visual) now precedes the `Sound` directive this test was already
+    // pinning.
+    assert_eq!(
+        directives.len(),
+        2,
+        "one Particles directive, then one Sound directive, from a real explode packet"
+    );
+    assert!(
+        matches!(
+            &directives[0],
+            Directive::Emit(ClientEvent::Particles { .. })
+        ),
+        "expected a Particles directive first, got {:?}",
+        directives[0]
+    );
     let Directive::Emit(ClientEvent::Sound {
         sound, category, volume, pitch, ..
-    }) = &directives[0]
+    }) = &directives[1]
     else {
-        panic!("expected a Sound directive from a real explode packet, got {:?}", directives[0]);
+        panic!("expected a Sound directive second, got {:?}", directives[1]);
     };
     println!("decoded explosion sound: {sound} category={category:?} volume={volume} pitch={pitch}");
     assert_eq!(

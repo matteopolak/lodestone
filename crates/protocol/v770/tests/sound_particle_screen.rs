@@ -374,7 +374,18 @@ fn explode_bytes() -> Vec<u8> {
 fn explode_decodes_the_explosion_sound_at_its_centre() {
     let adapter = V770Adapter::new();
     let directives = handle(&adapter, play::clientbound::EXPLODE, &explode_bytes());
-    assert_eq!(directives.len(), 1, "exactly one Sound directive");
+    // Issue #416: a leading `Particles` directive (the shockwave/smoke
+    // visual) now precedes the `Sound` directive this test was already
+    // pinning — see `decode_explode`'s doc comment.
+    assert_eq!(
+        directives.len(),
+        2,
+        "one Particles directive, then one Sound directive"
+    );
+    let Directive::Emit(ClientEvent::Particles { particle, .. }) = &directives[0] else {
+        panic!("expected a Particles directive first, got {:?}", directives[0]);
+    };
+    assert_eq!(*particle, key("minecraft:explosion_emitter"));
     let Directive::Emit(ClientEvent::Sound {
         sound,
         category,
@@ -383,9 +394,9 @@ fn explode_decodes_the_explosion_sound_at_its_centre() {
         pitch,
         seed: _,
         fixed_range: _,
-    }) = &directives[0]
+    }) = &directives[1]
     else {
-        panic!("expected a Sound directive, got {:?}", directives[0]);
+        panic!("expected a Sound directive second, got {:?}", directives[1]);
     };
     assert_eq!(*sound, key("minecraft:entity.generic.explode"));
     assert_eq!(*category, SoundCategory::Block, "SoundSource.BLOCKS");
@@ -421,7 +432,7 @@ fn explode_accepts_the_plain_explosion_particle_too() {
     assert_eq!(bytes[33], 29);
     bytes[33] = 30;
     let directives = handle(&adapter, play::clientbound::EXPLODE, &bytes);
-    assert_eq!(directives.len(), 1);
+    assert_eq!(directives.len(), 2, "one Particles directive, then one Sound directive");
 }
 
 /// An unmodeled `explosionParticle` (anything but 29/30) must fail loudly
@@ -461,7 +472,8 @@ fn explode_stays_aligned_past_a_present_player_knockback() {
     bytes.push(0xBC);
     bytes.push(0x05);
     let directives = handle(&adapter, play::clientbound::EXPLODE, &bytes);
-    let Directive::Emit(ClientEvent::Sound { sound, pos, .. }) = &directives[0] else {
+    // Issue #416: `directives[0]` is now the leading `Particles` directive.
+    let Directive::Emit(ClientEvent::Sound { sound, pos, .. }) = &directives[1] else {
         panic!("expected a Sound directive");
     };
     assert_eq!(*sound, key("minecraft:entity.generic.explode"));

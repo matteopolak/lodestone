@@ -1432,9 +1432,16 @@ const PARTICLE_ID_EXPLOSION: i32 = 30;
 /// that does not run the trailing-bytes misparse check — like `metadata.rs`'s
 /// partial item-stack decode, deliberately, not an oversight.
 ///
-/// The explosion shockwave/smoke visual and the flying block-debris particles
-/// are consequently both unimplemented — `explosionParticle` is recognised
-/// only to skip it, never spawned, and `blockParticles` is never reached.
+/// The flying block-debris particles (`blockParticles`) remain unimplemented
+/// for the reason above. The shockwave/smoke visual itself is issue #416:
+/// this decoder now also emits a `ClientEvent::Particles` directive for
+/// `explosion_emitter` (`ParticleTypes.EXPLOSION_EMITTER`, the id this
+/// packet actually carries — `HugeExplosionSeedParticle` is what schedules
+/// the follow-up `HugeExplosionParticle`s vanilla-side, per
+/// `docs/particle-catalogue.md`'s "Built, issue #416" entry), alongside the
+/// existing `Sound` directive. `net.rs`/`sim.rs` need no new arm: this
+/// crate's `ClientEvent::Particles` already forwards generically into
+/// `Particles::spawn_particles`.
 fn decode_explode(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     let mut reader = Reader::new(payload);
     let x = reader.f64().map_err(dec_err)?;
@@ -1458,15 +1465,32 @@ fn decode_explode(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     let (name, fixed_range) = read_sound_holder(&mut reader)?;
     // `blockParticles` follows and is deliberately not decoded — see the
     // function doc above. No `reader.ensure_empty()` call here on purpose.
-    Ok(vec![Directive::Emit(ClientEvent::Sound {
-        sound: parse_key(&name, "sound")?,
-        category: SoundCategory::Block,
-        pos: Vec3::new(x, y, z),
-        volume: 4.0,
-        pitch: (1.0 + (rand::random::<f32>() - rand::random::<f32>()) * 0.2) * 0.7,
-        fixed_range,
-        seed: rand::random(),
-    })])
+    //
+    // Issue #416: the shockwave/smoke visual, alongside the sound below.
+    // Always `explosion_emitter` regardless of which of the two ids this
+    // packet carried — `HugeExplosionSeedParticle` is what schedules the
+    // follow-up `HugeExplosionParticle`s client-side (see
+    // `Particle::tick_huge_explosion_seed`), so the seed is the one real
+    // vanilla explosions actually spawn from this packet.
+    Ok(vec![
+        Directive::Emit(ClientEvent::Particles {
+            particle: parse_key("explosion_emitter", "particle")?,
+            long_distance: false,
+            pos: Vec3::new(x, y, z),
+            offset: Vec3f::new(0.0, 0.0, 0.0),
+            max_speed: 0.0,
+            count: 1,
+        }),
+        Directive::Emit(ClientEvent::Sound {
+            sound: parse_key(&name, "sound")?,
+            category: SoundCategory::Block,
+            pos: Vec3::new(x, y, z),
+            volume: 4.0,
+            pitch: (1.0 + (rand::random::<f32>() - rand::random::<f32>()) * 0.2) * 0.7,
+            fixed_range,
+            seed: rand::random(),
+        }),
+    ])
 }
 
 /// Decodes `open_screen`: a container id, a `minecraft:menu` registry id, and an
