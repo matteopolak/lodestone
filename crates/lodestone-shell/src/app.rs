@@ -2894,6 +2894,26 @@ impl WindowApp {
             menu.render_overlay(device, queue, frame.view(), &death_frame, w, h);
         }
 
+        // In-world Options, from a player report: settings opened mid-game used
+        // to draw the *panorama* behind itself, which belongs to the main menu
+        // only. `menu::render::frame_for` now returns `None` for
+        // `Screen::Settings` when `ui.settings_in_world()`, so the frame has to
+        // be drawn here as an overlay over the still-rendering paused world —
+        // the same shape as pause and death above. Without this block that
+        // `None` means the screen draws *nothing*, which is worse than the
+        // panorama it replaced, so the two halves must stay together.
+        if self.ui.is_settings()
+            && self.ui.settings_in_world()
+            && let Some(menu) = self.menu.as_mut()
+        {
+            let settings_frame = crate::menu::options::settings_frame(
+                self.nav.settings(),
+                self.nav.options(),
+                self.nav.options_save_error(),
+            );
+            menu.render_overlay(device, queue, frame.view(), &settings_frame, w, h);
+        }
+
         if let Some(window) = &self.window {
             window.pre_present_notify();
         }
