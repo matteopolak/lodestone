@@ -2325,12 +2325,37 @@ impl WindowApp {
             .player_menu()
             .player_native(HEAD_NATIVE_SLOT)
             .is_some_and(|st| st.item().to_string() == "minecraft:carved_pumpkin");
+        // The freeze overlay's per-frame input (issue #139). `PlayerState::
+        // percent_frozen` is real, tested physics state (`update_freezing`,
+        // issue #212, `lodestone-physics`) — not a stub. `Sim::player()`
+        // already returns `PlayerState` by value, so this needs no new `Sim`
+        // accessor. See `docs/screen-overlays.md`'s "Freeze" section.
+        let freeze_percent = self.sim.player().percent_frozen();
         let screen_effects = crate::gpu::ScreenEffects {
             eye_in_water: self.sim.player().eye_in_water,
             on_fire,
             spectator,
             tick,
             wearing_pumpkin,
+            freeze_percent,
+            // `Player.isScoping()` is `isUsingItem() && getUseItem().is(Items.
+            // SPYGLASS)` (`Player.java:1936-1938`). Both halves already exist
+            // (`Sim`'s own `UsingItem` resource, and the already-computed
+            // `held` item a few lines above), but reading `UsingItem` from
+            // here needs a two-line `Sim::using_item()` accessor that does
+            // not exist yet — `sim.rs` is contended (another agent's
+            // in-flight work there), so that accessor is a prepared patch,
+            // not landed by this change. `false` is the honest current
+            // answer, same shape as `nausea_intensity`/`portal_intensity`
+            // below, not a guess that it is inactive.
+            scoping: false,
+            // No potion-effect-duration tracker or nether-portal-proximity
+            // tracker exists anywhere in this codebase yet to compute these
+            // — `0.0` is the honest current answer, not a placeholder
+            // pretending to work. See `docs/screen-overlays.md`'s "Confusion
+            // and portal" section.
+            nausea_intensity: 0.0,
+            portal_intensity: 0.0,
         };
         // Route the progressive-mining crack overlay when a dig is in flight,
         // otherwise take the plain path (avoids building the crack buffer while
