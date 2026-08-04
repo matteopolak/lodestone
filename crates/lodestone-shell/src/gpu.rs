@@ -1386,13 +1386,14 @@ impl RenderState {
             camera,
             outline,
             entities,
-            None,
+            &[],
             ScreenEffects::default(),
         )
     }
 
     /// Like [`render`](Self::render), but also draws the progressive mining-crack
-    /// overlay on the target block. The crack follows the block's real model
+    /// overlay for every target in `cracks` (issue #410: other players' digs, not
+    /// just the local player's own). Each follows its own block's real model
     /// geometry (slabs/stairs/crosses), not a synthetic cube.
     pub fn render_with_crack(
         &self,
@@ -1402,7 +1403,7 @@ impl RenderState {
         camera: &Camera,
         outline: Option<[i32; 3]>,
         entities: &[EntityDraw],
-        crack: CrackTarget,
+        cracks: &[CrackTarget],
     ) -> RenderStats {
         self.render_inner(
             device,
@@ -1411,7 +1412,7 @@ impl RenderState {
             camera,
             outline,
             entities,
-            Some(crack),
+            cracks,
             ScreenEffects::default(),
         )
     }
@@ -1440,7 +1441,7 @@ impl RenderState {
             camera,
             outline,
             entities,
-            None,
+            &[],
             screen_effects,
         )
     }
@@ -1448,7 +1449,9 @@ impl RenderState {
     /// [`render_with_crack`](Self::render_with_crack) +
     /// [`render_with_effects`](Self::render_with_effects) together — the shape
     /// `app.rs`'s real per-frame call site needs (mining and the overlays are
-    /// both possible at once).
+    /// both possible at once). `cracks` may hold any number of targets: the
+    /// local player's own dig, any number of other players' (issue #410), or
+    /// none at all (an empty slice costs nothing extra — see `render_inner`).
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn render_with_crack_and_effects(
@@ -1459,7 +1462,7 @@ impl RenderState {
         camera: &Camera,
         outline: Option<[i32; 3]>,
         entities: &[EntityDraw],
-        crack: CrackTarget,
+        cracks: &[CrackTarget],
         screen_effects: ScreenEffects,
     ) -> RenderStats {
         self.render_inner(
@@ -1469,7 +1472,7 @@ impl RenderState {
             camera,
             outline,
             entities,
-            Some(crack),
+            cracks,
             screen_effects,
         )
     }
@@ -1483,7 +1486,7 @@ impl RenderState {
         camera: &Camera,
         outline: Option<[i32; 3]>,
         entities: &[EntityDraw],
-        crack: Option<CrackTarget>,
+        cracks: &[CrackTarget],
         screen_effects: ScreenEffects,
     ) -> RenderStats {
         // Issues #144/#149's shared world-projection "spinning" warp — see
@@ -1634,32 +1637,43 @@ impl RenderState {
         stats.first_person_arm_drawn = matches!(first_person_hand, Some(FirstPersonHand::Arm(_)));
         stats.first_person_item_drawn = matches!(first_person_hand, Some(FirstPersonHand::Item(_)));
 
-        // Build the mining-crack overlay mesh before the pass (buffers can't be
-        // created mid-pass). It follows the target block's real model geometry;
-        // an air or unknown state, an out-of-range stage, or a block whose model
-        // has no faces yields `None` and nothing is drawn. The crack camera uses
-        // world-space positions (section origin zero), so rewrite its uniform
-        // with the current view-projection.
-        let crack_mesh = crack.and_then(|target| {
-            let model = self.model.as_ref()?;
-            let origin = [
-                target.block[0] as f32,
-                target.block[1] as f32,
-                target.block[2] as f32,
-            ];
-            let mesh = model
-                .crack_resolver
-                .mesh_for(target.state_id, target.stage, origin)?;
-            let gpu = GpuCrackMesh::upload(device, &mesh)?;
-            queue.write_buffer(
-                &model.crack_cam_buffer,
-                0,
-                bytemuck::bytes_of(&CameraUniform {
-                    view_proj,
-                    section_origin: [0.0, 0.0, 0.0, 0.0],
-                }),
-            );
-            Some(gpu)
+        // Build every mining-crack overlay mesh before the pass (buffers can't be
+        // created mid-pass) — one per entry in `cracks`, not just the local
+        // player's own dig (issue #410: `CrackPipeline` used to draw at most one
+        // target, so another player's crack overlay had nowhere to go even
+        // though `SessionBlockDestruction` already carried it). Each follows its
+        // own target block's real model geometry; an air or unknown state, an
+        // out-of-range stage, or a block whose model has no faces yields no mesh
+        // for that entry and the rest still draw. The crack camera uses
+        // world-space positions (section origin zero) and is shared by every
+        // crack draw call this frame, so its uniform is written at most once,
+        // only when there is at least one mesh to draw.
+        let crack_meshes: Vec<GpuCrackMesh> = self.model.as_ref().map_or_else(Vec::new, |model| {
+            let meshes: Vec<GpuCrackMesh> = cracks
+                .iter()
+                .filter_map(|target| {
+                    let origin = [
+                        target.block[0] as f32,
+                        target.block[1] as f32,
+                        target.block[2] as f32,
+                    ];
+                    let mesh = model
+                        .crack_resolver
+                        .mesh_for(target.state_id, target.stage, origin)?;
+                    GpuCrackMesh::upload(device, &mesh)
+                })
+                .collect();
+            if !meshes.is_empty() {
+                queue.write_buffer(
+                    &model.crack_cam_buffer,
+                    0,
+                    bytemuck::bytes_of(&CameraUniform {
+                        view_proj,
+                        section_origin: [0.0, 0.0, 0.0, 0.0],
+                    }),
+                );
+            }
+            meshes
         });
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1962,20 +1976,27 @@ impl RenderState {
                     stats.draw_calls += 1;
                 }
 
-                // Mining-crack overlay on the target block, drawn after the
-                // opaque terrain it sits on (so the block face is already in the
-                // depth buffer) and before translucent water. The pipeline's
-                // negative depth bias pulls the crack toward the camera so its
-                // `destroy_stage` texels win the depth test against the coplanar
-                // face without z-fighting; alpha-blended, depth-write off.
-                if let Some(crack) = &crack_mesh {
+                // Mining-crack overlays, drawn after the opaque terrain they sit
+                // on (so the block face is already in the depth buffer) and
+                // before translucent water. One draw call per target — the local
+                // player's own dig and any number of other players' (issue
+                // #410) — each independently textured with its own destroy-stage
+                // sprite; the pipeline's negative depth bias pulls every one of
+                // them toward the camera so its texels win the depth test
+                // against its own coplanar face without z-fighting;
+                // alpha-blended, depth-write off. Bind groups are shared and set
+                // once outside the loop rather than re-bound per draw.
+                if !crack_meshes.is_empty() {
                     pass.set_pipeline(&model.crack_pipeline.pipeline);
                     pass.set_bind_group(0, &model.crack_cam_bind_group, &[]);
                     pass.set_bind_group(1, &model.crack_atlas_bind_group, &[]);
-                    pass.set_vertex_buffer(0, crack.vertices.slice(..));
-                    pass.set_index_buffer(crack.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..crack.index_count, 0, 0..1);
-                    stats.draw_calls += 1;
+                    for crack in &crack_meshes {
+                        pass.set_vertex_buffer(0, crack.vertices.slice(..));
+                        pass.set_index_buffer(crack.indices.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..crack.index_count, 0, 0..1);
+                        stats.draw_calls += 1;
+                        stats.cracks_drawn += 1;
+                    }
                 }
 
                 // Translucent water, drawn after all opaque model terrain so the

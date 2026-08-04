@@ -174,13 +174,31 @@ entity's id — the same shape as `SessionBossBars`/`SessionTabList` just above 
 **Routing is not the same as drawing.** `HeldSlotChanged` reaches pixels for free —
 `lodestone_shell::sim::Sim::selected_slot()` already reads `SelectedSlot` and
 `app.rs`'s hotbar highlight already calls it, so wiring the fold was the whole fix.
-`BlockDestruction` and `DifficultyChanged` do not: nothing in the shell reads
-`SessionBlockDestruction` or `ServerDifficulty` yet, and for `BlockDestruction`
-specifically, the renderer's `CrackTarget`/`CrackPipeline`
-(`lodestone_shell::gpu`) only ever draws *one* target — the local player's own
-dig — so painting other players' cracks needs that pipeline to accept more than
-one, which is a rendering change outside this table's scope. Both are tracked as
-separate follow-up issues; see the routing commit's issue links.
+`BlockDestruction` and `DifficultyChanged` did not, at the time this table was
+written: nothing in the shell read `SessionBlockDestruction` or `ServerDifficulty`,
+and for `BlockDestruction` specifically, the renderer's `CrackTarget`/`CrackPipeline`
+(`lodestone_shell::gpu`) only ever drew *one* target — the local player's own dig.
+Both were tracked as separate follow-up issues (#410, #411), closed as follows:
+
+* **#411 (`DifficultyChanged`)** — `Sim::difficulty()` now reads `ServerDifficulty`
+  the same way `selected_slot()` reads `SelectedSlot`, and `app.rs` folds it into
+  `DebugStats::difficulty` each frame. It shows as a `DIFFICULTY <NAME>[ (LOCKED)]`
+  line on the F3 overlay (`hud.rs`'s `DebugStats::lines`); see
+  [`vanilla-hud-text.md`](./vanilla-hud-text.md).
+* **#410 (`BlockDestruction`)** — `CrackPipeline`/`RenderState::render_with_crack`
+  now take `cracks: &[CrackTarget]` instead of `Option<CrackTarget>`, so the
+  render pass itself can paint any number of simultaneous crack overlays (proved
+  by `lodestone-shell/tests/crack_multi_target_pixels.rs`, two targets at two
+  screen positions in one call). `app.rs` folds in the local player's own
+  `Sim::crack_target()` through the new shape unconditionally. **Not yet wired**:
+  a second producer for *other* players' overlays. `Sim::block_destruction_stage_at`
+  reads `SessionBlockDestruction` at a single known position (mirroring
+  `selected_slot()`), but the real per-frame loop needs the opposite shape —
+  every currently active overlay, with no position known in advance — and
+  `lodestone_game::mining::BlockDestructionOverlays` exposes no enumeration, only
+  `stage_at`/`len`/`is_empty`. Adding one (`lodestone-game`, outside the render
+  pass's own file ownership) is the one remaining hop from "the pipeline can draw
+  N targets" to "other players' digs actually appear".
 
 The remaining 35, listed for the record and not as a defect claim:
 
