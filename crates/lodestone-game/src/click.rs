@@ -29,7 +29,7 @@
 
 use crate::{
     item::ItemStack,
-    menu::{Menu, OUTSIDE_SLOT},
+    menu::{Menu, OFFHAND_NATIVE, OUTSIDE_SLOT},
 };
 
 /// A container-click mode (`ContainerInput` in vanilla).
@@ -97,6 +97,16 @@ pub struct PlayerCtx {
     pub infinite_materials: bool,
     /// Whether the player may drop items.
     pub can_drop: bool,
+    /// The currently selected hotbar slot (0–8), a native player-inventory
+    /// index — vanilla `Inventory.selected` (`Inventory.java:57`). Consulted by
+    /// the swap-overflow path's give-back-to-inventory scan, which tries this
+    /// slot before the off-hand and before the general scan (`Inventory.
+    /// getSlotWithRemainingSpace`, `Inventory.java:224-240`). Defaults to `0`,
+    /// which is also every production caller's current value — nothing yet
+    /// reads the live selected hotbar slot into a `PlayerCtx` (see
+    /// `lodestone-shell`'s `app.rs::send_menu_click`, which hardcodes
+    /// `PlayerCtx::survival()` for the same reason it hardcodes game mode).
+    pub selected_hotbar_slot: usize,
 }
 
 impl Default for PlayerCtx {
@@ -104,6 +114,7 @@ impl Default for PlayerCtx {
         Self {
             infinite_materials: false,
             can_drop: true,
+            selected_hotbar_slot: 0,
         }
     }
 }
@@ -121,6 +132,7 @@ impl PlayerCtx {
         Self {
             infinite_materials: true,
             can_drop: true,
+            selected_hotbar_slot: 0,
         }
     }
 }
@@ -206,7 +218,7 @@ impl Menu {
                 }
             }
             ContainerInput::Swap if (0..9).contains(&button) || button == 40 => {
-                self.do_swap(slot_index, button, &mut outcome);
+                self.do_swap(slot_index, button, ctx, &mut outcome);
             }
             ContainerInput::Clone
                 if ctx.infinite_materials && self.carried().is_none() && slot_index >= 0 =>
@@ -339,7 +351,7 @@ impl Menu {
         }
     }
 
-    fn do_swap(&mut self, slot_index: i32, button: i32, outcome: &mut ClickOutcome) {
+    fn do_swap(&mut self, slot_index: i32, button: i32, ctx: PlayerCtx, outcome: &mut ClickOutcome) {
         let Ok(index) = usize::try_from(slot_index) else {
             return;
         };
@@ -392,7 +404,7 @@ impl Menu {
                         // into the slot it just came from.
                         self.set_player_native(native, crate::item::normalize(source));
                         // Overflow target back into inventory or drop it.
-                        if !self.give_to_player(target.clone()) {
+                        if !self.give_to_player(target.clone(), ctx.selected_hotbar_slot) {
                             outcome.dropped.push(target);
                         }
                         self.on_take(index);
@@ -832,39 +844,76 @@ impl Menu {
         Some(removed)
     }
 
-    /// Attempts to merge a stack back into the player inventory (main+hotbar),
-    /// returning whether it was fully absorbed. Used by swap overflow.
-    fn give_to_player(&mut self, mut stack: ItemStack) -> bool {
-        let native = self.player_container();
-        // Merge into existing matching stacks first.
-        for i in 0..36 {
+    /// Attempts to merge a stack back into the player inventory (main+hotbar+
+    /// off-hand), returning whether it was fully absorbed. Used by swap
+    /// overflow.
+    ///
+    /// Mirrors vanilla `Inventory.add`/`addResource`/`getSlotWithRemainingSpace`/
+    /// `getFreeSlot` (`Inventory.java:195-240`, `:251-302`). Each iteration picks
+    /// **one** target slot via `getSlotWithRemainingSpace`'s priority — the
+    /// *selected* hotbar slot first, then the off-hand (native
+    /// [`OFFHAND_NATIVE`]), then a merge-only linear scan across natives
+    /// `0..36` — and only when *none* of those already hold a mergeable stack
+    /// does it fall back to `getFreeSlot`, the first **empty** slot in `0..36`.
+    /// The off-hand is never used as an empty-slot fallback: vanilla's
+    /// `getFreeSlot` scans only `this.items`, which it sizes at exactly 36
+    /// (`Inventory.java:56`); slot 40 only ever participates via the merge
+    /// check. The loop re-derives the target from scratch every pass (as
+    /// vanilla's `add` does by calling `addResource` repeatedly) so a stack
+    /// bigger than one cap can spread across several slots.
+    fn give_to_player(&mut self, mut stack: ItemStack, selected_hotbar_slot: usize) -> bool {
+        loop {
             if stack.is_empty() {
                 return true;
             }
-            let target = self.container(native).and_then(|c| c.get(i)).cloned();
-            if let Some(mut target) = target
-                && ItemStack::is_same_item_same_components(&target, &stack)
-            {
-                let room = target.max_stack_size() - target.count();
-                let give = room.min(stack.count());
-                if give > 0 {
-                    target.grow(give);
+            let merge_target = self
+                .mergeable_native(selected_hotbar_slot, &stack)
+                .or_else(|| self.mergeable_native(OFFHAND_NATIVE, &stack))
+                .or_else(|| (0..36).find(|&i| self.mergeable_native(i, &stack).is_some()));
+
+            let target = match merge_target {
+                Some(i) => i,
+                None => match (0..36).find(|&i| self.player_native(i).is_none()) {
+                    Some(i) => i,
+                    // No merge target and no free slot: no progress possible.
+                    None => return stack.is_empty(),
+                },
+            };
+
+            let existing = self.player_native(target).cloned();
+            let cap = existing
+                .as_ref()
+                .map_or_else(|| stack.max_stack_size(), ItemStack::max_stack_size);
+            let existing_count = existing.as_ref().map_or(0, ItemStack::count);
+            let give = (cap - existing_count).min(stack.count());
+            if give <= 0 {
+                return stack.is_empty();
+            }
+            match existing {
+                Some(mut existing) => {
+                    existing.grow(give);
                     stack.shrink(give);
-                    self.set_player_native(i, Some(target));
+                    self.set_player_native(target, Some(existing));
+                }
+                None => {
+                    let placed = stack.split(give);
+                    self.set_player_native(target, Some(placed));
                 }
             }
         }
-        // Then fill the first empty slot.
-        for i in 0..36 {
-            if stack.is_empty() {
-                return true;
-            }
-            if self.player_native(i).is_none() {
-                self.set_player_native(i, Some(stack));
-                return true;
-            }
-        }
-        stack.is_empty()
+    }
+
+    /// Returns `Some(native_index)` when the native slot already holds a
+    /// same-item-same-components, stackable stack with spare room for `stack`.
+    /// Mirrors vanilla `Inventory.hasRemainingSpaceForItem` (`Inventory.
+    /// java:95-100`), which is what `getSlotWithRemainingSpace` calls at each
+    /// candidate slot.
+    fn mergeable_native(&self, native_index: usize, stack: &ItemStack) -> Option<usize> {
+        let existing = self.player_native(native_index)?;
+        (ItemStack::is_same_item_same_components(existing, stack)
+            && existing.is_stackable()
+            && existing.count() < existing.max_stack_size())
+        .then_some(native_index)
     }
 
     /// Runs a full drag as a start/add.../end packet sequence and applies it.
