@@ -9090,7 +9090,15 @@ mod tests {
         // So: measure the text on an **unfocused** clone — no outline, no caret,
         // nothing in the box but glyphs — and use the focused draw as the control
         // that this band really can see ink at the box's edge.
-        let band = (fx, state.text_y, fw, GLYPH_H as f32 * EDIT_TEXT_SCALE);
+        // The band's bottom is the box's own bottom edge, not a glyph-height
+        // constant: the control below has to see the fallback outline's bottom
+        // bar, which draws at `y + h - 2` — a fixed offset from the box's real
+        // bottom, with nothing to do with any text scale. Tying the band to
+        // `EDIT_TEXT_SCALE` is what broke this the moment that scale stopped
+        // matching the outline's position (`2cd7c58`): the band shrank from
+        // 14px to 7px, stopped reaching the bar, and the control then measured
+        // text ink starting at `text_x` instead of outline ink at `fx`.
+        let band = (fx, state.text_y, fw, (fy + fh) - state.text_y);
         let mut unfocused = row.clone();
         if let Some(e) = unfocused.edit.as_mut() {
             e.widget.focused = false;
