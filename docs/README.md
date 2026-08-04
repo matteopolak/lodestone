@@ -277,7 +277,18 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Vanilla HUD text](./vanilla-hud-text.md) — drawing real `ascii.png` glyphs with
   per-glyph proportional advances and the gamma-space drop shadow, why the font is
   fail-open rather than required, and why the gate measures distances between lit
-  columns instead of asserting on the source string.
+  columns instead of asserting on the source string. Also (issue #117) bold, italic,
+  underline, strikethrough and obfuscated as real draw-time geometry — `Style` was
+  decoded and *measured* correctly all along, and only the draw side treated every
+  format flag as zero-width, which is why the bug looked like a parsing problem.
+- [Held-item name tooltip](./held-item-name-tooltip.md) — the selected-item name
+  highlight above the hotbar (issue #126): the `HeldItemHighlight` timer/alpha model
+  transcribed from `Hud.tick`, why it keys on item **identity** rather than slot index,
+  the styled-name resolver and its two narrower gaps (no rarity colour, no verified
+  `item.minecraft.*` table), and why the live per-tick wiring is still outstanding —
+  it needs a `HeldItemOverlay` component beside `TitleOverlay`/`ActionBarOverlay`,
+  whose `tick()` wants the selected stack's *identity* each tick rather than just a
+  duration.
 - [Container screen](./container-screen.md) — laying out an open `Menu` (chest,
   inventory, crafting table), why the crafting branch hangs off `Menu` instead of
   `MenuKind`, why the result slot is never computed locally, and (issue #370)
