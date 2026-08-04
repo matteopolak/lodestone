@@ -57,16 +57,16 @@ use lodestone_data::items::{item_id, item_name};
 use lodestone_data::menus::menu_id;
 use crate::packet_ids::{configuration, handshaking, login, play};
 use crate::packets::chunk::ChunkShape;
-use crate::packets::common::KeepAlive;
+use crate::packets::common::{KeepAlive, TeleportToEntity};
 use crate::packets::configuration::FinishConfiguration;
-use crate::packets::entity::{pack_degrees, write_lp_vec3};
+use crate::packets::entity::{pack_degrees, read_lp_vec3, write_lp_vec3};
 use crate::packets::game::{
     AcceptTeleportation, Attack, ChangeDifficultyClientbound, ChangeDifficultyServerbound,
     ClientTickEnd, GameLogin, GameRuleEntry, GameRuleValues, GlobalPos, LockDifficulty,
     MOVE_FLAG_ON_GROUND, MovePlayerPos, MovePlayerPosRot, MovePlayerRot, MovePlayerStatusOnly,
-    MoveVehicle, PaddleBoat, PlayerAction, PlayerLoaded, SERVERBOUND_ABILITY_FLAG_FLYING,
-    ServerboundPlayerAbilities, SetCarriedItem, SetDefaultSpawnPosition, SetGameRule, SetHealth,
-    UseItemOn,
+    MoveVehicle, PaddleBoat, PlayerAction, PlayerCommand, PlayerLoaded,
+    SERVERBOUND_ABILITY_FLAG_FLYING, ServerboundPlayerAbilities, SetCarriedItem,
+    SetDefaultSpawnPosition, SetGameRule, SetHealth, Swing, UseItem, UseItemOn,
 };
 use crate::packets::handshake::Intention;
 use crate::packets::login::{LoginFinished, LoginHello};
@@ -1241,6 +1241,68 @@ impl ServerProtocol for V770ServerProtocol {
             }
             State::Play if packet_id == play::serverbound::PADDLE_BOAT => {
                 let _ = decode_full::<PaddleBoat>(payload);
+                ServerBound::Ignored
+            }
+
+            // Issue #264 (entity actions/combat/interaction), remaining 6 of
+            // 9 — `ATTACK`, `PLAYER_ACTION` and `USE_ITEM_ON` are already
+            // decoded and applied above. All six below are field-verified
+            // against `.cache/mc/26.2/src`'s decompiled packet classes.
+            //
+            // `ServerboundInteractPacket`: VarInt target entity id, VarInt
+            // `InteractionHand` ordinal, a low-precision `Vec3` location
+            // (`Vec3.LP_STREAM_CODEC` — the same codec
+            // [`read_lp_vec3`](crate::packets::entity::read_lp_vec3) already
+            // decodes and unit-tests for entity velocity), then a trailing
+            // boolean for the secondary-action (shift) modifier. 26.2 split
+            // the old combined interact/attack packet in two
+            // (`ServerBound::Attack`'s own doc comment); this is what is left
+            // once attack is removed — right-click entity interaction
+            // (taming/feeding/mounting/etc.), for which this crate has no
+            // interaction model at all yet.
+            State::Play if packet_id == play::serverbound::INTERACT => {
+                let mut r = Reader::new(payload);
+                let decoded = (|| -> lodestone_core::Result<()> {
+                    let _entity_id = r.var_i32()?;
+                    let _hand = r.var_i32()?;
+                    let _location = read_lp_vec3(&mut r)?;
+                    let _using_secondary_action = r.bool()?;
+                    r.ensure_empty()
+                })();
+                let _ = decoded;
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::SWING => {
+                let _ = decode_full::<Swing>(payload);
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::USE_ITEM => {
+                let _ = decode_full::<UseItem>(payload);
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::PLAYER_COMMAND => {
+                let _ = decode_full::<PlayerCommand>(payload);
+                ServerBound::Ignored
+            }
+            // `ServerboundSpectatorActionPacket`: a single VarInt using
+            // `ByteBufCodecs.OPTIONAL_VAR_INT`'s offset encoding (`0` = no
+            // target, a present id `i` written as `i + 1`) — the exact
+            // inverse of `crate::adapter::encode_spectator_action`, which
+            // already documents why this must be hand-decoded rather than a
+            // derived `Option<i32>` (a bool-prefixed optional would silently
+            // misparse this packet).
+            State::Play if packet_id == play::serverbound::SPECTATOR_ACTION => {
+                let mut r = Reader::new(payload);
+                let decoded = (|| -> lodestone_core::Result<()> {
+                    let raw = r.var_i32()?;
+                    let _target_entity_id = if raw == 0 { None } else { Some(raw - 1) };
+                    r.ensure_empty()
+                })();
+                let _ = decoded;
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::TELEPORT_TO_ENTITY => {
+                let _ = decode_full::<TeleportToEntity>(payload);
                 ServerBound::Ignored
             }
             _ => ServerBound::Ignored,
