@@ -1,0 +1,416 @@
+//! Neighbour-update propagation (issue #308, second half): vanilla's fixed
+//! direction order plus its depth-first cascade semantics, the piece issue
+//! #316 calls "vanilla's update-order quirks."
+//!
+//! # The direction order, cited directly
+//!
+//! `NeighborUpdater.java:18`:
+//!
+//! ```text
+//! Direction[] UPDATE_ORDER = new Direction[]{Direction.WEST, Direction.EAST, Direction.DOWN, Direction.UP, Direction.NORTH, Direction.SOUTH};
+//! ```
+//!
+//! [`UPDATE_ORDER`] below is that array, verbatim.
+//!
+//! # The propagation shape is depth-first, not breadth-first — cited directly
+//!
+//! `ServerLevel`/`Level` use `CollectingNeighborUpdater`
+//! (`Level.java:152`, `this.neighborUpdater = new
+//! CollectingNeighborUpdater(this, maxChainedNeighborUpdates);`). Its
+//! `runUpdates` (`CollectingNeighborUpdater.java:87-112`) drives an explicit
+//! `ArrayDeque` stack, and the load-bearing part is `addAndRun`
+//! (`:68-85`):
+//!
+//! ```text
+//! private void addAndRun(final BlockPos pos, final NeighborUpdates update) {
+//!    boolean runningAlready = this.count > 0;
+//!    ...
+//!    if (!tooManyUpdates) {
+//!       if (runningAlready) { this.addedThisLayer.add(update); }
+//!       else { this.stack.push(update); }
+//!    }
+//!    ...
+//!    if (!runningAlready) { this.runUpdates(); }
+//! }
+//! ```
+//!
+//! A neighbour notification issued *while* another is already running
+//! (`runningAlready`) is queued as `addedThisLayer` and, per `runUpdates`'s
+//! own loop, pushed onto the **top** of the stack before the outer work
+//! resumes — so any cascade a single notification triggers is fully drained
+//! (including *its own* further cascades) before the direction loop that
+//! issued it moves on to the next direction. Concretely: notifying `WEST`
+//! and having that block's own state change cascade into notifying three
+//! more neighbours means all three of those (and anything *they* cascade
+//! into) run to completion **before `EAST` is ever notified** — this is not
+//! "notify all six, then resolve cascades level by level" (breadth-first);
+//! it is "resolve everything one notification causes before moving to the
+//! next" (depth-first). [`NeighborPropagator::propagate`]'s explicit `Vec`
+//! stack is that same algorithm, flattened to the one call shape this crate
+//! needs (fan-out to up to six neighbours, each of which may report further
+//! single-target cascades) rather than vanilla's four `NeighborUpdates`
+//! variants (shape/full/simple/multi), none of which this crate has a
+//! second consumer for yet.
+//!
+//! `maxChainedNeighborUpdates` (`:70`) caps total notifications per
+//! `propagate` call, logging once and discarding the rest
+//! (`CollectingNeighborUpdater.java:78-80`) — [`NeighborPropagator::propagate`]
+//! mirrors this with `max_chained`.
+//!
+//! # What this module does not yet have a real producer for
+//!
+//! No block in this crate implements a real `neighborChanged`/`updateShape`
+//! response yet (redstone, gravity blocks, and friends are #311/#314-322,
+//! downstream of this issue). [`NeighborPropagator`] is exercised end to end
+//! today by `crate::random_tick`'s grass/dirt conversion, which calls it
+//! after every block it mutates (mirroring vanilla's `setBlockAndUpdate`
+//! always notifying neighbours), with a currently-empty `notify` closure —
+//! real per-block reactions plug into that closure's implementation as they
+//! land, without changing this module's ordering contract.
+
+use lodestone_model::BlockPos;
+
+/// One of the six axis-aligned neighbour directions — mirrors
+/// `net.minecraft.core.Direction`'s six cardinal/vertical values, narrowed
+/// to what [`UPDATE_ORDER`] needs (vanilla's `Direction` also carries
+/// diagonal values used elsewhere, irrelevant here).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Direction {
+    Down,
+    Up,
+    North,
+    South,
+    West,
+    East,
+}
+
+impl Direction {
+    /// The block position one step off `pos` in this direction — vanilla's
+    /// `BlockPos.relative(Direction)`.
+    #[must_use]
+    pub fn relative(self, pos: BlockPos) -> BlockPos {
+        let (dx, dy, dz) = match self {
+            Direction::Down => (0, -1, 0),
+            Direction::Up => (0, 1, 0),
+            Direction::North => (0, 0, -1),
+            Direction::South => (0, 0, 1),
+            Direction::West => (-1, 0, 0),
+            Direction::East => (1, 0, 0),
+        };
+        BlockPos::new(pos.x + dx, pos.y + dy, pos.z + dz)
+    }
+}
+
+/// Vanilla's own fan-out order, verbatim from `NeighborUpdater.java:18`:
+/// **west, east, down, up, north, south**. Not alphabetical, not axis-major
+/// — this exact sequence is the "vanilla update-order quirk" issue #316
+/// names, and every consumer of [`NeighborPropagator::propagate`] observes
+/// neighbours notified in this order (modulo `skip`).
+pub const UPDATE_ORDER: [Direction; 6] = [
+    Direction::West,
+    Direction::East,
+    Direction::Down,
+    Direction::Up,
+    Direction::North,
+    Direction::South,
+];
+
+/// One pending notification: "tell the block at `pos` that its neighbour
+/// changed, as if approached from `from`" — vanilla's `neighborChanged`
+/// carries the *source* block/orientation, not a direction into `pos`, but
+/// every caller in this crate reasons in terms of "which of my six sides
+/// triggered this," so `from` here is the direction from the *causing*
+/// block into `pos` (i.e. `causing_pos.relative(from) == pos`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Notification {
+    pub pos: BlockPos,
+    pub from: Direction,
+}
+
+/// The depth-first neighbour-update propagator described in this module's
+/// own doc comment.
+#[derive(Debug, Clone, Copy)]
+pub struct NeighborPropagator {
+    /// Caps total notifications per [`propagate`](Self::propagate) call —
+    /// mirrors `maxChainedNeighborUpdates` (`CollectingNeighborUpdater.java:20`).
+    /// `None` means unbounded (only test code should choose this; a live
+    /// world always caps it, matching vanilla always constructing its
+    /// updater with a finite value).
+    pub max_chained: Option<usize>,
+}
+
+impl Default for NeighborPropagator {
+    fn default() -> Self {
+        // Vanilla's own default is large (a gamerule-configurable value in
+        // the tens of thousands) — chosen here just to be "large enough
+        // never to matter for a legitimate update," not to reproduce a
+        // specific vanilla constant this crate has no gamerule plumbing
+        // for yet.
+        Self { max_chained: Some(1_000_000) }
+    }
+}
+
+enum WorkItem {
+    /// Still-iterating fan-out from `origin`, having issued directions
+    /// `0..idx` of [`UPDATE_ORDER`] so far.
+    FanOut { origin: BlockPos, skip: Option<Direction>, idx: usize },
+    /// A single follow-up notification, produced as a cascade of an
+    /// already-issued notification.
+    Single(Notification),
+}
+
+impl NeighborPropagator {
+    /// Notifies every neighbour of `origin` except `skip` (pass `None` to
+    /// notify all six), in [`UPDATE_ORDER`], with vanilla's depth-first
+    /// cascade semantics: `notify` is called once per notification actually
+    /// issued, and any [`Notification`]s it returns are fully resolved
+    /// (including their own further cascades) before the next direction in
+    /// the original fan-out is issued. Mirrors
+    /// `updateNeighborsAtExceptFromFacing`
+    /// (`NeighborUpdater.java:26-34`) as the entry point, backed by
+    /// `CollectingNeighborUpdater`'s stack — see this module's doc comment
+    /// for the full citation.
+    ///
+    /// Returns every [`Notification`] actually issued, in the exact order
+    /// `notify` was called for them — the "observable behaviour" a caller
+    /// or test wants to assert on, since `notify` itself is a `FnMut` and
+    /// may have side effects the caller already observed as they happened.
+    pub fn propagate<F>(
+        &self,
+        origin: BlockPos,
+        skip: Option<Direction>,
+        mut notify: F,
+    ) -> Vec<Notification>
+    where
+        F: FnMut(Notification) -> Vec<Notification>,
+    {
+        let mut stack = vec![WorkItem::FanOut { origin, skip, idx: 0 }];
+        let mut issued = Vec::new();
+        let mut count: usize = 0;
+        let mut capped = false;
+
+        while let Some(top) = stack.last_mut() {
+            match top {
+                WorkItem::FanOut { origin, skip, idx } => {
+                    if *idx >= UPDATE_ORDER.len() {
+                        stack.pop();
+                        continue;
+                    }
+                    let direction = UPDATE_ORDER[*idx];
+                    *idx += 1;
+                    if Some(direction) == *skip {
+                        continue;
+                    }
+                    let notification = Notification { pos: direction.relative(*origin), from: direction };
+                    if capped {
+                        continue;
+                    }
+                    count += 1;
+                    if let Some(cap) = self.max_chained {
+                        if count > cap {
+                            capped = true;
+                            tracing::error!(
+                                "Too many chained neighbor updates. Skipping the rest. First skipped position: {:?}",
+                                notification.pos
+                            );
+                            continue;
+                        }
+                    }
+                    issued.push(notification);
+                    let cascades = notify(notification);
+                    for cascade in cascades.into_iter().rev() {
+                        stack.push(WorkItem::Single(cascade));
+                    }
+                }
+                WorkItem::Single(notification) => {
+                    let notification = *notification;
+                    stack.pop();
+                    if capped {
+                        continue;
+                    }
+                    count += 1;
+                    if let Some(cap) = self.max_chained {
+                        if count > cap {
+                            capped = true;
+                            tracing::error!(
+                                "Too many chained neighbor updates. Skipping the rest. First skipped position: {:?}",
+                                notification.pos
+                            );
+                            continue;
+                        }
+                    }
+                    issued.push(notification);
+                    let cascades = notify(notification);
+                    for cascade in cascades.into_iter().rev() {
+                        stack.push(WorkItem::Single(cascade));
+                    }
+                }
+            }
+        }
+
+        issued
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pos(x: i32, y: i32, z: i32) -> BlockPos {
+        BlockPos::new(x, y, z)
+    }
+
+    /// The plain fan-out, no cascades: six calls in exactly `UPDATE_ORDER`.
+    #[test]
+    fn no_cascades_issues_all_six_in_update_order() {
+        let prop = NeighborPropagator::default();
+        let issued = prop.propagate(pos(0, 0, 0), None, |_| Vec::new());
+        let dirs: Vec<Direction> = issued.iter().map(|n| n.from).collect();
+        assert_eq!(
+            dirs,
+            vec![
+                Direction::West,
+                Direction::East,
+                Direction::Down,
+                Direction::Up,
+                Direction::North,
+                Direction::South,
+            ]
+        );
+    }
+
+    /// `skip` removes exactly one direction and leaves the other five in
+    /// order — mirrors `updateNeighborsAtExceptFromFacing`'s own `skipDirection`.
+    #[test]
+    fn skip_direction_is_omitted_but_order_is_otherwise_unchanged() {
+        let prop = NeighborPropagator::default();
+        let issued = prop.propagate(pos(0, 0, 0), Some(Direction::Down), |_| Vec::new());
+        let dirs: Vec<Direction> = issued.iter().map(|n| n.from).collect();
+        assert_eq!(
+            dirs,
+            vec![Direction::West, Direction::East, Direction::Up, Direction::North, Direction::South]
+        );
+    }
+
+    /// The core ordering claim: a cascade from the FIRST direction (`West`)
+    /// must be fully resolved before the SECOND direction (`East`) is even
+    /// issued — depth-first, not breadth-first. If this ran breadth-first
+    /// instead, the recorded order would have `East, Down, Up, North, South`
+    /// all before the cascade position; that wrong hypothesis is asserted
+    /// against explicitly below, not just implied.
+    #[test]
+    fn a_cascade_from_the_first_direction_resolves_before_the_second_direction_is_issued() {
+        let prop = NeighborPropagator::default();
+        let west_target = Direction::West.relative(pos(0, 0, 0));
+        let cascade_target = pos(-99, -99, -99); // a position outside the fan-out entirely
+
+        let issued = prop.propagate(pos(0, 0, 0), None, |n| {
+            if n.pos == west_target {
+                vec![Notification { pos: cascade_target, from: Direction::North }]
+            } else {
+                Vec::new()
+            }
+        });
+
+        let positions: Vec<BlockPos> = issued.iter().map(|n| n.pos).collect();
+        let east_target = Direction::East.relative(pos(0, 0, 0));
+        let west_idx = positions.iter().position(|&p| p == west_target).unwrap();
+        let cascade_idx = positions.iter().position(|&p| p == cascade_target).unwrap();
+        let east_idx = positions.iter().position(|&p| p == east_target).unwrap();
+
+        assert!(
+            west_idx < cascade_idx && cascade_idx < east_idx,
+            "expected depth-first order west -> cascade -> east, got {positions:?}"
+        );
+
+        // State the rejected hypothesis explicitly: a breadth-first
+        // implementation would place every one of the five other fan-out
+        // directions (in particular `east`) before the cascade. Confirm
+        // that is NOT what happened, as a real (not merely implied) control.
+        let breadth_first_prediction_holds = east_idx < cascade_idx;
+        assert!(
+            !breadth_first_prediction_holds,
+            "control failed: this would also pass under the wrong (breadth-first) ordering"
+        );
+    }
+
+    /// A cascade that itself cascades (depth 3) must still resolve fully
+    /// before the outer fan-out continues — proves the stack recurses, not
+    /// just "one level of lookahead."
+    #[test]
+    fn cascades_of_cascades_all_resolve_before_the_next_fan_out_direction() {
+        let prop = NeighborPropagator::default();
+        let west_target = Direction::West.relative(pos(0, 0, 0));
+        let depth2 = pos(-1, -1, -1);
+        let depth3 = pos(-2, -2, -2);
+
+        let issued = prop.propagate(pos(0, 0, 0), None, |n| {
+            if n.pos == west_target {
+                vec![Notification { pos: depth2, from: Direction::North }]
+            } else if n.pos == depth2 {
+                vec![Notification { pos: depth3, from: Direction::North }]
+            } else {
+                Vec::new()
+            }
+        });
+
+        let positions: Vec<BlockPos> = issued.iter().map(|n| n.pos).collect();
+        let east_target = Direction::East.relative(pos(0, 0, 0));
+        let idx = |p: BlockPos| positions.iter().position(|&x| x == p).unwrap();
+        assert!(idx(west_target) < idx(depth2));
+        assert!(idx(depth2) < idx(depth3));
+        assert!(idx(depth3) < idx(east_target), "the depth-3 cascade must resolve before `east` is issued");
+    }
+
+    /// `max_chained` is a hard cap, proven with a `notify` that cascades
+    /// forever (an infinite chain) — without the cap this would hang.
+    #[test]
+    fn max_chained_stops_an_unbounded_cascade() {
+        let prop = NeighborPropagator { max_chained: Some(5) };
+        let issued = prop.propagate(pos(0, 0, 0), None, |n| {
+            // Always cascade to one more position than we were given.
+            vec![Notification { pos: pos(n.pos.x - 1, n.pos.y, n.pos.z), from: Direction::West }]
+        });
+        assert_eq!(issued.len(), 5, "exactly `max_chained` notifications must be issued, not more");
+    }
+
+    /// Negative control for the cap: a chain shorter than `max_chained`
+    /// must NOT be truncated — proving the cap is a ceiling, not something
+    /// that fires unconditionally.
+    #[test]
+    fn a_short_cascade_is_not_truncated_by_a_generous_cap() {
+        let prop = NeighborPropagator { max_chained: Some(1_000) };
+        let west_target = Direction::West.relative(pos(0, 0, 0));
+        let issued = prop.propagate(pos(0, 0, 0), None, |n| {
+            if n.pos == west_target {
+                vec![Notification { pos: pos(-5, -5, -5), from: Direction::North }]
+            } else {
+                Vec::new()
+            }
+        });
+        // 6 fan-out directions + 1 cascade = 7, nowhere near the cap.
+        assert_eq!(issued.len(), 7);
+    }
+
+    /// Determinism control: two independently constructed propagators,
+    /// given the same cascade script, must issue identical sequences —
+    /// built as two separate `NeighborPropagator` values (not the same
+    /// instance called twice) per CLAUDE.md's warning that calling one
+    /// instance twice can pass by memoisation/pointer-identity rather than
+    /// real determinism.
+    #[test]
+    fn two_independently_built_propagators_issue_identical_sequences() {
+        let script = |n: Notification| -> Vec<Notification> {
+            if n.from == Direction::West {
+                vec![Notification { pos: pos(42, 42, 42), from: Direction::Up }]
+            } else {
+                Vec::new()
+            }
+        };
+        let prop_a = NeighborPropagator::default();
+        let prop_b = NeighborPropagator { max_chained: Some(1_000_000) };
+        let issued_a = prop_a.propagate(pos(1, 2, 3), None, script);
+        let issued_b = prop_b.propagate(pos(1, 2, 3), None, script);
+        assert_eq!(issued_a, issued_b);
+    }
+}

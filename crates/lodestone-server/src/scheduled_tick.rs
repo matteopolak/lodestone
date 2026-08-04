@@ -1,0 +1,465 @@
+//! The scheduled-tick queue (issue #308, first half): vanilla's own
+//! `blockTicks`/`fluidTicks` machinery, collapsed to one generic
+//! [`ScheduledTickQueue<T>`] the tick loop instantiates twice.
+//!
+//! # Where this comes from in the jar
+//!
+//! `ServerLevel` keeps exactly two of these
+//! (`ServerLevel.java:209-210`):
+//!
+//! ```text
+//! private final LevelTicks<Block> blockTicks = new LevelTicks<>(this::isPositionTickingWithEntitiesLoaded);
+//! private final LevelTicks<Fluid> fluidTicks = new LevelTicks<>(this::isPositionTickingWithEntitiesLoaded);
+//! ```
+//!
+//! and drains both once per world tick, **block before fluid**
+//! (`ServerLevel.java:388-391`):
+//!
+//! ```text
+//! this.blockTicks.tick(tick, 65536, this::tickBlock);
+//! this.fluidTicks.tick(tick, 65536, this::tickFluid);
+//! ```
+//!
+//! `65536` is `ServerLevel.MAX_SCHEDULED_TICKS_PER_TICK`
+//! (`ServerLevel.java:194`) — see [`ScheduledTickQueue::drain_due`]'s
+//! `max_to_process` parameter.
+//!
+//! Vanilla partitions each queue further, per chunk, via `LevelTicks<T>`
+//! (`LevelTicks.java`) holding one `LevelChunkTicks<T>`
+//! (`LevelChunkTicks.java`) per loaded chunk, so that draining one very full
+//! chunk cannot starve every other chunk's due ticks in the same pass. This
+//! crate has no per-chunk tick-container registry yet (no chunk-load/unload
+//! lifecycle for blocks — see `crate::chunk`'s own module doc), so
+//! [`ScheduledTickQueue`] is the **single-container reduction** of vanilla's
+//! design: with exactly one container, `LevelTicks`'s own cross-container
+//! selection (`LevelTicks::drainContainers`/`drainFromCurrentContainer`,
+//! comparing containers by `ScheduledTick.INTRA_TICK_DRAIN_ORDER`) never has
+//! a second container to compare against, and the whole algorithm collapses
+//! to draining the single container's own queue in
+//! `ScheduledTick.DRAIN_ORDER` — which is exactly what this type does. This
+//! is not an invented simplification: it is the real algorithm evaluated at
+//! the case this crate is actually in today. If a per-chunk tick-container
+//! registry is ever added, promote this to one `ScheduledTickQueue` per
+//! chunk plus the `LevelTicks`-level cross-container merge; the ordering
+//! contract below does not change.
+//!
+//! # The ordering contract, cited directly
+//!
+//! `ScheduledTick.java:9-17`:
+//!
+//! ```text
+//! public static final Comparator<ScheduledTick<?>> DRAIN_ORDER = (o1, o2) -> {
+//!    int compare = Long.compare(o1.triggerTick, o2.triggerTick);
+//!    if (compare != 0) return compare;
+//!    compare = o1.priority.compareTo(o2.priority);
+//!    return compare != 0 ? compare : Long.compare(o1.subTickOrder, o2.subTickOrder);
+//! };
+//! ```
+//!
+//! i.e. **trigger tick, then priority, then insertion order** — see
+//! [`TickPriority`] for the seven priorities and
+//! [`ScheduledTickQueue::drain_due`] for the collect-then-run split that
+//! keeps a tick scheduled *during* processing out of the pass currently
+//! running (`LevelTicks::tick`, `LevelTicks.java:81-91`: `collectTicks` fully
+//! populates `toRunThisTick` before `runCollectedTicks` invokes the output
+//! callback even once).
+//!
+//! # The per-position dedup, cited directly
+//!
+//! `LevelChunkTicks.java:53-57`:
+//!
+//! ```text
+//! public void schedule(final ScheduledTick<T> tick) {
+//!    if (this.ticksPerPosition.add(tick)) {
+//!       this.scheduleUnchecked(tick);
+//!    }
+//! }
+//! ```
+//!
+//! `ticksPerPosition` hashes/compares only on `(pos, type)`
+//! (`ScheduledTick.UNIQUE_TICK_HASH`, `ScheduledTick.java:22-34`) — a second
+//! `schedule` for a position/kind pair that already has one pending is
+//! silently dropped, regardless of the new call's `trigger_tick` or
+//! `priority`. [`ScheduledTickQueue::schedule`] mirrors this exactly.
+
+use std::collections::{BinaryHeap, HashSet};
+use std::hash::Hash;
+
+/// Mirrors `net.minecraft.world.ticks.TickPriority`
+/// (`TickPriority.java:5-12`):
+///
+/// ```text
+/// public enum TickPriority {
+///    EXTREMELY_HIGH(-3), VERY_HIGH(-2), HIGH(-1), NORMAL(0), LOW(1), VERY_LOW(2), EXTREMELY_LOW(3);
+/// }
+/// ```
+///
+/// Declared in that exact order deliberately: `ScheduledTick.DRAIN_ORDER`
+/// compares priorities with `Enum::compareTo`, which is Java's **ordinal**
+/// (declaration order), not the `-3..3` values shown above. Rust's derived
+/// [`Ord`] on an enum is likewise declaration-order, so listing the variants
+/// `ExtremelyHigh` first reproduces that comparison with no explicit value
+/// mapping needed — a smaller `TickPriority` here is exactly a smaller
+/// `TickPriority` there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TickPriority {
+    ExtremelyHigh,
+    VeryHigh,
+    High,
+    Normal,
+    Low,
+    VeryLow,
+    ExtremelyLow,
+}
+
+impl Default for TickPriority {
+    /// Vanilla's own 3-arg `ScheduledTick` constructor
+    /// (`ScheduledTick.java:36-38`) defaults to `NORMAL` for callers that
+    /// don't care about priority.
+    fn default() -> Self {
+        TickPriority::Normal
+    }
+}
+
+/// One scheduled tick, mirroring `net.minecraft.world.ticks.ScheduledTick`
+/// (`ScheduledTick.java:8`,
+/// `record ScheduledTick<T>(T type, BlockPos pos, long triggerTick, TickPriority priority, long subTickOrder)`).
+///
+/// `sub_tick_order` is a queue-assigned monotonic counter (vanilla's own
+/// field of the same name) — the final tiebreaker when two ticks share both
+/// `trigger_tick` and `priority`, and it is what makes
+/// [`ScheduledTickQueue::drain_due`]'s output order a pure function of
+/// *schedule call order*, not of a `HashMap`/`HashSet`'s iteration order
+/// (CLAUDE.md's own warning: this queue never iterates a hash collection
+/// where output order matters — the dedup set below is membership-only).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduledTick<T> {
+    pub pos: (i32, i32, i32),
+    pub kind: T,
+    pub trigger_tick: u64,
+    pub priority: TickPriority,
+    sub_tick_order: u64,
+}
+
+/// `BinaryHeap` wrapper implementing `DRAIN_ORDER`
+/// (`ScheduledTick.java:9-17`) with the comparison inverted, so
+/// `BinaryHeap` (a max-heap) pops the vanilla-*smallest* entry first — i.e.
+/// a genuine min-heap by `(trigger_tick, priority, sub_tick_order)`.
+#[derive(Debug)]
+struct HeapEntry<T>(ScheduledTick<T>);
+
+impl<T> PartialEq for HeapEntry<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.trigger_tick == other.0.trigger_tick
+            && self.0.priority == other.0.priority
+            && self.0.sub_tick_order == other.0.sub_tick_order
+    }
+}
+impl<T> Eq for HeapEntry<T> {}
+
+impl<T> PartialOrd for HeapEntry<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<T> Ord for HeapEntry<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let self_key = (self.0.trigger_tick, self.0.priority, self.0.sub_tick_order);
+        let other_key = (other.0.trigger_tick, other.0.priority, other.0.sub_tick_order);
+        // Reversed on purpose (`other` compared against `self`): see the
+        // struct doc comment above for why this turns `BinaryHeap`'s
+        // max-heap into vanilla `DRAIN_ORDER`'s min-first semantics.
+        other_key.cmp(&self_key)
+    }
+}
+
+/// The single-container reduction of vanilla's `LevelTicks<T>` — see this
+/// module's own doc comment for why one container is the faithful case to
+/// model today, and what changes (nothing about the ordering contract) if a
+/// per-chunk registry is added later.
+///
+/// `T` is the tick's payload — the block/fluid *kind* being ticked (this
+/// crate keys it by canonical block-state-name `String`, matching
+/// `ChunkColumn`'s own block representation; vanilla keys by `Block`/`Fluid`
+/// registry object). `T: Eq + Hash + Clone` is required for the
+/// `(pos, kind)` dedup set — see [`schedule`](Self::schedule).
+#[derive(Debug)]
+pub struct ScheduledTickQueue<T> {
+    heap: BinaryHeap<HeapEntry<T>>,
+    scheduled: HashSet<((i32, i32, i32), T)>,
+    next_sub_tick_order: u64,
+}
+
+impl<T> Default for ScheduledTickQueue<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> ScheduledTickQueue<T> {
+    /// An empty queue.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            heap: BinaryHeap::new(),
+            scheduled: HashSet::new(),
+            next_sub_tick_order: 0,
+        }
+    }
+
+    /// Number of ticks currently pending (not yet drained).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.heap.len()
+    }
+
+    /// `true` iff nothing is pending.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.heap.is_empty()
+    }
+}
+
+impl<T: Eq + Hash + Clone> ScheduledTickQueue<T> {
+    /// Schedules `kind` at `pos` to run at `trigger_tick`, at `priority`.
+    ///
+    /// Returns `false` (a no-op) if a tick for the same `(pos, kind)` is
+    /// already pending — mirrors `LevelChunkTicks::schedule`'s
+    /// `ticksPerPosition.add(tick)` dedup keyed on `(pos, type)` only, per
+    /// this module's own doc comment. The *new* call's `trigger_tick`/
+    /// `priority` are discarded in that case, exactly like vanilla: the
+    /// tick already in the queue keeps its original scheduling.
+    pub fn schedule(
+        &mut self,
+        pos: (i32, i32, i32),
+        kind: T,
+        trigger_tick: u64,
+        priority: TickPriority,
+    ) -> bool {
+        let key = (pos, kind.clone());
+        if !self.scheduled.insert(key) {
+            return false;
+        }
+        let sub_tick_order = self.next_sub_tick_order;
+        self.next_sub_tick_order += 1;
+        self.heap.push(HeapEntry(ScheduledTick {
+            pos,
+            kind,
+            trigger_tick,
+            priority,
+            sub_tick_order,
+        }));
+        true
+    }
+
+    /// `true` iff a tick for `(pos, kind)` is currently pending — mirrors
+    /// `LevelChunkTicks::hasScheduledTick` (`LevelChunkTicks.java:67-69`).
+    #[must_use]
+    pub fn has_scheduled(&self, pos: (i32, i32, i32), kind: &T) -> bool {
+        self.scheduled.contains(&(pos, kind.clone()))
+    }
+
+    /// Drains every tick due at or before `current_tick` (`trigger_tick <=
+    /// current_tick`), in `DRAIN_ORDER`, up to `max_to_process` entries —
+    /// mirrors `LevelTicks::tick`/`ServerLevel`'s `65536` cap
+    /// (`ServerLevel.java:194,389,391`).
+    ///
+    /// Every returned entry is removed from the queue (and its dedup key)
+    /// **before** this function returns — the whole `Vec` is popped from the
+    /// heap in one pass, mirroring `LevelTicks`'s own collect-then-run split
+    /// (`collectTicks` before `runCollectedTicks`,
+    /// `LevelTicks.java:81-91`). So a tick the caller schedules while
+    /// iterating the returned `Vec` (a common shape: "processing this
+    /// scheduled tick causes a fresh one to be scheduled") is invisible to
+    /// *this* call regardless of its `trigger_tick` — it can only be seen by
+    /// a subsequent `drain_due` call. This is the "ticks scheduled during
+    /// this tick's processing must not be processed in the same pass"
+    /// invariant the #308 brief calls out by name.
+    pub fn drain_due(&mut self, current_tick: u64, max_to_process: usize) -> Vec<ScheduledTick<T>> {
+        let mut out = Vec::new();
+        while out.len() < max_to_process {
+            match self.heap.peek() {
+                Some(top) if top.0.trigger_tick <= current_tick => {
+                    let entry = self.heap.pop().expect("just peeked Some").0;
+                    self.scheduled.remove(&(entry.pos, entry.kind.clone()));
+                    out.push(entry);
+                }
+                _ => break,
+            }
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Predicted drain order for a hand-built set of five ticks spanning
+    /// every tiebreaker `DRAIN_ORDER` defines: trigger tick first (so the
+    /// tick due at 10 always precedes the ties due at 20 regardless of
+    /// priority), then priority (`ExtremelyHigh` before `Normal` before
+    /// `Low` among the trigger-tick-20 group), then insertion order for the
+    /// two `Normal`-at-20 entries (B before D, since B was scheduled
+    /// first).
+    #[test]
+    fn drains_in_trigger_tick_then_priority_then_insertion_order() {
+        let mut q: ScheduledTickQueue<&'static str> = ScheduledTickQueue::new();
+        q.schedule((0, 0, 0), "A-tick10-normal", 10, TickPriority::Normal);
+        q.schedule((1, 0, 0), "B-tick20-normal", 20, TickPriority::Normal);
+        q.schedule((2, 0, 0), "C-tick20-high", 20, TickPriority::ExtremelyHigh);
+        q.schedule((3, 0, 0), "D-tick20-normal", 20, TickPriority::Normal);
+        q.schedule((4, 0, 0), "E-tick20-low", 20, TickPriority::Low);
+
+        let drained = q.drain_due(20, 100);
+        let order: Vec<&str> = drained.iter().map(|t| t.kind).collect();
+        assert_eq!(
+            order,
+            vec![
+                "A-tick10-normal",
+                "C-tick20-high",
+                "B-tick20-normal",
+                "D-tick20-normal",
+                "E-tick20-low",
+            ],
+            "expected trigger_tick, then priority, then insertion order"
+        );
+    }
+
+    /// Negative control for the assertion above: nothing due later than
+    /// `current_tick` may be drained, proving `drain_due` isn't simply
+    /// draining the whole heap regardless of `trigger_tick`.
+    #[test]
+    fn drain_due_never_returns_a_tick_scheduled_for_the_future() {
+        let mut q: ScheduledTickQueue<&'static str> = ScheduledTickQueue::new();
+        q.schedule((0, 0, 0), "due-now", 5, TickPriority::Normal);
+        q.schedule((1, 0, 0), "not-due-yet", 6, TickPriority::Normal);
+
+        let drained = q.drain_due(5, 100);
+        assert_eq!(drained.len(), 1, "only the tick due at or before tick 5 may drain");
+        assert_eq!(drained[0].kind, "due-now");
+        assert_eq!(q.len(), 1, "the not-yet-due tick must remain queued");
+    }
+
+    /// Pins the dedup rule cited from `LevelChunkTicks.java:53-57`: a second
+    /// `schedule` for the same `(pos, kind)` while one is already pending is
+    /// dropped, and the *original* scheduling (trigger tick, priority) wins.
+    #[test]
+    fn duplicate_schedule_for_same_pos_and_kind_is_a_no_op() {
+        let mut q: ScheduledTickQueue<&'static str> = ScheduledTickQueue::new();
+        assert!(q.schedule((0, 0, 0), "fire", 100, TickPriority::Normal));
+        // Second call: same pos, same kind, different (earlier, higher-priority)
+        // scheduling — must be rejected, and the ORIGINAL trigger_tick/priority
+        // must be what actually drains.
+        assert!(!q.schedule((0, 0, 0), "fire", 1, TickPriority::ExtremelyHigh));
+        assert_eq!(q.len(), 1, "the duplicate must not have been added");
+
+        // The original scheduling (tick 100) is what wins, not the rejected
+        // one (tick 1) — draining at tick 1 must find nothing.
+        assert!(q.drain_due(1, 100).is_empty());
+        let drained = q.drain_due(100, 100);
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].priority, TickPriority::Normal, "original priority must survive");
+    }
+
+    /// Negative control for the dedup test above, proving the detector
+    /// actually discriminates on `kind`, not merely on `pos`: a second
+    /// `schedule` at the **same position** but a **different** kind must
+    /// succeed independently.
+    #[test]
+    fn different_kind_at_the_same_position_is_not_deduplicated() {
+        let mut q: ScheduledTickQueue<&'static str> = ScheduledTickQueue::new();
+        assert!(q.schedule((0, 0, 0), "block-kind", 10, TickPriority::Normal));
+        assert!(
+            q.schedule((0, 0, 0), "fluid-kind", 10, TickPriority::Normal),
+            "a different kind at the same position must schedule independently — \
+             dedup is keyed on (pos, kind), not pos alone"
+        );
+        assert_eq!(q.drain_due(10, 100).len(), 2);
+    }
+
+    /// The core "not in the same pass" control: draining once, then
+    /// scheduling a fresh tick (already due) for each drained entry — as a
+    /// real tick handler that reschedules itself would — must NOT have
+    /// grown the `Vec` this call already returned. A queue that drained
+    /// live (checking the heap after every push rather than snapshotting
+    /// first) would fail this by returning more than the initial count.
+    #[test]
+    fn ticks_scheduled_while_processing_a_drain_do_not_appear_in_it() {
+        let mut q: ScheduledTickQueue<&'static str> = ScheduledTickQueue::new();
+        q.schedule((0, 0, 0), "seed-a", 10, TickPriority::Normal);
+        q.schedule((1, 0, 0), "seed-b", 10, TickPriority::Normal);
+
+        let drained = q.drain_due(10, 100);
+        assert_eq!(drained.len(), 2, "setup: exactly the two seeded ticks must drain");
+
+        // Simulate "processing seed-a re-schedules itself, already due" —
+        // this must land in a FUTURE drain_due call, never retroactively in
+        // the Vec above (already returned, already immutable).
+        for tick in &drained {
+            q.schedule(tick.pos, "rescheduled", 10, TickPriority::Normal);
+        }
+        assert_eq!(drained.len(), 2, "the already-returned Vec cannot grow");
+
+        // And the rescheduled ticks are real, not lost: they drain on the
+        // *next* call.
+        let second_pass = q.drain_due(10, 100);
+        assert_eq!(second_pass.len(), 2, "both rescheduled ticks must surface on the next pass");
+    }
+
+    /// Magnitude check on `max_to_process`, not just a sign check: five due
+    /// ticks, capped at two, must yield *exactly* two — proving the cap is a
+    /// hard limit, not merely "fewer than five" (which a wrong
+    /// implementation returning e.g. four would also satisfy).
+    #[test]
+    fn max_to_process_is_a_hard_cap_not_a_loose_bound() {
+        let mut q: ScheduledTickQueue<&'static str> = ScheduledTickQueue::new();
+        for i in 0..5 {
+            q.schedule((i, 0, 0), "x", 1, TickPriority::Normal);
+        }
+        let first = q.drain_due(1, 2);
+        assert_eq!(first.len(), 2, "cap must be exact, not approximate");
+        assert_eq!(q.len(), 3, "the other three remain queued");
+        let second = q.drain_due(1, 2);
+        assert_eq!(second.len(), 2);
+        let third = q.drain_due(1, 2);
+        assert_eq!(third.len(), 1, "the last one drains once the queue is nearly empty");
+    }
+
+    /// `TickPriority`'s declared order must match vanilla's `-3..3` value
+    /// order (`TickPriority.java:6-12`) — the property `HeapEntry::cmp`
+    /// relies on via `#[derive(Ord)]`.
+    #[test]
+    fn tick_priority_declaration_order_matches_vanilla_value_order() {
+        assert!(TickPriority::ExtremelyHigh < TickPriority::VeryHigh);
+        assert!(TickPriority::VeryHigh < TickPriority::High);
+        assert!(TickPriority::High < TickPriority::Normal);
+        assert!(TickPriority::Normal < TickPriority::Low);
+        assert!(TickPriority::Low < TickPriority::VeryLow);
+        assert!(TickPriority::VeryLow < TickPriority::ExtremelyLow);
+    }
+
+    /// Determinism control (CLAUDE.md's own warning: a determinism gate that
+    /// calls the *same* instance twice proves memoisation, not determinism).
+    /// Builds two genuinely independent queues from the same schedule script
+    /// and asserts identical drain order from both.
+    #[test]
+    fn two_independently_built_queues_drain_identically() {
+        fn build() -> ScheduledTickQueue<&'static str> {
+            let mut q = ScheduledTickQueue::new();
+            q.schedule((0, 0, 0), "a", 5, TickPriority::Low);
+            q.schedule((1, 0, 0), "b", 5, TickPriority::High);
+            q.schedule((2, 0, 0), "c", 3, TickPriority::Normal);
+            q
+        }
+        let mut q1 = build();
+        let mut q2 = build();
+        let d1 = q1.drain_due(5, 100);
+        let d2 = q2.drain_due(5, 100);
+        let k1: Vec<&str> = d1.iter().map(|t| t.kind).collect();
+        let k2: Vec<&str> = d2.iter().map(|t| t.kind).collect();
+        assert_eq!(k1, k2);
+        assert_eq!(k1, vec!["c", "b", "a"]);
+    }
+}
