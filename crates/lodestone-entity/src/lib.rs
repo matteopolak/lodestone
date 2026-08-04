@@ -23,8 +23,13 @@
 //!   activity-scheduled [`Brain`](brain::Brain) used by newer mobs.
 //! * [`spawn`] — version-free mob-category rules and vanilla's despawn decision.
 //! * [`pose`] — per-entity pose/animation render state (the renderer seam).
-//! * [`projectile`] — ballistic (non-mob) projectile trajectories.
-//! * [`item_entity`] — dropped-item fall dynamics and lifecycle (age/pickup/merge).
+//! * [`projectile`] — ballistic (non-mob) projectile trajectories, plus
+//!   [`ProjectileRegistry`](projectile::ProjectileRegistry), the per-tick
+//!   driver a server owns to advance many of them at once.
+//! * [`item_entity`] — dropped-item fall dynamics and lifecycle
+//!   (age/pickup/merge), plus
+//!   [`ItemEntityRegistry`](item_entity::ItemEntityRegistry), the per-tick
+//!   driver a server owns to advance despawn/merge across many of them.
 //! * [`damage`] — the damage-reduction pipeline and invulnerability-frame gate.
 //! * [`explosion`] — ray-sampled blast exposure, damage and knockback power.
 
@@ -53,10 +58,10 @@ pub use damage::{
 pub use entity::{EntityKind, EntityState, EntityTracker};
 pub use explosion::{Aabb, OpenAir, RayView, entity_damage, knockback_power, seen_percent};
 pub use interpolation::Interpolated;
-pub use item_entity::{ItemLifecycle, ItemMotion, try_merge};
+pub use item_entity::{ItemEntityRegistry, ItemLifecycle, ItemMotion, TrackedItem, try_merge};
 pub use metadata::{EntityMetadata, MetadataSchema, MetadataValue, SharedEntityFlags};
 pub use pose::{EntityPose, RenderPose, WalkAnimation};
-pub use projectile::{DragProfile, IntegrationOrder, Projectile};
+pub use projectile::{DragProfile, IntegrationOrder, Projectile, ProjectileRegistry, TrackedProjectile};
 pub use spawn::{
     DespawnCtx, DespawnDecision, MobCategory, SpawnConditions, check_despawn, mob_cap,
 };
