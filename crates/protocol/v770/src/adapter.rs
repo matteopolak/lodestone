@@ -2419,6 +2419,23 @@ impl V770Adapter {
                     )
                 })
                 .unwrap_or_default();
+            // The same registry generation's entry *names*, indexed by holder
+            // id exactly like the two tables above (follow-up to issue #96 /
+            // `eb423ac`) — see `ClientEvent::BiomeRegistryNames`'s own doc for
+            // why the mesher's `FALLBACK_BIOME_NAMES` fallback is otherwise
+            // wrong against a third-party server. `entry_names` already
+            // decodes this correctly (it has since #288); nothing before this
+            // change carried it past this crate.
+            let biome_names = self
+                .registries
+                .lock()
+                .ok()
+                .and_then(|registries| {
+                    registries
+                        .entry_names(ClientRegistries::BIOME)
+                        .map(<[String]>::to_vec)
+                })
+                .unwrap_or_default();
             return Ok(vec![
                 // Before `Login`, deliberately: a consumer folding both sees the
                 // dimension's geometry before the level name that depends on it.
@@ -2434,6 +2451,7 @@ impl V770Adapter {
                     downfall: biome_downfall,
                     has_precipitation: biome_has_precipitation,
                 }),
+                Directive::Emit(ClientEvent::BiomeRegistryNames { names: biome_names }),
                 Directive::Emit(ClientEvent::Login {
                     entity_id: body.entity_id,
                     game_mode: game_mode(body.game_type)?,
@@ -3542,8 +3560,8 @@ impl V770Adapter {
         }
         if packet_id == play::clientbound::GAME_EVENT {
             // A small keyed world-state change. Only the aspects the model can
-            // represent are surfaced; the rest (win game, demo, arrow-hit, etc.)
-            // decode fully — so the trailing check still guards alignment — but
+            // represent are surfaced; the rest (demo, arrow-hit, etc.) decode
+            // fully — so the trailing check still guards alignment — but
             // produce no directive.
             let event: GameEvent = decode_full(payload)?;
             let directives = match event.event {
@@ -3562,6 +3580,14 @@ impl V770Adapter {
                         vec![Directive::Emit(ClientEvent::GameModeChanged { game_mode })]
                     })
                     .unwrap_or_default(),
+                // WIN_GAME (issue #192): exiting the End through the exit
+                // portal after the dragon fight. Vanilla's own handler
+                // ignores `param` for this event and always opens the
+                // credits screen with `showCredits = true`
+                // (`ClientPacketListener.java:1548-1552`), so nothing from
+                // the wire needs to ride along — see `ClientEvent::WinGame`'s
+                // own doc.
+                4 => vec![Directive::Emit(ClientEvent::WinGame)],
                 7 => vec![Directive::Emit(ClientEvent::WeatherChanged {
                     raining: None,
                     rain_level: Some(event.param),

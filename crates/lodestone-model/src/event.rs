@@ -1940,6 +1940,56 @@ pub enum ClientEvent {
         /// most Nether/End biomes).
         has_precipitation: Vec<Option<bool>>,
     },
+    /// The ordered entry names of the `minecraft:worldgen/biome` registry the
+    /// server declared in the Configuration `registry_data` (follow-up to
+    /// issue #96, commit `eb423ac`), **indexed by holder id** exactly as
+    /// [`Self::BiomeVisuals::sky_colors`] and [`Self::BiomeClimates`] are.
+    ///
+    /// Emitted at the same point (`Login`) and for the same reason as those
+    /// two — see [`Self::BiomeVisuals`]'s doc — so all three always describe
+    /// the same registry generation.
+    ///
+    /// # Why this exists as a third variant rather than a name column on the other two
+    ///
+    /// [`Self::BiomeVisuals`] and [`Self::BiomeClimates`] carry colour/climate
+    /// *values*; this carries the *identity* of the biome at each holder id,
+    /// which is a different consumer (id → name resolution for a tint lookup,
+    /// not a value the mesher shades with directly) and a different lifetime
+    /// concern — see the `shell`-side [`Route`] arm and
+    /// `crates/lodestone-shell/src/mesher.rs`'s `biome_name_at`.
+    ///
+    /// # Why this closes a real (not hypothetical) correctness gap
+    ///
+    /// Before this variant, `crates/lodestone-shell/src/mesher.rs` resolved a
+    /// chunk section's biome holder id to a name through a hardcoded,
+    /// alphabetical `FALLBACK_BIOME_NAMES` table — correct only against this
+    /// project's own server, which derives the same alphabetical order. A
+    /// real vanilla server (or one with a data pack that reorders, adds, or
+    /// removes a biome) sends its **own** registry order, and nothing told
+    /// the mesher what that order was: `ClientRegistries::entry_names` (the
+    /// v770 adapter's already-correct decode of it) never left the version
+    /// crate. Joining a third-party server could therefore paint the wrong
+    /// grass/foliage/water colour with no error anywhere — the id was valid,
+    /// just resolved through the wrong table.
+    BiomeRegistryNames {
+        /// Each biome's registry entry name (e.g. `minecraft:swamp`), at its
+        /// holder id. Every synchronized registry entry carries a name (it is
+        /// the wire key, never optional), unlike [`Self::BiomeVisuals::sky_colors`]
+        /// or [`Self::BiomeClimates`]'s per-field `Option`s.
+        names: Vec<String>,
+    },
+    /// A win condition was signalled by the server: `ClientboundGameEventPacket`'s
+    /// `WIN_GAME` event (code `4`), sent when the local player exits the End
+    /// through the exit portal after defeating the ender dragon.
+    ///
+    /// Carries no data: vanilla's own handler ignores the packet's `param` for
+    /// this event and always opens the credits screen with `showCredits = true`
+    /// (`ClientPacketListener.java:1548-1552`:
+    /// `this.minecraft.gui.setScreen(new WinScreen(true, () -> { ... }))`), so
+    /// there is nothing version-free left to carry — this is a pure signal,
+    /// like [`Self::Respawned`] is for a plain "you are alive again" with no
+    /// win-specific payload.
+    WinGame,
 }
 
 /// Which of the client's event routers claim a [`ClientEvent`].
@@ -2224,7 +2274,15 @@ pub fn route(event: &ClientEvent) -> Route {
         | ClientEvent::BlockEvent { .. }
         | ClientEvent::ItemPickup { .. }
         | ClientEvent::WeatherChanged { .. }
-        | ClientEvent::BiomeClimates { .. } => SHELL,
+        | ClientEvent::BiomeClimates { .. }
+        // Same shape as `BiomeClimates` just above: a registry-generation
+        // table folded into a shell-owned cell (`net::BiomeNameCell`), read by
+        // the mesher at mesh time. No `handles_event` arm needed.
+        | ClientEvent::BiomeRegistryNames { .. }
+        // The credits screen (issue #192): a pure world/session signal with no
+        // per-entity or per-session scalar to fold, forwarded to the shell's
+        // own `NetUpdate` stream exactly like `WeatherChanged`.
+        | ClientEvent::WinGame => SHELL,
         // Chat reaches the shell feed *and* the driver's signed-message
         // acknowledgement valve.
         ClientEvent::Chat { .. } => Route {

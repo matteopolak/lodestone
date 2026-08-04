@@ -356,7 +356,7 @@ fn full_login_sequence_produces_expected_directives() {
 
     // Game join -> login event.
     //
-    // Four `Emit`s, order **not** asserted: this used to be an exact `vec![…]`
+    // Five `Emit`s, order **not** asserted: this used to be an exact `vec![…]`
     // whose own comment claimed the order was load-bearing ("a consumer
     // folding them sees the dimension's geometry and the biome colour table
     // *before* the `Login` that makes a session out of them"). That claim was
@@ -371,8 +371,9 @@ fn full_login_sequence_produces_expected_directives() {
     // with no ordering claim this test cannot actually back up.
     //
     // `dimension_type: None` (issue #288) and `sky_colors`/`temperatures`/
-    // `downfall`/`has_precipitation` all empty (issues #96, #25/#26) because
-    // this flow feeds only a `world_clock` registry above, so neither the
+    // `downfall`/`has_precipitation`/`names` all empty (issues #96, #25/#26,
+    // and the biome-registry-names follow-up to `eb423ac`) because this flow
+    // feeds only a `world_clock` registry above, so neither the
     // dimension-type holder id nor the biome registry resolves. All of them
     // must report as **unresolved** rather than defaulting to the overworld —
     // an empty biome table means "the server sent no biome registry", which
@@ -400,6 +401,7 @@ fn full_login_sequence_produces_expected_directives() {
                 downfall: Vec::new(),
                 has_precipitation: Vec::new(),
             },
+            ClientEvent::BiomeRegistryNames { names: Vec::new() },
             ClientEvent::Login {
                 entity_id: 1,
                 game_mode: GameMode::Survival,
