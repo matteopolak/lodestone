@@ -406,14 +406,17 @@ impl Widget {
     /// [`SLIDER_SPRITES`]. Used by every numeric option on the settings tree
     /// (see [`super::options`]).
     ///
-    /// The **handle** is not this type's business. Vanilla draws it at
+    /// The **handle** is still not this type's business — vanilla draws it at
     /// `x + value * (width - 8)` from the widget's own `value`
-    /// (`AbstractSliderButton.java:66-80`), and a `Widget` holds no value — so a
-    /// screen that has one passes it to the draw. Every slider the settings tree
-    /// renders today is inactive and this client holds no value for any of them,
-    /// which is why nothing draws a handle yet; see `docs/settings-screen.md` on
-    /// why an arbitrary handle position would be a fabricated value rather than a
-    /// cosmetic default.
+    /// (`AbstractSliderButton.java:66-80`), and a `Widget` holds no value, so
+    /// the caller passes one to the draw. This used to say nothing drew a
+    /// handle at all, because every slider the settings tree rendered was
+    /// inactive; that stopped being true once issue #203 gave
+    /// `mouseWheelSensitivity` a real live value, and player report #<TBD>
+    /// (2026-08-04) is what caught the gap it left — see
+    /// [`super::render::MenuRow::slider_value`] and
+    /// [`Self::slider_handle_sprite`] for the handle this type still does not
+    /// draw itself.
     #[must_use]
     pub fn slider(x: f32, y: f32, width: f32, height: f32, message: impl Into<String>) -> Self {
         Self {
@@ -432,13 +435,35 @@ impl Widget {
     /// is vanilla's "the keyboard has taken the slider over" latch, which nothing
     /// here sets, so it is `false` and drops out.
     ///
-    /// Unobservable today (every slider we draw is inactive, and
-    /// `get(false, _)` is `widget/slider` either way) and written anyway: the
-    /// note that it *was* unobservable is exactly the kind of claim that goes
-    /// stale the moment one goes live.
+    /// Written when every slider we drew was inactive, so `get(false, _)` was
+    /// `widget/slider` regardless of `focused` and the highlighted branch was
+    /// unobservable — noted at the time as "exactly the kind of claim that
+    /// goes stale the moment one goes live", which is what issue #203's
+    /// `mouseWheelSensitivity` then did: it is `is_active() == true`, so its
+    /// row keyboard-focused now genuinely shows `widget/slider_highlighted`
+    /// rather than the plain track.
     #[must_use]
     pub fn slider_background_sprite(&self) -> Option<&'static str> {
         self.sprites.map(|s| s.get(self.is_active(), self.focused))
+    }
+
+    /// `AbstractSliderButton.getHandleSprite()`
+    /// (`AbstractSliderButton.java:41-43`):
+    /// `!isActive() || (!isHovered && !canChangeValue) ? SLIDER_HANDLE :
+    /// SLIDER_HANDLE_HIGHLIGHTED`. `canChangeValue` is the same always-`false`
+    /// keyboard latch [`Self::slider_background_sprite`]'s doc explains, so
+    /// the condition collapses to `isActive() && self.hovered`.
+    ///
+    /// Note the predicate is **hover**, not focus — the opposite of
+    /// [`Self::slider_background_sprite`]'s track, which highlights on focus
+    /// alone. Both are transcribed as vanilla wrote them, not harmonised.
+    #[must_use]
+    pub fn slider_handle_sprite(&self) -> &'static str {
+        if self.is_active() && self.hovered {
+            "widget/slider_handle_highlighted"
+        } else {
+            "widget/slider_handle"
+        }
     }
 
     /// `AbstractWidget.isActive()` (`AbstractWidget.java:216-218`):
@@ -855,6 +880,36 @@ mod tests {
             h.slider_background_sprite(),
             Some("widget/slider"),
             "`isActive()` is `visible && active`, unlike the button's raw field"
+        );
+    }
+
+    #[test]
+    fn a_sliders_handle_highlights_on_hover_not_focus() {
+        // The exact opposite predicate from the track's, per
+        // `AbstractSliderButton.getHandleSprite()`
+        // (`AbstractSliderButton.java:41-43`). Control-by-inversion of
+        // `a_slider_has_a_track_but_no_disabled_track`, so a fix to one that
+        // accidentally copies the other's predicate fails here.
+        let mut s = Widget::slider(0.0, 0.0, 150.0, 20.0, "Master Volume");
+        assert_eq!(s.slider_handle_sprite(), "widget/slider_handle");
+        s.focused = true;
+        assert_eq!(
+            s.slider_handle_sprite(),
+            "widget/slider_handle",
+            "focus highlights the track, not the handle"
+        );
+        s.focused = false;
+        s.hovered = true;
+        assert_eq!(
+            s.slider_handle_sprite(),
+            "widget/slider_handle_highlighted",
+            "hover highlights the handle, not the track"
+        );
+        s.active = false;
+        assert_eq!(
+            s.slider_handle_sprite(),
+            "widget/slider_handle",
+            "an inactive slider's handle must not light up even if hovered"
         );
     }
 
