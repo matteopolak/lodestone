@@ -198,6 +198,161 @@ pub fn light_term_from_levels(sky_level: f32, block_level: f32, sky_darken: f32)
     apply_brightness_option(AMBIENT_LIGHT + sky.max(block))
 }
 
+// ---------------------------------------------------------------------------
+// The colour lightmap (N1/N2/N3): `light_term`/`light_term_from_levels` above
+// are a scalar model of a texel that is genuinely three-channel in vanilla.
+// The scalar is *exactly* vanilla's blue channel (`not_gamma_grey`'s grey
+// specialisation collapses to vanilla's real `notGamma` when blue is the max
+// component, which it is at night), which is why every gate above passes on a
+// wrong hue and a right blue byte — a textbook "magnitude" vacuous test per
+// `CLAUDE.md`: the assert is right, its *subject* (one channel of three) is
+// not. `light_color_from_levels` below is the real, faithful vec3 port.
+// ---------------------------------------------------------------------------
+
+/// Vanilla's warm torch tint, `EnvironmentAttributes.BLOCK_LIGHT_TINT`
+/// (`DimensionDefaults.java:5`, `0xFFFFD88C`), as linear-space-agnostic sRGB
+/// bytes over 255 — the same "no linearisation" convention every other
+/// lightmap constant in this module uses (`ARGB.vector3fFromRGB24` is a bare
+/// `byte / 255`).
+pub const BLOCK_LIGHT_TINT: [f32; 3] = [1.0, 216.0 / 255.0, 140.0 / 255.0];
+
+/// Vanilla's `LightmapRenderStateExtractor.extract`: `blockFactor =
+/// blockLightFlicker + 1.4F`. The flicker term is not modelled here (see this
+/// module's "How to change it" — a visible torch shimmer, tracked as a
+/// follow-up); `1.4` alone is what keeps every hermetic gate deterministic.
+pub const BLOCK_FACTOR: f32 = 1.4;
+
+/// Vanilla's `notGamma` (`lightmap.fsh:24-29`), the real three-channel form:
+/// scale the whole triple by `maxScaled / maxComponent` where `maxScaled = 1 -
+/// (1 - maxComponent)^4`, rather than [`not_gamma`]'s grey specialisation
+/// (which is only exact when all three channels already agree).
+///
+/// Guards vanilla's `0.0 / 0.0` at the darkest texel (`max == 0.0`) by
+/// returning black rather than propagating a `NaN` — `lightmap.fsh` runs on a
+/// GPU where that division is hardware-defined, not a Rust panic, and this
+/// makes the two behave the same way for the one input where the formula
+/// itself is undefined.
+#[must_use]
+pub fn not_gamma_vec3(c: [f32; 3]) -> [f32; 3] {
+    let max_component = c[0].max(c[1]).max(c[2]);
+    if max_component <= 0.0 {
+        return [0.0, 0.0, 0.0];
+    }
+    let inv = 1.0 - max_component;
+    let max_scaled = 1.0 - inv * inv * inv * inv;
+    let ratio = max_scaled / max_component;
+    [c[0] * ratio, c[1] * ratio, c[2] * ratio]
+}
+
+/// Vanilla's `EnvironmentAttributes.SKY_LIGHT_COLOR` timeline track, recovered
+/// from `sky_darken` (`SKY_LIGHT_FACTOR`) instead of the raw tick.
+///
+/// `SKY_LIGHT_COLOR` and `SKY_LIGHT_FACTOR` share identical keyframe ticks —
+/// `730 / 11270 / 13140 / 22860` (`Timelines.java:71-80`) — and neither track
+/// calls `.setEasing(...)`, so both interpolate linearly on the same
+/// parameter. `SKY_LIGHT_FACTOR` runs `1.0` (day, ticks `≤ 730` and the
+/// `11270..13140` plateau) down to `0.24` (night, `≥ 13140`), so
+///
+/// ```text
+/// t = clamp((1.0 - sky_darken) / (1.0 - 0.24), 0.0, 1.0)
+/// ```
+///
+/// is the same interpolation parameter `SKY_LIGHT_COLOR` uses, and
+/// `srgbLerp(t, white, NIGHT_SKY_LIGHT_COLOR)` (`NIGHT_SKY_LIGHT_COLOR =
+/// colorFromFloat(1.0, 0.48, 0.48, 1.0)` = `0xFF7A7AFF`, `Timelines.java:30`)
+/// recovers the colour — **verified byte-exact** against the JVM oracle
+/// `tests/support/sky_light_timeline_jvm.txt` at ticks 0, 12000, 13000, 13140
+/// (see this function's tests), including `Mth.lerpInt`'s `floor` (a `round`
+/// here is off by one byte on roughly half of all ticks).
+///
+/// **Two known exceptions, both momentary, and both safe under the `clamp`:**
+/// vanilla's sky-flash overrides (`ClientLevel.java:268`,
+/// `LightmapRenderStateExtractor.java:57-64`) push `SKY_LIGHT_FACTOR` to or
+/// above `1.0` during a lightning flash without touching `SKY_LIGHT_COLOR`,
+/// so for a few ticks this derivation reads pure white (`t` clamped to `0.0`)
+/// where vanilla would still show a faint blue tint it never actually applies
+/// during the flash either (both tracks are read at the same instant, and the
+/// colour track's own `-1`/white keyframe is what a `sky_darken` of `1.0`
+/// already maps to) — the clamp does not paper over a real divergence here,
+/// it reproduces the one moment the two tracks are farthest from their normal
+/// relationship, and lands on the value vanilla is *already* extracting for
+/// its colour track at that instant.
+#[must_use]
+pub fn sky_light_color_from_darken(sky_darken: f32) -> [f32; 3] {
+    const NIGHT: [i32; 3] = [0x7A, 0x7A, 0xFF];
+    let t = ((1.0 - sky_darken) / (1.0 - 0.24)).clamp(0.0, 1.0);
+    [
+        f32::from(crate::sky::lerp_int(t, 0xFF, NIGHT[0]).clamp(0, 255) as u8) / 255.0,
+        f32::from(crate::sky::lerp_int(t, 0xFF, NIGHT[1]).clamp(0, 255) as u8) / 255.0,
+        f32::from(crate::sky::lerp_int(t, 0xFF, NIGHT[2]).clamp(0, 255) as u8) / 255.0,
+    ]
+}
+
+/// `lightmap.fsh`'s parabolic block-tint mix factor, `(2l - 1)^2`
+/// (`:31-33`) — `0.0` at `l = 0.5`, rising to `1.0` at both ends, so the tint
+/// is strongest at the darkest and brightest block levels and vanishes in the
+/// middle.
+fn parabolic_mix_factor(level: f32) -> f32 {
+    let x = 2.0 * level - 1.0;
+    x * x
+}
+
+/// The full three-channel lightmap sample — the faithful port
+/// `light_term_from_levels` is not. Straight from `lightmap.fsh:35-65`, in
+/// order:
+///
+/// ```text
+/// block_brightness = get_brightness(block_level) * BlockFactor
+/// sky_brightness   = get_brightness(sky_level)   * SkyFactor
+/// color  = AmbientColor                                    // grey, see AMBIENT_LIGHT
+/// color += SkyLightColor * sky_brightness                  // see sky_light_color_from_darken
+/// BlockLightColor = mix(BlockLightTint, white, 0.9 * parabolic(block_level))
+/// color += BlockLightColor * block_brightness
+/// color  = clamp(color, 0, 1)
+/// color  = mix(color, notGamma(color), BrightnessFactor)
+/// ```
+///
+/// `AmbientColor` is added once, not per-channel `max`ed with anything — same
+/// combine rule as the scalar model. The **sky/block combine changed from
+/// `max` to additive**, which [`light_term_from_levels`]'s doc already flags
+/// as the one deliberately unmodelled term; this function models it.
+#[must_use]
+pub fn light_color_from_levels(sky_level: f32, block_level: f32, sky_darken: f32) -> [f32; 3] {
+    let sky_brightness = brightness(sky_level) * sky_darken;
+    let block_brightness = brightness(block_level) * BLOCK_FACTOR;
+    let sky_light_color = sky_light_color_from_darken(sky_darken);
+
+    let block_mix = 0.9 * parabolic_mix_factor(block_level);
+    let block_light_color = [
+        BLOCK_LIGHT_TINT[0] + (1.0 - BLOCK_LIGHT_TINT[0]) * block_mix,
+        BLOCK_LIGHT_TINT[1] + (1.0 - BLOCK_LIGHT_TINT[1]) * block_mix,
+        BLOCK_LIGHT_TINT[2] + (1.0 - BLOCK_LIGHT_TINT[2]) * block_mix,
+    ];
+
+    let mut color = [
+        AMBIENT_LIGHT + sky_light_color[0] * sky_brightness + block_light_color[0] * block_brightness,
+        AMBIENT_LIGHT + sky_light_color[1] * sky_brightness + block_light_color[1] * block_brightness,
+        AMBIENT_LIGHT + sky_light_color[2] * sky_brightness + block_light_color[2] * block_brightness,
+    ];
+    color = [color[0].clamp(0.0, 1.0), color[1].clamp(0.0, 1.0), color[2].clamp(0.0, 1.0)];
+
+    let ng = not_gamma_vec3(color);
+    [
+        color[0] + (ng[0] - color[0]) * BRIGHTNESS_FACTOR,
+        color[1] + (ng[1] - color[1]) * BRIGHTNESS_FACTOR,
+        color[2] + (ng[2] - color[2]) * BRIGHTNESS_FACTOR,
+    ]
+}
+
+/// [`light_color_from_levels`] from a packed `sky << 4 | block` byte, the
+/// vec3 twin of [`light_term`].
+#[must_use]
+pub fn light_color(packed_light: u8, sky_darken: f32) -> [f32; 3] {
+    let sky = f32::from((packed_light >> 4) & 0x0F) / 15.0;
+    let block = f32::from(packed_light & 0x0F) / 15.0;
+    light_color_from_levels(sky, block, sky_darken)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,5 +597,233 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Gate E (N1/N2/N3): the colour lightmap. `q = (R/B at night) / (R/B at
+    // noon)` on one pixel cancels the texture's own colour, so it needs no
+    // knowledge of the subject — CLAUDE.md's ratio-of-ratios gate.
+    // -----------------------------------------------------------------
+
+    /// [`sky_light_color_from_darken`] against the existing JVM oracle
+    /// (`tests/support/sky_light_timeline_jvm.txt`), at the same four ticks
+    /// the diagnosis verified by hand: `0`, `12000` (both the flat white
+    /// plateau), `13000` (mid-ramp) and `13140` (the night plateau's first
+    /// tick). `sky_darken_for_time_of_day` is a separately JVM-gated primitive
+    /// (`tests/sky_light_factor_timeline.rs`), used here as a trusted input —
+    /// what this test checks is the colour recovered *from* that factor, not
+    /// the factor itself.
+    #[test]
+    fn sky_light_color_matches_the_jvm_oracle_byte_exact() {
+        for (tick, expected) in [
+            (0_i64, [0xcb_i32, 0xcb, 0xff]),
+            (12000, [0xcb, 0xcb, 0xff]),
+            (13000, [0x83, 0x83, 0xff]),
+            (13140, [0x7a, 0x7a, 0xff]),
+        ] {
+            let darken = crate::entity::sky_darken_for_time_of_day(tick);
+            let got = sky_light_color_from_darken(darken);
+            let got_bytes = got.map(|c| (c * 255.0).round() as i32);
+            assert_eq!(got_bytes, expected, "tick {tick}: sky_darken={darken}");
+        }
+    }
+
+    /// Vanilla's sky-flash override pushes `SKY_LIGHT_FACTOR` to or above
+    /// `1.0` momentarily; the `clamp` in [`sky_light_color_from_darken`] must
+    /// turn that into white rather than a negative `t` or a panic.
+    #[test]
+    fn a_flash_pushed_factor_above_one_clamps_to_white_not_garbage() {
+        assert_eq!(sky_light_color_from_darken(1.5), [1.0, 1.0, 1.0]);
+        assert_eq!(sky_light_color_from_darken(1.0), [1.0, 1.0, 1.0]);
+    }
+
+    /// The daylight regression pin, written *before* any shader touches this.
+    ///
+    /// **Not** a claim that every packed byte's vec3 result matches the old
+    /// scalar — whenever block light is present the two are *supposed* to
+    /// diverge now, because [`light_color_from_levels`] also fixes N2 (the
+    /// additive sky/block combine and `BlockFactor`/tint the scalar model
+    /// never implemented, `light_term_from_levels`'s own doc flags this as
+    /// deliberately unmodelled). The genuine invariant is narrower: at full
+    /// daylight `SKY_LIGHT_COLOR` is white across the whole flat plateau
+    /// (`730..11270`), so a **pure sky-lit texel — block level exactly `0`,
+    /// any sky level** — must reduce to grey and match the old scalar exactly,
+    /// because both the hue fix (N1) and the combine fix (N2) are inert when
+    /// block light is absent. This is the cheapest possible guard against the
+    /// re-baselining risk `docs/time-of-day-lighting.md` flagged for that
+    /// slice of the input space.
+    #[test]
+    fn daylight_vec3_reduces_to_the_existing_scalar_when_block_light_is_absent() {
+        for sky in 0..=15_u8 {
+            let packed = sky << 4;
+            let scalar = light_term(packed, 1.0);
+            let colour = light_color(packed, 1.0);
+            for (i, c) in colour.iter().enumerate() {
+                assert!(
+                    (c - scalar).abs() < 1e-5,
+                    "packed 0x{packed:02X} channel {i}: colour {c} != scalar {scalar}"
+                );
+            }
+        }
+    }
+
+    /// The mirror of the pin above, stated as a positive fact rather than an
+    /// absence of failure: **any** packed byte with block light present must
+    /// now clearly diverge from the old scalar (N2's additive combine and
+    /// `BlockFactor` are not a rounding-sized correction), so a fix that
+    /// silently kept the old `max`-based combine could not pass this file's
+    /// own block-light gates by accident.
+    #[test]
+    fn block_light_present_diverges_from_the_old_scalar_combine() {
+        // Excludes block level 15: both models clamp to exactly 1.0 at full
+        // brightness, so that one endpoint is a coincidence, not evidence.
+        for block in 1..15_u8 {
+            let packed = block; // sky = 0
+            let scalar = light_term(packed, 1.0);
+            let colour = light_color(packed, 1.0);
+            assert!(
+                (colour[0] - scalar).abs() > 0.005,
+                "block {block}: colour {colour:?} must diverge from scalar {scalar} \
+                 (N2's additive combine + BlockFactor + tint)"
+            );
+        }
+    }
+
+    /// **The measurement that settles hue vs. brightness**, per-channel, at
+    /// vanilla's exact midnight value. `light_term`'s existing
+    /// `midnight_lands_on_vanillas_value_and_not_on_either_wrong_one` passes
+    /// at `0.504652` — this pins that that number is the **blue** channel and
+    /// nothing else, by requiring red to *miss* it by more than `0.2`.
+    #[test]
+    fn midnight_blue_matches_the_old_scalar_gate_but_red_does_not() {
+        let midnight = 0.24_f32;
+        // sky level 15 (1.0), block 0 — open sky, unlit.
+        let colour = light_color_from_levels(1.0, 0.0, midnight);
+        assert!((colour[2] - 0.504_652).abs() < 1e-4, "blue: {colour:?}");
+        assert!((colour[0] - 0.278_367).abs() < 1e-4, "red: {colour:?}");
+        assert_eq!(colour[0], colour[1], "red and green must agree: {colour:?}");
+        assert!(
+            (colour[0] - 0.504_652).abs() > 0.2,
+            "red must clearly miss the blue-channel value the old scalar gate \
+             matched, or this is not discriminating hue from brightness: {colour:?}"
+        );
+    }
+
+    /// Gate E's ratio-of-ratios: `q = (R/B at tick T) / (R/B at noon)` on the
+    /// same open-sky, unlit pixel. Vanilla `0.551596` at midnight and
+    /// `0.570359` at tick 13000 (two ticks, so a single-point coincidence
+    /// cannot pass); this client before N1 read `1.000000` at both, because
+    /// the scalar model has no hue to lose.
+    #[test]
+    fn ratio_of_ratios_lands_on_vanillas_hue_not_grey() {
+        let noon = light_color_from_levels(1.0, 0.0, 1.0);
+        assert_eq!(noon[0], noon[2], "noon must be grey (SKY_LIGHT_COLOR is white)");
+        let q_noon = noon[0] / noon[2];
+        assert!((q_noon - 1.0).abs() < 1e-6);
+
+        for (tick, sky_darken, expected_q) in [
+            (18000_i64, 0.24_f32, 0.551_596_f32),
+            (13000, crate::entity::sky_darken_for_time_of_day(13000), 0.570_359),
+        ] {
+            let c = light_color_from_levels(1.0, 0.0, sky_darken);
+            let q = (c[0] / c[2]) / q_noon;
+            assert!(
+                (q - expected_q).abs() < 1e-3,
+                "tick {tick}: q={q}, want {expected_q}"
+            );
+
+            // Negative control, executed and observed to fail: the retained
+            // scalar `light_term` has no hue, so its ratio-of-ratios is
+            // exactly 1.0 regardless of tick — the pre-N1 measurement.
+            let scalar_q = light_term(0xF0, sky_darken) / light_term(0xF0, sky_darken);
+            assert!(
+                (scalar_q - 1.0).abs() < 1e-6,
+                "control: scalar q must be exactly 1.0 (it has no red/blue \
+                 distinction at all), got {scalar_q}"
+            );
+        }
+    }
+
+    /// **Measure by location, not by frame average.** Three spatially distinct
+    /// populations, all computed at the same instant (midnight): open-sky
+    /// (blue, `q ≈ 0.55`), a cave (`sky = 0`, must stay exactly grey — the
+    /// control against the laziest wrong fix, a global night tint, which
+    /// would pass the open-sky row and fail here), and torch-lit (warm,
+    /// time-invariant).
+    #[test]
+    fn three_populations_in_one_frame_disagree_the_way_vanilla_does() {
+        let midnight = 0.24_f32;
+
+        // Open sky, unlit: blue.
+        let open_sky = light_color_from_levels(1.0, 0.0, midnight);
+        assert!(open_sky[2] > open_sky[0] * 1.5, "open sky must read blue: {open_sky:?}");
+
+        // Cave: sky level 0, block level 0. `AmbientColor` is a neutral
+        // `#0a0a0a`, and at sky level 0 `SkyLightColor` contributes nothing
+        // regardless of its own hue, so this must be exactly grey no matter
+        // what tick it is measured at.
+        let cave_midnight = light_color_from_levels(0.0, 0.0, midnight);
+        let cave_noon = light_color_from_levels(0.0, 0.0, 1.0);
+        for c in [cave_midnight, cave_noon] {
+            assert!(
+                (c[0] - 0.093_545_4).abs() < 1e-5
+                    && c[0] == c[1]
+                    && c[1] == c[2],
+                "a cave must stay exactly grey at vanilla's ambient floor: {c:?}"
+            );
+        }
+
+        // Torch-lit: sky 0, block 8/15. Time-invariant (block light does not
+        // dim at dusk), and warm — R/B = 1.664 in vanilla, where the retained
+        // scalar model reads a neutral grey (R/B = 1.0).
+        let block_level = 8.0 / 15.0;
+        let torch_midnight = light_color_from_levels(0.0, block_level, midnight);
+        let torch_noon = light_color_from_levels(0.0, block_level, 1.0);
+        for (label, c) in [("midnight", torch_midnight), ("noon", torch_noon)] {
+            assert!(
+                (c[0] - 0.586_090).abs() < 1e-3,
+                "{label} torch red: {c:?}"
+            );
+            assert!(
+                (c[1] - 0.506_752).abs() < 1e-3,
+                "{label} torch green: {c:?}"
+            );
+            assert!(
+                (c[2] - 0.352_304).abs() < 1e-3,
+                "{label} torch blue: {c:?}"
+            );
+        }
+        assert_eq!(torch_midnight, torch_noon, "block light must not respond to the clock at all");
+
+        // Negative control, executed and observed to fail: the retained
+        // scalar model reads the cave correctly (it is genuinely grey) but
+        // reads the torch as neutral grey too, missing vanilla's warm tint.
+        let scalar_torch = light_term_from_levels(0.0, block_level, midnight);
+        assert!(
+            (scalar_torch - 0.481_948_0).abs() < 1e-4,
+            "control: scalar torch value drifted: {scalar_torch}"
+        );
+        let scalar_q = 1.0; // a scalar has no red/blue channels to ratio.
+        let vanilla_q = torch_midnight[0] / torch_midnight[2];
+        assert!(
+            (vanilla_q - scalar_q).abs() > 0.5,
+            "the scalar model's implicit q=1.0 must clearly miss vanilla's warm \
+             torch ratio {vanilla_q}"
+        );
+    }
+
+    /// [`not_gamma_vec3`] must collapse to [`not_gamma`] when all three
+    /// channels already agree (the daylight/cave case), and must not divide
+    /// by zero at pure black.
+    #[test]
+    fn not_gamma_vec3_matches_the_grey_specialisation_and_guards_black() {
+        for c in [0.0_f32, 0.093_545_4, 0.279_216, 1.0] {
+            let grey = not_gamma([c, c, c][0]);
+            let vec3 = not_gamma_vec3([c, c, c]);
+            for v in vec3 {
+                assert!((v - grey).abs() < 1e-6, "c={c}: {vec3:?} vs grey {grey}");
+            }
+        }
+        assert_eq!(not_gamma_vec3([0.0, 0.0, 0.0]), [0.0, 0.0, 0.0]);
     }
 }

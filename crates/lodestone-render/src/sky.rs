@@ -200,7 +200,7 @@ const CLOUD_COLOR_TRACK: [(i32, u32); 4] = [
 /// `p0 + floor(alpha * (p1 - p0))`. The `floor` is load-bearing — a `round`
 /// here is off by one byte on roughly half of all ticks, which the JVM gate
 /// catches immediately.
-fn lerp_int(alpha: f32, p0: i32, p1: i32) -> i32 {
+pub(crate) fn lerp_int(alpha: f32, p0: i32, p1: i32) -> i32 {
     p0 + (alpha * (p1 - p0) as f32).floor() as i32
 }
 

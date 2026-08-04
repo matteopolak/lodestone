@@ -65,9 +65,16 @@ fn light_brightness(level: f32) -> f32 {
     return level / (4.0 - 3.0 * level);
 }
 
-fn not_gamma_grey(c: f32) -> f32 {
-    let inverted = 1.0 - c;
-    return 1.0 - inverted * inverted * inverted * inverted;
+// Vanilla's real `notGamma` -- see the model shader's `not_gamma_vec3` for the
+// full derivation. Byte-for-byte the same function.
+fn not_gamma_vec3(c: vec3<f32>) -> vec3<f32> {
+    let max_component = max(c.r, max(c.g, c.b));
+    if (max_component <= 0.0) {
+        return vec3<f32>(0.0, 0.0, 0.0);
+    }
+    let inv = 1.0 - max_component;
+    let max_scaled = 1.0 - inv * inv * inv * inv;
+    return c * (max_scaled / max_component);
 }
 
 const BRIGHTNESS_FACTOR: f32 = 0.5;
@@ -77,15 +84,42 @@ const BRIGHTNESS_FACTOR: f32 = 0.5;
 // what an unlit surface looks like.
 const AMBIENT_LIGHT: f32 = 0.039215688;
 
+// Byte-for-byte the model shader's `lightmap_color`/`sky_light_color`/
+// `parabolic_mix_factor`/`lerp_byte` -- see that shader's comments and
+// `crate::light::light_color_from_levels` for the full derivation.
+const BLOCK_LIGHT_TINT: vec3<f32> = vec3<f32>(1.0, 216.0 / 255.0, 140.0 / 255.0);
+const BLOCK_FACTOR: f32 = 1.4;
+
+fn lerp_byte(t: f32, byte_from: f32, byte_to: f32) -> f32 {
+    return (byte_from + floor(t * (byte_to - byte_from))) / 255.0;
+}
+
+fn sky_light_color() -> vec3<f32> {
+    let t = clamp((1.0 - sky_darken()) / 0.76, 0.0, 1.0);
+    return vec3<f32>(lerp_byte(t, 255.0, 122.0), lerp_byte(t, 255.0, 122.0), lerp_byte(t, 255.0, 255.0));
+}
+
+fn parabolic_mix_factor(level: f32) -> f32 {
+    let x = 2.0 * level - 1.0;
+    return x * x;
+}
+
 // Only the *sky* half is darkened. A torch-lit mob is as bright at midnight as
 // at noon, which is vanilla's behaviour: `lightmap.fsh` scales the sky
 // contribution by `SkyFactor` and leaves the block contribution alone. Get this
-// wrong and every lit interior goes dark at sunset.
-fn lightmap_term(sky_level: f32, block_level: f32) -> f32 {
-    let sky = light_brightness(sky_level) * sky_darken();
-    let block = light_brightness(block_level);
-    let c = clamp(AMBIENT_LIGHT + max(sky, block), 0.0, 1.0);
-    return mix(c, not_gamma_grey(c), BRIGHTNESS_FACTOR);
+// wrong and every lit interior goes dark at sunset. The sky/block combine is
+// additive with a warm block tint, not `max` -- see the model shader's
+// `lightmap_color` and `crate::light::light_color_from_levels`.
+fn lightmap_color(sky_level: f32, block_level: f32) -> vec3<f32> {
+    let sky_brightness = light_brightness(sky_level) * sky_darken();
+    let block_brightness = light_brightness(block_level) * BLOCK_FACTOR;
+    let block_mix = 0.9 * parabolic_mix_factor(block_level);
+    let block_light_color = mix(BLOCK_LIGHT_TINT, vec3<f32>(1.0, 1.0, 1.0), block_mix);
+    var color = vec3<f32>(AMBIENT_LIGHT, AMBIENT_LIGHT, AMBIENT_LIGHT)
+        + sky_light_color() * sky_brightness
+        + block_light_color * block_brightness;
+    color = clamp(color, vec3<f32>(0.0, 0.0, 0.0), vec3<f32>(1.0, 1.0, 1.0));
+    return mix(color, not_gamma_vec3(color), BRIGHTNESS_FACTOR);
 }
 
 // sRGB transfer functions, as in the model shader: vanilla is not colour
@@ -109,7 +143,7 @@ struct VsOut {
     @location(1) world: vec3<f32>,
     // Flat: world light is one lightmap sample for the whole entity (vanilla's
     // granularity), so interpolating it across a mob would be meaningless.
-    @location(2) @interpolate(flat) light_term: f32,
+    @location(2) @interpolate(flat) light_term: vec3<f32>,
     // Flat for the same reason: vanilla's `submitModel` colour is one value per
     // submitted model. `vec3(1)` is `NO_TINT` and is what every mob carries;
     // dyed leather armour is the only thing that sets it today.
@@ -134,7 +168,7 @@ fn vs_main(
     let model = mat4x4<f32>(m0, m1, m2, m3);
     let world = model * vec4<f32>(position, 1.0);
     // Byte-for-byte the model shader's light term. `sky_darken` is applied inside
-    // `lightmap_term`, to the *curved* sky brightness rather than to the raw
+    // `lightmap_color`, to the *curved* sky brightness rather than to the raw
     // level, because that is the order `lightmap.fsh` uses.
     let sky = f32((light >> 4u) & 15u) / 15.0;
     let block = f32(light & 15u) / 15.0;
@@ -142,7 +176,7 @@ fn vs_main(
     out.clip = camera.view_proj * world;
     out.uv = uv;
     out.world = world.xyz;
-    out.light_term = lightmap_term(sky, block);
+    out.light_term = lightmap_color(sky, block);
     // Unpack bits 0-23 as 0x00RRGGBB. These bytes are *gamma-space* sRGB,
     // exactly as vanilla's vertex colour is, and are multiplied inside the
     // transfer round-trip below rather than in linear light.
