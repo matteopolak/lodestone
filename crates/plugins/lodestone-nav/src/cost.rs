@@ -879,4 +879,106 @@ mod tests {
         assert_eq!(SurfaceClass::of(0.98), SurfaceClass::Ice);
         assert_eq!(SurfaceClass::of(0.989), SurfaceClass::BlueIce);
     }
+
+    // --- M2: StepUp/Descend/Drop cost simulation ---
+
+    /// A `StepUp` genuinely simulates a jump: it must complete (the physics can
+    /// perform it — `jump_apex_height` says as much) and must cost noticeably
+    /// more than a flat walk of the same one-block distance, because it spends
+    /// real ticks airborne rather than only crossing horizontally.
+    #[test]
+    fn step_up_is_simulated_slower_than_a_flat_walk_and_still_completes() {
+        let mut t = table();
+        let flat = walk(&mut t, EntryRel::Straight, SurfaceClass::Normal);
+        let up = t.get(key_for(
+            MoveKind::StepUp(Dir4::East),
+            EntryRel::Straight,
+            SurfaceClass::Normal,
+        ));
+        assert!(up.ok, "the jump apex clears a one-block ascend; this must simulate ok");
+        assert!(
+            up.ticks > flat.ticks,
+            "step up {} should cost more than a flat walk {}", up.ticks, flat.ticks
+        );
+        // A generous ceiling: jump apex is ~12 airborne ticks plus crossing, not
+        // dozens more — this is the check that would catch a script that never
+        // releases jump and time out against `SIM_TICK_CAP` for the wrong reason.
+        assert!(up.ticks.as_f64() < 30.0, "{} ticks seems too slow for one step up", up.ticks);
+    }
+
+    /// A `Descend` is simulated too, and completes — but it costs *more* than a
+    /// flat walk of the same one-block span, not less, which is the opposite of
+    /// the first intuition ("falling is fast, so this should be cheap").
+    ///
+    /// The reason is real and worth recording, because it is exactly the sort
+    /// of thing a hand-written formula would get backwards: falling covers the
+    /// *vertical* distance quickly, but horizontal control while airborne is
+    /// governed by `air_control` (`~0.02`), far weaker than the grounded
+    /// acceleration a `Walk` uses the whole time. So the limiting factor for a
+    /// `Descend` is not "how fast can I fall", it is "how fast can I cross the
+    /// one block horizontally with almost no air steering" — and that is
+    /// slower than walking the same block on the ground. Simulating this
+    /// (rather than assuming "falling is free" from §4.3's heuristic, which is
+    /// a *different*, deliberately generous claim about the search's admissible
+    /// bound, not about a specific edge's real cost) is exactly what
+    /// `docs/baritone-port.md` §4.4 promises: the number self-heals in a
+    /// direction nobody would have written into a formula by hand.
+    #[test]
+    fn descend_costs_more_than_a_flat_walk_because_air_control_is_weak() {
+        let mut t = table();
+        let flat = walk(&mut t, EntryRel::Straight, SurfaceClass::Normal);
+        let down = t.get(key_for(
+            MoveKind::Descend(Dir4::East),
+            EntryRel::Straight,
+            SurfaceClass::Normal,
+        ));
+        assert!(down.ok, "stepping off a one-block ledge is always physically possible");
+        assert!(
+            down.ticks > flat.ticks,
+            "descend {} should cost more than a flat walk {} (weak air control)",
+            down.ticks,
+            flat.ticks
+        );
+        // A generous ceiling, so a script that overshoots and has to recover
+        // would still be caught rather than laundered into "plausible but slow".
+        assert!(down.ticks.as_f64() < 30.0, "{} ticks seems too slow for one descend", down.ticks);
+    }
+
+    /// `Drop`'s cost genuinely depends on `n` — a longer fall takes more ticks,
+    /// which is the entire reason [`TemplateKey::drop_n`] exists rather than
+    /// folding every fall height into one `Drop` id. Without a distinct `drop_n`
+    /// in the key, a 2-cell and a 5-cell drop would memoise to the same template
+    /// and this would be flat, not increasing.
+    #[test]
+    fn a_longer_drop_costs_more_ticks_than_a_shorter_one() {
+        let mut t = table();
+        let short = t.get(key_for(
+            MoveKind::Drop(Dir4::East, 2),
+            EntryRel::Straight,
+            SurfaceClass::Normal,
+        ));
+        let long = t.get(key_for(
+            MoveKind::Drop(Dir4::East, 6),
+            EntryRel::Straight,
+            SurfaceClass::Normal,
+        ));
+        assert!(short.ok && long.ok, "short {short:?} long {long:?}");
+        assert!(
+            long.ticks > short.ticks,
+            "a 6-cell drop {} must cost more than a 2-cell drop {}", long.ticks, short.ticks
+        );
+    }
+
+    /// The negative control for `drop_n`: two `Drop` keys differing *only* in
+    /// `drop_n` must occupy distinct memoisation slots, not collide into one.
+    /// Without this, the previous test could pass by coincidence if `get`
+    /// happened to memoise both under the same key for an unrelated reason.
+    #[test]
+    fn drop_keys_with_different_n_are_distinct_table_entries() {
+        let mut t = table();
+        t.get(key_for(MoveKind::Drop(Dir4::East, 2), EntryRel::Straight, SurfaceClass::Normal));
+        t.get(key_for(MoveKind::Drop(Dir4::East, 3), EntryRel::Straight, SurfaceClass::Normal));
+        t.get(key_for(MoveKind::Drop(Dir4::East, 3), EntryRel::Straight, SurfaceClass::Normal));
+        assert_eq!(t.len(), 2, "n=2 and n=3 are different templates; the repeat of n=3 must not add a third");
+    }
 }
