@@ -36,8 +36,8 @@ it.
 | 1 | Multiplayer | `W/2-100, topPos+24, 200×20` | live |
 | 2 | Minecraft Realms | `W/2-100, topPos+48, 200×20` | **disabled** |
 | 3 | Friends (icon) | `W/2-34, topPos+72, 20×20` | **disabled** |
-| 4 | Language (icon) | `W/2-10, topPos+72, 20×20` | **disabled** |
-| 5 | Accessibility (icon) | `W/2+14, topPos+72, 20×20` | **disabled** |
+| 4 | Language (icon) | `W/2-10, topPos+72, 20×20` | live |
+| 5 | Accessibility (icon) | `W/2+14, topPos+72, 20×20` | live |
 | 6 | Options… | `W/2-100, topPos+96, 98×20` | live |
 | 7 | Quit Game | `W/2+2, topPos+96, 98×20` | live |
 
@@ -55,7 +55,7 @@ Two details worth naming because a remembered layout gets them wrong:
   The pause screen's equivalent pair has an **8 px** one. They are not the same
   layout — see [`pause-menu.md`](./pause-menu.md).
 
-### Why four buttons are present and disabled
+### Why two buttons are present and disabled
 
 Because the alternative reads worse. A button missing from its vanilla position
 moves everything below it and the screen stops looking like vanilla's; a
@@ -63,11 +63,20 @@ greyed-out button in the right position looks exactly like vanilla with the
 feature unavailable, which is a state vanilla itself ships (it disables
 Multiplayer and Realms for a banned account, `TitleScreen.java:189-203`).
 
-Each disabled one needs a subsystem this client does not have: Realms is a paid
-Mojang-hosted service with an authenticated HTTP API; Friends needs a
-Microsoft-account social graph; Language needs a language-selection screen (the
-shell loads exactly one table, `en_us.json`); Accessibility needs an
-accessibility options screen.
+Realms and Friends each need a subsystem this client does not have: Realms is
+a paid Mojang-hosted service with an authenticated HTTP API; Friends needs a
+Microsoft-account social graph.
+
+**Language and Accessibility are live**, not disabled — this section used to
+say otherwise, back when neither destination screen existed. Both icons now
+open `Screen::Settings` directly at `SettingsPage::Language`/`::Accessibility`
+with an *empty* page stack (`MainButton::Language`/`::Accessibility` in
+`menu/nav.rs`, via `SettingsNav::open_at`), matching vanilla's
+`TitleScreen.java:131-139` — which constructs `LanguageSelectScreen`/
+`AccessibilityOptionsScreen` directly with `lastScreen = this` (the title),
+never through `OptionsScreen`. That empty stack is why Escape/Done from either
+returns straight to the title in one step rather than surfacing the root
+Options grid first.
 
 The look is vanilla's own, not invented: `MainButton::enabled() == false` selects
 `widget/button_disabled` and recolours the label to `0xFF_A0_A0_A0` — vanilla's

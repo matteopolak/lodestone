@@ -39,14 +39,14 @@
 //!   persists correctly and self-heals trivially (toggle again, or it simply
 //!   has no visible effect) but changes nothing on screen — an honestly
 //!   declared island half, not an implied feature.
-//! - **The list itself needs a queued patch to show real players.**
-//!   [`SocialNav::refresh`] takes a snapshot of `(Uuid, name)` pairs; nothing
-//!   calls it yet, because feeding it the live `TabList` needs a per-frame
-//!   call from `app.rs`, which owns the session. See this issue's own report
-//!   for the exact patch. Until then the list is empty by construction, which
-//!   is correctly-empty rather than fabricated — an empty online list is what
-//!   every hermetic test and every session with `refresh` never called looks
-//!   like, and that is exactly true today.
+//! - **Wired since `2453c0f` — the list itself.** This section used to say
+//!   "nothing calls [`SocialNav::refresh`] yet, because feeding it the live
+//!   `TabList` needs a per-frame call from `app.rs`"; that patch has landed.
+//!   `app.rs`'s `drive_ui_from_session` now calls [`entries_from_tablist`]
+//!   off `Sim`'s own tab list every frame while connected and feeds the
+//!   result to `MenuNav::refresh_social` (`app.rs:1514-1529`), so the roster
+//!   shown is the real, live tab list with the local player excluded. See
+//!   `docs/social-interactions.md`'s "Wired since" note for the full chain.
 //!
 //! ## What is deliberately not built
 //!
@@ -98,11 +98,11 @@ impl SocialEntry {
 /// never lists you against yourself, `SocialInteractionsPlayerList`'s own
 /// construction skips `Minecraft.player`'s UUID).
 ///
-/// This is the function `app.rs`'s queued patch should call each frame (or on
-/// each tab-list change) to feed [`SocialNav::refresh`] — see the module docs'
-/// "decorative" section. Free-standing and pure so it is testable without a
-/// live session, the same shape [`super::tablist::player_rows`] already is for
-/// the HUD overlay.
+/// `app.rs`'s `drive_ui_from_session` calls this every frame while connected
+/// to feed [`SocialNav::refresh`] via `MenuNav::refresh_social` — see the
+/// module docs' "Wired since" note. Free-standing and pure so it is testable
+/// without a live session, the same shape [`super::tablist::player_rows`]
+/// already is for the HUD overlay.
 #[must_use]
 pub fn entries_from_tablist(tab_list: &TabList, exclude: Option<Uuid>) -> Vec<SocialEntry> {
     tab_list

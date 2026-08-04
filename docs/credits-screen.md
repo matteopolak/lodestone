@@ -54,18 +54,24 @@ has nothing to drive it, or copying text that is not Lodestone's.
 
 ## Wired vs. decorative
 
-- **Wired**: reaching the screen (once something calls `show_credits`),
-  dismissing it by Enter/Escape/Done, and the teardown (`quit_to_title`
-  clears the session exactly as it already does from Paused/Death).
-- **Decorative / not yet wired**: **nothing calls `show_credits` anywhere in
-  the shell today.** The real trigger — exiting the End through the exit
-  portal after the dragon fight — is a server/ECS-driven condition (a
-  dimension-change flag), and lives in `sim.rs`/`app.rs`, which this batch of
-  work does not own. Until that patch lands, this screen is reachable only
-  from a test, which is this project's own definition of an island (see
-  `CLAUDE.md`'s "nothing is done until something on screen changes"). It is
-  kept anyway, as exactly the seam the trigger will land on — the same shape
-  `MenuAction::Singleplayer` was between issues #397 and #287.
+- **Wired**: reaching the screen, dismissing it by Enter/Escape/Done, and the
+  teardown (`quit_to_title` clears the session exactly as it already does
+  from Paused/Death).
+- **Wired since `86fbe0a` — the trigger itself.** This section used to say
+  "nothing calls `show_credits` anywhere in the shell today" and that the
+  screen was reachable only from a test. `sim.rs`'s `Sim::poll_net` now
+  latches `NetUpdate::WinGame` into a plain `won` field (the same shape as
+  `death_message`), reset by `Sim::end_session`; `net.rs`'s `forward`
+  translates the real decoded `ClientEvent::WinGame` into that
+  `NetUpdate::WinGame`; and `app.rs`'s `drive_ui_from_session` reconciles
+  `Sim::has_won()` into `UiState::show_credits()` every frame, guarded on
+  `screen() != Screen::Credits` so it does not re-latch while the screen is
+  up. Proved end to end by `app.rs`'s
+  `drive_ui_from_session_opens_credits_on_the_real_win_game_event`: a real
+  `WindowApp`, a real `NetUpdate::WinGame` fed through the loopback net
+  client, `Sim::poll_net`'s real arm, then the real `drive_ui_from_session`
+  call — asserting the screen actually becomes `Credits`, not a direct call
+  to `show_credits()`.
 
 ## How to change it
 
@@ -80,11 +86,12 @@ has nothing to drive it, or copying text that is not Lodestone's.
   per-frame `advance(dt)` call from `app.rs`, mirroring `panorama.rs`'s
   `pano.advance(Instant::now())`. Not built here — see "What this
   deliberately does not do" above.
-- The trigger itself: add a call to `UiState::show_credits()` wherever
-  `sim.rs`/`app.rs` observes the dimension-change condition for exiting the
-  End through the exit portal. Check `.cache/mc/26.2/client-src` for the
-  actual packet/flag vanilla's client keys this off before assuming it is
-  purely client-side (issue #192's own scope note).
+- **The trigger itself is wired** — see "Wired since `86fbe0a`" above; there
+  is no queued patch left for this part. The chain is
+  `ClientEvent::WinGame` (decoded from vanilla's real `WIN_GAME` game event,
+  code `4` — `lodestone-model`'s `event.rs`) → `net.rs`'s `forward` →
+  `NetUpdate::WinGame` → `Sim::poll_net`'s `won` field → `app.rs`'s
+  `drive_ui_from_session` → `UiState::show_credits()`.
 
 ## Configuration
 

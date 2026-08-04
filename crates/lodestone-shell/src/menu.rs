@@ -185,11 +185,13 @@ pub enum Screen {
     ///
     /// So this screen shows a short, Lodestone-authored placeholder message
     /// instead of vanilla's real scroll, dismissed by Enter/Escape/its own
-    /// Done button — reachable through [`Self::show_credits`], which nothing
-    /// calls yet: the real trigger (dragon defeat, exit portal) is
-    /// server/ECS-driven and outside this crate (`sim.rs`/`app.rs`), so this
-    /// is an island until that patch lands. See issue #192's own tracking
-    /// comment for the exact hook.
+    /// Done button — reachable through [`Self::show_credits`].
+    ///
+    /// **Wired since `86fbe0a`.** This doc used to say "which nothing calls
+    /// yet": `app.rs`'s `drive_ui_from_session` now reconciles `Sim::has_won()`
+    /// (latched from a real `NetUpdate::WinGame`) into `show_credits()` every
+    /// frame, the same way it already reconciles `Sim::is_dead()` into the
+    /// death screen. See `docs/credits-screen.md` for the full chain.
     Credits,
     /// The Social Interactions screen (issue #189): vanilla's
     /// `SocialInteractionsScreen`, an online-player list with a per-player
@@ -226,10 +228,15 @@ pub enum Screen {
     /// [`Screen::WorldSelect`].
     ///
     /// Collecting a name/seed/game-mode/difficulty/structures/bonus-chest/
-    /// allow-cheats config is real; **nothing downstream reads it yet** — the
-    /// integrated server still launches [`world_select::BUNDLED_WORLD`]'s
-    /// fixed seed regardless of what this screen collected. See
-    /// [`create_world`]'s module docs for the queued patch.
+    /// allow-cheats config is real. **The seed reaches the wire since
+    /// `72cb451`/`d65d593`**: the Create button produces
+    /// `MenuAction::Singleplayer(Some(config))`, and `app.rs`'s
+    /// `resolve_launch_seed` resolves `config.seed` (vanilla's own
+    /// `WorldOptions.parseSeed`/`randomSeed` rule) in place of
+    /// [`world_select::BUNDLED_WORLD`]'s fixed seed — this doc used to say
+    /// nothing downstream read it. Game mode/difficulty/structures/bonus-chest/
+    /// allow-cheats remain decorative (no session-setup wiring consumes them
+    /// yet). See [`create_world`]'s module docs for the current split.
     CreateWorld,
 }
 
@@ -867,13 +874,12 @@ impl UiState {
     /// are "the server just ended this session's world for a story reason"
     /// events.
     ///
-    /// **Nothing calls this yet.** The real trigger is server/ECS-driven (a
-    /// dimension-change flag on exiting the End) and lives outside this
-    /// crate's ownership for this batch of work — see [`Screen::Credits`]'s
-    /// own doc. Until that patch lands this is reachable only from a test,
-    /// which is this method's whole risk: an island by this project's own
-    /// definition, kept as exactly the seam the trigger will land on (the
-    /// same shape [`nav::MenuAction::Singleplayer`] was between #397 and #287).
+    /// **Called from production since `86fbe0a`.** `app.rs`'s
+    /// `drive_ui_from_session` calls this once `Sim::has_won()` latches a real
+    /// `NetUpdate::WinGame`, guarded on `screen() != Screen::Credits` so it
+    /// does not re-latch every frame the screen stays up — this doc used to
+    /// say the method was reachable only from a test; it no longer is. See
+    /// [`Screen::Credits`]'s own doc and `docs/credits-screen.md`.
     pub fn show_credits(&mut self) {
         if matches!(
             self.screen,

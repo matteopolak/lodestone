@@ -3272,9 +3272,12 @@ pub fn frame_for<'a>(
 
     let frame = match ui.screen() {
         // Vanilla's `TitleScreen`: the logo pair, eight widgets at vanilla's
-        // rects (see `title_slot`) with four of them present-and-disabled, and
-        // the two corner strings. No big "LODESTONE" heading and no key-hint
-        // footer — the logo *is* the heading, and vanilla draws no footer.
+        // rects (see `title_slot`) with two of them present-and-disabled
+        // (Realms, Friends — Language/Accessibility joined the live set once
+        // their destination screens were built, see `MainButton::Language`'s
+        // own doc), and the two corner strings. No big "LODESTONE" heading and
+        // no key-hint footer — the logo *is* the heading, and vanilla draws no
+        // footer.
         Screen::MainMenu => Some(MenuFrame {
             rows: MAIN_BUTTONS
                 .iter()
