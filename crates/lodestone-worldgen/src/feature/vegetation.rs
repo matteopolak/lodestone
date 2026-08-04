@@ -196,10 +196,76 @@ impl HeightmapKind {
 pub enum BlockPredicate {
     True,
     Not(Box<BlockPredicate>),
+    /// `AllOfPredicate`/`AnyOfPredicate` — added for `patch_sugar_cane*`'s
+    /// `block_predicate_filter`, which nests a `matching_block_tag` +
+    /// `would_survive` + `any_of(matching_fluids)` combinator. Before these
+    /// two variants existed, every combinator type fell through to
+    /// [`BlockPredicate::True`] — harmless while nothing in scope used one,
+    /// but it would have made sugar cane's water-adjacency requirement a
+    /// silent no-op *in the wrong direction* (always-pass instead of
+    /// always-fail) the moment `BlockColumnFeature` support let sugar cane's
+    /// placed feature actually run — named here because that direction of
+    /// bug is the more dangerous one this module's "degrade, don't panic"
+    /// convention can produce.
+    AllOf(Vec<BlockPredicate>),
+    AnyOf(Vec<BlockPredicate>),
     MatchingBlockTag(String),
+    /// `MatchingFluidPredicate` — `fluids` is the JSON's raw
+    /// `minecraft:water`/`minecraft:flowing_water`/`minecraft:lava`/
+    /// `minecraft:flowing_lava` id list; `offset` is `(dx, dy, dz)` added to
+    /// the tested position. Matched via [`fluid_base_matches`] because this
+    /// engine's grid never distinguishes a fluid's source/flowing variant
+    /// (the same "known representation gap: fluid `level`"
+    /// `docs/worldgen-parity.md` already names) — both JSON ids for one
+    /// fluid collapse onto the one base id our grid can ever hold.
+    MatchingFluid {
+        fluids: Vec<String>,
+        offset: (i32, i32, i32),
+    },
     /// Approximates every `would_survive` check this module reaches as
-    /// `VegetationBlock.mayPlaceOn` — see module doc.
+    /// `VegetationBlock.mayPlaceOn` — see module doc. The default for any
+    /// `would_survive` whose tested state isn't one of the two special-cased
+    /// below.
     WouldSurviveOnSupportsVegetation,
+    /// `would_survive` on a `minecraft:cactus` state — `CactusBlock
+    /// .canSurvive`: below is cactus itself or `#minecraft:supports_cactus`,
+    /// all 4 horizontal neighbours non-solid, block above not a fluid.
+    /// "Non-solid" is approximated as "air" (see [`BlockPredicate::test`]'s
+    /// own doc on this one) — a named narrowing, not the full vanilla
+    /// solidity table, which this crate has no other reason to carry.
+    WouldSurviveCactus,
+    /// `would_survive` on a `minecraft:sugar_cane` state — deliberately
+    /// **omits** `SugarCaneBlock.canSurvive`'s water-adjacency half: every
+    /// `patch_sugar_cane*` placed feature already re-checks that adjacency
+    /// explicitly via a sibling `any_of(matching_fluids)` predicate in the
+    /// same `all_of`, so modelling it twice would be redundant, not more
+    /// correct.
+    WouldSurviveSugarCane,
+}
+
+fn parse_predicate_list(v: &Value) -> Vec<BlockPredicate> {
+    v["predicates"]
+        .as_array()
+        .map(|arr| arr.iter().map(BlockPredicate::parse).collect())
+        .unwrap_or_default()
+}
+
+fn parse_offset(v: &Value) -> (i32, i32, i32) {
+    let Some(arr) = v.as_array() else {
+        return (0, 0, 0);
+    };
+    let get = |i: usize| arr.get(i).and_then(Value::as_i64).unwrap_or(0) as i32;
+    (get(0), get(1), get(2))
+}
+
+/// See [`BlockPredicate::MatchingFluid`]'s doc: both the source and flowing
+/// JSON ids for one fluid collapse onto this engine's single base id.
+fn fluid_base_matches(fluid_id: &str, base: &str) -> bool {
+    match fluid_id {
+        "minecraft:water" | "minecraft:flowing_water" => base == "minecraft:water",
+        "minecraft:lava" | "minecraft:flowing_lava" => base == "minecraft:lava",
+        _ => false,
+    }
 }
 
 impl BlockPredicate {
@@ -207,10 +273,23 @@ impl BlockPredicate {
         let ty = v["type"].as_str().unwrap_or("minecraft:true");
         match ty.strip_prefix("minecraft:").unwrap_or(ty) {
             "not" => BlockPredicate::Not(Box::new(BlockPredicate::parse(&v["predicate"]))),
+            "all_of" => BlockPredicate::AllOf(parse_predicate_list(v)),
+            "any_of" => BlockPredicate::AnyOf(parse_predicate_list(v)),
             "matching_block_tag" => {
                 BlockPredicate::MatchingBlockTag(v["tag"].as_str().unwrap_or_default().to_string())
             }
-            "would_survive" => BlockPredicate::WouldSurviveOnSupportsVegetation,
+            "matching_fluids" => BlockPredicate::MatchingFluid {
+                fluids: v["fluids"]
+                    .as_array()
+                    .map(|arr| arr.iter().filter_map(|f| f.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default(),
+                offset: parse_offset(&v["offset"]),
+            },
+            "would_survive" => match v["state"]["Name"].as_str().unwrap_or("") {
+                "minecraft:cactus" => BlockPredicate::WouldSurviveCactus,
+                "minecraft:sugar_cane" => BlockPredicate::WouldSurviveSugarCane,
+                _ => BlockPredicate::WouldSurviveOnSupportsVegetation,
+            },
             _ => BlockPredicate::True,
         }
     }
@@ -219,6 +298,8 @@ impl BlockPredicate {
         match self {
             BlockPredicate::True => true,
             BlockPredicate::Not(inner) => !inner.test(grid, tags, pos),
+            BlockPredicate::AllOf(list) => list.iter().all(|p| p.test(grid, tags, pos)),
+            BlockPredicate::AnyOf(list) => list.iter().any(|p| p.test(grid, tags, pos)),
             BlockPredicate::MatchingBlockTag(tag) => {
                 let base = base_id(grid.get(pos.x, pos.y, pos.z));
                 if tag == "minecraft:air" {
@@ -229,9 +310,31 @@ impl BlockPredicate {
                     false
                 }
             }
+            BlockPredicate::MatchingFluid { fluids, offset } => {
+                let (dx, dy, dz) = *offset;
+                let base = base_id(grid.get(pos.x + dx, pos.y + dy, pos.z + dz));
+                fluids.iter().any(|f| fluid_base_matches(f, base))
+            }
             BlockPredicate::WouldSurviveOnSupportsVegetation => {
                 let below = base_id(grid.get(pos.x, pos.y - 1, pos.z));
                 tags.supports_vegetation.contains(below)
+            }
+            BlockPredicate::WouldSurviveCactus => {
+                let below = base_id(grid.get(pos.x, pos.y - 1, pos.z));
+                if below != "minecraft:cactus" && !tags.supports_cactus.contains(below) {
+                    return false;
+                }
+                let neighbours_ok = [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().all(|&(dx, dz)| {
+                    is_air(base_id(grid.get(pos.x + dx, pos.y, pos.z + dz)))
+                });
+                if !neighbours_ok {
+                    return false;
+                }
+                !is_fluid(base_id(grid.get(pos.x, pos.y + 1, pos.z)))
+            }
+            BlockPredicate::WouldSurviveSugarCane => {
+                let below = base_id(grid.get(pos.x, pos.y - 1, pos.z));
+                below == "minecraft:sugar_cane" || tags.supports_sugar_cane.contains(below)
             }
         }
     }
@@ -410,6 +513,16 @@ pub struct VegTags {
     pub supports_vegetation: HashSet<String>,
     pub replaceable_by_trees: HashSet<String>,
     pub logs: HashSet<String>,
+    /// `#minecraft:supports_cactus` — `CactusBlock.canSurvive`'s below-block
+    /// check (cactus/`BlockColumnFeature`, added alongside sugar cane).
+    pub supports_cactus: HashSet<String>,
+    /// `#minecraft:supports_sugar_cane` — `SugarCaneBlock.canSurvive`'s
+    /// below-block check. The adjacency-to-water half of that same method
+    /// is *not* modelled here; it doesn't need to be, because every biome's
+    /// own `patch_sugar_cane*` placed-feature JSON already encodes it as an
+    /// explicit sibling `any_of`/`matching_fluids` predicate — see
+    /// [`BlockPredicate::MatchingFluid`].
+    pub supports_sugar_cane: HashSet<String>,
 }
 
 /// Resolves [`VegTags`] from a [`Resolver`]. Empty sets (never a panic) if
@@ -428,6 +541,8 @@ pub fn build_veg_tags(resolver: &dyn Resolver) -> VegTags {
         supports_vegetation: resolve("minecraft:supports_vegetation"),
         replaceable_by_trees: resolve("minecraft:replaceable_by_trees"),
         logs: resolve("minecraft:logs"),
+        supports_cactus: resolve("minecraft:supports_cactus"),
+        supports_sugar_cane: resolve("minecraft:supports_sugar_cane"),
     }
 }
 
@@ -502,6 +617,10 @@ fn try_parse_int_provider(v: &Value) -> Option<IntProvider> {
                         .collect::<Option<Vec<_>>>()?;
                     Some(IntProvider::WeightedList(entries))
                 }
+                "biased_to_bottom" => Some(IntProvider::BiasedToBottom {
+                    min: v["min_inclusive"].as_i64()? as i32,
+                    max: v["max_inclusive"].as_i64()? as i32,
+                }),
                 _ => None,
             }
         }
@@ -992,6 +1111,54 @@ impl TreeConfig {
     }
 }
 
+/// `net.minecraft.world.level.levelgen.feature.configurations.BlockColumnConfiguration`
+/// + `BlockColumnFeature` — issue #406's cacti/sugar-cane increment. Used by
+/// `cactus` (desert) and `sugar_cane` (desert/swamp/badlands/beach), both
+/// previously a silent no-op under [`ConfiguredFeature::Unsupported`].
+/// `direction` is `(dx, dy, dz)`; only `up`/`down` parse (every configured
+/// feature in this crate's embedded data uses one of those two — see
+/// [`BlockColumnConfig::try_parse`]'s doc), matching this module's blanket
+/// "unsupported degrades, never panics" rule for anything else.
+#[derive(Clone, Debug)]
+pub struct BlockColumnConfig {
+    layers: Vec<(IntProvider, BlockStateProvider)>,
+    direction: (i32, i32, i32),
+    allowed_placement: BlockPredicate,
+    prioritize_tip: bool,
+}
+
+impl BlockColumnConfig {
+    /// `direction` is a JSON string (`"up"`/`"down"`/four horizontal names);
+    /// only the two vertical directions parse — the only two any
+    /// `block_column` configured feature in `crates/lodestone-server/assets/worldgen`
+    /// actually uses (`cactus.json`, `sugar_cane.json`, `cave_vine*.json`,
+    /// `dripleaf.json`), checked at the time this was written. A horizontal
+    /// direction degrades the whole feature to [`ConfiguredFeature::Unsupported`]
+    /// rather than guessing.
+    fn try_parse(v: &Value) -> Option<Self> {
+        let layers = v["layers"]
+            .as_array()?
+            .iter()
+            .map(|l| {
+                let height = try_parse_int_provider(&l["height"])?;
+                let provider = BlockStateProvider::try_parse(&l["provider"])?;
+                Some((height, provider))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let direction = match v["direction"].as_str()? {
+            "up" => (0, 1, 0),
+            "down" => (0, -1, 0),
+            _ => return None,
+        };
+        Some(Self {
+            layers,
+            direction,
+            allowed_placement: BlockPredicate::parse(&v["allowed_placement"]),
+            prioritize_tip: v["prioritize_tip"].as_bool().unwrap_or(false),
+        })
+    }
+}
+
 /// `net.minecraft.world.level.levelgen.feature.ConfiguredFeature` (the
 /// subset reached from grass/flower/tree biome steps). [`Unsupported`]
 /// carries the vanilla type string purely for diagnostics — placing it is
@@ -1000,6 +1167,7 @@ impl TreeConfig {
 pub enum ConfiguredFeature {
     SimpleBlock(BlockStateProvider),
     Tree(Box<TreeConfig>),
+    BlockColumn(Box<BlockColumnConfig>),
     RandomSelector {
         default: Box<PlacedRef>,
         options: Vec<(f32, PlacedRef)>,
@@ -1097,6 +1265,12 @@ fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value) -> Configu
                 "tree: unsupported trunk/foliage/size/provider".into(),
             ),
         },
+        "block_column" => match BlockColumnConfig::try_parse(&doc["config"]) {
+            Some(cfg) => ConfiguredFeature::BlockColumn(Box::new(cfg)),
+            None => ConfiguredFeature::Unsupported(
+                "block_column: unsupported layer/direction/predicate".into(),
+            ),
+        },
         "random_selector" => {
             let cfg = &doc["config"];
             let default = resolve_placed_feature_ref(resolver, &cfg["default"]);
@@ -1129,6 +1303,41 @@ fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value) -> Configu
         }
         other => ConfiguredFeature::Unsupported(other.to_string()),
     }
+}
+
+/// Walks a resolved vegetal-decoration tree — through `RandomSelector`'s
+/// `default`/`options` and `SimpleRandomSelector`'s list, the only two ways
+/// this module's own [`ConfiguredFeature`] nests — collecting every
+/// [`ConfiguredFeature::Unsupported`] reason string actually reachable from
+/// `placed`. This is the read side of this module's "unsupported degrades to
+/// a silent no-op" rule: a caller that wants that silence to be **loud**
+/// (issue #406's "does this biome's declared vegetation include a placer we
+/// don't implement" gate, in `lodestone_server::worldgen_data`) diffs this
+/// against a maintained allow-list instead of trusting the resolved tree to
+/// run and simply place fewer blocks than vanilla. Reasons are **not**
+/// deduplicated here — the caller decides whether it wants a set or a count.
+#[must_use]
+pub fn collect_unsupported(placed: &PlacedRef) -> Vec<String> {
+    fn walk(feature: &ConfiguredFeature, out: &mut Vec<String>) {
+        match feature {
+            ConfiguredFeature::Unsupported(reason) => out.push(reason.clone()),
+            ConfiguredFeature::RandomSelector { default, options } => {
+                walk(&default.feature, out);
+                for (_, opt) in options {
+                    walk(&opt.feature, out);
+                }
+            }
+            ConfiguredFeature::SimpleRandomSelector(list) => {
+                for opt in list {
+                    walk(&opt.feature, out);
+                }
+            }
+            ConfiguredFeature::SimpleBlock(_) | ConfiguredFeature::Tree(_) | ConfiguredFeature::BlockColumn(_) => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(&placed.feature, &mut out);
+    out
 }
 
 /// The mutable, chunk-local (`0..16` × `0..16`, absolute `y`) block field
@@ -1373,6 +1582,7 @@ fn place_configured_feature<R: RandomSource>(
     match feature {
         ConfiguredFeature::SimpleBlock(provider) => place_simple_block(random, pos, provider, grid, tags),
         ConfiguredFeature::Tree(cfg) => place_tree(random, pos, cfg, grid, tags),
+        ConfiguredFeature::BlockColumn(cfg) => place_block_column(random, pos, cfg, grid, tags),
         ConfiguredFeature::RandomSelector { default, options } => {
             for (chance, option) in options {
                 if random.next_float() < *chance {
@@ -1410,6 +1620,83 @@ fn place_simple_block<R: RandomSource>(
         return;
     }
     grid.set_if_in_bounds(pos.x, pos.y, pos.z, state);
+}
+
+/// `BlockColumnFeature.place`: samples every layer's height up front (so the
+/// RNG draw order is fixed regardless of how far the column actually
+/// reaches), then walks `direction` from `origin` checking `allowed_placement`
+/// at each *next* position (`origin` itself is never checked — only used as
+/// the first placement slot) for up to the sampled total height, truncating
+/// via [`truncate_layers`] the moment a check fails, then places each layer's
+/// blocks in declared order.
+fn place_block_column<R: RandomSource>(
+    random: &mut R,
+    origin: BlockPos,
+    cfg: &BlockColumnConfig,
+    grid: &mut VegGrid,
+    tags: &VegTags,
+) {
+    let mut layer_heights: Vec<i32> = cfg.layers.iter().map(|(h, _)| h.sample(random)).collect();
+    let total_height: i32 = layer_heights.iter().sum();
+    if total_height == 0 {
+        return;
+    }
+    let (dx, dy, dz) = cfg.direction;
+    let mut probe = BlockPos {
+        x: origin.x + dx,
+        y: origin.y + dy,
+        z: origin.z + dz,
+    };
+    let mut new_height = total_height;
+    for y in 0..total_height {
+        if !cfg.allowed_placement.test(grid, tags, probe) {
+            new_height = y;
+            break;
+        }
+        probe = BlockPos {
+            x: probe.x + dx,
+            y: probe.y + dy,
+            z: probe.z + dz,
+        };
+    }
+    if new_height < total_height {
+        truncate_layers(&mut layer_heights, total_height, new_height, cfg.prioritize_tip);
+    }
+    let mut place_pos = origin;
+    for (i, (_, provider)) in cfg.layers.iter().enumerate() {
+        for _ in 0..layer_heights[i] {
+            if let Some(state) = provider.get_state(grid, tags, random, place_pos) {
+                grid.set_if_in_bounds(place_pos.x, place_pos.y, place_pos.z, state);
+            }
+            place_pos = BlockPos {
+                x: place_pos.x + dx,
+                y: place_pos.y + dy,
+                z: place_pos.z + dz,
+            };
+        }
+    }
+}
+
+/// `BlockColumnFeature.truncate`: removes `total_height - new_height` blocks
+/// total, walking layers tip-first (`prioritize_tip`) or base-first
+/// (everything else) — matching vanilla's own iteration-order choice exactly.
+fn truncate_layers(layer_heights: &mut [i32], total_height: i32, new_height: i32, prioritize_tip: bool) {
+    let mut to_remove = total_height - new_height;
+    let n = layer_heights.len();
+    let indices: Vec<usize> = if prioritize_tip {
+        (0..n).collect()
+    } else {
+        (0..n).rev().collect()
+    };
+    for i in indices {
+        if to_remove <= 0 {
+            break;
+        }
+        let this_layer = layer_heights[i];
+        let removed = this_layer.min(to_remove);
+        to_remove -= removed;
+        layer_heights[i] -= removed;
+    }
 }
 
 fn place_tree<R: RandomSource>(
@@ -1848,6 +2135,192 @@ mod tests {
             grid.get(5, 70, 6),
             "minecraft:air",
             "grass must not survive on a non-supports_vegetation block (stone)"
+        );
+    }
+
+    /// Real `configured_feature/cactus.json` (see `crates/lodestone-server
+    /// /assets/worldgen/configured_feature/cactus.json`, transcribed here)
+    /// must parse to [`ConfiguredFeature::BlockColumn`], not
+    /// [`ConfiguredFeature::Unsupported`] — the regression control for this
+    /// module's cacti increment: before it, this exact JSON degraded
+    /// silently.
+    #[test]
+    fn real_cactus_configured_feature_parses_as_block_column() {
+        struct EmptyResolver;
+        impl Resolver for EmptyResolver {
+            fn density_function(&self, _id: &str) -> Value {
+                Value::Null
+            }
+            fn noise(&self, _id: &str) -> crate::density::NoiseParams {
+                unimplemented!()
+            }
+        }
+        let doc = serde_json::json!({
+            "type": "minecraft:block_column",
+            "config": {
+                "allowed_placement": {"type": "minecraft:matching_block_tag", "tag": "minecraft:air"},
+                "direction": "up",
+                "layers": [
+                    {
+                        "height": {"type": "minecraft:biased_to_bottom", "max_inclusive": 3, "min_inclusive": 1},
+                        "provider": {"type": "minecraft:simple_state_provider", "state": {"Name": "minecraft:cactus", "Properties": {"age": "0"}}}
+                    },
+                    {
+                        "height": {"type": "minecraft:weighted_list", "distribution": [{"data": 0, "weight": 3}, {"data": 1, "weight": 1}]},
+                        "provider": {"type": "minecraft:simple_state_provider", "state": {"Name": "minecraft:cactus_flower"}}
+                    }
+                ],
+                "prioritize_tip": false
+            }
+        });
+        let feature = parse_configured_feature_doc(&EmptyResolver, &doc);
+        assert!(
+            matches!(feature, ConfiguredFeature::BlockColumn(_)),
+            "expected BlockColumn, got {feature:?}"
+        );
+    }
+
+    #[test]
+    fn block_column_places_full_sampled_height_when_unobstructed() {
+        let cfg = BlockColumnConfig {
+            layers: vec![(
+                IntProvider::Constant(3),
+                BlockStateProvider::Simple("minecraft:cactus[age=0]".to_string()),
+            )],
+            direction: (0, 1, 0),
+            allowed_placement: BlockPredicate::MatchingBlockTag("minecraft:air".to_string()),
+            prioritize_tip: false,
+        };
+        let mut grid = grid_with_flat_ground(-64, 384, 69);
+        let tags = VegTags::default();
+        let mut random = LegacyRandomSource::new(7);
+        let origin = BlockPos { x: 8, y: 70, z: 8 };
+        place_block_column(&mut random, origin, &cfg, &mut grid, &tags);
+
+        let mut placed = 0;
+        for y in 70..90 {
+            if base_id(grid.get(8, y, 8)) == "minecraft:cactus" {
+                placed += 1;
+            }
+        }
+        assert_eq!(placed, 3, "an unobstructed constant-height-3 column must place exactly 3 blocks");
+    }
+
+    #[test]
+    fn block_column_truncates_at_the_first_blocked_probe() {
+        // Same config as above, but with stone 2 blocks above the origin —
+        // the probe walk starts at origin+direction, so this must be caught
+        // on the SECOND probe (y=71 is clear, y=72 is stone), truncating the
+        // single layer from 3 down to 1. Control for the "does the truncate
+        // path actually fire" half of this feature, not merely the
+        // unobstructed happy path above.
+        let cfg = BlockColumnConfig {
+            layers: vec![(
+                IntProvider::Constant(3),
+                BlockStateProvider::Simple("minecraft:cactus[age=0]".to_string()),
+            )],
+            direction: (0, 1, 0),
+            allowed_placement: BlockPredicate::MatchingBlockTag("minecraft:air".to_string()),
+            prioritize_tip: false,
+        };
+        let mut grid = grid_with_flat_ground(-64, 384, 69);
+        grid.seed(8, 72, 8, "minecraft:stone".to_string());
+        let tags = VegTags::default();
+        let mut random = LegacyRandomSource::new(7);
+        let origin = BlockPos { x: 8, y: 70, z: 8 };
+        place_block_column(&mut random, origin, &cfg, &mut grid, &tags);
+
+        assert_eq!(base_id(grid.get(8, 70, 8)), "minecraft:cactus", "the origin block itself is never probe-checked");
+        assert_ne!(base_id(grid.get(8, 71, 8)), "minecraft:cactus", "truncated to height 1: only the origin gets a block");
+    }
+
+    #[test]
+    fn would_survive_cactus_requires_supports_cactus_below_and_clear_sides() {
+        let mut tags = VegTags::default();
+        tags.supports_cactus.insert("minecraft:sand".to_string());
+        let pred = BlockPredicate::WouldSurviveCactus;
+
+        let mut grid = VegGrid::new(-64, 384, 0, 0);
+        grid.seed(5, 69, 5, "minecraft:sand".to_string());
+        grid.seed(5, 70, 5, "minecraft:air".to_string());
+        grid.seed(6, 70, 5, "minecraft:air".to_string());
+        grid.seed(4, 70, 5, "minecraft:air".to_string());
+        grid.seed(5, 70, 6, "minecraft:air".to_string());
+        grid.seed(5, 70, 4, "minecraft:air".to_string());
+        grid.seed(5, 71, 5, "minecraft:air".to_string());
+        assert!(
+            pred.test(&grid, &tags, BlockPos { x: 5, y: 70, z: 5 }),
+            "sand below, all 4 horizontal neighbours air: must survive"
+        );
+
+        // Control: a solid neighbour must fail the check that just passed.
+        grid.seed(6, 70, 5, "minecraft:stone".to_string());
+        assert!(
+            !pred.test(&grid, &tags, BlockPos { x: 5, y: 70, z: 5 }),
+            "a solid horizontal neighbour must block cactus survival"
+        );
+
+        // Control: a non-supports_cactus block below must also fail.
+        grid.seed(6, 70, 5, "minecraft:air".to_string());
+        grid.seed(5, 69, 5, "minecraft:stone".to_string());
+        assert!(
+            !pred.test(&grid, &tags, BlockPos { x: 5, y: 70, z: 5 }),
+            "stone below (not in supports_cactus) must block cactus survival"
+        );
+    }
+
+    #[test]
+    fn would_survive_sugar_cane_ignores_adjacency_by_design() {
+        // See BlockPredicate::WouldSurviveSugarCane's own doc: the
+        // water-adjacency half of CactusBlock's real-vanilla sibling
+        // (SugarCaneBlock.canSurvive) is deliberately NOT modelled here —
+        // every patch_sugar_cane* placed feature re-checks it via an
+        // explicit sibling `any_of(matching_fluids)`. This predicate alone
+        // must therefore pass on bare sand with NO adjacent water.
+        let mut tags = VegTags::default();
+        tags.supports_sugar_cane.insert("minecraft:sand".to_string());
+        let pred = BlockPredicate::WouldSurviveSugarCane;
+        let mut grid = VegGrid::new(-64, 384, 0, 0);
+        grid.seed(5, 69, 5, "minecraft:sand".to_string());
+        grid.seed(5, 70, 5, "minecraft:air".to_string());
+        assert!(pred.test(&grid, &tags, BlockPos { x: 5, y: 70, z: 5 }));
+
+        // Control: stone below (not in supports_sugar_cane) must fail.
+        grid.seed(5, 69, 5, "minecraft:stone".to_string());
+        assert!(!pred.test(&grid, &tags, BlockPos { x: 5, y: 70, z: 5 }));
+    }
+
+    #[test]
+    fn matching_fluids_any_of_is_the_real_gate_sugar_cane_relies_on() {
+        // The explicit sibling predicate patch_sugar_cane*'s own JSON uses
+        // instead of adjacency-in-would_survive (see the test above). This
+        // is the control that proves `AnyOf`/`MatchingFluid` actually gate
+        // placement rather than defaulting to `True` the way every
+        // unrecognised combinator used to (see BlockPredicate::AllOf's doc).
+        let pred = BlockPredicate::AnyOf(vec![
+            BlockPredicate::MatchingFluid {
+                fluids: vec!["minecraft:water".to_string(), "minecraft:flowing_water".to_string()],
+                offset: (1, -1, 0),
+            },
+            BlockPredicate::MatchingFluid {
+                fluids: vec!["minecraft:water".to_string(), "minecraft:flowing_water".to_string()],
+                offset: (-1, -1, 0),
+            },
+        ]);
+        let tags = VegTags::default();
+        let mut grid = VegGrid::new(-64, 384, 0, 0);
+        grid.seed(5, 69, 5, "minecraft:sand".to_string());
+        grid.seed(5, 70, 5, "minecraft:air".to_string());
+        grid.seed(6, 69, 5, "minecraft:sand".to_string());
+        assert!(
+            !pred.test(&grid, &tags, BlockPos { x: 5, y: 70, z: 5 }),
+            "no adjacent water: must fail"
+        );
+
+        grid.seed(6, 69, 5, "minecraft:water".to_string());
+        assert!(
+            pred.test(&grid, &tags, BlockPos { x: 5, y: 70, z: 5 }),
+            "water at offset (1,-1,0): must pass"
         );
     }
 }
