@@ -44,8 +44,9 @@ fn main() {
         print!("{}", report_full.summary(8));
 
         println!(
-            "-- currently-composed subset (no ore composition yet) vs. vanilla postfeatures — \
-             the gap ore composition (#295's next increment) needs to close --"
+            "-- composed subset (issue #295's ore composition landed) vs. vanilla postfeatures — \
+             a single-source-only oracle stage, so real 3x3 spill is expected to widen this gap, \
+             not close it; see docs/worldgen-parity.md --"
         );
         let report_features = diff_field(
             f.min_y,

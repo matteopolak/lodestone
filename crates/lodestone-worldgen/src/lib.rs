@@ -29,6 +29,7 @@ pub mod aquifer;
 pub mod biome;
 pub mod carver;
 pub mod compose;
+pub mod dense_grid;
 pub mod density;
 pub mod feature;
 pub mod hash;

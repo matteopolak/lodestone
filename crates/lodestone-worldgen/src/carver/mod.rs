@@ -241,38 +241,92 @@ impl CarverConfig {
     }
 }
 
-/// The centre chunk's mutable block field, keyed by world coordinates. Carvers
-/// read the current block (to test replaceability) and overwrite it with
-/// air/water/lava.
+/// The centre chunk's mutable block field, addressed by world coordinates.
+/// Carvers read the current block (to test replaceability) and overwrite it
+/// with air/water/lava.
+///
+/// Backed by [`crate::dense_grid::DenseBlockGrid`] (issue #295's Job 2) — a
+/// flat, palette-indexed array instead of a `HashMap<(i32,i32,i32), String>`.
+/// The measured regression this replaces: composing carvers over the old
+/// `HashMap`-keyed shape (designed for parity-harness fixtures, not a
+/// per-chunk-per-neighbour production hot loop) took a 144-chunk sweep from
+/// sub-second to ~68s in debug. [`CarveGrid::new`]/[`CarveGrid::into_blocks`]
+/// keep the original `HashMap` shape as a **test adapter** (existing
+/// `carver_parity.rs` fixtures build one that way, and hand-writing a sparse
+/// fixture as a map literal is clearer than constructing a dense grid by
+/// hand); the production path
+/// (`crate::overworld::OverworldGenerator::carve_stage`) uses
+/// [`CarveGrid::from_dense`]/[`CarveGrid::into_dense`] instead, with no
+/// `HashMap<(i32,i32,i32), String>` anywhere in the loop.
 pub struct CarveGrid {
-    blocks: HashMap<(i32, i32, i32), String>,
+    dense: crate::dense_grid::DenseBlockGrid,
 }
 
 impl std::fmt::Debug for CarveGrid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CarveGrid")
-            .field("blocks", &self.blocks.len())
-            .finish()
+        f.debug_struct("CarveGrid").finish_non_exhaustive()
     }
 }
 impl CarveGrid {
+    /// Test-adapter constructor (see struct doc): the bounding box is
+    /// derived from the map's own key range, so this remains a drop-in
+    /// replacement for the pre-#295-Job-2 `HashMap`-keyed constructor —
+    /// every existing fixture-driven caller is unchanged.
     #[must_use]
     pub fn new(blocks: HashMap<(i32, i32, i32), String>) -> Self {
-        CarveGrid { blocks }
+        if blocks.is_empty() {
+            return CarveGrid {
+                dense: crate::dense_grid::DenseBlockGrid::new(0, 0, 0, 0, 0, 0, AIR),
+            };
+        }
+        let (mut min_x, mut min_y, mut min_z) = (i32::MAX, i32::MAX, i32::MAX);
+        let (mut max_x, mut max_y, mut max_z) = (i32::MIN, i32::MIN, i32::MIN);
+        for &(x, y, z) in blocks.keys() {
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            min_z = min_z.min(z);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+            max_z = max_z.max(z);
+        }
+        let dense = crate::dense_grid::DenseBlockGrid::from_hashmap(
+            min_x,
+            min_y,
+            min_z,
+            max_x - min_x + 1,
+            max_y - min_y + 1,
+            max_z - min_z + 1,
+            &blocks,
+        );
+        CarveGrid { dense }
+    }
+
+    /// Production constructor (see struct doc): adopts an already-built
+    /// dense grid with no conversion.
+    #[must_use]
+    pub fn from_dense(dense: crate::dense_grid::DenseBlockGrid) -> Self {
+        CarveGrid { dense }
     }
 
     fn get(&self, x: i32, y: i32, z: i32) -> &str {
-        self.blocks.get(&(x, y, z)).map_or(AIR, String::as_str)
+        self.dense.get(x, y, z)
     }
 
     fn set(&mut self, x: i32, y: i32, z: i32, state: &str) {
-        self.blocks.insert((x, y, z), state.to_string());
+        self.dense.set(x, y, z, state);
     }
 
-    /// Consume the grid, returning the carved block field.
+    /// Test-adapter destructor (see struct doc).
     #[must_use]
     pub fn into_blocks(self) -> HashMap<(i32, i32, i32), String> {
-        self.blocks
+        self.dense.into_hashmap()
+    }
+
+    /// Production destructor (see struct doc): no conversion, no
+    /// `HashMap<(i32,i32,i32), String>` ever built.
+    #[must_use]
+    pub fn into_dense(self) -> crate::dense_grid::DenseBlockGrid {
+        self.dense
     }
 }
 

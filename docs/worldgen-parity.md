@@ -174,25 +174,119 @@ a column can never resolve to one of the three excluded names in the first
 place (see `crates/lodestone-worldgen/src/overworld.rs`'s "Badlands" section).
 
 **After the ore-oracle fix (issue #295's ore-oracle-parity increment,
-`postfeatures` stage — ore composition into `column()` itself is still not
-composed, see the module doc comment on `overworld.rs`):**
+`postfeatures` stage — before ore composition landed):**
 
-| chunk | postfeatures vs postcarve (blocks the ore step placed) | postfeatures vs current `column()` (the ore-composition gap #295's next increment closes) |
+| chunk | postfeatures vs postcarve (blocks the ore step placed) | postfeatures vs pre-composition `column()` |
 |---|---|---|
 | (0, 0) | 4113 real mismatches | 4113 real mismatches, 90347/98304 match (91.91%) |
 | (-120, -120) | 4942 real mismatches | 9632 real mismatches, 88666/98304 match (90.20%) |
 
-The `(-120,-120)` gap breaks down cleanly: 4690 of the 9632 is the
-pre-existing badlands-exclusion gap above (unrelated to ores, already
-counted in the `postcarve` numbers), and the remaining 4942 is exactly the
-ore step's own contribution — the two figures add up to 9632 with nothing
-left over, which is itself a small consistency check that the `postfeatures`
-stage isn't double-counting or missing anything relative to `postcarve`.
+The `(-120,-120)` gap broke down cleanly: 4690 of the 9632 was the
+pre-existing badlands-exclusion gap above (unrelated to ores), and the
+remaining 4942 was exactly the ore step's own contribution.
+
+**After composing `apply_ore_step_3x3_per_source` into `column()`** (the
+real vanilla 3×3 neighbourhood driver, not the single-source primitive —
+see `crates/lodestone-worldgen/src/overworld.rs`'s module doc "Performance"
+and ore-features sections):
+
+| chunk | vs `postfeatures` (issue) | vs `postcarve` (full-pipeline floor) | vs `postsurface` (reference ceiling) |
+|---|---|---|---|
+| (0, 0) | 92223/98304 match, **2237** real mismatches (down from 4113) | 88733/98304 match, 5727 real | 8787 real |
+| (-120, -120) | 91703/98304 match, **6595** real mismatches (up from 4942) | 87508/98304 match, 10790 real | 11257 real |
+
+**The gap against `postfeatures` did not go to (near) zero, and that is the
+finding, not a bug to route around** — measured, not guessed, per
+`CLAUDE.md`'s evidence standard:
+
+- `postfeatures` is **single-source only** (`ComposedChunkOracle.java`'s own
+  doc comment: it never extends to a real 3×3 with real per-quart biome
+  variety). A faithful 3×3 composition *legitimately* diverges from a
+  single-source oracle wherever real vanilla ore spill from a neighbour
+  chunk lands in the centre — that is the composition working, not
+  regressing.
+- This was isolated, not assumed: a debug-only toggle
+  (`LODESTONE_ORE_SINGLE_SOURCE_DEBUG=1`, read by `OverworldGenerator::ore_stage`)
+  runs only the centre's own decoration pass — matching `postfeatures`'s own
+  scope exactly — while still stitching the full 3×3 terrain so heightmap
+  probes never panic. That measured **563/98304** real mismatches at chunk
+  (0,0) (down from the pre-composition 4113, a 86% reduction) — strong
+  evidence the ore *engine* and per-source biome resolution are correct, and
+  that most of the full-3×3 residual (2237/98304) against `postfeatures` is
+  real spill this oracle stage cannot model.
+- At chunk (-120,-120), the single-source residual (5391/98304) is *larger*
+  than the pre-composition baseline (4942) — because that chunk's real
+  vanilla biome is badlands, which `usable_overworld_table` still excludes
+  (Job 3, unported `SurfaceSystem.getBand`). Every source chunk there
+  resolves to the *wrong* biome's ore list, not merely an incomplete one.
+  This was confirmed directly, not inferred: a new per-ore-type count test
+  (`ore_counts_by_type_are_predicted_and_measured`) found vanilla placed 51
+  `minecraft:gold_ore` at this chunk while composed Rust placed **zero** —
+  `badlands.json`'s own `UNDERGROUND_ORES` step names
+  `minecraft:ore_gold_extra` (badlands' well-known bonus gold vein) as its
+  27th entry, absent from `plains.json`'s step (and every other substitute
+  biome's). A biome substitution can only ever place the substitute's ore
+  list, so this is the pre-existing badlands gap cascading into ore
+  selection, not a new defect — recorded as a documented exception in that
+  test, not a loosened assertion.
+- Per `CLAUDE.md`'s "an exact-match ore comparison can fail purely from RNG
+  stream ordering": the per-ore-type count table (chunk (0,0), vanilla
+  single-source / rust composed) shows the *narrow-target* ores (coal, iron,
+  copper, gold, lapis, redstone, diamond, all their deepslate variants)
+  matching within single digits — e.g. `iron_ore` 45→46, `coal_ore` 42→54 —
+  while the *large blob* ores (`size=64`: andesite, diorite, granite, tuff,
+  whose spread/radius genuinely crosses chunk boundaries) run
+  consistently ~1.5-1.8× vanilla's single-source count (andesite 359→648,
+  granite 607→852, tuff 672→1077). That ratio, applying uniformly across
+  every large-blob type and none of the small ones, is exactly the
+  signature real 3×3 spill predicts, not a random RNG-order bug (which
+  would not respect that size/type split).
 
 Run `cargo test -p lodestone-worldgen-parity --no-fail-fast -- --nocapture`
 to see these printed live (`ore_composition_gap_is_measured_and_reported`,
+`ore_counts_by_type_are_predicted_and_measured`,
 `postfeatures_actually_differs_from_postcarve`) rather than trusting this
 table to stay fresh forever.
+
+## A determinism bug the dense-grid refactor (Job 2) introduced, found and fixed
+
+Moving the working grid from `HashMap<(i32,i32,i32), String>` to
+`crate::dense_grid::DenseBlockGrid` (a flat, palette-indexed array — see
+`crates/lodestone-worldgen/src/overworld.rs`'s "Performance" module-doc
+section for the full story) changed *when* a block state's palette index
+gets assigned: incrementally, in `.set()` call order, rather than by a
+separate fixed-order final pass the old code used regardless of how the
+intermediate `HashMap` was populated. `OverworldGenerator::materialize_world`
+applied `surface_diff` (a fresh `HashMap` per chunk) by iterating it
+directly — and `std::collections::HashMap` iteration order is not guaranteed
+stable even across two *separately constructed* maps with identical content.
+Two independent `column()` calls for the *same* chunk therefore placed the
+same blocks at the same positions but assigned them **different palette
+indices** — same terrain, different serialised bytes.
+
+This was not found by this crate's own parity tests (which compare resolved
+block-state *strings*, immune to palette-index reshuffling) — it was found
+by `lodestone-server`'s brand-new
+`chunk::tests::parallel_generation_is_deterministic_and_matches_serial`
+(issue #414, landed by a different agent mid-session), which failed
+non-deterministically. Before assuming that test's own new
+`generate_columns_parallel` code was at fault, an isolated `git worktree` at
+the commit immediately before this session's ore composition landed
+confirmed the test passed cleanly there — ruling that out and pointing back
+at this session's own changes. A permanent, threading-free regression
+control,
+`lodestone_server::worldgen_data::tests::column_is_byte_identical_across_two_independent_sequential_calls`,
+narrowed it further: two *sequential*, single-threaded `column()` calls for
+the same chunk already produced different bytes, which meant the bug was a
+pure logic error (palette order depending on `HashMap` iteration), not a
+concurrency/Mutex issue in the (correctly-designed, `Mutex`-protected)
+`Density` node caching described in `crates/lodestone-worldgen/src/density/mod.rs`.
+
+Fixed by consulting `surface_diff` via a point lookup (`.get(&(lx, y, lz))`)
+inside the same fixed `(lz, lx, ly)` loop the base fill already uses, never
+iterating the map directly. Both controls above are green after the fix,
+and the originally-failing `parallel_generation_is_deterministic_and_matches_serial`
+passes reliably again.
 
 ## Anti-vacuity floors (`tests/chunk_parity.rs`)
 
@@ -213,30 +307,35 @@ table to stay fresh forever.
 - **Vegetation features**: not composed into `ComposedChunkOracle.java` and
   not built anywhere in this crate's Rust (epic #404 Phase 3). No isolated
   oracle for it exists yet in `scripts/worldgen-oracle/` either.
-- **Ore features (composition into `OverworldGenerator::column`)**: the
-  *oracle* side of this is now fixed (see "Known gap" below for what it still
-  approximates) — `FeatureOracle.java` drives a real 3×3 chunk neighbourhood
-  and `ComposedChunkOracle.java` has a `postfeatures` stage — but composing
-  `crate::feature::apply_ore_step_3x3` into `OverworldGenerator::column`
-  itself remains the next increment of #295, deliberately not attempted in
-  this pass. **The reason to fix the oracle first, separately from
-  composition, is itself worth recording**: a #295 architecture review found
-  that `FeatureOracle.java` used to share the very simplification it was
-  supposed to be checking. Its header used to say it "deliberately does NOT
-  model ore spill from the 8 neighbouring chunks into the centre (a 3×3
-  driver, analogous to the carver 17×17 driver)," and
-  `crate::feature::OreInput`'s `get_height`/`in_center` used to wrap/drop edge
-  probes to match that oracle rather than vanilla's real
-  `blockStateWriteRadius(1)` (`ChunkPyramid.java:32-35`). The old
+- **Ore features (composition into `OverworldGenerator::column`)**: **now
+  composed** (`crate::feature::apply_ore_step_3x3_per_source`, the real
+  vanilla 3×3 driver, per-source biome resolution). What still can't be
+  isolated with *this* oracle is the *comparison*: `ComposedChunkOracle
+  .java`'s `postfeatures` stage remains single-source only (extending it to a
+  real 3×3 with real per-quart biome variety needs 8 more fully-generated
+  real chunks per fixture dump — significant Docker/JVM cost, not attempted).
+  So a faithful 3×3 Rust composition necessarily shows *more* divergence from
+  `postfeatures` than a single-source comparison would, wherever real vanilla
+  spill lands in the centre — see the measured numbers and the
+  single-source-only debug toggle above, which isolates "is the engine
+  correct" (yes, 563/98304 residual) from "does 3×3 spill widen the gap
+  against an oracle that can't see it" (yes, expected). Extending this oracle
+  to a real 3×3 is the natural next increment for closing this specific
+  residual with hard evidence, not attempted in this pass.
+  **The reason the oracle was fixed *before* composition is itself worth
+  recording**: a #295 architecture review found that `FeatureOracle.java`
+  used to share the very simplification it was supposed to be checking. Its
+  header used to say it "deliberately does NOT model ore spill from the 8
+  neighbouring chunks into the centre (a 3×3 driver, analogous to the carver
+  17×17 driver)," and `crate::feature::OreInput`'s `get_height`/`in_center`
+  used to wrap/drop edge probes to match that oracle rather than vanilla's
+  real `blockStateWriteRadius(1)` (`ChunkPyramid.java:32-35`). The old
   `feature_parity`'s "whole-chunk exact both directions" agreement therefore
   proved the Rust port matched the oracle's chosen simplification, not that
   the simplification was vanilla's — the authored-oracle trap in a subtle
   form (the oracle shares the very simplification it's validating). Composing
   ore features into `OverworldGenerator` on top of *that* oracle would have
-  baked a wrong edge band into every chunk with no gate able to see it. Fixing
-  the oracle first, and leaving composition for a follow-on, keeps that
-  ordering honest: the oracle `feature_parity`/`chunk_parity` now measure
-  against is no longer the thing being validated.
+  baked a wrong edge band into every chunk with no gate able to see it.
 - **Structures**: unbuilt anywhere in this repo's Rust (`#136`: "do not start
   implementation against this issue" until core worldgen has *any* structure
   concept). Nothing to compare them against yet, so `postcarve` is honestly

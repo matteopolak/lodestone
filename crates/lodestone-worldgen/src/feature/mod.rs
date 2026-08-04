@@ -551,10 +551,10 @@ pub fn apply_ore_step<R: RandomSource>(
 /// grid keyed by centre-relative local coordinates.
 ///
 /// `ores` is the SAME list for all 9 passes — correct whenever biome does not
-/// vary across the neighbourhood (true for a fixed single-biome fixture; a
-/// per-source biome, needed once this composes against real per-quart biome
-/// variety, would need a per-source `ores` list and is not built here — see
-/// `docs/worldgen-parity.md`'s "known gap" section).
+/// vary across the neighbourhood (true for a fixed single-biome fixture).
+/// A thin wrapper over [`apply_ore_step_3x3_per_source`] for that fixed-list
+/// case; composing against real per-quart biome variety (issue #295) uses
+/// that function directly with a per-source ore-list closure instead.
 ///
 /// Returns the region grid after all 9 passes; the caller diffs the CENTRE
 /// 16×16 slice (`in_center`) against the original to obtain the fixture-
@@ -575,13 +575,55 @@ pub fn apply_ore_step_3x3<R: RandomSource>(
     grid: &RegionGrid,
     ores: &[PlacedOre],
 ) -> (RegionGrid, i64) {
+    apply_ore_step_3x3_per_source(
+        random,
+        seed,
+        center_x,
+        center_z,
+        min_y,
+        height,
+        min_gen_y,
+        gen_depth,
+        ocean_floor_wg,
+        in_tag,
+        grid,
+        &|_source_x, _source_z| ores,
+    )
+}
+
+/// The real vanilla 3×3 neighbourhood driver, generalised to a **per-source**
+/// ore list (issue #295's ore-composition increment): `ores_for_source(x, z)`
+/// is called once per of the 9 source chunks (their own chunk coordinates,
+/// not centre-relative) and must return that source's own biome's
+/// `UNDERGROUND_ORES` list — vanilla's `ChunkGenerator.applyBiomeDecoration`
+/// resolves the decorating biome per chunk, so a neighbour in a different
+/// biome to the centre places (and RNG-consumes) a different feature list,
+/// not the centre's own. [`apply_ore_step_3x3`] is the fixed-list special
+/// case of this for a single-biome fixture.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_ore_step_3x3_per_source<'a, R: RandomSource>(
+    random: &mut WorldgenRandom<R>,
+    seed: i64,
+    center_x: i32,
+    center_z: i32,
+    min_y: i32,
+    height: i32,
+    min_gen_y: i32,
+    gen_depth: i32,
+    ocean_floor_wg: &HashMap<(i32, i32), i32>,
+    in_tag: &dyn Fn(&str, &str) -> bool,
+    grid: &RegionGrid,
+    ores_for_source: &dyn Fn(i32, i32) -> &'a [PlacedOre],
+) -> (RegionGrid, i64) {
     let mut working = grid.clone();
     let mut center_decoration_seed = 0;
     for dx in -1..=1 {
         for dz in -1..=1 {
+            let source_x = center_x + dx;
+            let source_z = center_z + dz;
             let input = OreInput {
-                chunk_x: center_x + dx,
-                chunk_z: center_z + dz,
+                chunk_x: source_x,
+                chunk_z: source_z,
                 center_x,
                 center_z,
                 min_y,
@@ -591,6 +633,7 @@ pub fn apply_ore_step_3x3<R: RandomSource>(
                 ocean_floor_wg,
                 in_tag,
             };
+            let ores = ores_for_source(source_x, source_z);
             let ds = apply_one_source(random, seed, &input, ores, &mut working);
             if dx == 0 && dz == 0 {
                 center_decoration_seed = ds;
