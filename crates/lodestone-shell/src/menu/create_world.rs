@@ -30,19 +30,27 @@
 //!   Bonus Chest/Allow Cheats (real, in-memory [`WorldCreationConfig`]
 //!   state), and the Hardcore→Hard difficulty lock (`GameTab.java`'s own
 //!   rule: selecting Hardcore forces and disables the difficulty cycle).
-//! - **Decorative — the collected config's effect on the launched world.**
-//!   Pressing Create returns [`CreateWorldOutcome::Create`] carrying a real
-//!   [`WorldCreationConfig`], but **nothing downstream reads any field of it
-//!   yet**. `app.rs`'s `launch_singleplayer` hardcodes
-//!   [`super::world_select::BUNDLED_WORLD`]'s seed
-//!   (`crate::menu::world_select::BUNDLED_WORLD.seed`) regardless of what
-//!   this screen collected — that seam is a queued patch (see this issue's
-//!   own report for the exact change; `lodestone_server::worldgen_data::
-//!   overworld_chunk_source(seed: i64)` already takes a seed as a plain
-//!   parameter, so threading it through is the one line worth doing first).
-//!   Game mode, difficulty, structures, bonus chest and allow-cheats need
-//!   deeper session-setup wiring than a menu-side patch can specify on its
-//!   own and are left as documented follow-up.
+//! - **Wired since — the seed.** This section used to say "nothing
+//!   downstream reads any field of it yet"; that queued patch landed
+//!   (`72cb451`, `d65d593`). `apply_create_world` turns
+//!   [`CreateWorldOutcome::Create`] into `MenuAction::Singleplayer(Some(config))`,
+//!   and `app.rs`'s `begin_singleplayer` resolves `config.seed` through
+//!   `resolve_launch_seed`/`parse_seed` — vanilla's own
+//!   `WorldOptions.parseSeed`/`randomSeed` rule (trim, a valid `i64` literal
+//!   used verbatim, free text hashed with Java's `String.hashCode`, empty
+//!   means fresh random) — into the `i64`
+//!   `lodestone_server::worldgen_data::overworld_chunk_source(seed)` wants,
+//!   in place of `BUNDLED_WORLD.seed`. Proved end to end by `app.rs`'s
+//!   `resolved_seeds_from_different_world_creation_configs_generate_different_terrain`:
+//!   two different typed seeds resolved through the *production* path
+//!   generate different real terrain at the same coordinate, and the same
+//!   seed reproduces byte-identically — not merely different `i64`s, which
+//!   would be the isolated-unit species of this gate.
+//! - **Decorative — game mode, difficulty, structures, bonus chest and
+//!   allow-cheats.** Collected in `WorldCreationConfig` and cycled/toggled for
+//!   real, but nothing downstream reads any of them: they need deeper
+//!   session-setup wiring (server-side initial state) than the seed's
+//!   one-parameter threading, and are left as documented follow-up.
 //! - **Decorative — the world name and the "will be saved in" folder.**
 //!   There is still no `LevelStorageSource` (`world_select`'s own module
 //!   docs, unchanged by this issue), so a name is collected and shown but

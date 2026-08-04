@@ -54,38 +54,36 @@ no layout class); this is the same call at a coarser grain.
   toggling Structures/Bonus Chest/Allow Cheats (real, in-memory config
   state), and the Hardcore→Hard difficulty lock (`GameTab.java`'s own rule:
   selecting Hardcore forces and disables the difficulty cycle).
-- **Decorative — the collected config's effect on the launched world.**
-  Pressing Create returns a real `WorldCreationConfig`, but **nothing
-  downstream reads any field of it yet**. `app.rs`'s `launch_singleplayer`
-  hardcodes `world_select::BUNDLED_WORLD`'s seed regardless of what this
-  screen collected. See "The queued patch" below.
+- **Wired since — the collected config's effect on the launched seed.** This
+  section used to say "nothing downstream reads any field of it yet" and
+  pointed at a queued patch; that patch has landed (`72cb451`, `d65d593`).
+  `nav.rs`'s `apply_create_world` now turns `CreateWorldOutcome::Create` into
+  `MenuAction::Singleplayer(Some(config))`, and `app.rs`'s
+  `begin_singleplayer`/`resolve_launch_seed`/`parse_seed` resolve
+  `config.seed` (vanilla's own `WorldOptions.parseSeed`/`randomSeed` rule —
+  trim, a valid `i64` literal verbatim, free text hashed with Java's
+  `String.hashCode`, empty means fresh random) into the `i64`
+  `lodestone_server::worldgen_data::overworld_chunk_source(seed)` wants,
+  replacing `world_select::BUNDLED_WORLD`'s hardcoded seed. Proved end to end,
+  not just at the `i64` level: `app.rs`'s
+  `resolved_seeds_from_different_world_creation_configs_generate_different_terrain`
+  resolves two typed seeds through the *production* path and asserts
+  different real terrain at the same coordinate in the same column, plus
+  byte-identical reproduction of the same seed.
+- **Decorative — game mode, difficulty, structures, bonus chest and
+  allow-cheats.** Collected and cycled/toggled for real, but nothing
+  downstream reads any of them — see "What is still queued" below.
 - **Decorative — the world name and the "will be saved in" folder.** There
   is still no `LevelStorageSource`, so a name is collected and shown but
   nothing is ever written to a folder of that name.
 
-## The queued patch
+## What is still queued
 
-The one line most worth doing first: `lodestone_server::worldgen_data::
-overworld_chunk_source(seed: i64)` already takes a seed as a plain parameter
-(verified — it is not buried behind anything singleplayer-specific), so
-threading `WorldCreationConfig::seed` through to `launch_singleplayer` is a
-real, scoped change to `app.rs` (brokered for this batch):
-
-1. `MenuAction::Singleplayer` (currently a bare variant) needs to carry the
-   config the player collected, or `app.rs` needs a new variant/field for
-   "create and play" distinct from "play the bundled world" (`nav.rs`'s
-   `apply_create_world` is where the Create button's outcome is decided
-   today — it returns `MenuAction::None`, matching the fact that nothing
-   consumes the config yet).
-2. `launch_singleplayer` parses `config.seed` (empty → random, non-empty →
-   vanilla's own seed-hashing rule, `WorldOptions.java`'s `parseSeed`, not
-   yet implemented anywhere in this menu layer) into the `i64`
-   `overworld_chunk_source` wants, instead of reading `BUNDLED_WORLD.seed`.
-
-Game mode, difficulty, structures, bonus chest and allow-cheats need deeper
-session-setup wiring (an ECS/ server-side initial state, not just a menu-side
-constant) than this one patch can specify and are left as documented
-follow-up.
+The seed is the one field that reaches the wire (see above). Game mode,
+difficulty, structures, bonus chest and allow-cheats need deeper
+session-setup wiring (an ECS/server-side initial state, not just a menu-side
+constant) than the seed's one-parameter threading, and are left as
+documented follow-up.
 
 ## How to change it
 
