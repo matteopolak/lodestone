@@ -22,11 +22,27 @@ itself instead of hiding behind three green jobs and one red one:
 
 | job | command | why it's separate |
 |---|---|---|
-| `check-default` | `cargo check --workspace --all-targets` | the baseline health check |
-| `check-all-features` | `cargo check --workspace --all-features --all-targets --exclude lodestone-allocbench` | proves every feature combination compiles; the `--exclude` is structural, not a workaround (below) |
-| `check-shell-no-default` | `cargo check -p lodestone-shell --no-default-features` | the version-seam check — no protocol family is enabled by default, and this is the only thing that proves the shell still compiles with **none** |
+| `check-default` | `just check` (`cargo check --workspace --all-targets`) | the baseline health check |
+| `check-all-features` | `just check-all` (`cargo check --workspace --all-features --all-targets --exclude lodestone-allocbench`) | proves every feature combination compiles; the `--exclude` is structural, not a workaround (below) |
+| `check-shell-no-default` | `just check-seam` (`cargo check -p lodestone-shell --no-default-features`) | the version-seam check — no protocol family is enabled by default, and this is the only thing that proves the shell still compiles with **none** |
 | `xtask-structural-checks` | `cargo run -p xtask -- check-isolation`, then `check-deletable` for each of `v47`/`v340`/`v735`/`v770` | dependency-direction and folder-deletability checks; cheap (xtask has almost no dependencies) and catches a class of break nothing else does |
-| `test` | `cargo test --workspace --no-fail-fast` | the only thing that compiles doctests and runs all 22 `.wgsl` shaders through naga; see "What cannot run" below for what it deliberately does not exercise |
+| `test` | `just test` (`cargo test --workspace --no-fail-fast`) | the only thing that compiles doctests and runs all 22 `.wgsl` shaders through naga; see "What cannot run" below for what it deliberately does not exercise |
+
+**Four of the five jobs call `just` recipes** (`docs/task-runner.md`) rather
+than retyping the raw `cargo` invocation, so this file, `CLAUDE.md`, and
+`ci.yml` cannot silently drift apart the way three independently-maintained
+copies of the same command eventually do. Each of those four jobs installs a
+pinned `just` (`extractions/setup-just`, pinned to a commit SHA, not a
+floating major tag) right before its recipe-calling step. `xtask-structural-
+checks` is the one exception, left calling `cargo run -p xtask` directly: the
+Justfile's generic `xtask *args` passthrough always adds `-q`, which is not
+byte-identical to this job's pre-existing invocation, so wrapping it would
+change what the job runs rather than merely naming it. Neither
+`LODESTONE_TARGET_DIR` nor `LODESTONE_JOBS` is set anywhere in this workflow,
+so every recipe here expands to the same bare command it always ran — a
+private `--target-dir` is a local-agent convention (`docs/build-caching.md`),
+not something CI opts into, and `-j` stays at cargo's own default rather than
+a hardcoded value that would throttle the runner.
 
 These are exactly the commands named in `CLAUDE.md`. **Do not "simplify" the
 `--exclude lodestone-allocbench` away.** That crate has a deliberate
@@ -206,12 +222,13 @@ future agent doesn't have to re-derive them:
 
 ## How to reproduce a CI failure locally
 
-Run the exact failing job's command from `.github/workflows/ci.yml`. All five
-are plain `cargo`/`xtask` invocations with no hidden environment beyond the
-toolchain pin and (for anything workspace-wide) `libasound2-dev`/`pkg-config`.
-The first four have a `just` recipe (see
-[`docs/task-runner.md`](./task-runner.md)) that runs the identical command —
-named here first, raw command beside it as the definition:
+Run the exact failing job's command from `.github/workflows/ci.yml`. Four of
+the five jobs literally run a `just` recipe (see
+[`docs/task-runner.md`](./task-runner.md)) as their `run:` step — there is no
+translation to do, the job's own command **is** the recipe below. The fifth
+(`xtask-structural-checks`) still runs raw `cargo`/`xtask` invocations. None
+of the five need anything beyond the toolchain pin and (for anything
+workspace-wide) `libasound2-dev`/`pkg-config`:
 
 ```bash
 # whichever job went red
@@ -223,9 +240,19 @@ cargo run -p xtask -- check-deletable v770   # or v47 / v340 / v735
 just test         # cargo test --workspace --no-fail-fast
 ```
 
-The `xtask-structural-checks` job's two commands have no dedicated recipe —
-`just xtask check-isolation` and `just xtask check-deletable v770` run them
-through the same `--target-dir`-carrying expansion as everything else.
+The `xtask-structural-checks` job's two commands have no dedicated recipe and
+are not wrapped through `just xtask` either: the generic `xtask *args`
+passthrough always adds `-q`, which would make the recipe a different command
+from what this job has always run, not just a renamed one. Reproduce that job
+with the raw `cargo run -p xtask -- …` lines above (`just xtask
+check-isolation` and `just xtask check-deletable v770` are close but add
+`-q`, so prefer the raw form when you specifically need this job's exact
+output).
+
+Locally, `just` picks up whatever `LODESTONE_TARGET_DIR`/`LODESTONE_JOBS` you
+have set in your shell (per-agent private target dir, `-j 4` for multi-agent
+courtesy — see `docs/build-caching.md`); CI sets neither, so a recipe run in
+CI is the bare command with no `--target-dir` override and no `-j`.
 
 If `test` is red locally but was green in CI (or vice versa), the likely
 cause is **local `.cache/`/`vendor/` presence**: a dev checkout that has run
@@ -415,9 +442,13 @@ state is — will shift every number here run to run.
 
 - **Add a check**: add a job, following the existing pattern (checkout →
   apt step if the job touches `lodestone-sound` → toolchain → rust-cache with
-  its own `shared-key` → the command). Keep one command per job; a job that
-  runs three commands in sequence hides which one failed behind a single red
-  X.
+  its own `shared-key` → sccache-action → install `just` (pinned
+  `extractions/setup-just` commit SHA, `just-version: "1.58.0"`) → the
+  recipe). Keep one command per job; a job that runs three commands in
+  sequence hides which one failed behind a single red X. If the check has no
+  `just` recipe yet, add one to the `Justfile` first (`docs/task-runner.md`)
+  rather than calling raw `cargo` here — a job that bypasses `just` is exactly
+  the drift this conversion exists to close off.
 - **Add a new protocol family to `xtask-structural-checks`**: add its folder
   name to the `for family in ...` loop. `check-deletable` accepts a package
   name, folder name, or path — folder name (`v47`, not `lodestone-v47`) is
@@ -462,6 +493,14 @@ state is — will shift every number here run to run.
   installs the pinned toolchain.
 - [`Swatinem/rust-cache`](https://github.com/Swatinem/rust-cache) — caches
   `~/.cargo` and `target/` between runs.
+- [`mozilla-actions/sccache-action`](https://github.com/mozilla-actions/sccache-action)
+  (pinned `@v0.0.11`) — installs `sccache` and a GitHub-Actions-cache-backed
+  server; see "A pending coordination point: sccache" above.
+- [`extractions/setup-just`](https://github.com/extractions/setup-just)
+  (pinned to a commit SHA, `just-version: "1.58.0"`) — installs `just` in the
+  four jobs that call a recipe, so the job's own `run:` line can be the
+  recipe name (`docs/task-runner.md`) instead of a hand-copied `cargo`
+  invocation.
 - `actions/checkout@v4` — standard checkout.
 - No self-hosted runners, no repository secrets, and no third-party service
-  beyond GitHub Actions itself and the two actions above.
+  beyond GitHub Actions itself and the actions above.
