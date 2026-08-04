@@ -675,6 +675,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   identical "textured, alpha-blended, screen-space quad after the hand pass" shape
   closely enough that all seven landed in one pass rather than inventing a second
   pipeline: `lodestone_render::ScreenEffectRenderer`.
+- [The scrollable list primitive](./scrollable-list.md) — `menu::widget::ScrollList`
+  is the shared substrate for every list-shaped menu screen: a **pixel** scroll
+  offset, a scrollbar, and a `hovered`/`selected` pair that are two genuinely separate
+  pieces of state. It is a port of vanilla's `AbstractScrollArea` +
+  `AbstractSelectionList` scroll model, and it exists because the multiplayer list and
+  the account list had each grown their own — with different bugs.
 - [Section camera uniform (shared buffer + origin arena)](./section-camera-uniform.md) —
   The group-0 camera binding **every** terrain pipeline reads from — the model/fluid
   pair ([`ModelPipeline`](../crates/lodestone-render/src/model_pipeline.rs)) and the
