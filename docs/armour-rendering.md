@@ -51,7 +51,10 @@ mapping cannot be derived).
 
 ## What does not
 
-* **Trims.** Designed, not landed — see "Trims" below.
+* **Trims.** The render/asset capability is built and jar-verified; it draws
+  no pixels yet because the wire component and shell wiring are a separate,
+  named island — see "Trims" below and
+  [#436](https://github.com/matteopolak/lodestone/issues/436).
 * **Baby armour meshes**, **enchantment glint**, **`Body`/`Saddle` (animal)
   armour**, **elytra**, **skull/pumpkin heads**. Each is a different vanilla
   layer with its own model; see "Deliberately out of scope".
@@ -446,74 +449,115 @@ re-read `net.rs` directly rather than trusting that note and found the patch
 already present. **Nothing is open here anymore** — see "Trims" below for
 what remains in this doc's scope.
 
-## Trims: designed, not landed, and why
+## Trims: the render-side capability is built; it is a named island (#436)
 
-Deliberately deferred — the blockers are the same off-limits files item 2's
-wiring needs (`crates/protocol/v770` for the component, `gpu.rs`/
-`entity_pipeline.rs` for a third pipeline) plus an atlas-stitching capability
-this crate does not have yet, so a partial landing would cost more to review
-than the current honest absence. What it would take, so the next pass does not
-have to re-read the client:
+This section previously said trims were "designed, not landed" and listed
+three blockers: the undecoded wire component, a third depth mode, and "an
+atlas-stitching capability this crate does not have yet". Re-investigated
+directly against `.cache/mc/26.2/client-src` and `client.jar` rather than
+trusted from the old write-up — one of the three turned out to be a wrong
+diagnosis, and the other two are now built. **What remains is entirely outside
+`lodestone-render`/`lodestone-assets`'s ownership**, so this is filed as a
+named island on [#436](https://github.com/matteopolak/lodestone/issues/436)
+rather than shipped further.
 
-* **Input does not exist.** `minecraft:trim` is an `ArmorTrim` record
-  (pattern + material holders); nothing in `crates/protocol/v770` decodes it, and
-  `entity_snapshot` drops components anyway — the same gap dye has, one step
-  worse because the component itself is unmodeled.
-* **A third depth mode.** `RenderPipelines.ARMOR_DECAL_CUTOUT_NO_CULL` is
-  `DepthStencilState(CompareOp.EQUAL, false)` — depth compare **equal, no depth
-  write** — plus `LayeringTransform.VIEW_OFFSET_Z_LAYERING`. Under `[0,1]` depth
-  that is `CompareFunction::Equal` with `depth_write_enabled: false`; it is a
-  third pipeline, not a variant of the two that exist.
-* **A stitched trim atlas, and the material palette is per-*wearer*-material,
-  not global.** `ArmorTrim.layerAssetId`:
+### What actually needed building, corrected
 
-  ```java
-  // ArmorTrim.java:41-44
-  public Identifier layerAssetId(final String layerAssetPrefix, final ResourceKey<EquipmentAsset> equipmentAsset) {
-     MaterialAssetGroup.AssetInfo materialAsset = this.material().value().assets().assetId(equipmentAsset);
-     return this.pattern().value().assetId().withPath(patternPath -> layerAssetPrefix + "/" + patternPath + "_" + materialAsset.suffix());
-  }
-  ```
+The old write-up said the sprites "live in the `armor_trims` texture atlas,
+so this needs an atlas stitch this crate does not do yet" — true that the
+capability was missing, wrong about what it was. `client.jar` has exactly one
+loose PNG per pattern per layer type (`trims/entity/humanoid/sentry.png`, 36
+files total for 18 patterns × 2 layer types) — there is no per-material file
+on disk to load. `assets/minecraft/atlases/armor_trims.json` is a
+`minecraft:paletted_permutations` source, not a `directory` one: each base
+PNG is an **eight-step greyscale index image** (verified against the real
+`sentry.png` — its only four opaque colours are all members of the eight-entry
+reference strip `trims/color_palettes/trim_palette.png`), and a material's
+final sprite is produced *at load time* by substituting each pixel's grey for
+the same-indexed colour in that material's own 8×1 palette strip
+(`trims/color_palettes/iron.png`, `iron_darker.png`, …) — `PalettedPermutations.java`'s
+`createPaletteMapping`/`NativeImage.mappedCopy`. So the missing capability
+was never atlas *packing* (no UV sub-rects are needed — a resolved trim
+sprite is a full 64×32 image, same shape as any other `ArmourLayer` texture);
+it was this **palette-swap pixel generation**, which
+[`crate::atlas_source`]'s own module docs already flagged as parsed-but-not-baked
+("the actual palette-swap pixel generation is a bake step and is
+intentionally left to the atlas-baking layer").
 
-  called with `layerAssetPrefix = layerType.trimAssetPrefix()` = `"trims/entity/" + id`
-  (`EquipmentClientInfo.java:140-142`, e.g. `trims/entity/humanoid`), so the
-  final path is `trims/entity/<layer_type>/<pattern>_<material suffix>`. The
-  interesting part is `assetId(equipmentAsset)`:
+**Landed, in `lodestone-assets`:**
 
-  ```java
-  // MaterialAssetGroup.java:56-58
-  public MaterialAssetGroup.AssetInfo assetId(final ResourceKey<EquipmentAsset> equipmentAssetId) {
-     return this.overrides.getOrDefault(equipmentAssetId, this.base);
-  }
-  ```
+* `lodestone_assets::palette_bake::recolor_by_palette` — the pixel transform
+  itself, ported byte-for-byte from `PalettedPermutations.java`'s lambda
+  (alpha-`0` pixels pass through untouched *before* any lookup; a reference
+  palette entry with alpha `0` can never be matched; a matched pixel's alpha
+  is `pixel.alpha * target.alpha / 255`; an unmapped colour is — worked
+  through the same formula — a byte-exact pass-through, not a forced-opaque
+  substitution, which is easy to get backwards reading the Java quickly).
+* `lodestone_assets::palette_bake::bake_paletted_permutations` — drives it
+  against a real [`AtlasSource::PalettedPermutations`] and a
+  [`ResourceManager`], producing one decoded `Image` per derived sprite id,
+  with a report (missing textures, decode errors, per-palette errors) rather
+  than a hard failure — the same softness `BannerPatternAtlas` already uses
+  for its own per-sprite misses.
+* `lodestone_assets::trim` — the two hand-transcribed registry tables this
+  *cannot* discover from a generic atlas descriptor (`TRIM_PATTERNS`' `decal`
+  flag, `TRIM_MATERIALS`' wearer-keyed override table — genuine
+  `MaterialAssetGroup.java` statics, not resource files) plus `TrimAtlas`,
+  which loads the real `armor_trims.json`, bakes it, and resolves
+  `(pattern, material, layer type, wearer armour asset)` → sprite exactly like
+  `ArmorTrim.layerAssetId`/`MaterialAssetGroup.assetId` do — the wearer-aware
+  override (diamond trim darkens only on diamond armour, plain elsewhere) is
+  hermetically pinned (`diamond_trim_darkens_only_on_diamond_armour`) and then
+  proven against real baked pixels from the real jar (see "Gates").
 
-  — the trim **material**'s own `MaterialAssetGroup` looks up an override keyed
-  by the **wearer's armour** `equipmentAsset`, falling back to its plain
-  `suffix` otherwise. Only five of the eleven trim materials declare any
-  override at all, and each declares exactly one — itself:
+**Landed, in `lodestone-render`:** `EntityPipeline::trim_decal_pipeline`
+(`entity_pipeline.rs`) — the genuine third depth mode,
+`CompareFunction::Equal`/`depth_write_enabled: false`, translated from
+`RenderPipelines.ARMOR_DECAL_CUTOUT_NO_CULL`'s `DepthStencilState(CompareOp.EQUAL,
+false)`. Unlike every other depth translation in this doc, `EQUAL` needed no
+sign flip for `[0,1]` depth — equality has no "direction" the way
+`GREATER_THAN_OR_EQUAL`/`LessEqual` does. Reuses `camera_layout`/
+`texture_layout` exactly like `armour_pipeline`/`banner_layer_pipeline`/
+`flame_pipeline` — still two bind groups, nowhere near the 4-group floor.
 
-  ```java
-  // MaterialAssetGroup.java:37-43
-  IRON = create("iron", Map.of(EquipmentAssets.IRON, "iron_darker"));
-  NETHERITE = create("netherite", Map.of(EquipmentAssets.NETHERITE, "netherite_darker"));
-  COPPER = create("copper", Map.of(EquipmentAssets.COPPER, "copper_darker"));
-  GOLD = create("gold", Map.of(EquipmentAssets.GOLD, "gold_darker"));
-  DIAMOND = create("diamond", Map.of(EquipmentAssets.DIAMOND, "diamond_darker"));
-  ```
+**A gotcha worth keeping**: `TrimPattern.decal()` selects *this* pipeline vs.
+the ordinary armour one, and **every one of 26.2's 18 patterns has
+`"decal": false`** (checked directly against every
+`data/minecraft/trim_pattern/*.json` in `client.jar`). So `trim_decal_pipeline`
+is real, tested to exist and be selectable, and currently unreachable by any
+vanilla content — the fork still has to exist because `decal` is registry
+data a resource pack or a future version can set, not a constant this engine
+is free to assume.
 
-  So a **diamond**-material trim on a **diamond** chestplate resolves to the
-  `..._diamond_darker` sprite, but the same diamond trim on an iron chestplate
-  (or any other material) resolves to plain `..._diamond` — the override only
-  fires when the trim material matches the piece it decorates, for these five
-  materials (`quartz`/`redstone`/`emerald`/`lapis`/`amethyst`/`resin` never
-  override). Picking the sprite from the trim material alone, ignoring the
-  wearer's own armour material, is exactly the plausible-looking-but-wrong
-  colour `CLAUDE.md` warns this task about. Those sprites live in the
-  `armor_trims` texture atlas, so this needs an atlas stitch this crate does not
-  do yet, plus `TrimPattern.decal()` to choose between two sheet variants.
+### What is still missing, and why it is an island rather than half-shipped
 
-A helmet that draws with the wrong trim sprite looks like a *material* bug, so
-shipping this half-done would be worse than the current honest absence.
+Everything above reaches zero pixels without three more things, **all of
+which sit outside this pass's ownership** (`crates/protocol/v770`,
+`crates/lodestone-shell/src/{net.rs,entities.rs,gpu.rs}`):
+
+1. **The wire component is still undecoded.** `minecraft:trim` is an
+   `ArmorTrim` record (pattern + material holders); nothing in
+   `crates/protocol/v770` decodes it, and `entity_snapshot` drops unmodelled
+   components anyway — the same gap dye had before `64cfdcb`, one step worse
+   because the component itself has no Rust type yet at all.
+2. **`entities.rs`/`net.rs` need a carry path** for the decoded trim, the
+   same shape `equipment_dye` already has end to end
+   (`EntitySnapshot::equipment_dye` → `RenderEquipmentDye` → `EntityDraw`).
+3. **`gpu.rs`'s `prepare_armour` needs a trim draw pass**: for each equipped
+   piece with a trim, resolve `TrimAtlas::sprite_for` with the *wearer's own*
+   armour material (not the trim's), upload/cache that sprite as a texture,
+   and issue an instanced draw through `armour_pipeline` or
+   `trim_decal_pipeline` per `TrimPattern::decal`.
+
+None of the three is optional — a trim decal with no wire data is invisible
+by construction, and building the shell wiring speculatively (without a real
+decoded value ever reaching it) would be exactly the island `CLAUDE.md`'s top
+rule warns about, just moved one layer down. So rather than build (3) against
+a value that can never arrive this pass, or leave (1)-(3) as a vague "future
+work" note, this is filed as a named, scoped island:
+**[#436](https://github.com/matteopolak/lodestone/issues/436)** — the render
+and asset capability is real, tested against the real jar, and reaches zero
+pixels because nothing upstream feeds it yet.
 
 ## Deliberately out of scope
 
@@ -575,7 +619,7 @@ real baked vertices and `ArmourSlot::Chest::inflation()` — plus an exact
 This closes what an earlier revision of this doc called "the honest gap".
 
 **Still not covered:** trims have no pixel gate, because the feature itself
-does not reach a pixel yet (see "Trims" below) — a gate over an
+does not reach a pixel yet (see "Trims" above) — a gate over an
 unimplemented feature would be vacuous by construction. **Dye is different
 from this note's previous wording**: dye now reaches real pixels (see "Dye"
 above), and has hermetic coverage
@@ -585,6 +629,50 @@ module) but no dedicated *pixel* gate proving a dyed piece renders a
 different colour than an undyed one through the real GPU path — filed as a
 follow-up rather than built here, since `armour_pixels.rs` (the file a dye
 pixel gate would naturally extend) is another agent's in-flight work.
+
+**Trims' own capability is covered, up to the island boundary.** Hermetic,
+`lodestone-assets`:
+
+* `palette_bake` module (6 tests) — the recolour transform itself: a
+  referenced grey maps to the same-indexed target colour; a fully-transparent
+  pixel passes through unchanged even when its RGB would otherwise match; a
+  reference entry with zero alpha can never be matched; an unmapped colour is
+  a byte-exact pass-through, not forced opaque; alpha scales by the target's
+  own alpha (integer division, matching Java); a later duplicate reference
+  entry wins the lookup (the `HashMap` overwrite vanilla's own code produces).
+* `trim` module (7 tests) — the 18-pattern/11-material table closures, every
+  pattern's `decal` flag being `false` in 26.2, the five overriding materials
+  each overriding only their own armour and no other, the six non-overriding
+  materials never changing suffix, `trim_sprite_id` matching
+  `ArmorTrim.layerAssetId` for both a plain and an overridden suffix and both
+  layer types, and a missing-descriptor pack reporting an error rather than
+  panicking.
+
+Jar-backed, `#[ignore]`d, `crates/lodestone-assets/tests/trim_atlas_gate.rs`
+(`cargo test -p lodestone-assets --test trim_atlas_gate -- --ignored --nocapture`):
+
+* `every_trim_sprite_bakes_cleanly_against_the_real_jar` — all 576 sprites (18
+  patterns × 16 suffixes × 2 layer types) bake with zero missing textures,
+  decode errors, or palette errors against a real `client.jar`.
+* `a_hand_verified_pixel_recolours_to_irons_own_first_palette_entry` — a
+  specific pixel (`sentry.png`'s `(11, 0)`, independently confirmed to be the
+  reference palette's index-0 grey) recolours to iron's own index-0 colour,
+  read directly off the real PNGs (not round-tripped through this crate's own
+  encoder — the expected bytes came from decoding the jar's palette strips
+  with Pillow, outside this codebase, while investigating the feature).
+* `the_same_pixel_differs_between_the_overridden_and_plain_suffix` — the
+  wearer-aware override end to end: the identical pixel differs between a
+  diamond-worn (plain `iron`) and an iron-worn (`iron_darker`) resolution,
+  with both exact byte values asserted, not merely that they differ.
+* `background_pixels_outside_the_pattern_stay_fully_transparent` — a control
+  that the palette swap does not accidentally paint the transparent
+  background opaque.
+
+No pipeline-level test exists for `trim_decal_pipeline` itself, matching this
+file's existing convention: `armour_pipeline`/`banner_layer_pipeline`/
+`flame_pipeline` have none either (pipeline construction needs a real
+`wgpu::Device`; their correctness is proven downstream by the `#[ignore]`d GPU
+pixel gates above, which this pipeline cannot reach yet — see "Trims").
 
 ## Dependencies
 
@@ -599,6 +687,15 @@ pixel gate would naturally extend) is another agent's in-flight work.
   maps onto `ArmourSlot`.
 * `crates/lodestone-shell/src/entities.rs` — `EntityDraw::equipment`, read (not
   edited); it already carried all eight slots.
+* `lodestone_assets::trim` — `TrimPattern`/`TrimMaterial`/`TRIM_PATTERNS`/
+  `TRIM_MATERIALS`/`TrimAtlas`/`trim_sprite_id`, the registry tables and
+  atlas wrapper this pass added for trims.
+* `lodestone_assets::palette_bake` — `recolor_by_palette`/
+  `bake_paletted_permutations`, the generic `paletted_permutations` bake step
+  `trim` is built on; also the one [`crate::atlas_source`] flagged as
+  parsed-but-not-baked before this pass.
+* `lodestone_render::entity_pipeline::EntityPipeline::trim_decal_pipeline` —
+  the third depth mode for a `decal: true` trim pattern.
 
 ## See also
 

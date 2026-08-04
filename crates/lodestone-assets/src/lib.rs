@@ -93,6 +93,7 @@ mod manager;
 mod meta;
 pub mod mipmap;
 mod model;
+pub mod palette_bake;
 pub mod particle;
 pub mod particle_atlas;
 mod profile;
@@ -102,6 +103,7 @@ pub mod sound;
 mod source;
 mod texture;
 pub mod tint;
+pub mod trim;
 
 pub use atlas::{
     AnimSlot, AnimSlotFrame, AnimTable, Atlas, AtlasBuilder, AtlasSprite, MipCap, MipLevelRef,
@@ -121,7 +123,7 @@ pub use error::{
     AssetError, AtlasError, BakeError, BannerPatternAtlasError, BlockStateError,
     EntityFlameAssetError, FontError, GuiError, IconError, ItemAtlasError, ItemModelError,
     ModelError, ParticleAtlasError, ParticleError, ResourceLocationError, ScreenEffectAssetError,
-    SkyAssetError, SoundError, TextureError, TintError,
+    SkyAssetError, SoundError, TextureError, TintError, TrimAtlasError,
 };
 pub use icon::{
     DISPLAY_CONTEXT_PROPERTY, DefaultItemContext, DisplayContextItemContext, GuiItemContext,
@@ -141,6 +143,7 @@ pub use model::{
     Axis, Direction, DisplaySlot, DisplayTransform, DisplayTransforms, Element, ElementRotation,
     Face, GuiLight, ModelResolver, RawModel, ResolvedModel, TextureBinding,
 };
+pub use palette_bake::{PaletteBakeReport, bake_paletted_permutations, recolor_by_palette};
 pub use particle_atlas::{ParticleAtlas, ParticleAtlasReport};
 pub use profile::AssetProfile;
 pub use screen_effects::{
@@ -153,3 +156,7 @@ pub use sky::{CelestialAtlas, MOON_PHASE_NAMES, SUN_SPRITE_PATH, load_cloud_text
 pub use source::DirectorySource;
 pub use source::{MemorySource, ResourceSource, ZipSource};
 pub use texture::{AnimationFrame, AnimationMeta, Image, TextureMeta};
+pub use trim::{
+    ARMOR_TRIMS_ATLAS_PATH, TRIM_MATERIALS, TRIM_PATTERNS, TrimAtlas, TrimAtlasReport,
+    TrimMaterial, TrimPattern, trim_material, trim_pattern,
+};

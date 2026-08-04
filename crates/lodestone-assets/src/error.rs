@@ -281,6 +281,25 @@ pub enum BannerPatternAtlasError {
     Source(#[from] AtlasSourceError),
 }
 
+/// Errors produced while loading the armour-trim atlas
+/// (`assets/minecraft/atlases/armor_trims.json` — see [`crate::trim`]).
+#[derive(Debug, thiserror::Error)]
+pub enum TrimAtlasError {
+    /// `atlases/armor_trims.json` itself was not present in any pack — unlike
+    /// an individual missing or undecodable sprite (recorded in
+    /// [`crate::trim::TrimAtlasReport`], not fatal), this means there is no
+    /// source list to bake at all.
+    #[error("armour-trim atlas descriptor not found: {path}")]
+    DescriptorMissing {
+        /// The in-pack path that was probed.
+        path: String,
+    },
+    /// The descriptor was present but failed to parse as an atlas source
+    /// list.
+    #[error("armour-trim atlas descriptor: {0}")]
+    Source(#[from] AtlasSourceError),
+}
+
 /// Errors produced while loading the screen-overlay textures (`textures/misc/underwater.png`,
 /// `textures/block/fire_1.png`).
 #[derive(Debug, thiserror::Error)]
