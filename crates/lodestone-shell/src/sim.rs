@@ -228,54 +228,6 @@ pub(crate) fn tool_mining_item(
     }
 }
 
-/// Which section meshes a set of changed cells invalidates.
-///
-/// A section's geometry is a function of its whole 3×3×3 neighbourhood (face
-/// culling reads the 6 face-adjacent sections; AO samples the 3 cells around
-/// every vertex corner, which reach across section *edges and corners* too), so
-/// a changed cell dirties its own section **plus** every neighbour section it
-/// physically touches — and no others. A cell at local x=15 touches the +x
-/// neighbour; an interior cell touches nothing else. Skipping the neighbour is
-/// the defect that leaves a stale face at a chunk border while mining on a live
-/// server; dirtying all 27 unconditionally pays a 27× re-mesh for every redstone
-/// tick. Hence the per-axis filter rather than either extreme.
-///
-/// Coordinates are **section-relative** (`0..=15`), matching the wire form of
-/// `SECTION_BLOCKS_UPDATE`, and the result is in absolute section coordinates.
-fn dirty_sections_for_blocks(
-    sx: i32,
-    sy: i32,
-    sz: i32,
-    blocks: &[[u8; 3]],
-) -> BTreeSet<(i32, i32, i32)> {
-    let mut dirty: BTreeSet<(i32, i32, i32)> = BTreeSet::new();
-    for &[bx, by, bz] in blocks {
-        for dx in -1..=1 {
-            for dy in -1..=1 {
-                for dz in -1..=1 {
-                    if (dx == -1 && bx != 0) || (dx == 1 && bx != 15) {
-                        continue;
-                    }
-                    if (dy == -1 && by != 0) || (dy == 1 && by != 15) {
-                        continue;
-                    }
-                    if (dz == -1 && bz != 0) || (dz == 1 && bz != 15) {
-                        continue;
-                    }
-                    dirty.insert((sx + dx, sy + dy, sz + dz));
-                }
-            }
-        }
-        // Every further cell can only add sections already reachable from a full
-        // 3×3×3, so once all 27 are queued there is nothing left to find. This
-        // is what bounds a 4096-cell `SECTION_BLOCKS_UPDATE` to 27 re-meshes.
-        if dirty.len() == 27 {
-            break;
-        }
-    }
-    dirty
-}
-
 mod placement;
 
 // Re-exported so every existing call site in this file (and `sim/tests.rs`'s
@@ -3061,6 +3013,18 @@ mod actions;
 mod net_apply;
 mod audio;
 mod camera;
+mod meshing;
+
+// `sim/tests.rs`'s `dirty_sections_for_blocks(...)` calls cross the new
+// sibling boundary; this private `use` re-enters its `use super::*;` glob
+// the same way `placement::is_air_state` already does. No `pub use`: nothing
+// outside this crate names it. `#[cfg(test)]`, unlike the other seam
+// re-exports here: every non-test caller (`meshing::remesh_changed_blocks`)
+// already lives inside `sim::meshing` itself and needs no re-export, so a
+// plain `use` is dead code — and therefore a warning, not just noise — in a
+// `--lib`-only build.
+#[cfg(test)]
+use meshing::dirty_sections_for_blocks;
 
 // `app.rs` names this by its full path (`crate::sim::fog_for_render_distance`),
 // and `app.rs` is neither `sim` nor a descendant of it, so a private `use`
@@ -3209,246 +3173,6 @@ impl Sim {
     #[must_use]
     pub fn tick_count(&self) -> u64 {
         self.clock().ticks
-    }
-
-    /// The block state id at a world position, or air when the column is not
-    /// loaded or the y is outside the build range.
-    fn block_at_world(&self, block: [i32; 3]) -> u32 {
-        let pos = ChunkPos {
-            x: block[0].div_euclid(16),
-            z: block[2].div_euclid(16),
-        };
-        let store = self.chunk_world();
-        let world = store.read();
-        let Some(chunk) = world.get(pos) else {
-            return id::AIR;
-        };
-        let col = &chunk.column;
-        if block[1] < col.min_y() || block[1] >= col.max_y() {
-            return id::AIR;
-        }
-        lodestone_world::BlockVolume::block(
-            col,
-            block[0].rem_euclid(16) as usize,
-            block[1],
-            block[2].rem_euclid(16) as usize,
-        )
-    }
-
-    /// Write a block into the chunk store. Offline-world editing only: on a live
-    /// session the server is authoritative and the edit arrives as a block-update
-    /// packet.
-    ///
-    /// There is nothing to invalidate afterwards. Before Stage 4 this was the one
-    /// write path to `Sim.world` and therefore the one place the cached offline
-    /// collision clone had to be cleared by hand — a missed clear reading as "I
-    /// mined the block but still cannot walk through it". The collision source now
-    /// reads the store itself, so the rule is gone rather than merely obeyed.
-    ///
-    /// # Why this does *not* call `sync_block_entity`, unlike every other writer
-    ///
-    /// `value` is a [`crate::blocks::id`] constant — the shell's **own** ten-entry
-    /// demo palette, deliberately unrelated to any protocol's ids (see that
-    /// module's docs). Running it through `lodestone_data`'s 26.2
-    /// `state_id → block_entity_type` census would be a category error: `id::WATER`
-    /// is `5`, and real state `5` is some unrelated 26.2 block that may well own a
-    /// block entity. So the demo world has no block entities, correctly — the
-    /// palette contains nothing that could have one. The live prediction's writer
-    /// is [`write_predicted_block`], which is fed real census state ids.
-    fn set_block_world(&mut self, block: [i32; 3], value: u32) -> bool {
-        let pos = ChunkPos {
-            x: block[0].div_euclid(16),
-            z: block[2].div_euclid(16),
-        };
-        let store = self.chunk_world();
-        let mut world = store.write();
-        let Some(chunk) = world.get_mut(pos) else {
-            return false;
-        };
-        let col = &mut chunk.column;
-        if block[1] < col.min_y() || block[1] >= col.max_y() {
-            return false;
-        }
-        col.set_block(
-            block[0].rem_euclid(16) as usize,
-            block[1],
-            block[2].rem_euclid(16) as usize,
-            value,
-        );
-        true
-    }
-
-    /// Re-snapshot and re-schedule the section holding `block`, plus any
-    /// neighbour section that shares the boundary the block sits on (a face on a
-    /// section edge changes the neighbour's mesh via culling/AO). Sections that
-    /// became all-air are queued for GPU removal instead.
-    fn remesh_around(&mut self, block: [i32; 3]) {
-        let Some(extent) = self.chunk_world().extent() else {
-            return;
-        };
-        let (min_y, section_count) = (extent.min_y, extent.section_count);
-        let cx = block[0].div_euclid(16);
-        let cz = block[2].div_euclid(16);
-        let lx = block[0].rem_euclid(16);
-        let lz = block[2].rem_euclid(16);
-        let si = (block[1] - min_y).div_euclid(16);
-        let ly = (block[1] - min_y).rem_euclid(16);
-
-        for dx in -1..=1 {
-            for dy in -1..=1 {
-                for dz in -1..=1 {
-                    if (dx == -1 && lx != 0) || (dx == 1 && lx != 15) {
-                        continue;
-                    }
-                    if (dy == -1 && ly != 0) || (dy == 1 && ly != 15) {
-                        continue;
-                    }
-                    if (dz == -1 && lz != 0) || (dz == 1 && lz != 15) {
-                        continue;
-                    }
-                    let nsi = si + dy;
-                    if nsi < 0 || nsi as usize >= section_count {
-                        continue;
-                    }
-                    self.remesh_section(cx + dx, cz + dz, nsi as usize, min_y, section_count);
-                }
-            }
-        }
-    }
-
-    /// Re-snapshot and re-schedule one section. A section that snapshots to
-    /// nothing is queued for GPU removal rather than left showing stale geometry.
-    ///
-    /// One path, not two: before Stage 4 this branched on `vanilla_atlas &&
-    /// net && world_dimensions` to pick which of the two `World`s to read.
-    fn remesh_section(&mut self, cx: i32, cz: i32, si: usize, min_y: i32, section_count: usize) {
-        let key = SectionKey { cx, cz, si, min_y };
-        self.terrain_and_world(|store, terrain| terrain.mesh_section(store, key, section_count));
-    }
-
-    /// Re-mesh after a server-authoritative edit inside section
-    /// `(sx, sy, sz)`, where `blocks` are the section-relative coordinates of
-    /// every changed cell.
-    ///
-    /// Section granularity, not column: this is the signal every redstone tick
-    /// carries, and a whole-column re-mesh is ~24 sections each snapshotting a
-    /// 27-section neighbourhood. A cell on a section face also dirties the
-    /// section across that face — culling, AO and fluid corner heights all read
-    /// across the boundary — so an edit at local x=15 fixes the neighbouring
-    /// column's seam too, which a column-scoped signal cannot express. Keys are
-    /// deduplicated first, so a 4096-cell update still submits at most 27
-    /// snapshots.
-    fn remesh_changed_blocks(&mut self, sx: i32, sy: i32, sz: i32, blocks: &[[u8; 3]]) {
-        let Some(extent) = self.chunk_world().extent() else {
-            return;
-        };
-        let base_si = extent.min_y.div_euclid(16);
-        for (nsx, nsy, nsz) in dirty_sections_for_blocks(sx, sy, sz, blocks) {
-            let si = nsy - base_si;
-            if si < 0 || si as usize >= extent.section_count {
-                continue;
-            }
-            self.remesh_section(nsx, nsz, si as usize, extent.min_y, extent.section_count);
-        }
-    }
-
-    /// Handle a chunk-arrival signal for `(cx, cz)`: mesh that column now, and
-    /// queue its **loaded horizontal neighbours** for a boundary re-mesh.
-    ///
-    /// A section's geometry is a function of its whole 3×3×3 neighbourhood, so a
-    /// column that was meshed while `(cx, cz)` was still absent baked its seam
-    /// against air. Left alone that is permanent, and it is exactly what a
-    /// play-test sees: **water grows a falling "wall" at every chunk border**
-    /// (the neighbour cell reads as no-fluid, so the side face is emitted and the
-    /// corner heights collapse), plus wrong cross-chunk AO and stray culled
-    /// faces. The tell that it is a staleness bug and not a mesher bug is that
-    /// breaking any block in the column fixes it — [`Sim::remesh_around`] already
-    /// re-meshes neighbours.
-    ///
-    /// The centre column meshes immediately (load responsiveness); the eight
-    /// neighbours are coalesced into `TerrainMesh::dirty_columns` and drained on a
-    /// budget by the `heal_dirty_columns` system, so a spiral load re-meshes each
-    /// column a small constant number of times instead of nine.
-    fn on_column_arrived(&mut self, cx: i32, cz: i32) {
-        self.mark_column_dirty(cx, cz);
-        self.terrain_and_world(|store, terrain| terrain.mark_neighbours_dirty(store, cx, cz));
-    }
-
-    /// Handle a `ChunkLoaded` / [`NetUpdate::Chunk`] dirty-region signal: the
-    /// column at `(cx, cz)` changed, so re-mesh every section it holds.
-    ///
-    /// **One path since Stage 4.** This used to be two, chosen by
-    /// `vanilla_atlas.is_some() && net.is_some() && world_dimensions().is_some()`:
-    /// one reading the client-owned world through `NetClient`, one reading `Sim`'s
-    /// own. With a single [`ChunkWorld`] store there is one world to read, and the
-    /// only thing the old guard genuinely encoded — *is the mesh classifier's
-    /// block-id space the store's?* — survives as `MeshPolicy::id_spaces_agree`.
-    /// Light stays server-authoritative on the live path: nothing here recomputes
-    /// it (that would overwrite the server's seam-complete cross-chunk light with a
-    /// partial result — a divergence bug). Multiplayer *consumes* light;
-    /// singleplayer computes it.
-    fn mark_column_dirty(&mut self, cx: i32, cz: i32) {
-        self.terrain_and_world(|store, terrain| terrain.mesh_column(store, cx, cz));
-    }
-
-    /// Settle any placement prediction the server has just overwritten.
-    ///
-    /// [`NetUpdate::SectionBlocks`] is the shell's view of `BLOCK_UPDATE` /
-    /// `SECTION_BLOCKS_UPDATE`: the authoritative state has **already** been
-    /// applied to the one store by the adapter, which (since #374) already created
-    /// or removed the block entity with it. So this does not correct the world —
-    /// the world is corrected by construction, including a refused placement whose
-    /// bogus chest record is dropped by that arm's `sync_block_entity` — it only
-    /// clears the prediction from [`Placement`]'s ledger and asks whether the
-    /// server agreed.
-    ///
-    /// Both halves matter. Without the clear the ledger grows without bound for the
-    /// whole session, one entry per right-click, because nothing else drains it (the
-    /// `block_changed_ack` sequence is decoded by the adapter but has no shell
-    /// consumer). Without the answer a refusal is invisible.
-    fn reconcile_predictions(&mut self, sx: i32, sy: i32, sz: i32, blocks: &[[u8; 3]]) {
-        let pending: Vec<BlockPos> = self.read(|w| {
-            w.resource::<PlacementPredictor>()
-                .0
-                .pending()
-                .iter()
-                .map(|prediction| prediction.pos)
-                .collect()
-        });
-        // The common case by far — one `O(1)` read, and a `/fill` of 4096 cells
-        // does no per-cell work at all.
-        if pending.is_empty() {
-            return;
-        }
-        for &[rel_x, rel_y, rel_z] in blocks {
-            let pos = BlockPos::new(
-                (sx << 4) | i32::from(rel_x),
-                (sy << 4) | i32::from(rel_y),
-                (sz << 4) | i32::from(rel_z),
-            );
-            if !pending.contains(&pos) {
-                continue;
-            }
-            let server_block = self
-                .net
-                .as_ref()
-                .and_then(|net| net.block_at(pos))
-                .and_then(lodestone_data::block_states::block_name)
-                .and_then(|name| name.parse::<lodestone_model::Identifier>().ok());
-            let outcome = self.write(|w| {
-                w.resource_mut::<PlacementPredictor>()
-                    .0
-                    .reconcile(pos, server_block.as_ref())
-            });
-            if outcome.corrected {
-                tracing::debug!(
-                    target: "placement",
-                    "server overrode the predicted block at {:?} with {:?}",
-                    pos,
-                    server_block
-                );
-            }
-        }
     }
 
     fn refresh_stats(&mut self) {
