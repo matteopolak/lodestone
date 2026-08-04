@@ -615,6 +615,24 @@ scene in the tree that structurally cannot exercise it.**
 Audit questions: *does any server-side counter accumulate past this gate's lifetime?* and *does the
 input actually contain the structure the code under test exists to handle?*
 
+**A test that performs an OS-level side effect is a defect with a user-visible symptom, and no health
+check in this file can see it — the suite passes.** The owner reported that
+`https://login.live.com/oauth20_remoteconnect.srf` kept opening in their browser unprompted. It was
+**our test suite**: an accounts-screen unit test feeds a `Prompt` fixture, `nav.pump()` treats the
+browser open as an *effect*, and `Command::new("open").spawn()` fires — so to the OS a unit test and
+a player pressing **Add account** are indistinguishable. The fixture URL `https://microsoft.com/link`
+301s to the device-code endpoint in one hop, which is why the symptom named a flow production has not
+used since `c33e325`. It fired once per `cargo test -p lodestone-shell` run, which is constantly.
+
+Two things generalise. **Fork on `#[cfg(test)]` rather than early-returning on `cfg!(test)`**, so the
+interception is *assertable* instead of a silent skip — the gate that catches this asserts the
+`cfg(test)` arm is the compiled one, and fails if the fork is deleted. And **grep for the effect, not
+the feature**: `Command::new("open")` / `xdg-open` / `cmd /C start` tree-wide found a second latent
+instance in `menu/telemetry.rs`, which had escaped only because no test activates those two rows.
+Fixtures should use RFC 2606 `.invalid` hostnames as a second layer. Chasing this cost two passes,
+and the first one's guess — a stale binary — was disprovable from the owner's own bug report that
+morning.
+
 **Measure by location, never by frame average.** Averaging a frame once gave G/R ≈ 1.13 and read as
 "global gamma"; clustering by *location* revealed two spatially distinct populations, which a global
 transform cannot produce. Ask *where*, not *what*.
