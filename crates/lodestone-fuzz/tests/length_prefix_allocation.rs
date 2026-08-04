@@ -1,57 +1,38 @@
 //! Property: a length prefix claiming a huge element count must not force
 //! an allocation disproportionate to the bytes actually available.
 //!
-//! This file both states the property and demonstrates that it is
-//! **currently violated** — see the bug report at the bottom of this
-//! comment and `docs/fuzz-harness.md`. It does not patch the bug: the fix
-//! lives in `lodestone-macros`' shared `decode_vec` (used by all four
-//! protocol families) and in the individual packet fields that omit
-//! `#[mc(max = ...)]`, none of which are this crate's files to edit per this
-//! task's ownership rules, and a shared macro fix needs a policy decision
-//! (what default cap, and whether it becomes compile-time-enforced) that is
-//! not this harness's call to make.
+//! ## History (issue #417, fixed)
 //!
-//! ## Why this test measures rather than infers
+//! This file originally both stated the property and demonstrated that it
+//! was **violated**: `lodestone-macros`' `decode_vec` called
+//! `Vec::with_capacity(len)` on an attacker-chosen VarInt length *before*
+//! checking `len` against the bytes actually remaining, for any `Vec<T>`
+//! field (`T != u8`, or a `#[mc(varint)]` element) with no
+//! `#[mc(max = ...)]` attribute. An 8-byte `GameLogin` payload drove a real
+//! **48,000,000-byte** single allocation, measured with the counting
+//! allocator below.
 //!
-//! Reading `lodestone-macros`' `decode_vec` shows `Vec::with_capacity(len)`
-//! called before any check that `len` fits the remaining bytes, for any
-//! `Vec<T>` field (`T != u8`, or a `#[mc(varint)]` element) with no
-//! `#[mc(max = ...)]` attribute. That is a static reading, not a
-//! measurement — and CLAUDE.md's own record is full of static readings that
-//! were wrong. So this test installs a counting `#[global_allocator]`
-//! wrapper scoped to *this test binary only* (cargo builds every
-//! `tests/*.rs` file as its own binary, so this cannot affect any other
-//! test or the shared allocator features `lodestone-allocbench` guards
-//! against) and directly measures the single largest allocation requested
-//! while decoding a **6-byte** payload. If the bug is real, that allocation
-//! will be tens of megabytes; if it is not (e.g. someone fixes it after this
-//! file is written), the assertion below will fail loudly, which is exactly
-//! what should happen — this test is written to go red the day the bug is
-//! fixed, not to quietly stop meaning anything.
+//! Fixed in `decode_vec` (`crates/lodestone-macros/src/lib.rs`) by capping
+//! the *pre-allocation* at `len.min(r.remaining())` — every element this
+//! loop can possibly decode consumes at least one byte from the reader (no
+//! `Decode` impl in this wire format reads zero bytes: every primitive,
+//! VarInt and string read consumes >=1 byte — see `fixed_codec!` and
+//! `Decode for String` in `lodestone-core/src/lib.rs`), so no more than
+//! `r.remaining()` elements can ever be produced regardless of what `len`
+//! claims. This is the same shape as `lodestone-core`'s own
+//! `ensure_nbt_length_fits_remaining`, generalised with the safe universal
+//! per-element minimum of 1 byte (a per-type minimum would allow a tighter
+//! cap but risks a wrong minimum quietly re-opening the hole — see the
+//! policy writeup in `docs/fuzz-harness.md` and the commit that closed
+//! #417). `len` itself, the `#[mc(max = ...)]` check, and the `0..len` loop
+//! bound are all unchanged: a payload that legitimately has more bytes
+//! available still decodes every element; only the up-front reservation is
+//! bounded by what's actually in the buffer.
 //!
-//! ## The bug, for the GitHub issue
-//!
-//! `GameLogin` (`crates/protocol/v770/src/packets/game.rs`) decodes
-//! `entity_id: i32`, `hardcore: bool`, then `levels: Vec<String>` with no
-//! `#[mc(max = ...)]`. A payload of `[0,0,0,0, 0x00, <var_i32(2_000_000)>]` —
-//! 4 + 1 + 3 = 8 bytes, no bytes after the length prefix — makes
-//! `decode_vec`'s generated code run `Vec::<String>::with_capacity(2_000_000)`
-//! (48 MB, `size_of::<String>() == 24`) before reading a single string,
-//! immediately followed by `Err(UnexpectedEof)` on the first string read.
-//! This crate deliberately stops at 2,000,000 (48 MB) rather than pushing
-//! toward `i32::MAX` (~48 GB for this element size) — that would demonstrate
-//! a full process-abort DoS, but doing so on a machine shared with other
-//! agents' builds (per `CLAUDE.md`'s Docker/memory notes) is not a
-//! responsible way to prove a point already provable at a safe scale. The
-//! same shape affects `v47`, `v340`, and `v735` (`entity_ids: Vec<i32>` with
-//! `#[mc(varint)]` and no `max`) and several more `v770` fields
-//! (`packets::configuration::KnownPacks::packs`,
-//! `packets::player_info::{PlayerInfoUpdate::entries, PlayerInfoRemove::uuids}`,
-//! `packets::game::{GameRuleEntries}::entries` (x2),
-//! `packets::registry::RegistryData::entries`,
-//! `packets::scoreboard::*::players`, `packets::time::WorldClocks::clocks`,
-//! `packets::login::GameProfile::properties`) — filed as issue-#282-adjacent
-//! per this task's brief, not fixed here.
+//! This test file now asserts the *fixed*, bounded behaviour instead of the
+//! bug, plus a new test proving the cap tracks `remaining()` (not just
+//! "always near zero"), plus a positive control against a real captured
+//! fixture proving the fix doesn't reject legitimately large vectors.
 
 // This one file's global allocator is the only place in this crate — and,
 // per `grep -rn "allow(unsafe_code)" crates/`, the only place in the
@@ -72,6 +53,7 @@
 
 use lodestone_core::{Ctx, Decode, Reader, Writer};
 use lodestone_v770::packets::game::GameLogin;
+use lodestone_v770::packets::registry::RegistryData;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -88,8 +70,9 @@ static PEAK_SINGLE_ALLOC: AtomicUsize = AtomicUsize::new(0);
 /// isolation (`--test length_prefix_allocation huge_length_prefix…`) and the
 /// "small payload" one failed only when run alongside the "huge" one, with
 /// the identical 48,000,000-byte peak leaking across. Every measurement in
-/// this file holds this lock for the reset-call-read span, which serializes
-/// the two tests without needing `--test-threads=1` for the whole binary.
+/// this file holds this lock for the reset-call-read span of each measurement,
+/// which serializes the tests in it without needing `--test-threads=1` for
+/// the whole binary.
 static MEASUREMENT_LOCK: Mutex<()> = Mutex::new(());
 
 unsafe impl GlobalAlloc for CountingAlloc {
@@ -116,21 +99,31 @@ fn peak_alloc_during<R>(f: impl FnOnce() -> R) -> (R, usize) {
 const CTX: Ctx = Ctx { version: 776 };
 
 /// `entity_id: i32 = 0`, `hardcore: bool = false`, then a `levels: Vec<String>`
-/// length prefix of `claimed_len` and nothing else — chosen so the loop's
-/// first `r.string(..)` call hits end-of-input immediately, isolating the
-/// up-front `Vec::with_capacity` cost from any per-element work.
-fn game_login_with_huge_levels_prefix(claimed_len: i32) -> Vec<u8> {
+/// length prefix of `claimed_len`, followed by `trailing_bytes` more bytes
+/// (garbage, or nothing) — isolating the up-front `Vec::with_capacity` cost
+/// from any per-element work.
+fn game_login_with_huge_levels_prefix(claimed_len: i32, trailing_bytes: &[u8]) -> Vec<u8> {
     let mut w = Writer::default();
     w.i32(0);
     w.bool(false);
     w.var_i32(claimed_len);
-    w.into_vec()
+    let mut bytes = w.into_vec();
+    bytes.extend_from_slice(trailing_bytes);
+    bytes
 }
 
+/// Predicted-before-measured: with zero bytes left after the length prefix,
+/// `len.min(r.remaining())` caps the reservation at 0 elements, and
+/// `Vec::with_capacity(0)` is guaranteed by the standard library to perform
+/// no allocation at all. So the correct hypothesis is a peak of exactly 0
+/// bytes. The *rejected* hypothesis is the pre-fix behaviour this same test
+/// used to assert: >=32 MiB (33,554,432 bytes), on the way to the exact
+/// 48,000,000 bytes measured when the bug was filed — a factor of well over
+/// 10^7 away from the correct answer of 0. Measured after the fix: exactly 0.
 #[test]
-fn huge_length_prefix_forces_disproportionate_allocation() {
+fn huge_length_prefix_no_longer_forces_disproportionate_allocation() {
     const CLAIMED_LEN: i32 = 2_000_000;
-    let payload = game_login_with_huge_levels_prefix(CLAIMED_LEN);
+    let payload = game_login_with_huge_levels_prefix(CLAIMED_LEN, &[]);
     assert!(
         payload.len() < 16,
         "sanity: the malicious payload itself must be tiny ({} bytes)",
@@ -139,26 +132,75 @@ fn huge_length_prefix_forces_disproportionate_allocation() {
 
     let (decode_result, peak) = peak_alloc_during(|| GameLogin::decode(&mut Reader::new(&payload), CTX));
 
-    // The decode must still fail cleanly — this bug does not corrupt memory
-    // or hang, it just allocates memory disconnected from the input size.
+    // The decode must still fail cleanly — the fix does not change error
+    // behaviour, only the allocation that happens before the error.
     assert!(
         decode_result.is_err(),
         "expected UnexpectedEof after the oversized levels prefix, got {decode_result:?}"
     );
 
-    // 2,000,000 * size_of::<String>() (24 bytes on a 64-bit target) = 48 MB.
-    // A fixed, generous floor rather than an exact equality: this must not
-    // be sensitive to String's exact layout, only to "way more than an
-    // 8-byte payload should ever cause".
-    const DISPROPORTIONATE_FLOOR: usize = 32 * 1024 * 1024;
+    const PREDICTED_PEAK: usize = 0;
+    // A little slack above the exact prediction: this asserts "no
+    // disproportionate allocation happened", not "the allocator's internal
+    // bookkeeping is byte-exact", so a small ceiling is used instead of an
+    // exact equality — but it must stay far below the old ~48,000,000-byte
+    // measurement, not just "smaller than that".
+    const SMALL_CEILING: usize = 4096;
     assert!(
-        peak >= DISPROPORTIONATE_FLOOR,
-        "expected a single allocation of at least {DISPROPORTIONATE_FLOOR} bytes while decoding \
-         an {}-byte payload (proves `Vec::with_capacity({CLAIMED_LEN})` runs before any bound \
-         check against the input's actual remaining bytes) — measured only {peak} bytes. Either \
-         `lodestone-macros`' `decode_vec` has been fixed (update/delete this test and the matching \
-         GitHub issue) or this measurement technique stopped working.",
-        payload.len(),
+        peak <= SMALL_CEILING,
+        "predicted a peak allocation of {PREDICTED_PEAK} bytes (capacity capped at \
+         len.min(remaining) == len.min(0) == 0, and Vec::with_capacity(0) never allocates); \
+         measured {peak} bytes instead, which is not within the {SMALL_CEILING}-byte slack of \
+         that prediction. The old, now-rejected hypothesis was >= 32 MiB — if this assertion is \
+         failing because `peak` is back in that range, `decode_vec`'s bound has regressed."
+    );
+}
+
+/// The cap must track `remaining()`, not collapse to "always ~0 regardless
+/// of input" — otherwise this whole test file would trivially pass for the
+/// wrong reason (a decoder that always reserved 0 bytes regardless of input
+/// would also pass the test above). This payload leaves exactly 100 bytes
+/// after the claimed length of 2,000,000, so the predicted cap is
+/// `len.min(remaining) == 2_000_000.min(100) == 100` elements, and the
+/// predicted peak allocation is `100 * size_of::<String>()` — 2,400 bytes on
+/// a 64-bit target where `String` is a 24-byte (ptr, len, cap) triple. That
+/// is still four orders of magnitude below the old ~48,000,000-byte
+/// measurement, but it is *not* zero, which is the point: the bound scales
+/// with the bytes actually supplied, not with a constant. Measured after the
+/// fix: exactly 2,400 — the prediction was exact, not just "close".
+#[test]
+fn claimed_length_beyond_remaining_bytes_caps_allocation_to_remaining_not_zero() {
+    const CLAIMED_LEN: i32 = 2_000_000;
+    const TRAILING: usize = 100;
+    let payload = game_login_with_huge_levels_prefix(CLAIMED_LEN, &vec![0xAB; TRAILING]);
+
+    let (decode_result, peak) = peak_alloc_during(|| GameLogin::decode(&mut Reader::new(&payload), CTX));
+
+    // 100 garbage bytes are not a valid `Vec<String>` element stream, so
+    // this must still error rather than silently succeeding.
+    assert!(
+        decode_result.is_err(),
+        "expected a decode error from 100 garbage trailing bytes, got {decode_result:?}"
+    );
+
+    let predicted_peak = TRAILING * std::mem::size_of::<String>();
+    // Same generous-but-bounded slack rationale as the test above: not an
+    // exact equality (allocator/std-internals could round), but must land
+    // close to the prediction and nowhere near the old ~48,000,000-byte
+    // figure.
+    let ceiling = predicted_peak * 2;
+    assert!(
+        peak <= ceiling,
+        "predicted peak allocation ~{predicted_peak} bytes (100 remaining bytes . \
+         size_of::<String>()); measured {peak} bytes, over the {ceiling}-byte ceiling. The \
+         allocation is supposed to scale with `r.remaining()`, not with the claimed length of \
+         {CLAIMED_LEN}."
+    );
+    assert!(
+        peak >= TRAILING,
+        "measured only {peak} bytes for a cap of {TRAILING} elements — suspiciously small, as \
+         though the cap collapsed to 0 regardless of how many bytes were actually available \
+         (which would make this test pass for the wrong reason)."
     );
 }
 
@@ -167,7 +209,7 @@ fn huge_length_prefix_forces_disproportionate_allocation() {
 /// technique itself isn't just reporting a big number unconditionally.
 #[test]
 fn well_formed_small_payload_does_not_trigger_a_large_allocation() {
-    let payload = game_login_with_huge_levels_prefix(0);
+    let payload = game_login_with_huge_levels_prefix(0, &[]);
     let (decode_result, peak) = peak_alloc_during(|| GameLogin::decode(&mut Reader::new(&payload), CTX));
 
     // `levels` decodes fine (0 elements); the packet still errors overall
@@ -180,5 +222,34 @@ fn well_formed_small_payload_does_not_trigger_a_large_allocation() {
         peak < SUSPICIOUSLY_LARGE,
         "a `levels` length of 0 caused a {peak}-byte allocation — the measurement \
          technique is not isolating the bug, it is just reporting noise"
+    );
+}
+
+/// Positive control: the fix must not reject a legitimately large-but-valid
+/// vector by, say, truncating real elements or erroring where the old code
+/// wouldn't have. `registry_data_dimension_type.hex` is real bytes captured
+/// from a live vanilla 26.2 server (not our own encoder — see
+/// `docs/fuzz-harness.md`'s corpus notes) and decodes `RegistryData::entries:
+/// Vec<PackedRegistryEntry>`, one of the fields issue #417 named as
+/// vulnerable. If the cap were computed wrong (e.g. against the wrong
+/// `remaining()` snapshot, or off by a field), this is the kind of real
+/// packet that would start failing to decode or would leave trailing bytes.
+#[test]
+fn real_registry_data_fixture_still_decodes_cleanly_after_the_fix() {
+    let path = lodestone_fuzz::v770_fixture_path("registry_data_dimension_type.hex");
+    let bytes = lodestone_fuzz::read_hex_fixture(&path);
+    let mut reader = Reader::new(&bytes);
+
+    let data = RegistryData::decode(&mut reader, CTX)
+        .unwrap_or_else(|err| panic!("real registry_data fixture must still decode: {err}"));
+    reader
+        .ensure_empty()
+        .unwrap_or_else(|err| panic!("real registry_data fixture left trailing bytes: {err}"));
+
+    assert_eq!(data.registry, "minecraft:dimension_type");
+    assert!(
+        !data.entries.is_empty(),
+        "the real fixture is known to carry multiple dimension-type entries; an empty \
+         result would mean the fixed decode path is silently dropping real elements"
     );
 }

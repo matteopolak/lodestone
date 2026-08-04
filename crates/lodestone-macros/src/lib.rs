@@ -957,12 +957,27 @@ fn decode_vec(crate_path: &Path, ty: &Type, attrs: &FieldAttr) -> syn::Result<To
         .map(|max| limit_check(crate_path, quote!(len), max))
         .unwrap_or_default();
 
+    // `len` is attacker-controlled (a wire length prefix) and, absent
+    // `#[mc(max = ...)]`, unbounded by anything about this specific field.
+    // Every element this loop can possibly decode consumes at least one
+    // byte from `r` (there is no zero-byte-consuming `Decode` in this wire
+    // format: primitives, VarInts and strings all read >=1 byte), so no
+    // more than `r.remaining()` elements can ever be produced. Capping the
+    // *pre-allocation* at `len.min(r.remaining())` keeps the eager
+    // `with_capacity` call bounded by the bytes actually available rather
+    // than by a number the input merely claims — see issue #417. This does
+    // not change `len` itself: the `#max_check` above and the `0..len` loop
+    // below are untouched, so a payload that legitimately has more bytes
+    // than currently buffered (e.g. more arrives on the socket) still
+    // decodes every element; only the up-front reservation is bounded.
+    let capped_capacity = quote! { len.min(r.remaining()) };
+
     if attrs.var_encoding == VarEncoding::VarInt {
         validate_var_integer(element, "varint")?;
         Ok(quote! {{
             let len = { #read_len };
             #max_check
-            let mut values = ::std::vec::Vec::with_capacity(len);
+            let mut values = ::std::vec::Vec::with_capacity(#capped_capacity);
             for _ in 0..len {
                 values.push(r.var_i32()? as _);
             }
@@ -978,7 +993,7 @@ fn decode_vec(crate_path: &Path, ty: &Type, attrs: &FieldAttr) -> syn::Result<To
         Ok(quote! {{
             let len = { #read_len };
             #max_check
-            let mut values = ::std::vec::Vec::with_capacity(len);
+            let mut values = ::std::vec::Vec::with_capacity(#capped_capacity);
             for _ in 0..len {
                 values.push(<#element as #crate_path::Decode>::decode(r, ctx)?);
             }

@@ -48,7 +48,7 @@ Each test file targets a different property or a different decoder direction:
 | `tests/no_panic_v770_serverbound.rs` | no panic on arbitrary bytes | `V770ServerProtocol::decode`, serverbound |
 | `tests/no_panic_net_codec.rs` | no panic, and terminates, on arbitrary bytes | `lodestone_net::Codec` (frame length + compression, ahead of every `VersionAdapter`) |
 | `tests/truncation_is_clean.rs` | truncated valid packet errors cleanly | `handle_packet`, corpus-driven |
-| `tests/length_prefix_allocation.rs` | length prefix must not over-allocate | `GameLogin::decode` (demonstrates a real violation) |
+| `tests/length_prefix_allocation.rs` | length prefix must not over-allocate | `GameLogin::decode`, `RegistryData::decode` (proves the fix, issue #417) |
 
 ### The control (`tests/harness_control.rs`)
 
@@ -122,35 +122,57 @@ rule applies to fuzz seeds, so `truncation_is_clean.rs` ranks its corpus explici
   families). That gap is real; closing it would mean joining a legacy-protocol oracle and
   checking in fixtures the way `v770`'s live tests already do.
 
-### Bug found: unbounded allocation from a length prefix (not fixed here)
+### Bug found and fixed: unbounded allocation from a length prefix (issue #417)
 
-`length_prefix_allocation.rs` both states and **measures** a real violation of the "must not
+`length_prefix_allocation.rs` both stated and **measured** a real violation of the "must not
 pre-allocate" property. `lodestone-macros`' `decode_vec` (`crates/lodestone-macros/src/lib.rs`,
-in `decode_vec`, the non-`u8`-element and `#[mc(varint)]`-element branches) emits
+in `decode_vec`, the non-`u8`-element and `#[mc(varint)]`-element branches) emitted
 `Vec::with_capacity(len)` for a `Vec<T>` field *before* checking `len` against the bytes
 actually remaining — unlike `lodestone-core`'s NBT reader, which bounds every array/list
 length against `Reader::remaining()` first (`ensure_nbt_length_fits_remaining`). Any packet
-field of that shape with no `#[mc(max = ...)]` attribute inherits the bug.
+field of that shape with no `#[mc(max = ...)]` attribute inherited the bug.
 
 Confirmed, not just read: an 8-byte `GameLogin` payload (`entity_id = 0`, `hardcore = false`,
-then a `levels` length prefix of 2,000,000 and nothing after it) drives a real
-**48,000,000-byte** single allocation before the first per-element read fails with a clean
+then a `levels` length prefix of 2,000,000 and nothing after it) drove a real
+**48,000,000-byte** single allocation before the first per-element read failed with a clean
 `UnexpectedEof` — measured with a counting `#[global_allocator]` scoped to that one test
 binary (the only `allow(unsafe_code)` in the workspace; see the comment in that file for why
 implementing `GlobalAlloc` needs it and why it's safe to allow narrowly). 2,000,000 was chosen
 deliberately over pushing toward `i32::MAX` (~48 GB for this field): that would demonstrate a
 full process-abort DoS but risks real memory pressure on a machine shared with other agents'
-builds, which `CLAUDE.md`'s own Docker-memory incident already flags as a live hazard. A
-second test in the same file (`well_formed_small_payload_does_not_trigger_a_large_allocation`)
-is the control for that measurement: a `levels` length of 0 must **not** report a large
-allocation, proving the counting allocator isn't just reporting noise regardless of input —
-running both together also surfaced a real test-isolation bug of this harness's own (see
+builds, which `CLAUDE.md`'s own Docker-memory incident already flags as a live hazard.
+
+**Fixed** in `decode_vec` by capping the pre-allocation at `len.min(r.remaining())` instead of
+trusting `len` outright. This is the *bound-by-what's-available* policy (option 1 of the three
+the issue laid out — the other two were "don't pre-allocate at all", which pays a reallocation
+cost on the hot decode path for no benefit here, and "require `#[mc(max = ...)]` everywhere",
+a breaking change across four protocol crates that this fix avoids needing). The per-element
+minimum used is the safe universal one — 1 byte — rather than a per-`T` minimum: every `Decode`
+impl in this wire format consumes at least one byte (`fixed_codec!`'s primitives, `Decode for
+String` via `Reader::string`, and any derived struct built from those), so capacity can never
+exceed `r.remaining()` elements regardless of what `len` claims, and there is no per-type
+minimum to get subtly wrong. `len` itself, the `#[mc(max = ...)]` check, and the `0..len` loop
+bound are unchanged — only the up-front reservation is capped, so a field that legitimately has
+enough bytes buffered still decodes every element in one allocation as before.
+
+Measured after the fix: the same 8-byte payload now peaks at **0 bytes** (capacity capped to
+`len.min(0) == 0`, and `Vec::with_capacity(0)` never allocates) — down from 48,000,000. A second
+test proves the cap tracks `r.remaining()` rather than collapsing to "always zero": 100 trailing
+garbage bytes after the same oversized length prefix caps the reservation at 100 elements and
+peaks at exactly **2,400 bytes** (`100 * size_of::<String>()`), predicted before it was measured.
+A positive control decodes a real captured `registry_data` fixture — one of the affected
+field-shapes below — through `RegistryData::decode` and asserts it still decodes cleanly with no
+trailing bytes, proving the cap doesn't reject legitimately large vectors.
+`well_formed_small_payload_does_not_trigger_a_large_allocation` remains as the control that the
+counting allocator itself isn't just reporting noise regardless of input — running it alongside
+the huge-prefix test also surfaced a real test-isolation bug of this harness's own (see
 "Gotchas" below).
 
-Affected fields, found by grepping every `Vec<T>` struct field lacking `max`/`remaining`/
-`fixed`/`nbt` across all four families' `packets/*.rs` and excluding `Vec<u8>` (safe — its
-`decode_vec` branch validates via `Reader::bytes` before allocating) and `#[mc(len = "i16")]`
-fields (safe in practice — an `i16` length tops out at 32,767 elements regardless of `max`):
+Fields that were vulnerable before the fix, found by grepping every `Vec<T>` struct field
+lacking `max`/`remaining`/`fixed`/`nbt` across all four families' `packets/*.rs` and excluding
+`Vec<u8>` (safe — its `decode_vec` branch validates via `Reader::bytes` before allocating) and
+`#[mc(len = "i16")]` fields (safe in practice — an `i16` length tops out at 32,767 elements
+regardless of `max`):
 
 - `v47`, `v340`, `v735`: `entity.rs`'s `entity_ids: Vec<i32>` (`#[mc(varint)]`).
 - `v735`: `game.rs`'s `world_names: Vec<String>`.
@@ -160,11 +182,13 @@ fields (safe in practice — an `i16` length tops out at 32,767 elements regardl
   `scoreboard.rs`'s `players: Vec<String>`; `configuration.rs`'s `packs: Vec<KnownPack>`
   (×2); `time.rs`'s `clocks: Vec<ClockUpdate>`; `login.rs`'s `properties: Vec<Property>`.
 
-Not fixed here: the fix is a shared-macro change (`lodestone-macros` is not this task's file
-to edit) that needs a policy decision — a default cap, whether it becomes a compile-time
-lint requiring every `Vec` field to declare `max`, or a `remaining()`-based check mirroring
-`ensure_nbt_length_fits_remaining` — which is exactly the kind of protocol/design call
-`CLAUDE.md` says routes to a human, not to a fuzzer.
+All 13 are fixed by the same macro change with no per-field edits, because the cap lives in
+`decode_vec` itself rather than in an attribute each field would need to opt into. None of these
+fields need an additional `#[mc(max = ...)]` bound for *safety* — the generic cap already closes
+the allocation hole — though a real spec-derived `max` would still be a tighter, more meaningful
+bound than "as many elements as fit in the remaining bytes" for fields where the protocol defines
+one (e.g. a registry with a known maximum entry count). That tightening is optional follow-up
+work, not a gap left open by this fix.
 
 ## How to change it, and the gotchas
 
@@ -209,8 +233,12 @@ lint requiring every `Vec` field to declare `max`, or a `remaining()`-based chec
   decode body instead of an immediate "unknown id" bail-out); the rest use a fully arbitrary
   `i32`, including negative and out-of-range values.
 - **Allocation-magnitude constants** in `length_prefix_allocation.rs`: `CLAIMED_LEN =
-  2_000_000` (the malicious length prefix) and `DISPROPORTIONATE_FLOOR = 32 MiB` (the
-  assertion threshold, comfortably below the ~48 MB actually measured).
+  2_000_000` (the malicious length prefix, unchanged from when the bug was filed);
+  `SMALL_CEILING = 4096` bytes (the post-fix ceiling for the zero-remaining-bytes case, whose
+  predicted and measured peak is exactly 0); and `TRAILING = 100` bytes (the second test's
+  padding, whose predicted and measured peak is exactly `100 * size_of::<String>() == 2400`
+  bytes) — both post-fix figures four to seven orders of magnitude below the pre-fix
+  ~48,000,000-byte measurement.
 
 ## Dependencies
 
