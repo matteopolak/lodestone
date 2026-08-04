@@ -288,9 +288,9 @@ fn real_vanilla_block_models_map_to_correct_sprites() {
 #[test]
 #[ignore = "requires a fetched vanilla client.jar and a GPU adapter"]
 fn real_vanilla_block_textures_reach_pixels() {
-    use lodestone_render::block::{camera_buffer, sprite_uv_buffer};
+    use lodestone_render::block::{shared_camera_buffer, sprite_uv_buffer};
     use lodestone_render::{
-        BlockPipeline, Camera, CameraUniform, Cell, ChunkSectionView, DepthBuffer, GpuAtlas,
+        BlockPipeline, Camera, Cell, ChunkSectionView, DepthBuffer, GpuAtlas,
         GpuContext, GpuMesh, HeadlessTarget, RenderTarget, SectionNeighborhood, SectionView,
         UniformLight, mesh_greedy,
     };
@@ -404,10 +404,17 @@ fn real_vanilla_block_textures_reach_pixels() {
         near: 0.05,
         far: Camera::far_for_render_distance(32, 0),
     };
-    let cam_buf = camera_buffer(device, CameraUniform::new(&camera, [0.0, 0.0, 0.0]));
+    let cam_buf = shared_camera_buffer(
+        device,
+        camera.view_projection().to_cols_array_2d(),
+        lodestone_render::fog::FogUniform::disabled(),
+    );
+    // The packed path's group-0 binding 1 (issue #76): one origin slot, at zero
+    // — this scene's geometry is already section-local to the origin.
+    let origin_buf = lodestone_render::section_origin_buffer(device, [0.0, 0.0, 0.0]);
 
     let pipeline = BlockPipeline::new(device, format);
-    let cam_bg = pipeline.camera_bind_group(device, &cam_buf);
+    let cam_bg = pipeline.camera_bind_group(device, &cam_buf, &origin_buf);
     let atlas_bg = pipeline.atlas_bind_group(device, &gpu_atlas, &uv);
     let depth = DepthBuffer::new(device, w, h);
 
@@ -446,7 +453,7 @@ fn real_vanilla_block_textures_reach_pixels() {
             multiview_mask: None,
         });
         pass.set_pipeline(&pipeline.pipeline);
-        pass.set_bind_group(0, &cam_bg, &[]);
+        pass.set_bind_group(0, &cam_bg, &[0]);
         pass.set_bind_group(1, &atlas_bg, &[]);
         pass.set_vertex_buffer(0, gpu_mesh.vertices.slice(..));
         pass.set_index_buffer(gpu_mesh.indices.slice(..), wgpu::IndexFormat::Uint32);

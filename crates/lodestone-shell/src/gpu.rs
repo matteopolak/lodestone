@@ -29,7 +29,7 @@ use lodestone_render::{
     BlockAtlas, BlockPipeline, Camera, CameraUniform, DepthBuffer, ENTITY_FULLBRIGHT,
     EntityCameraUniform, GpuAtlas, GpuMesh, GpuModelMesh, InstanceTint, ItemStateContext,
     ItemVariants, Mesh, ModelMesh, ModelPipeline, SpriteAnimation,
-    block::{camera_buffer, sprite_uv_buffer},
+    block::sprite_uv_buffer,
     crack_pipeline::{CrackPipeline, GpuCrackMesh},
     crack_resolver::CrackResolver,
     entity::{
@@ -83,7 +83,8 @@ use outline::OutlineRenderer;
 use sign_text::SignTextRenderer;
 use sources::TimeOfDaySource;
 use terrain::{
-    MODEL_ORIGIN_ARENA_SLOTS, ModelRenderer, ModelSectionGpu, SectionGpu, SectionOriginArena,
+    MODEL_ORIGIN_ARENA_SLOTS, ModelRenderer, ModelSectionGpu, PACKED_ORIGIN_ARENA_SLOTS,
+    SectionGpu, SectionOriginArena,
     anim_slots_at,
 };
 #[cfg(test)]
@@ -165,6 +166,20 @@ pub struct RenderState {
     atlas_bind_group: wgpu::BindGroup,
     depth: DepthBuffer,
     sections: HashMap<SectionKey, SectionGpu>,
+    /// The packed path's group-0 binding 0: this frame's view-projection (and,
+    /// from issue #400 on, its fog), shared by every packed section and written
+    /// **once** per frame. See `docs/section-camera-uniform.md`.
+    packed_shared_cam_buffer: wgpu::Buffer,
+    /// The one group-0 bind group every packed section draws through, over
+    /// [`Self::packed_shared_cam_buffer`] and [`Self::packed_origin_arena`].
+    /// Built once; a draw picks its section by dynamic offset, never by
+    /// rebuilding this.
+    packed_cam_bind_group: wgpu::BindGroup,
+    /// Per-section world origins for the packed table, one arena slot each,
+    /// written at upload rather than per frame (issue #76). Allocated on every
+    /// run — the packed table is empty in live play, and 2 MiB is cheaper than a
+    /// second construction path.
+    packed_origin_arena: SectionOriginArena,
     model: Option<ModelRenderer>,
     outline: OutlineRenderer,
     /// The render half of `ExtractSet::Debug` (`docs/plugin-api.md`); see
@@ -347,6 +362,25 @@ impl RenderState {
             }
         };
         let atlas_bind_group = pipeline.atlas_bind_group(device, &atlas, &uv_buffer);
+        // The packed path's shared camera + per-section origin arena (issue
+        // #76). One bind group over both, built once here; every packed section
+        // draw reuses it and varies only the dynamic offset.
+        let packed_origin_arena = SectionOriginArena::new(
+            device,
+            queue,
+            "lodestone-packed-section-origin-arena",
+            PACKED_ORIGIN_ARENA_SLOTS,
+        );
+        let packed_shared_cam_buffer = lodestone_render::block::shared_camera_buffer(
+            device,
+            glam::Mat4::IDENTITY.to_cols_array_2d(),
+            FogUniform::disabled(),
+        );
+        let packed_cam_bind_group = pipeline.camera_bind_group(
+            device,
+            &packed_shared_cam_buffer,
+            packed_origin_arena.buffer(),
+        );
         let depth = DepthBuffer::new(device, width.max(1), height.max(1));
         let outline = OutlineRenderer::new(device, color_format);
         let debug_lines = DebugLineRenderer::new(device, color_format);
@@ -411,7 +445,12 @@ impl RenderState {
             // module doc). One bind group over both, built once; every
             // section draw and the dropped-item pass reuse it, varying only
             // the dynamic offset.
-            let origin_arena = SectionOriginArena::new(device, queue, MODEL_ORIGIN_ARENA_SLOTS);
+            let origin_arena = SectionOriginArena::new(
+                device,
+                queue,
+                "lodestone-model-section-origin-arena",
+                MODEL_ORIGIN_ARENA_SLOTS,
+            );
             let shared_cam_buffer = model_shared_camera_buffer(device, glam::Mat4::IDENTITY.to_cols_array_2d());
             let cam_bind_group =
                 pipeline.camera_bind_group(device, &shared_cam_buffer, origin_arena.buffer());
@@ -479,6 +518,9 @@ impl RenderState {
             atlas_bind_group,
             depth,
             sections: HashMap::new(),
+            packed_shared_cam_buffer,
+            packed_cam_bind_group,
+            packed_origin_arena,
             model,
             outline,
             debug_lines,
@@ -1190,7 +1232,7 @@ impl RenderState {
         mesh: &SectionGeometry,
     ) {
         match mesh {
-            SectionGeometry::Packed(mesh) => self.upload_packed_section(device, key, mesh),
+            SectionGeometry::Packed(mesh) => self.upload_packed_section(device, queue, key, mesh),
             SectionGeometry::Model { opaque, water } => {
                 let Some(model) = self.model.as_mut() else {
                     return;
@@ -1245,31 +1287,54 @@ impl RenderState {
     }
 
     /// Upload a packed full-cube section (the demo path).
-    fn upload_packed_section(&mut self, device: &wgpu::Device, key: SectionKey, mesh: &Mesh) {
+    ///
+    /// Mirrors the model path above since issue #76: the section's world origin
+    /// is written **once**, here, into a slot of the shared
+    /// [`packed_origin_arena`](Self::packed_origin_arena), and a remesh of an
+    /// already-resident coord reuses that slot rather than leaking it — the
+    /// origin is a pure function of `key`, so it never actually changes. Nothing
+    /// per-section is written per frame any more.
+    fn upload_packed_section(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        key: SectionKey,
+        mesh: &Mesh,
+    ) {
+        let existing = self.sections.remove(&key);
         match GpuMesh::upload(device, mesh) {
             None => {
-                self.sections.remove(&key);
+                if let Some(old) = existing {
+                    self.packed_origin_arena.free(old.origin_alloc);
+                }
             }
             Some(gpu_mesh) => {
                 let origin = key.origin();
                 let origin_f = [origin[0] as f32, origin[1] as f32, origin[2] as f32];
-                // Placeholder uniform; overwritten every frame with the live camera.
-                let cam_buffer = camera_buffer(
-                    device,
-                    CameraUniform {
-                        view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
-                        section_origin: [origin_f[0], origin_f[1], origin_f[2], 0.0],
+                let origin_alloc = match existing {
+                    Some(old) => old.origin_alloc,
+                    None => match self.packed_origin_arena.alloc(queue, origin_f) {
+                        Some((alloc, _offset)) => alloc,
+                        None => {
+                            // Should not happen — `PACKED_ORIGIN_ARENA_SLOTS` is
+                            // sized twice over the demo world's own hard cap —
+                            // but degrade to a dropped (missing) section rather
+                            // than a panic if it ever does, exactly as the model
+                            // path does.
+                            tracing::warn!(
+                                "packed section-origin arena exhausted at {key:?}; \
+                                 dropping this section's geometry"
+                            );
+                            return;
+                        }
                     },
-                );
-                let cam_bind_group = self.pipeline.camera_bind_group(device, &cam_buffer);
+                };
                 self.sections.insert(
                     key,
                     SectionGpu {
                         mesh: gpu_mesh,
                         quad_count: mesh.quad_count(),
-                        origin: origin_f,
-                        cam_buffer,
-                        cam_bind_group,
+                        origin_alloc,
                     },
                 );
             }
@@ -1278,7 +1343,9 @@ impl RenderState {
 
     /// Remove a section (e.g. an unloaded chunk).
     pub fn remove_section(&mut self, key: &SectionKey) {
-        self.sections.remove(key);
+        if let Some(old) = self.sections.remove(key) {
+            self.packed_origin_arena.free(old.origin_alloc);
+        }
         if let Some(model) = self.model.as_mut()
             && let Some(old) = model.sections.remove(key)
         {
@@ -1510,14 +1577,24 @@ impl RenderState {
             .view_projection_warped(warp_intensity, warp_angle_degrees)
             .to_cols_array_2d();
 
-        // Rewrite each section's uniform with the current view-projection.
-        for section in self.sections.values() {
-            let uniform = CameraUniform {
-                view_proj,
-                section_origin: [section.origin[0], section.origin[1], section.origin[2], 0.0],
-            };
-            queue.write_buffer(&section.cam_buffer, 0, bytemuck::bytes_of(&uniform));
-        }
+        // The packed sections' shared camera buffer: **one** write, not one per
+        // section. Until issue #76 this was a `queue.write_buffer` per resident
+        // packed section, every frame, rewriting the whole 80-byte uniform just
+        // to re-aim the camera — the same shape issue #75 profiled at 52.9% of
+        // main-thread CPU on the model path, left in place here because the
+        // packed table only ever holds the demo world. Each section's origin is
+        // written once, at upload (`upload_packed_section`), and selected at draw
+        // time by a dynamic offset.
+        //
+        // Fog is `disabled()` for now, which is what this path has always had —
+        // the packed shader does not read the lanes yet. Issue #400 is the
+        // follow-on that makes it fade with distance and darken at night.
+        update_model_shared_camera_buffer(
+            queue,
+            &self.packed_shared_cam_buffer,
+            view_proj,
+            FogUniform::disabled(),
+        );
 
         // The model sections' (live vanilla path) shared camera+fog buffer:
         // **one** write, not one per section. Fog is folded into the group-0
@@ -1770,7 +1847,13 @@ impl RenderState {
             pass.set_pipeline(&self.pipeline.pipeline);
             pass.set_bind_group(1, &self.atlas_bind_group, &[]);
             for section in self.sections.values() {
-                pass.set_bind_group(0, &section.cam_bind_group, &[]);
+                // One bind group for the whole packed table; the section is
+                // selected by the dynamic offset of its origin slot (issue #76).
+                pass.set_bind_group(
+                    0,
+                    &self.packed_cam_bind_group,
+                    &[section.origin_alloc.offset() as u32],
+                );
                 pass.set_vertex_buffer(0, section.mesh.vertices.slice(..));
                 pass.set_index_buffer(section.mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..section.mesh.index_count, 0, 0..1);
