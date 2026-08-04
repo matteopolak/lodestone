@@ -14,4 +14,4 @@ pub mod navigating_mob;
 
 pub use goal::{Flag, FlagSet, Goal, GoalSelector, MobAi};
 pub use mob::MobController;
-pub use navigating_mob::NavigatingMob;
+pub use navigating_mob::{BABY_START_AGE, LOVE_TICKS, NavigatingMob, PARENT_AGE_AFTER_BREEDING};

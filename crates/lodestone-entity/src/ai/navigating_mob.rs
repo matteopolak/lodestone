@@ -31,6 +31,23 @@ use super::goal::GoalSelector;
 use super::mob::MobController;
 use crate::pathfinding::{MobShape, PathFinder, PathNavigator, PathParams, PathStart, PathWorld};
 
+/// Vanilla `Animal::setInLove`'s love-mode duration, in ticks
+/// (`.cache/mc/26.2/src/net/minecraft/world/entity/animal/Animal.java:174`,
+/// `this.inLove = 600;`).
+pub const LOVE_TICKS: i32 = 600;
+
+/// Vanilla `AgeableMob.BABY_START_AGE`
+/// (`.cache/mc/26.2/src/net/minecraft/world/entity/AgeableMob.java:31`). The
+/// age timer a freshly bred (or otherwise spawned) baby starts at; it counts
+/// up by one every tick until it reaches `0` (adult).
+pub const BABY_START_AGE: i32 = -24_000;
+
+/// Vanilla `Animal.PARENT_AGE_AFTER_BREEDING`
+/// (`.cache/mc/26.2/src/net/minecraft/world/entity/animal/Animal.java:44`).
+/// The post-breeding cooldown applied to both parents' age timer; it counts
+/// down by one every tick until it reaches `0` (breedable again).
+pub const PARENT_AGE_AFTER_BREEDING: i32 = 6000;
+
 /// A tiny deterministic RNG (SplitMix64) so a `NavigatingMob` needs no `rand`
 /// dependency and its stroll behaviour is reproducible in tests.
 #[derive(Debug, Clone)]
@@ -90,6 +107,49 @@ pub struct NavigatingMob<'w> {
     /// The mob's body yaw in degrees, derived from its horizontal movement
     /// direction and retained across idle ticks (vanilla `yBodyRot`).
     body_yaw: f32,
+    /// Vanilla `Animal.inLove`: remaining love-mode ticks, set to
+    /// [`LOVE_TICKS`] by [`set_in_love`](Self::set_in_love) and decremented
+    /// once per [`advance`](Self::advance) regardless of what any goal does
+    /// (vanilla `Animal::aiStep` ages it unconditionally). `> 0` is
+    /// "in love" ([`MobController::is_in_love`]).
+    love_ticks: i32,
+    /// Host injection point, refreshed once per tick before
+    /// [`tick`](Self::tick)/[`advance`](Self::advance) runs: the current
+    /// position of the breeding partner this mob should pursue, or `None` if
+    /// no eligible partner exists right now. `lodestone-entity` has no
+    /// concept of a *population* of mobs, so — exactly as
+    /// [`MobController::find_love_partner`]'s doc comment specifies — the
+    /// host performs vanilla's `getFreePartner`/`canMate` search across
+    /// siblings and hands back only the answer. Both
+    /// [`find_love_partner`](MobController::find_love_partner) and
+    /// [`love_partner_position`](MobController::love_partner_position) read
+    /// this same field: the host is expected to clear it the instant the
+    /// chosen partner becomes ineligible, which is what ends
+    /// [`BreedGoal`](super::goals::BreedGoal).
+    partner_candidate: Option<Vec3>,
+    /// Set by [`MobController::breed`] the tick a `BreedGoal` connects;
+    /// drained by [`take_bred`](Self::take_bred) so a host can resolve the
+    /// intent into an actual child spawn (this seam has no notion of the
+    /// partner's identity or of creating a new entity, only of the *event*
+    /// happening).
+    bred: bool,
+    /// Vanilla `AgeableMob.age`
+    /// (`.cache/mc/26.2/src/net/minecraft/world/entity/AgeableMob.java:37`):
+    /// negative while a baby (ticks up toward `0`), positive as the
+    /// post-breeding parent cooldown (ticks down toward `0`), `0` for an
+    /// adult with no cooldown. [`MobController::is_baby`] is `age < 0`.
+    age: i32,
+    /// Vanilla `AgeableMob.AGE_LOCKED`: freezes [`age`](Self::age) from
+    /// advancing at all while `true`. The golden-dandelion interaction that
+    /// sets this in vanilla is not implemented here, but the freeze itself is
+    /// honoured so a host that does implement it gets correct behaviour.
+    age_locked: bool,
+    /// Host injection point, refreshed once per tick: the position of the
+    /// nearest eligible adult of this mob's own kind, or `None`. Drives
+    /// [`FollowParentGoal`](super::goals::FollowParentGoal) through
+    /// [`MobController::parent_position`], the same host-computes-the-filter
+    /// shape as [`partner_candidate`](Self::partner_candidate).
+    parent_candidate: Option<Vec3>,
 }
 
 /// Minecraft body yaw (degrees) for a horizontal movement delta: 0 = +Z (south),
@@ -111,6 +171,8 @@ impl std::fmt::Debug for NavigatingMob<'_> {
             .field("attacks", &self.attacks)
             .field("move_calls", &self.move_calls)
             .field("path_searches", &self.path_searches)
+            .field("love_ticks", &self.love_ticks)
+            .field("age", &self.age)
             .finish_non_exhaustive()
     }
 }
@@ -149,6 +211,12 @@ impl<'w> NavigatingMob<'w> {
             last_search_tick: None,
             velocity: Vec3::new(0.0, 0.0, 0.0),
             body_yaw: 0.0,
+            love_ticks: 0,
+            partner_candidate: None,
+            bred: false,
+            age: 0,
+            age_locked: false,
+            parent_candidate: None,
         }
     }
 
@@ -252,6 +320,76 @@ impl<'w> NavigatingMob<'w> {
         !self.navigator.is_done()
     }
 
+    /// Current age-timer value. See the `age` field's own doc comment:
+    /// negative is a baby (ticking toward `0`), positive is a post-breeding
+    /// parent cooldown (ticking toward `0`), `0` is a cooldown-free adult.
+    #[must_use]
+    pub fn age(&self) -> i32 {
+        self.age
+    }
+
+    /// Sets the age timer directly — e.g. [`BABY_START_AGE`] to spawn this
+    /// mob as a baby, or [`PARENT_AGE_AFTER_BREEDING`] to apply the
+    /// post-breeding cooldown (vanilla `AgeableMob::setAge`).
+    pub fn set_age(&mut self, age: i32) -> &mut Self {
+        self.age = age;
+        self
+    }
+
+    /// Whether ageing is currently frozen (vanilla `AgeableMob.isAgeLocked`).
+    #[must_use]
+    pub fn is_age_locked(&self) -> bool {
+        self.age_locked
+    }
+
+    /// Freezes (`true`) or resumes (`false`) age advancement.
+    pub fn set_age_locked(&mut self, locked: bool) -> &mut Self {
+        self.age_locked = locked;
+        self
+    }
+
+    /// Enters love mode for [`LOVE_TICKS`] (vanilla `Animal::setInLove`).
+    pub fn set_in_love(&mut self) -> &mut Self {
+        self.love_ticks = LOVE_TICKS;
+        self
+    }
+
+    /// Remaining love-mode ticks (vanilla `Animal.getInLoveTime`).
+    #[must_use]
+    pub fn love_time(&self) -> i32 {
+        self.love_ticks
+    }
+
+    /// Ends love mode immediately (vanilla `Animal::resetLove`).
+    pub fn reset_love(&mut self) -> &mut Self {
+        self.love_ticks = 0;
+        self
+    }
+
+    /// Host injection point: refreshes the breeding-partner candidate this
+    /// mob's [`BreedGoal`](super::goals::BreedGoal) should see this tick. See
+    /// the `partner_candidate` field's own doc comment.
+    pub fn set_love_partner_candidate(&mut self, partner: Option<Vec3>) -> &mut Self {
+        self.partner_candidate = partner;
+        self
+    }
+
+    /// Host injection point: refreshes the nearest-eligible-parent candidate
+    /// this mob's [`FollowParentGoal`](super::goals::FollowParentGoal) should
+    /// see this tick.
+    pub fn set_parent_candidate(&mut self, parent: Option<Vec3>) -> &mut Self {
+        self.parent_candidate = parent;
+        self
+    }
+
+    /// Drains the "a goal called `breed()` this tick" flag — `true` at most
+    /// once per tick. The host resolves it into an actual child spawn using
+    /// this mob's and its partner's identity, which this seam does not
+    /// carry.
+    pub fn take_bred(&mut self) -> bool {
+        std::mem::take(&mut self.bred)
+    }
+
     /// Runs one AI tick: the goal selector (whose goals call back through the
     /// [`MobController`] seam) followed by one kinematic follower step.
     pub fn tick(&mut self, ai: &mut GoalSelector) {
@@ -263,6 +401,19 @@ impl<'w> NavigatingMob<'w> {
     /// caller running its own goal loop can drive movement explicitly.
     pub fn advance(&mut self) {
         self.tick_count += 1;
+        // Vanilla `Animal::aiStep`/`AgeableMob::aiStep`: love mode and the age
+        // timer both age unconditionally every tick — not gated on whether any
+        // goal ran this tick, and not reset by anything below.
+        if self.love_ticks > 0 {
+            self.love_ticks -= 1;
+        }
+        if !self.age_locked {
+            if self.age < 0 {
+                self.age += 1;
+            } else if self.age > 0 {
+                self.age -= 1;
+            }
+        }
         let old = self.pos;
         let Some(waypoint) = self.navigator.tick(self.pos) else {
             self.velocity = Vec3::new(0.0, 0.0, 0.0);
@@ -408,6 +559,43 @@ impl MobController for NavigatingMob<'_> {
         let dx = (self.rng.next_unit() * 20.0 - 10.0).round();
         let dz = (self.rng.next_unit() * 20.0 - 10.0).round();
         Some(Vec3::new(self.pos.x + dx, self.pos.y, self.pos.z + dz))
+    }
+
+    fn is_baby(&self) -> bool {
+        self.age < 0
+    }
+
+    fn parent_position(&self) -> Option<Vec3> {
+        self.parent_candidate
+    }
+
+    fn is_in_love(&self) -> bool {
+        self.love_ticks > 0
+    }
+
+    fn find_love_partner(&mut self) -> Option<Vec3> {
+        self.partner_candidate
+    }
+
+    fn love_partner_position(&self) -> Option<Vec3> {
+        self.partner_candidate
+    }
+
+    fn breed(&mut self) {
+        // Vanilla `Animal::finalizeSpawnChildFromBreeding` calls
+        // `resetLove()` on both parents immediately
+        // (`.cache/mc/26.2/src/net/minecraft/world/entity/animal/Animal.java:227-228`).
+        // The age cooldown (`setAge(PARENT_AGE_AFTER_BREEDING)`, same file
+        // line 225-226) and the child itself are the host's job — this seam
+        // has no notion of the partner's identity or of creating an entity —
+        // so the host applies `set_age(PARENT_AGE_AFTER_BREEDING)` to both
+        // parents itself after observing `take_bred()`.
+        self.bred = true;
+        self.love_ticks = 0;
+    }
+
+    fn clear_love_partner(&mut self) {
+        self.partner_candidate = None;
     }
 }
 
@@ -789,6 +977,231 @@ mod tests {
         assert!(
             !mob.attacks().is_empty(),
             "a reached mob should have struck the target at least once"
+        );
+    }
+
+    // ---- Breeding / aging (issues #234, #237) -----------------------------
+    //
+    // These are driver-level: a real `GoalSelector` runs a real `BreedGoal`
+    // against two real `NavigatingMob`s. The only "host" logic here is the
+    // per-tick candidate refresh `MobController::find_love_partner`'s own doc
+    // comment calls for (a population-wide `canMate` search this crate has no
+    // way to do itself) — everything downstream of that one input is the
+    // production seam, and `breed()` is never called directly.
+
+    use crate::ai::goals::{BreedGoal, FollowParentGoal};
+
+    /// Refreshes each mob's love-partner candidate from the other, mirroring
+    /// what `MobSim::tick` will do every tick in production: a population
+    /// scan for the nearest still-in-love, not-already-bred sibling. Kept
+    /// deliberately trivial (exactly two mobs, no eligibility beyond
+    /// `is_in_love`) because this test's subject is the goal→seam wiring, not
+    /// the partner-selection policy — that lives in the server-side patch.
+    fn refresh_partner_candidates(a: &mut NavigatingMob<'_>, b: &mut NavigatingMob<'_>) {
+        let (pos_a, pos_b) = (a.position(), b.position());
+        a.set_love_partner_candidate(if b.is_in_love() { Some(pos_b) } else { None });
+        b.set_love_partner_candidate(if a.is_in_love() { Some(pos_a) } else { None });
+    }
+
+    #[test]
+    fn breed_goal_drives_two_navigating_mobs_to_a_predicted_tick() {
+        // Two in-love animals, 2 blocks apart (distSqr=4 < BreedGoal's 9.0
+        // range) on open ground, each running the production `BreedGoal`.
+        // Vanilla's own timer (`BreedGoal.java:57`, `loveTime >=
+        // adjustedTickDelay(60)`) is exactly `BreedGoal::BREED_TIME` (60) in
+        // `goals.rs` — so this predicts the *tick*, not just "eventually":
+        // both `can_use` on tick 1 (already in range, no travel needed), so
+        // `GoalSelector::tick`'s own start-then-tick-same-call semantics
+        // (`goal.rs`'s `update`/`tick_running`) put `love_time` at exactly
+        // `N` after the Nth call — bred must be false through tick 59 and
+        // true from tick 60, on both mobs simultaneously.
+        let world = Arena {
+            walls: HashSet::new(),
+        };
+        let shape = MobShape::land(0.6, 1.95);
+        let mut a = NavigatingMob::new(&world, shape.clone(), Vec3::new(0.0, 0.0, 0.0), 1.0, 400);
+        let mut b = NavigatingMob::new(&world, shape, Vec3::new(2.0, 0.0, 0.0), 1.0, 400);
+        a.set_in_love();
+        b.set_in_love();
+
+        let mut ai_a = GoalSelector::new();
+        ai_a.add(0, Box::new(BreedGoal::new(1.0)));
+        let mut ai_b = GoalSelector::new();
+        ai_b.add(0, Box::new(BreedGoal::new(1.0)));
+
+        for tick in 1..=60 {
+            refresh_partner_candidates(&mut a, &mut b);
+            a.tick(&mut ai_a);
+            b.tick(&mut ai_b);
+            if tick < 60 {
+                assert!(
+                    !a.take_bred() && !b.take_bred(),
+                    "bred before the predicted tick 60 (at tick {tick})"
+                );
+            } else {
+                assert!(
+                    a.take_bred(),
+                    "mob a must breed on the predicted tick (60)"
+                );
+                assert!(
+                    b.take_bred(),
+                    "mob b must breed on the predicted tick (60)"
+                );
+            }
+        }
+        // Vanilla resets love on both parents immediately
+        // (`Animal.java:227-228`) — proven through the seam, not asserted by
+        // calling `breed()` again.
+        assert!(!a.is_in_love(), "breeding must end this mob's love mode");
+        assert!(!b.is_in_love(), "breeding must end this mob's love mode");
+    }
+
+    #[test]
+    fn breed_goal_never_fires_without_a_partner_candidate() {
+        // Negative control for the test above: the same setup, minus ever
+        // refreshing the partner candidate, must never breed even though
+        // both mobs are in love the whole time and start in range. This is
+        // the control CLAUDE.md's evidence standards ask for — it proves the
+        // 60-tick assertion above is actually detecting the candidate wiring
+        // and not some other coincidence (e.g. a goal that ignores its
+        // `can_use` gate).
+        let world = Arena {
+            walls: HashSet::new(),
+        };
+        let shape = MobShape::land(0.6, 1.95);
+        let mut a = NavigatingMob::new(&world, shape.clone(), Vec3::new(0.0, 0.0, 0.0), 1.0, 400);
+        let mut b = NavigatingMob::new(&world, shape, Vec3::new(2.0, 0.0, 0.0), 1.0, 400);
+        a.set_in_love();
+        b.set_in_love();
+        let mut ai_a = GoalSelector::new();
+        ai_a.add(0, Box::new(BreedGoal::new(1.0)));
+        let mut ai_b = GoalSelector::new();
+        ai_b.add(0, Box::new(BreedGoal::new(1.0)));
+
+        for _ in 1..=200 {
+            // No `refresh_partner_candidates` call: `find_love_partner`
+            // always answers `None`, exactly like a lone in-love animal with
+            // nothing nearby to mate with.
+            a.tick(&mut ai_a);
+            b.tick(&mut ai_b);
+            assert!(!a.take_bred() && !b.take_bred());
+        }
+    }
+
+    #[test]
+    fn love_ticks_and_age_decay_unconditionally_each_advance() {
+        // Vanilla ages both timers every entity tick regardless of what goals
+        // ran (`Animal::aiStep`/`AgeableMob::aiStep`) — exercised here with no
+        // goals attached at all, just repeated `advance()` calls.
+        let world = Arena {
+            walls: HashSet::new(),
+        };
+        let shape = MobShape::land(0.6, 1.95);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 1.0, 400);
+        mob.set_in_love();
+        assert_eq!(mob.love_time(), LOVE_TICKS);
+        for _ in 0..LOVE_TICKS {
+            mob.advance();
+        }
+        assert_eq!(mob.love_time(), 0, "love mode must expire after exactly LOVE_TICKS");
+        assert!(!mob.is_in_love());
+
+        // A baby's age counts up from BABY_START_AGE to 0 at one tick per
+        // tick (`AgeableMob.java:207-212`), so growing up takes exactly
+        // `-BABY_START_AGE` advances — predicted, not just "eventually 0".
+        mob.set_age(-10);
+        assert!(mob.is_baby());
+        for i in 1..=10 {
+            mob.advance();
+            if i < 10 {
+                assert!(mob.is_baby(), "still a baby at age {}", mob.age());
+            }
+        }
+        assert_eq!(mob.age(), 0);
+        assert!(!mob.is_baby(), "must be an adult once age reaches 0");
+    }
+
+    #[test]
+    fn age_locked_freezes_growth_and_control_proves_it_would_otherwise_grow() {
+        // Control-then-subject, in that order, so the assertion of "locked
+        // means frozen" is backed by a run that shows the same starting state
+        // *would* have grown had it not been locked.
+        let world = Arena {
+            walls: HashSet::new(),
+        };
+        let shape = MobShape::land(0.6, 1.95);
+
+        // Control: unlocked, same starting age, ages normally over 50 ticks.
+        let mut control = NavigatingMob::new(&world, shape.clone(), Vec3::new(0.0, 0.0, 0.0), 1.0, 400);
+        control.set_age(-10);
+        for _ in 0..50 {
+            control.advance();
+        }
+        assert_eq!(
+            control.age(),
+            0,
+            "control must reach adulthood (proves the detector can see growth at all)"
+        );
+
+        // Subject: locked, identical starting age, must not move at all.
+        let mut locked = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 1.0, 400);
+        locked.set_age(-10);
+        locked.set_age_locked(true);
+        for _ in 0..50 {
+            locked.advance();
+        }
+        assert_eq!(locked.age(), -10, "age-locked mob must not age at all");
+        assert!(locked.is_baby());
+
+        // Unlocking resumes growth from exactly where it was frozen.
+        locked.set_age_locked(false);
+        for _ in 0..10 {
+            locked.advance();
+        }
+        assert_eq!(locked.age(), 0);
+    }
+
+    #[test]
+    fn follow_parent_goal_drives_a_baby_navigating_mob_toward_its_parent() {
+        // The second goal this seam unblocks: a baby's `is_baby`/
+        // `parent_position` are now real (host-injected) instead of the
+        // `MobController` trait defaults (`false`/`None`), so
+        // `FollowParentGoal` — already fully implemented in `goals.rs` — is
+        // reachable through the concrete production type. Mirrors the
+        // existing melee/pathfinder composition tests above: real A*, not a
+        // fake `move_to`.
+        let world = Arena {
+            walls: HashSet::new(),
+        };
+        let shape = MobShape::land(0.6, 1.95);
+        let baby_start = Vec3::new(0.0, 0.0, 0.0);
+        let parent_pos = Vec3::new(10.0, 0.0, 0.0);
+        let mut baby = NavigatingMob::new(&world, shape, baby_start, 0.25, 8000);
+        baby.set_age(-10); // is_baby() == true, far from BABY_START_AGE so it
+        // does not grow up mid-test.
+        baby.set_parent_candidate(Some(parent_pos));
+
+        let mut ai = GoalSelector::new();
+        ai.add(0, Box::new(FollowParentGoal::new(1.0)));
+
+        let mut reached = false;
+        for _ in 0..500 {
+            baby.set_parent_candidate(Some(parent_pos));
+            baby.tick(&mut ai);
+            let d = (parent_pos - baby.position()).length();
+            if d < 4.0 {
+                reached = true;
+                break;
+            }
+        }
+        assert!(
+            reached,
+            "a baby with a real parent candidate must actually path toward it, ended at {:?}",
+            baby.position()
+        );
+        assert!(
+            baby.path_searches() >= 1,
+            "FollowParentGoal must have driven a real A* search"
         );
     }
 }
