@@ -219,9 +219,20 @@ recurring defect classes, not because they are generically useful — see
    `AbstractContainerMenu.doClick`: drag-split (left even / right one-each / middle fill
    in creative), double-click gather, number-key swap, offhand swap, drop and drop-stack,
    creative variants. Each is a distinct wire `ClickType`.
-7. **Combat feel.** None of the 1.9+ feedback exists: attack-strength cooldown bar,
-   cooldown-scaled damage, crit particles, sweep arc, knockback feedback, hurt tint and
-   camera shake. `EntityDamaged`/`EntityHurtAnimation` decode — check for consumers.
+7. **Combat feel.** Stale as originally written — re-verified against the jar rather
+   than assumed (see `docs/combat.md`): the attack-strength cooldown bar and the hurt
+   tint both already shipped (#121, #98), and "camera shake" was never a real vanilla
+   mechanic at all (grepped `client-src` clean for `[Ss]hake`; the only hit is an
+   unrelated item-wobble in `ItemInHandRenderer.java`). What was actually still
+   missing, found by that same pass and now fixed: `ClientAction::ReleaseUseItem` was
+   a serverbound island (encoded by all four protocol adapters, zero producers), and
+   `use_item_live` returned without sending anything whenever the crosshair was over
+   any entity or nothing at all — together making the **shield and the bow
+   functionally dead in combat**, since aiming at a mob is the common case. Genuinely
+   still missing: cooldown-scaled damage (server-side, N/A), crit particles, sweep-arc
+   particle (may already partly work — unverified, see `docs/combat.md`), and
+   `bobHurt` camera roll (blocked on `Camera` gaining a roll DOF).
+   `EntityDamaged`/`EntityHurtAnimation` decode has consumers (`HurtTime`).
 8. **Riding.** The island was real when this was written and is closed —
    [`riding.md`](./riding.md). Mount (a right-click on an entity, which
    `use_item_live` never even looked for), the 26.2 attachment seat, camera on the

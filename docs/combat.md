@@ -22,6 +22,15 @@ Also landed: the `HurtTime` countdown component (both `EntityDamaged` and
 `EntityHurtAnimation` were decoded-but-unconsumed islands before this), the
 ECS-side half of the hurt-flash window a future render pass can key off.
 
+Also landed, still under issue #12: the `ReleaseUseItem`/`use_item_live`
+fallthrough fix that makes the shield and the bow reachable at all in combat —
+see "The shield/bow island pair" below. Two of #12's own named gaps
+(attack-strength cooldown bar, hurt tint) already shipped under #121/#98 by
+the time of that pass; its "camera shake" line was never a real vanilla
+mechanic (confirmed by grepping `client-src` for `[Ss]hake`, one unrelated
+hit in `ItemInHandRenderer.java`) — noted here so this doc does not repeat a
+stale claim #12 itself still carries.
+
 ## How it works
 
 ### Swing dispatch (`Sim::begin_attack`, `crates/lodestone-shell/src/sim.rs`)
@@ -422,6 +431,121 @@ idiom `sprite_vitals` already uses for the XP-bar progress fill.
   which is also the correct control for the pixel gate below: the indicator
   must produce **zero** pixels at `attack_cooldown = Some(1.0)`, not the full
   circle.
+
+### The shield/bow island pair: `ReleaseUseItem` and `use_item_live`'s fallthrough
+
+A combat-scoping pass (docs/backlog.md item 7, re-verified against the jar
+rather than assumed) found the shield and the bow **functionally dead**, for
+two independent, zero-ambiguity reasons — the highest-value gap this doc
+tracks, because both items are trivial to obtain in survival and a stranger
+hits the dead control within the first hour.
+
+**Finding 1 — `ClientAction::ReleaseUseItem` was a serverbound island.**
+Encoded by all four protocol adapters (v47/v340/v735/v770, `PLAYER_ACTION`
+action id `5`) since whenever each adapter landed, with **zero producers**
+anywhere in `lodestone-shell` — the outbound mirror of the inbound-island
+class this doc's own history already has two instances of
+(`EntityDamaged`/`EntityHurtAnimation`, the ticker/indicator pair above).
+`app.rs`'s mouse-input match had both edges of `Attack` (`begin_attack`/
+`end_attack`) but only `(Use, Pressed)` — no release arm existed at all, on
+mouse or keyboard.
+
+Vanilla's `LivingEntity.updateUsingItem` (`LivingEntity.java:3471-3475`)
+auto-completes a use only when `!useItem.useOnRelease()`. Food and potions
+are `useOnRelease() == false`, so they auto-complete on the server's own tick
+count and *appear* to work fine with no release packet at all — exactly why
+this stayed invisible. Bow, crossbow and shield are all
+`useOnRelease() == true` (`:3602-3616`, `releaseUsingItem`/`stopUsingItem`)
+and structurally cannot fire or lower without the explicit packet.
+
+Fix, mirroring vanilla's own gate (`Minecraft.java:1914-1917`,
+`this.player.isUsingItem()` guarding `gameMode.releaseUsingItem`):
+
+- `KeyOutcome::Use` became `Use(bool)` (`app.rs`); both the mouse match and
+  the keyboard `resolve_key` chain now route a release edge to a new
+  `Sim::end_use`.
+- A new resource, `UsingItem(pub bool)` (`crates/lodestone-shell/src/
+  interact.rs`), is the client-side mirror of `isUsingItem()`. Vanilla's own
+  flag is a side effect of the held item's `use()` running identically
+  client- and server-side (a bow's `use()` calls `LivingEntity.
+  startUsingItem` on both) — this client has no per-item `use()` simulation
+  to drive an equivalent flag from, so `UsingItem` is an **input-state**
+  mirror instead: set `true` at the top of `Sim::use_item_live` (every live
+  press), cleared by `Sim::end_use_live`. That is a superset of vanilla's
+  real gate — this client cannot yet tell whether a use is *actually* in
+  progress server-side, only that the button is down — but the gap is inert,
+  not a wrong transition: `LivingEntity.releaseUsingItem`
+  (`.cache/mc/26.2/src/…/LivingEntity.java:3602-3613`) already no-ops
+  whenever the server has nothing in progress, so an extra release is a
+  harmless duplicate.
+- `Sim::end_use`/`end_use_live` split the same way `begin_attack`/
+  `begin_attack_live` do, purely so the send logic is reachable from a
+  hermetic test with no `vanilla_atlas`.
+
+**Finding 2 — `use_item_live` could not even *start* a use in the situations
+combat happens in**, independent of Finding 1. Two structural gaps in
+`Sim::use_item_live` (`sim.rs`):
+
+- Whenever the crosshair was over **any** entity — hostile or not, which is
+  the overwhelmingly common combat case — the method called
+  `Self::interact_entity` and returned **unconditionally**, never falling
+  through to the generic use-item send. Vanilla's own `case ENTITY`
+  (`Minecraft.java:1693-1708`) only returns early on a **successful**
+  interact (`instanceof InteractionResult.Success`); anything else hits an
+  explicit `break;` at `:1708` and falls through to the unconditional
+  generic-use call at `:1730` (`gameMode.useItem`) — the call that actually
+  raises a shield or starts a bow draw. Most hostile mobs have no special
+  right-click behaviour, so this is the common path, not an edge case.
+- With **no** target at all — open air, or a mob standing just past block
+  reach with nothing behind it — the method `return`ed with **nothing sent**.
+  Vanilla's own `hitResult == null` path skips the whole
+  `if (this.hitResult != null)` switch (`Minecraft.java:1681,1691`) and still
+  reaches the same unconditional fallback at `:1730`.
+
+Fix: `use_item_live`'s entity branch now calls the new
+`Self::use_item_generic` after `interact_entity` instead of returning, and
+the no-target branch calls it instead of returning empty-handed.
+`use_item_generic` lowers to `ClientAction::UseItem` — a **second**
+serverbound island this pass found alongside `ReleaseUseItem`, encoded by all
+four adapters with zero producers before this fix — guarded on the main hand
+actually holding something (vanilla's own `!heldItem.isEmpty()` check at the
+same call site), and borrows its block-prediction `sequence` from
+`Placement::take_use_sequence` rather than a second independent counter,
+matching vanilla's single shared `BlockStatePredictionHandler` sequence
+(`MultiPlayerGameMode.startPrediction`,
+`.cache/mc/26.2/client-src/…/MultiPlayerGameMode.java:293-299`).
+
+**Deliberate divergence from vanilla, and why:** vanilla's `case ENTITY` only
+skips the fallback on a *locally classified* successful interact
+(`player.interactOn`, run client-side for prediction). This client has no
+such classification — there is no per-item interact simulation, only the wire
+send (the same gap `Self::interact_entity`'s own docs cover for why
+`InteractAt`'s hit position is not fabricated here) — so every entity
+interact is now treated as non-consuming and *always* falls through. The one
+place this can disagree with vanilla is a genuinely successful mount (an
+empty boat, a saddled rideable): vanilla's local prediction would skip the
+fallback there, and this shell does not, so a held item can also start its
+use while boarding a vehicle. That is judged the smaller error next to a
+shield/bow that could never fire at all, and it is the same "err toward
+sending" trade `Self::use_item_live`'s block-placement half already makes in
+the opposite direction (never predict something wrong, but here there is no
+prediction to get wrong — only a decision between never sending and
+sometimes sending one redundant packet).
+
+**A false belief worth recording.** The first pass at `UsingItem` only
+registered it in `Sim::end_session`'s explicit `insert_resource` block — the
+same place `Attacking`/`MiningPredictor`/`PlacementPredictor` are reset on
+reconnect — on the assumption that mirroring their reset call was sufficient
+for a resource genuinely new to this session's state. It was not: those three
+are *also* registered via `InteractPlugin::build`'s `app.init_resource::<…>()`
+calls, which is what actually creates them on a **first** session (`end_session`
+only runs when an existing session ends, never before the first connect). A
+hermetic test calling `Sim::end_use_live()` on a fresh `Sim::new(…)` panicked
+immediately with "Requested resource … does not exist in the World" —
+caught by the test, not by either `cargo check` (resource lookups are a
+runtime `bevy_ecs` panic, invisible to the type checker) or by hand-reading
+the diff, which looked complete. Fixed by adding
+`app.init_resource::<UsingItem>()` alongside its siblings.
 
 ## What is deliberately not built here
 

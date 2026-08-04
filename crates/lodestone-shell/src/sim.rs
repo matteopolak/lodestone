@@ -4024,11 +4024,48 @@ impl Sim {
         // per-part hit an armour stand or a horse's saddle slot resolves. So the
         // honest subset is sent, and refining it needs the ray to start reporting
         // its hit position, not a guess here.
+        //
+        // **`case ENTITY` only returns here on a *successful* interact.**
+        // Vanilla's own switch (`Minecraft.java:1693-1708`) returns
+        // immediately only when `gameMode.interact(...) instanceof
+        // InteractionResult.Success`; anything else hits an explicit `break;`
+        // at `:1708` and falls through to the unconditional generic-use call
+        // at `:1730` (`gameMode.useItem`) — which is what actually raises a
+        // shield or starts drawing a bow when the crosshair happens to be
+        // over a mob with no special right-click behaviour (hostile mobs,
+        // overwhelmingly, which is exactly the combat case). Before this fix
+        // `use_item_live` always returned here, so `entity_target()` being
+        // `Some` for *any* living entity in `ENTITY_REACH` — hostile or not —
+        // permanently short-circuited the fallback.
+        //
+        // This client has no local classification of an interact's result to
+        // match vanilla's `instanceof Success` test against: there is no
+        // `player.interactOn` equivalent here, only the wire send (the same
+        // gap `Self::interact_entity`'s own docs cover for why `InteractAt`
+        // is not fabricated). So every entity interact is treated as
+        // non-consuming for this decision and always falls through to
+        // [`Self::use_item_generic`]. The one place this can diverge from
+        // vanilla is a genuinely successful mount (an empty boat, a saddled
+        // and rideable horse): vanilla's own local prediction would skip the
+        // fallback there, and this does not, so an item held while boarding a
+        // vehicle can also start its use. That is judged the smaller error
+        // next to a shield/bow that could never fire at all.
         if let Some(entity_id) = self.entity_target() {
             self.interact_entity(entity_id);
+            self.use_item_generic();
             return;
         }
-        let Some(hit) = self.target() else { return };
+        let Some(hit) = self.target() else {
+            // Vanilla's own MISS/no-target path: a `null` `hitResult` skips
+            // the whole `if (this.hitResult != null)` switch in
+            // `startUseItem` (`Minecraft.java:1681,1691`) and still reaches
+            // the unconditional fallback at `:1730`. This used to `return`
+            // here with **nothing sent at all** — aiming at open air, or at a
+            // mob standing just past block reach with nothing behind it,
+            // silently dropped the click.
+            self.use_item_generic();
+            return;
+        };
         let clicked = BlockPos::new(hit.block[0], hit.block[1], hit.block[2]);
         let face = face_from_normal(hit.normal);
         let cursor = hit_cursor(hit);
@@ -4125,6 +4162,55 @@ impl Sim {
                 self.play_block_place_sound([pos.x, pos.y, pos.z], state);
             }
         }
+    }
+
+    /// Vanilla's unconditional generic-use fallback at the bottom of
+    /// `Minecraft.startUseItem`'s per-hand loop (`Minecraft.java:1730`,
+    /// `gameMode.useItem`) — the send that actually raises a shield, draws a
+    /// bow, or starts eating/drinking, independent of any block or entity
+    /// under the crosshair. Called from [`Self::use_item_live`]'s entity and
+    /// no-target branches; see that method's docs for exactly which vanilla
+    /// cases reach it.
+    ///
+    /// Lowers to [`ClientAction::UseItem`] — a **second** serverbound island
+    /// this investigation found alongside `ReleaseUseItem`: encoded by all
+    /// four protocol adapters
+    /// (`crates/protocol/{v47,v340,v735,v770}/src/adapter.rs`) with zero
+    /// producers anywhere in this shell before this method.
+    ///
+    /// Guarded on the main hand actually holding something, matching
+    /// vanilla's own `!heldItem.isEmpty()` check at the same call site —
+    /// there is nothing to use and no packet to justify for an empty hand.
+    /// Only `Hand::Main` is considered, matching every other send in this
+    /// method; vanilla's per-hand loop also tries the off hand, which this
+    /// shell does not model here.
+    ///
+    /// The prediction sequence is borrowed from [`PlacementPredictor`]'s own
+    /// counter rather than a second, independent one — see
+    /// [`Placement::take_use_sequence`]'s docs for why that matches vanilla's
+    /// own single shared counter.
+    fn use_item_generic(&mut self) {
+        let has_item = self
+            .player_menu()
+            .player_native(self.selected_slot())
+            .is_some_and(|stack| !stack.is_empty());
+        if !has_item {
+            return;
+        }
+        let rotation = Rotation::new(self.player().yaw, self.player().pitch);
+        let sequence =
+            self.write(|w| w.resource_mut::<PlacementPredictor>().0.take_use_sequence());
+        if let Some(net) = &self.net {
+            net.send_action(ClientAction::UseItem {
+                hand: Hand::Main,
+                rotation,
+                sequence,
+            });
+            net.send_action(ClientAction::SwingArm { hand: Hand::Main });
+        }
+        // Client-side animation, so it runs with or without a socket — the
+        // same split every other swing site in this method makes.
+        self.swing_hand();
     }
 
     /// The [`PlacementWorld`] facts for one right-click, read from the
@@ -8655,6 +8741,98 @@ mod tests {
                 });
             }
         });
+    }
+
+    /// Finding 2 (combat scoping doc): before this fix, `use_item_live`
+    /// returned unconditionally after `interact_entity` whenever *any*
+    /// entity was targeted — hostile mobs included, the overwhelmingly
+    /// common combat case — so a bow or shield could never even start a use.
+    /// Vanilla's own `case ENTITY` (`Minecraft.java:1693-1708`) only returns
+    /// on a *successful* interact; anything else falls through to the
+    /// generic use-item call (`:1730`) that actually raises a shield or
+    /// draws a bow.
+    ///
+    /// This is the control the scoping doc asked for: it must fail
+    /// (`ClientAction::UseItem` absent) against the pre-fix `use_item_live`,
+    /// which this test's own doc-comment history confirms was checked by
+    /// hand (see the report for the reverted/restored run).
+    #[test]
+    fn use_item_live_falls_through_to_generic_use_with_an_entity_targeted() {
+        let (net, actions, _feed) = NetClient::loopback_with_feed();
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        sim.attach_net(net);
+        give_main_hand_item(&mut sim, "minecraft:bow");
+        sim.write(|w| w.resource_mut::<EntityRayTarget>().0 = Some(42));
+
+        sim.use_item_live();
+
+        let sent: Vec<ClientAction> = std::iter::from_fn(|| actions.try_recv().ok()).collect();
+        assert!(
+            matches!(
+                sent.first(),
+                Some(ClientAction::InteractEntity {
+                    entity_id: 42,
+                    ..
+                })
+            ),
+            "the entity interact itself must still be sent first, got {sent:?}"
+        );
+        assert!(
+            sent.iter()
+                .any(|a| matches!(a, ClientAction::UseItem { hand: Hand::Main, .. })),
+            "an entity target must fall through to the generic use-item send \
+             (this is what raises a shield or draws a bow at a mob) — got {sent:?}"
+        );
+    }
+
+    /// Finding 2's other half: with **no** target at all — open air, or a mob
+    /// just past block reach with nothing behind it — `use_item_live` used to
+    /// `return` with nothing sent. Vanilla's own `hitResult == null` path
+    /// skips the block/entity switch entirely and still reaches the
+    /// unconditional fallback (`Minecraft.java:1681,1691,1730`).
+    #[test]
+    fn use_item_live_sends_generic_use_with_no_target_at_all() {
+        let (net, actions, _feed) = NetClient::loopback_with_feed();
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        sim.attach_net(net);
+        give_main_hand_item(&mut sim, "minecraft:bow");
+        assert!(sim.target().is_none(), "precondition: no block targeted");
+        assert!(sim.entity_target().is_none(), "precondition: no entity targeted");
+
+        sim.use_item_live();
+
+        let sent: Vec<ClientAction> = std::iter::from_fn(|| actions.try_recv().ok()).collect();
+        assert!(
+            sent.iter()
+                .any(|a| matches!(a, ClientAction::UseItem { hand: Hand::Main, .. })),
+            "a miss (no block, no entity) must still send the generic use-item action \
+             — got {sent:?}"
+        );
+    }
+
+    /// Negative control for both tests above: an **empty** main hand must
+    /// send nothing generic to use, matching vanilla's own
+    /// `!heldItem.isEmpty()` guard at the same call site
+    /// (`Minecraft.java:1730`). Without this, "always send `UseItem`"
+    /// would satisfy the two tests above vacuously.
+    #[test]
+    fn use_item_generic_sends_nothing_with_an_empty_main_hand() {
+        let (net, actions, _feed) = NetClient::loopback_with_feed();
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        sim.attach_net(net);
+        assert!(sim.target().is_none());
+        assert!(sim.entity_target().is_none());
+
+        sim.use_item_live();
+
+        let sent: Vec<ClientAction> = std::iter::from_fn(|| actions.try_recv().ok()).collect();
+        assert!(
+            sent.is_empty(),
+            "an empty main hand has nothing to use and must send nothing, got {sent:?}"
+        );
     }
 
     /// Finding 1: [`Sim::end_use_live`] must send `ReleaseUseItem` when a use
