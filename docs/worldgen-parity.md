@@ -268,13 +268,19 @@ This was not found by this crate's own parity tests (which compare resolved
 block-state *strings*, immune to palette-index reshuffling) — it was found
 by `lodestone-server`'s brand-new
 `chunk::tests::parallel_generation_is_deterministic_and_matches_serial`
-(issue #414, landed by a different agent mid-session), which failed
+(issue #414, landed by a different agent mid-session as part of `275c765`,
+which fanned chunk generation out over scoped threads), which failed
 non-deterministically. Before assuming that test's own new
 `generate_columns_parallel` code was at fault, an isolated `git worktree` at
 the commit immediately before this session's ore composition landed
 confirmed the test passed cleanly there — ruling that out and pointing back
-at this session's own changes. A permanent, threading-free regression
-control,
+at this session's own changes. This is a **different** bug from the one
+`275c765` itself already found and fixed in the same area
+(`ViewTracker::recenter`'s added-chunk list depending on
+`HashSet::difference`'s run-to-run-unstable iteration order — send order,
+not generation content; see `docs/server-chunk-generation-parallelism.md`,
+not this doc, for that one) — noted here only so the two aren't conflated,
+not duplicated. A permanent, threading-free regression control,
 `lodestone_server::worldgen_data::tests::column_is_byte_identical_across_two_independent_sequential_calls`,
 narrowed it further: two *sequential*, single-threaded `column()` calls for
 the same chunk already produced different bytes, which meant the bug was a
