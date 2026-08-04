@@ -2,9 +2,13 @@
 // Camera plus this frame's distance fog, folded into one group-0 uniform — the
 // same layout the model/fluid shaders use, so entities and terrain fog
 // identically. `fog_eye.xyz` is the camera world position; `fog_color_start.rgb`
-// is the fog colour and `.w` where fog begins; `fog_end_enabled.x` is where fog
-// is full and `.y` is 0/1. `fog_end_enabled.z` is this frame's sky darkening —
-// see `sky_darken()` below and `EntityCameraUniform::with_sky_darken`.
+// is the fog colour and `.w` the **render-distance** term's start distance
+// (measured cylindrically, see `fog_amount` below); `fog_end_enabled.x` is
+// that term's end distance and `.y` is 0/1 enabled. `fog_end_enabled.z` is
+// this frame's sky darkening — see `sky_darken()` below and
+// `EntityCameraUniform::with_sky_darken`. `fog_eye.w` / `fog_end_enabled.w`
+// are vanilla's second, independent **environmental** term's start/end
+// (measured spherically) — two lanes unused before issue #401 (F2/F3).
 struct Camera {
     view_proj: mat4x4<f32>,
     section_origin: vec4<f32>,
@@ -17,15 +21,21 @@ struct Camera {
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var smp: sampler;
 
-// Identical to the model shader's `fog_amount` and to `crate::fog::fog_factor`.
-fn fog_amount(dist: f32) -> f32 {
-    let start = camera.fog_color_start.w;
-    let end = camera.fog_end_enabled.x;
-    let enabled = camera.fog_end_enabled.y;
+// Identical to the model shader's `linear_fog`/`fog_amount` and to
+// `crate::fog::fog_factor`/`total_fog_factor`.
+fn linear_fog(dist: f32, start: f32, end: f32) -> f32 {
     if (end <= start) {
         return 0.0;
     }
-    return clamp((dist - start) / (end - start), 0.0, 1.0) * enabled;
+    return clamp((dist - start) / (end - start), 0.0, 1.0);
+}
+
+fn fog_amount(rel: vec3<f32>) -> f32 {
+    let sph = length(rel);
+    let cyl = max(length(rel.xz), abs(rel.y));
+    let env = linear_fog(sph, camera.fog_eye.w, camera.fog_end_enabled.w);
+    let rd = linear_fog(cyl, camera.fog_color_start.w, camera.fog_end_enabled.x);
+    return max(env, rd) * camera.fog_end_enabled.y;
 }
 
 // This frame's sky darkening: the factor vanilla's `LightTexture` scales the
@@ -251,7 +261,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // measured size of the linear-space error this replaced. Terrain, water and
     // entities must all mix in the same space or a mob fogs at a different rate
     // from the block it is standing on.
-    let amount = fog_amount(length(in.world - camera.fog_eye.xyz));
+    let amount = fog_amount(in.world - camera.fog_eye.xyz);
     let fogged_srgb = mix(overlaid, linear_to_srgb(camera.fog_color_start.rgb), amount);
     return vec4<f32>(srgb_to_linear(fogged_srgb), tex_col.a);
 }

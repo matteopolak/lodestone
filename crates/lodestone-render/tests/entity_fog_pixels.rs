@@ -381,6 +381,12 @@ fn entity_fog_darkens_with_depth() {
         sky_color: FOG_COLOR,
         start: FOG_START,
         end: FOG_END,
+        // Environmental term disabled: this gate is specifically about the
+        // render-distance term's response to depth, and leaving the
+        // environmental pair degenerate keeps it a single-term measurement
+        // exactly as before F2/F3.
+        environmental_start: 0.0,
+        environmental_end: 0.0,
     };
 
     let near = mob_red(&gpu, NEAR_Z, fog);
