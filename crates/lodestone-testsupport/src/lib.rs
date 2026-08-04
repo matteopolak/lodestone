@@ -1,5 +1,7 @@
 //! Shared live-test support helpers.
 
+pub mod bench_fixtures;
+
 use std::future::Future;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -7,7 +9,72 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use lodestone_core::Writer;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+/// Per-family wire quirks for the hermetic `spawn_entity`/`spawn_entity_living`
+/// fixtures shared by `v340` and `v735`'s `tests/entity.rs`.
+///
+/// Those two test files are structurally identical seam tests (see each
+/// file's own doc comment on why they are nonetheless *not* unified with
+/// v47's) — comment-stripped, the only difference is six literals: three
+/// per-family entity-type wire ids (creeper, arrow, boat), the width of
+/// `spawn_entity`'s object-type field (a signed byte pre-1.13, a varint from
+/// 1.13 on — `spawn_entity_living`'s mob-type field is a varint in *both*
+/// families, so this toggle applies only to the object field), and whether a
+/// `0xFF` metadata terminator byte follows the fixed fields (1.13 rewrote the
+/// metadata format and dropped it). This table isolates exactly that:
+/// parameterize by fixture, not by protocol version number, per this repo's
+/// rule that a six-literal delta is a fixture table, not a reason to
+/// template the test body.
+///
+/// Only `v340` and `v735` use this; `v47`'s `tests/entity.rs` is deliberately
+/// independent (see its own doc comment) and `v770`'s entity wire shape is
+/// unrelated to either, so neither participates here.
+#[derive(Debug, Clone, Copy)]
+pub struct EntitySpawnWireFixture {
+    /// Wire id for `minecraft:creeper` in `spawn_entity_living`'s mob-type
+    /// field (always a varint — see [`Self::write_mob_type_id`]).
+    pub creeper_id: i32,
+    /// Wire id for `minecraft:arrow` in `spawn_entity`'s object-type field.
+    pub arrow_id: i32,
+    /// Wire id for `minecraft:boat` in `spawn_entity`'s object-type field.
+    pub boat_id: i32,
+    /// Whether `spawn_entity`'s object-type field is a single signed byte
+    /// (pre-1.13) rather than a varint (1.13+). Does not affect
+    /// `spawn_entity_living`'s mob-type field, which is a varint either way.
+    pub object_type_id_is_byte: bool,
+    /// Metadata terminator byte appended after a living/named entity spawn's
+    /// fixed fields, if this family's decoder still expects one. `None` for
+    /// families whose metadata format has no terminator sentinel.
+    pub metadata_terminator: Option<u8>,
+}
+
+impl EntitySpawnWireFixture {
+    /// Writes a `spawn_entity_living` mob-type id. Always a varint in both
+    /// families that use this fixture; only the object-type field's width
+    /// differs (see [`Self::write_object_type_id`]).
+    pub fn write_mob_type_id(&self, w: &mut Writer, id: i32) {
+        w.var_i32(id);
+    }
+
+    /// Writes a `spawn_entity` object-type id, using this fixture's wire
+    /// width.
+    pub fn write_object_type_id(&self, w: &mut Writer, id: i32) {
+        if self.object_type_id_is_byte {
+            w.i8(id as i8);
+        } else {
+            w.var_i32(id);
+        }
+    }
+
+    /// Appends this fixture's metadata terminator, if it has one.
+    pub fn write_metadata_terminator(&self, w: &mut Writer) {
+        if let Some(byte) = self.metadata_terminator {
+            w.bytes(&[byte]);
+        }
+    }
+}
 
 const TYPE_AUTH: i32 = 3;
 const TYPE_COMMAND: i32 = 2;
