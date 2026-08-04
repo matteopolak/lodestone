@@ -16,6 +16,7 @@
 //! workspace's `deny(unsafe_code)` would reject) and draw in a `Load` pass over
 //! the terrain with no depth.
 
+mod anim;
 mod font;
 pub(crate) mod item_icon;
 pub mod vanilla_font;
@@ -28,6 +29,7 @@ pub use vanilla_font::VanillaFont;
 pub use item_icon::ItemIcon as HotbarSlot;
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use lodestone_render::{
     BUBBLE_SIZE, BlockModels, GpuAtlas, GuiAtlas, GuiSpriteQuad, ModelVertex, bubble_position,
@@ -591,6 +593,7 @@ impl HudGeometry {
             None,
             None,
             None,
+            HudAnim::NONE,
         )
     }
 
@@ -617,6 +620,7 @@ impl HudGeometry {
             None,
             None,
             Some(font),
+            HudAnim::NONE,
         )
     }
 
@@ -635,6 +639,7 @@ impl HudGeometry {
             None,
             None,
             None,
+            HudAnim::NONE,
         )
     }
 
@@ -648,6 +653,7 @@ impl HudGeometry {
         items: Option<&ItemAtlas>,
         models: Option<&BlockModels>,
         font: Option<&VanillaFont>,
+        anim: HudAnim,
     ) -> Self {
         // `width`/`height` are the **physical** framebuffer, straight from
         // `winit::inner_size()` — already DPI-scaled, exactly what
@@ -899,7 +905,7 @@ impl HudGeometry {
         // quads below. Both branches return `bars_y`, the anchor the action bar
         // sits above, so the rest of the HUD is oblivious to which drew.
         let bars_y = if b.gui.is_some() {
-            sprite_vitals(&mut b, frame)
+            sprite_vitals(&mut b, frame, &anim)
         } else {
             let pip = 8.0;
             let gap = 2.0;
@@ -1183,13 +1189,46 @@ fn draw_hotbar_items(b: &mut Builder, frame: &HudFrame) {
     }
 }
 
+/// The per-frame vitals-cluster animation phases [`HudGeometry::build_inner`]
+/// draws with — heart blink/jitter, and (later additions to this type) the
+/// hunger wobble and hotbar pop. See `hud/anim.rs` for the vanilla citations
+/// and `docs/hud-animations.md` for the port notes.
+///
+/// [`HudAnim::NONE`] is idle (every field at its settled value) and is what
+/// [`HudGeometry::build`]/[`HudGeometry::build_with_font`]/
+/// [`HudGeometry::build_with_gui`] pass — the pure, jar-less, deterministic
+/// entry points every pre-existing geometry test calls — so none of those
+/// three grow a wall-clock dependency, and every one of them keeps drawing
+/// pixel-identically to before this type existed. Only
+/// [`HudRenderer::render_with_item_models`] threads a live value in, computed
+/// from [`HudRenderer`]'s own cross-frame animation state.
+#[derive(Debug, Clone, Copy)]
+struct HudAnim {
+    /// Vanilla's heart-row `blink` (`Hud.java:766`).
+    heart_blink: bool,
+    /// Vanilla's `displayHealth` (`Hud.java:777,782`) — the "ghost" heart
+    /// overlay's total. Equal to the current health while idle.
+    display_health: i32,
+    /// The wall-tick index this frame resolved to (see `hud/anim::wall_tick`)
+    /// — the input the pure per-container/per-pip jitter functions need.
+    tick: i64,
+}
+
+impl HudAnim {
+    const NONE: Self = Self {
+        heart_blink: false,
+        display_health: i32::MIN, // unused while `heart_blink` is false and jitter is skipped
+        tick: 0,
+    };
+}
+
 /// Draw the survival vitals cluster — hotbar frame, selection highlight, XP bar
 /// (background + progress), hearts, and hunger — from the vanilla GUI atlas.
 /// Returns `bars_y`, the top of the hearts/hunger row, which the action bar sits
 /// above. Layout mirrors the procedural fallback closely so toggling the atlas
 /// on or off does not visibly jump the HUD. A no-op-safe: [`Builder::sprite`]
 /// draws nothing for a missing sprite, so a partial atlas degrades gracefully.
-fn sprite_vitals(b: &mut Builder, frame: &HudFrame) -> f32 {
+fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
     // Native sprite pixels, laid straight into `b.w`/`b.h` — the
     // already-scale-divided logical canvas `HudGeometry::build_inner` computes
     // via `logical_canvas`. This used to hardcode a ×2 ("vanilla GUI Scale 2")
@@ -1313,24 +1352,57 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame) -> f32 {
     let row_y = cluster_top - icon - 4.0;
     if let Some(hp) = frame.health {
         let hp = hp.max(0.0);
+        let current = hp.ceil() as i32;
+        // The container background flashes to the "_blinking" sprite variant
+        // for the same alternating windows the ghost overlay below uses —
+        // vanilla draws it for *every* container regardless of that
+        // container's own fill state (`Hud.java:871`).
+        let container = if anim.heart_blink {
+            "hud/heart/container_blinking"
+        } else {
+            "hud/heart/container"
+        };
+        // Critical-health y-jitter (`Hud.java:863-865`): `currentHealth +
+        // absorption <= 4`. Absorption is not modelled in `HudFrame` yet, so
+        // this gates on health alone — a documented narrowing, not a silent
+        // one.
+        let critical = current <= 4;
         for i in 0..10 {
             let x = hx + i as f32 * step;
-            b.sprite("hud/heart/container", x, row_y, icon, icon, white);
+            let y = if critical {
+                row_y + anim::heart_jitter(anim.tick, i)
+            } else {
+                row_y
+            };
+            b.sprite(container, x, y, icon, icon, white);
+            // The "ghost" of health about to be lost, forced onto the
+            // blinking sprite variant regardless of the fill state below —
+            // vanilla's `blink && halves < oldHealth` (`Hud.java:882-885`).
+            let halves = i * 2;
+            if anim.heart_blink && (halves as i32) < anim.display_health {
+                let half = (halves as i32 + 1) == anim.display_health;
+                let ghost = if half {
+                    "hud/heart/half_blinking"
+                } else {
+                    "hud/heart/full_blinking"
+                };
+                b.sprite(ghost, x, y, icon, icon, white);
+            }
             let units = hp - i as f32 * 2.0;
             if units >= 2.0 {
-                b.sprite("hud/heart/full", x, row_y, icon, icon, white);
+                b.sprite("hud/heart/full", x, y, icon, icon, white);
             } else if units >= 1.0 {
-                b.sprite("hud/heart/half", x, row_y, icon, icon, white);
+                b.sprite("hud/heart/half", x, y, icon, icon, white);
             }
         }
     }
     if let Some(food) = frame.food {
-        let food = food.max(0) as f32;
+        let food_f = food.max(0) as f32;
         for i in 0..10 {
             // Hunger fills right-to-left in vanilla.
             let x = hx + hw - icon - i as f32 * step;
             b.sprite("hud/food_empty", x, row_y, icon, icon, white);
-            let units = food - i as f32 * 2.0;
+            let units = food_f - i as f32 * 2.0;
             if units >= 2.0 {
                 b.sprite("hud/food_full", x, row_y, icon, icon, white);
             } else if units >= 1.0 {
@@ -1820,6 +1892,14 @@ pub struct HudRenderer {
     /// nothing for a caller to supply. [`HudRenderer::attach_font`] exists to
     /// override it (a resource pack, or a gate pinning a specific pack).
     font: Option<Arc<VanillaFont>>,
+    /// The wall-clock origin every vitals animation's tick index is measured
+    /// from — see `hud/anim.rs`'s module doc for why a wall clock stands in
+    /// for the real 20Hz game tick here. Fixed at construction so a fresh
+    /// renderer (a gate, a reconnect) starts at tick 0 rather than inheriting
+    /// whatever the process's own uptime happens to be.
+    anim_start: Instant,
+    /// Cross-frame heart blink/ghost state (`hud/anim::HeartAnim`).
+    heart_anim: anim::HeartAnim,
 }
 
 /// The GPU resources for drawing HUD sprites from the vanilla GUI atlas: the
@@ -1909,6 +1989,8 @@ impl HudRenderer {
             gui: None,
             icons: IconRenderer::new(),
             font: VanillaFont::shared(),
+            anim_start: Instant::now(),
+            heart_anim: anim::HeartAnim::new(),
         }
     }
 
@@ -2112,6 +2194,16 @@ impl HudRenderer {
         // rendered, and building them would be pure waste.
         let want_models = self.icons.models_attached() && depth.is_some();
         let font = self.font.clone();
+        // The vitals-cluster animation phases for this frame — see
+        // `hud/anim.rs`. `tick` is the one place a wall clock enters; every
+        // state machine it feeds is otherwise a pure function of that integer.
+        let tick = anim::wall_tick(self.anim_start);
+        let (heart_blink, display_health) = self.heart_anim.tick(tick, frame.health.unwrap_or(0.0));
+        let anim = HudAnim {
+            heart_blink,
+            display_health,
+            tick,
+        };
         let geo = HudGeometry::build_inner(
             frame,
             width,
@@ -2121,6 +2213,7 @@ impl HudRenderer {
             item_atlas.as_deref(),
             models.filter(|_| want_models),
             font.as_deref(),
+            anim,
         );
         // `geo.special` counts too. A hotbar holding nothing but a chest, with the
         // procedural frame suppressed, produces zero vertices in all four other
