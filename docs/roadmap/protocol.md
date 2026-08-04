@@ -25,12 +25,24 @@ cargo xtask connectedness
 
 ```
 protocol connectedness (denominators from each family play::{clientbound,serverbound} packet_ids.rs):
-v770  clientbound decoded 108/141; emits 107/141; decoded-but-stranded 1 [CHUNK_BATCH_START]; serverbound encoded 53/69; examined 108 arm(s)
+v47  clientbound decoded 17/74; emits 17/74; decoded-but-stranded 0; serverbound encoded 17/26; examined 17 arm(s); serverbound decode: not applicable (no src/server_protocol.rs — family does not implement ServerProtocol, so it cannot host)
+v340  clientbound decoded 16/80; emits 16/80; decoded-but-stranded 0; serverbound encoded 20/33; examined 16 arm(s); serverbound decode: not applicable (no src/server_protocol.rs — family does not implement ServerProtocol, so it cannot host)
+v735  clientbound decoded 17/92; emits 17/92; decoded-but-stranded 0; serverbound encoded 21/48; examined 17 arm(s); serverbound decode: not applicable (no src/server_protocol.rs — family does not implement ServerProtocol, so it cannot host)
+v770  clientbound decoded 111/141; emits 110/141; decoded-but-stranded 0; serverbound encoded 53/69; examined 111 arm(s); serverbound decoded 13/69, connected 13/69; examined 13 arm(s)
 ```
 
-Re-measured 2026-07-30; unchanged from the last recorded figure. **Use this command, never
-a hand count** — a hand-derived figure for this exact domain has been wrong four times in
-four different ways.
+Re-measured 2026-08-04. **Use this command, never a hand count** — a hand-derived figure
+for this exact domain has been wrong four times in four different ways, and the tool
+itself has now been wrong twice (see below).
+
+`v47`/`v340`/`v735` were **never measured before today** — `xtask`'s connectedness scanner
+had a hard `if family != "v770" { continue; }` while its own header claimed to take
+"denominators from each family." That filter is gone; every `vNN` directory under
+`crates/protocol/` is scanned, and a family that can't be scanned (missing
+`packet_ids.rs`/`adapter.rs`) is now named in a `SKIPPED` section instead of silently
+vanishing from the family list. Nothing above is a defect in the legacy families — they're
+dormant by design (see [multi-version](#multi-version-what-it-would-cost-and-the-call-this-roadmap-does-not-make)
+below) — it's just the first time the number has existed at all.
 
 `cargo xtask check-connected` currently fails on one unrelated finding — `lodestone-nav`
 has no workspace dependents outside dev-dependencies — which is a separate,
@@ -39,17 +51,37 @@ protocol. Not filed here; flagged in the final report instead.
 
 ### The measurement everything else in this doc adds to
 
-`53/69` serverbound **encoded** (our client can send it) is the only axis `xtask`
-currently measures. **Decoded** (our server can receive it) is a different axis
-entirely, and it is not `53/69` — it is measured directly against
-`crates/protocol/v770/src/server_protocol.rs::V770ServerProtocol::decode`, which has
-match arms only for `Handshaking::INTENTION`, `Login::HELLO`,
-`Login::LOGIN_ACKNOWLEDGED`, and `Configuration::FINISH_CONFIGURATION` — every one of
-the 69 `play::serverbound` packets falls through the wildcard `_ => ServerBound::Ignored`.
-**Serverbound decode is 0/69.** This is the single largest finding of this pass, and it
-is *not visible in the client-facing coverage number at all* — being a server is a
-genuinely fresh axis, exactly as the domain brief said, and the gap is total rather than
-partial.
+`53/69` serverbound **encoded** (our client can send it) and the new **serverbound
+decoded/connected** figure at the top of this section are two different axes, and
+conflating them is exactly how this doc went stale the first time. Encoded means *our
+client* can send the packet.
+Decoded means *our server* can receive and act on it — measured directly against
+`crates/protocol/v770/src/server_protocol.rs`'s `ServerProtocol::decode` (the
+`State::Play if packet_id == play::serverbound::…` arms) joined against
+`crates/lodestone-server/src/server.rs`'s dispatcher, which is a second, cross-crate hop:
+a packet can decode to a real `ServerBound` variant and still be stranded if nothing
+outside the protocol crate does anything with that variant. `xtask`'s scanner now
+measures both hops and gates on the first (classifier failures) the same way it already
+did for clientbound.
+
+**This section was itself wrong twice before landing on an automated number, which is
+the whole argument for automating it instead of re-counting by hand.** It originally
+said "completely zero" (true when written, stale within a day — issue #268 landed three
+decode arms the same day). `CLAUDE.md` separately recorded "5/69 → 8/69" from a manual
+count that was also already stale by the time it was read, and even the first automated
+figure this correction landed with (11/69) drifted to 13/69 from concurrent work in the
+time it took to write this paragraph — see the header measurement above for whichever
+number is current now. This is not a defect in the tool; it is exactly why the number
+belongs in one place (the `cargo xtask connectedness` header above, re-run on demand)
+rather than repeated by hand in prose that immediately starts rotting. **Do not hand-copy
+the decoded-packet list into this doc again** — run the command.
+
+The remaining ~55 of 69 `play::serverbound` packets have no decode arm at all as of this
+writing — that gap is real and is exactly what issues #262/#264/#266/#268/#270 below
+still track (their titles' `(0/…)` counts predate this landing and are stale in the
+other direction now; the per-issue counts were never wired to the automated figure,
+which is its own small argument for pointing them at `cargo xtask connectedness` output
+instead of a title that has to be hand-edited every time an arm lands).
 
 ### Decoded-but-stranded: `CHUNK_BATCH_START`, and why it isn't actually a defect
 
