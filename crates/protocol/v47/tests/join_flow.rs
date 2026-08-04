@@ -737,3 +737,167 @@ fn handshake_and_status_inbound_states_are_rejected() {
         Err(lodestone_model::AdapterError::UnsupportedPacketState { .. })
     ));
 }
+
+// ---- update_health / respawn / entity_status / entity_head_rotation ------
+//
+// Every payload below is hand-assembled straight from minecraft-data's 1.8
+// `protocol.json` field list (identical to 1.12.2's own shape for each of
+// these four packets) rather than built with this crate's own `Encode`
+// derive — the same "independent byte vector" standard `tests/join_flow.rs`'s
+// module doc and `lodestone-v770`'s `tests/block_updates.rs` both already
+// use, so a symmetric encode/decode bug in the derive macro cannot pass
+// silently.
+
+/// Independent VarInt encoder (not the codec under test).
+fn var_i32(value: i32) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut v = value as u32;
+    loop {
+        let byte = (v & 0x7F) as u8;
+        v >>= 7;
+        if v == 0 {
+            out.push(byte);
+            break;
+        }
+        out.push(byte | 0x80);
+    }
+    out
+}
+
+/// Independent Minecraft-string encoder (VarInt UTF-8 byte length, then the
+/// UTF-8 bytes — not the codec under test).
+fn mc_string(value: &str) -> Vec<u8> {
+    let mut out = var_i32(value.len() as i32);
+    out.extend_from_slice(value.as_bytes());
+    out
+}
+
+#[test]
+fn play_update_health_emits_health_changed_from_hand_built_bytes() {
+    let adapter = V47Adapter::new();
+    let mut payload = 12.5f32.to_be_bytes().to_vec(); // health
+    payload.extend_from_slice(&var_i32(18)); // food
+    payload.extend_from_slice(&3.0f32.to_be_bytes()); // saturation
+
+    let directives = adapter
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Play,
+            play::clientbound::UPDATE_HEALTH,
+            &payload,
+        )
+        .expect("handle");
+    assert_emits_set(
+        &directives,
+        &[ClientEvent::HealthChanged {
+            health: 12.5,
+            food: 18,
+            saturation: 3.0,
+        }],
+    );
+}
+
+#[test]
+fn play_respawn_emits_respawned_event() {
+    let adapter = V47Adapter::new();
+    // 1.8's `respawn` widens dimension to a full `i32` on the wire — a
+    // genuine historical inconsistency with `join`'s signed *byte* dimension,
+    // confirmed against minecraft-data rather than assumed.
+    let mut payload = 1i32.to_be_bytes().to_vec(); // dimension: the end
+    payload.push(2); // difficulty
+    payload.push(0x9); // hardcore | creative
+    payload.extend_from_slice(&mc_string("default"));
+
+    let directives = adapter
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Play,
+            play::clientbound::RESPAWN,
+            &payload,
+        )
+        .expect("handle");
+    match directives.as_slice() {
+        [Directive::Emit(ClientEvent::Respawned {
+            dimension,
+            game_mode,
+            previous_game_mode,
+            last_death_location,
+        })] => {
+            assert_eq!(dimension.to_string(), "minecraft:the_end");
+            // The 0x8 hardcore bit is masked off; the low bits select the mode.
+            assert_eq!(*game_mode, GameMode::Creative);
+            assert_eq!(*previous_game_mode, None);
+            assert_eq!(*last_death_location, None);
+        }
+        other => panic!("expected respawned event, got {other:?}"),
+    }
+}
+
+#[test]
+fn play_respawn_rejects_dimension_outside_1_8s_byte_range() {
+    // 1.8's `join` (and this adapter's `dimension_id`) only ever carried a
+    // signed byte; a value outside that range cannot be a real 1.8 dimension
+    // and must be rejected loudly rather than silently truncated.
+    let adapter = V47Adapter::new();
+    let mut payload = 1000i32.to_be_bytes().to_vec();
+    payload.push(0);
+    payload.push(0);
+    payload.extend_from_slice(&mc_string("default"));
+
+    let result = adapter.handle_packet(
+        &mut World::new(),
+        ConnectionState::Play,
+        play::clientbound::RESPAWN,
+        &payload,
+    );
+    assert!(
+        matches!(result, Err(lodestone_model::AdapterError::Decode(_))),
+        "expected a decode error, got {result:?}"
+    );
+}
+
+#[test]
+fn play_entity_status_emits_status_event_from_hand_built_bytes() {
+    let adapter = V47Adapter::new();
+    let mut payload = 42i32.to_be_bytes().to_vec(); // entity id (raw i32, not VarInt)
+    payload.push(3); // status: e.g. wolf "shaking" / totem particle family
+
+    let directives = adapter
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Play,
+            play::clientbound::ENTITY_STATUS,
+            &payload,
+        )
+        .expect("handle");
+    assert_emits_set(
+        &directives,
+        &[ClientEvent::EntityStatus {
+            entity_id: 42,
+            status: 3,
+        }],
+    );
+}
+
+#[test]
+fn play_entity_head_rotation_emits_head_yaw_degrees_from_hand_built_bytes() {
+    let adapter = V47Adapter::new();
+    let mut payload = var_i32(7); // entity id
+    payload.push(64i8 as u8); // packed yaw: 64/256 * 360 = 90 degrees
+
+    let directives = adapter
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Play,
+            play::clientbound::ENTITY_HEAD_ROTATION,
+            &payload,
+        )
+        .expect("handle");
+    assert_emits_set(
+        &directives,
+        &[ClientEvent::EntityHeadRotation {
+            entity_id: 7,
+            head_yaw: 90.0,
+        }],
+    );
+}
