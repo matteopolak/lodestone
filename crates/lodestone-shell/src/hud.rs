@@ -258,11 +258,35 @@ pub struct HudFrame<'a> {
     /// Whether to draw the centre aiming reticle. Suppressed while any screen is
     /// up (pause, chat, a container).
     ///
-    /// Vanilla is *not* the authority for that suppression: `Hud.extractCrosshair`
-    /// (`Hud.java:439-470`) gates on camera type and spectator mode only, so a
-    /// vanilla crosshair stays visible behind an open inventory, dimmed by the
-    /// screen's own background. We hide it instead because we have no such
-    /// background yet (issue #51); revisit when container screens gain one.
+    /// Vanilla is *not* the authority for that suppression — settled, not just
+    /// suspected (issue #71). Read directly rather than from memory:
+    /// `Hud.extractRenderState` (`Hud.java:218-243`, `.cache/mc/26.2/client-src`)
+    /// calls `extractCrosshair` whenever the HUD itself is not F1-hidden and the
+    /// active screen is not a `LevelLoadingScreen` — there is no
+    /// `screen() == null` guard on this call, unlike the sibling
+    /// `extractSubtitleOverlay` three lines below it, which does gate on
+    /// `screen() == null || screen().isInGameUi()`. And `extractCrosshair` itself
+    /// (`Hud.java:439-470`) gates only on `options.getCameraType().isFirstPerson()`
+    /// and not being in spectator mode (or, in spectator, aiming at a
+    /// `MenuProvider` via `canRenderCrosshairForSpectator`). So a vanilla
+    /// crosshair stays visible — dimmed only by whatever the screen itself draws
+    /// on top of it afterward — behind a pause menu, an inventory, or chat.
+    ///
+    /// We hide it outright instead, a confirmed divergence. The draw-order half
+    /// vanilla relies on already exists on this side, just not wired to the
+    /// crosshair: `container.rs`'s dim gradient (issue #61's leftover) draws
+    /// *after* the HUD pass and paints over it uniformly, which is exactly what
+    /// dims [`Self::hotbar`] for free while a container is open. Matching
+    /// vanilla for the crosshair is therefore a gating change in `app.rs`
+    /// (`crosshair = self.ui.is_playing()` would need to become something
+    /// shaped like [`Self::hotbar`]'s `world_hud`), not a rendering one — but
+    /// doing that correctly also needs vanilla's `isFirstPerson()` / spectator /
+    /// `canRenderCrosshairForSpectator` gate folded in, or a third-person or
+    /// spectator session would grow a crosshair vanilla never draws there. That
+    /// is a distinct, larger change than this issue asked for ("settle whether
+    /// vanilla hides the crosshair behind a screen", not "make it pixel-exact"),
+    /// so behaviour is left as-is; this comment is the settled answer plus the
+    /// pointer for whoever picks up the rest.
     ///
     /// **This flag is about the crosshair and nothing else.** It used to double as
     /// the hotbar's gate — one boolean answering two questions — which is exactly
