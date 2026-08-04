@@ -113,15 +113,22 @@ existed — nothing new needed on the wire-format side).
   blocks in the same section, one in desert one in swamp biome, render `[191, 183, 85]` and
   `[0x6A, 0x70, 0x39]` respectively (the second value predicted exactly from the jar source
   independent of this code, since `GrassColorModifier::Swamp` ignores the colormap entirely).
-  **What is not solved by this**: the id→name mapping this consumer uses
-  (`mesher.rs`'s `FALLBACK_BIOME_NAMES`) is a **provisional** local mirror of
-  `crates/protocol/v770/src/server_protocol.rs`'s `BIOME_NAMES` — correct against this codebase's
-  own server (the only one it can host), not necessarily against a real vanilla server, whose actual
-  registry-sync order this client already decodes correctly
-  (`ClientRegistries::entry_names(BIOME)`) but does not yet thread from `net.rs` into the mesher's
-  worker threads. See `biome-tint.md`'s "Gotchas" for the follow-up. The swamp/mangrove-swamp
-  two-tone noise term (`Biome.BIOME_INFO_NOISE`) also stays unported — 64 of 66 biomes are
-  unaffected by that gap.
+  **Follow-up now closed**: the id→name mapping this consumer uses
+  (`mesher.rs`'s `biome_name_at`) used to read *only* a provisional local mirror of
+  `crates/protocol/v770/src/server_protocol.rs`'s `BIOME_NAMES` (`FALLBACK_BIOME_NAMES`) —
+  correct against this codebase's own server (the only one it can host), not necessarily against a
+  real vanilla server. The real registry-sync order this client already decoded correctly
+  (`ClientRegistries::entry_names(BIOME)`) now threads all the way from the v770 adapter through
+  `net.rs`'s `BiomeNameCell` and `Sim::refresh_mesh_policy` into the mesher's worker threads (baked
+  onto each `SectionSnapshot`, the same way `SkyDefault` already crosses that boundary);
+  `FALLBACK_BIOME_NAMES` is now consulted only when no live registry has arrived (no connection
+  yet, or a version/server that sends none). See `biome-tint.md`'s "Gotchas" for the full wiring
+  and the live gate that proves it against a fixture registry order which deliberately disagrees
+  with the fallback table. **`server_protocol.rs`'s `BIOME_NAMES` itself is untouched by this
+  follow-up** — it is the server's own id→name *assignment*, a separate and still-provisional gap
+  from the client's id→name *resolution* this bullet is about; see the bullet below. The
+  swamp/mangrove-swamp two-tone noise term (`Biome.BIOME_INFO_NOISE`) also stays unported — 64 of
+  66 biomes are unaffected by that gap.
 - **`chunks_biomes` (protocol issue #26) is decoded and reaches the world**, independently of tint:
   `World::merge_biomes` (`crates/lodestone-world/src/world.rs`) applies a live biome edit (vanilla's
   `/fillbiome`) to an already-loaded column without touching its block state, and

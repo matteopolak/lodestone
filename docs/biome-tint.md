@@ -77,26 +77,52 @@ matching vanilla's own `ClientLevel.calculateBlockTint` box-blend.
 
 - `SnapshotModelView`/`SnapshotFluidView` (the real views `MeshScheduler` meshes through) implement
   the two new trait methods: resolve the biome name at a snapshot-relative position via
-  `ChunkSection::biome_at_block` + `FALLBACK_BIOME_NAMES`, wrap it in a `NamedBiomeTint`, and call
+  `ChunkSection::biome_at_block` + `biome_name_at`, wrap it in a `NamedBiomeTint`, and call
   `resolve_blended_tint`.
-- `FALLBACK_BIOME_NAMES` is a **known, provisional** id→name table (see "Gotchas" below) — the
-  correct source is per-connection registry data, which nothing yet threads from `NetClient` into
-  the mesher's worker threads.
+- `biome_name_at` prefers a **live** id→name table when one is known, falling back to
+  `FALLBACK_BIOME_NAMES` only when it is empty (no connection yet, an offline/demo world, or a
+  version/server that sends no biome registry) — see the next bullet for how the live table gets
+  there, and "Gotchas" below for what is still provisional.
 
 ## How to change it, and gotchas
 
-- **The id→name mapping is provisional.** `FALLBACK_BIOME_NAMES` mirrors
-  `crates/protocol/v770/src/server_protocol.rs`'s `BIOME_NAMES` (alphabetical over the 55 biomes
-  the embedded overworld generator can select — nether/end aren't servable yet, see
-  `worldgen-biomes.md`). This is **exactly right against this codebase's own server** (the only
-  server v770 can host, and the default `cargo run --release` path), because both sides derive the
-  same alphabetical order from the same fixed set — but it would very likely be wrong against a
-  third-party vanilla server, whose real registry-sync order this client already decodes correctly
-  (`crates/protocol/v770/src/packets/registry.rs`'s `ClientRegistries::entry_names(BIOME)`) but does
-  not yet thread anywhere past `net.rs`. Swapping `FALLBACK_BIOME_NAMES` for a live
-  `ClientRegistries`-backed lookup is real, separately-scoped follow-up work (needs a `NetClient`
-  accessor plus threading an `Arc` through `MeshScheduler`'s worker-thread jobs, which currently
-  touch no live client state by design).
+- **The id→name mapping now threads a live registry, closing the gap this section used to
+  describe as open.** `crates/protocol/v770/src/packets/registry.rs`'s
+  `ClientRegistries::entry_names(BIOME)` already decoded a real server's registry-sync order
+  correctly; the missing piece was carrying it past that crate. The path, end to end:
+  `crates/protocol/v770/src/adapter.rs`'s `LOGIN` handler now emits a third biome event,
+  `ClientEvent::BiomeRegistryNames { names }`, alongside `BiomeVisuals`/`BiomeClimates` →
+  `crates/lodestone-shell/src/net.rs`'s `forward` folds it into a new `BiomeNameCell` (same
+  "whole table replaces at once, never queued" shape as `BiomeClimateCell`), exposed as
+  `NetClient::shared_biome_names()` → `Sim::refresh_mesh_policy` reads a snapshot every tick into
+  `TerrainMesh::biome_names` (an `Arc<[&'static str]>`, mirroring how `MeshPolicy::sky_default`
+  already crosses this exact boundary) → `TerrainMesh::mesh_column`/`mesh_section` attach it to
+  the `SectionSnapshot` via `SnapshotOutcome::with_biome_names`/`SectionSnapshot::with_biome_names`
+  → `biome_name_at` reads it off the snapshot it was handed, inside the mesh worker thread.
+  **Baked into the snapshot itself, not threaded into `MeshScheduler`'s worker closures** — a
+  worker thread only ever sees the jobs on its channel, never a live `Sim`/`NetClient`, so the
+  per-connection value has to be captured at snapshot time, exactly like `sky_default` already is.
+- **The `&'static str` bound forced a deliberate, bounded leak.** `NamedBiomeTint<F>` requires
+  `F: Fn(BlockPos) -> Option<&'static str>` (`crates/lodestone-render/src/biome_tint.rs`, out of
+  scope to relax for this change), but names arrive as owned `String`s off the wire. `BiomeNameCell`
+  leak-interns each one once (`Box::leak`) on the rare `Login`-time fold; a session that reconnects
+  many times leaks at most a few KB total, which is the trade documented on `BiomeNameCell` itself.
+- **`FALLBACK_BIOME_NAMES` is now a true fallback, not the only path — and it is still provisional
+  on its own terms.** It mirrors `crates/protocol/v770/src/server_protocol.rs`'s `BIOME_NAMES`
+  (alphabetical over the 55 biomes the embedded overworld generator can select — nether/end aren't
+  servable yet, see `worldgen-biomes.md`). That table is **unchanged by this work** — this fix is
+  entirely client-side (id→name *resolution*), not server-side (id→name *assignment*), and touching
+  `server_protocol.rs` was out of this batch's scope. The fallback stays exactly right against this
+  codebase's own server (the only server v770 can host) and is now only reached when no live
+  registry has arrived — never against a connection where one has.
+- **The gate that actually proves this: `tests/biome_tint_live_mesh.rs`'s
+  `live_mesh_snapshot_models_resolves_biome_names_from_the_live_registry_not_the_fallback_table`.**
+  A fixture built from `FALLBACK_BIOME_NAMES`'s own order cannot distinguish "the live table is
+  consulted" from "the fallback silently won and happened to agree" — it would be vacuous by
+  construction. This gate's fixture registry order **deliberately disagrees** with
+  `FALLBACK_BIOME_NAMES` at both tested biome ids (each names the *other* one), so a regression
+  back to fallback-only resolution fails it, with a fired negative control proving the same world
+  gives the opposite answer through the empty/fallback path.
 - **The swamp/mangrove-swamp noise term is unported.** `GrassColorModifier::Swamp` picks between two
   constants based on `Biome.BIOME_INFO_NOISE` (a Perlin sampler); `BiomeTint::grass_modifier_noise`
   stays at its trait default `0.0` (always the `>= -0.1` branch), so those two biomes render a
@@ -141,3 +167,12 @@ nothing currently overrides it.
   the **real** `mesh_snapshot_models` over a real `BlockModels` and a world with two real biomes,
   and gets exactly `[0x6A, 0x70, 0x39]` for the swamp side (predicted from the jar source
   independently of this code) and a distinct, real colour for the desert side.
+  `live_mesh_snapshot_models_resolves_biome_names_from_the_live_registry_not_the_fallback_table`
+  (same file) is the live-registry-threading gate: a deliberately permuted fixture registry order
+  proves the two ids resolve to the *opposite* biome from what `FALLBACK_BIOME_NAMES` would give,
+  with a fired control confirming the fallback path alone still gives the old (wrong-if-real-server)
+  answer on the identical snapshot.
+- `crates/lodestone-shell/src/net.rs`'s own `#[cfg(test)]` module —
+  `forward_folds_biome_registry_names_into_the_cell_without_using_the_channel` proves the real
+  `forward` function folds `ClientEvent::BiomeRegistryNames` into `BiomeNameCell` and that it never
+  crosses the `NetUpdate` channel, matching `BiomeClimateCell`'s own test.
