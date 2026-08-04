@@ -586,32 +586,60 @@ mod tests {
     /// independent `column()` calls, so a byte mismatch could mean either
     /// "the actual blocks differ" or "the same blocks, a different palette
     /// assignment order" — this isolates which, for the exact chunks that
-    /// test uses, with no threading involved at all (two *sequential* calls
-    /// on one thread). If this passes, `OverworldGenerator::column` is a
-    /// pure function of `(self, cx, cz)` as designed and the #414 failure is
-    /// not a value-determinism bug in ore composition itself.
+    /// test uses, with no threading involved at all.
+    ///
+    /// **Made vacuous by `6509a97`'s pre-ore memoisation cache, now fixed.**
+    /// `OverworldGenerator::pre_ore_cache` (`crates/lodestone-worldgen/src/overworld.rs`)
+    /// is a field on the generator instance, keyed by exact `(cx, cz)`. This
+    /// test used to call `column()` twice on *one* `generator`, so the
+    /// second call was served straight out of the first call's cache entry
+    /// — literally the same `Arc<PreOreResult>` — which guarantees identical
+    /// bytes by **pointer identity**, not by `column()` being deterministic.
+    /// A regression that reintroduced the historical palette-order bug (see
+    /// `crate::overworld::OverworldGenerator::materialize_world`'s own doc
+    /// comment — iterating a `surface_diff` `HashMap` directly instead of a
+    /// fixed-order point lookup) would still pass this test, because both
+    /// calls would still hit the one cached value.
+    ///
+    /// Fixed by building **two independently-constructed generators** —
+    /// each gets its own empty cache, its own `HashMap<String, f32>`
+    /// temperature table, its own everything — so a byte match here again
+    /// means real determinism, not a shared cache entry. This is also the
+    /// property a server restart actually needs: two separate process
+    /// lifetimes must generate the same chunk from the same seed.
+    ///
+    /// If this passes, `OverworldGenerator::column` is a pure function of
+    /// `(self.seed_and_settings, cx, cz)` as designed and the #414 failure
+    /// is not a value-determinism bug in ore composition itself.
     #[test]
-    fn column_is_byte_identical_across_two_independent_sequential_calls() {
-        let generator = overworld_generator(42);
+    fn column_is_byte_identical_across_two_independently_constructed_generators() {
+        let generator_a = overworld_generator(42);
+        let generator_b = overworld_generator(42);
         for &(cx, cz) in &[(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1), (2, -1)] {
-            let a = generator.column(cx, cz);
-            let b = generator.column(cx, cz);
+            let a = generator_a.column(cx, cz);
+            let b = generator_b.column(cx, cz);
             let (a_min_y, a_height, a_palette, a_blocks, a_biomes) = a.into_raw();
             let (b_min_y, b_height, b_palette, b_blocks, b_biomes) = b.into_raw();
-            assert_eq!(a_min_y, b_min_y, "chunk ({cx},{cz}) min_y differs between two sequential calls");
-            assert_eq!(a_height, b_height, "chunk ({cx},{cz}) height differs between two sequential calls");
+            assert_eq!(
+                a_min_y, b_min_y,
+                "chunk ({cx},{cz}) min_y differs between two independently constructed generators"
+            );
+            assert_eq!(
+                a_height, b_height,
+                "chunk ({cx},{cz}) height differs between two independently constructed generators"
+            );
             assert_eq!(
                 a_palette, b_palette,
-                "chunk ({cx},{cz}) palette differs between two sequential calls — a non-determinism \
-                 bug or a palette-assignment-order difference, not threading"
+                "chunk ({cx},{cz}) palette differs between two independently constructed generators \
+                 — a non-determinism bug or a palette-assignment-order difference, not threading"
             );
             assert_eq!(
                 a_blocks, b_blocks,
-                "chunk ({cx},{cz}) block indices differ between two sequential calls"
+                "chunk ({cx},{cz}) block indices differ between two independently constructed generators"
             );
             assert_eq!(
                 a_biomes, b_biomes,
-                "chunk ({cx},{cz}) biome quarts differ between two sequential calls"
+                "chunk ({cx},{cz}) biome quarts differ between two independently constructed generators"
             );
         }
     }

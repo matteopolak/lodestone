@@ -98,7 +98,7 @@
 //! `column()` calls for the *same* chunk therefore produced the same blocks
 //! at the same positions but a **different palette order** — same terrain,
 //! different bytes. Caught by
-//! `lodestone_server::worldgen_data::tests::column_is_byte_identical_across_two_independent_sequential_calls`
+//! `lodestone_server::worldgen_data::tests::column_is_byte_identical_across_two_independently_constructed_generators`
 //! (added as a permanent regression control, no threading involved) after
 //! it was first surfaced by `lodestone-server`'s own
 //! `chunk::tests::parallel_generation_is_deterministic_and_matches_serial`
@@ -979,7 +979,7 @@ impl OverworldGenerator {
         // `surface_diff` is consulted by **point lookup**, in the same fixed
         // `(lz, lx, ly)` order as the base fill below — never iterated
         // directly. This was a real bug (issue #295's Job 2, found by
-        // `worldgen_data::tests::column_is_byte_identical_across_two_independent_sequential_calls`):
+        // `worldgen_data::tests::column_is_byte_identical_across_two_independently_constructed_generators`):
         // a `DenseBlockGrid`'s palette is built incrementally, in `.set()`
         // call order, unlike the old `HashMap<(i32,i32,i32), String>` `world`
         // this replaced, whose palette used to be assigned by a *separate*,
