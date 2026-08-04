@@ -19,6 +19,21 @@
 //! inside `lodestone-auth`"), and the metadata file's whole point is to sit
 //! **beside** `servers.json`/`options.json`, so approximating the directory
 //! would silently break that.
+//!
+//! # Issue #67's "hoist to `lodestone-core`" is stale
+//!
+//! That issue proposed `lodestone-core` as the shared home because "both
+//! crates already depend on it" — checked against the committed
+//! `Cargo.toml`s and that is false today: neither `lodestone-auth` nor
+//! `lodestone-shell` depends on `lodestone-core`, which is a narrowly-scoped
+//! protocol-codec crate (VarInt/NBT, `Encode`/`Decode`) with no reason to grow
+//! platform-directory logic. What *is* true, and wasn't when #67 was filed, is
+//! simpler: `lodestone-shell` depends on `lodestone-auth` (see
+//! `lodestone-shell/Cargo.toml`), so this module is already the correct
+//! one-implementation home — the remaining work is deleting the shell's copy
+//! in favour of calling [`data_dir`] here, not inventing a third crate. That
+//! edit lives in `crates/lodestone-shell/src/menu/servers.rs`, which is
+//! outside this crate's ownership.
 
 use std::ffi::OsStr;
 use std::path::PathBuf;
