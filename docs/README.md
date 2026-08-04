@@ -11,6 +11,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   reaching the physics engine, why `blocks_motion` moved from a geometry
   approximation to a dumped census of its own, `fluid_at` reporting a real
   per-state level now, and the `is_solid_face` approximation that remains.
+- [Entity tick drivers](./entity-tick-drivers.md) — `ProjectileRegistry` and
+  `ItemEntityRegistry`, the per-tick seam that turned `projectile.rs` and
+  `item_entity.rs`'s lifecycle half from islands into driven code (#211, #215), plus
+  why `MobSim` having **no production instantiation** makes #217 the prerequisite for
+  wiring any of them into the integrated server rather than a beneficiary of them.
 - [Entity-versus-entity interaction](./entity-push.md) — the soft crowd push
   (`Entity.push`) and the hard-collision half of `noCollision`: why `isPushable` and
   `canBeCollidedWith` are different predicates, why players passing through each

@@ -352,6 +352,15 @@ Two specific traps, both of which have already cost real work:
 Prefer `cargo xtask connectedness` over any hand-derived coverage number; the hand-derived version
 has been wrong four times in four different ways.
 
+**But know what it measures, because it is silent rather than wrong outside that scope.** It reports
+**protocol packet decode → event wiring**, not Rust call graphs. Pointed at a *crate-internal* island
+— an implemented type nothing in the workspace constructs — it returns **byte-identical output before
+and after the fix**, which reads as "no change" rather than "not applicable". Measured: an agent
+closing `projectile.rs` and `item_entity.rs`'s missing tick drivers ran it either side and correctly
+reported the identical output as meaningless here instead of quoting it as a result. For that class,
+the instrument is a grep for constructors across the whole tree plus a test that drives the *registry*
+rather than the type.
+
 ---
 
 ## Evidence standards
@@ -505,7 +514,13 @@ transform cannot produce. Ask *where*, not *what*.
   `pktsize == read - 4`. **Write the entire frame in one call.**
 - **A freshly summoned entity is not selector-visible until the next server tick.** Poll; never
   assert immediately. `Invulnerable:1b` also makes an entity un-targetable — use `NoAI:1b` for a
-  stationary lure.
+  stationary lure, **but `NoAI:1b` halts gravity too, not just AI.** Measured while building a
+  fall-damage oracle: a `NoAI` subject does not fall at all, so it is the wrong lure for anything
+  involving motion, and a test that used it would read "no fall damage" as a code defect. Use it for
+  a stationary *target*, never for a subject you intend to drop.
+- **`minecraft:generic` is itself `bypasses_armor`-tagged**, so it is the wrong damage type for testing
+  armour reduction — it reduces nothing by design. Caught mid-oracle when a fully-armoured subject took
+  full damage and the armour maths looked broken. `minecraft:mob_attack` is a reducible type.
 - **`tick step N` does not advance entity physics; only `tick sprint N` does** — and a
   `tick sprint 1` used for registration silently consumes a tick.
 
