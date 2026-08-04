@@ -8,23 +8,25 @@
 xtask = "run --quiet --package xtask --"
 
 # ---------------------------------------------------------------------------
-# sccache — measured and ready, deliberately NOT active. Read
-# docs/build-caching.md ("How to turn it on repo-wide") before uncommenting:
-# flipping the wrapper invalidates EVERY fingerprint in the shared target/
-# (one full rebuild for every agent, measured, not theoretical), and CI
-# (docs/ci.md) currently assumes no rustc-wrapper. Flip only in a coordinated
-# quiet window, then prime with the three CLAUDE.md health checks.
+# sccache — ACTIVE since 2026-08-04 (measurements and playbook in
+# docs/build-caching.md). Every builder needs the binary: local dev has
+# /opt/homebrew/bin/sccache (Homebrew), CI installs it via
+# mozilla-actions/sccache-action@v0.0.11. An environment without it can
+# override the wrapper off with RUSTC_WRAPPER="" (verified working).
 #
-# Until then, opt in per-build for private dirs only (safe today):
-#   RUSTC_WRAPPER=/opt/homebrew/bin/sccache cargo check -p <crate> \
-#     --target-dir /tmp/<unique-dir>
-# Use the --target-dir FLAG, never the CARGO_TARGET_DIR env var — sccache
-# hashes CARGO_* env vars into its keys, and the env-var form measured 0%
-# hits where the flag form measured 78-94%.
-#
-# [build]
-# rustc-wrapper = "/opt/homebrew/bin/sccache"
-#
-# [env]
-# SCCACHE_CACHE_SIZE = "20G"
+# Two rules that keep the cache useful:
+# - Build in a PRIVATE dir via the --target-dir FLAG. Never export
+#   CARGO_TARGET_DIR as an env var — sccache hashes CARGO_* env vars into
+#   its keys, and the env-var form measured 0% hits where the flag form
+#   measured 78-94%.
+# - Do not remove/re-add this wrapper casually: flipping it invalidates
+#   every cargo fingerprint (measured), i.e. one full rebuild per target dir.
+[build]
+rustc-wrapper = "/opt/homebrew/bin/sccache"
+
+# 10G is >3x headroom over measured usage (94-129 MB per config/mode pair;
+# ~1-3 GB estimated steady state across the three health-check configs).
+# Applies on sccache server start; does not override an existing env var.
+[env]
+SCCACHE_CACHE_SIZE = "10G"
 # ---------------------------------------------------------------------------
