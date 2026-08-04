@@ -91,6 +91,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   surfacing swimmer from being clipped into one.
 - [Item GUI geometry](./item-gui-geometry.md) — baking block items into 3-D
   inventory-slot geometry, and the pose/projection matrices that place them.
+- [Item variants](./item-variants.md) — one item, several baked geometries: why
+  resolving `items/<id>.json` **once at load against a static GUI context**
+  flattened all 84 branching items to their inventory form (a spyglass in the hand
+  drew the flat sprite, and took `item/generated`'s `firstperson_righthand` rather
+  than the in-hand model's), why the fix has to run in the **pre-stitch** discovery
+  pass (`bow_pulling_*` geometry is walked out of the alpha outline of a texture
+  that was in no atlas at all), which properties are honestly sourced and which
+  fall back, and why `use_duration` counts **up** while `use_cycle` counts down.
 - [Section camera uniform](./section-camera-uniform.md) — the group-0 camera
   binding split into a shared per-frame half (view-projection + fog) and a
   per-section origin arena addressed by a dynamic offset, fixing a profiled
