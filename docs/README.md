@@ -245,6 +245,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   The path from "the server says there is a `minecraft:drowned` at (x, y, z)" to a
   posed, textured, instanced mob on screen. Three separate decisions live along it,
   and each has burned us once:
+- [The `v340`/`v735` `tests/entity.rs` spawn-packet fixture](./entity-spawn-wire-fixture.md) —
+  `lodestone-testsupport::EntitySpawnWireFixture` is a small data table that replaces
+  the hand-written wire bytes in `crates/protocol/v340/tests/entity.rs` and
+  `crates/protocol/v735/tests/entity.rs`'s `spawn_entity`/`spawn_entity_living` tests.
+  The two test files are structurally identical hermetic seam tests through
+  `VersionAdapter::handle_packet`; comment-stripped, the only difference between them
+  is six literals, not a code-shape difference — so this is a fixture table, not a
+  templated test body.
 - [Entity tick drivers: `ProjectileRegistry` and `ItemEntityRegistry`](./entity-tick-drivers.md) —
   Two small per-tick driver types in `lodestone-entity` that own a *collection* of
   already-correct, previously-unconsumed entity mechanics and advance all of them
@@ -428,6 +436,17 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   is the "not Minecraft" tell issue
   [#22](https://github.com/matteopolak/lodestone/issues/22) named: flat per-block
   light plus directional shade, with no darkening in corners and crevices.
+- [The particle catalogue: what's wired, what isn't, and why](./particle-catalogue.md) —
+  `lodestone-particle`'s `Sheet` enum names a physical texture sheet under
+  `textures/particle/*.png`; `Behaviour` names a per-type tick/quad-size/layer
+  override; `emit` is one function per vanilla particle *class* (not per registry type
+  — several registry types share a Java class, see "One class, several registry
+  names" below). `Particles::spawn_one` (`crates/lodestone-shell/src/particles.rs`) is
+  the one place that maps a decoded registry name to an emitter call. Adding a type
+  end-to-end means: a `Sheet` variant naming the real sheet (if one doesn't already
+  exist for it), a `Behaviour` variant if the tick shape is new, an `emit::` function
+  transcribed from the matching `net.minecraft.client.particle.*` class, and one
+  `match` arm in `spawn_one`.
 - [Pause menu](./pause-menu.md) — The in-game Escape menu, and `Sim::end_session`
   — the teardown that lets a player leave a live session cleanly and start (or join)
   another one without carrying anything over. Landed in `c53d022` ("an in-game pause
@@ -475,11 +494,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   cost of changing course is still low. `v340` (protocol 340, Minecraft 1.12.2) is
   that version: pre-Flattening, already depends only on version-free crates, already
   live-verified against a real 1.12.2 server.
-- [Version-free codec plumbing shared by the four adapter crates](./protocol-adapter-shared-helpers.md) —
-  Two extractions identified by a protocol-architecture survey as safe to de-duplicate
-  because neither touches an enforced invariant (folder-level deletability, or the
-  `lodestone-model`/version-crate dependency direction `xtask check-isolation`
-  enforces):
+- [The version-free part of each adapter's helper prologue](./protocol-adapter-prologue.md) —
+  `crates/lodestone-core/src/lib.rs` now exports `encode_body`, `decode_body`,
+  `decode_body_exact`, and `unpack_degrees` — the substance of four small helpers
+  that used to be hand-copied, byte-for-byte, at the top of
+  `crates/protocol/{v47,v340,v735,v770}/src/adapter.rs`. Each version crate keeps a
+  same-named local wrapper that is now one line.
 - [Protocol version crate naming, and what `v47`/`v340`/`v735` already are](./protocol-crate-naming.md) —
   Groundwork for GitHub epic #343 (support 1.7.10 through 26.2, one crate per major
   version's latest patch, via a single canonical internal version plus a per-version
