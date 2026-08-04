@@ -1,8 +1,10 @@
 //! GPU resources and texture loading for the entity render pass: mobs,
-//! humanoid armour layers, and the sheep wool layer.
+//! humanoid armour layers, the sheep wool layer, and the mob-fire billboard
+//! (issue #434).
 use std::collections::HashMap;
 
 use lodestone_assets::equipment::{ArmourLayerType, ArmourSlot};
+use lodestone_render::entity_pipeline::{FlameInstanceRaw, flame_mesh};
 use lodestone_render::{
     ArmourModelSet, CameraUniform, EntityCameraUniform, EntityModelSet, EntityPipeline,
     GpuEntityModel, SheepWoolModelSet, entity_camera_buffer, fog::FogUniform,
@@ -76,6 +78,23 @@ pub(super) struct EntityRenderer {
     pub(super) wool_models: SheepWoolModelSet,
     pub(super) wool_gpu: Option<GpuEntityModel>,
     pub(super) wool_texture: Option<wgpu::BindGroup>,
+    /// The mob-fire billboard (issue #434, player report: "mobs dont show
+    /// flames yet"): a fourth pipeline
+    /// ([`EntityPipeline::flame_pipeline`]) drawn through the **base**
+    /// pipeline's own camera bind group (flame needs no camera data the mob
+    /// pass does not already have), one baked mesh per entity type keyed by
+    /// its network type path (built eagerly for every
+    /// `lodestone_data::entity_types` name with a known
+    /// `lodestone_data::entity_dimensions` entry — see [`Self::new`]), and one
+    /// texture bind group for the combined `fire_0`/`fire_1` strip.
+    ///
+    /// `flame_texture` is `None` without a vanilla pack, and fire then draws
+    /// nothing — the same asymmetry [`Self::armour_textures`]/
+    /// [`Self::wool_texture`] document: a synthetic placeholder flame would
+    /// read as a rendering bug, not as "no pack found".
+    pub(super) flame_pipeline: wgpu::RenderPipeline,
+    pub(super) flame_gpu_models: HashMap<String, GpuEntityModel>,
+    pub(super) flame_texture: Option<wgpu::BindGroup>,
 }
 
 impl EntityRenderer {
@@ -141,6 +160,48 @@ impl EntityRenderer {
             pipeline.texture_bind_group(device, &view, &sampler)
         });
 
+        // The mob-fire billboard (issue #434). A fourth pipeline over this
+        // pipeline's own two bind-group layouts — see
+        // `EntityPipeline::flame_pipeline`'s doc for why this is not a fifth
+        // bind group.
+        let flame_pipeline = pipeline.flame_pipeline(device, color_format);
+        // One baked mesh per entity type with a known base hitbox, built
+        // eagerly for the same reason `gpu_models` above is: `prepare_flame`
+        // (gpu.rs) only ever *reads* this map, never builds into it, so every
+        // entry has to exist before the first frame. `lodestone_data::
+        // entity_types::TYPE_COUNT` is ~160 — trivial to build in full rather
+        // than lazily keying on which types are ever actually seen on fire.
+        let mut flame_gpu_models: HashMap<String, GpuEntityModel> = HashMap::new();
+        for id in 0..i32::try_from(lodestone_data::entity_types::TYPE_COUNT).unwrap_or(0) {
+            let Some(name) = lodestone_data::entity_types::entity_type_name(id) else {
+                continue;
+            };
+            let Some(path) = name.strip_prefix("minecraft:") else {
+                continue;
+            };
+            let Some(dims) = lodestone_data::entity_dimensions::base_dimensions(id) else {
+                continue;
+            };
+            let (vertices, indices) = flame_mesh(dims.width, dims.height);
+            if let Some(gpu) = GpuEntityModel::upload_parts(
+                device,
+                &vertices,
+                &indices,
+                vec![lodestone_render::PartRange {
+                    index_start: 0,
+                    index_count: indices.len() as u32,
+                    vertex_start: 0,
+                    vertex_count: vertices.len() as u32,
+                }],
+            ) {
+                flame_gpu_models.insert(path.to_string(), gpu);
+            }
+        }
+        let flame_texture = load_flame_textures().map(|img| {
+            let view = entity_texture_from_image(device, queue, &img);
+            pipeline.texture_bind_group(device, &view, &sampler)
+        });
+
         // A persistent group-0 uniform, rewritten every frame before the pass.
         // Sized for camera **plus fog**: the entity shader reads both out of one
         // binding, so a buffer sized for the camera alone would leave the fog
@@ -196,6 +257,9 @@ impl EntityRenderer {
             wool_models,
             wool_gpu,
             wool_texture,
+            flame_pipeline,
+            flame_gpu_models,
+            flame_texture,
         }
     }
 
@@ -360,6 +424,62 @@ fn load_sheep_wool_texture() -> Option<lodestone_assets::Image> {
         Ok(img) => Some(img),
         Err(e) => {
             tracing::warn!(target: "assets", "decode {PATH}: {e}");
+            None
+        }
+    }
+}
+
+/// Decode and combine the mob-fire billboard's two sprites
+/// (`textures/block/fire_0.png`/`fire_1.png`) from the vanilla `client.jar`,
+/// or `None` if no pack is found — the flame equivalent of
+/// [`load_sheep_wool_texture`], with the same duplicated pack-discovery
+/// rationale documented there (`resources::vanilla_manager` is
+/// `#[cfg(test)]`-only, so production code in this module cannot reach it).
+///
+/// Delegates the actual decode/reorder/combine to
+/// [`lodestone_assets::entity_flame::load_combined_flame_texture`] — this
+/// function's only job is finding the jar, exactly like its two siblings.
+fn load_flame_textures() -> Option<lodestone_assets::Image> {
+    use lodestone_assets::{ResourceManager, ResourceSource, ZipSource};
+    use std::path::{Path, PathBuf};
+
+    fn is_pack_root(dir: &Path) -> bool {
+        dir.join("client.jar").is_file() && dir.join("generated/reports/blocks.json").is_file()
+    }
+    fn pack_root() -> Option<PathBuf> {
+        if let Some(dir) = std::env::var_os("LODESTONE_ASSETS") {
+            let p = PathBuf::from(dir);
+            return is_pack_root(&p).then_some(p);
+        }
+        let cwd = std::env::current_dir().ok()?;
+        for base in cwd.ancestors() {
+            let mut entries: Vec<PathBuf> = match std::fs::read_dir(base.join(".cache/mc")) {
+                Ok(rd) => rd
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| is_pack_root(p))
+                    .collect(),
+                Err(_) => continue,
+            };
+            entries.sort();
+            if let Some(root) = entries.pop() {
+                return Some(root);
+            }
+        }
+        None
+    }
+
+    let jar = pack_root()?.join("client.jar");
+    let bytes = std::fs::read(&jar)
+        .inspect_err(|_| tracing::warn!(target: "assets", "read {}", jar.display()))
+        .ok()?;
+    let zip = ZipSource::from_bytes(bytes)
+        .inspect_err(|_| tracing::warn!(target: "assets", "open {}", jar.display()))
+        .ok()?;
+    let manager = ResourceManager::new(vec![Box::new(zip) as Box<dyn ResourceSource>]);
+    match lodestone_assets::entity_flame::load_combined_flame_texture(&manager) {
+        Ok(img) => Some(img),
+        Err(e) => {
+            tracing::warn!(target: "assets", "load combined flame texture: {e}");
             None
         }
     }

@@ -302,6 +302,28 @@ pub enum ScreenEffectAssetError {
     },
 }
 
+/// Errors produced while loading the burning-mob flame textures
+/// (`textures/block/fire_0.png`, `textures/block/fire_1.png` — see
+/// `crate::entity_flame`).
+#[derive(Debug, thiserror::Error)]
+pub enum EntityFlameAssetError {
+    /// A required flame texture was not present in any pack.
+    #[error("entity-flame texture not found: {location}")]
+    Missing {
+        /// The missing texture's location.
+        location: String,
+    },
+    /// A flame texture failed to decode.
+    #[error("entity-flame texture {location}: {source}")]
+    Texture {
+        /// The texture being processed.
+        location: String,
+        /// The underlying decode error.
+        #[source]
+        source: TextureError,
+    },
+}
+
 /// Errors produced while baking a resolved model into renderer-ready geometry.
 #[derive(Debug, thiserror::Error)]
 pub enum BakeError {

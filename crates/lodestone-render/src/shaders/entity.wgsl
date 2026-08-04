@@ -348,3 +348,71 @@ fn shade_entity(in: VsOut, tex_col: vec4<f32>) -> vec4<f32> {
     let fogged_srgb = mix(overlaid, linear_to_srgb(camera.fog_color_start.rgb), amount);
     return vec4<f32>(srgb_to_linear(fogged_srgb), tex_col.a);
 }
+
+// ---------------------------------------------------------------------------
+// Mob fire (issue #434 — player report: "mobs dont show flames yet")
+//
+// `EntityPipeline::flame_pipeline`'s vertex/fragment entry points. Distinct
+// from `vs_main`/`fs_main` because the flame instance format
+// (`FlameInstanceRaw`, entity_pipeline.rs) has no light/tint/overlay word at
+// all — just a matrix and the current animation frame — so this pass needs
+// its own, narrower `@location` set rather than reusing `VsOut`'s.
+// ---------------------------------------------------------------------------
+
+struct FlameVsOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) world: vec3<f32>,
+};
+
+@vertex
+fn vs_main_flame(
+    @location(0) position: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(4) m0: vec4<f32>,
+    @location(5) m1: vec4<f32>,
+    @location(6) m2: vec4<f32>,
+    @location(7) m3: vec4<f32>,
+    @location(8) frame: u32,
+) -> FlameVsOut {
+    let model = mat4x4<f32>(m0, m1, m2, m3);
+    let world = model * vec4<f32>(position, 1.0);
+    var out: FlameVsOut;
+    out.clip = camera.view_proj * world;
+    out.world = world.xyz;
+    // `uv.x` is already the complete, final U into the combined 32-wide flame
+    // texture (see `FlameVertex::uv`'s doc in entity_pipeline.rs) — carried
+    // through unchanged. `uv.y` is only the *local* top/bottom of whichever
+    // frame cell is current (0.0 or 1.0); this is where it is combined with
+    // the per-instance `frame` into the real V, exactly the contract that
+    // doc promises.
+    const FLAME_FRAME_COUNT: f32 = 32.0;
+    out.uv = vec2<f32>(uv.x, (f32(frame) + uv.y) / FLAME_FRAME_COUNT);
+    return out;
+}
+
+@fragment
+fn fs_main_flame(in: FlameVsOut) -> @location(0) vec4<f32> {
+    let tex_col = textureSample(tex, smp, in.uv);
+    // Vanilla's `ENTITY_CUTOUT_CULL` pipeline is `ALPHA_CUTOUT` at `0.1`
+    // (`RenderPipelines.java:238-243`), not the `0.5` `fs_main` uses — a
+    // lower threshold keeps more of a flame sprite's soft, low-alpha fringe
+    // than the mob-body cutout would.
+    if (tex_col.a < 0.1) {
+        discard;
+    }
+    // Vanilla forces the flame's light coords to full block-light
+    // (`LightCoordsUtil.withBlock(state.lightCoords, 15)`,
+    // `FlameFeatureRenderer.java:42`) and submits a flat white vertex colour
+    // (`fireVertex`'s `setColor(-1)`, `:71`) with no per-face lighting define
+    // on `ENTITY_CUTOUT_CULL` — fire reads as self-lit, not shaded by the
+    // scene the way a mob's body is. This entry point therefore skips
+    // `shade_entity`'s two-light diffuse and world-light dimming entirely
+    // (there is no per-instance light byte to look one up from — see
+    // `FlameInstanceRaw`'s doc) and only applies distance fog, so a burning
+    // mob at the render-distance edge still dissolves with the terrain around
+    // it instead of hanging in front of it as a flat-lit cutout.
+    let amount = fog_amount(in.world - camera.fog_eye.xyz);
+    let fogged_srgb = mix(linear_to_srgb(tex_col.rgb), linear_to_srgb(camera.fog_color_start.rgb), amount);
+    return vec4<f32>(srgb_to_linear(fogged_srgb), tex_col.a);
+}

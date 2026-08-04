@@ -683,6 +683,64 @@ villager and zombie-villager profession/type overlays, and glowing-eye layers
 mesh/tint/pixel level; the others have not been investigated further than this
 list.
 
+### Mob fire (issue #434)
+
+Player report: "mobs dont show flames yet." Landed as two separate halves —
+see the two commits' own messages — because the bit extraction alone reaches
+nothing and the render pass alone has no input.
+
+**The bit.** `EntityDraw::on_fire` reads bit `0x01` of the shared-flags byte
+via `lodestone_ecs::entity::EntityFlags`, bridged through `EntityIndex` in
+`extract_entity_draws` (`entities.rs`) exactly the way `EntityDraw::hurt` and
+`EntityDraw::item_use` already are — **not** through `EntitySnapshot`. This is
+a deliberate correction to how the work was originally briefed: the briefing
+proposed decoding the bit in `net.rs`'s `entity_snapshot` and threading it
+through `EntitySnapshot`, but `EntityFlags` already exists, is already
+populated for every remote entity by `lodestone-ecs::ingest::
+apply_entity_metadata`, and is already read this same way by `MobState`/
+`HurtTime`/`ItemUse` — so no `net.rs` change, and no new `EntitySnapshot`
+field, was needed at all.
+
+**The geometry**, derived from vanilla's `FlameFeatureRenderer.prepare`
+(`.cache/mc/26.2/client-src/net/minecraft/client/renderer/feature/
+FlameFeatureRenderer.java:29-66`) — see `flame_quads`'s doc in
+`lodestone-render/src/entity_pipeline.rs` for the full line-by-line derivation
+and `lodestone-render/tests` (in-module `entity_pipeline::tests`) for the
+predicted-vs-measured geometry (a zombie: 6 quads, first-quad world
+half-width 0.42 blocks, stack top ~3.07 blocks above the feet):
+
+* One camera-**yaw-only** billboarded column of quads (not axis-aligned, and
+  not a full look-at billboard — the rotation is the *camera's own* yaw,
+  identical for every flame drawn that frame, not a per-entity vector toward
+  the camera), stacked from the entity's feet upward, shrinking (`×0.9` per
+  quad) and receding in depth (`-0.03` per quad) as it rises.
+* Scaled by the entity's **base hitbox** (`lodestone_data::entity_dimensions`
+  — vanilla's `Entity.getBbWidth()`/`getBbHeight()`), not this crate's own
+  baked mesh AABB — the two differ for several mobs (e.g. a zombie's model
+  geometry includes its outstretched arms; its hitbox does not).
+* Alternates between two textures (`fire_0`/`fire_1`) every quad, combined
+  into one side-by-side texture by
+  `lodestone_assets::entity_flame::load_combined_flame_texture` so the flame
+  pass binds exactly one extra texture, not two.
+* Animated by a 32-frame vertical strip per texture, **not** a per-vertex UV
+  scroll — see `load_combined_flame_texture`'s doc for `fire_0.png`'s
+  `fire_0.png.mcmeta`-specified frame permutation, which `fire_1` does not
+  share and which had to be corrected on the CPU side so both textures index
+  by a plain `tick % 32`.
+* Rendered **cutout, not translucent**: vanilla's own render type
+  (`RenderTypes.entityCutoutCull`) is `ALPHA_CUTOUT` at `0.1` with backface
+  culling, full-bright forced block light, and no per-face diffuse shading —
+  `fs_main_flame`/`vs_main_flame` in `entity.wgsl` skip the mob shader's
+  two-light diffuse entirely rather than applying it to a self-lit sprite.
+
+**The pipeline** reuses `EntityPipeline`'s existing two bind-group layouts
+(camera, texture) — a fourth pipeline variant alongside the mob/armour/banner
+ones, over the 4-bind-group floor for exactly the same reason those three
+are. Its own instance format, `FlameInstanceRaw` (a model matrix plus the
+current animation frame — no light/tint/overlay word, since vanilla's flame
+never varies any of those), is why it needs its own vertex entry point
+(`vs_main_flame`) rather than sharing `vs_main`'s.
+
 ## How to change it
 
 * **New mob ported.** Add the `EntityModelEntry` to

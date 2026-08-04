@@ -292,6 +292,308 @@ impl EntityInstanceRaw {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Mob fire (issue #434 — player report: "mobs dont show flames yet")
+// ---------------------------------------------------------------------------
+
+/// The mob-fire billboard's geometry, derived from vanilla's
+/// `FlameFeatureRenderer.prepare`
+/// (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/feature/
+/// FlameFeatureRenderer.java:29-66`) — **modelled**, not transliterated: this
+/// is a clean re-derivation of the same rule in idiomatic Rust, with every
+/// constant cited back to the line it comes from.
+///
+/// # The rule
+///
+/// One camera-yaw-billboarded column of quads, stacked from the entity's feet
+/// upward, shrinking and receding as it rises:
+///
+/// * `s = width * 1.4` (`:32`) is the whole billboard's scale — width and
+///   height below are in *scaled* local units, not world blocks, until
+///   [`flame_quads`] multiplies through by `s` at the end.
+/// * `h = height / s` (`:36`) is how many scaled units tall the stack has to
+///   fill; the loop below runs once per `0.45`-unit slice of it (`:60`),
+///   which is [`FLAME_QUAD_HEIGHT`]'s value.
+/// * Quad `ss` (0-indexed, `:41`, `:64`) has half-width `r`, starting at `0.5`
+///   (`:34`) and shrinking by `×0.9` per quad (`:62`) — [`FLAME_WIDTH_DECAY`].
+/// * Quad `ss`'s vertical span is `[-yo, 1.4-yo]` (`:56-59`), with `yo`
+///   decreasing by `0.45` per quad (`:61`) — the same `0.45` as the height
+///   step, so consecutive quads overlap by `1.4 - 0.45 = 0.95` scaled units
+///   rather than tiling edge-to-edge.
+/// * Quad `ss`'s local Z is a constant pose-level push-back,
+///   `0.3 - i32(h_initial) * 0.02` (`:39`), plus a further `-0.03` per quad
+///   (`:63`) — so later, smaller quads sit measurably behind earlier ones,
+///   which is what keeps the stack from z-fighting itself.
+/// * Quad `ss` alternates texture (`ss % 2 == 0` → `fire_0`, else `fire_1`,
+///   `:45`) and flips its U mapping every *other pair* of quads
+///   (`ss / 2 % 2 == 0`, `:50-54`).
+///
+/// # What this does not model
+///
+/// The **animation frame** (which of the 32 stacked rows in `fire_0`/`fire_1`
+/// is current) is deliberately absent from this struct — it is the one
+/// per-tick-varying quantity, carried instead by [`FlameInstanceRaw::frame`]
+/// so a static, once-baked mesh can still animate. See [`FlameVertex::uv`]'s
+/// doc for the exact contract between what is baked here and what the shader
+/// adds at draw time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlameVertex {
+    /// Position in the flame's own local space: `+Y` up from the entity's
+    /// feet, `+Z` the yaw-billboard's forward axis. **Already scaled** by `s`
+    /// — see [`flame_quads`]'s doc.
+    pub position: [f32; 3],
+    /// `[u, v_local]`, **not** a complete UV pair on its own:
+    ///
+    /// * `u` is the complete, final U into the combined 32-wide flame texture
+    ///   ([`lodestone_assets::entity_flame::combine_flame_halves`]) —
+    ///   `0.0..0.5` for a `fire_0` vertex, `0.5..1.0` for `fire_1`, already
+    ///   carrying this quad's horizontal flip. Fully baked; the shader reads
+    ///   it unchanged.
+    /// * `v_local` is only `0.0` (top of whichever frame cell is current) or
+    ///   `1.0` (bottom) — it does **not** know which of the 32 frames is
+    ///   current. The shader combines it with [`FlameInstanceRaw::frame`] as
+    ///   `v = (frame + v_local) / 32.0`. Baking the animation into the mesh
+    ///   itself would mean re-uploading every flame mesh on every frame
+    ///   advance; carrying only the two endpoints here and letting the
+    ///   *instance* (which already changes every frame for every moving mob)
+    ///   supply the frame index costs nothing extra against the pipeline's
+    ///   existing per-instance-attribute budget.
+    pub uv: [f32; 2],
+}
+
+/// One quad of the mob-fire billboard, in [`FlameVertex`]'s local space,
+/// wound bottom-left → bottom-right → top-right → top-left (matching every
+/// other baked quad in this crate — see `push_part_quads`'s doc in
+/// `entity.rs`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlameQuad {
+    /// The four corners, in winding order.
+    pub vertices: [FlameVertex; 4],
+    /// `true` selects the right half of the combined flame texture
+    /// (`fire_1`), `false` the left half (`fire_0`) —
+    /// `FlameFeatureRenderer.java:45`'s `ss % 2 == 0 ? fire1 : fire2` (vanilla
+    /// names its *first* alternate `fire1` for the sprite `ModelBakery.FIRE_0`
+    /// resolves to — the naming looks swapped at a glance and is not; `fire1`
+    /// the local variable and `FIRE_0` the sprite are the same texture).
+    pub fire_1: bool,
+}
+
+/// Vertical size of one flame quad in scaled local units
+/// (`FlameFeatureRenderer.java:58-59`'s `1.4`), and simultaneously the step
+/// `yo`/`h` advance by per quad (`:60-61`) — vanilla reuses one literal for
+/// both, so consecutive quads overlap by `1.4 - 0.45 = 0.95` rather than
+/// tiling edge to edge.
+const FLAME_QUAD_HEIGHT: f32 = 1.4;
+const FLAME_STEP: f32 = 0.45;
+const FLAME_INITIAL_HALF_WIDTH: f32 = 0.5;
+const FLAME_WIDTH_DECAY: f32 = 0.9;
+const FLAME_Z_STEP: f32 = 0.03;
+const FLAME_SCALE_FACTOR: f32 = 1.4;
+/// A safety cap absent from vanilla's own unguarded `while` loop
+/// (`FlameFeatureRenderer.java:44`): a pathological `(width, height)` pair —
+/// zero width, or a height orders of magnitude beyond any real vanilla entity
+/// — must produce a bounded mesh rather than an unbounded allocation. No real
+/// `lodestone_data::entity_dimensions` entry comes close to needing this many
+/// quads (the tallest, the ender dragon at height 8, needs single digits).
+const MAX_FLAME_QUADS: usize = 64;
+
+/// Vanilla's `FlameFeatureRenderer.prepare` (see [`FlameQuad`]'s doc for the
+/// full derivation), for an entity whose **base** hitbox is `width × height`
+/// blocks (`lodestone_data::entity_dimensions::base_dimensions` — vanilla's
+/// `state.boundingBoxWidth`/`boundingBoxHeight`, `EntityRenderer.java:168-169`,
+/// i.e. `Entity.getBbWidth()`/`getBbHeight()`, not this crate's own baked mesh
+/// AABB).
+///
+/// Empty for a non-positive `width` (nothing to scale by) or an already
+/// non-positive `height` — both degenerate inputs vanilla's own loop would
+/// simply not enter (`while (h > 0.0F)`) — and capped at
+/// [`MAX_FLAME_QUADS`] for anything else.
+#[must_use]
+pub fn flame_quads(width: f32, height: f32) -> Vec<FlameQuad> {
+    if !(width > 0.0) || !(height > 0.0) {
+        return Vec::new();
+    }
+    let s = width * FLAME_SCALE_FACTOR; // `:32`
+    let h_initial = height / s; // `:36`
+    // The pose-level push-back applied once, before any quad — `:39`. Vanilla
+    // truncates toward zero (an `int` cast on a positive float), matching
+    // `as i32` here.
+    let base_z = 0.3 - (h_initial as i32) as f32 * 0.02;
+
+    let mut quads = Vec::with_capacity(8);
+    let mut h = h_initial;
+    let mut r = FLAME_INITIAL_HALF_WIDTH; // `:34`
+    let mut yo = 0.0f32; // `:37`
+    let mut zo = 0.0f32; // `:40`, the loop-local component added to `base_z`
+    let mut ss: u32 = 0;
+    while h > 0.0 && quads.len() < MAX_FLAME_QUADS {
+        let fire_1 = ss % 2 != 0; // `:45`
+        let flip = (ss / 2) % 2 == 0; // `:50`
+        // At `+r` (right edge): `u0` unflipped, `u1` flipped. At `-r` (left
+        // edge): the opposite. See `FlameQuad::fire_1`'s doc for why vanilla's
+        // baseline (unflipped) orientation is itself already mirrored.
+        let (u_right, u_left) = if flip { (1.0, 0.0) } else { (0.0, 1.0) };
+        let half_base = if fire_1 { 0.5 } else { 0.0 };
+        let u_right = half_base + u_right * 0.5;
+        let u_left = half_base + u_left * 0.5;
+        let z = base_z + zo;
+        let y0 = -yo; // bottom, `:56-57`
+        let y1 = FLAME_QUAD_HEIGHT - yo; // top, `:58-59`
+        // Bottom vertices sample `v1` (bottom of the frame cell, local 1.0),
+        // top vertices sample `v0` (top of the frame cell, local 0.0) —
+        // `:56-59`'s vertex argument order, carried into `FlameVertex::uv`'s
+        // `v_local` convention.
+        quads.push(FlameQuad {
+            vertices: [
+                FlameVertex {
+                    position: [-r, y0, z],
+                    uv: [u_left, 1.0],
+                },
+                FlameVertex {
+                    position: [r, y0, z],
+                    uv: [u_right, 1.0],
+                },
+                FlameVertex {
+                    position: [r, y1, z],
+                    uv: [u_right, 0.0],
+                },
+                FlameVertex {
+                    position: [-r, y1, z],
+                    uv: [u_left, 0.0],
+                },
+            ],
+            fire_1,
+        });
+        h -= FLAME_STEP; // `:60`
+        yo -= FLAME_STEP; // `:61`
+        r *= FLAME_WIDTH_DECAY; // `:62`
+        zo -= FLAME_Z_STEP; // `:63`
+        ss += 1;
+    }
+    quads
+}
+
+/// [`flame_quads`], baked into a [`ModelVertex`]/index pair a
+/// [`GpuEntityModel::upload_parts`] call can upload directly — the same
+/// vertex type every other baked entity mesh in this crate uses, so the flame
+/// pass shares `ModelVertex::vertex_layout()` (locations 0..=3) with the mob
+/// body pass; only the *instance* format
+/// ([`FlameInstanceRaw`] vs. [`EntityInstanceRaw`]) differs between the two
+/// pipelines. The fields [`ModelVertex`] carries that flame has no use for
+/// (`ao`, `light`, `tint`, `anim`, `tint_rgb_override`) are set to their
+/// inert/untinted defaults — `vs_main_flame`/`fs_main_flame` never read them,
+/// exactly as `vs_main`/`fs_main` already never read `ModelVertex::light`
+/// meaningfully (see `push_part_quads`'s doc).
+///
+/// Wound the same way every other baked quad here is: two triangles,
+/// `(0, 1, 2)` and `(0, 2, 3)`, over the bottom-left/bottom-right/top-right/
+/// top-left order [`flame_quads`] already emits.
+#[must_use]
+pub fn flame_mesh(width: f32, height: f32) -> (Vec<ModelVertex>, Vec<u32>) {
+    let quads = flame_quads(width, height);
+    let mut vertices = Vec::with_capacity(quads.len() * 4);
+    let mut indices = Vec::with_capacity(quads.len() * 6);
+    for quad in &quads {
+        let base = vertices.len() as u32;
+        for v in &quad.vertices {
+            vertices.push(ModelVertex {
+                position: v.position,
+                uv: v.uv,
+                ao: 1.0,
+                light: 0,
+                tint: 255,
+                anim: 0,
+                _pad: 0,
+                tint_rgb_override: [0, 0, 0, 0],
+            });
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    (vertices, indices)
+}
+
+/// One per-instance record for the flame pass's instance buffer: a model
+/// matrix and the current animation frame — nothing else.
+///
+/// Deliberately **not** [`EntityInstanceRaw`]: flame carries no per-instance
+/// light (vanilla forces full-bright block light, `LightCoordsUtil.withBlock(
+/// state.lightCoords, 15)`, `FlameFeatureRenderer.java:42`), no tint (a flat
+/// vertex colour `-1`, `:71`) and no hurt/creeper overlay (fire is not a mob
+/// layer vanilla's `OverlayTexture` ever touches) — carrying three unused
+/// attributes per instance for a value that is *always* the same constant
+/// would be pure waste, and would invite a future caller to wire a tint that
+/// vanilla's own flame never has.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct FlameInstanceRaw {
+    /// The model→world matrix, column-major — feet position composed with the
+    /// camera-yaw-only billboard rotation
+    /// (`Mth.rotationAroundAxis(Mth.Y_AXIS, camera.orientation, …)`,
+    /// `EntityRenderDispatcher.java:163`). Building that rotation is the
+    /// caller's job (it needs the camera, which this crate's pure geometry
+    /// functions deliberately do not take) — see `docs/entity-rendering.md`'s
+    /// "Mob fire" section.
+    pub model: [[f32; 4]; 4],
+    /// Which of the 32 stacked rows in the combined flame texture is current
+    /// this frame — the same value for every flame instance drawn in one
+    /// frame, duplicated per instance because a per-instance attribute has no
+    /// bind-group cost (see [`EntityInstanceRaw::light`]'s doc for the same
+    /// argument made about a different field). Combined with
+    /// [`FlameVertex::uv`]'s `v_local` in `vs_main_flame`.
+    pub frame: u32,
+}
+
+impl FlameInstanceRaw {
+    /// Pack a model matrix and animation frame into the instance format.
+    #[must_use]
+    pub fn new(model: glam::Mat4, frame: u32) -> Self {
+        Self {
+            model: model.to_cols_array_2d(),
+            frame,
+        }
+    }
+
+    /// The instance-stepped vertex-buffer layout: four `Float32x4` matrix
+    /// columns at locations 4-7 (matching [`EntityInstanceRaw::instance_layout`]'s
+    /// own first four attributes byte-for-byte, since both are "a `glam::Mat4`
+    /// column-major"), and the frame index as a `Uint32` at location 8.
+    #[must_use]
+    pub const fn instance_layout() -> wgpu::VertexBufferLayout<'static> {
+        const ATTRS: [wgpu::VertexAttribute; 5] = [
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 0,
+                shader_location: 4,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 16,
+                shader_location: 5,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 32,
+                shader_location: 6,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 48,
+                shader_location: 7,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Uint32,
+                offset: 64,
+                shader_location: 8,
+            },
+        ];
+        wgpu::VertexBufferLayout {
+            array_stride: core::mem::size_of::<FlameInstanceRaw>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &ATTRS,
+        }
+    }
+}
+
 /// Derives vanilla's `OverlayTexture` alpha byte from a creeper's white-flash
 /// progress (`0.0..=1.0`, [`crate::entity_anim::creeper_white_overlay_progress`]).
 ///
@@ -623,12 +925,41 @@ pub fn upload_instances_tinted(
     )
 }
 
+/// Build a flame-instance buffer from a slice of billboard transforms and this
+/// frame's current animation `frame` (`0..32`) — the mob-fire counterpart to
+/// [`upload_instances`]/[`upload_instances_tinted`], `None` if empty.
+///
+/// Every transform gets the **same** `frame`: the animation advances once per
+/// render frame for every flame drawn that frame, not per instance — see
+/// `FlameInstanceRaw::frame`'s doc.
+#[must_use]
+pub fn upload_flame_instances(
+    device: &wgpu::Device,
+    transforms: &[glam::Mat4],
+    frame: u32,
+) -> Option<wgpu::Buffer> {
+    if transforms.is_empty() {
+        return None;
+    }
+    let raw: Vec<FlameInstanceRaw> = transforms
+        .iter()
+        .map(|m| FlameInstanceRaw::new(*m, frame))
+        .collect();
+    Some(
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lodestone-flame-instances"),
+            contents: bytemuck::cast_slice(&raw),
+            usage: wgpu::BufferUsages::VERTEX,
+        }),
+    )
+}
+
 /// The one place the entity pipeline's raster/depth/vertex state is spelled out,
 /// parameterised by the things that vary across callers: the label, the depth
 /// comparison, the colour-target blend state and whether the pass writes depth.
-/// Three pipelines share it — the mob pass, the armour pass and the banner
-/// mask-layer pass — so a change to the vertex layout or the colour target
-/// cannot land on one and miss the others.
+/// Four pipelines share it — the mob pass, the armour pass, the banner
+/// mask-layer pass and the mob-fire pass — so a change to the vertex layout or
+/// the colour target cannot land on one and miss the others.
 ///
 /// `blend`/`depth_write` were added for [`EntityPipeline::banner_layer_pipeline`]
 /// (issue #174 step B) without touching the mob/armour pipelines' own
@@ -639,9 +970,19 @@ pub fn upload_instances_tinted(
 /// `fragment_entry` was added in step C, for the same reason: every existing
 /// caller (`Self::new`, `armour_pipeline`) passes `"fs_main"`, the literal
 /// entry point this function hardcoded before, so this is zero behaviour
-/// change for mobs and armour. Only [`EntityPipeline::banner_layer_pipeline`]
+/// change for mobs and armour. [`EntityPipeline::banner_layer_pipeline`]
 /// passes `"fs_main_no_cutout"` — see that function's doc for why a mask
 /// layer needs the fragment shader itself to change, not just pipeline state.
+///
+/// `vertex_entry`/`instance_layout` were added for
+/// [`EntityPipeline::flame_pipeline`] (mob fire, issue #434): the flame quads
+/// carry no light/tint/overlay at all (see [`FlameInstanceRaw`]'s doc for why
+/// that instance format is smaller than [`EntityInstanceRaw`]'s), so the flame
+/// pass needs its own vertex entry point (`"vs_main_flame"`) reading its own,
+/// narrower instance attributes — a shader entry point can only declare one
+/// fixed set of `@location` inputs. Every existing caller keeps passing
+/// `"vs_main"` and [`EntityInstanceRaw::instance_layout()`], so this is zero
+/// behaviour change for mobs, armour and banners.
 fn build_entity_pipeline(
     device: &wgpu::Device,
     color_format: wgpu::TextureFormat,
@@ -651,7 +992,9 @@ fn build_entity_pipeline(
     depth_compare: wgpu::CompareFunction,
     blend: Option<wgpu::BlendState>,
     depth_write: bool,
+    vertex_entry: &str,
     fragment_entry: &str,
+    instance_layout: wgpu::VertexBufferLayout<'_>,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(&format!("{label}-shader")),
@@ -667,11 +1010,8 @@ fn build_entity_pipeline(
         layout: Some(&layout),
         vertex: wgpu::VertexState {
             module: &shader,
-            entry_point: Some("vs_main"),
-            buffers: &[
-                Some(ModelVertex::vertex_layout()),
-                Some(EntityInstanceRaw::instance_layout()),
-            ],
+            entry_point: Some(vertex_entry),
+            buffers: &[Some(ModelVertex::vertex_layout()), Some(instance_layout)],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         },
         fragment: Some(wgpu::FragmentState {
@@ -782,7 +1122,9 @@ impl EntityPipeline {
             wgpu::CompareFunction::LessEqual,
             None,
             true,
+            "vs_main",
             "fs_main",
+            EntityInstanceRaw::instance_layout(),
         );
 
         EntityPipeline {
@@ -843,7 +1185,9 @@ impl EntityPipeline {
             wgpu::CompareFunction::LessEqual,
             None,
             true,
+            "vs_main",
             "fs_main",
+            EntityInstanceRaw::instance_layout(),
         )
     }
 
@@ -901,7 +1245,61 @@ impl EntityPipeline {
             wgpu::CompareFunction::LessEqual,
             Some(wgpu::BlendState::ALPHA_BLENDING),
             false,
+            "vs_main",
             "fs_main_no_cutout",
+            EntityInstanceRaw::instance_layout(),
+        )
+    }
+
+    /// A fourth render pipeline over this pipeline's own bind-group layouts,
+    /// for the mob-fire billboard (issue #434 — player report: "mobs dont show
+    /// flames yet"). Reuses [`Self::camera_layout`]/[`Self::texture_layout`]
+    /// exactly like [`armour_pipeline`](Self::armour_pipeline)/
+    /// [`banner_layer_pipeline`](Self::banner_layer_pipeline): the flame pass
+    /// needs its own *texture* (the combined `fire_0`/`fire_1` strip built by
+    /// `lodestone_assets::entity_flame::load_combined_flame_texture`), bound as
+    /// a fresh [`wgpu::BindGroup`] over this same layout, not a new bind group
+    /// *slot* — the entity shader still spends exactly two groups (camera,
+    /// texture), never a fifth, per `CLAUDE.md`'s 4-bind-group-floor note.
+    ///
+    /// Depth state matches [`Self::new`]/[`armour_pipeline`](Self::armour_pipeline):
+    /// `LessEqual` (vanilla's `DepthStencilState.DEFAULT`,
+    /// `GREATER_THAN_OR_EQUAL` under this engine's `[0,1]` depth), depth write
+    /// on. Vanilla's own flame render type
+    /// (`RenderTypes.entityCutoutCull`, `.cache/mc/26.2/client-src/net/
+    /// minecraft/client/renderer/rendertype/RenderTypes.java:429`) inherits
+    /// `ENTITY_SNIPPET`'s `DepthStencilState.DEFAULT` like every other entity
+    /// render type — there is no separate depth state to translate here, only
+    /// the fixed cutout/blend spelled out below.
+    ///
+    /// `blend: None` (cutout, not translucent) and a dedicated
+    /// `"fs_main_flame"` entry point are the load-bearing divergence from
+    /// [`Self::new`]: vanilla's `ENTITY_CUTOUT_CULL` pipeline
+    /// (`RenderPipelines.java:238-243`) is `ALPHA_CUTOUT` at `0.1`, not the
+    /// `ALPHA_BLENDING` translucency this doc's own brief initially assumed —
+    /// see `fs_main_flame`'s doc in `entity.wgsl` for the corrected threshold
+    /// and for why the flame fragment skips `shade_entity`'s two-light
+    /// diffuse. `vs_main_flame` reads [`FlameInstanceRaw`]'s attributes rather
+    /// than [`EntityInstanceRaw`]'s, hence the dedicated `instance_layout`
+    /// argument below.
+    #[must_use]
+    pub fn flame_pipeline(
+        &self,
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
+        build_entity_pipeline(
+            device,
+            color_format,
+            &self.camera_layout,
+            &self.texture_layout,
+            "lodestone-entity-flame",
+            wgpu::CompareFunction::LessEqual,
+            None,
+            true,
+            "vs_main_flame",
+            "fs_main_flame",
+            FlameInstanceRaw::instance_layout(),
         )
     }
 
@@ -1354,5 +1752,166 @@ mod tests {
         assert_eq!(raw.model[3][1], 2.0);
         assert_eq!(raw.model[3][2], 3.0);
         assert_eq!(raw.model[3][3], 1.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Mob fire geometry (issue #434)
+    // -----------------------------------------------------------------------
+
+    /// A zombie's real `(width, height)` from
+    /// `lodestone_data::entity_dimensions::base_dimensions` (verified against
+    /// the generated table directly: index 151, `(0.6, 1.95)`). Predicted by
+    /// hand-simulating `FlameFeatureRenderer.prepare` in Python before writing
+    /// this Rust: **6** quads, `s = 0.84`, first quad half-width `0.42` world
+    /// blocks, last (6th) quad half-width `0.2952 * 0.84 ≈ 0.248` world
+    /// blocks, top edge of the stack at `3.65 * 0.84 ≈ 3.066` world blocks
+    /// above the feet.
+    ///
+    /// The **rejected hypothesis**, stated before measuring: a version of this
+    /// function that forgot the `/s` scale on `h` (i.e. used raw `height`
+    /// directly as the loop bound, an easy mistake since `height` alone *is*
+    /// vanilla's other bounding-box field) predicts **5** quads for a zombie,
+    /// not 6 — the two hypotheses are only 1 quad apart here, which is exactly
+    /// why this needs an exact count assertion and not a "some quads" check.
+    #[test]
+    fn zombie_flame_geometry_matches_the_hand_derived_prediction() {
+        let quads = flame_quads(0.6, 1.95);
+        assert_eq!(
+            quads.len(),
+            6,
+            "zombie (0.6x1.95): predicted 6 quads (s=0.84, h=2.3214, step 0.45); \
+             the rejected /s-forgetting hypothesis predicts 5"
+        );
+
+        let s = 0.6 * 1.4;
+        // First quad: half-width r=0.5 (local) -> 0.42 world; y spans 0..1.4
+        // local -> 0..1.176 world.
+        let first = &quads[0];
+        let first_half_width = (first.vertices[1].position[0] - first.vertices[0].position[0]) / 2.0;
+        assert!(
+            (first_half_width - 0.5).abs() < 1e-5,
+            "first quad's local half-width must be the initial r=0.5, got {first_half_width}"
+        );
+        assert!(
+            (first_half_width * s - 0.42).abs() < 1e-4,
+            "first quad's world half-width must be 0.42 blocks, got {}",
+            first_half_width * s
+        );
+        assert!(
+            (first.vertices[0].position[1] - 0.0).abs() < 1e-5,
+            "first quad's bottom edge must sit at the feet (local y=0)"
+        );
+        assert!(
+            (first.vertices[2].position[1] - 1.4).abs() < 1e-5,
+            "first quad's top edge must be at local y=1.4"
+        );
+
+        // Last (6th) quad: r has shrunk by 0.9^5, top edge at local y = 3.65.
+        let last = quads.last().expect("6 quads");
+        let last_half_width = (last.vertices[1].position[0] - last.vertices[0].position[0]) / 2.0;
+        let expected_r = 0.5 * 0.9f32.powi(5);
+        assert!(
+            (last_half_width - expected_r).abs() < 1e-4,
+            "6th quad's local half-width must be 0.5 * 0.9^5 = {expected_r}, got {last_half_width}"
+        );
+        assert!(
+            (last.vertices[2].position[1] - 3.65).abs() < 1e-4,
+            "6th quad's top edge must be at local y=3.65, got {}",
+            last.vertices[2].position[1]
+        );
+        // World-space top of the whole stack.
+        let world_top = last.vertices[2].position[1] * s;
+        assert!(
+            (world_top - 3.066).abs() < 1e-3,
+            "top of the zombie's flame stack must be ~3.066 world blocks above \
+             its feet, got {world_top}"
+        );
+    }
+
+    /// A player's `(0.6, 1.8)` — one `0.45` step short of a zombie's `1.95`,
+    /// so the predicted count drops by exactly one quad (5, not 6): a control
+    /// that the quad count actually tracks height rather than being a fixed
+    /// constant for "any biped-shaped hitbox".
+    #[test]
+    fn player_flame_geometry_has_one_fewer_quad_than_a_zombie() {
+        assert_eq!(flame_quads(0.6, 1.8).len(), 5);
+        assert_eq!(flame_quads(0.6, 1.95).len(), 6);
+    }
+
+    /// A spider's `(1.4, 0.9)` — wide and short rather than tall and narrow.
+    /// `s = 1.96` is more than double a zombie's, so despite a *smaller* real
+    /// height, `h = height / s = 0.459` is much smaller still: predicted 2
+    /// quads, not the "shorter hitbox, fewer quads by a small margin" a reader
+    /// might guess from height alone. This is the case that actually exercises
+    /// the `/s` division mattering in the *other* direction from the zombie
+    /// test above.
+    #[test]
+    fn spider_flame_geometry_reflects_the_width_scaled_height() {
+        let quads = flame_quads(1.4, 0.9);
+        assert_eq!(quads.len(), 2, "spider (1.4x0.9): predicted 2 quads (s=1.96, h=0.459)");
+        let s = 1.4 * 1.4;
+        let first_half_width = (quads[0].vertices[1].position[0] - quads[0].vertices[0].position[0]) / 2.0;
+        assert!(
+            (first_half_width * s - 0.98).abs() < 1e-3,
+            "spider's first quad world half-width must be 0.98 blocks, got {}",
+            first_half_width * s
+        );
+    }
+
+    /// The **negative control**: a non-positive width or height must yield an
+    /// empty mesh rather than dividing by zero, looping forever, or producing
+    /// NaN geometry. Vanilla's own `while (h > 0.0F)` simply never enters for
+    /// these inputs; this must not enter either.
+    #[test]
+    fn degenerate_dimensions_yield_no_flame_quads() {
+        assert!(flame_quads(0.0, 1.95).is_empty(), "zero width must not divide by s=0");
+        assert!(flame_quads(0.6, 0.0).is_empty(), "zero height must yield h=0, no iterations");
+        assert!(flame_quads(-0.6, 1.95).is_empty(), "negative width must not be entered");
+        assert!(flame_quads(0.6, -1.0).is_empty(), "negative height must not be entered");
+    }
+
+    /// `flame_mesh` must bake exactly 4 vertices and 6 indices per quad
+    /// [`flame_quads`] produces, wound the same way every other baked quad in
+    /// this crate is (two triangles sharing the bottom-left/top-right
+    /// diagonal), and every index must stay in bounds.
+    #[test]
+    fn flame_mesh_bakes_one_quad_per_four_vertices_and_six_indices() {
+        let (vertices, indices) = flame_mesh(0.6, 1.95);
+        assert_eq!(vertices.len(), 6 * 4);
+        assert_eq!(indices.len(), 6 * 6);
+        for &i in &indices {
+            assert!((i as usize) < vertices.len(), "index {i} out of bounds");
+        }
+        // First quad's two triangles: (0,1,2) and (0,2,3).
+        assert_eq!(&indices[0..6], &[0, 1, 2, 0, 2, 3]);
+    }
+
+    /// [`FlameQuad::fire_1`] must alternate starting from `fire_0`
+    /// (`FlameFeatureRenderer.java:45`'s `ss % 2 == 0 ? fire1 : fire2`, and
+    /// `fire1` names `ModelBakery.FIRE_0` — see that field's own doc for why
+    /// the naming looks swapped and is not).
+    #[test]
+    fn flame_quads_alternate_textures_starting_from_fire_0() {
+        let quads = flame_quads(0.6, 1.95);
+        assert_eq!(
+            quads.iter().map(|q| q.fire_1).collect::<Vec<_>>(),
+            vec![false, true, false, true, false, true]
+        );
+    }
+
+    /// [`FlameInstanceRaw`] must occupy exactly locations 4-8 (past
+    /// [`ModelVertex`]'s 0..=3, matching [`EntityInstanceRaw`]'s own promise),
+    /// with the frame index immediately after the matrix.
+    #[test]
+    fn flame_instance_raw_is_a_matrix_plus_one_frame_word() {
+        assert_eq!(core::mem::size_of::<FlameInstanceRaw>(), 68);
+        let layout = FlameInstanceRaw::instance_layout();
+        assert_eq!(layout.array_stride, 68);
+        assert_eq!(layout.attributes.len(), 5);
+        assert_eq!(layout.attributes[0].shader_location, 4);
+        assert_eq!(layout.attributes[3].shader_location, 7);
+        assert_eq!(layout.attributes[4].shader_location, 8);
+        assert_eq!(layout.attributes[4].offset, 64);
+        assert_eq!(layout.attributes[4].format, wgpu::VertexFormat::Uint32);
     }
 }
