@@ -83,7 +83,7 @@ smallest it has ever been.
 | `Renderable.extractRenderState` → `GuiRenderState` | `gui/`, `renderer/state/gui/` | **done in spirit** — `ExtractSet`/`FrameSet` | — |
 | `JoinMultiplayerScreen` + `ServerSelectionList` + `ServerStatusPinger` | `screens/multiplayer/` | **partly** — `menu/servers.rs`, `menu/status.rs` | #396 |
 | `SelectWorldScreen` + `WorldSelectionList` | `screens/worldselection/` | **nothing** | #397 |
-| `OptionsScreen` tree, `OptionInstance`, `OptionsList` | `screens/options/`, `client/` | **done for 8 of 13 screens** — `menu/options.rs`, 135 controls, 23 live (7 of 93 options persisted, up from 2 as of #200/#202/#203; see below) | #55 |
+| `OptionsScreen` tree, `OptionInstance`, `OptionsList` | `screens/options/`, `client/` | **done for 9 of 13 screens** — `menu/options.rs`, 143 controls, 24-or-25 live depending on `in_world` (7 of 93 options persisted, up from 2 as of #200/#202/#203; see below) | #55 |
 | `AbstractContainerScreen` | `screens/inventory/` | bespoke per screen | #398 |
 
 ## What is already done, and must not be re-filed
@@ -215,7 +215,7 @@ settings screen is a list of options, not bespoke geometry.
 | `ControlsScreen` | 9 | 2 nav + 7 toggles `:15-23` |
 | `SkinCustomizationScreen` | 8 | 7 `PlayerModelPart`s + `mainHand` `:20-31` |
 | `MouseSettingsScreen` | 7 | 6 `:14-23` + `rawMouseInput`* |
-| `OnlineOptionsScreen` | 7 | 3 headers; friends, requests, notifications, presence, Xbox link, `allowServerListing`, `realmsNotifications` |
+| `OnlineOptionsScreen` | 7 | **built** — `SettingsPage::Online`, all seven decorative. 3 headers; friends, requests, notifications, presence, Xbox link, `allowServerListing`, `realmsNotifications` |
 | `FontOptionsScreen` | 2 | `forceUnicodeFont`, `japaneseGlyphVariants` `:9-11` |
 | `LanguageSelectScreen` | list | scrollable language list + Done |
 | `TelemetryInfoScreen` / `PackSelectionScreen` | info / list | |
@@ -255,7 +255,13 @@ cannot be an `f32` without `Options` losing its `Eq`.
 option *model* rather than screen by screen: most rows will be present-and-disabled for a long time,
 and that is the intended end state, not a shortfall. #55 landed 135 controls of which 18 worked;
 #200/#202/#203 made five more Controls/Mouse rows live without changing the 135-control census, so
-**23** work as of this writing. See [`settings-screen.md`](./settings-screen.md).
+23 worked after that pass. The Online settings page (`task_036bd7b9`) then added a ninth page —
+`OnlineOptionsScreen` above, all seven of its own controls decorative — bringing the census to
+**143** and, for the first time, making the live count context-dependent: the root's Online button
+is a tenth live row outside a world (**25**) and stays the inactive World Options placeholder inside
+one (**24**), because `WorldOptionsScreen` itself is still not built. See
+[`settings-screen.md`](./settings-screen.md) for the exact split and the tests that hold both
+numbers.
 
 ## What already exists on our side
 
