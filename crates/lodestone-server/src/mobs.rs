@@ -68,7 +68,9 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use lodestone_data::{block_states, collision_shapes, entity_dimensions, entity_types, path_types};
-use lodestone_entity::ai::goals::{MeleeAttackGoal, RandomLookAroundGoal, RandomStrollGoal};
+use lodestone_entity::ai::goals::{
+    MeleeAttackGoal, RandomLookAroundGoal, RandomStrollGoal, SwellGoal,
+};
 use lodestone_entity::ai::{Goal, GoalSelector, MobController, NavigatingMob};
 use lodestone_entity::attribute::default_attributes;
 use lodestone_entity::explosion::Aabb as ExplosionAabb;
@@ -1027,6 +1029,19 @@ impl<'w> MobSim<'w> {
         .add_goal(1, Box::new(RandomLookAroundGoal::new()));
         if hostile {
             mob.add_goal(2, Box::new(MeleeAttackGoal::new(step_per_tick.max(0.2), 2.0)));
+        }
+        if mob.entity_type().path() == "creeper" {
+            // Vanilla `Creeper.java:66` registers `SwellGoal` at priority 2,
+            // one below `MeleeAttackGoal`'s own priority 4 — i.e. *higher*
+            // precedence, alongside it rather than instead of it
+            // (`Creeper.java:65-74` registers both). The priority numbers
+            // above (0/1/2) are this baseline's own private numbering, not
+            // vanilla's absolute scale — `GoalSelector` preemption only ever
+            // compares priorities within one mob's own goal set — so `-1`
+            // (lower than every baseline goal added above, including
+            // `MeleeAttackGoal` at `2`) is what reproduces "Swell preempts
+            // Melee" here.
+            mob.add_goal(-1, Box::new(SwellGoal::new()));
         }
         mob
     }
