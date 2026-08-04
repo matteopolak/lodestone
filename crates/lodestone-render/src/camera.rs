@@ -162,6 +162,132 @@ impl Camera {
     pub fn frustum(&self) -> Frustum {
         Frustum::from_view_projection(self.view_projection())
     }
+
+    /// [`view_projection`](Self::view_projection), post-multiplied by
+    /// [`nausea_portal_warp`] — the world-side half of issues #144 (nausea)
+    /// and #149 (portal). See that function's doc for the transform itself
+    /// and why it lives here rather than in `screen_effects.rs`: this is the
+    /// **one** matrix every world-space uniform in `RenderState::render_inner`
+    /// is rewritten from each frame (sections, the model shared camera
+    /// buffer, the outline pass, debug lines — see that function's own `let
+    /// view_proj = camera.view_projection()...` line), so injecting the warp
+    /// here, at the single upstream source, reaches everything vanilla's own
+    /// `RenderSystem.setProjectionMatrix` call in `GameRenderer.renderLevel`
+    /// does (the whole world pass) and nothing it does not (the HUD/GUI and
+    /// this crate's own screen-effect overlay pipeline read no camera matrix
+    /// at all, so they are structurally unaffected) — without a second call
+    /// site to keep in sync.
+    #[must_use]
+    pub fn view_projection_warped(&self, intensity: f32, angle_degrees: f32) -> Mat4 {
+        (self.projection_matrix() * nausea_portal_warp(intensity, angle_degrees)) * self.view_matrix()
+    }
+}
+
+/// The nausea/portal "spinning" world-projection warp, issues #144/#149's
+/// shared mechanism (`GameRenderer.renderLevel`,
+/// `.cache/mc/26.2/client-src/net/minecraft/client/renderer/GameRenderer.java:543-552`):
+///
+/// ```text
+/// if (spinningEffectIntensity > 0.0F) {
+///     skew = 5.0F / (spinningEffectIntensity^2 + 5.0F) - spinningEffectIntensity * 0.04F;
+///     skew *= skew;
+///     axis = (0, sqrt(2)/2, sqrt(2)/2);
+///     angle = (spinningEffectTime + worldPartialTicks * spinningEffectSpeed) * (pi/180);
+///     projectionMatrix.rotate(angle, axis);
+///     projectionMatrix.scale(1/skew, 1, 1);
+///     projectionMatrix.rotate(-angle, axis);
+/// }
+/// ```
+///
+/// Transcribed as `R(angle, axis) * S(1/skew, 1, 1) * R(-angle, axis)` — JOML's
+/// `Matrix4f#rotate`/`#scale` right-multiply the receiver (`this = this *
+/// arg`), the same convention glam's `*` uses, so the three chained calls
+/// compose in the order written, matching this function's return expression
+/// read left to right.
+///
+/// This crate has no persistent per-frame state (`RenderState::render_inner`
+/// takes `&self`, and every "how far has this animation progressed" input
+/// elsewhere in this pass — e.g. the fire overlay's `tick` — is threaded in
+/// from outside rather than accumulated internally), so unlike vanilla's
+/// `GameRenderer.tick`, which integrates `spinningEffectTime +=
+/// spinningEffectSpeed` every tick only while active, this takes the
+/// *already-computed* `angle_degrees` as a pure argument — see
+/// [`spinning_effect_angle_degrees`] for the (simplified) function this
+/// codebase derives it with.
+///
+/// Returns the identity at `intensity <= 0.0`, matching vanilla's own `if
+/// (spinningEffectIntensity > 0.0F)` guard, so a caller can multiply this in
+/// unconditionally rather than branching — the same "always safe to call"
+/// shape [`Camera::view_projection_warped`] relies on.
+#[must_use]
+pub fn nausea_portal_warp(intensity: f32, angle_degrees: f32) -> Mat4 {
+    if intensity <= 0.0 {
+        return Mat4::IDENTITY;
+    }
+    let mut skew = 5.0 / (intensity * intensity + 5.0) - intensity * 0.04;
+    skew *= skew;
+    let axis = Vec3::new(0.0, std::f32::consts::FRAC_1_SQRT_2, std::f32::consts::FRAC_1_SQRT_2);
+    let angle = angle_degrees.to_radians();
+    Mat4::from_axis_angle(axis, angle)
+        * Mat4::from_scale(Vec3::new(1.0 / skew, 1.0, 1.0))
+        * Mat4::from_axis_angle(axis, -angle)
+}
+
+/// The spyglass zoom's field-of-view multiplier (issue #154's *other* half —
+/// see the module doc pointer in `crate::screen_effects` for the vignette/
+/// letterbox half). `AbstractClientPlayer.getFieldOfViewModifier`
+/// (`.cache/mc/26.2/client-src/net/minecraft/client/player/AbstractClientPlayer.java:92-114`):
+///
+/// ```text
+/// } else if (firstPerson && this.isScoping()) {
+///     return 0.1F;
+/// }
+/// ```
+///
+/// — an early `return`, so scoping **overrides** every other modifier in that
+/// method (flying's `1.1`, the walk-speed ratio, the bow-draw ease-in), not a
+/// factor composed with them. This function models only the scoping case
+/// (flying/sprint/bow FOV are a different, unstarted issue) — `1.0` (no
+/// change) when not scoping, vanilla's `0.1` (a 10x zoom-in: `getFov`
+/// multiplies `options.fov` by this) when scoping.
+///
+/// Vanilla smooths this behind `Camera.fovModifier`, a `0.5`-per-frame lerp
+/// toward the target (`Camera.java:172`) clamped to `0.1..=1.5`
+/// (`Camera.java:173`) — this function returns the unsmoothed target only;
+/// **not wired to a live `Camera.fov_y_degrees` anywhere in this codebase
+/// yet**, since that value is assigned in `lodestone-shell/src/camera_rig.rs`
+/// (`FOV_Y_DEGREES`/per-frame construction), a file outside this crate and
+/// outside this change's ownership — see `docs/screen-overlays.md`'s #154
+/// section for the exact composition point.
+#[must_use]
+pub fn spyglass_fov_modifier(scoping: bool) -> f32 {
+    if scoping { 0.1 } else { 1.0 }
+}
+
+/// The warp's accumulated spin angle, in degrees, as a **pure function of the
+/// current game tick** rather than an integral this crate stores anywhere —
+/// see [`nausea_portal_warp`]'s doc for why. Vanilla's own per-tick speed
+/// (`GameRenderer.tick`, lines 261-270) is
+/// `(portalIntensity * 20 + nauseaIntensity * 7) / (portalIntensity +
+/// nauseaIntensity)` while either is active, `0` otherwise; this treats that
+/// blended speed as constant and multiplies it straight through by `tick`,
+/// which is **not** the same number vanilla's own accumulator would hold
+/// (vanilla only integrates while active and freezes, rather than resets,
+/// the moment both intensities hit zero — this reaches the identical
+/// steady-state rotation *rate* the instant either effect is active, just at
+/// a different absolute phase, which is imperceptible for a continuously
+/// looping spin with no fixed start reference). Returns `0.0` when neither
+/// intensity is positive, matching vanilla's own `spinningEffectSpeed = 0`
+/// branch (though the caller does not need this: [`nausea_portal_warp`]
+/// already no-ops below `intensity <= 0.0` regardless of the angle passed).
+#[must_use]
+pub fn spinning_effect_angle_degrees(tick: u64, portal_intensity: f32, nausea_intensity: f32) -> f32 {
+    let (p, n) = (portal_intensity.max(0.0), nausea_intensity.max(0.0));
+    if p <= 0.0 && n <= 0.0 {
+        return 0.0;
+    }
+    let speed = (p * 20.0 + n * 7.0) / (p + n);
+    (tick as f32 * speed).rem_euclid(360.0)
 }
 
 /// A plane `normal · p + d = 0`, with `normal` unit length and the positive
@@ -459,5 +585,128 @@ mod tests {
         assert_eq!(Camera::far_for_render_distance(32, 0), 2048.0);
         // Cloud range can dominate at tiny render distances.
         assert_eq!(Camera::far_for_render_distance(2, 192), 3072.0);
+    }
+
+    // -- nausea/portal projection warp (#144/#149) -----------------------
+
+    #[test]
+    fn nausea_portal_warp_is_identity_at_zero_or_negative_intensity() {
+        assert_eq!(nausea_portal_warp(0.0, 45.0), Mat4::IDENTITY);
+        assert_eq!(nausea_portal_warp(-1.0, 45.0), Mat4::IDENTITY);
+    }
+
+    #[test]
+    fn nausea_portal_warp_at_max_intensity_matches_hand_computed_skew() {
+        // Hud.java / GameRenderer.java:544-552, intensity = 1.0:
+        // skew = 5/(1+5) - 0.04 = 0.793333...; skew *= skew = 0.629378...
+        let intensity = 1.0_f32;
+        let mut skew = 5.0 / (intensity * intensity + 5.0) - intensity * 0.04;
+        skew *= skew;
+        assert!((skew - 0.629_377_78).abs() < 1e-6, "hypothesis drifted: {skew}");
+
+        // At angle 0, R(0)=I on both sides, so the warp reduces to a pure
+        // scale by 1/skew on the rotated-axis-perpendicular component. Probe
+        // it algebraically instead: the warp matrix's determinant must equal
+        // the scale matrix's determinant (1/skew), since rotations have
+        // determinant 1 and do not change it.
+        let warp = nausea_portal_warp(intensity, 0.0);
+        let expected_det = 1.0 / skew;
+        assert!(
+            (warp.determinant() - expected_det).abs() < 1e-4,
+            "warp determinant {} must equal the scale-only determinant {expected_det} \
+             (rotations are determinant-1 and must not change it)",
+            warp.determinant()
+        );
+    }
+
+    #[test]
+    fn nausea_portal_warp_angle_zero_is_a_pure_x_axis_scale() {
+        // At angle 0 both rotations are identity, so R(0)*S*R(0) = S exactly:
+        // a plain scale of (1/skew, 1, 1) with no rotation component at all.
+        let intensity = 0.5_f32;
+        let mut skew = 5.0 / (intensity * intensity + 5.0) - intensity * 0.04;
+        skew *= skew;
+        let warp = nausea_portal_warp(intensity, 0.0);
+        let expected = Mat4::from_scale(Vec3::new(1.0 / skew, 1.0, 1.0));
+        assert!(
+            (warp.to_cols_array().iter().zip(expected.to_cols_array()).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max)) < 1e-5,
+            "warp at angle 0 must equal a pure scale(1/skew,1,1): {warp:?} vs {expected:?}"
+        );
+    }
+
+    #[test]
+    fn nausea_portal_warp_preserves_the_rotation_axis() {
+        // R(angle,axis) * S(...) * R(-angle,axis) fixes any point exactly on
+        // `axis` up to the scale term's effect on that same direction — since
+        // axis = (0, sqrt2/2, sqrt2/2) is orthogonal to the scaled x-axis, a
+        // vector along `axis` must be completely unaffected by the whole warp
+        // (scale(1/skew,1,1) leaves y/z untouched, and axis has no x
+        // component).
+        let intensity = 0.7_f32;
+        let axis = Vec3::new(0.0, std::f32::consts::FRAC_1_SQRT_2, std::f32::consts::FRAC_1_SQRT_2);
+        let warp = nausea_portal_warp(intensity, 33.0);
+        let transformed = warp.transform_vector3(axis);
+        assert!(
+            (transformed - axis).length() < 1e-4,
+            "a vector along the warp's own rotation axis must be fixed: {transformed:?} vs {axis:?}"
+        );
+    }
+
+    #[test]
+    fn view_projection_warped_matches_plain_view_projection_when_inactive() {
+        let c = cam_looking_south();
+        let plain = c.view_projection();
+        let warped = c.view_projection_warped(0.0, 999.0);
+        assert!(
+            (plain.to_cols_array().iter().zip(warped.to_cols_array()).map(|(a, b)| (a - b).abs()).fold(0.0_f32, f32::max)) < 1e-6,
+            "zero intensity must leave view_projection completely unmodified"
+        );
+    }
+
+    #[test]
+    fn view_projection_warped_differs_when_active() {
+        let c = cam_looking_south();
+        let plain = c.view_projection();
+        let warped = c.view_projection_warped(0.8, 25.0);
+        let max_diff = plain
+            .to_cols_array()
+            .iter()
+            .zip(warped.to_cols_array())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(max_diff > 1e-3, "an active warp must actually change the matrix, max diff was {max_diff}");
+    }
+
+    #[test]
+    fn spinning_effect_angle_is_zero_when_both_intensities_are_zero() {
+        assert_eq!(spinning_effect_angle_degrees(1000, 0.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn spinning_effect_angle_uses_vanillas_blended_speed() {
+        // Portal-only: speed is exactly 20 deg/tick (GameRenderer.java:268).
+        assert!((spinning_effect_angle_degrees(1, 1.0, 0.0) - 20.0).abs() < 1e-4);
+        // Nausea-only: speed is exactly 7 deg/tick.
+        assert!((spinning_effect_angle_degrees(1, 0.0, 1.0) - 7.0).abs() < 1e-4);
+        // Both at equal intensity: the average of the two speeds, 13.5.
+        assert!((spinning_effect_angle_degrees(1, 1.0, 1.0) - 13.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn spinning_effect_angle_wraps_into_0_360() {
+        let angle = spinning_effect_angle_degrees(10_000, 1.0, 0.0);
+        assert!((0.0..360.0).contains(&angle), "angle {angle} must be wrapped into [0, 360)");
+    }
+
+    // -- spyglass FOV modifier (#154) --------------------------------------
+
+    #[test]
+    fn spyglass_fov_modifier_is_a_tenth_while_scoping() {
+        assert_eq!(spyglass_fov_modifier(true), 0.1);
+    }
+
+    #[test]
+    fn spyglass_fov_modifier_is_unchanged_while_not_scoping() {
+        assert_eq!(spyglass_fov_modifier(false), 1.0);
     }
 }

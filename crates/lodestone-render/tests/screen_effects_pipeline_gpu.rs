@@ -56,6 +56,28 @@ fn manager() -> ResourceManager {
         "assets/minecraft/textures/misc/pumpkinblur.png".to_string(),
         png(16, 16, [40, 200, 40, 255]),
     );
+    // Opaque light-blue freeze vignette (#139).
+    src.insert(
+        "assets/minecraft/textures/misc/powder_snow_outline.png".to_string(),
+        png(256, 256, [200, 230, 255, 255]),
+    );
+    // Opaque grey spyglass lens (#154) — distinct from black so the lens vs.
+    // letterbox-bar split is unambiguous.
+    src.insert(
+        "assets/minecraft/textures/misc/spyglass_scope.png".to_string(),
+        png(256, 256, [180, 180, 180, 255]),
+    );
+    // Opaque white nausea texture (#144) so the tint's own colour (green-biased,
+    // see `confusion_overlay_triangles`) is what shows up, not the texture's.
+    src.insert(
+        "assets/minecraft/textures/misc/nausea.png".to_string(),
+        png(256, 256, [255, 255, 255, 255]),
+    );
+    // Opaque magenta 32-frame portal strip (#149).
+    src.insert(
+        "assets/minecraft/textures/block/nether_portal.png".to_string(),
+        png(16, 16 * 32, [200, 40, 200, 255]),
+    );
     ResourceManager::new(vec![Box::new(src)])
 }
 
@@ -261,5 +283,233 @@ fn pumpkin_overlay_paints_the_whole_frame_at_full_strength() {
     assert!(
         avg_green > 150.0,
         "opaque untinted green texture should read back close to 200 on the green channel, got avg {avg_green:.1}"
+    );
+}
+
+/// The freeze overlay (issue #139), drawn at `percent_frozen = 0.5` onto a
+/// black target, covers the whole frame (same static full-NDC shape as
+/// pumpkin — see `freeze_overlay_triangles`'s doc) but at half the opacity a
+/// full `1.0` would give. Magnitude, not just sign: the source is opaque
+/// light-blue `(200, 230, 255)`; standard alpha blending over black at
+/// `alpha=0.5` predicts a readback close to half that, `(100, 115, 128)`, not
+/// the full source colour a wrong (always-`1.0`) alpha would give, and not
+/// the near-zero a wrong (near-`0.0`) alpha would give.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn freeze_overlay_paints_the_whole_frame_at_the_predicted_half_alpha() {
+    let Some(ctx) = ctx() else { return };
+    let fx = ScreenEffectRenderer::new(
+        ctx.device(),
+        ctx.queue(),
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        &manager(),
+    )
+    .expect("build screen-effect renderer over the synthetic pack");
+
+    let mut target = HeadlessTarget::new(ctx.device(), WIDTH, HEIGHT, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let frame = target.acquire().expect("acquire");
+    let mut encoder = ctx
+        .device()
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("freeze-gpu-test-encoder"),
+        });
+    fx.draw_freeze(ctx.queue(), &mut encoder, frame.view(), 0.5);
+    ctx.queue().submit(std::iter::once(encoder.finish()));
+
+    let pixels = target.read_texels(ctx.device(), ctx.queue());
+    let frac = non_black_fraction(&pixels);
+    assert!(
+        frac > 0.95,
+        "expected the freeze overlay to cover the whole frame even at half alpha, only {:.1}% non-black",
+        frac * 100.0
+    );
+
+    let mut sum = [0u64; 3];
+    let mut n = 0u64;
+    for px in pixels.chunks_exact(4) {
+        sum[0] += u64::from(px[0]);
+        sum[1] += u64::from(px[1]);
+        sum[2] += u64::from(px[2]);
+        n += 1;
+    }
+    let avg = [sum[0] as f64 / n.max(1) as f64, sum[1] as f64 / n.max(1) as f64, sum[2] as f64 / n.max(1) as f64];
+    // Predicted midpoint: standard `src*a + dst*(1-a)` over a black dst at
+    // a=0.5 puts each channel near half the source's sRGB byte value —
+    // loosely bounded (not "close to 200/230/255" which a wrong alpha=1.0
+    // would also satisfy, and not "close to 0" which alpha=0.0 would).
+    assert!(
+        avg[0] > 60.0 && avg[0] < 160.0,
+        "half-alpha freeze overlay red channel should land near the source's half-blend, got {:.1}",
+        avg[0]
+    );
+    assert!(
+        avg[2] > avg[0],
+        "the source texture is light-blue (blue channel highest); half-alpha blending must \
+         preserve that channel ordering, got avg {avg:?}"
+    );
+}
+
+/// The spyglass overlay (issue #154), drawn onto a black target at a 16:9
+/// aspect, must paint the whole frame (lens + letterbox bars together tile
+/// the full screen, see `spyglass_letterbox_triangles`'s doc) with two
+/// visually distinct regions: the centre (lens, opaque grey `(180,180,180)`)
+/// and the far corners (bars, opaque black) — a location check, not a frame
+/// average, since a pure average could not distinguish "grey lens + black
+/// bars" from a uniform mid-grey wash.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn spyglass_overlay_paints_a_grey_lens_surrounded_by_black_bars() {
+    let Some(ctx) = ctx() else { return };
+    let fx = ScreenEffectRenderer::new(
+        ctx.device(),
+        ctx.queue(),
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        &manager(),
+    )
+    .expect("build screen-effect renderer over the synthetic pack");
+
+    let mut target = HeadlessTarget::new(ctx.device(), WIDTH, HEIGHT, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let frame = target.acquire().expect("acquire");
+    let mut encoder = ctx
+        .device()
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("spyglass-gpu-test-encoder"),
+        });
+    fx.draw_spyglass(ctx.queue(), &mut encoder, frame.view(), 16.0 / 9.0);
+    ctx.queue().submit(std::iter::once(encoder.finish()));
+
+    let pixels = target.read_texels(ctx.device(), ctx.queue());
+    let frac = non_black_fraction(&pixels);
+    assert!(
+        frac > 0.3,
+        "expected the spyglass lens to paint a visible fraction of the frame, only {:.1}% non-black",
+        frac * 100.0
+    );
+
+    // Centre pixel: inside the lens, must be lit (non-black).
+    let px_at = |x: u32, y: u32| -> [u8; 4] {
+        let idx = ((y * WIDTH + x) * 4) as usize;
+        [pixels[idx], pixels[idx + 1], pixels[idx + 2], pixels[idx + 3]]
+    };
+    let centre = px_at(WIDTH / 2, HEIGHT / 2);
+    assert!(
+        centre[0] > 8 || centre[1] > 8 || centre[2] > 8,
+        "the screen centre must be inside the lens and non-black, got {centre:?}"
+    );
+
+    // At 16:9, `spyglass_lens_half_extent` gives hw ≈ 0.6326, hh = 1.125 —
+    // i.e. the lens overflows top/bottom entirely (no top/bottom bars) but
+    // leaves real left/right bars. Sample a corner pixel, well outside the
+    // lens's horizontal extent (hw*WIDTH/2 ≈ 0.317*WIDTH from centre).
+    let corner = px_at(2, HEIGHT / 2);
+    assert!(
+        corner[0] < 8 && corner[1] < 8 && corner[2] < 8,
+        "the far-left edge at mid-height must be inside a letterbox bar and pure black, got {corner:?}"
+    );
+}
+
+/// The confusion overlay (issue #144, screen-space half), drawn onto a black
+/// target at maximum strength, must cover the whole frame (see
+/// `confusion_overlay_triangles`'s doc: `size >= 1.0` always) with the
+/// predicted green-biased tint — magnitude, not just "some colour appeared":
+/// vanilla's own tint at `strength=1.0` is `(0.2, 0.4, 0.2)` in linear-ish
+/// float space multiplied onto an opaque white source, so green should read
+/// back roughly double red/blue, not merely "greater than zero".
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn confusion_overlay_paints_the_whole_frame_with_a_green_biased_tint() {
+    let Some(ctx) = ctx() else { return };
+    let fx = ScreenEffectRenderer::new(
+        ctx.device(),
+        ctx.queue(),
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        &manager(),
+    )
+    .expect("build screen-effect renderer over the synthetic pack");
+
+    let mut target = HeadlessTarget::new(ctx.device(), WIDTH, HEIGHT, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let frame = target.acquire().expect("acquire");
+    let mut encoder = ctx
+        .device()
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("confusion-gpu-test-encoder"),
+        });
+    fx.draw_confusion(ctx.queue(), &mut encoder, frame.view(), 1.0);
+    ctx.queue().submit(std::iter::once(encoder.finish()));
+
+    let pixels = target.read_texels(ctx.device(), ctx.queue());
+    let frac = non_black_fraction(&pixels);
+    assert!(
+        frac > 0.95,
+        "expected the confusion overlay to cover the whole frame at strength 1.0, only {:.1}% non-black",
+        frac * 100.0
+    );
+
+    let mut sum = [0u64; 3];
+    let mut n = 0u64;
+    for px in pixels.chunks_exact(4) {
+        sum[0] += u64::from(px[0]);
+        sum[1] += u64::from(px[1]);
+        sum[2] += u64::from(px[2]);
+        n += 1;
+    }
+    let avg = [sum[0] as f64 / n.max(1) as f64, sum[1] as f64 / n.max(1) as f64, sum[2] as f64 / n.max(1) as f64];
+    assert!(
+        avg[1] > avg[0] * 1.3 && avg[1] > avg[2] * 1.3,
+        "confusion overlay's green channel must dominate red/blue by roughly the tint's own \
+         0.4-vs-0.2 ratio, got avg {avg:?}"
+    );
+}
+
+/// The portal overlay (issue #149, screen-space half), drawn onto a black
+/// target at full intensity, must cover the whole frame and select the
+/// requested animation frame from the 32-frame strip (same shape as the fire
+/// overlay's own frame-selection gate).
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn portal_overlay_paints_the_whole_frame_at_full_intensity() {
+    let Some(ctx) = ctx() else { return };
+    let fx = ScreenEffectRenderer::new(
+        ctx.device(),
+        ctx.queue(),
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        &manager(),
+    )
+    .expect("build screen-effect renderer over the synthetic pack");
+    assert_eq!(fx.portal_frame_count(), 32, "the synthetic strip is 32 frames");
+
+    let mut target = HeadlessTarget::new(ctx.device(), WIDTH, HEIGHT, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let frame = target.acquire().expect("acquire");
+    let mut encoder = ctx
+        .device()
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("portal-gpu-test-encoder"),
+        });
+    fx.draw_portal(ctx.queue(), &mut encoder, frame.view(), 5, 1.0);
+    ctx.queue().submit(std::iter::once(encoder.finish()));
+
+    let pixels = target.read_texels(ctx.device(), ctx.queue());
+    let frac = non_black_fraction(&pixels);
+    assert!(
+        frac > 0.95,
+        "expected the portal overlay to cover the whole frame at full intensity, only {:.1}% non-black",
+        frac * 100.0
+    );
+
+    // Magnitude: opaque magenta (200, 40, 200) source, full alpha (intensity
+    // 1.0 is the identity case of `portal_overlay_alpha`), straight over
+    // black — red and blue should dominate green, not merely be nonzero.
+    let mut sum = [0u64; 3];
+    let mut n = 0u64;
+    for px in pixels.chunks_exact(4) {
+        sum[0] += u64::from(px[0]);
+        sum[1] += u64::from(px[1]);
+        sum[2] += u64::from(px[2]);
+        n += 1;
+    }
+    let avg = [sum[0] as f64 / n.max(1) as f64, sum[1] as f64 / n.max(1) as f64, sum[2] as f64 / n.max(1) as f64];
+    assert!(
+        avg[0] > 130.0 && avg[2] > 130.0 && avg[1] < 80.0,
+        "opaque magenta source at full intensity should read back close to (200, 40, 200), got avg {avg:?}"
     );
 }

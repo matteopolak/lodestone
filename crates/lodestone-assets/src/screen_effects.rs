@@ -107,6 +107,89 @@ pub fn load_pumpkin_overlay_texture(manager: &ResourceManager) -> Result<Image, 
     )
 }
 
+/// Loads `textures/misc/powder_snow_outline.png` (256x256 in vanilla), the
+/// freezing vignette `Hud.extractCameraOverlays` draws whenever
+/// `player.getTicksFrozen() > 0`, at alpha `player.getPercentFrozen()`
+/// (`Hud.java:293-295`). Issue #139.
+///
+/// # Errors
+///
+/// Returns [`ScreenEffectAssetError`] if the texture is missing or fails to
+/// decode.
+pub fn load_freeze_overlay_texture(manager: &ResourceManager) -> Result<Image, ScreenEffectAssetError> {
+    load_plain(
+        manager,
+        "assets/minecraft/textures/misc/powder_snow_outline.png",
+        "minecraft:misc/powder_snow_outline",
+    )
+}
+
+/// Loads `textures/misc/spyglass_scope.png` (256x256 in vanilla), the lens
+/// texture `Hud.extractSpyglassOverlay` blits at the screen centre while
+/// scoping (`Hud.java:1033-1048`). Issue #154. The four black letterbox bars
+/// around it are not a texture at all in vanilla (`graphics.fill`, a flat
+/// colour) — see `spyglass_letterbox_triangles` in
+/// `crates/lodestone-render/src/screen_effects.rs`, which reuses the
+/// pipeline's own procedural 1x1 white texture rather than loading a second
+/// asset for a solid fill.
+///
+/// # Errors
+///
+/// Returns [`ScreenEffectAssetError`] if the texture is missing or fails to
+/// decode.
+pub fn load_spyglass_scope_texture(manager: &ResourceManager) -> Result<Image, ScreenEffectAssetError> {
+    load_plain(
+        manager,
+        "assets/minecraft/textures/misc/spyglass_scope.png",
+        "minecraft:misc/spyglass_scope",
+    )
+}
+
+/// Loads `textures/misc/nausea.png` (256x256 in vanilla), the confusion
+/// overlay `Hud.extractConfusionOverlay` draws while the Nausea effect is
+/// active and the screen-effect-scale option is below `1.0`
+/// (`Hud.java:1109-1132`). Issue #144.
+///
+/// # Errors
+///
+/// Returns [`ScreenEffectAssetError`] if the texture is missing or fails to
+/// decode.
+pub fn load_nausea_overlay_texture(manager: &ResourceManager) -> Result<Image, ScreenEffectAssetError> {
+    load_plain(
+        manager,
+        "assets/minecraft/textures/misc/nausea.png",
+        "minecraft:misc/nausea",
+    )
+}
+
+/// Loads `textures/block/nether_portal.png` (16x512 in vanilla: 32 stacked
+/// 16x16 frames, `{"animation": {}}` — the exact same animated-strip shape as
+/// [`load_fire_texture`]/[`fire_frame_count`], see both docs), the sprite
+/// `Hud.extractPortalOverlay` draws while `Entity.portalEffectIntensity > 0`
+/// (`Hud.java:1097-1107`). Issue #149.
+///
+/// Vanilla reaches this texture through the *block-atlas particle material*
+/// for `Blocks.NETHER_PORTAL`
+/// (`getModelManager().getBlockStateModelSet().getParticleMaterial(...)`),
+/// which is how its atlas-driven animation advances; this port loads the raw
+/// strip standalone instead, for the identical reason `load_fire_texture`
+/// gives (this pass is deliberately kept off the model pipeline's four
+/// bind groups) — [`fire_frame_count`] already generalises over any strip
+/// whose height is a multiple of 16, so no second frame-count function is
+/// needed here.
+///
+/// # Errors
+///
+/// Returns [`ScreenEffectAssetError`] if the texture is missing or fails to
+/// decode.
+pub fn load_portal_overlay_texture(manager: &ResourceManager) -> Result<Image, ScreenEffectAssetError> {
+    load_plain(
+        manager,
+        "assets/minecraft/textures/block/nether_portal.png",
+        "minecraft:block/nether_portal",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,6 +224,22 @@ mod tests {
         src.insert(
             "assets/minecraft/textures/misc/pumpkinblur.png".to_string(),
             png(16, 16, [10, 10, 10, 255]),
+        );
+        src.insert(
+            "assets/minecraft/textures/misc/powder_snow_outline.png".to_string(),
+            png(256, 256, [200, 230, 255, 255]),
+        );
+        src.insert(
+            "assets/minecraft/textures/misc/spyglass_scope.png".to_string(),
+            png(256, 256, [20, 20, 20, 255]),
+        );
+        src.insert(
+            "assets/minecraft/textures/misc/nausea.png".to_string(),
+            png(256, 256, [255, 255, 255, 255]),
+        );
+        src.insert(
+            "assets/minecraft/textures/block/nether_portal.png".to_string(),
+            png(16, 512, [140, 20, 200, 255]),
         );
         ResourceManager::new(vec![Box::new(src)])
     }
@@ -197,5 +296,58 @@ mod tests {
         let mgr = ResourceManager::new(vec![Box::new(src)]);
         let image = load_fire_texture(&mgr).expect("load");
         assert_eq!(fire_frame_count(&image), 1);
+    }
+
+    #[test]
+    fn freeze_overlay_texture_loads_as_a_plain_256x256_image() {
+        let image = load_freeze_overlay_texture(&manager()).expect("load");
+        assert_eq!((image.width, image.height), (256, 256));
+    }
+
+    #[test]
+    fn missing_freeze_overlay_texture_is_reported() {
+        let mgr = ResourceManager::new(vec![Box::new(MemorySource::new("empty"))]);
+        let err = load_freeze_overlay_texture(&mgr).expect_err("must fail closed");
+        assert!(matches!(err, ScreenEffectAssetError::Missing { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn spyglass_scope_texture_loads_as_a_plain_256x256_image() {
+        let image = load_spyglass_scope_texture(&manager()).expect("load");
+        assert_eq!((image.width, image.height), (256, 256));
+    }
+
+    #[test]
+    fn missing_spyglass_scope_texture_is_reported() {
+        let mgr = ResourceManager::new(vec![Box::new(MemorySource::new("empty"))]);
+        let err = load_spyglass_scope_texture(&mgr).expect_err("must fail closed");
+        assert!(matches!(err, ScreenEffectAssetError::Missing { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn nausea_overlay_texture_loads_as_a_plain_256x256_image() {
+        let image = load_nausea_overlay_texture(&manager()).expect("load");
+        assert_eq!((image.width, image.height), (256, 256));
+    }
+
+    #[test]
+    fn missing_nausea_overlay_texture_is_reported() {
+        let mgr = ResourceManager::new(vec![Box::new(MemorySource::new("empty"))]);
+        let err = load_nausea_overlay_texture(&mgr).expect_err("must fail closed");
+        assert!(matches!(err, ScreenEffectAssetError::Missing { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn portal_overlay_texture_loads_with_32_frames() {
+        let image = load_portal_overlay_texture(&manager()).expect("load");
+        assert_eq!((image.width, image.height), (16, 512));
+        assert_eq!(fire_frame_count(&image), 32);
+    }
+
+    #[test]
+    fn missing_portal_overlay_texture_is_reported() {
+        let mgr = ResourceManager::new(vec![Box::new(MemorySource::new("empty"))]);
+        let err = load_portal_overlay_texture(&mgr).expect_err("must fail closed");
+        assert!(matches!(err, ScreenEffectAssetError::Missing { .. }), "{err:?}");
     }
 }

@@ -63,7 +63,8 @@ use wgpu::util::DeviceExt;
 
 use lodestone_assets::{
     ResourceManager, ScreenEffectAssetError, fire_frame_count, load_fire_texture,
-    load_pumpkin_overlay_texture, load_underwater_texture,
+    load_freeze_overlay_texture, load_nausea_overlay_texture, load_portal_overlay_texture,
+    load_pumpkin_overlay_texture, load_spyglass_scope_texture, load_underwater_texture,
 };
 
 // ---------------------------------------------------------------------------
@@ -226,6 +227,241 @@ pub fn pumpkin_overlay_triangles() -> [ScreenOverlayVertex; 6] {
         vertex([1.0, -1.0], [1.0, 1.0], PUMPKIN_TINT),
         vertex([1.0, 1.0], [1.0, 0.0], PUMPKIN_TINT),
         vertex([-1.0, 1.0], [0.0, 0.0], PUMPKIN_TINT),
+    ];
+    [q[0], q[1], q[2], q[2], q[3], q[0]]
+}
+
+// ---------------------------------------------------------------------------
+// Freeze overlay (issue #139): `Hud.extractCameraOverlays`'s
+// `player.getTicksFrozen() > 0` branch, `Hud.java:293-295`:
+// `extractTextureOverlay(POWDER_SNOW_OUTLINE_LOCATION, player.getPercentFrozen())`.
+// The freeze *mechanic* (`frozen_ticks`/`percent_frozen`) is
+// `lodestone_physics::player::PlayerState`'s (issue #212); this is only the
+// overlay half.
+// ---------------------------------------------------------------------------
+
+/// Builds the freeze overlay's static full-screen NDC quad, same shape as
+/// [`pumpkin_overlay_triangles`] — a static, untiled, unscrolled blit — but
+/// with `percent` (vanilla's `Entity.getPercentFrozen()`, already `0.0..=1.0`
+/// by construction, see `PlayerState::percent_frozen`) as the vertex alpha
+/// instead of pumpkin's fixed `1.0`: `extractTextureOverlay`'s `alpha`
+/// parameter is `ARGB.white(alpha)`, i.e. an opaque-white texel multiplied by
+/// a *variable* alpha, not a fixed one. Clamped defensively even though
+/// `percent_frozen` is already bounded, so a future caller passing a raw
+/// ticks-based ratio cannot produce an out-of-range vertex alpha.
+#[must_use]
+pub fn freeze_overlay_triangles(percent: f32) -> [ScreenOverlayVertex; 6] {
+    let percent = percent.clamp(0.0, 1.0);
+    let color = [1.0, 1.0, 1.0, percent];
+    let q = [
+        vertex([-1.0, -1.0], [0.0, 1.0], color),
+        vertex([1.0, -1.0], [1.0, 1.0], color),
+        vertex([1.0, 1.0], [1.0, 0.0], color),
+        vertex([-1.0, 1.0], [0.0, 0.0], color),
+    ];
+    [q[0], q[1], q[2], q[2], q[3], q[0]]
+}
+
+// ---------------------------------------------------------------------------
+// Spyglass overlay (issue #154): `Hud.extractSpyglassOverlay`,
+// `Hud.java:1033-1048`. Not the generic `camera_overlay` component path
+// pumpkin uses — `player.isScoping()` gates a *dedicated* method with its own
+// geometry (a centred lens + four solid-black letterbox bars), checked
+// against the jar rather than assumed to be a two-line table addition.
+// ---------------------------------------------------------------------------
+
+/// Vanilla's settled spyglass zoom scale. `Hud.scopeScale` lerps toward this
+/// constant every frame while scoping
+/// (`Mth.lerp(0.5F * gameTimeDeltaTicks, this.scopeScale, 1.125F)`,
+/// `Hud.java:276`) and snaps back to `0.5F` the instant scoping stops
+/// (`Hud.java:281`, read on the *next* non-scoping frame — irrelevant here
+/// since this pass only draws while scoping). This port uses the settled
+/// value directly rather than modelling the few-frame ease-in ramp — a
+/// deliberate simplification in the spirit of the fire overlay's placement
+/// (see the module doc): the texture, the letterbox shape and this constant
+/// are all real; only the animation into it is dropped.
+pub const SPYGLASS_SCALE: f32 = 1.125;
+
+/// The spyglass lens's half-extent in NDC on each axis, for a given screen
+/// `aspect` (width/height). Derived algebraically from
+/// `Hud.extractSpyglassOverlay`'s `srcWidth = srcHeight =
+/// min(guiWidth, guiHeight)` and
+/// `ratio = min(guiWidth/srcWidth, guiHeight/srcHeight) * scale`: one of the
+/// two `Math.min` arms is always exactly `1.0` (whichever dimension *is* the
+/// smaller one divides itself), so `ratio` reduces to `scale` and the smaller
+/// screen dimension gets half-extent exactly `scale`, the larger one either
+/// `scale / aspect` (landscape) or `scale * aspect` (portrait).
+///
+/// On a typical landscape screen (`aspect > 1`) this makes the vertical
+/// half-extent `1.125 > 1.0`, i.e. the lens overflows past the top/bottom of
+/// NDC — intentional, matching vanilla (no top/bottom bars in landscape); the
+/// rasterizer clips it for free, so [`spyglass_lens_triangles`]/
+/// [`spyglass_letterbox_triangles`] need no branch for it.
+#[must_use]
+pub fn spyglass_lens_half_extent(aspect: f32) -> (f32, f32) {
+    if aspect >= 1.0 {
+        (SPYGLASS_SCALE / aspect, SPYGLASS_SCALE)
+    } else {
+        (SPYGLASS_SCALE, SPYGLASS_SCALE * aspect)
+    }
+}
+
+/// The spyglass lens's textured quad — `spyglass_scope.png`, centred, sized
+/// by [`spyglass_lens_half_extent`]. Opaque white tint: vanilla's
+/// `graphics.blit(RenderPipelines.GUI_TEXTURED, SPYGLASS_SCOPE_LOCATION, ...)`
+/// call (`Hud.java:1043`) is the 9-argument overload with no colour
+/// parameter, which defaults to full white at full alpha, the same as
+/// [`PUMPKIN_TINT`].
+#[must_use]
+pub fn spyglass_lens_triangles(aspect: f32) -> [ScreenOverlayVertex; 6] {
+    let (hw, hh) = spyglass_lens_half_extent(aspect);
+    let q = [
+        vertex([-hw, -hh], [0.0, 1.0], PUMPKIN_TINT),
+        vertex([hw, -hh], [1.0, 1.0], PUMPKIN_TINT),
+        vertex([hw, hh], [1.0, 0.0], PUMPKIN_TINT),
+        vertex([-hw, hh], [0.0, 0.0], PUMPKIN_TINT),
+    ];
+    [q[0], q[1], q[2], q[2], q[3], q[0]]
+}
+
+/// Opaque black — vanilla's four `graphics.fill(RenderPipelines.GUI, ...,
+/// -16777216)` calls around the lens (`Hud.java:1044-1047`; `-16777216` is
+/// ARGB opaque black).
+pub const LETTERBOX_TINT: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+
+/// The four letterbox bars filling the NDC screen outside the lens — top,
+/// bottom, left, right, in that order, six vertices each. Together with
+/// [`spyglass_lens_triangles`] these exactly tile `[-1,1]x[-1,1]` with no gap
+/// and no overlap, by construction from the same [`spyglass_lens_half_extent`]
+/// split. Drawn with the pipeline's spare 1x1 white texture (see
+/// [`ScreenEffectRenderer`]'s doc) rather than a second pipeline or a loaded
+/// asset: multiplying any texel by [`LETTERBOX_TINT`]'s zero RGB is black
+/// regardless of what is sampled, so this needs only an opaque alpha channel
+/// wherever it samples, not real texture content — the UV coordinates here
+/// are therefore unused and left at `[0, 0]`.
+#[must_use]
+pub fn spyglass_letterbox_triangles(aspect: f32) -> [ScreenOverlayVertex; 24] {
+    let (hw, hh) = spyglass_lens_half_extent(aspect);
+    // Clamped to NDC for the bars only (never the lens itself, which is
+    // allowed to overflow and rely on the rasterizer's free clip — see
+    // `spyglass_lens_triangles`'s doc): a landscape screen's `hh` is always
+    // `SPYGLASS_SCALE = 1.125 > 1.0`, so an unclamped top/bottom bar would be
+    // an *inverted* (min > max) rect rather than a zero-area one. Clamping
+    // degenerates it to a genuine zero-width quad instead, matching vanilla's
+    // real behaviour (no bar drawn at all in that axis) without depending on
+    // GPU clip semantics to make an inverted quad a no-op.
+    let hw_c = hw.min(1.0);
+    let hh_c = hh.min(1.0);
+    let bar = |x0: f32, y0: f32, x1: f32, y1: f32| -> [ScreenOverlayVertex; 6] {
+        let q = [
+            vertex([x0, y0], [0.0, 0.0], LETTERBOX_TINT),
+            vertex([x1, y0], [0.0, 0.0], LETTERBOX_TINT),
+            vertex([x1, y1], [0.0, 0.0], LETTERBOX_TINT),
+            vertex([x0, y1], [0.0, 0.0], LETTERBOX_TINT),
+        ];
+        [q[0], q[1], q[2], q[2], q[3], q[0]]
+    };
+    let top = bar(-1.0, hh_c, 1.0, 1.0);
+    let bottom = bar(-1.0, -1.0, 1.0, -hh_c);
+    let left = bar(-1.0, -hh_c, -hw_c, hh_c);
+    let right = bar(hw_c, -hh_c, 1.0, hh_c);
+    let mut out = [top[0]; 24];
+    out[0..6].copy_from_slice(&top);
+    out[6..12].copy_from_slice(&bottom);
+    out[12..18].copy_from_slice(&left);
+    out[18..24].copy_from_slice(&right);
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Confusion overlay (issue #144, the nausea screen-space half):
+// `Hud.extractConfusionOverlay`, `Hud.java:1109-1132`. The *other* half of
+// #144 — the world-projection "spinning" warp vanilla applies alongside this
+// — is `crate::camera::nausea_portal_warp`, not geometry, so it lives in
+// `camera.rs` rather than here; see that function's doc for why.
+// ---------------------------------------------------------------------------
+
+/// Builds the confusion overlay's quad for a given `strength` (vanilla's
+/// `overlayStrength = nauseaIntensity * (1 - screenEffectScale)`,
+/// `Hud.java:305`, already clamped to `0.0..=1.0` by construction there —
+/// clamped again here defensively). The quad is scaled about the screen
+/// centre by `size = Mth.lerp(strength, 2.0F, 1.0F) = 2.0 - strength`
+/// (`Hud.java:1113`, transcribed with vanilla's own literals rather than
+/// simplified, since `2.0 - strength` reads as unrelated to the source line
+/// it came from) — always `>= 1.0` for `strength` in its valid `(0, 1]`
+/// range, so the quad always at least covers the full NDC screen; the
+/// rasterizer clips whatever it overflows by, the same free clip
+/// [`spyglass_lens_triangles`] relies on. UV stays anchored to the *unscaled*
+/// corners (`0.0..1.0`), matching vanilla's pose-stack transform applying
+/// only to position, never to the blit's own UV rectangle.
+///
+/// Tint is vanilla's `red = 0.2 * strength, green = 0.4 * strength, blue =
+/// 0.2 * strength` (`Hud.java:1117-1119`) at alpha `1.0`
+/// (`ARGB.colorFromFloat(1.0F, red, green, blue)`) — a green-biased tint,
+/// unlike every other overlay in this pass, which is why it is not folded
+/// into a shared "tint from strength" helper with anything else here.
+#[must_use]
+pub fn confusion_overlay_triangles(strength: f32) -> [ScreenOverlayVertex; 6] {
+    let strength = strength.clamp(0.0, 1.0);
+    let size = 2.0 - strength;
+    let color = [0.2 * strength, 0.4 * strength, 0.2 * strength, 1.0];
+    let q = [
+        vertex([-size, -size], [0.0, 1.0], color),
+        vertex([size, -size], [1.0, 1.0], color),
+        vertex([size, size], [1.0, 0.0], color),
+        vertex([-size, size], [0.0, 0.0], color),
+    ];
+    [q[0], q[1], q[2], q[2], q[3], q[0]]
+}
+
+// ---------------------------------------------------------------------------
+// Portal overlay (issue #149, the screen-space half):
+// `Hud.extractPortalOverlay`, `Hud.java:1097-1107`. The shared "spinning"
+// world-projection warp is `crate::camera::nausea_portal_warp` — see the
+// confusion overlay's module comment above; vanilla drives both this overlay
+// and that warp from the same `Entity.portalEffectIntensity`, but only this
+// half is geometry.
+// ---------------------------------------------------------------------------
+
+/// Vanilla's portal-overlay alpha curve (`Hud.java:1097-1102`):
+/// `if (alpha < 1.0F) { alpha *= alpha; alpha *= alpha; alpha = alpha * 0.8F +
+/// 0.2F; }` — i.e. `alpha^4 * 0.8 + 0.2` below `1.0`, identity at `1.0`.
+/// `intensity` is vanilla's `portalEffectIntensity`, clamped defensively to
+/// `0.0..=1.0` (vanilla's own value is time-integrated and typically stays in
+/// range, but nothing here enforces that upstream).
+#[must_use]
+pub fn portal_overlay_alpha(intensity: f32) -> f32 {
+    let a = intensity.clamp(0.0, 1.0);
+    if a < 1.0 {
+        let a2 = a * a;
+        let a4 = a2 * a2;
+        a4 * 0.8 + 0.2
+    } else {
+        a
+    }
+}
+
+/// Builds the portal overlay's full-screen NDC quad for animation frame
+/// `frame_index` (wrapped by `frame_count`, from
+/// [`lodestone_assets::fire_frame_count`] applied to the loaded
+/// `nether_portal.png` strip — see that texture's own loader doc for why the
+/// exact same frame-count function applies). Unlike the fire strip's four
+/// tiled quads, this is one full-screen quad, matching
+/// `extractPortalOverlay`'s single `blitSprite` call — no tile mirroring is
+/// needed since there is only one quad to begin with.
+#[must_use]
+pub fn portal_overlay_triangles(frame_index: u32, frame_count: u32, intensity: f32) -> [ScreenOverlayVertex; 6] {
+    let alpha = portal_overlay_alpha(intensity);
+    let frame_count = frame_count.max(1);
+    let frame = frame_index % frame_count;
+    let v0 = frame as f32 / frame_count as f32;
+    let v1 = (frame + 1) as f32 / frame_count as f32;
+    let color = [1.0, 1.0, 1.0, alpha];
+    let q = [
+        vertex([-1.0, -1.0], [0.0, v1], color),
+        vertex([1.0, -1.0], [1.0, v1], color),
+        vertex([1.0, 1.0], [1.0, v0], color),
+        vertex([-1.0, 1.0], [0.0, v0], color),
     ];
     [q[0], q[1], q[2], q[2], q[3], q[0]]
 }
@@ -412,19 +648,40 @@ pub struct ScreenEffectRenderer {
     underwater_bind_group: wgpu::BindGroup,
     fire_bind_group: wgpu::BindGroup,
     pumpkin_bind_group: wgpu::BindGroup,
+    /// The freezing vignette (issue #139) — `powder_snow_outline.png`.
+    freeze_bind_group: wgpu::BindGroup,
+    /// The spyglass lens (issue #154) — `spyglass_scope.png`.
+    spyglass_bind_group: wgpu::BindGroup,
+    /// A procedural 1x1 opaque-white texture with no backing asset, used by
+    /// the spyglass letterbox bars ([`spyglass_letterbox_triangles`]'s doc)
+    /// — a flat colour fill needs no real texture content, only opacity.
+    white_bind_group: wgpu::BindGroup,
+    /// The confusion overlay (issue #144) — `nausea.png`.
+    nausea_bind_group: wgpu::BindGroup,
+    /// The portal overlay (issue #149) — `nether_portal.png`.
+    portal_bind_group: wgpu::BindGroup,
     fire_frame_count: u32,
+    /// [`load_portal_overlay_texture`]'s strip is a different image from the
+    /// fire strip (different frame content, same shape), so it gets its own
+    /// count rather than reusing [`Self::fire_frame_count`].
+    portal_frame_count: u32,
     underwater_vbuf: wgpu::Buffer,
     fire_vbuf: wgpu::Buffer,
     pumpkin_vbuf: wgpu::Buffer,
+    freeze_vbuf: wgpu::Buffer,
+    spyglass_lens_vbuf: wgpu::Buffer,
+    spyglass_bars_vbuf: wgpu::Buffer,
+    nausea_vbuf: wgpu::Buffer,
+    portal_vbuf: wgpu::Buffer,
 }
 
 impl ScreenEffectRenderer {
-    /// Loads both overlay textures from `manager` and builds the pass.
+    /// Loads every overlay texture from `manager` and builds the pass.
     ///
     /// # Errors
     ///
-    /// Returns [`ScreenEffectAssetError`] if either texture is missing or
-    /// fails to decode.
+    /// Returns [`ScreenEffectAssetError`] if any texture is missing or fails
+    /// to decode.
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -434,6 +691,11 @@ impl ScreenEffectRenderer {
         let underwater_image = load_underwater_texture(manager)?;
         let fire_image = load_fire_texture(manager)?;
         let pumpkin_image = load_pumpkin_overlay_texture(manager)?;
+        let freeze_image = load_freeze_overlay_texture(manager)?;
+        let spyglass_image = load_spyglass_scope_texture(manager)?;
+        let nausea_image = load_nausea_overlay_texture(manager)?;
+        let portal_image = load_portal_overlay_texture(manager)?;
+        let portal_frame_count = fire_frame_count(&portal_image);
         let fire_frame_count = fire_frame_count(&fire_image);
 
         let layout = texture_bind_group_layout(device, "lodestone-screen-effect-tex-bgl");
@@ -499,6 +761,99 @@ impl ScreenEffectRenderer {
             &pumpkin_sampler,
         );
 
+        // Nearest, clamp: a single static image, same reasoning as pumpkin's.
+        let (freeze_view, freeze_sampler) = upload_plain_texture(
+            device,
+            queue,
+            "lodestone-freeze-overlay-texture",
+            freeze_image.width,
+            freeze_image.height,
+            &freeze_image.rgba,
+            wgpu::AddressMode::ClampToEdge,
+            wgpu::FilterMode::Linear,
+        );
+        let freeze_bind_group = texture_bind_group(
+            device,
+            &layout,
+            "lodestone-freeze-overlay-texture-bg",
+            &freeze_view,
+            &freeze_sampler,
+        );
+
+        let (spyglass_view, spyglass_sampler) = upload_plain_texture(
+            device,
+            queue,
+            "lodestone-spyglass-scope-texture",
+            spyglass_image.width,
+            spyglass_image.height,
+            &spyglass_image.rgba,
+            wgpu::AddressMode::ClampToEdge,
+            wgpu::FilterMode::Linear,
+        );
+        let spyglass_bind_group = texture_bind_group(
+            device,
+            &layout,
+            "lodestone-spyglass-scope-texture-bg",
+            &spyglass_view,
+            &spyglass_sampler,
+        );
+
+        // The letterbox bars' procedural stand-in — see the struct field doc.
+        let (white_view, white_sampler) = upload_plain_texture(
+            device,
+            queue,
+            "lodestone-screen-effect-white-1x1",
+            1,
+            1,
+            &[255, 255, 255, 255],
+            wgpu::AddressMode::ClampToEdge,
+            wgpu::FilterMode::Nearest,
+        );
+        let white_bind_group = texture_bind_group(
+            device,
+            &layout,
+            "lodestone-screen-effect-white-1x1-bg",
+            &white_view,
+            &white_sampler,
+        );
+
+        let (nausea_view, nausea_sampler) = upload_plain_texture(
+            device,
+            queue,
+            "lodestone-nausea-overlay-texture",
+            nausea_image.width,
+            nausea_image.height,
+            &nausea_image.rgba,
+            wgpu::AddressMode::ClampToEdge,
+            wgpu::FilterMode::Linear,
+        );
+        let nausea_bind_group = texture_bind_group(
+            device,
+            &layout,
+            "lodestone-nausea-overlay-texture-bg",
+            &nausea_view,
+            &nausea_sampler,
+        );
+
+        // Nearest, clamp: an animation strip like fire's, same reasoning.
+        let (portal_view, portal_sampler) = upload_plain_texture(
+            device,
+            queue,
+            "lodestone-portal-overlay-texture",
+            portal_image.width,
+            portal_image.height,
+            &portal_image.rgba,
+            wgpu::AddressMode::ClampToEdge,
+            wgpu::FilterMode::Nearest,
+        );
+        let portal_bind_group = texture_bind_group(
+            device,
+            &layout,
+            "lodestone-portal-overlay-texture-bg",
+            &portal_view,
+            &portal_sampler,
+        );
+
         let underwater_vbuf = vertex_buffer(
             device,
             "lodestone-underwater-vbuf",
@@ -506,16 +861,41 @@ impl ScreenEffectRenderer {
         );
         let fire_vbuf = vertex_buffer(device, "lodestone-fire-vbuf", &fire_overlay_triangles(0, fire_frame_count));
         let pumpkin_vbuf = vertex_buffer(device, "lodestone-pumpkin-vbuf", &pumpkin_overlay_triangles());
+        let freeze_vbuf = vertex_buffer(device, "lodestone-freeze-vbuf", &freeze_overlay_triangles(0.0));
+        let spyglass_lens_vbuf =
+            vertex_buffer(device, "lodestone-spyglass-lens-vbuf", &spyglass_lens_triangles(1.0));
+        let spyglass_bars_vbuf = vertex_buffer(
+            device,
+            "lodestone-spyglass-bars-vbuf",
+            &spyglass_letterbox_triangles(1.0),
+        );
+        let nausea_vbuf = vertex_buffer(device, "lodestone-nausea-vbuf", &confusion_overlay_triangles(0.0));
+        let portal_vbuf = vertex_buffer(
+            device,
+            "lodestone-portal-vbuf",
+            &portal_overlay_triangles(0, portal_frame_count, 0.0),
+        );
 
         Ok(Self {
             pipeline,
             underwater_bind_group,
             fire_bind_group,
             pumpkin_bind_group,
+            freeze_bind_group,
+            spyglass_bind_group,
+            white_bind_group,
+            nausea_bind_group,
+            portal_bind_group,
             fire_frame_count,
+            portal_frame_count,
             underwater_vbuf,
             fire_vbuf,
             pumpkin_vbuf,
+            freeze_vbuf,
+            spyglass_lens_vbuf,
+            spyglass_bars_vbuf,
+            nausea_vbuf,
+            portal_vbuf,
         })
     }
 
@@ -630,6 +1010,151 @@ impl ScreenEffectRenderer {
         pass.set_bind_group(0, &self.pumpkin_bind_group, &[]);
         pass.set_vertex_buffer(0, self.pumpkin_vbuf.slice(..));
         pass.draw(0..6, 0..1);
+    }
+
+    /// The `nether_portal.png` strip's frame count — same shape as
+    /// [`Self::fire_frame_count`], separate storage since it is a different
+    /// image.
+    #[must_use]
+    pub fn portal_frame_count(&self) -> u32 {
+        self.portal_frame_count
+    }
+
+    /// Draws the freeze overlay (issue #139) as its own `Load` render pass,
+    /// for the reasons on [`Self::draw_underwater`]. `percent` is vanilla's
+    /// `Entity.getPercentFrozen()` (see [`freeze_overlay_triangles`]) — the
+    /// caller is expected to have already checked `percent > 0.0`
+    /// (`Hud.java`'s own `getTicksFrozen() > 0` guard), but this draws
+    /// unconditionally like every other method here; gating is
+    /// [`super::ScreenEffects`]'s job, one layer up.
+    pub fn draw_freeze(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, percent: f32) {
+        let verts = freeze_overlay_triangles(percent);
+        queue.write_buffer(&self.freeze_vbuf, 0, bytemuck::cast_slice(&verts));
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("lodestone-freeze-overlay-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.freeze_bind_group, &[]);
+        pass.set_vertex_buffer(0, self.freeze_vbuf.slice(..));
+        pass.draw(0..verts.len() as u32, 0..1);
+    }
+
+    /// Draws the spyglass overlay (issue #154) as its own `Load` render pass:
+    /// the lens quad, then the four letterbox bars, both re-derived from
+    /// `aspect` every call since a window resize changes it (unlike
+    /// [`Self::draw_pumpkin`]'s vertex buffer, these cannot be built once at
+    /// [`Self::new`]). Two draw calls in one pass, one bind group active at a
+    /// time — see [`spyglass_letterbox_triangles`]'s doc for why the bars
+    /// need no second pipeline.
+    pub fn draw_spyglass(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, aspect: f32) {
+        let lens = spyglass_lens_triangles(aspect);
+        let bars = spyglass_letterbox_triangles(aspect);
+        queue.write_buffer(&self.spyglass_lens_vbuf, 0, bytemuck::cast_slice(&lens));
+        queue.write_buffer(&self.spyglass_bars_vbuf, 0, bytemuck::cast_slice(&bars));
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("lodestone-spyglass-overlay-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        // Bars first, then the lens on top — vanilla's own call order in
+        // `extractSpyglassOverlay` (`Hud.java:1043-1047`) draws the lens
+        // first and the four fills after, but since the two regions are
+        // disjoint by construction (see `spyglass_letterbox_triangles`'s
+        // doc), draw order between them cannot change the result; bars
+        // first here only so the lens's own bind group is the last one set.
+        pass.set_bind_group(0, &self.white_bind_group, &[]);
+        pass.set_vertex_buffer(0, self.spyglass_bars_vbuf.slice(..));
+        pass.draw(0..bars.len() as u32, 0..1);
+        pass.set_bind_group(0, &self.spyglass_bind_group, &[]);
+        pass.set_vertex_buffer(0, self.spyglass_lens_vbuf.slice(..));
+        pass.draw(0..lens.len() as u32, 0..1);
+    }
+
+    /// Draws the confusion overlay (issue #144, screen-space half) as its own
+    /// `Load` render pass. `strength` is vanilla's `overlayStrength` (see
+    /// [`confusion_overlay_triangles`]) — the caller is expected to have
+    /// already applied the mutual-exclusion-with-portal and
+    /// `screenEffectScale < 1.0` checks (`Hud.java:300-307`), matching every
+    /// other `draw_*` method's "gating happens one layer up" convention.
+    pub fn draw_confusion(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, strength: f32) {
+        let verts = confusion_overlay_triangles(strength);
+        queue.write_buffer(&self.nausea_vbuf, 0, bytemuck::cast_slice(&verts));
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("lodestone-confusion-overlay-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.nausea_bind_group, &[]);
+        pass.set_vertex_buffer(0, self.nausea_vbuf.slice(..));
+        pass.draw(0..verts.len() as u32, 0..1);
+    }
+
+    /// Draws the portal overlay (issue #149, screen-space half) as its own
+    /// `Load` render pass. `frame` selects the animation frame
+    /// (`frame % `[`Self::portal_frame_count`]`, same one-frame-per-tick
+    /// cadence as [`Self::draw_fire`]); `intensity` is vanilla's
+    /// `portalEffectIntensity` (see [`portal_overlay_triangles`]/
+    /// [`portal_overlay_alpha`]).
+    pub fn draw_portal(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, frame: u32, intensity: f32) {
+        let verts = portal_overlay_triangles(frame, self.portal_frame_count, intensity);
+        queue.write_buffer(&self.portal_vbuf, 0, bytemuck::cast_slice(&verts));
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("lodestone-portal-overlay-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.portal_bind_group, &[]);
+        pass.set_vertex_buffer(0, self.portal_vbuf.slice(..));
+        pass.draw(0..verts.len() as u32, 0..1);
     }
 }
 
@@ -818,5 +1343,171 @@ mod tests {
         let tile0_u = [tris[0].uv[0], tris[1].uv[0]];
         let tile1_u = [tris[6].uv[0], tris[7].uv[0]];
         assert_eq!(tile0_u, [tile1_u[1], tile1_u[0]], "tile 1 must be a horizontal mirror of tile 0");
+    }
+
+    // -- freeze overlay (#139) -----------------------------------------
+
+    #[test]
+    fn freeze_overlay_covers_the_full_ndc_screen() {
+        let tris = freeze_overlay_triangles(0.5);
+        let xs: Vec<f32> = tris.iter().map(|v| v.position[0]).collect();
+        let ys: Vec<f32> = tris.iter().map(|v| v.position[1]).collect();
+        assert_eq!(xs.iter().cloned().fold(f32::INFINITY, f32::min), -1.0);
+        assert_eq!(xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max), 1.0);
+        assert_eq!(ys.iter().cloned().fold(f32::INFINITY, f32::min), -1.0);
+        assert_eq!(ys.iter().cloned().fold(f32::NEG_INFINITY, f32::max), 1.0);
+    }
+
+    #[test]
+    fn freeze_overlay_alpha_tracks_percent_frozen() {
+        for v in freeze_overlay_triangles(0.25) {
+            assert!((v.color[3] - 0.25).abs() < 1e-6);
+            assert_eq!(&v.color[0..3], &[1.0, 1.0, 1.0]);
+        }
+    }
+
+    #[test]
+    fn freeze_overlay_alpha_clamps_to_valid_range() {
+        for v in freeze_overlay_triangles(-1.0) {
+            assert_eq!(v.color[3], 0.0);
+        }
+        for v in freeze_overlay_triangles(2.0) {
+            assert_eq!(v.color[3], 1.0);
+        }
+    }
+
+    // -- spyglass overlay (#154) ----------------------------------------
+
+    #[test]
+    fn spyglass_lens_half_extent_matches_vanillas_min_dimension_rule() {
+        // Landscape (aspect > 1): the smaller dimension (vertical) gets the
+        // full scale; the larger (horizontal) is compressed by aspect.
+        let (hw, hh) = spyglass_lens_half_extent(16.0 / 9.0);
+        assert!((hh - SPYGLASS_SCALE).abs() < 1e-6);
+        assert!((hw - SPYGLASS_SCALE / (16.0 / 9.0)).abs() < 1e-6);
+
+        // Portrait (aspect < 1): mirrored.
+        let (hw, hh) = spyglass_lens_half_extent(9.0 / 16.0);
+        assert!((hw - SPYGLASS_SCALE).abs() < 1e-6);
+        assert!((hh - SPYGLASS_SCALE * (9.0 / 16.0)).abs() < 1e-6);
+
+        // Square: both axes equal, both exactly the scale.
+        let (hw, hh) = spyglass_lens_half_extent(1.0);
+        assert!((hw - SPYGLASS_SCALE).abs() < 1e-6);
+        assert!((hh - SPYGLASS_SCALE).abs() < 1e-6);
+    }
+
+    #[test]
+    fn spyglass_lens_is_centred_and_untinted() {
+        let (hw, hh) = spyglass_lens_half_extent(16.0 / 9.0);
+        let tris = spyglass_lens_triangles(16.0 / 9.0);
+        let xs: Vec<f32> = tris.iter().map(|v| v.position[0]).collect();
+        let ys: Vec<f32> = tris.iter().map(|v| v.position[1]).collect();
+        assert!((xs.iter().cloned().fold(f32::INFINITY, f32::min) - -hw).abs() < 1e-6);
+        assert!((xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max) - hw).abs() < 1e-6);
+        assert!((ys.iter().cloned().fold(f32::INFINITY, f32::min) - -hh).abs() < 1e-6);
+        assert!((ys.iter().cloned().fold(f32::NEG_INFINITY, f32::max) - hh).abs() < 1e-6);
+        for v in tris {
+            assert_eq!(v.color, [1.0, 1.0, 1.0, 1.0]);
+        }
+    }
+
+    #[test]
+    fn spyglass_letterbox_is_opaque_black_and_tiles_the_screen_with_the_lens() {
+        let aspect = 16.0 / 9.0;
+        let (hw, hh) = spyglass_lens_half_extent(aspect);
+        let bars = spyglass_letterbox_triangles(aspect);
+        for v in bars {
+            assert_eq!(v.color, [0.0, 0.0, 0.0, 1.0]);
+        }
+        // Every bar vertex must lie on the outer NDC edge or on the lens
+        // boundary — nothing should stray inside the lens or outside NDC.
+        for v in bars {
+            let (x, y) = (v.position[0], v.position[1]);
+            assert!(x >= -1.0 - 1e-6 && x <= 1.0 + 1e-6, "x out of NDC: {x}");
+            assert!(y >= -1.0 - 1e-6 && y <= 1.0 + 1e-6, "y out of NDC: {y}");
+            let inside_lens = x > -hw + 1e-4 && x < hw - 1e-4 && y > -hh + 1e-4 && y < hh - 1e-4;
+            assert!(!inside_lens, "bar vertex ({x}, {y}) falls inside the lens rect");
+        }
+    }
+
+    // -- confusion overlay (#144) ----------------------------------------
+
+    #[test]
+    fn confusion_overlay_always_covers_at_least_the_full_screen() {
+        for strength in [0.01, 0.3, 0.7, 1.0] {
+            let tris = confusion_overlay_triangles(strength);
+            let xs: Vec<f32> = tris.iter().map(|v| v.position[0]).collect();
+            let max_x = xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            assert!(max_x >= 1.0 - 1e-6, "strength {strength}: max_x {max_x} must be >= 1.0");
+        }
+    }
+
+    #[test]
+    fn confusion_overlay_shrinks_toward_unscaled_as_strength_rises() {
+        let weak = confusion_overlay_triangles(0.1);
+        let strong = confusion_overlay_triangles(0.9);
+        let weak_extent = weak.iter().map(|v| v.position[0].abs()).fold(0.0_f32, f32::max);
+        let strong_extent = strong.iter().map(|v| v.position[0].abs()).fold(0.0_f32, f32::max);
+        assert!(
+            strong_extent < weak_extent,
+            "higher nausea strength must shrink `size` toward 1.0 (Hud.java:1113): \
+             weak={weak_extent}, strong={strong_extent}"
+        );
+    }
+
+    #[test]
+    fn confusion_overlay_tint_is_green_biased_and_scales_with_strength() {
+        let strength = 0.5_f32;
+        let tris = confusion_overlay_triangles(strength);
+        for v in tris {
+            assert!((v.color[0] - 0.2 * strength).abs() < 1e-6);
+            assert!((v.color[1] - 0.4 * strength).abs() < 1e-6);
+            assert!((v.color[2] - 0.2 * strength).abs() < 1e-6);
+            assert_eq!(v.color[3], 1.0);
+            assert!(v.color[1] > v.color[0] && v.color[1] > v.color[2], "green must dominate");
+        }
+    }
+
+    // -- portal overlay (#149) --------------------------------------------
+
+    #[test]
+    fn portal_overlay_alpha_is_identity_at_full_intensity() {
+        assert!((portal_overlay_alpha(1.0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn portal_overlay_alpha_follows_vanillas_quartic_floor_curve() {
+        // Hud.java:1097-1102: alpha = alpha^4 * 0.8 + 0.2, below 1.0.
+        let intensity = 0.5_f32;
+        let expected = intensity.powi(4) * 0.8 + 0.2;
+        assert!((expected - 0.25).abs() < 1e-6, "hypothesis drifted: {expected}");
+        assert!((portal_overlay_alpha(intensity) - expected).abs() < 1e-6);
+        // The floor: even as intensity -> 0, alpha approaches 0.2, never 0 —
+        // distinguishing this from a naive linear or unclamped curve.
+        assert!((portal_overlay_alpha(0.0) - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn portal_overlay_covers_the_full_ndc_screen_and_selects_the_right_frame() {
+        let tris = portal_overlay_triangles(5, 32, 1.0);
+        let xs: Vec<f32> = tris.iter().map(|v| v.position[0]).collect();
+        let ys: Vec<f32> = tris.iter().map(|v| v.position[1]).collect();
+        assert_eq!(xs.iter().cloned().fold(f32::INFINITY, f32::min), -1.0);
+        assert_eq!(xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max), 1.0);
+        assert_eq!(ys.iter().cloned().fold(f32::INFINITY, f32::min), -1.0);
+        assert_eq!(ys.iter().cloned().fold(f32::NEG_INFINITY, f32::max), 1.0);
+        let v0 = 5.0 / 32.0;
+        let v1 = 6.0 / 32.0;
+        for v in tris {
+            assert!(v.uv[1] >= v0 - 1e-6 && v.uv[1] <= v1 + 1e-6);
+        }
+    }
+
+    #[test]
+    fn portal_overlay_frame_wraps_past_the_last_frame() {
+        let wrapped = portal_overlay_triangles(32, 32, 1.0);
+        let first = portal_overlay_triangles(0, 32, 1.0);
+        assert_eq!(wrapped, first, "frame 32 of a 32-frame strip is frame 0 again");
     }
 }
