@@ -72,6 +72,58 @@ pub enum SpecialLayout {
     Smithing,
     /// `EnchantmentMenu`: slots at `(15,47)`, `(35,47)`.
     Enchanting,
+    /// `FurnaceMenu` (wire `menu_type` `furnace`): ingredient `(56,17)`, fuel
+    /// `(56,53)`, result `(116,35)` — `FurnaceMenu.java` (via
+    /// `AbstractFurnaceMenu.java:63-65`). A separate variant from
+    /// [`BlastFurnace`](Self::BlastFurnace)/[`Smoker`](Self::Smoker) purely
+    /// for the background sheet: all three share these exact slot
+    /// coordinates (`AbstractFurnaceMenu` is the common constructor), but
+    /// `furnace.png`/`blast_furnace.png`/`smoker.png` are three different
+    /// textures with three differently-named progress sprites
+    /// (issue #28).
+    Furnace,
+    /// `BlastFurnaceMenu` (wire `menu_type` `blast_furnace`). Same three slot
+    /// coordinates as [`Furnace`](Self::Furnace); see its doc comment for why
+    /// this is still a separate variant.
+    BlastFurnace,
+    /// `SmokerMenu` (wire `menu_type` `smoker`). Same three slot coordinates
+    /// as [`Furnace`](Self::Furnace); see its doc comment for why this is
+    /// still a separate variant.
+    Smoker,
+    /// `BrewingStandMenu`: potion slots `(56,51)`, `(79,58)`, `(102,51)`,
+    /// ingredient `(79,17)`, fuel `(17,17)` — `BrewingStandMenu.java:48-52`.
+    Brewing,
+    /// `LoomMenu`: banner `(13,26)`, dye `(33,26)`, pattern `(23,45)`, result
+    /// `(143,57)` — `LoomMenu.java:64-82`. The pattern-selection button grid
+    /// (`clickMenuButton`) is not modelled — see `docs/container-clicks.md`'s
+    /// "screens whose logic does not exist" framing; it needs the banner
+    /// pattern registry and a `ContainerButtonClick` producer, neither of
+    /// which this tree has yet.
+    Loom,
+    /// `StonecutterMenu`: input `(20,33)`, result `(143,33)` —
+    /// `StonecutterMenu.java:54-55`. The recipe-selection scroll list is not
+    /// modelled, for the same reason as [`Loom`](Self::Loom)'s pattern grid:
+    /// it needs the stonecutter recipe set, which is server-only data here.
+    Stonecutter,
+    /// `CartographyTableMenu`: map `(15,15)`, additional `(15,52)`, result
+    /// `(145,39)` — `CartographyTableMenu.java:49-61`.
+    Cartography,
+    /// `DispenserMenu` (wire `menu_type` `generic_3x3`, shared by the
+    /// dispenser **and** the dropper — vanilla ships no `dropper.png` or
+    /// `DropperScreen`; `MenuScreens.java:82` registers `GENERIC_3x3` to
+    /// `DispenserScreen` alone): a 3×3 grid at `(62,17)`, step `18` —
+    /// `DispenserMenu.java:26,30-37`.
+    Dispenser,
+    /// `HopperMenu`: five slots in a row at `(44,20)`, step `18` —
+    /// `HopperMenu.java:24`. Not one of the container types issue #28's own
+    /// body names, but found while fixing the doc that (incorrectly) claimed
+    /// this one had nowhere to go: `HopperScreen` is a real, *shorter*
+    /// screen — `imageHeight = 133`, not `166`
+    /// (`HopperScreen.java:15`, via `super(menu, inventory, title, 176,
+    /// 133)`) — so a hopper drawing `generic_54`'s ordinary chest sheet was
+    /// exactly this issue's own class of defect: a plausible but wrong
+    /// screen, not a missing one.
+    Hopper,
 }
 
 /// Where a menu's crafting grid and result live, in **menu-slot** indices.
@@ -374,6 +426,137 @@ impl Menu {
             slot.no_item_icon = Some(EMPTY_SLOT_LAPIS_LAZULI);
         }
         menu.special_layout = Some(SpecialLayout::Enchanting);
+        menu
+    }
+
+    /// Builds a furnace-family menu (`layout` selects which of
+    /// [`SpecialLayout::Furnace`]/[`SpecialLayout::BlastFurnace`]/
+    /// [`SpecialLayout::Smoker`] — all three are the same three slots, only
+    /// the background art differs): ingredient, fuel, then a take-only
+    /// result slot at menu index 2 (`AbstractFurnaceMenu.java:63-65`),
+    /// followed by the player's main storage and hotbar.
+    ///
+    /// The fuel/smeltable routing `AbstractFurnaceMenu.quickMoveStack` does
+    /// by item kind is deliberately not modelled — see
+    /// [`crate::menus::build_menu`]'s doc comment ("two families are
+    /// genuinely different and are knowingly left on the generic order").
+    /// What *is* modelled, because it needs no recipe/fuel data, is that the
+    /// result slot only ever yields, never accepts.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: `layout` is expected to be one of the three
+    /// furnace-family variants. Any other [`SpecialLayout`] still builds a
+    /// mechanically correct 3-slot menu (`lodestone-shell`'s
+    /// `special_layout_positions` simply will not recognise it and falls
+    /// back to a plain generic row), so this is not a hard precondition.
+    #[must_use]
+    pub fn furnace(layout: SpecialLayout) -> Self {
+        let mut menu = Self::generic(3);
+        if let Some(slot) = menu.slots.get_mut(2) {
+            slot.kind = SlotKind::Output;
+        }
+        menu.special_layout = Some(layout);
+        menu
+    }
+
+    /// Builds the brewing stand menu: three potion slots (`0..3`), an
+    /// ingredient slot (`3`), a fuel slot (`4`), then the player's main
+    /// storage and hotbar (`BrewingStandMenu.java:48-54`).
+    ///
+    /// `BrewingStandMenu.quickMoveStack` routes by item kind (blaze
+    /// powder/ingredient/potion), which is the same "genuinely different,
+    /// left on generic order" gap [`furnace`](Self::furnace) and
+    /// [`crate::menus::build_menu`]'s doc comment both name — it needs the
+    /// potion-brewing predicate tables this tree does not have. No slot kind
+    /// changes are made here for the same reason: unlike the furnace's
+    /// result slot, none of the five brewing-stand slots are unconditionally
+    /// take-only (a potion slot yields *and* accepts a fresh bottle).
+    #[must_use]
+    pub fn brewing_stand() -> Self {
+        let mut menu = Self::generic(5);
+        menu.special_layout = Some(SpecialLayout::Brewing);
+        menu
+    }
+
+    /// Builds the loom menu: banner (`0`), dye (`1`), pattern (`2`), then a
+    /// take-only result slot (`3`), then the player's main storage and
+    /// hotbar (`LoomMenu.java:64-106`).
+    ///
+    /// The banner-pattern selection grid (`LoomMenu.clickMenuButton`) is not
+    /// modelled — see [`SpecialLayout::Loom`]'s doc comment. The slots
+    /// themselves need no such data: a banner/dye/pattern item is accepted
+    /// or refused by its own item kind, which is a placement predicate this
+    /// menu leaves on the generic "accept anything, let the server correct
+    /// it" order along with the routing gap above, and the result slot is
+    /// still correctly take-only.
+    #[must_use]
+    pub fn loom() -> Self {
+        let mut menu = Self::generic(4);
+        if let Some(slot) = menu.slots.get_mut(3) {
+            slot.kind = SlotKind::Output;
+        }
+        menu.special_layout = Some(SpecialLayout::Loom);
+        menu
+    }
+
+    /// Builds the stonecutter menu: an input slot (`0`) and a take-only
+    /// result slot (`1`), then the player's main storage and hotbar
+    /// (`StonecutterMenu.java:54-56`).
+    ///
+    /// The recipe-selection scroll list (`StonecutterMenu.clickMenuButton`)
+    /// is not modelled — see [`SpecialLayout::Stonecutter`]'s doc comment.
+    #[must_use]
+    pub fn stonecutter() -> Self {
+        let mut menu = Self::generic(2);
+        if let Some(slot) = menu.slots.get_mut(1) {
+            slot.kind = SlotKind::Output;
+        }
+        menu.special_layout = Some(SpecialLayout::Stonecutter);
+        menu
+    }
+
+    /// Builds the cartography table menu: a map slot (`0`), an additional
+    /// (paper/map/glass-pane) slot (`1`), then a take-only result slot
+    /// (`2`), then the player's main storage and hotbar
+    /// (`CartographyTableMenu.java:49-89`).
+    #[must_use]
+    pub fn cartography_table() -> Self {
+        let mut menu = Self::generic(3);
+        if let Some(slot) = menu.slots.get_mut(2) {
+            slot.kind = SlotKind::Output;
+        }
+        menu.special_layout = Some(SpecialLayout::Cartography);
+        menu
+    }
+
+    /// Builds a dispenser/dropper menu: a 3×3 grid (`0..9`), then the
+    /// player's main storage and hotbar (`DispenserMenu.java:26-37`).
+    /// Mechanically identical to [`generic`](Self::generic) — no slot kind
+    /// changes, `DispenserMenu.quickMoveStack` is the same "container then
+    /// player" shape [`crate::menus::build_menu`]'s doc comment already
+    /// attributes to `quick_move_generic` — this exists purely to attach
+    /// [`SpecialLayout::Dispenser`] so the 3×3 grid draws as a square
+    /// instead of `generic`'s flat 9-wide row.
+    #[must_use]
+    pub fn dispenser() -> Self {
+        let mut menu = Self::generic(9);
+        menu.special_layout = Some(SpecialLayout::Dispenser);
+        menu
+    }
+
+    /// Builds a hopper menu: five slots in a row (`0..5`), then the player's
+    /// main storage and hotbar (`HopperMenu.java:24,27`). Mechanically
+    /// identical to [`generic`](Self::generic) — `HopperMenu.quickMoveStack`
+    /// is the same container-then-player shape
+    /// [`crate::menus::build_menu`]'s doc comment already attributes to
+    /// `quick_move_generic` — this exists purely to attach
+    /// [`SpecialLayout::Hopper`] so the screen draws at vanilla's real,
+    /// *shorter* `176×133` panel instead of the plain chest sheet's `166`.
+    #[must_use]
+    pub fn hopper() -> Self {
+        let mut menu = Self::generic(5);
+        menu.special_layout = Some(SpecialLayout::Hopper);
         menu
     }
 

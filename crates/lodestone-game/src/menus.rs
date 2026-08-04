@@ -581,6 +581,23 @@ impl Menus {
 /// ever disagrees about the size, falling back to a plain generic container
 /// (whose slot count *does* match the packet) beats building a menu that
 /// contradicts what was actually sent.
+///
+/// Issue #28 ("container screens: the whole family") added the furnace
+/// family, the brewing stand, the loom, the stonecutter, the cartography
+/// table and the dispenser/dropper on top of that same pattern —
+/// [`Menu::furnace`], [`Menu::brewing_stand`], [`Menu::loom`],
+/// [`Menu::stonecutter`], [`Menu::cartography_table`] and
+/// [`Menu::dispenser`] all still build on [`Menu::generic`] and stay
+/// `MenuKind::Generic`, attaching only a [`SpecialLayout`] for
+/// `lodestone-shell` to draw the right panel and slot positions. Three of
+/// these screens have a real button-driven sub-feature this pass does not
+/// model — the loom's pattern grid, the stonecutter's recipe list, and (not
+/// yet added here at all) the beacon's power/effect buttons and the
+/// villager's trade list — because each needs data this tree does not carry
+/// yet (a banner-pattern/recipe registry, or a whole trade-offer packet).
+/// The slots themselves need none of that: they are the same "accept
+/// anything, let the server's `container_set_slot` correct a wrong guess"
+/// order already established above.
 fn build_menu(menu_type: Option<&ResourceKey>, container_size: usize) -> Menu {
     let is_crafting =
         menu_type.is_some_and(|key| key.namespace() == "minecraft" && key.path() == "crafting");
@@ -595,6 +612,23 @@ fn build_menu(menu_type: Option<&ResourceKey>, container_size: usize) -> Menu {
         (Some("grindstone"), 3) => Menu::item_combiner(3, 2, SpecialLayout::Grindstone),
         (Some("smithing"), 4) => Menu::item_combiner(4, 3, SpecialLayout::Smithing),
         (Some("enchantment"), 2) => Menu::enchanting_table(),
+        // The furnace family (issue #28): three menu types, one shape.
+        // `Menu::furnace` takes the layout so the background art (the only
+        // thing that differs between them) can still be told apart.
+        (Some("furnace"), 3) => Menu::furnace(SpecialLayout::Furnace),
+        (Some("blast_furnace"), 3) => Menu::furnace(SpecialLayout::BlastFurnace),
+        (Some("smoker"), 3) => Menu::furnace(SpecialLayout::Smoker),
+        (Some("brewing_stand"), 5) => Menu::brewing_stand(),
+        (Some("loom"), 4) => Menu::loom(),
+        (Some("stonecutter"), 2) => Menu::stonecutter(),
+        (Some("cartography_table"), 3) => Menu::cartography_table(),
+        // Shared by the dispenser and the dropper — see
+        // `SpecialLayout::Dispenser`'s doc comment for why there is no
+        // separate dropper case.
+        (Some("generic_3x3"), 9) => Menu::dispenser(),
+        // Not one of #28's own named containers — found while documenting
+        // it (see `SpecialLayout::Hopper`'s doc comment).
+        (Some("hopper"), 5) => Menu::hopper(),
         _ => Menu::generic(container_size),
     }
 }
