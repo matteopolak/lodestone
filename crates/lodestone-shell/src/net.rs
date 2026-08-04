@@ -331,6 +331,58 @@ impl BiomeClimateCell {
 /// A [`BiomeClimateCell`] shared between the net thread and the render thread.
 pub type SharedBiomeClimates = Arc<BiomeClimateCell>;
 
+/// The `minecraft:worldgen/biome` registry's ordered entry names, published
+/// once at `Login` by [`forward`]'s `BiomeRegistryNames` arm and read by the
+/// mesh worker threads that resolve a chunk section's biome holder id to a
+/// name (`crate::mesher`'s `biome_name_at`) — the live counterpart of that
+/// module's provisional `FALLBACK_BIOME_NAMES` table.
+///
+/// # Why `&'static str`, not `String`
+///
+/// `lodestone_render::biome_tint::NamedBiomeTint` requires
+/// `Fn(BlockPos) -> Option<&'static str>` — a bound this crate does not own
+/// and Job 2's scope does not touch. Names arrive as owned `String`s off the
+/// wire, so [`Self::apply`] **leaks** each one once (`Box::leak`) to get a
+/// `&'static str` a closure of that shape can return. This is deliberate and
+/// bounded, not a mistake: the biome registry is a few dozen to a couple
+/// hundred short strings, folded once per `Login` (never per-tick, matching
+/// [`BiomeClimateCell`]'s own "whole table replaces at once" shape), so a
+/// session that reconnects many times leaks at most a few KB total — a cost
+/// worth paying once rather than plumbing a lifetime through a trait bound
+/// three crates away.
+///
+/// `Mutex<Vec<&'static str>>`, not lock-free atomics, for the same reason as
+/// [`BiomeClimateCell`]: this table's *length* changes with the registry, so
+/// per-field atomics could not express it anyway.
+#[derive(Debug, Default)]
+pub struct BiomeNameCell(Mutex<Vec<&'static str>>);
+
+impl BiomeNameCell {
+    /// Replace the whole table, leak-interning each name. Called once, at
+    /// `Login`, by [`forward`]'s `BiomeRegistryNames` arm.
+    pub(crate) fn apply(&self, names: &[String]) {
+        let leaked: Vec<&'static str> = names
+            .iter()
+            .map(|name| -> &'static str { Box::leak(name.clone().into_boxed_str()) })
+            .collect();
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = leaked;
+    }
+
+    /// A cheap snapshot of the current table — `&'static str` is `Copy`, so
+    /// this is one allocation for the `Vec`, not one per name. Empty before
+    /// any `registry_data` arrives, or on a version/server that sends none;
+    /// callers must fall back to a local table in that case (see
+    /// `crate::mesher::biome_name_at`), never treat empty as "id 0".
+    #[must_use]
+    pub fn snapshot(&self) -> Vec<&'static str> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+}
+
+/// A [`BiomeNameCell`] shared between the net thread and the mesh worker
+/// threads.
+pub type SharedBiomeNames = Arc<BiomeNameCell>;
+
 /// The current dimension's policy for *absent* sky light, shared between the
 /// thread that learns the dimension and the render thread's per-entity light
 /// sampler.
@@ -547,6 +599,14 @@ pub enum NetUpdate {
     /// `/respawn`). The fresh position arrives in the placement
     /// [`NetUpdate::Teleport`] that follows.
     Respawned,
+    /// The server signalled `WIN_GAME` (issue #192): the local player exited
+    /// the End through the exit portal after the dragon fight. Carries no
+    /// data — see [`lodestone_model::event::ClientEvent::WinGame`]'s own doc
+    /// for why. `Sim::poll_net` latches this into a `won` flag,
+    /// `WindowApp::drive_ui_from_session` notices it and shows the credits
+    /// screen (`UiState::show_credits`) — the same shape as
+    /// [`NetUpdate::Death`]/`Sim::is_dead`/`UiState::die`.
+    WinGame,
     /// A positioned sound to play (`SOUND` packet). `name` is the sound event
     /// key's path (namespace stripped, e.g. `"entity.slime.squish"`); `seed` is
     /// the server-rolled value that makes weighted variant selection
@@ -685,6 +745,11 @@ pub struct NetClient {
     /// arm at `Login`. See [`BiomeClimateCell`] for why this is a shared cell
     /// rather than a [`NetUpdate`] — the same reasoning as [`Self::weather`].
     biome_climates: SharedBiomeClimates,
+    /// The biome registry's ordered entry names, folded by [`forward`]'s
+    /// `BiomeRegistryNames` arm at `Login`. See [`BiomeNameCell`] for why this
+    /// is a shared cell rather than a [`NetUpdate`], and for the `&'static
+    /// str` leak-intern this is the one caller of.
+    biome_names: SharedBiomeNames,
     /// The current dimension's absent-sky-light policy. Unlike [`Self::weather`]
     /// the **net thread never writes this** — `Sim::refresh_mesh_policy` is the
     /// sole producer and the render thread's light samplers are the consumers.
@@ -904,6 +969,8 @@ impl NetClient {
         let weather_thread = Arc::clone(&weather);
         let biome_climates: SharedBiomeClimates = Arc::new(BiomeClimateCell::default());
         let biome_climates_thread = Arc::clone(&biome_climates);
+        let biome_names: SharedBiomeNames = Arc::new(BiomeNameCell::default());
+        let biome_names_thread = Arc::clone(&biome_names);
         let local_uuid: SharedLocalUuid = Arc::new(OnceLock::new());
         let local_uuid_thread = Arc::clone(&local_uuid);
 
@@ -919,6 +986,7 @@ impl NetClient {
                     handle_thread,
                     weather_thread,
                     biome_climates_thread,
+                    biome_names_thread,
                     local_uuid_thread,
                     session,
                 )
@@ -933,6 +1001,7 @@ impl NetClient {
             handle,
             weather,
             biome_climates,
+            biome_names,
             sky_default: Arc::new(SkyDefaultCell::default()),
             local_uuid,
             #[cfg(test)]
@@ -1154,6 +1223,16 @@ impl NetClient {
         Arc::clone(&self.biome_climates)
     }
 
+    /// Clone out the `Arc`-backed biome-name cell, for the same reason
+    /// [`shared_weather`](Self::shared_weather) exists: `crate::sim` reads
+    /// this once at `TerrainMesh` construction/refresh time and hands the
+    /// snapshot down into `SectionSnapshot` for the mesh worker threads —
+    /// see `crate::mesher::biome_name_at`.
+    #[must_use]
+    pub fn shared_biome_names(&self) -> SharedBiomeNames {
+        Arc::clone(&self.biome_names)
+    }
+
     /// Clone out the `Arc`-backed absent-sky-light policy cell, for the same
     /// reason [`shared_weather`](Self::shared_weather) exists. Two callers:
     /// `crate::app` hands it to the `'static` entity-light closure it installs at
@@ -1179,6 +1258,7 @@ impl NetClient {
             handle: Arc::new(OnceLock::new()),
             weather: Arc::new(WeatherCell::default()),
             biome_climates: Arc::new(BiomeClimateCell::default()),
+            biome_names: Arc::new(BiomeNameCell::default()),
             sky_default: Arc::new(SkyDefaultCell::default()),
             local_uuid: Arc::new(OnceLock::new()),
             // Bound by `Sim::attach_net`; a loopback with no `Sim` folds nothing.
@@ -1232,6 +1312,7 @@ impl NetClient {
             handle: Arc::new(OnceLock::new()),
             weather: Arc::new(WeatherCell::default()),
             biome_climates: Arc::new(BiomeClimateCell::default()),
+            biome_names: Arc::new(BiomeNameCell::default()),
             sky_default: Arc::new(SkyDefaultCell::default()),
             local_uuid: Arc::new(OnceLock::new()),
             // Bound by `Sim::attach_net`; a loopback with no `Sim` folds nothing.
@@ -1336,6 +1417,7 @@ fn run(
     shared_handle: SharedHandle,
     weather: SharedWeather,
     biome_climates: SharedBiomeClimates,
+    biome_names: SharedBiomeNames,
     local_uuid: SharedLocalUuid,
     session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
 ) {
@@ -1536,7 +1618,7 @@ fn run(
             // server is quiet (no inbound events to wake us).
             match tokio::time::timeout(Duration::from_millis(15), events.recv()).await {
                 Ok(Some(event)) => {
-                    if forward(&tx, &weather, &biome_climates, event).is_err() {
+                    if forward(&tx, &weather, &biome_climates, &biome_names, event).is_err() {
                         break;
                     }
                 }
@@ -1577,6 +1659,7 @@ fn forward(
     tx: &Sender<NetUpdate>,
     weather: &WeatherCell,
     biome_climates: &BiomeClimateCell,
+    biome_names: &BiomeNameCell,
     event: ClientEvent,
 ) -> Result<(), ()> {
     let update = match event {
@@ -1642,6 +1725,11 @@ fn forward(
             message: message.to_plain_string(),
         },
         ClientEvent::Respawned { .. } => NetUpdate::Respawned,
+        // WIN_GAME (issue #192): a pure signal, forwarded unconditionally —
+        // `route()` claims this `shell: true, shell_conditional: false`, so
+        // this arm is `must_forward()` and its absence would trip `forward`'s
+        // own `debug_assert!` on the catch-all below.
+        ClientEvent::WinGame => NetUpdate::WinGame,
         // Sound events: strip the namespace to the `sounds.json` key path and
         // pass the server's seed through unchanged (client-side variant
         // selection would desync every client). `fixed_range` is intentionally
@@ -1803,6 +1891,15 @@ fn forward(
             has_precipitation,
         } => {
             biome_climates.apply(&temperatures, &downfall, &has_precipitation);
+            return Ok(());
+        }
+        // The same registry generation's entry names (follow-up to issue #96
+        // / `eb423ac`), folded into the shared `BiomeNameCell` and
+        // deliberately not forwarded — same shape as `BiomeClimates` above:
+        // the whole table replaces at once, and the mesh worker threads read
+        // it through `Sim`/`TerrainMesh`, not through this channel.
+        ClientEvent::BiomeRegistryNames { names } => {
+            biome_names.apply(&names);
             return Ok(());
         }
         // The lightning flash (`ClientLevel.java:264-268`). A bolt is an ordinary
@@ -2123,6 +2220,7 @@ mod tests {
             &tx,
             &weather,
             &BiomeClimateCell::default(),
+            &BiomeNameCell::default(),
             ClientEvent::ExperienceChanged {
                 progress: 0.25,
                 level: 5,
@@ -2134,6 +2232,7 @@ mod tests {
             &tx,
             &weather,
             &BiomeClimateCell::default(),
+            &BiomeNameCell::default(),
             ClientEvent::HealthChanged {
                 health: 12.0,
                 food: 8,
@@ -2153,6 +2252,7 @@ mod tests {
             &tx,
             &weather,
             &BiomeClimateCell::default(),
+            &BiomeNameCell::default(),
             ClientEvent::Death {
                 message: lodestone_client::Text::literal("you died"),
             },
@@ -2161,6 +2261,30 @@ mod tests {
         match rx.try_recv().expect("Death still crosses") {
             NetUpdate::Death { message } => assert_eq!(message, "you died"),
             other => panic!("expected NetUpdate::Death, got {other:?}"),
+        }
+    }
+
+    /// Issue #192: `ClientEvent::WinGame` must reach `NetUpdate::WinGame`
+    /// through the real `forward` function — not a hand-constructed
+    /// `NetUpdate` — the same shape as `forward_translates_...` above proves
+    /// for `Death`. `route()` claims `shell: true` unconditionally for this
+    /// variant, so a missing arm here would trip `forward`'s own
+    /// `debug_assert!` on the catch-all in every debug test run; this test
+    /// pins the actual translation rather than relying on that assert alone.
+    #[test]
+    fn forward_translates_win_game_into_the_credits_signal() {
+        let (tx, rx) = mpsc::channel();
+        forward(
+            &tx,
+            &WeatherCell::default(),
+            &BiomeClimateCell::default(),
+            &BiomeNameCell::default(),
+            ClientEvent::WinGame,
+        )
+        .expect("forward does not stop the loop");
+        match rx.try_recv().expect("WinGame must cross the NetUpdate channel") {
+            NetUpdate::WinGame => {}
+            other => panic!("expected NetUpdate::WinGame, got {other:?}"),
         }
     }
 
@@ -2180,7 +2304,7 @@ mod tests {
             show_icon: true,
             blend: false,
         };
-        forward(&tx, &WeatherCell::default(), &BiomeClimateCell::default(), event).expect("forward does not stop the loop");
+        forward(&tx, &WeatherCell::default(), &BiomeClimateCell::default(), &BiomeNameCell::default(), event).expect("forward does not stop the loop");
         match rx.try_recv().expect("an update was forwarded") {
             NetUpdate::EffectApplied {
                 entity_id,
@@ -2221,7 +2345,7 @@ mod tests {
             max_speed: 0.5,
             count: 12,
         };
-        forward(&tx, &WeatherCell::default(), &BiomeClimateCell::default(), event).expect("forward does not stop the loop");
+        forward(&tx, &WeatherCell::default(), &BiomeClimateCell::default(), &BiomeNameCell::default(), event).expect("forward does not stop the loop");
         match rx.try_recv().expect("an update was forwarded") {
             NetUpdate::Particles {
                 kind,
@@ -2255,7 +2379,7 @@ mod tests {
             entity_id: 99,
             effect: ResourceKey::from_str("minecraft:levitation").unwrap(),
         };
-        forward(&tx, &WeatherCell::default(), &BiomeClimateCell::default(), event).expect("forward does not stop the loop");
+        forward(&tx, &WeatherCell::default(), &BiomeClimateCell::default(), &BiomeNameCell::default(), event).expect("forward does not stop the loop");
         match rx.try_recv().expect("an update was forwarded") {
             NetUpdate::EffectRemoved { entity_id, effect } => {
                 assert_eq!(entity_id, 99);
@@ -2279,6 +2403,7 @@ mod tests {
             &tx,
             &weather,
             &BiomeClimateCell::default(),
+            &BiomeNameCell::default(),
             ClientEvent::WeatherChanged {
                 raining: None,
                 rain_level: Some(0.75),
@@ -2290,6 +2415,7 @@ mod tests {
             &tx,
             &weather,
             &BiomeClimateCell::default(),
+            &BiomeNameCell::default(),
             ClientEvent::WeatherChanged {
                 raining: None,
                 rain_level: None,
@@ -2318,6 +2444,7 @@ mod tests {
             &tx,
             &weather,
             &BiomeClimateCell::default(),
+            &BiomeNameCell::default(),
             ClientEvent::WeatherChanged {
                 raining: Some(true),
                 rain_level: None,
@@ -2348,6 +2475,7 @@ mod tests {
             &tx,
             &weather,
             &climates,
+            &BiomeNameCell::default(),
             ClientEvent::BiomeClimates {
                 temperatures: vec![Some(-0.7), Some(2.0)],
                 downfall: vec![Some(0.9), Some(0.0)],
@@ -2378,6 +2506,40 @@ mod tests {
             rx.try_recv().is_err(),
             "biome climates must not cross the NetUpdate channel — the whole \
              table replaces at once, exactly like weather"
+        );
+    }
+
+    /// The biome-registry-names twin of the test above (follow-up to issue
+    /// #96 / `eb423ac`): before this arm existed, the event reached the
+    /// terminal `_ =>` and the `debug_assert!` there would have fired on
+    /// every login once `v770` started emitting it (`route` claims
+    /// `shell`/`must_forward` for it). Also pins the leak-intern:
+    /// `BiomeNameCell::snapshot` must hand back the *same* strings by value
+    /// (not merely equal ones), proving the cache is read, not re-leaked, on
+    /// every access.
+    #[test]
+    fn forward_folds_biome_registry_names_into_the_cell_without_using_the_channel() {
+        let (tx, rx) = mpsc::channel();
+        let weather = WeatherCell::default();
+        let names = BiomeNameCell::default();
+        assert_eq!(names.snapshot(), Vec::<&str>::new(), "empty before Login");
+
+        forward(
+            &tx,
+            &weather,
+            &BiomeClimateCell::default(),
+            &names,
+            ClientEvent::BiomeRegistryNames {
+                names: vec!["minecraft:swamp".to_string(), "minecraft:desert".to_string()],
+            },
+        )
+        .expect("forward does not stop the loop");
+
+        assert_eq!(names.snapshot(), vec!["minecraft:swamp", "minecraft:desert"]);
+        assert!(
+            rx.try_recv().is_err(),
+            "biome registry names must not cross the NetUpdate channel — the whole \
+             table replaces at once, exactly like weather/biome climates"
         );
     }
 
@@ -2458,16 +2620,16 @@ mod tests {
 
         // The negative control first, so a passing positive cannot be "every
         // spawn bumps it".
-        forward(&tx, &weather, &BiomeClimateCell::default(), spawn("minecraft:zombie")).expect("forward continues");
+        forward(&tx, &weather, &BiomeClimateCell::default(), &BiomeNameCell::default(), spawn("minecraft:zombie")).expect("forward continues");
         assert_eq!(
             weather.snapshot().lightning_seq,
             0,
             "a zombie must not flash the sky"
         );
 
-        forward(&tx, &weather, &BiomeClimateCell::default(), spawn("minecraft:lightning_bolt")).expect("forward continues");
+        forward(&tx, &weather, &BiomeClimateCell::default(), &BiomeNameCell::default(), spawn("minecraft:lightning_bolt")).expect("forward continues");
         assert_eq!(weather.snapshot().lightning_seq, 1);
-        forward(&tx, &weather, &BiomeClimateCell::default(), spawn("minecraft:lightning_bolt")).expect("forward continues");
+        forward(&tx, &weather, &BiomeClimateCell::default(), &BiomeNameCell::default(), spawn("minecraft:lightning_bolt")).expect("forward continues");
         assert_eq!(
             weather.snapshot().lightning_seq,
             2,
