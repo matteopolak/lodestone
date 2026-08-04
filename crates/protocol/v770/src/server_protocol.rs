@@ -55,6 +55,7 @@ use lodestone_data::block_states::{block_name, properties};
 use lodestone_data::entity_types::entity_type_id;
 use lodestone_data::items::{item_id, item_name};
 use lodestone_data::menus::menu_id;
+use lodestone_data::mob_effects::mob_effect_name;
 use crate::packet_ids::{configuration, handshaking, login, play};
 use crate::packets::chunk::ChunkShape;
 use crate::packets::common::{KeepAlive, TeleportToEntity};
@@ -62,11 +63,13 @@ use crate::packets::configuration::FinishConfiguration;
 use crate::packets::entity::{pack_degrees, read_lp_vec3, write_lp_vec3};
 use crate::packets::game::{
     AcceptTeleportation, Attack, ChangeDifficultyClientbound, ChangeDifficultyServerbound,
-    ClientTickEnd, GameLogin, GameRuleEntry, GameRuleValues, GlobalPos, LockDifficulty,
-    MOVE_FLAG_ON_GROUND, MovePlayerPos, MovePlayerPosRot, MovePlayerRot, MovePlayerStatusOnly,
-    MoveVehicle, PaddleBoat, PlayerAction, PlayerCommand, PlayerLoaded,
-    SERVERBOUND_ABILITY_FLAG_FLYING, ServerboundPlayerAbilities, SetCarriedItem,
-    SetDefaultSpawnPosition, SetGameRule, SetHealth, Swing, UseItem, UseItemOn,
+    ClientTickEnd, ContainerButtonClick, ContainerSlotStateChanged, EditBook, GameLogin,
+    GameRuleEntry, GameRuleValues, GlobalPos, LockDifficulty, MOVE_FLAG_ON_GROUND, MovePlayerPos,
+    MovePlayerPosRot, MovePlayerRot, MovePlayerStatusOnly, MoveVehicle, PaddleBoat,
+    PickItemFromBlock, PickItemFromEntity, PlaceRecipe, PlayerAction, PlayerCommand, PlayerLoaded,
+    RecipeBookChangeSettings, RecipeBookSeenRecipe, RenameItem, SERVERBOUND_ABILITY_FLAG_FLYING,
+    SelectBundleItem, SelectTrade, ServerboundPlayerAbilities, SetCarriedItem,
+    SetDefaultSpawnPosition, SetGameRule, SetHealth, SignUpdate, Swing, UseItem, UseItemOn,
 };
 use crate::packets::handshake::Intention;
 use crate::packets::login::{LoginFinished, LoginHello};
@@ -497,6 +500,62 @@ fn decode_container_click(payload: &[u8]) -> Option<ServerBound> {
         changed_slots,
         carried_item,
     })
+}
+
+/// Reads a serverbound `set_creative_mode_slot` item
+/// (`ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC`, the inverse of the
+/// client-side encoder `crate::adapter::write_optional_item_stack`): a VarInt
+/// count where `<= 0` means empty, otherwise the item registry id as a
+/// VarInt, then an empty `DataComponentPatch` (two VarInt `0`s, added then
+/// removed).
+///
+/// Deliberately **not** the same shape as [`read_hashed_stack`]: that one has
+/// a leading presence bool and puts the item id before the count
+/// (`HashedStack.ActualItem.STREAM_CODEC`); this one has no presence bool at
+/// all — a `count` of zero or less *is* the absence marker
+/// (`ItemStack.createOptionalStreamCodec`, verified against
+/// `.cache/mc/26.2/src/net/minecraft/world/item/ItemStack.java`) — and puts
+/// the count first. Conflating the two would silently misalign every byte
+/// that follows.
+///
+/// A nonzero component-patch count is treated as a decode failure for the
+/// same reason [`read_hashed_stack`] does: this crate's canonical
+/// [`ItemStack`] carries no components, so there is no way to apply a
+/// nonempty patch, and guessing a skip length would misalign the rest of the
+/// packet.
+fn read_optional_item_stack(r: &mut Reader) -> Option<Option<ItemStack>> {
+    let count = r.var_i32().ok()?;
+    if count <= 0 {
+        return Some(None);
+    }
+    let item_id = r.var_i32().ok()?;
+    let added = r.var_i32().ok()?;
+    let removed = r.var_i32().ok()?;
+    if added != 0 || removed != 0 {
+        return None;
+    }
+    let name = item_name(item_id)?;
+    let item = name.parse().ok()?;
+    let count = u32::try_from(count).ok()?;
+    Some(Some(ItemStack::new(item, count)))
+}
+
+/// Reads one serverbound `set_beacon` mob-effect slot
+/// (`ByteBufCodecs.optional(MobEffect.STREAM_CODEC)`, the inverse of
+/// `crate::adapter::write_optional_mob_effect`): a bool presence flag, then,
+/// only if present, the effect's `minecraft:mob_effect` registry id as a
+/// direct VarInt.
+///
+/// Returns the effect's canonical name on success so a future consumer has
+/// something to act on immediately; today's decode arm for `SET_BEACON`
+/// still discards it (`ServerBound` has no beacon-effect variant — see
+/// this module's `SET_BEACON` decode arm doc comment for why).
+fn read_optional_mob_effect(r: &mut Reader) -> Option<Option<&'static str>> {
+    if !r.bool().ok()? {
+        return Some(None);
+    }
+    let id = r.var_i32().ok()?;
+    Some(Some(mob_effect_name(id)?))
 }
 
 /// Packs a block position into vanilla's `BlockPos.asLong` form: `x` in the
@@ -1303,6 +1362,111 @@ impl ServerProtocol for V770ServerProtocol {
             }
             State::Play if packet_id == play::serverbound::TELEPORT_TO_ENTITY => {
                 let _ = decode_full::<TeleportToEntity>(payload);
+                ServerBound::Ignored
+            }
+
+            // Issue #266 (inventory/container), remaining packets beyond the
+            // three already decoded and applied above (`CONTAINER_CLICK`,
+            // `CONTAINER_CLOSE`, `SET_CARRIED_ITEM`, into the real
+            // `PlayerInventory` model issue #408 built). Every struct below
+            // either already exists and is exercised by this crate's own
+            // client encoder (`crate::adapter`, itself checked against
+            // `docs/container-clicks.md` and `.cache/mc/26.2/src`), or is
+            // hand-decoded against the same decompiled source directly. All
+            // decode to `Ignored`: `PlayerInventory` only covers window 0's
+            // 41 native slots via `ContainerClicked`/`CarriedItemChanged`
+            // today — it has no recipe-book, beacon, anvil, bundle, book,
+            // sign, or creative-slot state to receive any of these into yet.
+            // `SET_CREATIVE_MODE_SLOT` is the one exception worth flagging:
+            // unlike the rest of this family it writes into exactly the slot
+            // space `PlayerInventory` already models (window 0), so wiring
+            // it up is "add a `ServerBound::CreativeModeSlotSet { slot,
+            // item }` variant and an arm that writes straight into
+            // `PlayerInventory`, mirroring `ContainerClicked`'s own
+            // consumer" rather than a new feature — the smallest next step
+            // in this family, once someone can touch `lodestone-server`.
+            State::Play if packet_id == play::serverbound::CONTAINER_BUTTON_CLICK => {
+                let _ = decode_full::<ContainerButtonClick>(payload);
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::CONTAINER_SLOT_STATE_CHANGED => {
+                let _ = decode_full::<ContainerSlotStateChanged>(payload);
+                ServerBound::Ignored
+            }
+            // `ServerboundSetCreativeModeSlotPacket`: big-endian `i16` slot,
+            // then an [`read_optional_item_stack`] item — see that helper's
+            // doc comment for why it is not the same shape as
+            // [`read_hashed_stack`].
+            State::Play if packet_id == play::serverbound::SET_CREATIVE_MODE_SLOT => {
+                let mut r = Reader::new(payload);
+                let decoded = (|| -> Option<()> {
+                    let _slot = r.i16().ok()?;
+                    let _item = read_optional_item_stack(&mut r)?;
+                    r.ensure_empty().ok()
+                })();
+                let _ = decoded;
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::PLACE_RECIPE => {
+                let _ = decode_full::<PlaceRecipe>(payload);
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::RECIPE_BOOK_CHANGE_SETTINGS => {
+                let _ = decode_full::<RecipeBookChangeSettings>(payload);
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::RECIPE_BOOK_SEEN_RECIPE => {
+                let _ = decode_full::<RecipeBookSeenRecipe>(payload);
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::SELECT_TRADE => {
+                let _ = decode_full::<SelectTrade>(payload);
+                ServerBound::Ignored
+            }
+            // `ServerboundSetBeaconPacket`: two `Optional<Holder<MobEffect>>`
+            // values (primary then secondary power), each read by
+            // [`read_optional_mob_effect`] — the exact inverse of
+            // `crate::adapter::encode_set_beacon`.
+            State::Play if packet_id == play::serverbound::SET_BEACON => {
+                let mut r = Reader::new(payload);
+                let decoded = (|| -> Option<()> {
+                    let _primary = read_optional_mob_effect(&mut r)?;
+                    let _secondary = read_optional_mob_effect(&mut r)?;
+                    r.ensure_empty().ok()
+                })();
+                let _ = decoded;
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::EDIT_BOOK => {
+                let _ = decode_full::<EditBook>(payload);
+                ServerBound::Ignored
+            }
+            // Block-entity text, not item state — arguably miscategorized in
+            // this issue's own packet list (see #266's investigation
+            // comment). Decoded here anyway since sign storage lives in
+            // `lodestone-world`, not `PlayerInventory`, so this cannot
+            // collide with that territory; still `Ignored` regardless.
+            State::Play if packet_id == play::serverbound::SIGN_UPDATE => {
+                let _ = decode_full::<SignUpdate>(payload);
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::RENAME_ITEM => {
+                let _ = decode_full::<RenameItem>(payload);
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::PICK_ITEM_FROM_BLOCK => {
+                let _ = decode_full::<PickItemFromBlock>(payload);
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::PICK_ITEM_FROM_ENTITY => {
+                let _ = decode_full::<PickItemFromEntity>(payload);
+                ServerBound::Ignored
+            }
+            // Bonus beyond this issue's own 16-packet count (its "remaining
+            // container/recipe-adjacent ids" clause) — the same bundle-select
+            // struct the client already encodes.
+            State::Play if packet_id == play::serverbound::BUNDLE_ITEM_SELECTED => {
+                let _ = decode_full::<SelectBundleItem>(payload);
                 ServerBound::Ignored
             }
             _ => ServerBound::Ignored,
