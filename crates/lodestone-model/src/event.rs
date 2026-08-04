@@ -1657,6 +1657,29 @@ pub enum ClientEvent {
         /// Footer text shown below the player list.
         footer: Text,
     },
+    /// The server's stored per-book recipe-book UI state, from
+    /// `ClientboundRecipeBookSettingsPacket`.
+    ///
+    /// Four books in vanilla's own fixed order, each carrying two booleans — the
+    /// wire form is exactly eight bytes with no length prefix and no discriminator
+    /// (`RecipeBookSettings.STREAM_CODEC`). Named fields rather than a `Vec`
+    /// deliberately: the shape is fixed, so a collection would admit a length this
+    /// packet cannot have.
+    ///
+    /// This is the *inbound* half of a round trip whose outbound half already
+    /// existed — [`crate::action::ClientAction::SetRecipeBookSettings`] has been
+    /// encoded by the adapters for some time, so the client could tell the server
+    /// its book state and could never be told the state back.
+    RecipeBookSettingsChanged {
+        /// The crafting-table book.
+        crafting: RecipeBookTypeSettings,
+        /// The furnace book.
+        furnace: RecipeBookTypeSettings,
+        /// The blast-furnace book.
+        blast_furnace: RecipeBookTypeSettings,
+        /// The smoker book.
+        smoker: RecipeBookTypeSettings,
+    },
     /// The world border's center moved, from
     /// `ClientboundSetBorderCenterPacket`.
     WorldBorderCenterChanged {
@@ -2063,6 +2086,18 @@ pub enum ClientEvent {
 /// | [`shell`](Route::shell) | a `debug_assert!` on the catch-all of `lodestone_shell::net::forward` |
 /// | [`shell_conditional`](Route::shell_conditional) | nothing; it exists only to keep that assert correct |
 /// | [`client`](Route::client) | nothing; documentation, so that [`Route::NOWHERE`] means what it says |
+/// One recipe book's stored UI state, from `RecipeBookSettings.TypeSettings`.
+///
+/// Both fields default to `false`, which is vanilla's own default for a book no
+/// server has reported: closed, unfiltered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RecipeBookTypeSettings {
+    /// Whether this book is open.
+    pub open: bool,
+    /// Whether this book's "only show craftable" filter is active.
+    pub filtering: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Route {
     /// `lodestone_ecs::ingest` folds it: **per-entity ECS state** — components
@@ -2374,6 +2409,11 @@ pub fn route(event: &ClientEvent) -> Route {
         // asked for. The other eight got folds in the same commit as this flag,
         // per the instruction in the block below.
         ClientEvent::TabListChanged { .. } => SESSION,
+        // `lodestone_game::recipe::RecipeBookSettings` via
+        // `apply_recipe_book_settings`. Not a world scalar like its neighbours
+        // here — it is per-*player* UI state the server persists — but `session`
+        // for exactly that reason, and certainly not `ingest`.
+        ClientEvent::RecipeBookSettingsChanged { .. } => SESSION,
         // `lodestone_game::worldborder::WorldBorder` via `apply_world_border`.
         // The largest single cluster in `docs/event-routing.md`'s island list.
         ClientEvent::WorldBorderCenterChanged { .. }
@@ -2523,7 +2563,7 @@ mod route_tests {
         // Asserting the two counts agree turns it into evidence a reader can see,
         // and catches a variant named twice.
         assert_eq!(
-            total, 103,
+            total, 104,
             "the `ClientEvent` variant count changed. That is fine and expected — \
              update `docs/event-routing.md` and this number together, which is the \
              whole point of this gate firing."

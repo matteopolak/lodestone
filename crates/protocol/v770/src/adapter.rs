@@ -22,6 +22,7 @@ use lodestone_model::{
     LookAnchor, MainHand, NumberFormat, ObjectiveMode, ObjectiveRenderType, PackedMessageSignature,
     ParticleStatus, PlayerCommand, PlayerInput, PlayerListEntry, PlayerLookAtEntity,
     RecipeBookType,
+    RecipeBookTypeSettings,
     ResourceKey, ResourcePackResponseKind, Rotation, SectionPos, ServerAddress, SoundCategory,
     TeamAction, TeamColor, TeamParameters, TeleportFlags, Text, TextColor, ToolBlocks, ToolMining,
     ToolPatch, ToolRule, Vec3, Vec3f, VersionAdapter, Visibility, WorldSink,
@@ -2944,6 +2945,34 @@ impl V770Adapter {
                 food: body.food,
                 saturation: body.saturation,
             })]);
+        }
+        if packet_id == play::clientbound::RECIPE_BOOK_SETTINGS {
+            // `RecipeBookSettings.STREAM_CODEC` composes four `TypeSettings`, each
+            // two booleans, in the fixed order crafting, furnace, blast furnace,
+            // smoker. Eight bytes, no length prefix and no discriminator — the
+            // codec is `StreamCodec<FriendlyByteBuf, _>`, i.e. not registry-aware,
+            // which is the structural proof that nothing else is on the wire.
+            //
+            // Field order within a pair is `open` then `filtering`. Getting that
+            // pair backwards is the available mistake here and it is invisible to a
+            // round-trip test, so `recipe_book_settings_wire_order_is_open_then_filtering`
+            // pins it against a hand-built asymmetric byte pattern.
+            let mut reader = Reader::new(payload);
+            let mut settings = [RecipeBookTypeSettings::default(); 4];
+            for slot in &mut settings {
+                slot.open = reader.bool().map_err(dec_err)?;
+                slot.filtering = reader.bool().map_err(dec_err)?;
+            }
+            reader.ensure_empty().map_err(dec_err)?;
+            let [crafting, furnace, blast_furnace, smoker] = settings;
+            return Ok(vec![Directive::Emit(
+                ClientEvent::RecipeBookSettingsChanged {
+                    crafting,
+                    furnace,
+                    blast_furnace,
+                    smoker,
+                },
+            )]);
         }
         if packet_id == play::clientbound::SET_HELD_SLOT {
             let mut reader = Reader::new(payload);

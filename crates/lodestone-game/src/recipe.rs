@@ -25,7 +25,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use lodestone_model::{Identifier, RecipeBookType};
+use lodestone_model::event::ClientEvent;
+use lodestone_model::{Identifier, RecipeBookType, RecipeBookTypeSettings};
 
 use crate::item::ItemStack;
 
@@ -1208,6 +1209,158 @@ fn insert_sorted(bucket: &mut Vec<Identifier>, id: Identifier) {
 fn remove_sorted(bucket: &mut Vec<Identifier>, id: &Identifier) {
     if let Ok(at) = bucket.binary_search(id) {
         bucket.remove(at);
+    }
+}
+
+/// The server's stored per-book recipe-book UI state — open, and filtering — for
+/// each of the four books.
+///
+/// # What it is
+///
+/// The fold behind [`ClientEvent::RecipeBookSettingsChanged`]. Vanilla persists
+/// each book's open/filter state per player and replays it on join, which is why
+/// re-opening a crafting table remembers that you had the filter on.
+///
+/// # Why it existed only in the outbound direction until now
+///
+/// `ClientAction::SetRecipeBookSettings` has been encoded by the adapters for some
+/// time, so the client could *tell* the server its book state. The clientbound
+/// `RECIPE_BOOK_SETTINGS` packet had no decode at all — the packet id was
+/// registered, which proves only that the id is known, and
+/// `cargo xtask connectedness` counted it as undecoded. So the round trip was
+/// half-open: our state could go out and the server's could never come back.
+///
+/// # How to change it
+///
+/// [`Self::for_type`] is the read accessor; keep the wire order (`crafting`,
+/// `furnace`, `blast_furnace`, `smoker`) if you index positionally, because that
+/// order is fixed by `RecipeBookSettings.STREAM_CODEC` and is not alphabetical.
+///
+/// `reported` exists for the same reason `SpawnPoint`'s `Option` does: a server
+/// that has never sent this packet is not the same thing as a server that sent
+/// all-`false`, and a UI that wants to distinguish "closed" from "unknown" needs
+/// the difference. Unlike a bare `Option` this keeps the per-book values usable
+/// without unwrapping, since vanilla's own default *is* all-`false`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RecipeBookSettings {
+    /// The crafting-table book.
+    pub crafting: RecipeBookTypeSettings,
+    /// The furnace book.
+    pub furnace: RecipeBookTypeSettings,
+    /// The blast-furnace book.
+    pub blast_furnace: RecipeBookTypeSettings,
+    /// The smoker book.
+    pub smoker: RecipeBookTypeSettings,
+    /// Whether the server has ever reported these settings.
+    pub reported: bool,
+}
+
+impl RecipeBookSettings {
+    /// Fold one event, returning whether it belonged to this aggregate.
+    pub fn apply(&mut self, event: &ClientEvent) -> bool {
+        match event {
+            ClientEvent::RecipeBookSettingsChanged {
+                crafting,
+                furnace,
+                blast_furnace,
+                smoker,
+            } => {
+                // Assigned as a whole record: one packet reports all four books
+                // together, so there is no way to hold a stale furnace state next
+                // to a fresh crafting one.
+                self.crafting = *crafting;
+                self.furnace = *furnace;
+                self.blast_furnace = *blast_furnace;
+                self.smoker = *smoker;
+                self.reported = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The settings for one book.
+    #[must_use]
+    pub fn for_type(&self, book_type: RecipeBookType) -> RecipeBookTypeSettings {
+        match book_type {
+            RecipeBookType::Crafting => self.crafting,
+            RecipeBookType::Furnace => self.furnace,
+            RecipeBookType::BlastFurnace => self.blast_furnace,
+            RecipeBookType::Smoker => self.smoker,
+        }
+    }
+}
+
+#[cfg(test)]
+mod recipe_book_settings_tests {
+    use super::*;
+
+    fn event(
+        pairs: [(bool, bool); 4],
+    ) -> ClientEvent {
+        let s = |(open, filtering): (bool, bool)| RecipeBookTypeSettings { open, filtering };
+        ClientEvent::RecipeBookSettingsChanged {
+            crafting: s(pairs[0]),
+            furnace: s(pairs[1]),
+            blast_furnace: s(pairs[2]),
+            smoker: s(pairs[3]),
+        }
+    }
+
+    #[test]
+    fn starts_unreported_with_vanillas_all_false_default() {
+        let s = RecipeBookSettings::default();
+        assert!(!s.reported, "unreported must be distinguishable from all-false");
+        for t in [
+            RecipeBookType::Crafting,
+            RecipeBookType::Furnace,
+            RecipeBookType::BlastFurnace,
+            RecipeBookType::Smoker,
+        ] {
+            assert_eq!(s.for_type(t), RecipeBookTypeSettings::default());
+        }
+    }
+
+    /// `for_type` must map each book to *its own* pair. A wrong mapping is the
+    /// available mistake and an all-books-identical fixture could not catch it, so
+    /// every one of the four pairs here is distinct.
+    #[test]
+    fn for_type_maps_each_book_to_its_own_pair() {
+        let mut s = RecipeBookSettings::default();
+        assert!(s.apply(&event([
+            (true, false),
+            (false, true),
+            (true, true),
+            (false, false),
+        ])));
+        assert!(s.reported);
+        assert_eq!(
+            s.for_type(RecipeBookType::Crafting),
+            RecipeBookTypeSettings { open: true, filtering: false }
+        );
+        assert_eq!(
+            s.for_type(RecipeBookType::Furnace),
+            RecipeBookTypeSettings { open: false, filtering: true }
+        );
+        assert_eq!(
+            s.for_type(RecipeBookType::BlastFurnace),
+            RecipeBookTypeSettings { open: true, filtering: true }
+        );
+        assert_eq!(
+            s.for_type(RecipeBookType::Smoker),
+            RecipeBookTypeSettings { open: false, filtering: false }
+        );
+    }
+
+    /// Negative control for the `_ => false` arm.
+    #[test]
+    fn unrelated_events_are_rejected_and_change_nothing() {
+        let mut s = RecipeBookSettings::default();
+        assert!(!s.apply(&ClientEvent::KeepAlive { id: 1 }));
+        assert!(
+            !s.reported,
+            "an unrelated event must not mark the settings reported"
+        );
     }
 }
 
