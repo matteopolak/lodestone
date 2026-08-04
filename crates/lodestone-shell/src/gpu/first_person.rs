@@ -14,6 +14,8 @@ use lodestone_render::{
     update_model_shared_camera_buffer, upload_instances,
 };
 
+use crate::camera_rig::BobFrame;
+
 use super::{RenderState, RenderStats};
 
 // ---------------------------------------------------------------------------
@@ -246,6 +248,117 @@ impl HeldItemEquip {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The walk/hurt bob reaches the hand (issue #58 follow-up)
+// ---------------------------------------------------------------------------
+
+/// `damage_tilt_strength` for the hand's own bob transform, passed to
+/// [`BobFrame::eye_transform`]. **`0.0` — `bobHurt` deliberately held off, the
+/// same choice [`crate::sim::camera::Sim::render_camera`] makes for the world
+/// camera, but for a *different* reason.**
+///
+/// Unlike the world, the hand needs no lossy fold to carry the tilt:
+/// [`hand_view_proj`] multiplies the raw bob matrix straight into the hand's
+/// projection, so every term of `BobFrame::eye_transform` — including roll —
+/// would reach it exactly (see the `tests` module's
+/// `hand_view_proj_can_carry_the_hurt_tilt_once_a_nonzero_strength_is_supplied`,
+/// which proves the mechanism at `1.0` without shipping it). The blocker is
+/// upstream: [`crate::sim::camera::Sim::bob_frame`] returns
+/// [`BobFrame::default`] **whole-cloth** when `view_bobbing` is off
+/// (`sim/camera.rs:320-325`), zeroing `hurt`/`hurt_dir_degrees` along with the
+/// walk terms — but vanilla's own `bobHurt` is unconditional
+/// (`GameRenderer.java:534-536` calls it outside the `optionsRenderState.
+/// bobView` check), and `docs/view-bobbing.md`'s Configuration section already
+/// claims "that split is reproduced". It is not, once anything reads `hurt`
+/// with a nonzero strength — turning View Bobbing off would silently mute a
+/// damage tilt vanilla still shows. Driving this constant from `1.0` needs that
+/// fixed first (a few-line change to `bob_frame`, sketched in this crate's
+/// hand-off notes for whoever owns `sim/camera.rs`), not a change here.
+const HAND_HURT_TILT_STRENGTH: f32 = 0.0;
+
+/// Where this frame's walk/hurt bob comes from, for the first-person hand pass
+/// — polled once per frame like [`super::HandSwingSource`]/[`super::MainHandSource`].
+///
+/// # Why the hand needs its *own* source rather than reading `camera`
+///
+/// `camera: &Camera`, passed into [`RenderState::prepare_first_person_hand`],
+/// is already [`crate::sim::camera`]'s **folded** render camera —
+/// `sim/camera.rs:328-352` (`Sim::render_camera`) bakes
+/// [`BobFrame::eye_transform`] into the camera's position/yaw/pitch via
+/// [`crate::camera_rig::bobbed_camera`], mirroring vanilla's own
+/// `GameRenderer.renderLevel:539`
+/// (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/GameRenderer.java`:
+/// `projectionMatrix.mul(bobStack.last().pose())`) — the bob folded into the
+/// **world's** projection matrix.
+///
+/// Vanilla's hand path (`GameRenderer.renderItemInHand`, same file, `:333-362`)
+/// does not read that folded value at all. It builds a **second, independent**
+/// `PoseStack`, seeds it with `modelViewMatrix.invert()` — the camera's
+/// *unbobbed* view rotation — and then applies `bobHurt`/`bobView` to *that*
+/// stack a second time (`:344-347`). The GPU's own model-view is pushed as the
+/// very same unbobbed `modelViewMatrix` (`:342-343`), so at draw time the
+/// inverse cancels it exactly and the hand's net pose is **just the bob
+/// matrix**, with no trace of the world's position and none of
+/// [`crate::camera_rig::bobbed_camera`]'s lossy roll-dropping decomposition —
+/// that fold's own doc names roll as the one term a folded `Camera` cannot
+/// carry, and the hand must not inherit that loss. [`hand_view_proj`] is where
+/// that decomposition is sidestepped entirely: the raw matrix is multiplied
+/// straight into the projection, never folded through a `Camera`.
+///
+/// So: a fresh, independent copy of the same [`BobFrame`], not a value
+/// inherited from `camera`. That is *why* a source is needed at all — the
+/// value has to reach here from `Sim::bob_frame()`
+/// (`sim/camera.rs:320-325`), which nothing below the GPU boundary can read.
+pub(super) struct HandBobSource(pub(super) Option<Box<dyn Fn() -> BobFrame + Send + Sync>>);
+
+impl HandBobSource {
+    /// This frame's bob, or [`BobFrame::default`] — the identity: no dip, no
+    /// sway, no tilt — until a source is installed. That default reproduces
+    /// exactly the arm's pre-existing (unbobbed) behaviour, the same guarantee
+    /// `HandSwingSource`'s unset state gives the swing.
+    #[must_use]
+    pub(super) fn value(&self) -> BobFrame {
+        self.0.as_ref().map_or_else(BobFrame::default, |f| f())
+    }
+}
+
+impl Default for HandBobSource {
+    fn default() -> Self {
+        Self(None)
+    }
+}
+
+impl std::fmt::Debug for HandBobSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("HandBobSource")
+            .field(&if self.0.is_some() { "set" } else { "rest" })
+            .finish()
+    }
+}
+
+/// The hand pass's whole camera-space transform: [`hand_projection`] composed
+/// with a fresh copy of the walk/hurt bob — vanilla's own second application
+/// of it (`GameRenderer.java:344-347`), described in full on
+/// [`HandBobSource`]'s doc.
+///
+/// **Post-multiplied, matching vanilla's own `projectionMatrix.mul(bobStack.
+/// pose())` (`GameRenderer.java:539`)** — the bob lands between the projection
+/// and the already-camera-space arm/item pose, exactly where vanilla's own
+/// `Proj · ModelViewStack · PoseStack` puts it once the view rotation cancels
+/// (see [`hand_projection`]'s own doc for that cancellation). Pre-multiplying
+/// instead would apply the bob in *clip* space and scale its magnitude by
+/// whatever the projection does to depth — a different, wrong transform that
+/// happens to also move the arm, which is exactly the kind of bug a gate that
+/// only asserts "it moved" cannot catch.
+///
+/// A pure function of its inputs (no GPU handle), so it is unit-testable
+/// against hand-derived vanilla numbers with no adapter — see the `tests`
+/// module below.
+#[must_use]
+fn hand_view_proj(aspect: f32, bob: BobFrame, damage_tilt_strength: f32) -> glam::Mat4 {
+    hand_projection(aspect) * bob.eye_transform(damage_tilt_strength)
+}
+
 /// What the first-person hand pass draws this frame: the held item's model, or
 /// the bare arm. **Never both** — see
 /// [`RenderState::prepare_first_person_hand`], which is vanilla's own
@@ -330,9 +443,20 @@ impl RenderState {
     ///
     /// # The remaining fidelity gap, missing *shell state*, not code
     ///
-    /// * **`bobView` / `bobHurt` and the `xBob`/`yBob` view lag are absent.** All
-    ///   need per-tick player state the shell does not track (walk distance, hurt
-    ///   time, the two smoothed view angles). All are the identity standing still.
+    /// * **`bobView` now reaches the hand (issue #58 follow-up, the player
+    ///   report that "the arm should bob too").** See [`HandBobSource`]'s doc
+    ///   for the derivation — it is vanilla's own **second, independent**
+    ///   application of the identical [`BobFrame`] the world's camera already
+    ///   folds, not something inherited from `camera`.
+    /// * **`bobHurt` reaches the hand *mechanically* but is held at `0.0`
+    ///   (`HAND_HURT_TILT_STRENGTH`).** The transform is proven — see that
+    ///   constant's own doc — but landing it needs a small fix to
+    ///   `Sim::bob_frame` first, or it would silently drop the tilt whenever a
+    ///   player has View Bobbing off, which vanilla does not do.
+    /// * **The `xBob`/`yBob` view lag is still absent** — a *different* feature
+    ///   (the hand trailing behind camera rotation, not the walk bob), needing
+    ///   the two smoothed view angles, which the shell does not track. Tracked
+    ///   as its own issue rather than folded in here; see `docs/view-bobbing.md`.
     ///
     /// The rig is `player_wide` unconditionally — the shell has no skin-model
     /// signal, and `canonical_model_name` already maps `"player"` to it.
@@ -455,22 +579,48 @@ impl RenderState {
         u32::from(self.entity_light.sample(camera.position))
     }
 
-    /// Rewrite both hand passes' group-0 uniforms with [`hand_projection`].
+    /// Install this frame's walk/hurt bob for the first-person hand pass — see
+    /// [`HandBobSource`]'s doc for why the hand needs its own copy of the same
+    /// [`BobFrame`] the world's camera already folded, and
+    /// [`crate::sim::camera::Sim::bob_frame`] for the value to pass.
     ///
-    /// **The projection alone, with no view matrix**, because
+    /// **Install every frame**, like
+    /// [`Self::set_hand_swing_source`](RenderState::set_hand_swing_source) and
+    /// [`Self::set_main_hand_source`](RenderState::set_main_hand_source): the
+    /// value is a partial-tick interpolation of `Sim`'s walk distance, so a
+    /// one-shot install would freeze the bob at whatever it looked like the
+    /// instant the source was wired in.
+    ///
+    /// Unset — the default, the offline demo, every headless test — reads as
+    /// [`BobFrame::default`] via [`HandBobSource::value`], which reproduces
+    /// exactly the pre-existing (unbobbed) hand.
+    pub fn set_hand_bob_source(&mut self, f: impl Fn() -> BobFrame + Send + Sync + 'static) {
+        self.hand_bob = HandBobSource(Some(Box::new(f)));
+    }
+
+    /// Rewrite both hand passes' group-0 uniforms with [`hand_view_proj`].
+    ///
+    /// **No view matrix, but now a bob matrix**, because
     /// `GameRenderer.renderItemInHand` multiplies the pose stack by
     /// `modelViewMatrix.invert()` while pushing `modelViewStack.mul(modelViewMatrix)`
     /// and the shader evaluates `Proj · ModelViewStack · PoseStack`: the view
     /// rotation cancels exactly, leaving a camera-space pose. Feeding
     /// `Camera::view_projection` here instead parks the hand at the world origin,
-    /// visible only when the player stands on it.
+    /// visible only when the player stands on it. [`hand_view_proj`]'s own doc
+    /// (and [`HandBobSource`]'s) has the rest: vanilla applies `bobHurt`/`bobView`
+    /// to this same pass a **second** time, independent of the world's copy.
     ///
     /// Two buffers, one value: the entity pipeline (bare arm) and the model
     /// pipeline (held item) declare different group-0 layouts, so each needs its
     /// own. Written together here so they cannot drift.
     fn write_hand_camera(&self, queue: &wgpu::Queue, camera: &Camera) {
+        let view_proj = hand_view_proj(
+            camera.aspect,
+            self.hand_bob.value(),
+            HAND_HURT_TILT_STRENGTH,
+        );
         let camera_uniform = CameraUniform {
-            view_proj: hand_projection(camera.aspect).to_cols_array_2d(),
+            view_proj: view_proj.to_cols_array_2d(),
             section_origin: [0.0, 0.0, 0.0, 0.0],
         };
         // No distance fog on the hand for either branch (vanilla does not fog
@@ -814,5 +964,213 @@ mod tests {
         equip.advance_by(5.0, Some(&sword));
         assert_eq!(equip.visible(), Some(&sword));
         assert_eq!(equip.inverse_arm_height(), 0.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // `hand_view_proj`: the bob reaching the hand's own projection. No GPU
+    // needed — every number below is hand-derived from vanilla's constants,
+    // never from `eye_transform`/`hand_projection` themselves, the same
+    // standard `camera_rig.rs`'s own bob tests and `view_bob_pixels.rs`'s
+    // module doc hold to.
+    // -----------------------------------------------------------------------
+
+    /// A synthetic eye-space point, `0.6` blocks straight ahead — a plausible
+    /// hand-mesh depth (`write_hand_camera`'s own doc: "at ~0.7 blocks"). It is
+    /// not read from any real mesh; it exists only so the matrix can be
+    /// checked against numbers computed independently of the code under test.
+    const HAND_TEST_POINT: glam::Vec3 = glam::Vec3::new(0.0, 0.0, -0.6);
+    const HAND_TEST_ASPECT: f32 = 320.0 / 240.0;
+    const HAND_TEST_W: f32 = 320.0;
+    const HAND_TEST_H: f32 = 240.0;
+
+    /// `clip.xy / clip.w` for `p` under `m`.
+    fn ndc(m: glam::Mat4, p: glam::Vec3) -> (f32, f32) {
+        let clip = m * p.extend(1.0);
+        (clip.x / clip.w, clip.y / clip.w)
+    }
+
+    /// Bit-identical, not merely close, to the bare projection — the "view
+    /// bobbing off" and "no source installed" cases both land here via
+    /// [`BobFrame::default`], and CLAUDE.md's evidence standards ask for exact
+    /// equality on an inert input, not a small-diff tolerance.
+    #[test]
+    fn a_zero_frame_is_bit_identical_to_the_bare_hand_projection() {
+        let bobbed = hand_view_proj(HAND_TEST_ASPECT, BobFrame::default(), HAND_HURT_TILT_STRENGTH);
+        let bare = hand_projection(HAND_TEST_ASPECT);
+        assert_eq!(
+            bobbed.to_cols_array(),
+            bare.to_cols_array(),
+            "an identity bob must leave hand_projection completely untouched, not \
+             merely close to it"
+        );
+        // And an unset source reads the same way, through `HandBobSource`.
+        let source = HandBobSource::default();
+        assert_eq!(source.value(), BobFrame::default());
+    }
+
+    /// **The dip, at the amplitude ceiling** (`walk_phase = 0`, `bob = 0.1`).
+    ///
+    /// Hand-derived, not from `eye_transform`: the nod is
+    /// `|cos(-0.2)*0.1|*5 = 0.4900335°` (pinned independently against vanilla's
+    /// source in `camera_rig::tests::the_nods_phase_offset_is_...`), rotating
+    /// [`HAND_TEST_POINT`] about `+X` gives `(0, 0.0051318, -0.5999780)`; adding
+    /// the dip's translate `(0, -0.1, 0)` gives `(0, -0.0948684, -0.5999780)`.
+    /// Projected through `hand_projection`'s `70°` FOV (`tan(35°) = 0.700208`):
+    /// `NDC.y` goes from `0` to `-0.2258186`, i.e. **`+27.10 px` down**
+    /// (`dpixel_y = -dNDC_y * (H/2)`, `H = 240`).
+    ///
+    /// That is far larger than the chest's `+8.50 px` in `view_bob_pixels.rs`
+    /// for the *same* `0.1`-amplitude dip — because the hand sits `0.6` blocks
+    /// from the eye against the chest's `2.5`, and the same physical
+    /// displacement subtends a bigger angle the closer the surface is. This is
+    /// also why vanilla's own hand visibly swings more than the scenery while
+    /// walking; a smaller number here would be the sign of a wrong depth
+    /// assumption, not a mistake in the transform itself.
+    ///
+    /// Two rejected hypotheses, computed the same way: dropping the nod
+    /// entirely gives `+28.56 px` (`1.46 px` off — a small but real gap, not
+    /// hidden by rounding), and inverting the nod's sign gives `+30.03 px`
+    /// (`2.93 px` off). Both are closer to the true sign than to the true
+    /// magnitude, which is exactly the "it moved" trap CLAUDE.md's *magnitude*
+    /// species names — a gate that only checked direction would accept either.
+    #[test]
+    fn the_dip_moves_the_test_point_by_the_hand_derived_pixel_offset() {
+        let bare = hand_projection(HAND_TEST_ASPECT);
+        let (x0, y0) = ndc(bare, HAND_TEST_POINT);
+        assert_eq!((x0, y0), (0.0, 0.0), "precondition: the test point starts dead centre");
+
+        let dip = BobFrame {
+            walk_phase: 0.0,
+            bob: 0.1,
+            hurt: -1.0,
+            hurt_dir_degrees: 0.0,
+        };
+        let m = hand_view_proj(HAND_TEST_ASPECT, dip, HAND_HURT_TILT_STRENGTH);
+        let (x1, y1) = ndc(m, HAND_TEST_POINT);
+        let dpixel_y = -(y1 - y0) * (HAND_TEST_H / 2.0);
+        let dpixel_x = (x1 - x0) * (HAND_TEST_W / 2.0);
+
+        assert!(
+            (dpixel_y - 27.098).abs() < 0.05,
+            "predicted +27.10 px down; got {dpixel_y:+.3}"
+        );
+        assert!(
+            dpixel_x.abs() < 0.01,
+            "no sway at the dip's bottom (`sin(0) == 0`); got {dpixel_x:+.3}"
+        );
+
+        // -- the two rejected hypotheses, each individually distinguishable --
+        let no_nod = glam::Mat4::from_translation(dip.view_translation());
+        let (nx, ny) = ndc(bare * no_nod, HAND_TEST_POINT);
+        let no_nod_dy = -(ny - y0) * (HAND_TEST_H / 2.0);
+        assert!(
+            (no_nod_dy - dpixel_y).abs() > 1.0,
+            "dropping the nod must move the prediction by more than a pixel \
+             (predicted +28.56 vs the real +27.10); got {no_nod_dy:+.3} vs \
+             {dpixel_y:+.3} — the control would not separate them"
+        );
+        let _ = nx;
+
+        let inverted_nod = glam::Mat4::from_translation(dip.view_translation())
+            * glam::Mat4::from_rotation_x(-dip.view_nod_degrees().to_radians());
+        // Note the rotation is applied to the *point*, matching `apply_bob`'s
+        // T*Rz*Rx composition order (Rz is identity at the dip's bottom):
+        // `v' = T(Rx(v))`, i.e. `T * Rx` as a matrix product.
+        let inverted = ndc(bare * inverted_nod, HAND_TEST_POINT);
+        let inverted_dy = -(inverted.1 - y0) * (HAND_TEST_H / 2.0);
+        assert!(
+            (inverted_dy - dpixel_y).abs() > 2.0,
+            "an inverted nod must move the prediction by more than two pixels \
+             (predicted +30.03 vs the real +27.10); got {inverted_dy:+.3} vs \
+             {dpixel_y:+.3}"
+        );
+    }
+
+    /// **The sway, a quarter-stride later** (`walk_phase = -0.5`, `bob = 0.1`) —
+    /// the roles swap, same as `view_bob_pixels.rs`'s world-side gate.
+    ///
+    /// Hand-derived: translate `(-0.05, 0, 0)`, roll `-0.3°`, nod `0.0993°`.
+    /// Rotating [`HAND_TEST_POINT`] by the nod then the roll and adding the
+    /// translate gives `(-0.0499946, 0.0010397, -0.5999991)`; projected, `NDC.x`
+    /// moves from `0` to `-0.0892567` — **`-14.28 px`, leftward** — and `NDC.y`
+    /// moves by under a pixel (`-0.30 px`), the residual nod.
+    #[test]
+    fn the_sway_moves_the_test_point_by_the_hand_derived_pixel_offset() {
+        let bare = hand_projection(HAND_TEST_ASPECT);
+        let (x0, y0) = ndc(bare, HAND_TEST_POINT);
+
+        let sway = BobFrame {
+            walk_phase: -0.5,
+            bob: 0.1,
+            hurt: -1.0,
+            hurt_dir_degrees: 0.0,
+        };
+        let m = hand_view_proj(HAND_TEST_ASPECT, sway, HAND_HURT_TILT_STRENGTH);
+        let (x1, y1) = ndc(m, HAND_TEST_POINT);
+        let dpixel_x = (x1 - x0) * (HAND_TEST_W / 2.0);
+        let dpixel_y = -(y1 - y0) * (HAND_TEST_H / 2.0);
+
+        assert!(
+            (dpixel_x - -14.280).abs() < 0.05,
+            "predicted -14.28 px left; got {dpixel_x:+.3}"
+        );
+        assert!(
+            (dpixel_y - -0.297).abs() < 0.05,
+            "predicted a residual -0.30 px; got {dpixel_y:+.3}"
+        );
+        assert!(
+            dpixel_x < 0.0,
+            "must move LEFT; a sign flip would land near +14.28. got {dpixel_x:+.3}"
+        );
+    }
+
+    /// **`bobHurt` is held at `0.0` in production** (`HAND_HURT_TILT_STRENGTH`'s
+    /// own doc has the reason: `Sim::bob_frame` zeroes `hurt` along with the
+    /// walk terms when View Bobbing is off, so enabling this constant today
+    /// would make the damage tilt disappear whenever a player turns that
+    /// option off — a real divergence from vanilla, not a rounding error).
+    ///
+    /// This test proves the *other* half: the mechanism itself already
+    /// carries the tilt correctly, so landing it later is a one-line change to
+    /// this constant plus the `sim/camera.rs` fix named above — not new code
+    /// here.
+    #[test]
+    fn hand_view_proj_can_carry_the_hurt_tilt_once_a_nonzero_strength_is_supplied() {
+        assert_eq!(
+            HAND_HURT_TILT_STRENGTH, 0.0,
+            "precondition: production deliberately holds this at zero; if this \
+             assertion is what failed, the doc above needs to move with it and \
+             the `sim/camera.rs` gating fix must have already landed"
+        );
+        let hurt = BobFrame {
+            walk_phase: 0.0,
+            bob: 0.0,
+            hurt: 5.0,
+            hurt_dir_degrees: 0.0,
+        };
+        assert!(
+            hurt.hurt_roll_degrees(1.0).abs() > 1.0,
+            "precondition: this frame has a real tilt to lose"
+        );
+
+        // At production's actual constant, inert — matching the bare projection
+        // exactly, not just closely.
+        let off = hand_view_proj(HAND_TEST_ASPECT, hurt, HAND_HURT_TILT_STRENGTH);
+        assert_eq!(
+            off.to_cols_array(),
+            hand_projection(HAND_TEST_ASPECT).to_cols_array(),
+            "at this file's actual (zero) constant the hurt tilt must be \
+             completely inert"
+        );
+
+        // At vanilla's own accessibility default, live — proving the plumbing
+        // works, without this file actually shipping it yet.
+        let on = hand_view_proj(HAND_TEST_ASPECT, hurt, 1.0);
+        assert_ne!(
+            on.to_cols_array(),
+            hand_projection(HAND_TEST_ASPECT).to_cols_array(),
+            "at a nonzero strength the hurt tilt must reach the matrix — this is \
+             what the day this constant flips to 1.0 will look like"
+        );
     }
 }
