@@ -22,12 +22,48 @@
 > shared file is the one change pattern that most resembles this repo's
 > recorded clobber incidents.
 >
-> The placement-prediction block (`PlacementFacts`, `BlockStates`,
-> `state_for_placement`, `predicted_placement_state`, `write_predicted_block`
-> and the orientation/face/axis/half helpers, `sim.rs:349-954`ish) is the
-> next-most-isolated seam — pure functions with zero `Sim` state — and is a
-> candidate for a `sim/placement.rs` split later. Not done in this pass; see
-> the session that did this split for whether it had room to continue.
+> **Seam 2 landed too**, same session: the placement-prediction block
+> (`PlacementFacts`, `BlockStates`, `state_for_placement`,
+> `predicted_placement_state`, `write_predicted_block`, the orientation/face/
+> axis/half property helpers — pure functions and plain data types, zero
+> `Sim` state) moved into `sim/placement.rs`, re-exported into `sim`'s own
+> namespace so nothing calling them had to change; `predicted_placement_state`/
+> `write_predicted_block` specifically as `pub use`, since both are named by
+> their original `crate::sim::`/`lodestone::sim::` path from
+> `block_entities.rs` and an external integration test. One real complication
+> surfaced here that the test-module move never hit: another agent's
+> in-flight, uncommitted work (`Sim::difficulty`/`Sim::block_destruction_stage_at`,
+> issues #410/#411) landed directly in the shared `sim.rs` between this
+> session's own commits, sitting immediately adjacent to the extraction
+> boundary. Committed via the private-index/`commit-tree` route rather than a
+> pathspec commit of the whole file, so the split shipped without also
+> shipping — or deleting — that other agent's unfinished work; see the
+> session's own report for the two stale-index entries that turned up
+> alongside it.
+>
+> **Seam 3 landed too**: the interaction/combat cluster — `break_block`,
+> `begin_attack`/`begin_attack_demo`/`begin_attack_live`, `entity_target`,
+> `attack_entity`, `maybe_spawn_crit_particles`, `interact_entity`,
+> `end_attack`, `use_item`, `end_use`/`end_use_live`, `use_item_live`,
+> `use_item_generic`, `placement_facts`, `predict_block`, `place_block`,
+> `block_intersects_player` — moved into `sim/actions.rs` as a second
+> `impl Sim { .. }` block. Unlike the first two seams this one *is* `Sim`
+> state (every item is a `&self`/`&mut self` method), which is exactly why it
+> needed no re-export at all: a method call resolves through the `Sim` type
+> regardless of which file defines it, so nothing calling `sim.break_block()`
+> anywhere else in the tree had to change. The one real wrinkle:
+> `sim::actions` is a *child* of `sim` and so already sees `Sim`'s private
+> fields (privacy cascades down to descendants, the same rule that let
+> `sim::tests` call private methods for free) — but `sim::tests` is a
+> *sibling* of `sim::actions`, not its descendant, so three methods
+> (`begin_attack_live`, `end_use_live`, `use_item_live`) that were private
+> and only ever called from inside the old single `impl Sim` block needed
+> bumping to `pub(crate)` once `sim/tests.rs`'s own calls to them crossed a
+> module boundary that did not exist before. Caught immediately by
+> `cargo check`, not a silent gap.
+>
+> `net_apply`, `audio`, `camera` and `meshing` remain candidate seams, not
+> attempted this session.
 
 ## What it is
 
