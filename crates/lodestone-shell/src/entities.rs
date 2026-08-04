@@ -3629,7 +3629,14 @@ mod tests {
         (snap(2, Vec3::X, 0.0)).apply(interp.world_mut());
         interp.update(0.016);
         assert_eq!(interp.len(), 2);
-        // Entity 2 vanishes from the report.
+        // Entity 2 vanishes from the report. Since #36 deleted the
+        // `&[EntitySnapshot]` parameter, re-applying only entity 1 no longer
+        // *implies* 2 is gone — absence from a slice was the old signal, and
+        // there is no slice. `forget` is the stand-in the migration added for
+        // exactly this, and production's equivalent is `ingest.rs`'s
+        // `ClientEvent::EntityRemoved` arm, which despawns and drops the
+        // `EntityIndex` mapping the same way.
+        forget(interp.world_mut(), 2);
         (snap(1, Vec3::ZERO, 0.0)).apply(interp.world_mut());
         interp.update(0.016);
         let draws = interp.draws();
@@ -4520,7 +4527,11 @@ mod tests {
             "the item was tracked with a reported stack, so a pickup must start"
         );
 
-        // One tick, with the item gone from the server's report.
+        // One tick, with the item gone from the server's report. `forget` is
+        // what makes it gone: since #36 there is no snapshot slice to omit it
+        // from, so without this the item entity stays tracked and draws
+        // *alongside* its own flight animation — two item draws, not one.
+        forget(interp.world_mut(), ITEM);
         (snap(COLLECTOR, collector_feet, 0.0)).apply(interp.world_mut());
         interp.update(TICK);
 
@@ -4578,6 +4589,11 @@ mod tests {
         (item_snap_with(ITEM, Vec3::ZERO, Some(stone()))).apply(interp.world_mut());
         (snap(COLLECTOR, collector_feet, 0.0)).apply(interp.world_mut());
         interp.update(0.0);
+        // Collected, so the server stops reporting it — but *no* pickup event is
+        // raised, which is the whole point of this control. `forget` is what
+        // "stops reporting" means since #36; without it this asserts against an
+        // unpruned track and fails for the very reason the doc above warns about.
+        forget(interp.world_mut(), ITEM);
         (snap(COLLECTOR, collector_feet, 0.0)).apply(interp.world_mut());
         interp.update(TICK);
         assert!(
@@ -4604,6 +4620,12 @@ mod tests {
         (snap(COLLECTOR, collector_feet, 0.0)).apply(interp.world_mut());
         interp.update(0.0);
         assert!(begin_item_pickup(interp.world_mut(), ITEM, COLLECTOR));
+
+        // The server stops reporting the item the moment it is collected. Since
+        // #36 that has to be said explicitly — otherwise the item track survives
+        // every tick and this measures an unpruned track rather than the
+        // animation's own three-tick life, reading `[2, 2, 1, 1, 1]`.
+        forget(interp.world_mut(), ITEM);
 
         let mut drawn = Vec::new();
         for _ in 0..5 {
