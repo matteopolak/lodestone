@@ -2156,11 +2156,31 @@ impl WindowApp {
             .and_then(|n| n.shared_handle().get().cloned())
             .and_then(|h| h.game_mode())
             == Some(lodestone_client::GameMode::Spectator);
+        // Native slot 39 is the head, per `Menu::player`'s own table (menu slots
+        // `5..=8` are head/chest/legs/feet at native `39/38/37/36`, running
+        // backwards feet-first) — the same indices `Sim::third_person_body_state`
+        // reads for the armour layers.
+        //
+        // Matched on the item id rather than on
+        // `minecraft:equippable.camera_overlay`, which is what vanilla actually
+        // keys on (`Hud.extractCameraOverlays`, `Hud.java:269-291`). That is a
+        // deliberate narrowing and it matches `ScreenEffects::wearing_pumpkin`'s
+        // own doc: carved pumpkin is the only item shipping with that component
+        // field set, so the general per-item lookup would have exactly one entry.
+        // If a second item ever gains it, this is the line that has to become the
+        // component read.
+        const HEAD_NATIVE_SLOT: usize = 39;
+        let wearing_pumpkin = self
+            .sim
+            .player_menu()
+            .player_native(HEAD_NATIVE_SLOT)
+            .is_some_and(|st| st.item().to_string() == "minecraft:carved_pumpkin");
         let screen_effects = crate::gpu::ScreenEffects {
             eye_in_water: self.sim.player().eye_in_water,
             on_fire,
             spectator,
             tick,
+            wearing_pumpkin,
         };
         // Route the progressive-mining crack overlay when a dig is in flight,
         // otherwise take the plain path (avoids building the crack buffer while
