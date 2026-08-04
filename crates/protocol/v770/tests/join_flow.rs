@@ -486,13 +486,17 @@ fn configuration_disconnect_decodes_nbt_reason() {
 
 #[test]
 fn unknown_play_packet_is_ignored() {
-    // BUNDLE_DELIMITER (id 0) is an empty, unhandled play packet.
+    // AWARD_STATS has no decode arm at all (falls through to the trailing
+    // catch-all). BUNDLE_DELIMITER used to be this test's fixture, but issue
+    // #299 gave it a real decode arm (`Directive::BundleDelimiter`), so it no
+    // longer decodes to an empty directive list — using it here now would
+    // assert the exact defect that issue fixed.
     assert!(
         adapter()
             .handle_packet(
                 &mut World::new(),
                 ConnectionState::Play,
-                play::clientbound::BUNDLE_DELIMITER,
+                play::clientbound::AWARD_STATS,
                 &[]
             )
             .unwrap()
