@@ -214,8 +214,29 @@ Oracles (not part of repo state — recreate them):
   is misled about what it contains. The same gap cost that work three re-stagings, because a
   concurrent broad `git add` also reset the index for `docs/` twice mid-flight, and a
   `git diff --cached` read one command later was already describing a different index.
-  **Use the pathspec form: `git commit -- <your paths>`.** It commits exactly those paths and
-  **ignores the index entirely**, which is the only property that makes it safe here.
+  **Use the pathspec form: `git commit -m "…" -- <your paths>`. This is the standard here, not a
+  fallback.** It commits exactly those paths and **ignores the index entirely**, which is the only
+  property that makes it safe.
+
+  Measured in a throwaway worktree, because the whole point is that it needs no cleanup step:
+
+  | | result |
+  |---|---|
+  | commit created | yes, `HEAD` moved |
+  | contents | only the named path |
+  | **index afterwards** | **clean — no `git reset` needed** |
+  | working tree | untouched |
+  | another file's edits | survived on disk, excluded from the commit |
+
+  That third row is the important one. **`git reset -- <paths>` is the source of every stale-index
+  incident in this file** — nine in one session — and it only exists to clean up after the private-index
+  route. The pathspec form leaves nothing to clean up, so **do not run `git reset` after it.** Adding
+  that step back is how the hazard returns.
+
+  Argument order matters: `git commit -m "msg" -- <paths>`. Put `-m` *before* the `--` or git parses
+  the message as a pathspec and silently commits nothing — a probe written the wrong way round here
+  reported "index clean" from a commit that never happened, which is a vacuous control on top of a
+  no-op.
   "Stage, verify and commit in one shell invocation" was tried and is **not sufficient** — a single
   invocation is not an atomic transaction. An agent staged six files, asserted
   `git diff --cached --name-only` matched exactly, and then its plain `git commit` swept in **14
@@ -226,13 +247,24 @@ Oracles (not part of repo state — recreate them):
   `git add` "to see the diff" is the most expensive way to look — `git diff -- <paths>` shows the
   same thing and touches nothing.
 
-  **But the pathspec form commits *working-tree* content, so it is only safe for files you
-  exclusively own.** It defeats the index race, not the shared checkout: if another agent has
-  uncommitted edits in a path you name, those edits go into your commit. One agent caught this before
-  committing — its one-line fix touched `sim.rs`, which was holding ~500 lines of another agent's
-  in-flight work — and correctly abandoned the change rather than shipping it. **Before naming a path,
-  check `git diff -- <path>` is only your own work.** If it is not, either wait for the owner or take
-  the temp-index route below.
+  **The pathspec form commits *working-tree* content, so a path you name carries whatever is in it.**
+  It defeats the index race, not the shared checkout. **That is an accepted cost, not a blocker** —
+  the repo owner's call: shipping a few of another agent's lines under your message is far cheaper than
+  agents stalling on each other, and it is recoverable by reading the diff. So:
+
+  - **Name only paths in your own assigned cluster.** That is what actually prevents this, and it is
+    why ownership is assigned per agent up front.
+  - `git diff -- <path>` before naming it, so you *know* what is going in. If a foreign edit is there,
+    say so in the commit message rather than abandoning the commit.
+  - **Do not block on it.** Waiting for another agent to finish is usually the wrong trade, and
+    splitting your change to avoid a shared file is worse — it produces two half-commits neither of
+    which reaches pixels.
+  - The one case still worth avoiding: a file that is **mid-keystroke** rather than merely modified. If
+    it does not compile and you did not break it, wait a beat, do not commit it.
+
+  Only reach for the temp-index route below when you need **partial-file** granularity — committing two
+  hunks out of a file whose remaining hunks belong to someone else. That is a real need (it happened
+  once here) and it is the only thing the pathspec form cannot express.
 - **Never `git pull --rebase`, and never `--autostash`.** The `git stash` ban above is easy to keep
   when you type it; `--autostash` runs one *for* you, on the whole shared tree, silently. An agent ran
   `git pull --rebase --autostash`, the rebase aborted, and it was left with a spurious **staged
