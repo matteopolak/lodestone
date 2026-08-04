@@ -745,6 +745,9 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   experience bottle, splash potion, lingering potion, eye of ender, fireball and small
   fireball. Each is drawn as its **item model**, posed by `display.ground`, turned to
   face the camera, at the entity's position.
+- [Random ticks, scheduled ticks, and neighbour-update propagation](./tick-scheduling.md) —
+  Three new modules in `crates/lodestone-server/src/`, each a generic, vanilla-shaped
+  primitive with its own test suite, wired into `tick::run_tick_loop` (issue #284):
 - [Time-of-day lighting: the day clock and `sky_darken`](./time-of-day-lighting.md) —
   The one number that makes terrain and mobs darker at night: the factor the **sky**
   half of the lightmap is scaled by. **This doc's original scope was the clock feed

@@ -44,12 +44,16 @@
 //! constant.
 
 use std::collections::VecDeque;
+use std::ops::RangeInclusive;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::block_entities::{BlockEntityHandle, BlockEntityRegistry};
+use crate::chunk::ChunkSource;
 use crate::mobs::{LiveMobSource, MobHandle, MobSim};
+use crate::random_tick::{DEFAULT_RANDOM_TICK_SPEED, RandomTickScheduler};
+use crate::scheduled_tick::ScheduledTickQueue;
 
 /// Vanilla's tick period at normal (non-sprinting) speed — 20 TPS, matching
 /// `server.rs`'s own private `MILLIS_PER_TICK` and every one of the six
@@ -63,6 +67,67 @@ pub(crate) const TICK_PERIOD: Duration = Duration::from_millis(MILLIS_PER_TICK);
 /// own `tickTimesNanos` ring buffer size
 /// (`MinecraftServer.java:248`, `private final long[] tickTimesNanos = new long[100];`).
 const HISTORY_LEN: usize = 100;
+
+/// Vanilla's own per-queue drain cap, `ServerLevel.MAX_SCHEDULED_TICKS_PER_TICK`
+/// (`ServerLevel.java:194`) — see `crate::scheduled_tick`'s module doc for the
+/// full citation of `blockTicks.tick(tick, 65536, ...)`/`fluidTicks.tick(tick,
+/// 65536, ...)` (`ServerLevel.java:389,391`).
+const MAX_SCHEDULED_TICKS_PER_TICK: usize = 65536;
+
+/// Seeds for [`RandomTickScheduler`]'s two independent generators (issue
+/// #307). Vanilla seeds its position LCG (`Level.randValue`) from an
+/// arbitrary thread-local draw at level creation — this crate has no
+/// per-world seed store to draw a "real" one from yet, so these are fixed
+/// literals rather than derived from the world seed. Picking a different
+/// (still fixed) literal changes nothing about which blocks are *eligible*
+/// for a random tick, only the pseudo-random order/positions they are
+/// visited in — see `random_tick.rs`'s own doc comment for why the draw
+/// *pattern*, not the literal values, is what this crate's tests assert on.
+const RANDOM_TICK_POSITION_SEED: i32 = 0x5EED_1234u32 as i32;
+const RANDOM_TICK_BEHAVIOR_SEED: u64 = 0x5EED_5678;
+
+/// A shared feed of block changes the world tick loop wants every connection
+/// to learn about (issue #307/#308's one real producer reaching a client
+/// today: grass ↔ dirt, via `crate::random_tick`). Mirrors [`LiveMobSource`]'s
+/// publish shape — "world state that changes independently of any one
+/// connection, and every connection must notice" is the exact problem
+/// `LiveMobSource` already solves for mob positions; this is the same idiom
+/// for block state.
+///
+/// # Single-consumer only
+///
+/// Unlike [`LiveMobSource`] (a replace-latest-snapshot design every connection
+/// diffs independently), this is an **append-and-drain-all** queue: whichever
+/// connection calls [`drain_all`](BlockTickFeed::drain_all) first consumes
+/// every pending change, and a second concurrent consumer would see nothing.
+/// This is correct for [`crate::IntegratedServer::open_in_memory_with_mobs`]
+/// today because it spawns **exactly one** connection task per feed instance
+/// (the in-memory singleplayer duplex) — [`IntegratedServer::bind`] (LAN,
+/// multiple connections) does not spawn a tick loop at all, so it never
+/// constructs one of these. If a future change spawns this loop for a
+/// multi-connection server, promote this to a per-connection cursor over a
+/// shared append-only log (the same fix `LiveMobSource`'s own doc comment
+/// would point at) before relying on it there.
+#[derive(Debug, Clone, Default)]
+pub struct BlockTickFeed(Arc<Mutex<Vec<(i32, i32, i32, String)>>>);
+
+impl BlockTickFeed {
+    /// Records one block change for every consumer to learn about on their
+    /// next [`drain_all`](Self::drain_all).
+    pub(crate) fn publish(&self, x: i32, y: i32, z: i32, state: String) {
+        self.0
+            .lock()
+            .expect("block tick feed lock poisoned")
+            .push((x, y, z, state));
+    }
+
+    /// Drains and returns every change published since the last call —
+    /// see the struct doc comment for why this is safe only for exactly one
+    /// consumer.
+    pub fn drain_all(&self) -> Vec<(i32, i32, i32, String)> {
+        std::mem::take(&mut *self.0.lock().expect("block tick feed lock poisoned"))
+    }
+}
 
 /// How far behind wall-clock schedule the loop must fall before it gives up
 /// trying to catch up and forgives the backlog, matching vanilla's
@@ -327,18 +392,62 @@ pub struct TickStats {
 /// that never ran is never counted by [`TickClock::record_tick`], so
 /// `tick_count` reflects real work done, not wall-clock elapsed / 50ms.
 ///
+/// # Scheduled ticks and random ticks (issues #307/#308)
+///
+/// Each iteration additionally drains the block-tick queue, then the
+/// fluid-tick queue, then runs random ticks over `tick_area` — in exactly
+/// that order, mirroring `ServerLevel.tick`'s own sequence
+/// (`ServerLevel.java:388-391,400-401`: `blockTicks.tick(...)` before
+/// `fluidTicks.tick(...)` before `this.getChunkSource().tick(...)`, which is
+/// what eventually calls `tickChunk`'s random ticks — see
+/// `ServerChunkCache.java:403`). See [`crate::scheduled_tick`] for the queues'
+/// own ordering contract and [`crate::random_tick`] for the random-tick
+/// selection and the one block (grass ↔ dirt) modeled end to end.
+///
+/// **Nothing schedules a block or fluid tick yet** — `block_ticks`/
+/// `fluid_ticks` below are drained every iteration (proving the *order* is
+/// wired: block before fluid before random, every tick), but no producer in
+/// this crate calls [`ScheduledTickQueue::schedule`] on them today. Stated
+/// plainly, per this issue's own brief: the scheduled-tick *queue* (#308) is
+/// real and tested in isolation (`crate::scheduled_tick`'s own test module),
+/// but is an acknowledged island here until a block behaviour (fluid flow
+/// #309, gravity blocks #311, redstone #314-322) schedules into it. Random
+/// ticks (#307) are **not** an island: [`RandomTickScheduler::tick_chunk`]
+/// runs against `world` (the same [`ChunkSource`] the connection this loop
+/// shares a server with actually serves), and every resulting change is
+/// both persisted (`ChunkSource::set_block`) and published through
+/// `block_tick_out` for `serve_play`'s `container_sync_tick` arm to forward
+/// to the connected client — see that arm's own doc comment for the wire
+/// half.
+///
+/// `tick_area` is deliberately the same `(cx_range, cz_range)` shape
+/// `open_in_memory_with_mobs` already threads through for `mob_area` — not a
+/// generic "loaded chunks" registry (this crate has none — see
+/// `crate::chunk`'s module doc), but a small fixed region, matching the
+/// scope mob pathing already accepted. Every chunk in it is re-fetched via
+/// `world.column(cx, cz)` **every tick**; for an unedited column this
+/// re-runs the generator (no per-tick cache beyond `OverworldChunkSource`'s
+/// own edit cache — see that type's doc comment), which is a real,
+/// documented performance gap for anything wider than a handful of chunks,
+/// not a correctness one.
+///
 /// # wasm32
 ///
 /// Native only, like the two loops it replaces: `tokio::time::sleep_until`
 /// needs `tokio::time`, unavailable on `wasm32` (see `mobs::run_mob_tick_loop`'s
 /// own doc comment for the established precedent this repeats).
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) async fn run_tick_loop(
+pub(crate) async fn run_tick_loop<W>(
     mobs: MobHandle,
     mob_out: LiveMobSource,
     block_entities: BlockEntityHandle,
     clock: Arc<TickClock>,
-) {
+    world: Arc<W>,
+    block_tick_out: BlockTickFeed,
+    tick_area: (RangeInclusive<i32>, RangeInclusive<i32>),
+) where
+    W: ChunkSource,
+{
     // Same reasoning as `run_mob_tick_loop`'s own opening publish: a fresh
     // connection's first streaming pass should see the seeded population
     // immediately, not after waiting a full tick period for the loop below to
@@ -347,6 +456,15 @@ pub(crate) async fn run_tick_loop(
 
     let mut next_tick_at = tokio::time::Instant::now();
     let mut last_overload_warning_at: Option<tokio::time::Instant> = None;
+    let mut game_tick: u64 = 0;
+    // #308: one queue per vanilla queue (`ServerLevel.blockTicks`/
+    // `fluidTicks`, `ServerLevel.java:209-210`) — see this function's own
+    // doc comment for why nothing schedules into either yet.
+    let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+    let mut fluid_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+    // #307.
+    let mut random_ticks = RandomTickScheduler::new(RANDOM_TICK_POSITION_SEED, RANDOM_TICK_BEHAVIOR_SEED);
+    let (tick_cx_range, tick_cz_range) = tick_area;
 
     loop {
         let now = tokio::time::Instant::now();
@@ -372,6 +490,38 @@ pub(crate) async fn run_tick_loop(
         mobs.with(MobSim::tick);
         mob_out.publish(mobs.with(|sim| sim.snapshots()));
         block_entities.with(BlockEntityRegistry::tick_all);
+
+        game_tick += 1;
+
+        // #308, block before fluid (`ServerLevel.java:388-391`). Draining
+        // (rather than iterating a live queue) is what keeps a tick
+        // scheduled *by* one of these callbacks out of this same pass — see
+        // `ScheduledTickQueue::drain_due`'s own doc comment.
+        for _due in block_ticks.drain_due(game_tick, MAX_SCHEDULED_TICKS_PER_TICK) {
+            // No block-tick behaviour is modeled yet — see this function's
+            // doc comment. Draining (not just checking `is_empty`) still
+            // proves the order and the "not this pass" invariant hold for
+            // whatever a future producer schedules.
+        }
+        for _due in fluid_ticks.drain_due(game_tick, MAX_SCHEDULED_TICKS_PER_TICK) {
+            // Same acknowledgement as above, for fluid ticks.
+        }
+
+        // #307, after both scheduled-tick queues (`ServerChunkCache.java:403`
+        // runs after `ServerLevel`'s own `blockTicks`/`fluidTicks.tick`,
+        // `:388-391`).
+        for cz in tick_cz_range.clone() {
+            for cx in tick_cx_range.clone() {
+                let mut column = world.column(cx, cz);
+                let events = random_ticks.tick_chunk(&mut column, cx, cz, DEFAULT_RANDOM_TICK_SPEED);
+                for event in events {
+                    let (x, y, z) = event.pos;
+                    world.set_block(x, y, z, &event.to);
+                    block_tick_out.publish(x, y, z, event.to);
+                }
+            }
+        }
+
         clock.record_tick(tick_start.elapsed());
     }
 }
@@ -389,6 +539,27 @@ mod tests {
         )
     }
 
+    /// A minimal [`ChunkSource`] for tests that only need `run_tick_loop` to
+    /// have *something* to random-tick against — every column is bare air,
+    /// so #307's random ticks run (proving the loop's own ordering/timing)
+    /// but never produce an event (nothing eligible), which is exactly what
+    /// the MSPT/overrun tests in this module want: zero interference from
+    /// #307/#308 with the clock behaviour they actually assert on.
+    struct EmptyWorld;
+    impl ChunkSource for EmptyWorld {
+        fn column(&self, _cx: i32, _cz: i32) -> crate::chunk::ChunkColumn {
+            crate::chunk::ChunkColumn::new(0, 16)
+        }
+    }
+
+    /// `(world, block_tick_out, tick_area)` — the three new `run_tick_loop`
+    /// arguments (issues #307/#308), factored out because every existing
+    /// clock/overrun test in this module needs them but does not care what
+    /// they are.
+    fn world_tick_args() -> (Arc<EmptyWorld>, BlockTickFeed, (RangeInclusive<i32>, RangeInclusive<i32>)) {
+        (Arc::new(EmptyWorld), BlockTickFeed::default(), (0..=0, 0..=0))
+    }
+
     /// Predicted value: at 20 TPS, 10 real tick periods (500ms of virtual
     /// time) advance the loop exactly 10 ticks — not 9 (an off-by-one in the
     /// scheduling), not 11 (a burst), and `overrun_count` stays 0 because
@@ -400,7 +571,16 @@ mod tests {
     async fn ten_periods_advance_exactly_ten_ticks_with_no_overrun() {
         let (mobs, out, block_entities) = handles();
         let clock = Arc::new(TickClock::new());
-        tokio::spawn(run_tick_loop(mobs, out, block_entities, Arc::clone(&clock)));
+        let (world, block_tick_out, tick_area) = world_tick_args();
+        tokio::spawn(run_tick_loop(
+            mobs,
+            out,
+            block_entities,
+            Arc::clone(&clock),
+            world,
+            block_tick_out,
+            tick_area,
+        ));
         // Let the freshly spawned task reach its first `Instant::now()` call (its
         // `next_tick_at` baseline) before any `advance()` below — otherwise the
         // task's first poll (and thus its baseline) lands *after* the first
@@ -429,7 +609,16 @@ mod tests {
     async fn nine_point_nine_periods_do_not_yet_produce_a_tenth_tick() {
         let (mobs, out, block_entities) = handles();
         let clock = Arc::new(TickClock::new());
-        tokio::spawn(run_tick_loop(mobs, out, block_entities, Arc::clone(&clock)));
+        let (world, block_tick_out, tick_area) = world_tick_args();
+        tokio::spawn(run_tick_loop(
+            mobs,
+            out,
+            block_entities,
+            Arc::clone(&clock),
+            world,
+            block_tick_out,
+            tick_area,
+        ));
         // Let the freshly spawned task reach its first `Instant::now()` call (its
         // `next_tick_at` baseline) before any `advance()` below — otherwise the
         // task's first poll (and thus its baseline) lands *after* the first
@@ -588,7 +777,16 @@ mod tests {
     async fn a_healthy_run_never_records_an_overrun() {
         let (mobs, out, block_entities) = handles();
         let clock = Arc::new(TickClock::new());
-        tokio::spawn(run_tick_loop(mobs, out, block_entities, Arc::clone(&clock)));
+        let (world, block_tick_out, tick_area) = world_tick_args();
+        tokio::spawn(run_tick_loop(
+            mobs,
+            out,
+            block_entities,
+            Arc::clone(&clock),
+            world,
+            block_tick_out,
+            tick_area,
+        ));
         // Let the freshly spawned task reach its first `Instant::now()` call (its
         // `next_tick_at` baseline) before any `advance()` below — otherwise the
         // task's first poll (and thus its baseline) lands *after* the first
