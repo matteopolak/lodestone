@@ -63,13 +63,15 @@ use crate::packets::configuration::FinishConfiguration;
 use crate::packets::entity::{pack_degrees, read_lp_vec3, write_lp_vec3};
 use crate::packets::game::{
     AcceptTeleportation, Attack, ChangeDifficultyClientbound, ChangeDifficultyServerbound,
-    ClientTickEnd, ContainerButtonClick, ContainerSlotStateChanged, EditBook, GameLogin,
-    GameRuleEntry, GameRuleValues, GlobalPos, LockDifficulty, MOVE_FLAG_ON_GROUND, MovePlayerPos,
-    MovePlayerPosRot, MovePlayerRot, MovePlayerStatusOnly, MoveVehicle, PaddleBoat,
-    PickItemFromBlock, PickItemFromEntity, PlaceRecipe, PlayerAction, PlayerCommand, PlayerLoaded,
+    ChangeGameMode, ClientTickEnd, ConfigurationAcknowledged, ContainerButtonClick,
+    ContainerSlotStateChanged, EditBook, GameLogin, GameRuleEntry, GameRuleValues, GlobalPos,
+    JigsawGenerate, LockDifficulty, MOVE_FLAG_ON_GROUND, MovePlayerPos, MovePlayerPosRot,
+    MovePlayerRot, MovePlayerStatusOnly, MoveVehicle, PaddleBoat, PickItemFromBlock,
+    PickItemFromEntity, PlaceRecipe, PlayerAction, PlayerCommand, PlayerLoaded,
     RecipeBookChangeSettings, RecipeBookSeenRecipe, RenameItem, SERVERBOUND_ABILITY_FLAG_FLYING,
-    SelectBundleItem, SelectTrade, ServerboundPlayerAbilities, SetCarriedItem,
-    SetDefaultSpawnPosition, SetGameRule, SetHealth, SignUpdate, Swing, UseItem, UseItemOn,
+    SelectBundleItem, SelectTrade, ServerboundPlayerAbilities, SetCarriedItem, SetCommandBlock,
+    SetCommandMinecart, SetDefaultSpawnPosition, SetGameRule, SetHealth, SetJigsawBlock,
+    SetStructureBlock, SetTestBlock, SignUpdate, Swing, UseItem, UseItemOn,
 };
 use crate::packets::handshake::Intention;
 use crate::packets::login::{LoginFinished, LoginHello};
@@ -1469,6 +1471,99 @@ impl ServerProtocol for V770ServerProtocol {
                 let _ = decode_full::<SelectBundleItem>(payload);
                 ServerBound::Ignored
             }
+
+            // Issue #268 (world/block-admin), remaining packets beyond
+            // `CHANGE_DIFFICULTY`/`LOCK_DIFFICULTY`/`SET_GAME_RULE` above.
+            // A prior pass on this issue deliberately left the seven below
+            // undecoded, reasoning they are "deep features, not decode
+            // gaps" (command-block/jigsaw/structure/game-test state, none
+            // of which this crate models). That reasoning about the
+            // *feature* stands — nothing here builds command blocks,
+            // jigsaw structures, or the game-test framework. What changed:
+            // this pass decodes the wire shape anyway, straight against
+            // `.cache/mc/26.2/src`'s decompiled packet classes (the
+            // independent source `CLAUDE.md`'s evidence standard calls for
+            // when no client encoder exists to cross-check against, which
+            // is the case for all seven), and maps to `Ignored` — the same
+            // "examined, no consumer" bucket `cargo xtask connectedness`
+            // already tracks separately from "never examined" for
+            // `PLAYER_ACTION`'s item-action ordinals. This is additive
+            // measurement/documentation, not a claim that any of these
+            // features now exist.
+            State::Play if packet_id == play::serverbound::SET_COMMAND_BLOCK => {
+                let _ = decode_full::<SetCommandBlock>(payload);
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::SET_COMMAND_MINECART => {
+                let _ = decode_full::<SetCommandMinecart>(payload);
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::JIGSAW_GENERATE => {
+                let _ = decode_full::<JigsawGenerate>(payload);
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::SET_JIGSAW_BLOCK => {
+                let _ = decode_full::<SetJigsawBlock>(payload);
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::SET_STRUCTURE_BLOCK => {
+                let _ = decode_full::<SetStructureBlock>(payload);
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::SET_TEST_BLOCK => {
+                let _ = decode_full::<SetTestBlock>(payload);
+                ServerBound::Ignored
+            }
+            // `ServerboundCustomClickActionPacket`: an identifier, then a
+            // length-prefixed optional NBT tag
+            // (`ByteBufCodecs.lengthPrefixed(65536)` wraps
+            // `optionalTagCodec` with an outer VarInt byte-length) — the tag
+            // contents are never interpreted server-side for any known
+            // click-action id, so only the outer shape (identifier, VarInt
+            // length, then that many bytes skipped) is verified here rather
+            // than decoding the NBT itself.
+            State::Play if packet_id == play::serverbound::CUSTOM_CLICK_ACTION => {
+                let mut r = Reader::new(payload);
+                let decoded = (|| -> lodestone_core::Result<()> {
+                    let _id = r.string(32767)?;
+                    let len = r.var_i32()?;
+                    let len = usize::try_from(len)
+                        .map_err(|_| lodestone_core::Error::UnexpectedEof)?;
+                    let _tag_bytes = r.bytes(len)?;
+                    r.ensure_empty()
+                })();
+                let _ = decoded;
+                ServerBound::Ignored
+            }
+            // Also administration-adjacent, decoded for the same reason as
+            // the rest of this issue's family even though neither is named
+            // in its original packet-id list: `CHANGE_GAME_MODE` (F4
+            // singleplayer/LAN cheat gamemode switch) and
+            // `CONFIGURATION_ACKNOWLEDGED` (the reply to a clientbound
+            // `start_configuration` mid-session reconfigure, which this
+            // crate's join sequence never sends — see
+            // `ServerBound::ConfigurationFinished`'s sibling handling for the
+            // *initial* configuration handshake, which is a different wire
+            // packet from this one).
+            State::Play if packet_id == play::serverbound::CHANGE_GAME_MODE => {
+                let _ = decode_full::<ChangeGameMode>(payload);
+                ServerBound::Ignored
+            }
+            State::Play if packet_id == play::serverbound::CONFIGURATION_ACKNOWLEDGED => {
+                let _ = decode_full::<ConfigurationAcknowledged>(payload);
+                ServerBound::Ignored
+            }
+            // Deliberately left undecoded (falls through to the wildcard
+            // below), unlike the rest of this issue's family:
+            // `TEST_INSTANCE_BLOCK_ACTION`'s body
+            // (`TestInstanceBlockEntity.Data.STREAM_CODEC`) is a nested
+            // `Optional<ResourceKey>`/`Vec3i`/`Rotation`/`Status`/
+            // `Optional<...>` composite this crate has no codec support for
+            // yet, and — like its sibling `SET_TEST_BLOCK` above — it
+            // drives the game-test framework only, which this crate does
+            // not implement at all. Left for whoever adds game-test
+            // support, at which point the real `Data` type will exist to
+            // decode into anyway.
             _ => ServerBound::Ignored,
         }
     }

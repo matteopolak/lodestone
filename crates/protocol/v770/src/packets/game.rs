@@ -1047,3 +1047,143 @@ pub struct ServerboundPlayerAbilities {
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:client_tick_end", state = Play, bound = Server)]
 pub struct ClientTickEnd;
+
+/// Serverbound `set_command_minecart` packet (command-block minecart editor).
+///
+/// Wire layout: VarInt entity id, a UTF command string, then a trailing
+/// boolean for output tracking (`ServerboundSetCommandMinecartPacket`) — no
+/// mode/conditional/automatic flags byte, unlike [`SetCommandBlock`], since a
+/// command-block minecart has neither a mode nor redstone/conditional
+/// behaviour.
+#[derive(Debug, Clone, PartialEq, Eq, Decode)]
+pub struct SetCommandMinecart {
+    /// Target command-block-minecart entity id.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// Command text to run.
+    pub command: String,
+    /// Whether the output line is tracked.
+    pub track_output: bool,
+}
+
+/// Serverbound `jigsaw_generate` packet (jigsaw-block "Generate" button).
+///
+/// Wire layout: packed `BlockPos` long, VarInt max depth ("levels"), then a
+/// trailing boolean for "keep jigsaws" (`ServerboundJigsawGeneratePacket`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Decode)]
+pub struct JigsawGenerate {
+    /// Packed `BlockPos` long of the jigsaw block to generate from.
+    pub pos: i64,
+    /// Maximum structure-piece recursion depth.
+    #[mc(varint)]
+    pub levels: i32,
+    /// Whether already-placed jigsaw blocks are kept rather than replaced.
+    pub keep_jigsaws: bool,
+}
+
+/// Serverbound `set_jigsaw_block` packet (jigsaw-block editor screen).
+///
+/// Wire layout: packed `BlockPos` long, then five identifier/UTF strings —
+/// name, target, pool, final-state block-state string, and the joint type's
+/// serialized name (`"aligned"`/`"rollable"`, `JigsawBlockEntity.JointType`)
+/// — then two VarInts, selection priority and placement priority
+/// (`ServerboundSetJigsawBlockPacket`). Identifiers use the same
+/// VarInt-length-prefixed UTF-8 wire shape as a plain string (see
+/// [`BrandPayload`](crate::packets::common::BrandPayload)'s own doc comment),
+/// so `String` decodes all five fields correctly regardless of which are
+/// namespaced identifiers.
+#[derive(Debug, Clone, PartialEq, Eq, Decode)]
+pub struct SetJigsawBlock {
+    /// Packed `BlockPos` long of the target jigsaw block.
+    pub pos: i64,
+    /// The jigsaw's own name identifier.
+    pub name: String,
+    /// The target pool-element identifier this jigsaw attaches to.
+    pub target: String,
+    /// The structure-pool identifier to pull pieces from.
+    pub pool: String,
+    /// Block-state string applied once no further piece can attach.
+    pub final_state: String,
+    /// Serialized `JointType` name (`"aligned"` or `"rollable"`).
+    pub joint: String,
+    /// Selection priority among sibling jigsaws.
+    #[mc(varint)]
+    pub selection_priority: i32,
+    /// Placement priority among sibling jigsaws.
+    #[mc(varint)]
+    pub placement_priority: i32,
+}
+
+/// Serverbound `set_structure_block` packet (structure-block editor screen).
+///
+/// Wire layout (`ServerboundSetStructureBlockPacket`): packed `BlockPos`
+/// long; VarInt `StructureBlockEntity.UpdateType` ordinal and VarInt
+/// `StructureMode` ordinal (both `FriendlyByteBuf.writeEnum`, i.e. a plain
+/// VarInt of `Enum.ordinal()` — **not** the `ByteBufCodecs.idMapper` used
+/// elsewhere in this file, though the two encode identically as a VarInt so
+/// the wire bytes are the same either way); a UTF structure name; six signed
+/// bytes (offset x/y/z then size x/y/z, each clamped `-48..=48`/`0..=48` by
+/// the real packet before use — this decoder reads the raw byte
+/// unclamped, since nothing here re-derives vanilla's clamp and the value is
+/// discarded regardless); VarInt `Mirror` and `Rotation` ordinals (again
+/// plain `writeEnum`); a UTF `data` string (mode/metadata); a big-endian
+/// `f32` integrity; a VarLong seed; then a single flags byte packing
+/// ignore-entities (`0x01`), show-air (`0x02`), show-bounding-box (`0x04`)
+/// and strict (`0x08`).
+#[derive(Debug, Clone, PartialEq, Decode)]
+pub struct SetStructureBlock {
+    /// Packed `BlockPos` long of the target structure block.
+    pub pos: i64,
+    /// `StructureBlockEntity.UpdateType` ordinal.
+    #[mc(varint)]
+    pub update_type: i32,
+    /// `StructureMode` ordinal.
+    #[mc(varint)]
+    pub mode: i32,
+    /// Structure name (save/load identifier).
+    pub name: String,
+    /// Offset x, unclamped raw byte.
+    pub offset_x: i8,
+    /// Offset y, unclamped raw byte.
+    pub offset_y: i8,
+    /// Offset z, unclamped raw byte.
+    pub offset_z: i8,
+    /// Size x, unclamped raw byte.
+    pub size_x: i8,
+    /// Size y, unclamped raw byte.
+    pub size_y: i8,
+    /// Size z, unclamped raw byte.
+    pub size_z: i8,
+    /// `Mirror` ordinal.
+    #[mc(varint)]
+    pub mirror: i32,
+    /// `Rotation` ordinal.
+    #[mc(varint)]
+    pub rotation: i32,
+    /// Mode-specific metadata string.
+    pub data: String,
+    /// Structure integrity (fraction of blocks placed on load), `0.0..=1.0`.
+    pub integrity: f32,
+    /// Structure-void random seed.
+    #[mc(varlong)]
+    pub seed: i64,
+    /// Packed ignore-entities/show-air/show-bounding-box/strict flags.
+    pub flags: u8,
+}
+
+/// Serverbound `set_test_block` packet (game-test test-block editor).
+///
+/// Wire layout: packed `BlockPos` long, VarInt `TestBlockMode` ordinal
+/// (`ByteBufCodecs.idMapper`, same VarInt-of-ordinal wire shape as the plain
+/// `writeEnum` fields above), then a plain UTF string message
+/// (`ServerboundSetTestBlockPacket`).
+#[derive(Debug, Clone, PartialEq, Eq, Decode)]
+pub struct SetTestBlock {
+    /// Packed `BlockPos` long of the target test block.
+    pub pos: i64,
+    /// `TestBlockMode` ordinal (`0` start, `1` log, `2` fail, `3` accept).
+    #[mc(varint)]
+    pub mode: i32,
+    /// Free-form message shown by `log`/`fail`/`accept` modes.
+    pub message: String,
+}
