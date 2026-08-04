@@ -328,6 +328,169 @@ pub fn horizontal_facing_yaw(name: &str) -> Option<f32> {
     })
 }
 
+/// Which of vanilla's five simple skull/head types this renderer draws.
+///
+/// Vanilla ships seven (`SkullBlock.Types` plus the player-profile case). The
+/// first five share one CPU model (`SkullModel`, a single 8×8×8 head box —
+/// see `lodestone_assets::block_entity_models::skull_mob_model`'s doc) and
+/// differ only by canvas size and sheet; `dragon`/`piglin` use their own
+/// multi-part rigs (`DragonHeadModel`/`PiglinHeadModel`) unrelated to that
+/// shared box and are not ported — [`SkullType::from_block_path`] declines
+/// them rather than drawing a wrong shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SkullType {
+    /// `minecraft:skeleton_skull`/`skeleton_wall_skull`.
+    Skeleton,
+    /// `minecraft:wither_skeleton_skull`/`wither_skeleton_wall_skull`.
+    WitherSkeleton,
+    /// `minecraft:zombie_head`/`zombie_wall_head`.
+    Zombie,
+    /// `minecraft:creeper_head`/`creeper_wall_head`.
+    Creeper,
+    /// `minecraft:player_head`/`player_wall_head`, always drawn with the
+    /// default Steve skin (`DefaultPlayerSkin.getDefaultTexture()`) — a real
+    /// profile skin needs a network fetch, out of scope here.
+    Player,
+}
+
+/// Model name of the 64×32-canvas skull head (skeleton/wither skeleton/creeper).
+pub const SKULL_MOB: &str = "skull_mob";
+/// Model name of the 64×64-canvas skull head (zombie/player).
+pub const SKULL_HUMANOID: &str = "skull_humanoid";
+
+impl SkullType {
+    /// Resolves a block's registry path (namespace stripped, wall/floor
+    /// suffix included) to its skull type, or `None` for a path this
+    /// renderer does not cover — including the two real skull types it
+    /// declines (`dragon_head`/`piglin_head` and their wall variants) and
+    /// anything that is not a skull at all.
+    #[must_use]
+    pub fn from_block_path(path: &str) -> Option<Self> {
+        Some(match path {
+            "skeleton_skull" | "skeleton_wall_skull" => SkullType::Skeleton,
+            "wither_skeleton_skull" | "wither_skeleton_wall_skull" => SkullType::WitherSkeleton,
+            "zombie_head" | "zombie_wall_head" => SkullType::Zombie,
+            "creeper_head" | "creeper_wall_head" => SkullType::Creeper,
+            "player_head" | "player_wall_head" => SkullType::Player,
+            _ => return None,
+        })
+    }
+
+    /// The baked model this type draws with.
+    #[must_use]
+    pub const fn model(self) -> &'static str {
+        match self {
+            SkullType::Skeleton | SkullType::WitherSkeleton | SkullType::Creeper => SKULL_MOB,
+            SkullType::Zombie | SkullType::Player => SKULL_HUMANOID,
+        }
+    }
+}
+
+/// The jar sheet a [`SkullType`] draws with — `SkullBlockRenderer.SKIN_BY_TYPE`,
+/// minus the `.png`/`assets/<ns>/textures/` wrapping.
+///
+/// **These are the mob skins already on disk for entity rendering, not a new
+/// asset family.** `resources::load_block_entity_textures` (the shell's
+/// loader) has to load them a second time regardless — this pass keeps its
+/// own texture bind groups, entirely separate from `EntityRenderer`'s — but
+/// there is nothing to author or ship beyond this stem list.
+#[must_use]
+pub const fn skull_texture_stem(skull_type: SkullType) -> &'static str {
+    match skull_type {
+        SkullType::Skeleton => "entity/skeleton/skeleton",
+        SkullType::WitherSkeleton => "entity/skeleton/wither_skeleton",
+        SkullType::Zombie => "entity/zombie/zombie",
+        SkullType::Creeper => "entity/creeper/creeper",
+        SkullType::Player => "entity/player/wide/steve",
+    }
+}
+
+/// Every skull type, for enumerating stems and exhaustiveness in tests.
+pub const SKULL_TYPES: &[SkullType] = &[
+    SkullType::Skeleton,
+    SkullType::WitherSkeleton,
+    SkullType::Zombie,
+    SkullType::Creeper,
+    SkullType::Player,
+];
+
+/// Every skull sheet stem the renderer can ask for — what the shell preloads,
+/// mirroring [`chest_texture_stems`].
+#[must_use]
+pub fn skull_texture_stems() -> Vec<&'static str> {
+    SKULL_TYPES.iter().map(|t| skull_texture_stem(*t)).collect()
+}
+
+/// Where a skull/head sits: on the floor, spun by a `rotation` segment, or on
+/// a wall, offset outward from the block it faces.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SkullOrientation {
+    /// A floor-placed skull's `rotation` property, `0..16` — vanilla's
+    /// `RotationSegment` (16 steps of 22.5°, **not**
+    /// [`horizontal_facing_yaw`]'s four-direction convention: segment `0` is
+    /// north, not south).
+    Floor {
+        /// `0..16`; out-of-range values still compose a matrix rather than
+        /// panicking.
+        rotation_segment: u8,
+    },
+    /// A wall skull's `facing` property, already converted by
+    /// [`horizontal_facing_yaw`] — the direction the skull points *away from*
+    /// its wall.
+    Wall {
+        /// `Direction.toYRot()` of the `facing` property.
+        facing_yaw_deg: f32,
+    },
+}
+
+/// The world placement transform for a floor-standing skull —
+/// `SkullBlockRenderer.createGroundTransformation`:
+/// `Matrix4f().translation(0.5, 0, 0.5).rotate(Axis.YP.rotationDegrees(-deg)).scale(-1, -1, 1)`,
+/// composed with the block's own translation.
+///
+/// **This is the one block-entity placement in this module that *does*
+/// flip** (`scale(-1, -1, 1)`, matching
+/// [`crate::entity::entity_model_matrix`]'s sign exactly) — unlike
+/// [`block_entity_placement_matrix`]. `SkullModel`'s head box is authored in
+/// the same Y-down convention as a mob's head part, and vanilla never
+/// re-authors it block-space-up the way `ChestModel` was; see
+/// `lodestone_assets::block_entity_models::skull_head_part`'s doc.
+/// `rotation_segment` is vanilla's `RotationSegment` (16 steps of 22.5°), not
+/// [`horizontal_facing_yaw`]'s four-value convention — segment `0` is
+/// **north** (`Direction.NORTH.toYRot() == 180`), so do not reuse that helper
+/// here.
+#[must_use]
+pub fn skull_ground_placement_matrix(pos: [i32; 3], rotation_segment: u8) -> Mat4 {
+    let origin = Vec3::new(pos[0] as f32, pos[1] as f32, pos[2] as f32);
+    let segment_deg = f32::from(rotation_segment) * (360.0 / 16.0);
+    Mat4::from_translation(origin)
+        * Mat4::from_translation(Vec3::new(0.5, 0.0, 0.5))
+        * Mat4::from_rotation_y(-segment_deg.to_radians())
+        * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0))
+}
+
+/// The world placement transform for a wall-mounted skull —
+/// `SkullBlockRenderer.createWallTransformation`:
+/// `translate(0.5 − dir.stepX·0.25, 0.25, 0.5 − dir.stepZ·0.25) · rotY(−opposite(dir).toYRot()) · scale(−1,−1,1)`.
+///
+/// `dir.getStepX()/getStepZ()` are recovered from `facing_yaw_deg` by trig
+/// rather than a second lookup table that could drift from
+/// [`horizontal_facing_yaw`]'s: south `0° → (0, 1)`, west `90° → (−1, 0)`,
+/// north `180° → (0, −1)`, east `270° → (1, 0)` — hand-verified against
+/// vanilla's `Direction` enum, not derived from this function.
+#[must_use]
+pub fn skull_wall_placement_matrix(pos: [i32; 3], facing_yaw_deg: f32) -> Mat4 {
+    let origin = Vec3::new(pos[0] as f32, pos[1] as f32, pos[2] as f32);
+    let yaw_rad = facing_yaw_deg.to_radians();
+    let step_x = -yaw_rad.sin();
+    let step_z = yaw_rad.cos();
+    let opposite_yaw_deg = (facing_yaw_deg + 180.0).rem_euclid(360.0);
+    Mat4::from_translation(origin)
+        * Mat4::from_translation(Vec3::new(0.5 - step_x * 0.25, 0.25, 0.5 - step_z * 0.25))
+        * Mat4::from_rotation_y(-opposite_yaw_deg.to_radians())
+        * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0))
+}
+
 /// A CPU block-entity mesh: part-local vertices plus the part hierarchy needed
 /// to rebuild transforms with per-part overrides each frame.
 ///
@@ -484,6 +647,19 @@ fn affine_to_mat4(a: &lodestone_assets::entity::Affine) -> Mat4 {
     ])
 }
 
+/// Every sheet stem across every block-entity family — what the shell's
+/// texture loader preloads. Union of [`chest_texture_stems`] and
+/// [`skull_texture_stems`] rather than the shell iterating each list itself,
+/// so a third family only has to update this one function to reach the
+/// loader (see the module doc's "How to change it" — this is the "entry in
+/// the preload list" step, generalised past chest).
+#[must_use]
+pub fn block_entity_texture_stems() -> Vec<&'static str> {
+    let mut stems = chest_texture_stems();
+    stems.extend(skull_texture_stems());
+    stems
+}
+
 /// The baked block-entity corpus: one [`BlockEntityMesh`] per entry in
 /// [`BLOCK_ENTITY_MODELS`], baked on the CPU with no GPU involvement.
 #[derive(Debug, Clone)]
@@ -568,6 +744,40 @@ impl BlockEntityModelSet {
             light: spawn.light,
         })
     }
+
+    /// Resolves one skull/head into a drawable instance, or `None` if its
+    /// model is not in the corpus.
+    ///
+    /// No overrides: unlike a chest lid, none of the five ported skull types
+    /// pose their head part (`SkullBlockRenderState.yRot`/`xRot` are only
+    /// ever set for the *item-frame*/GUI skull paths, never by
+    /// `SkullBlockRenderer.extractRenderState` for a placed block), so
+    /// `part_transforms` is built from the rest pose alone — same shape as
+    /// [`Self::resolve_chest`] minus the animation.
+    #[must_use]
+    pub fn resolve_skull(&self, spawn: &SkullSpawn) -> Option<BlockEntityInstance> {
+        let model = spawn.skull_type.model();
+        let mesh = self.get(model)?;
+        let placement = match spawn.orientation {
+            SkullOrientation::Floor { rotation_segment } => {
+                skull_ground_placement_matrix(spawn.pos, rotation_segment)
+            }
+            SkullOrientation::Wall { facing_yaw_deg } => {
+                skull_wall_placement_matrix(spawn.pos, facing_yaw_deg)
+            }
+        };
+        let part_transforms = mesh.part_transforms(placement, &[]);
+        let (aabb_min, aabb_max) = transformed_aabb(&placement, mesh.local_min, mesh.local_max);
+        Some(BlockEntityInstance {
+            model,
+            texture: skull_texture_stem(spawn.skull_type),
+            transform: placement,
+            part_transforms,
+            aabb_min,
+            aabb_max,
+            light: spawn.light,
+        })
+    }
 }
 
 impl Default for BlockEntityModelSet {
@@ -611,6 +821,37 @@ impl ChestSpawn {
             half: ChestHalf::Single,
             material: ChestMaterial::Regular,
             openness: 0.0,
+            light: ENTITY_FULLBRIGHT,
+        }
+    }
+}
+
+/// The version-free description of one skull/head to draw this frame.
+///
+/// The caller owns every field, the same contract as [`ChestSpawn`]: block
+/// state → `orientation`/`skull_type`, world light → `light`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SkullSpawn {
+    /// Block position.
+    pub pos: [i32; 3],
+    /// Floor or wall placement.
+    pub orientation: SkullOrientation,
+    /// Which mob's model and sheet.
+    pub skull_type: SkullType,
+    /// Packed sky/block light. Pass [`ENTITY_FULLBRIGHT`] only when there is
+    /// genuinely no world to sample.
+    pub light: u8,
+}
+
+impl SkullSpawn {
+    /// A floor-placed, `rotation_segment = 0`, full-bright skeleton skull at
+    /// `pos` — the minimum a hermetic gate needs.
+    #[must_use]
+    pub fn at(pos: [i32; 3]) -> Self {
+        SkullSpawn {
+            pos,
+            orientation: SkullOrientation::Floor { rotation_segment: 0 },
+            skull_type: SkullType::Skeleton,
             light: ENTITY_FULLBRIGHT,
         }
     }
@@ -751,23 +992,37 @@ mod tests {
     #[test]
     fn every_ported_model_bakes_with_geometry_and_parts() {
         let set = set();
-        assert_eq!(set.len(), 3);
+        assert_eq!(set.len(), 5, "3 chest layers + 2 skull canvases");
         for (name, mesh) in set.iter() {
             assert!(mesh.quad_count() > 0, "{name} baked no quads");
             assert_eq!(mesh.parts.len(), mesh.part_names.len());
             assert_eq!(mesh.parts.len(), mesh.part_rest.len());
+        }
+        for name in [CHEST_SINGLE, CHEST_LEFT, CHEST_RIGHT] {
+            let mesh = set.get(name).unwrap();
             assert!(mesh.index_of("lid").is_some(), "{name} has no lid part");
             assert!(mesh.index_of("lock").is_some(), "{name} has no lock part");
             assert!(mesh.index_of("bottom").is_some(), "{name} has no bottom");
         }
+        for name in [SKULL_MOB, SKULL_HUMANOID] {
+            let mesh = set.get(name).unwrap();
+            assert!(mesh.index_of("head").is_some(), "{name} has no head part");
+        }
     }
 
-    /// The rest AABB must land in `0..1` on Y — the assertion an entity-space
-    /// (Y-flipped, `−1.501`) placement fails. Measured through the same
-    /// `part_transforms` the draw uses, not from restated texel extents.
+    /// The rest AABB must land in `0..1` on Y for the chest layers — the
+    /// assertion an entity-space (Y-flipped, `−1.501`) placement fails.
+    /// Measured through the same `part_transforms` the draw uses, not from
+    /// restated texel extents. Skull is deliberately excluded: it *is*
+    /// authored entity-space (Y-down, see `skull_head_part`'s doc), so its
+    /// rest bounds dip below zero on purpose — that is asserted by
+    /// `skull_head_box_extends_below_its_pivot_like_a_mob_head` in the asset
+    /// crate, not this one.
     #[test]
     fn rest_bounds_sit_inside_the_block_above_the_floor() {
-        for (name, mesh) in set().iter() {
+        let set = set();
+        for name in [CHEST_SINGLE, CHEST_LEFT, CHEST_RIGHT] {
+            let mesh = set.get(name).unwrap();
             assert!(
                 mesh.local_min.y >= -1e-5,
                 "{name} dips below the floor: {}",
@@ -1109,5 +1364,179 @@ mod tests {
         assert_eq!(ChestHalf::parse("left"), ChestHalf::Left);
         assert_eq!(ChestHalf::parse("right"), ChestHalf::Right);
         assert_eq!(ChestHalf::parse("sideways"), ChestHalf::Single);
+    }
+
+    // --- skull/head ---------------------------------------------------
+
+    #[test]
+    fn skull_type_from_path_covers_the_five_ported_types_and_declines_the_rest() {
+        assert_eq!(
+            SkullType::from_block_path("skeleton_skull"),
+            Some(SkullType::Skeleton)
+        );
+        assert_eq!(
+            SkullType::from_block_path("skeleton_wall_skull"),
+            Some(SkullType::Skeleton)
+        );
+        assert_eq!(
+            SkullType::from_block_path("wither_skeleton_skull"),
+            Some(SkullType::WitherSkeleton)
+        );
+        assert_eq!(
+            SkullType::from_block_path("wither_skeleton_wall_skull"),
+            Some(SkullType::WitherSkeleton)
+        );
+        assert_eq!(
+            SkullType::from_block_path("zombie_head"),
+            Some(SkullType::Zombie)
+        );
+        assert_eq!(
+            SkullType::from_block_path("creeper_wall_head"),
+            Some(SkullType::Creeper)
+        );
+        assert_eq!(
+            SkullType::from_block_path("player_head"),
+            Some(SkullType::Player)
+        );
+        // Real skull types this renderer does not cover — must decline
+        // rather than draw a wrong shape.
+        assert_eq!(SkullType::from_block_path("dragon_head"), None);
+        assert_eq!(SkullType::from_block_path("dragon_wall_head"), None);
+        assert_eq!(SkullType::from_block_path("piglin_head"), None);
+        assert_eq!(SkullType::from_block_path("piglin_wall_head"), None);
+        // Not a skull at all.
+        assert_eq!(SkullType::from_block_path("chest"), None);
+    }
+
+    #[test]
+    fn every_skull_stem_is_in_the_preload_list() {
+        let stems = skull_texture_stems();
+        assert_eq!(stems.len(), 5, "{stems:?}");
+        for t in SKULL_TYPES {
+            assert!(
+                stems.contains(&skull_texture_stem(*t)),
+                "{t:?} missing from the preload list"
+            );
+        }
+        // Distinct sheets — a copy-paste in `skull_texture_stem` collapsing
+        // two types onto one file would still pass a naive coverage check.
+        let unique: std::collections::BTreeSet<_> = stems.iter().collect();
+        assert_eq!(unique.len(), stems.len(), "{stems:?}");
+    }
+
+    #[test]
+    fn every_ported_skull_type_bakes_and_resolves() {
+        let set = set();
+        for t in SKULL_TYPES {
+            let spawn = SkullSpawn {
+                skull_type: *t,
+                ..SkullSpawn::at([0, 0, 0])
+            };
+            let inst = set
+                .resolve_skull(&spawn)
+                .unwrap_or_else(|| panic!("{t:?} did not resolve"));
+            assert!(!inst.part_transforms.is_empty(), "{t:?}");
+            assert_eq!(inst.texture, skull_texture_stem(*t));
+        }
+    }
+
+    /// Ground and wall placement both preserve orientation (`det == +1`),
+    /// same as the chest placements — measured, not assumed, because this is
+    /// the one block-entity placement that *does* apply the entity-style
+    /// `scale(-1, -1, 1)` flip and a sign mistake there would show up as a
+    /// negative determinant, not merely "upside down".
+    #[test]
+    fn skull_placement_preserves_orientation() {
+        for seg in [0u8, 4, 8, 12, 15] {
+            let m = skull_ground_placement_matrix([1, 2, 3], seg);
+            assert!(
+                (m.determinant() - 1.0).abs() < 1e-4,
+                "segment {seg}: det {}",
+                m.determinant()
+            );
+        }
+        for yaw in [0.0_f32, 90.0, 180.0, 270.0] {
+            let m = skull_wall_placement_matrix([1, 2, 3], yaw);
+            assert!(
+                (m.determinant() - 1.0).abs() < 1e-4,
+                "yaw {yaw}: det {}",
+                m.determinant()
+            );
+        }
+    }
+
+    /// Unlike a chest, a floor skull genuinely flips Y — the mirror image of
+    /// `placement_does_not_flip_or_lift`'s chest assertion. Getting this
+    /// backwards would bury the head texture upside down while every bounds
+    /// and determinant check stayed green.
+    #[test]
+    fn ground_skull_flips_y_like_an_entity_head() {
+        let m = skull_ground_placement_matrix([0, 0, 0], 0);
+        let up = m.transform_vector3(Vec3::Y);
+        assert!(up.y < 0.0, "expected an entity-style flip, got {up}");
+    }
+
+    /// The rotation segment spins the head about the block's own centre
+    /// pivot `(0.5, 0, 0.5)`, so that pivot must land in the same world point
+    /// regardless of segment — only the *head*, not the block position,
+    /// rotates.
+    #[test]
+    fn ground_segment_rotates_about_the_block_centre() {
+        let pos = [2, 5, -3];
+        let unrotated = skull_ground_placement_matrix(pos, 0);
+        let rotated = skull_ground_placement_matrix(pos, 8); // 180 degrees
+        let a = unrotated.transform_point3(Vec3::ZERO);
+        let b = rotated.transform_point3(Vec3::ZERO);
+        assert!(a.abs_diff_eq(b, 1e-4), "pivot moved: {a} vs {b}");
+        let expected = Vec3::new(2.5, 5.0, -2.5);
+        assert!(a.abs_diff_eq(expected, 1e-4), "{a}");
+    }
+
+    /// `dir.getStepX()/getStepZ()` recovered by trig against a hand-verified
+    /// table (not derived from the function under test): south `(0, 1)`,
+    /// west `(-1, 0)`, north `(0, -1)`, east `(1, 0)`. A sign slip here
+    /// offsets a wall skull toward the wrong wall while it still renders a
+    /// plausible skull shape.
+    #[test]
+    fn wall_offset_moves_toward_the_named_direction() {
+        let cases = [
+            ("south", 0.0_f32, 0.0_f32, 1.0_f32),
+            ("west", 90.0, -1.0, 0.0),
+            ("north", 180.0, 0.0, -1.0),
+            ("east", 270.0, 1.0, 0.0),
+        ];
+        for (name, yaw, step_x, step_z) in cases {
+            let m = skull_wall_placement_matrix([0, 0, 0], yaw);
+            let origin = m.transform_point3(Vec3::ZERO);
+            let expected = Vec3::new(0.5 - step_x * 0.25, 0.25, 0.5 - step_z * 0.25);
+            assert!(
+                origin.abs_diff_eq(expected, 1e-4),
+                "{name}: got {origin}, expected {expected}"
+            );
+        }
+    }
+
+    /// A chest and a skull share neither model nor texture, so a frame
+    /// holding both must batch them separately — the same coverage the chest
+    /// `planning_batches_by_model_and_texture_and_culls_what_is_behind` test
+    /// gives two chest materials, now across two entirely different corpora,
+    /// proving [`plan_block_entities`]/[`BlockEntityInstance`] are generic
+    /// over block-entity *family*, not just over chest variants.
+    #[test]
+    fn chests_and_skulls_batch_independently_in_one_frame() {
+        let set = set();
+        let chest = set.resolve_chest(&ChestSpawn::at([0, 0, 0])).unwrap();
+        let skull = set.resolve_skull(&SkullSpawn::at([1, 0, 0])).unwrap();
+        let cam = looking_at_origin();
+        let frame = plan_block_entities(
+            &[chest, skull],
+            &Frustum::from_view_projection(cam.view_projection()),
+        );
+        assert_eq!(frame.stats.drawn, 2);
+        assert_eq!(
+            frame.batches.len(),
+            2,
+            "a chest and a skull must not share a batch"
+        );
     }
 }

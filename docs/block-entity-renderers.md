@@ -1,13 +1,41 @@
 # Block entity renderers
 
-**Issue:** [#23](https://github.com/matteopolak/lodestone/issues/23) — still open; chest is
-landed, the other eleven types are not.
+**Issue:** [#23](https://github.com/matteopolak/lodestone/issues/23) — still open; chest and skull
+are landed (skull's screen half is prepared but not yet wired — see
+[Skull](#skull-skeleton-wither-skeleton-zombie-creeper-player)), the rest are not.
+
+## The real vanilla scope, from the registration list — not the issue's guess-list
+
+`BlockEntityRenderers.java`'s static block
+(`.cache/mc/26.2/client-src/net/minecraft/client/renderer/blockentity/BlockEntityRenderers.java:34-61`)
+is the authoritative list: 26 `register(...)` calls (chest counts once for three block types).
+Issue #23's own list — the one this doc used to quote as "still absent" — was hand-recalled and is
+wrong in both directions:
+
+- **`beds` are not on the registration list at all.** A bed is a real block model
+  (`assets/minecraft/models/block/*_bed_head.json` has genuine geometry, verified against the real
+  jar), same shape as the sign correction below. There is no `BedRenderer` anywhere in
+  `client-src`. Nothing to build here.
+- **`item frames` and `end crystals` are not block entities.** Both are `Entity`
+  (`HangingEntity`/`EndCrystal`), drawn by an `EntityRenderer`, not a `BlockEntityRenderer` — out of
+  this issue's scope entirely, tracked wherever entity rendering is.
+- The list is also missing several real entries the issue never mentioned: `mob spawner`
+  (`SpawnerRenderer`, a miniature spinning entity inside the cage), `piston head`
+  (`PistonHeadRenderer`), `end portal`/`end gateway` (their own full-bright shader effects, not
+  cuboid rigs), `beacon` (a light-shaft pipeline, not a cuboid rig), **`skull`** (see below),
+  `structure block`/`test instance block` (creative/dev-only, not player-facing — out of scope),
+  `campfire` (items cooking on top), `brushable block` (suspicious sand/gravel), `trial spawner`,
+  `vault`, and two 26.x additions, `copper golem statue` and `shelf`.
+
+So the honest count is: **3 of 26 registrations landed** (chest/ender chest/trapped chest all through
+`ChestRenderer`), **1 more built but not yet wired** (skull), and the rest — including signs — still
+absent. Picking the next few should read this list, not the original issue body.
 
 ## What it is
 
 The cuboid rigs vanilla's `BlockEntityRenderer`s draw for blocks whose **block model does not
 describe them**. Today: chests (single, double left, double right; every material; the lid
-animation).
+animation) and skull/head geometry (five of vanilla's seven types).
 
 This is not a nice-to-have layer over an existing box. A 26.2 chest has **no block model at all** —
 `assets/minecraft/blockstates/chest.json` points at `block/chest`, and that file is verbatim:
@@ -29,6 +57,36 @@ declares **no model whatsoever** — only text transformations. So there is deli
 *geometry* here; porting one would draw a second board inside the one the terrain mesher already
 produces. Sign block entities are a **text pass**, and that pass is not built (see
 [What is not built](#what-is-not-built)).
+
+**The sign NBT reaches the client, confirmed on the wire, not merely by reading the decode path.**
+`crates/lodestone-world/src/block_entity.rs`'s `BlockEntity.nbt` is generic — it is populated for
+*any* block entity's `BLOCK_ENTITY_DATA` payload the same way regardless of type, which chest already
+proved for its own (usually-empty) NBT. To settle whether that generality actually carries sign text
+rather than assuming it, a throwaway probe (not part of the tree — a standalone binary depending on
+`lodestone-core`/`-model`/`-world`/`-net`/`-v770` as libraries, connected to the creative oracle,
+placed a real `oak_sign` with `front_text`/`back_text` over RCON) read the resulting record straight
+out of a live `World`. It arrived as:
+
+```text
+type_id = 7
+nbt = Compound([
+    ("back_text", Compound([("has_glowing_text", Byte(0)), ("color", String("black")),
+        ("messages", List { elements: [String(""); 4] })])),
+    ("is_waxed", Byte(0)),
+    ("front_text", Compound([("has_glowing_text", Byte(0)), ("color", String("red")),
+        ("messages", List { elements: [String("\"LODESTONE PROBE\""), String("\"\""), ...] })])),
+])
+```
+
+Exactly the shape `SignText.DIRECT_CODEC` implies (per-side `has_glowing_text`/`color`/`messages`,
+plus a sibling `is_waxed`). **So signs are not blocked on wire decode** — the remaining work is a
+small typed parse of this already-arriving `Nbt::Compound` (there is no `SignText` struct yet, only
+the raw payload) and the render pass itself. The render pass is what stayed out of scope this
+session: `gpu/nametag.rs`, the substrate the issue's spec points at for the text quads, was another
+agent's uncommitted work throughout (see [`docs/README.md`](./README.md) or ask the session owner for
+current status before touching it). Building the codec with no consumer to call it would itself be a
+zero-pixel island, so it was left as a spec rather than dead code — the confirmed NBT shape above is
+what the next attempt should decode against.
 
 ## How it works
 
@@ -194,6 +252,73 @@ to nothing, which reads as a broken renderer rather than a missing texture.
 26.2 stitches these into `textures/atlas/chest.png` and submits a `SpriteId`. We bind the individual
 PNGs instead: each sprite **is** the whole 64×64 sheet, so the model's own UVs (normalised against
 64×64 by the bake) address a direct upload identically, and the atlas would only add a UV remap.
+
+## Skull (skeleton, wither skeleton, zombie, creeper, player)
+
+Like chest, `assets/minecraft/models/block/skull.json` is `{"textures":{"particle":"..."}}` — zero
+elements, a hole in the world. Every visible triangle comes from `SkullBlockRenderer`/`SkullModel`.
+
+**Geometry is shared and trivial: one 8×8×8 box.** `SkullModel.createHeadModel()` is a single `"head"`
+part at `PartPose.ZERO`. What differs across vanilla's seven types is the *canvas*: skeleton, wither
+skeleton and creeper skins are 64×32 (`createMobHeadLayer`), zombie and player are 64×64
+(`createHumanoidHeadLayer`, base head only — the `"hat"` overlay child is not ported; see
+`lodestone_assets::block_entity_models::skull_humanoid_model`'s doc for why). Baking the same box
+twice, once per canvas, is the whole model corpus — `skull_mob_model()`/`skull_humanoid_model()` in
+`crates/lodestone-assets/src/block_entity_models.rs`. **Two of vanilla's seven skull types are not
+ported: dragon and piglin.** Both use their own multi-part rigs (`DragonHeadModel`/`PiglinHeadModel`)
+unrelated to the shared box, and both are late-game/rare finds — lower value than the five common
+ones for the "player survives an hour" bar this tier targets.
+`lodestone_render::SkullType::from_block_path` declines them explicitly (draws nothing) rather than
+drawing a wrong shape.
+
+**Placement is the one surprise, and it inverts the chest lesson.** Chest's whole module doc leads
+with "block entities are not Y-flipped, unlike entities" — true for chest, **false for skull**.
+`SkullBlockRenderer.createGroundTransformation`/`createWallTransformation` both end in
+`scale(-1, -1, 1)`, the same flip `entity_model_matrix` uses, because `SkullModel`'s head box is
+authored in the ordinary mob Y-down convention (vanilla reuses a mob's own head geometry for the
+block-entity case) and was never re-authored block-space-up the way `ChestModel` was.
+`skull_ground_placement_matrix`/`skull_wall_placement_matrix` in
+`crates/lodestone-render/src/block_entity.rs` port both transforms exactly, including the ground
+case's `RotationSegment` (16 steps of 22.5°, segment 0 = **north** — not
+[`horizontal_facing_yaw`]'s four-value south-is-0 convention, a different angle system in the same
+file) and the wall case's outward `0.25`-block offset from `Direction.getStepX()/getStepZ()`.
+`skull_placement_preserves_orientation` measures `det == +1` for both (same sign as the entity path,
+not a mirror), and `wall_offset_moves_toward_the_named_direction` pins the offset against a
+hand-verified `Direction` table rather than the function under test.
+
+Player skulls always draw the **default Steve skin** (`entity/player/wide/steve`,
+`DefaultPlayerSkin.getDefaultTexture()`'s own choice). A real profile skin needs a session-server
+lookup and a network fetch — out of scope here, tracked as a gap rather than silently wrong (every
+player skull looks the same rather than looking like a *specific* wrong player).
+
+Texture stems are the **mob skins already on disk for entity rendering** — `skull_texture_stem`
+just names five of them (`entity/{skeleton/skeleton, skeleton/wither_skeleton, zombie/zombie,
+creeper/creeper, player/wide/steve}`), no new asset family. `block_entity_texture_stems()` (new,
+`crates/lodestone-render/src/block_entity.rs`) is the union of `chest_texture_stems()` and
+`skull_texture_stems()` — the shell's `resources::load_block_entity_textures` and this pass's own GPU
+loader (`gpu/block_entities.rs`) both need to iterate the *combined* list, not just chest's, or a
+skull draws every frame with no bind group.
+
+### Skull's status: built, not yet wired — an island by construction, not by omission
+
+Everything CPU-side is in place and tested against the real 26.2 state table: `SkullType` resolution,
+both placements, `BlockEntityModelSet::resolve_skull`, and the shell's `skull_spawn`/`skull_spawns`
+gather (`crates/lodestone-shell/src/block_entities.rs`, reusing `chest_candidates` — already generic
+over block-entity type, so a second scan was never needed). `plan_block_entities`/`BlockEntityInstance`
+needed **zero changes**: `chests_and_skulls_batch_independently_in_one_frame` proves a chest and a
+skull batch correctly in the same frame through the existing generic path.
+
+**What is missing is the wiring into `crates/lodestone-shell/src/gpu.rs`** —
+`RenderState::block_entity_source` and `prepare_block_entities` are still chest-only
+(`BlockEntitySource(Fn(Vec3) -> Vec<ChestSpawn>)`, one hardcoded `resolve_chest` call), and `gpu.rs`
+plus `gpu/*.rs` were another agent's live uncommitted work for the whole of this session, so that file
+could not be touched here. A prepared patch (new `SkullSource` alongside `BlockEntitySource`, a second
+`resolve_skull` pass merged into the same `instances` vec before `plan_block_entities`, plus the two
+one-line `sim.rs`/`app.rs` install calls mirroring the existing chest ones) was handed to the session
+owner rather than applied blind. Until that lands, this is a real island by the letter of `CLAUDE.md`
+rule 1 — the difference from the nine confirmed instances there is that this one is disclosed rather
+than discovered later, and the reason it exists (a file another agent held) is recorded here so
+whoever applies the patch does not have to re-derive it.
 
 ## How to change it
 
@@ -451,20 +576,36 @@ but that is the pure function, not the gate.
 
 ## What is not built
 
-Eleven of the twelve types on #23, in the order the issue puts them:
+Against the real 26-entry registration list (see above), not the issue's original twelve-item guess:
 
-- **Signs** — text only (the board is a block model). Needs: `SignText` NBT decode (`messages`,
-  `color`, `has_glowing_text` per `SignText.DIRECT_CODEC`), the transforms from
-  `StandingSignRenderer` (`RENDER_SCALE 0.6666667`, `TEXT_OFFSET (0, 0.33333334, 0.046666667)`,
+- **Signs** — text only (the board is a block model). NBT arrival is now confirmed on the wire (see
+  above); needs a typed `SignText` parse of the confirmed `Nbt::Compound` shape, then the transforms
+  from `StandingSignRenderer` (`RENDER_SCALE 0.6666667`, `TEXT_OFFSET (0, 0.33333334, 0.046666667)`,
   scale `±0.010416667`, the wall offset `(0, -0.3125, -0.4375)`, 16 `RotationSegment` steps, front
   and back), `MAX_TEXT_LINE_WIDTH 90` / `TEXT_LINE_HEIGHT 10`, and the dye rule
   (`ARGB.scaleRGB(color, 0.4)` normally; full `DyeColor.textColor` plus full-bright plus an outline
   when glowing, with `BLACK_TEXT_OUTLINE_COLOR = -988212` substituted for black). The substrate
   exists: `gpu/nametag.rs` already draws world-space text as coloured quads from a `RasterFont`,
-  including its own two depth passes. Colour must multiply in **gamma** space.
-- Beds, banners (layered patterns from the `banner_patterns` atlas), item frames, shulker boxes
-  (`shulker_boxes` atlas, 16 dyes), the enchanting-table book, bells, conduits, end crystals,
-  decorated pots (`decorated_pot` atlas).
+  including its own two depth passes — but that file was another agent's live work all session and
+  could not be touched here. Colour must multiply in **gamma** space.
+- **Skull** — geometry, placement and gather are built and unit-tested (see the section above); not
+  yet wired into `gpu.rs`'s draw call, for the same off-limits-file reason as signs.
+- Banners (layered patterns from the `banner_patterns` atlas — tracked separately as
+  [#174](https://github.com/matteopolak/lodestone/issues/174), which also covers the shield item
+  sharing the same compositing function), shulker boxes (`shulker_boxes` atlas, 16 dyes), the
+  enchanting-table book (a full animation state machine — `open`/`flip`/`rot`/`time`, all
+  client-simulated, none of it on the wire, closer in scope to the chest lid than to a static model),
+  bells (also animated — a shake driven by `BLOCK_EVENT` `b0 == 1`, a **different** `b0` meaning than
+  chest's own `b0 == 1`; the block's own attachment frame already has real geometry, only the
+  swinging body box is missing), mob spawner (draws a miniature spinning entity inside the cage —
+  reuses full entity rendering, not a simple cuboid rig), piston head, campfire, brushable block,
+  decorated pot (`decorated_pot` atlas; its sides need **up to four independently textured sprites
+  per instance** from NBT `sherds`, which the current `(model, texture)` single-texture-per-instance
+  batch key cannot express as one instance — it would need decomposing into a plain base plus up to
+  four small per-side instances, not a straightforward follow-on to chest/skull), trial spawner,
+  vault, copper golem statue, shelf. End portal/end gateway/beacon are their own shader effects, not
+  cuboid rigs, and structure block/test instance block are creative/dev-only — none of the four
+  belong in "what a survival player sees."
 
 Also unbuilt for chests specifically: the `BrightnessCombiner` that makes a double chest's two halves
 share one light sample, and the `SpecialDates.isExtendedChristmas()` clock behind
@@ -487,6 +628,8 @@ share one light sample, and the `SpecialDates.isExtendedChristmas()` clock behin
 
 - [`entity-rendering.md`](./entity-rendering.md) — the cuboid-rig machinery this reuses.
 - [`gpu-module-layout.md`](./gpu-module-layout.md) — the bind-group budget and pass ordering.
-- Vanilla reference: `.cache/mc/26.2/client-src/net/minecraft/client/{model/object/chest/ChestModel,
-  renderer/blockentity/{ChestRenderer,BlockEntityRenderDispatcher,AbstractSignRenderer,
-  StandingSignRenderer},renderer/Sheets}.java`.
+- Vanilla reference: `.cache/mc/26.2/client-src/net/minecraft/client/{model/object/{chest/ChestModel,
+  skull/SkullModel},renderer/blockentity/{BlockEntityRenderers,ChestRenderer,SkullBlockRenderer,
+  BlockEntityRenderDispatcher,AbstractSignRenderer,StandingSignRenderer},renderer/Sheets}.java`.
+  `BlockEntityRenderers.java` is the registration list itself — read it directly rather than trusting
+  any summary of it, including this doc's, the next time the scope needs re-deriving.

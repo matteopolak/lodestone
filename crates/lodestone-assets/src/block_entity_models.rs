@@ -107,10 +107,11 @@ pub struct BlockEntityModelEntry {
 
 /// Every block-entity model ported so far.
 ///
-/// Three entries, all chest: vanilla genuinely has three separate chest
-/// *layers*, not one layer posed three ways — a double chest's halves are
-/// 15 texels wide instead of 14 and each omits the face that meets its partner,
-/// so `left`/`right` cannot be derived from `single` by a transform.
+/// Three chest layers (vanilla genuinely has three separate chest *layers*,
+/// not one layer posed three ways — a double chest's halves are 15 texels wide
+/// instead of 14 and each omits the face that meets its partner, so
+/// `left`/`right` cannot be derived from `single` by a transform), plus the two
+/// skull/head canvases — see [`skull_mob_model`]'s doc for why there are two.
 pub const BLOCK_ENTITY_MODELS: &[BlockEntityModelEntry] = &[
     BlockEntityModelEntry {
         name: "chest",
@@ -126,6 +127,16 @@ pub const BLOCK_ENTITY_MODELS: &[BlockEntityModelEntry] = &[
         name: "chest_right",
         texture: "entity/chest/normal_right",
         build: chest_double_right_model,
+    },
+    BlockEntityModelEntry {
+        name: "skull_mob",
+        texture: "entity/skeleton/skeleton",
+        build: skull_mob_model,
+    },
+    BlockEntityModelEntry {
+        name: "skull_humanoid",
+        texture: "entity/zombie/zombie",
+        build: skull_humanoid_model,
     },
 ];
 
@@ -251,6 +262,66 @@ pub fn chest_double_right_model() -> EntityModelDef {
     EntityModelDef {
         texture_width: CHEST_SHEET.0,
         texture_height: CHEST_SHEET.1,
+        root,
+    }
+}
+
+/// A skull/head's single box — `SkullModel.createHeadModel()`:
+/// `addBox(-4, -8, -4, 8, 8, 8)` at `PartPose.ZERO`, texel offset `(0, 0)`.
+///
+/// Unlike the chest models, this is authored in the **same Y-down convention
+/// as a mob's own head part** — vanilla never re-authored it block-space-up
+/// the way `ChestModel` was. `SkullBlockRenderer`'s own placement transforms
+/// (`createGroundTransformation`/`createWallTransformation`, ported as
+/// `lodestone_render::block_entity::{skull_ground_placement_matrix,
+/// skull_wall_placement_matrix}`) apply vanilla's `scale(-1, -1, 1)` flip to
+/// compensate, exactly the sign [`crate::entity::entity_model_matrix`] uses.
+/// Porting this box pre-flipped (to look "right" in isolation) would double
+/// the flip once placement is applied.
+fn skull_head_part() -> PartDef {
+    PartDef::new(PartPose::ZERO)
+        .with_cube(CubeDef::new([-4.0, -8.0, -4.0], [8.0, 8.0, 8.0], [0.0, 0.0]))
+}
+
+/// The 64×32-canvas skull head — `SkullModel.createMobHeadLayer()`. Used by
+/// skeleton, wither skeleton and creeper, whose skin PNGs really are 64×32.
+///
+/// **Two models exist for one box, not one.** The head's `texOffs(0, 0)`
+/// placement is identical on both canvases (the cube only occupies the
+/// top-left 32×16 texels regardless of total sheet size — the extra height on
+/// the 64×64 canvas is room for the "hat" overlay and body parts this
+/// renderer does not draw), but UV normalisation divides by the *declared*
+/// canvas size at bake time. Baking one model at 64×32 and sampling a 64×64
+/// skin (or vice versa) would double or halve the head's `v` extent — a
+/// texture-stretch bug invisible in a coverage-only gate, since the mesh
+/// still draws a full box either way.
+#[must_use]
+pub fn skull_mob_model() -> EntityModelDef {
+    let root = PartDef::new(PartPose::ZERO).with_child("head", skull_head_part());
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 32,
+        root,
+    }
+}
+
+/// The 64×64-canvas skull head — `SkullModel.createHumanoidHeadLayer()`
+/// (base head only). Used by zombie (whose skin moved to 64×64) and player
+/// (always 64×64). See [`skull_mob_model`] for why the canvas size is a
+/// second model rather than a parameter.
+///
+/// The real `createHumanoidHeadLayer` also adds a `"hat"` overlay child
+/// (`texOffs(32, 0)`, inflated `0.25`) — not ported. It is per-player
+/// cosmetic geometry (usually empty/transparent) layered *outside* the base
+/// head, and every ported skull type here draws with a fixed skin the hat
+/// layer would just double-draw against; see the module's block-entity-renderers
+/// doc for the tracked gap.
+#[must_use]
+pub fn skull_humanoid_model() -> EntityModelDef {
+    let root = PartDef::new(PartPose::ZERO).with_child("head", skull_head_part());
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 64,
         root,
     }
 }
@@ -384,11 +455,58 @@ mod tests {
     fn every_entry_builds_and_resolves_by_name() {
         for entry in BLOCK_ENTITY_MODELS {
             let def = (entry.build)();
-            assert_eq!(def.texture_width, 64);
-            assert_eq!(def.texture_height, 64);
+            // 64 wide on every canvas so far; height varies (see
+            // `skull_mob_model`'s doc for why 32 and 64 are both real).
+            assert_eq!(def.texture_width, 64, "{}", entry.name);
+            assert!(
+                def.texture_height == 32 || def.texture_height == 64,
+                "{}: unexpected canvas height {}",
+                entry.name,
+                def.texture_height
+            );
             assert!(!crate::entity::bake_entity(&def).is_empty());
             assert_eq!(block_entity_model(entry.name).map(|e| e.name), Some(entry.name));
         }
         assert!(block_entity_model("no_such_model").is_none());
+    }
+
+    /// The skull box is identical on both canvases — only the declared sheet
+    /// size differs, which is exactly the thing a copy-paste between the two
+    /// builders could silently drop.
+    #[test]
+    fn skull_mob_and_humanoid_share_the_same_box_on_different_canvases() {
+        let mob = skull_mob_model();
+        let humanoid = skull_humanoid_model();
+        assert_eq!(mob.texture_width, 64);
+        assert_eq!(mob.texture_height, 32);
+        assert_eq!(humanoid.texture_width, 64);
+        assert_eq!(humanoid.texture_height, 64);
+        assert_eq!(mob.root, PartDef::new(PartPose::ZERO).with_child("head", skull_head_part()));
+        assert_eq!(
+            mob.root.children[0].1.cubes,
+            humanoid.root.children[0].1.cubes,
+            "the head box itself must not differ between the two canvases"
+        );
+    }
+
+    /// A skull is authored Y-down like a mob head (see `skull_head_part`'s
+    /// doc): the box dips *below* its `PartPose::ZERO` pivot, which is the
+    /// opposite sign from every chest box (which sits *above* the floor at
+    /// its own zero pivot). This is the one assertion that would catch the
+    /// box being accidentally re-authored block-space-up like a chest.
+    #[test]
+    fn skull_head_box_extends_below_its_pivot_like_a_mob_head() {
+        let quads = crate::entity::bake_entity(&skull_mob_model());
+        assert!(!quads.is_empty());
+        let mut min_y = f32::MAX;
+        let mut max_y = f32::MIN;
+        for q in &quads {
+            for p in &q.positions {
+                min_y = min_y.min(p[1]);
+                max_y = max_y.max(p[1]);
+            }
+        }
+        assert!(min_y < 0.0, "min y {min_y} should dip below the pivot");
+        assert!(max_y <= 0.0 + 1e-5, "max y {max_y} should not rise above the pivot");
     }
 }
