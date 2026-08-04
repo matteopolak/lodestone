@@ -385,13 +385,19 @@ impl Search {
         self.consecutive_edge_of_world = 0;
 
         for step in &scratch {
-            let entry = EntryRel::of(
-                match node.node.arrival {
-                    Arrival::Still => None,
-                    Arrival::Walking(dir) => Some(dir),
-                },
-                step.kind.dir(),
-            );
+            let arrival_dir = match node.node.arrival {
+                Arrival::Still => None,
+                Arrival::Walking(dir) => Some(dir),
+            };
+            // `WalkDiagonal` needs its own entry classification —
+            // `EntryRel::of` assumes `going` is a single `Dir4`, which a
+            // diagonal is not. `EntryRel::of_diagonal`'s own doc comment
+            // explains why it collapses to `Still`/`Straight`/`Reverse`
+            // rather than needing new variants.
+            let entry = match step.kind {
+                MoveKind::WalkDiagonal(d1, d2) => EntryRel::of_diagonal(arrival_dir, d1, d2),
+                _ => EntryRel::of(arrival_dir, step.kind.dir()),
+            };
             let Some(cost) = self.edge_cost(step, entry) else {
                 continue;
             };
@@ -407,7 +413,7 @@ impl Search {
     /// [`MoveKind::stencil`] ignores `n` and every `Drop` in a direction shares
     /// one generous, `n`-independent stencil (`drop_stencil` in `graph.rs`).
     fn touches_unknown(&self, node: NavNode) -> bool {
-        crate::graph::Dir4::ALL.iter().any(|dir| {
+        let cardinal_or_drop = crate::graph::Dir4::ALL.iter().any(|dir| {
             [
                 MoveKind::Walk(*dir),
                 MoveKind::StepUp(*dir),
@@ -422,6 +428,22 @@ impl Search {
                         .is_none()
                 })
             })
+        });
+        if cardinal_or_drop {
+            return true;
+        }
+        // Same idea, one direction pair per diagonal: `MoveKind::stencil`
+        // ignores which pair it is (all four translate the same four-column
+        // shape), so any one representative per `d1` covers it.
+        crate::graph::Dir4::ALL.iter().any(|d1| {
+            MoveKind::WalkDiagonal(*d1, d1.clockwise())
+                .stencil()
+                .iter()
+                .any(|cell| {
+                    self.view
+                        .state_at(node.x + cell[0], node.y + cell[1], node.z + cell[2])
+                        .is_none()
+                })
         })
     }
 
@@ -489,7 +511,7 @@ impl Search {
                     (delta + 1e-6 - crate::graph::SAFE_FALL_DISTANCE).floor().max(0.0);
                 extra = extra.saturating_add(Ticks::from_f64(half_hearts * self.policy.damage_cost));
             }
-            MoveKind::Walk(_) | MoveKind::Descend(_) => {}
+            MoveKind::Walk(_) | MoveKind::Descend(_) | MoveKind::WalkDiagonal(_, _) => {}
         }
         Some(template.ticks.saturating_add(extra))
     }
@@ -757,6 +779,79 @@ mod tests {
         assert_eq!(state.position.x.floor() as i32, 12);
     }
 
+    /// The diagonal counterpart of `the_planned_cost_matches_what_executing_the_plan_costs`
+    /// — the same real-physics replay, but over a plan that is `WalkDiagonal`
+    /// edges end to end, which is the direct answer to whether
+    /// `WalkDrive::arrived`/`done` (and therefore the executor, not merely the
+    /// cost simulation) still hold for a genuinely non-cardinal approach.
+    ///
+    /// They do, and the reason is structural rather than luck:
+    /// `WalkDrive::inside_cell` already ANDs `floor(x) == cell[0]` with
+    /// `floor(z) == cell[2]` — it was never a single-axis test the way the cost
+    /// model's own sub-tick fraction turned out to be (see `completion_fraction`'s
+    /// doc comment for the bug that *was* real). `WalkDiagonal` also never
+    /// changes surface height (same-cell-height family, like `Walk`), so the
+    /// straddle trap `StepUp`/`Descend`/`Drop` needed `arrived`'s surface-height
+    /// check for does not apply here either — a diagonal never straddles two
+    /// *different* surfaces at once, only two different horizontal cells.
+    #[test]
+    fn the_planned_cost_matches_what_executing_a_diagonal_plan_costs() {
+        use crate::drive::WalkDrive;
+        use lodestone_physics::{PlayerState, Vec3d};
+
+        let view = flat(40);
+        let mut s = search(
+            view.clone(),
+            Box::new(AtBlock { x: 5, y: 1, z: 5 }),
+            NavPolicy::default(),
+        );
+        assert_eq!(s.run(Budget { nodes: 1_000 }), Outcome::Reached);
+        let plan = s.best_plan().expect("a plan");
+        assert!(
+            plan.edges()
+                .iter()
+                .all(|e| matches!(e.kind, MoveKind::WalkDiagonal(_, _))),
+            "{:?}",
+            plan.edges()
+        );
+
+        let profile = PhysicsProfile::mc_1_21();
+        let mut state = PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0);
+        state.on_ground = true;
+        let mut actual = 0u32;
+        for (i, edge) in plan.edges().iter().enumerate() {
+            let drive = WalkDrive {
+                cell: [edge.to.x, edge.to.y, edge.to.z],
+                surface: edge.to_surface,
+                brake: i + 1 == plan.len(),
+                sprint: false,
+                steer: true,
+                jump: false,
+            };
+            let mut edge_ticks = 0;
+            while !drive.done(&state) && edge_ticks < 60 {
+                let step = drive.tick(&state);
+                state.yaw = step.yaw;
+                state = state.with_movement_speed(f64::from(profile.base_movement_speed));
+                lodestone_physics::tick(&mut state, step.input, view.as_ref(), &profile);
+                edge_ticks += 1;
+                actual += 1;
+            }
+            assert!(edge_ticks < 60, "edge {i} never completed");
+        }
+
+        let planned = plan.total_cost().as_f64();
+        let error = f64::from(actual) - planned;
+        assert!(
+            error.abs() < 24.0,
+            "planned {planned:.1} ticks, executed {actual} ({error:+.1})"
+        );
+        // And it actually arrived, on **both** axes — the exact thing a
+        // single-axis `arrived`/`done` could get away with faking.
+        assert_eq!(state.position.x.floor() as i32, 5);
+        assert_eq!(state.position.z.floor() as i32, 5);
+    }
+
     /// The surface a step is costed against is the block the **feet rest on**, which
     /// for a partial block is the destination cell itself and not the cell below it.
     ///
@@ -945,11 +1040,25 @@ mod tests {
         }
     }
 
-    /// A path with a turn costs more than a straight path of the same length,
-    /// because the templates measured the turn. Confirms the penalty and the
-    /// template both reach the search.
+    /// `docs/baritone-port.md` §4.1's whole point in having `WalkDiagonal` at
+    /// all: reaching a 45°-offset goal via **five diagonal edges** must cost
+    /// less than reaching an *equal Manhattan-distance* goal that can only be
+    /// walked cardinally in **ten**. Before `WalkDiagonal` existed this
+    /// comparison was the opposite claim ("the dog-leg costs more, because it
+    /// needs a turn") — the graph was 4-connected then, so `(5, 5)` really
+    /// was a ten-edge zigzag with an extra turn baked in. It is now an
+    /// eight-connected graph, and `(5, 5)` is the cheap route, not the dear
+    /// one: this test is the one this crate's own generalisation from M1 to
+    /// M2's diagonal made obsolete in its old form, kept here in its new one
+    /// so the search's actual advantage is never assumed, only measured.
+    ///
+    /// This is also the gate `docs/baritone-port.md`'s brief for this work
+    /// calls the "exact resulting path" check: the plan to `(5, 5)` must
+    /// actually **use** `WalkDiagonal` edges — cheaper-in-theory and
+    /// cheaper-in-practice are different claims, and only the second is
+    /// worth anything to a player watching the bot walk.
     #[test]
-    fn a_dog_leg_costs_more_than_a_straight_run_of_equal_length() {
+    fn a_diagonal_reachable_goal_beats_an_equal_manhattan_cardinal_only_goal() {
         let cost_to = |gx: i32, gz: i32| {
             let mut s = search(
                 flat(30),
@@ -957,14 +1066,78 @@ mod tests {
                 NavPolicy::default(),
             );
             s.run(Budget { nodes: 20_000 });
-            s.best_plan().expect("a plan").total_cost()
+            s.best_plan().expect("a plan")
         };
-        // Both are 10 orthogonal steps in a 4-connected graph.
+        // Both goals are 10 blocks of Manhattan distance from the start.
         let straight = cost_to(10, 0);
-        let dog_leg = cost_to(5, 5);
+        let diagonal = cost_to(5, 5);
         assert!(
-            dog_leg > straight,
-            "dog-leg {dog_leg} should exceed straight {straight}"
+            diagonal.total_cost() < straight.total_cost(),
+            "diagonal-reachable {} should beat the cardinal-only equal-Manhattan-distance {}",
+            diagonal.total_cost(),
+            straight.total_cost()
         );
+        assert_eq!(diagonal.len(), 5, "five diagonal edges, not ten cardinal ones");
+        assert!(
+            diagonal
+                .edges()
+                .iter()
+                .all(|e| matches!(e.kind, MoveKind::WalkDiagonal(_, _))),
+            "{:?}",
+            diagonal.edges()
+        );
+        assert_eq!(diagonal.terminal().x, 5);
+        assert_eq!(diagonal.terminal().z, 5);
+    }
+
+    /// The unreachable control for `WalkDiagonal`: a one-block-wide,
+    /// L-shaped corridor — walled solid on both sides everywhere off the path
+    /// itself — must force a cardinal-only route to the same `(5, 5)` goal
+    /// the previous test reaches diagonally, because a diagonal's shoulder
+    /// check (`diagonal_step`) can never find *both* shoulders open when
+    /// there is no two-dimensional open space for them to be open *in*. This
+    /// is the "did the detector actually fire" standard the M1/M2 cardinal
+    /// controls (`a_boxed_in_search_fails_rather_than_returning_a_useless_plan`,
+    /// `an_ascend_taller_than_the_jump_apex_is_refused`) already hold to —
+    /// and it is a real before/after, not a test that could never have
+    /// failed: an earlier version of this control walled only the direct
+    /// diagonal line's own shoulders, and the search simply shifted the
+    /// diagonal run over by one row to dodge it, still using four
+    /// `WalkDiagonal` edges. Only removing all room for a shoulder to exist
+    /// closes that escape.
+    #[test]
+    fn a_diagonal_walled_off_at_every_shoulder_forces_the_cardinal_only_route() {
+        let facts = Arc::new(FactsTable::build(&FixtureCensus));
+        let mut view = GridView::new(facts, AIR, -64, 320, Some((-2, -2, 8, 8)));
+        // Solid everywhere, at foot height and head height, off the corridor.
+        view.fill(-2, 0, -2, 8, 0, 8, STONE);
+        view.fill(-2, 1, -2, 8, 2, 8, STONE);
+        // Carve the one-block-wide L: east along z = 0 from x = 0 to 5, then
+        // north along x = 5 from z = 0 to 5.
+        for x in 0..=5 {
+            view.set(x, 1, 0, AIR);
+            view.set(x, 2, 0, AIR);
+        }
+        for z in 0..=5 {
+            view.set(5, 1, z, AIR);
+            view.set(5, 2, z, AIR);
+        }
+        let view = Arc::new(view);
+
+        let mut s = search(
+            view,
+            Box::new(AtBlock { x: 5, y: 1, z: 5 }),
+            NavPolicy::default(),
+        );
+        s.run(Budget { nodes: 20_000 });
+        let plan = s.best_plan().expect("still reachable along the corridor");
+        assert!(
+            plan.edges()
+                .iter()
+                .all(|e| matches!(e.kind, MoveKind::Walk(_))),
+            "a one-block-wide corridor leaves no room for any diagonal shoulder: {:?}",
+            plan.edges()
+        );
+        assert_eq!((plan.terminal().x, plan.terminal().z), (5, 5));
     }
 }

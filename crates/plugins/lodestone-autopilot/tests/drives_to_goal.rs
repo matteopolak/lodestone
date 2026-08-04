@@ -907,4 +907,127 @@ mod real_collision {
             "the plugin's own status resource must agree that it arrived"
         );
     }
+
+    // --- M2: WalkDiagonal over real, jar-derived collision ---
+    //
+    // `lodestone_nav::graph`'s own unit tests
+    // (`a_diagonal_over_open_flat_ground_is_legal`,
+    // `a_diagonal_across_a_blocked_corner_is_refused`) prove the corner-cutting
+    // rule against `FixtureCensus` — the same "world" species of vacuous test
+    // the slab and step-up gates above already exist to close for their own
+    // kinds. This closes it for `WalkDiagonal`: real `minecraft:stone`, through
+    // the real `VersionAdapter`/`AdapterCensus`/`FactsTable` chain, and —
+    // unlike the two ECS-driven gates above — through `lodestone_autopilot`'s
+    // own [`compute_plan`], which is the same function a real "plan this route"
+    // caller would use and returns the [`Plan`] object directly, so the
+    // *exact* resulting path (which edges, in which order) is inspectable
+    // rather than merely inferred from where the player ends up 400 ticks
+    // later.
+
+    use lodestone_autopilot::compute_plan;
+    use lodestone_nav::{AdapterCensus, MoveKind, NavPolicy};
+
+    /// Real flat `minecraft:stone` at world `y = 0` everywhere in
+    /// `-radius..=radius` chunk columns, `minecraft:air` above — plus one
+    /// optional single-block real-stone post at `(wall_x, 1, wall_z)`, for the
+    /// corner-blocking control below. `None` means an open floor.
+    fn diagonal_world(radius: i32, stone: u32, air: u32, wall: Option<(i32, i32)>) -> World {
+        let mut world = World::new();
+        let block_kind = PaletteKind::block_states();
+        let biome_kind = PaletteKind::biomes();
+        const SECTION_COUNT: usize = 4;
+
+        for cx in -radius..=radius {
+            for cz in -radius..=radius {
+                let mut column = ChunkColumn::new(0, SECTION_COUNT, block_kind, biome_kind, air, 0);
+                for lx in 0..16i32 {
+                    for lz in 0..16i32 {
+                        let wx = cx * 16 + lx;
+                        let wz = cz * 16 + lz;
+                        column.set_block(lx as usize, 0, lz as usize, stone);
+                        if wall == Some((wx, wz)) {
+                            column.set_block(lx as usize, 1, lz as usize, stone);
+                        }
+                    }
+                }
+                let light = ColumnLight::new(SECTION_COUNT);
+                let chunk = LoadedChunk::new(column, light, Heightmaps::default(), Vec::new());
+                world.load(ChunkPos::new(cx, cz), chunk);
+            }
+        }
+        world
+    }
+
+    fn real_facts() -> Arc<lodestone_nav::FactsTable> {
+        Arc::new(lodestone_nav::FactsTable::build(&AdapterCensus(&RealDataAdapter)))
+    }
+
+    /// Predicted path: five `WalkDiagonal` edges straight from `(0, 1, 0)` to
+    /// `(5, 1, 5)`, over a real, flat, jar-derived stone floor with nothing to
+    /// block any of the four shoulders a diagonal step needs.
+    #[test]
+    fn a_diagonal_over_real_flat_stone_is_used_for_the_whole_route() {
+        let stone = real_state_id("minecraft:stone");
+        let air = real_state_id("minecraft:air");
+        let world = diagonal_world(3, stone, air, None);
+
+        let plan = compute_plan(
+            &world,
+            Vec3d::new(0.5, 1.0, 0.5),
+            BlockPos::new(5, 1, 5),
+            real_facts(),
+            3,
+            NavPolicy::default(),
+            10_000,
+        )
+        .expect("a real flat floor has no obstruction to refuse the diagonal");
+
+        assert_eq!(plan.len(), 5, "{:?}", plan.edges());
+        assert!(
+            plan.edges()
+                .iter()
+                .all(|e| matches!(e.kind, MoveKind::WalkDiagonal(_, _))),
+            "{:?}",
+            plan.edges()
+        );
+        assert_eq!((plan.terminal().x, plan.terminal().z), (5, 5));
+    }
+
+    /// The unreachable control: a single real `minecraft:stone` block sitting
+    /// on top of the floor at `(1, 1, 0)` — the East shoulder of the first
+    /// diagonal step toward `(5, 1, 5)` — must refuse that one diagonal edge,
+    /// forcing the plan's first move to be an ordinary cardinal `Walk`
+    /// instead. This is real per-state collision data doing the refusing, not
+    /// `FixtureCensus`'s synthetic one: a regression that only broke the
+    /// corner-cutting check's path through real jar data (as opposed to the
+    /// nav crate's own hand-built fixture) would be invisible to every other
+    /// gate in this file and caught only here.
+    #[test]
+    fn a_real_stone_block_at_the_shoulder_refuses_that_one_diagonal_edge() {
+        let stone = real_state_id("minecraft:stone");
+        let air = real_state_id("minecraft:air");
+        let world = diagonal_world(3, stone, air, Some((1, 0)));
+
+        let plan = compute_plan(
+            &world,
+            Vec3d::new(0.5, 1.0, 0.5),
+            BlockPos::new(5, 1, 5),
+            real_facts(),
+            3,
+            NavPolicy::default(),
+            10_000,
+        )
+        .expect("still reachable by a cardinal detour around the one blocked shoulder");
+
+        let first = plan.edges().first().expect("a non-empty plan");
+        assert!(
+            matches!(first.kind, MoveKind::Walk(_)),
+            "the real stone post at the East shoulder must refuse the first diagonal edge: {:?}",
+            plan.edges()
+        );
+        assert!(
+            !matches!(first.kind, MoveKind::WalkDiagonal(_, _)),
+            "sanity: Walk and WalkDiagonal are mutually exclusive kinds"
+        );
+    }
 }

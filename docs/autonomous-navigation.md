@@ -12,11 +12,12 @@ Two crates under [`crates/plugins/`](../crates/plugins/) implementing M1 and par
   goal resource in, `MovementIntent`/`LookIntent` components out, through the exact same seam
   documented in [`docs/plugin-api.md`](./plugin-api.md).
 
-**Where this stands, honestly:** `lodestone-nav` implements `Walk`, `StepUp`, `Descend` and `Drop`
-(M2's real-terrain kinds bar diagonals and climbing — see §"M2, so far" below) plus segmentation
-(a journey longer than one snapshot no longer stalls at the boundary). `WalkDiagonal` and `Climb`
-are **not** implemented; breaking and placing are M4/M5. Point the plugin at a reachable block —
-now including one a block or two up, down, or off a short drop — and it walks, climbs or falls
+**Where this stands, honestly:** `lodestone-nav` implements `Walk`, `StepUp`, `Descend`, `Drop` and
+`WalkDiagonal` (M2's real-terrain kinds bar climbing — see §"M2, so far" below) plus segmentation
+(a journey longer than one snapshot no longer stalls at the boundary). `Climb` is **not**
+implemented and is stopped deliberately rather than rushed (see "`Climb`: stopped, and why" below);
+breaking and placing are M4/M5. Point the plugin at a reachable block — now including one a block
+or two up, down, or off a short drop, or one a 45° corner-cut away — and it walks, jumps or falls
 there, planning the next leg while still walking the current one if the goal is further than one
 snapshot away. That is still deliberately not a finished bot.
 
@@ -127,19 +128,153 @@ reachable through this test if a second search actually ran and its plan was act
   `bevy_ecs`, `bevy_app`) is a version crate, so the workspace dependency does not compromise the
   version seam.
 
+### `Climb`: stopped, and why
+
+`docs/baritone-port.md` §9 names `Climb` as the other M2 kind alongside `WalkDiagonal`. It is
+**not implemented**, and this was a deliberate stop rather than a rushed third generalisation, made
+after `WalkDiagonal` landed and was gated — following exactly the brief this pass was handed
+("stopping with a written scope is a good outcome here; a rushed third frame is not").
+
+The reason is structural, not a time-boxing excuse: **`Climb` needs a real second *script*, not
+just a second cost-model frame.** Every kind implemented so far — `Walk`, `StepUp`, `Descend`,
+`Drop`, `WalkDiagonal` — shares one physical shape: aim at the destination cell's horizontal centre
+and either brake or don't (`docs/baritone-port.md` §4.8, and this crate's own "`MoveKind` has five
+variants now" entry above records that `WalkDiagonal` needed zero changes to `drive::edge_drive`
+because of it). Climbing a ladder or a vine is not that shape at all — `docs/baritone-port.md` §2.3's
+own catalogue says as much: "pressing forward while airborne beside a climbable block makes you
+grab and climb it instead of moving forward", and holding a direction key against a climbable
+column is the entire mechanism, with no horizontal aiming involved once mounted. `WalkDrive`'s
+`target()`/`inside_cell()`/`arrived()` are all expressed in terms of a horizontal destination cell
+and a single surface height; a ladder's own "are we done" question is about a *column* and a
+*vertical* position, which is a different completion test, not a parameter to the existing one.
+
+Concretely, `Climb` would need at minimum:
+
+- **A second `DriveTick` producer** (`docs/autonomous-navigation.md`'s own "`MoveKind` has five
+  variants now" entry already flagged this as the next thing that should grow `edge_drive`'s
+  `match` for real) — one that holds a direction key rather than solving `(forward, strafe)` from a
+  world-space direction, and mounts/dismounts a `Climb` edge as two phases the way `Break`/`Place`
+  are already documented as two-phase in `docs/baritone-port.md` §4.8.
+- **A vertical cost-model frame.** `TemplateTable::simulate`'s two existing frames are `+x`
+  (cardinal) and `+x, -z` (diagonal, this pass); a ladder's own frame is `+y` (or `-y` descending,
+  capped at a different rate per `docs/baritone-port.md` §4.3's own worked table: `0.2` b/t up,
+  `0.15` b/t down). Nothing here suggests that frame is hard to build — the stencil-world and
+  entry-state machinery both generalise the same way `WalkDiagonal`'s did — but it is real,
+  additional, untested work, not a parameter to the frame this pass already built.
+- **A real legality predicate** over `BlockFacts::climbable`, including mounting (approaching a
+  climbable column while grounded, per the airborne-grab trap above) and dismounting (stepping off
+  the top or bottom onto ordinary ground).
+
+None of this is started. `MoveKind` has no `Climb` variant, `BlockFacts::climbable` is read by
+nothing in this crate yet, and no stencil, legality rule or template key exists for it. This is
+recorded here rather than left to be rediscovered, exactly as `WalkDiagonal`'s own former "not
+implemented" note (removed from `## What it is` above now that it is done) was recorded by the
+predecessor who stopped short of it.
+
 ## How to change it, and the gotchas
 
-- **`MoveKind` has four variants now — `Walk`, `StepUp`, `Descend`, `Drop(Dir4, n)` — and the M1
-  forcing function already did its job once.** `drive::edge_drive` used to have
-  `let lodestone_nav::MoveKind::Walk(_) = edge.kind;`, an irrefutable-pattern assertion that stopped
-  compiling the moment a second kind landed, forcing a real `match` rather than a silent mis-handle.
-  The answer for all three M2 additions turned out to be "no new script needed" — `WalkDrive` already
-  aims at the destination cell centre and brakes-or-doesn't identically for all four; the only
-  physical difference is `WalkDrive::jump`, a plain bool set for `StepUp` only. `WalkDiagonal` and
-  `Climb` are **not implemented** (M2's own scope stopped short of them this pass — see
-  `docs/baritone-port.md` §9's M2 status note); `Climb` in particular will need a real second script
-  (holding a direction key against a ladder, not aiming at a cell centre), which is the next thing
-  that should grow `edge_drive`'s `match` for real.
+- **`MoveKind` has five variants now — `Walk`, `StepUp`, `Descend`, `Drop(Dir4, n)`,
+  `WalkDiagonal(Dir4, Dir4)` — and the M1 forcing function already did its job twice.**
+  `drive::edge_drive` used to have `let lodestone_nav::MoveKind::Walk(_) = edge.kind;`, an
+  irrefutable-pattern assertion that stopped compiling the moment a second kind landed, forcing a
+  real `match` rather than a silent mis-handle. The answer for **all four** M2 additions turned out
+  to be "no new script needed" — `WalkDrive` already aims at the destination cell centre (both `x`
+  *and* `z`, unconditionally) and brakes-or-doesn't identically regardless of how many axes moved;
+  the only physical difference across all five variants is `WalkDrive::jump`, a plain bool set for
+  `StepUp` only. `edge_drive` needed **zero** changes to add `WalkDiagonal` — the entire executor
+  layer generalised for free. `Climb` is the one that will not: see "`Climb`: stopped, and why"
+  below.
+- **`WalkDiagonal` generalised cleanly in three places and needed real new work in two — knowing
+  which was which is the actual deliverable, not just the code.** Clean generalisations, each
+  reusing an existing mechanism verbatim: the **executor** (`drive.rs`, above); the **legality
+  stencil pattern** (`graph::diagonal_step` reuses `walk_step`'s own hazard/head-room checks for its
+  two shoulders, and `diagonal_stencil` is `column_stencil`'s four-column generalisation of the same
+  idea); and the **heuristic** (`goal::octile`'s doc comment already said it would be exact once
+  this landed, and it is — see below). Two things needed a genuine second frame:
+  - **The cost model's canonical simulation frame.** `cost::TemplateTable::simulate` used to place a
+    kind's destination at `[1, 1 + rise, 0]` — a pure `+x` canonical frame every cardinal kind
+    shares. `WalkDiagonal` moves along `+x` **and** `-z` at once (the canonical pair is always
+    `(North, East)`; every real diagonal is rotated onto it, exactly as every real cardinal direction
+    already rotates onto `+x`), so the destination is `[1, 1, -1]` and the entry-state formulas
+    needed a genuine two-axis treatment — see `EntryRel::of_diagonal`'s own doc comment for why that
+    turned out to need only **three** entry classes (`Still`/`Straight`/`Reverse`, reusing the
+    cardinal position formulas verbatim) rather than five: a cardinal arrival is always exactly `45°`
+    or `135°` off a diagonal's own heading, never `0°`, `90°` or `180°`, and the diagonal's own mirror
+    symmetry makes the two `45°` members (and the two `135°` members) of each pair cost-equivalent.
+  - **The sub-tick completion fraction — and this one was a real, found bug, the diagonal analogue of
+    the `arrived()` straddle the predecessor found for `Descend`/`Drop`.** `simulate`'s "the boundary
+    was crossed partway through this tick, don't charge a whole tick for it" refinement was
+    hardcoded to `x` alone, because every cardinal kind only ever moves along `x`. `WalkDrive::done`
+    requires **both** `x` and `z` inside the destination cell, and a diagonal's two axes can (and
+    typically do) cross their own boundaries on *different* ticks — so on the tick `done()` first
+    fires, whichever axis crossed earlier is no longer moving toward anything meaningful, and
+    measuring "how far into this tick" against a boundary crossed ticks ago produces a number with no
+    physical meaning. Fixed by `cost::completion_fraction`, which only credits an axis that is
+    **newly** inside its target cell this tick, and — when both are newly inside on the same tick —
+    takes the **later** (larger) of the two, since completion needs both. Provably backward
+    compatible with every cardinal kind (`z`'s target always equals its start, so it is never "newly
+    inside" and never contributes — see the function's own doc comment and
+    `completion_fraction_matches_the_original_single_axis_formula_when_z_never_moves`), so the fix
+    only ever changes `WalkDiagonal`'s own numbers.
+  - **A real, load-bearing side effect of the frame change:** `cost::TemplateTable::cheapest_ticks_per_block`
+    used to scan only steady-state *cardinal* speed on the reasoning that nothing moves faster per
+    block than continuing in a straight line. That reasoning broke the moment `WalkDiagonal` existed:
+    its `Reverse` entry class measured **~3.09 ticks per octile block** against a cardinal-only
+    heuristic rate of **~3.46** — the heuristic *overestimating* true cost for a diagonal approached
+    that way, a genuine admissibility violation this crate's own `debug_assert`-backed contract
+    exists to forbid. Not because a diagonal is actually faster than steady state — because
+    `Reverse`'s aligned axis inherits almost no residual distance from a prior cardinal edge's own
+    **boundary**-crossing completion (`WalkDrive::done` is a cell-boundary test, not a
+    "reached-centre" test). Fixed by also scanning every diagonal template `EntryRel::of_diagonal`
+    can actually produce into the same minimum — see `cheapest_ticks_per_block`'s own doc comment and
+    `the_heuristic_rate_still_bounds_every_diagonal_entry_classs_own_rate`.
+  - **One measured number that does not match the design doc's own estimate, recorded rather than
+    quietly reconciled:** `docs/baritone-port.md` §4.1 says a diagonal should cost "a hair below
+    `sqrt(2)` times a straight step". Measured here (`Straight` entry, open flat ground): **~1.17×**,
+    not `~1.41×` — and `Reverse` entry measures **~0.89×**, genuinely *cheaper* than one cardinal
+    step. The reason is the same boundary-vs-centre distinction above: the design doc's figure
+    describes a full centre-to-centre Euclidean crossing, and `WalkDrive::done` measures a
+    cell-boundary crossing on both axes — a different, smaller distance for exactly the entry classes
+    that inherit a "just crossed a boundary" position from a prior cardinal edge. What actually
+    matters for the search (a diagonal must beat a two-edge cardinal detour of the same net
+    displacement) still holds — see `a_diagonal_step_costs_less_than_two_cardinal_steps` — so this is
+    a genuine finding about *why* the number differs, not a bug needing a fix.
+  - **The corner-cutting rule is real vanilla source, cited, not intuition.** A diagonal can be
+    physically blocked even with an open destination cell — the player's `0.6`-wide body clips a
+    solid corner unless both orthogonal neighbours ("shoulders") are clear. The discrete rule comes
+    from the *mob* pathfinder's own diagonal check —
+    `WalkNodeEvaluator.isDiagonalValid(pos, ew, ns)`
+    (`.cache/mc/26.2/src/net/minecraft/world/level/pathfinder/WalkNodeEvaluator.java:167-182`):
+    both shoulders must be legally walkable *and* neither may sit above the current cell
+    (`ns.y > pos.y || ew.y > pos.y` refuses outright, before cost is ever considered) — citing this
+    is deriving a real Minecraft fact about the moving body's shape from real source, not extending
+    the mob pathfinder itself (`docs/baritone-port.md` §3.4's "do not extend it" is about the
+    pathfinder's *search*, not about facts a player-navigator can independently derive from the same
+    source). `graph::diagonal_step` reuses `walk_step` for the "legally walkable" half and adds the
+    `y <= from.y` gate on top — including the case a plain `walk_step` reuse would miss: a shoulder
+    that is itself a perfectly legal one-cell-**up** `Walk` (stepping off soul sand onto stone beside
+    it) is still refused as a diagonal shoulder, exactly as vanilla refuses it
+    (`a_shoulder_that_is_a_legal_walk_but_one_cell_higher_still_refuses_the_diagonal`). One real
+    vanilla permissiveness is deliberately **not** replicated — accepting a strictly-lower shoulder
+    regardless of hazard — because it does not fit this crate's own conservative hazard policy; see
+    `diagonal_step`'s own doc comment.
+  - **`WalkDiagonal`'s exit `Arrival` collapses onto its first component (`Arrival::Walking(d1)`)
+    rather than gaining a genuinely diagonal variant, and this is a real, bounded approximation, not
+    an oversight.** `NavNode::try_pack`'s 64-bit key spends exactly 3 bits (0..=7) on
+    `Arrival::index()`, of which only 3 (`5, 6, 7`) are free — one short of the 4 a full diagonal
+    arrival set needs — and the other 61 bits are already exactly spent covering the real world
+    border (`±29,999,984`), so widening the field is not a free edit. The cost is a slightly
+    approximate `turn_penalty` charge on whichever edge follows a diagonal (see
+    `EntryRel::of_diagonal`'s own doc comment) — a *preference*, not a measurement, and therefore a
+    cheap place to absorb the approximation.
+  - **`WalkDrive::arrived()`/`done()` needed no change for a diagonal approach, and this is verified,
+    not assumed.** Unlike the cost model's sub-tick fraction, `WalkDrive::inside_cell` was already a
+    two-axis test (`floor(x) == cell[0] && floor(z) == cell[2]`), and `WalkDiagonal` never changes
+    surface height (same-cell-height family, like `Walk`), so the straddle trap `StepUp`/`Descend`/
+    `Drop` needed `arrived`'s own surface-height check for does not apply — a diagonal never
+    straddles two *different* surfaces, only two different horizontal cells at once.
+    `the_planned_cost_matches_what_executing_a_diagonal_plan_costs` replays a real diagonal plan
+    through the real integrator end to end and confirms both axes actually arrive, not just one.
 - **`fall_step` (M2) unifies `Descend` and `Drop` into one legality function, not two, because a
   falling body stops at the first surface it reaches.** There is never a family of "try landing 2, 3,
   4 cells down" — see `graph.rs`'s own doc comment on `fall_step` for the reasoning and the hazard
