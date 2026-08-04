@@ -29,7 +29,9 @@ use lodestone_model::{BlockPos, Vec3};
 
 use super::goal::GoalSelector;
 use super::mob::MobController;
-use crate::pathfinding::{MobShape, PathFinder, PathNavigator, PathParams, PathStart, PathWorld};
+use crate::pathfinding::{
+    MobShape, PathFinder, PathNavigator, PathParams, PathStart, PathType, PathWorld,
+};
 
 /// Vanilla `Animal::setInLove`'s love-mode duration, in ticks
 /// (`.cache/mc/26.2/src/net/minecraft/world/entity/animal/Animal.java:174`,
@@ -56,6 +58,28 @@ pub const PARENT_AGE_AFTER_BREEDING: i32 = 6000;
 /// call, and reaching this value is detonation
 /// (`Creeper.java:144-146`, `explodeCreeper()`).
 pub const MAX_SWELL: i32 = 30;
+
+/// How long a mob remembers who hurt it, in ticks. Vanilla `LivingEntity.tick`
+/// clears `lastHurtByMob` once the record ages past this
+/// (`.cache/mc/26.2/src/net/minecraft/world/entity/LivingEntity.java:493`,
+/// `else if (this.tickCount - this.lastHurtByMobTimestamp > 100)`), which is
+/// what bounds `HurtByTargetGoal`'s retaliation window
+/// (`ai/goal/target/HurtByTargetGoal.java:34-36` reads exactly that pair).
+pub const LAST_HURT_BY_TICKS: i32 = 100;
+
+/// How long a mob stays panicked after taking damage, in ticks. Vanilla's
+/// `PanicGoal.shouldPanic` (`ai/goal/PanicGoal.java:61-63`) tests
+/// `getLastDamageSource() != null`, and `getLastDamageSource` self-clears once
+/// the stamp ages past this
+/// (`.cache/mc/26.2/src/net/minecraft/world/entity/LivingEntity.java:1420-1421`,
+/// `if (this.level().getGameTime() - this.lastDamageStamp > 40L)`).
+///
+/// Note this is a **different, shorter** window than [`LAST_HURT_BY_TICKS`]:
+/// vanilla panics off the *damage source* and retaliates off the *attacking
+/// mob*, two independently-decaying records, so a mob keeps chasing its
+/// attacker for 60 ticks after it stops fleeing. Collapsing them into one
+/// timer would be a silent behaviour change, not a simplification.
+pub const PANIC_DAMAGE_TICKS: i32 = 40;
 
 /// A tiny deterministic RNG (SplitMix64) so a `NavigatingMob` needs no `rand`
 /// dependency and its stroll behaviour is reproducible in tests.
@@ -188,6 +212,76 @@ pub struct NavigatingMob<'w> {
     /// [`bred`](Self::bred)'s "flag the host drains" shape — this seam has no
     /// notion of triggering an explosion, only of the *event* happening.
     detonated: bool,
+    /// Host injection point, refreshed once per tick: the nearest player's
+    /// position, or `None` when no player is in perception range. Drives
+    /// [`MobController::nearest_player`] and therefore
+    /// [`LookAtPlayerGoal`](super::goals::LookAtPlayerGoal).
+    ///
+    /// Host-injected for the same reason as
+    /// [`partner_candidate`](Self::partner_candidate): `lodestone-entity` has
+    /// no concept of a *player*, let alone a population of them, so vanilla's
+    /// `level.getNearestPlayer(lookAtContext, mob, x, eyeY, z)`
+    /// (`ai/goal/LookAtPlayerGoal.java:62`) is the host's search to run. The
+    /// goal still applies its own `lookDistance` cut-off on top, so a host
+    /// that over-reports is merely wasteful, not wrong.
+    nearest_player: Option<Vec3>,
+    /// Host injection point, refreshed once per tick: the position of a nearby
+    /// entity currently tempting this mob, or `None`. Drives
+    /// [`MobController::temptation`] and therefore
+    /// [`TemptGoal`](super::goals::TemptGoal).
+    ///
+    /// The host owns **both** halves of vanilla's test: the range (an
+    /// attribute, `Attributes.TEMPT_RANGE`, default `10.0` —
+    /// `ai/attributes/Attributes.java:107`) and the item predicate, which in
+    /// 26.2 is an item *tag* per species (`pig_food` is 3 items,
+    /// `chicken_food` is 6) rather than the single item older versions used.
+    /// Resolving those tags is a data-generation job this crate deliberately
+    /// does not do; see `docs/mob-perception.md`.
+    temptation: Option<Vec3>,
+    /// Host injection point, refreshed once per tick: the position of a nearby
+    /// entity this mob wants to flee, or `None`. Drives
+    /// [`MobController::avoid_threat`] and therefore
+    /// [`AvoidEntityGoal`](super::goals::AvoidEntityGoal).
+    ///
+    /// Vanilla's avoid set is per-species and per-goal-instance (a creeper
+    /// registers two separate `AvoidEntityGoal`s, `Ocelot` and `Cat`, both at
+    /// `6.0F` — `monster/Creeper.java:67-68`), so the *class filter* is the
+    /// host's, exactly like the temptation predicate above.
+    avoid_threat: Option<Vec3>,
+    /// Host injection point: vanilla `Mob.noActionTime`
+    /// (`Mob.java:717`, `this.noActionTime++`, reset to `0` at `:707`/`:711`).
+    /// Read by [`RandomStrollGoal`](super::goals::RandomStrollGoal)'s idle
+    /// suppression, which yields at `>= 100` (`ai/goal/RandomStrollGoal.java:43`).
+    ///
+    /// Injected rather than counted here because the *reset* conditions are
+    /// the host's: vanilla zeroes it when a player is within the immune
+    /// radius, which is population knowledge this crate does not have. A host
+    /// that never sets it leaves the vanilla-default `0`, i.e. stroll is never
+    /// idle-suppressed — which is exactly the permissive-direction bug this
+    /// field exists to fix, so it is worth stating that a silent `0` here is
+    /// not neutral.
+    no_action_time: i32,
+    /// The position of the mob that most recently damaged this one, retained
+    /// for [`LAST_HURT_BY_TICKS`] after the hit. Recorded by
+    /// [`note_hurt`](Self::note_hurt), decayed unconditionally in
+    /// [`advance`](Self::advance), and read by
+    /// [`MobController::last_hurt_by`] — which is what
+    /// [`HurtByTargetGoal`](super::goals::HurtByTargetGoal) retaliates against.
+    last_hurt_by: Option<Vec3>,
+    /// Ticks remaining on [`last_hurt_by`](Self::last_hurt_by). Vanilla stores
+    /// the *timestamp* and compares against `tickCount`
+    /// (`LivingEntity.java:493`); a countdown is the same thing with no need
+    /// for a shared clock, and it decays in `advance` alongside
+    /// [`love_ticks`](Self::love_ticks) for the same reason — vanilla ages it
+    /// every tick regardless of whether any goal ran.
+    hurt_by_ticks: i32,
+    /// Ticks remaining on "took damage recently", the panic window
+    /// ([`PANIC_DAMAGE_TICKS`]). Set by [`note_hurt`](Self::note_hurt) for
+    /// **every** hit, including one with no identifiable attacker, because
+    /// vanilla's `shouldPanic` reads the damage *source* rather than the
+    /// attacking mob (`ai/goal/PanicGoal.java:61-63`). Read by
+    /// [`MobController::is_panicking`].
+    damage_ticks: i32,
 }
 
 /// Minecraft body yaw (degrees) for a horizontal movement delta: 0 = +Z (south),
@@ -259,6 +353,13 @@ impl<'w> NavigatingMob<'w> {
             swell: 0,
             ignited: false,
             detonated: false,
+            nearest_player: None,
+            temptation: None,
+            avoid_threat: None,
+            no_action_time: 0,
+            last_hurt_by: None,
+            hurt_by_ticks: 0,
+            damage_ticks: 0,
         }
     }
 
@@ -481,6 +582,80 @@ impl<'w> NavigatingMob<'w> {
         std::mem::take(&mut self.detonated)
     }
 
+    /// Host injection point: refreshes the nearest-player position this mob's
+    /// [`LookAtPlayerGoal`](super::goals::LookAtPlayerGoal) should see this
+    /// tick. See the `nearest_player` field's own doc comment.
+    pub fn set_nearest_player(&mut self, player: Option<Vec3>) -> &mut Self {
+        self.nearest_player = player;
+        self
+    }
+
+    /// Host injection point: refreshes the tempting-entity position this mob's
+    /// [`TemptGoal`](super::goals::TemptGoal) should see this tick. See the
+    /// `temptation` field's own doc comment for why the item predicate is the
+    /// host's and not this crate's.
+    pub fn set_temptation(&mut self, temptation: Option<Vec3>) -> &mut Self {
+        self.temptation = temptation;
+        self
+    }
+
+    /// Host injection point: refreshes the threat position this mob's
+    /// [`AvoidEntityGoal`](super::goals::AvoidEntityGoal) should flee this
+    /// tick. See the `avoid_threat` field's own doc comment.
+    pub fn set_avoid_threat(&mut self, threat: Option<Vec3>) -> &mut Self {
+        self.avoid_threat = threat;
+        self
+    }
+
+    /// Host injection point: sets vanilla `Mob.noActionTime`, which
+    /// [`RandomStrollGoal`](super::goals::RandomStrollGoal) uses to yield when
+    /// idle-throttled. See the `no_action_time` field's own doc comment —
+    /// leaving this at `0` is *not* a neutral default.
+    pub fn set_no_action_time(&mut self, ticks: i32) -> &mut Self {
+        self.no_action_time = ticks;
+        self
+    }
+
+    /// Records that this mob just took damage, optionally from an attacker at
+    /// `attacker`.
+    ///
+    /// This is one call for vanilla's two separate records, because one hit
+    /// writes both: `LivingEntity.hurt` sets `lastDamageSource`
+    /// (`LivingEntity.java:1268-1269`) — which is what
+    /// [`PanicGoal`](super::goals::PanicGoal) reads — *and*, when the source
+    /// has a living attacker, `setLastHurtByMob`
+    /// (`LivingEntity.java:1358`), which is what
+    /// [`HurtByTargetGoal`](super::goals::HurtByTargetGoal) reads. They then
+    /// expire on **different** timers ([`PANIC_DAMAGE_TICKS`] vs
+    /// [`LAST_HURT_BY_TICKS`]), so both are tracked separately here.
+    ///
+    /// Pass `None` for damage with no living attacker — fall damage, drowning,
+    /// an explosion whose source this seam cannot name. Such a hit still
+    /// panics the mob (vanilla's panic is source-driven, not attacker-driven)
+    /// but gives it nothing to retaliate against, and deliberately **leaves any
+    /// existing** [`last_hurt_by`](MobController::last_hurt_by) alone rather
+    /// than clearing it: vanilla's two records are independent, so a mob shoved
+    /// into a cactus mid-fight does not forget who it was fighting.
+    pub fn note_hurt(&mut self, attacker: Option<Vec3>) -> &mut Self {
+        self.damage_ticks = PANIC_DAMAGE_TICKS;
+        if let Some(attacker) = attacker {
+            self.last_hurt_by = Some(attacker);
+            self.hurt_by_ticks = LAST_HURT_BY_TICKS;
+        }
+        self
+    }
+
+    /// The block cell the mob's feet occupy, for the fluid classification
+    /// below. The follower snaps `pos.y` to the floor it stands on, so this is
+    /// the cell *containing* the feet, not the floor beneath them.
+    fn feet_block(&self) -> (i32, i32, i32) {
+        (
+            self.pos.x.floor() as i32,
+            self.pos.y.floor() as i32,
+            self.pos.z.floor() as i32,
+        )
+    }
+
     /// Runs one AI tick: the goal selector (whose goals call back through the
     /// [`MobController`] seam) followed by one kinematic follower step.
     pub fn tick(&mut self, ai: &mut GoalSelector) {
@@ -504,6 +679,22 @@ impl<'w> NavigatingMob<'w> {
             } else if self.age > 0 {
                 self.age -= 1;
             }
+        }
+        // Vanilla `LivingEntity.tick` ages both damage records every tick with
+        // no goal involvement: `lastHurtByMob` is dropped past 100 ticks
+        // (`LivingEntity.java:493`) and `getLastDamageSource` self-clears past
+        // 40 (`LivingEntity.java:1420-1421`). Same "integrate unconditionally"
+        // placement as the age/love/swell counters above, and for the same
+        // reason — a goal that stops running must not freeze the timer that
+        // ends it.
+        if self.hurt_by_ticks > 0 {
+            self.hurt_by_ticks -= 1;
+            if self.hurt_by_ticks == 0 {
+                self.last_hurt_by = None;
+            }
+        }
+        if self.damage_ticks > 0 {
+            self.damage_ticks -= 1;
         }
         // Vanilla `Creeper.tick()` (`Creeper.java:126-151`): runs every tick
         // regardless of whether `SwellGoal` (or anything else) is currently
@@ -567,6 +758,65 @@ impl MobController for NavigatingMob<'_> {
 
     fn position(&self) -> Vec3 {
         self.pos
+    }
+
+    /// Whether the mob's feet cell holds water, read straight from the
+    /// [`PathWorld`] this struct already borrows — no host injection, so
+    /// [`FloatGoal`](super::goals::FloatGoal) works for any world that
+    /// classifies its blocks, which every real one does.
+    ///
+    /// **Scope cut, disclosed:** vanilla is
+    /// `isInWater() && getFluidHeight(WATER) > getFluidJumpThreshold()`
+    /// (`ai/goal/FloatGoal.java:18`), where `isInWater` is a bounding-box
+    /// sweep (`Entity.java:1605-1607`, `wasTouchingWater`) and the threshold is
+    /// `getEyeHeight() < 0.4 ? 0.0 : 0.4` (`Entity.java:3692-3694`). This
+    /// composition has no fluid-height model at all — `PathWorld` exposes
+    /// per-cell classification and collision tops, not fluid levels — so the
+    /// feet cell being water stands in for both halves. The practical
+    /// difference is at the surface: vanilla stops floating once the mob's feet
+    /// are in water shallower than 0.4, and this does not. Getting that right
+    /// needs a fluid-level seam on `PathWorld`, which is a wider change than
+    /// this perception fix.
+    fn in_water(&self) -> bool {
+        let (x, y, z) = self.feet_block();
+        // `is_water` rather than matching `base_path_type` directly: the seam
+        // gives hosts an override for exactly this question (`world.rs:146-150`)
+        // and its own default is the `PathType::Water` match anyway, so going
+        // through it honours a host that classifies waterlogged blocks.
+        self.world.is_water(x, y, z)
+    }
+
+    /// Whether the mob's feet cell holds lava. Same world-derived,
+    /// injection-free shape as [`in_water`](MobController::in_water); vanilla's
+    /// `isInLava` (`Entity.java:1748-1750`) has no height threshold, so this
+    /// side is faithful rather than cut.
+    fn in_lava(&self) -> bool {
+        let (x, y, z) = self.feet_block();
+        matches!(self.world.base_path_type(x, y, z), PathType::Lava)
+    }
+
+    fn no_action_time(&self) -> i32 {
+        self.no_action_time
+    }
+
+    fn nearest_player(&self) -> Option<Vec3> {
+        self.nearest_player
+    }
+
+    fn last_hurt_by(&self) -> Option<Vec3> {
+        self.last_hurt_by
+    }
+
+    fn temptation(&self) -> Option<Vec3> {
+        self.temptation
+    }
+
+    fn avoid_threat(&self) -> Option<Vec3> {
+        self.avoid_threat
+    }
+
+    fn is_panicking(&self) -> bool {
+        self.damage_ticks > 0
     }
 
     fn move_to(&mut self, target: Vec3, speed: f64) -> bool {
@@ -722,7 +972,11 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
-    use crate::ai::goals::{MeleeAttackGoal, SwellGoal};
+    use crate::ai::goal::Goal;
+    use crate::ai::goals::{
+        AvoidEntityGoal, FloatGoal, HurtByTargetGoal, LookAtPlayerGoal, MeleeAttackGoal, PanicGoal,
+        RandomStrollGoal, SwellGoal, TemptGoal,
+    };
     use crate::pathfinding::{Aabb, PathType};
 
     /// Flat ground one block below `y=0`, plus a set of fence cells with a 1.5
@@ -1477,5 +1731,345 @@ mod tests {
         }
         assert_eq!(mob.swell(), 0);
         assert!(!mob.take_detonated());
+    }
+
+    // ---------------------------------------------------------------------
+    // Perception seam (issue #441, plan unit A1).
+    //
+    // Every goal below had a **constant-false `can_use` in production** before
+    // this seam existed, because `impl MobController for NavigatingMob` left
+    // the eight perception methods at their trait defaults (`false`/`None`/`0`).
+    // Each also had a green unit test, because those tests drive `ScriptMob`
+    // (`goals.rs`), a fake that overrides all eight — CLAUDE.md's *world*
+    // species of vacuous test, where the flaw is in which controller the test
+    // was pointed at and reading the test source cannot reveal it.
+    //
+    // So the load-bearing property of every test in this section is the
+    // **type**: `NavigatingMob`, the one production implementor. A rewrite of
+    // these against `ScriptMob` would pass identically and prove nothing.
+    // ---------------------------------------------------------------------
+
+    /// Flat ground with a per-cell fluid map, so [`MobController::in_water`] /
+    /// [`MobController::in_lava`] are exercised against a real [`PathWorld`]
+    /// classification rather than a setter.
+    ///
+    /// A separate fixture from [`Arena`] rather than a new field on it: the
+    /// water/lava distinction is the *only* thing these tests need from a
+    /// world, and widening `Arena` would touch every existing construction of
+    /// it for no benefit.
+    struct FluidArena {
+        fluids: std::collections::HashMap<(i32, i32, i32), PathType>,
+    }
+
+    impl FluidArena {
+        fn dry() -> Self {
+            Self {
+                fluids: std::collections::HashMap::new(),
+            }
+        }
+
+        fn with(cell: (i32, i32, i32), fluid: PathType) -> Self {
+            let mut fluids = std::collections::HashMap::new();
+            fluids.insert(cell, fluid);
+            Self { fluids }
+        }
+    }
+
+    impl PathWorld for FluidArena {
+        fn min_y(&self) -> i32 {
+            -8
+        }
+        fn base_path_type(&self, x: i32, y: i32, z: i32) -> PathType {
+            if let Some(fluid) = self.fluids.get(&(x, y, z)) {
+                return *fluid;
+            }
+            if y <= -1 {
+                PathType::Blocked
+            } else {
+                PathType::Open
+            }
+        }
+        fn collision_top(&self, _x: i32, y: i32, _z: i32) -> f64 {
+            if y <= -1 { 1.0 } else { 0.0 }
+        }
+        fn collides(&self, aabb: Aabb) -> bool {
+            (aabb.min_y.floor() as i32) <= -1
+        }
+        // Deliberately *not* overridden: the seam's own default is the
+        // `PathType::Water` match (`pathfinding/world.rs:146-150`), which is
+        // what `in_water` calls through, so leaving it default keeps this
+        // fixture from being able to fake the answer.
+    }
+
+    fn perception_mob<'w>(world: &'w dyn PathWorld, at: Vec3) -> NavigatingMob<'w> {
+        NavigatingMob::new(world, MobShape::land(0.6, 1.95), at, 0.25, 400)
+    }
+
+    /// Whether each of the six previously-dead goals reports `can_use` for the
+    /// mob as currently configured, in a fixed order:
+    /// `[float, look_at_player, hurt_by_target, tempt, avoid_entity, panic]`.
+    ///
+    /// `LookAtPlayerGoal` is built with `probability == 1.0` so its
+    /// `next_f32() >= probability` pre-roll (`goals.rs:130`, vanilla's `0.02F`
+    /// default at `ai/goal/LookAtPlayerGoal.java:26`) cannot make this test
+    /// flaky in either direction — a probability roll is not what is under
+    /// test here, the perception read behind it is.
+    fn six_verdicts(mob: &mut NavigatingMob<'_>) -> [bool; 6] {
+        // Distances are all inside each goal's own range gate for a mob at the
+        // origin, so a `false` can only come from the perception method
+        // returning the trait default.
+        [
+            FloatGoal.can_use(mob),
+            LookAtPlayerGoal::new(8.0, 1.0).can_use(mob),
+            HurtByTargetGoal::new().can_use(mob),
+            TemptGoal::new(1.25).can_use(mob),
+            AvoidEntityGoal::new(6.0, 1.0).can_use(mob),
+            PanicGoal::new(1.25).can_use(mob),
+        ]
+    }
+
+    #[test]
+    fn all_six_perception_starved_goals_fire_on_a_real_navigating_mob() {
+        // Water at the mob's feet cell drives `FloatGoal` with no injection at
+        // all — vanilla `ai/goal/FloatGoal.java:18`.
+        let world = FluidArena::with((0, 0, 0), PathType::Water);
+        let mut mob = perception_mob(&world, Vec3::new(0.5, 0.0, 0.5));
+
+        // Each of the remaining five, at a distance vanilla would accept:
+        //  * player 3 blocks away, inside `LookAtPlayerGoal`'s 8.0
+        //    (`monster/Creeper.java:70`, `LookAtPlayerGoal(Player, 8.0F)`);
+        //  * attacker 2 blocks away — `HurtByTargetGoal` has no range gate of
+        //    its own (`ai/goal/target/HurtByTargetGoal.java:33-40` tests only
+        //    the timestamp and non-null attacker);
+        //  * tempter 4 blocks away, inside `Attributes.TEMPT_RANGE`'s default
+        //    `10.0` (`ai/attributes/Attributes.java:107`);
+        //  * threat 3 blocks away, inside the `6.0F` every vanilla
+        //    `AvoidEntityGoal` registration uses (`monster/Creeper.java:67-68`,
+        //    `monster/skeleton/AbstractSkeleton.java:79`,
+        //    `monster/spider/Spider.java:59`).
+        mob.set_nearest_player(Some(Vec3::new(3.5, 0.0, 0.5)))
+            .set_temptation(Some(Vec3::new(4.5, 0.0, 0.5)))
+            .set_avoid_threat(Some(Vec3::new(-2.5, 0.0, 0.5)))
+            // One hit records both the retaliation target and the panic
+            // window, exactly as vanilla's single `hurt` call writes both
+            // records (`LivingEntity.java:1268-1269` and `:1358`).
+            .note_hurt(Some(Vec3::new(2.5, 0.0, 0.5)));
+
+        let got = six_verdicts(&mut mob);
+        assert_eq!(
+            got,
+            [true; 6],
+            "a fed NavigatingMob must satisfy all six goals; \
+             order is [float, look_at_player, hurt_by_target, tempt, avoid_entity, panic], got {got:?}"
+        );
+    }
+
+    #[test]
+    fn the_same_six_goals_all_refuse_an_unfed_navigating_mob() {
+        // The negative control the plan requires: identical construction,
+        // identical goals, identical distances — only the perception inputs
+        // withheld, and the world dry. Every verdict must invert.
+        //
+        // For the four injected methods this proves the value came from the
+        // setter; for `in_water`/`in_lava` it proves it came from the *world*,
+        // since there is no setter to withhold.
+        let world = FluidArena::dry();
+        let mut mob = perception_mob(&world, Vec3::new(0.5, 0.0, 0.5));
+
+        let got = six_verdicts(&mut mob);
+        assert_eq!(
+            got,
+            [false; 6],
+            "an unfed NavigatingMob must satisfy none of the six; got {got:?}"
+        );
+    }
+
+    #[test]
+    fn lava_alone_floats_a_mob_and_water_alone_does_too() {
+        // `FloatGoal`'s condition is a disjunction (`FloatGoal.java:18`), so a
+        // test that only ever sets water cannot tell `in_water() || in_lava()`
+        // from `in_water()` — one arm could be dead. Drive each arm alone.
+        let lava = FluidArena::with((0, 0, 0), PathType::Lava);
+        let mut in_lava = perception_mob(&lava, Vec3::new(0.5, 0.0, 0.5));
+        assert!(in_lava.in_lava(), "lava cell must classify as in_lava");
+        assert!(
+            !in_lava.in_water(),
+            "a lava cell must not also read as water — that would make the \
+             two methods indistinguishable and the disjunction untestable"
+        );
+        assert!(FloatGoal.can_use(&mut in_lava), "lava alone must float");
+
+        let water = FluidArena::with((0, 0, 0), PathType::Water);
+        let mut in_water = perception_mob(&water, Vec3::new(0.5, 0.0, 0.5));
+        assert!(in_water.in_water());
+        assert!(!in_water.in_lava());
+        assert!(FloatGoal.can_use(&mut in_water), "water alone must float");
+    }
+
+    #[test]
+    fn a_navigating_mob_in_water_actually_jumps_through_the_real_scheduler() {
+        // Behavioural, not `can_use`: run `FloatGoal` through the same
+        // `GoalSelector`/`NavigatingMob::tick` path production uses and assert
+        // the mob ends up *jumping*. `can_use` returning true is the wiring;
+        // the jump is the observable effect a player would see as floating.
+        let world = FluidArena::with((0, 0, 0), PathType::Water);
+        let mut mob = perception_mob(&world, Vec3::new(0.5, 0.0, 0.5));
+        let mut ai = GoalSelector::new();
+        // Vanilla registers `FloatGoal` at priority 1 on a creeper
+        // (`monster/Creeper.java:66`) and 9 on a bee (`animal/bee/Bee.java:191`);
+        // the absolute number is private to one mob's set, so 0 is fine here.
+        ai.add(0, Box::new(FloatGoal));
+
+        // `tick` is 0.8-probability per tick (`FloatGoal.java:28`), so a
+        // handful of ticks makes a miss vanishingly unlikely; 20 is generous.
+        let mut jumped = false;
+        for _ in 0..20 {
+            mob.tick(&mut ai);
+            if mob.is_jumping() {
+                jumped = true;
+                break;
+            }
+        }
+        assert!(jumped, "a mob standing in water must be driven to jump");
+
+        // Control, same 20 ticks on dry land: the goal must never start, so
+        // the mob must never jump. Without this the assertion above is
+        // satisfied by anything that sets `jumping` for any reason.
+        let dry = FluidArena::dry();
+        let mut dry_mob = perception_mob(&dry, Vec3::new(0.5, 0.0, 0.5));
+        let mut dry_ai = GoalSelector::new();
+        dry_ai.add(0, Box::new(FloatGoal));
+        for _ in 0..20 {
+            dry_mob.tick(&mut dry_ai);
+            assert!(
+                !dry_mob.is_jumping(),
+                "a mob on dry land must never be driven to jump by FloatGoal"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hurt_mob_retaliates_through_the_real_scheduler_and_forgets_on_vanillas_timer() {
+        // `HurtByTargetGoal` end to end: note a hit, run the scheduler, and
+        // assert the mob's *attack target* became the attacker — the state a
+        // `MeleeAttackGoal` then chases. This is the observable retaliation,
+        // not a `can_use` probe.
+        let world = FluidArena::dry();
+        let mut mob = perception_mob(&world, Vec3::new(0.5, 0.0, 0.5));
+        let attacker = Vec3::new(4.5, 0.0, 0.5);
+        mob.note_hurt(Some(attacker));
+
+        let mut ai = GoalSelector::new();
+        // Vanilla puts `HurtByTargetGoal` at target-priority 1 everywhere it
+        // appears (`monster/zombie/Zombie.java:124`,
+        // `monster/zombie/ZombifiedPiglin.java:75`).
+        ai.add(0, Box::new(HurtByTargetGoal::new()));
+
+        mob.tick(&mut ai);
+        assert_eq!(
+            mob.attack_target(),
+            Some(attacker),
+            "a hurt mob must adopt its attacker as its attack target"
+        );
+
+        // Vanilla forgets the attacker past `LAST_HURT_BY_TICKS`
+        // (`LivingEntity.java:493`). Prove the decay is real and lands on the
+        // predicted tick rather than merely "eventually": one `note_hurt`
+        // followed by exactly that many `advance`s must clear it, and one
+        // fewer must not.
+        let mut early = perception_mob(&world, Vec3::new(0.5, 0.0, 0.5));
+        early.note_hurt(Some(attacker));
+        for _ in 0..LAST_HURT_BY_TICKS - 1 {
+            early.advance();
+        }
+        assert_eq!(
+            early.last_hurt_by(),
+            Some(attacker),
+            "the attacker must still be remembered one tick before the window closes"
+        );
+        early.advance();
+        assert_eq!(
+            early.last_hurt_by(),
+            None,
+            "the attacker must be forgotten exactly at LAST_HURT_BY_TICKS"
+        );
+    }
+
+    #[test]
+    fn panic_expires_on_its_own_shorter_window_while_retaliation_persists() {
+        // The two records decay independently and on *different* timers
+        // (40 vs 100 — `LivingEntity.java:1420-1421` and `:493`). A single
+        // shared timer would satisfy "panics then stops panicking", so the
+        // discriminating assertion is that at tick 40 the mob has stopped
+        // panicking *and is still hunting*.
+        let world = FluidArena::dry();
+        let mut mob = perception_mob(&world, Vec3::new(0.5, 0.0, 0.5));
+        let attacker = Vec3::new(2.5, 0.0, 0.5);
+        mob.note_hurt(Some(attacker));
+        assert!(mob.is_panicking(), "a freshly hit mob must panic");
+
+        for _ in 0..PANIC_DAMAGE_TICKS {
+            mob.advance();
+        }
+        assert!(
+            !mob.is_panicking(),
+            "panic must expire at PANIC_DAMAGE_TICKS ({PANIC_DAMAGE_TICKS})"
+        );
+        assert_eq!(
+            mob.last_hurt_by(),
+            Some(attacker),
+            "retaliation must OUTLIVE panic — this is the assertion that fails \
+             if the two windows are collapsed into one timer"
+        );
+    }
+
+    #[test]
+    fn attacker_less_damage_panics_without_giving_the_mob_anything_to_chase() {
+        // Vanilla's panic reads the damage *source*, not the attacking mob
+        // (`ai/goal/PanicGoal.java:61-63` vs
+        // `ai/goal/target/HurtByTargetGoal.java:35`), so fall damage panics a
+        // cow and gives it no retaliation target. `note_hurt(None)` is that
+        // case; without this test the two records could be one field.
+        let world = FluidArena::dry();
+        let mut mob = perception_mob(&world, Vec3::new(0.5, 0.0, 0.5));
+        mob.note_hurt(None);
+        assert!(mob.is_panicking(), "attacker-less damage must still panic");
+        assert_eq!(
+            mob.last_hurt_by(),
+            None,
+            "attacker-less damage must not invent a retaliation target"
+        );
+        assert!(PanicGoal::new(1.25).can_use(&mut mob));
+        assert!(!HurtByTargetGoal::new().can_use(&mut mob));
+    }
+
+    #[test]
+    fn no_action_time_suppresses_stroll_at_vanillas_threshold() {
+        // The seventh, subtler case: `no_action_time`'s trait default of `0`
+        // is inert *in the permissive direction*, so stroll was always
+        // eligible where vanilla suppresses it. No dead-code warning could
+        // fire for this — the goal simply behaved wrong.
+        //
+        // Vanilla: `checkNoActionTime && mob.getNoActionTime() >= 100`
+        // (`ai/goal/RandomStrollGoal.java:43`). Predict the boundary rather
+        // than asserting a direction: 99 must still allow, 100 must suppress.
+        let world = FluidArena::dry();
+
+        // `interval(1)` makes the goal's own `next_i32(interval) != 0` roll
+        // (`goals.rs`, vanilla `RandomStrollGoal.java:47`) deterministic, so
+        // the only variable left is the idle suppression.
+        let mut allowed = perception_mob(&world, Vec3::new(0.5, 0.0, 0.5));
+        allowed.set_no_action_time(99);
+        assert!(
+            RandomStrollGoal::new(1.0).with_interval(1).can_use(&mut allowed),
+            "no_action_time 99 is below vanilla's threshold and must still stroll"
+        );
+
+        let mut suppressed = perception_mob(&world, Vec3::new(0.5, 0.0, 0.5));
+        suppressed.set_no_action_time(100);
+        assert!(
+            !RandomStrollGoal::new(1.0).with_interval(1).can_use(&mut suppressed),
+            "no_action_time 100 must suppress stroll (RandomStrollGoal.java:43)"
+        );
     }
 }
