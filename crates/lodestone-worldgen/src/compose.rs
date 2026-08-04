@@ -127,6 +127,47 @@ pub fn build_biome_ores(resolver: &dyn Resolver, biome: &str) -> Vec<PlacedOre> 
     ores
 }
 
+/// Resolves one biome's `VEGETAL_DECORATION` decoration step
+/// (`features[`[`crate::feature::STEP_VEGETAL_DECORATION`]`]`, issue #406)
+/// into `(raw step index, resolved PlacedRef)` pairs — the same "preserve
+/// the raw position" convention [`build_biome_ores`] establishes, so
+/// [`crate::feature::vegetation::apply_vegetal_decoration_step`]'s
+/// `setFeatureSeed` index matches vanilla's even if some entries here
+/// resolve to [`crate::feature::vegetation::ConfiguredFeature::Unsupported`]
+/// (which still consumes an index, just places nothing — see that module's
+/// doc for why an unsupported entry must never be dropped from the list,
+/// only made inert).
+///
+/// Empty if the resolver has no data for `biome`.
+#[must_use]
+pub fn build_biome_vegetation(
+    resolver: &dyn Resolver,
+    biome: &str,
+) -> Vec<(usize, crate::feature::vegetation::PlacedRef)> {
+    let doc = resolver.biome_document(biome);
+    let Some(step) = doc
+        .get("features")
+        .and_then(Value::as_array)
+        .and_then(|steps| steps.get(crate::feature::STEP_VEGETAL_DECORATION as usize))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (i, entry) in step.iter().enumerate() {
+        let Some(id) = entry.as_str() else {
+            continue;
+        };
+        if resolver.placed_feature(id).is_null() {
+            continue;
+        }
+        let placed_ref =
+            crate::feature::vegetation::resolve_placed_feature_ref(resolver, entry);
+        out.push((i, placed_ref));
+    }
+    out
+}
+
 /// Resolves every block tag referenced by `ores`' [`RuleTest::TagMatch`]
 /// targets into a `tag id -> member block set` map, for
 /// [`crate::feature::OreInput::in_tag`].
@@ -325,5 +366,62 @@ mod tests {
         let ores = build_biome_ores(&resolver, "minecraft:test");
         assert_eq!(ores.len(), 1, "the non-ore entry must not produce a PlacedOre");
         assert_eq!(ores[0].index, 1, "index must be the raw step position, not a count");
+    }
+
+    #[test]
+    fn build_biome_vegetation_skips_missing_but_keeps_index() {
+        let mut steps = vec![Value::Array(Vec::new()); 10];
+        steps[crate::feature::STEP_VEGETAL_DECORATION as usize] = serde_json::json!([
+            "minecraft:missing", // index 0, skipped (no placed_feature data)
+            "minecraft:grass_patch" // index 1, must keep index 1, not 0
+        ]);
+        let mut biomes = HashMap::new();
+        biomes.insert("minecraft:test", serde_json::json!({"features": steps}));
+
+        let mut placed = HashMap::new();
+        placed.insert(
+            "minecraft:grass_patch",
+            serde_json::json!({"feature": "minecraft:grass_cf", "placement": []}),
+        );
+        let mut features = HashMap::new();
+        features.insert(
+            "minecraft:grass_cf",
+            serde_json::json!({
+                "type": "minecraft:simple_block",
+                "config": {
+                    "to_place": {
+                        "type": "minecraft:simple_state_provider",
+                        "state": {"Name": "minecraft:short_grass"}
+                    }
+                }
+            }),
+        );
+
+        let resolver = FakeResolver {
+            tags: HashMap::new(),
+            biomes,
+            carvers: HashMap::new(),
+            features,
+            placed,
+        };
+        let veg = build_biome_vegetation(&resolver, "minecraft:test");
+        assert_eq!(veg.len(), 1, "the missing entry must not produce a PlacedRef");
+        assert_eq!(veg[0].0, 1, "index must be the raw step position, not a count");
+        assert!(matches!(
+            *veg[0].1.feature,
+            crate::feature::vegetation::ConfiguredFeature::SimpleBlock(_)
+        ));
+    }
+
+    #[test]
+    fn build_biome_vegetation_unknown_biome_is_empty() {
+        let resolver = FakeResolver {
+            tags: HashMap::new(),
+            biomes: HashMap::new(),
+            carvers: HashMap::new(),
+            features: HashMap::new(),
+            placed: HashMap::new(),
+        };
+        assert!(build_biome_vegetation(&resolver, "minecraft:nowhere").is_empty());
     }
 }
