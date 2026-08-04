@@ -1290,7 +1290,22 @@ impl WindowApp {
         // player; ours is the same number the camera's far plane and the mesher
         // already use, so the server never sends a column the renderer would
         // discard and never withholds one it wants.
-        let view_radius = i32::try_from(self.config.render_distance).unwrap_or(i32::MAX);
+        //
+        // **Plus one, and the `+ 1` is not slack — it is the buffer ring the
+        // mesher's invariant requires.** Vanilla's own server tracks
+        // `center + viewDistance + 1` (`ChunkTrackingView.java:92, 96`), and it has
+        // to: a section is only meshed once all its neighbours are resident, so the
+        // outermost ring of a radius-`n` stream permanently lacks a neighbour and
+        // **never draws**. Streaming exactly `render_distance` made singleplayer
+        // silently lose its last ring of chunks — reported as "some water far away
+        // is blocky", because a large flat surface is where a missing outer ring
+        // reads as a hard step rather than as absent scenery.
+        //
+        // This does not widen the view: fog and the far plane read
+        // `config.render_distance` directly, not this value.
+        let view_radius = i32::try_from(self.config.render_distance)
+            .unwrap_or(i32::MAX)
+            .saturating_add(1);
         match launch_singleplayer(self.config.protocol, view_radius, session) {
             Ok(net) => {
                 self.sim.attach_net(net);
@@ -1362,8 +1377,18 @@ impl WindowApp {
             .net()
             .map(|net| Arc::new(WeatherTracker::new(net.shared_weather())));
         self.weather = weather.clone();
+        // The dimension's absent-sky-light policy, cloned out for the same reason as
+        // the two above. The entity-light closure is installed **once** and must
+        // still be right after a portal, so it reads the policy per call from this
+        // cell rather than capturing today's value — `Sim::refresh_mesh_policy`
+        // publishes into it. See `net::SkyDefaultCell`.
+        let sky_policy = self
+            .sim
+            .net()
+            .map(crate::net::NetClient::shared_sky_default);
         if let Some(render) = self.render.as_mut() {
             let handle = net_handle.clone();
+            let light_policy = sky_policy.clone();
             // Terrain and mobs must read the same clock: `RenderState` folds this
             // factor into the fog lane both the model and entity passes sample.
             // Installing it for one and not the other makes mobs darker than the
@@ -1399,6 +1424,11 @@ impl WindowApp {
                     feet.x.floor() as i32,
                     feet.y.floor() as i32,
                     feet.z.floor() as i32,
+                    // Read per call, not captured: a portal changes this mid-session.
+                    light_policy.as_ref().map_or(
+                        lodestone_render::SkyDefault::Full,
+                        |cell| cell.get(),
+                    ),
                 )
             });
             render.set_time_of_day_source(move || {
@@ -2049,13 +2079,19 @@ impl WindowApp {
                     let packed = self
                         .sim
                         .net()
-                        .map(crate::net::NetClient::shared_handle)
-                        .and_then(|h| {
+                        .map(|n| (n.shared_handle(), n.shared_sky_default()))
+                        .and_then(|(h, policy)| {
                             crate::net::entity_light_at(
                                 &h,
                                 camera.position.x.floor() as i32,
                                 camera.position.y.floor() as i32,
                                 camera.position.z.floor() as i32,
+                                // Load-bearing for `sky_visible` below, not just for
+                                // brightness: absent sky data used to resolve to 0
+                                // here, so `(p >> 4) & 0x0F > 0` was false and rain
+                                // rendered **nowhere in open sky** — the one place a
+                                // player is guaranteed to be looking at it.
+                                policy.get(),
                             )
                         });
                     let probe = ShellWeatherProbe {
@@ -2543,12 +2579,19 @@ impl ApplicationHandler for WindowApp {
                     &weather.state(),
                 ))
             });
+            // Same cell as `install_session_render_sources`, installed on this path
+            // too for the reason that function's doc gives about duplicated
+            // sources: a `--connect` launch that skipped it would black out mobs in
+            // open air while a menu-launched session did not.
+            let light_policy = net.shared_sky_default();
             render.set_entity_light_source(move |feet| {
                 crate::net::entity_light_at(
                     &entity_light_handle,
                     feet.x.floor() as i32,
                     feet.y.floor() as i32,
                     feet.z.floor() as i32,
+                    // Read per call, not captured: a portal changes this mid-session.
+                    light_policy.get(),
                 )
             });
             render.set_time_of_day_source(move || {

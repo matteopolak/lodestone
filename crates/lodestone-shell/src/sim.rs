@@ -40,7 +40,10 @@ use lodestone_particle::emit as particle_emit;
 use lodestone_physics::{
     CollisionView, EntityDimensions, FluidState, NearbyEntity, PhysicsProfile, PlayerState, Vec3d,
 };
-use lodestone_render::{AnimInput, BlockAtlas, Camera};
+// `SectionLight` anonymously: it carries `sky_light`/`block_light` on
+// `WorldSectionLight`, and naming it would collide with `lodestone_world`'s
+// storage type of the same name.
+use lodestone_render::{AnimInput, BlockAtlas, Camera, SectionLight as _};
 use lodestone_world::{BlockEntitySync, ChunkPos, World, WorldSink};
 
 use crate::audio::ShellAudio;
@@ -1704,6 +1707,15 @@ impl Sim {
             // The offline fixture world is the overworld.
             None => lodestone_render::SkyDefault::Full,
         };
+        // Publish it for the render thread's *point* samplers — entity light, the
+        // rain probe, particles. They cannot compute this themselves: each is a
+        // `'static` closure installed once at connect, so it has no per-frame value
+        // to read, and calling `ClientHandle::player()` per entity per frame would
+        // cost an ECS lock and a snapshot clone each time. This function stays the
+        // single place the policy is decided; see `net::SkyDefaultCell`.
+        if let Some(net) = &self.net {
+            net.shared_sky_default().set(sky_default);
+        }
         // The worker pool's classifier was chosen at construction from
         // `!demo_world`, so "the atlas we have" *is* "the id space the pool
         // meshes". A live session with no vanilla atlas (jar-less run, demo-palette
@@ -4166,6 +4178,13 @@ impl Sim {
                 // function used to take the write guard by hand and hold it across
                 // every per-particle light lookup.
                 let handle = net.shared_handle();
+                // The dimension's absent-sky-light policy, read per sample from the
+                // cell `refresh_mesh_policy` publishes into. Same reason
+                // `net::entity_light_at` takes one: `sky_at` resolves
+                // `LightData::Missing` to **0**, so a particle in open air above the
+                // top of the lit column used to come out unlit and near-black. A
+                // captured value would go stale on a portal.
+                let sky_policy = net.shared_sky_default();
                 Box::new(move |x, y, z| {
                     let dims = dims?;
                     let section = (y - dims.min_y).div_euclid(16);
@@ -4192,12 +4211,17 @@ impl Sim {
                     let ly = (y - dims.min_y).rem_euclid(16) as usize;
                     let lx = x.rem_euclid(16) as usize;
                     let lz = z.rem_euclid(16) as usize;
+                    // Through the same adapter the terrain draw uses, so absent sky
+                    // data gets the dimension's default rather than `sky_at`'s bare
+                    // `0`. Not a second `match` restating 15 — one expression.
+                    let resolved =
+                        lodestone_render::WorldSectionLight::new(&light, sky_policy.get());
                     // Vanilla's `LightTexture.pack`: block light at bit 4, sky
                     // light at bit 20. The particle shader reproduces the
                     // terrain term `0.2 + 0.8 * max(sky, block)` from these.
                     Some(
-                        u32::from(light.block_at(lx, ly, lz)) << 4
-                            | u32::from(light.sky_at(lx, ly, lz)) << 20,
+                        u32::from(resolved.block_light(lx, ly, lz)) << 4
+                            | u32::from(resolved.sky_light(lx, ly, lz)) << 20,
                     )
                 })
             }

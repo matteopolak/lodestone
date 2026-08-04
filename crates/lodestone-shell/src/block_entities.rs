@@ -375,10 +375,23 @@ pub fn chest_spawns(
         )
     };
 
+    // Resolved once for the whole frame, from the `client` this function already
+    // holds, rather than per chest: `player()` clones a snapshot behind an ECS read
+    // lock, and the loop below runs once per visible chest. The point samplers on
+    // the render thread read a shared cell instead because they are `'static`
+    // closures with no per-frame value available — see `net::SkyDefaultCell`.
+    let sky_default = {
+        let player = client.player();
+        crate::mesher::sky_default_for_dimension(
+            player.dimension.as_ref(),
+            player.dimension_type.as_ref(),
+        )
+    };
+
     for (block, state_id) in candidates {
         // The light sample is the only thing here that needs the handle, which is
         // why it is the only thing `chest_candidates`/`chest_spawn` do not cover.
-        let light = entity_light_at(handle, block[0], block[1], block[2])
+        let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
             .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
         if let Some(spawn) =
             chest_spawn(block, state_id, lids.openness(block, partial_tick), light)

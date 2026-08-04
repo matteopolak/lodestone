@@ -106,7 +106,7 @@
 
 use std::sync::{
     Arc, OnceLock,
-    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
     mpsc::{self, Receiver, Sender},
 };
 use std::thread::JoinHandle;
@@ -122,6 +122,11 @@ use lodestone_game::scoreboard::Scoreboard;
 use lodestone_game::tablist::TabList;
 use lodestone_model::Vec3f;
 use lodestone_model::event::SoundCategory;
+// `SectionLight` is imported anonymously: it is the trait carrying
+// `sky_light`/`block_light` on `WorldSectionLight`, and naming it would collide
+// with `lodestone_world::SectionLight`, the *storage* type of the same name that
+// `sections_and_light_at` hands back.
+use lodestone_render::{SectionLight as _, SkyDefault, WorldSectionLight};
 
 pub use lodestone_testsupport::unique_username;
 
@@ -228,6 +233,72 @@ impl WeatherCell {
 
 /// A [`WeatherCell`] shared between the net thread and the render thread.
 pub type SharedWeather = Arc<WeatherCell>;
+
+/// The current dimension's policy for *absent* sky light, shared between the
+/// thread that learns the dimension and the render thread's per-entity light
+/// sampler.
+///
+/// # Why a cell rather than a lookup
+///
+/// This exists for a shape mismatch, not for concurrency. [`entity_light_at`]
+/// needs a [`SkyDefault`], and its caller is the `'static` closure
+/// [`RenderState::set_entity_light_source`](crate::gpu::RenderState::set_entity_light_source)
+/// installs **once** at connect — so it cannot be handed a per-frame value, while
+/// the policy it needs changes mid-session on a portal.
+///
+/// The obvious alternative is to call `ClientHandle::player()` inside the closure
+/// and read `dimension`/`dimension_type` off the snapshot. That costs an ECS read
+/// lock and a whole `PlayerSnapshot` clone **per entity per frame**, and
+/// `Sim::extract_particles` is a standing warning about precisely that: it used to
+/// take the `World` guard per *particle* and was the longest lock hold in the
+/// process.
+///
+/// One `AtomicU8`, `Relaxed`, holding a discriminant. `Sim::refresh_mesh_policy`
+/// is the **single** producer — it already computes this value for the mesher, so
+/// there is one expression deciding it and no second source of truth. A reader
+/// that sees a one-frame-stale value on the frame you step through a portal has
+/// exactly the staleness every other per-frame poll here has.
+#[derive(Debug)]
+pub struct SkyDefaultCell(AtomicU8);
+
+/// [`SkyDefault::None`] as stored in a [`SkyDefaultCell`].
+const SKY_DEFAULT_NONE: u8 = 0;
+/// [`SkyDefault::Full`] as stored in a [`SkyDefaultCell`].
+const SKY_DEFAULT_FULL: u8 = 1;
+
+impl Default for SkyDefaultCell {
+    /// [`SkyDefault::Full`], which is what `sky_default_for_dimension(None, None)`
+    /// answers for "dimension not yet known". Defaulting to `None` instead would
+    /// black out every mob in the first frames of a join, before the dimension
+    /// type arrives — the failure this whole cell exists to fix.
+    fn default() -> Self {
+        Self(AtomicU8::new(SKY_DEFAULT_FULL))
+    }
+}
+
+impl SkyDefaultCell {
+    /// Publish the policy for the dimension we are now in.
+    pub fn set(&self, policy: SkyDefault) {
+        let bits = match policy {
+            SkyDefault::Full => SKY_DEFAULT_FULL,
+            SkyDefault::None => SKY_DEFAULT_NONE,
+        };
+        self.0.store(bits, Ordering::Relaxed);
+    }
+
+    /// This frame's policy.
+    #[must_use]
+    pub fn get(&self) -> SkyDefault {
+        if self.0.load(Ordering::Relaxed) == SKY_DEFAULT_FULL {
+            SkyDefault::Full
+        } else {
+            SkyDefault::None
+        }
+    }
+}
+
+/// A [`SkyDefaultCell`] shared between `Sim` and the render thread's samplers.
+pub type SharedSkyDefault = Arc<SkyDefaultCell>;
 
 /// A decoded, version-free update the app can act on without touching tokio.
 #[derive(Debug, Clone)]
@@ -513,6 +584,12 @@ pub struct NetClient {
     /// [`forward`]'s `WeatherChanged` arm. See [`WeatherCell`] for why this is a
     /// shared cell rather than a [`NetUpdate`].
     weather: SharedWeather,
+    /// The current dimension's absent-sky-light policy. Unlike [`Self::weather`]
+    /// the **net thread never writes this** — `Sim::refresh_mesh_policy` is the
+    /// sole producer and the render thread's light samplers are the consumers.
+    /// It lives here only because `NetClient` is where a per-session shared cell
+    /// is already handed out at connect time. See [`SkyDefaultCell`].
+    sky_default: SharedSkyDefault,
     /// The driver's `World` and session entity, for a **loopback** client that has
     /// no `ClientBuilder` to hand them to.
     ///
@@ -745,6 +822,7 @@ impl NetClient {
             thread: Some(thread),
             handle,
             weather,
+            sky_default: Arc::new(SkyDefaultCell::default()),
             #[cfg(test)]
             session: None,
         }
@@ -942,6 +1020,15 @@ impl NetClient {
         Arc::clone(&self.weather)
     }
 
+    /// Clone out the `Arc`-backed absent-sky-light policy cell, for the same
+    /// reason [`shared_weather`](Self::shared_weather) exists. Two callers:
+    /// `crate::app` hands it to the `'static` entity-light closure it installs at
+    /// connect, and `Sim::refresh_mesh_policy` publishes into it.
+    #[must_use]
+    pub fn shared_sky_default(&self) -> SharedSkyDefault {
+        Arc::clone(&self.sky_default)
+    }
+
     /// This frame's weather, read directly. Clear until the first `GAME_EVENT`.
     #[must_use]
     pub fn weather(&self) -> WeatherSnapshot {
@@ -963,6 +1050,7 @@ impl NetClient {
             thread: None,
             handle: Arc::new(OnceLock::new()),
             weather: Arc::new(WeatherCell::default()),
+            sky_default: Arc::new(SkyDefaultCell::default()),
             // Bound by `Sim::attach_net`; a loopback with no `Sim` folds nothing.
             session: None,
         };
@@ -1013,6 +1101,7 @@ impl NetClient {
             thread: None,
             handle: Arc::new(OnceLock::new()),
             weather: Arc::new(WeatherCell::default()),
+            sky_default: Arc::new(SkyDefaultCell::default()),
             // Bound by `Sim::attach_net`; a loopback with no `Sim` folds nothing.
             session: None,
         };
@@ -1045,12 +1134,42 @@ impl Drop for NetClient {
 ///   darkness; the caller (here, `EntityLightSource::sample`) substitutes
 ///   full brightness, exactly like the particle path's fallback.
 ///
+/// # `sky_default` is load-bearing, and omitting it blacked out mobs in open air
+///
+/// `SectionLight::sky_at` resolves [`LightData::Missing`] to **`0`** — its own doc
+/// says so, and says a caller wanting vanilla's above-the-world default of `15`
+/// must branch on the public `sky` field itself, because that default depends on
+/// the dimension and on whether the section sits above the heightmap. This
+/// function used to call `sky_at` with no such branch.
+///
+/// The server sends no sky array for sections above the top of the lit column, so
+/// every such section arrived `Missing` and read as sky `0`. Vanilla's
+/// `SkyLightSectionStorage` returns `15` there instead. The visible result was
+/// two player-reported bugs that looked unrelated: **mobs flashing black** when
+/// they jumped or swam up into an empty section, and **the first-person arm going
+/// black over an ocean** — the arm samples at the camera, and over open water the
+/// camera sits in exactly such a section, while on land it is usually inside one
+/// that carries data. That is why it looked ocean-specific rather than
+/// height-specific.
+///
+/// The policy is applied through [`WorldSectionLight`], which is the **same
+/// adapter the terrain draw uses**, rather than a second `match` restating `15`
+/// here — per CLAUDE.md, derive from the expression the draw uses. It only ever
+/// touches `Missing`; stored data, including a nether section's `Uniform(0)`, is
+/// returned verbatim, so this cannot manufacture a too-bright nether.
+///
 /// Returns the packed byte the entity shader unpacks
 /// (`crates/lodestone-render/src/entity_pipeline.rs`: `sky = (light >> 4) &
 /// 15; block = light & 15`) — sky light in the high nibble, block light in
 /// the low nibble, i.e. `sky << 4 | block`.
 #[must_use]
-pub fn entity_light_at(handle: &SharedHandle, x: i32, y: i32, z: i32) -> Option<u8> {
+pub fn entity_light_at(
+    handle: &SharedHandle,
+    x: i32,
+    y: i32,
+    z: i32,
+    sky_default: SkyDefault,
+) -> Option<u8> {
     let h = handle.get()?;
     let dims = h.world_dimensions()?;
     let section = (y - dims.min_y).div_euclid(16);
@@ -1067,8 +1186,12 @@ pub fn entity_light_at(handle: &SharedHandle, x: i32, y: i32, z: i32) -> Option<
     let lx = x.rem_euclid(16) as usize;
     let ly = (y - dims.min_y).rem_euclid(16) as usize;
     let lz = z.rem_euclid(16) as usize;
-    let block = light.block_at(lx, ly, lz);
-    let sky = light.sky_at(lx, ly, lz);
+    // The dimension policy for absent sky data, through the same adapter the
+    // terrain draw uses. `sky_at`/`block_at` directly would resolve `Missing` sky
+    // to 0 — see this function's doc for the two bugs that produced.
+    let resolved = WorldSectionLight::new(&light, sky_default);
+    let block = resolved.block_light(lx, ly, lz);
+    let sky = resolved.sky_light(lx, ly, lz);
     Some((sky << 4) | block)
 }
 
@@ -2299,7 +2422,76 @@ mod tests {
     #[test]
     fn entity_light_at_reads_none_before_login() {
         let shared: SharedHandle = Arc::new(OnceLock::new());
-        assert_eq!(entity_light_at(&shared, 0, 64, 0), None);
+        assert_eq!(entity_light_at(&shared, 0, 64, 0, SkyDefault::Full), None);
+    }
+
+    /// The `Missing` sky default is honoured, and only for `Missing`.
+    ///
+    /// This is the unit half of the regression that blacked out mobs in open air
+    /// and the first-person arm over an ocean: [`SectionLight::sky_at`] resolves
+    /// [`LightData::Missing`] to `0`, so `entity_light_at` reading it directly
+    /// reported "no sky" for every section above the top of the lit column.
+    ///
+    /// It asserts against [`WorldSectionLight`] rather than against a session,
+    /// because `ClientHandle` has no public constructor — but that is the point:
+    /// the fix routes through the *same adapter the terrain draw uses*, so this
+    /// pins the adapter's contract and the live gate below pins the wiring.
+    ///
+    /// The two `Uniform(0)` cases are the control that matters. If the fix had
+    /// been "default absent sky to 15" rather than "ask the policy", the nether
+    /// row would read 15 and the overworld-stored-zero row would too — the
+    /// too-bright-nether bug. Both must stay `0`.
+    #[test]
+    fn a_missing_sky_section_takes_the_dimension_default_and_stored_zero_does_not() {
+        use lodestone_world::{LightData, SectionLight as WorldSectionLightData};
+
+        let missing = WorldSectionLightData {
+            sky: LightData::Missing,
+            block: LightData::Missing,
+        };
+        let stored_dark = WorldSectionLightData {
+            sky: LightData::Uniform(0),
+            block: LightData::Missing,
+        };
+
+        // Absent sky, overworld: vanilla's above-the-top default.
+        assert_eq!(
+            WorldSectionLight::new(&missing, SkyDefault::Full).sky_light(0, 0, 0),
+            15,
+            "absent sky in a skylit dimension is full daylight, not 0"
+        );
+        // Absent sky, nether: absent must stay dark there.
+        assert_eq!(
+            WorldSectionLight::new(&missing, SkyDefault::None).sky_light(0, 0, 0),
+            0,
+            "absent sky in a dimension with no skylight must not default up"
+        );
+        // Stored zero is real data in *either* dimension and is never defaulted up.
+        assert_eq!(
+            WorldSectionLight::new(&stored_dark, SkyDefault::Full).sky_light(0, 0, 0),
+            0,
+            "a stored 0 is measured darkness (a cell inside a room), not absence"
+        );
+        assert_eq!(
+            WorldSectionLight::new(&stored_dark, SkyDefault::None).sky_light(0, 0, 0),
+            0
+        );
+    }
+
+    /// The cell's default is [`SkyDefault::Full`], and it round-trips.
+    ///
+    /// The default is load-bearing rather than arbitrary: it is what
+    /// `sky_default_for_dimension(None, None)` answers for "dimension not yet
+    /// known", so the frames between connect and the first `registry_data` render
+    /// mobs lit instead of black.
+    #[test]
+    fn the_sky_default_cell_defaults_to_full_and_round_trips() {
+        let cell = SkyDefaultCell::default();
+        assert_eq!(cell.get(), SkyDefault::Full, "pre-login must not be dark");
+        cell.set(SkyDefault::None);
+        assert_eq!(cell.get(), SkyDefault::None);
+        cell.set(SkyDefault::Full);
+        assert_eq!(cell.get(), SkyDefault::Full);
     }
 
     /// Live gate for the entity-lighting seam: [`entity_light_at`] — the
@@ -2395,7 +2587,8 @@ mod tests {
         // comfortably inside the dimension's build range.
         let chunk = loaded[0];
         let y = dims.min_y + (dims.height as i32 / 2);
-        let lit = entity_light_at(&shared, chunk.x * 16 + 8, y, chunk.z * 16 + 8);
+        // The oracle is the overworld, so `Full` is the honest policy here.
+        let lit = entity_light_at(&shared, chunk.x * 16 + 8, y, chunk.z * 16 + 8, SkyDefault::Full);
         assert!(
             lit.is_some(),
             "expected a real light byte for a loaded chunk {chunk:?}, got None"
@@ -2404,7 +2597,10 @@ mod tests {
         // Unloaded: a chunk address far outside any sane render distance from
         // spawn, so this reads the "outside loaded chunks" branch, not a
         // fluke miss.
-        let far = entity_light_at(&shared, 1_000_000, y, 1_000_000);
+        // Still `None`, and the policy must not change that: `SkyDefault` resolves
+        // absent *data within a resident section*, never a missing chunk. If this
+        // ever returns `Some`, the fix has leaked into the unloaded branch.
+        let far = entity_light_at(&shared, 1_000_000, y, 1_000_000, SkyDefault::Full);
         assert_eq!(
             far, None,
             "an unloaded neighbour must read None (full-bright fallback), not a stale byte"
