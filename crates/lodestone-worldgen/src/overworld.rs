@@ -643,7 +643,24 @@ impl OverworldGenerator {
             return center_world;
         }
 
-        let mut region: HashMap<(i32, i32, i32), String> = HashMap::new();
+        // Issue #106: a `DenseBlockGrid`, not a `HashMap<(i32,i32,i32),
+        // String>` — see `crate::feature::RegionGrid`'s own doc for why.
+        // `"minecraft:air"` as the default is a real behaviour match, not
+        // just a placeholder: the old `HashMap`'s `.get(&key)` returned
+        // `None` (folded to `"minecraft:air"` by every reader) for any cell
+        // `stitch_region` hadn't visited yet, which never actually happens
+        // in the covered region — every one of the 9 sources always stitches
+        // its own full 16-wide column range before ore placement runs.
+        let region_size = crate::feature::REGION_MAX - crate::feature::REGION_MIN;
+        let mut region = crate::feature::RegionGrid::new(
+            crate::feature::REGION_MIN,
+            self.min_y,
+            crate::feature::REGION_MIN,
+            region_size,
+            self.height,
+            region_size,
+            "minecraft:air",
+        );
         let mut ocean_floor_wg: HashMap<(i32, i32), i32> = HashMap::new();
 
         Self::stitch_region(&mut region, &mut ocean_floor_wg, cx, cz, cx, cz, &center_world, center_heights);
@@ -718,34 +735,47 @@ impl OverworldGenerator {
         };
 
         let mut center_world = center_world;
+        // Unconditional, unlike the old `HashMap`'s `if let Some(state) =
+        // region.get(&key)`: the centre's own 16×16×height range is always
+        // fully stitched before ore placement runs (the very first
+        // `stitch_region` call above), so every cell this loop reads was
+        // always already written — a `DenseBlockGrid` has no separate
+        // "touched" bit to check, and none is needed here.
         for y in self.min_y..self.min_y + self.height {
             for lz in 0..16i32 {
                 for lx in 0..16i32 {
-                    if let Some(state) = region.get(&(lx, y, lz)) {
-                        center_world.set(cx * 16 + lx, y, cz * 16 + lz, state);
-                    }
+                    let state = region.get(lx, y, lz);
+                    center_world.set(cx * 16 + lx, y, cz * 16 + lz, state);
                 }
             }
         }
         center_world
     }
 
-    /// Inserts one source chunk's own post-carve world/heights into a shared
+    /// Copies one source chunk's own post-carve world/heights into a shared
     /// 3×3 region grid, translating its absolute coordinates into
     /// centre-relative local coordinates (`crate::feature::REGION_MIN..
     /// REGION_MAX` on each axis, matching [`crate::feature::OreInput::region_local`]'s
     /// key space).
     ///
     /// `world` is read via [`crate::dense_grid::DenseBlockGrid::get`] (O(1)
-    /// array access, issue #295's Job 2) rather than iterated as a
-    /// `HashMap`; the destination `region`/`ocean_floor_wg` stay
-    /// `HashMap`-keyed because `crate::feature::apply_ore_step_3x3_per_source`
-    /// (proven against `feature_parity`'s fixture-driven `HashMap` shape)
-    /// still expects that type — narrowing that engine's own signature to a
-    /// dense grid too is future work, not attempted in this pass (see
-    /// `docs/worldgen-parity.md`).
+    /// array access, issue #295's Job 2) and written into `region` — also a
+    /// [`crate::dense_grid::DenseBlockGrid`] since issue #106 — via
+    /// [`crate::dense_grid::DenseBlockGrid::set`], which interns each
+    /// distinct state string once in `region`'s own palette rather than
+    /// heap-allocating a fresh `String` per cell the way a
+    /// `HashMap<(i32,i32,i32), String>`'s `.insert` used to. This runs for
+    /// all 9 source chunks on every `column()` call (this is the "9×
+    /// String-map re-materialisation" issue #106 named — the per-source
+    /// *pipeline* recompute this loop's caller avoids is a separate,
+    /// already-fixed cost; see [`OverworldGenerator::pre_ore_cache`]'s doc
+    /// comment), so cutting its allocation count matters regardless of
+    /// whether the pipeline itself was a cache hit. `ocean_floor_wg` stays
+    /// a small `HashMap<(i32,i32), i32>` — at most 48×48 = 2304 entries
+    /// total across the whole region, an order of magnitude below the
+    /// `48×384×48` block field, so it was never the cost this pass targets.
     fn stitch_region(
-        region: &mut HashMap<(i32, i32, i32), String>,
+        region: &mut crate::feature::RegionGrid,
         ocean_floor_wg: &mut HashMap<(i32, i32), i32>,
         source_cx: i32,
         source_cz: i32,
@@ -765,7 +795,7 @@ impl OverworldGenerator {
                     let state = world.get(base_x + lx, y, base_z + lz);
                     let rx = base_x + lx - center_cx * 16;
                     let rz = base_z + lz - center_cz * 16;
-                    region.insert((rx, y, rz), state.to_string());
+                    region.set(rx, y, rz, state);
                 }
             }
         }

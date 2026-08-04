@@ -44,7 +44,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use lodestone_worldgen::feature::{PlacedOre, apply_ore_step_3x3, parse_ore_config, parse_placements};
+use lodestone_worldgen::dense_grid::DenseBlockGrid;
+use lodestone_worldgen::feature::{
+    PlacedOre, REGION_MAX, REGION_MIN, apply_ore_step_3x3, parse_ore_config, parse_placements,
+};
 use lodestone_worldgen::rng::{WorldgenRandom, XoroshiroRandomSource};
 use serde_json::Value;
 
@@ -271,6 +274,15 @@ fn run_fixture(
     // still be cross-checked against the oracle's `meta.decorationSeed`
     // without a second, separate derivation.
     let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+    // `RegionGrid` is a `DenseBlockGrid` (issue #106) — build one from this
+    // fixture's own sparse `HashMap` via the test-adapter seam
+    // `crate::dense_grid` documents for exactly this purpose (production
+    // code never goes through `HashMap` at all; only this fixture-driven
+    // test does).
+    let region_size = REGION_MAX - REGION_MIN;
+    let grid = DenseBlockGrid::from_hashmap(
+        REGION_MIN, MIN_Y, REGION_MIN, region_size, HEIGHT, region_size, &f.input,
+    );
     let (working, center_decoration_seed) = apply_ore_step_3x3(
         &mut random,
         f.seed,
@@ -282,7 +294,7 @@ fn run_fixture(
         GEN_DEPTH,
         &f.ocean_floor_wg,
         &in_tag,
-        &f.input,
+        &grid,
         ores,
     );
 
@@ -290,14 +302,23 @@ fn run_fixture(
     // `ore.*` is scoped the same way (a write from a NEIGHBOUR source pass
     // landing in the centre still counts; a write landing in a neighbour,
     // from any of the 9 passes, does not — that block is real vanilla
-    // output too, just not what this fixture captures).
+    // output too, just not what this fixture captures). A fixed-order loop
+    // over exactly the centre 16x16xheight range, not an iteration over the
+    // whole region — `DenseBlockGrid` exposes no `IntoIterator`, only
+    // positional `get`/`set`, so this is the natural (and only) way to walk
+    // it; it also means every column-by-column read is in the same
+    // deterministic order every other fixed-loop grid walk in this crate
+    // already uses (see `crate::overworld`'s "Performance" module-doc
+    // section on why a raw `HashMap` iteration was avoided there too).
     let mut changes = HashMap::new();
-    for (&(lx, y, lz), block) in &working {
-        if !(0..16).contains(&lx) || !(0..16).contains(&lz) {
-            continue;
-        }
-        if f.input.get(&(lx, y, lz)) != Some(block) {
-            changes.insert((lx, y, lz), block.clone());
+    for y in MIN_Y..MIN_Y + HEIGHT {
+        for lz in 0..16i32 {
+            for lx in 0..16i32 {
+                let block = working.get(lx, y, lz);
+                if f.input.get(&(lx, y, lz)).map(String::as_str) != Some(block) {
+                    changes.insert((lx, y, lz), block.to_string());
+                }
+            }
         }
     }
     RunResult {
