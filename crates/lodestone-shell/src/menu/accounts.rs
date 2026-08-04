@@ -374,7 +374,23 @@ impl AccountsNav {
         let shown = list_len.saturating_sub(st.scroll).min(VISIBLE_ROWS);
         if rendered_row < shown {
             let logical = st.scroll + rendered_row;
-            st.highlighted = logical;
+            // **Only `focus`.** `focus` is what draws highlighted;
+            // `highlighted` is what Select/Remove act on — vanilla's `hovered`
+            // (`AbstractSelectionList.java:41`) and `selected` (`:40`), which are
+            // separate fields that nothing ever copies between.
+            //
+            // This line used to also write `st.highlighted = logical`, and that
+            // was the reported bug: moving the mouse across the list silently
+            // re-aimed Select and Remove at whatever the cursor last passed over,
+            // so a player who highlighted an account with the keyboard and then
+            // moved the mouse would sign in as a different one. Nothing about the
+            // assignment looked wrong in isolation, which is why the guard is now
+            // a test that reads *both* fields after a hover
+            // (`hovering_an_account_does_not_change_what_select_acts_on`) —
+            // a single assertion cannot tell "hover works" from "hover selected it".
+            //
+            // `super::widget::ScrollList` makes this structural rather than a
+            // remembered rule: `set_hovered` has no path to `selected` at all.
             st.focus = logical;
         } else {
             let button = rendered_row - shown;
@@ -439,6 +455,19 @@ impl AccountsNav {
             MenuKey::Enter => {
                 if st.focus < list_len {
                     let logical = st.focus;
+                    // A click **does** select — `AbstractSelectionList.mouseClicked`
+                    // ends in `setSelected` (`ObjectSelectionList.java:69-72` plus
+                    // `AbstractSelectionList.java:299-311`). Only *hover* does not.
+                    //
+                    // `highlighted` has to move with it, or the hover fix opens a
+                    // new gap in the other direction: a click reached here through
+                    // `MenuNav::click`'s `hover` + `Enter` fall-through
+                    // (`nav.rs:1724-1725`), so with hover no longer writing
+                    // `highlighted`, clicking account 3 would sign in as 3 while
+                    // leaving Remove and the Delete key aimed at whatever the
+                    // keyboard last highlighted. That is the same class of bug as
+                    // the one being fixed, so it is closed in the same change.
+                    st.highlighted = logical;
                     select(&mut st, logical, &self.path);
                     AccountsSignal::None
                 } else {
@@ -1234,7 +1263,99 @@ mod tests {
         let scroll = nav.scroll();
         assert!(scroll > 0, "highlighting row 7 with only 5 visible must have scrolled");
         nav.hover(0);
-        assert_eq!(nav.highlighted(), scroll, "rendered row 0 on screen is `scroll` logically");
+        // The *mapping* is what this test is about: rendered row 0 is logical row
+        // `scroll`. It is asserted on `focus`, not `highlighted` — see
+        // `hovering_an_account_does_not_change_what_select_acts_on`. This
+        // assertion read `highlighted()` until the hover-vs-selection fix, and in
+        // doing so it locked in the reported bug: the test agreed with the code
+        // because both were written from the same wrong assumption.
+        assert_eq!(nav.focus(), scroll, "rendered row 0 on screen is `scroll` logically");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn hovering_an_account_does_not_change_what_select_acts_on() {
+        // The owner's report: "hovering an account shouldn't focus it (it should
+        // work the same as the server list)".
+        //
+        // Both pieces of state are read after every move, because one assertion
+        // cannot distinguish "the hover highlight works" from "the hover selected
+        // it" — the two facts are `focus` (drawn) and `highlighted` (acted on).
+        let path = temp_path("hover-not-select");
+        let mut meta = AccountsMetadata::default();
+        for i in 0..3u64 {
+            meta.upsert(profile(&format!("p{i}"), i));
+        }
+        meta.save_to(&path).unwrap();
+        let nav = AccountsNav::with_path(path.clone());
+
+        // Keyboard-highlight row 1, so there is a selection to steal.
+        nav.handle_key(MenuKey::Down);
+        assert_eq!(nav.highlighted(), 1);
+        assert_eq!(nav.focus(), 1);
+
+        // Now hover a *different* row. The highlight must follow the mouse and
+        // the selection must not move.
+        nav.hover(3);
+        assert_eq!(nav.focus(), 3, "the hover highlight must follow the mouse");
+        assert_eq!(
+            nav.highlighted(),
+            1,
+            "hover must not re-aim Select/Remove — this is the reported bug"
+        );
+
+        // Sweeping across every row leaves the selection where it was.
+        for row in 0..4 {
+            nav.hover(row);
+            assert_eq!(
+                nav.highlighted(),
+                1,
+                "hovering row {row} must not move the selection"
+            );
+        }
+
+        // Control: the selection *can* still be moved, so the assertions above
+        // are not passing merely because `highlighted` is stuck. A click is what
+        // selects, and the keyboard is what selects — hover is neither.
+        nav.handle_key(MenuKey::Down);
+        assert_eq!(nav.highlighted(), 2, "the keyboard must still select");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn clicking_an_account_selects_it_and_moves_what_remove_acts_on() {
+        // The other direction of the hover fix, and the reason it is not just a
+        // deleted line. `MenuNav::click` reaches this screen as `hover` + `Enter`
+        // (`nav.rs:1724-1725`); now that `hover` no longer writes `highlighted`,
+        // `Enter` must, or Remove and Delete stay aimed at a row the player is no
+        // longer looking at.
+        let path = temp_path("click-selects");
+        let mut meta = AccountsMetadata::default();
+        for i in 0..3u64 {
+            meta.upsert(profile(&format!("p{i}"), i));
+        }
+        meta.save_to(&path).unwrap();
+        let nav = AccountsNav::with_path(path.clone());
+        assert_eq!(nav.highlighted(), 0);
+
+        // Simulate a click on rendered row 2: hover then Enter, exactly as
+        // `MenuNav::click` does it.
+        nav.hover(2);
+        nav.handle_key(MenuKey::Enter);
+
+        assert_eq!(nav.focus(), 2);
+        assert_eq!(
+            nav.highlighted(),
+            2,
+            "a click must move the sticky highlight, unlike a hover"
+        );
+        // And it really did select that account, not merely highlight it.
+        let ordered = nav.rows();
+        if let Some(AccountRow::Account(p)) = ordered.get(2) {
+            assert!(nav.is_selected(p.profile_id));
+        } else {
+            panic!("row 2 of 3 accounts + offline should be an account: {ordered:?}");
+        }
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

@@ -722,6 +722,614 @@ impl LayoutElement for Widget {
     }
 }
 
+// -- the scrollable list ----------------------------------------------------
+
+/// `AbstractScrollArea.SCROLLBAR_WIDTH` (`AbstractScrollArea.java:13`), which is
+/// also the `scrollbarWidth` every `defaultSettings` record carries (`:146`).
+pub const SCROLLBAR_WIDTH: f32 = 6.0;
+
+/// `AbstractScrollArea.SCROLLBAR_MIN_HEIGHT` (`AbstractScrollArea.java:14`), the
+/// floor [`ScrollList::scroller_height`] clamps the thumb to.
+pub const SCROLLBAR_MIN_HEIGHT: f32 = 32.0;
+
+/// The gap `scrollerHeight()` leaves at the bottom of its own clamp:
+/// `Mth.clamp(…, 32, this.height - 8)` (`AbstractScrollArea.java:97`).
+pub const SCROLLBAR_HEIGHT_INSET: f32 = 8.0;
+
+/// `AbstractSelectionList.Entry.CONTENT_PADDING` (`AbstractSelectionList.java:435`)
+/// — also the `+ 2` in `getFirstEntryY()` (`:104-106`) and half the `+ 4` in
+/// `contentHeight()` (`:198-206`). One constant because vanilla derives all three
+/// from the same 2 px inset, and splitting them is how they drift.
+pub const LIST_CONTENT_PADDING: f32 = 2.0;
+
+/// The thumb sprite: `AbstractScrollArea.SCROLLER_SPRITE`
+/// (`AbstractScrollArea.java:15`).
+pub const SCROLLER_SPRITE: &str = "widget/scroller";
+
+/// The track sprite: `AbstractScrollArea.SCROLLER_BACKGROUND_SPRITE`
+/// (`AbstractScrollArea.java:16`).
+pub const SCROLLER_BACKGROUND_SPRITE: &str = "widget/scroller_background";
+
+/// Vanilla's `AbstractScrollArea` + `AbstractSelectionList` scroll model: a
+/// **pixel** scroll offset, a scrollbar, and a `hovered`/`selected` pair that are
+/// two separate pieces of state.
+///
+/// ## What it is
+///
+/// The shared substrate for every list-shaped menu screen. It owns four things
+/// and deliberately nothing else:
+///
+/// | field | vanilla |
+/// |---|---|
+/// | [`Self::scroll`] | `AbstractScrollArea.scrollAmount` (`:18`) |
+/// | [`Self::selected`] | `AbstractSelectionList.selected` (`:40`) |
+/// | [`Self::hovered`] | `AbstractSelectionList.hovered` (`:41`) |
+/// | [`Self::dragging`] | `AbstractScrollArea.scrolling` (`:19`) |
+///
+/// It holds **no entries**. A screen keeps its own rows in whatever shape suits
+/// it and tells this type only how many there are, so adopting the primitive
+/// never means restructuring a screen's model.
+///
+/// ## The offset is pixels, and that is the whole point
+///
+/// `scrollAmount` is a `double` in vanilla (`AbstractScrollArea.java:18`) and
+/// every consumer treats it as pixels: `repositionEntries` subtracts it straight
+/// from a y (`AbstractSelectionList.java:143-150`), and `mouseScrolled` moves it
+/// by `scrollY * scrollRate()` where `scrollRate` is `defaultEntryHeight / 2`
+/// (`:44` via `AbstractScrollArea.defaultSettings`, `:145-147`).
+///
+/// **Both of this shell's lists previously stored a row *index*** — `MenuNav`'s
+/// `server_scroll: usize` and `accounts::State::scroll: usize` — so one wheel
+/// notch jumped a whole 36 px entry. That is not a smoothing problem to be eased
+/// over; it is the wrong representation, and this type is the fix. A row index
+/// **cannot** express vanilla's half-entry notch, which is the assertion
+/// `one_notch_is_half_an_entry_in_pixels` makes.
+///
+/// ## There is no scroll animation in 26.2
+///
+/// Checked rather than assumed, because "smooth" invites one:
+/// `setScrollAmount` is an immediate `Mth.clamp` with no target, no velocity and
+/// no per-frame approach (`AbstractScrollArea.java:67-69`), and
+/// `smoothScroll`/`scrollAnimation`/`targetScroll` appear **nowhere** in
+/// `client/gui`. Smoothness in vanilla is entirely a consequence of the offset
+/// being pixel-granular. **Do not add easing** — it would be invention, and it
+/// would desynchronise the draw from the hit-test, which read the same
+/// [`Self::row_top`].
+///
+/// ## Hover is not selection
+///
+/// These are separate fields in vanilla and nothing ever copies one into the
+/// other. `hovered` is recomputed from the mouse position at the top of every
+/// extract (`AbstractSelectionList.java:210`) and is only ever *read* as a
+/// boolean argument to the entry's own draw (`:360`). `selected` moves on a
+/// click, on a keyboard arrow, or through `setFocused` (`:299-311`) — never on a
+/// hover.
+///
+/// [`Self::set_hovered`] therefore cannot touch `selected`, by construction:
+/// there is no code path from one to the other. That is what fixes "hovering an
+/// account shouldn't focus it" at the level of the representation rather than by
+/// deleting one assignment from one screen.
+///
+/// ## How to change it
+///
+/// - **Keep every formula a citation.** Each method below names the vanilla line
+///   it ports. A convenience that has no vanilla counterpart belongs in the
+///   screen, not here.
+/// - **The integer truncations are load-bearing.** `scrollerHeight` casts to
+///   `int` before clamping (`AbstractScrollArea.java:97`) and `scrollBarY` does
+///   `(int)scrollAmount * (height - scrollerHeight()) / maxScrollAmount()` in
+///   **integer** arithmetic (`:104-108`). The `floor`s here are that arithmetic,
+///   not defensive rounding — deleting them moves the thumb by up to a pixel and
+///   no test of ours would say why.
+/// - **`row_h` is uniform.** `AbstractSelectionList` allows a per-entry height
+///   (`addEntry(entry, height)`, `:122-129`) and `super::options`' settings list
+///   genuinely needs it. Supporting that here means replacing [`Self::row_top`]
+///   and [`Self::content_height`] with a prefix-sum walk; until a second screen
+///   needs it, the uniform case is honest and the variable one is a documented
+///   absence rather than a wrong answer.
+///
+/// ## Dependencies
+///
+/// None — pure arithmetic. The scrollbar's *pixels* are drawn by
+/// [`super::render`], which reads [`Self::scrollbar_rects`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScrollList {
+    /// Scroll offset in **logical pixels** — `AbstractScrollArea.scrollAmount`
+    /// (`:18`). Always inside `0..=max_scroll()`; every writer goes through
+    /// [`Self::set_scroll`].
+    scroll: f32,
+    /// Uniform entry height — `AbstractSelectionList.defaultEntryHeight` (`:37`).
+    row_h: f32,
+    /// The band's top y — `getY()`.
+    top: f32,
+    /// The band's height — `getHeight()`.
+    height: f32,
+    /// Number of entries — `getItemCount()` (`:160-162`).
+    len: usize,
+    /// `AbstractSelectionList.selected` (`:40`). What Enter/Select acts on.
+    selected: Option<usize>,
+    /// `AbstractSelectionList.hovered` (`:41`). Draw-only, mouse-derived, and
+    /// **never** written by anything that writes [`Self::selected`].
+    hovered: Option<usize>,
+    /// `AbstractScrollArea.scrolling` (`:19`) — a thumb drag is in progress.
+    dragging: bool,
+}
+
+impl ScrollList {
+    /// A list of `len` entries of `row_h` each, in a band at `top` of `height`.
+    ///
+    /// Nothing is selected and nothing is hovered, matching a freshly
+    /// constructed `AbstractSelectionList` (both fields are `@Nullable` and start
+    /// null).
+    #[must_use]
+    pub fn new(row_h: f32, top: f32, height: f32, len: usize) -> Self {
+        Self {
+            scroll: 0.0,
+            row_h,
+            top,
+            height,
+            len,
+            selected: None,
+            hovered: None,
+            dragging: false,
+        }
+    }
+
+    // -- geometry ---------------------------------------------------------
+
+    /// `getBottom()`.
+    #[must_use]
+    pub fn bottom(&self) -> f32 {
+        self.top + self.height
+    }
+
+    /// `getY()`.
+    #[must_use]
+    pub fn top(&self) -> f32 {
+        self.top
+    }
+
+    /// `getHeight()`.
+    #[must_use]
+    pub fn height(&self) -> f32 {
+        self.height
+    }
+
+    /// `defaultEntryHeight`.
+    #[must_use]
+    pub fn row_h(&self) -> f32 {
+        self.row_h
+    }
+
+    /// `getItemCount()` (`AbstractSelectionList.java:160-162`).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether the list has no entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Re-seat the band and the entry count, then re-clamp — vanilla's
+    /// `updateSizeAndPosition` (`AbstractSelectionList.java:186-195`), which
+    /// ends in `refreshScrollAmount()`.
+    ///
+    /// **Call this every frame**, before reading any geometry. The band depends
+    /// on the canvas, and a list that keeps a stale `height` reports a stale
+    /// `max_scroll`, which is how a shrunk window ends up scrolled past its own
+    /// content. The re-clamp is why this cannot be a plain field write.
+    pub fn resize(&mut self, top: f32, height: f32, len: usize) {
+        self.top = top;
+        self.height = height;
+        self.len = len;
+        if let Some(s) = self.selected
+            && s >= len
+        {
+            self.selected = None;
+        }
+        if let Some(h) = self.hovered
+            && h >= len
+        {
+            self.hovered = None;
+        }
+        self.refresh_scroll();
+    }
+
+    /// `getFirstEntryY() = getY() + 2` (`AbstractSelectionList.java:104-106`).
+    #[must_use]
+    pub fn first_entry_y(&self) -> f32 {
+        self.top + LIST_CONTENT_PADDING
+    }
+
+    /// `contentHeight()`: the entries' total height plus 4
+    /// (`AbstractSelectionList.java:198-206`) — the 2 px above the first entry
+    /// and the 2 px below the last.
+    #[must_use]
+    pub fn content_height(&self) -> f32 {
+        self.len as f32 * self.row_h + 2.0 * LIST_CONTENT_PADDING
+    }
+
+    /// `maxScrollAmount() = max(0, contentHeight() - height)`
+    /// (`AbstractScrollArea.java:84-86`).
+    #[must_use]
+    pub fn max_scroll(&self) -> f32 {
+        (self.content_height() - self.height).max(0.0)
+    }
+
+    /// `scrollable() = maxScrollAmount() > 0` (`AbstractScrollArea.java:88-90`).
+    /// Also the gate on the scrollbar being drawn at all (`:126`).
+    #[must_use]
+    pub fn scrollable(&self) -> bool {
+        self.max_scroll() > 0.0
+    }
+
+    /// The top of entry `index`, in the same space the band is measured in:
+    /// `getFirstEntryY() - scrollAmount() + index * height`, which is
+    /// `repositionEntries`' running `y` (`AbstractSelectionList.java:143-152`).
+    ///
+    /// Vanilla truncates the offset once, at `(int)this.scrollAmount()`
+    /// (`:144`), rather than per entry — so the whole column moves as a unit and
+    /// entries stay exactly `row_h` apart. Reproduced with a single `floor`
+    /// outside the multiply for that reason.
+    #[must_use]
+    pub fn row_top(&self, index: usize) -> f32 {
+        self.first_entry_y() - self.scroll.floor() + index as f32 * self.row_h
+    }
+
+    /// Whether entry `index` is inside the band —
+    /// `child.getY() + child.getHeight() >= getY() && child.getY() <= getBottom()`
+    /// (`AbstractSelectionList.java:346-352`).
+    ///
+    /// **This is a *partial*-overlap test, and now that is the whole point.** It
+    /// was previously stood in for by "skip any row that is not wholly inside",
+    /// because the menu pipeline had no scissor and a half-row would have painted
+    /// over the header or footer. [`super::render`]'s `Quads` now clips, so a row
+    /// that straddles the edge is drawn *and cut*, exactly as vanilla's
+    /// `enableScissor` (`:242-249`) does it.
+    #[must_use]
+    pub fn row_visible(&self, index: usize) -> bool {
+        if index >= self.len {
+            return false;
+        }
+        let top = self.row_top(index);
+        top + self.row_h >= self.top && top <= self.bottom()
+    }
+
+    /// The half-open range of entries that overlap the band at all.
+    ///
+    /// Derived by **inverting** [`Self::row_visible`]'s two inequalities rather
+    /// than by scanning, so a long list costs no walk. Writing
+    /// `row_top(i) = top + 2 - s + i*row_h` (with `s = floor(scroll)`) into
+    /// `row_top(i) + row_h >= top` and `row_top(i) <= bottom()` and solving for
+    /// `i` gives, with `d = s - 2`:
+    ///
+    /// ```text
+    /// i >= d/row_h - 1        ->  first = ceil(d/row_h) - 1
+    /// i <= (d + height)/row_h ->  last  = floor((d + height)/row_h)   (inclusive)
+    /// ```
+    ///
+    /// **The `ceil - 1` is not interchangeable with a `floor`.** At `s = 38` and
+    /// a 36 px row, row 0's bottom edge lands exactly on the band's top, so it is
+    /// visible by the `>=`; `floor(36/36)` says the range starts at 1 and drops a
+    /// row that is being drawn. A first version of this used `floor` plus a
+    /// compensating `+ 1` on the far end and over-reported the last row by one at
+    /// rest — caught by `visible_range_agrees_with_row_visible_at_every_offset`,
+    /// which sweeps the whole span and is the reason this is stated as algebra
+    /// rather than adjusted until the obvious cases passed.
+    #[must_use]
+    pub fn visible_range(&self) -> core::ops::Range<usize> {
+        if self.len == 0 || self.row_h <= 0.0 {
+            return 0..0;
+        }
+        let d = self.scroll.floor() - LIST_CONTENT_PADDING;
+        let first = ((d / self.row_h).ceil() - 1.0).max(0.0) as usize;
+        let last_inclusive = ((d + self.height) / self.row_h).floor();
+        if last_inclusive < 0.0 {
+            return 0..0;
+        }
+        let end = (last_inclusive as usize).saturating_add(1);
+        first.min(self.len)..end.min(self.len)
+    }
+
+    // -- the offset -------------------------------------------------------
+
+    /// `scrollAmount()` (`AbstractScrollArea.java:63-65`) — **pixels**.
+    #[must_use]
+    pub fn scroll(&self) -> f32 {
+        self.scroll
+    }
+
+    /// `setScrollAmount`: `Mth.clamp(scrollAmount, 0, maxScrollAmount())`
+    /// (`AbstractScrollArea.java:67-69`).
+    ///
+    /// A NaN would survive `clamp` and poison every y downstream, so it is
+    /// mapped to 0 — vanilla cannot receive one (its inputs are all `int`-derived
+    /// doubles) and we can, via a `PixelDelta` wheel event.
+    pub fn set_scroll(&mut self, scroll: f32) {
+        self.scroll = if scroll.is_nan() {
+            0.0
+        } else {
+            scroll.clamp(0.0, self.max_scroll())
+        };
+    }
+
+    /// `refreshScrollAmount()` (`AbstractScrollArea.java:80-82`) — re-apply the
+    /// clamp after the band or the content changed.
+    pub fn refresh_scroll(&mut self) {
+        let s = self.scroll;
+        self.set_scroll(s);
+    }
+
+    /// `scrollRate()`, which for a selection list is `defaultEntryHeight / 2`
+    /// (`AbstractSelectionList.java:44` → `AbstractScrollArea.defaultSettings`,
+    /// `:145-147`).
+    ///
+    /// **Integer division, and `scrollRate` is an `int` field of the record**
+    /// (`:155`) — so a 36 px entry gives exactly 18, and a 25 px entry gives 12,
+    /// not 12.5. The `floor` is that, and it is why this returns a value a row
+    /// index could never represent.
+    #[must_use]
+    pub fn scroll_rate(&self) -> f32 {
+        (self.row_h / 2.0).floor()
+    }
+
+    /// `mouseScrolled`: `setScrollAmount(scrollAmount() - scrollY * scrollRate())`
+    /// (`AbstractScrollArea.java:28-36`).
+    ///
+    /// `notches` is winit's `scrollY`, so **positive scrolls up** (toward entry
+    /// 0), matching vanilla's sign.
+    pub fn mouse_scrolled(&mut self, notches: f32) {
+        self.set_scroll(self.scroll - notches * self.scroll_rate());
+    }
+
+    /// `scrollToEntry` (`AbstractSelectionList.java:251-261`): the minimum move
+    /// that brings entry `index` fully inside the band.
+    ///
+    /// Both deltas are computed against the *current* offset and applied in
+    /// order, exactly as vanilla does — the second `if` sees the first one's
+    /// effect, which is what makes an entry taller than the band settle at its
+    /// top rather than oscillating.
+    pub fn scroll_to_entry(&mut self, index: usize) {
+        if index >= self.len {
+            return;
+        }
+        let top_delta = self.row_top(index) - self.top - LIST_CONTENT_PADDING;
+        if top_delta < 0.0 {
+            self.set_scroll(self.scroll + top_delta);
+        }
+        let bottom_delta = self.bottom() - self.row_top(index) - self.row_h - LIST_CONTENT_PADDING;
+        if bottom_delta < 0.0 {
+            self.set_scroll(self.scroll - bottom_delta);
+        }
+    }
+
+    /// `centerScrollOn` (`AbstractSelectionList.java:263-276`).
+    pub fn center_on(&mut self, index: usize) {
+        if index >= self.len {
+            return;
+        }
+        let y = index as f32 * self.row_h + self.row_h / 2.0;
+        self.set_scroll(y - self.height / 2.0);
+    }
+
+    // -- selection and hover, which are different things -------------------
+
+    /// `getSelected()` (`AbstractSelectionList.java:49-51`).
+    #[must_use]
+    pub fn selected(&self) -> Option<usize> {
+        self.selected
+    }
+
+    /// `setSelected` (`AbstractSelectionList.java:53-62`), including its
+    /// scroll-into-view.
+    ///
+    /// Vanilla scrolls when the entry is clipped at either edge **or** when the
+    /// last input was the keyboard (`:58`). The clipped tests are ported;
+    /// `getLastInputType().isKeyboard()` has no equivalent here, so callers that
+    /// mean "the keyboard moved this" pass `keyboard = true`. A click passes
+    /// `false`, which is what stops a click on a partially-visible row from
+    /// yanking the list — vanilla's own behaviour, and easy to lose.
+    pub fn set_selected(&mut self, selected: Option<usize>, keyboard: bool) {
+        self.selected = selected.filter(|&i| i < self.len);
+        if let Some(i) = self.selected {
+            let top_clipped = self.row_top(i) + LIST_CONTENT_PADDING < self.top;
+            let bottom_clipped =
+                self.row_top(i) + self.row_h - LIST_CONTENT_PADDING > self.bottom();
+            if keyboard || top_clipped || bottom_clipped {
+                self.scroll_to_entry(i);
+            }
+        }
+    }
+
+    /// `getHovered()` (`AbstractSelectionList.java:416-418`).
+    #[must_use]
+    pub fn hovered(&self) -> Option<usize> {
+        self.hovered
+    }
+
+    /// `this.hovered = isMouseOver(…) ? getEntryAtPosition(…) : null`
+    /// (`AbstractSelectionList.java:210`).
+    ///
+    /// **This method must never touch [`Self::selected`], and there is no code
+    /// path here by which it could.** That is not a stylistic note — it is the
+    /// fix for "hovering an account shouldn't focus it". The two screens that had
+    /// this bug both wrote *both* fields from one hover handler
+    /// (`accounts::AccountsNav::hover` set `highlighted` **and** `focus`), and
+    /// nothing about either line looked wrong in isolation.
+    pub fn set_hovered(&mut self, hovered: Option<usize>) {
+        self.hovered = hovered.filter(|&i| i < self.len);
+    }
+
+    /// `getEntryAtPosition` (`AbstractSelectionList.java:168-176`) restricted to
+    /// entries actually inside the band, then folded through
+    /// [`Self::set_hovered`].
+    ///
+    /// `row_left`/`row_w` come from the caller because row width is a screen's
+    /// choice (`getRowWidth()`, `:389-391`, is overridable).
+    pub fn hover_at(&mut self, x: f32, y: f32, row_left: f32, row_w: f32) {
+        let inside_x = x >= row_left && x < row_left + row_w;
+        let inside_band = y >= self.top && y < self.bottom();
+        if !inside_x || !inside_band {
+            self.set_hovered(None);
+            return;
+        }
+        let hit = self
+            .visible_range()
+            .find(|&i| y >= self.row_top(i) && y < self.row_top(i) + self.row_h);
+        self.set_hovered(hit);
+    }
+
+    /// The entry at `y`, ignoring hover state — what a click hit-tests against.
+    ///
+    /// Restricted to [`Self::visible_range`] *and* to the band, so a click can
+    /// never land on an entry that is not on screen. Before this primitive that
+    /// guarantee was absent: `render::row_rect` still answered for a row the draw
+    /// had skipped, so clicking empty space below a short list selected an
+    /// invisible entry (recorded against issue #402).
+    #[must_use]
+    pub fn entry_at(&self, x: f32, y: f32, row_left: f32, row_w: f32) -> Option<usize> {
+        if x < row_left || x >= row_left + row_w || y < self.top || y >= self.bottom() {
+            return None;
+        }
+        self.visible_range()
+            .find(|&i| y >= self.row_top(i) && y < self.row_top(i) + self.row_h)
+    }
+
+    // -- the scrollbar ----------------------------------------------------
+
+    /// `scrollbarWidth()` (`AbstractScrollArea.java:92-94`).
+    #[must_use]
+    pub fn scrollbar_width(&self) -> f32 {
+        SCROLLBAR_WIDTH
+    }
+
+    /// `scrollBarX()` — and note **`AbstractSelectionList` overrides it**:
+    /// `getRowRight() + scrollbarWidth() + 2` (`AbstractSelectionList.java:289-291`),
+    /// *not* `AbstractScrollArea`'s `getRight() - scrollbarWidth()` (`:100-102`).
+    ///
+    /// So the bar sits 8 px to the **right** of the row, outside it, rather than
+    /// being inset into the list's right edge. Taking `row_right` rather than
+    /// reading a width is what keeps this honest: the caller passes the same
+    /// `getRowRight()` its rows are drawn at.
+    #[must_use]
+    pub fn scrollbar_x(&self, row_right: f32) -> f32 {
+        row_right + SCROLLBAR_WIDTH + 2.0
+    }
+
+    /// `scrollerHeight() = Mth.clamp((int)((float)(height * height) / contentHeight()), 32, height - 8)`
+    /// (`AbstractScrollArea.java:96-98`).
+    ///
+    /// The `floor` is vanilla's `(int)` cast. Note the upper clamp can be
+    /// *below* the lower one on a very short band, and `Mth.clamp` resolves that
+    /// to the **upper** bound; `min` after `max` reproduces that order.
+    #[must_use]
+    pub fn scroller_height(&self) -> f32 {
+        let content = self.content_height();
+        if content <= 0.0 {
+            return SCROLLBAR_MIN_HEIGHT;
+        }
+        let ideal = (self.height * self.height / content).floor();
+        ideal
+            .max(SCROLLBAR_MIN_HEIGHT)
+            .min(self.height - SCROLLBAR_HEIGHT_INSET)
+    }
+
+    /// `scrollBarY()` (`AbstractScrollArea.java:104-108`).
+    ///
+    /// **Integer arithmetic throughout in vanilla**:
+    /// `(int)scrollAmount * (height - scrollerHeight()) / maxScrollAmount() + getY()`,
+    /// so the numerator truncates *before* the divide. The two `floor`s are that,
+    /// in that order.
+    #[must_use]
+    pub fn scrollbar_y(&self) -> f32 {
+        let max = self.max_scroll();
+        if max <= 0.0 {
+            return self.top;
+        }
+        let travel = self.height - self.scroller_height();
+        let y = (self.scroll.floor() * travel / max).floor() + self.top;
+        y.max(self.top)
+    }
+
+    /// The track and thumb rects as `(x, y, w, h)`, or `None` when the list does
+    /// not scroll — `extractScrollbar` draws nothing unless `scrollable()`
+    /// (`AbstractScrollArea.java:126-136`), and this shell has no
+    /// `disabledScrollerSprite`, so the `!scrollable()` branch (`:114-124`) has
+    /// no counterpart.
+    ///
+    /// Returned as a pair rather than drawn here because `widget.rs` owns no
+    /// pixels; [`super::render`]'s `draw_scrollbar` is the consumer.
+    #[must_use]
+    pub fn scrollbar_rects(&self, row_right: f32) -> Option<(Rect, Rect)> {
+        if !self.scrollable() {
+            return None;
+        }
+        let x = self.scrollbar_x(row_right);
+        let w = self.scrollbar_width();
+        Some((
+            (x, self.top, w, self.height),
+            (x, self.scrollbar_y(), w, self.scroller_height()),
+        ))
+    }
+
+    /// `isOverScrollbar` (`AbstractScrollArea.java:76-78`). Note the asymmetry
+    /// vanilla itself has: inclusive in x on **both** edges, half-open in y.
+    #[must_use]
+    pub fn is_over_scrollbar(&self, x: f32, y: f32, row_right: f32) -> bool {
+        let bar_x = self.scrollbar_x(row_right);
+        x >= bar_x && x <= bar_x + self.scrollbar_width() && y >= self.top && y < self.bottom()
+    }
+
+    /// `updateScrolling` (`AbstractScrollArea.java:71-74`): begin a thumb drag if
+    /// the press landed on the bar of a scrollable list. Returns whether it did,
+    /// which is vanilla's own "I consumed this click".
+    pub fn begin_drag(&mut self, x: f32, y: f32, row_right: f32) -> bool {
+        self.dragging = self.scrollable() && self.is_over_scrollbar(x, y, row_right);
+        self.dragging
+    }
+
+    /// `onRelease` (`AbstractScrollArea.java:58-61`).
+    pub fn end_drag(&mut self) {
+        self.dragging = false;
+    }
+
+    /// Whether a thumb drag is in progress — `AbstractScrollArea.scrolling`.
+    #[must_use]
+    pub fn dragging(&self) -> bool {
+        self.dragging
+    }
+
+    /// `mouseDragged` (`AbstractScrollArea.java:38-56`), the thumb-drag branch.
+    ///
+    /// Three cases, all vanilla's: above the band snaps to 0, below it snaps to
+    /// `maxScrollAmount()`, and inside it multiplies the mouse delta by
+    /// `max(1, maxScroll / (height - scrollerHeight()))` so dragging the thumb
+    /// one pixel moves the content one *page-fraction*. A no-op unless
+    /// [`Self::begin_drag`] armed it.
+    pub fn drag_to(&mut self, y: f32, dy: f32) {
+        if !self.dragging {
+            return;
+        }
+        if y < self.top {
+            self.set_scroll(0.0);
+        } else if y > self.bottom() {
+            let max = self.max_scroll();
+            self.set_scroll(max);
+        } else {
+            let max = self.max_scroll().max(1.0);
+            let travel = self.height - self.scroller_height();
+            let scale = if travel > 0.0 { (max / travel).max(1.0) } else { 1.0 };
+            self.set_scroll(self.scroll + dy * scale);
+        }
+    }
+}
+
+/// An `(x, y, w, h)` rect in logical pixels, as every menu draw helper takes it.
+pub type Rect = (f32, f32, f32, f32);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1083,5 +1691,499 @@ mod tests {
             [120.0, 150.0, 200.0, 20.0, 8.0]
         );
         assert_eq!(TEXT_MARGIN, 2.0);
+    }
+
+    // -- ScrollList ---------------------------------------------------------
+
+    /// The multiplayer list's real shape: 36 px rows (`SERVER_LIST_ITEM_H`) in a
+    /// 200 px band. Ten entries so it genuinely overflows.
+    fn server_shaped() -> ScrollList {
+        ScrollList::new(36.0, 32.0, 200.0, 10)
+    }
+
+    #[test]
+    fn one_notch_is_half_an_entry_in_pixels() {
+        // `mouseScrolled` moves by `scrollY * scrollRate()`
+        // (`AbstractScrollArea.java:34`) and `scrollRate` is
+        // `defaultEntryHeight / 2` (`AbstractSelectionList.java:44`). For a 36 px
+        // entry that is *exactly* 18 px.
+        //
+        // This is the assertion a row-index implementation cannot satisfy, and it
+        // is written as a predicted value rather than "the offset changed"
+        // precisely because both the buggy and the correct version satisfy the
+        // latter. The two wrong hypotheses are named and excluded below.
+        let mut list = server_shaped();
+        assert_eq!(list.scroll_rate(), 18.0);
+        list.mouse_scrolled(-1.0);
+        assert_eq!(
+            list.scroll, 18.0,
+            "one notch must land at half an entry height"
+        );
+        assert_ne!(
+            list.scroll, 36.0,
+            "36.0 is the row-quantized hypothesis — a whole entry per notch"
+        );
+        assert_ne!(
+            list.scroll, 1.0,
+            "1.0 is the row-index hypothesis — the offset counted in rows"
+        );
+
+        // A second notch accumulates rather than snapping to a row boundary,
+        // which is the other thing an index cannot do: 36 is a legal row offset,
+        // so a test that stopped at one notch would not separate them.
+        list.mouse_scrolled(-1.0);
+        assert_eq!(list.scroll, 36.0);
+        list.mouse_scrolled(-1.0);
+        assert_eq!(list.scroll, 54.0, "an odd multiple of half a row");
+
+        // Positive scrolls up, vanilla's sign.
+        list.mouse_scrolled(1.0);
+        assert_eq!(list.scroll, 36.0);
+    }
+
+    /// The implementation this primitive replaces, kept **executable** so the
+    /// assertion above is a control rather than a description of one.
+    ///
+    /// This is `MenuNav::server_scroll` and `accounts::State::scroll` as they
+    /// actually were: a `usize` row counter clamped against a row window. Its
+    /// `scroll_px` is what `render::server_row_top` did with that counter —
+    /// `scroll as f32 * row_h`.
+    struct RowIndexList {
+        scroll_rows: usize,
+        row_h: f32,
+    }
+
+    impl RowIndexList {
+        fn mouse_scrolled(&mut self, notches: f32) {
+            // The old `scroll_server_list(rows, …)`: one notch, one row.
+            if notches < 0.0 {
+                self.scroll_rows += 1;
+            } else if notches > 0.0 {
+                self.scroll_rows = self.scroll_rows.saturating_sub(1);
+            }
+        }
+
+        fn scroll_px(&self) -> f32 {
+            self.scroll_rows as f32 * self.row_h
+        }
+    }
+
+    #[test]
+    fn a_row_index_implementation_fails_the_notch_assertion() {
+        // The executed negative control for `one_notch_is_half_an_entry_in_pixels`.
+        // Both implementations agree that "the offset changed", which is exactly
+        // why that assertion predicts a *value*: this one lands on 36, not 18, and
+        // no amount of easing on top of it could produce 18 — the information is
+        // not in a row counter to begin with.
+        let mut old = RowIndexList {
+            scroll_rows: 0,
+            row_h: 36.0,
+        };
+        let mut new = server_shaped();
+
+        old.mouse_scrolled(-1.0);
+        new.mouse_scrolled(-1.0);
+
+        assert_eq!(new.scroll(), 18.0, "the primitive lands at half an entry");
+        assert_eq!(
+            old.scroll_px(),
+            36.0,
+            "the row-index model can only land on a whole entry"
+        );
+        assert_ne!(
+            old.scroll_px(),
+            new.scroll(),
+            "the control must FAIL the predicted value — if these ever agree, \
+             the notch assertion has stopped discriminating"
+        );
+
+        // And it cannot represent the offset at all: three notches is 54 px, which
+        // is not a multiple of the row height, so no `usize` maps onto it.
+        new.mouse_scrolled(-2.0);
+        old.mouse_scrolled(-1.0);
+        old.mouse_scrolled(-1.0);
+        assert_eq!(new.scroll(), 54.0);
+        assert_eq!(old.scroll_px(), 108.0);
+        assert!(
+            (new.scroll() / 36.0).fract() != 0.0,
+            "54 px is mid-entry — the state a row index structurally cannot hold"
+        );
+    }
+
+    #[test]
+    fn the_scroll_rate_truncates_like_vanillas_int_division() {
+        // `scrollRate` is an `int` field of the `ScrollbarSettings` record
+        // (`AbstractScrollArea.java:155`) fed `defaultEntryHeight / 2` in
+        // **integer** division, so an odd row height loses the half pixel. The
+        // settings list's 25 px entry is the live case.
+        assert_eq!(ScrollList::new(25.0, 0.0, 100.0, 10).scroll_rate(), 12.0);
+        assert_eq!(ScrollList::new(18.0, 0.0, 100.0, 10).scroll_rate(), 9.0);
+        assert_eq!(ScrollList::new(20.0, 0.0, 100.0, 10).scroll_rate(), 10.0);
+    }
+
+    #[test]
+    fn content_height_and_max_scroll_are_vanillas() {
+        // `contentHeight() = Σ heights + 4` (`AbstractSelectionList.java:198-206`)
+        // and `maxScrollAmount() = max(0, contentHeight - height)`
+        // (`AbstractScrollArea.java:84-86`).
+        let list = server_shaped();
+        assert_eq!(list.content_height(), 10.0 * 36.0 + 4.0);
+        assert_eq!(list.max_scroll(), 364.0 - 200.0);
+        assert!(list.scrollable());
+
+        // A list that fits has max 0 and does not scroll — and therefore draws no
+        // scrollbar at all (`AbstractScrollArea.java:126`).
+        let short = ScrollList::new(36.0, 32.0, 200.0, 2);
+        assert_eq!(short.content_height(), 76.0);
+        assert_eq!(short.max_scroll(), 0.0);
+        assert!(!short.scrollable());
+        assert!(short.scrollbar_rects(300.0).is_none());
+    }
+
+    #[test]
+    fn the_offset_clamps_at_both_ends() {
+        let mut list = server_shaped();
+        list.mouse_scrolled(5.0);
+        assert_eq!(list.scroll, 0.0, "cannot scroll above the first entry");
+        list.set_scroll(9_999.0);
+        assert_eq!(list.scroll, 164.0, "clamped to maxScrollAmount()");
+        // A NaN must not poison every downstream y.
+        list.set_scroll(f32::NAN);
+        assert_eq!(list.scroll, 0.0);
+    }
+
+    #[test]
+    fn shrinking_the_band_reclamps_the_offset() {
+        // `updateSizeAndPosition` ends in `refreshScrollAmount()`
+        // (`AbstractSelectionList.java:194`). Without it a shrunk window stays
+        // scrolled past its own content and the list draws empty.
+        let mut list = server_shaped();
+        list.set_scroll(164.0);
+        list.resize(32.0, 200.0, 3);
+        assert_eq!(list.max_scroll(), 0.0);
+        assert_eq!(list.scroll, 0.0, "a shorter list must pull the offset back");
+    }
+
+    #[test]
+    fn row_tops_move_as_one_column_and_stay_a_row_apart() {
+        // `repositionEntries` (`AbstractSelectionList.java:143-152`) truncates the
+        // offset **once**, outside the per-entry accumulation.
+        let mut list = server_shaped();
+        assert_eq!(list.row_top(0), 34.0, "getFirstEntryY() = getY() + 2");
+        assert_eq!(list.row_top(1), 70.0);
+
+        list.mouse_scrolled(-1.0); // 18 px — half a row
+        assert_eq!(list.row_top(0), 16.0);
+        assert_eq!(list.row_top(1), 52.0);
+        assert_eq!(
+            list.row_top(1) - list.row_top(0),
+            36.0,
+            "entries must stay exactly one row apart at a fractional offset"
+        );
+    }
+
+    #[test]
+    fn a_half_scrolled_row_is_visible_rather_than_skipped() {
+        // The partial-overlap test of `extractListItems`
+        // (`AbstractSelectionList.java:346-352`). Row 0 is half above the band
+        // after one notch and must still be *drawn* — clipped, not dropped. The
+        // old row-quantized code skipped it, which is why smooth scrolling needed
+        // the clip in `render.rs` before it could be correct.
+        let mut list = server_shaped();
+        list.mouse_scrolled(-1.0);
+        assert_eq!(list.row_top(0), 16.0);
+        assert!(list.row_top(0) < list.top(), "row 0 straddles the top edge");
+        assert!(
+            list.row_visible(0),
+            "a partially-scrolled row must be visible, not skipped"
+        );
+        assert!(list.visible_range().contains(&0));
+
+        // And an entry entirely above the band is genuinely gone.
+        list.set_scroll(100.0);
+        assert!(!list.row_visible(0), "row 0 is now fully above the band");
+        assert!(!list.visible_range().contains(&0));
+    }
+
+    #[test]
+    fn visible_range_agrees_with_row_visible_at_every_offset() {
+        // `visible_range` inverts `row_top` instead of scanning, so the two could
+        // drift. Swept across the whole scrollable span in half-notch steps,
+        // which is finer than any offset the wheel can produce.
+        let mut list = server_shaped();
+        let mut offset = 0.0_f32;
+        while offset <= list.max_scroll() {
+            list.set_scroll(offset);
+            let range = list.visible_range();
+            for i in 0..list.len() {
+                assert_eq!(
+                    range.contains(&i),
+                    list.row_visible(i),
+                    "row {i} at offset {offset}: range {range:?}"
+                );
+            }
+            offset += 9.0;
+        }
+    }
+
+    #[test]
+    fn the_scrollbar_sits_outside_the_row_not_inset_into_it() {
+        // `AbstractSelectionList` **overrides** `scrollBarX()` to
+        // `getRowRight() + scrollbarWidth() + 2` (`:289-291`). Getting this from
+        // `AbstractScrollArea`'s un-overridden `getRight() - scrollbarWidth()`
+        // (`AbstractScrollArea.java:100-102`) would put the bar *inside* the list.
+        let list = server_shaped();
+        let row_right = 392.0;
+        assert_eq!(list.scrollbar_x(row_right), 400.0);
+        assert_eq!(list.scrollbar_width(), 6.0);
+        assert!(
+            list.scrollbar_x(row_right) > row_right,
+            "the bar must not overlap the rows"
+        );
+    }
+
+    #[test]
+    fn thumb_geometry_lands_flush_at_both_ends() {
+        // `scrollerHeight()` = `clamp((int)(h*h / contentHeight), 32, h - 8)`
+        // (`AbstractScrollArea.java:96-98`). For h=200, content=364:
+        // 200*200/364 = 109.89 -> 109, and clamp(109, 32, 192) = 109.
+        let mut list = server_shaped();
+        assert_eq!(list.scroller_height(), 109.0);
+
+        // `scrollBarY()` (`:104-108`). At rest the thumb is at the band's top.
+        assert_eq!(list.scrollbar_y(), list.top());
+
+        // Fully scrolled, the thumb's *bottom* must reach the band's bottom
+        // exactly — travel is `height - scrollerHeight()` = 91, so
+        // 32 + 91 + 109 = 232 = top + height. A geometry that did not land flush
+        // would leave a visible gap the player reads as "there is more below".
+        list.set_scroll(list.max_scroll());
+        assert_eq!(list.scrollbar_y(), 32.0 + 91.0);
+        assert_eq!(
+            list.scrollbar_y() + list.scroller_height(),
+            list.bottom(),
+            "a fully-scrolled thumb must be flush with the band's bottom"
+        );
+
+        // Halfway down the content puts the thumb halfway down its travel.
+        list.set_scroll(82.0);
+        assert_eq!(list.scrollbar_y(), 32.0 + (82.0_f32 * 91.0 / 164.0).floor());
+    }
+
+    #[test]
+    fn the_thumb_never_shrinks_below_vanillas_floor() {
+        // `SCROLLBAR_MIN_HEIGHT` (`AbstractScrollArea.java:14`). A 500-entry list
+        // would compute a 2 px thumb, which is unusable.
+        let long = ScrollList::new(36.0, 32.0, 200.0, 500);
+        assert!(long.height() * long.height() / long.content_height() < 32.0);
+        assert_eq!(long.scroller_height(), 32.0);
+
+        // And the upper clamp wins on a band so short the two bounds cross —
+        // `Mth.clamp` returns the *upper* bound in that case.
+        let tiny = ScrollList::new(36.0, 0.0, 30.0, 50);
+        assert_eq!(tiny.scroller_height(), 30.0 - 8.0);
+    }
+
+    #[test]
+    fn scroll_to_entry_moves_the_minimum_and_settles() {
+        // `scrollToEntry` (`AbstractSelectionList.java:251-261`).
+        let mut list = server_shaped();
+
+        // Entry 5 is below the band (top 34 + 5*36 = 214 > bottom 232 - 36).
+        list.scroll_to_entry(5);
+        // bottomDelta = 232 - 214 - 36 - 2 = -20, so scroll moves by +20.
+        assert_eq!(list.scroll, 20.0);
+        assert!(list.row_visible(5));
+
+        // Already visible: nothing moves. Asserting the *absence* of a move needs
+        // the control below, which shows the mechanism does fire.
+        let before = list.scroll;
+        list.scroll_to_entry(4);
+        assert_eq!(list.scroll, before, "a visible entry must not move the list");
+
+        // Control: entry 9 is not visible, and the same call does move it.
+        list.scroll_to_entry(9);
+        assert_ne!(list.scroll, before);
+        assert!(list.row_visible(9));
+
+        // Scrolling back to entry 0 lands exactly at the top.
+        list.scroll_to_entry(0);
+        assert_eq!(list.scroll, 0.0);
+    }
+
+    #[test]
+    fn hovering_never_changes_the_selection() {
+        // The two-piece assertion for "hovering an account shouldn't focus it".
+        // One assertion cannot distinguish "hover works" from "hover selected
+        // it", so both fields are read after every move.
+        let mut list = server_shaped();
+        list.set_selected(Some(2), false);
+        assert_eq!(list.selected(), Some(2));
+        assert_eq!(list.hovered(), None);
+
+        // Hover a *different* entry. The highlight must move and the selection
+        // must not.
+        list.set_hovered(Some(4));
+        assert_eq!(list.hovered(), Some(4), "the hover highlight must be present");
+        assert_eq!(
+            list.selected(),
+            Some(2),
+            "hover must not steal the selection — this is the reported bug"
+        );
+
+        // Leaving the list clears the hover and still leaves the selection alone.
+        list.set_hovered(None);
+        assert_eq!(list.hovered(), None);
+        assert_eq!(list.selected(), Some(2));
+
+        // Control: the selection *can* still be moved, so the assertion above is
+        // not passing merely because `selected` is immutable.
+        list.set_selected(Some(4), false);
+        assert_eq!(list.selected(), Some(4));
+    }
+
+    #[test]
+    fn hovering_does_not_scroll_the_list_either() {
+        // `setSelected` scrolls into view (`AbstractSelectionList.java:53-62`);
+        // `this.hovered = …` (`:210`) does not. A hover handler that routed
+        // through selection would yank the list under the cursor.
+        let mut list = server_shaped();
+        list.set_hovered(Some(9));
+        assert_eq!(list.scroll, 0.0, "a hover must never scroll");
+        // Control: selection does scroll, so the check above is not vacuous.
+        list.set_selected(Some(9), true);
+        assert!(list.scroll > 0.0);
+    }
+
+    #[test]
+    fn a_click_does_not_yank_a_partially_visible_row_but_the_keyboard_does() {
+        // `setSelected` scrolls when clipped **or** when the last input was the
+        // keyboard (`:58`). A click on a fully-visible row must not move the list.
+        let mut list = server_shaped();
+        list.set_selected(Some(1), false);
+        assert_eq!(list.scroll, 0.0);
+
+        // The keyboard arm fires even on an already-visible row.
+        let mut list2 = server_shaped();
+        list2.set_scroll(50.0);
+        list2.set_selected(Some(1), true);
+        assert_ne!(list2.scroll, 50.0, "keyboard selection scrolls into view");
+    }
+
+    #[test]
+    fn hover_and_click_hit_test_the_same_rows_the_draw_shows() {
+        // `getEntryAtPosition` (`AbstractSelectionList.java:168-176`) restricted
+        // to the band. The point is that a click can no longer land on an entry
+        // the draw skipped — the residual defect issue #402 recorded.
+        let mut list = server_shaped();
+        let (left, w) = (100.0, 305.0);
+
+        // Dead centre of row 0.
+        assert_eq!(list.entry_at(200.0, 34.0 + 18.0, left, w), Some(0));
+        list.hover_at(200.0, 34.0 + 18.0, left, w);
+        assert_eq!(list.hovered(), Some(0));
+
+        // Outside the row's x band: no hit, and the hover clears.
+        assert_eq!(list.entry_at(50.0, 52.0, left, w), None);
+        list.hover_at(50.0, 52.0, left, w);
+        assert_eq!(list.hovered(), None);
+
+        // Below the band entirely (the footer) — must not select entry 9.
+        assert_eq!(list.entry_at(200.0, 300.0, left, w), None);
+
+        // Every y inside the band resolves to a row that `row_visible` agrees is
+        // on screen, at a fractional offset.
+        list.set_scroll(50.0);
+        let mut y = list.top();
+        while y < list.bottom() {
+            if let Some(i) = list.entry_at(200.0, y, left, w) {
+                assert!(list.row_visible(i), "hit row {i} at y {y} is not drawn");
+            }
+            y += 1.0;
+        }
+    }
+
+    #[test]
+    fn dragging_the_thumb_scales_by_the_page_fraction() {
+        // `mouseDragged` (`AbstractScrollArea.java:38-56`).
+        let list0 = server_shaped();
+        let row_right = 392.0;
+        let bar_x = list0.scrollbar_x(row_right);
+
+        // A press off the bar does not arm a drag, and then dragging is a no-op.
+        let mut list = server_shaped();
+        assert!(!list.begin_drag(200.0, 100.0, row_right));
+        list.drag_to(100.0, 40.0);
+        assert_eq!(list.scroll, 0.0, "an unarmed drag must not scroll");
+
+        // A press *on* the bar arms it. travel = 200 - 109 = 91, max = 164, so
+        // the scale is 164/91 = 1.8021 and a 10 px drag moves 18.02 px.
+        assert!(list.begin_drag(bar_x + 3.0, 100.0, row_right));
+        list.drag_to(110.0, 10.0);
+        let expected = 10.0 * (164.0 / 91.0);
+        assert!(
+            (list.scroll - expected).abs() < 1e-3,
+            "expected {expected}, got {}",
+            list.scroll
+        );
+
+        // Dragging above the band snaps to 0, below it snaps to the maximum.
+        list.drag_to(list.top() - 5.0, -50.0);
+        assert_eq!(list.scroll, 0.0);
+        list.drag_to(list.bottom() + 5.0, 50.0);
+        assert_eq!(list.scroll, 164.0);
+
+        // Release disarms.
+        list.end_drag();
+        assert!(!list.dragging());
+        list.drag_to(150.0, 40.0);
+        assert_eq!(list.scroll, 164.0);
+    }
+
+    #[test]
+    fn the_scrollbar_hit_band_matches_where_it_draws() {
+        let list = server_shaped();
+        let row_right = 392.0;
+        let (track, thumb) = list
+            .scrollbar_rects(row_right)
+            .expect("a 10-entry list in a 200 px band scrolls");
+        assert_eq!(track, (400.0, 32.0, 6.0, 200.0));
+        assert_eq!(thumb, (400.0, 32.0, 6.0, 109.0));
+
+        // `isOverScrollbar` (`AbstractScrollArea.java:76-78`) must agree with the
+        // track it draws, or the bar is a picture you cannot grab.
+        assert!(list.is_over_scrollbar(track.0, track.1, row_right));
+        assert!(list.is_over_scrollbar(track.0 + track.2, track.1 + 10.0, row_right));
+        assert!(!list.is_over_scrollbar(track.0 - 1.0, track.1 + 10.0, row_right));
+        assert!(!list.is_over_scrollbar(track.0 + 1.0, track.1 - 1.0, row_right));
+        assert!(!list.is_over_scrollbar(track.0 + 1.0, list.bottom(), row_right));
+    }
+
+    #[test]
+    fn an_empty_list_answers_everything_without_panicking() {
+        let mut list = ScrollList::new(36.0, 32.0, 200.0, 0);
+        assert!(list.is_empty());
+        assert_eq!(list.max_scroll(), 0.0);
+        assert!(!list.scrollable());
+        assert_eq!(list.visible_range(), 0..0);
+        assert!(!list.row_visible(0));
+        assert_eq!(list.entry_at(200.0, 100.0, 100.0, 305.0), None);
+        list.mouse_scrolled(-3.0);
+        assert_eq!(list.scroll, 0.0);
+        list.scroll_to_entry(0);
+        list.center_on(0);
+        list.set_selected(Some(0), true);
+        assert_eq!(list.selected(), None, "there is no entry 0 to select");
+        list.set_hovered(Some(0));
+        assert_eq!(list.hovered(), None);
+    }
+
+    #[test]
+    fn sprite_ids_and_metrics_are_vanillas_own() {
+        assert_eq!(SCROLLER_SPRITE, "widget/scroller");
+        assert_eq!(SCROLLER_BACKGROUND_SPRITE, "widget/scroller_background");
+        assert_eq!(SCROLLBAR_WIDTH, 6.0);
+        assert_eq!(SCROLLBAR_MIN_HEIGHT, 32.0);
+        assert_eq!(LIST_CONTENT_PADDING, 2.0);
     }
 }
