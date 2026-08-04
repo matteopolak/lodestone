@@ -249,6 +249,61 @@ pub trait ChunkSource: Send + Sync {
     }
 }
 
+/// Generates every column in `coords` across scoped OS threads over `&source`,
+/// returning them in the **same order as `coords`** regardless of which
+/// thread finished which column first.
+///
+/// This is safe because `column()` is genuinely pure per chunk: every RNG a
+/// generator touches is positionally seeded (`set_decoration_seed` /
+/// `set_feature_seed` / `setLargeFeatureSeed` per source chunk,
+/// `fork_positional`/`from_hash_of`) with no shared RNG stream anywhere in
+/// `lodestone-worldgen`, so results are order-independent by construction —
+/// see `OverworldGenerator::column`'s own doc comment and
+/// `examples/bench_worldgen.rs`, which already shares a generator across
+/// `std::thread::scope` workers the same way. `ChunkSource: Send + Sync`
+/// (this trait's own bound, above) is what makes `&S` shareable across the
+/// scope in the first place.
+///
+/// Callers that care about the wire being independent of thread scheduling
+/// (i.e. every caller) must still encode/send the returned columns in the
+/// fixed order they came in — this function only parallelises the
+/// generation, not the ordering guarantee, which is why it hands back a
+/// `Vec` aligned index-for-index with `coords` rather than an unordered
+/// collection.
+#[must_use]
+pub(crate) fn generate_columns_parallel<S: ChunkSource>(
+    source: &S,
+    coords: &[(i32, i32)],
+) -> Vec<ChunkColumn> {
+    if coords.len() <= 1 {
+        return coords.iter().map(|&(cx, cz)| source.column(cx, cz)).collect();
+    }
+
+    let workers = std::thread::available_parallelism()
+        .map(std::num::NonZero::get)
+        .unwrap_or(4)
+        .max(1);
+    let batch = coords.len().div_ceil(workers).max(1);
+
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = coords
+            .chunks(batch)
+            .map(|slice| {
+                scope.spawn(move || {
+                    slice
+                        .iter()
+                        .map(|&(cx, cz)| source.column(cx, cz))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("worldgen worker thread panicked"))
+            .collect()
+    })
+}
+
 /// The real terrain source: the composed, JVM-verified overworld generator.
 ///
 /// This is what a client connecting to the integrated server should be served —
@@ -430,5 +485,81 @@ mod tests {
         assert!(!col.is_solid(3, 4, 7));
         // Only the grass block counts toward solidity.
         assert_eq!(col.solid_count(), 1);
+    }
+
+    /// Canonical byte serialisation of a column's full content — `min_y`,
+    /// `height`, the palette (length-prefixed strings), the block-index
+    /// grid, then the biome quarts (length-prefixed strings). Two columns
+    /// with identical bytes here carry identical block/biome content; this
+    /// is the "emitted byte sequence" the determinism control below
+    /// compares, standing in for the real wire encoding (which lives behind
+    /// `ServerProtocol` in the protocol crates, not reachable from here).
+    fn column_bytes(col: &ChunkColumn) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&col.min_y.to_le_bytes());
+        out.extend_from_slice(&col.height.to_le_bytes());
+        for s in &col.palette {
+            out.extend_from_slice(&(s.len() as u32).to_le_bytes());
+            out.extend_from_slice(s.as_bytes());
+        }
+        for &id in &col.blocks {
+            out.extend_from_slice(&id.to_le_bytes());
+        }
+        for s in &col.biome_quarts {
+            out.extend_from_slice(&(s.len() as u32).to_le_bytes());
+            out.extend_from_slice(s.as_bytes());
+        }
+        out
+    }
+
+    /// **Determinism control.** Generates the same small patch of real,
+    /// RNG-bearing overworld columns (surface + aquifer + ore/feature
+    /// placement — the pipeline `crate::worldgen_data::overworld_chunk_source`
+    /// serves to a real client) through [`generate_columns_parallel`]
+    /// repeatedly, and asserts every repeat's emitted byte sequence
+    /// ([`column_bytes`]) is identical to a plain serial baseline built by
+    /// calling `source.column()` in a straight loop.
+    ///
+    /// This is the property the task exists to protect: per-chunk RNG is
+    /// positionally seeded (`set_decoration_seed`/`set_feature_seed`/
+    /// `setLargeFeatureSeed`, `fork_positional`/`from_hash_of` —
+    /// `lodestone-worldgen`'s own doc comments), so there is no shared RNG
+    /// stream for thread scheduling to desync. A single passing repeat would
+    /// prove nothing about a scheduling-dependent race, so this runs the
+    /// parallel path many times against one fixed coordinate set, over a
+    /// coordinate count that does not divide evenly across
+    /// `available_parallelism` worker batches, to make an off-by-one batch
+    /// boundary bug visible if one existed.
+    ///
+    /// Deliberately small (2×3 = 6 columns) and a modest repeat count: this
+    /// runs the real generator, which is not cheap, and this test executes
+    /// in debug mode as part of the ordinary crate test suite on a shared,
+    /// loaded machine.
+    #[test]
+    fn parallel_generation_is_deterministic_and_matches_serial() {
+        let source = crate::overworld_chunk_source(42);
+        let coords: Vec<(i32, i32)> = vec![(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1), (2, -1)];
+
+        let serial: Vec<Vec<u8>> = coords
+            .iter()
+            .map(|&(cx, cz)| column_bytes(&source.column(cx, cz)))
+            .collect();
+
+        const REPEATS: usize = 8;
+        for rep in 0..REPEATS {
+            let parallel = generate_columns_parallel(&source, &coords);
+            assert_eq!(
+                parallel.len(),
+                coords.len(),
+                "repeat {rep}: chunk count changed under parallel generation"
+            );
+            let parallel_bytes: Vec<Vec<u8>> =
+                parallel.iter().map(column_bytes).collect();
+            assert_eq!(
+                parallel_bytes, serial,
+                "repeat {rep}: parallel generation diverged from the serial baseline \
+                 — a scheduling-dependent RNG desync would show up here"
+            );
+        }
     }
 }
