@@ -27,7 +27,7 @@ use crate::container::{
 use crate::effects::EffectsRenderer;
 use crate::gpu::RenderState;
 use crate::hud::{HotbarSlot, HudFrame, HudRenderer};
-use crate::keybinds::{InputAction, Keybinds};
+use crate::keybinds::{Binding, InputAction, Keybinds};
 use crate::menu::nav::{MenuAction, MenuKey, MenuNav};
 use crate::menu::render::MenuRenderer;
 use crate::menu::status::StatusCache;
@@ -199,6 +199,35 @@ fn accumulate_scroll(accum: &mut f64, scaled: f64) -> i32 {
     let whole = accum.trunc();
     *accum -= whole;
     whole as i32
+}
+
+/// What one raw physical key means while a Controls-menu bind button is
+/// mid-capture (issue #15's last hop) — extracted as a pure function so the
+/// decision is unit-testable without a window, the same reason
+/// [`resolve_key`] and [`WindowApp::menu_key_for`] are split out. Deliberately
+/// **not** `menu_key_for`: that function drops any physical key with no
+/// printable `text` (F-keys, modifiers, arrows other than Up/Down), which is
+/// exactly the common rebind target a Controls menu exists to capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureKey {
+    /// Escape: cancel the capture without changing the binding. Vanilla sets
+    /// `InputConstants.UNKNOWN` on Escape unconditionally
+    /// (`KeyBindsScreen.java:73-74`); this client deliberately does not — see
+    /// [`crate::menu::nav::MenuNav::capture_binding`]'s own doc on why
+    /// unconditional-Unbound is the `Pause` hazard.
+    Cancel,
+    /// Any other identified key: finish the capture with it.
+    Bind(KeyCode),
+}
+
+fn capture_key_for(physical_key: PhysicalKey) -> Option<CaptureKey> {
+    match physical_key {
+        PhysicalKey::Code(KeyCode::Escape) => Some(CaptureKey::Cancel),
+        PhysicalKey::Code(code) => Some(CaptureKey::Bind(code)),
+        // No `KeyCode` to persist — nothing to do, the same as `menu_key_for`
+        // falling through to its own `_ => {}`.
+        PhysicalKey::Unidentified(_) => None,
+    }
 }
 
 /// Which input surface owns the keyboard this instant.
@@ -2986,24 +3015,36 @@ impl ApplicationHandler for WindowApp {
                     || self.ui.is_paused()
                     || self.ui.is_death() =>
             {
-                if state == ElementState::Pressed && button == MouseButton::Left {
-                    // Only a click *on a row* activates: clicking the backdrop
-                    // must not confirm whatever happens to be highlighted.
-                    //
-                    // `MenuNav::click` and not `hover` + `MenuKey::Enter`: that
-                    // pair is still what happens on every screen with a single
-                    // row cursor and a single meaning of Enter, and it was wrong
-                    // on the settings screen, which had no cursor and gave each
-                    // control its own key. There, a click on the GUI SCALE row
-                    // arrived as `Enter` and therefore as "toggle View Bobbing" —
-                    // issue #391, where the whole bob chain was working and the
-                    // option had been silently persisted off by a click on an
-                    // unrelated row. Issue #55 gave that screen 135 controls and
-                    // a real cursor, so a click now resolves its row to that
-                    // row's own control; `MenuNav::click`'s doc has the history.
-                    if let Some(row) = self.menu_row_at(self.cursor.0, self.cursor.1) {
-                        let action = self.nav.click(&mut self.ui, row);
-                        self.apply_menu_action(action);
+                if state == ElementState::Pressed {
+                    // Issue #15's other capture half: a mouse-button rebind
+                    // (vanilla defaults `key.attack` to the left button,
+                    // `key.pickItem` to the middle one — real cases, not
+                    // hypothetical) needs *any* button, not only Left, and must
+                    // run before the "click acts on the row under the cursor"
+                    // branch below — otherwise a capture would immediately
+                    // consume its own confirming click as a hover-row
+                    // activation instead of finishing the rebind.
+                    if self.nav.awaiting_key_capture() {
+                        self.nav.capture_binding(Binding::Mouse(button));
+                    } else if button == MouseButton::Left {
+                        // Only a click *on a row* activates: clicking the backdrop
+                        // must not confirm whatever happens to be highlighted.
+                        //
+                        // `MenuNav::click` and not `hover` + `MenuKey::Enter`: that
+                        // pair is still what happens on every screen with a single
+                        // row cursor and a single meaning of Enter, and it was wrong
+                        // on the settings screen, which had no cursor and gave each
+                        // control its own key. There, a click on the GUI SCALE row
+                        // arrived as `Enter` and therefore as "toggle View Bobbing" —
+                        // issue #391, where the whole bob chain was working and the
+                        // option had been silently persisted off by a click on an
+                        // unrelated row. Issue #55 gave that screen 135 controls and
+                        // a real cursor, so a click now resolves its row to that
+                        // row's own control; `MenuNav::click`'s doc has the history.
+                        if let Some(row) = self.menu_row_at(self.cursor.0, self.cursor.1) {
+                            let action = self.nav.click(&mut self.ui, row);
+                            self.apply_menu_action(action);
+                        }
                     }
                 }
                 // Every `owns_frame` action handles its own grab (each of them
@@ -3233,7 +3274,27 @@ impl ApplicationHandler for WindowApp {
                 let outcome = resolve_key(&self.keybinds, gate, code, pressed, self.ctrl_held);
                 match outcome {
                     Some(KeyOutcome::Menu) => {
-                        if pressed
+                        // Issue #15's last hop: a bind button mid-capture needs the
+                        // *next raw key*, not `menu_key_for`'s translation —
+                        // `menu_key_for` silently drops any physical key with no
+                        // printable `text` (F-keys, modifiers, arrows other than
+                        // Up/Down), which is exactly the common rebind case
+                        // (`docs/keybindings.md`'s "Wiring the Controls menu").
+                        // Checked *before* calling `menu_key_for` at all, not only
+                        // when it returns `None`: a capture target can be a
+                        // printable key too, and `menu_key_for` would otherwise
+                        // consume it as `MenuKey::Char` first.
+                        if pressed && self.nav.awaiting_key_capture() {
+                            match capture_key_for(event.physical_key) {
+                                Some(CaptureKey::Cancel) => {
+                                    self.handle_menu_key(MenuKey::Escape);
+                                }
+                                Some(CaptureKey::Bind(code)) => {
+                                    self.nav.capture_binding(Binding::Key(code));
+                                }
+                                None => {}
+                            }
+                        } else if pressed
                             && let Some(key) = Self::menu_key_for(&event)
                         {
                             self.handle_menu_key(key);
@@ -3977,6 +4038,59 @@ mod tests {
     /// every existing call above.
     fn resolve_ctrl(gate: KeyGate, code: KeyCode, pressed: bool) -> Option<KeyOutcome> {
         resolve_key(&Keybinds::new(), gate, Some(code), pressed, true)
+    }
+
+    /// Issue #15's last hop: an F-key has no printable `text`, so it is
+    /// exactly the case `menu_key_for` drops and `capture_key_for` must not.
+    /// `F1` (not `F5`, which `resolve_key`'s own default table already binds
+    /// to `TogglePerspective` — picking a bound key here would prove nothing
+    /// about the *unbound*, no-text case a real Controls-menu rebind targets)
+    /// persists as vanilla's own `"key.keyboard.f1"`.
+    #[test]
+    fn capture_key_for_forwards_a_function_key() {
+        assert_eq!(
+            capture_key_for(PhysicalKey::Code(KeyCode::F1)),
+            Some(CaptureKey::Bind(KeyCode::F1)),
+            "an F-key must reach the capture as a bindable key, not be \
+             dropped the way menu_key_for drops it"
+        );
+    }
+
+    /// Escape must cancel through the ordinary `MenuKey` path
+    /// (`CaptureKey::Cancel`), never through `capture_binding` — the latter
+    /// is exactly the `Pause`-unbinding hazard `capture_binding`'s own doc
+    /// warns about, and this is the one physical key capture must special-case
+    /// rather than forward.
+    #[test]
+    fn capture_key_for_treats_escape_as_cancel_not_a_binding() {
+        assert_eq!(
+            capture_key_for(PhysicalKey::Code(KeyCode::Escape)),
+            Some(CaptureKey::Cancel)
+        );
+    }
+
+    /// A printable key must forward too — a capture target is not always an
+    /// unprintable one (most vanilla rebinds are ordinary letters), so this
+    /// is the control proving `capture_key_for` is not secretly just
+    /// `menu_key_for` under another name.
+    #[test]
+    fn capture_key_for_forwards_a_printable_key_too() {
+        assert_eq!(
+            capture_key_for(PhysicalKey::Code(KeyCode::KeyF)),
+            Some(CaptureKey::Bind(KeyCode::KeyF))
+        );
+    }
+
+    /// No `KeyCode` exists to persist for an unidentified physical key, so
+    /// there is nothing to bind — matches `menu_key_for`'s own `_ => {}`.
+    #[test]
+    fn capture_key_for_ignores_an_unidentified_key() {
+        assert_eq!(
+            capture_key_for(PhysicalKey::Unidentified(
+                winit::keyboard::NativeKeyCode::Unidentified
+            )),
+            None
+        );
     }
 
     /// Every key the default table binds, with what it should resolve to while

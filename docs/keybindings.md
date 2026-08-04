@@ -15,7 +15,7 @@ Three types, all in [`crates/lodestone-shell/src/keybinds.rs`](../crates/lodesto
 | `Binding` | what they press: `Key(KeyCode)`, `Mouse(MouseButton)`, or `Unbound` |
 | `Keybinds` | the table joining them, plus the queries a Controls menu needs |
 
-**The Controls menu UI exists now** (issue #15, `crates/lodestone-shell/src/menu/key_binds.rs`) — this doc's own module docs called it "a later, small addition", and it was: everything in `Keybinds` this doc describes was already there, and the screen was a last hop over it rather than construction. See that module's own doc for the screen's geometry (`KeyBindsList`, a different `AbstractSelectionList` from every other settings page's `OptionsList`) and [`docs/settings-screen.md`](./settings-screen.md) for how it slots into the rest of the tree. **One hop still isn't landed**: finishing a rebind needs a raw key/mouse event `app.rs` does not yet forward — see "Wiring the Controls menu" below, which this section used to describe as a plan and now describes as the one remaining patch.
+**The Controls menu UI exists now** (issue #15, `crates/lodestone-shell/src/menu/key_binds.rs`) — this doc's own module docs called it "a later, small addition", and it was: everything in `Keybinds` this doc describes was already there, and the screen was a last hop over it rather than construction. See that module's own doc for the screen's geometry (`KeyBindsList`, a different `AbstractSelectionList` from every other settings page's `OptionsList`) and [`docs/settings-screen.md`](./settings-screen.md) for how it slots into the rest of the tree. **Finishing a rebind is landed too** — `app.rs` now forwards the raw key/mouse event a capture needs; see "Wiring the Controls menu" below for the exact patch.
 
 ## How it works
 
@@ -218,7 +218,7 @@ See `docs/combat.md`'s "The drop key (`Q`)" for the vanilla-source detail
 (the `hoveredSlot.hasItem()` gate, why it is `else if` not two `if`s, why
 `PickItem` is not creative-gated at this layer) and the live-gate story.
 
-### Wiring the Controls menu — landed, except one hop
+### Wiring the Controls menu — fully landed
 
 Issue #15 landed. `crates/lodestone-shell/src/menu/key_binds.rs` is the screen;
 `SettingsPage::KeyBinds` (`crates/lodestone-shell/src/menu/options.rs`) is
@@ -245,58 +245,72 @@ exactly as written, on `MenuNav` (`crates/lodestone-shell/src/menu/nav.rs`):
   *finishing* one needs to reach `Options`, which is what `capture_binding`
   is for.
 
-**One hop still is not landed, and it needs `app.rs`, which
-`crates/lodestone-shell` does not own.** Starting a capture is a click like
-any other, handled entirely inside this crate. *Finishing* one needs the
-**next raw key or mouse event**, and `app.rs`'s `menu_key_for` — the function
-that turns a `winit::event::KeyEvent` into a `MenuKey` — silently drops any
-physical key with no printable `text` (an F-key, a modifier, an arrow other
-than Up/Down: see that function's own `_ => {}` branch). Rebinding to exactly
-one of those is a real, common case (F-keys are a standard rebind target), and
-none of it should ever reach `resolve_key`'s gameplay dispatch or the ordinary
-`MenuKey` path while a bind button is capturing.
+**The last hop needed `app.rs`, and it is landed.** Starting a capture is a
+click like any other, handled entirely inside this crate. *Finishing* one
+needs the **next raw key or mouse event**, and `app.rs`'s `menu_key_for` — the
+function that turns a `winit::event::KeyEvent` into a `MenuKey` — silently
+drops any physical key with no printable `text` (an F-key, a modifier, an
+arrow other than Up/Down: see that function's own `_ => {}` branch). Rebinding
+to exactly one of those is a real, common case (F-keys are a standard rebind
+target), and none of it should ever reach `resolve_key`'s gameplay dispatch or
+the ordinary `MenuKey` path while a bind button is capturing.
 
 The patch, in `crates/lodestone-shell/src/app.rs`'s `window_event`:
 
-1. **`WindowEvent::KeyboardInput`'s `Some(KeyOutcome::Menu)` arm** (the one
-   that currently reads `if pressed && let Some(key) = Self::menu_key_for(&event) { self.handle_menu_key(key); … }`).
-   Check `self.nav.awaiting_key_capture()` **before** calling `menu_key_for`
-   at all, not only when it returns `None` — a capture target can be a
-   printable key too (most vanilla rebinds are), and `menu_key_for` would
-   otherwise consume it as `MenuKey::Char` first.
+1. **`WindowEvent::KeyboardInput`'s `Some(KeyOutcome::Menu)` arm.** Checks
+   `self.nav.awaiting_key_capture()` **before** calling `menu_key_for` at all,
+   not only when it returns `None` — a capture target can be a printable key
+   too (most vanilla rebinds are), and `menu_key_for` would otherwise consume
+   it as `MenuKey::Char` first. The decision itself is a free function,
+   `capture_key_for(physical_key) -> Option<CaptureKey>`, extracted the same
+   way `resolve_key` and `menu_key_for` are — unit-testable without a window
+   — rather than inlined into the match arm:
 
    ```rust
-   if pressed {
-       if self.nav.awaiting_key_capture() {
-           match event.physical_key {
-               // Escape cancels the capture without changing the binding —
-               // `KeyBindsNav::escape` via the *ordinary* MenuKey path, not
-               // `capture_binding`. Vanilla sets `InputConstants.UNKNOWN` on
-               // Escape unconditionally (`KeyBindsScreen.java:73-74`); this
-               // client deliberately does not — see `capture_binding`'s own
-               // doc on why unconditional-Unbound is the `Pause` hazard.
-               PhysicalKey::Code(KeyCode::Escape) => self.handle_menu_key(MenuKey::Escape),
-               PhysicalKey::Code(code) => self.nav.capture_binding(Binding::Key(code)),
-               PhysicalKey::Unidentified(_) => {}
-           }
-       } else if let Some(key) = Self::menu_key_for(&event) {
-           self.handle_menu_key(key);
-           let want = self.ui.wants_cursor_grab();
-           if want != self.grabbed {
-               self.set_grab(want);
-           }
+   enum CaptureKey {
+       Cancel,
+       Bind(KeyCode),
+   }
+
+   fn capture_key_for(physical_key: PhysicalKey) -> Option<CaptureKey> {
+       match physical_key {
+           PhysicalKey::Code(KeyCode::Escape) => Some(CaptureKey::Cancel),
+           PhysicalKey::Code(code) => Some(CaptureKey::Bind(code)),
+           PhysicalKey::Unidentified(_) => None,
+       }
+   }
+   ```
+
+   and the arm itself:
+
+   ```rust
+   if pressed && self.nav.awaiting_key_capture() {
+       match capture_key_for(event.physical_key) {
+           // `KeyBindsNav::escape` via the *ordinary* MenuKey path, not
+           // `capture_binding`. Vanilla sets `InputConstants.UNKNOWN` on
+           // Escape unconditionally (`KeyBindsScreen.java:73-74`); this
+           // client deliberately does not — see `capture_binding`'s own doc
+           // on why unconditional-Unbound is the `Pause` hazard.
+           Some(CaptureKey::Cancel) => self.handle_menu_key(MenuKey::Escape),
+           Some(CaptureKey::Bind(code)) => self.nav.capture_binding(Binding::Key(code)),
+           None => {}
+       }
+   } else if pressed && let Some(key) = Self::menu_key_for(&event) {
+       self.handle_menu_key(key);
+       let want = self.ui.wants_cursor_grab();
+       if want != self.grabbed {
+           self.set_grab(want);
        }
    }
    ```
 
 2. **`WindowEvent::MouseInput`'s menu arm** (guarded on
-   `owns_frame(self.ui.screen()) || self.ui.is_paused() || self.ui.is_death()`,
-   currently `if state == ElementState::Pressed && button == MouseButton::Left { … }`).
+   `owns_frame(self.ui.screen()) || self.ui.is_paused() || self.ui.is_death()`).
    A mouse-button rebind (vanilla defaults `key.attack` to the left button,
    `key.pickItem` to the middle one — real cases, not hypothetical) needs any
-   button, not only Left, and needs to run *before* the existing "click acts
-   on the row under the cursor" branch or a capture would immediately consume
-   its own confirming click as a hover-row activation instead:
+   button, not only Left, and runs *before* the existing "click acts on the
+   row under the cursor" branch — otherwise a capture would immediately
+   consume its own confirming click as a hover-row activation instead:
 
    ```rust
    if state == ElementState::Pressed {
@@ -312,21 +326,24 @@ The patch, in `crates/lodestone-shell/src/app.rs`'s `window_event`:
    ```
 
    The grab-sync lines after the existing `if` block are unaffected — a
-   capture never changes `wants_cursor_grab()`, so nothing there needs
+   capture never changes `wants_cursor_grab()`, so nothing there needed
    touching.
 
-Both arms need `use crate::keybinds::Binding;` (or a qualified path) and
-`winit::keyboard::KeyCode` is already imported in `app.rs`. Neither arm
-touches `resolve_key`, `KeyGate`, or anything on the *gameplay* dispatch path
-— capture only ever intercepts inside the two menu-input arms, which already
-run only while a menu screen owns the frame.
+Neither arm touches `resolve_key`, `KeyGate`, or anything on the *gameplay*
+dispatch path — capture only ever intercepts inside the two menu-input arms,
+which already run only while a menu screen owns the frame.
 
 `crates/lodestone-shell/src/menu/nav.rs`'s
-`clicking_a_bind_button_then_capturing_a_key_rebinds_and_persists` and its
-sibling tests already drive `MenuNav::capture_binding` directly and prove
-everything on this crate's side of the hop — persistence, the Escape-cancels
-behaviour, the `Pause` guard — so the patch above has nothing left to get
-wrong on the model side; it only has to *call* the method.
+`clicking_a_bind_button_then_capturing_a_key_rebinds_and_persists`,
+`escape_while_capturing_cancels_without_changing_the_binding` and
+`capturing_pause_refuses_to_leave_it_unbound` already drive
+`MenuNav::capture_binding` directly and prove everything on this crate's side
+of the hop — persistence (asserting the exact persisted string, e.g.
+`"key.keyboard.f1"` for an F-key in `app.rs`'s own
+`capture_key_for_forwards_a_function_key`), the Escape-cancels behaviour, the
+`Pause` guard — so `app.rs`'s patch had nothing left to get wrong on the model
+side; it only had to *call* the method, which `capture_key_for`'s own tests
+(`app::tests::capture_key_for_*`) confirm it does for each physical-key case.
 
 The menu's own needs beyond that were already queries, unchanged from this
 section's original sketch:
@@ -346,10 +363,10 @@ section's original sketch:
   layout-independent: it says "W" for the key an AZERTY user has marked Z.
   Vanilla has the same tension and resolves it the same way. Fixing the label
   means capturing `KeyEvent::logical_key` at rebind time and caching it — still
-  not done, but the reason changed now that the menu exists (#15): the still-
-  outstanding `app.rs` patch (see "Wiring the Controls menu") forwards a
-  `KeyCode` to `capture_binding`, not a `KeyEvent`, so today's label is
-  layout-independent by construction rather than by omission. Caching the
+  not done, but the reason changed now that the menu exists (#15): the landed
+  `app.rs` patch (see "Wiring the Controls menu") forwards a `KeyCode` to
+  `capture_binding`, not a `KeyEvent`, so today's label is layout-independent
+  by construction rather than by omission. Caching the
   logical key would mean threading the whole event through instead of just the
   physical code. Text entry is unaffected — the chat prompt and address field
   already use `KeyEvent::text`.
