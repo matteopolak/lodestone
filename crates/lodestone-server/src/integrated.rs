@@ -43,6 +43,7 @@ use tokio::io::DuplexStream;
 use tokio::sync::Notify;
 
 use crate::chunk::ChunkSource;
+use crate::mobs::{LiveMobSource, run_mob_tick_loop};
 use crate::protocol::ServerProtocol;
 use crate::server::{EntitySource, NoEntities, serve_connection};
 use crate::spawn::{Task, spawn};
@@ -58,6 +59,12 @@ pub struct IntegratedServer {
     local_addr: Option<std::net::SocketAddr>,
     shutdown: Arc<Notify>,
     task: Task,
+    /// The mob-simulation tick task, present only when this handle was built
+    /// by [`open_in_memory_with_mobs`](Self::open_in_memory_with_mobs). Kept
+    /// separate from `task` (rather than folded into the same future) because
+    /// the sim is meant to keep ticking independently of any one connection —
+    /// see that constructor's own doc comment.
+    mob_task: Option<Task>,
 }
 
 impl IntegratedServer {
@@ -119,6 +126,84 @@ impl IntegratedServer {
                 local_addr: None,
                 shutdown,
                 task,
+                mob_task: None,
+            },
+            client_end,
+        )
+    }
+
+    /// Like [`open_in_memory_with_entities`](Self::open_in_memory_with_entities),
+    /// but the entity source is a real, live-ticked [`crate::MobSim`] (issue
+    /// #217) rather than a caller-supplied [`EntitySource`]: this constructor
+    /// also spawns the tick-loop task that owns the sim
+    /// (`mobs::run_mob_tick_loop`), so dropping the returned handle stops
+    /// *both* the connection task and the simulation task, and shutdown waits
+    /// on both.
+    ///
+    /// `world_source` is a **second, independent instance** of whatever
+    /// [`ChunkSource`] `source` also is — not the same value, and not shared.
+    /// See `mobs::run_mob_tick_loop`'s own doc comment for why two instances
+    /// rather than one shared one: every `ChunkSource` this crate ships is a
+    /// pure function of its construction parameters/seed, so two instances
+    /// built the same way (same seed) produce identical terrain.
+    ///
+    /// `mob_area` is the `(cx_range, cz_range)` of chunk columns loaded once
+    /// into the sim's `ChunkWorld` snapshot — pick a range that covers
+    /// `mob_center` with room to path around in; it does not grow later (see
+    /// the scope note on `mobs::run_mob_tick_loop`). `mob_center` is the block
+    /// `(x, z)` mobs are seeded around; `mob_count` is how many.
+    ///
+    /// Native only, like [`bind`](Self::bind) — the sim's tick timer needs
+    /// `tokio::time`, unavailable on `wasm32` (see `mobs::run_mob_tick_loop`'s
+    /// doc comment).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_in_memory_with_mobs<P, S, M>(
+        protocol: P,
+        source: S,
+        world_source: M,
+        mob_area: (std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>),
+        mob_center: (i32, i32),
+        mob_count: usize,
+        view_radius: i32,
+    ) -> (Self, DuplexStream)
+    where
+        P: ServerProtocol + 'static,
+        S: ChunkSource + 'static,
+        M: ChunkSource + 'static,
+    {
+        let (client_end, server_end) = memory_pair();
+        let shutdown = Arc::new(Notify::new());
+        let mobs = LiveMobSource::default();
+
+        let conn_signal = shutdown.clone();
+        let conn_entities = mobs.clone();
+        let task = spawn(async move {
+            let mut conn = Connection::new(server_end);
+            tokio::select! {
+                _ = conn_signal.notified() => {}
+                _ = serve_connection(&mut conn, &protocol, &source, &conn_entities, view_radius) => {}
+            }
+        });
+
+        let sim_signal = shutdown.clone();
+        let (cx_range, cz_range) = mob_area;
+        let (center_x, center_z) = mob_center;
+        let mob_task = spawn(async move {
+            tokio::select! {
+                _ = sim_signal.notified() => {}
+                _ = run_mob_tick_loop(world_source, cx_range, cz_range, center_x, center_z, mob_count, mobs) => {}
+            }
+        });
+
+        (
+            Self {
+                #[cfg(not(target_arch = "wasm32"))]
+                local_addr: None,
+                shutdown,
+                task,
+                mob_task: Some(mob_task),
             },
             client_end,
         )
@@ -183,6 +268,7 @@ impl IntegratedServer {
             local_addr,
             shutdown,
             task,
+            mob_task: None,
         })
     }
 
@@ -205,18 +291,28 @@ impl IntegratedServer {
     /// down (e.g. before rebinding the same port).
     pub async fn shutdown(mut self) {
         self.shutdown.notify_waiters();
-        // Await the task without moving the field (the handle also has a `Drop`
-        // impl). Natively this joins the tokio task; on wasm the task is not
-        // joinable, so this returns once the `Notify` has been fired above.
+        // Await the task(s) without moving the fields (the handle also has a
+        // `Drop` impl). Natively this joins the tokio task; on wasm the task
+        // is not joinable, so this returns once the `Notify` has been fired
+        // above. `mob_task` is only `Some` for a handle built by
+        // `open_in_memory_with_mobs`; the same one `notify_waiters()` call
+        // above already signalled it (both tasks `select!` on clones of the
+        // same `Arc<Notify>`).
         self.task.join().await;
+        if let Some(mut mob_task) = self.mob_task.take() {
+            mob_task.join().await;
+        }
     }
 }
 
 impl Drop for IntegratedServer {
     fn drop(&mut self) {
-        // Never leak the serving task past the handle: signal, then abort in
-        // case it is parked somewhere the signal cannot reach.
+        // Never leak a serving task past the handle: signal, then abort in
+        // case a task is parked somewhere the signal cannot reach.
         self.shutdown.notify_waiters();
         self.task.abort();
+        if let Some(mob_task) = &self.mob_task {
+            mob_task.abort();
+        }
     }
 }

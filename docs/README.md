@@ -16,6 +16,16 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `item_entity.rs`'s lifecycle half from islands into driven code (#211, #215), plus
   why `MobSim` having **no production instantiation** makes #217 the prerequisite for
   wiring any of them into the integrated server rather than a beneficiary of them.
+- [Live mob simulation](./live-mob-sim.md) — issue #217: `MobSim` now has a real
+  production tick loop (`IntegratedServer::open_in_memory_with_mobs`), and the actual
+  gap was one level up from what the module doc said — the encoders and the
+  spawn/update/remove wire pipeline already existed and were already proven live;
+  nothing ever constructed or ticked a `MobSim`. Also the collision this wiring found
+  live: `MobSim`'s default starting entity id (`1`) is `V770ServerProtocol`'s own
+  `LOCAL_PLAYER_ENTITY_ID`, so the first mob a fresh sim ever spawned silently never
+  reached the client (a real client never `ADD_ENTITY`s itself) until mob ids moved
+  off that range; and why `Goal: Send` landing separately is what made a real `MobSim`
+  usable as a `tokio::spawn`ed `EntitySource` at all.
 - [Entity-versus-entity interaction](./entity-push.md) — the soft crowd push
   (`Entity.push`) and the hard-collision half of `noCollision`: why `isPushable` and
   `canBeCollidedWith` are different predicates, why players passing through each

@@ -32,19 +32,40 @@
 //!   world outlives the sim (the mobs borrow it), which is why `ChunkWorld` is a
 //!   value the caller holds and hands to [`MobSim::new`] by reference.
 //!
-//! # Scope, honestly
+//! # Scope, honestly — updated for issue #217
 //!
-//! This ticks AI over terrain. It does **not** stream the resulting positions to
-//! a connected client: that needs a version crate's client-bound `add_entity` /
-//! `move_entity` *encoders*, which this version-free crate may not implement
-//! without naming a protocol number — the same reported encoder seam
-//! `serve_connection` already documents. So this is the server-authoritative
-//! simulation half; the wire half is a separate seam. Keeping them separate is
-//! the point: a wrong-because-half-built loop is worse than an honest boundary.
+//! The paragraph this replaced said streaming positions to a client needed a
+//! version crate's `add_entity`/`move_entity` *encoders* that did not exist yet.
+//! Those encoders shipped separately (`V770ServerProtocol::encode_add_entity`/
+//! `encode_entity_update`/`encode_remove_entity` in `crates/protocol/v770`) and
+//! were proven end-to-end against a real client by
+//! `crates/protocol/v770/tests/entity_streaming_live.rs` — but with a
+//! hand-mutated stand-in source, not a real [`MobSim`], because `MobSim` was
+//! `!Send` at the time (it stores goals as `Box<dyn Goal>`, and
+//! `lodestone_entity::ai::Goal` carried no `Send` bound) and
+//! `IntegratedServer::open_in_memory_with_entities` spawns its serving task
+//! with `tokio::spawn`, which requires the future — and everything it captures
+//! — to be `Send`. `Goal: Send` landed since (`crates/lodestone-entity/src/ai/goal.rs`),
+//! so that blocker is gone (see the `assert_send::<MobSim<'static>>()` const
+//! check below, which now compiles).
+//!
+//! So the actual remaining gap, confirmed by grepping for
+//! `open_in_memory_with_entities`/`MobSim::new` outside this crate's own
+//! tests, was **not** a missing encoder — it was that nothing in production
+//! ever constructed a [`MobSim`] or ticked it. [`LiveMobSource`] and
+//! [`run_mob_tick_loop`] below close that: a background task owns a
+//! [`ChunkWorld`] snapshot and a seeded [`MobSim`] for its lifetime, ticks it
+//! once per server tick, and republishes snapshots into a shared
+//! `EntitySource` the same [`serve_connection`](crate::serve_connection)
+//! streaming pass `entity_streaming_live.rs` already exercises picks up
+//! reactively on the connection's own inbound-packet cadence. See
+//! [`crate::IntegratedServer::open_in_memory_with_mobs`] for the production
+//! wiring and `docs/live-mob-sim.md` for the full writeup, including what is
+//! deliberately still not built (natural terrain/biome-aware spawning).
 
 use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use lodestone_data::{block_states, collision_shapes, path_types};
 use lodestone_entity::ai::goals::{RandomLookAroundGoal, RandomStrollGoal};
@@ -65,6 +86,7 @@ use crate::protocol::EntitySnapshot;
 use crate::mob_spawn::{
     DespawnOutcome, MobCategory, SpawnCandidateSource, SpawnRng, SpawnState, check_despawn,
 };
+use crate::server::EntitySource;
 
 /// Translates `lodestone_model::PathType` (what the census in
 /// [`lodestone_data::path_types`] is keyed by) into
@@ -740,6 +762,26 @@ impl<'w> MobSim<'w> {
         }
     }
 
+    /// Overrides the id the next [`spawn`](Self::spawn) call assigns (and
+    /// every one after it, still incrementing by one each time).
+    ///
+    /// Exists for a caller that shares its mob ids' wire namespace with a
+    /// real protocol's own reserved ids. `MobSim::new`'s default start (`1`)
+    /// collided, in production, with `V770ServerProtocol`'s
+    /// `LOCAL_PLAYER_ENTITY_ID` (also `1`, `crates/protocol/v770/src/server_protocol.rs`):
+    /// a real client never spawns "itself" as a separate `ADD_ENTITY`, so the
+    /// very first mob a fresh [`MobSim`] ever spawns silently failed to
+    /// appear — found live by `crates/protocol/v770/tests/live_mob_sim.rs`,
+    /// which consistently observed 2 of 3 seeded mobs, never 3, until
+    /// `run_mob_tick_loop` started calling this. `MobSim::new`'s default is
+    /// left unchanged (`1`) so every existing hermetic test keeps its
+    /// already-asserted ids stable; only a caller wired to a real wire
+    /// protocol needs to call this.
+    pub fn set_next_id(&mut self, next_id: i32) -> &mut Self {
+        self.next_id = next_id;
+        self
+    }
+
     /// Spawns a mob at `pos` with body `shape`, moving `step_per_tick` blocks per
     /// tick (derived from its movement-speed attribute) and an A\* open-set
     /// budget of `visited_budget` (vanilla `floor(followRange * 16)`).
@@ -1022,3 +1064,148 @@ fn dist_sqr(a: Vec3, b: Vec3) -> f64 {
 // `tests/mob_sim.rs` so it drives them through the crate's *public* API — the
 // same discipline the rest of the project uses (a consumer that is only a
 // `#[cfg(test)]` fake proves nothing about the public seam).
+
+/// A live [`EntitySource`] fed by a background-ticked [`MobSim`] (issue
+/// #217). [`IntegratedServer::open_in_memory_with_mobs`](crate::IntegratedServer::open_in_memory_with_mobs)
+/// constructs one alongside [`run_mob_tick_loop`], the task that owns the sim
+/// and republishes its snapshots here every tick.
+///
+/// Deliberately the same shape as `entity_streaming_live.rs`'s own test-only
+/// `SharedSnapshotSource` (an `Arc<Mutex<Vec<EntitySnapshot>>>` behind
+/// [`EntitySource`]) — that test already proved the read side of this shape
+/// reaches a real client; this type is the production version, now fed by a
+/// real simulation instead of a hand-mutated `Vec`.
+#[derive(Debug, Clone, Default)]
+pub struct LiveMobSource(Arc<Mutex<Vec<EntitySnapshot>>>);
+
+impl EntitySource for LiveMobSource {
+    fn snapshots(&self) -> Vec<EntitySnapshot> {
+        self.0
+            .lock()
+            .expect("live mob snapshot lock poisoned")
+            .clone()
+    }
+}
+
+impl LiveMobSource {
+    /// Replaces the published snapshot set. Called once per tick by
+    /// [`run_mob_tick_loop`]; the next `snapshots()` call from any connection
+    /// (there may be several, e.g. open-to-LAN) sees the new set.
+    fn publish(&self, snapshots: Vec<EntitySnapshot>) {
+        *self.0.lock().expect("live mob snapshot lock poisoned") = snapshots;
+    }
+}
+
+/// The highest solid-block Y at `(x, z)` within `world`'s loaded vertical
+/// range, or `None` if the whole column reads air (or is unloaded) — the
+/// ground a freshly seeded mob should stand on. A linear scan from the top
+/// down; only ever called at seed time (a handful of calls, not per-tick), so
+/// this is not a hot path.
+fn surface_y(world: &ChunkWorld, x: i32, z: i32) -> Option<i32> {
+    let top = world.min_y + world.height - 1;
+    (world.min_y..=top).rev().find(|&y| world.is_solid(x, y, z))
+}
+
+/// Seeds `count` zombies in a ring of radius 6 blocks around `(center_x,
+/// center_z)`, each placed on the real terrain surface (skipped if the column
+/// has no solid ground within `world`'s loaded range) with a baseline
+/// wander/look goal set — the same defaults [`MobSim::run_spawn_cycle`] gives
+/// a naturally-spawned mob.
+///
+/// This is **not** vanilla natural spawning: there is no light-level,
+/// biome, or pack-size logic here, because no terrain/biome-aware
+/// [`SpawnCandidateSource`] implementation exists in production yet (the
+/// trait exists; every current impl is a test mock — see `mob_spawn.rs`).
+/// Building that is a separate, considerably larger feature. This exists
+/// purely so issue #217's actual subject — computed AI motion reaching the
+/// wire — has a population to move; a caller that wants real spawning wires
+/// [`MobSim::run_spawn_cycle`] in its place once a real source exists.
+fn seed_demo_mobs(sim: &mut MobSim<'_>, world: &ChunkWorld, center_x: i32, center_z: i32, count: usize) {
+    let zombie = ResourceKey::from_str("minecraft:zombie").expect("static key is valid");
+    for i in 0..count.max(1) {
+        let angle = (i as f64) * std::f64::consts::TAU / (count.max(1) as f64);
+        let x = center_x + (angle.cos() * 6.0).round() as i32;
+        let z = center_z + (angle.sin() * 6.0).round() as i32;
+        let Some(y) = surface_y(world, x, z) else {
+            continue;
+        };
+        let pos = Vec3::new(f64::from(x) + 0.5, f64::from(y + 1), f64::from(z) + 0.5);
+        let mob = sim.spawn(pos, MobShape::land(0.6, 1.95), 0.23, 400);
+        mob.set_entity_type(zombie.clone())
+            .add_goal(0, Box::new(RandomStrollGoal::new(0.23)))
+            .add_goal(1, Box::new(RandomLookAroundGoal::new()));
+    }
+}
+
+/// Native tick-loop driver for issue #217: owns a [`ChunkWorld`] snapshot and
+/// a seeded [`MobSim`] for the lifetime of the returned future, ticking it
+/// once every [`MOB_TICK_INTERVAL`] and republishing snapshots to `out` after
+/// every tick.
+///
+/// `world_source` supplies the terrain the mobs path over. It is intended to
+/// be a **second, independent instance** of whatever [`ChunkSource`] the
+/// paired connection is also streaming terrain from — not the same shared
+/// value — because this future needs to *own* a `'static` snapshot for its
+/// whole lifetime (`ChunkWorld::from_source` copies the requested columns out
+/// once, up front) while the connection's own `source` is moved into a
+/// different, independently-spawned task. Every `ChunkSource` this crate
+/// ships (`OverworldChunkSource`, `WorldgenChunkSource`) is a pure function of
+/// its construction parameters/seed, so two instances built the same way
+/// produce identical terrain — this is two handles onto the same
+/// deterministic world, not two different worlds.
+///
+/// # Scope cuts, explicit
+///
+/// * The `ChunkWorld` snapshot loaded here is **static** for the task's whole
+///   lifetime — nothing re-queries `world_source` after the initial load, so a
+///   mob does not path across a chunk boundary that was not included in
+///   `cx_range`/`cz_range`. Widening this to grow with the player's view is
+///   future work; for a first live driver a fixed area around spawn is an
+///   honest, working scope cut rather than a silent limitation.
+/// * No natural spawning — see [`seed_demo_mobs`]'s own doc comment.
+/// * No despawn pass (`MobSim::despawn_pass` needs a player position this
+///   task has no way to learn; it is not plumbed through
+///   [`EntitySource`], which is deliberately read-only and one-directional).
+///   A long singleplayer session therefore keeps the same fixed demo
+///   population forever rather than vanilla's natural cap-driven churn — an
+///   explicit, documented cut, not an oversight.
+///
+/// Native only: uses `tokio::time::interval`, which (like
+/// `server.rs`'s `serve_play`/`KEEP_ALIVE_INTERVAL` family — see that
+/// module's own doc comment) is not available on `wasm32`. A `wasm32` session
+/// therefore gets no live mob sim yet, exactly the same kind of documented gap
+/// `PlayerVitals` already has on that target.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn run_mob_tick_loop<S: ChunkSource>(
+    world_source: S,
+    cx_range: std::ops::RangeInclusive<i32>,
+    cz_range: std::ops::RangeInclusive<i32>,
+    center_x: i32,
+    center_z: i32,
+    mob_count: usize,
+    out: LiveMobSource,
+) {
+    let world = ChunkWorld::from_source(&world_source, cx_range, cz_range);
+    let mut sim = MobSim::new(&world);
+    // See `set_next_id`'s own doc comment: id `1` is `LOCAL_PLAYER_ENTITY_ID`
+    // on the wire (v770's, and plausibly any future protocol's own "self" id
+    // — starting well clear of the low reserved range is the safe default
+    // regardless), so mob ids start at 1000 rather than `MobSim::new`'s
+    // hermetic-test-facing default of `1`.
+    sim.set_next_id(1000);
+    seed_demo_mobs(&mut sim, &world, center_x, center_z, mob_count);
+    out.publish(sim.iter().map(SimMob::snapshot).collect());
+
+    // 50ms, matching vanilla's 20 TPS and this crate's own `VITALS_TICK_INTERVAL`
+    // (`server.rs`) — kept as a local constant rather than sharing that one
+    // because it is `server.rs`-private and the two are allowed to drift
+    // independently (mob AI has no reason to share a literal with drowning
+    // damage beyond both wanting "one vanilla tick").
+    const MOB_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+    let mut tick = tokio::time::interval(MOB_TICK_INTERVAL);
+    loop {
+        tick.tick().await;
+        sim.tick();
+        out.publish(sim.iter().map(SimMob::snapshot).collect());
+    }
+}
