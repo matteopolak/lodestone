@@ -25,6 +25,7 @@
 use std::time::Instant;
 
 use lodestone_server::overworld_generator;
+use lodestone_worldgen::overworld::GeneratedColumn;
 
 fn main() {
     let seed: i64 = std::env::args()
@@ -144,6 +145,156 @@ fn main() {
         value: par_total.as_nanos() as f64 / 1000.0 / n as f64,
         unit: "us",
     });
+
+    // --- Thread-count sweep (issue #86's remaining ask) --------------------
+    //
+    // The single `workers`-thread measurement above answers "is parallel
+    // generation faster"; it can't answer "does it degrade past the core
+    // count" or "what does the scaling curve actually look like between 1
+    // and N threads" — both explicitly asked for in #86 and neither
+    // derivable from one data point. Sweep 1/2/4/8/workers/2*workers
+    // (deduplicated, so a small-core machine doesn't repeat a count) and
+    // report scaling *efficiency* (speedup / thread count), the number that
+    // actually distinguishes "still scaling" from "past the core count and
+    // fighting for cache/memory bandwidth".
+    let mut thread_counts: Vec<usize> = vec![1, 2, 4, 8, workers, workers * 2];
+    thread_counts.retain(|&c| c >= 1);
+    thread_counts.sort_unstable();
+    thread_counts.dedup();
+
+    println!();
+    println!("--- thread-count sweep (same {n}-chunk patch each time) ---");
+    for &count in &thread_counts {
+        let batch = coords.len().div_ceil(count);
+        let t0 = Instant::now();
+        let sum: usize = std::thread::scope(|scope| {
+            let handles: Vec<_> = coords
+                .chunks(batch.max(1))
+                .map(|slice| {
+                    let gtor = &gtor;
+                    scope.spawn(move || {
+                        slice
+                            .iter()
+                            .map(|&(cx, cz)| gtor.column(cx, cz).non_air_count())
+                            .sum::<usize>()
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).sum()
+        });
+        std::hint::black_box(sum);
+        let elapsed = t0.elapsed();
+        let speedup = serial_total.as_secs_f64() / elapsed.as_secs_f64();
+        let efficiency = speedup / count as f64;
+        println!(
+            "  threads={count:<3} total={elapsed:>10?} speedup={speedup:.2}x efficiency={:.2}",
+            efficiency
+        );
+        let sweep_scene = format!("seed={seed} radius={radius}({n} chunks) workers={count}");
+        record(Record {
+            bench: "generation",
+            metric: "parallel_speedup_vs_serial",
+            scene: &sweep_scene,
+            value: speedup,
+            unit: "x",
+        });
+        record(Record {
+            bench: "generation",
+            metric: "parallel_scaling_efficiency",
+            scene: &sweep_scene,
+            value: efficiency,
+            unit: "x",
+        });
+    }
+
+    // --- In-benchmark RNG-determinism parity assertion ---------------------
+    //
+    // #86's whole point: the fastest way to "improve" the numbers above is
+    // to break per-chunk RNG determinism (HANDOFF.md §4's buried-ore
+    // `nextFloat`-before-air-check trap is exactly this class of bug — a
+    // wrong draw count desyncs the shared stream and features vanish
+    // silently, invisible to a speed number alone). Recompute a small
+    // subset both ways and assert byte-identical output; this must panic
+    // this binary, not just print, if a future change breaks it.
+    let parity_coords: Vec<(i32, i32)> = (-1..=1).flat_map(|cz| (-1..=1).map(move |cx| (cx, cz))).collect();
+    let serial_fingerprints: Vec<u64> = parity_coords
+        .iter()
+        .map(|&(cx, cz)| column_fingerprint(&gtor.column(cx, cz)))
+        .collect();
+    let parity_workers = thread_counts.last().copied().unwrap_or(1).max(2);
+    let parity_batch = parity_coords.len().div_ceil(parity_workers);
+    let parallel_fingerprints: Vec<u64> = std::thread::scope(|scope| {
+        let handles: Vec<_> = parity_coords
+            .chunks(parity_batch.max(1))
+            .map(|slice| {
+                let gtor = &gtor;
+                scope.spawn(move || {
+                    slice
+                        .iter()
+                        .map(|&(cx, cz)| column_fingerprint(&gtor.column(cx, cz)))
+                        .collect::<Vec<u64>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect()
+    });
+    assert_eq!(
+        serial_fingerprints.len(),
+        parallel_fingerprints.len(),
+        "parity check lost or gained chunks between serial and parallel paths"
+    );
+    for (i, (&(cx, cz), (&s, &p))) in parity_coords
+        .iter()
+        .zip(serial_fingerprints.iter().zip(parallel_fingerprints.iter()))
+        .enumerate()
+    {
+        assert_eq!(
+            s, p,
+            "chunk ({cx},{cz}) [index {i}] differs between serial and {parity_workers}-thread \
+             parallel generation (fingerprint {s:#x} vs {p:#x}) — this is the RNG-determinism \
+             break #86 is gated on, not a speed regression"
+        );
+    }
+    println!();
+    println!(
+        "--- parity check: {} chunks, serial vs {parity_workers}-thread parallel: byte-identical ---",
+        parity_coords.len()
+    );
+}
+
+/// FNV-1a over every cell's canonical block-state string plus the biome at
+/// each horizontal quart, used only for the serial-vs-parallel parity check
+/// above (never in a timed region). Stronger than comparing
+/// `non_air_count()` alone, which the RNG-determinism trap in HANDOFF.md §4
+/// could satisfy by coincidence (same count of non-air blocks, wrong
+/// blocks) — this hashes the actual placed states.
+fn column_fingerprint(col: &GeneratedColumn) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    let mut mix = |bytes: &[u8]| {
+        for &b in bytes {
+            hash ^= u64::from(b);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+    };
+    for lz in 0..16usize {
+        for lx in 0..16usize {
+            mix(col.biome_state(lx, lz).as_bytes());
+        }
+    }
+    for ly in 0..col.height() {
+        let y = col.min_y() + ly;
+        for lz in 0..16usize {
+            for lx in 0..16usize {
+                mix(col.block_state(lx, y, lz).as_bytes());
+            }
+        }
+    }
+    hash
 }
 
 // --- Minimal bench-result recorder -----------------------------------------
