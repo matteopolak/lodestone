@@ -65,7 +65,7 @@ mod stats;
 mod terrain;
 
 pub use debug_lines::{DebugLineVertex, debug_line_vertices};
-pub use outline::CrackTarget;
+pub use outline::{CrackTarget, gather_crack_targets};
 pub use screen_effects::ScreenEffects;
 pub use sources::{
     BellSource, BlockEntitySource, EntityLightSource, HandSwingSource, MainHandSource,

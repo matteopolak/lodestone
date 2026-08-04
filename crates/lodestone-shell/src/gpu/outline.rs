@@ -1,4 +1,5 @@
 //! The mining-crack target descriptor and the block-outline wireframe pass.
+use lodestone_model::math::BlockPos;
 use lodestone_render::DEPTH_FORMAT;
 
 /// The block currently being mined, for the progressive crack overlay: its world
@@ -12,6 +13,143 @@ pub struct CrackTarget {
     pub state_id: u32,
     /// Destruction stage `0..=9`; selects the `destroy_stage_N` sprite.
     pub stage: u8,
+}
+
+/// Assembles the full per-frame `cracks` slice (issue #410): the local
+/// player's own dig, if any, plus one [`CrackTarget`] for every *other*
+/// player's active overlay in `overlays` — the enumeration
+/// `lodestone_game::mining::BlockDestructionOverlays::iter` exists for.
+///
+/// This is the actual gather logic, kept version/`Sim`-agnostic and pure so it
+/// can be driven directly by a real
+/// `BlockDestructionOverlays`/`ClientEvent::BlockDestruction` fold in a test —
+/// not by hand-building a `Vec<CrackTarget>`, which
+/// `crack_multi_target_pixels.rs` already covers and which cannot tell "the
+/// gather is wired" from "the pipeline can draw N targets". `Sim`'s own
+/// per-frame call is the thin, brokered wiring on top of this: resolve each
+/// overlay's block position to a state id (`resolve` — live `NetClient::
+/// block_at` or the offline demo world, mirroring `Sim::crack_target`'s own
+/// resolution) and hand the result here.
+///
+/// A position `resolve` cannot answer (chunk not streamed in, e.g.) is
+/// dropped rather than drawn with a bogus state id — the same "no crack
+/// without real geometry" rule `Sim::crack_target` already follows for the
+/// local dig.
+pub fn gather_crack_targets(
+    local: Option<CrackTarget>,
+    overlays: impl Iterator<Item = (BlockPos, u8)>,
+    mut resolve: impl FnMut(BlockPos) -> Option<u32>,
+) -> Vec<CrackTarget> {
+    let mut out: Vec<CrackTarget> = Vec::new();
+    out.extend(local);
+    for (pos, stage) in overlays {
+        if stage >= 10 {
+            // `BlockDestructionOverlays::set` already drops out-of-range
+            // stages on write, so `iter()` should never yield one — this is
+            // belt-and-suspenders against a future change to that invariant,
+            // not a path this function relies on.
+            continue;
+        }
+        if let Some(state_id) = resolve(pos) {
+            out.push(CrackTarget {
+                block: [pos.x, pos.y, pos.z],
+                state_id,
+                stage,
+            });
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod gather_tests {
+    use super::*;
+    use lodestone_game::mining::BlockDestructionOverlays;
+    use lodestone_model::ClientEvent;
+
+    fn pos(x: i32, y: i32, z: i32) -> BlockPos {
+        BlockPos::new(x, y, z)
+    }
+
+    /// The gather must fold a real `BlockDestructionOverlays` — built through
+    /// its real `ClientEvent::BlockDestruction` production path, not a
+    /// hand-built `Vec<CrackTarget>` — into one `CrackTarget` per active
+    /// entity, plus the local target when present.
+    #[test]
+    fn gathers_local_plus_every_other_players_overlay() {
+        let mut overlays = BlockDestructionOverlays::new();
+        let a = pos(1, 0, 3);
+        let b = pos(-2, 0, 3);
+        overlays.apply(&ClientEvent::BlockDestruction {
+            entity_id: 11,
+            pos: a,
+            progress: 9,
+        });
+        overlays.apply(&ClientEvent::BlockDestruction {
+            entity_id: 22,
+            pos: b,
+            progress: 5,
+        });
+
+        let local = CrackTarget {
+            block: [0, 0, 0],
+            state_id: 42,
+            stage: 3,
+        };
+        let mut resolved: Vec<BlockPos> = Vec::new();
+        let targets = gather_crack_targets(Some(local), overlays.iter(), |p| {
+            resolved.push(p);
+            Some(100)
+        });
+
+        assert_eq!(targets.len(), 3, "local + two other-player overlays");
+        assert!(
+            targets
+                .iter()
+                .any(|t| t.block == [0, 0, 0] && t.stage == 3 && t.state_id == 42),
+            "the local target must pass through unchanged"
+        );
+        assert!(
+            targets
+                .iter()
+                .any(|t| t.block == [1, 0, 3] && t.stage == 9 && t.state_id == 100),
+            "entity 11's overlay must resolve to a CrackTarget"
+        );
+        assert!(
+            targets
+                .iter()
+                .any(|t| t.block == [-2, 0, 3] && t.stage == 5 && t.state_id == 100),
+            "entity 22's overlay must resolve to a CrackTarget"
+        );
+        assert_eq!(resolved.len(), 2, "resolve is called once per overlay, not per local target");
+    }
+
+    /// A position `resolve` cannot answer is dropped, not drawn with a bogus
+    /// state id — proves the gather does not silently fabricate geometry for
+    /// an unstreamed chunk.
+    #[test]
+    fn unresolvable_overlay_is_dropped_not_faked() {
+        let mut overlays = BlockDestructionOverlays::new();
+        overlays.apply(&ClientEvent::BlockDestruction {
+            entity_id: 1,
+            pos: pos(0, 0, 0),
+            progress: 4,
+        });
+        let targets = gather_crack_targets(None, overlays.iter(), |_| None);
+        assert!(
+            targets.is_empty(),
+            "an overlay `resolve` cannot answer must not appear in the output"
+        );
+    }
+
+    /// No local target and no overlays gathers nothing — the empty-slice
+    /// no-op path `crack_multi_target_pixels.rs` already proves is cheap.
+    #[test]
+    fn empty_input_gathers_nothing() {
+        let overlays = BlockDestructionOverlays::new();
+        let targets = gather_crack_targets(None, overlays.iter(), |_| Some(1));
+        assert!(targets.is_empty());
+    }
 }
 
 /// The 12 edges of a unit cube as pairs of corner indices.
