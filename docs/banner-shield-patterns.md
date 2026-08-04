@@ -261,6 +261,22 @@ list, not atlas stitching.
   itself, since the banner/shield split changes the namespace prefix
   (`entity/banner/…` vs `entity/shield/…`) the *consumer* needs, which a
   pre-resolved location would bake in wrong for one of the two callers.
+- **The jar ships individual sprite PNGs, not a pre-built atlas** — settled by
+  listing `client.jar` directly rather than assuming, per a reviewer flag on
+  this doc. `assets/minecraft/textures/entity/banner/*.png` holds one PNG per
+  pattern asset id (`base.png`, `creeper.png`, `cross.png`, … ~40 files) plus
+  `banner_base.png`; the shield family is the parallel `entity/shield/*.png`
+  set. `assets/minecraft/atlases/banner_patterns.json` is not a second, competing
+  source — it is a *directory-source* atlas descriptor (`{"sources": [{"type":
+  "minecraft:directory", "prefix": "entity/banner/", "source": "entity/banner"}]}`)
+  telling vanilla's own runtime stitcher to combine every PNG under that
+  directory into one GPU atlas texture, the same "stitch many individual
+  sprites at startup" shape this codebase's own vanilla block-atlas loader
+  already implements — not a format to parse for compositing math. A future
+  loader should load the individual pattern PNGs by asset id (mirroring
+  [`chest_texture_stems`](../crates/lodestone-render/src/block_entity.rs)/
+  `skull_texture_stems`'s stem-list-plus-loader shape), not attempt to read or
+  rebuild vanilla's atlas file.
 
 ## Configuration
 
