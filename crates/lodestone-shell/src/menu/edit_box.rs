@@ -81,9 +81,47 @@
 //! this approximation for every other menu string (`render::text_px` and
 //! `render::clip` are fixed-advance; only `clip_measured` consults the real
 //! font), so this is not a new class of error — it means a long value can differ
-//! from vanilla by a glyph at the right edge. **Do not "fix" it by giving the
-//! box a font**; give it a measurement seam if it ever matters, and note that
-//! the advance must match the *scale the text is drawn at* (see
+//! from vanilla by a glyph at the right edge.
+//!
+//! **That fixed advance is now a *default*, not the only path.** A 2026-08-04
+//! player report ("the gap between the end of the word and start of cursor
+//! grows as I type") turned out to be exactly the deviation this section
+//! already warned about, arriving in production: `render.rs`'s `draw_edit_box`
+//! attaches a real [`super::hud::vanilla_font::VanillaFont`] whenever the jar
+//! is present and draws `state.before`/`state.after` with **its** proportional
+//! advances (`Quads::text` → `VanillaFont::draw`), while [`EditBox::draw_state`]
+//! computed `cursor_x`/`highlight_x`/`before_x` from this box's fixed 6 px
+//! [`MENU_TEXT_ADVANCE`] — two different per-glyph widths for the same string,
+//! one used to draw, the other to place the caret after it. Vanilla's own
+//! glyphs are mostly narrower than 6 px (`i` is 2, most lowercase letters are
+//! 5), so every typed character added roughly `6 - real_advance` px of extra
+//! gap, and it accumulated — the "grows as I type" symptom, precisely.
+//!
+//! The fix is the seam this paragraph used to say to add "if it ever
+//! matters": [`EditBox::measure_with`], [`EditBox::text_x_with`] and
+//! [`EditBox::draw_state_with`] take an `Option<&dyn Fn(&str) -> f32>` and
+//! consult it instead of the fixed advance when given, falling back to the
+//! exact old behaviour (`measure`/`text_x`/`draw_state`, unchanged, still
+//! called by every existing test and by the command-suggestions popup in
+//! `render.rs`) when `None`. `render.rs`'s `draw_edit_box` is the one caller
+//! that now passes `Some(|s| b.text_width(s, EDIT_TEXT_SCALE))` —
+//! `Quads::text_width`, the *exact* function `Quads::text` uses to pick a
+//! font, so measurement and drawing can never disagree about which font is
+//! in play. This box still carries no hard `Font` dependency: the closure is
+//! threaded through a call, never stored on the struct, so `EditBox` stays
+//! pure data and every hermetic test above still exercises the fixed-advance
+//! path with no jar required.
+//!
+//! Note for whoever wires per-character bold/italic (`§`-formatting) into an
+//! `EditBox` value: a plain `Fn(&str) -> f32` cannot see run-local style
+//! state, so if a value ever carries legacy colour codes, the closure needs
+//! to be built from something bold-aware (`VanillaFont::legacy_width`, not
+//! `VanillaFont::width`) — this widget's `value` today is always plain
+//! user-typed text (addresses, names, console commands), so that case does
+//! not yet exist, but the moment it does, `width` silently under-measures a
+//! bold run by `BOLD_OFFSET` per bold character.
+//!
+//! The advance must match the *scale the text is drawn at* (see
 //! [`MENU_TEXT_ADVANCE`]) — which, for this widget specifically, **is**
 //! vanilla's own scale-1 advance, unlike every other menu string in this
 //! shell. `render.rs`'s `draw_edit_box` draws at `EDIT_TEXT_SCALE = 1.0`, not
@@ -441,6 +479,20 @@ impl EditBox {
         s.chars().count() as f32 * self.advance
     }
 
+    /// [`measure`](Self::measure), but consulting `measure_fn` first when
+    /// given — the seam the module docs describe. `render.rs` passes the
+    /// exact proportional width function it is about to *draw* `s` with
+    /// (`Quads::text_width`), so the caret advances by what was actually
+    /// painted rather than by this box's own fixed approximation. `None`
+    /// behaves identically to [`measure`](Self::measure).
+    #[must_use]
+    pub fn measure_with(&self, s: &str, measure_fn: Option<&dyn Fn(&str) -> f32>) -> f32 {
+        match measure_fn {
+            Some(f) => f(s),
+            None => self.measure(s),
+        }
+    }
+
     /// `Font.plainSubstrByWidth(s, width)`'s *length*, under a fixed advance.
     fn fits(&self, width: f32) -> usize {
         if self.advance <= 0.0 {
@@ -464,8 +516,21 @@ impl EditBox {
     /// see the module docs on why it is not cached.
     #[must_use]
     pub fn text_x(&self) -> f32 {
+        self.text_x_with(None)
+    }
+
+    /// [`text_x`](Self::text_x), but consulting `measure_fn` (see
+    /// [`measure_with`](Self::measure_with)) instead of the fixed advance when
+    /// `centered` is set. `None` behaves identically to
+    /// [`text_x`](Self::text_x); no current caller sets `centered`, but a
+    /// centred box measured with a real font would have this exact "gap grows"
+    /// bug in its own centring arithmetic if this used the fixed path instead.
+    #[must_use]
+    pub fn text_x_with(&self, measure_fn: Option<&dyn Fn(&str) -> f32>) -> f32 {
         if self.centered {
-            self.widget.x + ((self.widget.width - self.measure(self.displayed())) / 2.0).floor()
+            self.widget.x
+                + ((self.widget.width - self.measure_with(self.displayed(), measure_fn)) / 2.0)
+                    .floor()
         } else if self.bordered {
             self.widget.x + BORDER_INSET
         } else {
@@ -752,7 +817,27 @@ impl EditBox {
     /// so `super::render` reads rather than re-derives it.
     #[must_use]
     pub fn draw_state(&self, millis_since_focus: Option<u64>) -> EditBoxDraw {
-        let text_x = self.text_x();
+        self.draw_state_with(millis_since_focus, None)
+    }
+
+    /// [`draw_state`](Self::draw_state), but every measurement
+    /// (`text_x`, the width of `before`, the highlight's x) goes through
+    /// `measure_fn` when given, instead of this box's fixed
+    /// [`MENU_TEXT_ADVANCE`] approximation. `None` behaves identically to
+    /// [`draw_state`](Self::draw_state).
+    ///
+    /// This is the fix for the "cursor gap grows while typing" report: the
+    /// caller must pass the *same* width function the glyphs are about to be
+    /// drawn with (`render.rs`'s `draw_edit_box` passes `Quads::text_width`),
+    /// or the caret and the text it follows are measured by two different
+    /// rulers again. See the module docs.
+    #[must_use]
+    pub fn draw_state_with(
+        &self,
+        millis_since_focus: Option<u64>,
+        measure_fn: Option<&dyn Fn(&str) -> f32>,
+    ) -> EditBoxDraw {
+        let text_x = self.text_x_with(measure_fn);
         let text_y = self.text_y();
         let displayed = self.displayed();
         let displayed_len = displayed.chars().count();
@@ -776,7 +861,7 @@ impl EditBox {
 
         let mut draw_x = text_x;
         if !displayed.is_empty() {
-            draw_x += self.measure(&before) + 1.0;
+            draw_x += self.measure_with(&before, measure_fn) + 1.0;
         }
         // `insert` is what picks the bar over the underscore, and it is also what
         // suppresses the suggestion.
@@ -795,8 +880,11 @@ impl EditBox {
 
         let right_edge = self.widget.x + self.widget.width;
         let highlight = (rel_highlight != rel_cursor).then(|| {
-            let highlight_x =
-                text_x + self.measure(&displayed.chars().take(rel_highlight).collect::<String>());
+            let highlight_x = text_x
+                + self.measure_with(
+                    &displayed.chars().take(rel_highlight).collect::<String>(),
+                    measure_fn,
+                );
             (
                 cursor_x.min(right_edge),
                 (highlight_x - 1.0).min(right_edge),
@@ -1487,5 +1575,185 @@ mod tests {
             assert_eq!(w.rect(), (40.0, 128.0, 200.0, 20.0));
         });
         assert_eq!(seen, 1);
+    }
+
+    /// A synthetic proportional width function for the gates below: `i`/`l`
+    /// are narrow, `W`/`M` are wide, everything else is a middling width —
+    /// deliberately nothing like [`MENU_TEXT_ADVANCE`]'s flat `6.0`, so a
+    /// test that happened to pass by picking an average-width string could
+    /// not happen here. These numbers are what "correct" is computed against
+    /// below; they are not claimed to be vanilla's real advances — those are
+    /// covered separately by `hud::vanilla_font`'s own jar-gated pixel tests.
+    fn synth_advance(ch: char) -> f32 {
+        match ch {
+            'i' | 'l' => 2.0,
+            'W' | 'M' => 9.0,
+            _ => 5.0,
+        }
+    }
+
+    fn synth_measure(s: &str) -> f32 {
+        s.chars().map(synth_advance).sum()
+    }
+
+    /// The exact cursor x `draw_state_with` must produce for a wide,
+    /// never-scrolled [`field`], derived independently from the same
+    /// `EditBox.java:404-473` arithmetic `draw_state_with` implements —
+    /// `text_x + width(before) + 1.0`, minus 1 more when the caret is the
+    /// insert bar rather than the append underscore — but evaluated here with
+    /// a hand-computed width, not by calling the code under test.
+    ///
+    /// The one place this differs from `draw_state`'s own arithmetic: when
+    /// the *value* is empty, vanilla adds no gap at all (`displayed.isEmpty()`
+    /// short-circuits both the `+1` and the insert `-1`), so `before` being
+    /// empty is not by itself enough to predict the "no gap" case — an empty
+    /// value is.
+    fn predicted_cursor_x(value: &str, prefix: usize, measure: impl Fn(&str) -> f32) -> f32 {
+        if value.is_empty() {
+            return BORDER_INSET;
+        }
+        let before: String = value.chars().take(prefix).collect();
+        let insert_cursor = prefix < value.chars().count();
+        BORDER_INSET + measure(&before) + 1.0 - if insert_cursor { 1.0 } else { 0.0 }
+    }
+
+    /// **The gate for the "cursor gap grows while typing" report.** Predicts
+    /// the exact `cursor_x` from the correct (proportional) hypothesis and
+    /// requires `draw_state_with` to land on it — not merely "closer than
+    /// before" — at *every* prefix length of several adversarial strings, so
+    /// an error that is zero only at the string's end (or only at its start)
+    /// cannot pass.
+    #[test]
+    fn draw_state_with_tracks_a_proportional_font_not_the_fixed_advance() {
+        let measure_fn: &dyn Fn(&str) -> f32 = &synth_measure;
+
+        for s in ["iiiil", "WWWWM", "iWiWi", "", "i", "W"] {
+            let mut b = field();
+            typed(&mut b, s);
+            let n = s.chars().count();
+            for prefix in 0..=n {
+                b.move_cursor_to(prefix, false);
+                let state = b.draw_state_with(None, Some(measure_fn));
+                let before: String = s.chars().take(prefix).collect();
+                assert_eq!(
+                    state.before, before,
+                    "premise: `before` must be exactly the prefix at cursor {prefix}"
+                );
+
+                let correct = predicted_cursor_x(s, prefix, synth_measure);
+                assert!(
+                    (state.cursor_x - correct).abs() < 1e-4,
+                    "string {s:?} prefix {prefix}: cursor_x {} != predicted proportional \
+                     {correct}",
+                    state.cursor_x
+                );
+
+                // The two hypotheses must actually differ here, or this
+                // assertion could not have told a correct implementation from
+                // a broken one — see the sibling negative-control test for
+                // the case that must fail.
+                let wrong_fixed = predicted_cursor_x(s, prefix, |t: &str| {
+                    t.chars().count() as f32 * MENU_TEXT_ADVANCE
+                });
+                if prefix > 0 && !s.is_empty() {
+                    assert!(
+                        (correct - wrong_fixed).abs() > 1e-6,
+                        "string {s:?} prefix {prefix}: the proportional and fixed-advance \
+                         hypotheses coincide ({correct}), so this assertion is vacuous here"
+                    );
+                }
+            }
+        }
+    }
+
+    /// **Negative control, run rather than described.** `EditBox::draw_state`
+    /// (no measurement seam — the box's own fixed [`MENU_TEXT_ADVANCE`]) is
+    /// exactly what production called before this fix, for every render where
+    /// a real proportional font was attached. This test proves that path
+    /// really does diverge from the correct, proportional cursor position,
+    /// and that the divergence **accumulates with every character** rather
+    /// than being a one-off rounding difference — the "gap ... grows as I
+    /// type" the player reported, reproduced numerically.
+    #[test]
+    fn the_fixed_advance_path_is_the_bug_and_the_error_grows_with_length() {
+        let s = "iiiil"; // every character narrower than MENU_TEXT_ADVANCE (6.0)
+        let mut b = field();
+        typed(&mut b, s);
+        let n = s.chars().count();
+
+        let mut errors = Vec::new();
+        for prefix in 0..=n {
+            b.move_cursor_to(prefix, false);
+            // The pre-fix call shape: no seam, so `draw_state` falls back to
+            // this box's own fixed advance — reproducing the bug exactly.
+            let naive = b.draw_state(None);
+            let correct = predicted_cursor_x(s, prefix, synth_measure);
+            errors.push(naive.cursor_x - correct);
+        }
+
+        assert_eq!(errors[0], 0.0, "premise: an empty prefix has nothing to diverge on");
+        for (prefix, &err) in errors.iter().enumerate().skip(1) {
+            assert!(
+                err > 0.0,
+                "the fixed-advance path must overshoot the correct cursor position by \
+                 prefix {prefix} (every character in {s:?} is narrower than \
+                 MENU_TEXT_ADVANCE); measured error {err}"
+            );
+        }
+        // The accumulating property, asserted directly: each additional
+        // character must widen the gap by exactly one character's worth of
+        // (fixed advance - real advance) = 6.0 - 2.0 = 4.0, not merely "some
+        // more" — a constant per-character error, growing linearly, is
+        // precisely what turns "off by a pixel" into "unusable after a
+        // sentence".
+        for prefix in 1..=n {
+            assert!(
+                (errors[prefix] - errors[prefix - 1] - 4.0).abs() < 1e-4,
+                "expected the per-character error to grow by exactly 4.0 px from prefix \
+                 {} to {prefix}; got {} -> {} (delta {})",
+                prefix - 1,
+                errors[prefix - 1],
+                errors[prefix],
+                errors[prefix] - errors[prefix - 1]
+            );
+        }
+
+        // And the seam this file adds is the fix: the same string, same
+        // cursor positions, through `draw_state_with`, has zero error at
+        // every prefix length — not just at the end.
+        let measure_fn: &dyn Fn(&str) -> f32 = &synth_measure;
+        for prefix in 0..=n {
+            b.move_cursor_to(prefix, false);
+            let fixed = b.draw_state_with(None, Some(measure_fn));
+            let correct = predicted_cursor_x(s, prefix, synth_measure);
+            assert!(
+                (fixed.cursor_x - correct).abs() < 1e-4,
+                "prefix {prefix}: draw_state_with must land exactly on {correct}, got {}",
+                fixed.cursor_x
+            );
+        }
+    }
+
+    /// The highlight rect's far edge is measured the same way `cursor_x` is
+    /// (`EditBox.java:404-473`'s `highlightX`), so a selection under a
+    /// proportional font must widen by the *selected characters'* real
+    /// widths, not by `count * MENU_TEXT_ADVANCE`.
+    #[test]
+    fn a_selection_under_a_proportional_font_spans_the_real_glyph_widths() {
+        let measure_fn: &dyn Fn(&str) -> f32 = &synth_measure;
+        let mut b = field();
+        typed(&mut b, "iiWWi"); // 2 narrow, 2 wide, 1 narrow
+        b.move_cursor_to(0, false);
+        b.set_highlight_pos(4); // selects "iiWW": 2*2.0 + 2*9.0 = 22.0
+        let state = b.draw_state_with(None, Some(measure_fn));
+        let (from, to) = state.highlight.expect("a live selection must draw a rect");
+        assert!((from - BORDER_INSET).abs() < 1e-4, "selection starts at the caret, here 0");
+        let expected_to = BORDER_INSET + synth_measure("iiWW") - 1.0;
+        assert!(
+            (to - expected_to).abs() < 1e-4,
+            "selection's far edge {to} != predicted {expected_to} (would be {} under the \
+             fixed advance)",
+            BORDER_INSET + 4.0 * MENU_TEXT_ADVANCE - 1.0
+        );
     }
 }
