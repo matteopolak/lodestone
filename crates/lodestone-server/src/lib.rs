@@ -109,7 +109,9 @@ mod integrated;
 mod inventory;
 mod mob_spawn;
 mod mobs;
+mod neighbor_update;
 mod protocol;
+mod scheduled_tick;
 mod server;
 mod spawn;
 mod tick;
@@ -144,7 +146,9 @@ pub use mob_spawn::{
     SpawnState, check_despawn, resolve_mob_shape,
 };
 pub use mobs::{AttackOutcome, ChunkWorld, LiveMobSource, MobHandle, MobSim, SimMob};
+pub use neighbor_update::{Direction, NeighborPropagator, Notification, UPDATE_ORDER};
 pub use protocol::{EntitySnapshot, ServerBound, ServerDirective, ServerProtocol};
+pub use scheduled_tick::{ScheduledTick, ScheduledTickQueue, TickPriority};
 pub use server::{EntitySource, NoEntities, ServeSummary, ServerError, serve_connection};
 pub use tick::{TickClock, TickStats};
 pub use vitals::{DROWN_DAMAGE, EYE_HEIGHT, MAX_AIR_SUPPLY, MAX_HEALTH, PlayerVitals, VitalsTick};
