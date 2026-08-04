@@ -8,7 +8,7 @@
 //! [`memory_pair`](lodestone_net::memory_pair) client (singleplayer) or a
 //! `TcpStream` client (open-to-LAN).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
@@ -205,6 +205,33 @@ impl EntityStreamer {
 struct ViewTracker {
     center: (i32, i32),
     loaded: HashSet<(i32, i32)>,
+    /// The connection's *current* effective view radius — starts at the
+    /// server's configured cap (`serve_connection`'s own `view_radius`
+    /// parameter) and can shrink or grow within that cap via
+    /// [`set_view_radius`](Self::set_view_radius) (issue #270's
+    /// `ServerBound::ClientInformationChanged`). Stored on `self` rather than
+    /// re-passed at every [`recenter`](Self::recenter) call so a client's
+    /// requested distance actually sticks across subsequent moves, instead
+    /// of being silently overwritten by the original cap on the next
+    /// `PlayerMoved`.
+    radius: i32,
+}
+
+/// The directives produced by one [`ViewTracker`] update, split by whether
+/// they are subject to issue #270's chunk-batch flow-control gate
+/// (`ServerBound::ChunkBatchAcknowledged`) — see
+/// [`send_view_update`]'s own doc comment for how a caller applies this.
+#[derive(Debug, Default)]
+struct ViewUpdate {
+    /// Cache-center update and forgets: sent right away regardless of any
+    /// outstanding chunk-batch acknowledgement, matching vanilla's own
+    /// `ChunkTrackingView::difference`, which is not gated by
+    /// `PlayerChunkSender` at all (only new chunk *sends* are).
+    immediate: Vec<ServerDirective>,
+    /// The `begin_chunk_batch`/`encode_chunk`*/`end_chunk_batch` sequence for
+    /// any newly-visible columns, if any — empty when nothing new entered the
+    /// view. Subject to the one-unacknowledged-batch gate.
+    batch: Vec<ServerDirective>,
 }
 
 impl ViewTracker {
@@ -219,52 +246,34 @@ impl ViewTracker {
                 loaded.insert((center.0 + dx, center.1 + dz));
             }
         }
-        Self { center, loaded }
+        Self {
+            center,
+            loaded,
+            radius: view_radius,
+        }
     }
 
-    /// Recomputes the view for a new player chunk position `(cx, cz)`,
-    /// returning the directives that bring the client's tracked chunks back
-    /// in sync — and returning nothing at all if `(cx, cz)` is still the
-    /// tracked center (the same "did the 2D chunk position actually change"
-    /// guard `ChunkMap::updateChunkTracking` applies before touching the
-    /// view at all).
-    ///
-    /// Order mirrors vanilla's `applyChunkTrackingView`
-    /// (`ChunkMap.java:1122-1132`): the cache-center update is sent first
-    /// (unconditionally, since by this point the center *did* change —
-    /// vanilla additionally guards this send on the center changing, which
-    /// is already implied here), then every column that left the window is
-    /// forgotten, then every column that entered it is sent as one chunk
-    /// batch.
-    fn recenter<P, S>(
-        &mut self,
-        proto: &P,
-        source: &S,
-        cx: i32,
-        cz: i32,
-        view_radius: i32,
-    ) -> Vec<ServerDirective>
+    /// The square `[-self.radius, self.radius]²` window around `center`.
+    fn window(center: (i32, i32), radius: i32) -> HashSet<(i32, i32)> {
+        let mut next = HashSet::new();
+        for dz in -radius..=radius {
+            for dx in -radius..=radius {
+                next.insert((center.0 + dx, center.1 + dz));
+            }
+        }
+        next
+    }
+
+    /// The `begin_chunk_batch`/`encode_chunk`*/`end_chunk_batch` sequence for
+    /// every column in `next` this tracker has not already sent — empty if
+    /// there is nothing new. Shared by [`recenter`](Self::recenter) and
+    /// [`set_view_radius`](Self::set_view_radius) so both diff against
+    /// `self.loaded` identically.
+    fn build_batch<P, S>(&self, proto: &P, source: &S, next: &HashSet<(i32, i32)>) -> Vec<ServerDirective>
     where
         P: ServerProtocol,
         S: ChunkSource,
     {
-        if (cx, cz) == self.center {
-            return Vec::new();
-        }
-
-        let mut next = HashSet::new();
-        for dz in -view_radius..=view_radius {
-            for dx in -view_radius..=view_radius {
-                next.insert((cx + dx, cz + dz));
-            }
-        }
-
-        let mut directives = vec![proto.encode_chunk_cache_center(cx, cz)];
-
-        for &(x, z) in self.loaded.difference(&next) {
-            directives.push(proto.encode_forget_chunk(x, z));
-        }
-
         // Sorted rather than left in `HashSet::difference`'s hash-iteration
         // order: that order already varies run-to-run (`RandomState` reseeds
         // per process), and generating in parallel below means the set of
@@ -273,19 +282,118 @@ impl ViewTracker {
         // independent of both.
         let mut added: Vec<(i32, i32)> = next.difference(&self.loaded).copied().collect();
         added.sort_unstable();
-        if !added.is_empty() {
-            directives.push(proto.begin_chunk_batch());
-            let columns = generate_columns_parallel(source, &added);
-            for (&(x, z), column) in added.iter().zip(columns.iter()) {
-                directives.push(proto.encode_chunk(x, z, column));
-            }
-            directives.push(proto.end_chunk_batch(added.len() as i32));
+        if added.is_empty() {
+            return Vec::new();
         }
+        let mut batch = vec![proto.begin_chunk_batch()];
+        let columns = generate_columns_parallel(source, &added);
+        for (&(x, z), column) in added.iter().zip(columns.iter()) {
+            batch.push(proto.encode_chunk(x, z, column));
+        }
+        batch.push(proto.end_chunk_batch(added.len() as i32));
+        batch
+    }
+
+    /// Recomputes the view for a new player chunk position `(cx, cz)` at the
+    /// tracker's current [`radius`](Self::radius), returning the directives
+    /// that bring the client's tracked chunks back in sync — and returning
+    /// nothing at all if `(cx, cz)` is still the tracked center (the same
+    /// "did the 2D chunk position actually change" guard
+    /// `ChunkMap::updateChunkTracking` applies before touching the view at
+    /// all).
+    ///
+    /// Order mirrors vanilla's `applyChunkTrackingView`
+    /// (`ChunkMap.java:1122-1132`): the cache-center update is sent first
+    /// (unconditionally, since by this point the center *did* change —
+    /// vanilla additionally guards this send on the center changing, which
+    /// is already implied here), then every column that left the window is
+    /// forgotten, then every column that entered it is sent as one chunk
+    /// batch.
+    fn recenter<P, S>(&mut self, proto: &P, source: &S, cx: i32, cz: i32) -> ViewUpdate
+    where
+        P: ServerProtocol,
+        S: ChunkSource,
+    {
+        if (cx, cz) == self.center {
+            return ViewUpdate::default();
+        }
+
+        let next = Self::window((cx, cz), self.radius);
+
+        let mut immediate = vec![proto.encode_chunk_cache_center(cx, cz)];
+        for &(x, z) in self.loaded.difference(&next) {
+            immediate.push(proto.encode_forget_chunk(x, z));
+        }
+        let batch = self.build_batch(proto, source, &next);
 
         self.center = (cx, cz);
         self.loaded = next;
-        directives
+        ViewUpdate { immediate, batch }
     }
+
+    /// Resizes the tracked view around the *current* center without the
+    /// player having moved at all (issue #270's
+    /// `ServerBound::ClientInformationChanged` — a client changing its
+    /// render-distance setting mid-session). Unlike
+    /// [`recenter`](Self::recenter), there is no cache-center update to send
+    /// (the center did not change) and no early-return guard on position —
+    /// the guard here is `radius` itself already matching, so a settings
+    /// packet that does not actually change the distance is correctly a
+    /// no-op.
+    fn set_view_radius<P, S>(&mut self, proto: &P, source: &S, radius: i32) -> ViewUpdate
+    where
+        P: ServerProtocol,
+        S: ChunkSource,
+    {
+        if radius == self.radius {
+            return ViewUpdate::default();
+        }
+
+        let next = Self::window(self.center, radius);
+        let mut immediate = Vec::new();
+        for &(x, z) in self.loaded.difference(&next) {
+            immediate.push(proto.encode_forget_chunk(x, z));
+        }
+        let batch = self.build_batch(proto, source, &next);
+
+        self.radius = radius;
+        self.loaded = next;
+        ViewUpdate { immediate, batch }
+    }
+}
+
+/// Applies one [`ViewUpdate`]: the non-batch directives immediately, and the
+/// chunk-batch portion (if any) either right away or queued behind
+/// `awaiting_chunk_batch_ack` — the flow-control gate issue #270's
+/// `ServerBound::ChunkBatchAcknowledged` closes. Vanilla's `PlayerChunkSender`
+/// keeps at most one batch in flight; before this, `crate::server` started a
+/// fresh batch on every `recenter` regardless of whether the client had
+/// acknowledged the last one at all (the issue's own "never reads this reply"
+/// gap). Shared by both [`ViewTracker::recenter`] and
+/// [`ViewTracker::set_view_radius`] call sites in [`dispatch_play_packet`] so
+/// the two update paths cannot drift into different flow-control behaviour.
+async fn send_view_update<T: Transport>(
+    conn: &mut Connection<T>,
+    state: &mut State,
+    update: ViewUpdate,
+    awaiting_chunk_batch_ack: &mut bool,
+    pending_chunk_batches: &mut VecDeque<Vec<ServerDirective>>,
+) -> Result<(), ServerError> {
+    for directive in update.immediate {
+        apply(conn, state, directive).await?;
+    }
+    if update.batch.is_empty() {
+        return Ok(());
+    }
+    if *awaiting_chunk_batch_ack {
+        pending_chunk_batches.push_back(update.batch);
+        return Ok(());
+    }
+    *awaiting_chunk_batch_ack = true;
+    for directive in update.batch {
+        apply(conn, state, directive).await?;
+    }
+    Ok(())
 }
 
 /// Outcome of serving a connection's initial view.
@@ -557,6 +665,10 @@ where
             | ServerBound::ContainerClosed { .. }
             | ServerBound::Attack { .. }
             | ServerBound::PlayerInput { .. }
+            | ServerBound::CreativeModeSlotSet { .. }
+            | ServerBound::ClientCommand { .. }
+            | ServerBound::ClientInformationChanged { .. }
+            | ServerBound::ChunkBatchAcknowledged { .. }
             | ServerBound::Ignored => {}
         }
     }
@@ -1075,6 +1187,72 @@ where
     apply(conn, state, directive).await
 }
 
+/// Applies a `client_command` request (`ServerBound::ClientCommand`, issue
+/// #270), mirroring `ServerGamePacketListenerImpl::handleClientCommand`'s two
+/// modellable ordinals — `action == 1` (`REQUEST_STATS`) has no stats model
+/// in this crate and is a documented no-op, matching every other
+/// "decoded, no model to act on yet" gap this crate already discloses
+/// elsewhere (e.g. `PLAYER_ACTION`'s item-action ordinals).
+///
+/// # `action == 0`, `PERFORM_RESPAWN`
+///
+/// Vanilla's full respawn (`PlayerList::respawn`) rebuilds the player entity,
+/// re-teleports it to its spawn point, and resets per-player state this
+/// crate does not track at all (dimension, XP, permissions, `wonGame`). What
+/// *is* modelled here — [`PlayerVitals`] — is reset exactly like a fresh
+/// connection's own defaults ([`PlayerVitals::respawn`]), and the result is
+/// confirmed back to the client via
+/// [`ServerProtocol::encode_set_health`]/[`encode_air_supply_update`], the
+/// same two directives [`PlayerVitals::tick`]'s own drowning path already
+/// sends — so a real client's health/air HUD actually refills on respawn,
+/// not just the server's internal value. Vanilla guards respawn on
+/// `player.getHealth() <= 0.0` (`return;` otherwise, ignoring `wonGame` since
+/// this crate has no such concept); the identical guard is applied here — a
+/// respawn request while still alive is a no-op.
+///
+/// # `action == 2`, `REQUEST_GAMERULE_VALUES`
+///
+/// Mirrors `sendGameRuleValues` minus its permission check (see
+/// [`apply_difficulty_change`]'s own doc comment for why every connection
+/// here is treated as the permission-holding singleplayer owner): replies
+/// with every rule this connection's own [`WorldAdminState`] has ever had
+/// set, via the same [`ServerProtocol::encode_game_rule_values`] confirmation
+/// [`apply_game_rule_changed`] already uses. Vanilla instead enumerates the
+/// full `GameRules` registry, including every rule at its default — this
+/// crate has no such registry (see [`WorldAdminState`]'s own doc comment), so
+/// a rule that was never explicitly set is simply absent from the reply
+/// rather than reported at a registry default.
+async fn apply_client_command<T, P>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    state: &mut State,
+    vitals: &mut PlayerVitals,
+    admin: &WorldAdminState,
+    action: i32,
+) -> Result<(), ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+{
+    match action {
+        0 if vitals.health() <= 0.0 => {
+            vitals.respawn();
+            apply(conn, state, proto.encode_set_health(vitals.health())).await?;
+            apply(conn, state, proto.encode_air_supply_update(vitals.air_supply())).await?;
+        }
+        2 => {
+            let entries: Vec<(String, String)> = admin
+                .game_rules
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            apply(conn, state, proto.encode_game_rule_values(&entries)).await?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Applies a `SET_CARRIED_ITEM` request (`ServerBound::CarriedItemChanged`),
 /// mirroring `ServerGamePacketListenerImpl::handleSetCarriedItem`, which
 /// writes straight into `Inventory.setSelectedSlot` and sends **no**
@@ -1086,6 +1264,23 @@ where
 /// degrades instead of panicking).
 fn apply_carried_item_changed(inventory: &mut PlayerInventory, slot: u8) {
     inventory.set_selected_hotbar_slot(slot);
+}
+
+/// Applies a `SET_CREATIVE_MODE_SLOT` write (`ServerBound::CreativeModeSlotSet`,
+/// issue #266) straight into [`PlayerInventory`] via the exact same menu-slot
+/// table `CONTAINER_CLICK` against window 0 already uses
+/// ([`PlayerInventory::apply_menu_slot_change`]) — `SET_CREATIVE_MODE_SLOT`'s
+/// wire `slot` field uses the identical `InventoryMenu` numbering
+/// (`ServerGamePacketListenerImpl::handleSetCreativeModeSlot`'s
+/// `player.inventoryMenu.getSlot(slotNum)`), so no new mapping is needed.
+/// `slot` values that table does not recognise (`0`, the crafting output; any
+/// negative value, vanilla's "drop into the world" case) are silent no-ops
+/// here, exactly as [`ServerBound::CreativeModeSlotSet`]'s own doc comment
+/// documents — this crate has no world-drop model, and no creative/game-mode
+/// state to gate on either (see that same doc comment for why vanilla's
+/// `hasInfiniteMaterials()` check has nothing to mirror here).
+fn apply_creative_mode_slot_set(inventory: &mut PlayerInventory, slot: i16, item: Option<ItemStack>) {
+    inventory.apply_menu_slot_change(i32::from(slot), item);
 }
 
 /// Applies a `CONTAINER_CLICK` result the client already predicted locally
@@ -1217,12 +1412,17 @@ fn apply_attack(mobs: &MobHandle, player_pos: Option<(f64, f64, f64)>, sprinting
 /// feeds [`FallTracker`] and applies any resulting fall damage, applies a
 /// block break/placement (see [`apply_block_action`]/[`apply_use_item_on`]),
 /// applies a difficulty/game-rule change (see
-/// [`apply_difficulty_change`]/[`apply_game_rule_changed`]), or applies a
-/// hotbar selection/container click against [`PlayerInventory`] (see
-/// [`apply_carried_item_changed`]/[`apply_container_clicked`]).
+/// [`apply_difficulty_change`]/[`apply_game_rule_changed`]), applies a
+/// respawn/game-rule-request `client_command` (see [`apply_client_command`]),
+/// resizes the streamed view on a settings change (see
+/// [`ViewTracker::set_view_radius`]), advances issue #270's chunk-batch
+/// flow-control gate (see [`send_view_update`]), or applies a hotbar
+/// selection/container click/creative-slot write against [`PlayerInventory`]
+/// (see
+/// [`apply_carried_item_changed`]/[`apply_container_clicked`]/[`apply_creative_mode_slot_set`]).
 /// Every other packet decodes to [`ServerBound::Ignored`] in `State::Play`
 /// under the current protocols (no further state transitions are modeled —
-/// no respawn/dimension change yet) and is a no-op here.
+/// no dimension change yet) and is a no-op here.
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_play_packet<T, P, S>(
     conn: &mut Connection<T>,
@@ -1244,6 +1444,8 @@ async fn dispatch_play_packet<T, P, S>(
     next_window_id: &mut i32,
     mobs: &MobHandle,
     sprinting: &mut bool,
+    awaiting_chunk_batch_ack: &mut bool,
+    pending_chunk_batches: &mut VecDeque<Vec<ServerDirective>>,
     packet_id: i32,
     payload: &[u8],
 ) -> Result<(), ServerError>
@@ -1266,9 +1468,8 @@ where
             // `SectionPos.blockToSectionCoord` (an arithmetic right shift).
             let cx = (x / 16.0).floor() as i32;
             let cz = (z / 16.0).floor() as i32;
-            for directive in view.recenter(proto, source, cx, cz, view_radius) {
-                apply(conn, state, directive).await?;
-            }
+            let update = view.recenter(proto, source, cx, cz);
+            send_view_update(conn, state, update, awaiting_chunk_batch_ack, pending_chunk_batches).await?;
 
             if let Some(raw) = fall.on_player_moved(y, on_ground)
                 && vitals.apply_fall_damage(raw as f32).is_some()
@@ -1355,6 +1556,38 @@ where
         }
         ServerBound::PlayerInput { sprint } => {
             *sprinting = sprint;
+        }
+        ServerBound::CreativeModeSlotSet { slot, item } => {
+            apply_creative_mode_slot_set(inventory, slot, item);
+        }
+        ServerBound::ClientCommand { action } => {
+            apply_client_command(conn, proto, state, vitals, admin, action).await?;
+        }
+        ServerBound::ClientInformationChanged { view_distance } => {
+            // Clamp against the server's own configured cap (`view_radius`,
+            // this connection's original `serve_connection` argument) —
+            // vanilla's own server likewise never streams more than its
+            // configured `view-distance` setting regardless of what a
+            // client asks for. The floor is `0`, not vanilla client UI's
+            // slider minimum of `2` (`Options::renderDistance`): the server
+            // side has no evidence pinning that specific floor, and a floor
+            // above the server's own cap would be actively wrong on a
+            // connection configured with a smaller `view_radius` than that
+            // (several tests in this crate use `view_radius: 0`). `.max(0)`
+            // on the upper bound only guards `clamp`'s own `min <= max`
+            // invariant against a caller passing a negative `view_radius`.
+            let requested = i32::from(view_distance).clamp(0, view_radius.max(0));
+            let update = view.set_view_radius(proto, source, requested);
+            send_view_update(conn, state, update, awaiting_chunk_batch_ack, pending_chunk_batches).await?;
+        }
+        ServerBound::ChunkBatchAcknowledged { .. } => {
+            *awaiting_chunk_batch_ack = false;
+            if let Some(next) = pending_chunk_batches.pop_front() {
+                *awaiting_chunk_batch_ack = true;
+                for directive in next {
+                    apply(conn, state, directive).await?;
+                }
+            }
         }
         ServerBound::Handshake { .. }
         | ServerBound::LoginStart { .. }
@@ -1451,6 +1684,14 @@ where
     // very first open bumps it to `1` before use (`ServerPlayer.java:1330,
     // 1343`) — see [`open_container_screen`]'s own `% 100 + 1` wrap.
     let mut next_window_id: i32 = 0;
+    // Issue #270's chunk-batch flow-control gate (`ServerBound::
+    // ChunkBatchAcknowledged`, see `send_view_update`'s own doc comment):
+    // starts `true` because `serve_connection`'s own initial full-view dump
+    // (sent just before this function was called) is itself an outstanding
+    // unacknowledged batch — the first ack this loop receives is for *that*
+    // batch, not a later `recenter`/`set_view_radius` one.
+    let mut awaiting_chunk_batch_ack = true;
+    let mut pending_chunk_batches: VecDeque<Vec<ServerDirective>> = VecDeque::new();
     let mut keep_alive_tick = tokio::time::interval_at(
         tokio::time::Instant::now() + KEEP_ALIVE_INTERVAL,
         KEEP_ALIVE_INTERVAL,
@@ -1509,6 +1750,8 @@ where
                     &mut next_window_id,
                     mobs,
                     &mut sprinting,
+                    &mut awaiting_chunk_batch_ack,
+                    &mut pending_chunk_batches,
                     packet_id,
                     &payload,
                 )
@@ -1647,6 +1890,10 @@ where
     let mut open_container: Option<OpenContainer> = None;
     let mut container_sync = ContainerSync::default();
     let mut next_window_id: i32 = 0;
+    // See the native `serve_play`'s identical field for why this starts
+    // `true` (the initial join dump is itself an unacknowledged batch).
+    let mut awaiting_chunk_batch_ack = true;
+    let mut pending_chunk_batches: VecDeque<Vec<ServerDirective>> = VecDeque::new();
 
     while let Some((packet_id, payload)) = conn.read_packet().await? {
         dispatch_play_packet(
@@ -1669,6 +1916,8 @@ where
             &mut next_window_id,
             mobs,
             &mut sprinting,
+            &mut awaiting_chunk_batch_ack,
+            &mut pending_chunk_batches,
             packet_id,
             &payload,
         )

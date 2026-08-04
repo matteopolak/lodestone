@@ -342,6 +342,22 @@ impl PlayerVitals {
         self.health = (self.health - outcome.to_health).max(0.0);
         Some(outcome.to_health)
     }
+
+    /// Resets vitals to a fresh-spawn state (full air, full health, no
+    /// invulnerability frames outstanding) — the one piece of vanilla's
+    /// `PlayerList::respawn` this module can model, per this module's own
+    /// "Death/respawn... out of scope" doc note above: no corpse, no
+    /// teleport, no dimension change, just the health/air a real respawn
+    /// *does* reset (`Player`'s fresh-entity defaults, the same ones
+    /// [`Default`](Self::default) already establishes for a brand-new
+    /// connection). Issue #270's `ServerBound::ClientCommand { action: 0 }`
+    /// consumer (`crate::server::apply_client_command`) is the only caller,
+    /// and only once [`health`](Self::health) has actually reached `0.0` —
+    /// mirroring vanilla's own `handleClientCommand` guard
+    /// (`this.player.getHealth() > 0.0F` → early return).
+    pub fn respawn(&mut self) {
+        *self = Self::default();
+    }
 }
 
 #[cfg(test)]
@@ -549,6 +565,27 @@ mod tests {
     /// the third damage source now sharing the identical `health <= 0.0`
     /// guard [`dead_vitals_do_not_tick`]/[`dead_player_takes_no_further_fall_damage`]
     /// already prove for the other two.
+    /// [`PlayerVitals::respawn`] must actually restore a dead player to full
+    /// health/air, not merely leave `health` untouched at `0.0` — the
+    /// positive half of issue #270's respawn consumer.
+    #[test]
+    fn respawn_restores_full_health_and_air_after_death() {
+        let mut v = PlayerVitals::default();
+        v.apply_fall_damage(999.0);
+        assert_eq!(v.health(), 0.0, "expected the player to be dead before respawning");
+
+        v.respawn();
+        assert_eq!(v.health(), MAX_HEALTH, "respawn must restore full health");
+        assert_eq!(v.air_supply(), MAX_AIR_SUPPLY, "respawn must restore full air");
+
+        // Control: a respawned (alive) player must resume taking damage
+        // normally — proof this isn't a cosmetic reset that leaves the
+        // `health <= 0.0` guards still latched somehow.
+        let dealt = v.apply_fall_damage(5.0);
+        assert_eq!(dealt, Some(5.0), "a respawned player must be able to take damage again");
+        assert_eq!(v.health(), MAX_HEALTH - 5.0);
+    }
+
     #[test]
     fn dead_player_takes_no_further_generic_damage() {
         let mut v = PlayerVitals::default();
