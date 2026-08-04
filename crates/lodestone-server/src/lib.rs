@@ -104,6 +104,7 @@ mod chunk;
 mod composter;
 mod fall;
 mod furnace;
+mod gravity_tick;
 mod growth_tick;
 mod hopper;
 mod integrated;
