@@ -524,6 +524,16 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   one production `MobController` implementor,
   [`NavigatingMob`](../crates/lodestone-entity/src/ai/navigating_mob.rs) — the same
   "goal exists, effect doesn't" shape #225's triage sweep found for all four defaults.
+- [Mob perception: what a goal is allowed to know](./mob-perception.md) — The seam
+  that lets a goal ask questions about the world — *am I in water, who hurt me,
+  where is the nearest player, is there a threat nearby* — and the server-side feed
+  that answers them. Before issue
+  [#441](https://github.com/matteopolak/lodestone/issues/441) this seam existed but
+  was **unfilled**: `NavigatingMob`'s `impl MobController` left eight perception
+  methods at their trait defaults, so six goals had a `can_use` that was
+  constant-`false` in the running game and two more read fields nothing ever wrote.
+  Eight of thirteen implemented goals could not act. This doc records what each method
+  reads, who feeds it, and the two that still have no production producer.
 - [Species-aware mob spawning (issue #205)](./mob-species-spawning.md) —
   `MobSim::spawn_species` (`crates/lodestone-server/src/mobs.rs`), a spawn entry point
   that resolves a mob's body, combat stats, and baseline goal set from its real
@@ -756,6 +766,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   to be spawned side-by-side, and adds the accounting #285 asked for: ticks-run,
   most-recent and rolling-average tick duration (MSPT), a derived TPS figure, and an
   overrun counter for when the loop falls behind schedule.
+- [v770 serverbound `play` packet wiring, and why decoding is not the bar](./serverbound-packet-wiring.md) —
+  The measured state of protocol 776's **serverbound** `play` packets on the hosting
+  side — what `V770ServerProtocol::decode` understands, what actually reaches a
+  consumer in `lodestone-server`, and why those two numbers differ by more than 3×.
+  This is the record for GitHub issues #262, #264, #266, #268 and #270, whose bodies
+  all framed the gap as a decode gap. **That framing is stale**: decode is nearly
+  complete and connectedness is the real bar.
 - [Session and HUD state as ECS components](./session-components.md) — The
   scoreboard, tab list, boss bars, menus, session phase, vitals, experience, the
   title/action-bar overlays, the HUD effect stack, the respawn counter and the
