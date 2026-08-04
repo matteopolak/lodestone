@@ -57,6 +57,16 @@ use crate::rng::{RandomSource, WorldgenRandom};
 /// `GenerationStep.Decoration.UNDERGROUND_ORES.ordinal()`.
 pub const STEP_UNDERGROUND_ORES: i32 = 6;
 
+/// `GenerationStep.Decoration.VEGETAL_DECORATION.ordinal()` — grass, flowers
+/// and trees (issue #406). One past `UNDERGROUND_DECORATION`/`FLUID_SPRINGS`
+/// (7, 8), which this engine does not compose; see
+/// `net.minecraft.world.level.levelgen.GenerationStep.Decoration`'s own
+/// declaration order (`RAW_GENERATION, LAKES, LOCAL_MODIFICATIONS,
+/// UNDERGROUND_STRUCTURES, SURFACE_STRUCTURES, STRONGHOLDS, UNDERGROUND_ORES,
+/// UNDERGROUND_DECORATION, FLUID_SPRINGS, VEGETAL_DECORATION,
+/// TOP_LAYER_MODIFICATION`).
+pub const STEP_VEGETAL_DECORATION: i32 = 9;
+
 /// A block position with `i32` components (`net.minecraft.core.BlockPos`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BlockPos {
@@ -97,10 +107,21 @@ impl VerticalAnchor {
 }
 
 /// `net.minecraft.util.valueproviders.IntProvider` (the subset features use).
+///
+/// [`IntProvider::WeightedList`] (issue #406's `trees_plains`/`trees_birch`/
+/// `trees_taiga` outer `count` — e.g. `{data: 0, weight: 19}, {data: 1,
+/// weight: 1}`) is additive: nothing in the ore engine (issue #295)
+/// constructs it, so this is a strict superset, not a behaviour change to
+/// any existing caller.
 #[derive(Clone, Debug)]
 pub enum IntProvider {
     Constant(i32),
     Uniform { min: i32, max: i32 },
+    /// `net.minecraft.util.valueproviders.WeightedListInt` — a `WeightedList<Integer>`.
+    /// `(value, weight)` pairs, in JSON declaration order (order doesn't
+    /// affect the *distribution*, but does affect [`WeightedList::sample`]'s
+    /// draw semantics, which walks the list in order — see that fn's doc).
+    WeightedList(Vec<(i32, i32)>),
 }
 
 impl IntProvider {
@@ -117,6 +138,20 @@ impl IntProvider {
                         min: v["min_inclusive"].as_i64().expect("min_inclusive") as i32,
                         max: v["max_inclusive"].as_i64().expect("max_inclusive") as i32,
                     },
+                    "weighted_list" => {
+                        let entries = v["distribution"]
+                            .as_array()
+                            .expect("weighted_list distribution")
+                            .iter()
+                            .map(|e| {
+                                (
+                                    e["data"].as_i64().expect("weighted_list data") as i32,
+                                    e["weight"].as_i64().expect("weighted_list weight") as i32,
+                                )
+                            })
+                            .collect();
+                        IntProvider::WeightedList(entries)
+                    }
                     other => panic!("unsupported int provider: {other}"),
                 }
             }
@@ -124,10 +159,45 @@ impl IntProvider {
         }
     }
 
-    fn sample<R: RandomSource>(&self, random: &mut R) -> i32 {
-        match *self {
-            IntProvider::Constant(v) => v,
-            IntProvider::Uniform { min, max } => math::random_between_inclusive(random, min, max),
+    /// Expected value, for count-prediction tests — not consulted by
+    /// [`IntProvider::sample`] itself.
+    #[must_use]
+    pub fn expected_value(&self) -> f64 {
+        match self {
+            IntProvider::Constant(v) => f64::from(*v),
+            IntProvider::Uniform { min, max } => f64::from(min + max) / 2.0,
+            IntProvider::WeightedList(entries) => {
+                let total: i64 = entries.iter().map(|(_, w)| i64::from(*w)).sum();
+                entries
+                    .iter()
+                    .map(|(v, w)| f64::from(*v) * f64::from(*w) / total as f64)
+                    .sum()
+            }
+        }
+    }
+
+    pub(crate) fn sample<R: RandomSource>(&self, random: &mut R) -> i32 {
+        match self {
+            IntProvider::Constant(v) => *v,
+            IntProvider::Uniform { min, max } => {
+                math::random_between_inclusive(random, *min, *max)
+            }
+            // `WeightedList.getRandom`: walk in declared order, subtracting a
+            // `nextInt(totalWeight)` draw until it goes negative — the entry
+            // it goes negative on is the pick. Matches
+            // `net.minecraft.util.random.SimpleWeightedRandomList`'s walk
+            // order exactly (declaration order, not sorted).
+            IntProvider::WeightedList(entries) => {
+                let total: i32 = entries.iter().map(|(_, w)| *w).sum();
+                let mut roll = random.next_int_bounded(total.max(1));
+                for (value, weight) in entries {
+                    roll -= *weight;
+                    if roll < 0 {
+                        return *value;
+                    }
+                }
+                entries.last().map_or(0, |(v, _)| *v)
+            }
         }
     }
 }
