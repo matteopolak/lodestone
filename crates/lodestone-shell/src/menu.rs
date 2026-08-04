@@ -47,6 +47,7 @@ pub mod options;
 pub mod panorama;
 pub mod render;
 pub mod servers;
+pub mod social;
 pub mod status;
 pub mod widget;
 pub mod world_select;
@@ -185,6 +186,20 @@ pub enum Screen {
     /// is an island until that patch lands. See issue #192's own tracking
     /// comment for the exact hook.
     Credits,
+    /// The Social Interactions screen (issue #189): vanilla's
+    /// `SocialInteractionsScreen`, an online-player list with a per-player
+    /// Hide/Show-in-Chat toggle and a Report button. Reached from the pause
+    /// menu's Player Reporting icon button
+    /// ([`nav::PauseButton::PlayerReporting`]); Escape or the screen's own
+    /// Done button returns to [`Screen::Paused`].
+    ///
+    /// Vanilla itself shows this screen's real list only in a multiplayer
+    /// session (`multiplayer.socialInteractions.not_available`) — see
+    /// [`social::available_for`] for the fork, which this client's own
+    /// [`SessionKind`] already carries. The Report button stays permanently
+    /// inactive regardless of session kind: it needs secure chat signing,
+    /// which does not exist here (see [`social`]'s module docs).
+    Social,
 }
 
 impl Screen {
@@ -210,7 +225,7 @@ impl Screen {
     /// residue is real; it is stated rather than papered over. If a third
     /// consumer ever needs this, a derive is the fix, not another hand-written
     /// list.
-    pub const ALL: [Screen; 14] = [
+    pub const ALL: [Screen; 15] = [
         Screen::MainMenu,
         Screen::ServerList,
         Screen::ServerEdit,
@@ -225,6 +240,7 @@ impl Screen {
         Screen::Death,
         Screen::Error,
         Screen::Credits,
+        Screen::Social,
     ];
 }
 
@@ -466,6 +482,11 @@ impl UiState {
                     | Screen::Paused
                     | Screen::Death
                     | Screen::Error
+                    // Same reasoning as `Screen::Death` above: a disconnect
+                    // while Social Interactions is open (#189) must not
+                    // silently strand the player on a screen backed by a
+                    // session that no longer exists.
+                    | Screen::Social
             )
         {
             self.death_message = None;
@@ -604,6 +625,26 @@ impl UiState {
         self.settings_return == Screen::Paused
     }
 
+    /// Open the Social Interactions screen (issue #189) from the pause
+    /// menu's Player Reporting button. Only from [`Screen::Paused`] — vanilla
+    /// has no title-screen entry point for it at all (there is no session to
+    /// list players from before one exists), so unlike
+    /// [`Self::open_settings`]/[`open_settings_from_pause`](Self::open_settings_from_pause)
+    /// this needs no return-fork: it always came from the pause menu, so
+    /// [`Self::close_social`] always goes back there.
+    pub fn open_social_from_pause(&mut self) {
+        if self.screen == Screen::Paused {
+            self.screen = Screen::Social;
+        }
+    }
+
+    /// Back to the pause menu from Social Interactions.
+    pub fn close_social(&mut self) {
+        if self.screen == Screen::Social {
+            self.screen = Screen::Paused;
+        }
+    }
+
     // -- input-driven transitions ----------------------------------------
 
     /// Open the chat box over the world. Only from [`Screen::Playing`]; opening
@@ -693,6 +734,12 @@ impl UiState {
             // match exhaustive and does the same thing for a caller that
             // reaches here some other way.
             Screen::Credits => self.quit_to_title(),
+            // In practice `MenuNav::key_social` intercepts Escape before this
+            // is reached (same reasoning as `Screen::Accounts` above) — this
+            // arm exists so the match stays exhaustive and unwinds one level
+            // like every ordinary sub-screen (unlike `Screen::Credits`, this
+            // one has a real "back", the pause menu it was opened from).
+            Screen::Social => self.close_social(),
         }
     }
 

@@ -343,6 +343,99 @@ pub fn options_path() -> PathBuf {
     crate::menu::servers::data_dir().join("options.json")
 }
 
+/// The Social Interactions screen's (issue #189) per-player "Hide in Chat"
+/// choices, keyed by UUID. **Not** part of [`Options`]: `Options` derives
+/// `Copy` deliberately (see its own doc — "the menu layer that reads it by
+/// value does not have to change"), and a `Vec` field would take that away
+/// from every existing call site that copies an `Options` by value. A second
+/// small file, alongside `options.json`/`servers.json`, is the same trade
+/// [`crate::menu::servers::ServerList`] and `menu/accounts.rs`'s profile list
+/// already made rather than growing one shared struct without bound.
+///
+/// Persisting a hidden choice cannot be "wrong" the way a cycled option value
+/// can — see `docs/social-interactions.md`'s note on self-healing: toggling a
+/// player hidden or shown is a deliberate, reversible click each time, with
+/// no derived state that could drift from it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HiddenPlayers {
+    ids: std::collections::BTreeSet<uuid::Uuid>,
+}
+
+impl HiddenPlayers {
+    /// Loads from the real on-disk location ([`hidden_players_path`]).
+    /// Missing or corrupt is empty, never an error — same rule as
+    /// [`Options::load`].
+    #[must_use]
+    pub fn load() -> Self {
+        Self::load_from(&hidden_players_path())
+    }
+
+    /// As [`Self::load`], from an explicit path (for tests).
+    #[must_use]
+    pub fn load_from(path: &Path) -> Self {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Self::default();
+        };
+        let Ok(serde_json::Value::Array(items)) = serde_json::from_str(&text) else {
+            return Self::default();
+        };
+        let ids = items
+            .into_iter()
+            .filter_map(|v| v.as_str().and_then(|s| uuid::Uuid::parse_str(s).ok()))
+            .collect();
+        Self { ids }
+    }
+
+    #[must_use]
+    pub fn contains(&self, id: uuid::Uuid) -> bool {
+        self.ids.contains(&id)
+    }
+
+    /// Flips `id`'s hidden state. Does not persist by itself — see
+    /// [`Self::save_to`], called separately so a test can inspect the
+    /// in-memory state without touching disk.
+    pub fn toggle(&mut self, id: uuid::Uuid) {
+        if !self.ids.remove(&id) {
+            self.ids.insert(id);
+        }
+    }
+
+    /// Writes to the real on-disk location.
+    ///
+    /// # Errors
+    /// Returns the underlying I/O error if the directory cannot be created or
+    /// the file cannot be written.
+    pub fn save(&self) -> std::io::Result<()> {
+        self.save_to(&hidden_players_path())
+    }
+
+    /// As [`Self::save`], to an explicit path (for tests).
+    ///
+    /// # Errors
+    /// Returns the underlying I/O error if the directory cannot be created or
+    /// the file cannot be written.
+    pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let items: Vec<serde_json::Value> = self
+            .ids
+            .iter()
+            .map(|id| serde_json::Value::String(id.to_string()))
+            .collect();
+        let text = serde_json::to_string_pretty(&serde_json::Value::Array(items))
+            .unwrap_or_else(|_| "[]".to_string());
+        std::fs::write(path, text)
+    }
+}
+
+/// Full path to the persisted hidden-players file — same directory
+/// discovery as [`options_path`]/`servers_path`.
+#[must_use]
+pub fn hidden_players_path() -> PathBuf {
+    crate::menu::servers::data_dir().join("hidden_players.json")
+}
+
 /// How the binary should run this session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -941,5 +1034,88 @@ mod tests {
             crate::menu::servers::servers_path().parent()
         );
         assert_eq!(options_path().file_name().unwrap(), "options.json");
+    }
+
+    // -- HiddenPlayers (issue #189) -------------------------------------------
+
+    fn temp_hidden_path(tag: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "lodestone-config-{}-{tag}/hidden_players.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        path
+    }
+
+    #[test]
+    fn a_fresh_hidden_players_list_hides_nobody() {
+        let hp = HiddenPlayers::default();
+        assert!(!hp.contains(uuid::Uuid::from_u128(1)));
+    }
+
+    #[test]
+    fn toggle_flips_both_ways_and_leaves_other_ids_alone() {
+        let mut hp = HiddenPlayers::default();
+        let a = uuid::Uuid::from_u128(1);
+        let b = uuid::Uuid::from_u128(2);
+        hp.toggle(a);
+        assert!(hp.contains(a));
+        assert!(!hp.contains(b), "an untouched id must not report hidden");
+        hp.toggle(a);
+        assert!(!hp.contains(a), "toggling again must self-heal");
+    }
+
+    #[test]
+    fn save_and_load_round_trip_through_the_real_file() {
+        let path = temp_hidden_path("round-trip");
+        let mut hp = HiddenPlayers::default();
+        let a = uuid::Uuid::from_u128(1);
+        let b = uuid::Uuid::from_u128(2);
+        hp.toggle(a);
+        hp.toggle(b);
+        hp.save_to(&path).unwrap();
+
+        let loaded = HiddenPlayers::load_from(&path);
+        assert!(loaded.contains(a));
+        assert!(loaded.contains(b));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_missing_or_corrupt_hidden_players_file_is_empty_not_an_error() {
+        assert_eq!(
+            HiddenPlayers::load_from(Path::new("/nonexistent/hidden_players.json")),
+            HiddenPlayers::default()
+        );
+        // A distinct tag from `Options`' own "corrupt" test, deliberately:
+        // both helpers build a path from `lodestone-config-{pid}-{tag}/…`, so
+        // sharing a tag put both tests' files in the *same* parent directory
+        // — and one test's end-of-test `remove_dir_all` could then race the
+        // other's write, since `cargo test` runs tests in parallel threads by
+        // default. Caught by this test flaking under `--no-fail-fast` even
+        // though the logic it exercises was correct.
+        let path = temp_hidden_path("hp-corrupt");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "not json at all").unwrap();
+        assert_eq!(HiddenPlayers::load_from(&path), HiddenPlayers::default());
+        // A well-formed JSON array with a non-UUID entry degrades that one
+        // entry rather than the whole file — same "a broken piece must not
+        // cost the rest" rule `Keybinds::from_json_value` follows.
+        std::fs::write(&path, r#"["not-a-uuid", "00000000-0000-0000-0000-000000000001"]"#).unwrap();
+        let loaded = HiddenPlayers::load_from(&path);
+        assert!(loaded.contains(uuid::Uuid::from_u128(1)));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn the_hidden_players_path_lives_beside_the_server_list() {
+        assert_eq!(
+            hidden_players_path().parent(),
+            crate::menu::servers::servers_path().parent()
+        );
+        assert_eq!(
+            hidden_players_path().file_name().unwrap(),
+            "hidden_players.json"
+        );
     }
 }
