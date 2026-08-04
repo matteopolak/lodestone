@@ -4240,6 +4240,63 @@ fn walking_accumulates_a_real_bob_that_only_the_render_camera_sees() {
     );
 }
 
+/// Issue #154, end-to-end: `Sim::spyglass_scoping`'s two halves
+/// (`Self::using_item` and the held-item identity check) have to actually
+/// reach `Self::render_camera`'s FOV, not just exist. Predicts the *exact*
+/// FOV from `lodestone_render::spyglass_fov_modifier`'s tested `0.1`
+/// constant rather than asserting only that the number changed — a wrong
+/// multiplier would still pass a same-direction-only check.
+#[test]
+fn spyglass_scoping_zooms_the_render_camera_by_exactly_a_tenth() {
+    let (net, _actions, _feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.attach_net(net);
+
+    let base_fov = sim.render_camera(1.0).fov_y_degrees;
+    assert_eq!(
+        base_fov,
+        crate::camera_rig::FOV_Y_DEGREES,
+        "precondition: an empty hand must not zoom at all"
+    );
+
+    give_main_hand_item(&mut sim, "minecraft:spyglass");
+    sim.use_item_live();
+    let zoomed_fov = sim.render_camera(1.0).fov_y_degrees;
+    assert_eq!(
+        zoomed_fov,
+        base_fov * lodestone_render::spyglass_fov_modifier(true),
+        "a held, in-use spyglass must scale the FOV by exactly vanilla's 0.1 \
+         override, not merely reduce it"
+    );
+    assert!(
+        (zoomed_fov - 7.0).abs() < 1e-6,
+        "70 degrees * 0.1 is 7.0 exactly; got {zoomed_fov}"
+    );
+
+    // -- negative control -------------------------------------------------
+    // Using a non-spyglass item must not zoom, proving the assertions above
+    // test the item's identity and not merely "is using any item".
+    sim.end_use_live();
+    give_main_hand_item(&mut sim, "minecraft:bow");
+    sim.use_item_live();
+    assert_eq!(
+        sim.render_camera(1.0).fov_y_degrees,
+        base_fov,
+        "using a bow must not zoom — only a spyglass does"
+    );
+
+    // And releasing the spyglass must drop the zoom back to base, so the
+    // wiring is proven live rather than latched permanently on the first
+    // press.
+    sim.end_use_live();
+    give_main_hand_item(&mut sim, "minecraft:spyglass");
+    assert_eq!(
+        sim.render_camera(1.0).fov_y_degrees,
+        base_fov,
+        "holding a spyglass without using it must not zoom"
+    );
+}
+
 /// Issue #391's gate: the walk bob must reach the projection **at vanilla's
 /// own magnitude, on vanilla's own axes**, driven by a real walking `Sim`.
 ///

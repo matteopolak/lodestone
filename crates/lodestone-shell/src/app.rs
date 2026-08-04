@@ -2164,6 +2164,11 @@ impl WindowApp {
             .get(self.sim.selected_slot())
             .and_then(|record| record.as_ref())
             .map(|record| record.item.clone());
+        // Cloned rather than moved whole into the closure below: issue #154's
+        // spyglass FOV/vignette needs this same value further down in this
+        // function (`ScreenEffects::scoping`), and the closure otherwise
+        // takes ownership for the render source's lifetime.
+        let held_for_scoping = held.clone();
         render.set_main_hand_source(move || held.clone());
 
         // Block entities — chests (issue #23). **This install is what makes a
@@ -2381,16 +2386,14 @@ impl WindowApp {
             wearing_pumpkin,
             freeze_percent,
             // `Player.isScoping()` is `isUsingItem() && getUseItem().is(Items.
-            // SPYGLASS)` (`Player.java:1936-1938`). Both halves already exist
-            // (`Sim`'s own `UsingItem` resource, and the already-computed
-            // `held` item a few lines above), but reading `UsingItem` from
-            // here needs a two-line `Sim::using_item()` accessor that does
-            // not exist yet — `sim.rs` is contended (another agent's
-            // in-flight work there), so that accessor is a prepared patch,
-            // not landed by this change. `false` is the honest current
-            // answer, same shape as `nausea_intensity`/`portal_intensity`
-            // below, not a guess that it is inactive.
-            scoping: false,
+            // SPYGLASS)` (`Player.java:1936-1938`). Both halves: `Sim::
+            // using_item()` (the two-line accessor issue #154 was waiting
+            // on) and `held_for_scoping`, the same item id already computed
+            // above for the first-person hand pass.
+            scoping: self.sim.using_item()
+                && held_for_scoping
+                    .as_ref()
+                    .is_some_and(|loc| loc.namespace() == "minecraft" && loc.path() == "spyglass"),
             // No potion-effect-duration tracker or nether-portal-proximity
             // tracker exists anywhere in this codebase yet to compute these
             // — `0.0` is the honest current answer, not a placeholder
