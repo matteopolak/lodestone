@@ -188,6 +188,10 @@ pub struct RenderState {
     debug_lines: DebugLineRenderer,
     debug_lines_source: DebugLinesSource,
     entities: EntityRenderer,
+    /// Render-frame counter driving the mob-fire billboard's texture
+    /// animation (issue #434) — see `prepare_flame`'s doc for why this counts
+    /// render frames rather than the real 20 Hz game tick.
+    flame_frame_counter: std::cell::Cell<u64>,
     /// Block-break debris **and** sheet particles (flame, smoke, crits,
     /// splashes). Bound to *both* stitches: whichever atlas the terrain draws
     /// from, so a debris fragment is textured from the same pixels as the block
@@ -533,6 +537,7 @@ impl RenderState {
             debug_lines,
             debug_lines_source: DebugLinesSource::default(),
             entities,
+            flame_frame_counter: std::cell::Cell::new(0),
             particles,
             particle_atlas_bind_group,
             particle_sheet_atlas: None,
@@ -1699,6 +1704,10 @@ impl RenderState {
         // off a pose the body pass did not also draw.
         let wool_batches = self.prepare_wool(device, camera, entities, &mut stats);
 
+        // The mob-fire billboard (issue #434), over the same instances, for
+        // the same reason armour/wool are: no buffer creation mid-pass.
+        let flame_batches = self.prepare_flame(device, camera, entities, &mut stats);
+
         // Block entities (chests, issue #23). Not derived from `entities` — a
         // chest is a *block*, gathered from the world's block-entity records by
         // the installed source — but uploaded here for the same reason as
@@ -1997,6 +2006,27 @@ impl RenderState {
                         pass.set_vertex_buffer(1, buffer.slice(..));
                         let end = range.index_start + range.index_count;
                         pass.draw_indexed(range.index_start..end, 0, 0..*count);
+                        stats.draw_calls += 1;
+                    }
+                }
+            }
+
+            // The mob-fire billboard (issue #434), right after wool and
+            // before block entities — cutout with depth write on, same as
+            // every other opaque-cutout entity layer in this pass.
+            if !flame_batches.is_empty() {
+                if let Some(texture) = &self.entities.flame_texture {
+                    pass.set_pipeline(&self.entities.flame_pipeline);
+                    pass.set_bind_group(0, &self.entities.cam_bind_group, &[]);
+                    pass.set_bind_group(1, texture, &[]);
+                    for batch in &flame_batches {
+                        let Some(model) = self.entities.flame_gpu_models.get(&batch.model) else {
+                            continue;
+                        };
+                        pass.set_vertex_buffer(0, model.vertices.slice(..));
+                        pass.set_index_buffer(model.indices.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.set_vertex_buffer(1, batch.buffer.slice(..));
+                        pass.draw_indexed(0..model.index_count, 0, 0..batch.count);
                         stats.draw_calls += 1;
                     }
                 }
@@ -2894,6 +2924,81 @@ impl RenderState {
     /// * **Baby sheep, the `jeb_` rainbow name, and the undercoat overlay.**
     ///   Not built — see `docs/entity-rendering.md`'s "deliberately out of
     ///   scope" list, unchanged by this pass.
+    /// Resolve this frame's on-fire entities into per-model-type flame
+    /// instance buffers (issue #434 — player report: "mobs dont show flames
+    /// yet"). One [`FlameBatch`] per distinct `EntityDraw::type_path` that has
+    /// at least one on-fire, frustum-visible instance this frame.
+    ///
+    /// No pack, no texture, nothing to draw — and no synthetic fallback, on
+    /// purpose (see `EntityRenderer::flame_texture`'s doc, the same asymmetry
+    /// `wool_texture`/`armour_textures` already document).
+    ///
+    /// The billboard rotation is the camera's own yaw only (vanilla's
+    /// `Mth.rotationAroundAxis(Mth.Y_AXIS, camera.orientation, …)`,
+    /// `EntityRenderDispatcher.java:163`) — identical for every flame drawn
+    /// this frame, not a per-entity look-at vector. The exact sign is not
+    /// pixel-matched against vanilla's own convention: this engine's entity
+    /// draws are double-sided (`cull_mode: None`, see `entity_pipeline.rs`),
+    /// so a flat billboard reads identically face-on for either sign of the
+    /// rotation — only *which* horizontal axis the flame's thin edge points
+    /// down would flip, never its visibility.
+    fn prepare_flame(
+        &self,
+        device: &wgpu::Device,
+        camera: &Camera,
+        entities: &[EntityDraw],
+        stats: &mut RenderStats,
+    ) -> Vec<FlameBatch> {
+        let Some(_flame_texture) = &self.entities.flame_texture else {
+            return Vec::new();
+        };
+        // The current animation frame. Both `fire_0`/`fire_1` have exactly 32
+        // frames, held one *render* frame each rather than the real 20 Hz
+        // game tick — see `docs/entity-rendering.md`'s "Mob fire" section for
+        // why: avoiding a new parameter threaded through `render`/
+        // `render_with_crack`/`render_with_effects`'s call sites.
+        let tick = self.flame_frame_counter.get();
+        self.flame_frame_counter.set(tick.wrapping_add(1));
+        let frame = (tick % 32) as u32;
+
+        let frustum = camera.frustum();
+        let billboard = glam::Mat4::from_rotation_y(camera.yaw.to_radians());
+        let mut accum: HashMap<String, Vec<glam::Mat4>> = HashMap::new();
+
+        for draw in entities {
+            if !draw.on_fire {
+                continue;
+            }
+            if !self.entities.flame_gpu_models.contains_key(&draw.type_path) {
+                continue;
+            }
+            let Some(instance) = self.entities.models.resolve(
+                &draw.type_path,
+                draw.feet,
+                draw.yaw,
+                draw.scale,
+                &draw.anim,
+            ) else {
+                continue;
+            };
+            if !frustum.intersects_aabb(instance.aabb_min, instance.aabb_max) {
+                continue;
+            }
+            let transform = glam::Mat4::from_translation(draw.feet) * billboard;
+            accum.entry(draw.type_path.clone()).or_default().push(transform);
+            stats.flame_billboards_drawn += 1;
+        }
+
+        accum
+            .into_iter()
+            .filter_map(|(model, transforms)| {
+                let count = u32::try_from(transforms.len()).unwrap_or(u32::MAX);
+                lodestone_render::entity_pipeline::upload_flame_instances(device, &transforms, frame)
+                    .map(|buffer| FlameBatch { model, buffer, count })
+            })
+            .collect()
+    }
+
     fn prepare_wool(
         &self,
         device: &wgpu::Device,
@@ -3099,6 +3204,18 @@ struct WoolPartAccum {
     transforms: Vec<glam::Mat4>,
     lights: Vec<u32>,
     tints: Vec<InstanceTint>,
+}
+
+/// One model type's uploaded flame-instance buffer for a frame (issue #434)
+/// — the mob-fire counterpart to [`WoolPartAccum`]/`ArmourDrawBatch`, simpler
+/// than either because the flame mesh has no per-part skeleton attachment:
+/// one buffer, one draw.
+struct FlameBatch {
+    /// The `EntityDraw::type_path` this batch's mesh
+    /// (`EntityRenderer::flame_gpu_models`) is keyed by.
+    model: String,
+    buffer: wgpu::Buffer,
+    count: u32,
 }
 
 /// One model type's uploaded per-part instance buffers for a frame. `parts[p]`

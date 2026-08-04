@@ -68,6 +68,13 @@ pub struct RenderStats {
     /// at zero, so a broken wool attach cannot hide behind "nothing rendered
     /// at all".
     pub wool_layers_drawn: usize,
+    /// Mob-fire billboards drawn this frame (issue #434) — one per on-fire,
+    /// frustum-visible entity whose type has a baked flame mesh. Zero with no
+    /// vanilla pack (no flame texture) or when no entity currently has
+    /// `EntityDraw::on_fire` set — see `RenderState::prepare_flame`'s doc for
+    /// why there is no synthetic-texture fallback here, mirroring
+    /// `armour_layers_drawn`/`wool_layers_drawn`.
+    pub flame_billboards_drawn: usize,
     /// Whether the first-person arm was drawn this frame. `false` means the
     /// `player_wide` mesh, its texture, or its arm part was missing — i.e. a
     /// real defect, not a quiet frame, because this pass is unconditional
