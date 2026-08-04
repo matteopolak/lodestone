@@ -195,6 +195,52 @@ The policy, applied to every benchmark under this epic:
   count" for render submit — mirroring the fix already made to
   `measure_neighbour_light_cost`.
 
+### `cargo xtask bench-compare` (issue #82)
+
+The policy above needed one concrete tool it did not yet have: a way to compare two
+*specific* recorded runs from `bench-results/*.jsonl` without re-running a bench.
+`benches/support.rs`'s `record()` already prints a ratio against the immediately
+preceding same-machine/profile/scene run every time a bench executes — useful for
+"did the run I just took regress vs the last one," but not for "compare the run from
+before my change against the run from after it" once other runs (or other people's
+runs, on a shared machine) have landed in between.
+
+```bash
+cargo xtask bench-compare bench-results/light_propagation.jsonl \
+  --metric neighbourhood_factor_vs_single \
+  --scene "3x3 realistic terrain neighbourhood"
+# -> baseline 9.6636x @ 33d0ad5bdfe4, candidate 9.7057x @ e95dbe39349f, ratio 1.004 -> OK
+```
+
+With no `--baseline`/`--candidate`, it compares the most recent recorded run against
+the one immediately before it on the same machine and build profile (refusing the
+comparison outright, rather than silently answering, if the two differ) — the same
+pairing `record()` already does inline. Either can be pinned to a specific commit with
+a git-sha prefix, for an explicit before/after comparison across a change:
+`--candidate <sha-of-your-change> --baseline <sha-before-it>`. `--tolerance <pct>` sets
+the band (default 25, i.e. ±25%, matching the literal in `support.rs`).
+
+It prints a ratio and a verdict and exits non-zero when the ratio falls outside the
+tolerance band — useful to a human, or to some future opt-in script — but nothing here
+runs it: **issue #82 decides explicitly not to wire this into CI**, per the "nothing
+fails a PR by default" policy above. A nightly or manually-triggered workflow that
+shells out to it once a body of tracked baselines exists is a reasonable next step, not
+attempted here.
+
+The tool deliberately does not label a result "regression" or "improvement" — a metric
+recorded in `bench-results/*.jsonl` carries no annotation of which direction is better
+(lower is better for a `_ms` timing, higher is better for a throughput count), so it
+reports the ratio and lets the caller, who knows what the metric means, read the
+direction.
+
+Demonstrated against `light_propagation.jsonl`'s real history above: issue #80's
+fixture consolidation (`lodestone-world`'s `tests/memory.rs` and
+`benches/light_propagation.rs` switching from a hand-rolled `realistic_terrain_column`
+to the shared `lodestone_testsupport::bench_fixtures::synthetic_overworld_column`)
+measured a 1.004× ratio on the neighbourhood-factor metric across that change — the
+tool correctly reads that as "no real change," which is what the fixture swap was
+supposed to produce.
+
 ## Evidence standards this epic inherits
 
 From `CLAUDE.md`, restated here because a benchmark is where they matter most:
