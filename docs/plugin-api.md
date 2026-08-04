@@ -180,12 +180,25 @@ one Stage 0 delivered. Everything else a plugin will eventually want — the loc
 world, HUD/session state — is still off-ECS, in `lodestone-shell::Sim` and
 `lodestone_client::state::Inner`, per §5 below.
 
-**How a plugin observes events:** not yet built. `NetIngest`'s `IngestSet::Apply` systems fold
-`ClientEvent`s into components today, but there is no bevy `Message`/`MessageWriter` a plugin can
-read to observe the raw event stream — `docs/bevy-migration.md` §5.1 proposes a `RawPacket` message
-type (`state: ConnectionState, id: i32, payload: Arc<[u8]>`, version-opaque) for exactly this, and
-it is unbuilt. Until it lands, a plugin can only observe *effects* (component changes) via its own
-`Query`, never the *event* that caused them.
+**How a plugin observes events:** half built, as of issue #104's `GameEvent` bus. `NetIngest`'s
+`IngestSet::Apply` systems still fold `ClientEvent`s into components, and now there is also a bevy
+`Message` a plugin can read to observe the stream directly: `lodestone_ecs::GameEvent(pub ClientEvent)`,
+written from `lodestone_client::state::SharedState::apply` — one call site, with **no `match` on the
+event at all**, so a new `ClientEvent` variant cannot compile with an arm that quietly skips the bus the
+way the three routers named in the doctrine above can silently drop one. It is gated off by default
+behind the `lodestone_ecs::GameEventBus` marker resource (`GameEventBusPlugin` installs it): a plugin
+that never asked for the bus costs nothing extra, not even an additional `EcsHandle` lock, because
+`SharedState` checks for the marker once, at construction, rather than on every event. See
+[`§5.4 below`](#the-plugin-event-bus-and-cross-plugin-priority-ordering) for the read side —
+`EventPriority`'s tiers, `Monitor`'s structural read-only enforcement, and the toy
+`crates/plugins/lodestone-event-logger` that exercises the whole pipeline.
+
+`docs/bevy-migration.md` §5.1's other proposal — `RawPacket { state: ConnectionState, id: i32,
+payload: Arc<[u8]> }`, the version-*opaque* half that lets a plugin decode a packet type this crate
+does not model — remains **unbuilt** (`grep -rn RawPacket crates` is still empty). `GameEvent` is
+deliberately not a substitute for it: it carries the same already-decoded, version-*free* vocabulary
+`IngestSet::Apply` folds into components, not raw bytes. A plugin that needs the wire form still has
+no route but depending on a version crate directly (§3, at the cost of version-locking).
 
 **How a plugin injects intent:** also not yet built, and this is the motivating case named in this
 document's brief — a plugin driving the player. `docs/bevy-migration.md` §6 specifies
@@ -245,6 +258,85 @@ This correction is deliberately narrow — full paragraph-by-paragraph rewrites 
 the material above, and of the stage-map table further down, are a larger pass
 than this note; treat the bullets here as the authoritative current state where
 they overlap with the prose above, and the prose above as Stage-1-era history.
+
+### The plugin event bus and cross-plugin priority ordering
+
+Issues #104/#105/#110, landed together because #105 and #110 both depend on #104's bus existing at
+all before either has anything to order.
+
+**Scope: `lodestone-ecs` and `lodestone-client` only, today.** Everything in this section is the
+*client's* event surface — `SharedState::apply` is a `lodestone-client` type, and `GameEvent`/
+`GameEventBus`/`EventPriority` all live in `lodestone-ecs`, which `lodestone-server` does not depend
+on for this. A census of `lodestone-server` taken alongside this pass found **no event bus, no
+cancellation, and no hook registration anywhere in it**: `dispatch_play_packet` calls its `apply_*`
+helpers inline with no interception point, and every applier is veto-free. So none of the structural
+guarantees below (the no-`match` write site, `EventPriority`'s cross-plugin chain, `Monitor`'s
+read-only enforcement) currently apply server-side, and nothing here should be read as implying they
+do. Per `docs/server-ecs.md` (server-side `bevy_ecs`, decided against issue #433) the two sides are
+converging on the same substrate — plugins are meant to be ordinary bevy plugins on *either* side, and
+core game systems (physics is the worked example: a client-side plugin a headless bot can omit)
+should themselves become plugins where that makes sense, which is what would let a Java/Paper
+compatibility layer be just another external plugin on this same public API rather than a second
+shape. That convergence is not built yet; a server-side event bus/priority/cancellation design is
+`docs/plans/server-ecs-migration.md`'s to make, and it should reference this shape rather than invent
+a parallel one — but it is a *reference*, not an assumption that this section's mechanisms already
+run on the server.
+
+**The bus.** `lodestone_ecs::GameEvent(pub ClientEvent)` — a bevy `Message`, not a second vocabulary.
+`ClientEvent` is already version-free, `Clone`, and `#[non_exhaustive]`, so wrapping it costs nothing
+to keep in sync; a parallel ~107-variant enum would have been exactly the staleness factory `CLAUDE.md`
+calls this repo's most-documented defect. `lodestone_client::state::SharedState::apply` is the one
+write site, and it pushes **every** event with no `match` on it at all — the island-factory property
+named throughout this document (`ingest::handles_event`/`session::handles_event`/`net::forward`'s
+terminal `_ =>` arms) comes specifically from *selective* matching, so a firehose with no `match`
+structurally cannot have that shape. `crates/lodestone-client/src/state.rs`'s
+`tests::game_event_bus_write_site_has_no_match_on_the_event` reads that function's own source to keep
+it that way, the same idiom `lodestone_model::event::route_tests::route_has_no_catch_all_arm` uses for
+`route()`.
+
+Off by default, behind `lodestone_ecs::GameEventBus` (a marker resource; `GameEventBusPlugin` installs
+it together with `Messages<GameEvent>` and the system that ages the double-buffer once per `GameTick`,
+since this codebase never calls `App::update()` and so never gets bevy's own message-aging system for
+free). `SharedState` checks for the marker exactly once, at construction, and caches the answer as a
+plain `bool` — a client that never opted in pays nothing beyond one boolean check per event, not an
+extra `EcsHandle` lock. Today's only opt-in path is whoever builds the `World` before a `SharedState`
+wraps it (`SharedState::adopting`'s caller, i.e. `lodestone_shell::sim::Sim::new` for the live client —
+brokered, not part of this pass); `SharedState::default`'s bot/test path has no opt-in at all yet
+(`new_ingest_handle` is hardcoded), named as a follow-up rather than solved here.
+
+**Cross-plugin priority.** `lodestone_ecs::sets::EventPriority::{Lowest, Low, Normal, High, Highest,
+Monitor}` — `SystemSet`s mirroring `org.bukkit.event.EventPriority` almost exactly, `.chain()`ed and
+configured into **all four** public schedules (`NetIngest`, `GameTick`, `Update`, `Extract`) by
+`CorePlugin`, since there is no single canonical "the event schedule" here the way Bukkit has one
+thread. This is the piece `TickSet`/`IngestSet`/`FrameSet`/`ExtractSet` cannot provide: those anchor a
+plugin against *our* systems, which says nothing about two *third-party* plugins that have never heard
+of each other and need to agree on relative order without importing one another's crates.
+
+**`Monitor` is enforced structurally, not by convention.** `lodestone_ecs::sets::assert_monitor_system_is_read_only`
+panics if a candidate system has any mutable `World` access, checked through
+`bevy_ecs::system::System::initialize`'s public `FilteredAccessSet` — the identical per-system access
+metadata bevy's own `ambiguity_detection: LogLevel::Error` consults internally. **Walking an
+already-*built* schedule to ask it the same question does not work with bevy 0.19's public API**,
+checked directly rather than assumed: the type pairing a boxed system with its computed access
+(`SystemWithAccess`) keeps that access field `pub(crate)`, and although `ScheduleGraph::systems`/
+`Systems::get_mut` are public, the graph's own node storage is emptied once `Schedule::initialize` has
+moved the systems into the optimized `executable` representation — confirmed empirically, not just by
+reading field visibility, in an earlier draft of `crates/lodestone-ecs/src/sets.rs`'s own test. So the
+check runs on a system *before* scheduling rather than reading one back out of a schedule after the
+fact; `sets.rs`'s own doc comment on `assert_monitor_system_is_read_only` walks through why, including
+the one known gap (`Commands`' deferred mutation is invisible to `System::initialize`'s access set, so
+a `Monitor` system that queues a command through it would pass this check and still break the
+guarantee — tracked on issue #110, not solved here).
+
+**The toy consumer.** `crates/plugins/lodestone-event-logger`: an `EventPriority::Monitor` reader that
+appends every observed `ClientEvent` to a plain `Arc<Mutex<Vec<_>>>` captured by its system's closure —
+outside the ECS entirely, which is what lets a genuinely read-only `Monitor` system still report
+findings anywhere it likes, exactly as a Bukkit `MONITOR` logger does. Nothing in the shipped client
+registers it (`lodestone_shell::sim::Sim::new` does not know it exists); it is a sanctioned island per
+`CLAUDE.md`'s rule 1, landed with its own end-to-end test
+(`crates/plugins/lodestone-event-logger/tests/observes_the_game_event_bus.rs`) in the same commit, with
+the follow-ups (`Sim::new` registration, a bot-path opt-in for `SharedState::default`, a real
+non-toy consumer) named on issue #436.
 
 ### What stays privileged, and why
 
@@ -530,6 +622,9 @@ cheaper substitute for the other is the mistake `docs/bevy-migration.md` warns a
 | chunk world as a `Resource` with batched snapshot reads | Stage 4 | **done** — `lodestone_ecs::ChunkWorld` (`crates/lodestone-ecs/src/chunks.rs`), a `Clone`-able handle over one shared `lodestone_world::World`; `crates/plugins/lodestone-autopilot` reads it via `Res<ChunkWorld>` to snapshot a `lodestone_nav::SnapshotView` for search |
 | `SendAction` message / `MessageWriter<SendAction>` egress | unassigned | **closed under a different shape** — `player.rs`'s `ActionQueue(Vec<ClientAction>)` resource landed with Stage 2 and is reachable from a plugin system via `ResMut<ActionQueue>`; see the correction note above. Not a bevy `Message`, so the ordering/observability a `MessageWriter` gives for free is still absent — recorded here as a design question, not a completeness gap |
 | raw-packet observation (`RawPacket` message) | unassigned | **gap — re-verified: `grep -rn RawPacket crates` is still empty** |
+| version-free event observation (`GameEvent` message, mirroring `ClientEvent`) | issue #104 | **done, gated off by default** — `lodestone_ecs::GameEvent`/`GameEventBus`/`GameEventBusPlugin`; see "The plugin event bus and cross-plugin priority ordering" above. Not a substitute for the `RawPacket` row above it — version-free and already-decoded, not version-opaque wire bytes |
+| cross-plugin event-priority ordering (`EventPriority::{Lowest..Monitor}`) | issue #105 | **done** — `lodestone_ecs::sets::EventPriority`, chained and configured into all four public schedules by `CorePlugin` |
+| `Monitor`-tier structural read-only enforcement | issue #110 | **done, via a pre-scheduling check** — `lodestone_ecs::sets::assert_monitor_system_is_read_only`; see the section above for why walking an already-built `Schedule` does not work with bevy 0.19's public API (checked directly) and what this checks instead |
 | `Sim` deleted; plugin no longer reaches into shell internals | Stage 5 | not started — `lodestone-shell/src/sim.rs` still exists and still owns plugin registration (`Sim::new`'s `app.add_plugins((...))`), which is why a third-party plugin cannot self-register into the shipped client today: it has to be added to that call by whoever owns `sim.rs` |
 | async bot tier / headless plugin host | Stage 6 | not started |
 | world-space debug-geometry `Extract` channel | unassigned | **done** — see gap 3 above; this row was left stale (still saying "gap") for a time after gap 3 itself was marked closed, which is its own small instance of `CLAUDE.md`'s "staleness is the most common defect" rule: fixing one paragraph does not fix every other paragraph that restates the same fact |
@@ -663,13 +758,16 @@ Issue #170 asks for "a short `CHANGELOG`-style section... that every PR touching
 ordering-anchor\] enums is expected to update" — the enforcement mechanism this document's own "how to
 change it" section describes only in prose ("additions are fine, renames need a deprecation window").
 This section is that changelog. **Every PR that adds, renames or removes a `TickSet`/`IngestSet`/
-`FrameSet`/`ExtractSet` variant should add an entry here**, oldest first:
+`FrameSet`/`ExtractSet` variant should add an entry here** (and, per the row below, the same now goes
+for `EventPriority` — a fifth ordering-anchor *type*, not a variant of one of the original four),
+oldest first:
 
 | commit | change | why |
 |---|---|---|
 | `415138f` (Stage 0) | `IngestSet`, `TickSet`, `FrameSet`, `ExtractSet` all land with their original variant sets — `TickSet` as `Input, Physics, Predict, Animate, Send`, `ExtractSet` as `Terrain, Entities, Hud` | baseline |
 | `0d82ab4` | `TickSet` gains `Intent`, between `Input` and `Physics` | give automation-supplied movement intent (a plugin, or a future navigator) a named ordering anchor distinct from raw human input, so two writers of `MovementIntent` become an explicit, checkable order instead of an `ambiguity_detection: Error` build failure — see `sets.rs`'s own doc comment on `TickSet::Intent` |
 | `0d82ab4` | `ExtractSet` gains `Debug`, between `Entities` and `Hud` | a world-space debug-geometry channel (`DebugLines`) a plugin can push planned routes/probes into, ordered with the other world-space extracts before the screen-space `Hud` one |
+| (this pass, issues #104/#105/#110) | New `EventPriority::{Lowest, Low, Normal, High, Highest, Monitor}`, configured into all four public schedules | give two *third-party* plugins that have never heard of each other a shared order to agree on — `TickSet`/`IngestSet`/`FrameSet`/`ExtractSet` anchor a plugin against *our* systems, not against another plugin's, which is a different problem `EventPriority` exists to solve; see "The plugin event bus and cross-plugin priority ordering" above |
 
 **On `#[non_exhaustive]` (issue #170's other proposed mechanism):** re-checked for this pass —
 `grep -rn "match.*\(TickSet\|IngestSet\|FrameSet\|ExtractSet\)" crates/` finds **zero** matches

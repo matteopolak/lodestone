@@ -51,7 +51,11 @@ repo-wide claim.
 |---|---|
 | `lodestone-nav` | version-free autonomous-navigation search core: world view, movement graph, simulation-derived cost model, goals, resumable A\*. No bevy, no ECS, no threads. |
 | `lodestone-autopilot` | the bevy plugin: chat commands, search driver, per-tick closed-loop executor. |
+| `lodestone-event-logger` | a toy `EventPriority::Monitor` reader plugin (issues #104/#105/#110): observes `lodestone_ecs::GameEvent`, the plugin event bus, and reports through a plain `Arc<Mutex<_>>` outside the ECS rather than a resource. `MIT OR Apache-2.0`, no licensing table row needed. |
 
-Both are documented in
+`lodestone-nav`/`lodestone-autopilot` are documented in
 [`docs/autonomous-navigation.md`](../../docs/autonomous-navigation.md), against the
 design in [`docs/baritone-port.md`](../../docs/baritone-port.md).
+`lodestone-event-logger` is documented in
+[`docs/plugin-api.md`](../../docs/plugin-api.md)'s "The plugin event bus and cross-plugin
+priority ordering" section.
