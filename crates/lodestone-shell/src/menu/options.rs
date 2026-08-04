@@ -866,32 +866,33 @@ static ROOT_GRID: &[Cell] = &[
     // list widget. See `SettingsPage::Language`'s own doc.
     nav("Language...", SettingsPage::Language),
     nav("Chat Settings...", SettingsPage::Chat),
-    no_screen("Resource Packs..."),
+    // Issue #415 — the third and last of the three unbuilt sub-screens,
+    // landed as a deliberately reduced selection list. See
+    // `SettingsPage::ResourcePacks`'s own doc.
+    nav("Resource Packs...", SettingsPage::ResourcePacks),
     nav("Accessibility Settings...", SettingsPage::Accessibility),
-    no_screen("Telemetry Data..."),
+    // Issue #415 — the second of the three unbuilt sub-screens to get its
+    // own page. See `SettingsPage::Telemetry`'s own doc.
+    nav("Telemetry Data...", SettingsPage::Telemetry),
     unsupported("Credits & Attribution..."),
 ];
 
 /// One screen of the options tree.
 ///
-/// Eleven of vanilla's thirteen. The two that are **not** here are absent
-/// because each needs a *different list widget* than either this client
-/// already has — and each is reachable as a present-and-inactive nav button,
-/// which is what keeps the parent screen's shape honest:
+/// All thirteen of vanilla's, as of issue #415 — every root-grid nav button
+/// now opens something real, though "real" means a deliberately reduced
+/// shape for two of them (see [`SettingsPage::ResourcePacks`]'s and
+/// [`SettingsPage::Telemetry`]'s own docs). This table used to list the
+/// screens still absent; there are none left in it, so it is kept as a
+/// record of what each one needed rather than deleted:
 ///
-/// | vanilla screen | why not built |
+/// | vanilla screen | what it needed |
 /// |---|---|
-/// | `PackSelectionScreen` | two drag-between `ObjectSelectionList`s over a `PackRepository`. |
-/// | `TelemetryInfoScreen` | prose and external links, no options at all. |
-///
-/// `LanguageSelectScreen` **used to be in this table** and is not any more —
-/// see [`SettingsPage::Language`] and [`super::language`], the third
-/// list-widget kind #392's plan always said this tree would eventually need
-/// (issue #415). `OnlineOptionsScreen` and `KeyBindsScreen` **were** in it
-/// too. `OnlineOptionsScreen` needed no new list widget at all — it is a
-/// plain `OptionsList` screen like eight others, absent only because the
-/// root's header button was permanently inactive (see
-/// [`SettingsPage::Online`]). `KeyBindsScreen` **did** need a different list
+/// | `LanguageSelectScreen` | the third list-widget kind (`ObjectSelectionList`) — see [`SettingsPage::Language`]/[`super::language`]. |
+/// | `KeyBindsScreen` | a different list-widget kind again (`KeyBindsList`, not `OptionsList`) — see [`SettingsPage::KeyBinds`]/[`super::key_binds`]. |
+/// | `OnlineOptionsScreen` | no new widget at all — the root's own header button was permanently inactive; see [`SettingsPage::Online`]. |
+/// | `TelemetryInfoScreen` | no new widget either, once the event log and opt-in state this client structurally cannot have are recognised as *absent* rather than *unbuilt* — see [`SettingsPage::Telemetry`]/[`super::telemetry`]. |
+/// | `PackSelectionScreen` | vanilla's own shape needs two drag-between `ObjectSelectionList`s over a filesystem-backed `PackRepository`, which this client's asset-loading layer has no analogue for at all. Landed as a declared reduction instead — one always-empty list, one always-one-entry list, no transfer controls — rather than left absent; see [`SettingsPage::ResourcePacks`]/[`super::packs`]. |
 /// widget — `KeyBindsList`, not `OptionsList` — and got one: see
 /// [`SettingsPage::KeyBinds`] and [`super::key_binds`], the second list-widget
 /// kind #392's plan always said this tree would eventually need.
@@ -956,6 +957,41 @@ pub enum SettingsPage {
     /// LANGUAGE, ...))`, the same `helper.addChild` sequence [`ROOT_GRID`]
     /// mirrors).
     Language,
+    /// `TelemetryInfoScreen` (issue #415) — **not** an `OptionsList` page
+    /// either, for the same structural reason as [`SettingsPage::Language`]
+    /// and [`SettingsPage::KeyBinds`]: [`SettingsNav`] delegates to
+    /// [`super::telemetry::TelemetryNav`] whenever `page ==
+    /// SettingsPage::Telemetry`. Needed **no new list widget at all** —
+    /// see [`super::telemetry`]'s module doc: once the event log and opt-in
+    /// checkbox are recognised as things this client cannot have rather than
+    /// things it has not built yet, what is left is a title, two paragraphs
+    /// and four buttons, which this tree's existing primitives already
+    /// cover.
+    ///
+    /// Reached from the **root grid**, vanilla's own wiring
+    /// (`OptionsScreen.java:88`, `helper.addChild(this.openScreenButton(
+    /// TELEMETRY, ...))`).
+    ///
+    /// **Considered departure**: vanilla itself disables this exact button
+    /// (with a `TELEMETRY_DISABLED_TOOLTIP`) when `!minecraft.allowsTelemetry()`
+    /// (`:89-91`) — the precedent this whole tree's disabled path already
+    /// follows. This client is permanently in that state and could have kept
+    /// the button inactive for that reason alone. It is live instead because
+    /// the screen behind it has real content even with no telemetry system —
+    /// two working external links — where vanilla's own binary choice assumes
+    /// a telemetry-less screen has nothing worth reaching.
+    Telemetry,
+    /// `PackSelectionScreen` (issue #415) — **not** an `OptionsList` page,
+    /// for the same structural reason as [`SettingsPage::Language`]/
+    /// [`SettingsPage::Telemetry`]. Landed as a deliberately reduced
+    /// selection list rather than vanilla's own drag-between-two-lists
+    /// shape, which this client's asset-loading layer has no analogue for
+    /// at all — see [`super::packs`]'s module doc for the full reasoning.
+    ///
+    /// Reached from the **root grid**, vanilla's own wiring
+    /// (`OptionsScreen.java:76-86`, `helper.addChild(this.openScreenButton(
+    /// RESOURCEPACK, () -> new PackSelectionScreen(...)))`).
+    ResourcePacks,
 }
 
 impl SettingsPage {
@@ -983,6 +1019,12 @@ impl SettingsPage {
             // practice for the same reason `KeyBinds`' arm above is — see
             // `super::language::frame`.
             SettingsPage::Language => "Language",
+            // `telemetry_info.screen.title` (`en_us.json`). Unreachable in
+            // practice — same reason.
+            SettingsPage::Telemetry => "Telemetry Data Collection",
+            // `resourcePack.title` (`en_us.json`). Unreachable in practice —
+            // same reason.
+            SettingsPage::ResourcePacks => "Select Resource Packs",
         }
     }
 
@@ -1014,6 +1056,10 @@ impl SettingsPage {
             SettingsPage::KeyBinds => &[],
             // Never actually read — same reason.
             SettingsPage::Language => &[],
+            // Never actually read — same reason.
+            SettingsPage::Telemetry => &[],
+            // Never actually read — same reason.
+            SettingsPage::ResourcePacks => &[],
         }
     }
 
@@ -1601,6 +1647,14 @@ pub struct SettingsNav {
     /// live only while [`Self::page`] is [`SettingsPage::Language`], kept
     /// unconditionally for the same reason as [`Self::key_binds`].
     language: super::language::LanguageNav,
+    /// The Telemetry screen's own cursor (issue #415) — live only while
+    /// [`Self::page`] is [`SettingsPage::Telemetry`], kept unconditionally
+    /// for the same reason.
+    telemetry: super::telemetry::TelemetryNav,
+    /// The Resource Packs screen's own cursor (issue #415) — live only
+    /// while [`Self::page`] is [`SettingsPage::ResourcePacks`], kept
+    /// unconditionally for the same reason.
+    packs: super::packs::PacksNav,
 }
 
 impl Default for SettingsNav {
@@ -1621,6 +1675,8 @@ impl SettingsNav {
             in_world: false,
             key_binds: super::key_binds::KeyBindsNav::default(),
             language: super::language::LanguageNav::default(),
+            telemetry: super::telemetry::TelemetryNav::default(),
+            packs: super::packs::PacksNav::default(),
         }
     }
 
@@ -1671,6 +1727,45 @@ impl SettingsNav {
     /// state so re-entering never resumes mid-filter.
     pub fn leave_language(&mut self) -> SettingsOutcome {
         self.language.reset();
+        self.back()
+    }
+
+    /// Borrow the Telemetry screen's own cursor — mirrors [`Self::key_binds`].
+    #[must_use]
+    pub fn telemetry(&self) -> &super::telemetry::TelemetryNav {
+        &self.telemetry
+    }
+
+    /// Mutably borrow the Telemetry screen's own cursor — mirrors
+    /// [`Self::key_binds_mut`].
+    pub fn telemetry_mut(&mut self) -> &mut super::telemetry::TelemetryNav {
+        &mut self.telemetry
+    }
+
+    /// Leave [`SettingsPage::Telemetry`] for whichever page pushed it —
+    /// always Root — mirrors [`Self::leave_language`].
+    pub fn leave_telemetry(&mut self) -> SettingsOutcome {
+        self.telemetry.reset();
+        self.back()
+    }
+
+    /// Borrow the Resource Packs screen's own cursor — mirrors
+    /// [`Self::key_binds`].
+    #[must_use]
+    pub fn packs(&self) -> &super::packs::PacksNav {
+        &self.packs
+    }
+
+    /// Mutably borrow the Resource Packs screen's own cursor — mirrors
+    /// [`Self::key_binds_mut`].
+    pub fn packs_mut(&mut self) -> &mut super::packs::PacksNav {
+        &mut self.packs
+    }
+
+    /// Leave [`SettingsPage::ResourcePacks`] for whichever page pushed it —
+    /// always Root — mirrors [`Self::leave_telemetry`].
+    pub fn leave_packs(&mut self) -> SettingsOutcome {
+        self.packs.reset();
         self.back()
     }
 
@@ -1871,6 +1966,12 @@ impl SettingsNav {
                 if page == SettingsPage::Language {
                     self.language.reset();
                 }
+                if page == SettingsPage::Telemetry {
+                    self.telemetry.reset();
+                }
+                if page == SettingsPage::ResourcePacks {
+                    self.packs.reset();
+                }
                 SettingsOutcome::None
             }
             Cell::Nav { page: None, .. } => SettingsOutcome::None,
@@ -1952,6 +2053,17 @@ pub fn settings_frame(
             });
         }
         return frame;
+    }
+    // `SettingsPage::Telemetry` (issue #415) — same shape again. No
+    // save-error line: this page persists nothing, so `save_error` cannot
+    // fire for it, but the branch is spelled out the same way rather than
+    // silently dropping a future error this page never expects.
+    if nav.page() == SettingsPage::Telemetry {
+        return super::telemetry::frame(nav.telemetry());
+    }
+    // `SettingsPage::ResourcePacks` (issue #415) — same shape again.
+    if nav.page() == SettingsPage::ResourcePacks {
+        return super::packs::frame(nav.packs());
     }
     let page = nav.page();
     let visible = nav.visible();
@@ -2157,13 +2269,14 @@ mod tests {
             "and the same predicate must answer true for one that is"
         );
         // The count itself, not just the ratio's ingredients: 7 live options +
-        // 9 Done buttons (one per page, always live) + 11 working nav buttons
-        // (Skin/Sound/Video/Controls/Chat/Accessibility/**Language** from the
-        // root grid — issue #415 — Accessibility -> Controls, Controls ->
-        // Mouse, Controls -> Key Binds, and the root's own Online button,
-        // live outside a world).
+        // 9 Done buttons (one per page, always live) + 13 working nav buttons
+        // (Skin/Sound/Video/Controls/Chat/Accessibility/**Language**/
+        // **Telemetry**/**Resource Packs** from the root grid — issue #415
+        // completes the grid — Accessibility -> Controls, Controls -> Mouse,
+        // Controls -> Key Binds, and the root's own Online button, live
+        // outside a world).
         // A change that adds or removes a live row anywhere must say so here.
-        assert_eq!(live.len(), 27, "outside a world: {live:?}");
+        assert_eq!(live.len(), 29, "outside a world: {live:?}");
     }
 
     /// The companion to [`the_disabled_majority_is_the_point_and_it_is_measured`]:
@@ -2185,8 +2298,8 @@ mod tests {
             .flat_map(|&p| all_controls(p, true))
             .filter(|c| c.is_live())
             .collect();
-        assert_eq!(outside.len(), 27);
-        assert_eq!(inside.len(), 26, "one fewer: the root's Online button");
+        assert_eq!(outside.len(), 29);
+        assert_eq!(inside.len(), 28, "one fewer: the root's Online button");
         assert!(
             outside.contains(&nav("Online...", SettingsPage::Online)),
             "outside a world the root links to Online"
@@ -2447,15 +2560,20 @@ mod tests {
             SettingsPage::Accessibility,
             "the stack is history, not structure"
         );
-        // A nav button to a screen we do not build must be inert. Language
-        // used to be this test's example (issue #415 built it); Resource
-        // Packs is the same shape today.
+        // A nav button to a screen we do not build must be inert. Language,
+        // Telemetry and Resource Packs were this test's examples in turn —
+        // issue #415 built all three, so the root grid itself has no
+        // unbuilt `Cell::Nav` left at all. The one that remains is the
+        // root's own header button *inside* a world, where it is the
+        // inactive World Options placeholder rather than a link to Online
+        // (`WorldOptionsScreen` is out of scope — see `online_cell`'s doc).
         let mut nav = SettingsNav::new();
-        let packs = all_controls(SettingsPage::Root, false)
+        nav.reset(true); // inside a world
+        let world_options = all_controls(SettingsPage::Root, true)
             .iter()
-            .position(|c| matches!(c, Cell::Nav { label: "Resource Packs...", page: None }))
-            .expect("Resource Packs is present and unbuilt");
-        nav.cursor = packs;
+            .position(|c| matches!(c, Cell::Nav { label: "World Options...", page: None }))
+            .expect("World Options is present and unbuilt, inside a world");
+        nav.cursor = world_options;
         assert_eq!(nav.enter(), SettingsOutcome::None);
         assert_eq!(nav.page(), SettingsPage::Root, "and must not move");
         // Root -> Language (issue #415), and back — the third list-widget
@@ -2468,6 +2586,28 @@ mod tests {
         nav.cursor = language;
         assert_eq!(nav.enter(), SettingsOutcome::None);
         assert_eq!(nav.page(), SettingsPage::Language);
+        nav.escape();
+        assert_eq!(nav.page(), SettingsPage::Root);
+        // Root -> Telemetry (issue #415), and back.
+        let mut nav = SettingsNav::new();
+        let telemetry = all_controls(SettingsPage::Root, false)
+            .iter()
+            .position(|c| matches!(c, Cell::Nav { page: Some(SettingsPage::Telemetry), .. }))
+            .expect("the root links to Telemetry");
+        nav.cursor = telemetry;
+        assert_eq!(nav.enter(), SettingsOutcome::None);
+        assert_eq!(nav.page(), SettingsPage::Telemetry);
+        nav.escape();
+        assert_eq!(nav.page(), SettingsPage::Root);
+        // Root -> Resource Packs (issue #415), and back.
+        let mut nav = SettingsNav::new();
+        let packs = all_controls(SettingsPage::Root, false)
+            .iter()
+            .position(|c| matches!(c, Cell::Nav { page: Some(SettingsPage::ResourcePacks), .. }))
+            .expect("the root links to Resource Packs");
+        nav.cursor = packs;
+        assert_eq!(nav.enter(), SettingsOutcome::None);
+        assert_eq!(nav.page(), SettingsPage::ResourcePacks);
         nav.escape();
         assert_eq!(nav.page(), SettingsPage::Root);
         // The new one: Root -> Online, live only outside a world.

@@ -694,8 +694,10 @@ pub fn frame(nav: &LanguageNav) -> MenuFrame<'static> {
     }
 }
 
-/// `-4539718` decoded: ARGB(255, 186, 186, 186).
-const WARNING_COLOUR: [f32; 4] = [186.0 / 255.0, 186.0 / 255.0, 186.0 / 255.0, 1.0];
+/// `-4539718` decoded: ARGB(255, 186, 186, 186). `pub` since issue #415's
+/// Telemetry screen (`super::telemetry`) draws the same vanilla grey for its
+/// own description text.
+pub const WARNING_COLOUR: [f32; 4] = [186.0 / 255.0, 186.0 / 255.0, 186.0 / 255.0, 1.0];
 
 #[cfg(test)]
 mod tests {

@@ -488,6 +488,17 @@ pub enum Origin {
     /// a third geometry entirely (a single centred line per row, not
     /// `OptionsList`'s or `KeyBindsList`'s shapes).
     Language(super::language::LanguagePlacement),
+    /// A widget of the Telemetry screen's **header** (issue #415), resolved
+    /// by [`super::telemetry::placement_anchor`]. The footer reuses
+    /// [`Origin::Settings`]`(`[`super::options::Placement::Footer`]`)`
+    /// directly instead of a fifth variant — see
+    /// [`super::telemetry::TelemetryPlacement`]'s own doc.
+    Telemetry(super::telemetry::TelemetryPlacement),
+    /// A widget of the Resource Packs screen (issue #415), resolved by
+    /// [`super::packs::placement_anchor`]. The footer reuses
+    /// [`Origin::Settings`]`(`[`super::options::Placement::Footer`]`)`
+    /// directly, same as [`Origin::Telemetry`].
+    Packs(super::packs::PacksPlacement),
 }
 
 impl Origin {
@@ -524,6 +535,10 @@ impl Origin {
             Origin::Language(placement) => {
                 super::language::placement_anchor(placement, width, height)
             }
+            Origin::Telemetry(placement) => {
+                super::telemetry::placement_anchor(placement, width, height)
+            }
+            Origin::Packs(placement) => super::packs::placement_anchor(placement, width, height),
         }
     }
 }

@@ -83,7 +83,7 @@ smallest it has ever been.
 | `Renderable.extractRenderState` → `GuiRenderState` | `gui/`, `renderer/state/gui/` | **done in spirit** — `ExtractSet`/`FrameSet` | — |
 | `JoinMultiplayerScreen` + `ServerSelectionList` + `ServerStatusPinger` | `screens/multiplayer/` | **partly** — `menu/servers.rs`, `menu/status.rs` | #396 |
 | `SelectWorldScreen` + `WorldSelectionList` | `screens/worldselection/` | **nothing** | #397 |
-| `OptionsScreen` tree, `OptionInstance`, `OptionsList` | `screens/options/`, `client/` | **done for 10 of 13 screens** (Language, issue #415, is the tenth) — `menu/options.rs`, 143 `OptionsList` controls, 26-or-27 live depending on `in_world` (7 of 93 options persisted, up from 2 as of #200/#202/#203; see below) — plus Key Binds (56 controls) and Language (own count, see [`language-screen.md`](./language-screen.md)), neither an `OptionsList` page so neither is part of the 143 | #55 |
+| `OptionsScreen` tree, `OptionInstance`, `OptionsList` | `screens/options/`, `client/` | **all 13 of 13 screens built** (Language, Telemetry, Resource Packs — issue #415 — are the last three) — `menu/options.rs`, 143 `OptionsList` controls, 28-or-29 live depending on `in_world` (7 of 93 options persisted, up from 2 as of #200/#202/#203; see below) — plus Key Binds, Language, Telemetry and Resource Packs (each their own count, see [`language-screen.md`](./language-screen.md)/[`telemetry-screen.md`](./telemetry-screen.md)/[`resource-packs-screen.md`](./resource-packs-screen.md)), none an `OptionsList` page so none is part of the 143 | #55 |
 | `AbstractContainerScreen` | `screens/inventory/` | bespoke per screen | #398 |
 
 ## What is already done, and must not be re-filed
@@ -218,7 +218,8 @@ settings screen is a list of options, not bespoke geometry.
 | `OnlineOptionsScreen` | 7 | **built** — `SettingsPage::Online`, all seven decorative. 3 headers; friends, requests, notifications, presence, Xbox link, `allowServerListing`, `realmsNotifications` |
 | `FontOptionsScreen` | 2 | `forceUnicodeFont`, `japaneseGlyphVariants` `:9-11` — present-and-inactive on the built `LanguageSelectScreen`'s footer, not yet its own page |
 | `LanguageSelectScreen` | list | **built** (issue #415) — `SettingsPage::Language`, the third list-widget kind (`ObjectSelectionList`); see [`language-screen.md`](./language-screen.md) |
-| `TelemetryInfoScreen` / `PackSelectionScreen` | info / list | still unbuilt — each needs substantially more than a list widget (see `language-screen.md`'s "What is deliberately not built") |
+| `TelemetryInfoScreen` | info | **built** (issue #415) — `SettingsPage::Telemetry`, an honest prose screen (no event log, no opt-in state — this client collects no telemetry); see [`telemetry-screen.md`](./telemetry-screen.md) |
+| `PackSelectionScreen` | list | **built, deliberately reduced** (issue #415) — `SettingsPage::ResourcePacks`: one always-empty list, one always-one-entry list, no drag-between transfer controls (nothing for them to do); see [`resource-packs-screen.md`](./resource-packs-screen.md) |
 
 **~198 distinct interactive controls**, of which 57 are keybind rows — **141 excluding keybinds**.
 Counted as focusable/clickable widgets, excluding per-screen Done/Cancel except where noted; headers
