@@ -165,6 +165,7 @@
 //! excluded names in the first place.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::Value;
 
@@ -211,6 +212,43 @@ struct AquiferTrees {
     lava: Density,
     prelim: Density,
     positional: XoroshiroPositionalFactory,
+}
+
+/// The return shape of [`OverworldGenerator::pre_ore_stage`] — one chunk's
+/// own post-carve world, heightmap and biome quarts (stages 1-4). Named so
+/// [`OverworldGenerator::pre_ore_cache`]'s value type reads as "one chunk's
+/// pre-ore result", not an anonymous 3-tuple.
+type PreOreResult = (crate::dense_grid::DenseBlockGrid, [i32; 256], [(String, bool); 16]);
+
+/// Bound on [`PreOreCache`]'s size. `OverworldGenerator` is not only used by
+/// one-shot sweeps (this cache's original motivation): `lodestone_server`'s
+/// `OverworldChunkSource` holds one generator for a whole world's lifetime
+/// ("share it across the view", its own doc comment), so a session that
+/// gradually explores a large area would otherwise grow this cache without
+/// bound — each entry holds a full `16×height×16` `DenseBlockGrid`, on the
+/// order of 200 KiB, so unbounded growth here is a real, if slow, memory
+/// leak on a machine `CLAUDE.md` already flags memory as the binding limit
+/// on. 512 entries (~100 MiB worst case) comfortably covers the 14×14 = 196
+/// unique chunks the 144-chunk sweep this cache was built for actually needs
+/// (its 12×12 centres plus their shared 1-chunk halo), with headroom to
+/// spare — and an eviction only ever costs a recompute on the next request
+/// for that key, never a wrong answer (see [`OverworldGenerator::pre_ore_stage`]'s
+/// own doc comment on why the *value* per key never changes).
+const PRE_ORE_CACHE_CAPACITY: usize = 512;
+
+/// [`OverworldGenerator::pre_ore_cache`]'s storage: the memoisation map plus
+/// a FIFO insertion-order queue so eviction can drop the oldest key once the
+/// map exceeds [`PRE_ORE_CACHE_CAPACITY`]. Plain FIFO rather than true LRU
+/// (which would need to reorder on *read*, not just insert) because the
+/// access pattern this exists for — a centre's own [`Self::column`] call plus
+/// [`Self::ore_stage`]'s 8-neighbour sweep, repeated across a scan that
+/// advances roughly in coordinate order — makes insertion order and recency
+/// order coincide closely enough that the extra bookkeeping of true LRU
+/// would not measurably change the hit rate.
+#[derive(Default)]
+struct PreOreCache {
+    map: HashMap<(i32, i32), Arc<PreOreResult>>,
+    order: std::collections::VecDeque<(i32, i32)>,
 }
 
 /// A composed, reusable overworld generator. Build once per seed; call
@@ -265,6 +303,32 @@ pub struct OverworldGenerator {
     /// Block-tag closures for every tag referenced by any biome's ore
     /// targets, resolved once — see `crate::compose::build_ore_tag_map`.
     ore_tag_map: HashMap<String, HashSet<String>>,
+    /// Per-generator memoisation of [`Self::pre_ore_stage`] (issue #295's Job
+    /// 1 performance follow-up, see this module's doc "Performance"
+    /// section). [`Self::ore_stage`]'s real 3×3 driver calls
+    /// `pre_ore_stage` for the centre plus all 8 neighbours on *every*
+    /// [`column`](Self::column) call, with no memoisation across calls — so a
+    /// 144-chunk sweep, where every interior chunk is somebody else's
+    /// neighbour up to 8 times, redid the same full pre-ore pipeline up to
+    /// 9× (measured: a 144-chunk sweep went from ~68s to 700.57s in debug
+    /// after ore composition landed, matching the predicted ~9×). This cache
+    /// makes each chunk's pre-ore result pay for its own computation exactly
+    /// once per generator, regardless of whether it is first reached as a
+    /// centre or as a neighbour.
+    ///
+    /// Keyed by the **exact** chunk coordinate, never clamped or rounded —
+    /// see [`Self::pre_ore_stage`]'s own doc comment for why a clamped
+    /// equivalent is a known failure shape (it aliased two distinct chunks
+    /// onto one cached value in a JVM oracle and hung the process). `Arc`
+    /// so a hit hands back a cheap pointer clone rather than a clone of the
+    /// `DenseBlockGrid`'s own `Vec`s; `Mutex`-protected because
+    /// [`OverworldGenerator`] is shared across threads by
+    /// `lodestone_server::chunk::generate_columns_parallel` — the value
+    /// behind each key is immutable-after-insert (a pure function of
+    /// `(cx, cz)` and this generator's own fixed state), so the lock only
+    /// ever guards *insertion*, never a mutation raced against a reader.
+    /// Bounded — see [`PreOreCache`] and [`PRE_ORE_CACHE_CAPACITY`].
+    pre_ore_cache: Mutex<PreOreCache>,
 }
 
 impl OverworldGenerator {
@@ -406,6 +470,7 @@ impl OverworldGenerator {
             carvers_by_biome,
             ores_by_biome,
             ore_tag_map,
+            pre_ore_cache: Mutex::new(PreOreCache::default()),
         }
     }
 
@@ -430,9 +495,14 @@ impl OverworldGenerator {
     /// Generates the block field for chunk `(cx, cz)`.
     #[must_use]
     pub fn column(&self, cx: i32, cz: i32) -> GeneratedColumn {
-        let (world, heights, biome_quarts) = self.pre_ore_stage(cx, cz);
-        let world = self.ore_stage(cx, cz, world, &heights);
-        self.intern_from_dense(world, biome_quarts)
+        let cached = self.pre_ore_stage(cx, cz);
+        // `ore_stage` mutates and folds ore placements back into its
+        // `center_world` argument, so it needs to own a copy — this is the
+        // one clone this cache still pays per `column()` call (not per
+        // neighbour visit), and it is cheap relative to the full pipeline
+        // recomputation it replaces. See `pre_ore_cache`'s doc comment.
+        let world = self.ore_stage(cx, cz, cached.0.clone(), &cached.1);
+        self.intern_from_dense(world, cached.2.clone())
     }
 
     /// Stages 1-4 (fill/aquifer, biome, surface, carve) for chunk `(cx, cz)` —
@@ -449,7 +519,58 @@ impl OverworldGenerator {
     /// approximation — a neighbour in a different biome to the centre also
     /// carves (and later decorates) differently, so there is no shortcut
     /// that reuses the centre's own field.
-    fn pre_ore_stage(&self, cx: i32, cz: i32) -> (crate::dense_grid::DenseBlockGrid, [i32; 256], [(String, bool); 16]) {
+    ///
+    /// Memoised in [`Self::pre_ore_cache`], keyed by the **exact** `(cx, cz)`
+    /// passed in — never rounded, clamped, or otherwise merged with a
+    /// neighbouring key. That distinction matters: an earlier version of
+    /// this same idea in the JVM oracle this crate is proven against
+    /// (`FeatureOracle.java`) *did* clamp reads to a bounded region, aliasing
+    /// two distinct chunk coordinates onto one memoised value, and vanilla's
+    /// own `BulkSectionAccess` then tried to lock the same
+    /// `LevelChunkSection`'s non-reentrant semaphore twice within one
+    /// placement and hung forever (see `docs/worldgen-parity.md`'s "Known
+    /// gap" section on the 3×3 driver). This engine has no such semaphore,
+    /// but the aliasing shape — two logically distinct chunks sharing one
+    /// cached answer — is exactly what an exact-coordinate key rules out.
+    fn pre_ore_stage(&self, cx: i32, cz: i32) -> Arc<PreOreResult> {
+        {
+            let cache = self.pre_ore_cache.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(hit) = cache.map.get(&(cx, cz)) {
+                return Arc::clone(hit);
+            }
+        }
+        // Computed with the lock released: this is a pure function of
+        // `(cx, cz)` and this generator's own fixed state, so two threads
+        // racing on the same miss both landing here just means the same
+        // value gets computed twice, never a wrong one — see
+        // `pre_ore_cache`'s doc comment. The alternative (holding the lock
+        // across the whole pipeline) would serialise every worker thread in
+        // `generate_columns_parallel` on one mutex for the most expensive
+        // part of generation, defeating the parallelism it relies on.
+        let computed = Arc::new(self.pre_ore_stage_uncached(cx, cz));
+        let mut cache = self.pre_ore_cache.lock().unwrap_or_else(PoisonError::into_inner);
+        // Another thread may have inserted the same key while this one was
+        // computing (a racing miss, not an error — see above); keep
+        // whichever is already there instead of double-inserting into
+        // `order`, which would let one key occupy two eviction slots.
+        if let Some(existing) = cache.map.get(&(cx, cz)) {
+            return Arc::clone(existing);
+        }
+        cache.map.insert((cx, cz), Arc::clone(&computed));
+        cache.order.push_back((cx, cz));
+        if cache.order.len() > PRE_ORE_CACHE_CAPACITY {
+            if let Some(oldest) = cache.order.pop_front() {
+                cache.map.remove(&oldest);
+            }
+        }
+        computed
+    }
+
+    /// The actual stages 1-4 computation [`Self::pre_ore_stage`] memoises.
+    /// Never call this directly outside that wrapper — doing so bypasses the
+    /// cache and reintroduces the exact 9× redundancy this cache exists to
+    /// remove.
+    fn pre_ore_stage_uncached(&self, cx: i32, cz: i32) -> PreOreResult {
         let base_x = cx * 16;
         let base_z = cz * 16;
 
@@ -501,8 +622,13 @@ impl OverworldGenerator {
                 if dx == 0 && dz == 0 {
                     continue;
                 }
-                let (world, heights, _biome_quarts) = self.pre_ore_stage(cx + dx, cz + dz);
-                Self::stitch_region(&mut region, &mut ocean_floor_wg, cx + dx, cz + dz, cx, cz, &world, &heights);
+                // No clone: `stitch_region` only ever reads through a
+                // reference, so a cache hit here (the common case in a
+                // sweep — see `pre_ore_cache`'s doc comment) costs one
+                // `HashMap` lookup and an `Arc` bump, not a recomputed
+                // pipeline or a copied grid.
+                let cached = self.pre_ore_stage(cx + dx, cz + dz);
+                Self::stitch_region(&mut region, &mut ocean_floor_wg, cx + dx, cz + dz, cx, cz, &cached.0, &cached.1);
             }
         }
 
