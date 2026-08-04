@@ -2530,6 +2530,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lodestone-event-logger"
+version = "0.1.0"
+dependencies = [
+ "bevy_app",
+ "bevy_ecs",
+ "lodestone-ecs",
+ "lodestone-model",
+]
+
+[[package]]
 name = "lodestone-fuzz"
 version = "0.1.0"
 dependencies = [

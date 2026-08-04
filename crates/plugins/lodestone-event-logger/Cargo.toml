@@ -1,0 +1,33 @@
+# A toy MONITOR-tier reader plugin (issues #104/#105/#110): the first, and
+# so far only, consumer of `lodestone_ecs::GameEvent`/`GameEventBus`/
+# `EventPriority`. Named as a deliberate island landing in
+# `docs/plugin-api.md` and on issue #436's ledger — nothing in the shipped
+# client wires this in yet.
+[package]
+name = "lodestone-event-logger"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# `GameEvent`, `GameEventBus`, `GameEventBusPlugin`, `EventPriority`,
+# `assert_monitor_system_is_read_only`, `GameTick`. Re-exports
+# `bevy_app`/`bevy_ecs` as `lodestone_ecs::{app, ecs}` so this crate's own
+# code never has to match either version by hand.
+lodestone-ecs = { workspace = true }
+# `ClientEvent` — the type `GameEvent` wraps, named directly so this crate can
+# store/inspect events without going through `lodestone_ecs::ecs::*` paths.
+lodestone-model = { workspace = true }
+# Direct, in addition to `lodestone-ecs`'s re-export: `#[derive(Resource)]`/
+# `#[derive(Plugin)]`-adjacent code below emits absolute `bevy_ecs::`/
+# `bevy_app::` paths, which only resolve if this crate has them as direct
+# dependencies too (`docs/plugin-api.md`'s "how to change it" note;
+# `crates/plugins/lodestone-autopilot/Cargo.toml` documents the same
+# requirement for the same reason). Same `[workspace.dependencies]` pin
+# `lodestone-ecs` itself builds against, so there is only ever one
+# `bevy_ecs`/`bevy_app` in the graph.
+bevy_ecs = { workspace = true }
+bevy_app = { workspace = true }

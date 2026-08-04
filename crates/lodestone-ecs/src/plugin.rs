@@ -4,7 +4,25 @@ use bevy_app::{App, Plugin, Update};
 use bevy_ecs::schedule::IntoScheduleConfigs;
 
 use crate::schedules::{Extract, GameTick, NetIngest};
-use crate::sets::{ExtractSet, FrameSet, IngestSet, TickSet};
+use crate::sets::{EventPriority, ExtractSet, FrameSet, IngestSet, TickSet};
+
+/// [`EventPriority`]'s chain, in Bukkit's own `LOWEST..MONITOR` order,
+/// configured into all four public schedules below by
+/// [`CorePlugin::build`] — one call site so the six variants cannot drift
+/// into four different orderings of themselves.
+macro_rules! event_priority_chain {
+    () => {
+        (
+            EventPriority::Lowest,
+            EventPriority::Low,
+            EventPriority::Normal,
+            EventPriority::High,
+            EventPriority::Highest,
+            EventPriority::Monitor,
+        )
+            .chain()
+    };
+}
 
 /// Registers the Stage-0 schedule/set scaffolding
 /// (`docs/bevy-migration.md` §4.2) on an `App`: the three schedules this
@@ -48,6 +66,12 @@ impl Plugin for CorePlugin {
             NetIngest,
             (IngestSet::Drain, IngestSet::Apply, IngestSet::Index).chain(),
         );
+        // Issue #105: the same `EventPriority` chain, anchored here too, so a
+        // plugin's `GameEvent` observer ordered inside `NetIngest` still gets
+        // a cross-plugin order against other plugins' observers in the same
+        // schedule. See `EventPriority`'s own doc for why this is repeated
+        // in all four schedules rather than declared once.
+        app.configure_sets(NetIngest, event_priority_chain!());
 
         app.init_schedule(GameTick);
         app.configure_sets(
@@ -61,6 +85,7 @@ impl Plugin for CorePlugin {
             )
                 .chain(),
         );
+        app.configure_sets(GameTick, event_priority_chain!());
 
         // `Update` already exists (installed by `MainSchedulePlugin` as part
         // of `App::new()`/`App::default()`); `configure_sets` creates it if
@@ -75,11 +100,13 @@ impl Plugin for CorePlugin {
             )
                 .chain(),
         );
+        app.configure_sets(Update, event_priority_chain!());
 
         app.init_schedule(Extract);
         app.configure_sets(
             Extract,
             (ExtractSet::Terrain, ExtractSet::Entities, ExtractSet::Hud).chain(),
         );
+        app.configure_sets(Extract, event_priority_chain!());
     }
 }

@@ -362,6 +362,14 @@ pub(crate) struct SharedState {
     /// `&mut World` (it caches its `QueryState`) and would contend with the net
     /// thread's ingest writes for nothing at this scale.
     session: Entity,
+    /// Whether [`Self::ecs`] carries [`lodestone_ecs::GameEventBus`] — checked
+    /// **once**, at construction, and cached here so [`Self::apply`]'s hot
+    /// path is a plain `bool` read when the bus is off (issue #104's "zero
+    /// cost when unused"). See [`lodestone_ecs::GameEventBusPlugin`]'s doc for
+    /// why a runtime toggle is not needed: a plugin opts in by being present
+    /// when the `World` is built, and that is always before a `SharedState`
+    /// wraps it.
+    game_event_bus_enabled: bool,
 }
 
 impl std::fmt::Debug for SharedState {
@@ -383,7 +391,7 @@ impl Default for SharedState {
         // systems as well as `IngestPlugin`'s, so this `World` folds the session
         // read-model too. It needs one entity to hang those components off.
         let world = Arc::new(RwLock::new(World::new()));
-        let session = {
+        let (session, game_event_bus_enabled) = {
             let mut world_ecs = ecs.write();
             world_ecs.insert_resource(WorldTime::default());
             // Stage 4 (§4.1(d)): the chunk store is a resource, and it is the
@@ -391,7 +399,14 @@ impl Default for SharedState {
             // names. A system or plugin in this `World` can therefore read
             // chunks without a second copy existing anywhere.
             world_ecs.insert_resource(ChunkWorld::from_shared(Arc::clone(&world)));
-            lodestone_ecs::spawn_session(&mut world_ecs)
+            let session = lodestone_ecs::spawn_session(&mut world_ecs);
+            // Issue #104: `new_ingest_handle()` above never adds
+            // `GameEventBusPlugin`, so this is `false` for every
+            // `SharedState::default` today — a bot/test that wants the bus
+            // has no opt-in path through this constructor yet, named as a
+            // follow-up rather than solved here.
+            let bus_enabled = world_ecs.contains_resource::<lodestone_ecs::GameEventBus>();
+            (session, bus_enabled)
         };
         Self {
             inner: Arc::new(RwLock::new(LocalEcho::default())),
@@ -399,8 +414,29 @@ impl Default for SharedState {
             notify: Arc::new(Notify::new()),
             ecs,
             session,
+            game_event_bus_enabled,
         }
     }
+}
+
+/// Pushes `event` onto the plugin event bus (issue #104), unconditionally —
+/// no `match` on `event` anywhere in this function's body, checked by
+/// `tests::game_event_bus_write_site_has_no_match_on_the_event` below in the
+/// style of `lodestone_model::event::route_tests::route_has_no_catch_all_arm`.
+///
+/// # Why this cannot become a sixth silent-drop router
+///
+/// `docs/plugin-api.md`'s doctrine names three existing routers whose
+/// terminal `_ =>` arm is an island factory: a wildcard that is
+/// indistinguishable, at the call site, from a decision, so a new
+/// `ClientEvent` variant can compile with no arm anywhere and reach nothing.
+/// A firehose with **no match on the event at all** cannot have that shape —
+/// every event that reaches this function reaches the bus, full stop. The
+/// caller ([`SharedState::apply`]) still gates *whether* this function runs
+/// at all on `SharedState`'s cached `game_event_bus_enabled` flag, but that
+/// gate is a boolean feature flag, not a discrimination by event variant.
+fn push_to_game_event_bus(world: &mut lodestone_ecs::ecs::world::World, event: &ClientEvent) {
+    world.write_message(lodestone_ecs::GameEvent(event.clone()));
 }
 
 /// Local block coordinate within a chunk column (0..16).
@@ -436,13 +472,23 @@ impl SharedState {
     /// control that depends on an explicitly empty store). The chunk store is
     /// still reachable as [`Self::chunk_world`] for the driver to adopt when it
     /// chooses.
+    ///
+    /// Also checks `ecs` once for [`lodestone_ecs::GameEventBus`] — see
+    /// [`Self::game_event_bus_enabled`]'s field doc. This is today's real
+    /// opt-in path for issue #104's bus: whoever builds `ecs` (currently
+    /// `lodestone_shell::sim::Sim`, brokered / out of this pass's scope)
+    /// decides by adding `GameEventBusPlugin` before calling this.
     pub(crate) fn adopting(ecs: EcsHandle, session: Entity) -> Self {
+        let game_event_bus_enabled = lodestone_ecs::hold_read(&ecs, |world| {
+            world.contains_resource::<lodestone_ecs::GameEventBus>()
+        });
         Self {
             inner: Arc::new(RwLock::new(LocalEcho::default())),
             world: Arc::new(RwLock::new(World::new())),
             notify: Arc::new(Notify::new()),
             ecs,
             session,
+            game_event_bus_enabled,
         }
     }
 
@@ -491,6 +537,20 @@ impl SharedState {
     /// entities, so it is not worth an API change to avoid — but if `apply` ever
     /// takes the event by value, drop it.
     pub(crate) fn apply(&self, event: &ClientEvent) {
+        // Issue #104: the plugin event bus. Pushed before the routing branch
+        // below and through no `match` on `event` at all — see
+        // `push_to_game_event_bus`'s own doc and
+        // `tests::game_event_bus_write_site_has_no_match_on_the_event` for why
+        // that absence is the property this write site exists to have.
+        // `self.game_event_bus_enabled` is a plain `bool` cached at
+        // construction (`Self::default`/`Self::adopting`), so a client that
+        // never opted in pays nothing beyond this one branch — no extra
+        // `EcsHandle` lock.
+        if self.game_event_bus_enabled {
+            lodestone_ecs::hold_write(&self.ecs, |world| {
+                push_to_game_event_bus(world, event);
+            });
+        }
         if let ClientEvent::TimeChanged {
             world_age,
             time_of_day,
@@ -1265,5 +1325,122 @@ mod tests {
         let a = SharedState::default();
         let b = SharedState::default();
         assert!(!a.chunk_world().is_same_store(&b.chunk_world()));
+    }
+
+    // ---- issue #104: the plugin event bus ---------------------------------
+
+    /// Builds a [`SharedState`] the way [`SharedState::default`] does, except
+    /// the underlying `World` carries `GameEventBusPlugin` before
+    /// [`SharedState::adopting`] ever sees it — today's real opt-in path (see
+    /// that constructor's doc).
+    fn state_with_game_event_bus() -> SharedState {
+        let mut app = lodestone_ecs::app::App::new();
+        app.add_plugins((
+            lodestone_ecs::ingest::IngestPlugin,
+            lodestone_ecs::SessionPlugin,
+            lodestone_ecs::GameEventBusPlugin,
+        ));
+        let session = lodestone_ecs::spawn_session(app.world_mut());
+        let ecs: EcsHandle = std::sync::Arc::new(lodestone_ecs::parking_lot::RwLock::new(
+            std::mem::take(app.world_mut()),
+        ));
+        SharedState::adopting(ecs, session)
+    }
+
+    /// **The source-scan guard**, in the style of
+    /// `lodestone_model::event::route_tests::route_has_no_catch_all_arm`: the
+    /// bus's whole safety property is that its one write site has no `match`
+    /// on the event at all, so a new `ClientEvent` variant cannot compile
+    /// with an arm that silently skips the bus. Reads this file's own source
+    /// rather than trusting a comment to stay true.
+    #[test]
+    fn game_event_bus_write_site_has_no_match_on_the_event() {
+        let source = include_str!("state.rs");
+        let body = source
+            .split_once(
+                "fn push_to_game_event_bus(world: &mut lodestone_ecs::ecs::world::World, event: &ClientEvent) {",
+            )
+            .expect("push_to_game_event_bus must exist in this file")
+            .1;
+        let body = body
+            .split_once("\n}\n")
+            .map_or(body, |(before, _)| before);
+
+        assert!(
+            !body.contains("match "),
+            "push_to_game_event_bus must never match on `event` — a match is \
+             exactly the island-factory shape CLAUDE.md calls out for \
+             ingest::handles_event/session::handles_event/net::forward. Body:\n{body}"
+        );
+
+        // The control, per CLAUDE.md: an absence assertion is worth only as
+        // much as the evidence the detector fires.
+        assert!(
+            "        match event {\n".contains("match "),
+            "the detector must see a real match keyword"
+        );
+    }
+
+    /// **The off-by-default control.** A `SharedState::default()` client
+    /// (no `GameEventBusPlugin` anywhere in its `World`) must not be
+    /// observable through the bus at all: `Messages<GameEvent>` is not even a
+    /// resource, so nothing can have been dropped, delayed, or partially
+    /// applied — the bus is simply not there.
+    #[test]
+    fn a_default_state_has_no_game_event_bus_resource() {
+        let state = SharedState::default();
+        let ecs = state.ecs.read();
+        assert!(
+            ecs.get_resource::<lodestone_ecs::ecs::message::Messages<lodestone_ecs::GameEvent>>()
+                .is_none(),
+            "SharedState::default must not install the bus"
+        );
+    }
+
+    /// **The on half of the pair**, and the control that proves the off
+    /// assertion above is discriminating rather than vacuous: the identical
+    /// `apply` call, through a state built with `GameEventBusPlugin`
+    /// installed, must land the event in `Messages<GameEvent>`.
+    #[test]
+    fn apply_reaches_the_game_event_bus_when_a_plugin_opted_in() {
+        let state = state_with_game_event_bus();
+        assert!(
+            state.game_event_bus_enabled,
+            "precondition: the cached flag must reflect the installed marker"
+        );
+
+        state.apply(&ClientEvent::Ping { id: 5 });
+
+        let ecs = state.ecs.read();
+        let messages = ecs
+            .get_resource::<lodestone_ecs::ecs::message::Messages<lodestone_ecs::GameEvent>>()
+            .expect("GameEventBusPlugin must register Messages<GameEvent>");
+        assert_eq!(
+            messages.len(),
+            1,
+            "the Ping must have reached the bus through the real SharedState::apply path"
+        );
+    }
+
+    /// A state with the bus disabled must not populate `Messages<GameEvent>`
+    /// even when one exists in a *different* state's `World` — this is the
+    /// same shape as `two_independent_states_do_not_share_a_chunk_store`
+    /// above, applied to the bus's own gate rather than to the chunk store.
+    #[test]
+    fn a_disabled_state_does_not_touch_an_unrelated_bus() {
+        let disabled = SharedState::default();
+        let enabled = state_with_game_event_bus();
+
+        disabled.apply(&ClientEvent::Ping { id: 9 });
+
+        let ecs = enabled.ecs.read();
+        let messages = ecs
+            .get_resource::<lodestone_ecs::ecs::message::Messages<lodestone_ecs::GameEvent>>()
+            .expect("the enabled state's own bus must still exist");
+        assert_eq!(
+            messages.len(),
+            0,
+            "a disabled state's apply() must never reach a different state's bus"
+        );
     }
 }

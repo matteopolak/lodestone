@@ -128,6 +128,7 @@
 
 pub mod chunks;
 pub mod entity;
+pub mod events;
 mod handle;
 pub mod ingest;
 pub mod player;
@@ -153,6 +154,7 @@ pub use bevy_ecs as ecs;
 pub use parking_lot;
 
 pub use chunks::{ChunkWorld, WorldExtent};
+pub use events::{GameEvent, GameEventBus, GameEventBusPlugin};
 pub use handle::{
     EcsHandle, HoldStats, LockHolds, hold_read, hold_write, new_handle, new_ingest_handle,
 };
@@ -177,7 +179,9 @@ pub use session::{
     SessionScoreboard, SessionSet, SessionTabList, TitleOverlay, Vitals, Xp,
     insert_hud_components, insert_session_components, spawn_session,
 };
-pub use sets::{ExtractSet, FrameSet, IngestSet, TickSet};
+pub use sets::{
+    EventPriority, ExtractSet, FrameSet, IngestSet, TickSet, assert_monitor_system_is_read_only,
+};
 
 #[cfg(test)]
 mod tests {
