@@ -866,6 +866,9 @@ pub enum CliCommand {
     Conformance {
         options: ConformanceOptions,
     },
+    DocsIndex {
+        check: bool,
+    },
     Planned {
         name: &'static str,
     },
@@ -873,7 +876,7 @@ pub enum CliCommand {
 
 #[must_use]
 pub const fn root_help() -> &'static str {
-    "xtask\n\nUsage:\n    cargo run -p xtask -- <command> [options]\n\nCommands:\n    gen-packet-ids   Generate Rust packet ID tables from a Mojang report or minecraft-data\n    fetch-assets     Download and verify vanilla client.jar, the asset index, and the asset-store objects client.jar stubs, into .cache/mc/<version>/\n    fetch-sounds     Download and verify the vanilla .ogg sound corpus (~80 MB) into .cache/mc/<version>/objects/\n    fetch-version    Download and verify vanilla server.jar into .cache/mc/<version>/\n    version-table    Generate/check the epic-343 16-version protocol/data-version table\n    gen-registries   Generate selected registry id->ResourceKey tables from registries.json\n    check-isolation  Enforce protocol version crate dependency isolation\n    check-connected  Enforce workspace crates are reachable from shipped binary/cdylib roots\n    connectedness    Report v770 play packet reachability\n    check-deletable  Simulate deleting a version family's folder and report the fallout\n    codegen-ratio    Report generated-vs-hand-written codec metrics per protocol family\n    new-version      Scaffold a protocol family; registry support is withheld until SHAPE_REVIEW.toml is discharged\n    gen-reports      Not implemented yet\n    conformance      Run packet-id, registry, isolation, deletability, test, and clippy checks for a family\n\nOptions for gen-packet-ids:\n    --version <version>   Minecraft version, e.g. 26.2 (Mojang) or 1.8 (minecraft-data dir)\n    --protocol <id>       Protocol version, e.g. 776 or 47\n    --source <source>     Report source: mojang (default) or minecraft-data\n    --out <path>          Output path under crates/protocol/*/src/generated/\n    --check               Compare generated output against disk and fail on drift without writing\n\nOptions for gen-registries:\n    --version <version>       Minecraft version, e.g. 26.2\n    --protocol <id>           Protocol version, e.g. 776\n    --out-dir <path>          Output directory under crates/protocol/*/src/generated\n    --registries <csv>        Registry keys to generate (default: sound_event,particle_type,menu,item)\n    --check                   Compare generated registry tables against disk without writing\n\nOptions for check-connected:\n    --allowlist <path>    TOML file of explicit exceptions (default: xtask/check-connected.toml)\n\nOptions for connectedness:\n    Parses v770's generated packet_ids.rs for play denominators, then classifies adapter dispatch outlets (ClientEvent, Directive, world/sink writes) with explicit UNCLASSIFIED output.\n\nOptions for check-deletable:\n    <version>             Version family to simulate deleting: package name (lodestone-v47), folder (v47), or path\n\nOptions for codegen-ratio:\n    Reports both the optimistic per-struct derive/manual ratio and the more decision-useful absolute hand-written source lines.\n\nOptions for new-version:\n    --protocol <id>       Protocol number for the new family (required)\n    --minecraft <ver>    Minecraft version key for the packet-id oracle (required)\n    --from <family>       Existing family to copy from, e.g. v770 (default) or v47\n    --source <source>     Oracle: mojang or minecraft-data (default inferred from --from)\n    --name <vNNN>         Family folder/label (default v<protocol>)\n    --force               Overwrite the target folder if it already exists\n    SHAPE_REVIEW.toml     Generated when packet shapes differ; every entry must be reviewed before registry support may be added\n\nOptions for conformance:\n    --family <vNNN>       Version family folder/label to check, e.g. v735\n    --minecraft <ver>     Minecraft version key for packet-id/registry checks\n    --protocol <id>       Protocol number for the family\n    --source <source>     Packet-id oracle: mojang or minecraft-data (default mojang)\n    --skip-cargo          Only run xtask structural checks; skip cargo test/clippy\n\nOptions for fetch-version:\n    --version <version>   Minecraft version, e.g. 1.16.5\n    --force               Re-download even when cached server.jar already matches its SHA-1\n\nOptions for fetch-assets:\n    --version <version>   Minecraft version, e.g. 26.2\n    --force               Re-download even when cached files already match their SHA-1\n    -h, --help            Print help\n  Also fetches asset-store objects, ~3.2 MB in total:\n    - the 8 whose name is in client.jar at a DIFFERENT size, i.e. the stubs the jar ships to be\n      overridden (the 6 panorama faces, panorama_overlay, unifont.json). Nothing at runtime can\n      tell a stub from the real asset, which is why these must be eager.\n    - minecraft/sounds.json (626 KB), which ShellAudio reads eagerly and cannot start without.\n  The 4871 .ogg samples (375 MB) are NOT fetched: a missing sample is one silent sound, resolved\n  lazily per event. Run `fetch-sounds` for the corpus.\n\nOptions for fetch-sounds:\n    --version <version>   Minecraft version, e.g. 26.2 (fetch-assets must have run first)\n    --all                 Also fetch background music and jukebox discs (+293 MB, 92 objects)\n    --jobs <n>            Concurrent downloads (default 12)\n    --force               Re-download every object even when it already matches its SHA-1\n  Derives the corpus from sounds.json, not a file list: every sample any non-music event can\n  select. Measured on 26.2 -- 4751 objects, 80.14 MB, including all six biome ambience loops.\n  Excluded by default: 70 music tracks + 22 jukebox records = 92 objects, 293.23 MB. The 28 index\n  .ogg objects no event references are fetched in neither mode. Every object's SHA-1 is verified\n  against the index, and a re-run of a complete fetch downloads nothing.\n\nOptions for version-table:\n    --check               Compare the generated table against crates/lodestone-registry/src/generated/version_table.rs and fail on drift without writing\n    --fetch-missing       Also run fetch-version for any of the 16 target versions with no cached .cache/mc/<version>/server.jar (network + disk heavy; off by default)\n"
+    "xtask\n\nUsage:\n    cargo run -p xtask -- <command> [options]\n\nCommands:\n    gen-packet-ids   Generate Rust packet ID tables from a Mojang report or minecraft-data\n    fetch-assets     Download and verify vanilla client.jar, the asset index, and the asset-store objects client.jar stubs, into .cache/mc/<version>/\n    fetch-sounds     Download and verify the vanilla .ogg sound corpus (~80 MB) into .cache/mc/<version>/objects/\n    fetch-version    Download and verify vanilla server.jar into .cache/mc/<version>/\n    version-table    Generate/check the epic-343 16-version protocol/data-version table\n    gen-registries   Generate selected registry id->ResourceKey tables from registries.json\n    check-isolation  Enforce protocol version crate dependency isolation\n    check-connected  Enforce workspace crates are reachable from shipped binary/cdylib roots\n    connectedness    Report v770 play packet reachability\n    check-deletable  Simulate deleting a version family's folder and report the fallout\n    codegen-ratio    Report generated-vs-hand-written codec metrics per protocol family\n    new-version      Scaffold a protocol family; registry support is withheld until SHAPE_REVIEW.toml is discharged\n    gen-reports      Not implemented yet\n    conformance      Run packet-id, registry, isolation, deletability, test, and clippy checks for a family\n    docs-index       Generate docs/README.md from every doc's own H1 + `## What it is` summary\n\nOptions for gen-packet-ids:\n    --version <version>   Minecraft version, e.g. 26.2 (Mojang) or 1.8 (minecraft-data dir)\n    --protocol <id>       Protocol version, e.g. 776 or 47\n    --source <source>     Report source: mojang (default) or minecraft-data\n    --out <path>          Output path under crates/protocol/*/src/generated/\n    --check               Compare generated output against disk and fail on drift without writing\n\nOptions for gen-registries:\n    --version <version>       Minecraft version, e.g. 26.2\n    --protocol <id>           Protocol version, e.g. 776\n    --out-dir <path>          Output directory under crates/protocol/*/src/generated\n    --registries <csv>        Registry keys to generate (default: sound_event,particle_type,menu,item)\n    --check                   Compare generated registry tables against disk without writing\n\nOptions for check-connected:\n    --allowlist <path>    TOML file of explicit exceptions (default: xtask/check-connected.toml)\n\nOptions for connectedness:\n    Parses v770's generated packet_ids.rs for play denominators, then classifies adapter dispatch outlets (ClientEvent, Directive, world/sink writes) with explicit UNCLASSIFIED output.\n\nOptions for check-deletable:\n    <version>             Version family to simulate deleting: package name (lodestone-v47), folder (v47), or path\n\nOptions for codegen-ratio:\n    Reports both the optimistic per-struct derive/manual ratio and the more decision-useful absolute hand-written source lines.\n\nOptions for new-version:\n    --protocol <id>       Protocol number for the new family (required)\n    --minecraft <ver>    Minecraft version key for the packet-id oracle (required)\n    --from <family>       Existing family to copy from, e.g. v770 (default) or v47\n    --source <source>     Oracle: mojang or minecraft-data (default inferred from --from)\n    --name <vNNN>         Family folder/label (default v<protocol>)\n    --force               Overwrite the target folder if it already exists\n    SHAPE_REVIEW.toml     Generated when packet shapes differ; every entry must be reviewed before registry support may be added\n\nOptions for conformance:\n    --family <vNNN>       Version family folder/label to check, e.g. v735\n    --minecraft <ver>     Minecraft version key for packet-id/registry checks\n    --protocol <id>       Protocol number for the family\n    --source <source>     Packet-id oracle: mojang or minecraft-data (default mojang)\n    --skip-cargo          Only run xtask structural checks; skip cargo test/clippy\n\nOptions for fetch-version:\n    --version <version>   Minecraft version, e.g. 1.16.5\n    --force               Re-download even when cached server.jar already matches its SHA-1\n\nOptions for fetch-assets:\n    --version <version>   Minecraft version, e.g. 26.2\n    --force               Re-download even when cached files already match their SHA-1\n    -h, --help            Print help\n  Also fetches asset-store objects, ~3.2 MB in total:\n    - the 8 whose name is in client.jar at a DIFFERENT size, i.e. the stubs the jar ships to be\n      overridden (the 6 panorama faces, panorama_overlay, unifont.json). Nothing at runtime can\n      tell a stub from the real asset, which is why these must be eager.\n    - minecraft/sounds.json (626 KB), which ShellAudio reads eagerly and cannot start without.\n  The 4871 .ogg samples (375 MB) are NOT fetched: a missing sample is one silent sound, resolved\n  lazily per event. Run `fetch-sounds` for the corpus.\n\nOptions for fetch-sounds:\n    --version <version>   Minecraft version, e.g. 26.2 (fetch-assets must have run first)\n    --all                 Also fetch background music and jukebox discs (+293 MB, 92 objects)\n    --jobs <n>            Concurrent downloads (default 12)\n    --force               Re-download every object even when it already matches its SHA-1\n  Derives the corpus from sounds.json, not a file list: every sample any non-music event can\n  select. Measured on 26.2 -- 4751 objects, 80.14 MB, including all six biome ambience loops.\n  Excluded by default: 70 music tracks + 22 jukebox records = 92 objects, 293.23 MB. The 28 index\n  .ogg objects no event references are fetched in neither mode. Every object's SHA-1 is verified\n  against the index, and a re-run of a complete fetch downloads nothing.\n\nOptions for version-table:\n    --check               Compare the generated table against crates/lodestone-registry/src/generated/version_table.rs and fail on drift without writing\n    --fetch-missing       Also run fetch-version for any of the 16 target versions with no cached .cache/mc/<version>/server.jar (network + disk heavy; off by default)\n\nOptions for docs-index:\n    --check               Compare the generated index against docs/README.md and fail on drift without writing\n  Do not hand-edit docs/README.md: add/edit a doc under docs/ (with an H1 and a `## What\n  it is`/`## What this is` summary paragraph) and re-run this command. `cargo test -p xtask`\n  already fails if the committed file drifts from the generator.\n"
 }
 
 pub fn parse_cli_args<I, S>(args: I) -> Result<CliCommand>
@@ -904,6 +907,7 @@ where
         "fetch-version" => parse_fetch_version_args(&args[1..]),
         "version-table" => parse_version_table_args(&args[1..]),
         "conformance" => parse_conformance_args(&args[1..]),
+        "docs-index" => parse_docs_index_args(&args[1..]),
         "gen-reports" => Ok(CliCommand::Planned {
             name: planned_command_name(command).expect("matched planned command has a name"),
         }),
@@ -1091,6 +1095,21 @@ pub fn run_cli_command(command: CliCommand) -> Result<()> {
                 std::env::current_dir().context("determine current workspace directory")?;
             let report = run_conformance(&workspace_root, &options)?;
             println!("{}", report.render());
+            Ok(())
+        }
+        CliCommand::DocsIndex { check } => {
+            let workspace_root =
+                std::env::current_dir().context("determine current workspace directory")?;
+            if check {
+                let check = check_docs_index(&workspace_root)?;
+                if !check.is_identical() {
+                    bail!("{}", check.summary);
+                }
+                println!("{} is up to date", check.out_path.display());
+            } else {
+                let path = write_docs_index(&workspace_root)?;
+                println!("generated {}", path.display());
+            }
             Ok(())
         }
         CliCommand::Planned { name } => bail!("xtask command {name:?} is not implemented yet"),
@@ -1282,6 +1301,22 @@ fn parse_version_table_args(args: &[String]) -> Result<CliCommand> {
         check,
         fetch_missing,
     })
+}
+
+fn parse_docs_index_args(args: &[String]) -> Result<CliCommand> {
+    let mut check = false;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "-h" | "--help" => return Ok(CliCommand::Help),
+            "--check" => check = true,
+            unknown => bail!("unknown docs-index option {unknown:?}"),
+        }
+        index += 1;
+    }
+
+    Ok(CliCommand::DocsIndex { check })
 }
 
 fn parse_gen_registries_args(args: &[String]) -> Result<CliCommand> {
@@ -6642,6 +6677,292 @@ pub fn check_version_table(workspace_root: &Path, fetch_missing: bool) -> Result
     })
 }
 
+// ---------------------------------------------------------------------------
+// docs-index: `docs/README.md` generated from every doc's own H1 + summary
+// ---------------------------------------------------------------------------
+//
+// `docs/README.md` was the single most contended file in this repo -- every
+// agent that lands a doc needs one index line in it, so it was hand-edited
+// under a shared index and hand-edited files under a shared index are exactly
+// what CLAUDE.md's repo-hazards section warns about (a stale staged blob of
+// this file has, historically, deleted another agent's index bullet). The fix
+// is to stop hand-editing it: `CLAUDE.md`'s own docs convention already
+// requires every doc to open with a "what it is" summary, so the index is a
+// pure function of the doc tree, not a thing anyone should ever type by hand
+// again.
+//
+// A doc's summary is the first paragraph under a `## What it is` or
+// `## What this is` heading (the two spellings actually used across this
+// repo's 123 existing docs, checked before picking them -- 113 use one of the
+// two, and no doc uses a spelling other than these two). Docs written before
+// that heading convention existed fall back to the first paragraph directly
+// under the H1. A doc with neither -- so `extract_doc_summary` cannot find
+// any prose to quote -- fails loudly naming the file, per the acceptance
+// criterion: no doc gets a blank index line.
+
+/// `docs/*.md` files that are not part of the generated index at all --
+/// companion docs `CLAUDE.md` and `docs/README.md`'s own prose already link
+/// to directly, structurally different from a per-subsystem doc (an ordered
+/// work queue, not the record of a landed feature). Kept as an explicit,
+/// documented exception rather than an inferred one.
+const DOCS_INDEX_SKIP: &[&str] = &["backlog.md"];
+
+/// Top-level `docs/*.md` files that belong in the "Plans and research" group
+/// (phased plans and read-only diagnoses) rather than the main per-subsystem
+/// list, mirroring the hand-curated split the pre-generator `docs/README.md`
+/// used. Everything under `docs/research/` joins them automatically.
+const DOCS_INDEX_PLANS_AND_RESEARCH: &[&str] = &["worldgen-plan.md", "worldgen-parity.md"];
+
+struct DocIndexEntry {
+    /// Repo-relative link target, e.g. `./accounts.md` or `./roadmap/protocol.md`.
+    link: String,
+    title: String,
+    summary: String,
+}
+
+/// True for a real ATX heading line (`#` through `######`, followed by a
+/// space or end of line, per CommonMark) -- deliberately **not** just
+/// `starts_with('#')`. A prose line beginning with an issue reference like
+/// `#12/#72/#98/#121)` also starts with `#`, and treating that as a heading
+/// silently truncated `docs/research/combat-scope.md`'s summary mid-sentence
+/// the first time this ran -- caught by eye in the generated
+/// `docs/README.md`, not by any test, which is why this got its own name
+/// instead of staying an inline check.
+fn is_atx_heading(trimmed_line: &str) -> bool {
+    let hashes = trimmed_line.chars().take_while(|&c| c == '#').count();
+    (1..=6).contains(&hashes) && matches!(trimmed_line.as_bytes().get(hashes), None | Some(b' '))
+}
+
+/// Extracts a doc's H1 title and a one-paragraph summary. See the module note
+/// above for the extraction rule and why these two heading spellings.
+fn extract_doc_summary(text: &str, rel_path: &str) -> Result<(String, String)> {
+    let lines: Vec<&str> = text.lines().collect();
+
+    let h1_idx = lines
+        .iter()
+        .position(|l| l.starts_with("# "))
+        .ok_or_else(|| anyhow!("{rel_path}: no H1 (`# Title`) heading found"))?;
+    let title = lines[h1_idx][2..].trim().to_string();
+    if title.is_empty() {
+        bail!("{rel_path}: H1 heading has no title text");
+    }
+
+    let is_summary_heading = |l: &str| {
+        let t = l.trim();
+        t.eq_ignore_ascii_case("## what it is") || t.eq_ignore_ascii_case("## what this is")
+    };
+
+    // Search the whole doc for the heading (not just immediately after the
+    // H1): several docs carry a long preamble -- issue status, corrections --
+    // before reaching it.
+    let body_start = lines[h1_idx + 1..]
+        .iter()
+        .position(|l| is_summary_heading(l))
+        .map(|i| h1_idx + 1 + i + 1);
+    let scan_from = body_start.unwrap_or(h1_idx + 1);
+
+    let mut para: Vec<&str> = Vec::new();
+    for &line in &lines[scan_from..] {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if para.is_empty() {
+                continue; // skip leading blank lines
+            }
+            break; // paragraph ended
+        }
+        if is_atx_heading(trimmed) {
+            break; // hit a heading before (or right after) any prose
+        }
+        para.push(trimmed);
+    }
+
+    if para.is_empty() {
+        bail!(
+            "{rel_path}: no usable summary paragraph found (no prose under a \
+             `## What it is`/`## What this is` heading, and none directly under the H1) -- \
+             add one instead of leaving this doc out of the index"
+        );
+    }
+
+    Ok((title, para.join(" ")))
+}
+
+/// Word-wraps one index bullet at a fixed width, matching the hand-authored
+/// file's rough line length so the generated output stays readable as plain
+/// text, not just as rendered markdown.
+fn write_docs_index_entry(out: &mut String, entry: &DocIndexEntry) {
+    const WIDTH: usize = 86;
+    let mut line = format!("- [{}]({}) —", entry.title, entry.link);
+    for word in entry.summary.split_whitespace() {
+        if line.len() + 1 + word.len() > WIDTH {
+            out.push_str(&line);
+            out.push('\n');
+            line = format!("  {word}");
+        } else {
+            line.push(' ');
+            line.push_str(word);
+        }
+    }
+    out.push_str(&line);
+    out.push('\n');
+}
+
+fn read_md_dir_sorted(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .with_context(|| format!("reading {}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
+        .collect();
+    files.sort();
+    Ok(files)
+}
+
+/// Builds `docs/README.md`'s full contents from the doc tree. Deterministic:
+/// a pure function of what is on disk under `docs/`, so two runs against the
+/// same tree always produce byte-identical output -- the property the
+/// drift-guard test below depends on.
+pub fn generate_docs_index(workspace_root: &Path) -> Result<String> {
+    let docs_dir = workspace_root.join("docs");
+
+    let mut main: Vec<DocIndexEntry> = Vec::new();
+    let mut plans: Vec<DocIndexEntry> = Vec::new();
+
+    for path in read_md_dir_sorted(&docs_dir)? {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+        if name == "README.md" || DOCS_INDEX_SKIP.contains(&name.as_str()) {
+            continue;
+        }
+        let rel = format!("./{name}");
+        let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let (title, summary) = extract_doc_summary(&text, &rel)?;
+        let entry = DocIndexEntry { link: rel, title, summary };
+        if DOCS_INDEX_PLANS_AND_RESEARCH.contains(&name.as_str()) {
+            plans.push(entry);
+        } else {
+            main.push(entry);
+        }
+    }
+
+    let mut roadmap: Vec<DocIndexEntry> = Vec::new();
+    for path in read_md_dir_sorted(&docs_dir.join("roadmap"))? {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        let rel = format!("./roadmap/{name}");
+        let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let (title, summary) = extract_doc_summary(&text, &rel)?;
+        roadmap.push(DocIndexEntry { link: rel, title, summary });
+    }
+
+    for path in read_md_dir_sorted(&docs_dir.join("research"))? {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        let rel = format!("./research/{name}");
+        let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let (title, summary) = extract_doc_summary(&text, &rel)?;
+        plans.push(DocIndexEntry { link: rel, title, summary });
+    }
+
+    let mut out = String::new();
+    out.push_str("# Lodestone docs\n\n");
+    out.push_str(
+        "<!-- Generated by `cargo xtask docs-index` from every doc's own H1 and its \
+`## What it is`/`## What this is` summary paragraph. Do not hand-edit: edit the doc\n\
+     itself and regenerate (`cargo xtask docs-index`), or run `LODESTONE_REGEN=1 cargo\n\
+     test -p xtask docs_index_matches_committed`. `cargo test -p xtask` fails loudly if\n\
+     this file drifts from the generator's output. -->\n\n",
+    );
+    out.push_str(
+        "Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)\n\
+(architecture and rationale) and [`HANDOFF.md`](../HANDOFF.md) (deferred work).\n\n",
+    );
+
+    for entry in &main {
+        write_docs_index_entry(&mut out, entry);
+    }
+
+    out.push_str("\n---\n\n## Roadmap\n\n");
+    out.push_str(
+        "Per-track roadmap documents for the plan to 1:1 parity (epic decompositions, one per\n\
+track) -- see the first entry below for how the whole set is organised and what invariants\n\
+every issue under it inherits.\n\n",
+    );
+    for entry in &roadmap {
+        write_docs_index_entry(&mut out, entry);
+    }
+
+    out.push_str("\n---\n\n## Plans and research\n\n");
+    out.push_str(
+        "Longer-form artifacts that are not per-subsystem docs: a phased plan, and read-only\n\
+diagnoses produced before the corresponding fix was written. They live here because a\n\
+diagnosis is worth keeping *after* the fix lands -- CLAUDE.md's standing claim is that the\n\
+record of confidently-held false beliefs is the most valuable thing in this repo, and several\n\
+of these caught the *brief* being wrong rather than the code.\n\n",
+    );
+    for entry in &plans {
+        write_docs_index_entry(&mut out, entry);
+    }
+
+    Ok(out)
+}
+
+fn docs_index_out_path(workspace_root: &Path) -> PathBuf {
+    workspace_root.join("docs/README.md")
+}
+
+/// Writes the generated index to `docs/README.md`.
+pub fn write_docs_index(workspace_root: &Path) -> Result<PathBuf> {
+    let generated = generate_docs_index(workspace_root)?;
+    let out_path = docs_index_out_path(workspace_root);
+    std::fs::write(&out_path, generated)
+        .with_context(|| format!("write generated docs index to {}", out_path.display()))?;
+    Ok(out_path)
+}
+
+/// The result of a docs-index drift check, shaped like
+/// [`VersionTableCheck`] (same idea, different generated file) but kept as
+/// its own type rather than reused -- `VersionTableCheck` naming a
+/// `docs/README.md` result would be its own small staleness trap.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DocsIndexCheck {
+    pub out_path: PathBuf,
+    pub summary: String,
+    identical: bool,
+}
+
+impl DocsIndexCheck {
+    #[must_use]
+    pub const fn is_identical(&self) -> bool {
+        self.identical
+    }
+}
+
+/// Recomputes the docs index and compares it against the checked-in file
+/// without writing, for use as a drift-guard check (mirrors
+/// [`check_version_table`]'s shape).
+pub fn check_docs_index(workspace_root: &Path) -> Result<DocsIndexCheck> {
+    let expected = generate_docs_index(workspace_root)?;
+    let out_path = docs_index_out_path(workspace_root);
+    let actual = std::fs::read_to_string(&out_path)
+        .with_context(|| format!("read {}", out_path.display()))?;
+
+    if actual == expected {
+        return Ok(DocsIndexCheck {
+            out_path,
+            summary: "docs/README.md is up to date".to_owned(),
+            identical: true,
+        });
+    }
+
+    Ok(DocsIndexCheck {
+        summary: packet_id_diff_summary(&out_path, &expected, &actual),
+        out_path,
+        identical: false,
+    })
+}
+
 fn file_sha1_hex(path: &Path) -> Result<String> {
     let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut hasher = sha1::Sha1::new();
@@ -6914,6 +7235,144 @@ mod tests {
                 check: true,
                 fetch_missing: true,
             }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cli_parses_docs_index_command() -> Result<()> {
+        assert_eq!(
+            parse_cli_args(["docs-index"])?,
+            CliCommand::DocsIndex { check: false }
+        );
+        assert_eq!(
+            parse_cli_args(["docs-index", "--check"])?,
+            CliCommand::DocsIndex { check: true }
+        );
+        assert!(parse_cli_args(["docs-index", "--nope"]).is_err());
+        assert!(root_help().contains("docs-index"));
+        Ok(())
+    }
+
+    #[test]
+    fn extract_doc_summary_prefers_what_it_is_section() -> Result<()> {
+        let text = "# Example doc\n\n**Status:** a long preamble that should be skipped\nentirely because a real section follows.\n\n## What it is\n\nThe real summary paragraph,\nwrapped across two source lines.\n\n## How it works\n\nThis part must never be quoted.\n";
+        let (title, summary) = extract_doc_summary(text, "example.md")?;
+        assert_eq!(title, "Example doc");
+        assert_eq!(
+            summary,
+            "The real summary paragraph, wrapped across two source lines."
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn extract_doc_summary_accepts_what_this_is_spelling() -> Result<()> {
+        let text = "# Example\n\n## What this is\n\nA summary using the second spelling.\n";
+        let (_, summary) = extract_doc_summary(text, "example.md")?;
+        assert_eq!(summary, "A summary using the second spelling.");
+        Ok(())
+    }
+
+    /// Regression for the real bug this generator's first draft shipped:
+    /// `docs/research/combat-scope.md`'s summary paragraph contains
+    /// `#12/#72/#98/#121)` (an issue-reference list), and a naive
+    /// `starts_with('#')` heading check truncated the summary right before
+    /// it, mid-sentence. A real ATX heading needs a space (or EOL) after the
+    /// `#`s.
+    #[test]
+    fn extract_doc_summary_does_not_treat_issue_references_as_headings() -> Result<()> {
+        let text = "# Scoping doc\n\n## What it is\n\nSee issues landed under\n#12/#72/#98/#121), which continue the sentence.\n\n## Next heading\n\nUnreachable.\n";
+        let (_, summary) = extract_doc_summary(text, "scoping.md")?;
+        assert_eq!(
+            summary,
+            "See issues landed under #12/#72/#98/#121), which continue the sentence."
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn extract_doc_summary_falls_back_to_paragraph_under_h1() -> Result<()> {
+        let text = "# Legacy doc\n\nNo `What it is` heading exists in this one, so the first\nparagraph under the H1 is the summary.\n\n## Some other heading\n\nNot this.\n";
+        let (title, summary) = extract_doc_summary(text, "legacy.md")?;
+        assert_eq!(title, "Legacy doc");
+        assert_eq!(
+            summary,
+            "No `What it is` heading exists in this one, so the first paragraph under the H1 is the summary."
+        );
+        Ok(())
+    }
+
+    /// Anti-vacuity control: a doc with no prose anywhere (no `What it is`
+    /// section, and nothing but headings right after the H1) must fail
+    /// loudly and name the file -- never emit a blank summary. Run and
+    /// watched fail per `CLAUDE.md`'s evidence standard for a negative
+    /// assertion.
+    #[test]
+    fn extract_doc_summary_fails_loudly_with_no_usable_prose() {
+        let text = "# Heading-only doc\n\n## Immediately another heading\n\n### And another\n";
+        let error = extract_doc_summary(text, "heading-only.md").unwrap_err();
+        assert!(
+            error.to_string().contains("heading-only.md"),
+            "error must name the offending file: {error}"
+        );
+    }
+
+    #[test]
+    fn extract_doc_summary_fails_loudly_with_no_h1() {
+        let text = "## What it is\n\nNo H1 above this.\n";
+        let error = extract_doc_summary(text, "no-h1.md").unwrap_err();
+        assert!(error.to_string().contains("no-h1.md"));
+    }
+
+    /// Every real doc under `docs/` (minus the explicit skip list) must
+    /// produce a usable title and summary -- this is the check that would
+    /// fail loudly, naming the file, the moment a new doc lands without a
+    /// `## What it is` section and no prose under its H1 either.
+    #[test]
+    fn generate_docs_index_succeeds_over_the_real_doc_tree() -> Result<()> {
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let generated = generate_docs_index(&workspace_root)?;
+        assert!(generated.contains("# Lodestone docs"));
+        assert!(generated.contains("## Roadmap"));
+        assert!(generated.contains("## Plans and research"));
+        // Every doc that exists on disk must appear as a link target
+        // somewhere in the output, so nothing was silently dropped.
+        for path in read_md_dir_sorted(&workspace_root.join("docs"))? {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            if name == "README.md" || DOCS_INDEX_SKIP.contains(&name) {
+                continue;
+            }
+            assert!(
+                generated.contains(name),
+                "docs/{name} is missing from the generated index"
+            );
+        }
+        Ok(())
+    }
+
+    /// The drift guard: `docs/README.md` must be exactly what the generator
+    /// produces from the current doc tree. Regenerate with
+    /// `LODESTONE_REGEN=1 cargo test -p xtask docs_index_matches_committed`
+    /// (same pattern as `crates/lodestone-data/tests/hardness.rs`'s
+    /// `committed_table_matches_dump`) or `cargo xtask docs-index`.
+    #[test]
+    fn docs_index_matches_committed() -> Result<()> {
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let generated = generate_docs_index(&workspace_root)?;
+
+        if std::env::var_os("LODESTONE_REGEN").is_some() {
+            let out_path = docs_index_out_path(&workspace_root);
+            std::fs::write(&out_path, &generated)?;
+            eprintln!("regenerated {}", out_path.display());
+            return Ok(());
+        }
+
+        let committed = std::fs::read_to_string(docs_index_out_path(&workspace_root))?;
+        assert_eq!(
+            generated, committed,
+            "docs/README.md is stale vs the doc tree -- regenerate with `cargo xtask docs-index` \
+             or `LODESTONE_REGEN=1 cargo test -p xtask docs_index_matches_committed`"
         );
         Ok(())
     }
