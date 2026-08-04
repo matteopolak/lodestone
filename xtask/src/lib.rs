@@ -3481,9 +3481,21 @@ fn delegate_function_calls(
     while let Some(pos) = body[start..].find('(') {
         let open = start + pos;
         let name_end = open;
+        // `rfind` hands back the byte index where the matching character
+        // *starts*, which is only safe to step past with `+ 1` if that
+        // character is one byte (ASCII). `body` is raw source text with no
+        // comment-skipping (unlike `find_outside_comments`/`matching_brace`),
+        // so a comment containing a multi-byte character directly against an
+        // identifier -- no space, e.g. `note—decode(` -- lands `idx + 1`
+        // mid-character and panics on the slice below. `char_indices` gives
+        // the matched char itself, so `idx + ch.len_utf8()` is the byte
+        // offset just past the *whole* character, which is always a valid
+        // boundary.
         let name_start = body[..name_end]
-            .rfind(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
-            .map_or(0, |idx| idx + 1);
+            .char_indices()
+            .rev()
+            .find(|&(_, ch)| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .map_or(0, |(idx, ch)| idx + ch.len_utf8());
         let name = body[name_start..name_end].trim();
         let receiver_call = name_start > 0
             && matches!(body.as_bytes().get(name_start - 1), Some(b'.') | Some(b':'));
@@ -8942,6 +8954,48 @@ fn handle_play(
             arms.len()
         );
         Ok(())
+    }
+
+    /// `delegate_function_calls` scans raw source text (comments included --
+    /// it has none of `find_outside_comments`/`matching_brace`'s comment
+    /// awareness) for `identifier(` calls by walking backward from each `(`
+    /// with `str::rfind` to find the start of the identifier. `rfind` hands
+    /// back the **byte** index where the matching (non-identifier) character
+    /// *starts*, and the old code did `idx + 1` to step past it -- correct
+    /// only if that character is one byte (ASCII). A multi-byte character
+    /// sitting directly against an identifier, with no space between (the
+    /// shape a comment like `note—decode(payload)` takes), makes `idx + 1`
+    /// land mid-character, and the subsequent `body[name_start..name_end]`
+    /// panics with "byte index N is not a char boundary".
+    ///
+    /// This is a distinct bug from the lifetime-vs-char-literal one fixed in
+    /// `e164d06` (`char_literal_span`): that one was in the three
+    /// comment/string scanners and is already repaired. This one is in the
+    /// unrelated identifier-boundary arithmetic here, still `idx + 1`, and it
+    /// is exactly the class CLAUDE.md's evidence standard requires a test
+    /// that visibly fails before the fix for. Em dash (3 bytes), `é` (2
+    /// bytes), and `中` (3 bytes) are the minimal non-ASCII set: pure ASCII
+    /// input cannot exercise a char-boundary bug at all.
+    #[test]
+    fn delegate_function_calls_does_not_panic_on_multibyte_characters_before_an_identifier() {
+        let mut functions = BTreeMap::new();
+        functions.insert("decode".to_owned(), FunctionBody { body: "" });
+        for body in [
+            "// note—decode(payload)\n",
+            "// café—decode(payload)\n",
+            "// 中—decode(payload)\n",
+        ] {
+            // Not just "does not panic": the identifier extraction must
+            // still land on the right boundary and find the real call, or a
+            // fix that merely avoided the panic (e.g. by giving up on the
+            // whole line) would pass a vacuous version of this test.
+            let delegates = delegate_function_calls(body, &functions);
+            assert_eq!(
+                delegates,
+                vec!["decode".to_owned()],
+                "wrong delegate extracted from {body:?}"
+            );
+        }
     }
 
     #[test]
