@@ -449,3 +449,165 @@ pub fn stem_color(age: u8) -> Rgb {
     let b = (a * 4) & 0xFF;
     (r << 16) | (g << 8) | b
 }
+
+/// A biome's `effects` compound plus its top-level `temperature`/`downfall` —
+/// everything [`BiomeTint`] needs for one biome, read directly off the biome's
+/// own definition rather than sampled from a colormap PNG.
+///
+/// Verified against `.cache/mc/26.2/src/data/minecraft/worldgen/biome/*.json`
+/// (Mojang's own generated data, tier 1 in `CLAUDE.md`'s data-source order) —
+/// every one of the 66 files gated by `docs/worldgen-biomes.md`'s "66/66"
+/// check. `water_color`, `grass_color`, `foliage_color` and
+/// `dry_foliage_color` are `effects.*_color`; `grass_modifier` is
+/// `effects.grass_color_modifier`; `temperature`/`downfall` are the
+/// biome-level fields `Biome.ClimateSettings` reads (see
+/// [`Colormap::sample`]'s doc for why those two, not the override colours,
+/// still need clamping downstream).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BiomeEffects {
+    /// Declared `temperature`, matching `Biome.getBaseTemperature()`.
+    pub temperature: f32,
+    /// Declared `downfall`.
+    pub downfall: f32,
+    /// `effects.water_color` — every 26.2 biome declares one (no `Option`,
+    /// unlike the three colormap overrides below).
+    pub water_color: Rgb,
+    /// `effects.grass_color`, when the biome overrides the grass colormap
+    /// (badlands' dead grass, the cherry blossoms' pink, etc.).
+    pub grass_color: Option<Rgb>,
+    /// `effects.foliage_color` override.
+    pub foliage_color: Option<Rgb>,
+    /// `effects.dry_foliage_color` override.
+    pub dry_foliage_color: Option<Rgb>,
+    /// `effects.grass_color_modifier` (`"swamp"`/`"dark_forest"`/absent).
+    pub grass_modifier: GrassColorModifier,
+}
+
+/// Every 26.2 biome's [`BiomeEffects`], keyed by its path (no `minecraft:`
+/// namespace — see [`biome_effects`]). Sorted alphabetically, matching the 66
+/// files enumerated above; the sort order carries no meaning of its own since
+/// [`biome_effects`] looks up by name, not by index.
+#[rustfmt::skip]
+const BIOME_EFFECTS: &[(&str, BiomeEffects)] = &[
+    ("badlands", BiomeEffects { temperature: 2.0f32, downfall: 0.0f32, water_color: 0x3F76E4, grass_color: Some(0x90814D), foliage_color: Some(0x9E814D), dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("bamboo_jungle", BiomeEffects { temperature: 0.95f32, downfall: 0.9f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("basalt_deltas", BiomeEffects { temperature: 2.0f32, downfall: 0.0f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("beach", BiomeEffects { temperature: 0.8f32, downfall: 0.4f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("birch_forest", BiomeEffects { temperature: 0.6f32, downfall: 0.6f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("cherry_grove", BiomeEffects { temperature: 0.5f32, downfall: 0.8f32, water_color: 0x5DB7EF, grass_color: Some(0xB6DB61), foliage_color: Some(0xB6DB61), dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("cold_ocean", BiomeEffects { temperature: 0.5f32, downfall: 0.5f32, water_color: 0x3D57D6, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("crimson_forest", BiomeEffects { temperature: 2.0f32, downfall: 0.0f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("dark_forest", BiomeEffects { temperature: 0.7f32, downfall: 0.8f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: Some(0x7B5334), grass_modifier: GrassColorModifier::DarkForest }),
+    ("deep_cold_ocean", BiomeEffects { temperature: 0.5f32, downfall: 0.5f32, water_color: 0x3D57D6, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("deep_dark", BiomeEffects { temperature: 0.8f32, downfall: 0.4f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("deep_frozen_ocean", BiomeEffects { temperature: 0.5f32, downfall: 0.5f32, water_color: 0x3938C9, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("deep_lukewarm_ocean", BiomeEffects { temperature: 0.5f32, downfall: 0.5f32, water_color: 0x45ADF2, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("deep_ocean", BiomeEffects { temperature: 0.5f32, downfall: 0.5f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("desert", BiomeEffects { temperature: 2.0f32, downfall: 0.0f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("dripstone_caves", BiomeEffects { temperature: 0.8f32, downfall: 0.4f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("end_barrens", BiomeEffects { temperature: 0.5f32, downfall: 0.5f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("end_highlands", BiomeEffects { temperature: 0.5f32, downfall: 0.5f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("end_midlands", BiomeEffects { temperature: 0.5f32, downfall: 0.5f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("eroded_badlands", BiomeEffects { temperature: 2.0f32, downfall: 0.0f32, water_color: 0x3F76E4, grass_color: Some(0x90814D), foliage_color: Some(0x9E814D), dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("flower_forest", BiomeEffects { temperature: 0.7f32, downfall: 0.8f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("forest", BiomeEffects { temperature: 0.7f32, downfall: 0.8f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("frozen_ocean", BiomeEffects { temperature: 0.0f32, downfall: 0.5f32, water_color: 0x3938C9, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("frozen_peaks", BiomeEffects { temperature: -0.7f32, downfall: 0.9f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("frozen_river", BiomeEffects { temperature: 0.0f32, downfall: 0.5f32, water_color: 0x3938C9, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("grove", BiomeEffects { temperature: -0.2f32, downfall: 0.8f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("ice_spikes", BiomeEffects { temperature: 0.0f32, downfall: 0.5f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("jagged_peaks", BiomeEffects { temperature: -0.7f32, downfall: 0.9f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("jungle", BiomeEffects { temperature: 0.95f32, downfall: 0.9f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("lukewarm_ocean", BiomeEffects { temperature: 0.5f32, downfall: 0.5f32, water_color: 0x45ADF2, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("lush_caves", BiomeEffects { temperature: 0.5f32, downfall: 0.5f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("mangrove_swamp", BiomeEffects { temperature: 0.8f32, downfall: 0.9f32, water_color: 0x3A7A6A, grass_color: None, foliage_color: Some(0x8DB127), dry_foliage_color: Some(0x7B5334), grass_modifier: GrassColorModifier::Swamp }),
+    ("meadow", BiomeEffects { temperature: 0.5f32, downfall: 0.8f32, water_color: 0x0E4ECF, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("mushroom_fields", BiomeEffects { temperature: 0.9f32, downfall: 1.0f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("nether_wastes", BiomeEffects { temperature: 2.0f32, downfall: 0.0f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("ocean", BiomeEffects { temperature: 0.5f32, downfall: 0.5f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("old_growth_birch_forest", BiomeEffects { temperature: 0.6f32, downfall: 0.6f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("old_growth_pine_taiga", BiomeEffects { temperature: 0.3f32, downfall: 0.8f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("old_growth_spruce_taiga", BiomeEffects { temperature: 0.25f32, downfall: 0.8f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("pale_garden", BiomeEffects { temperature: 0.7f32, downfall: 0.8f32, water_color: 0x76889D, grass_color: Some(0x778272), foliage_color: Some(0x878D76), dry_foliage_color: Some(0xA0A69C), grass_modifier: GrassColorModifier::None }),
+    ("plains", BiomeEffects { temperature: 0.8f32, downfall: 0.4f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("river", BiomeEffects { temperature: 0.5f32, downfall: 0.5f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("savanna", BiomeEffects { temperature: 2.0f32, downfall: 0.0f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("savanna_plateau", BiomeEffects { temperature: 2.0f32, downfall: 0.0f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("small_end_islands", BiomeEffects { temperature: 0.5f32, downfall: 0.5f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("snowy_beach", BiomeEffects { temperature: 0.05f32, downfall: 0.3f32, water_color: 0x3D57D6, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("snowy_plains", BiomeEffects { temperature: 0.0f32, downfall: 0.5f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("snowy_slopes", BiomeEffects { temperature: -0.3f32, downfall: 0.9f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("snowy_taiga", BiomeEffects { temperature: -0.5f32, downfall: 0.4f32, water_color: 0x3D57D6, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("soul_sand_valley", BiomeEffects { temperature: 2.0f32, downfall: 0.0f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("sparse_jungle", BiomeEffects { temperature: 0.95f32, downfall: 0.8f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("stony_peaks", BiomeEffects { temperature: 1.0f32, downfall: 0.3f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("stony_shore", BiomeEffects { temperature: 0.2f32, downfall: 0.3f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("sulfur_caves", BiomeEffects { temperature: 0.8f32, downfall: 0.4f32, water_color: 0x34BF89, grass_color: Some(0xABA64F), foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("sunflower_plains", BiomeEffects { temperature: 0.8f32, downfall: 0.4f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("swamp", BiomeEffects { temperature: 0.8f32, downfall: 0.9f32, water_color: 0x617B64, grass_color: None, foliage_color: Some(0x6A7039), dry_foliage_color: Some(0x7B5334), grass_modifier: GrassColorModifier::Swamp }),
+    ("taiga", BiomeEffects { temperature: 0.25f32, downfall: 0.8f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("the_end", BiomeEffects { temperature: 0.5f32, downfall: 0.5f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("the_void", BiomeEffects { temperature: 0.5f32, downfall: 0.5f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("warm_ocean", BiomeEffects { temperature: 0.5f32, downfall: 0.5f32, water_color: 0x43D5EE, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("warped_forest", BiomeEffects { temperature: 2.0f32, downfall: 0.0f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("windswept_forest", BiomeEffects { temperature: 0.2f32, downfall: 0.3f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("windswept_gravelly_hills", BiomeEffects { temperature: 0.2f32, downfall: 0.3f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("windswept_hills", BiomeEffects { temperature: 0.2f32, downfall: 0.3f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("windswept_savanna", BiomeEffects { temperature: 2.0f32, downfall: 0.0f32, water_color: 0x3F76E4, grass_color: None, foliage_color: None, dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+    ("wooded_badlands", BiomeEffects { temperature: 2.0f32, downfall: 0.0f32, water_color: 0x3F76E4, grass_color: Some(0x90814D), foliage_color: Some(0x9E814D), dry_foliage_color: None, grass_modifier: GrassColorModifier::None }),
+];
+
+/// Looks up a biome's [`BiomeEffects`] by name. Accepts either the bare path
+/// (`"swamp"`) or the namespaced id (`"minecraft:swamp"`) — a caller reading a
+/// wire biome name doesn't have to strip the namespace first.
+#[must_use]
+pub fn biome_effects(id: &str) -> Option<&'static BiomeEffects> {
+    let path = id.strip_prefix("minecraft:").unwrap_or(id);
+    BIOME_EFFECTS
+        .iter()
+        .find(|(name, _)| *name == path)
+        .map(|(_, effects)| effects)
+}
+
+/// Vanilla's biome-tint smoothing kernel: a `(2*radius+1)²` box average of a
+/// per-position colour, sampled at `radius`-many neighbours on each side of
+/// `(x, z)` at a fixed height. Matches `ClientLevel.calculateBlockTint`
+/// (`ClientLevel.java:1012-1034`) exactly, including its per-channel integer
+/// (floor) division — `sample` should already be vanilla's un-blended
+/// `ColorResolver.getColor` for one position (i.e. one [`Colormaps::resolve`]
+/// call), and this function performs the averaging **around** it, matching
+/// the split between `Biome.getGrassColor`/`getFoliageColor`/`getWaterColor`
+/// (one point) and `calculateBlockTint` (the box that wraps them).
+///
+/// `radius: 0` skips the loop entirely and returns `sample(x, z)` directly —
+/// vanilla's own `dist == 0` fast path, which the "Fast" video-settings
+/// preset selects, and which incidentally makes `radius: 0` and *no* biome
+/// tint (a single-sample world) diverge only in what `sample` does, not in
+/// this function's control flow.
+///
+/// The default `biomeBlendRadius` is `2` (`Options.java:472`,
+/// `new OptionInstance.IntRange(0, 7, false), 2, …`), giving the vanilla
+/// default 5x5 = 25-sample average this crate's callers should use unless a
+/// video setting says otherwise (this client has no such setting yet, so `2`
+/// is not a guess — it is the only value reachable).
+#[must_use]
+pub fn blend_box<F: FnMut(i32, i32) -> Rgb>(x: i32, z: i32, radius: i32, mut sample: F) -> Rgb {
+    if radius <= 0 {
+        return sample(x, z);
+    }
+    let count = ((radius * 2 + 1) * (radius * 2 + 1)) as u32;
+    let (mut r, mut g, mut b) = (0u32, 0u32, 0u32);
+    for dz in -radius..=radius {
+        for dx in -radius..=radius {
+            let c = sample(x + dx, z + dz);
+            r += (c >> 16) & 0xFF;
+            g += (c >> 8) & 0xFF;
+            b += c & 0xFF;
+        }
+    }
+    ((r / count) << 16) | ((g / count) << 8) | (b / count)
+}
+
+/// Vanilla's default biome-blend radius (`Options.java:472`). See
+/// [`blend_box`]'s doc for why this is the only reachable value right now.
+pub const DEFAULT_BLEND_RADIUS: i32 = 2;

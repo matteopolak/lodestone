@@ -589,6 +589,10 @@ pub(crate) fn push_part_quads(
                 tint: 255,
                 anim: 0,
                 _pad: 0,
+                // No biome tint on entities (see `models` module docs' D1
+                // note: entities share `ModelVertex`'s layout but carry no
+                // tint), so this override is always inert.
+                tint_rgb_override: [0, 0, 0, 0],
             });
         }
         // Wind the two triangles so the geometric normal agrees with the baked

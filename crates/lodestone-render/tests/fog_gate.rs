@@ -69,6 +69,7 @@ fn white_quad() -> ModelMesh {
         tint: 255,
         anim: 0,
         _pad: 0,
+        tint_rgb_override: [0, 0, 0, 0],
     };
     ModelMesh {
         vertices: vec![

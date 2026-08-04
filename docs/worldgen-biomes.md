@@ -102,29 +102,26 @@ existed — nothing new needed on the wire-format side).
   exists — regenerate the list with `awk '/^row\./{print $2}' scripts/worldgen-oracle/biome_java.txt
   | sort -u`. Replace this table with the real synced order once registry-data sync lands; don't
   treat it as a substitute for that.
-- **No render-side consumer exists yet.** `crates/lodestone-assets/src/tint.rs` already defines a
-  `BiomeTint` trait and `Colormaps::resolve` for grass/foliage/water tint, but nothing in
-  `crates/lodestone-shell` implements `BiomeTint` (checked directly — zero implementors at the time
-  this landed, and **still zero** as of the #25/#26 biome-climate-lane session that re-checked it: the
-  only `impl BiomeTint` anywhere in the workspace is a test mock in
-  `crates/lodestone-assets/tests/tint.rs`). So although real biome ids now reach the wire and decode
-  correctly (`crates/protocol/v770`'s `encode_chunk_carries_real_per_quart_biome` proves the whole
-  chain), grass color on screen will stay uniform until a render-layers consumer reads
-  `ChunkSection::biome_at_block` and implements `BiomeTint`. **Surface material already varies**
-  independent of tint (sand/snow/etc. come from the surface-rule `biome` condition, which this issue
-  did wire up), so the world is not visually flat — just not yet tinted correctly.
-  That same session added the **data** half of what a `BiomeTint` implementor would need —
-  `ClientRegistries::biome_climates` (`crates/protocol/v770/src/packets/registry.rs`) decodes
-  `temperature`/`downfall`/`has_precipitation` per biome holder id, reaching the shell as
-  `ClientEvent::BiomeClimates` — but built it for `docs/weather.md`'s snow gap (which needs only
-  `temperature`+`has_precipitation`), not for tint (which additionally needs `grass_color`/
-  `foliage_color`/`water_color` overrides and the `grass_color_modifier` out of the biome's `effects`
-  compound, neither of which is decoded yet). A `BiomeTint` implementor is real, separately-scoped
-  work: a struct bundling per-position biome lookup (already possible via
-  `ClientHandle::section_at` + `ChunkSection::biome_at_block`) with a climate table, wired into
-  whichever pass builds vertex colours (`lodestone-render`'s block-model mesher) — none of that
-  landed this session, since the mesher passes it would touch were under concurrent edit by another
-  agent for the session's whole duration.
+- **Render-side consumer now exists — see [`biome-tint.md`](./biome-tint.md).** This bullet used to
+  say zero implementors of `BiomeTint`; that is no longer true. `crates/lodestone-shell/src/
+  mesher.rs`'s `SnapshotModelView`/`SnapshotFluidView` (the real views `MeshScheduler` meshes
+  through) now implement `ModelSectionView::biome_tint_at`/`FluidSectionView::water_tint_at`,
+  resolving each grass/foliage/dry-foliage/water quad's *real*, vanilla-box-blended colour via a new
+  `lodestone_assets::tint::BiomeEffects` table (jar-derived, 66 biomes) and
+  `crates/lodestone-render/src/biome_tint.rs`'s `NamedBiomeTint`/`resolve_blended_tint`. Proven live
+  against a real `client.jar` in `crates/lodestone-shell/tests/biome_tint_live_mesh.rs`: two grass
+  blocks in the same section, one in desert one in swamp biome, render `[191, 183, 85]` and
+  `[0x6A, 0x70, 0x39]` respectively (the second value predicted exactly from the jar source
+  independent of this code, since `GrassColorModifier::Swamp` ignores the colormap entirely).
+  **What is not solved by this**: the id→name mapping this consumer uses
+  (`mesher.rs`'s `FALLBACK_BIOME_NAMES`) is a **provisional** local mirror of
+  `crates/protocol/v770/src/server_protocol.rs`'s `BIOME_NAMES` — correct against this codebase's
+  own server (the only one it can host), not necessarily against a real vanilla server, whose actual
+  registry-sync order this client already decodes correctly
+  (`ClientRegistries::entry_names(BIOME)`) but does not yet thread from `net.rs` into the mesher's
+  worker threads. See `biome-tint.md`'s "Gotchas" for the follow-up. The swamp/mangrove-swamp
+  two-tone noise term (`Biome.BIOME_INFO_NOISE`) also stays unported — 64 of 66 biomes are
+  unaffected by that gap.
 - **`chunks_biomes` (protocol issue #26) is decoded and reaches the world**, independently of tint:
   `World::merge_biomes` (`crates/lodestone-world/src/world.rs`) applies a live biome edit (vanilla's
   `/fillbiome`) to an already-loaded column without touching its block state, and

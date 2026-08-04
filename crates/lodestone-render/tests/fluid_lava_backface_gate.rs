@@ -124,6 +124,7 @@ fn to_clip_space_mesh(quads: &[lodestone_assets::BakedQuad]) -> ModelMesh {
                 tint: 255,
                 anim: quad.anim,
                 _pad: 0,
+                tint_rgb_override: [0, 0, 0, 0],
             });
         }
         mesh.indices

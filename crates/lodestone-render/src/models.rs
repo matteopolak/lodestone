@@ -75,8 +75,10 @@
 //! other — different texture source and lighting — regardless of vertex width, so
 //! the shader/pipeline count is set by texture-source and lighting differences,
 //! not by how many vertex *formats* exist. Collapsing blocks to one wide format
-//! would still leave ≥2 pipelines, while paying **1.9× per quad** (72 → 136 bytes
-//! incl. indices; 2.33× per vertex, 12 → 28) on the single largest consumer, (1).
+//! would still leave ≥2 pipelines, while paying **2.1× per quad** (72 → 152 bytes
+//! incl. indices; 2.67× per vertex, 12 → 32 — the 28→32 growth is
+//! `tint_rgb_override`, added later for real per-position biome tint) on the
+//! single largest consumer, (1).
 //! See [`model_vram_bytes`] vs [`crate::vertex::vram_bytes`].
 //!
 //! So entities *strengthen* the split rather than weakening it: the wide path's
@@ -135,14 +137,57 @@ pub struct ModelVertex {
     pub anim: u8,
     /// Padding to keep the struct `4`-byte aligned and `Pod`-friendly.
     pub _pad: u8,
+    /// A **real, position-resolved** biome tint colour, or an untinted/inert
+    /// sentinel — see [`Self::tint_rgb_override`]. `tint` above still indexes
+    /// the frame-shared palette (group 2) for [`TintKind::Constant`]/
+    /// [`TintKind::RedstonePower`]/untinted quads, which do not vary by
+    /// position; this field exists because the palette *cannot* hold a
+    /// different colour per section for the four kinds that do (grass,
+    /// foliage, dry-foliage, water — see `block_models::biome_tint_slot`'s
+    /// doc). `.w` (alpha) is the override flag: `0` means "no override, read
+    /// the palette at `tint` as before" and `255` means "use `.rgb` directly".
+    /// A **new, additive vertex attribute** rather than a vertex-format
+    /// change to the existing four: no bind group is touched (vertex
+    /// attributes cost nothing against the 4-group floor), and every existing
+    /// caller that never sets this (GUI items, headless tests, an untinted
+    /// quad) keeps rendering exactly as before because the flag defaults to
+    /// `0`.
+    ///
+    /// [`TintKind::Constant`]: lodestone_assets::tint::TintKind::Constant
+    /// [`TintKind::RedstonePower`]: lodestone_assets::tint::TintKind::RedstonePower
+    pub tint_rgb_override: [u8; 4],
 }
 
 impl ModelVertex {
-    /// The `wgpu` vertex-buffer layout for the wide model vertex.
+    /// The `wgpu` vertex-buffer layout for the wide model vertex, **not**
+    /// carrying [`tint_rgb_override`](Self::tint_rgb_override) as a shader
+    /// input.
     ///
-    /// Four attributes over the 28-byte stride: position (`Float32x3`), UV
-    /// (`Float32x2`), AO (`Float32`), and the packed `light`/`tint`/pad tail as a
-    /// single `Uint8x4` the shader unpacks. Locations `0..=3`.
+    /// Four attributes over the 32-byte stride: position (`Float32x3`), UV
+    /// (`Float32x2`), AO (`Float32`), and the packed `light`/`tint`/`anim`/pad
+    /// tail as one `Uint8x4`. Locations `0..=3`.
+    ///
+    /// This is the layout [`crate::entity_pipeline`] builds its own
+    /// **instance** buffer's attributes on top of, starting at location `4`
+    /// (`entity_pipeline.rs`: "Instance attributes start at location 4, past
+    /// `ModelVertex`'s 0..=3") — so this method's location range is a promise
+    /// to that pipeline, not just a description of the struct, and must never
+    /// grow. [`Self::vertex_layout_with_biome_tint`] is the model/fluid
+    /// pipelines' own five-attribute variant, kept as a **separate** method
+    /// for exactly this reason: growing *this* one to expose
+    /// `tint_rgb_override` at location `4` collided with the entity
+    /// pipeline's instance attributes there — measured directly, a
+    /// `wgpu` validation panic ("Two or more vertex attributes were assigned
+    /// to the same location in the shader: 4") on every entity pixel gate,
+    /// caught by running them after this feature's other 771 render-crate
+    /// tests had already gone green.
+    ///
+    /// The `array_stride` is still the full 32-byte struct size (not 28):
+    /// `tint_rgb_override` still occupies real space in every uploaded
+    /// vertex, it is just four bytes this layout doesn't expose to a shader —
+    /// exactly like the entity shader already not reading the `light` field
+    /// meaningfully (`push_part_quads`'s doc: "The entity shader does **not**
+    /// read this byte") despite the field being present in every vertex.
     #[must_use]
     pub const fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
         const ATTRS: [wgpu::VertexAttribute; 4] = [
@@ -165,6 +210,49 @@ impl ModelVertex {
                 format: wgpu::VertexFormat::Uint8x4,
                 offset: 24,
                 shader_location: 3,
+            },
+        ];
+        wgpu::VertexBufferLayout {
+            array_stride: MODEL_BYTES_PER_VERTEX as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &ATTRS,
+        }
+    }
+
+    /// [`Self::vertex_layout`] plus a fifth attribute exposing
+    /// [`tint_rgb_override`](Self::tint_rgb_override) at location `4` — the
+    /// real, position-resolved biome colour. Used by the **model** and
+    /// **fluid** pipelines only (`model_pipeline.rs`'s `ModelPipeline::build`),
+    /// neither of which has an instance buffer contesting location `4`. Do
+    /// **not** use this for the entity pipeline — see [`Self::vertex_layout`]'s
+    /// doc for why that collides.
+    #[must_use]
+    pub const fn vertex_layout_with_biome_tint() -> wgpu::VertexBufferLayout<'static> {
+        const ATTRS: [wgpu::VertexAttribute; 5] = [
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 0,
+                shader_location: 0,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x2,
+                offset: 12,
+                shader_location: 1,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32,
+                offset: 20,
+                shader_location: 2,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Uint8x4,
+                offset: 24,
+                shader_location: 3,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Uint8x4,
+                offset: 28,
+                shader_location: 4,
             },
         ];
         wgpu::VertexBufferLayout {
@@ -201,7 +289,8 @@ impl ModelMesh {
     }
 }
 
-/// Bytes per wide model vertex (asserted to be 28). This is the format the
+/// Bytes per wide model vertex (asserted to be 32 — see
+/// `tint_rgb_override`'s doc for the 28→32 growth). This is the format the
 /// non-cube block path uses, and the format the entity path can share (see the
 /// D1 note above): the two differ by bind group and lighting, not by layout.
 pub const MODEL_BYTES_PER_VERTEX: usize = core::mem::size_of::<ModelVertex>();
@@ -470,6 +559,30 @@ pub trait ModelSectionView {
         let _ = (x, y, z);
         true
     }
+
+    /// The **real**, position-resolved colour for a biome-dependent quad at
+    /// section-local `(x, y, z)`, or `None` to fall back to the frame-shared
+    /// palette's plains-default colour at that `slot` — exactly today's
+    /// behaviour.
+    ///
+    /// `slot` is the quad's `tint_index` byte (`quad.tint_index.map_or(255,
+    /// |t| t as u8)`), which [`mesh_models`] already computed to build the
+    /// vertex; a view only needs to recognise the four reserved slots
+    /// (`crate::block_models::{GRASS_TINT_SLOT, FOLIAGE_TINT_SLOT,
+    /// DRY_FOLIAGE_TINT_SLOT, WATER_TINT_SLOT}`) and can ignore any other
+    /// value (untinted, or a constant/redstone colour that is not
+    /// position-dependent and has nothing to override).
+    ///
+    /// Defaults to `None` — no live biome data — so every existing view (GUI
+    /// items, headless tests, a demo world with no biome grid at all) keeps
+    /// rendering the exact plains-default palette colour it always has. This
+    /// is the seam a real [`lodestone_assets::tint::BiomeTint`] implementor
+    /// plugs into; see `crates/lodestone-shell/src/mesher.rs`'s
+    /// `SnapshotModelView` for the live one.
+    fn biome_tint_at(&self, x: usize, y: usize, z: usize, slot: u8) -> Option<[u8; 3]> {
+        let _ = (x, y, z, slot);
+        None
+    }
 }
 
 /// AO shade of a fully-occluding corner neighbour. Mirrors [`crate::mesh`]'s
@@ -701,7 +814,15 @@ pub fn mesh_models(view: &dyn ModelSectionView) -> ModelMesh {
                         // same fallback the fluid path uses.
                         [(1.0, light); 4]
                     };
-                    emit_baked_quad(&mut mesh, quad, [x as f32, y as f32, z as f32], corners);
+                    let tint = quad.tint_index.map_or(255u8, |t| t as u8);
+                    let tint_rgb_override = view.biome_tint_at(x, y, z, tint);
+                    emit_baked_quad(
+                        &mut mesh,
+                        quad,
+                        [x as f32, y as f32, z as f32],
+                        corners,
+                        tint_rgb_override,
+                    );
                 }
             }
         }
@@ -735,10 +856,27 @@ fn face_shade(quad: &BakedQuad) -> f32 {
 /// The AO factor multiplies into the constant per-face directional shade, so
 /// a flat caller (`ao_factor` always `1.0`) reproduces the pre-smoothing
 /// behaviour exactly.
-fn emit_baked_quad(mesh: &mut ModelMesh, quad: &BakedQuad, origin: [f32; 3], corners: [(f32, u8); 4]) {
+///
+/// `tint_rgb_override` is the *real*, position-resolved colour for a
+/// biome-dependent quad ([`ModelSectionView::biome_tint_at`]/
+/// [`FluidSectionView::water_tint_at`]), or `None` to keep reading the
+/// frame-shared palette at `quad.tint_index` as before — see
+/// [`ModelVertex::tint_rgb_override`]'s doc for why these are two different
+/// mechanisms rather than one.
+fn emit_baked_quad(
+    mesh: &mut ModelMesh,
+    quad: &BakedQuad,
+    origin: [f32; 3],
+    corners: [(f32, u8); 4],
+    tint_rgb_override: Option<[u8; 3]>,
+) {
     let base = mesh.vertices.len() as u32;
     let shade = face_shade(quad);
     let tint = quad.tint_index.map_or(255u8, |t| t as u8);
+    let tint_rgb_override = match tint_rgb_override {
+        Some([r, g, b]) => [r, g, b, 255],
+        None => [0, 0, 0, 0],
+    };
     for i in 0..4 {
         let p = quad.positions[i];
         let (ao_factor, light) = corners[i];
@@ -750,6 +888,7 @@ fn emit_baked_quad(mesh: &mut ModelMesh, quad: &BakedQuad, origin: [f32; 3], cor
             tint,
             anim: quad.anim,
             _pad: 0,
+            tint_rgb_override,
         });
     }
     // Flip the triangulation diagonal when AO disagrees across it, so the
@@ -819,6 +958,11 @@ pub fn mesh_item_quads(quads: &[BakedQuad], pose: Mat4, gui_light: GuiLight) -> 
                 tint,
                 anim: quad.anim,
                 _pad: 0,
+                // GUI/inventory icons always render vanilla's fixed default
+                // tint (never the world biome the player happens to stand
+                // in — an item in your hotbar does not change colour), so
+                // this path never has an override to carry.
+                tint_rgb_override: [0, 0, 0, 0],
             });
         }
         mesh.indices
@@ -862,6 +1006,22 @@ pub trait FluidSectionView {
     fn overlay_at(&self, x: i32, y: i32, z: i32) -> bool {
         let _ = (x, y, z);
         false
+    }
+
+    /// The **real**, position-resolved water colour at `(x, y, z)`, or `None`
+    /// to fall back to `fluid.wgsl`'s hardcoded `#3F76E4` default — exactly
+    /// today's behaviour. Only ever consulted for a water cell (lava is never
+    /// tinted); see [`ModelSectionView::biome_tint_at`]'s doc for why this is
+    /// a vertex override rather than a palette lookup — the fluid pipeline
+    /// has no palette bind group at all (`ModelPipeline::for_fluid`), so it
+    /// was always going to need its own colour path.
+    ///
+    /// Defaults to `None`, so every existing view (headless tests, a demo
+    /// world with no biome grid) keeps rendering the exact fixed water colour
+    /// it always has.
+    fn water_tint_at(&self, x: i32, y: i32, z: i32) -> Option<[u8; 3]> {
+        let _ = (x, y, z);
+        None
     }
 }
 
@@ -1032,15 +1192,27 @@ pub fn mesh_fluids(view: &dyn FluidSectionView) -> FluidMeshes {
                 };
                 let quads = bake_fluid(&geom, sprites.still, sprites.flow, sprites.overlay);
 
-                let (mesh, light) = match kind {
-                    FluidKind::Water => (&mut out.water, view.light_at(x, y, z)),
-                    FluidKind::Lava => (&mut out.lava, 0xFF),
+                let (mesh, light, tint_rgb_override) = match kind {
+                    FluidKind::Water => (
+                        &mut out.water,
+                        view.light_at(x, y, z),
+                        view.water_tint_at(xi, yi, zi),
+                    ),
+                    // Lava is never tinted (`tint_index` above is `None` for
+                    // it), so it never has an override to look up either.
+                    FluidKind::Lava => (&mut out.lava, 0xFF, None),
                 };
                 // Fluids stay flat by design: uniform light, no AO, per the
                 // module docs on `mesh_fluids`.
                 let corners = [(1.0, light); 4];
                 for quad in &quads {
-                    emit_baked_quad(mesh, quad, [x as f32, y as f32, z as f32], corners);
+                    emit_baked_quad(
+                        mesh,
+                        quad,
+                        [x as f32, y as f32, z as f32],
+                        corners,
+                        tint_rgb_override,
+                    );
                 }
             }
         }
@@ -1055,14 +1227,17 @@ mod tests {
     #[test]
     fn wide_vertex_prices_the_split() {
         // The D1 re-decision rests on these numbers being real, not vibes.
-        assert_eq!(MODEL_BYTES_PER_VERTEX, 28);
+        // 32, not 28: `tint_rgb_override` (a real per-position biome colour,
+        // additive to the existing four attributes) grew the stride by one
+        // more `Uint8x4`.
+        assert_eq!(MODEL_BYTES_PER_VERTEX, 32);
         assert_eq!(crate::vertex::BYTES_PER_VERTEX, 12);
-        // Per quad, including u32 indices: packed 72 B, wide 136 B ≈ 1.9×.
+        // Per quad, including u32 indices: packed 72 B, wide 152 B ≈ 2.1×.
         assert_eq!(crate::vertex::vram_bytes(1), 72);
-        assert_eq!(model_vram_bytes(1), 136);
-        // Collapsing the dominant cube geometry to the wide format would nearly
-        // double its VRAM/bandwidth — the cost the split buys back.
-        assert!(model_vram_bytes(1_000) > crate::vertex::vram_bytes(1_000) * 18 / 10);
+        assert_eq!(model_vram_bytes(1), 152);
+        // Collapsing the dominant cube geometry to the wide format would more
+        // than double its VRAM/bandwidth — the cost the split buys back.
+        assert!(model_vram_bytes(1_000) > crate::vertex::vram_bytes(1_000) * 2);
     }
 
     fn cube_face(dir: Direction, cull: Option<Direction>) -> BakedQuad {
@@ -1650,6 +1825,7 @@ mod tests {
             &quad,
             [0.0, 0.0, 0.0],
             [(1.0, 0xF0), (0.2, 0x00), (1.0, 0xF0), (0.2, 0x00)],
+            None,
         );
         assert_eq!(cut_02.indices, vec![0, 1, 2, 2, 3, 0]);
 
@@ -1660,6 +1836,7 @@ mod tests {
             &quad,
             [0.0, 0.0, 0.0],
             [(0.2, 0x00), (1.0, 0xF0), (0.2, 0x00), (1.0, 0xF0)],
+            None,
         );
         assert_eq!(cut_13.indices, vec![1, 2, 3, 3, 0, 1]);
     }

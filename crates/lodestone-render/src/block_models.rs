@@ -91,7 +91,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use lodestone_assets::fluid::{FluidState, SpriteUv};
-use lodestone_assets::tint::{vanilla_particle_tint_kind, vanilla_tint_kind};
+use lodestone_assets::tint::{TintKind, vanilla_particle_tint_kind, vanilla_tint_kind};
 use lodestone_assets::{
     AnimTable, Atlas, AtlasBuilder, AtlasError, AtlasSprite, BakeOptions, BakedQuad, BlockBaker,
     BlockStates, Direction, DisplayTransform, DisplayTransforms, Element, Face, FirstWeight,
@@ -119,6 +119,77 @@ pub(crate) const PALETTE_LEN: usize = 256;
 /// untinted quad renders `tex.rgb * 1`. [`emit_baked_quad`](crate::models) writes
 /// this for any quad whose `tint_index` is `None`.
 pub(crate) const UNTINTED: u8 = 255;
+
+/// Reserved palette slots for the four **biome-dependent** [`TintKind`]s —
+/// [`TintKind::Grass`]/[`Foliage`](TintKind::Foliage)/
+/// [`DryFoliage`](TintKind::DryFoliage)/[`Water`](TintKind::Water) — as
+/// opposed to [`TintKind::Constant`]/[`TintKind::RedstonePower`], which do not
+/// vary by position and keep going through [`TintPalette::intern`] as before.
+///
+/// # Why these need a *fixed* slot rather than an interned one
+///
+/// The palette is **one uniform buffer shared by every section drawn this
+/// frame** (group 2, bound once — see `model_pipeline.rs`), so it can only
+/// ever hold one colour per slot at a time. That is fine for a constant
+/// colour, but grass in a desert and grass in a swamp are the same
+/// [`TintKind`] with two different *real* colours, and no single slot in a
+/// frame-shared buffer can hold both. So biome-dependent quads no longer
+/// carry their final colour in the palette at all: [`crate::models::
+/// ModelSectionView::biome_tint_at`] resolves the *real*, position-blended
+/// colour at mesh time and writes it straight into the vertex (see
+/// [`crate::models::ModelVertex::tint_rgb_override`]). These four slots exist
+/// only so [`emit_baked_quad`](crate::models) can tell a biome-dependent quad
+/// apart from a constant one by its `tint_index` alone, and so that a view
+/// with **no** live biome data (GUI items, headless tests, a section whose
+/// neighbourhood biome isn't wired) still renders the exact plains-default
+/// colour these slots are pre-filled with in [`TintPalette::new`] — the
+/// fallback path is not a special case, it is simply "no vertex override, so
+/// the shader reads the slot like any other."
+/// Reserved slot for [`TintKind::Water`].
+pub const WATER_TINT_SLOT: u8 = UNTINTED - 1;
+/// Reserved slot for [`TintKind::DryFoliage`].
+pub const DRY_FOLIAGE_TINT_SLOT: u8 = UNTINTED - 2;
+/// Reserved slot for [`TintKind::Foliage`].
+pub const FOLIAGE_TINT_SLOT: u8 = UNTINTED - 3;
+/// Reserved slot for [`TintKind::Grass`].
+pub const GRASS_TINT_SLOT: u8 = UNTINTED - 4;
+
+/// The first slot reserved for [`WATER_TINT_SLOT`]/[`DRY_FOLIAGE_TINT_SLOT`]/
+/// [`FOLIAGE_TINT_SLOT`]/[`GRASS_TINT_SLOT`] — [`TintPalette::intern`] must
+/// never hand out a slot at or past this index, or a popular constant colour
+/// could collide with one of the four biome-dependent slots above.
+const RESERVED_SLOTS_START: u8 = GRASS_TINT_SLOT;
+
+/// The reserved slot for `kind`, or `None` for a kind that still goes through
+/// [`TintPalette::intern`] ([`TintKind::Constant`]/[`TintKind::RedstonePower`]/
+/// [`TintKind::None`]).
+pub fn biome_tint_slot(kind: TintKind) -> Option<u8> {
+    match kind {
+        TintKind::Grass => Some(GRASS_TINT_SLOT),
+        TintKind::Foliage => Some(FOLIAGE_TINT_SLOT),
+        TintKind::DryFoliage => Some(DRY_FOLIAGE_TINT_SLOT),
+        TintKind::Water => Some(WATER_TINT_SLOT),
+        TintKind::None | TintKind::Constant(_) | TintKind::RedstonePower(_) => None,
+    }
+}
+
+/// The inverse of [`biome_tint_slot`]: which biome-dependent [`TintKind`] a
+/// vertex's `tint`/`quad.tint_index` byte names, or `None` for anything else
+/// (untinted, or a position-independent constant/redstone colour). This is
+/// what a live [`crate::models::ModelSectionView::biome_tint_at`]/
+/// [`crate::models::FluidSectionView::water_tint_at`] implementor needs: the
+/// mesher hands back the raw slot byte, and the view must know *which*
+/// colormap/water lookup to run for it.
+#[must_use]
+pub fn biome_tint_kind_for_slot(slot: u8) -> Option<TintKind> {
+    match slot {
+        GRASS_TINT_SLOT => Some(TintKind::Grass),
+        FOLIAGE_TINT_SLOT => Some(TintKind::Foliage),
+        DRY_FOLIAGE_TINT_SLOT => Some(TintKind::DryFoliage),
+        WATER_TINT_SLOT => Some(TintKind::Water),
+        _ => None,
+    }
+}
 
 /// Interns each distinct **default tint colour** into a small palette so a baked
 /// quad can carry a stable palette index (in place of the raw model tint index)
@@ -151,22 +222,51 @@ impl TintPalette {
     }
 
     /// Intern a `0xRRGGBB` colour, returning its palette index. Repeated colours
-    /// reuse their slot. Saturates just below [`UNTINTED`] so the reserved white
-    /// sentinel is never overwritten (unreachable for any real vanilla pack).
+    /// reuse their slot. Saturates just below [`RESERVED_SLOTS_START`] so
+    /// neither the reserved white sentinel ([`UNTINTED`]) nor the four
+    /// biome-dependent slots ([`biome_tint_slot`]) are ever overwritten by an
+    /// unrelated constant colour (well under 50 distinct default tint colours
+    /// exist in vanilla, so this is unreachable for any real pack).
     pub(crate) fn intern(&mut self, rgb: u32) -> u8 {
         if let Some(&idx) = self.lookup.get(&rgb) {
             return idx;
         }
-        let idx = self.next.min(UNTINTED - 1);
+        let idx = self.next.min(RESERVED_SLOTS_START - 1);
         self.colors[idx as usize] = rgb_to_rgba(rgb);
         self.lookup.insert(rgb, idx);
         self.next = self.next.saturating_add(1);
         idx
     }
 
+    /// Force-set a **reserved** slot ([`biome_tint_slot`]'s return value) to a
+    /// colour, bypassing `lookup`/`next` entirely. Used only for the four
+    /// biome-dependent kinds, whose slot is fixed rather than interned — see
+    /// [`biome_tint_slot`]'s doc for why a shared, frame-wide palette cannot
+    /// hold their *real* per-position colour and what this fallback slot is
+    /// for instead.
+    pub(crate) fn reserve(&mut self, slot: u8, rgb: u32) {
+        self.colors[slot as usize] = rgb_to_rgba(rgb);
+    }
+
     /// The `PALETTE_LEN` palette entries, as the model shader's uniform expects.
     pub(crate) fn colors(&self) -> &[[f32; 4]] {
         &self.colors
+    }
+}
+
+/// The palette index a tinted quad of `kind` should carry, given its resolved
+/// **default (plains)** colour `rgb`: the fixed [`biome_tint_slot`] for the
+/// four biome-dependent kinds (pre-filled with `rgb` as the no-live-data
+/// fallback), or an ordinary [`TintPalette::intern`]ed slot for everything
+/// else (`Constant`/`RedstonePower`, which never need a fallback because they
+/// never have a *different* live value to fall back from).
+fn palette_slot_for(kind: TintKind, rgb: u32, palette: &mut TintPalette) -> u8 {
+    match biome_tint_slot(kind) {
+        Some(slot) => {
+            palette.reserve(slot, rgb);
+            slot
+        }
+        None => palette.intern(rgb),
     }
 }
 
@@ -1260,6 +1360,15 @@ pub struct BlockModels {
     /// vanilla blockstate never reaches (or that a resource pack drops) is an
     /// expected absence, not a reason to refuse to render the world.
     item_bake_misses: Vec<String>,
+    /// The grass/foliage/dry-foliage colormaps, loaded once here so a mesher
+    /// with live per-position biome data (a [`crate::models::ModelSectionView`]
+    /// implementor) can resolve a **real** colour instead of the
+    /// [`tint_palette`](Self::tint_palette)'s plains default — see
+    /// [`Self::colormaps`]. `None` only when the pack has no colormap PNGs at
+    /// all (tolerated, matching [`item_bake_misses`](Self::item_bake_misses)'s
+    /// "an absence is not fatal" posture): the reserved palette slots still
+    /// carry a usable fallback colour either way.
+    colormaps: Option<lodestone_assets::tint::Colormaps>,
 }
 
 impl BlockModels {
@@ -1318,6 +1427,10 @@ impl BlockModels {
         // single hardcoded green that made grass, leaves and every other tinted
         // quad render identically.
         let tints = DefaultTints::load(manager);
+        // Same three PNGs `tints` just sampled at plains, kept around whole so
+        // a live mesher can sample them at a *real* biome's temperature/downfall
+        // instead — see `colormaps` field doc.
+        let colormaps = lodestone_assets::tint::Colormaps::load(manager).ok();
         let mut palette = TintPalette::new();
         let count = registry.state_count();
         let mut models = Vec::with_capacity(count as usize);
@@ -1338,8 +1451,9 @@ impl BlockModels {
                         for quad in &mut quads {
                             if let Some(raw) = quad.tint_index {
                                 let kind = vanilla_tint_kind(r.block, raw, r.properties);
-                                quad.tint_index =
-                                    tints.color(kind).map(|rgb| i32::from(palette.intern(rgb)));
+                                quad.tint_index = tints.color(kind).map(|rgb| {
+                                    i32::from(palette_slot_for(kind, rgb, &mut palette))
+                                });
                             }
                         }
                     }
@@ -1417,8 +1531,9 @@ impl BlockModels {
                 for quad in &mut quads {
                     if let Some(raw) = quad.tint_index {
                         let kind = vanilla_tint_kind(&block, raw, &no_props);
-                        quad.tint_index =
-                            tints.color(kind).map(|rgb| i32::from(palette.intern(rgb)));
+                        quad.tint_index = tints
+                            .color(kind)
+                            .map(|rgb| i32::from(palette_slot_for(kind, rgb, &mut palette)));
                     }
                 }
             }
@@ -1549,7 +1664,17 @@ impl BlockModels {
             crack_stages,
             items,
             item_bake_misses,
+            colormaps,
         })
+    }
+
+    /// The grass/foliage/dry-foliage colormaps, for a mesher that wants a
+    /// biome's *real* colour (not the plains default baked into
+    /// [`tint_palette`](Self::tint_palette)). `None` only when the pack's
+    /// colormap PNGs failed to load at build time.
+    #[must_use]
+    pub fn colormaps(&self) -> Option<&lodestone_assets::tint::Colormaps> {
+        self.colormaps.as_ref()
     }
 
     /// The complete stitched block atlas, for

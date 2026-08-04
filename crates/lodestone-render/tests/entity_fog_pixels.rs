@@ -487,6 +487,7 @@ fn plane_mesh(z: f32, half: f32, y_centre: f32, tint: u8) -> ModelMesh {
         tint,
         anim: 0,
         _pad: 0,
+        tint_rgb_override: [0, 0, 0, 0],
     };
     ModelMesh {
         vertices: vec![

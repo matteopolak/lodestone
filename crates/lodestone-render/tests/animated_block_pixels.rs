@@ -120,6 +120,7 @@ fn quad(x0: f32, x1: f32, u0: f32, u1: f32, v0: f32, v1: f32, anim: u8) -> Model
         tint: 255,
         anim,
         _pad: 0,
+        tint_rgb_override: [0, 0, 0, 0],
     };
     ModelMesh {
         vertices: vec![
