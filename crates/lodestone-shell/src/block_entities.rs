@@ -108,10 +108,10 @@ use std::collections::HashMap;
 
 use glam::Vec3;
 use lodestone_render::{
-    ChestHalf, ChestMaterial, ChestSpawn, SkullOrientation, SkullSpawn, SkullType,
-    horizontal_facing_yaw,
+    ChestHalf, ChestMaterial, ChestSpawn, SignOrientation, SignSpawn, SkullOrientation,
+    SkullSpawn, SkullType, horizontal_facing_yaw,
 };
-use lodestone_world::{ChunkPos, World};
+use lodestone_world::{ChunkPos, SignText, World};
 
 use crate::net::{SharedHandle, entity_light_at};
 
@@ -519,6 +519,162 @@ pub fn skull_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<SkullSpawn> {
     out
 }
 
+/// Resolves a block's registry path into whether it is a ported *plain*
+/// (standing/wall) sign — `None` for anything that is not a sign at all, or
+/// that is a **hanging** sign (a different model set again, deferred: see
+/// `docs/block-entity-renderers.md`'s Sign section).
+///
+/// Every plain sign block path ends in `_sign`, including the wall variant
+/// (`oak_wall_sign`); a hanging one always contains `hanging`
+/// (`oak_hanging_sign`, `oak_wall_hanging_sign`) — checked first so it is
+/// never mistaken for a plain sign by the shared `_sign` suffix.
+#[must_use]
+fn is_plain_sign_path(path: &str) -> bool {
+    !path.contains("hanging") && path.ends_with("_sign")
+}
+
+/// Resolves one block state id into whether it names a ported plain sign —
+/// `None` for anything else, including a hanging sign (see
+/// [`is_plain_sign_path`]).
+#[must_use]
+fn sign_kind_for_state(state_id: u32) -> Option<()> {
+    let name = lodestone_data::block_states::block_name(state_id)?;
+    let path = name.strip_prefix("minecraft:").unwrap_or(name);
+    is_plain_sign_path(path).then_some(())
+}
+
+/// Reads a plain sign's placement — `rotation` (`0..16`, ground) or `facing`
+/// (wall) — into [`SignOrientation`]. Mirrors [`skull_orientation`] exactly:
+/// a real sign state carries exactly one of the two (`oak_sign.json` has
+/// `rotation`, `oak_wall_sign.json` has `facing`), and `None` for a state
+/// with neither cannot happen for a real sign.
+#[must_use]
+fn sign_orientation(state_id: u32) -> Option<SignOrientation> {
+    let props = lodestone_data::block_states::properties(state_id)?;
+    for (name, value) in props {
+        match *name {
+            "rotation" => {
+                return value
+                    .parse::<u8>()
+                    .ok()
+                    .map(|rotation_segment| SignOrientation::Ground { rotation_segment });
+            }
+            "facing" => {
+                return horizontal_facing_yaw(value)
+                    .map(|facing_yaw_deg| SignOrientation::Wall { facing_yaw_deg });
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Every sign block-entity position within [`VIEW_DISTANCE`], paired with its
+/// block state **and** typed text — the one candidate gather in this module
+/// that needs the NBT half of a [`lodestone_world::BlockEntity`], because
+/// sign text lives there and nowhere else (see
+/// `docs/block-entity-renderers.md`'s Sign section for the captured wire
+/// shape). [`chest_candidates`] cannot be reused here: it deliberately
+/// discards `be.nbt` because neither chest nor skull reads it, and widening
+/// its return type would ripple through both of those working, tested
+/// gathers for a field only this caller needs. The NBT is parsed into
+/// [`SignText`] right here rather than threaded further as a raw
+/// [`lodestone_core::Nbt`] — nothing downstream wants the untyped form.
+#[must_use]
+fn sign_candidates(
+    world: &World,
+    chunks: impl IntoIterator<Item = ChunkPos>,
+    eye: Vec3,
+) -> Vec<([i32; 3], u32, SignText)> {
+    let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
+    let mut candidates = Vec::new();
+    for pos in chunks {
+        let Some(chunk) = world.get(pos) else {
+            continue;
+        };
+        for be in &chunk.block_entities {
+            let x = pos.x * 16 + i32::from(be.rel_x);
+            let z = pos.z * 16 + i32::from(be.rel_z);
+            let y = i32::from(be.y);
+            let centre = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+            if centre.distance_squared(eye) > cutoff {
+                continue;
+            }
+            let state_id = chunk
+                .column
+                .get_block(usize::from(be.rel_x), y, usize::from(be.rel_z));
+            candidates.push(([x, y, z], state_id, SignText::parse(&be.nbt)));
+        }
+    }
+    candidates
+}
+
+/// One candidate resolved into a [`SignSpawn`], or `None` if the state at
+/// that position is not a ported plain sign. Same shape as [`chest_spawn`]/
+/// [`skull_spawn`]: the block **state** is the truth about whether this is a
+/// sign at all and how it sits, so a stale or orphan record whose state is
+/// not a sign draws nothing.
+#[must_use]
+fn sign_spawn(block: [i32; 3], state_id: u32, text: SignText, light: u8) -> Option<SignSpawn> {
+    sign_kind_for_state(state_id)?;
+    let orientation = sign_orientation(state_id)?;
+    Some(SignSpawn {
+        pos: block,
+        orientation,
+        front: text.front,
+        back: text.back,
+        light,
+    })
+}
+
+/// Every sign to draw this frame, gathered from the client-owned world's
+/// block-entity records. `eye` is the camera position, the same gate
+/// [`chest_spawns`]/[`skull_spawns`] apply. No lid-style animation state:
+/// sign text does not animate, so there is nothing here to tick.
+///
+/// Sorted by position for the same reason [`chest_spawns`] is — deterministic
+/// batch order for pixel gates, not a correctness requirement of the draw
+/// itself.
+#[must_use]
+pub fn sign_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<SignSpawn> {
+    let Some(client) = handle.get() else {
+        return Vec::new();
+    };
+    let store = client.chunk_world();
+
+    // Same lock-ordering rule as `chest_spawns`: `loaded_chunks()` takes its
+    // own read lock, so it must not be called from inside the guard below.
+    let chunks = client.loaded_chunks();
+
+    let candidates = {
+        let world = store.read();
+        sign_candidates(
+            &world,
+            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            eye,
+        )
+    };
+
+    let sky_default = {
+        let player = client.player();
+        crate::mesher::sky_default_for_dimension(
+            player.dimension.as_ref(),
+            player.dimension_type.as_ref(),
+        )
+    };
+
+    let mut out = Vec::new();
+    for (block, state_id, text) in candidates {
+        let light = entity_light_at(handle, block[0], block[1], block[2], sky_default)
+            .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
+        if let Some(spawn) = sign_spawn(block, state_id, text, light) {
+            out.push(spawn);
+        }
+    }
+    out.sort_by_key(|s| s.pos);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -835,5 +991,153 @@ mod skull_tests {
     fn skull_spawns_before_login_is_empty_rather_than_a_panic() {
         let handle: SharedHandle = std::sync::Arc::new(std::sync::OnceLock::new());
         assert!(skull_spawns(&handle, Vec3::ZERO).is_empty());
+    }
+}
+
+/// Kept as its own module for the same reason `skull_tests` is: this file is
+/// shared with the chest/skull gather work.
+#[cfg(test)]
+mod sign_tests {
+    use super::*;
+
+    /// Orientation comes from the real 26.2 state table, not a fixture —
+    /// mirrors `skull_states_resolve_orientation_from_the_real_table`. Only
+    /// `oak_sign`/`oak_wall_sign` are walked (not every wood), since the
+    /// property *shape* — not the wood — is what is under test, exactly the
+    /// same choice `chest_states_resolve_facing_and_half_from_the_real_table`
+    /// makes for one chest block.
+    #[test]
+    fn sign_states_resolve_orientation_from_the_real_table() {
+        let mut ground_segments = std::collections::BTreeSet::new();
+        let mut wall_yaws = std::collections::BTreeSet::new();
+        let mut ground_states = 0usize;
+        let mut wall_states = 0usize;
+        for id in 0..lodestone_data::block_states::STATE_COUNT {
+            match lodestone_data::block_states::block_name(id) {
+                Some("minecraft:oak_sign") => {
+                    ground_states += 1;
+                    assert!(sign_kind_for_state(id).is_some());
+                    match sign_orientation(id).expect("a ground sign must have an orientation") {
+                        SignOrientation::Ground { rotation_segment } => {
+                            ground_segments.insert(rotation_segment);
+                        }
+                        SignOrientation::Wall { .. } => panic!("oak_sign resolved as wall"),
+                    }
+                }
+                Some("minecraft:oak_wall_sign") => {
+                    wall_states += 1;
+                    assert!(sign_kind_for_state(id).is_some());
+                    match sign_orientation(id).expect("a wall sign must have an orientation") {
+                        SignOrientation::Wall { facing_yaw_deg } => {
+                            wall_yaws.insert(facing_yaw_deg as i32);
+                        }
+                        SignOrientation::Ground { .. } => panic!("oak_wall_sign resolved as ground"),
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(ground_states > 0, "no ground oak_sign states at all");
+        assert!(wall_states > 0, "no wall oak_wall_sign states at all");
+        assert_eq!(
+            ground_segments,
+            (0..16).collect(),
+            "all sixteen rotation segments must be reachable"
+        );
+        assert_eq!(
+            wall_yaws,
+            [0, 90, 180, 270].into_iter().collect(),
+            "all four wall facings must be reachable"
+        );
+    }
+
+    /// Every plain sign block in the real 26.2 table — every wood, both
+    /// standing and wall — must resolve as a sign with an orientation.
+    /// Mirrors `every_ported_skull_block_in_the_real_table_resolves`.
+    #[test]
+    fn every_plain_sign_block_in_the_real_table_resolves() {
+        for wood in [
+            "oak", "spruce", "birch", "jungle", "acacia", "dark_oak", "mangrove", "cherry",
+            "pale_oak", "bamboo", "crimson", "warped",
+        ] {
+            for suffix in ["sign", "wall_sign"] {
+                let name = format!("minecraft:{wood}_{suffix}");
+                let found = (0..lodestone_data::block_states::STATE_COUNT)
+                    .find(|id| lodestone_data::block_states::block_name(*id) == Some(name.as_str()));
+                let id = found.unwrap_or_else(|| panic!("{name} is not in the 26.2 state table"));
+                assert!(sign_kind_for_state(id).is_some(), "{name} (state {id}) not a sign");
+                assert!(
+                    sign_orientation(id).is_some(),
+                    "{name} (state {id}) resolved no orientation"
+                );
+            }
+        }
+    }
+
+    /// Hanging signs are a real, present block family this renderer declines
+    /// (deferred — see `docs/block-entity-renderers.md`). Mirrors
+    /// `declined_skull_types_are_present_but_resolve_to_nothing`: this is
+    /// testing the decline, not a stale block name, so the block must exist
+    /// in the table and still resolve to nothing.
+    #[test]
+    fn hanging_signs_are_present_but_declined() {
+        for path in [
+            "oak_hanging_sign",
+            "oak_wall_hanging_sign",
+            "bamboo_hanging_sign",
+            "bamboo_wall_hanging_sign",
+        ] {
+            let name = format!("minecraft:{path}");
+            let found = (0..lodestone_data::block_states::STATE_COUNT)
+                .find(|id| lodestone_data::block_states::block_name(*id) == Some(name.as_str()));
+            let id = found.unwrap_or_else(|| panic!("{name} is not in the 26.2 state table"));
+            assert!(
+                sign_kind_for_state(id).is_none(),
+                "{name} unexpectedly resolved as a plain sign"
+            );
+        }
+    }
+
+    /// A non-sign block entity must not resolve — the control on the type
+    /// filter, mirroring `a_non_skull_block_entity_resolves_to_no_skull_type`.
+    #[test]
+    fn a_non_sign_block_entity_resolves_to_no_sign_kind() {
+        for path in ["furnace", "chest", "barrel", "bell", "skeleton_skull"] {
+            let name = format!("minecraft:{path}");
+            let Some(id) = (0..lodestone_data::block_states::STATE_COUNT)
+                .find(|id| lodestone_data::block_states::block_name(*id) == Some(name.as_str()))
+            else {
+                continue;
+            };
+            assert!(
+                sign_kind_for_state(id).is_none(),
+                "{name} matched a sign kind"
+            );
+        }
+    }
+
+    /// A real 26.2 `oak_sign` state joined with typed text (the shape
+    /// `docs/block-entity-renderers.md`'s live probe captured, parsed once
+    /// already in `lodestone-world`'s own tests) must survive the whole
+    /// `sign_spawn` resolution — the join between that parse and the
+    /// block-state-driven orientation/kind gate, which is the one thing
+    /// `lodestone-world`'s tests cannot see since they have no state table.
+    #[test]
+    fn a_real_sign_state_plus_real_text_resolves_to_a_spawn_with_that_text() {
+        let id = (0..lodestone_data::block_states::STATE_COUNT)
+            .find(|id| lodestone_data::block_states::block_name(*id) == Some("minecraft:oak_sign"))
+            .expect("oak_sign must be in the 26.2 state table");
+        let mut text = SignText::default();
+        text.front.lines[0] = "LODESTONE PROBE".to_owned();
+        let spawn = sign_spawn([0, 64, 0], id, text, lodestone_render::ENTITY_FULLBRIGHT)
+            .expect("a real oak_sign state must resolve to a spawn");
+        assert_eq!(spawn.front.lines[0], "LODESTONE PROBE");
+        assert!(matches!(spawn.orientation, SignOrientation::Ground { .. }));
+    }
+
+    #[test]
+    fn sign_spawns_before_login_is_empty_rather_than_a_panic() {
+        let handle: SharedHandle = std::sync::Arc::new(std::sync::OnceLock::new());
+        assert!(sign_spawns(&handle, Vec3::ZERO).is_empty());
     }
 }

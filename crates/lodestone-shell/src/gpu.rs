@@ -59,6 +59,7 @@ mod first_person;
 mod nametag;
 mod outline;
 mod screen_effects;
+mod sign_text;
 mod sources;
 mod stats;
 mod terrain;
@@ -68,7 +69,7 @@ pub use outline::CrackTarget;
 pub use screen_effects::ScreenEffects;
 pub use sources::{
     BlockEntitySource, EntityLightSource, HandSwingSource, MainHandSource, OutlineShapeSource,
-    SkullSource, SkyDarkenSource, ThirdPersonBodySource, ThirdPersonBodyState,
+    SignSource, SkullSource, SkyDarkenSource, ThirdPersonBodySource, ThirdPersonBodyState,
 };
 pub use stats::RenderStats;
 
@@ -78,6 +79,7 @@ use entities::EntityRenderer;
 use first_person::FirstPersonHand;
 use nametag::NameTagRenderer;
 use outline::OutlineRenderer;
+use sign_text::SignTextRenderer;
 use sources::TimeOfDaySource;
 use terrain::{
     MODEL_ORIGIN_ARENA_SLOTS, ModelRenderer, ModelSectionGpu, SectionGpu, SectionOriginArena,
@@ -278,6 +280,15 @@ pub struct RenderState {
     /// nothing" convention as [`Self::block_entity_source`], and a separate
     /// field for the reason [`SkullSource`] documents.
     skull_source: SkullSource,
+    /// World-space sign text (issue #23). Always constructed, like
+    /// [`Self::nametag`]: it loads its own jar-sourced font and fail-opens to
+    /// drawing nothing. A sign's *board* is a real block model (unlike chest
+    /// or skull) and already draws through the ordinary terrain pass with no
+    /// help from this field — this only ever draws the text painted on it.
+    sign_text: SignTextRenderer,
+    /// Where this frame's signs come from. Same "unset means draw nothing"
+    /// convention as [`Self::skull_source`].
+    sign_source: SignSource,
     /// The rain/snow pass, built once `textures/environment/{rain,snow}.png` are
     /// available. `None` — no `client.jar`, a headless test, or simply before
     /// [`RenderState::install_weather`] runs — draws no precipitation, the same
@@ -334,6 +345,7 @@ impl RenderState {
         let debug_lines = DebugLineRenderer::new(device, color_format);
         let entities = EntityRenderer::new(device, queue, color_format);
         let nametag = NameTagRenderer::new(device, color_format);
+        let sign_text = SignTextRenderer::new(device, color_format);
 
         // The live vanilla atlas carries baked model geometry; build the model
         // render pass over its *complete* atlas (whose UVs the baked quads index,
@@ -503,6 +515,10 @@ impl RenderState {
             // `set_block_entity_source`.
             block_entity_source: BlockEntitySource::default(),
             skull_source: SkullSource::default(),
+            sign_text,
+            // No signs until the shell installs a world source; see
+            // `set_sign_source`.
+            sign_source: SignSource::default(),
             // No rain/snow droplets until the shell installs the two environment
             // textures; see `install_weather`.
             weather: None,
@@ -1051,6 +1067,17 @@ impl RenderState {
         self.skull_source = SkullSource(Some(Box::new(f)));
     }
 
+    /// Install the source for this frame's sign text — same shape as
+    /// [`set_skull_source`](Self::set_skull_source): an independent gather,
+    /// no shared per-frame state, and no partial-tick interpolation because
+    /// sign text does not animate.
+    pub fn set_sign_source(
+        &mut self,
+        f: impl Fn(Vec3) -> Vec<lodestone_render::SignSpawn> + Send + Sync + 'static,
+    ) {
+        self.sign_source = SignSource(Some(Box::new(f)));
+    }
+
     /// Install the source for the targeted block's outline shape.
     ///
     /// Without this the selection box is a unit cube, which is wrong for roughly
@@ -1502,6 +1529,16 @@ impl RenderState {
         // (`ThirdPersonBodyState::into_draw`), so this is a no-op for it.
         let name_tag_counts = self.nametag.prepare(queue, &view_proj, camera, entities);
 
+        // Sign text (issue #23), same "upload before the pass opens"
+        // constraint. Not derived from `entities` — a sign is a *block*,
+        // gathered from the world's block-entity records exactly like
+        // `block_entity_source`/`skull_source` below, just with no cull or
+        // batch step of its own (see `gpu/sign_text.rs`'s module doc for why
+        // this is not a billboard and needs no camera basis).
+        let signs = self.sign_source.signs(camera.position);
+        let sign_text_count = self.sign_text.prepare(queue, &view_proj, &signs);
+        stats.sign_text_vertices = sign_text_count;
+
         // Resolve, frustum-cull and upload entity instances *before* the pass —
         // buffers can't be created mid-pass, and the entity camera uniform (no
         // section origin; the world position lives in each instance matrix) must
@@ -1843,6 +1880,14 @@ impl RenderState {
                     }
                 }
             }
+
+            // Sign text (issue #23), right after the block entities and
+            // before translucent water — a sign's board is real terrain
+            // (unlike a chest, it has a genuine block model), so by this
+            // point in the pass it is already in the depth buffer for the
+            // text's own polygon-offset bias to win against. See
+            // `gpu/sign_text.rs`'s module doc for the depth pipeline.
+            self.sign_text.draw(&mut pass, sign_text_count);
 
             if let Some(model) = &self.model {
                 // Dropped items, through the *model* pipeline rather than the

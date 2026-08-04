@@ -464,3 +464,32 @@ impl std::fmt::Debug for SkullSource {
             .finish()
     }
 }
+
+/// Where this frame's sign text comes from — same shape as [`SkullSource`],
+/// again an independent source rather than a shared return type:
+/// `crate::block_entities::sign_spawns` reads a different half of a block
+/// entity's record than either chest or skull (the NBT, not just the block
+/// state), but the gather-and-install contract is identical, so the source
+/// itself does not need to know that.
+#[derive(Default)]
+pub struct SignSource(
+    #[allow(clippy::type_complexity)]
+    pub(super)  Option<Box<dyn Fn(glam::Vec3) -> Vec<lodestone_render::SignSpawn> + Send + Sync>>,
+);
+
+impl SignSource {
+    /// This frame's signs, or none when unset — the same "unset means draw
+    /// nothing" convention [`BlockEntitySource`] uses.
+    #[must_use]
+    pub(super) fn signs(&self, eye: glam::Vec3) -> Vec<lodestone_render::SignSpawn> {
+        self.0.as_ref().map(|f| f(eye)).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for SignSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("SignSource")
+            .field(&if self.0.is_some() { "set" } else { "empty" })
+            .finish()
+    }
+}
