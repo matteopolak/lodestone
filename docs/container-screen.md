@@ -17,25 +17,46 @@ palette the hotbar uses. Read that for anything about the icons themselves.
 
 ### Layout
 
-`slot_layout(&Menu) -> SlotLayout` dispatches twice:
+`slot_layout(&Menu) -> SlotLayout` dispatches three times:
 
 ```
-match menu.kind() {
-    MenuKind::Player            => player_layout(),
-    MenuKind::Generic { size }  => match menu.craft_layout() {
-        Some(craft) => crafting_layout(craft, size),   // crafting table
-        None        => generic_layout(size),           // chest, barrel, ...
-    },
+fn slot_layout(menu: &Menu) -> SlotLayout {
+    if let Some(layout) = special_layout_positions(menu) {  // anvil, grindstone,
+        return layout;                                       // smithing, enchanting
+    }
+    match menu.kind() {
+        MenuKind::Player            => player_layout(),
+        MenuKind::Generic { size }  => match menu.craft_layout() {
+            Some(craft) => crafting_layout(craft, size),   // crafting table
+            None        => generic_layout(size),           // chest, barrel, ...
+        },
+    }
 }
 ```
 
-The second dispatch is **additive on `Menu`, not a new `MenuKind`**, and that is
-deliberate. A crafting table *is* a generic container as far as sizing and
-quick-move regions are concerned — vanilla's `CraftingMenu` is positionally
-identical to a `Generic { container_size: 10 }`. Only its slot *kinds* and its
-screen differ. `MenuKind` is matched exhaustively across this crate, so a new
-variant would have broken every match; `Menu::craft_layout()` was added for
-exactly this.
+Both the `craft_layout` and `special_layout` checks are **additive on `Menu`, not
+a new `MenuKind`**, and that is deliberate. A crafting table *is* a generic
+container as far as sizing and quick-move regions are concerned — vanilla's
+`CraftingMenu` is positionally identical to a `Generic { container_size: 10 }`.
+The anvil, grindstone, smithing table and enchanting table (issues #253-#255) are
+the same shape one level further: all four are `ItemCombinerMenu`-family menus
+whose quick-move regions are exactly `Menu::generic`'s (`lodestone_game::menu::Menu::item_combiner`'s
+own doc comment has the `getInventorySlotStart() == result_slot + 1` proof), so
+only their **slot kinds** (`SlotKind::Output`, `SlotKind::LapisOnly`) and their
+**pixel positions** differ, not their `MenuKind`. `MenuKind` is matched
+exhaustively across this crate, so a new variant would have broken every match;
+`Menu::craft_layout()` and `Menu::special_layout()` exist for exactly this.
+
+**`special_layout_positions` is checked *inside* `slot_layout` itself, not via a
+`menu_type`-keyed override function called separately by drawing and by
+[`hit_test`]/[`hit_test_with_scale`].** That was the first shape tried and it was
+wrong: `hit_test`'s callers are in `app.rs`, so a `menu_type` parameter added only
+to the draw path would have made clicks land on the *old* generic-grid positions
+while the screen visibly drew at the *real* anvil/grindstone/smithing/enchanting
+ones — this module's own documented failure mode ("clicks land one slot off... a
+bug invisible in any screenshot"). Putting the discriminator on `Menu` instead
+means the one `slot_layout(menu)` call both `build_inner` and `hit_test` already
+make picks it up for free.
 
 Every `SlotRect` carries the **real `menu_index`**. There is no constant offset
 anywhere, and none should be reintroduced:
@@ -45,11 +66,23 @@ anywhere, and none should be reintroduced:
 | `Player` (window 0) | `0` result, `1..=4` 2×2 craft, `5..=8` armour, `9..=35` main, `36..=44` hotbar, `45` offhand |
 | `Generic { n }` | `0..n` container, `n..n+27` main, `n+27..n+36` hotbar — **no** armour, **no** offhand |
 | crafting table | a `Generic { 10 }`: `0` result, `1..=9` grid, `10..=36` main, `37..=45` hotbar |
+| anvil / grindstone | a `Generic { 3 }`: `0`, `1` input, `2` result (take-only), `3..=29` main, `30..=38` hotbar |
+| smithing table | a `Generic { 4 }`: `0` template, `1` base, `2` addition, `3` result (take-only), `4..=30` main, `31..=39` hotbar |
+| enchanting table | a `Generic { 2 }`: `0` item, `1` lapis-only, `2..=28` main, `29..=37` hotbar |
 
 `crafting_layout` uses vanilla's `crafting_table.png` slot origins for the 3×3
 case — grid at `(30, 17)`, result at `(124, 35)`, main at `(8, 84)`, hotbar at
 `(8, 142)`, panel `176×166` — expressed in terms of the grid's real dimensions so
 a differently sized grid still lands somewhere sane.
+
+`special_layout_positions` (the anvil/grindstone/smithing/enchanting case) is
+simpler: all four use vanilla's **fixed** `addStandardInventorySlots(inventory,
+8, 84)` for the player section, so `main_y` is a constant `84.0` rather than
+computed from the top section's own row count. See
+[`container-cost-screens.md`](container-cost-screens.md) for the full slot
+position table, the background art, and what these screens' "cost" (the anvil's
+level-cost number, the enchanting table's three offer costs) does and does not
+reach yet.
 
 ### The title goes through the language table (issue #52)
 

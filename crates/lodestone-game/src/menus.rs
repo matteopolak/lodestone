@@ -35,7 +35,7 @@ use lodestone_model::{
 use crate::{
     click::{Click, PlayerCtx},
     item::ItemStack,
-    menu::Menu,
+    menu::{Menu, SpecialLayout},
     recipe::{CraftingGrid, RecipeBook},
     reconcile::{ClickIntent, ClientMenu, ServerUpdate},
 };
@@ -558,13 +558,30 @@ impl Menus {
 /// crafting table was deliberately kept a `Generic` for exactly that reason.
 /// Carry the extra routing as a descriptor on [`Menu`], the way
 /// [`CraftLayout`](crate::menu::CraftLayout) already is.
+///
+/// The anvil, grindstone, smithing table and enchanting table (issues #253,
+/// #254, #255) are four more cases of exactly this: [`Menu::item_combiner`]
+/// and [`Menu::enchanting_table`] both still build on [`Menu::generic`] and
+/// stay `MenuKind::Generic`. `container_size` is checked alongside
+/// `menu_type` for the same reason [`is_crafting`] checks `10`: if the server
+/// ever disagrees about the size, falling back to a plain generic container
+/// (whose slot count *does* match the packet) beats building a menu that
+/// contradicts what was actually sent.
 fn build_menu(menu_type: Option<&ResourceKey>, container_size: usize) -> Menu {
     let is_crafting =
         menu_type.is_some_and(|key| key.namespace() == "minecraft" && key.path() == "crafting");
     if is_crafting && container_size == 10 {
-        Menu::crafting(3, 3)
-    } else {
-        Menu::generic(container_size)
+        return Menu::crafting(3, 3);
+    }
+    let path = menu_type
+        .filter(|key| key.namespace() == "minecraft")
+        .map(ResourceKey::path);
+    match (path, container_size) {
+        (Some("anvil"), 3) => Menu::item_combiner(3, 2, SpecialLayout::Anvil),
+        (Some("grindstone"), 3) => Menu::item_combiner(3, 2, SpecialLayout::Grindstone),
+        (Some("smithing"), 4) => Menu::item_combiner(4, 3, SpecialLayout::Smithing),
+        (Some("enchantment"), 2) => Menu::enchanting_table(),
+        _ => Menu::generic(container_size),
     }
 }
 
@@ -685,6 +702,84 @@ mod tests {
         assert_eq!(
             menus.opened_menu_type(),
             Some(&key("minecraft:generic_9x3"))
+        );
+    }
+
+    /// `build_menu` (#253-#255) must key the anvil, grindstone, smithing table
+    /// and enchanting table off the wire `menu_type`, not just fall through to
+    /// a plain [`Menu::generic`] the way every other unmodelled screen still
+    /// does. Checked through the real `ScreenOpened` → `ContainerContent`
+    /// path, not by calling the constructors directly, so this also proves
+    /// `build_menu`'s dispatch — not just the constructors it dispatches to.
+    #[test]
+    fn build_menu_selects_the_item_combiner_shape_for_anvil_grindstone_and_smithing() {
+        let open = |menu_type: &str, container_size: usize| {
+            let mut menus = Menus::new();
+            assert!(menus.apply(&ClientEvent::ScreenOpened {
+                window_id: 5,
+                menu_type: key(menu_type),
+                title: Text::literal("T"),
+            }));
+            assert!(menus.apply(&ClientEvent::ContainerContent {
+                window_id: 5,
+                state_id: 1,
+                items: vec![None; container_size + 36],
+                carried_item: None,
+            }));
+            menus
+        };
+
+        for menu_type in ["minecraft:anvil", "minecraft:grindstone"] {
+            let menus = open(menu_type, 3);
+            let opened = menus.opened().expect("container open");
+            assert!(
+                !opened.may_place(2, &game_stack("minecraft:diamond", 1)),
+                "{menu_type}'s result slot (index 2) must be take-only"
+            );
+            assert!(opened.may_place(0, &game_stack("minecraft:diamond", 1)));
+        }
+
+        let smithing = open("minecraft:smithing", 4);
+        let opened = smithing.opened().expect("container open");
+        assert!(
+            !opened.may_place(3, &game_stack("minecraft:diamond", 1)),
+            "smithing's result slot (index 3) must be take-only"
+        );
+
+        let enchanting = open("minecraft:enchantment", 2);
+        let opened = enchanting.opened().expect("container open");
+        assert!(
+            !opened.may_place(1, &game_stack("minecraft:diamond", 1)),
+            "the enchanting table's slot 1 must reject a non-lapis item"
+        );
+        assert!(opened.may_place(1, &game_stack("minecraft:lapis_lazuli", 1)));
+    }
+
+    /// Control for the test above: a size the server never actually sends for
+    /// an anvil (real anvils are always 3 slots) must **not** get the
+    /// item-combiner treatment — `build_menu` falls back to a plain generic
+    /// container, matching the crafting-table precedent this dispatch was
+    /// modelled on. Without this, the gate above could pass merely because
+    /// `menu_type == "anvil"` was enough on its own, regardless of size.
+    #[test]
+    fn control_anvil_menu_type_with_the_wrong_size_falls_back_to_generic() {
+        let mut menus = Menus::new();
+        assert!(menus.apply(&ClientEvent::ScreenOpened {
+            window_id: 5,
+            menu_type: key("minecraft:anvil"),
+            title: Text::literal("T"),
+        }));
+        assert!(menus.apply(&ClientEvent::ContainerContent {
+            window_id: 5,
+            state_id: 1,
+            items: vec![None; 9 + 36], // not the real 3-slot anvil size
+            carried_item: None,
+        }));
+        let opened = menus.opened().expect("container open");
+        assert_eq!(opened.slot_count(), 45);
+        assert!(
+            opened.may_place(2, &game_stack("minecraft:diamond", 1)),
+            "a mismatched size must not get the take-only result slot"
         );
     }
 

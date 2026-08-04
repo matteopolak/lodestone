@@ -11,6 +11,9 @@
 
 use crate::item::ItemStack;
 
+/// The enchanting table's currency item — see [`SlotKind::LapisOnly`].
+const LAPIS_LAZULI: &str = "minecraft:lapis_lazuli";
+
 /// A flat array of item slots.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Container {
@@ -112,6 +115,13 @@ pub enum SlotKind {
     Armor(EquipmentSlot),
     /// The off-hand slot (accepts any item, like vanilla's shield slot).
     Offhand,
+    /// The enchanting table's currency slot: accepts only lapis lazuli
+    /// (`EnchantmentMenu.java:61-71`, the anonymous `Slot` whose `mayPlace`
+    /// checks `itemStack.is(Items.LAPIS_LAZULI)`). A dedicated variant rather
+    /// than a closure predicate because [`Menu`](crate::menu::Menu) derives
+    /// `PartialEq`/`Eq` (needed for [`crate::reconcile`]'s predict/reconcile
+    /// diffing), which a stored `fn` or closure would break.
+    LapisOnly,
 }
 
 /// A view onto one index of one container, plus its rules.
@@ -186,13 +196,15 @@ impl Slot {
     ///
     /// Output slots reject everything. Armour slots accept only a stack whose
     /// `minecraft:equippable` component names the matching position; a stack
-    /// with no such component is rejected, matching vanilla `ArmorSlot`. All
+    /// with no such component is rejected, matching vanilla `ArmorSlot`. The
+    /// enchanting table's lapis slot accepts only `minecraft:lapis_lazuli`. All
     /// other slots accept any item.
     #[must_use]
     pub fn may_place(&self, stack: &ItemStack) -> bool {
         match self.kind {
             SlotKind::Output => false,
             SlotKind::Armor(target) => equippable_slot(stack) == Some(target),
+            SlotKind::LapisOnly => stack.item().to_string() == LAPIS_LAZULI,
             SlotKind::Normal | SlotKind::CraftingInput | SlotKind::Offhand => true,
         }
     }

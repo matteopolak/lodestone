@@ -31,7 +31,7 @@
 
 use lodestone_game::click::{Click, ContainerInput, drag_header, drag_type, quick_craft_mask};
 use lodestone_game::item::ItemStack;
-use lodestone_game::menu::{CraftLayout, Menu, MenuKind, OUTSIDE_SLOT};
+use lodestone_game::menu::{CraftLayout, Menu, MenuKind, OUTSIDE_SLOT, SpecialLayout};
 use lodestone_game::recipe::RecipeBook;
 use lodestone_render::{BlockModels, GpuAtlas, GuiSpriteQuad, ModelVertex};
 
@@ -531,6 +531,10 @@ pub struct ContainerBackground {
     generic: ResourceLocation,
     crafting: ResourceLocation,
     inventory: ResourceLocation,
+    anvil: ResourceLocation,
+    grindstone: ResourceLocation,
+    smithing: ResourceLocation,
+    enchantment: ResourceLocation,
 }
 
 /// Which vanilla `container/*.png` sheet a menu's background draws from, and
@@ -542,14 +546,38 @@ enum BackgroundKind {
     Inventory,
     Crafting,
     Generic { rows: usize },
+    Anvil,
+    Grindstone,
+    Smithing,
+    Enchantment,
 }
 
-/// Mirrors [`slot_layout`]'s own dispatch: a menu with a [`Menu::craft_layout`]
-/// draws the crafting table's background regardless of container size (today
-/// that is always the 3×3 table), everything else generic draws the chest
-/// sheet at its own row count, and [`MenuKind::Player`] draws the player
-/// inventory sheet.
+/// Mirrors [`slot_layout`]'s own dispatch, **including** its
+/// [`Menu::special_layout`] check (issues #253-#255): the anvil, grindstone,
+/// smithing table and enchanting table each get their own real
+/// `container/*.png` sheet, checked *before* the plain `MenuKind` dispatch for
+/// the same reason `slot_layout` checks it before `craft_layout` — a menu with
+/// a `special_layout` is mechanically a [`MenuKind::Generic`] and would
+/// otherwise fall into the plain chest case. Everything else without one:
+/// [`Menu::craft_layout`] draws the crafting table's background regardless of
+/// container size (today always the 3×3 table), everything else generic draws
+/// the chest sheet at its own row count, and [`MenuKind::Player`] draws the
+/// player inventory sheet.
+///
+/// All four `special_layout` sheets are a single whole-panel `176×166` blit at
+/// the sheet's origin, exactly like
+/// [`BackgroundKind::Inventory`]/[`BackgroundKind::Crafting`]
+/// (`AnvilScreen.java:30`-adjacent `blit` calls; every one of these screens'
+/// `blit(texture, x, y, 0, 0, imageWidth, imageHeight)` uses the vanilla
+/// `176×166` default, none override `imageWidth`/`imageHeight`).
 fn background_kind(menu: &Menu) -> BackgroundKind {
+    match menu.special_layout() {
+        Some(SpecialLayout::Anvil) => return BackgroundKind::Anvil,
+        Some(SpecialLayout::Grindstone) => return BackgroundKind::Grindstone,
+        Some(SpecialLayout::Smithing) => return BackgroundKind::Smithing,
+        Some(SpecialLayout::Enchanting) => return BackgroundKind::Enchantment,
+        None => {}
+    }
     match menu.kind() {
         MenuKind::Player => BackgroundKind::Inventory,
         MenuKind::Generic { container_size } => match menu.craft_layout() {
@@ -562,8 +590,8 @@ fn background_kind(menu: &Menu) -> BackgroundKind {
 }
 
 impl ContainerBackground {
-    /// Loads and stitches the three sheets from a resource manager (in
-    /// practice, `client.jar`).
+    /// Loads and stitches the sheets from a resource manager (in practice,
+    /// `client.jar`).
     pub fn build(manager: &ResourceManager) -> Result<Self, AtlasError> {
         let generic = ResourceLocation::new("minecraft", "gui/container/generic_54")
             .expect("hardcoded location is always valid");
@@ -571,10 +599,24 @@ impl ContainerBackground {
             .expect("hardcoded location is always valid");
         let inventory = ResourceLocation::new("minecraft", "gui/container/inventory")
             .expect("hardcoded location is always valid");
+        // The four item-combiner-shaped screens (#253-#255): each is its own
+        // whole-panel sheet, same family as the three above.
+        let anvil = ResourceLocation::new("minecraft", "gui/container/anvil")
+            .expect("hardcoded location is always valid");
+        let grindstone = ResourceLocation::new("minecraft", "gui/container/grindstone")
+            .expect("hardcoded location is always valid");
+        let smithing = ResourceLocation::new("minecraft", "gui/container/smithing")
+            .expect("hardcoded location is always valid");
+        let enchantment = ResourceLocation::new("minecraft", "gui/container/enchanting_table")
+            .expect("hardcoded location is always valid");
         let mut builder = AtlasBuilder::new();
         builder.load(manager, &generic)?;
         builder.load(manager, &crafting)?;
         builder.load(manager, &inventory)?;
+        builder.load(manager, &anvil)?;
+        builder.load(manager, &grindstone)?;
+        builder.load(manager, &smithing)?;
+        builder.load(manager, &enchantment)?;
         // The hover highlight and the empty-slot placeholders (issue #376) ride
         // in this same atlas rather than a second one. They are ordinary
         // textures with an ordinary `.png.mcmeta`, so `AtlasBuilder` needs no
@@ -584,9 +626,9 @@ impl ContainerBackground {
         // `tests/container_slot_sprites.rs` recorded as "a pipeline/bind-group
         // job"; it turned out not to be one.
         //
-        // A missing sprite is a hard error here, matching the three sheets
-        // above, so a pack that drops one **names the sprite** instead of
-        // silently drawing an empty cell.
+        // A missing sprite is a hard error here, matching the sheets above, so
+        // a pack that drops one **names the sprite** instead of silently
+        // drawing an empty cell.
         for id in GUI_SPRITES {
             let loc = sprite_location(id).ok_or_else(|| AtlasError::TextureMissing {
                 location: (*id).to_string(),
@@ -599,6 +641,10 @@ impl ContainerBackground {
             generic,
             crafting,
             inventory,
+            anvil,
+            grindstone,
+            smithing,
+            enchantment,
         })
     }
 
@@ -650,23 +696,23 @@ impl ContainerBackground {
                 ],
             ))
         };
+        // A whole-panel `176x166` blit at the sheet's origin — the shape every
+        // one of these single-image screens shares.
+        let whole_panel = |loc: &ResourceLocation| -> Option<Vec<GuiSpriteQuad>> {
+            let (uv_min, uv_max) = uv(loc, [0.0, 0.0, 176.0, 166.0])?;
+            Some(vec![GuiSpriteQuad {
+                dst: [x, y, 176.0, 166.0],
+                uv_min,
+                uv_max,
+            }])
+        };
         match background_kind(menu) {
-            BackgroundKind::Inventory => {
-                let (uv_min, uv_max) = uv(&self.inventory, [0.0, 0.0, 176.0, 166.0])?;
-                Some(vec![GuiSpriteQuad {
-                    dst: [x, y, 176.0, 166.0],
-                    uv_min,
-                    uv_max,
-                }])
-            }
-            BackgroundKind::Crafting => {
-                let (uv_min, uv_max) = uv(&self.crafting, [0.0, 0.0, 176.0, 166.0])?;
-                Some(vec![GuiSpriteQuad {
-                    dst: [x, y, 176.0, 166.0],
-                    uv_min,
-                    uv_max,
-                }])
-            }
+            BackgroundKind::Inventory => whole_panel(&self.inventory),
+            BackgroundKind::Crafting => whole_panel(&self.crafting),
+            BackgroundKind::Anvil => whole_panel(&self.anvil),
+            BackgroundKind::Grindstone => whole_panel(&self.grindstone),
+            BackgroundKind::Smithing => whole_panel(&self.smithing),
+            BackgroundKind::Enchantment => whole_panel(&self.enchantment),
             BackgroundKind::Generic { rows } => {
                 let top_h = (rows * 18 + 17) as f32;
                 let (top_min, top_max) = uv(&self.generic, [0.0, 0.0, 176.0, top_h])?;
@@ -1349,15 +1395,29 @@ fn icon_record(stack: &lodestone_game::item::ItemStack) -> Option<HotbarSlot> {
 
 /// Computes the slot layout in local widget coordinates.
 ///
-/// The [`MenuKind`] match stays exhaustive over two variants; the crafting
-/// screen is reached *additively* through [`Menu::craft_layout`], which is
-/// exactly why that descriptor was put on [`Menu`] instead of in `MenuKind`. A
-/// crafting table is a `Generic { container_size: 10 }` whose result and 3×3
-/// grid happen to be its first ten slots, and laying those out as a 9-wide run
-/// (which is what a plain container would do) puts the result slot in the middle
-/// of the grid.
+/// [`Menu::special_layout`] is checked first (issues #253-#255): the anvil,
+/// grindstone, smithing table and enchanting table are all mechanically a
+/// plain [`MenuKind::Generic`] (see `lodestone_game::menu::Menu::item_combiner`'s
+/// doc comment) whose real screen is *not* [`generic_layout`]'s left-to-right
+/// grid — that grid would put three-in-a-row input slots at `y = 18` instead
+/// of vanilla's spread-out, screen-specific placement. Checked before the
+/// `MenuKind` match for the same reason [`Menu::craft_layout`] already is:
+/// both are extra routing carried *on* [`Menu`] rather than grown into
+/// `MenuKind`, which is matched exhaustively here and stays that way.
+///
+/// [`special_layout_positions`] has the per-screen coordinates, cited against
+/// the decompile. Both this function and [`crate::hit_test`] (menu clicks)
+/// call `slot_layout`, so a `special_layout` change is visible to drawing
+/// *and* correctly hit-tested by construction — no second place to keep in
+/// sync, which is exactly what put [`SpecialLayout`] on [`Menu`] instead of
+/// requiring `menu_type` threaded into `hit_test`'s callers (this module's own
+/// docs warn that mismatch reads as "clicks land one slot off" and is
+/// invisible in any screenshot).
 #[must_use]
 pub fn slot_layout(menu: &Menu) -> SlotLayout {
+    if let Some(layout) = special_layout_positions(menu) {
+        return layout;
+    }
     match menu.kind() {
         MenuKind::Player => player_layout(),
         MenuKind::Generic { container_size } => match menu.craft_layout() {
@@ -1365,6 +1425,70 @@ pub fn slot_layout(menu: &Menu) -> SlotLayout {
             None => generic_layout(container_size),
         },
     }
+}
+
+/// Vanilla's real slot layout for the four menus that have a
+/// [`Menu::special_layout`]. Positions are vanilla's slot constructor
+/// arguments, re-read from the decompile rather than taken from a summary:
+///
+/// | [`SpecialLayout`] | slots (menu index @ x,y) | source |
+/// |---|---|---|
+/// | `Anvil` | `0@27,47` `1@76,47` `2@134,47` | `AnvilMenu.java:42-45,58-60` |
+/// | `Grindstone` | `0@49,19` `1@49,40` `2@129,34` | `GrindstoneMenu.java:48-60` |
+/// | `Smithing` | `0@8,48` `1@26,48` `2@44,48` `3@98,48` | `SmithingMenu.java:25-29,58-61` |
+/// | `Enchanting` | `0@15,47` `1@35,47` | `EnchantmentMenu.java:55-61` |
+///
+/// All four call vanilla's standard `addStandardInventorySlots(inventory, 8,
+/// 84)` for the player section (`ItemCombinerMenu.java:48`,
+/// `EnchantmentMenu.java:72`) — a **fixed** `main_y = 84`, not derived from the
+/// top section the way [`generic_layout`]/[`crafting_layout`] compute it from
+/// their own row count, because these four screens' top sections don't stack
+/// rows the way a chest or crafting grid does.
+///
+/// `None` for a menu with no [`Menu::special_layout`], or (defensively) if the
+/// menu's `container_size` does not match what the real screen has — the same
+/// guard [`lodestone_game::menus::build_menu`] itself takes before ever
+/// setting a `special_layout`, so this should be unreachable in practice, but
+/// a mismatch here is safer falling back to the plain grid than drawing a
+/// panel sized for the wrong content.
+#[must_use]
+fn special_layout_positions(menu: &Menu) -> Option<SlotLayout> {
+    let Some(special) = menu.special_layout() else {
+        return None;
+    };
+    let MenuKind::Generic { container_size } = menu.kind() else {
+        return None;
+    };
+    let mut slots = Vec::new();
+    match (special, container_size) {
+        (SpecialLayout::Anvil, 3) => {
+            slots.push(slot(0, 27.0, 47.0));
+            slots.push(slot(1, 76.0, 47.0));
+            slots.push(slot(2, 134.0, 47.0));
+        }
+        (SpecialLayout::Grindstone, 3) => {
+            slots.push(slot(0, 49.0, 19.0));
+            slots.push(slot(1, 49.0, 40.0));
+            slots.push(slot(2, 129.0, 34.0));
+        }
+        (SpecialLayout::Smithing, 4) => {
+            slots.push(slot(0, 8.0, 48.0));
+            slots.push(slot(1, 26.0, 48.0));
+            slots.push(slot(2, 44.0, 48.0));
+            slots.push(slot(3, 98.0, 48.0));
+        }
+        (SpecialLayout::Enchanting, 2) => {
+            slots.push(slot(0, 15.0, 47.0));
+            slots.push(slot(1, 35.0, 47.0));
+        }
+        _ => return None,
+    }
+    let hotbar_y = append_main_inventory(&mut slots, container_size, 84.0);
+    Some(SlotLayout {
+        width: 176.0,
+        height: hotbar_y + 24.0,
+        slots,
+    })
 }
 
 /// Appends the 27-slot main inventory (9-wide rows starting at `base`) and the
@@ -3917,6 +4041,126 @@ mod tests {
         );
     }
 
+    /// The four `special_layout` menus (#253-#255) get their own real
+    /// background, not the plain generic-chest fallback a same-sized
+    /// container without one draws — the control at the end proves it is the
+    /// `special_layout`, not the size, that changed the result.
+    #[test]
+    fn background_kind_recognises_the_four_special_layout_menus() {
+        assert_eq!(
+            background_kind(&Menu::item_combiner(3, 2, SpecialLayout::Anvil)),
+            BackgroundKind::Anvil
+        );
+        assert_eq!(
+            background_kind(&Menu::item_combiner(3, 2, SpecialLayout::Grindstone)),
+            BackgroundKind::Grindstone
+        );
+        assert_eq!(
+            background_kind(&Menu::item_combiner(4, 3, SpecialLayout::Smithing)),
+            BackgroundKind::Smithing
+        );
+        assert_eq!(
+            background_kind(&Menu::enchanting_table()),
+            BackgroundKind::Enchantment
+        );
+        // Control: a plain 3-slot generic container (same size as the anvil
+        // and grindstone, no `special_layout`) still draws the ordinary chest
+        // background — proving the dispatch above keyed on `special_layout`,
+        // not merely on `container_size == 3`.
+        assert_eq!(
+            background_kind(&Menu::generic(3)),
+            BackgroundKind::Generic { rows: 1 }
+        );
+    }
+
+    /// The anvil's three slots land at vanilla's real positions
+    /// (`AnvilMenu.java:42-45`), not [`generic_layout`]'s plain left-to-right
+    /// row — and the panel is the real `176x166`, not whatever height a
+    /// 3-slot generic container's single row would compute.
+    #[test]
+    fn anvil_slots_land_at_vanillas_real_positions_not_a_generic_row() {
+        let anvil = Menu::item_combiner(3, 2, SpecialLayout::Anvil);
+        let layout = slot_layout(&anvil);
+        assert_eq!(layout.width, 176.0);
+        assert_eq!(layout.height, 166.0);
+        let at = |i: usize| {
+            layout
+                .slots
+                .iter()
+                .find(|s| s.menu_index == i)
+                .map(|s| (s.x, s.y))
+        };
+        assert_eq!(at(0), Some((27.0, 47.0)));
+        assert_eq!(at(1), Some((76.0, 47.0)));
+        assert_eq!(at(2), Some((134.0, 47.0)));
+        // The player's main storage starts at vanilla's fixed `(8, 84)`, same
+        // as every other `addStandardInventorySlots(inventory, 8, 84)` screen.
+        assert_eq!(at(3), Some((8.0, 84.0)));
+
+        // Control: an *ordinary* 3-slot generic container (no `special_layout`)
+        // draws slot 0 at the plain grid's `(8, 18)` — proving the anvil
+        // positions above come from `special_layout`, not from `container_size
+        // == 3` alone.
+        let plain = slot_layout(&Menu::generic(3));
+        assert_eq!(
+            plain.slots.iter().find(|s| s.menu_index == 0).map(|s| (s.x, s.y)),
+            Some((8.0, 18.0)),
+            "control: a plain 3-slot container must use the generic grid, not the anvil layout"
+        );
+    }
+
+    /// The other three `special_layout` screens, spot-checked against the
+    /// same `SmithingMenu.java`/`GrindstoneMenu.java`/`EnchantmentMenu.java`
+    /// constants [`special_layout_positions`] cites.
+    #[test]
+    fn the_other_three_special_layouts_match_their_menu_constructors() {
+        let smithing = slot_layout(&Menu::item_combiner(4, 3, SpecialLayout::Smithing));
+        let at = |layout: &SlotLayout, i: usize| {
+            layout
+                .slots
+                .iter()
+                .find(|s| s.menu_index == i)
+                .map(|s| (s.x, s.y))
+        };
+        assert_eq!(at(&smithing, 0), Some((8.0, 48.0)));
+        assert_eq!(at(&smithing, 1), Some((26.0, 48.0)));
+        assert_eq!(at(&smithing, 2), Some((44.0, 48.0)));
+        assert_eq!(at(&smithing, 3), Some((98.0, 48.0)));
+
+        let grindstone = slot_layout(&Menu::item_combiner(3, 2, SpecialLayout::Grindstone));
+        assert_eq!(at(&grindstone, 0), Some((49.0, 19.0)));
+        assert_eq!(at(&grindstone, 1), Some((49.0, 40.0)));
+        assert_eq!(at(&grindstone, 2), Some((129.0, 34.0)));
+
+        let enchanting = slot_layout(&Menu::enchanting_table());
+        assert_eq!(at(&enchanting, 0), Some((15.0, 47.0)));
+        assert_eq!(at(&enchanting, 1), Some((35.0, 47.0)));
+    }
+
+    /// [`slot_layout`] is what both drawing (`build_inner`, above) and
+    /// [`hit_test`] consult — proven here by calling `hit_test` itself rather
+    /// than re-deriving the coordinates, so a future refactor that moves the
+    /// override elsewhere cannot silently desync the two. A click at the
+    /// anvil's second input slot (`76,47` local, panel origin `(0,0)` at this
+    /// view size) must resolve to menu index 1, which is nowhere near where
+    /// a plain 3-slot generic grid would put it.
+    #[test]
+    fn hit_test_agrees_with_the_anvil_layout_it_was_never_told_about() {
+        let anvil = Menu::item_combiner(3, 2, SpecialLayout::Anvil);
+        let layout = slot_layout(&anvil);
+        let (px, py) = panel_origin_with_scale(&layout, 1, VIEW.0, VIEW.1);
+        // Centre of slot 1's cell, in physical pixels at `gui_scale = 1`.
+        let x = px + 76.0 + SLOT * 0.5;
+        let y = py + 47.0 + SLOT * 0.5;
+        let hit = hit_test_with_scale(&anvil, 1, VIEW.0, VIEW.1, x, y);
+        assert_eq!(
+            hit,
+            MenuHit::Slot(1),
+            "a click on the anvil's second input slot must hit menu index 1 — \
+             if this fails, hit_test and the draw path have desynced"
+        );
+    }
+
     /// A minimal in-memory pack with distinctly-sized solid-colour stand-ins
     /// for the three real sheets, so `ContainerBackground::build` succeeds
     /// hermetically — no `client.jar` needed for this test.
@@ -3936,7 +4180,15 @@ mod tests {
         }
 
         let mut src = MemorySource::default();
-        for name in ["generic_54", "crafting_table", "inventory"] {
+        for name in [
+            "generic_54",
+            "crafting_table",
+            "inventory",
+            "anvil",
+            "grindstone",
+            "smithing",
+            "enchanting_table",
+        ] {
             src.insert(
                 format!("assets/minecraft/textures/gui/container/{name}.png"),
                 solid_png(256, 256),
