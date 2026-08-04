@@ -111,6 +111,25 @@ Oracles (not part of repo state — recreate them):
   **Never `git add -A`. Never `git reset --hard`, `git checkout .`, `git stash`, or `git clean`
   (in any form, including `-n`-then-`-f`).** A blanket stage has clobbered in-flight work three
   times and destroyed a `lib.rs` edit once.
+
+  **`git checkout -- <path>` is the same command as `git checkout .`, narrowed — and it is banned
+  too.** An agent read the ban above as covering only the `.` form and ran
+  `git checkout -- docs/README.md` to discard a regeneration it did not want to commit. That path
+  happened to be a generated file, so nothing was lost, but the operation discards *whatever* is in
+  the working tree for the named path — including another agent's uncommitted edit, with no diff and
+  no reflog to recover from. There is no safe pathspec for it in a shared checkout. If you have a
+  working-tree change you do not want in your commit, **just do not name that path** — the pathspec
+  commit form ignores everything you do not list, which is the whole reason it is the standard here.
+- **`docs/README.md` drift is red-`main`-shaped, and reverting it makes it worse.** `cargo test -p
+  xtask` fails when the committed index does not match the generator, and the usual cause is a
+  *different* agent changing a doc's H1 or `## What it is` summary and not regenerating. That is what
+  happened above: the summary change was already **committed**, so reverting the regeneration left
+  `main` red and the next agent inherited it. If you find that test red and the drift is not yours,
+  **regenerate and commit `docs/README.md` alone** (`cargo xtask docs-index`, or
+  `LODESTONE_REGEN=1 cargo test -p xtask docs_index_matches_committed`) — committing a one-file
+  regeneration under your own message is correct and expected, not a foreign-line violation. Check
+  `git status` first: if the drift is *uncommitted*, its author is mid-flight and will regenerate
+  themselves; only a committed drift is yours to fix.
 - **Never rewrite a shared file wholesale — edit the lines you mean.** This is a *fourth* way to
   clobber, and no git command is involved, so none of the rules above catch it: writing a full new
   copy of a file silently discards every concurrent edit in it, and the loser finds out only when
