@@ -445,6 +445,27 @@ impl Particles {
             "crit" => emit::crit(&mut self.engine, x, y, z, xa, ya, za),
             "splash" => emit::splash(&mut self.engine, x, y, z, xa, ya, za),
             "bubble" => emit::bubble(&mut self.engine, x, y, z, xa, ya, za),
+            // The sweep-attack particle (#12's split-out remainder — its own
+            // issue now). `xa` doubles as the constructor's `size` parameter
+            // here, per `AttackSweepParticle`'s own signature; see
+            // `emit::sweep_attack`'s docs for why the one real vanilla call
+            // site always sends `0.0` regardless of the swing direction.
+            // The packet's own field is an f32; widened to f64 only for the
+            // generic dispatch signature above, narrowed straight back here.
+            "sweep_attack" => {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "narrowing back to the f32 the wire value started as"
+                )]
+                let size = xa as f32;
+                emit::sweep_attack(&mut self.engine, x, y, z, size);
+            }
+            "note" => emit::note(&mut self.engine, x, y, z, xa),
+            "heart" => emit::heart(&mut self.engine, x, y, z),
+            "angry_villager" => emit::angry_villager(&mut self.engine, x, y, z),
+            "happy_villager" => emit::happy_villager(&mut self.engine, x, y, z, xa, ya, za),
+            "witch" => emit::witch(&mut self.engine, x, y, z, xa, ya, za),
+            "totem_of_undying" => emit::totem_of_undying(&mut self.engine, x, y, z, xa, ya, za),
             other => tracing::debug!(
                 target: "particles",
                 "no emitter wired for particle type {other:?}; dropped"
@@ -966,6 +987,14 @@ mod tests {
             ((Sheet::Flame, 0u16), rect),
             ((Sheet::Generic, 0u16), rect),
             ((Sheet::CriticalHit, 0u16), rect),
+            ((Sheet::SweepAttack, 0u16), rect),
+            ((Sheet::SweepAttack, 2u16), rect),
+            ((Sheet::Note, 0u16), rect),
+            ((Sheet::Heart, 0u16), rect),
+            ((Sheet::Angry, 0u16), rect),
+            ((Sheet::Glint, 0u16), rect),
+            ((Sheet::Spell, 0u16), rect),
+            ((Sheet::Glitter, 0u16), rect),
         ]));
         p
     }
@@ -993,6 +1022,60 @@ mod tests {
         assert_eq!(
             frame.sheet_drawn, 7,
             "every one of these addresses the particle sheet, not the block atlas"
+        );
+    }
+
+    /// The particle batch (#182/#178) plus the sweep-attack particle split
+    /// out of #12: proves each new `kind` string reaches its emitter through
+    /// the *generic* dispatch (`spawn_particles` → `spawn_one`), the same
+    /// path a `/particle` command or any datapack's `sendParticles` call
+    /// uses — not merely that calling `emit::foo` directly produces a
+    /// particle. Before this pass every one of these fell into `spawn_one`'s
+    /// `other => debug!` catch-all and was silently dropped, exactly like the
+    /// ~119 types #178's issue body counted.
+    #[test]
+    fn every_newly_wired_kind_reaches_its_emitter_through_the_generic_dispatch() {
+        let cases: &[(&str, [f32; 3])] = &[
+            ("sweep_attack", [0.0, 0.0, 0.0]),
+            ("note", [0.5, 0.0, 0.0]),
+            ("heart", [0.0, 0.0, 0.0]),
+            ("angry_villager", [0.0, 0.0, 0.0]),
+            ("happy_villager", [0.0, 0.0, 0.0]),
+            ("witch", [0.0, 0.0, 0.0]),
+            ("totem_of_undying", [0.0, 0.2, 0.0]),
+        ];
+        for &(kind, offset) in cases {
+            let mut p = resolvable();
+            p.spawn_particles(kind, [0.5, 65.0, 0.5], offset, 0.0, 1);
+            assert_eq!(
+                p.engine.particles().len(),
+                1,
+                "{kind:?} must spawn exactly one particle via the generic dispatch"
+            );
+            let frame = p.extract(&Camera::default(), 0.0, &|_, _, _| {
+                Some(lodestone_particle::FULL_BRIGHT)
+            });
+            assert_eq!(frame.unresolved, 0, "{kind:?} must resolve against its sheet");
+            assert_eq!(frame.drawn, 1, "{kind:?} must produce exactly one instance");
+            assert_eq!(
+                frame.sheet_drawn, 1,
+                "{kind:?} must address the particle sheet, not the block atlas"
+            );
+        }
+    }
+
+    /// Negative control for the test above: an unrecognised kind must still
+    /// fall into the catch-all rather than one of the new arms accidentally
+    /// matching a substring or prefix.
+    #[test]
+    fn a_near_miss_kind_still_falls_into_the_catch_all() {
+        let mut p = resolvable();
+        for kind in ["sweep", "note_block", "heartbeat", "totem"] {
+            p.spawn_particles(kind, [0.0, 64.0, 0.0], [0.0; 3], 0.0, 3);
+        }
+        assert!(
+            p.engine.particles().is_empty(),
+            "a near-miss kind must not match any of the new dispatch arms"
         );
     }
 
@@ -1486,19 +1569,33 @@ mod tests {
         emit::flame(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.05, 0.0);
         emit::smoke(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.0, 0.0, 1.0);
         emit::crit(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.0, 0.0);
+        // The particle batch (#182/#178, plus the sweep-attack particle split
+        // out of #12): every one of these names a *new* `Sheet` variant, so
+        // this is the only test in the tree that proves the `stem()` chosen
+        // for each (`sweep`, `spell`, `angry`, `glint`) actually matches a
+        // real file under `textures/particle/` in the jar, rather than a
+        // plausible-looking guess. `Sheet::Note`/`Heart`/`Glitter` already
+        // existed but had no emitter ever exercising them either.
+        emit::sweep_attack(p.engine_mut(), 0.5, 65.0, 0.5, 0.0);
+        emit::note(p.engine_mut(), 0.5, 65.0, 0.5, 0.5);
+        emit::heart(p.engine_mut(), 0.5, 65.0, 0.5);
+        emit::angry_villager(p.engine_mut(), 0.5, 65.0, 0.5);
+        emit::happy_villager(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.0, 0.0);
+        emit::witch(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.0, 0.0);
+        emit::totem_of_undying(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.2, 0.0);
         let alive = p.engine.particles().len();
-        assert!(alive >= 3, "all three emitters must have added a particle");
+        assert!(alive >= 10, "all ten emitters must have added a particle");
 
         let frame = p.extract(&Camera::default(), 0.0, &|_, _, _| {
             Some(lodestone_particle::FULL_BRIGHT)
         });
         eprintln!(
-            "flame/smoke/crit resolution: alive={} drawn={} unresolved={}",
+            "particle batch resolution: alive={} drawn={} unresolved={}",
             frame.alive, frame.drawn, frame.unresolved
         );
         assert_eq!(
             frame.unresolved, 0,
-            "flame, smoke and crit all name real vanilla sheets and must resolve \
+            "every emitted sheet must name a real vanilla texture and resolve \
              against the stitched atlas"
         );
         assert_eq!(frame.drawn, frame.alive);

@@ -40,10 +40,9 @@ the rest of #12's genuine remainder:
   drop key (`Q`)" below.
 - **Crit particles**, as local-only prediction in `Sim::attack_entity`. See
   "Crit particles" below.
-- **The sweep-attack particle was investigated and confirmed *not* wired**,
-  correcting this doc's own previous "deliberately not built" entry, which
-  guessed it might already partly render — it does not, and the gap is larger
-  than a missing dispatch arm. See "The sweep-attack particle" below.
+- **The sweep-attack particle is now built** in a later pass, split into its
+  own issue rather than left as this issue's last hop. See "The sweep-attack
+  particle" below.
 - **`bobHurt` was re-confirmed still blocked** on `Camera` gaining a roll
   degree of freedom, a cross-cutting change out of this pass's scope. See
   "`bobHurt`, still blocked" below.
@@ -733,36 +732,62 @@ pre-existing particle tests already use.
 
 ### The sweep-attack particle
 
-**Confirmed not wired, correcting this doc's own previous guess.** The
-combat-scoping pass that investigated this before said it "may already
-partly work" because `minecraft:sweep_attack` is a registered particle type
-id and the generic server-particle pipeline is real. That turned out to be
-the wrong instrument to check first: `Particles::spawn_one`
-(`crates/lodestone-shell/src/particles.rs`) dispatches by **kind string**,
-and its `match` has arms for exactly `"flame"`, `"smoke"`, `"large_smoke"`,
-`"crit"`, `"splash"` and `"bubble"` — `"sweep_attack"` is not one of them, so
-it falls into the `other => tracing::debug!(...)` arm and is silently
-dropped. One level deeper, `lodestone_particle::emit` has no sweep-particle
-function at all (`terrain_particle`, `destroy_block_effect`,
-`breaking_block_effect`, `crit`, `smoke`, `flame`, `bubble`, `splash` are the
-whole module), and `lodestone_particle::Sheet` has no `SweepAttack` variant
-either — there is no atlas entry to sample even if a caller reached one.
+**Built.** Split out of #12 into its own issue (#409) rather
+than left buried in a mostly-closed one, since — per the two prior passes
+recorded above — it was the one genuine remainder and its whole rendering
+path was unbuilt, not merely unwired. Landed in `lodestone-particle`
+(`crates/lodestone-particle/src/{lib,emit}.rs`) and
+`crates/lodestone-shell/src/particles.rs`, the two files this doc's own
+"out of scope" note named as the blocker: a new `Sheet::SweepAttack` variant
+(`particle/sweep_0`…`sweep_7`, confirmed against the real files under
+`.cache/mc/26.2/client-src/assets/minecraft/textures/particle/`), a new
+`Behaviour::SweepAttack` with its own full-tick override (`Particle::
+tick_sweep_attack` — `AttackSweepParticle.tick()` never calls `move()` at
+all; the quad is stationary for its whole 4-tick life), `emit::sweep_attack`,
+and one `"sweep_attack"` arm in `Particles::spawn_one`.
 
-So this is not a missing dispatch line the way crit's ticker read was; it is
-an **unbuilt rendering path**: a new `Sheet` variant (`sweep_0.png` …
-`sweep_7.png`, 8 frames, `assets/minecraft/particles/sweep_attack.json` /
-`AttackSweepParticle.java`), atlas stitching, a new `emit::sweep_attack`
-function, and the one-line `particles.rs` dispatch addition — noticeably more
-than crit needed, because crit reused an emitter and a sheet that already
-existed end to end.
+No `sim.rs`/`app.rs`/`net.rs` change was needed, and the reason is worth
+recording: vanilla's own trigger
+(`.cache/mc/26.2/src/net/minecraft/world/entity/player/Player.java:1191`,
+`serverLevel.sendParticles(ParticleTypes.SWEEP_ATTACK, ...)`) is an ordinary
+`LEVEL_PARTICLES` broadcast, and that packet already forwards through
+`ClientEvent::Particles` → `NetUpdate::Particles` → `Particles::
+spawn_particles` → `spawn_one` generically (`crates/lodestone-shell/src/
+net.rs:1466-1478`, `sim.rs:5043-5077`) — the same path `"flame"`/`"crit"`/etc.
+already used. Adding the dispatch arm was the entire wiring job; a
+`/particle minecraft:sweep_attack` command or any server broadcasting the
+type reaches pixels immediately.
 
-**Out of this pass's file scope.** `lodestone-particle` is a separate crate
-and `crates/lodestone-shell/src/particles.rs` is neither in this task's
-`sim.rs`/`app.rs`/`keybinds.rs`/`interact.rs`/`camera_rig.rs` allowlist nor
-explicitly brokered the way `lodestone-game` was for the drop key. Building
-it would mean editing shared, unclaimed files with no sign-off, so it stays
-unbuilt here and is flagged as its own follow-up rather than rushed into this
-commit.
+One disclosed vanilla quirk, verified directly against the jar rather than
+assumed: `AttackSweepParticle`'s constructor takes a `size` parameter
+(`quadSize = 1.0F - (float) size * 0.5F`), but the one real call site above
+sends `count == 0` with `maxSpeed == 0.0F`, and
+`ClientPacketListener.handleParticleEvent`'s `count == 0` branch computes
+`xAux = maxSpeed * xDist` — so the value that actually reaches the
+constructor in real play is always `0.0`, regardless of swing direction,
+making `quadSize` always exactly `1.0` in practice. `emit::sweep_attack`
+still takes `size` as a real parameter (not hardcoded) so it stays a
+faithful transcription for any future caller that passes something else.
+
+**Verification.** `crates/lodestone-particle/src/emit.rs`'s
+`sweep_attack_has_the_exact_vanilla_lifetime_and_colour_range` and
+`sweep_attack_dies_on_exactly_the_fifth_tick` assert the exact lifetime (`4`,
+hardcoded, not a range), the exact `quadSize` (`1.0`, derived from the
+`size == 0.0` finding above, not merely "some size"), and the precise
+post-increment removal tick (alive through tick 4, removed on tick 5 —
+pinning the off-by-one a naive `age >= lifetime` check before incrementing
+would get wrong). `crates/lodestone-shell/src/particles.rs`'s
+`sheet_particle_resolves_against_the_real_particle_atlas` (an `#[ignore]`d
+gate, run against the real `.cache/mc/26.2/client.jar`) confirms
+`Sheet::SweepAttack`'s `"sweep"` stem actually resolves against the jar's
+real `sweep_0.png`…`sweep_7.png`, not merely a plausible-looking guess; measured
+`unresolved: 0` for the sweep instance alongside the rest of this same
+pass's batch (see [`docs/particle-catalogue.md`](./particle-catalogue.md)).
+No live-server oracle capture was taken for this one (the formula above was
+derived from the decompiled source and the jar assets directly, which
+CLAUDE.md ranks above a wiki or hand transcription); a future pass could add
+one by swinging at a mob on the creative oracle and checking the packet
+bytes.
 
 ### `bobHurt`, still blocked
 
@@ -791,11 +816,6 @@ a single agent picking it up mid-flight. `ViewBob::hurt`/
 unit-tested, called only by their own tests.
 
 ## What is deliberately not built here
-
-**The sweep-attack particle rendering path** — see "The sweep-attack
-particle" above. Confirmed unbuilt (no `Sheet::SweepAttack`, no
-`emit::sweep_attack`, no `particles.rs` dispatch arm), and out of this pass's
-file scope rather than half-started.
 
 **`bobHurt`'s production wiring** — see "`bobHurt`, still blocked" above.
 Blocked on `Camera` gaining a roll degree of freedom, a change spanning three
@@ -890,15 +910,16 @@ issue #98's section above for the jar evidence.
 
 ## How to change it
 
-- Adding the sweep-attack particle: needs a new `lodestone_particle::Sheet`
-  variant (`sweep_0.png`…`sweep_7.png`), atlas stitching, a new
-  `emit::sweep_attack` function (`AttackSweepParticle.java` is the reference,
-  distinct from every existing emitter — vanilla's sweep quad is oriented by
-  swing direction, not a billboard), and one dispatch arm in
-  `Particles::spawn_one` (`crates/lodestone-shell/src/particles.rs`) for
-  `"sweep_attack"`. See "The sweep-attack particle" above for why this is a
-  real build, not a wiring fix, and why it was not attempted in this pass
-  (file scope).
+- The sweep-attack particle is built — see "The sweep-attack particle" above.
+  Correcting one thing this bullet used to claim: `AttackSweepParticle`
+  overrides neither `getFacingCameraMode()` nor `roll`, so — verified directly
+  against `.cache/mc/26.2/client-src/net/minecraft/client/particle/
+  AttackSweepParticle.java` rather than assumed — it is an ordinary
+  camera-facing billboard like every other particle in this crate, *not*
+  oriented by swing direction. To extend it (a bigger sweep for a bigger
+  weapon, say): `emit::sweep_attack`'s `size` parameter already threads
+  through to `quadSize`; only the caller — wherever swing detection lands in
+  `sim.rs`, outside this crate's scope — would need building.
 - Adding sweep/crit *sound*: both are ordinary server-broadcast sounds
   (`Player.java:965,1064`, `playServerSideSound`) — already covered by the
   generic sound pipeline (`docs/sound-playback.md`), no client work needed,
