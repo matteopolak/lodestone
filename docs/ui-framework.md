@@ -83,7 +83,7 @@ smallest it has ever been.
 | `Renderable.extractRenderState` → `GuiRenderState` | `gui/`, `renderer/state/gui/` | **done in spirit** — `ExtractSet`/`FrameSet` | — |
 | `JoinMultiplayerScreen` + `ServerSelectionList` + `ServerStatusPinger` | `screens/multiplayer/` | **partly** — `menu/servers.rs`, `menu/status.rs` | #396 |
 | `SelectWorldScreen` + `WorldSelectionList` | `screens/worldselection/` | **nothing** | #397 |
-| `OptionsScreen` tree, `OptionInstance`, `OptionsList` | `screens/options/`, `client/` | **done for 8 of 13 screens** — `menu/options.rs`, 135 controls, 18 live (2 of 93 options persisted; see below) | #55 |
+| `OptionsScreen` tree, `OptionInstance`, `OptionsList` | `screens/options/`, `client/` | **done for 8 of 13 screens** — `menu/options.rs`, 135 controls, 23 live (7 of 93 options persisted, up from 2 as of #200/#202/#203; see below) | #55 |
 | `AbstractContainerScreen` | `screens/inventory/` | bespoke per screen | #398 |
 
 ## What is already done, and must not be re-filed
@@ -251,10 +251,11 @@ So the live pair is `gui_scale` and `view_bobbing`, and #55 renders `renderDista
 key, and a consumer in `app.rs` that prefers it over the flag — and `sensitivity` additionally
 cannot be an `f32` without `Options` losing its `Eq`.
 
-**2 of 93.** That ratio is the argument for building the tree from an option *model* rather than
-screen by screen: most rows will be present-and-disabled for a long time, and that is the intended
-end state, not a shortfall. #55 landed 135 controls of which **18** work; see
-[`settings-screen.md`](./settings-screen.md).
+**2 of 93 at #55's landing, 7 of 93 now.** That ratio is the argument for building the tree from an
+option *model* rather than screen by screen: most rows will be present-and-disabled for a long time,
+and that is the intended end state, not a shortfall. #55 landed 135 controls of which 18 worked;
+#200/#202/#203 made five more Controls/Mouse rows live without changing the 135-control census, so
+**23** work as of this writing. See [`settings-screen.md`](./settings-screen.md).
 
 ## What already exists on our side
 

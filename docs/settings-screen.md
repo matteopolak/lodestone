@@ -3,9 +3,17 @@
 ## What it is
 
 `crates/lodestone-shell/src/menu/options.rs` — vanilla's `OptionsScreen` tree as
-a **table plus arithmetic**: eight pages, **135 controls**, of which **18 work
-and 117 are present and greyed out**. Reached from the title screen's Options
+a **table plus arithmetic**: eight pages, **135 controls**, of which **23 work
+and 112 are present and greyed out**. Reached from the title screen's Options
 button and from the pause menu's, on `Screen::Settings`.
+
+**Updated since #55 landed:** #200/#202/#203 (`docs/input-options.md`) made five
+more Controls/Mouse-page rows live — `toggleCrouch`/`toggleSprint`/
+`invertMouseX`/`invertMouseY`/`mouseWheelSensitivity` — without adding or
+removing any row, so the 135-control census below is unchanged; only the
+live/inactive split moved. The rest of this doc's per-page tables were not
+re-audited for this update; see this doc's "What is actually live" section for
+the current authoritative list.
 
 This is issue #55, the settings branch of the menu-framework epic #392.
 [`ui-framework.md`](./ui-framework.md) is the plan of record;
@@ -74,14 +82,19 @@ stops being one mechanism. #396 and #397 are landing that shape concurrently.
 
 ### What is actually live — and a correction to the census
 
-**Two options**, not four:
+**Seven options**, as of #200/#202/#203 (up from the two #55 landed with):
 
 | option | page | field |
 |---|---|---|
 | `guiScale` | Video, under *Display* | `config::Options::gui_scale` |
 | `bobView` | Accessibility | `config::Options::view_bobbing` |
+| `toggleCrouch` | Controls, as "Sneak" | `config::Options::toggle_sneak` |
+| `toggleSprint` | Controls, as "Sprint" | `config::Options::toggle_sprint` |
+| `mouseWheelSensitivity` | Mouse, as "Scroll Sensitivity" | `config::Options::mouse_wheel_sensitivity` |
+| `invertMouseX` | Mouse | `config::Options::invert_mouse_x` |
+| `invertMouseY` | Mouse | `config::Options::invert_mouse_y` |
 
-Plus eight `Done` buttons and eight working nav buttons: 18 live, 117 inactive.
+Plus eight `Done` buttons and eight working nav buttons: 23 live, 112 inactive.
 
 #55's census comment and `ui-framework.md` both say **"4 of 93"**, listing
 `render_distance` and `sensitivity` alongside those two. That is wrong, and it is
@@ -195,7 +208,7 @@ This is the departure most worth revisiting: a scissor in the menu pipeline, or 
 `AbstractWidget.nextFocusPath` returns `null` when `!isActive()`
 (`AbstractWidget.java:152-158`), and `MenuNav`'s `step_enabled` skips inactive
 rows on the title and pause screens. On a screen whose *content* is the inactive
-majority, skipping them would leave 117 of 135 controls unreachable **and
+majority, skipping them would leave 112 of 135 controls unreachable **and
 unscrollable** — i.e. invisible, which defeats the whole issue. The vanilla
 predicate still governs *activation*: Enter on an inactive row does nothing, and
 `WidgetSprites::get(false, true)` keeps it drawing `widget/button_disabled` under

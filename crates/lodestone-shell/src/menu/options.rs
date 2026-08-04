@@ -23,9 +23,11 @@
 //!
 //! There is no disabled widget type in vanilla and none here — see
 //! [`super::widget`]'s module docs. [`Cell::is_live`] is what decides it, and
-//! it answers `false` for **117 of the 135** controls this module renders (the
-//! eighteen live ones are two real options, eight `Done` buttons and eight
-//! working nav buttons). That ratio is the point of the issue: a greyed row in
+//! it answers `false` for **112 of the 135** controls this module renders (the
+//! twenty-three live ones are seven real options — `guiScale`/`bobView` from
+//! #55, plus `toggleCrouch`/`toggleSprint`/`invertMouseX`/`invertMouseY`/
+//! `mouseWheelSensitivity` from #200/#202/#203 — eight `Done` buttons and
+//! eight working nav buttons). That ratio is the point of the issue: a greyed row in
 //! vanilla's own position makes the gap between this client and vanilla
 //! *visible*, where a missing row silently changes the screen's shape.
 //!
@@ -64,7 +66,7 @@
 //!    ones** — where `AbstractWidget.nextFocusPath` skips them
 //!    (`AbstractWidget.java:152-158`), as [`super::nav`]'s `step_enabled` does
 //!    on the title and pause screens. On a screen whose *content* is the
-//!    inactive majority, skipping them would leave 109 of 127 rows unreachable
+//!    inactive majority, skipping them would leave 112 of 135 rows unreachable
 //!    **and unscrollable**, i.e. invisible — which defeats the whole issue. The
 //!    vanilla predicate still governs activation: Enter consults
 //!    [`Widget::takes_focus`](super::widget::Widget::takes_focus)'s `is_active`

@@ -2210,6 +2210,117 @@ pub fn death_frame(nav: &super::nav::MenuNav, message: Option<&str>) -> MenuFram
     }
 }
 
+// -- vanilla's `DisconnectedScreen` metrics -----------------------------------
+
+/// `Button.builder(…).width(200)`, every call site
+/// (`DisconnectedScreen.java:52,57,61,63`) — not [`widget::DEFAULT_WIDTH`]'s
+/// 150.
+const ERROR_BUTTON_W: f32 = 200.0;
+/// Room reserved above the bottom edge for the one button this screen draws:
+/// [`WIDGET_H`] plus a margin roughly matching vanilla's `padding(2)` between
+/// stack children (`DisconnectedScreen.java:47`) plus some slack so the
+/// button never crowds the edge on a small canvas.
+const ERROR_BUTTON_BOTTOM_MARGIN: f32 = WIDGET_H + 20.0;
+/// Where the title sits, from [`Origin::ScreenTop`].
+///
+/// Vanilla has no fixed y here — the whole stack is centred vertically by
+/// `FrameLayout.centerInRectangle` (`:73-75`), which needs the reason text's
+/// *wrapped line count* to size the stack, a draw-time fact `frame_for`
+/// cannot see (it runs before the canvas is known — see [`Slot`]'s docs).
+/// This anchors the title near the top instead, the same trade
+/// [`accounts_failed_frame`] already makes for an identically-shaped screen.
+const ERROR_TITLE_Y: f32 = 40.0;
+/// The wrap column the reason text is bounded to.
+///
+/// Vanilla bounds its `MultiLineTextWidget` to `this.width - 50`
+/// (`DisconnectedScreen.java:46`), which is canvas-*dependent* and therefore
+/// not expressible as a fixed [`MenuNotice::w`] (the same reason
+/// [`ACCOUNTS_ROW_W`] is fixed rather than derived per-canvas). Sized off
+/// [`crate::config::MIN_SCALED_WIDTH`] so it is correct even at the smallest
+/// canvas `calculate_gui_scale` can produce — the same conservative-at-minimum
+/// trade [`super::options::LIST_WINDOW_PX`] makes vertically.
+const ERROR_NOTICE_W: f32 = crate::config::MIN_SCALED_WIDTH as f32 - 50.0;
+
+/// Builds vanilla's `DisconnectedScreen` (issue #392's framework epic — this
+/// screen was still the pre-framework centred row stack, with no [`Slot`] on
+/// its row and no wrapped-text bound on its reason, until now):
+/// title, the disconnect reason wrapped and bounded exactly like
+/// [`accounts_failed_frame`]'s failure message, and one real button
+/// (`.cache/mc/26.2/client-src/net/minecraft/client/gui/screens/DisconnectedScreen.java:42-70`).
+///
+/// **Two vanilla widgets are never built here.** The `gui.report_to_server`
+/// and `gui.open_report_dir` buttons only appear when a `DisconnectionDetails`
+/// carries a bug-report link or a saved crash report (`:48-58`); nothing in
+/// this workspace produces either, so their absence is "present only when
+/// vanilla would show it", not a missing row — the same rule the
+/// multiplayer-screen footer's `Direct Connection` button already follows in
+/// the other direction (present, but inactive).
+///
+/// **The button's label is vanilla's `gui.toTitle`** ("Back to Title
+/// Screen"), not the `gui.toMenu` default ("Back to Server List") a
+/// `DisconnectedScreen` shows when `allowsMultiplayer()` is true
+/// (`:59-64`). [`super::UiState::dismiss_error`] always returns to
+/// [`super::Screen::MainMenu`], never to a server list — that is vanilla's
+/// `!allowsMultiplayer()` branch, reproduced honestly, rather than a label
+/// that promises a screen this client does not return to.
+///
+/// **The title is `disconnect.lost`** ("Connection Lost"), vanilla's own
+/// title for `ClientPacketListener.onDisconnect`'s ordinary mid-session
+/// disconnect — the case [`super::UiState::session_failed`] models most often.
+/// A failed *initial* connection attempt is titled `connect.failed` in
+/// vanilla instead; this client has one generic error screen for both causes,
+/// so one title has to be picked, and the mid-session one is both the more
+/// common path and the truthful one when there was a session to lose.
+///
+/// `shouldCloseOnEsc()` is `false` in vanilla (`:82-85`) — Escape does
+/// **not** dismiss this screen there, so a misclick cannot swallow a network
+/// error before it is read. This client's Escape *does* dismiss it (see
+/// `nav::MenuNav`'s `Screen::Error` arm), which is a pre-existing, separately
+/// tested behaviour this pass does not change — this function is layout, not
+/// input semantics.
+#[must_use]
+fn error_frame(reason: Option<&str>) -> MenuFrame<'static> {
+    MenuFrame {
+        rows: vec![MenuRow {
+            label: "Back to Title Screen".to_string(),
+            enabled: true,
+            slot: Some(Slot {
+                origin: Origin::ScreenBottom,
+                dx: -(ERROR_BUTTON_W * 0.5),
+                dy: -ERROR_BUTTON_BOTTOM_MARGIN,
+                w: ERROR_BUTTON_W,
+                h: WIDGET_H,
+            }),
+            ..Default::default()
+        }],
+        selected: 0,
+        vanilla: true,
+        labels: vec![MenuLabel {
+            text: "Connection Lost".to_string(),
+            origin: Origin::ScreenTop,
+            dx: 0.0,
+            dy: ERROR_TITLE_Y,
+            align: Align::Centre,
+            colour: LABEL,
+            scale: 1.0,
+        }],
+        // `reason.is_empty()` never happens in production (`session_failed`
+        // always carries a real message), but an empty notice would still
+        // draw zero lines correctly — no special-casing needed, unlike
+        // `death_frame`'s optional message.
+        notice: reason.map(|text| MenuNotice {
+            text: text.to_string(),
+            origin: Origin::ScreenTop,
+            dx: -(ERROR_NOTICE_W * 0.5),
+            dy: ERROR_TITLE_Y + LINE_H * 3.0,
+            w: ERROR_NOTICE_W,
+            bottom: ERROR_BUTTON_BOTTOM_MARGIN + WIDGET_H,
+            colour: FG_BAD,
+        }),
+        ..Default::default()
+    }
+}
+
 // -- the account screen's metrics ---------------------------------------------
 //
 // **There is no accounts screen in vanilla to port.** Minecraft picks an account
@@ -3067,15 +3178,25 @@ pub fn frame_for<'a>(
         // function because the row content alone is thirty lines of state
         // resolution — see `server_list_frame`.
         Screen::ServerList => Some(server_list_frame(nav, statuses, favicons)),
+        // Vanilla's `ManageServerScreen` (the framework conversion this arm
+        // used to lack entirely: no row here carried a `slot`, so every
+        // widget drew through the pre-#392 centred stack instead of a real
+        // `widget/button*`/`widget/text_field` sprite). See
+        // `manage_server_slot` for the five widgets' vanilla rects.
         Screen::ServerEdit => {
             let form = nav.form();
+            let title = if form.editing.is_some() {
+                "Edit Server Info"
+            } else {
+                "Add Server"
+            };
+            // Vanilla disables Done rather than printing an error
+            // (`ManageServerScreen.java:92-93`) — the greyed `widget/
+            // button_disabled` sprite this row now draws *is* the feedback,
+            // so no extra text duplicates it.
+            let valid = form.is_valid();
+            use super::nav::{ADDRESS_FIELD, CANCEL_ROW, DONE_ROW, NAME_FIELD, RESOURCE_PACK_ROW};
             Some(MenuFrame {
-                title: if form.editing.is_some() {
-                    "EDIT SERVER"
-                } else {
-                    "ADD SERVER"
-                },
-                subtitle: "",
                 // `edit` carries a **clone of the live widget**, which is how
                 // #395's persistent `EditBox` reaches a draw through a `&MenuNav`
                 // frame builder: `build`'s `draw_edit_box` moves the clone into
@@ -3086,30 +3207,74 @@ pub fn frame_for<'a>(
                 rows: vec![
                     MenuRow {
                         label: form.name().to_string(),
-                        detail: "NAME".to_string(),
+                        detail: "Server Name".to_string(),
                         enabled: true,
                         field: true,
                         edit: Some(form.fields.name.clone()),
+                        slot: Some(manage_server_slot(NAME_FIELD)),
                         ..Default::default()
                     },
                     MenuRow {
                         label: form.address().to_string(),
-                        detail: "ADDRESS - HOST OR HOST:PORT".to_string(),
+                        detail: "Server Address".to_string(),
                         enabled: true,
                         field: true,
                         edit: Some(form.fields.address.clone()),
+                        slot: Some(manage_server_slot(ADDRESS_FIELD)),
+                        ..Default::default()
+                    },
+                    // Present and inactive — see `RESOURCE_PACK_ROW`'s doc on
+                    // why: `ServerEntry` has no `pack_status` to cycle.
+                    MenuRow {
+                        label: "Server Resource Packs".to_string(),
+                        enabled: false,
+                        slot: Some(manage_server_slot(RESOURCE_PACK_ROW)),
+                        ..Default::default()
+                    },
+                    MenuRow {
+                        label: "Done".to_string(),
+                        enabled: valid,
+                        slot: Some(manage_server_slot(DONE_ROW)),
+                        ..Default::default()
+                    },
+                    MenuRow {
+                        label: "Cancel".to_string(),
+                        enabled: true,
+                        slot: Some(manage_server_slot(CANCEL_ROW)),
                         ..Default::default()
                     },
                 ],
                 selected: match form.field() {
-                    FormField::Name => 0,
-                    FormField::Address => 1,
+                    FormField::Name => NAME_FIELD,
+                    FormField::Address => ADDRESS_FIELD,
                 },
-                footer: vec![
-                    "TAB SWITCH FIELD   ENTER SAVE   ESC CANCEL".to_string(),
-                    "AN EMPTY NAME USES THE HOST - AN EMPTY PORT ALLOWS SRV".to_string(),
+                hovered: form.hovered_button(),
+                vanilla: true,
+                labels: vec![
+                    MenuLabel {
+                        text: title.to_string(),
+                        origin: Origin::ScreenTop,
+                        dx: 0.0,
+                        dy: MANAGE_SERVER_TITLE_Y,
+                        align: Align::Centre,
+                        colour: LABEL,
+                        scale: 1.0,
+                    },
+                    // Not vanilla — this client's own affordance, kept from
+                    // the pre-conversion screen: SRV resolution and the
+                    // name-falls-back-to-host rule have no vanilla widget to
+                    // announce them (`ServerEntry::split_host_port`,
+                    // `EditForm::to_entry`).
+                    MenuLabel {
+                        text: "Tab switches fields - an empty name uses the host".to_string(),
+                        origin: Origin::ScreenBottom,
+                        dx: 0.0,
+                        dy: -16.0,
+                        align: Align::Centre,
+                        colour: FG_DIM,
+                        scale: 1.0,
+                    },
                 ],
-                message: (!form.is_valid()).then(|| "AN ADDRESS IS REQUIRED".to_string()),
                 ..Default::default()
             })
         }
@@ -3208,20 +3373,9 @@ pub fn frame_for<'a>(
         // frozen world on screen with no explanation. `Screen::Connecting` is
         // deliberately *not* here — it keeps rendering the world so chunks mesh
         // and upload as they stream in, rather than piling up behind a loading
-        // screen and landing as one spike at login.
-        Screen::Error => Some(MenuFrame {
-            title: "DISCONNECTED",
-            subtitle: "",
-            rows: vec![MenuRow {
-                label: "BACK TO MENU".to_string(),
-                enabled: true,
-                ..Default::default()
-            }],
-            selected: 0,
-            footer: vec!["ENTER OR ESC RETURNS TO THE MENU".to_string()],
-            message: ui.error().map(|e| e.to_uppercase()),
-            ..Default::default()
-        }),
+        // screen and landing as one spike at login. See `error_frame` for the
+        // vanilla `DisconnectedScreen` this now reproduces.
+        Screen::Error => Some(error_frame(ui.error())),
         _ => None,
     };
     // Stamped on every screen (not read back out of `nav` per-screen above) so
@@ -3364,6 +3518,88 @@ pub fn row_rect(rows: &[MenuRow], i: usize, width: f32, height: f32) -> Option<(
 /// fill to vanilla's real `widget/text_field` nine-slice.
 pub const EDIT_BOX_H: f32 = 20.0;
 
+// -- vanilla's `ManageServerScreen` metrics ----------------------------------
+//
+// `.cache/mc/26.2/client-src/net/minecraft/client/gui/screens/ManageServerScreen.java`
+// — the add/edit-server form `JoinMultiplayerScreen`'s Add/Edit buttons open.
+// Every number is transcribed from there, not measured off this pipeline's
+// own output.
+
+/// Every widget's width: the two `EditBox`es and the three buttons below them
+/// are all `200` (`:33-38,43,55,58`).
+const MANAGE_SERVER_W: f32 = 200.0;
+/// Every widget's x, relative to [`Origin::ScreenTop`]: `width / 2 - 100`
+/// (same lines).
+const MANAGE_SERVER_X: f32 = -100.0;
+/// The name field's y (`:33`).
+const MANAGE_SERVER_NAME_Y: f32 = 66.0;
+/// The address field's y (`:38`).
+const MANAGE_SERVER_ADDRESS_Y: f32 = 106.0;
+/// The Resource Packs button's y, as an offset from [`Origin::TitleTop`]'s own
+/// `height / 4 + 48` anchor: `height / 4 + 72` is `+ 24` from there (`:43`).
+/// Reusing `TitleTop` rather than a second `height / 4` origin is the same
+/// choice [`death_slot`] already made, for the same reason named there.
+const MANAGE_SERVER_PACK_DY: f32 = 24.0;
+/// Done's y: `height / 4 + 114` is `+ 66` from [`Origin::TitleTop`] (`:55`).
+const MANAGE_SERVER_DONE_DY: f32 = 66.0;
+/// Cancel's y: `height / 4 + 138` is `+ 90` from [`Origin::TitleTop`] (`:58`).
+const MANAGE_SERVER_CANCEL_DY: f32 = 90.0;
+/// Where this screen's title is drawn: vanilla `Screen`'s own generic
+/// `drawCenteredString(title, width / 2, 20, …)` fallback — `ManageServerScreen`
+/// overrides neither `render` nor `renderBackground`/`addTitle`, so its title
+/// draws wherever the base `Screen` puts one, same as every simple dialog that
+/// does not build a `HeaderAndFooterLayout` of its own.
+const MANAGE_SERVER_TITLE_Y: f32 = 20.0;
+
+/// One [`super::Screen::ServerEdit`] widget's [`Slot`] — vanilla's rects at
+/// `ManageServerScreen.java:33-62`, read out of the constants above rather
+/// than resolved by hand, so a click, a hover and the draw cannot disagree.
+/// Row indices are [`super::nav::NAME_FIELD`] and its siblings.
+#[must_use]
+fn manage_server_slot(row: usize) -> Slot {
+    use super::nav::{ADDRESS_FIELD, DONE_ROW, NAME_FIELD, RESOURCE_PACK_ROW};
+    match row {
+        NAME_FIELD => Slot {
+            origin: Origin::ScreenTop,
+            dx: MANAGE_SERVER_X,
+            dy: MANAGE_SERVER_NAME_Y,
+            w: MANAGE_SERVER_W,
+            h: EDIT_BOX_H,
+        },
+        ADDRESS_FIELD => Slot {
+            origin: Origin::ScreenTop,
+            dx: MANAGE_SERVER_X,
+            dy: MANAGE_SERVER_ADDRESS_Y,
+            w: MANAGE_SERVER_W,
+            h: EDIT_BOX_H,
+        },
+        RESOURCE_PACK_ROW => Slot {
+            origin: Origin::TitleTop,
+            dx: MANAGE_SERVER_X,
+            dy: MANAGE_SERVER_PACK_DY,
+            w: MANAGE_SERVER_W,
+            h: WIDGET_H,
+        },
+        DONE_ROW => Slot {
+            origin: Origin::TitleTop,
+            dx: MANAGE_SERVER_X,
+            dy: MANAGE_SERVER_DONE_DY,
+            w: MANAGE_SERVER_W,
+            h: WIDGET_H,
+        },
+        // `CANCEL_ROW`, and any row past it: the caller never asks for one
+        // this screen does not have, so the match stays a `usize` rather than
+        // an enum to share `Cell`-free indices with `EditForm`'s focus ids.
+        _ => Slot {
+            origin: Origin::TitleTop,
+            dx: MANAGE_SERVER_X,
+            dy: MANAGE_SERVER_CANCEL_DY,
+            w: MANAGE_SERVER_W,
+            h: WIDGET_H,
+        },
+    }
+}
+
 /// The rect an [`EditBox`] row's box occupies, as distinct from the whole row's.
 ///
 /// Derived from [`row_rect`] rather than restated, so the field, the row fill,
@@ -3380,33 +3616,22 @@ pub fn field_rect(
     Some((x, y, w, EDIT_BOX_H))
 }
 
-/// The two [`super::Screen::ServerEdit`] field rects at a given canvas, through
-/// [`field_rect`].
+/// The two [`super::Screen::ServerEdit`] field rects at a given canvas —
+/// vanilla's own `ManageServerScreen.java:33-42` rects, through
+/// [`manage_server_slot`].
 ///
 /// Exists so [`super::nav::EditForm::adding`] can seed its two `EditBox`es'
-/// geometry from the layout the draw actually uses instead of hardcoding a width
-/// — the boxes need real bounds *before* any frame exists, because arrow
-/// navigation between them is geometric and `displayPos` scrolling is measured
-/// against the width. Both probe rows carry a non-empty `detail`, which is what
-/// makes [`row_height`] give them [`LIST_ROW_H`]; a blank one would be 30 px and
-/// the seed would be a different rect from the draw.
+/// geometry before any frame exists — arrow navigation between them is
+/// geometric and `displayPos` scrolling is measured against the width, so a
+/// freshly-constructed box needs real bounds immediately. Reads the same
+/// [`manage_server_slot`] the real per-frame rows resolve through (via their
+/// own `slot`), rather than a second computation that could drift from it.
 #[must_use]
 pub fn field_row_rects(width: f32, height: f32) -> [(f32, f32, f32, f32); 2] {
-    let rows = [
-        MenuRow {
-            detail: "NAME".to_string(),
-            field: true,
-            ..Default::default()
-        },
-        MenuRow {
-            detail: "ADDRESS".to_string(),
-            field: true,
-            ..Default::default()
-        },
-    ];
+    use super::nav::{ADDRESS_FIELD, NAME_FIELD};
     [
-        field_rect(&rows, 0, width, height).unwrap_or_default(),
-        field_rect(&rows, 1, width, height).unwrap_or_default(),
+        manage_server_slot(NAME_FIELD).resolve(width, height),
+        manage_server_slot(ADDRESS_FIELD).resolve(width, height),
     ]
 }
 
@@ -5902,6 +6127,11 @@ mod tests {
 
     #[test]
     fn the_error_screen_carries_the_disconnect_reason() {
+        // Since `error_frame`'s conversion onto the framework, the reason
+        // lives in `notice` (a wrapped, bounded `MenuNotice`, like the
+        // account screen's failure message) rather than `message` — a
+        // `vanilla` frame suppresses `message` entirely (see `MenuNotice`'s
+        // own doc on why an unwrapped line was the bug this pattern fixes).
         let nav = test_nav("err");
         let mut ui = UiState::new();
         ui.begin(SessionKind::Multiplayer);
@@ -5909,8 +6139,15 @@ mod tests {
         let statuses = StatusCache::with_probe(unavailable_probe());
         let mut fav = FaviconCache::new();
         let f = frame_for(&ui, &nav, &statuses, &mut fav).unwrap();
-        let msg = f.message.expect("the reason must reach the screen");
-        assert!(msg.contains("SERVER CLOSED"), "{msg}");
+        assert!(f.vanilla, "the disconnect screen is on the framework now");
+        assert!(f.message.is_none(), "a vanilla frame draws no `message`");
+        let notice = f.notice.expect("the reason must reach the screen");
+        assert!(notice.text.contains("Server closed"), "{}", notice.text);
+        assert_eq!(
+            f.rows[0].label, "Back to Title Screen",
+            "vanilla's gui.toTitle, since dismiss_error always returns to MainMenu"
+        );
+        assert!(f.rows[0].slot.is_some(), "the button is vanilla-placed now");
     }
 
     #[test]
@@ -6125,6 +6362,7 @@ mod tests {
 
     #[test]
     fn the_edit_form_shows_both_fields_and_marks_the_focused_one() {
+        use crate::menu::nav::{ADDRESS_FIELD, CANCEL_ROW, DONE_ROW, NAME_FIELD, RESOURCE_PACK_ROW};
         let mut nav = test_nav("form");
         let mut ui = UiState::new();
         ui.open_server_list();
@@ -6135,18 +6373,32 @@ mod tests {
         let statuses = StatusCache::with_probe(unavailable_probe());
         let mut fav = FaviconCache::new();
         let f = frame_for(&ui, &nav, &statuses, &mut fav).unwrap();
-        assert_eq!(f.rows.len(), 2);
-        assert!(f.rows.iter().all(|r| r.field), "both rows are text fields");
-        assert_eq!(f.rows[0].label, "abc");
-        assert_eq!(f.selected, 0, "the name field has focus");
+        // Two text fields plus the framework conversion's three button rows.
+        assert_eq!(f.rows.len(), 5);
+        assert!(f.vanilla, "the framework conversion sets `vanilla`");
+        assert!(f.rows[NAME_FIELD].field, "row 0 is a text field");
+        assert!(f.rows[ADDRESS_FIELD].field, "row 1 is a text field");
+        assert!(!f.rows[RESOURCE_PACK_ROW].field, "row 2 is a button, not text");
+        assert_eq!(f.rows[NAME_FIELD].label, "abc");
+        assert_eq!(f.selected, NAME_FIELD, "the name field has focus");
+        // Vanilla disables Done rather than printing a message
+        // (`ManageServerScreen.java:92-93`) — see `error_frame`'s sibling note
+        // on why a `vanilla` frame's `message` is unused, and this screen's own
+        // arm on why no extra label duplicates the disabled sprite.
+        assert!(f.message.is_none(), "a vanilla frame draws no `message`");
         assert!(
-            f.message.is_some(),
-            "an addressless form must say so rather than looking ready to save"
+            !f.rows[DONE_ROW].enabled,
+            "an addressless form must not offer a working Done button"
         );
+        assert!(f.rows[CANCEL_ROW].enabled, "Cancel always works");
+        assert!(!f.rows[RESOURCE_PACK_ROW].enabled, "present, but inactive");
+        for row in [NAME_FIELD, ADDRESS_FIELD, RESOURCE_PACK_ROW, DONE_ROW, CANCEL_ROW] {
+            assert!(f.rows[row].slot.is_some(), "row {row} must be vanilla-placed");
+        }
 
         nav.key(&mut ui, MenuKey::Tab);
         let f = frame_for(&ui, &nav, &statuses, &mut fav).unwrap();
-        assert_eq!(f.selected, 1, "Tab moves focus to the address");
+        assert_eq!(f.selected, ADDRESS_FIELD, "Tab moves focus to the address");
     }
 
     fn frame_with(rows: Vec<MenuRow>, selected: usize) -> MenuFrame<'static> {
