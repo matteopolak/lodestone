@@ -1,5 +1,14 @@
 # Block placement prediction
 
+> **Lives in `crates/lodestone-shell/src/sim/placement.rs`, not `sim.rs`.** Split out (a pure,
+> behaviour-preserving move — no logic changed) because it was the most self-contained ~600-line
+> block in that file: every item here is a pure function or a plain data type, none of it touches
+> `Sim` state. Re-exported into `sim`'s own namespace so every call site elsewhere in `sim.rs`, and
+> `sim/tests.rs`'s `use super::*;`, still resolves the names unqualified — `predicted_placement_state`
+> and `write_predicted_block` specifically keep their original `crate::sim::`/`lodestone::sim::` path
+> via `pub use`, since both are referenced by that path from `block_entities.rs` and from
+> `tests/placed_chest_block_entity_pixels.rs`. See `sim/placement.rs`'s own module doc.
+
 ## What it is
 
 When you right-click a block on a live server the shell now **writes the placed block into the
@@ -211,7 +220,7 @@ by resolving to `None`.
 ## Gates
 
 ```bash
-# hermetic, in sim.rs's test module
+# hermetic, in sim/tests.rs (sim.rs's test module, split into its own file)
 cargo test -p lodestone-shell --lib -- placement
 # the pixel gates (GPU + client.jar)
 cargo test -p lodestone-shell --test placed_chest_block_entity_pixels -- --ignored --nocapture
