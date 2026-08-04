@@ -3,30 +3,48 @@
 ## What it is
 
 The criterion-based benchmark harness for epic [#78](https://github.com/matteopolak/lodestone/issues/78),
-implemented for four crates so far: `lodestone-worldgen` (chunk generation,
+implemented for five crates so far: `lodestone-worldgen` (chunk generation,
 sub-issues #84/#85), `lodestone-v770` (protocol decode throughput,
-sub-issues #137/#142/#146), `lodestone-world` (client-side chunk loading —
-store insertion, heightmap decode, light propagation) and `lodestone-entity`
-(mob simulation and pathfinding). It is the concrete implementation of the
-design recorded in [`docs/roadmap/benchmarks.md`](./roadmap/benchmarks.md) —
-that doc is the *argument* for the shape; this one is *how it actually works*
-and how to extend it.
+sub-issues #137/#142/#146/#88), `lodestone-world` (client-side chunk loading —
+store insertion, heightmap decode, light propagation, light *application*,
+memory footprint), `lodestone-entity` (mob simulation and pathfinding) and
+`lodestone-physics` (movement integration, collision sweep, pose fit gate,
+crowd push — sub-issues #115/#120/#124/#102). It is the concrete
+implementation of the design recorded in
+[`docs/roadmap/benchmarks.md`](./roadmap/benchmarks.md) — that doc is the
+*argument* for the shape; this one is *how it actually works* and how to
+extend it.
 
-Nine bench binaries exist today:
+Sixteen bench binaries exist today:
 
 | crate | bench | what it measures |
 |---|---|---|
-| `lodestone-worldgen` | `generation` | real-generator column throughput, per-stage cost split, linearity |
+| `lodestone-worldgen` | `generation` | real-generator column throughput, per-stage cost split, linearity, thread-count sweep + RNG-determinism parity |
 | `lodestone-v770` | `chunk_light_decode` | `level_chunk_with_light` decode throughput |
 | `lodestone-v770` | `nbt_decode` | `read_network_nbt` throughput, two realistic payload shapes |
 | `lodestone-v770` | `registry_decode` | block-state id → name/properties resolution (zero-heap and `BlockStateTable`) |
+| `lodestone-v770` | `palette_expansion` | `PalettedContainer::iter` — local index → raw block-state id resolution, the middle stage between wire decode and `World::load` |
 | `lodestone-world` | `chunk_load` | `World::load` insertion throughput — the real MP per-chunk consumer |
 | `lodestone-world` | `heightmap_decode` | `Heightmaps::decode` — the real per-chunk heightmap consumer |
 | `lodestone-world` | `light_propagation` | `compute_column_light`/`_with_neighbours` — the real SP per-chunk consumer |
-| `lodestone-entity` | `pathfinding_search` | `PathFinder::find_path` over four scenes (open/detour/maze/sealed) |
+| `lodestone-world` | `light_application` | `World::merge_light` — the real MP light-update consumer, single-column and render-distance-batch |
+| `lodestone-world` | `memory_footprint` | tracked-baseline layer over `tests/memory.rs`'s five heap-byte fixtures |
+| `lodestone-entity` | `pathfinding_search` | `PathFinder::find_path` over five scenes (open/detour/maze/sealed/real-collision-census stair gap) |
 | `lodestone-entity` | `mob_tick` | `NavigatingMob::tick`, split into search-triggering vs. steady-follow regimes |
+| `lodestone-physics` | `movement_integration` | `player::tick` per-tick cost, walking-on-ground vs. falling-in-air |
+| `lodestone-physics` | `collision_sweep` | `collide` swept against open air / simple cube / real complex-shape census |
+| `lodestone-physics` | `pose_fit_gate` | `can_player_fit_within_blocks_when`, succeeding vs. repeatedly-failing transition |
+| `lodestone-physics` | `crowd_push` | `entity_push_impulse` pair-test cost at N = 10/50/200/1000 nearby entities |
 
 Run any of them with `cargo bench -p <crate> --bench <name>`.
+
+**`lodestone-physics` is the fifth `support.rs` copy** — the threshold "How
+to change it" below already names for promoting the recorder to a real
+crate. Not done in this pass: promoting it would mean editing `worldgen`'s
+and `entity`'s `Cargo.toml`/`mod support;` lines while both crates were held
+by concurrent agents working unrelated features, a bigger blast radius than
+one more ~100-line copy. Left as the next thing to do once those crates are
+free — see `benches/support.rs`'s own doc comment in `lodestone-physics`.
 
 ## How it works
 
@@ -180,10 +198,45 @@ alone; both were obvious once `threadCPUDelta`-weighted self-time was
 attributed back to `preliminary_surface_level` and `build_surface`'s own
 frame, respectively.
 
+## Status of specific sub-issues, re-verified rather than assumed
+
+Per `CLAUDE.md`'s "re-verify before routing around 'X doesn't exist yet'"
+rule, checked against the actual code rather than a prior comment's summary:
+
+- **#85 (worldgen stage-cost split) is *not* fully done**, despite a prior
+  epic-comment claim that it was "verified done, same commit". Read
+  `OverworldGenerator::column_timed` (`crates/lodestone-worldgen/src/
+  overworld.rs`): its four timed boundaries are shape (incl. aquifer),
+  fluid+heightmap (actually biome), surface, and **intern — which silently
+  folds in `carve_stage` and `ore_stage` too**. The issue explicitly asks for
+  carvers/aquifer/ore features broken out on their own; they are not. Fixing
+  that needs a `StageTimes` field change in `lodestone-worldgen/src/
+  overworld.rs`, which is `crates/*/src/` (off-limits to this pass) and a
+  crate currently held by a concurrent agent doing perf work there — flagged
+  on the issue rather than attempted.
+- **#93/#94/#95 are satisfied by `light_propagation.rs`**, which already:
+  records the same functions #93 names into `support::record` (substance, not
+  the literal `tests/memory.rs` conversion #93's acceptance criterion
+  describes — the sanity tests stay untouched, per that issue's own
+  instruction); reports the from-scratch cost at realistic edit rates for
+  #94 (no incremental relight exists anywhere in the tree, confirmed by grep —
+  the issue's own documented fallback); and writes down #95's negative
+  finding (`Neighbourhood` is architecturally a fixed 3×3, confirmed at
+  `lodestone-world/src/lighting.rs`, so there is no larger API to sweep
+  against until that type changes shape). See that bench file's own module
+  doc for the detail.
+- **#86's remaining ask (thread-count sweep + in-benchmark parity)** is now in
+  `lodestone-server/examples/bench_worldgen.rs`: a 1/2/4/8/workers/2×workers
+  sweep reporting scaling efficiency, plus an FNV-1a fingerprint comparing
+  serial vs. parallel output over a 3×3 chunk subset that `panic!`s on
+  mismatch — the RNG-determinism break #86 is actually gated on, not merely a
+  speed number.
+
 ## How to change it
 
 - **Add a bench to a crate the harness already covers** (`lodestone-worldgen`,
-  `lodestone-v770`, `lodestone-world`, `lodestone-entity`): add a `.rs` file
+  `lodestone-v770`, `lodestone-world`, `lodestone-entity`, `lodestone-physics`):
+  add a `.rs` file
   under that crate's `benches/`, add a matching `[[bench]] name = "..."
   harness = false` entry to its `Cargo.toml`, and start the file with `mod
   support;` to get `support::record`.
