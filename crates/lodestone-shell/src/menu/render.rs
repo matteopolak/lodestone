@@ -394,11 +394,14 @@ fn rgba_mosaic(rgba: &[u8], width: usize, height: usize) -> Option<FaviconMosaic
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
     /// `(w / 2, 0)` — the top of the screen, for the logo band and the pause
-    /// screen's title.
+    /// screen's title. `this.width` is `int` everywhere vanilla anchors off it
+    /// (e.g. `this.width / 2 - 100` at `TitleScreen.java:144`), so `w / 2` is
+    /// Java integer division — hence the `floor` (issue #401).
     ScreenTop,
-    /// `(w / 2, floor(h / 4) + 48)` — vanilla `TitleScreen.init`'s `topPos`
-    /// (`TitleScreen.java:113`), the y every title-screen row is offset from.
-    /// `this.height / 4` is Java integer division, hence the `floor`.
+    /// `(floor(w / 2), floor(h / 4) + 48)` — vanilla `TitleScreen.init`'s
+    /// `topPos` (`TitleScreen.java:113`) for y, and the same `this.width / 2`
+    /// as [`Origin::ScreenTop`] for x. Both are Java integer division, hence
+    /// both `floor`s (issue #401: only the y one used to be here).
     TitleTop,
     /// The top-left of vanilla `PauseScreen`'s **arranged** `GridLayout`:
     /// `(floor((w - 212) / 2), floor((h - 166) / 4))`.
@@ -426,21 +429,29 @@ pub enum Origin {
     /// The gap above the logo (`y < LOGO_Y`, i.e. `y < 30`) is free at every
     /// canvas size instead, which is where this corner sits.
     TopRight,
-    /// `(w / 2, h)` — bottom-centre, for the footer band of the account screen
-    /// (Add Account / Select / Remove / Back) and the multiplayer screen's seven.
-    /// Not vanilla-sourced like the others above: nothing in
+    /// `(floor(w / 2), h)` — bottom-centre, for the footer band of the account
+    /// screen (Add Account / Select / Remove / Back) and the multiplayer
+    /// screen's seven. Not vanilla-sourced like the others above: nothing in
     /// `TitleScreen`/`PauseScreen` anchors a widget row to the bottom edge. Since
     /// #396 it is where both `HeaderAndFooterLayout` footers are pinned, which is
     /// canvas-independent even though the arranged rects are not — see
-    /// [`ACCOUNTS_REF_CANVAS`].
+    /// [`ACCOUNTS_REF_CANVAS`]. `floor`ed for the same reason as
+    /// [`Origin::ScreenTop`] (issue #401): every consumer of this origin is a
+    /// `Slot` centred *about* this x, and an unfloored anchor at an odd width
+    /// puts that centring a half-pixel off whole, which blurs the text drawn
+    /// there.
     ScreenBottom,
-    /// `(w / 4, 0)` — the death screen's title anchor (issue #103).
+    /// `(floor(w / 4), 0)` — the death screen's title anchor (issue #103).
     /// `DeathScreen.visitText` draws it at `middleLine / 2` where
     /// `middleLine = this.width / 2` (`DeathScreen.java:118-120`), i.e.
     /// **centred on the screen's left quarter, not the middle** — this is
     /// vanilla's own layout (seemingly an oversight nobody ever fixed, not a
     /// deliberate design), reproduced faithfully rather than "corrected" to
-    /// [`Origin::ScreenTop`].
+    /// [`Origin::ScreenTop`]. Both are Java integer division —
+    /// `floor(floor(w/2)/2) == floor(w/4)` for a non-negative `w`, so the two
+    /// chained truncations collapse to the one `floor` here — and #401's audit
+    /// of every unfloored `Origin::anchor` term caught this arm too, alongside
+    /// [`Origin::ScreenTop`]/[`Origin::TitleTop`]/[`Origin::ScreenBottom`].
     DeathTitle,
     /// A widget of the settings tree (issue #55), resolved by
     /// [`super::options::placement_anchor`].
@@ -461,8 +472,8 @@ impl Origin {
     #[must_use]
     pub fn anchor(self, width: f32, height: f32) -> (f32, f32) {
         match self {
-            Origin::ScreenTop => (width * 0.5, 0.0),
-            Origin::TitleTop => (width * 0.5, (height / 4.0).floor() + 48.0),
+            Origin::ScreenTop => ((width * 0.5).floor(), 0.0),
+            Origin::TitleTop => ((width * 0.5).floor(), (height / 4.0).floor() + 48.0),
             Origin::PauseGrid => {
                 let (grid_w, grid_h) = pause_grid_size();
                 (
@@ -473,8 +484,8 @@ impl Origin {
             Origin::BottomLeft => (0.0, height),
             Origin::BottomRight => (width, height),
             Origin::TopRight => (width, 0.0),
-            Origin::ScreenBottom => (width * 0.5, height),
-            Origin::DeathTitle => (width * 0.25, 0.0),
+            Origin::ScreenBottom => ((width * 0.5).floor(), height),
+            Origin::DeathTitle => ((width * 0.25).floor(), 0.0),
             // Unlike every arm above, this one *runs a layout* rather than
             // evaluating an expression — `OptionsScreen`'s tree cannot be
             // arranged once per process the way `pause_block` is, because
@@ -1466,21 +1477,31 @@ pub fn server_row_left(width: f32) -> f32 {
     (width * 0.5).floor() - (SERVER_LIST_ROW_W * 0.5).floor()
 }
 
-/// The top of list row `index`: `getFirstEntryY() + index * itemHeight`.
+/// The top of list row `index`: `getFirstEntryY() + (index - scrollAmount) *
+/// itemHeight` (`AbstractSelectionList.java:143-150`), with `scrollAmount`
+/// quantized to whole rows (issue #402).
 ///
-/// No scroll term — see [`server_row_visible`] on what this screen does instead
-/// of scrolling.
+/// **Row-quantized rather than vanilla's continuous pixel `scrollAmount`.**
+/// Vanilla scissors the band, so a row can be half on-screen; this pipeline has
+/// no scissor (see [`server_row_visible`]), so a partially-clipped row would
+/// paint over the header or the footer instead of being cut. Skipping whole
+/// rows is the only offset this draw model can express safely — [`MenuNav`
+/// (`super::nav::MenuNav`)]'s `server_scroll` is therefore a row count, not a
+/// pixel amount, and this is where that count is turned back into pixels.
 #[must_use]
-pub fn server_row_top(index: usize) -> f32 {
-    server_list_block().content_top + SERVER_LIST_FIRST_ENTRY_Y + index as f32 * SERVER_LIST_ITEM_H
+pub fn server_row_top(index: usize, scroll: usize) -> f32 {
+    server_list_block().content_top
+        + SERVER_LIST_FIRST_ENTRY_Y
+        + (index as f32 - scroll as f32) * SERVER_LIST_ITEM_H
 }
 
-/// The rect of list row `index` at a `width`-wide canvas.
+/// The rect of list row `index` at a `width`-wide canvas, scrolled by `scroll`
+/// rows (issue #402).
 #[must_use]
-pub fn server_row_rect(index: usize, width: f32) -> (f32, f32, f32, f32) {
+pub fn server_row_rect(index: usize, width: f32, scroll: usize) -> (f32, f32, f32, f32) {
     (
         server_row_left(width),
-        server_row_top(index),
+        server_row_top(index, scroll),
         SERVER_LIST_ROW_W,
         SERVER_LIST_ITEM_H,
     )
@@ -1491,8 +1512,8 @@ pub fn server_row_rect(index: usize, width: f32) -> (f32, f32, f32, f32) {
 /// (`AbstractSelectionList.java:477-506`). Everything an
 /// `OnlineServerEntry` draws is measured from this, not from the row.
 #[must_use]
-pub fn server_row_content_rect(index: usize, width: f32) -> (f32, f32, f32, f32) {
-    let (x, y, w, h) = server_row_rect(index, width);
+pub fn server_row_content_rect(index: usize, width: f32, scroll: usize) -> (f32, f32, f32, f32) {
+    let (x, y, w, h) = server_row_rect(index, width, scroll);
     (
         x + SERVER_LIST_ENTRY_PADDING,
         y + SERVER_LIST_ENTRY_PADDING,
@@ -1501,23 +1522,61 @@ pub fn server_row_content_rect(index: usize, width: f32) -> (f32, f32, f32, f32)
     )
 }
 
-/// Whether row `index` is inside the list's band on a `height`-tall canvas —
-/// `extractListItems`' own visibility test, `child.getY() + child.getHeight() >=
-/// getY() && child.getY() <= getBottom()` (`AbstractSelectionList.java:346-352`).
+/// Whether row `index` is inside the list's band on a `height`-tall canvas at
+/// `scroll` rows of offset — `extractListItems`' own visibility test,
+/// `child.getY() + child.getHeight() >= getY() && child.getY() <= getBottom()`
+/// (`AbstractSelectionList.java:346-352`).
 ///
 /// This stands in for vanilla's **scissor**, which this pipeline has no
 /// equivalent of: a row that would overflow into the footer is skipped entirely
-/// rather than half-drawn. What is deliberately *not* here is scrolling — see
-/// `docs/server-list.md` — so on a short canvas a long list is truncated instead
-/// of scrollable, and `row_rect` (which `app.rs` hit-tests through) still reports
-/// a rect for the skipped rows. The consequence is bounded: a click on an
-/// off-band row selects it and nothing else.
+/// rather than half-drawn, and — as of #402 — a row scrolled above the band
+/// (`index < scroll`) is rejected outright rather than relying on the geometry
+/// producing a negative top that happens to fail the bottom check, which is
+/// what made the *old*, scroll-less version of this function look complete
+/// while `row_rect` still answered for a row it would never draw. `row_rect`
+/// now calls this too (through [`MenuRow::entry`]'s carried `scroll`), so a
+/// click can no longer land on a row that is not on screen — see
+/// `docs/server-list.md`'s `hit_testing_matches_what_is_drawn_after_scrolling`
+/// for the executed control.
 #[must_use]
-pub fn server_row_visible(index: usize, height: f32) -> bool {
-    let top = server_row_top(index);
+pub fn server_row_visible(index: usize, height: f32, scroll: usize) -> bool {
+    if index < scroll {
+        return false;
+    }
+    let top = server_row_top(index, scroll);
     let list_top = server_list_block().content_top;
     let list_bottom = height - SERVER_LIST_FOOTER_H;
     top + SERVER_LIST_ITEM_H >= list_top && top <= list_bottom
+}
+
+/// Rows guaranteed visible at [`crate::config::MIN_SCALED_HEIGHT`] (vanilla's
+/// `Window.java:453`), so scroll-into-view (keyboard) and the wheel's fallback
+/// clamp are correct at every canvas and merely conservative at a larger one —
+/// the same trade `options::LIST_WINDOW_PX` and `accounts::VISIBLE_ROWS` make,
+/// for the same reason named on [`server_row_visible`]: this pipeline has no
+/// scissor, so a window that ever *overestimates* what fits would paint a row
+/// over the footer. Row-quantized rather than `LIST_WINDOW_PX`'s pixels, for
+/// [`server_row_top`]'s reason.
+#[must_use]
+pub fn server_list_window_rows() -> usize {
+    let list_top = server_list_block().content_top;
+    let band = crate::config::MIN_SCALED_HEIGHT as f32 - list_top - SERVER_LIST_FOOTER_H;
+    (band / SERVER_LIST_ITEM_H).floor().max(1.0) as usize
+}
+
+/// The largest legal `scroll` for `entry_count` rows at a `height`-tall canvas —
+/// vanilla's `AbstractScrollArea::maxScrollAmount`, `max(0, contentHeight -
+/// height)`, expressed in rows instead of pixels for [`server_row_top`]'s
+/// reason. Used by the mouse wheel (`MenuNav::scroll_server_list`), which knows
+/// the real canvas at the moment it fires — unlike keyboard scroll-into-view,
+/// which uses the canvas-independent [`server_list_window_rows`] instead.
+#[must_use]
+pub fn server_list_max_scroll(entry_count: usize, height: f32) -> usize {
+    let list_top = server_list_block().content_top;
+    let visible = ((height - SERVER_LIST_FOOTER_H - list_top) / SERVER_LIST_ITEM_H)
+        .floor()
+        .max(0.0) as usize;
+    entry_count.saturating_sub(visible)
 }
 
 /// The favicon's rect in row `index` — the content origin, 32×32
@@ -1528,8 +1587,8 @@ pub fn server_row_visible(index: usize, height: f32) -> bool {
 /// rect the cursor is in, and a second copy of the arithmetic is how the
 /// highlighted quadrant and the acting quadrant drift apart.
 #[must_use]
-pub fn server_entry_icon_rect(index: usize, width: f32) -> (f32, f32, f32, f32) {
-    let (cx, cy, _, _) = server_row_content_rect(index, width);
+pub fn server_entry_icon_rect(index: usize, width: f32, scroll: usize) -> (f32, f32, f32, f32) {
+    let (cx, cy, _, _) = server_row_content_rect(index, width, scroll);
     (cx, cy, SERVER_ENTRY_ICON, SERVER_ENTRY_ICON)
 }
 
@@ -1539,8 +1598,8 @@ pub fn server_entry_icon_rect(index: usize, width: f32) -> (f32, f32, f32, f32) 
 /// `statusIconX = getContentRight() - 10 - 5` (`ServerSelectionList.java:329`),
 /// at `getContentY()` — the icon is **not** vertically centred in the row.
 #[must_use]
-pub fn server_status_icon_rect(index: usize, width: f32) -> (f32, f32, f32, f32) {
-    let (cx, cy, cw, _) = server_row_content_rect(index, width);
+pub fn server_status_icon_rect(index: usize, width: f32, scroll: usize) -> (f32, f32, f32, f32) {
+    let (cx, cy, cw, _) = server_row_content_rect(index, width, scroll);
     (
         cx + cw - SERVER_STATUS_ICON_W - SERVER_ENTRY_SPACING,
         cy,
@@ -1795,6 +1854,12 @@ pub struct ServerEntryView {
     pub can_move_up: bool,
     /// `index < servers.size() - 1` — the move-down guard (`:386`).
     pub can_move_down: bool,
+    /// The list's current scroll offset, in rows (issue #402). Denormalized
+    /// onto every entry (rather than added as a parameter to [`row_rect`] and
+    /// every render function it calls) so `row_rect` — which `app.rs`'s
+    /// hit-test reads too — can resolve a row's position and visibility from
+    /// the row alone, with no second plumbing path from `MenuNav` to the draw.
+    pub scroll: usize,
 }
 
 /// Everything one menu screen draws.
@@ -2833,6 +2898,8 @@ fn server_list_frame(
     // One clock read for the whole frame, so every pinging row animates in step
     // (out of phase by index, which is `pinging_sprite`'s own doing).
     let millis = statuses.millis();
+    // #402: read once and stamp onto every entry — see `ServerEntryView::scroll`.
+    let scroll = nav.server_scroll();
 
     let mut rows: Vec<MenuRow> = entries
         .iter()
@@ -2883,6 +2950,7 @@ fn server_list_frame(
                     selected: i == nav.server_index(),
                     can_move_up: i > 0,
                     can_move_down: i < last,
+                    scroll,
                 }),
                 ..Default::default()
             }
@@ -3233,10 +3301,17 @@ pub fn row_rect(rows: &[MenuRow], i: usize, width: f32, height: f32) -> Option<(
     // this function's whole reason — `app.rs`'s hit-test reads it too, so a second
     // definition is how a click lands on a row the draw put somewhere else.
     //
-    // Note this returns a rect for a row that `server_row_visible` would skip
-    // drawing; see that function on the bounded consequence.
+    // #402: gated on `server_row_visible` first, so a row that is scrolled out
+    // of the band or would overflow into the footer reports **no** rect at all,
+    // rather than one nothing draws at. That is what keeps a click from landing
+    // on a row that is not on screen — `menu_row_at`'s `find` simply keeps
+    // scanning past a `None` the same way it already does past the end of
+    // `rows`. Contrast the account-row arm below, which still has this gap.
     if let Some(view) = row.entry.as_ref() {
-        return Some(server_row_rect(view.index, width));
+        if !server_row_visible(view.index, height, view.scroll) {
+            return None;
+        }
+        return Some(server_row_rect(view.index, width, view.scroll));
     }
     // An account row (#66/#402) is placed the same way and for the same reason —
     // `floor(width / 2) - floor(305 / 2)` is two integer divisions, not
@@ -3643,7 +3718,9 @@ fn draw_server_entry(
     let Some(view) = row.entry.as_ref() else { return };
     // `extractListItems` only draws the rows inside the band (`:346-352`); this is
     // that test, standing in for the scissor this pipeline has no equivalent of.
-    if !server_row_visible(view.index, height) {
+    // `row_rect` below now performs the same check on the way to its rect
+    // (#402), so this one is a fast-out, not the only guard.
+    if !server_row_visible(view.index, height, view.scroll) {
         return;
     }
     let Some((x, y, w, h)) = row_rect(rows, i, width, height) else {
@@ -3660,8 +3737,8 @@ fn draw_server_entry(
         b.rect(x + 1.0, y + 1.0, w - 2.0, h - 2.0, SERVER_LIST_SELECTION_FILL);
     }
 
-    let (cx, cy, cw, _) = server_row_content_rect(view.index, width);
-    let (ix, iy, iw, ih) = server_entry_icon_rect(view.index, width);
+    let (cx, cy, cw, _) = server_row_content_rect(view.index, width, view.scroll);
+    let (ix, iy, iw, ih) = server_entry_icon_rect(view.index, width, view.scroll);
     let text_x = cx + SERVER_ENTRY_ICON + SERVER_ENTRY_TEXT_GAP;
 
     // The favicon, or `FaviconTexture`'s fallback when the server sent none
@@ -3674,7 +3751,7 @@ fn draw_server_entry(
     }
 
     // The status column first, because the name's room depends on where it lands.
-    let (icon_x, icon_y, icon_w, icon_h) = server_status_icon_rect(view.index, width);
+    let (icon_x, icon_y, icon_w, icon_h) = server_status_icon_rect(view.index, width, view.scroll);
     b.sprite(view.status_sprite, icon_x, icon_y, icon_w, icon_h, LABEL);
     let status_w = b.text_width(&view.status, 1.0);
     let status_x = icon_x - status_w - SERVER_ENTRY_SPACING;
@@ -5346,23 +5423,30 @@ mod tests {
         assert_eq!(delx - (ex + ew), 4.0, "lower row spacing");
         assert_eq!(SERVER_LIST_BUTTONS.len(), 7);
 
-        // The rows.
-        assert_eq!(server_row_rect(0, V_W), (275.0, 35.0, 305.0, 36.0));
+        // The rows, unscrolled.
+        assert_eq!(server_row_rect(0, V_W, 0), (275.0, 35.0, 305.0, 36.0));
         assert_eq!(
-            server_row_rect(1, V_W),
+            server_row_rect(1, V_W, 0),
             (275.0, 71.0, 305.0, 36.0),
             "rows stack by itemHeight with no gap"
         );
         assert_eq!(
-            server_row_content_rect(0, V_W),
+            server_row_content_rect(0, V_W, 0),
             (277.0, 37.0, 301.0, 32.0),
             "CONTENT_PADDING insets the entry by 2, and 36 - 4 is the icon's 32"
         );
-        assert_eq!(server_entry_icon_rect(0, V_W), (277.0, 37.0, 32.0, 32.0));
+        assert_eq!(server_entry_icon_rect(0, V_W, 0), (277.0, 37.0, 32.0, 32.0));
         assert_eq!(
-            server_status_icon_rect(0, V_W),
+            server_status_icon_rect(0, V_W, 0),
             (563.0, 37.0, 10.0, 8.0),
             "contentRight - 10 - 5, at contentY"
+        );
+        // A scroll of 1 shifts every row up by one `itemHeight` (#402): row 1
+        // at scroll 0 lands exactly where row 0 sits at scroll 1.
+        assert_eq!(
+            server_row_rect(1, V_W, 1),
+            server_row_rect(0, V_W, 0),
+            "scrolling by one row is the same shift as re-indexing by one row"
         );
         // `getRowLeft()` is not `(width - rowWidth) / 2`, and the difference shows
         // at an odd canvas: 855/2 = 427 either way here, 856 is where they split.
@@ -5503,10 +5587,10 @@ mod tests {
         assert_eq!(dim_at(&f), None, "no cursor must mean no hover overlay");
 
         // Row 0, then row 1: the same overlay, one `itemHeight` lower.
-        let icon0 = server_entry_icon_rect(0, V_W);
+        let icon0 = server_entry_icon_rect(0, V_W, 0);
         f.cursor = Some((icon0.0 + 4.0, icon0.1 + 4.0));
         is(dim_at(&f), icon0, "row 0's icon");
-        let icon1 = server_entry_icon_rect(1, V_W);
+        let icon1 = server_entry_icon_rect(1, V_W, 0);
         f.cursor = Some((icon1.0 + 4.0, icon1.1 + 20.0));
         is(dim_at(&f), icon1, "row 1's icon");
         assert_eq!(
@@ -5659,7 +5743,7 @@ mod tests {
         }
 
         // Row 1 of three, so both move arrows apply.
-        let (ix, iy, iw, ih) = server_entry_icon_rect(1, V_W);
+        let (ix, iy, iw, ih) = server_entry_icon_rect(1, V_W, 0);
         let cases = [
             // (cursor, which of the three is highlighted)
             ((ix + iw * 0.75, iy + ih * 0.5), 0usize),
@@ -5695,7 +5779,7 @@ mod tests {
 
         // Row 0 has nowhere to move up to, so its arrow must not be drawn at all —
         // vanilla's `if (index > 0)` guard (`ServerSelectionList.java:375`).
-        let (ix0, iy0, iw0, ih0) = server_entry_icon_rect(0, V_W);
+        let (ix0, iy0, iw0, ih0) = server_entry_icon_rect(0, V_W, 0);
         f.cursor = Some((ix0 + 4.0, iy0 + 4.0));
         let sprite = build(&f, Some(&atlas), None, V_W, V_H).sprite;
         let up = region(SERVER_MOVE_UP_SPRITES.0);
@@ -5789,7 +5873,7 @@ mod tests {
 
         // 400 ms is the middle bucket. Asserted at the status icon's own rect, so
         // this is both "the right sprite" and "in the right place".
-        let rect = server_status_icon_rect(0, V_W);
+        let rect = server_status_icon_rect(0, V_W, 0);
         let uvs = uvs_in_dest(&stream, V_W, V_H, rect);
         assert!(!uvs.is_empty(), "no status sprite at {rect:?}");
         let (min, max) = sprite_uv_bounds(&atlas, PING_SPRITES[2]);
@@ -7018,11 +7102,64 @@ mod tests {
         // width / 2`, i.e. `width / 4` — not `width / 2` like every other
         // centred heading in this file (`Origin::ScreenTop`). A layout
         // "corrected" to the screen centre would fail this by a wide margin.
-        assert_eq!(Origin::DeathTitle.anchor(V_W, V_H), (V_W / 4.0, 0.0));
+        //
+        // `.floor()`ed (issue #401): `854.0 / 4.0` is `213.5`, not a whole
+        // pixel, where vanilla's `this.width / 2 / 2` is two Java integer
+        // divisions and can only ever land on a whole pixel.
+        assert_eq!(Origin::DeathTitle.anchor(V_W, V_H), ((V_W / 4.0).floor(), 0.0));
         assert_ne!(
             Origin::DeathTitle.anchor(V_W, V_H).0,
             Origin::ScreenTop.anchor(V_W, V_H).0,
             "the death title and the score/message lines are not on the same x"
+        );
+    }
+
+    /// Issue #401: every width-derived [`Origin`] anchor is vanilla's `this.width`
+    /// (always `int`) divided by a constant — Java integer division — so the x
+    /// term must be `floor`ed. At an *even* width that is invisible, because
+    /// `width * 0.5` (or `* 0.25`) is already a whole pixel; **no test before
+    /// this one used an odd width**, which is exactly how the bug shipped. 855
+    /// is odd and not a multiple of 4 either, so it exercises every one of the
+    /// affected arms at once.
+    ///
+    /// Each assertion predicts *both* hypotheses from `width` alone — floored
+    /// (right) and unfloored (the bug) — and requires landing on the floored
+    /// one, per CLAUDE.md's magnitude-species rule: asserting only "the anchor
+    /// moved" or "is not X.5" would pass for nearly any wrong number too.
+    #[test]
+    fn odd_width_anchors_are_floored_like_javas_integer_division() {
+        let width = 855.0_f32;
+        let height = 481.0_f32;
+
+        let floored_half = (width * 0.5).floor();
+        let unfloored_half = width * 0.5;
+        assert_eq!(floored_half, 427.0, "sanity: floor(855/2) is 427, not 427.5");
+        assert_ne!(floored_half, unfloored_half, "sanity: 855 is odd, so the two must differ");
+
+        assert_eq!(
+            Origin::ScreenTop.anchor(width, height),
+            (floored_half, 0.0),
+            "ScreenTop must not land on the unfloored {unfloored_half}"
+        );
+        assert_eq!(
+            Origin::TitleTop.anchor(width, height),
+            (floored_half, (height / 4.0).floor() + 48.0),
+            "TitleTop's x must not land on the unfloored {unfloored_half}"
+        );
+        assert_eq!(
+            Origin::ScreenBottom.anchor(width, height),
+            (floored_half, height),
+            "ScreenBottom must not land on the unfloored {unfloored_half}"
+        );
+
+        let floored_quarter = (width * 0.25).floor();
+        let unfloored_quarter = width * 0.25;
+        assert_eq!(floored_quarter, 213.0, "sanity: floor(855/4) is 213, not 213.75");
+        assert_ne!(floored_quarter, unfloored_quarter, "sanity: 855/4 is not a whole pixel");
+        assert_eq!(
+            Origin::DeathTitle.anchor(width, height),
+            (floored_quarter, 0.0),
+            "DeathTitle must not land on the unfloored {unfloored_quarter}"
         );
     }
 

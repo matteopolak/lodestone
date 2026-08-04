@@ -217,13 +217,56 @@ exactly as `Screen.keyPressed`'s ordering requires.
 
 Each of these is a scope cut, not an oversight:
 
-- **No scrolling and no scrollbar.** `server_row_visible` reproduces
-  `extractListItems`' visibility test, which stands in for vanilla's scissor: a row
-  that would overflow into the footer is skipped rather than half-drawn. There is
-  no scroll offset, so on a short canvas a long list is truncated. `row_rect` still
-  reports a rect for a skipped row, so a click there selects it and nothing else.
-  `AbstractSelectionList`'s scissored viewport, scrollbar and mouse-wheel handling
-  are shared with `Screen::WorldSelect` and want doing once.
+- **No scrollbar.** The wheel and the keyboard both scroll the list (issue
+  #402, below), but there is no `widget/scroller` thumb drawn in the 6 px
+  gutter vanilla reserves for one. A player has no visual cue for how much
+  list is off-screen beyond the row outline reaching the band's edge.
+- **Scrolling is row-quantized, not vanilla's continuous pixel
+  `scrollAmount`.** This pipeline has no scissor — `server_row_visible` stands
+  in for one by skipping a row entirely rather than half-drawing it — so a
+  fractional-row scroll offset would paint a sliver of a row over the header
+  or the footer. `server_row_top`'s `scroll` parameter is therefore a row
+  count. One wheel notch moves one row (vanilla's own `scrollRate` is half an
+  item's height per notch, `itemHeight / 2` at `AbstractSelectionList.java:44`
+  — half a row has no meaning in a row-only model).
+  `AbstractSelectionList`'s scissored viewport and scrollbar are shared with
+  `Screen::WorldSelect`, which has exactly one row today and so has nothing to
+  scroll yet — see `world_select.rs`'s module doc.
+
+### Scrolling (issue #402)
+
+The list scrolls, and the fix has two halves — the issue named both by name:
+
+- **The offset.** `MenuNav::server_scroll` is a row count. The keyboard
+  (`Up`/`Down` in `key_list`, and `swap_rows` after a reorder) keeps the
+  selection in view via `scroll_server_to_show`, which uses the
+  canvas-independent `render::server_list_window_rows` — rows guaranteed to
+  fit at `config::MIN_SCALED_HEIGHT`, the same trade `options::LIST_WINDOW_PX`
+  and `accounts::VISIBLE_ROWS` already make, for the same reason: a window
+  that ever *overestimates* what fits paints a row over the footer, where
+  underestimating only leaves a larger canvas showing fewer rows than it
+  could. The mouse wheel (`MenuNav::scroll_server_list`, called from
+  `app.rs`'s `MouseWheel` handler) instead uses the *real* canvas height,
+  which it has at the moment it fires, through `render::server_list_max_scroll`
+  — vanilla's `AbstractScrollArea::maxScrollAmount` in rows. Because the two
+  clamps use different heights, keyboard-only navigation on a canvas taller
+  than `MIN_SCALED_HEIGHT` can leave the list scrolled further than the real
+  canvas needs — bounded (never negative, never past the list's end) and
+  self-correcting the instant the wheel is used, since its dynamic clamp pulls
+  the offset back down to what the real canvas actually requires.
+- **The hit test.** `ServerEntryView` now carries the frame's `scroll` on every
+  row, and `row_rect` calls `server_row_visible` *before* answering a rect —
+  so a row scrolled out of the band, or overflowing the footer, returns `None`
+  instead of a rect nothing draws at. `app.rs`'s `menu_row_at` hit-test and the
+  draw both go through `row_rect`, so this is the one place that fix has to
+  live. Proved by `arrowing_past_the_window_scrolls_and_off_window_rows_are_not_hit_testable`
+  (`menu/nav.rs`), with the on-screen row's own rect as the executed control —
+  without it, "the off-window row returns `None`" would pass just as well
+  against a detector that always returns `None`.
+
+Not persisted, and reset to `0` whenever Multiplayer is opened from the title
+— vanilla builds a fresh `JoinMultiplayerScreen` (`scrollAmount` starts at 0)
+every time.
 - **No LAN discovery**, so no `LANHeader` row and no `NetworkServerEntry`. That is
   also why Edit/Delete need no entry-type test.
 - **No double-click to join.** `app.rs` reports one click at a time with no

@@ -876,6 +876,15 @@ pub struct MenuNav {
     /// are visible at once: the selected *server* keeps its outline while a footer
     /// button under the mouse draws highlighted.
     list_button: Option<usize>,
+    /// How many rows the multiplayer list is scrolled down, in whole rows
+    /// (issue #402). Row-quantized rather than vanilla's continuous
+    /// `scrollAmount` — see [`super::render::server_row_top`]'s doc on why this
+    /// draw pipeline (no scissor) cannot show a partial row.
+    ///
+    /// Not persisted and reset to `0` whenever the screen is (re)opened from the
+    /// title, matching vanilla building a fresh `JoinMultiplayerScreen` — see
+    /// [`Self::key_main`]'s `MainButton::Multiplayer` arm.
+    server_scroll: usize,
     /// The last known mouse position in **logical** pixels, and the canvas it was
     /// measured in (#396).
     ///
@@ -962,6 +971,7 @@ impl MenuNav {
             accounts: crate::menu::accounts::AccountsNav::with_path(profiles_path),
             world_select: crate::menu::world_select::WorldSelectNav::new(),
             list_button: None,
+            server_scroll: 0,
             menu_cursor: None,
             settings: crate::menu::options::SettingsNav::new(),
         }
@@ -1037,6 +1047,55 @@ impl MenuNav {
         self.list_button
     }
 
+    /// How many rows the multiplayer list is scrolled down (issue #402).
+    #[must_use]
+    pub fn server_scroll(&self) -> usize {
+        self.server_scroll
+    }
+
+    /// Scrolls the multiplayer list by `rows` (positive = down, revealing later
+    /// entries), clamping to `[0, server_list_max_scroll(len, canvas_height)]` —
+    /// vanilla's `AbstractScrollArea::mouseScrolled` /
+    /// `setScrollAmount`'s clamp, in rows rather than pixels.
+    ///
+    /// Takes the real canvas height because the mouse wheel is the one call site
+    /// that has it (`app.rs` already resolves the framebuffer to a logical
+    /// canvas for every cursor event) — unlike keyboard scroll-into-view, which
+    /// runs on every arrow press and uses the canvas-independent
+    /// [`super::render::server_list_window_rows`] instead so it needs no new
+    /// plumbing from `app.rs`. A no-op on an empty list, so `max` (which would
+    /// otherwise be `0.saturating_sub(0) = 0`, i.e. already a no-op) does not
+    /// need to special-case it, but an early return reads clearer than relying
+    /// on that.
+    pub fn scroll_server_list(&mut self, rows: i32, canvas_height: f32) {
+        if self.list.is_empty() {
+            return;
+        }
+        let max = super::render::server_list_max_scroll(self.list.len(), canvas_height) as i32;
+        let cur = self.server_scroll as i32;
+        self.server_scroll = (cur + rows).clamp(0, max.max(0)) as usize;
+    }
+
+    /// Keeps [`Self::server`] inside the scrolled window — vanilla's
+    /// `AbstractSelectionList.scrollToEntry` at row granularity, modelled on
+    /// [`super::accounts`]'s `scroll_to_show`. Uses the canvas-independent
+    /// [`super::render::server_list_window_rows`] rather than a real canvas
+    /// height, so a keyboard press needs no new plumbing from `app.rs` — see
+    /// that function's doc on why the result is safe (never wrong direction)
+    /// even when it under-uses a larger canvas.
+    fn scroll_server_to_show(&mut self) {
+        let window = super::render::server_list_window_rows();
+        if self.server < self.server_scroll {
+            self.server_scroll = self.server;
+        } else if self.server >= self.server_scroll + window {
+            self.server_scroll = self.server + 1 - window;
+        }
+        // Never leave the window scrolled past the point where it has nothing
+        // left to reveal, e.g. right after a delete shrinks the list.
+        let max = self.list.len().saturating_sub(1);
+        self.server_scroll = self.server_scroll.min(max);
+    }
+
     /// Records the mouse position in logical pixels, and the canvas it was
     /// measured in (#396).
     ///
@@ -1073,7 +1132,7 @@ impl MenuNav {
         if canvas_w <= 0.0 || canvas_h <= 0.0 {
             return None;
         }
-        let (ix, iy, iw, _) = super::render::server_entry_icon_rect(row, canvas_w);
+        let (ix, iy, iw, _) = super::render::server_entry_icon_rect(row, canvas_w, self.server_scroll);
         Some((x - ix, y - iy, iw))
     }
 
@@ -1338,6 +1397,10 @@ impl MenuNav {
             return MenuAction::None;
         }
         self.server = to;
+        // #402: the swap can carry the selection to the edge of the scrolled
+        // window (repeated clicks on the move-up/down arrow), matching
+        // vanilla's own `scrollToEntry` call right after the swap.
+        self.scroll_server_to_show();
         self.persist();
         MenuAction::None
     }
@@ -1457,6 +1520,13 @@ impl MenuNav {
                     }
                     MainButton::Multiplayer => {
                         ui.open_server_list();
+                        // Vanilla builds a fresh `JoinMultiplayerScreen`
+                        // (`scrollAmount` starts at 0) every time this is
+                        // pressed; `clamp_server` below then re-derives the
+                        // window from wherever `self.server` already points,
+                        // matching a fresh screen whose selection just happens
+                        // to already be scrolled to (#402).
+                        self.server_scroll = 0;
                         self.clamp_server();
                         MenuAction::Reprobe(None)
                     }
@@ -1498,10 +1568,15 @@ impl MenuNav {
         match key {
             MenuKey::Up => {
                 self.server = wrap_prev(self.server, self.list.len());
+                // #402: without this, arrowing past the bottom of the visible
+                // window moved the selection but drew nothing new — the
+                // outline vanished off-screen with no sign anything happened.
+                self.scroll_server_to_show();
                 MenuAction::None
             }
             MenuKey::Down => {
                 self.server = wrap_next(self.server, self.list.len());
+                self.scroll_server_to_show();
                 MenuAction::None
             }
             MenuKey::Enter => match self.list.get(self.server) {
@@ -1857,11 +1932,15 @@ impl MenuNav {
         }
     }
 
-    /// Keeps the highlight inside the list after an add or a delete.
+    /// Keeps the highlight inside the list after an add or a delete, and
+    /// (#402) keeps the scroll window consistent with wherever that leaves it —
+    /// a delete can otherwise strand the scroll offset past the new, shorter
+    /// list's end.
     fn clamp_server(&mut self) {
         if self.server >= self.list.len() {
             self.server = self.list.len().saturating_sub(1);
         }
+        self.scroll_server_to_show();
     }
 
     /// Writes the list to disk, recording (not swallowing) any failure.
@@ -3294,9 +3373,10 @@ mod tests {
         nav.set_menu_cursor(x, y, 854.0, 480.0);
     }
 
-    /// The centre of a quadrant of row `row`'s favicon, in logical pixels.
+    /// The centre of a quadrant of row `row`'s favicon, in logical pixels,
+    /// unscrolled.
     fn icon_point(row: usize, fx: f32, fy: f32) -> (f32, f32) {
-        let (ix, iy, iw, ih) = crate::menu::render::server_entry_icon_rect(row, 854.0);
+        let (ix, iy, iw, ih) = crate::menu::render::server_entry_icon_rect(row, 854.0, 0);
         (ix + iw * fx, iy + ih * fy)
     }
 
@@ -3331,6 +3411,90 @@ mod tests {
                 "a footer row is a slotted button, not a list entry"
             );
         }
+    }
+
+    /// #402: arrowing past the bottom of the scroll window scrolls to keep the
+    /// selection on screen, and — the hit-testing half the issue calls out by
+    /// name — `row_rect` (the same function `app.rs`'s hit-test calls) refuses
+    /// a row that has scrolled out of the band, rather than reporting a rect
+    /// for a row nothing draws there.
+    #[test]
+    fn arrowing_past_the_window_scrolls_and_off_window_rows_are_not_hit_testable() {
+        let window = crate::menu::render::server_list_window_rows();
+        let n = window + 3; // guaranteed to overflow the window
+        let (nav, ui, _) = listing("list-scroll-keyboard", n);
+        // `listing` adds through the real add-form path, which leaves the
+        // cursor on the row it just created.
+        assert_eq!(nav.server_index(), n - 1, "precondition: cursor on the last row");
+        assert!(
+            nav.server_scroll() > 0,
+            "selecting a row past the window must have scrolled to show it"
+        );
+
+        let mut favicons = crate::menu::render::FaviconCache::new();
+        let frame = crate::menu::render::frame_for(
+            &ui,
+            &nav,
+            &crate::menu::status::StatusCache::with_probe(
+                crate::menu::status::unavailable_probe(),
+            ),
+            &mut favicons,
+        )
+        .expect("the multiplayer screen owns its frame");
+
+        const V_W: f32 = 854.0;
+        const V_H: f32 = 480.0;
+
+        // The control: the detector can return `Some` at all, on the row that
+        // actually is on screen. Without this, "returns `None`" below would be
+        // satisfied just as well by a `row_rect` that always answers `None`.
+        let visible = crate::menu::render::row_rect(&frame.rows, n - 1, V_W, V_H);
+        assert!(
+            visible.is_some(),
+            "control: the selected, on-screen row must still have a rect"
+        );
+
+        // The bug itself: row 0's `MenuRow` still exists in `frame.rows` —
+        // nothing is windowed out of the vec — but it has scrolled above the
+        // band. A hit-test that still answered a rect for it is exactly how a
+        // stale click coordinate could select whatever is now drawn at row 0's
+        // old pixels.
+        let scrolled_off = crate::menu::render::row_rect(&frame.rows, 0, V_W, V_H);
+        assert_eq!(
+            scrolled_off, None,
+            "a row scrolled out of the band must not be hit-testable"
+        );
+    }
+
+    /// #402: the mouse wheel scrolls the list too, independently of the
+    /// keyboard path above, and clamps at both ends rather than running past
+    /// the list.
+    #[test]
+    fn the_mouse_wheel_scrolls_the_server_list_and_clamps() {
+        // `server_list_max_scroll` is dynamic (the real canvas, not the
+        // conservative keyboard window), so pick `n` large enough that even
+        // the *reference* 854×480 canvas cannot show it all — otherwise the
+        // wheel would legitimately have nothing to do (`max == 0`) and the
+        // clamp assertions below would hold vacuously.
+        const V_H: f32 = 480.0;
+        let n = 15;
+        let (mut nav, _ui, _) = listing("list-scroll-wheel", n);
+        let max = crate::menu::render::server_list_max_scroll(n, V_H);
+        assert!(max > 0, "precondition: {n} rows must overflow an 854x480 canvas");
+
+        // Scroll to the very top and past it — must clamp at 0, not go negative
+        // (which `usize` would panic on if the clamp were wrong).
+        nav.scroll_server_list(-1000, V_H);
+        assert_eq!(nav.server_scroll(), 0, "wheel-up clamps at the top");
+
+        // Scroll to the very bottom and past it — must clamp at
+        // `server_list_max_scroll`, not run off the end of the list.
+        nav.scroll_server_list(1000, V_H);
+        assert_eq!(nav.server_scroll(), max, "wheel-down clamps at the bottom");
+
+        // One notch back up must move by exactly one row, not snap or drift.
+        nav.scroll_server_list(-1, V_H);
+        assert_eq!(nav.server_scroll(), max - 1);
     }
 
     /// **Hovering a server row does not select it.** Reported by a player: the
