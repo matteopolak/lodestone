@@ -105,6 +105,13 @@ pub struct WalkDrive {
     ///   The bot then walks correctly while facing anywhere at all, which is what
     ///   makes view steering a nicety rather than a prerequisite.
     pub steer: bool,
+    /// Whether this edge needs a jump to clear its destination — `true` only
+    /// for [`lodestone_nav::MoveKind::StepUp`] (`Walk`/`Descend`/`Drop` all
+    /// clear or fall without one). Held only while grounded and short of the
+    /// destination cell (`docs/baritone-port.md` §2.3: "do not press jump if
+    /// already airborne"); `lodestone_physics::tick`'s own jump-cooldown
+    /// handling is what stops a held key from re-triggering mid-flight.
+    pub jump: bool,
 }
 
 impl WalkDrive {
@@ -151,11 +158,15 @@ impl WalkDrive {
 
         let frame = if self.steer { yaw } else { state.yaw };
         let (forward, strafe) = axes_for_world_dir(frame, dx, dz);
+        // Only while grounded and still short of the destination: pressing jump
+        // mid-air does nothing physically, and holding it past arrival is not
+        // meaningful either since `done` will end the edge on the same tick.
+        let jump = self.jump && state.on_ground && !self.inside_cell(state.position);
         DriveTick {
             input: MovementInput {
                 forward,
                 strafe,
-                jump: false,
+                jump,
                 sneak: false,
                 sprint: self.sprint,
             },
@@ -263,6 +274,7 @@ mod tests {
             // `steer`: this test exercises `done()` only and never calls `tick`, so no yaw is
             // adopted.
             steer: false,
+            jump: false,
         };
         let mut state = PlayerState::at(Vec3d::new(1.02, 1.0, 0.5), 0.0);
         state.velocity = Vec3d::new(0.2, 0.0, 0.0);
@@ -300,6 +312,7 @@ mod tests {
             sprint: false,
             // `steer`: the loop below does `state.yaw = step.yaw` before ticking.
             steer: true,
+            jump: false,
         };
         let mut state = PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0);
         state.on_ground = true;
@@ -354,6 +367,7 @@ mod tests {
             // `steer`: the point of this test: the view is deliberately held at 137 deg and
             // `step.yaw` is never adopted.
             steer: false,
+            jump: false,
         };
         let mut state = PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 137.0);
         state.on_ground = true;
