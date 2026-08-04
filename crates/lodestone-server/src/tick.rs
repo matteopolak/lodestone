@@ -51,7 +51,7 @@ use std::time::Duration;
 
 use crate::block_entities::{BlockEntityHandle, BlockEntityRegistry};
 use crate::chunk::ChunkSource;
-use crate::mobs::{LiveMobSource, MobHandle, MobSim};
+use crate::mobs::{Detonation, LiveMobSource, MobHandle, MobSim};
 use crate::random_tick::{DEFAULT_RANDOM_TICK_SPEED, RandomTickScheduler};
 use crate::scheduled_tick::ScheduledTickQueue;
 
@@ -126,6 +126,43 @@ impl BlockTickFeed {
     /// consumer.
     pub fn drain_all(&self) -> Vec<(i32, i32, i32, String)> {
         std::mem::take(&mut *self.0.lock().expect("block tick feed lock poisoned"))
+    }
+}
+
+/// A shared feed of detonations the world tick loop wants every connection
+/// to learn about (issue #425) — the exact same idiom [`BlockTickFeed`]
+/// already establishes just above, applied to
+/// [`MobSim::take_detonations`]'s own drain instead of a random-ticked block
+/// change. `MobSim::tick` already discards its `explode` return entirely
+/// before this (issue #213's exposure/damage maths had two production
+/// callers, both direct-explosion tests calling `MobSim::explode` by hand,
+/// and zero path from "a creeper's fuse completed" to anything a client
+/// could see) — this is what [`run_tick_loop`] publishes into so
+/// `crate::server::serve_play`'s own `container_sync_tick` arm can forward a
+/// real `EXPLODE` packet, the same way it already forwards
+/// [`BlockTickFeed`]'s random-tick changes.
+///
+/// Same single-consumer caveat as [`BlockTickFeed`]: safe today because
+/// [`crate::IntegratedServer::open_in_memory_with_mobs`] spawns exactly one
+/// connection task per feed instance.
+#[derive(Debug, Clone, Default)]
+pub struct ExplosionFeed(Arc<Mutex<Vec<Detonation>>>);
+
+impl ExplosionFeed {
+    /// Records one detonation for every consumer to learn about on their
+    /// next [`drain_all`](Self::drain_all).
+    pub(crate) fn publish(&self, detonation: Detonation) {
+        self.0
+            .lock()
+            .expect("explosion feed lock poisoned")
+            .push(detonation);
+    }
+
+    /// Drains and returns every detonation published since the last call —
+    /// see the struct doc comment for why this is safe only for exactly one
+    /// consumer.
+    pub fn drain_all(&self) -> Vec<Detonation> {
+        std::mem::take(&mut *self.0.lock().expect("explosion feed lock poisoned"))
     }
 }
 
@@ -445,6 +482,7 @@ pub(crate) async fn run_tick_loop<W>(
     world: Arc<W>,
     block_tick_out: BlockTickFeed,
     tick_area: (RangeInclusive<i32>, RangeInclusive<i32>),
+    explosion_out: ExplosionFeed,
 ) where
     W: ChunkSource,
 {
@@ -489,6 +527,15 @@ pub(crate) async fn run_tick_loop<W>(
         let tick_start = tokio::time::Instant::now();
         mobs.with(MobSim::tick);
         mob_out.publish(mobs.with(|sim| sim.snapshots()));
+        // Issue #425: `MobSim::tick` already calls `MobSim::explode` the
+        // tick a creeper's own fuse completes (`1feed17`/`614acb8`), but
+        // until now nothing read the detonation back out of the sim — see
+        // `ExplosionFeed`'s own doc comment just above for why this is the
+        // one production path that turns "a creeper detonated" into an
+        // `EXPLODE` packet reaching a connection at all.
+        for detonation in mobs.with(MobSim::take_detonations) {
+            explosion_out.publish(detonation);
+        }
         block_entities.with(BlockEntityRegistry::tick_all);
 
         game_tick += 1;
@@ -580,6 +627,7 @@ mod tests {
             world,
             block_tick_out,
             tick_area,
+            ExplosionFeed::default(),
         ));
         // Let the freshly spawned task reach its first `Instant::now()` call (its
         // `next_tick_at` baseline) before any `advance()` below — otherwise the
@@ -618,6 +666,7 @@ mod tests {
             world,
             block_tick_out,
             tick_area,
+            ExplosionFeed::default(),
         ));
         // Let the freshly spawned task reach its first `Instant::now()` call (its
         // `next_tick_at` baseline) before any `advance()` below — otherwise the
@@ -786,6 +835,7 @@ mod tests {
             world,
             block_tick_out,
             tick_area,
+            ExplosionFeed::default(),
         ));
         // Let the freshly spawned task reach its first `Instant::now()` call (its
         // `next_tick_at` baseline) before any `advance()` below — otherwise the

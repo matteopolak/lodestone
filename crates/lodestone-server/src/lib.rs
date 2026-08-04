@@ -148,9 +148,9 @@ pub use mob_spawn::{
     DespawnOutcome, MAGIC_NUMBER, MobCategory, SpawnCandidate, SpawnCandidateSource, SpawnRng,
     SpawnState, check_despawn, resolve_mob_shape,
 };
-pub use mobs::{AttackOutcome, ChunkWorld, LiveMobSource, MobHandle, MobSim, SimMob};
+pub use mobs::{AttackOutcome, ChunkWorld, Detonation, LiveMobSource, MobHandle, MobSim, SimMob};
 pub use neighbor_update::{Direction, NeighborPropagator, Notification, UPDATE_ORDER};
-pub use protocol::{EntitySnapshot, ServerBound, ServerDirective, ServerProtocol};
+pub use protocol::{EntitySnapshot, MetadataField, ServerBound, ServerDirective, ServerProtocol};
 pub use random_tick::{
     DEFAULT_RANDOM_TICK_SPEED, GrassOutcome, RandomTickEvent, RandomTickScheduler,
     can_propagate_onto, grass_random_tick, is_air_variant, is_randomly_ticking,
@@ -158,7 +158,7 @@ pub use random_tick::{
 };
 pub use scheduled_tick::{ScheduledTick, ScheduledTickQueue, TickPriority};
 pub use server::{EntitySource, NoEntities, ServeSummary, ServerError, serve_connection};
-pub use tick::{BlockTickFeed, TickClock, TickStats};
+pub use tick::{BlockTickFeed, ExplosionFeed, TickClock, TickStats};
 pub use vitals::{DROWN_DAMAGE, EYE_HEIGHT, MAX_AIR_SUPPLY, MAX_HEALTH, PlayerVitals, VitalsTick};
 pub use worldgen_data::{overworld_chunk_source, overworld_generator};
 
