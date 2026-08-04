@@ -347,6 +347,25 @@ pub struct MobState {
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Baby(pub bool);
 
+/// A creeper's fuse direction — `Creeper.DATA_SWELL_DIR`
+/// ([`lodestone_model::event::EntityMetadataUpdate::creeper_swell_dir`]), `-1`
+/// while idle or backing off, `1` while counting up to detonation. **Absent**
+/// until the first report, like [`Baby`] — which for an idle, never-approached
+/// creeper is forever, since `SynchedEntityData` never puts a field on the wire
+/// that is already at its accessor default (the protocol adapter works around
+/// this at spawn; see `docs/entity-rendering.md`'s "Creeper swell" section).
+///
+/// Only the direction is a component here, not `Creeper.DATA_IS_POWERED`/
+/// `DATA_IS_IGNITED` alongside it: both decode at the protocol layer
+/// (`EntityMetadataUpdate::creeper_powered`/`creeper_ignited`), but nothing
+/// downstream of the ECS reads either one yet — `lodestone-shell::entities`'
+/// `CreeperFuse`/white-flash-overlay chain only ever consumes the direction.
+/// Per CLAUDE.md's island rule, add `powered`/`ignited` here (and their
+/// `apply_entity_metadata` arms) only alongside whatever render path first
+/// consumes them, not speculatively.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CreeperSwellDir(pub i32);
+
 /// The entity's cosmetic variant (sheep colour, villager profession, …).
 ///
 /// **Absent** means the server sent no variant override, and a consumer should

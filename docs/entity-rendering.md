@@ -145,20 +145,21 @@ incrementally:
   the correct prediction and clearly miss the swapped one. Measured: byte 133
   vs. predicted-correct 133, predicted-swapped 13.
 
-**The remaining hop, and why this agent could not close it.** All of the
-above only ever *produces* a value if something *populates*
-`EntitySnapshot::creeper_swell_dir` before `fold_entity_snapshots` runs — and
-that requires a component in `lodestone-ecs` (`crates/lodestone-ecs/src/
-entity.rs` + an `ingest.rs` arm folding `EntityMetadataUpdate::creeper_*`
-into it), a field on `lodestone-client`'s `EntityView` (`state.rs`'s
-`entity_view()` reads components, by that module's own explicit rule: "do not
-add a field here without adding the component it is read from"), and one line
-in `sim.rs` where `EntityView` becomes `EntitySnapshot`. `lodestone-ecs` is
-another agent's assigned cluster and `sim.rs` is brokered, so this agent's
-patch stops at `EntitySnapshot`'s own field and `entities.rs`'s consumption of
-it — the field exists and is wired end-to-end on this side, but nothing yet
-writes into it in production. See the patch spec this agent left for exactly
-those three files.
+**Closed.** `lodestone-ecs/src/entity.rs` has a `CreeperSwellDir(pub i32)`
+component, folded from `EntityMetadataUpdate::creeper_swell_dir` by a new arm
+in `ingest.rs::apply_entity_metadata`; `lodestone-client`'s `EntityView` grew
+the matching `creeper_swell_dir: Option<i32>` field and `entity_view()`
+mapping. Only the direction is a component — `creeper_powered`/`creeper_ignited`
+decode at the protocol layer but nothing downstream reads either one yet, so
+per CLAUDE.md's island rule they stay protocol-only until a render path
+consumes them.
+
+The last hop — `net.rs::entity_snapshot`'s `creeper_swell_dir: None,` becoming
+`creeper_swell_dir: view.creeper_swell_dir,` — is one line in a brokered file;
+see the commit that lands this doc update for the exact patch. Once that
+lands, a creeper's fuse direction reaches `EntitySnapshot` → `CreeperFuse` →
+`tick_creeper_fuse` → `EntityDraw::creeper_swelling`, the chain that was
+already fully wired and tested waiting on exactly this value.
 
 One known gap that predates this change and is still open:
 `EntityMesh::local_min`/`local_max` come from `rest_pose()`, so a swelling
