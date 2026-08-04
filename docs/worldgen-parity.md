@@ -98,14 +98,30 @@ rather than silently skipping calibration).
 Two named chunks, chosen to match coordinates other oracles in this directory
 already use (`carver_parity`'s "ocean chunk (0,0)" / "land chunk
 (-120,-120)"), so this fixture set is drawn from already-characterised,
-non-degenerate columns:
+non-degenerate columns.
+
+**Before issue #295** (shape + sea-level fluid approximation + biome + surface;
+no carvers, no real aquifer):
 
 | chunk | stage | match | real mismatches | property-only mismatches |
 |---|---|---|---|---|
-| (0, 0) | postsurface (composed-today subset) | 93160/98304 (94.77%) | 316 | 4828 |
+| (0, 0) | postsurface (composed-then subset) | 93160/98304 (94.77%) | 316 | 4828 |
 | (0, 0) | postcarve (full, minus features/structures) | 90100/98304 (91.65%) | 3376 | 4828 |
 | (-120, -120) | postsurface | 93394/98304 (95.01%) | 4910 | 0 |
 | (-120, -120) | postcarve | 93053/98304 (94.66%) | 5251 | 0 |
+
+**After issue #295** (the real aquifer replaces the sea-level approximation,
+and carvers are composed — `crates/lodestone-worldgen/src/overworld.rs`;
+`column()`'s own output is now post-carve, so "postsurface" below is a
+pre-carve *reference*, not the composed-today subset any more — see that
+module's doc comment):
+
+| chunk | stage | match | real mismatches | property-only mismatches |
+|---|---|---|---|---|
+| (0, 0) | postsurface (pre-carve reference) | 91400/98304 (92.98%) | 3060 | 3844 |
+| (0, 0) | postcarve (full, minus features/structures) | **94460/98304 (96.09%)** | **0** | 3844 |
+| (-120, -120) | postsurface | 93141/98304 (94.75%) | 5157 | 6 |
+| (-120, -120) | postcarve | 93608/98304 (95.22%) | 4690 | 6 |
 
 "Real" = the block *id* differs (a genuine composition/algorithm gap).
 "Property-only" = same block id, different block-state properties —
@@ -116,27 +132,46 @@ Run `cargo run -p lodestone-worldgen-parity --bin compare` for the live
 report (bounding box + per-16-tall-section breakdown), or
 `cargo run -p lodestone-worldgen-parity --example breakdown_by_block_pair`
 for a `(expected, got)` frequency table. What that breakdown shows, per
-chunk:
+chunk, after #295:
 
-- **(0, 0), postcarve vs. today**: dominated by `water → stone` (2780
-  positions) and `air → stone` (218). This is the honest #295 number: vanilla
-  carved flooded caves and tunnels through this column; today's
-  `OverworldGenerator` has no carvers composed at all
-  (`crates/lodestone-worldgen/src/overworld.rs:29-34`), so it's still solid
-  rock there.
-- **(-120, -120), both stages**: dominated by `terracotta`/`orange_terracotta`
-  /`yellow_terracotta`/`white_terracotta`/`red_terracotta`/
-  `light_gray_terracotta` → `stone`/`dirt`/`grass_block` (nearly all 4910–5251
-  mismatches). This chunk's real vanilla biome is `badlands`/
-  `eroded_badlands` — and `crates/lodestone-worldgen/src/biome.rs`'s
-  `usable_overworld_table` **deliberately excludes** badlands/eroded_badlands
-  /wooded_badlands from the searchable biome table (vanilla's `Bandlands`
-  surface rule delegates to an unported `SurfaceSystem.getBand` subsystem that
-  would panic if reached), so Rust falls back to the nearest *supported*
-  biome and its surface rule never produces terracotta banding. This chunk is
-  a live, measured demonstration of that already-documented Phase 1 gap, not
-  a new finding — but it's a useful fixture precisely because it makes the
-  gap concrete instead of theoretical.
+- **(0, 0), postcarve**: **zero real mismatches.** The pre-#295 breakdown
+  named this chunk's gap as `water → stone` (2780 positions, vanilla's flooded
+  caves) and `air → stone` (218) — composing the real aquifer + carvers
+  resolved both buckets completely for this chunk/seed; only the pre-existing
+  fluid-`level` property gap remains. `tests/chunk_parity.rs`'s
+  `water_to_stone_bucket_is_resolved_for_chunk_0_0` asserts this bucket is
+  exactly 0 (not just "smaller") and was confirmed to *fail* at exactly 2780
+  when carve composition was temporarily disabled as a control — see that
+  test's own doc comment.
+- **(0, 0), postsurface (pre-carve reference)**: now shows the *inverse* of
+  the old gap — `stone → water`/`stone → air` at almost exactly the same
+  2780/218 positions. This is expected, not a regression: `column()`'s output
+  is post-carve, so comparing it against vanilla's pre-carve `postsurface`
+  necessarily shows every cell the carver legitimately touched as a
+  "mismatch" against the pre-carve reference. `docs/worldgen-parity.md`
+  keeps both stages in the fixture specifically so this distinction is
+  visible instead of collapsing into one number.
+- **(-120, -120), both stages**: still dominated by `terracotta`/
+  `orange_terracotta`/`yellow_terracotta`/`white_terracotta`/
+  `red_terracotta`/`light_gray_terracotta` → `stone`/`dirt`/`grass_block` —
+  the pre-existing badlands-exclusion gap (`crates/lodestone-worldgen/src/biome.rs`'s
+  `usable_overworld_table`, unrelated to #295, see the original write-up
+  below) — plus a modest **postcarve improvement over postsurface** (5157 →
+  4690 real mismatches) from `deepslate → lava` and similar carve-introduced
+  cells now agreeing with vanilla. The badlands gap dominates regardless of
+  #295's work here.
+
+**Original (pre-#295) badlands finding, unchanged:** this chunk's real
+vanilla biome is `badlands`/`eroded_badlands` — and
+`crates/lodestone-worldgen/src/biome.rs`'s `usable_overworld_table`
+**deliberately excludes** badlands/eroded_badlands/wooded_badlands from the
+searchable biome table (vanilla's `Bandlands` surface rule delegates to an
+unported `SurfaceSystem.getBand` subsystem that would panic if reached), so
+Rust falls back to the nearest *supported* biome and its surface rule never
+produces terracotta banding. Composing carvers/the real aquifer does not
+change this: the same excluded table feeds carver/ore biome resolution too, so
+a column can never resolve to one of the three excluded names in the first
+place (see `crates/lodestone-worldgen/src/overworld.rs`'s "Badlands" section).
 
 ## Anti-vacuity floors (`tests/chunk_parity.rs`)
 
@@ -163,6 +198,25 @@ chunk:
   one Docker run's scope bounded, and because per-biome feature-list
   resolution needs the same kind of biome-source rewiring
   `applyCarvers` needed here, freshly built rather than reused.
+  **A #295 architecture review found a second, sharper reason this extension
+  is required before composing ore features into `OverworldGenerator`, not
+  merely a nice-to-have**: `FeatureOracle.java`'s own header states it
+  "deliberately does NOT model ore spill from the 8 neighbouring chunks into
+  the centre (a 3×3 driver, analogous to the carver 17×17 driver)," and
+  `crate::feature::OreInput`'s `get_height`/`in_center` wrap/drop edge probes
+  to match that oracle rather than vanilla's real `blockStateWriteRadius(1)`
+  (`ChunkPyramid.java:32-35`). `feature_parity`'s "whole-chunk exact both
+  directions" agreement therefore proves the Rust port matches the oracle's
+  chosen simplification, not that the simplification is vanilla's — the
+  authored-oracle trap in a subtle form (the oracle shares the very
+  simplification it's validating). Composing on top of this today would bake
+  a wrong ~4-block edge band into every chunk with no gate able to see it
+  (this harness has no `postfeatures` stage yet). The fix is the same
+  extension named above (real 3×3 driver + real neighbour `OCEAN_FLOOR_WG`
+  heightmaps) plus a matching `OreInput` change — tracked as #295's next
+  increment; carvers/the real aquifer do not have this problem (their
+  neighbourhoods — 17×17 source chunks for carvers, the aquifer's own padded
+  grid — were already real in both the oracle and the Rust port).
 - **Structures**: unbuilt anywhere in this repo's Rust (`#136`: "do not start
   implementation against this issue" until core worldgen has *any* structure
   concept). Nothing to compare them against yet, so `postcarve` is honestly
