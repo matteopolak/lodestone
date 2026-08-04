@@ -598,6 +598,21 @@ struct ContainerSync {
     data: Vec<i32>,
 }
 
+/// Reads `pos`'s container slots and menu-data properties, or a pair of empty
+/// vectors if nothing is registered there — the one read [`open_container_screen`]
+/// (opening a menu) and the `container_sync_tick` arm of [`serve_play`]
+/// (re-reading a background-ticked entity) both need, against the same
+/// [`BlockEntityHandle`].
+fn container_state(
+    block_entities: &BlockEntityHandle,
+    pos: BlockPos,
+) -> (Vec<Option<ItemStack>>, Vec<i32>) {
+    block_entities.with(|reg| match reg.get(pos) {
+        Some(entity) => (entity.container_slots(), entity.data_properties()),
+        None => (Vec::new(), Vec::new()),
+    })
+}
+
 /// Diffs `current_slots`/`current_data` (freshly read off the block entity at
 /// `open.pos`) against what [`ContainerSync`] last pushed to this
 /// connection, returning the directives that bring the client back in sync —
@@ -696,10 +711,7 @@ where
     *next_window_id = *next_window_id % 100 + 1;
     let window_id = *next_window_id;
 
-    let (own_slots, data) = block_entities.with(|reg| match reg.get(pos) {
-        Some(entity) => (entity.container_slots(), entity.data_properties()),
-        None => (Vec::new(), Vec::new()),
-    });
+    let (own_slots, data) = container_state(block_entities, pos);
 
     apply(
         conn,
@@ -1501,10 +1513,7 @@ where
                 // connection needs its own timer to notice — see
                 // `sync_open_container`'s own doc comment.
                 if let Some(open) = open_container.as_mut() {
-                    let (slots, data) = block_entities.with(|reg| match reg.get(open.pos) {
-                        Some(entity) => (entity.container_slots(), entity.data_properties()),
-                        None => (Vec::new(), Vec::new()),
-                    });
+                    let (slots, data) = container_state(block_entities, open.pos);
                     for directive in
                         sync_open_container(proto, open, &mut container_sync, slots, data)
                     {
