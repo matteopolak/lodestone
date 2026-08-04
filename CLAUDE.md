@@ -1,6 +1,25 @@
 # Lodestone — working rules
 
-A from-scratch Minecraft client in Rust. Active scope is **v770 only** (protocol 776 / MC 26.2).
+A from-scratch Minecraft client in Rust, plus an integrated server.
+
+**Four client protocol families exist**, each a workspace member under `crates/protocol/` behind a
+`lodestone-registry` feature: `v47` (1.8.9), `v340` (1.12.2), `v735`, `v770` (protocol 776 / MC
+26.2). This file used to say "v770 only" and that was wrong for long enough to mislead — `v340`
+alone is ~18k lines with a canonical id:meta bridge and live-oracle tests.
+
+Three things that line hid, all load-bearing:
+
+- **No family is enabled by default** in `lodestone-registry`; the shell's default `live` feature
+  turns on `v770` and nothing else. So a legacy family is invisible to every command in *Build and
+  test* below unless you name its feature.
+- **Only `v770` implements `ServerProtocol`**, so 26.2 is the only version we can *host*. Joining
+  and hosting are different sets, and `lodestone-registry` keeps `Family` and `ServerFamily` as two
+  tables for exactly that reason — read its doc before assuming a family you can join is a family
+  you can serve.
+- **`v735` speaks protocol 754** (1.16.5). The folder name is not the protocol number, unlike the
+  other three. Never derive the protocol from the folder — ask `VersionAdapter::supports`.
+
+New gameplay work targets `v770` unless an issue says otherwise; that is a default, not a scope.
 
 This file is the short, durable set of rules. The long-form record lives in
 [`DESIGN.md`](./DESIGN.md) (architecture, plus a §12 validation log of ~20 beliefs that were
@@ -140,6 +159,16 @@ Oracles (not part of repo state — recreate them):
   bullet. Refreshing one path with `git reset -- <path>` sets that index entry back to `HEAD` and
   leaves the working tree untouched, which is the safe cleanup — but the real fix is never staging in
   the first place (see the pathspec-commit entry).
+  **This is the most frequently observed hazard in the file: three more instances in one session**, and
+  all three were *reversals of a commit that had just landed*, sitting armed for the next agent's `git
+  commit` to ship under their message. Twice on `container.rs` — 632 lines then 268 — found by its owner
+  immediately after each of its own private-index commits. Once on `gpu.rs` at 3 insertions / **115
+  deletions**, a blob from before `662ffeb`, which would have reverted that commit's fog fix. Every
+  affected agent had used `GIT_INDEX_FILE` correctly and none admitted to a bare `git add`, so the
+  source was never identified — which is the point: **you cannot rely on knowing who did it.**
+  Check `git diff --cached` is empty immediately before every commit, and treat anything you did not put
+  there as hostile. `git add` "just to look" is what manufactures these; `git diff -- <path>` shows the
+  same content and touches nothing.
 - **The index is shared too: never leave work staged.** Hunk-staging (above) stops *you* shipping
   someone else's lines; it does nothing to stop *them* shipping yours. `git add` writes to the one
   index every agent shares, so any other agent's `git commit` in the gap — however narrow — harvests
