@@ -697,6 +697,7 @@ mod tests {
                 text: "Babe".to_owned(),
                 see_through: true,
             }),
+            item_use: None,
         };
         // A raster is required to reach the distance check at all in
         // `prepare`, but `push_entity_quads` itself only needs one to lay
@@ -752,6 +753,7 @@ mod tests {
                 text: "Babe".to_owned(),
                 see_through: true,
             }),
+            item_use: None,
         };
         push_entity_quads(
             &raster,
@@ -828,6 +830,7 @@ mod tests {
                 text: String::new(),
                 see_through: true,
             }),
+            item_use: None,
         };
         push_entity_quads(
             &raster,

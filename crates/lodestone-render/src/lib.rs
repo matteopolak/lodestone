@@ -99,7 +99,7 @@ pub use block_entity::{
 };
 pub use block_models::{
     BlockModels, BlockModelsError, CRACK_STAGE_COUNT, FluidCell, FluidKind, FluidSprites,
-    ItemGeometry, StateModel,
+    ItemGeometry, ItemVariants, StateModel,
 };
 pub use block_resolver::{BlockAtlas, BlockAtlasError, MAX_SPRITES};
 pub use blocks_json::{BlocksJsonError, BlocksJsonRegistry};
@@ -137,8 +137,8 @@ pub use frame::SystemClock;
 pub use frame::{FrameOutcome, FramePacer, FrameTiming, Renderer, TimeSource};
 pub use gui_atlas::{GuiAtlas, GuiAtlasError, GuiSpriteQuad};
 pub use item_render::{
-    GUI_DEPTH_HALF_RANGE, SCALE_LIMIT, TRANSLATION_LIMIT, UNITS_PER_BLOCK, display_matrix,
-    gui_item_pose, gui_ortho,
+    CROSSBOW_CHARGE_TICKS, GUI_DEPTH_HALF_RANGE, ItemStateContext, SCALE_LIMIT, TRANSLATION_LIMIT,
+    UNITS_PER_BLOCK, display_matrix, gui_item_pose, gui_ortho,
 };
 pub use light::{
     BRIGHTNESS_FACTOR, apply_brightness_option, brightness, light_term, light_term_from_levels,

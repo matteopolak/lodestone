@@ -128,6 +128,8 @@ fn drop_draw(item: Option<ResourceLocation>, age_ticks: f32) -> EntityDraw {
         wool: None,
         count: 1,
         name_tag: None,
+        // An item entity is not a living one; nothing can be using it.
+        item_use: None,
     }
 }
 
@@ -456,6 +458,7 @@ fn a_thrown_snowball_reaches_pixels_through_the_real_render_call() {
         wool: None,
         count: 1,
         name_tag: None,
+        item_use: None,
     };
     // The same camera, turned to put the projectile squarely behind it.
     let away = Camera {

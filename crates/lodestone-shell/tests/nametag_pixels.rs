@@ -136,6 +136,7 @@ fn base_draw(id: i32, type_path: &str, feet: glam::Vec3, scale: f32) -> EntityDr
         wool: None,
         count: 1,
         name_tag: None,
+        item_use: None,
     }
 }
 

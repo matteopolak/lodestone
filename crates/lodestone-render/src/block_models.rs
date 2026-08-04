@@ -52,6 +52,14 @@
 //!   into vanilla's thin slab by `extruded_sprite_geometry`, which is most of
 //!   the remaining ~785.
 //!
+//! …and **per item, one geometry per model its definition tree can name**, not
+//! one per item. That is [`ItemVariants`], and it is the axis the whole item path
+//! lacked: `items/<id>.json` is a selector tree, this module used to resolve it
+//! once at load against a static GUI context, and so every state- and
+//! context-dependent item was flattened to its inventory form. 84 of 26.2's items
+//! bake more than one model. Read [`ItemVariants`] before touching this file's
+//! item half; `docs/item-variants.md` is the long form.
+//!
 //! **The two are indistinguishable to a consumer**, and that is deliberate: a
 //! dropped diamond, a diamond in a zombie's hand, a diamond in the first-person
 //! hand and a thrown snowball all just look the item up. There is no
@@ -88,7 +96,8 @@ use lodestone_assets::{
     AnimTable, Atlas, AtlasBuilder, AtlasError, AtlasSprite, BakeOptions, BakedQuad, BlockBaker,
     BlockStates, Direction, DisplayTransform, DisplayTransforms, Element, Face, FirstWeight,
     GuiItemContext, GuiLight,
-    IconPart, ItemIconBuilder, ModelResolver, ModelTransform, ResolvedModel, ResourceLocation,
+    IconPart, ItemIconBuilder, ItemModel, ItemModelOutput, ItemPropertyContext, ModelResolver,
+    ModelTransform, ResolvedModel, ResourceLocation,
     ResourceManager, SpriteLayer, TextureBinding, bake_model_with,
 };
 use lodestone_model::{BlockStateRegistry, Identifier};
@@ -527,8 +536,138 @@ pub struct ItemGeometry {
     pub gui_light: GuiLight,
 }
 
-/// One item's [`IconPart::Model`], discovered *before* the atlas is stitched so
-/// the textures it reaches can be seeded into it.
+/// **Every** baked form one item can take, plus the definition tree that chooses
+/// between them — the variant axis.
+///
+/// # The defect this exists to fix
+///
+/// An item's `items/<id>.json` is a selector tree, and `BlockModels` used to
+/// resolve it **once, at asset-load time, against a static context** that answered
+/// every `condition` false, every `range` `0.0`, every `select` `None` except
+/// `minecraft:display_context -> "gui"`. So one geometry was baked per item id and
+/// there was no axis to vary it along. Measured over the real jar by
+/// `tests/item_variant_gate.rs`, **84 items bake more than one model** (2,012
+/// variants across 1,474 items) and every one of them was flattened:
+///
+/// * `display_context` (26 items) — a spyglass in the hand drew the flat
+///   `item/spyglass` sprite instead of `item/spyglass_in_hand`'s 3-D tube, and
+///   took `item/generated`'s `firstperson_righthand` pose rather than the in-hand
+///   model's, because [`ItemIcon::display`](lodestone_assets::ItemIcon::display)
+///   is the *first drawable part's* map.
+/// * `using_item` + `use_duration` — a drawn bow stayed slack.
+///
+/// # How a frame picks one
+///
+/// [`Self::resolve`] runs the *real* resolver against a live
+/// [`ItemPropertyContext`] — [`ItemStateContext`](crate::ItemStateContext) is the
+/// one this crate supplies — and looks the chosen model ref up in the pre-baked
+/// map. Resolution is pure and allocation-light (a `Vec` of at most a few
+/// outputs); the *baking* is what had to happen up front, because a flat variant's
+/// geometry is read out of the stitched atlas (see `ItemSpritePart`).
+///
+/// # How to change it
+///
+/// Adding a sourceable property means teaching
+/// [`ItemStateContext`](crate::ItemStateContext) to answer it — nothing here
+/// changes, because every variant is already baked. Adding a *node type* means
+/// `lodestone_assets::item_model`. The one thing that would need work here is a
+/// variant whose geometry is **not** a model ref (a `special` renderer), which is
+/// deliberately absent: those are block-entity draws, not baked quads.
+#[derive(Debug, Clone)]
+pub struct ItemVariants {
+    /// The parsed `items/<id>.json` selector tree, kept so a frame can re-resolve
+    /// it. Parsed once at load — resolution needs no I/O.
+    definition: ItemModel,
+    /// Baked geometry per resolved model ref. Contains every model the tree can
+    /// reach, including the GUI one.
+    by_model: HashMap<ResourceLocation, ItemGeometry>,
+    /// The ref an inventory slot resolves to, and the fallback for any context
+    /// whose own resolution reaches nothing bakeable. `None` when the GUI form is
+    /// a code-driven `special` renderer.
+    gui: Option<ResourceLocation>,
+}
+
+impl ItemVariants {
+    /// The parsed definition tree, for a caller that wants to enumerate or
+    /// inspect the variants rather than resolve one.
+    #[must_use]
+    pub fn definition(&self) -> &ItemModel {
+        &self.definition
+    }
+
+    /// The inventory-slot form: the geometry [`BlockModels::item`] returns.
+    #[must_use]
+    pub fn gui(&self) -> Option<&ItemGeometry> {
+        self.by_model.get(self.gui.as_ref()?)
+    }
+
+    /// The geometry baked for one specific model ref (`minecraft:item/bow_pulling_2`),
+    /// bypassing resolution. For gates that assert *which* variant a context picks.
+    #[must_use]
+    pub fn variant(&self, model: &ResourceLocation) -> Option<&ItemGeometry> {
+        self.by_model.get(model)
+    }
+
+    /// Every baked variant as `(model_ref, geometry)`. Order is the backing
+    /// `HashMap`'s — sort by ref if you need determinism.
+    pub fn variants(&self) -> impl Iterator<Item = (&ResourceLocation, &ItemGeometry)> {
+        self.by_model.iter()
+    }
+
+    /// How many distinct models this item bakes. `1` for the ~1,457 items with no
+    /// branch node.
+    #[must_use]
+    pub fn variant_count(&self) -> usize {
+        self.by_model.len()
+    }
+
+    /// Resolve the definition tree against live state and return that variant's
+    /// geometry, falling back to the inventory form.
+    ///
+    /// The fallback is load-bearing rather than defensive: a context can legally
+    /// resolve to a `special` node (a trident in the hand does) or to a model that
+    /// baked nothing, and drawing the inventory form is what vanilla's own
+    /// `MissingItemModel` degradation amounts to — strictly better than the item
+    /// vanishing from the hand.
+    ///
+    /// A `composite` resolution yields several outputs; the **first** bakeable one
+    /// wins, matching [`gui`](Self::gui) and for the same unparsed-per-part-
+    /// transformation reason.
+    #[must_use]
+    pub fn resolve(&self, ctx: &impl ItemPropertyContext) -> Option<&ItemGeometry> {
+        self.definition
+            .resolve(ctx)
+            .into_iter()
+            .find_map(|output| match output {
+                ItemModelOutput::Model { model, .. } => self.by_model.get(model),
+                ItemModelOutput::Special { .. } => None,
+            })
+            .or_else(|| self.gui())
+    }
+
+    /// Which model ref `ctx` resolves to, whether or not it baked — the diagnostic
+    /// half of [`Self::resolve`], so a gate can assert the *choice* rather than
+    /// inferring it from geometry that two variants might share.
+    #[must_use]
+    pub fn resolve_ref(&self, ctx: &impl ItemPropertyContext) -> Option<ResourceLocation> {
+        self.definition
+            .resolve(ctx)
+            .into_iter()
+            .find_map(|output| match output {
+                ItemModelOutput::Model { model, .. } => Some(model.clone()),
+                ItemModelOutput::Special { .. } => None,
+            })
+    }
+}
+
+/// One **variant** of one item whose model is 3-D geometry, discovered *before*
+/// the atlas is stitched so the textures it reaches can be seeded into it.
+///
+/// `(item, model)` is the key, not `item` alone. An item's definition tree can
+/// name several models — `bow` names four, `spyglass` two — and which one a frame
+/// draws depends on the display context and on live stack state, neither of which
+/// is known at asset-load time. So every reachable model is baked and the choice
+/// is made per frame; see [`ItemVariants`].
 #[derive(Debug, Clone)]
 struct ItemModelPart {
     item: ResourceLocation,
@@ -538,100 +677,200 @@ struct ItemModelPart {
     gui_light: GuiLight,
 }
 
-/// One item's [`IconPart::Sprite`]: the flat `builtin/generated` layer stack that
-/// [`extruded_sprite_geometry`] turns into vanilla's thin extruded slab.
+/// One variant of one item whose model is a flat `builtin/generated` layer stack,
+/// which [`extruded_sprite_geometry`] turns into vanilla's thin extruded slab.
 ///
 /// Discovered in the same pass as [`ItemModelPart`], and for the same reason —
 /// the layer sprites live under `textures/item/`, which no *blockstate* reaches,
 /// so they have to be seeded into the atlas before it is stitched.
+///
+/// **This is why variant discovery cannot be deferred to draw time.**
+/// `item/bow_pulling_0`, `_1` and `_2` are `item/generated` sprite models whose
+/// only difference from `item/bow` is a swapped `layer0`, so their geometry comes
+/// out of the alpha outline of a texture that has to be *in the atlas already*. A
+/// per-frame "resolve then bake" would find no sprite and draw nothing.
 #[derive(Debug, Clone)]
 struct ItemSpritePart {
     item: ResourceLocation,
+    model: ResourceLocation,
     layers: Vec<SpriteLayer>,
     display: DisplayTransforms,
 }
 
-/// Resolve every item definition in the pack stack and keep the ones whose GUI
-/// icon is a 3-D model or a flat sprite stack.
+/// Everything the item half of [`BlockModels::build`] needs, discovered in one
+/// pre-stitch pass: the parse of each definition, and every bakeable variant it
+/// reaches, split by geometry kind.
+struct ItemVariantParts {
+    /// Per item: its parsed definition and which model its GUI slot resolves to.
+    plans: Vec<ItemVariantPlan>,
+    /// Every `(item, model)` variant whose model is 3-D geometry.
+    models: Vec<ItemModelPart>,
+    /// Every `(item, model)` variant whose model is a flat sprite stack.
+    sprites: Vec<ItemSpritePart>,
+    /// Notes for [`BlockModels::item_bake_misses`].
+    notes: Vec<String>,
+}
+
+/// One item's definition tree plus the variant its inventory slot picks.
+struct ItemVariantPlan {
+    item: ResourceLocation,
+    definition: ItemModel,
+    /// The model ref [`GuiItemContext`] resolves to — `None` when the GUI form is
+    /// a code-driven `special` renderer (chests, shields, banners) or renders
+    /// nothing at all.
+    gui: Option<ResourceLocation>,
+}
+
+/// Parse every item definition in the pack stack and enumerate **every** model it
+/// can resolve to, classified into 3-D and flat-sprite variants.
 ///
-/// Resolution uses [`GuiItemContext`], not the default context: a handful of
-/// items (`spyglass`, `trident`, the spears, the bundles) branch on
-/// `minecraft:display_context` and would otherwise resolve to their *in-hand*
-/// model. Items that fail to resolve, or that draw through a code-driven special
-/// renderer, are simply absent — they are not this path's business.
+/// # Why every variant and not just the GUI one
 ///
-/// An item contributes to **at most one** of the two lists, model first. A
-/// `composite` icon mixing a model part and a sprite part would otherwise bake
-/// two disjoint geometries under one id, and `BlockModels::items` is keyed by id.
+/// This pass used to resolve each definition exactly once, under
+/// [`GuiItemContext`], and keep that single form. That is right for an inventory
+/// slot and wrong everywhere else: `minecraft:display_context` is a `select`
+/// property, so 26 of 26.2's items (`spyglass`, `trident`, the spears, every
+/// bundle) name a *different* model in the hand than in the slot, and
+/// `minecraft:using_item` / `minecraft:use_duration` make a drawn bow a different
+/// model again. Baking one form flattened all of them to the inventory sprite.
 ///
-/// A `composite` icon can hold several model parts; only the **first** is kept,
-/// and the item is named in [`BlockModels::item_bake_misses`]. In vanilla 26.2
-/// that is the 16 beds and nothing else: `items/<colour>_bed.json` composites
-/// `block/<colour>_bed_head` with `block/<colour>_bed_foot` plus a per-part
-/// `transformation` (`translation [0, 0, 1]`) that positions the foot behind the
-/// head. `lodestone_assets`'s [`IconPart::Model`] does not carry that
+/// [`ItemModel::outputs`] is the union over every branch, so the loop below is
+/// context-free by construction: it cannot miss a variant a context might later
+/// ask for, which is the property the atlas needs (see [`ItemSpritePart`]).
+/// Duplicate refs are collapsed — `select`/`range_dispatch` reuse models freely,
+/// and vanilla's `crossbow` names `item/crossbow` twice.
+///
+/// # The GUI form still gets singled out
+///
+/// [`ItemVariantPlan::gui`] preserves the old behaviour exactly: the first
+/// [`IconPart::Model`] the GUI resolution produces, else its first
+/// [`IconPart::Sprite`]. That "model before sprite" preference is not tree order —
+/// it is what the single-geometry-per-item code did, and keeping it means this
+/// change cannot silently move which part of a mixed `composite` an inventory
+/// slot draws.
+///
+/// A `composite` GUI icon can hold several model parts; only the first is the GUI
+/// form, and the item is named in [`BlockModels::item_bake_misses`]. In vanilla
+/// 26.2 that is the 16 beds and nothing else: `items/<colour>_bed.json`
+/// composites `block/<colour>_bed_head` with `block/<colour>_bed_foot` plus a
+/// per-part `transformation` (`translation [0, 0, 1]`) that positions the foot
+/// behind the head. `lodestone_assets`'s [`IconPart::Model`] does not carry that
 /// transformation — `item_model.rs` never parses it — so concatenating the parts
 /// would stack the foot *inside* the head and z-fight, which is strictly worse
-/// than drawing the head alone. Keeping the first part and recording the item is
-/// the honest option until the parser carries the per-part transform.
-fn collect_item_model_parts(
-    manager: &ResourceManager,
-) -> (Vec<ItemModelPart>, Vec<ItemSpritePart>, Vec<String>) {
+/// than drawing the head alone. (Both parts are still *baked*, under their own
+/// refs; nothing resolves to the foot, so nothing draws it.)
+fn collect_item_variants(manager: &ResourceManager) -> ItemVariantParts {
     let builder = ItemIconBuilder::new(manager);
-    let mut parts = Vec::new();
-    let mut sprites = Vec::new();
-    let mut notes = Vec::new();
+    let mut out = ItemVariantParts {
+        plans: Vec::new(),
+        models: Vec::new(),
+        sprites: Vec::new(),
+        notes: Vec::new(),
+    };
     for id in item_ids(manager) {
-        let Ok(icon) = builder.icon_with(&id, &GuiItemContext) else {
+        let Ok(definition) = builder.definition(&id) else {
             continue;
         };
-        let mut models = icon.parts.iter().filter_map(|p| match p {
-            IconPart::Model {
-                model,
-                transform,
-                gui_light,
-            } => Some(ItemModelPart {
-                item: id.clone(),
-                model: model.clone(),
-                transform: *transform,
-                // `ItemIcon`-level rather than per-part: see `ItemIcon::display`
-                // for why. It is the *first drawable part's* map, and this loop
-                // keeps the first model part, so the two agree in every case
-                // that reaches a pixel — including the composite items noted
-                // below, where only the first part is baked either way.
-                display: icon.display,
-                gui_light: *gui_light,
-            }),
-            _ => None,
-        });
-        if let Some(first) = models.next() {
-            let extra = models.count();
-            if extra > 0 {
-                notes.push(format!(
-                    "{id}: composite icon has {} model parts, but IconPart::Model carries no \
-                     per-part transformation; only the first is baked",
-                    extra + 1
-                ));
+        // Every model the tree can reach, deduplicated. `Special` outputs are
+        // skipped: their geometry is a block-entity renderer, not a bakeable
+        // model, and their `base` sprite reaches this path as the GUI form of the
+        // same item anyway.
+        let mut seen = BTreeSet::new();
+        for output in definition.outputs() {
+            let ItemModelOutput::Model { model, tints } = output else {
+                continue;
+            };
+            if !seen.insert(model.clone()) {
+                continue;
             }
-            parts.push(first);
-            continue;
+            let part = match builder.part_for_model(model, tints) {
+                Ok((part, display)) => part.map(|p| (p, display.unwrap_or(DisplayTransforms::NONE))),
+                Err(e) => {
+                    out.notes.push(format!("{id} ({model}): {e}"));
+                    continue;
+                }
+            };
+            // The `display` map is **this model's**, not the icon's — the fix for
+            // the held-item transform. `item/spyglass_in_hand` authors no
+            // `firstperson_righthand` at all and `item/bow_pulling_1` inherits
+            // `item/bow`'s, and resolving the icon in the GUI context reported
+            // `item/generated`'s for both.
+            match part {
+                Some((
+                    IconPart::Model {
+                        model: geometry,
+                        transform,
+                        gui_light,
+                    },
+                    display,
+                )) => out.models.push(ItemModelPart {
+                    item: id.clone(),
+                    model: geometry,
+                    transform,
+                    display,
+                    gui_light,
+                }),
+                // Every layer is kept — vanilla's `ItemModelGenerator.bake` walks
+                // `layer0..layer4` and concatenates each layer's extrusion into
+                // one quad collection, so a two-layer item (a dyed leather boot,
+                // an enchanted book glint base) is two stacked slabs, not one.
+                Some((IconPart::Sprite { layers }, display)) => {
+                    out.sprites.push(ItemSpritePart {
+                        item: id.clone(),
+                        model: model.clone(),
+                        layers,
+                        display,
+                    });
+                }
+                Some((IconPart::Special { .. }, _)) | None => {}
+            }
         }
-        // No model part: the flat `builtin/generated` path. Every layer of the
-        // *first* sprite part is kept — vanilla's `ItemModelGenerator.bake` walks
-        // `layer0..layer4` and concatenates each layer's extrusion into one quad
-        // collection, so a two-layer item (a dyed leather boot, an enchanted book
-        // glint base) is two stacked slabs, not one.
-        if let Some(IconPart::Sprite { layers }) =
-            icon.parts.iter().find(|p| matches!(p, IconPart::Sprite { .. }))
-        {
-            sprites.push(ItemSpritePart {
-                item: id.clone(),
-                layers: layers.clone(),
-                display: icon.display,
-            });
+        let gui = gui_variant_of(&builder, &definition, &id, &mut out.notes);
+        out.plans.push(ItemVariantPlan {
+            item: id,
+            definition,
+            gui,
+        });
+    }
+    out
+}
+
+/// Which model an inventory slot draws for `definition` — the GUI resolution's
+/// first [`IconPart::Model`], else its first [`IconPart::Sprite`]. See
+/// [`collect_item_variants`] for why the preference is that way round and not
+/// tree order.
+fn gui_variant_of(
+    builder: &ItemIconBuilder<'_>,
+    definition: &ItemModel,
+    id: &ResourceLocation,
+    notes: &mut Vec<String>,
+) -> Option<ResourceLocation> {
+    let mut first_model = None;
+    let mut first_sprite = None;
+    let mut model_parts = 0usize;
+    for output in definition.resolve(&GuiItemContext) {
+        let ItemModelOutput::Model { model, tints } = output else {
+            continue;
+        };
+        let Ok((Some(part), _)) = builder.part_for_model(model, tints) else {
+            continue;
+        };
+        match part {
+            IconPart::Model { .. } => {
+                model_parts += 1;
+                first_model = first_model.or_else(|| Some(model.clone()));
+            }
+            IconPart::Sprite { .. } => first_sprite = first_sprite.or_else(|| Some(model.clone())),
+            IconPart::Special { .. } => {}
         }
     }
-    (parts, sprites, notes)
+    if model_parts > 1 {
+        notes.push(format!(
+            "{id}: composite icon has {model_parts} model parts, but IconPart::Model carries no \
+             per-part transformation; only the first is drawn"
+        ));
+    }
+    first_model.or(first_sprite)
 }
 
 // ---------------------------------------------------------------------------
@@ -1010,10 +1249,12 @@ pub struct BlockModels {
     /// crack-overlay sprite, indexed by stage `0..CRACK_STAGE_COUNT`. The
     /// mining crack pass re-draws a block's model geometry sampling these.
     crack_stages: [[f32; 4]; CRACK_STAGE_COUNT],
-    /// Baked inventory geometry for every item whose icon is a 3-D model, keyed
-    /// by item id (`minecraft:stone`). See the [module docs](self) for why it
-    /// lives on a type called `BlockModels`.
-    items: HashMap<ResourceLocation, ItemGeometry>,
+    /// Baked geometry for every item that has any, keyed by item id
+    /// (`minecraft:stone`) — and, within each, by the **model ref** its definition
+    /// tree resolved to. See the [module docs](self) for why it lives on a type
+    /// called `BlockModels`, and [`ItemVariants`] for why one geometry per item is
+    /// not enough.
+    items: HashMap<ResourceLocation, ItemVariants>,
     /// Item models that did **not** bake, named. Recorded rather than fatal, for
     /// the same reason `ItemAtlasReport::missing_special_bases` is: a texture a
     /// vanilla blockstate never reaches (or that a resource pack drops) is an
@@ -1044,8 +1285,18 @@ impl BlockModels {
         let resolver = ModelResolver::new(manager);
         // Item models are discovered before the atlas is stitched so their
         // textures can be seeded into it (see `build_complete_atlas`), and
-        // reused after it to bake, so the item definitions are resolved once.
-        let (item_parts, sprite_parts, mut item_bake_misses) = collect_item_model_parts(manager);
+        // reused after it to bake, so the item definitions are parsed once.
+        //
+        // **Every variant**, not just the GUI form: a flat variant's geometry is
+        // walked out of the alpha outline of a *stitched* sprite, so a variant
+        // discovered after this point could never be baked at all. See
+        // `collect_item_variants`.
+        let ItemVariantParts {
+            plans: item_plans,
+            models: item_parts,
+            sprites: sprite_parts,
+            notes: mut item_bake_misses,
+        } = collect_item_variants(manager);
         let atlas = build_complete_atlas(manager, &resolver, &item_parts, &sprite_parts)?;
 
         // Precompute each atlas sprite's render layer once; a baked quad's layer
@@ -1128,7 +1379,11 @@ impl BlockModels {
         // GUI item pass reuse the terrain pipeline wholesale. It runs after the
         // states (rather than inside that loop) only because items are keyed by
         // id, not by state id; everything it shares is what matters.
-        let mut items = HashMap::with_capacity(item_parts.len());
+        //
+        // Keyed by `(item, model)`: one item can bake several variants, and the
+        // per-item maps are assembled from these below.
+        let mut baked: HashMap<(ResourceLocation, ResourceLocation), ItemGeometry> =
+            HashMap::with_capacity(item_parts.len() + sprite_parts.len());
         for part in &item_parts {
             let resolved = match resolver.resolve(&part.model) {
                 Ok(r) => r,
@@ -1167,8 +1422,8 @@ impl BlockModels {
                     }
                 }
             }
-            items.insert(
-                part.item.clone(),
+            baked.insert(
+                (part.item.clone(), part.model.clone()),
                 ItemGeometry {
                     quads,
                     transform: part.transform,
@@ -1185,14 +1440,15 @@ impl BlockModels {
         for part in &sprite_parts {
             let Some(quads) = extruded_sprite_geometry(&atlas, &part.layers) else {
                 item_bake_misses.push(format!(
-                    "{}: sprite icon has {} layer(s), none of which stitched into the atlas",
+                    "{} ({}): sprite variant has {} layer(s), none of which stitched into the atlas",
                     part.item,
+                    part.model,
                     part.layers.len()
                 ));
                 continue;
             };
-            items.insert(
-                part.item.clone(),
+            baked.insert(
+                (part.item.clone(), part.model.clone()),
                 ItemGeometry {
                     quads,
                     // `item/generated` declares no `display.gui`, so vanilla poses a
@@ -1213,6 +1469,40 @@ impl BlockModels {
                     // (translation [0, 2, 0], scale 0.5) instead of the block
                     // items' `[0, 3, 0]` / 0.25 — see `ground_transform_for`.
                     gui_light: GuiLight::Front,
+                },
+            );
+        }
+
+        // Regroup `(item, model) -> geometry` into `item -> ItemVariants`, pairing
+        // each item's baked forms with the definition tree that chooses between
+        // them.
+        //
+        // One draining pass and then a join, rather than a filter per item: the
+        // obvious `baked.iter().filter(|((item, _), _)| ...)` inside the plan loop
+        // is O(items x variants) *and* clones every geometry, so two copies of all
+        // ~1,700 baked quad sets are live at once.
+        //
+        // An item with no bakeable variant at all (a chest: its definition is one
+        // `special` node) is absent, which is exactly what `BlockModels::item`
+        // returned for it before the variant axis existed — `hotbar_special_item_
+        // pixels` asserts that absence.
+        let mut grouped: HashMap<ResourceLocation, HashMap<ResourceLocation, ItemGeometry>> =
+            HashMap::with_capacity(item_plans.len());
+        for ((item, model), geometry) in baked {
+            grouped.entry(item).or_default().insert(model, geometry);
+        }
+        let mut items: HashMap<ResourceLocation, ItemVariants> =
+            HashMap::with_capacity(grouped.len());
+        for plan in item_plans {
+            let Some(by_model) = grouped.remove(&plan.item) else {
+                continue;
+            };
+            items.insert(
+                plan.item,
+                ItemVariants {
+                    definition: plan.definition,
+                    by_model,
+                    gui: plan.gui,
                 },
             );
         }
@@ -1348,26 +1638,49 @@ impl BlockModels {
     /// whose icon is a flat sprite", which was true until `9980a96` and was then
     /// cited as the root cause of four separate rendering issues — none of which
     /// it was.
+    ///
+    /// **This is the *inventory* form specifically.** It is
+    /// [`ItemVariants::gui`], and for the 84 items with several forms it is only
+    /// one of several baked forms — a spyglass in the hand and a drawn bow are
+    /// different geometry. Any caller that is not drawing an inventory slot wants
+    /// [`item_forms`](Self::item_forms) and
+    /// [`ItemVariants::resolve`] against the context it is drawing in.
     #[must_use]
     pub fn item(&self, item: &ResourceLocation) -> Option<&ItemGeometry> {
+        self.items.get(item)?.gui()
+    }
+
+    /// Every baked form of an item plus the tree that chooses between them —
+    /// the variant axis. `None` for an item with no bakeable geometry at all.
+    #[must_use]
+    pub fn item_forms(&self, item: &ResourceLocation) -> Option<&ItemVariants> {
         self.items.get(item)
     }
 
-    /// The baked quads of an item's icon — 3-D model or extruded sprite slab
-    /// (empty when it has neither).
+    /// The baked quads of an item's **inventory** icon — 3-D model or extruded
+    /// sprite slab (empty when it has neither).
     /// Pose them with [`gui_item_pose`](crate::gui_item_pose) and mesh them with
     /// [`mesh_item_quads`](crate::mesh_item_quads); their UVs index
     /// [`atlas`](Self::atlas) and their tints [`tint_palette`](Self::tint_palette),
     /// exactly like [`quads`](Self::quads).
     #[must_use]
     pub fn item_quads(&self, item: &ResourceLocation) -> &[BakedQuad] {
-        self.items.get(item).map_or(&[], |g| &g.quads)
+        self.item(item).map_or(&[], |g| &g.quads)
     }
 
-    /// The number of items with baked geometry of either kind.
+    /// The number of items with baked geometry of any kind.
     #[must_use]
     pub fn item_count(&self) -> usize {
         self.items.len()
+    }
+
+    /// The total number of baked `(item, model)` variants — at least
+    /// [`item_count`](Self::item_count), and larger by however many extra models
+    /// the pack's definitions name (vanilla 26.2: 2,012 for 1,474 items, with 84
+    /// items contributing the extra 538).
+    #[must_use]
+    pub fn item_variant_count(&self) -> usize {
+        self.items.values().map(ItemVariants::variant_count).sum()
     }
 
     /// Every item with baked geometry, as `(id, geometry)` pairs — 3-D models and
@@ -1384,7 +1697,22 @@ impl BlockModels {
     ///
     /// Order is the backing `HashMap`'s and therefore arbitrary and unstable —
     /// sort by id if you need determinism.
+    ///
+    /// Yields the **inventory** form. A snapshotting consumer that draws items in
+    /// the world or the hand wants [`item_forms_iter`](Self::item_forms_iter)
+    /// instead, or it re-creates the flattening this API used to force.
     pub fn items(&self) -> impl Iterator<Item = (&ResourceLocation, &ItemGeometry)> {
+        self.items
+            .iter()
+            .filter_map(|(id, variants)| variants.gui().map(|g| (id, g)))
+    }
+
+    /// Every item with baked geometry, as `(id, variants)` — the whole variant
+    /// axis, for a consumer that snapshots the geometry and then resolves per
+    /// frame (`lodestone-shell`'s `ModelRenderer::items` is exactly that).
+    ///
+    /// Order is arbitrary and unstable, as [`items`](Self::items).
+    pub fn item_forms_iter(&self) -> impl Iterator<Item = (&ResourceLocation, &ItemVariants)> {
         self.items.iter()
     }
 

@@ -120,7 +120,10 @@ pub use error::{
     ResourceLocationError, ScreenEffectAssetError, SkyAssetError, SoundError, TextureError,
     TintError,
 };
-pub use icon::{DefaultItemContext, GuiItemContext, IconPart, ItemIcon, ItemIconBuilder, SpriteLayer};
+pub use icon::{
+    DISPLAY_CONTEXT_PROPERTY, DefaultItemContext, DisplayContextItemContext, GuiItemContext,
+    IconPart, ItemIcon, ItemIconBuilder, SpriteLayer,
+};
 pub use item_atlas::{ItemAtlas, ItemAtlasReport};
 pub use lang::Language;
 pub use item_model::{

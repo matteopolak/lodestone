@@ -50,9 +50,20 @@
 //! Applying those here keeps the parsed struct honest — a field that silently
 //! means "the JSON value ÷ 16" is worse than one that means the JSON value — and
 //! keeps every render-time convention in the renderer.
+//!
+//! # And the *which geometry* half
+//!
+//! [`ItemStateContext`] is the other thing a draw needs to decide: **which** of an
+//! item's baked variants this pass is drawing. It lives here rather than in
+//! `lodestone_assets` because the property values are live game state, which that
+//! GPU-free data crate deliberately does not own — it supplies only the
+//! `ItemPropertyContext` *trait*. See
+//! [`ItemVariants`](crate::ItemVariants) and `docs/item-variants.md`.
 
 use glam::{Mat4, Vec3};
-use lodestone_assets::DisplayTransform;
+use lodestone_assets::{
+    DISPLAY_CONTEXT_PROPERTY, DisplaySlot, DisplayTransform, ItemPropertyContext,
+};
 
 /// Model-space units per block: a model JSON's `display` translation is in
 /// sixteenths of a block, matching the `0..16` element coordinate grid.
@@ -176,6 +187,151 @@ pub fn gui_ortho(width_px: u32, height_px: u32) -> Mat4 {
     let h = height_px.max(1) as f32;
     Mat4::from_translation(Vec3::new(-1.0, 1.0, 0.5))
         * Mat4::from_scale(Vec3::new(2.0 / w, -2.0 / h, -0.5 / GUI_DEPTH_HALF_RANGE))
+}
+
+// ---------------------------------------------------------------------------
+// Which variant: the live item property context
+// ---------------------------------------------------------------------------
+
+/// `minecraft:crossbow/pull`'s denominator: `CrossbowItem.getChargeDuration` with
+/// **no Quick Charge**, `floor(1.25 * 20)`.
+///
+/// Read from `CrossbowItem.java:245-248`
+/// (`Mth.floor(EnchantmentHelper.modifyCrossbowChargingTime(stack, user, 1.25F) * 20.0F)`),
+/// not guessed. The enchantment level is not modelled anywhere on this side of the
+/// wire — `RenderEquipment` narrows a stack to a bare item id long before a draw —
+/// so an enchanted crossbow winds visually slower than it really does. That is the
+/// same approximation `lodestone-shell`'s `arm_pose_for` already makes for the
+/// *arm* pose, and the two must agree or a crossbow's arms and its model would
+/// disagree about how far along the wind is.
+pub const CROSSBOW_CHARGE_TICKS: f32 = 25.0;
+
+/// The live state an item's definition tree is resolved against for one draw —
+/// the runtime half of [`ItemVariants`](crate::ItemVariants).
+///
+/// # What it can answer, and why only these
+///
+/// Every property here is sourced from state the client actually holds; nothing is
+/// guessed. Anything unsourced falls through to the trait's "unset" answer
+/// (`false` / `None` / `0.0`), which routes a `condition` to its `on_false` and a
+/// `select`/`range_dispatch` to its `fallback` — i.e. to the item's default
+/// appearance, which is what the whole path did before the variant axis existed.
+/// A wrong *guess* would be worse than the default, loudly and everywhere.
+///
+/// | property | source |
+/// |---|---|
+/// | `minecraft:display_context` | [`Self::display`] — static per pass |
+/// | `minecraft:using_item` | `LivingEntity`'s flags byte, via `lodestone_ecs`'s `ItemUse` |
+/// | `minecraft:use_duration` | `ItemUse::ticks` |
+/// | `minecraft:crossbow/pull` | `ItemUse::ticks / `[`CROSSBOW_CHARGE_TICKS`] |
+///
+/// Deliberately **unsourced**, each because the datum genuinely is not decoded:
+/// `trim_material`, `bundle/has_selected_item`, `block_state`, `local_time`,
+/// `compass`, `has_component`, `use_cycle`, `time`, `context_dimension`,
+/// `charge_type`, `broken`, `fishing_rod/cast`, `damage`, `count`, `cooldown`,
+/// `custom_model_data`. Most need per-stack components (`ItemComponents` has no
+/// field for them, and an unmodelled component halts the patch decode); `time`
+/// and `local_time` need a level clock this type is not given.
+///
+/// # `use_duration` counts UP, `use_cycle` counts DOWN — do not unify them
+///
+/// Vanilla's `UseDuration.get` returns
+/// `stack.getUseDuration(owner) - owner.getUseItemRemainingTicks()`, i.e.
+/// `getTicksUsingItem()`, which **increases** from 0 as the bow is drawn. Our
+/// `ItemUse::ticks` already *is* that number (it counts up from the rising edge of
+/// the using-item bit precisely so no per-item `getUseDuration` lookup is needed),
+/// so [`Self::use_ticks`] is fed in **directly, with no inversion**.
+///
+/// `UseCycle` in the same package is `getUseItemRemainingTicks() % period` — the
+/// *other* direction — and it needs the per-item `getUseDuration` we do not model
+/// (a brush's is 200 ticks). It is therefore listed as unsourced above, and an
+/// "obvious" `duration - ticks` inversion applied to `use_duration` to make the two
+/// look alike would pin a drawn bow at `bow_pulling_0` forever while reading, from
+/// the property name alone, perfectly correct.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ItemStateContext {
+    /// Which of vanilla's nine `ItemDisplayContext`s this pass draws in. The one
+    /// property that is a property of the *pass* rather than of the stack, and the
+    /// one that fixes 26 items with no live state at all.
+    pub display: DisplaySlot,
+    /// Whether the holder is using **this** item right now — vanilla's
+    /// `owner.isUsingItem() && owner.getUseItem() == itemStack`. The second half is
+    /// why a caller must check the *hand*: an entity drawing a bow in the main hand
+    /// is not using the shield in its off hand.
+    pub using: bool,
+    /// `getTicksUsingItem()` — ticks elapsed since the use began, counting **up**
+    /// from 0. Meaningless while `!using`, and read as `0` there, matching
+    /// vanilla's `getUseItem() != itemStack` early return.
+    pub use_ticks: u32,
+}
+
+impl ItemStateContext {
+    /// A context for `display` with no item in use — the resting form, and the
+    /// right thing for every pass that has no using-item state to offer.
+    #[must_use]
+    pub const fn new(display: DisplaySlot) -> Self {
+        Self {
+            display,
+            using: false,
+            use_ticks: 0,
+        }
+    }
+
+    /// [`Self::new`] plus the using-item state, for a holder we know about.
+    ///
+    /// `using` should already be narrowed to *this* item: pass
+    /// `item_use.using && (item_use.off_hand == arm.is_left())`, not
+    /// `item_use.using`, or an entity drawing a bow would also draw its off-hand
+    /// item mid-use.
+    ///
+    /// For [`Self::display`] in a held-item pass, use
+    /// [`Arm::display_slot`](crate::entity::Arm::display_slot) — the same
+    /// expression [`hand_transform`](crate::entity::hand_transform) reads the pose
+    /// from, so the variant and the transform cannot disagree about which hand.
+    #[must_use]
+    pub const fn with_use(mut self, using: bool, use_ticks: u32) -> Self {
+        self.using = using;
+        self.use_ticks = use_ticks;
+        self
+    }
+}
+
+impl ItemPropertyContext for ItemStateContext {
+    fn condition(&self, property: &str, _component: Option<&str>) -> bool {
+        match property {
+            "minecraft:using_item" => self.using,
+            _ => false,
+        }
+    }
+
+    fn select(&self, property: &str) -> Option<String> {
+        if property == DISPLAY_CONTEXT_PROPERTY {
+            Some(self.display.json_name().to_string())
+        } else {
+            None
+        }
+    }
+
+    fn range(&self, property: &str) -> f32 {
+        if !self.using {
+            // Both sourced ranges are gated on `getUseItem() == itemStack` in
+            // vanilla and return `0.0F` otherwise. Gating here rather than at each
+            // arm keeps a future property from silently forgetting it.
+            return 0.0;
+        }
+        match property {
+            // `getTicksUsingItem()` verbatim; see the type docs for why there is
+            // no inversion here.
+            "minecraft:use_duration" => self.use_ticks as f32,
+            // `useDuration / getChargeDuration`. Vanilla additionally returns 0
+            // when the crossbow is already **charged**, which reads the
+            // `minecraft:charged_projectiles` component we do not decode — so a
+            // charged crossbow keeps whatever wind fraction its last using tick
+            // left, instead of snapping back to the slack model.
+            "minecraft:crossbow/pull" => self.use_ticks as f32 / CROSSBOW_CHARGE_TICKS,
+            _ => 0.0,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -608,5 +764,189 @@ mod tests {
             gui_item_pose([0.0, 0.0, 16.0, 16.0], &vanilla_block_gui()).determinant() < 0.0,
             "the pose's scale(w, -h, d) is orientation-reversing"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // ItemStateContext: which variant a draw resolves to
+    // -----------------------------------------------------------------------
+
+    /// `assets/minecraft/items/bow.json`, byte-for-byte from the 26.2 client jar.
+    ///
+    /// The fixture is the *authority*, not a restatement of our resolver: the
+    /// thresholds (`0.65`, `0.9`) and the `scale` (`0.05`) are Mojang's numbers,
+    /// and the expected tick crossings below are derived from them by hand
+    /// (`0.65 / 0.05 = 13`, `0.9 / 0.05 = 18`) rather than by running the code.
+    const BOW_JSON: &[u8] = br#"{
+      "model": {
+        "type": "minecraft:condition",
+        "on_false": { "type": "minecraft:model", "model": "minecraft:item/bow" },
+        "on_true": {
+          "type": "minecraft:range_dispatch",
+          "entries": [
+            { "model": { "type": "minecraft:model", "model": "minecraft:item/bow_pulling_1" }, "threshold": 0.65 },
+            { "model": { "type": "minecraft:model", "model": "minecraft:item/bow_pulling_2" }, "threshold": 0.9 }
+          ],
+          "fallback": { "type": "minecraft:model", "model": "minecraft:item/bow_pulling_0" },
+          "property": "minecraft:use_duration",
+          "scale": 0.05
+        },
+        "property": "minecraft:using_item"
+      }
+    }"#;
+
+    /// Which model `bow.json` names, resolved through a real [`ItemStateContext`].
+    fn bow_model_at(ctx: ItemStateContext) -> String {
+        let def = lodestone_assets::ItemModel::parse(BOW_JSON).expect("parse bow.json");
+        match def.resolve(&ctx).as_slice() {
+            [lodestone_assets::ItemModelOutput::Model { model, .. }] => model.to_string(),
+            other => panic!("expected exactly one model output, got {other:?}"),
+        }
+    }
+
+    /// The bow's four forms and the exact ticks they cross at.
+    ///
+    /// This is the gate the existing pose gates cannot be: every pose and every
+    /// variant is the identity at `using == false`, so
+    /// `first_person_hand_light_pixels` and `thrown_and_held_item_pixels` pass
+    /// whether or not this wiring exists. `using` is driven **true** here.
+    #[test]
+    fn the_bow_crosses_at_thirteen_and_eighteen_ticks() {
+        let drawing = |ticks: u32| {
+            bow_model_at(ItemStateContext::new(DisplaySlot::FirstPersonRightHand).with_use(true, ticks))
+        };
+        // Not using at all: the slack bow, whatever the counter says. `ItemUse`
+        // holds `ticks` at 0 while `!using`, but the gate must not depend on that.
+        assert_eq!(
+            bow_model_at(
+                ItemStateContext::new(DisplaySlot::FirstPersonRightHand).with_use(false, 40)
+            ),
+            "minecraft:item/bow"
+        );
+        // 0..=12: 12 * 0.05 = 0.60, below the 0.65 threshold -> the fallback.
+        for ticks in [0, 1, 6, 12] {
+            assert_eq!(drawing(ticks), "minecraft:item/bow_pulling_0", "at {ticks} ticks");
+        }
+        // 13..=17: 13 * 0.05 = 0.65 exactly, 17 * 0.05 = 0.85 < 0.9.
+        for ticks in [13, 14, 17] {
+            assert_eq!(drawing(ticks), "minecraft:item/bow_pulling_1", "at {ticks} ticks");
+        }
+        // >= 18: 18 * 0.05 = 0.90 exactly. A full draw is 20 ticks and a bow's
+        // `getUseDuration` is 72000, so the top entry has to hold indefinitely.
+        for ticks in [18, 19, 20, 72_000] {
+            assert_eq!(drawing(ticks), "minecraft:item/bow_pulling_2", "at {ticks} ticks");
+        }
+    }
+
+    /// The inversion trap, as a control: had `use_duration` been fed
+    /// `getUseItemRemainingTicks()`-style (counting **down** from a duration)
+    /// instead of `ItemUse::ticks`, every crossing above would land on a different
+    /// model. Asserting the wrong hypothesis *fails* is what makes the right one
+    /// evidence rather than a coincidence.
+    #[test]
+    fn feeding_the_counter_backwards_would_pin_the_bow_at_full_draw() {
+        // A bow's `getUseDuration` is 72000; `duration - ticks` at 6 ticks in is
+        // 71994, which sails past every threshold.
+        let inverted = ItemStateContext::new(DisplaySlot::FirstPersonRightHand)
+            .with_use(true, 72_000 - 6);
+        assert_eq!(bow_model_at(inverted), "minecraft:item/bow_pulling_2");
+        // Where the correct feed says a barely-drawn bow.
+        let correct =
+            ItemStateContext::new(DisplaySlot::FirstPersonRightHand).with_use(true, 6);
+        assert_eq!(bow_model_at(correct), "minecraft:item/bow_pulling_0");
+    }
+
+    /// `crossbow/pull` is `useDuration / getChargeDuration`, so its own thresholds
+    /// (0.58 and 1.0, from `items/crossbow.json`) land at ticks 15 and 25.
+    #[test]
+    fn the_crossbow_pull_fraction_divides_by_the_charge_duration() {
+        let ctx = |ticks| ItemStateContext::new(DisplaySlot::ThirdPersonRightHand).with_use(true, ticks);
+        // 0.58 * 25 = 14.5, so 14 ticks is still below and 15 is above.
+        assert!(ctx(14).range("minecraft:crossbow/pull") < 0.58);
+        assert!(ctx(15).range("minecraft:crossbow/pull") >= 0.58);
+        // Fully wound at the charge duration itself, not before it.
+        assert!(ctx(24).range("minecraft:crossbow/pull") < 1.0);
+        assert!(ctx(25).range("minecraft:crossbow/pull") >= 1.0);
+        // Not in use: zero, matching vanilla's `getUseItem() != itemStack` return.
+        assert_eq!(
+            ItemStateContext::new(DisplaySlot::ThirdPersonRightHand)
+                .range("minecraft:crossbow/pull"),
+            0.0
+        );
+    }
+
+    /// The context must report each slot's **own** JSON key for
+    /// `minecraft:display_context`, because that string is the `when` a `select`
+    /// case matches on: one wrong key silently sends every branching item down its
+    /// `fallback`, which looks exactly like the flattening this replaced.
+    ///
+    /// The slots themselves come from
+    /// [`Arm::display_slot`](crate::entity::Arm::display_slot) at the call sites —
+    /// the *same* expression `hand_transform` uses to read the pose — so there is
+    /// deliberately no second mapping here to disagree with it.
+    #[test]
+    fn every_display_context_reports_its_own_key() {
+        use std::collections::BTreeSet;
+        let mut names = BTreeSet::new();
+        for slot in DisplaySlot::ALL {
+            let reported = ItemStateContext::new(slot).select(DISPLAY_CONTEXT_PROPERTY);
+            assert_eq!(
+                reported.as_deref(),
+                Some(slot.json_name()),
+                "{slot:?} must report its own key"
+            );
+            names.insert(slot.json_name());
+        }
+        assert_eq!(
+            names.len(),
+            DisplaySlot::ALL.len(),
+            "the nine contexts have nine distinct keys"
+        );
+        // Spot-check against `ItemDisplayContext.getSerializedName()` verbatim, so
+        // the loop above cannot be satisfied by nine consistently wrong keys.
+        assert!(names.contains("firstperson_righthand"));
+        assert!(names.contains("thirdperson_righthand"));
+        assert!(names.contains("gui"));
+        assert!(names.contains("ground"));
+        assert!(names.contains("on_shelf"));
+    }
+
+    /// Every property this context cannot source must read as *unset*, so a
+    /// `condition` takes `on_false` and a `select` takes `fallback` — never a
+    /// plausible-looking guess. Named explicitly so adding a source to one of them
+    /// is a deliberate act with a test to update.
+    #[test]
+    fn unsourced_properties_read_as_unset() {
+        let ctx = ItemStateContext::new(DisplaySlot::Gui).with_use(true, 40);
+        for property in [
+            "minecraft:broken",
+            "minecraft:bundle/has_selected_item",
+            "minecraft:fishing_rod/cast",
+            "minecraft:has_component",
+        ] {
+            assert!(!ctx.condition(property, None), "{property} must be unset");
+        }
+        for property in [
+            "minecraft:trim_material",
+            "minecraft:block_state",
+            "minecraft:charge_type",
+            "minecraft:context_dimension",
+        ] {
+            assert_eq!(ctx.select(property), None, "{property} must be unset");
+        }
+        for property in [
+            "minecraft:use_cycle",
+            "minecraft:time",
+            "minecraft:local_time",
+            "minecraft:compass",
+            "minecraft:damage",
+            "minecraft:count",
+            "minecraft:cooldown",
+        ] {
+            assert_eq!(ctx.range(property), 0.0, "{property} must be unset");
+        }
+        // But the two that *are* sourced must not be swept up in that: a context
+        // where everything reads unset would pass the block above vacuously.
+        assert_eq!(ctx.range("minecraft:use_duration"), 40.0);
+        assert!(ctx.condition("minecraft:using_item", None));
     }
 }

@@ -627,6 +627,27 @@ pub struct EntityDraw {
     /// makes the overlay end ~10 ticks after the killing blow instead of
     /// persisting through the fall-over, which is the only visible divergence.
     pub hurt: bool,
+    /// This entity's using-item state, when it has ever reported the
+    /// `LivingEntity` flags byte — `None` otherwise, like every other component
+    /// bridged off the ingest entity.
+    ///
+    /// # Why the draw needs it and not just [`Self::anim`]
+    ///
+    /// [`arm_pose_for`] already folds this into `anim.arm_pose`, and that is
+    /// enough for the *arms*. It is not enough for the **item**: an item's
+    /// definition tree branches on `minecraft:using_item` and dispatches on
+    /// `minecraft:use_duration`, so a drawn bow is a different *model*
+    /// (`item/bow_pulling_0/1/2`) and not just a different pose.
+    /// [`ArmPose::BowAndArrow`] carries no tick count, so it cannot tell
+    /// `bow_pulling_0` from `_2` — which is exactly the flattening
+    /// [`lodestone_render::ItemVariants`] exists to undo.
+    ///
+    /// `off_hand` is load-bearing here in a way it is not for the pose: vanilla's
+    /// `using_item` property is
+    /// `owner.isUsingItem() && owner.getUseItem() == itemStack`, so
+    /// `RenderState::merge_held_items` must compare it against the arm it is
+    /// drawing or a skeleton drawing a bow would bend its off-hand item too.
+    pub item_use: Option<ItemUse>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1055,6 +1076,9 @@ pub fn extract_pickup_draws(
             },
             name_tag: None,
             hurt: false,
+            // A flying pickup is an item entity, not a living one: nothing can be
+            // using it, so its variant resolves in `DisplaySlot::Ground` alone.
+            item_use: None,
         });
     }
 }
@@ -1194,7 +1218,13 @@ const CROSSBOW_PATH: &str = "crossbow";
 /// therefore charges visually slower than it really does, and finishes its wind
 /// animation late. Recorded rather than fixed because widening `RenderEquipment`
 /// to full stacks is a larger change than the pose it would serve.
-const CROSSBOW_CHARGE_TICKS: f32 = 25.0;
+///
+/// **Shared with the item *model* path** rather than restated: the same number
+/// divides `minecraft:crossbow/pull`, which picks `item/crossbow_pulling_0/1/2`.
+/// Two copies would let a crossbow's arms and its model disagree about how far
+/// along the same wind is, on the same frame. An alias rather than a re-import so
+/// the derivation stays documented at the place the arm pose reads it.
+const CROSSBOW_CHARGE_TICKS: f32 = lodestone_render::CROSSBOW_CHARGE_TICKS;
 
 /// Which arm pose an entity's arms take, and in which hand.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -1450,15 +1480,14 @@ pub fn extract_entity_draws(
             .get(id.0)
             .and_then(|entity| mob_states.get(entity).ok())
             .is_some_and(|state| state.aggressive);
-        let arm_pose = arm_pose_for(
-            &kind.0,
-            &equipment.0,
-            index
-                .get(id.0)
-                .and_then(|entity| item_uses.get(entity).ok())
-                .map(|item_use| *item_use),
-            aggressive,
-        );
+        // One lookup, two consumers: the arm pose below and `EntityDraw::item_use`,
+        // which the held-item pass resolves the item's own definition tree against.
+        // Reading it twice would let the two disagree about the same tick.
+        let item_use = index
+            .get(id.0)
+            .and_then(|entity| item_uses.get(entity).ok())
+            .map(|item_use| *item_use);
+        let arm_pose = arm_pose_for(&kind.0, &equipment.0, item_use, aggressive);
         out.0.push(EntityDraw {
             id: id.0,
             type_path: kind.0.clone(),
@@ -1483,6 +1512,7 @@ pub fn extract_entity_draws(
             ),
             name_tag: name_tag.0.clone(),
             hurt,
+            item_use,
         });
     }
 }

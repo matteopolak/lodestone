@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use lodestone_assets::ResourceLocation;
 use lodestone_render::{
-    AnimSlotUniform, ArenaAllocation, ArenaBuffer, GpuAtlas, GpuMesh, GpuModelMesh, ItemGeometry,
+    AnimSlotUniform, ArenaAllocation, ArenaBuffer, GpuAtlas, GpuMesh, GpuModelMesh, ItemVariants,
     ModelPipeline, SpriteAnimation, crack_pipeline::CrackPipeline, crack_resolver::CrackResolver,
     write_section_origin,
 };
@@ -213,7 +213,13 @@ pub(super) struct ModelRenderer {
     /// `app.rs`: the geometry is already here, and the only thing a frame has to
     /// supply is which item each drop is carrying, which rides on
     /// [`EntityDraw::item`].
-    pub(super) items: HashMap<ResourceLocation, ItemGeometry>,
+    ///
+    /// **[`ItemVariants`], not `ItemGeometry`** — every form the item can take,
+    /// resolved per draw against an
+    /// [`ItemStateContext`](lodestone_render::ItemStateContext). Snapshotting one
+    /// geometry per item is what made a spyglass in the hand draw its flat
+    /// inventory sprite, so the snapshot has to carry the axis, not a point on it.
+    pub(super) items: HashMap<ResourceLocation, ItemVariants>,
     /// The shared group-0 buffer (binding 0: view-projection + this frame's
     /// fog), written **once per frame** by `update_model_shared_camera_buffer`
     /// in [`RenderState::render_inner`] — replacing what used to be one
