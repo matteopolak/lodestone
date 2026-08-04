@@ -17,6 +17,50 @@
 //!   * **Damage *sources* and their tags.** Which hits bypass armour, cooldown
 //!     or resistance is registry data; a caller passes the relevant [`DamageFlags`]
 //!     rather than this crate hardcoding a version's damage-type table.
+//!
+//! # Issue #261 status: the formula is live-verified, the *feed* is not
+//!
+//! `apply_reductions`/`damage_after_armor`/`damage_after_protection` are
+//! cross-checked term-for-term against `CombatRules.getDamageAfterAbsorb`/
+//! `getDamageAfterMagicAbsorb` (`.cache/mc/26.2/src/net/minecraft/world/
+//! damagesource/CombatRules.java`, the whole file is 39 lines) and, beyond
+//! that, **live-verified against a real running vanilla 26.2 server**: a pig
+//! force-equipped with a full diamond armour set (`armor_formula_lands_on_
+//! the_toughness_hypothesis_not_the_flat_one`'s doc comment has the exact
+//! RCON transcript) took **3.0** damage from a raw 10.0 hit, matching this
+//! module's formula and *not* a flat-percentage alternative. The pipeline is
+//! also a real, non-island consumer: `lodestone-server`'s
+//! `SimMob::apply_damage` (`crates/lodestone-server/src/mobs.rs:584`) calls
+//! it for every landed melee hit and explosion.
+//!
+//! What #261 actually asked for beyond that, and does **not** exist anywhere
+//! in this workspace yet (verified by a full-repo grep, not assumed):
+//!   * **Feeding `Defenses` from an entity's real equipped items.**
+//!     `crate::mobs::combat_defaults`-equivalent code only ever reads
+//!     generic per-species base attributes (`default_attributes`), never an
+//!     equipped helmet/chestplate/leggings/boots. There is no equipment/
+//!     inventory model anywhere in `lodestone-server`, `lodestone-ecs`, or
+//!     this crate that carries per-item armour/toughness/enchantment-level
+//!     stats for combat purposes (the ECS `EntityEquipment` component that
+//!     does exist is cosmetic-rendering-only). Building this needs, at
+//!     minimum: per-material armour/toughness constants (`.cache/mc/26.2/
+//!     src/net/minecraft/world/item/equipment/ArmorMaterials.java` has the
+//!     real vanilla table) and a per-entity equipped-item slot model — a
+//!     prerequisite feature, not a `damage.rs` change.
+//!   * **`knockback_resistance` reducing an incoming melee push.** No melee
+//!     knockback impulse is computed anywhere in this workspace at all (only
+//!     `explosion::knockback_power` exists, for blasts) — `knockback_
+//!     resistance`/`ARMOR`/`ARMOR_TOUGHNESS` from equipped items would have
+//!     nothing to plug into yet.
+//!   * **Attack-cooldown-scaled damage and critical-hit/sweep bonus damage**
+//!     (also explicitly in #261's scope) — no attack-cooldown timer or hit
+//!     classification exists server-side.
+//!
+//! None of this is started here — it is a materially larger prerequisite
+//! (an equipment/inventory model, which several other in-flight issues also
+//! depend on) than "wire an existing pipeline up," and inventing an
+//! unconsumed per-material armour table now would itself be the kind of
+//! island CLAUDE.md warns about. See issue #261 for the up-to-date status.
 
 /// Per-hit flags a caller derives from the damage source's type tags. Each one
 /// switches off a stage of the pipeline, matching the `DamageTypeTags` checks in
@@ -217,6 +261,32 @@ mod tests {
         // result = 10 * (1-0.6) = 4.0.
         let out = damage_after_armor(10.0, 20.0, 0.0, 1.0);
         assert!((out - 4.0).abs() < 1e-4, "got {out}");
+    }
+
+    /// **Magnitude check** (CLAUDE.md's vacuous-test species): a flat
+    /// `armor / ARMOR_PROTECTION_DIVIDER` reduction with no toughness term is
+    /// a plausible-looking wrong formula that still shows "armour reduces
+    /// damage" — it would predict `10 * (1 - 20/25) = 2.0` for full diamond
+    /// armour (20 armour, 8 toughness) against a 10.0 hit. The real
+    /// toughness-aware formula predicts `3.0` (`toughness=2+8/4=4,
+    /// realArmor=clamp(20-10/4,4,20)=17.5, frac=17.5/25=0.7, 10*0.3=3.0`).
+    /// Live-verified against a real vanilla 26.2 server (not just this
+    /// hermetic assertion): a pig force-equipped with a full diamond armour
+    /// set (`equipment:{head:diamond_helmet,...}`, confirmed via
+    /// `/attribute get` to resolve to armor=20.0/toughness=8.0) took exactly
+    /// **3.0** damage from a raw 10.0 `minecraft:mob_attack` hit (`/damage
+    /// <pig> 10 minecraft:mob_attack`, health 20.0 -> 17.0) — landing on the
+    /// correct hypothesis, not the flat-percentage one.
+    #[test]
+    fn armor_formula_lands_on_the_toughness_hypothesis_not_the_flat_one() {
+        let correct = damage_after_armor(10.0, 20.0, 8.0, 1.0);
+        let flat_wrong = 10.0 * (1.0 - 20.0 / ARMOR_PROTECTION_DIVIDER);
+        assert!((correct - 3.0).abs() < 1e-4, "got {correct}");
+        assert!((flat_wrong - 2.0).abs() < 1e-4, "sanity-check on the wrong hypothesis itself");
+        assert!(
+            (correct - flat_wrong).abs() > 0.5,
+            "the two hypotheses must actually differ for this to be a real check"
+        );
     }
 
     #[test]
