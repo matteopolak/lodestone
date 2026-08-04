@@ -3342,6 +3342,10 @@ mod tests {
                     Rl::parse("minecraft:diamond_horse_armor").unwrap(),
                 ),
             ],
+            // No dye reported for any slot in this fixture — this test is
+            // about armour *resolution* (real wearer parts), not tint, and
+            // an absent dye is `armour_layer_tint_with_dye`'s own "undyed"
+            // case (`docs/armour-rendering.md`).
             equipment_dye: Vec::new(),
             feet: Vec3::new(4.0, 70.0, -2.0),
             yaw: 41.0,
@@ -4132,6 +4136,7 @@ mod tests {
                 scale: 1.0,
                 anim: lodestone_render::AnimInput::REST,
                 equipment: Vec::new(),
+                // No equipment above, so nothing here could carry a dye.
                 equipment_dye: Vec::new(),
                 wool: None,
                 count: 1,
@@ -4154,6 +4159,7 @@ mod tests {
                 scale: 1.0,
                 anim: lodestone_render::AnimInput::REST,
                 equipment: Vec::new(),
+                // No equipment above, so nothing here could carry a dye.
                 equipment_dye: Vec::new(),
                 wool: None,
                 count: 1,
@@ -4329,6 +4335,7 @@ mod tests {
             scale: 1.0,
             anim: lodestone_render::AnimInput::REST,
             equipment: Vec::new(),
+            // No equipment above, so nothing here could carry a dye.
             equipment_dye: Vec::new(),
             wool: None,
             count: 1,
