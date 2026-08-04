@@ -36,7 +36,8 @@
 use std::collections::HashMap;
 
 use lodestone_physics::{
-    Aabb, CollisionView, FluidCell, HorizontalDir, MovementInput, PhysicsProfile, PlayerState, Vec3d,
+    Aabb, CollisionView, FluidCell, FluidKind, HorizontalDir, MovementInput, PhysicsProfile,
+    PlayerState, Vec3d,
 };
 
 use crate::drive::WalkDrive;
@@ -589,7 +590,7 @@ impl CollisionView for StencilWorld {
         None
     }
 
-    fn is_solid_face(&self, _x: i32, y: i32, _z: i32, _dir: HorizontalDir) -> bool {
+    fn is_solid_face(&self, _x: i32, y: i32, _z: i32, _dir: HorizontalDir, _kind: FluidKind) -> bool {
         y == 0
     }
 }

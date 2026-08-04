@@ -343,9 +343,20 @@ macro_rules! collision_view_from_facts {
             /// full when a *single* box covers it, where vanilla unions the whole
             /// shape first. No false positives, possible false negatives, and the
             /// only consumer is a falling fluid's downward jet.
-            fn is_solid_face(&self, x: i32, y: i32, z: i32, dir: HorizontalDir) -> bool {
+            ///
+            /// `false` only for a neighbour holding the **same** fluid as `kind` —
+            /// the fluid asking, per [`CollisionView::is_solid_face`]'s doc — not
+            /// for any fluid whatsoever; matches the shell's adapters.
+            fn is_solid_face(&self, x: i32, y: i32, z: i32, dir: HorizontalDir, kind: FluidKind) -> bool {
                 let facts = self.$facts(x, y, z);
-                if facts.water || facts.lava {
+                let neighbour_kind = if facts.water {
+                    Some(FluidKind::Water)
+                } else if facts.lava {
+                    Some(FluidKind::Lava)
+                } else {
+                    None
+                };
+                if neighbour_kind == Some(kind) {
                     return false;
                 }
                 let (axis, at_max) = match dir {

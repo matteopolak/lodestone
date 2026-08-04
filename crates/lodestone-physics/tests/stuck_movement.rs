@@ -286,3 +286,80 @@ fn powder_snow_scales_by_its_own_vector_not_cobwebs() {
         "powder snow still slows the walker below free speed"
     );
 }
+
+// --- Axis 3: issue #216, the swept segment vs. the resting box -------------
+
+#[test]
+fn a_fast_faller_is_grabbed_by_a_one_block_layer_it_never_rests_in() {
+    // The defect #216 fixes: the pre-fix `update_stuck_multiplier` sampled only
+    // the *final* resting bounding box, so an entity moving fast enough to pass
+    // straight through a thin stuck-in-block layer within a single tick took no
+    // impulse at all. Constructed so neither the pre-move nor the post-move box
+    // overlaps the one-block cobweb layer — only the *swept path between them*
+    // does — which is the specific geometry a resting-box sample cannot see.
+    //
+    // Box height is 1.8; feet start at y=46.5 (box 46.5..48.3, entirely above
+    // the layer at world y=45..46) and a velocity already at gravity's
+    // terminal (-3.92/tick, `g=0.08, drag=0.98`: v=(v-g)*drag has fixed point
+    // -g*drag/(1-drag) = -3.92) carries feet to y≈42.58 (box 42.58..44.38,
+    // entirely below the layer). The window for this to hold — box start
+    // entirely above (`feet_start >= layer_top`) and box end entirely below
+    // (`feet_start - |v| + 1.8 <= layer_bottom`, i.e.
+    // `feet_start <= layer_bottom + |v| - 1.8`) — is `46 <= feet_start <=
+    // 47.12` here; 46.5 sits inside it with margin either side.
+    let mut world = World::default();
+    world.fill_stuck(4, 45..=45, COBWEB);
+
+    let profile = PhysicsProfile::mc_1_21();
+    let mut s = PlayerState::at(Vec3d::new(0.5, 46.5, 0.5), 0.0);
+    s.velocity = Vec3d::new(0.0, -3.92, 0.0);
+
+    assert!(
+        s.position.y >= 46.0,
+        "sanity: pre-move box's bottom must sit at/above the y=45..46 layer's \
+         top, got feet={}",
+        s.position.y
+    );
+
+    tick(&mut s, MovementInput::NONE, &world, &profile);
+
+    assert!(
+        s.position.y + 1.8 <= 45.0,
+        "sanity: post-move box's top must sit at/below the y=45..46 layer's \
+         bottom — otherwise this is just an ordinary resting-box overlap and \
+         proves nothing about the sweep, got feet={}",
+        s.position.y
+    );
+
+    assert_eq!(
+        s.stuck_speed_multiplier, COBWEB,
+        "the swept segment crossed the layer even though neither endpoint box \
+         did — the pre-#216 resting-box sample would have left this at ZERO, \
+         got {:?}",
+        s.stuck_speed_multiplier
+    );
+}
+
+#[test]
+fn a_faller_that_never_crosses_the_layer_is_not_grabbed() {
+    // Negative control for the test above, proving the swept detector is not a
+    // blanket "anything below counts" — a layer positioned so the swept path
+    // does *not* reach it (moved another 20 blocks further down, well past
+    // this tick's ~3.92-block travel) must leave the multiplier at ZERO.
+    let mut world = World::default();
+    world.fill_stuck(4, 20..=20, COBWEB);
+
+    let profile = PhysicsProfile::mc_1_21();
+    let mut s = PlayerState::at(Vec3d::new(0.5, 46.5, 0.5), 0.0);
+    s.velocity = Vec3d::new(0.0, -3.92, 0.0);
+
+    tick(&mut s, MovementInput::NONE, &world, &profile);
+
+    assert_eq!(
+        s.stuck_speed_multiplier,
+        Vec3d::ZERO,
+        "control: a layer the swept path never reaches must not grab the player, \
+         got {:?}",
+        s.stuck_speed_multiplier
+    );
+}

@@ -377,6 +377,13 @@ pub struct AirTravelContext {
     pub slow_falling: bool,
     /// Suppress the ladder slide-down (`isSuppressingSlidingDownLadder()`), which
     /// vanilla gates on `this instanceof Player`; a mob always passes `false`.
+    ///
+    /// This is the *sneak* input alone, not the full vanilla conjunct: the
+    /// scaffolding exception (`!getInBlockState().is(Blocks.SCAFFOLDING)`,
+    /// issue #210) is applied inside [`travel_in_air`] against the same
+    /// in-block position `is_climbable` already queries, because it needs a
+    /// [`CollisionView`] call this context struct has none of — see that
+    /// function's climbing block.
     pub suppress_ladder_slide: bool,
     /// `isSuppressingBounce()` (a sneaking player) — vetoes slime/bed bounce.
     pub suppress_bounce: bool,
@@ -470,14 +477,25 @@ pub fn travel_in_air(
     // the climbable. `onClimbable` tests the block at the feet block position;
     // we evaluate it once (pre-move) and reuse it, as the current player path
     // does, rather than re-querying the post-move position.
-    let climbing = !ctx.suppress_climbable
-        && view.is_climbable(
-            mth::floor(motion.position.x),
-            mth::floor(motion.position.y),
-            mth::floor(motion.position.z),
-        );
+    let climb_x = mth::floor(motion.position.x);
+    let climb_y = mth::floor(motion.position.y);
+    let climb_z = mth::floor(motion.position.z);
+    let climbing = !ctx.suppress_climbable && view.is_climbable(climb_x, climb_y, climb_z);
     if climbing {
-        motion.velocity = handle_on_climbable(motion.velocity, ctx.suppress_ladder_slide);
+        // Issue #210. `LivingEntity.handleOnClimbable`'s sneak-to-hold clamp
+        // carries one extra conjunct beyond "is this a climbable block":
+        // `!getInBlockState().is(Blocks.SCAFFOLDING)` (`LivingEntity.java:2700`),
+        // read at the **same** in-block position `climbing` above already
+        // queried. On a ladder or vine, sneaking while moving down clamps `yd`
+        // to `0.0` and you hang in place; on scaffolding that conjunct is
+        // `false`, so the clamp never engages and sneaking keeps descending at
+        // the ordinary `-0.15` cap — scaffolding does not offer a ladder's
+        // edge-hold.
+        let on_scaffolding = view.is_scaffolding(climb_x, climb_y, climb_z);
+        motion.velocity = handle_on_climbable(
+            motion.velocity,
+            ctx.suppress_ladder_slide && !on_scaffolding,
+        );
     }
 
     let move_ctx = MoveContext {

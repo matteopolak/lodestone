@@ -9,7 +9,7 @@
 //! epsilon placement rather than the classic pre-1.13 form, because the epsilon
 //! decides borderline contacts that the server's anti-cheat also sees.
 
-use crate::fluid::{FluidCell, HorizontalDir};
+use crate::fluid::{FluidCell, FluidKind, HorizontalDir};
 use crate::geometry::{Aabb, Axis, Vec3d};
 
 /// Vanilla's collision epsilon (`1.0E-7`), used throughout `VoxelShape.collideX`.
@@ -82,9 +82,38 @@ pub trait CollisionView {
     ///
     /// Vanilla's `LivingEntity.onClimbable` tests the block at the entity's
     /// *feet* block position, so a consumer maps this to the ladder/vine tag.
-    /// The sneak-to-hold behaviour differs for scaffolding, which this coarse
-    /// hook does not distinguish; ladders and vines (the common case) hold.
+    /// The sneak-to-hold behaviour differs for scaffolding — see
+    /// [`Self::is_scaffolding`], the narrow hook that carries exactly that
+    /// distinction without widening this one.
     fn is_climbable(&self, _x: i32, _y: i32, _z: i32) -> bool {
+        false
+    }
+
+    /// Whether the block at `(x, y, z)` is `minecraft:scaffolding` specifically,
+    /// among the [`Self::is_climbable`] set. Default `false`.
+    ///
+    /// One line of vanilla needs this and nothing else does:
+    /// `LivingEntity.handleOnClimbable`'s sneak-to-hold clamp reads
+    /// `!this.getInBlockState().is(Blocks.SCAFFOLDING)`
+    /// (`LivingEntity.java:2700`) — on a ladder or vine, holding sneak while
+    /// moving down clamps the Y velocity to `0.0` (you hang in place); on
+    /// scaffolding that conjunct is `false`, so the clamp never engages and
+    /// sneaking keeps descending at the same `-0.15` cap as everything else.
+    /// This is *why* scaffolding "feels like a ladder you fall through": the
+    /// tag membership ([`Self::is_climbable`]) is identical, only this one
+    /// exception differs.
+    ///
+    /// **Deliberately narrow.** Vanilla's other scaffolding-specific behaviour
+    /// — the stable/unstable collision-shape toggle
+    /// (`ScaffoldingBlock.getCollisionShape`, `ScaffoldingBlock.java:137-147`)
+    /// that lets a sneaking player fall *through* the platform instead of
+    /// standing on it — depends on the entity's sneak state and vertical
+    /// approach direction at query time, which [`Self::collision_boxes`] has no
+    /// parameter for. Modelling that would mean widening every implementer's
+    /// shape query with a descending/approach context most blocks never use.
+    /// Not attempted here; a consumer that needs it must special-case
+    /// scaffolding at the collision-box layer itself.
+    fn is_scaffolding(&self, _x: i32, _y: i32, _z: i32) -> bool {
         false
     }
 
@@ -122,6 +151,25 @@ pub trait CollisionView {
         None
     }
 
+    /// Whether the block at `(x, y, z)` is `minecraft:powder_snow`, for the
+    /// freezing mechanic (`InsideBlockEffectType.FREEZE`,
+    /// `InsideBlockEffectType.java:6-11`). Default `false`.
+    ///
+    /// A separate hook from [`Self::stuck_multiplier`] because the two answer
+    /// different vanilla questions over the same block, on different gates.
+    /// `PowderSnowBlock.entityInside` (`PowderSnowBlock.java:63-83`) applies
+    /// **both** effects to a `LivingEntity` standing in the block — the stuck
+    /// multiplier via `makeStuckInBlock`, which `Player` suppresses while
+    /// flying (`Player.java:1515-1518`), and `FREEZE` via the
+    /// `InsideBlockEffectApplier`, which **no** flying conjunct gates. A
+    /// creative-flying player drifting through powder snow keeps accumulating
+    /// `frozen_ticks` even though they feel none of the `(0.9, 1.5, 0.9)` drag —
+    /// collapsing this into "same cells as `stuck_multiplier`, filtered by
+    /// vector" would silently lose that case.
+    fn is_powder_snow(&self, _x: i32, _y: i32, _z: i32) -> bool {
+        false
+    }
+
     /// The fluid occupying `(x, y, z)`, if any, for **flow-current** (fluid-push)
     /// computation (`FlowingFluid.getFlow` / `EntityFluidInteraction.update`).
     /// Default `None` (no fluid) → no current, preserving existing behaviour.
@@ -143,10 +191,23 @@ pub trait CollisionView {
         false
     }
 
-    /// Whether the block at `(x, y, z)` presents a sturdy solid face toward `dir`
-    /// (`FlowingFluid.isSolidFace`), used only by a *falling* fluid's downward jet.
-    /// Default `false`.
-    fn is_solid_face(&self, _x: i32, _y: i32, _z: i32, _dir: HorizontalDir) -> bool {
+    /// Whether the block at `(x, y, z)` presents a sturdy solid face toward `dir`,
+    /// **from the point of view of a falling `kind` fluid** (`FlowingFluid`
+    /// instance method `isSolidFace`, `FlowingFluid.java:105-115`), used only by a
+    /// *falling* fluid's downward jet. Default `false`.
+    ///
+    /// `kind` is the fluid asking the question, not the fluid at `(x, y, z)`:
+    /// vanilla's `isSolidFace` is called *on* the flowing fluid instance
+    /// (`this.isSolidFace(...)` from `WaterFluid`/`LavaFluid`), and its first
+    /// line is `fluidState.getType().isSame(this)` — `false` when the neighbour
+    /// holds the **same** fluid as the one computing its flow, regardless of
+    /// what the neighbour's own block is. A neighbour holding a *different*
+    /// fluid (or none) falls through to the ice/sturdy-face check. Implementers
+    /// must not shortcut "any fluid present → not solid" — that answers "same
+    /// fluid" for the common case (water beside water) but is wrong for a
+    /// waterlogged solid block asked by a *different* fluid's jet (falling lava
+    /// beside a waterlogged stair should still see a sturdy face).
+    fn is_solid_face(&self, _x: i32, _y: i32, _z: i32, _dir: HorizontalDir, _kind: FluidKind) -> bool {
         false
     }
 

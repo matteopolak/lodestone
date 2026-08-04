@@ -57,8 +57,9 @@ pub use fluid::{FluidCell, FluidKind, HorizontalDir, apply_fluid_push, get_flow}
 pub use fluid_state::{FluidState, compute_fluid_state};
 pub use geometry::{Aabb, Axis, Vec3d};
 pub use player::{
-    EdgeBackOff, MovementInput, PlayerState, StatusEffects, input_vector, player_flying_speed, tick,
-    tick_air, tick_among_entities, tick_elytra, tick_lava, tick_water,
+    EdgeBackOff, MovementInput, PlayerState, StatusEffects, apply_firework_boost, apply_riptide,
+    input_vector, player_flying_speed, tick, tick_air, tick_among_entities, tick_elytra,
+    tick_lava, tick_water,
 };
 pub use pose::{
     Pose, can_player_fit_within_blocks_and_entities_when, can_player_fit_within_blocks_when,
