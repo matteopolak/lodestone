@@ -144,12 +144,13 @@ pub struct SessionMenus(pub lodestone_game::menus::Menus);
 /// the breaking entity's id, not by *this* session, but there is exactly one
 /// copy of it client-side, same as a boss-bar set).
 ///
-/// **Drawing it is a separate piece of work.** The renderer's single-target
-/// `CrackTarget`/`CrackPipeline` (`lodestone_shell::gpu`) only ever draws the
-/// local player's own dig; painting *other* players' cracks needs that
-/// pipeline to accept more than one target, which is a rendering change, not
-/// a routing one. [`stage_at`](lodestone_game::mining::BlockDestructionOverlays::stage_at)
-/// is the read side ready for whoever picks that up.
+/// **Drawing it is a separate piece of work (issue #410).** The renderer's
+/// single-target `CrackTarget`/`CrackPipeline` (`lodestone_shell::gpu`) only
+/// ever draws the local player's own dig; painting *other* players' cracks
+/// needs that pipeline to accept more than one target, which is a rendering
+/// change, not a routing one.
+/// [`stage_at`](lodestone_game::mining::BlockDestructionOverlays::stage_at) is
+/// the read side ready for whoever picks that up.
 #[derive(Component, Debug, Clone, Default)]
 pub struct SessionBlockDestruction(pub lodestone_game::mining::BlockDestructionOverlays);
 
@@ -251,6 +252,10 @@ pub struct ServerGameMode(pub Option<GameMode>);
 /// note on the Stage 3 collapse), so the event reached nothing at all until
 /// this component. The pre-report state is represented honestly rather than
 /// guessed as `Normal`, the same convention [`Vitals`]/[`ServerGameMode`] use.
+///
+/// Nothing in the shell reads this yet — showing it in the F3 overlay / pause
+/// menu is tracked separately as issue #411, since that is a text/HUD change
+/// in files outside this routing fix's scope.
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ServerDifficulty(pub Option<(Difficulty, bool)>);
 
