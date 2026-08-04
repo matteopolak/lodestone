@@ -1753,6 +1753,20 @@ fn entity_snapshot(view: EntityView, tab_list: &TabList) -> EntitySnapshot {
             }
         })
         .collect();
+    // Narrowed the same way `equipment` is, per `EntityDraw::equipment_dye`'s
+    // own doc: a slot only carries a dye if its item is present *and* its id
+    // validates. Emitting a dye for a slot `equipment` dropped would describe
+    // a tint on an item the renderer was never told about.
+    let equipment_dye = view
+        .equipment
+        .iter()
+        .filter_map(|eq| {
+            let stack = eq.item.as_ref()?;
+            lodestone_assets::ResourceLocation::new(stack.item.namespace(), stack.item.path())
+                .ok()?;
+            Some((eq.slot, stack.components.dyed_color?))
+        })
+        .collect();
     // Nametag resolution (issue #100). Two entirely different rules, per the
     // real 26.2 client:
     //
@@ -1799,15 +1813,12 @@ fn entity_snapshot(view: EntityView, tab_list: &TabList) -> EntitySnapshot {
         see_through: view.flags.map_or(true, |f| f & 0x02 == 0),
     });
     EntitySnapshot {
-        // `EntityView` carries no creeper-fuse fields yet — that needs a
-        // `lodestone-ecs` component (another agent's cluster) and a field on
-        // `EntityView` itself, which that module's own doc requires be added
-        // together with the component it reads from. `entities.rs`'s
-        // `CreeperFuse`/`tick_creeper_fuse`/`EntityDraw::creeper_swelling`
-        // chain is fully wired and waiting on exactly this one value — see
-        // `docs/entity-rendering.md`'s "Creeper swell" section for the patch
-        // spec left for whoever lands the other side.
-        creeper_swell_dir: None,
+        // `EntityView::creeper_swell_dir` is populated by `CreeperSwellDir`
+        // (`lodestone-ecs::entity`), folded in `ingest.rs`'s `apply_metadata`.
+        // `entities.rs`'s `CreeperFuse`/`tick_creeper_fuse`/
+        // `EntityDraw::creeper_swelling` chain reads this value directly —
+        // see `docs/entity-rendering.md`'s "Creeper swell" section.
+        creeper_swell_dir: view.creeper_swell_dir,
         id: view.entity_id,
         type_path: view.entity_type.path().to_string(),
         feet: glam::Vec3::new(
@@ -1838,6 +1849,14 @@ fn entity_snapshot(view: EntityView, tab_list: &TabList) -> EntitySnapshot {
         // to know a zombie was holding a sword even though the wire data was
         // sitting right here. Nothing downstream of this function could see it.
         equipment,
+        // `docs/armour-rendering.md`'s "hop 2", now closed. The comment this
+        // replaces said `EntityView` carried no dye data — true when written,
+        // and stale as of `64cfdcb`, which decoded `minecraft:dyed_color` into
+        // `ItemComponents::dyed_color`. The dye was already arriving *inside*
+        // `view.equipment`'s own `ItemStack`s; nothing new had to reach this
+        // function, which is why the stale note is worth naming rather than
+        // just deleting.
+        equipment_dye,
         // A third instance of the same gap: `EntityView::variant` has been fully
         // decoded (down to `EntityVariant::Dyed`'s sheep colour/shear bit) since
         // `lodestone_client::state`'s `Variant` component fold, and this function
@@ -2180,6 +2199,7 @@ mod tests {
             health: None,
             baby: None,
             variant: None,
+            creeper_swell_dir: None,
             attributes: Vec::new(),
             equipment: Vec::new(),
             item: Reported::Unreported,
@@ -2274,6 +2294,76 @@ mod tests {
         assert!(bare.equipment.is_empty());
     }
 
+    /// The last hop of `docs/armour-rendering.md`'s dye chain. `64cfdcb` decoded
+    /// `minecraft:dyed_color` and taught `prepare_armour` to tint with it, but
+    /// this function passed `Vec::new()`, so every leather item rendered undyed
+    /// while the wire data sat inside `view.equipment`'s own `ItemStack`s.
+    ///
+    /// The expected value comes from outside our code: vanilla's own default
+    /// leather RGB is the literal `10511680` in
+    /// `ItemStackComponentizationFix.java:250`, which writes it as `dyed_color`'s
+    /// `rgb` when an old stack carries no explicit colour. That is `0x00A06540`.
+    #[test]
+    fn entity_snapshot_carries_equipment_dye_through() {
+        use lodestone_model::ItemStack;
+        use lodestone_model::event::{EntityEquipment, EquipmentSlot};
+        use std::str::FromStr;
+
+        const VANILLA_DEFAULT_LEATHER: u32 = 0x00A0_6540;
+
+        let dyed = |path: &str, colour: Option<u32>| {
+            let mut stack = ItemStack::new(
+                lodestone_client::ResourceKey::from_str(path).unwrap(),
+                1,
+            );
+            stack.components.dyed_color = colour;
+            stack
+        };
+
+        let mut view = bare_entity_view(None, true);
+        view.equipment = vec![
+            EntityEquipment {
+                slot: EquipmentSlot::Chest,
+                item: Some(dyed(
+                    "minecraft:leather_chestplate",
+                    Some(VANILLA_DEFAULT_LEATHER),
+                )),
+            },
+            // An undyeable item in an occupied slot must contribute no entry at
+            // all — not a zero, which would read as "dyed pure black".
+            EntityEquipment {
+                slot: EquipmentSlot::Head,
+                item: Some(dyed("minecraft:iron_helmet", None)),
+            },
+        ];
+
+        let snap = entity_snapshot(view, &TabList::new());
+        assert_eq!(
+            snap.equipment_dye,
+            vec![(EquipmentSlot::Chest, VANILLA_DEFAULT_LEATHER)],
+            "only the dyed slot contributes, and it carries vanilla's exact RGB"
+        );
+        assert_eq!(
+            snap.equipment.len(),
+            2,
+            "narrowing the dye list must not narrow `equipment` itself"
+        );
+
+        // Control: the same two items with the dye component absent must produce
+        // an empty list, so the assertion above cannot pass on a build that
+        // simply forwards every occupied slot with some placeholder colour.
+        let mut undyed_view = bare_entity_view(None, true);
+        undyed_view.equipment = vec![EntityEquipment {
+            slot: EquipmentSlot::Chest,
+            item: Some(dyed("minecraft:leather_chestplate", None)),
+        }];
+        let undyed = entity_snapshot(undyed_view, &TabList::new());
+        assert!(
+            undyed.equipment_dye.is_empty(),
+            "no dye component reported means no dye, never a default"
+        );
+    }
+
     /// A third instance of the velocity/equipment gap:
     /// `EntityView::variant` was already fully decoded and simply never read
     /// past this boundary. This is the fix `docs/entity-rendering.md`'s
@@ -2301,6 +2391,34 @@ mod tests {
         // `None`, not as some default variant.
         let bare = entity_snapshot(bare_entity_view(None, true), &TabList::new());
         assert_eq!(bare.variant, None);
+    }
+
+    /// The last hop of the creeper-swell chain `docs/entity-rendering.md`'s
+    /// "Creeper swell" section names: `Creeper.DATA_SWELL_DIR` is fully
+    /// decoded down to `EntityView::creeper_swell_dir`
+    /// (`lodestone_client::state`'s `entity_view`, fed by
+    /// `lodestone-ecs::CreeperSwellDir`) — this function was the one place
+    /// that dropped it on the floor, hardcoding `None` regardless of what the
+    /// server actually reported. `entities.rs`'s
+    /// `CreeperFuse`/`tick_creeper_fuse`/`EntityDraw::creeper_swelling` chain
+    /// reads only `EntitySnapshot::creeper_swell_dir`, so this is the
+    /// boundary that made every creeper swell invisible end to end.
+    #[test]
+    fn entity_snapshot_carries_creeper_swell_dir_through() {
+        let mut view = bare_entity_view(None, true);
+        view.creeper_swell_dir = Some(1);
+        let snap = entity_snapshot(view, &TabList::new());
+        assert_eq!(
+            snap.creeper_swell_dir,
+            Some(1),
+            "a decoded swell direction must survive the EntityView -> EntitySnapshot boundary"
+        );
+
+        // Control: an entity the server has never reported a swell direction
+        // for (i.e. every non-creeper) must read as `None`, not some default
+        // "growing" or "shrinking" direction.
+        let bare = entity_snapshot(bare_entity_view(None, true), &TabList::new());
+        assert_eq!(bare.creeper_swell_dir, None);
     }
 
     /// The visible half of the stack-count gap `docs/dropped-items.md`
