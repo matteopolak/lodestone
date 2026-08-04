@@ -409,11 +409,23 @@ has been wrong four times in four different ways.
 narrower than its name suggests.** Measured twice today, each time by an agent I had pointed at it
 wrongly:
 
-- It reports **clientbound decode → event wiring on the client side only.** It does **not** measure
-  serverbound decode in `lodestone-server`; an agent implementing three server decode arms ran it and
-  found it reports client encode coverage exclusively, matching a prior finding already recorded in
-  `docs/roadmap/protocol.md`. Server decode coverage has to be counted by grep (that agent measured
-  5/69 → 8/69 by hand for exactly this reason).
+- It reports **clientbound decode → event wiring, for `v770` only.** `xtask/src/lib.rs:2846` is a hard
+  `if family != "v770" { continue; }`, so v47/v340/v735 are **silently never measured** — and the report's
+  own header string claims it takes "denominators from each family", which is false. Do not read a green
+  connectedness number as saying anything whatever about a legacy family.
+  It does **not** measure serverbound decode. Its `53/69` "serverbound encoded" figure is bare token
+  presence in the *client* adapter — no arm, no body, no direction check — which is why it is an *encode*
+  number: the client adapter only ever names a serverbound id while building a `Directive::Send`.
+- **Serverbound decode does not live in `lodestone-server` at all** —
+  `/usr/bin/grep -rn "serverbound::" crates/lodestone-server/src/` returns **zero hits**. It is in
+  `crates/protocol/v770/src/server_protocol.rs:880`, as `State::Play if packet_id ==
+  play::serverbound::NAME =>` arms. **This entry previously said `lodestone-server` and quoted
+  "5/69 → 8/69"; both were wrong** — there are **10 Play arms**, and `docs/roadmap/protocol.md`'s
+  "completely zero" is stale too. Two hand-counted figures in two documents, both stale within a day,
+  which is the argument for automating the axis rather than re-counting it.
+  Note the count alone is not connectedness: a variant that decodes and lands only in `server.rs`'s
+  `ServerBound::Ignored => {}` group is stranded exactly as a clientbound packet would be, so the
+  serverbound axis is a **two-file join** across crates, not a one-file scan.
 - It does not measure **Rust call graphs** either. Pointed at a *crate-internal* island — an
   implemented type nothing in the workspace constructs — it returns **byte-identical output before and
   after the fix**, which reads as "no change" rather than "not applicable". The agent closing
