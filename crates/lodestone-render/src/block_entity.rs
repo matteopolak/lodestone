@@ -647,16 +647,87 @@ fn affine_to_mat4(a: &lodestone_assets::entity::Affine) -> Mat4 {
     ])
 }
 
+/// Model name of the bell body/rim rig.
+pub const BELL: &str = "bell";
+
+/// The jar sheet a bell draws with — `BellRenderer.BELL_TEXTURE`
+/// (`Sheets.BLOCK_ENTITIES_MAPPER.defaultNamespaceApply("bell/bell_body")`).
+/// Single stem, no material variants: unlike chest, a bell's sheet never
+/// changes with block state or NBT.
+pub const BELL_TEXTURE_STEM: &str = "entity/bell/bell_body";
+
+/// The one bell sheet stem, for [`block_entity_texture_stems`] — mirrors
+/// [`skull_texture_stems`]'s shape even though there is only one entry, so a
+/// future material split (there is none today) has one function to widen
+/// rather than a call site to find.
+#[must_use]
+pub fn bell_texture_stems() -> Vec<&'static str> {
+    vec![BELL_TEXTURE_STEM]
+}
+
+/// A bell's shake direction — `BellModel.State.shakeDirection`, the four
+/// horizontal directions a player (or projectile) can hit a bell from.
+/// `Option<BellShakeDirection>` (not a fifth "none" variant) mirrors the
+/// jar's own `@Nullable Direction`, and matches how [`BellSpawn::shake`]
+/// spells "at rest".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BellShakeDirection {
+    /// `Direction.NORTH`.
+    North,
+    /// `Direction.SOUTH`.
+    South,
+    /// `Direction.EAST`.
+    East,
+    /// `Direction.WEST`.
+    West,
+}
+
+/// The bell body's `(x_rot, z_rot)` in radians for a shake in progress —
+/// `BellModel.setupAnim`:
+///
+/// ```text
+/// baseRot = sin(ticks / PI) / (4 + ticks / 3)
+/// NORTH: xRot = -baseRot   SOUTH: xRot = +baseRot
+/// EAST:  zRot = -baseRot   WEST:  zRot = +baseRot
+/// ```
+///
+/// `direction = None` returns `(0.0, 0.0)` without evaluating `base_rot` at
+/// all, mirroring `BellModel.setupAnim`'s own `if (state.shakeDirection !=
+/// null)` guard rather than computing the ratio and multiplying by a zero
+/// that never appears in the real formula — there is no direction to carry a
+/// sign for a bell at rest, so a literal port has nothing to multiply.
+///
+/// `ticks` is vanilla's raw tick counter (`BellBlockEntity.ticks`, `0..50`,
+/// **not** eased or clamped here) plus partial tick, exactly as
+/// `BellRenderer.extractRenderState` passes it — unlike
+/// [`chest_lid_openness`], there is only one transform here because vanilla
+/// itself has only one; `setupAnim` computes the angle directly from ticks
+/// with no separate easing pass.
+#[must_use]
+pub fn bell_shake_angle(direction: Option<BellShakeDirection>, ticks: f32) -> (f32, f32) {
+    let Some(direction) = direction else {
+        return (0.0, 0.0);
+    };
+    let base_rot = (ticks / std::f32::consts::PI).sin() / (4.0 + ticks / 3.0);
+    match direction {
+        BellShakeDirection::North => (-base_rot, 0.0),
+        BellShakeDirection::South => (base_rot, 0.0),
+        BellShakeDirection::East => (0.0, -base_rot),
+        BellShakeDirection::West => (0.0, base_rot),
+    }
+}
+
 /// Every sheet stem across every block-entity family — what the shell's
-/// texture loader preloads. Union of [`chest_texture_stems`] and
-/// [`skull_texture_stems`] rather than the shell iterating each list itself,
-/// so a third family only has to update this one function to reach the
-/// loader (see the module doc's "How to change it" — this is the "entry in
-/// the preload list" step, generalised past chest).
+/// texture loader preloads. Union of [`chest_texture_stems`],
+/// [`skull_texture_stems`] and [`bell_texture_stems`] rather than the shell
+/// iterating each list itself, so a fourth family only has to update this one
+/// function to reach the loader (see the module doc's "How to change it" —
+/// this is the "entry in the preload list" step, generalised past chest).
 #[must_use]
 pub fn block_entity_texture_stems() -> Vec<&'static str> {
     let mut stems = chest_texture_stems();
     stems.extend(skull_texture_stems());
+    stems.extend(bell_texture_stems());
     stems
 }
 
@@ -778,6 +849,46 @@ impl BlockEntityModelSet {
             light: spawn.light,
         })
     }
+
+    /// Resolves one bell into a drawable instance, or `None` if the model is
+    /// not in the corpus.
+    ///
+    /// `bell_body` is the only part overridden — `bell_base` is its *child*
+    /// in the baked mesh (see `lodestone_assets::block_entity_models::bell_model`'s
+    /// doc), so rotating the body carries the rim with it through
+    /// [`BlockEntityMesh::part_transforms`]'s own chain, exactly as
+    /// `ModelPart`'s parent/child composition does in the jar. There is no
+    /// second override for `bell_base`, unlike chest's `lid`/`lock` pair,
+    /// because vanilla itself poses only `bellBody.xRot`/`zRot`.
+    #[must_use]
+    pub fn resolve_bell(&self, spawn: &BellSpawn) -> Option<BlockEntityInstance> {
+        let mesh = self.get(BELL)?;
+        let placement = block_entity_placement_matrix(spawn.pos, 0.0);
+
+        let (x_rot, z_rot) = match spawn.shake {
+            Some((direction, ticks)) => bell_shake_angle(Some(direction), ticks),
+            None => (0.0, 0.0),
+        };
+        let mut overrides = Vec::with_capacity(1);
+        if let Some(index) = mesh.index_of("bell_body") {
+            let mut pose = mesh.part_rest[index];
+            pose.x_rot = x_rot;
+            pose.z_rot = z_rot;
+            overrides.push((index, pose));
+        }
+        let part_transforms = mesh.part_transforms(placement, &overrides);
+
+        let (aabb_min, aabb_max) = transformed_aabb(&placement, mesh.local_min, mesh.local_max);
+        Some(BlockEntityInstance {
+            model: BELL,
+            texture: BELL_TEXTURE_STEM,
+            transform: placement,
+            part_transforms,
+            aabb_min,
+            aabb_max,
+            light: spawn.light,
+        })
+    }
 }
 
 impl Default for BlockEntityModelSet {
@@ -852,6 +963,53 @@ impl SkullSpawn {
             pos,
             orientation: SkullOrientation::Floor { rotation_segment: 0 },
             skull_type: SkullType::Skeleton,
+            light: ENTITY_FULLBRIGHT,
+        }
+    }
+}
+
+/// The version-free description of one bell to draw this frame.
+///
+/// Unlike [`ChestSpawn`]/[`SkullSpawn`], placement needs no facing at all:
+/// `BellRenderer.submit` applies no rotation of its own before
+/// `submitModel` (contrast `ChestRenderer.submit`'s explicit
+/// `rotationAround`), so every `FACING`/`ATTACHMENT` combination poses the
+/// body identically — only the block's own attachment-frame *model* (drawn
+/// by the ordinary block mesher, not this pass) differs per attachment.
+/// [`BlockEntityModelSet::resolve_bell`] therefore calls
+/// [`block_entity_placement_matrix`] with a fixed `facing_yaw_deg` of `0.0`,
+/// reusing the chest's placement function unchanged rather than adding a
+/// bell-specific one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BellSpawn {
+    /// Block position.
+    pub pos: [i32; 3],
+    /// The in-progress shake (direction plus vanilla's raw tick counter,
+    /// `0..50`), or `None` at rest.
+    ///
+    /// **`None` is the only value this pass can produce today.** The
+    /// `BLOCK_EVENT` trigger that starts a shake (`b0 == 1`, direction packed
+    /// in `b1` — `BellBlockEntity.triggerEvent`) is not wired from any
+    /// gather in this crate; see `docs/block-entity-renderers.md`'s Bell
+    /// section for exactly what is missing and why (the install call site is
+    /// outside this crate's file ownership for the session that ported the
+    /// geometry). A bell always draws — closing the "hole" the doc's chest
+    /// section describes for a model-less block entity — it just never
+    /// shakes yet.
+    pub shake: Option<(BellShakeDirection, f32)>,
+    /// Packed sky/block light. Pass [`ENTITY_FULLBRIGHT`] only when there is
+    /// genuinely no world to sample.
+    pub light: u8,
+}
+
+impl BellSpawn {
+    /// A resting, full-bright bell at `pos` — the minimum a hermetic gate
+    /// needs.
+    #[must_use]
+    pub fn at(pos: [i32; 3]) -> Self {
+        BellSpawn {
+            pos,
+            shake: None,
             light: ENTITY_FULLBRIGHT,
         }
     }
@@ -992,7 +1150,7 @@ mod tests {
     #[test]
     fn every_ported_model_bakes_with_geometry_and_parts() {
         let set = set();
-        assert_eq!(set.len(), 5, "3 chest layers + 2 skull canvases");
+        assert_eq!(set.len(), 6, "3 chest layers + 2 skull canvases + bell");
         for (name, mesh) in set.iter() {
             assert!(mesh.quad_count() > 0, "{name} baked no quads");
             assert_eq!(mesh.parts.len(), mesh.part_names.len());
@@ -1008,6 +1166,9 @@ mod tests {
             let mesh = set.get(name).unwrap();
             assert!(mesh.index_of("head").is_some(), "{name} has no head part");
         }
+        let bell = set.get(BELL).unwrap();
+        assert!(bell.index_of("bell_body").is_some(), "bell has no bell_body part");
+        assert!(bell.index_of("bell_base").is_some(), "bell has no bell_base part");
     }
 
     /// The rest AABB must land in `0..1` on Y for the chest layers — the
@@ -1537,6 +1698,100 @@ mod tests {
             frame.batches.len(),
             2,
             "a chest and a skull must not share a batch"
+        );
+    }
+
+    #[test]
+    fn bell_stem_is_in_the_preload_list() {
+        let stems = bell_texture_stems();
+        assert_eq!(stems, vec![BELL_TEXTURE_STEM]);
+        assert!(block_entity_texture_stems().contains(&BELL_TEXTURE_STEM));
+    }
+
+    /// `BellModel.setupAnim`'s exact formula, predicted independently of the
+    /// port rather than by re-deriving its own arithmetic: choosing
+    /// `ticks = pi^2 / 2` makes `sin(ticks / pi) == sin(pi/2) == 1` exactly,
+    /// so the only remaining unknown is `base_rot = 1 / (4 + ticks/3)` and
+    /// each direction's sign/axis — a magnitude check, not merely a sign
+    /// flip (`CLAUDE.md`'s "predict the value, do not merely assert the
+    /// sign" rule).
+    #[test]
+    fn bell_shake_angle_matches_the_exact_vanilla_formula() {
+        assert_eq!(bell_shake_angle(None, 999.0), (0.0, 0.0), "no direction, no motion");
+        assert_eq!(
+            bell_shake_angle(Some(BellShakeDirection::North), 0.0),
+            (0.0, 0.0),
+            "sin(0) is zero at tick 0"
+        );
+
+        let ticks = std::f32::consts::PI * std::f32::consts::PI / 2.0;
+        let expected = 1.0 / (4.0 + ticks / 3.0);
+
+        let (x, z) = bell_shake_angle(Some(BellShakeDirection::North), ticks);
+        assert!((x - -expected).abs() < 1e-4, "north x_rot {x}");
+        assert_eq!(z, 0.0);
+
+        let (x, z) = bell_shake_angle(Some(BellShakeDirection::South), ticks);
+        assert!((x - expected).abs() < 1e-4, "south x_rot {x}");
+        assert_eq!(z, 0.0);
+
+        let (x, z) = bell_shake_angle(Some(BellShakeDirection::East), ticks);
+        assert_eq!(x, 0.0);
+        assert!((z - -expected).abs() < 1e-4, "east z_rot {z}");
+
+        let (x, z) = bell_shake_angle(Some(BellShakeDirection::West), ticks);
+        assert_eq!(x, 0.0);
+        assert!((z - expected).abs() < 1e-4, "west z_rot {z}");
+    }
+
+    /// The rim (`bell_base`) has no override of its own — if shaking the body
+    /// did not also move it, that would mean the parent/child nesting broke
+    /// (see `bell_model`'s doc), not merely that the shake is small.
+    #[test]
+    fn shaking_the_body_moves_the_rim_too_because_it_is_a_child() {
+        let set = set();
+        let resting = set.resolve_bell(&BellSpawn::at([0, 0, 0])).unwrap();
+        assert_eq!(resting.texture, BELL_TEXTURE_STEM);
+        assert!(!resting.part_transforms.is_empty());
+
+        let mesh = set.get(BELL).unwrap();
+        let body = mesh.index_of("bell_body").unwrap();
+        let base = mesh.index_of("bell_base").unwrap();
+
+        let ticks = std::f32::consts::PI * std::f32::consts::PI / 2.0;
+        let shaking = set
+            .resolve_bell(&BellSpawn {
+                shake: Some((BellShakeDirection::East, ticks)),
+                ..BellSpawn::at([0, 0, 0])
+            })
+            .unwrap();
+
+        assert_ne!(
+            shaking.part_transforms[body], resting.part_transforms[body],
+            "the body itself must move"
+        );
+        assert_ne!(
+            shaking.part_transforms[base], resting.part_transforms[base],
+            "the rim must move with its parent"
+        );
+    }
+
+    #[test]
+    fn bells_batch_independently_from_chests_and_skulls() {
+        let set = set();
+        let chest = set.resolve_chest(&ChestSpawn::at([0, 0, 0])).unwrap();
+        let skull = set.resolve_skull(&SkullSpawn::at([1, 0, 0])).unwrap();
+        let bell = set.resolve_bell(&BellSpawn::at([2, 0, 0])).unwrap();
+        let cam = looking_at_origin();
+        let frame = plan_block_entities(
+            &[chest, skull, bell],
+            &Frustum::from_view_projection(cam.view_projection()),
+        );
+        assert_eq!(frame.stats.drawn, 3);
+        assert_eq!(
+            frame.batches.len(),
+            3,
+            "a chest, a skull and a bell must not share a batch"
         );
     }
 }
