@@ -5,10 +5,12 @@ pub mod blended;
 pub mod improved;
 pub mod normal;
 pub mod perlin;
+pub mod perlin_simplex;
 pub mod simplex;
 
 pub use blended::BlendedNoise;
 pub use improved::ImprovedNoise;
 pub use normal::NormalNoise;
 pub use perlin::{PerlinNoise, wrap};
+pub use perlin_simplex::{ClimateNoise, PerlinSimplexNoise};
 pub use simplex::{SimplexNoise, biome_info_noise_value};

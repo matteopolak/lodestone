@@ -382,6 +382,29 @@ pub struct OverworldGenerator {
     /// rather than a per-ore-target walk (this module's own tag set is
     /// fixed, not data-dependent — see that function's doc comment).
     veg_tags: crate::feature::vegetation::VegTags,
+    /// Per-biome `ClimateSettings` (`has_precipitation`, `temperature`,
+    /// `temperature_modifier`), read straight out of each biome's own
+    /// `Resolver::biome_document` — see
+    /// [`crate::feature::top_layer::parse_biome_climate`] for why no new
+    /// resolver method was needed. Only populated for biomes whose document
+    /// carries a `temperature` field; a biome absent here does not freeze.
+    biome_climates: HashMap<String, crate::feature::top_layer::BiomeClimate>,
+    /// Which biomes list `minecraft:freeze_top_layer` in their
+    /// `TOP_LAYER_MODIFICATION` step. In vanilla 26.2 that is **every** biome
+    /// (`BiomeDefaultFeatures.java:413`), so this is not really a filter — it is
+    /// there so a trimmed or modified datapack that omits the step gets a
+    /// snow-free world rather than snow this engine invented.
+    freeze_biomes: HashSet<String>,
+    /// The five per-block-state predicates plus two tags
+    /// [`Self::top_layer_stage`] needs. Empty (making the stage a no-op) when
+    /// the resolver supplies no `block_freeze_facts` — the same "no data
+    /// supplied" convention as every field above.
+    snow_support: crate::feature::top_layer::SnowSupport,
+    /// `Biome`'s three climate noise fields, built once per generator rather
+    /// than per column — see [`crate::noise::ClimateNoise`]. Only read by
+    /// [`Self::top_layer_stage`], and cheap enough (~780 draws) to build
+    /// unconditionally.
+    climate_noise: crate::noise::ClimateNoise,
 }
 
 impl OverworldGenerator {
@@ -491,6 +514,11 @@ impl OverworldGenerator {
         let mut carvers_by_biome = HashMap::new();
         let mut ores_by_biome = HashMap::new();
         let mut vegetation_by_biome = HashMap::new();
+        // Issue #404's U2: the same per-biome document walk also yields each
+        // biome's `ClimateSettings` and whether it lists `freeze_top_layer`, so
+        // `TOP_LAYER_MODIFICATION` composition costs no extra JSON parses.
+        let mut biome_climates = HashMap::new();
+        let mut freeze_biomes = HashSet::new();
         for name in &biome_names {
             carvers_by_biome.insert(
                 name.clone(),
@@ -501,10 +529,18 @@ impl OverworldGenerator {
                 name.clone(),
                 crate::compose::build_biome_vegetation(resolver, name),
             );
+            let document = resolver.biome_document(name);
+            if let Some(climate) = crate::feature::top_layer::parse_biome_climate(&document) {
+                biome_climates.insert(name.clone(), climate);
+            }
+            if crate::compose::biome_lists_freeze_top_layer(&document) {
+                freeze_biomes.insert(name.clone());
+            }
         }
         let all_ores: Vec<PlacedOre> = ores_by_biome.values().flatten().cloned().collect();
         let ore_tag_map = crate::compose::build_ore_tag_map(resolver, &all_ores);
         let veg_tags = crate::feature::vegetation::build_veg_tags(resolver);
+        let snow_support = crate::feature::top_layer::build_snow_support(resolver);
 
         // Captured last, after every `builder.build()` call above (shape,
         // surface, climate, the eight aquifer trees) — see `AquiferTrees`'s
@@ -533,6 +569,10 @@ impl OverworldGenerator {
             post_ore_cache: Mutex::new(PostOreCache::default()),
             vegetation_by_biome,
             veg_tags,
+            biome_climates,
+            freeze_biomes,
+            snow_support,
+            climate_noise: crate::noise::ClimateNoise::new(),
         }
     }
 
@@ -572,6 +612,12 @@ impl OverworldGenerator {
         // cost as before, not a new one.
         let world = (*self.post_ore_world(cx, cz)).clone();
         let world = self.vegetation_stage(cx, cz, world);
+        // Issue #404's U2: `TOP_LAYER_MODIFICATION` is vanilla's LAST decoration
+        // step (index 10) and must run after vegetation, because the
+        // `MOTION_BLOCKING` height it reads includes leaves and logs — snow sits
+        // on a spruce canopy. Running it before vegetation would put snow at the
+        // pre-tree surface and then bury it.
+        let (world, _) = self.top_layer_stage(cx, cz, world, &cached.2);
         self.intern_from_dense(world, cached.2.clone())
     }
 
@@ -963,6 +1009,77 @@ impl OverworldGenerator {
             world.set(x, y, z, state);
         }
         world
+    }
+
+    /// Stage 7 (issue #404's U2): the `TOP_LAYER_MODIFICATION` step —
+    /// `freeze_top_layer`'s snow layers and surface ice, over the finished
+    /// post-vegetation world.
+    ///
+    /// **No 3×3 driver, and that is vanilla's own behaviour, not a narrowing.**
+    /// `SnowAndFreezeFeature.place` loops `dx`/`dz` over `0..16` from the chunk
+    /// origin and writes only at `(x, y, z)` / `(x, y - 1, z)` of that same
+    /// column (`SnowAndFreezeFeature.java:26-45`), so it has no
+    /// `blockStateWriteRadius(1)` spill for [`Self::ore_stage`]'s and
+    /// [`Self::vegetation_stage`]'s neighbour drivers to model. A neighbour's own
+    /// freeze pass cannot reach into this chunk, and this one cannot reach out.
+    /// That also means this stage costs no neighbour recomputation at all — it is
+    /// one 256-column scan over a grid that is already in hand.
+    ///
+    /// Returns the world plus the pass's [`FreezeCounts`](crate::feature::top_layer::FreezeCounts),
+    /// which [`Self::column`] discards and gates use to assert a count without
+    /// rescanning a chunk.
+    ///
+    /// No-op when the resolver supplied no `block_freeze_facts`, no biome with a
+    /// `freeze_top_layer` entry, or no biome climates — the same "no data
+    /// supplied" convention as every other stage, and the reason every existing
+    /// fixture resolver in this crate still generates a snow-free world.
+    fn top_layer_stage(
+        &self,
+        cx: i32,
+        cz: i32,
+        world: crate::dense_grid::DenseBlockGrid,
+        biome_quarts: &[(String, bool); 16],
+    ) -> (
+        crate::dense_grid::DenseBlockGrid,
+        crate::feature::top_layer::FreezeCounts,
+    ) {
+        let mut world = world;
+        if self.snow_support.is_empty()
+            || self.freeze_biomes.is_empty()
+            || self.biome_climates.is_empty()
+        {
+            return (world, crate::feature::top_layer::FreezeCounts::default());
+        }
+        // `level.getBiome(topPos)` resolves through the quart grid. `biome_stage`
+        // samples each quart at its own corner, so a column's quart index is
+        // `(lz >> 2) * 4 + (lx >> 2)` — the same rounding `Self::surface_stage`'s
+        // own `biome_at` uses. See `crate::feature::top_layer`'s
+        // "Approximations, named" for the 2-D-biome caveat this inherits.
+        let biome_at = |lx: i32, lz: i32| -> &str {
+            let quart = ((lz >> 2) * 4 + (lx >> 2)) as usize;
+            let name = biome_quarts[quart].0.as_str();
+            // A biome that does not list the step contributes no snow. Handing
+            // back a name absent from `biome_climates` is how that is expressed,
+            // since `apply_freeze_top_layer` skips an unknown biome.
+            if self.freeze_biomes.contains(name) {
+                name
+            } else {
+                ""
+            }
+        };
+        let counts = crate::feature::top_layer::apply_freeze_top_layer(
+            &mut world,
+            cx,
+            cz,
+            self.min_y,
+            self.height,
+            self.sea_level,
+            &biome_at,
+            &self.biome_climates,
+            &self.snow_support,
+            &self.climate_noise,
+        );
+        (world, counts)
     }
 
     /// One chunk's own post-carve-and-ore world (stages 1-5), for an

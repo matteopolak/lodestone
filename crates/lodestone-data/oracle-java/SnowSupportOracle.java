@@ -14,14 +14,14 @@ import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.material.Fluids;
 
 /**
- * Authoritative extractor for the four per-block-state facts
+ * Authoritative extractor for the five per-block-state facts
  * {@code SnowAndFreezeFeature} (vanilla's {@code freeze_top_layer},
  * {@code TOP_LAYER_MODIFICATION}) needs and that no other committed census in
  * this crate carries.
  *
  * <p>Boots the real 26.2 server (registries only, no world, no data pack) the
  * same way {@code ShadeBrightnessOracle} and {@code HardnessOracle} in this
- * directory do. No tag is read by any of the four predicates, so no
+ * directory do. No tag is read by any of the five predicates, so no
  * {@code TagLoader} bind is needed — the two snow-support <i>tags</i>
  * ({@code cannot_support_snow_layer}, {@code support_override_snow_layer}) reach
  * the world generator through its own datapack resolver, not through this table.
@@ -63,6 +63,15 @@ import net.minecraft.world.level.material.Fluids;
  *       {@link lodestone_data.block_states#properties}, and the committed test
  *       asserts exactly that agreement — the column exists so "derivable" is a
  *       measurement, not a claim.</li>
+ *   <li>{@code D} — {@code state == state.getBlock().defaultBlockState()}. Not a
+ *       {@code freeze_top_layer} predicate at all, but the key its consumer needs:
+ *       {@code lodestone-worldgen} emits fluids without their {@code level}
+ *       property, so a column's water reads as {@code minecraft:water} rather than
+ *       {@code minecraft:water[level=0]} — and since {@code W} is true for exactly
+ *       one water state, a property-less lookup has to resolve to the block's
+ *       default state or no ocean ever freezes. Nothing in {@code blocks.json}'s
+ *       committed extraction retained the {@code "default": true} flag, so it is
+ *       dumped here.</li>
  * </ul>
  *
  * <p><b>Known scope of {@code U}.</b> The shape is read at
@@ -79,8 +88,8 @@ import net.minecraft.world.level.material.Fluids;
  *   C &lt;stateCount&gt; &lt;blockCount&gt;
  *   B &lt;firstStateIdOfBlock&gt; &lt;blockName&gt;
  *   N &lt;blockName&gt;                       (block declares dynamicShape())
- *   K &lt;U|L|W|Y&gt; &lt;countOfTrueStates&gt;
- *   P &lt;U|L|W|Y&gt; &lt;startStateId&gt; &lt;bitstring, up to 256 chars, ascending&gt;
+ *   K &lt;U|L|W|Y|D&gt; &lt;countOfTrueStates&gt;
+ *   P &lt;U|L|W|Y|D&gt; &lt;startStateId&gt; &lt;bitstring, up to 256 chars, ascending&gt;
  * </pre>
  *
  * {@code K} is the population count per column, emitted so a consumer can prove
@@ -110,6 +119,7 @@ public final class SnowSupportOracle {
         List<Boolean> hasFluid = new ArrayList<>();
         List<Boolean> waterLiquidBlock = new ArrayList<>();
         List<Boolean> snowyProperty = new ArrayList<>();
+        List<Boolean> isDefaultState = new ArrayList<>();
 
         Block previousBlock = null;
         int count = 0;
@@ -131,6 +141,11 @@ public final class SnowSupportOracle {
             waterLiquidBlock.add(
                     state.getFluidState().is(Fluids.WATER) && state.getBlock() instanceof LiquidBlock);
             snowyProperty.add(state.hasProperty(BlockStateProperties.SNOWY));
+            // `Block.defaultBlockState()` is the state a property-less block
+            // string denotes. Emitted as a bitset so a consumer walking the whole
+            // registry picks out each block's default in the same pass with no
+            // name lookup; exactly one bit per block must be set.
+            isDefaultState.add(state == state.getBlock().defaultBlockState());
             count++;
         }
 
@@ -141,11 +156,12 @@ public final class SnowSupportOracle {
         sb.append("#   L = !state.getFluidState().isEmpty()\n");
         sb.append("#   W = state.getFluidState().is(WATER) && block instanceof LiquidBlock\n");
         sb.append("#   Y = state.hasProperty(BlockStateProperties.SNOWY)\n");
+        sb.append("#   D = state == state.getBlock().defaultBlockState()\n");
         sb.append("# C <stateCount> <blockCount>\n");
         sb.append("# B <firstStateIdOfBlock> <blockName>\n");
         sb.append("# N <blockName>   (block declares dynamicShape(); U reads its uncached shape)\n");
-        sb.append("# K <U|L|W|Y> <countOfTrueStates>\n");
-        sb.append("# P <U|L|W|Y> <startStateId> <bitstring up to 256 chars, ascending>\n");
+        sb.append("# K <U|L|W|Y|D> <countOfTrueStates>\n");
+        sb.append("# P <U|L|W|Y|D> <startStateId> <bitstring up to 256 chars, ascending>\n");
         sb.append("C ").append(count).append(' ').append(blockCount).append('\n');
         sb.append(blocks);
         sb.append(dynamic);
@@ -153,10 +169,12 @@ public final class SnowSupportOracle {
         emitCount(sb, 'L', hasFluid);
         emitCount(sb, 'W', waterLiquidBlock);
         emitCount(sb, 'Y', snowyProperty);
+        emitCount(sb, 'D', isDefaultState);
         emitBits(sb, 'U', faceFullUp);
         emitBits(sb, 'L', hasFluid);
         emitBits(sb, 'W', waterLiquidBlock);
         emitBits(sb, 'Y', snowyProperty);
+        emitBits(sb, 'D', isDefaultState);
 
         System.out.print(sb);
     }

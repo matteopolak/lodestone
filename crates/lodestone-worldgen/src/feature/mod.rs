@@ -60,6 +60,13 @@ use crate::rng::{RandomSource, WorldgenRandom};
 /// its own module doc for scope and named gaps.
 pub mod vegetation;
 
+/// `TOP_LAYER_MODIFICATION` — snow layers and surface ice (issue #404's U2),
+/// vanilla's `freeze_top_layer`. A third engine again: it consumes no RNG, never
+/// writes outside its own chunk, and reads per-block-state facts (collision
+/// UP-face fullness, fluid presence) that neither the ore nor the vegetation
+/// engine needs. See its own module doc.
+pub mod top_layer;
+
 /// `GenerationStep.Decoration.UNDERGROUND_ORES.ordinal()`.
 pub const STEP_UNDERGROUND_ORES: i32 = 6;
 

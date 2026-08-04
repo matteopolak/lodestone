@@ -168,6 +168,41 @@ pub fn build_biome_vegetation(
     out
 }
 
+/// Whether a biome document lists `minecraft:freeze_top_layer` in its
+/// `TOP_LAYER_MODIFICATION` step (issue #404's U2).
+///
+/// In vanilla 26.2 **every** biome does — `BiomeDefaultFeatures.java:413` adds it
+/// from a shared tail, so the step self-gates on temperature rather than on
+/// biome membership, and `docs/plans/worldgen-parity.md`'s census row 6i verified
+/// that across `assets/worldgen/biome/*.json`. This function exists anyway
+/// because "every biome" is a property of the *data*, not of the engine: a
+/// trimmed or modified datapack that omits the entry must produce a snow-free
+/// world rather than snow the engine assumed.
+///
+/// Unlike [`build_biome_vegetation`] this does not consult
+/// [`Resolver::placed_feature`]: `placed_feature/freeze_top_layer.json` carries
+/// nothing the engine reads (its whole placement is `[{"type":
+/// "minecraft:biome"}]`, and `configured_feature/freeze_top_layer.json`'s config
+/// is `{}` — `NoneFeatureConfiguration`), so requiring it to resolve would gate
+/// the step on an asset with no content.
+#[must_use]
+pub fn biome_lists_freeze_top_layer(document: &Value) -> bool {
+    document
+        .get("features")
+        .and_then(Value::as_array)
+        .and_then(|steps| {
+            steps.get(crate::feature::top_layer::STEP_TOP_LAYER_MODIFICATION as usize)
+        })
+        .and_then(Value::as_array)
+        .is_some_and(|step| {
+            step.iter().any(|entry| {
+                entry.as_str().is_some_and(|id| {
+                    id.strip_prefix("minecraft:").unwrap_or(id) == "freeze_top_layer"
+                })
+            })
+        })
+}
+
 /// Resolves every block tag referenced by `ores`' [`RuleTest::TagMatch`]
 /// targets into a `tag id -> member block set` map, for
 /// [`crate::feature::OreInput::in_tag`].

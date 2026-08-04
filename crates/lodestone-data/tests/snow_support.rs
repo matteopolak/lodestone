@@ -1,4 +1,4 @@
-//! The four per-block-state `freeze_top_layer` facts generated into
+//! The per-block-state `freeze_top_layer` facts generated into
 //! `src/generated/snow_support.rs` and read through
 //! [`lodestone_data::snow_support`].
 //!
@@ -13,13 +13,15 @@
 //! `Block.isFaceFull(collisionShape, UP)` (column `U`),
 //! `!getFluidState().isEmpty()` (`L`), `getFluidState().is(Fluids.WATER) &&
 //! block instanceof LiquidBlock` (`W`), and
-//! `hasProperty(BlockStateProperties.SNOWY)` (`Y`).
+//! `hasProperty(BlockStateProperties.SNOWY)` (`Y`). A fifth column, `D`
+//! (`state == block.defaultBlockState()`), is not a predicate but the key the
+//! consumer needs — see [`exactly_one_default_state_per_block`].
 //!
 //! # Data provenance
 //!
 //! `tests/support/snow_support_jvm.txt` is an authoritative dump produced by
 //! booting the real 26.2 server (`oracle-java/SnowSupportOracle.java`) and
-//! reading those four expressions per block state. `vendor/minecraft-data` has
+//! reading those five expressions per block state. `vendor/minecraft-data` has
 //! no 26.x data at all, and the collision census next door was measured 92.29%
 //! covered and stale for 26.2 — so "boot the jar and ask it" is again the only
 //! authoritative source.
@@ -36,7 +38,7 @@
 //!   found instead of asserting a bare count.
 //! * `N <block>` — the `dynamicShape()` census, which bounds column `U`'s known
 //!   scope (shapes are read with no neighbours) to a checkable set rather than a
-//!   claim ([`no_dynamic_shape_block_is_a_worldgen_surface_block`]).
+//!   claim ([`powder_snow_is_the_only_dynamic_shape_block_worldgen_exposes`]).
 //!
 //! # Refreshing after a version bump
 //!
@@ -83,12 +85,13 @@ fn committed_path() -> PathBuf {
 /// The committed JVM dump — an external anchor, not gitignored.
 const DUMP: &str = include_str!("support/snow_support_jvm.txt");
 
-/// The four dump columns, in the order the generated file emits them.
-const COLUMNS: [(char, &str); 4] = [
+/// The dump columns, in the order the generated file emits them.
+const COLUMNS: [(char, &str); 5] = [
     ('U', "FACE_FULL_UP"),
     ('L', "HAS_FLUID_STATE"),
     ('W', "IS_WATER_SOURCE_LIQUID_BLOCK"),
     ('Y', "HAS_SNOWY_PROPERTY"),
+    ('D', "IS_DEFAULT_STATE"),
 ];
 
 struct Dump {
@@ -250,6 +253,7 @@ fn generate(dump: &Dump) -> String {
             'L' => "`!state.getFluidState().isEmpty()`",
             'W' => "`state.getFluidState().is(Fluids.WATER) && block instanceof LiquidBlock`",
             'Y' => "`state.hasProperty(BlockStateProperties.SNOWY)`",
+            'D' => "`state == state.getBlock().defaultBlockState()`",
             other => panic!("unknown column {other}"),
         };
         let _ = writeln!(
@@ -289,11 +293,12 @@ fn committed_bits_match_the_dump() {
         "committed STATE_COUNT disagrees with the dump"
     );
 
-    let readers: [(char, fn(u32) -> Option<bool>); 4] = [
+    let readers: [(char, fn(u32) -> Option<bool>); 5] = [
         ('U', snow_support::face_full_up),
         ('L', snow_support::has_fluid_state),
         ('W', snow_support::is_water_source_liquid_block),
         ('Y', snow_support::has_snowy_property),
+        ('D', snow_support::is_default_state),
     ];
     for (kind, read) in readers {
         let expected = dump.column(kind);
@@ -680,6 +685,45 @@ fn cansurvive_inputs_that_a_hand_written_table_gets_wrong() {
             );
         }
     }
+}
+
+/// Exactly one default state per block, and it is the state a property-less
+/// block string denotes. This is what makes the world generator's bare
+/// `minecraft:water` resolve to the one freezable water state — the column exists
+/// for that lookup and nothing else.
+#[test]
+fn exactly_one_default_state_per_block() {
+    let dump = parse_dump(DUMP);
+    let by_block = dump.set_states_by_block('D');
+    assert_eq!(
+        by_block.len(),
+        dump.block_count,
+        "one default state per registered block"
+    );
+    for (name, states) in &by_block {
+        assert_eq!(
+            states.len(),
+            1,
+            "{name} has {} default states, not 1",
+            states.len()
+        );
+    }
+    // The load-bearing instance, named: water's default is the level=0 state,
+    // which is also the only state `W` sets. If those two ever diverge, a
+    // property-less `minecraft:water` stops freezing and every ocean stays open.
+    let water_default = by_block["minecraft:water"][0];
+    assert!(
+        dump.column('W')[water_default],
+        "water's default state must be the freezable one; default is state \
+         {water_default}, which W does not set"
+    );
+    // And lava's default must NOT be freezable, or lava lakes would ice over.
+    let lava_default = by_block["minecraft:lava"][0];
+    assert!(!dump.column('W')[lava_default], "lava must not freeze");
+    assert!(
+        dump.column('L')[lava_default],
+        "lava must still count as a fluid for the MOTION_BLOCKING heightmap"
+    );
 }
 
 /// The dump's own shape: one `B` row per registered block.
