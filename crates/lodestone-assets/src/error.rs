@@ -262,6 +262,25 @@ pub enum SkyAssetError {
     Atlas(#[from] AtlasError),
 }
 
+/// Errors produced while loading the real banner-pattern mask atlas
+/// (`assets/minecraft/textures/entity/banner/*.png`, discovered through
+/// `atlases/banner_patterns.json` — see [`crate::banner_pattern_atlas`]).
+#[derive(Debug, thiserror::Error)]
+pub enum BannerPatternAtlasError {
+    /// `atlases/banner_patterns.json` itself was not present in any pack —
+    /// unlike an individual missing sprite (recorded in the report, not
+    /// fatal), this means there is no source list to resolve at all.
+    #[error("banner-pattern atlas descriptor not found: {path}")]
+    DescriptorMissing {
+        /// The in-pack path that was probed.
+        path: String,
+    },
+    /// The descriptor was present but failed to parse as an atlas source
+    /// list.
+    #[error("banner-pattern atlas descriptor: {0}")]
+    Source(#[from] AtlasSourceError),
+}
+
 /// Errors produced while loading the screen-overlay textures (`textures/misc/underwater.png`,
 /// `textures/block/fire_1.png`).
 #[derive(Debug, thiserror::Error)]

@@ -72,6 +72,7 @@
 mod atlas;
 pub mod atlas_source;
 mod bake;
+pub mod banner_pattern_atlas;
 pub mod block_entity_models;
 mod blockstate;
 pub mod entity;
@@ -110,15 +111,16 @@ pub use bake::{
     BakeOptions, BakedModel, BakedQuad, BlockBaker, FirstWeight, ModelTransform, SeededWeight,
     WeightSelector, bake_model, bake_model_with,
 };
+pub use banner_pattern_atlas::{BannerPatternAtlas, BannerPatternAtlasReport};
 pub use blockstate::{
     BlockStateDefinition, BlockStates, ModelRef, MultipartCase, When, parse_variant_key,
 };
 pub use error::AtlasSourceError;
 pub use error::{
-    AssetError, AtlasError, BakeError, BlockStateError, FontError, GuiError, IconError,
-    ItemAtlasError, ItemModelError, ModelError, ParticleAtlasError, ParticleError,
-    ResourceLocationError, ScreenEffectAssetError, SkyAssetError, SoundError, TextureError,
-    TintError,
+    AssetError, AtlasError, BakeError, BannerPatternAtlasError, BlockStateError, FontError,
+    GuiError, IconError, ItemAtlasError, ItemModelError, ModelError, ParticleAtlasError,
+    ParticleError, ResourceLocationError, ScreenEffectAssetError, SkyAssetError, SoundError,
+    TextureError, TintError,
 };
 pub use icon::{
     DISPLAY_CONTEXT_PROPERTY, DefaultItemContext, DisplayContextItemContext, GuiItemContext,
