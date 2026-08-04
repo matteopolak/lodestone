@@ -83,7 +83,7 @@ smallest it has ever been.
 | `Renderable.extractRenderState` → `GuiRenderState` | `gui/`, `renderer/state/gui/` | **done in spirit** — `ExtractSet`/`FrameSet` | — |
 | `JoinMultiplayerScreen` + `ServerSelectionList` + `ServerStatusPinger` | `screens/multiplayer/` | **partly** — `menu/servers.rs`, `menu/status.rs` | #396 |
 | `SelectWorldScreen` + `WorldSelectionList` | `screens/worldselection/` | **nothing** | #397 |
-| `OptionsScreen` tree, `OptionInstance`, `OptionsList` | `screens/options/`, `client/` | **done for 9 of 13 screens** — `menu/options.rs`, 143 controls, 24-or-25 live depending on `in_world` (7 of 93 options persisted, up from 2 as of #200/#202/#203; see below) | #55 |
+| `OptionsScreen` tree, `OptionInstance`, `OptionsList` | `screens/options/`, `client/` | **done for 10 of 13 screens** (Language, issue #415, is the tenth) — `menu/options.rs`, 143 `OptionsList` controls, 26-or-27 live depending on `in_world` (7 of 93 options persisted, up from 2 as of #200/#202/#203; see below) — plus Key Binds (56 controls) and Language (own count, see [`language-screen.md`](./language-screen.md)), neither an `OptionsList` page so neither is part of the 143 | #55 |
 | `AbstractContainerScreen` | `screens/inventory/` | bespoke per screen | #398 |
 
 ## What is already done, and must not be re-filed
@@ -216,9 +216,9 @@ settings screen is a list of options, not bespoke geometry.
 | `SkinCustomizationScreen` | 8 | 7 `PlayerModelPart`s + `mainHand` `:20-31` |
 | `MouseSettingsScreen` | 7 | 6 `:14-23` + `rawMouseInput`* |
 | `OnlineOptionsScreen` | 7 | **built** — `SettingsPage::Online`, all seven decorative. 3 headers; friends, requests, notifications, presence, Xbox link, `allowServerListing`, `realmsNotifications` |
-| `FontOptionsScreen` | 2 | `forceUnicodeFont`, `japaneseGlyphVariants` `:9-11` |
-| `LanguageSelectScreen` | list | scrollable language list + Done |
-| `TelemetryInfoScreen` / `PackSelectionScreen` | info / list | |
+| `FontOptionsScreen` | 2 | `forceUnicodeFont`, `japaneseGlyphVariants` `:9-11` — present-and-inactive on the built `LanguageSelectScreen`'s footer, not yet its own page |
+| `LanguageSelectScreen` | list | **built** (issue #415) — `SettingsPage::Language`, the third list-widget kind (`ObjectSelectionList`); see [`language-screen.md`](./language-screen.md) |
+| `TelemetryInfoScreen` / `PackSelectionScreen` | info / list | still unbuilt — each needs substantially more than a list widget (see `language-screen.md`'s "What is deliberately not built") |
 
 **~198 distinct interactive controls**, of which 57 are keybind rows — **141 excluding keybinds**.
 Counted as focusable/clickable widgets, excluding per-screen Done/Cancel except where noted; headers
