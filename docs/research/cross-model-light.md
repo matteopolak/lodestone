@@ -1,5 +1,15 @@
 # Diagnosis: cross-plant faces go dark against a solid neighbour
 
+## What it is
+
+Root cause of "cross-plant faces go dark next to a solid neighbour": `mesh_models` samples
+light from `pos + quad.direction` unconditionally, but vanilla only samples the neighbour when
+a quad's plane is flush with the block boundary (`faceCubic`) or the quad carries a
+`cullface`. A cross blade's plane is diagonal and carries no `cullface`, so vanilla lights it
+from the plant's own cell; this client instead reads the interior of the adjacent solid
+block, which the light engine stores as 0. A per-quad fix and its mesh-level proof gate are
+specified in §5–6 below; nothing in the repo has been edited by this read-only investigation.
+
 **Status:** root cause established by reading both sources plus one f32 simulation of our own
 baker. Read-only investigation — nothing in the repo was edited.
 
