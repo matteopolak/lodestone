@@ -651,8 +651,15 @@ pub enum PauseButton {
     /// workspace decodes the `update_advancements` packet, so there is no
     /// advancement tree to open.
     Advancements,
-    /// Vanilla's `gui.stats`. Present and disabled: nothing decodes the
-    /// `award_stats` packet, so there are no statistics to show.
+    /// Vanilla's `gui.stats` — opens [`super::Screen::Statistics`] (issue
+    /// #188). **Now live.** What used to be this button's whole disabled
+    /// reason ("nothing decodes the `award_stats` packet") is still true,
+    /// and still matters: it is why every value the screen shows reads zero.
+    /// It no longer has to keep the *button* off, because the screen behind
+    /// it is real and a zero-everywhere state is what it honestly shows —
+    /// see [`super::stats`]'s module docs for why that is not a
+    /// fabrication. If a decoder for that packet lands, this is the doc to
+    /// point at it, not a reason the button needed flipping again.
     Statistics,
     /// Vanilla's `menu.reportBugs` icon button. Present and disabled: it opens
     /// an external Mojang bug tracker through a link-confirmation screen.
@@ -728,6 +735,8 @@ impl PauseButton {
                 // Issue #189: the screen behind this button is built. See the
                 // variant's own doc for what is and is not wired inside it.
                 | PauseButton::PlayerReporting
+                // Issue #188: likewise.
+                | PauseButton::Statistics
         )
     }
 
@@ -976,6 +985,9 @@ pub struct MenuNav {
     /// [`Self::settings`] is: `Screen::Social` is one screen regardless of how
     /// far its list is scrolled, and `UiState` models legal screen edges only.
     social: crate::menu::social::SocialNav,
+    /// The Statistics screen's own scroll cursor (issue #188). No persisted
+    /// state of its own — see [`crate::menu::stats::StatsNav`]'s doc.
+    stats: crate::menu::stats::StatsNav,
 }
 
 impl Default for MenuNav {
@@ -1052,6 +1064,7 @@ impl MenuNav {
             menu_cursor: None,
             settings: crate::menu::options::SettingsNav::new(),
             social: crate::menu::social::SocialNav::with_path(hidden_players_path),
+            stats: crate::menu::stats::StatsNav::default(),
         }
     }
 
@@ -1152,6 +1165,12 @@ impl MenuNav {
     /// everything else is either persisted or pure.
     pub fn refresh_social(&mut self, entries: Vec<crate::menu::social::SocialEntry>) {
         self.social.refresh(entries);
+    }
+
+    /// The Statistics screen's own state (issue #188).
+    #[must_use]
+    pub fn stats(&self) -> &crate::menu::stats::StatsNav {
+        &self.stats
     }
 
     /// Whether a Key Binds bind button is mid-capture (issue #15) — a click
@@ -1713,6 +1732,12 @@ impl MenuNav {
             // keeps Up/Down/Enter and Escape's screen-specific meaning in one
             // place instead of splitting it across two functions.
             Screen::Social => self.key_social(ui, key),
+            // Statistics (#188) — its own arm for the same reason
+            // `Screen::Social`'s is: routing Escape through the catch-all's
+            // `UiState::on_escape` would also work (its `Screen::Statistics`
+            // arm calls `close_statistics`), but keeping Up/Down/Escape in
+            // one function is the established pattern here.
+            Screen::Statistics => self.key_statistics(ui, key),
             // Escape is the only menu key that means anything on the world and
             // loading screens, and `UiState` already owns it.
             _ => {
@@ -2195,8 +2220,14 @@ impl MenuNav {
                         ui.open_social_from_pause();
                         MenuAction::None
                     }
+                    // Issue #188 — same "reset on every entry" rule as
+                    // `PauseButton::PlayerReporting` immediately above.
+                    PauseButton::Statistics => {
+                        self.stats.reset();
+                        ui.open_statistics_from_pause();
+                        MenuAction::None
+                    }
                     PauseButton::Advancements
-                    | PauseButton::Statistics
                     | PauseButton::ReportBugs
                     | PauseButton::Feedback
                     | PauseButton::Friends => MenuAction::None,
@@ -2303,6 +2334,33 @@ impl MenuNav {
             ui.close_social();
         }
         MenuAction::None
+    }
+
+    /// The Statistics screen (issue #188). No selection/activation at all —
+    /// the General list is not clickable in vanilla either (only narrated),
+    /// so Up/Down just scroll and Enter does nothing; Escape/Done are the
+    /// only ways out.
+    fn key_statistics(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        match key {
+            MenuKey::Up => {
+                self.stats.scroll(false);
+                MenuAction::None
+            }
+            MenuKey::Down => {
+                self.stats.scroll(true);
+                MenuAction::None
+            }
+            MenuKey::Enter => {
+                // The only control is Done, always at the cursor.
+                ui.close_statistics();
+                MenuAction::None
+            }
+            MenuKey::Escape => {
+                ui.close_statistics();
+                MenuAction::None
+            }
+            _ => MenuAction::None,
+        }
     }
 
     /// Steps the persisted `gui_scale` option by `delta`, wrapping between
@@ -3961,8 +4019,11 @@ mod tests {
         nav.key(&mut ui, MenuKey::Down);
         assert_eq!(nav.pause_button(), PauseButton::BackToGame);
         nav.key(&mut ui, MenuKey::Down);
-        // Issue #189: Player Reporting is now live, so it is the next stop
-        // rather than Options.
+        // Issue #188: Statistics is now live, so it is the next stop rather
+        // than Player Reporting.
+        assert_eq!(nav.pause_button(), PauseButton::Statistics);
+        nav.key(&mut ui, MenuKey::Down);
+        // Issue #189: likewise, Player Reporting rather than Options.
         assert_eq!(nav.pause_button(), PauseButton::PlayerReporting);
         nav.key(&mut ui, MenuKey::Down);
         assert_eq!(nav.pause_button(), PauseButton::Options);
@@ -3990,8 +4051,9 @@ mod tests {
         let mut ui = UiState::new();
         ui.enter_dev_world();
         ui.pause();
-        // BackToGame -> Player Reporting -> Options (#189 made the middle
-        // stop live).
+        // BackToGame -> Statistics -> Player Reporting -> Options (#188/#189
+        // made the two middle stops live).
+        nav.key(&mut ui, MenuKey::Down);
         nav.key(&mut ui, MenuKey::Down);
         nav.key(&mut ui, MenuKey::Down);
         assert_eq!(nav.pause_button(), PauseButton::Options);
@@ -4132,12 +4194,13 @@ mod tests {
             );
         }
 
-        // Pause screen: Back to Game, Player Reporting, Options, Disconnect
-        // (issue #189 made Player Reporting the fourth live row).
+        // Pause screen: Back to Game, Statistics, Player Reporting, Options,
+        // Disconnect (issues #188/#189 made Statistics and Player Reporting
+        // live).
         ui.enter_dev_world();
         ui.pause();
         let mut seen = vec![nav.pause_button()];
-        for _ in 0..3 {
+        for _ in 0..4 {
             nav.key(&mut ui, MenuKey::Down);
             seen.push(nav.pause_button());
         }
@@ -4145,6 +4208,7 @@ mod tests {
             seen,
             vec![
                 PauseButton::BackToGame,
+                PauseButton::Statistics,
                 PauseButton::PlayerReporting,
                 PauseButton::Options,
                 PauseButton::QuitToTitle
