@@ -65,8 +65,8 @@ use crate::packets::game::{
 };
 use crate::packets::handshake::Intention;
 use crate::packets::login::{
-    EncryptionRequest, EncryptionResponse, LoginAcknowledged, LoginCompression, LoginDisconnect,
-    LoginFinished,
+    CustomQueryAnswer, EncryptionRequest, EncryptionResponse, LoginAcknowledged, LoginCompression,
+    LoginDisconnect, LoginFinished,
 };
 use crate::packets::metadata::{
     MetadataClass, TrackedEntity, metadata_class, read_entity_metadata, read_update_attributes,
@@ -1627,6 +1627,57 @@ fn decode_update_tags(payload: &[u8]) -> Result<(), AdapterError> {
     Ok(())
 }
 
+/// Decodes a clientbound `custom_payload`: a channel identifier followed by
+/// however many bytes remain in the packet (`ClientboundCustomPayloadPacket`).
+/// Shared by the Configuration and Play states — issue #301 found
+/// Configuration had no arm for this at all; only Play did.
+///
+/// Only `minecraft:brand` gets a specially-typed codec in vanilla (a single
+/// UTF-8 string); every other channel is `DiscardedPayload`, which just
+/// consumes whatever bytes remain in the packet. Carrying the raw bytes for
+/// every channel (rather than special-casing brand) loses nothing and avoids
+/// guessing at channel-specific shapes this adapter cannot verify.
+fn decode_custom_payload(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    let mut reader = Reader::new(payload);
+    let channel = reader.string(32767).map_err(dec_err)?;
+    let channel = parse_key(&channel, "custom payload channel")?;
+    let remaining = reader.remaining();
+    let data = reader.bytes(remaining).map_err(dec_err)?.to_vec();
+    reader.ensure_empty().map_err(dec_err)?;
+    Ok(vec![Directive::Emit(ClientEvent::CustomPayload {
+        channel,
+        data,
+    })])
+}
+
+/// Decodes a clientbound `custom_query` (Login state only): a VarInt
+/// transaction id, a channel identifier, then however many bytes remain
+/// (`ClientboundCustomQueryPacket`). This is the older, pre-`custom_payload`
+/// plugin-message mechanism (historically Forge/FML's login handshake); even
+/// vanilla's own reference client never interprets a payload — every channel
+/// decodes to `DiscardedQueryPayload`, which just skips the remaining bytes —
+/// and unconditionally answers with no payload
+/// (`ClientHandshakePacketListenerImpl.handleCustomQuery`:
+/// `new ServerboundCustomQueryAnswerPacket(transactionId, null)`, no channel
+/// check, no UI). This mirrors that exactly: decode to stay byte-aligned,
+/// answer `None`, surface no event — there is nothing to observe that
+/// vanilla itself does not already discard silently.
+fn decode_custom_query(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    let mut reader = Reader::new(payload);
+    let transaction_id = reader.var_i32().map_err(dec_err)?;
+    let _channel = reader.string(32767).map_err(dec_err)?;
+    let remaining = reader.remaining();
+    reader.bytes(remaining).map_err(dec_err)?;
+    reader.ensure_empty().map_err(dec_err)?;
+    Ok(vec![send(
+        login::serverbound::CUSTOM_QUERY_ANSWER,
+        &CustomQueryAnswer {
+            transaction_id,
+            payload: None,
+        },
+    )?])
+}
+
 /// Decodes a clientbound `cookie_request`: a single identifier key, no other
 /// fields (`ClientboundCookieRequestPacket`, `ClientCookiePacketListener`).
 /// Shared by the Login, Configuration and Play states — issue #291's
@@ -2432,6 +2483,12 @@ impl V770Adapter {
             // different code path from the Play-state one below.
             return decode_cookie_request(payload);
         }
+        if packet_id == login::clientbound::CUSTOM_QUERY {
+            // Issue #301: zero decode existed for this at all. See
+            // `decode_custom_query`'s own doc for why the reply is
+            // unconditionally empty, matching vanilla's own client.
+            return decode_custom_query(payload);
+        }
         Ok(Vec::new())
     }
 
@@ -2481,12 +2538,6 @@ impl V770Adapter {
             let ping: Pong = decode_body(payload)?;
             return Ok(vec![Directive::Emit(ClientEvent::Ping { id: ping.id })]);
         }
-        if packet_id == configuration::clientbound::COOKIE_REQUEST {
-            // Issue #291: also missing here, not just in `handle_login` — the
-            // issue named Login and Play explicitly; Configuration had the
-            // identical gap.
-            return decode_cookie_request(payload);
-        }
         if packet_id == configuration::clientbound::UPDATE_TAGS {
             // Issue #296: block/item tags were always hardcoded from the
             // vanilla census; this installs the server's own `minecraft:block`
@@ -2495,6 +2546,20 @@ impl V770Adapter {
             // the override is process-wide.
             decode_update_tags(payload)?;
             return Ok(Vec::new());
+        }
+        if packet_id == configuration::clientbound::COOKIE_REQUEST {
+            // Issue #291: also missing here, not just in `handle_login` — the
+            // issue named Login and Play explicitly; Configuration had the
+            // identical gap.
+            return decode_cookie_request(payload);
+        }
+        if packet_id == configuration::clientbound::CUSTOM_PAYLOAD {
+            // Issue #301: only `handle_play` decoded this before now; a
+            // server that sends plugin messages during Configuration (the
+            // vanilla mod-handshake window, before `minecraft:brand` is even
+            // announced by some servers) hit the fall-through below and lost
+            // the message entirely.
+            return decode_custom_payload(payload);
         }
         if packet_id == configuration::clientbound::CODE_OF_CONDUCT {
             return Ok(vec![send(
@@ -4086,22 +4151,7 @@ impl V770Adapter {
             return Ok(vec![Directive::Emit(ClientEvent::ResourcePackPopped { id })]);
         }
         if packet_id == play::clientbound::CUSTOM_PAYLOAD {
-            // Only `minecraft:brand` gets a specially-typed codec in vanilla
-            // (a single UTF-8 string); every other channel is
-            // `DiscardedPayload`, which just consumes whatever bytes remain
-            // in the packet. Carrying the raw bytes for every channel (rather
-            // than special-casing brand) loses nothing and avoids guessing at
-            // channel-specific shapes this adapter cannot verify.
-            let mut reader = Reader::new(payload);
-            let channel = reader.string(32767).map_err(dec_err)?;
-            let channel = parse_key(&channel, "custom payload channel")?;
-            let remaining = reader.remaining();
-            let data = reader.bytes(remaining).map_err(dec_err)?.to_vec();
-            reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(ClientEvent::CustomPayload {
-                channel,
-                data,
-            })]);
+            return decode_custom_payload(payload);
         }
         if packet_id == play::clientbound::SERVER_DATA {
             let mut reader = Reader::new(payload);
@@ -4569,6 +4619,29 @@ impl VersionAdapter for V770Adapter {
                     _ => play::serverbound::CUSTOM_PAYLOAD,
                 };
                 Ok(Some((packet_id, encode_body(&body)?)))
+            }
+            // Issue #301: the general case `SendBrand` above is vanilla's one
+            // built-in instance of. `custom_payload`'s wire body is just
+            // channel + raw bytes (`ClientboundCustomPayloadPacket`'s
+            // `DiscardedPayload`, mirrored on the serverbound side), so this
+            // needs no dedicated packet struct — `BrandPayload`'s two-string
+            // shape doesn't fit arbitrary bytes, but `send` only needs an
+            // `Encode` body, and a `(String, Vec<u8>)`-shaped write is exactly
+            // what `custom_payload` is on every channel that isn't `brand`.
+            ClientAction::SendCustomPayload { channel, data }
+                if matches!(
+                    state,
+                    ConnectionState::Configuration | ConnectionState::Play
+                ) =>
+            {
+                let mut writer = Writer::default();
+                writer.string(&channel.to_string());
+                writer.bytes(data);
+                let packet_id = match state {
+                    ConnectionState::Configuration => configuration::serverbound::CUSTOM_PAYLOAD,
+                    _ => play::serverbound::CUSTOM_PAYLOAD,
+                };
+                Ok(Some((packet_id, writer.into_vec())))
             }
             ClientAction::PongResponse { id }
                 if matches!(

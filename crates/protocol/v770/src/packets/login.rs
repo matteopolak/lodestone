@@ -110,3 +110,21 @@ pub struct LoginDisconnect {
     /// JSON-encoded disconnect reason component.
     pub reason: String,
 }
+
+/// Serverbound `custom_query_answer`, replying to a clientbound `custom_query`
+/// (issue #301) — the old, pre-`custom_payload` login-phase plugin-message
+/// mechanism (historically Forge/FML's handshake). `payload` is nullable on
+/// the wire (`writeNullable`); this crate never has one to send, matching
+/// vanilla's own reference client
+/// (`ClientHandshakePacketListenerImpl.handleCustomQuery`), which answers
+/// every `custom_query` with `payload: null` unconditionally regardless of
+/// channel.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:custom_query_answer", state = Login, bound = Server)]
+pub struct CustomQueryAnswer {
+    /// Transaction id echoed from the `custom_query` this answers.
+    #[mc(varint)]
+    pub transaction_id: i32,
+    /// Response payload; always `None` — see the type's own doc.
+    pub payload: Option<Vec<u8>>,
+}
