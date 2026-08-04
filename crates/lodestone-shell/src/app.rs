@@ -5240,8 +5240,15 @@ mod tests {
             mouse_action_for(&binds, MouseButton::Right),
             Some(InputAction::Use)
         );
-        // Middle is the container pick gesture, not a gameplay binding.
-        assert_eq!(mouse_action_for(&binds, MouseButton::Middle), None);
+        // Middle **is** a gameplay binding now: `key.pickItem` defaults to
+        // `Type.MOUSE, 2` (`Options.java:669`), so it is the primary route for
+        // pick-item rather than a rebound one. This assertion previously read
+        // `None`, which was correct only while pick-item did not exist — the
+        // premise went stale when the binding landed, not the code.
+        assert_eq!(
+            mouse_action_for(&binds, MouseButton::Middle),
+            Some(InputAction::PickItem)
+        );
 
         // Swapping the two buttons is a supported rebind.
         let mut swapped = binds;
