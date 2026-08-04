@@ -1724,18 +1724,17 @@ executor with corridor, drift and stall budgets, one search dispatch (no segment
   the correction counter is flat throughout**. Negative control: the same run with
   `collide_against_live_world = false` must show the correction burst.
 - **Needs:** Stage 2, Stage 4, and M0.
-- **Status, this pass:** the search core, the executor (`AutopilotGoal` resource in, `MovementIntent`
-  / `LookIntent` out via `WalkDrive`), and a hermetic gate proving arrival through the real physics
-  seam all exist (`crates/plugins/lodestone-autopilot`). **Not yet built: the `#goto` chat command**
-  (this milestone's stated observable) and the live-oracle gate this milestone's own bullet asks for —
-  both need a route from chat/command input to `AutopilotGoal`, which is `lodestone-shell` territory
-  this change did not touch, and registering the plugin into the shipped client's `App` in the first
-  place (see the correction box near the top of this document and `docs/autonomous-navigation.md`).
-  So M0's own precondition is also still open: this plugin's `SnapshotView` already reads real
-  per-state facts through `VersionAdapter`/`AdapterCensus`, but `LiveCollision` (the *player's own*
-  collision, a separate seam — §3.2) has not been re-verified for this pass to still answer only three
-  of twelve questions or to have gained the rest; M0 is a different piece of work from what this pass
-  did.
+- **Status, corrected this pass:** **closed**, and this box was stale — the search core, the executor
+  (`AutopilotGoal` resource in, `MovementIntent`/`LookIntent` out via `WalkDrive`), a hermetic gate
+  proving arrival through the real physics seam (`crates/plugins/lodestone-autopilot`), the `#goto`
+  chat command and the plugin's registration into the shipped client's `App` all exist now
+  (`crates/lodestone-shell/src/sim.rs`'s `#goto` handling and its `AutopilotPlugin` registration,
+  gated by `sim::tests::goto_chat_command_drives_the_player_toward_the_goal_over_real_ticks` and
+  `sim::tests::autopilot_plugin_is_registered_and_its_systems_actually_run` — outside this document's
+  ownership, landed by whoever closed issue #38). Re-verified rather than assumed: read both tests and
+  `sim.rs`'s registration directly, this pass, before writing this correction. M0's own precondition
+  (`LiveCollision` answering all twelve `CollisionView` questions rather than three) was **not**
+  re-checked this pass — a different piece of work from M1/M2's — so do not assume it from this box.
 
 ### M2 — real terrain
 
@@ -1749,6 +1748,25 @@ Witness-set invalidation plus per-edge re-verification and the look-ahead window
   stopping — and you can *see* the plan.
 - **Gate:** a ≥300-block traversal on the terrain oracle with the correction counter flat, zero
   `Stalled` aborts, plan well-formedness asserted, and the cost histogram inside tolerance (§6).
+
+**Status, this pass:** `StepUp`, `Descend`/`Drop` and segmentation landed
+(`crates/plugins/lodestone-nav`, `crates/plugins/lodestone-autopilot`); see
+[`docs/autonomous-navigation.md`](./autonomous-navigation.md) for the detail. **Not landed:**
+diagonals (and the corner-cutting rule), `Climb`, prefix trimming, tail truncation, witness-set
+invalidation, per-edge re-verification, the look-ahead window, and the debug overlay — this pass
+scoped to the movements and segmentation explicitly briefed, in the order StepUp → Descend/Drop →
+segmentation, and stopped there rather than rush diagonals' cost-model generalisation (a genuinely
+different canonical frame, not a small edit) at the same sitting. `StepUp`/`Descend`/`Drop` are each
+gated against real jar-derived collision, not only the crate's own `FixtureCensus` unit tests
+(`lodestone-autopilot/tests/drives_to_goal.rs`'s `real_collision` module), and each carries an
+unreachable/negative control (an ascend past the real, simulated jump apex; a fall through lava with
+solid ground further down; a slab excluded as a multi-cell drop landing; a goal with no reachable
+progress at all). One real bug was found and fixed in the process: `WalkDrive::done()` tested only
+horizontal cell plus `on_ground`, which is unsafe the moment a `MoveKind`'s source and destination
+surfaces differ in height — the player's 0.6-wide AABB straddles the boundary for a few ticks, and a
+`StepUp`/`Descend`/`Drop` could read "arrived" before ever climbing or falling. Found by the M2 cost
+tests themselves (two different `Drop` heights simulating to the identical tick count), not by
+inspection — see `lodestone-nav/src/drive.rs`'s `WalkDrive::arrived`.
 
 ### M3 — jumps and gaps
 
