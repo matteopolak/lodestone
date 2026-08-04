@@ -15,11 +15,12 @@
 use std::sync::Arc;
 
 use lodestone_model::BlockPos;
+use lodestone_nav::drive::{ClimbDrive, DriveTick, WalkDrive};
 use lodestone_nav::{
-    AtBlock, Budget, Edge, FactsTable, Goal, NavNode, NavPolicy, Outcome, Plan, Search,
-    SnapshotView, WalkDrive,
+    AtBlock, Budget, Edge, FactsTable, Goal, MoveKind, NavNode, NavPolicy, Outcome, Plan, Search,
+    SnapshotView,
 };
-use lodestone_physics::{PhysicsProfile, Vec3d};
+use lodestone_physics::{PhysicsProfile, PlayerState, Vec3d};
 use lodestone_world::World;
 
 /// Build a [`Search`] toward `goal`'s block, given an already-built `view` and
@@ -119,34 +120,93 @@ pub fn compute_plan(
     }
 }
 
-/// The [`WalkDrive`] one plan `edge` produces, braking only when it is the
+/// Whichever script one plan edge needs. `Walk`/`StepUp`/`Descend`/`Drop`/
+/// `WalkDiagonal` all still fit [`WalkDrive`]; `Climb` is the kind that
+/// actually needed the second script this `match` was flagged as the arm
+/// for (see [`edge_drive`]'s own doc comment on why). One small wrapper
+/// rather than two independent return types, so [`crate::drive_plan`] has a
+/// single `.tick()`/`.done()` pair to call regardless of which kind is
+/// executing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum EdgeDrive {
+    /// Aim at a horizontal destination cell.
+    Walk(WalkDrive),
+    /// Hold a direction key against a climbable column.
+    Climb(ClimbDrive),
+}
+
+impl EdgeDrive {
+    /// One tick of input from the player's actual state — see
+    /// [`WalkDrive::tick`]/[`ClimbDrive::tick`].
+    #[must_use]
+    pub fn tick(&self, state: &PlayerState) -> DriveTick {
+        match self {
+            Self::Walk(drive) => drive.tick(state),
+            Self::Climb(drive) => drive.tick(state),
+        }
+    }
+
+    /// Whether the edge is finished — see [`WalkDrive::done`]/[`ClimbDrive::done`].
+    #[must_use]
+    pub fn done(&self, state: &PlayerState) -> bool {
+        match self {
+            Self::Walk(drive) => drive.done(state),
+            Self::Climb(drive) => drive.done(state),
+        }
+    }
+}
+
+/// The [`EdgeDrive`] one plan `edge` produces, braking only when it is the
 /// plan's `last` edge — see [`WalkDrive`]'s own doc comment on why a mid-plan
 /// edge must not brake (it would stutter once per block instead of walking
-/// continuously).
+/// continuously). `Climb` has no brake concept at all — see
+/// [`ClimbDrive::done`]'s own doc comment on why arrival there is a purely
+/// vertical, not horizontal, question.
 ///
-/// # M2: `Walk`/`StepUp`/`Descend`/`Drop` all still fit one script
+/// # M2, in two parts: `Walk`/`StepUp`/`Descend`/`Drop`/`WalkDiagonal` fit one
+/// script; `Climb` needed a second
 ///
 /// `lodestone-nav`'s M1 comment here said this `match` would need a new arm
 /// the moment a second `MoveKind` landed, as a forcing function against
 /// silently mis-driving a kind `WalkDrive` cannot express. It was right to
-/// force the check, and the answer for M2's three new kinds turned out to be
-/// "no new script needed": `StepUp`/`Descend`/`Drop` all still aim at the
-/// destination cell's centre and either brake or don't exactly like `Walk` —
-/// the only physical difference is whether a jump is needed to clear the
-/// ascent, which `WalkDrive::jump` already carries as a plain flag. A kind
-/// that needs genuinely different keys — `Climb`, holding a direction key
-/// against a ladder rather than aiming at a cell centre — is the one that will
-/// actually need a second script, and *that* is the arm this match should grow
-/// next.
+/// force the check, and the answer for four of M2's five new kinds turned out
+/// to be "no new script needed": `StepUp`/`Descend`/`Drop`/`WalkDiagonal` all
+/// still aim at the destination cell's centre and either brake or don't
+/// exactly like `Walk` — the only physical difference is whether a jump is
+/// needed to clear the ascent, which `WalkDrive::jump` already carries as a
+/// plain flag. `Climb` is the one that actually needed the second script this
+/// comment predicted: holding a direction key against a climbable column,
+/// never aiming at a horizontal cell centre at all
+/// (`docs/autonomous-navigation.md`'s "`Climb`: stopped, and why").
 #[must_use]
-pub fn edge_drive(edge: &Edge, last: bool) -> WalkDrive {
-    let jump = matches!(edge.kind, lodestone_nav::MoveKind::StepUp(_));
-    WalkDrive {
+pub fn edge_drive(edge: &Edge, last: bool) -> EdgeDrive {
+    if let MoveKind::Climb(dir) = edge.kind {
+        return EdgeDrive::Climb(ClimbDrive {
+            column: [edge.to.x, edge.to.z],
+            target_y: edge.to.y,
+            target_surface: edge.to_surface,
+            ascending: matches!(dir, lodestone_nav::ClimbDir::Up),
+            // `edge.to.arrival` is the source of truth: `climb_step` sets
+            // `Arrival::Climbing` for "still clinging" and `Arrival::Still`
+            // for "landed on real ground" at the moment it decides which one
+            // this edge is, and nothing downstream (`to_surface` cannot: a
+            // full-block dismount's surface is numerically identical to a
+            // continuing climb's nominal cell-floor reference) can
+            // reconstruct that after the fact. `Arrival::Climbing`'s own doc
+            // comment is the record of finding `!last` insufficient here —
+            // a plan can legitimately end mid-column (a goal that targets a
+            // climbable cell directly), and `!last` would then wrongly
+            // demand `on_ground` from a body that will never report it.
+            continuing: matches!(edge.to.arrival, lodestone_nav::Arrival::Climbing),
+        });
+    }
+    let jump = matches!(edge.kind, MoveKind::StepUp(_));
+    EdgeDrive::Walk(WalkDrive {
         cell: [edge.to.x, edge.to.y, edge.to.z],
         surface: edge.to_surface,
         brake: last,
         sprint: false,
         steer: true,
         jump,
-    }
+    })
 }

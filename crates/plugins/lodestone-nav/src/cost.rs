@@ -40,8 +40,8 @@ use lodestone_physics::{
     PlayerState, Vec3d,
 };
 
-use crate::drive::WalkDrive;
-use crate::graph::{Dir4, MoveKind};
+use crate::drive::{ClimbDrive, WalkDrive};
+use crate::graph::{ClimbDir, Dir4, MoveKind};
 use crate::ticks::Ticks;
 
 /// Friction buckets. `docs/baritone-port.md` §4.4's `SurfaceClass`, with the values
@@ -467,6 +467,31 @@ impl TemplateTable {
                 }
             }
         }
+        // `Climb` folded in too, for the same reason `WalkDiagonal` had to be:
+        // do not *assume* a slower-looking movement cannot be the new
+        // minimum, verify it. It never is here — climbing (~5-6.67
+        // ticks/block) is far slower than the cheapest horizontal rate
+        // (~3.4-3.6) — but the assumption that "the horizontal rate is
+        // always cheaper" is exactly the kind of unverified belief this
+        // crate's own evidence standards warn about, and it costs one small
+        // loop to check rather than assert. Unlike a diagonal, one real block
+        // of vertical progress per edge, no `sqrt(2)` division.
+        for dir in [ClimbDir::Up, ClimbDir::Down] {
+            let template = self.get(TemplateKey {
+                kind: MoveKind::Climb(dir).id(),
+                entry: EntryRel::Still,
+                surface: SurfaceClass::Normal,
+                speed: SpeedClass::Normal,
+                sprint: false,
+                drop_n: 0,
+            });
+            if template.ok {
+                let rate = template.ticks.as_f64();
+                if rate > 1e-6 {
+                    best = best.min(rate);
+                }
+            }
+        }
         if !best.is_finite() {
             // No simulation produced motion at all. Refuse to invent a rate: a zero
             // heuristic is admissible (A\* degrades to Dijkstra) and honest, where a
@@ -497,11 +522,22 @@ impl TemplateTable {
                 ok: false,
             };
         };
+        // `Climb` does not fit this function's canonical `+x` frame at all —
+        // no horizontal displacement, no floor, a body that clings instead of
+        // stands. `simulate_climb` is the genuinely new vertical frame
+        // `docs/autonomous-navigation.md`'s "`Climb`: stopped, and why" named
+        // as one of the two hard parts; see its own doc comment for why it
+        // needed a separate `CollisionView` rather than a `rise`-parameterised
+        // `StencilWorld`.
+        if let MoveKind::Climb(dir) = kind {
+            return self.simulate_climb(dir);
+        }
         let rise: i32 = match kind {
             MoveKind::Walk(_) | MoveKind::WalkDiagonal(_, _) => 0,
             MoveKind::StepUp(_) => 1,
             MoveKind::Descend(_) => -1,
             MoveKind::Drop(_, n) => -i32::from(n),
+            MoveKind::Climb(_) => unreachable!("handled above"),
         };
         let world = StencilWorld::new(key.surface, key.speed, rise);
         // The **stored** velocity, not the displacement rate: this is going straight
@@ -609,6 +645,22 @@ impl TemplateTable {
         world: &StencilWorld,
         sprint: bool,
     ) {
+        self.advance_with(state, world, sprint, |s| drive.tick(s));
+    }
+
+    /// The generalised form: any script that can produce a [`crate::drive::DriveTick`]
+    /// from a [`PlayerState`], not only [`WalkDrive`], against any
+    /// [`CollisionView`], not only [`StencilWorld`] — what [`Self::simulate_climb`]
+    /// needs, since `Climb`'s script and world are both genuinely different
+    /// (`crate::drive::ClimbDrive`, [`ClimbStencilWorld`]) rather than a
+    /// parameter to the horizontal ones.
+    fn advance_with(
+        &self,
+        state: &mut PlayerState,
+        world: &dyn CollisionView,
+        sprint: bool,
+        tick: impl Fn(&PlayerState) -> crate::drive::DriveTick,
+    ) {
         let base = f64::from(self.profile.base_movement_speed);
         let attr = if sprint {
             base * (1.0 + f64::from(self.profile.sprint_speed_modifier))
@@ -616,10 +668,147 @@ impl TemplateTable {
             base
         };
         *state = state.with_movement_speed(attr);
-        let step = drive.tick(state);
+        let step = tick(state);
         state.yaw = step.yaw;
         state.sprinting = sprint;
         lodestone_physics::tick(state, step.input, world, &self.profile);
+    }
+
+    /// `Climb`'s simulation: the genuinely new vertical frame.
+    ///
+    /// # Why this cannot be a `rise`-parameterised call into [`Self::simulate`]
+    ///
+    /// Every horizontal kind's frame is "a floor that steps once at `x = 1`",
+    /// which [`StencilWorld`] already models for any `rise`. Climbing has no
+    /// floor at all — the body clings to a climbable cell, never stands — and
+    /// no horizontal displacement, so neither [`StencilWorld`] nor
+    /// [`WalkDrive`] (which aims at a horizontal destination cell) applies.
+    /// [`ClimbStencilWorld`] is climbable everywhere in one column and solid
+    /// nowhere; [`ClimbDrive`] presses jump (ascend) or nothing (descend),
+    /// never forward/strafe.
+    ///
+    /// # Why the simulation never sets `on_ground = true`
+    ///
+    /// Real mounting *does* sometimes begin on solid ground (walking into a
+    /// ladder's own footprint at floor level), and in that case vanilla's
+    /// ordinary ground-jump impulse (`0.42`) fires on the very first tick
+    /// alongside the climb override, before `climbing` overwrites the stored
+    /// velocity for next tick. Modelling that exactly would need a *second*
+    /// climb template (mount-from-ground vs. continue-while-already-clinging)
+    /// for what is a bounded, one-tick effect — real ticks-per-block instead
+    /// scanned as `1.0 - Reverse` gives it exists to avoid over-fitting.
+    /// This simulation instead seeds every climb template as already-clinging
+    /// (`on_ground = false` throughout), which is the more common case (every
+    /// edge but the first in a chain) and, for the first edge, a **safe**
+    /// direction to be wrong in: the real executor may finish that one edge a
+    /// hair faster than the simulated template predicts (extra free height
+    /// from the ground hop), never slower — an overestimate of cost, not an
+    /// underestimate, so admissibility is unaffected and "achievability by
+    /// construction" has exactly this one narrow, bounded, documented
+    /// exception rather than a silent one.
+    ///
+    /// # Why there is one template per direction, not per entry class
+    ///
+    /// [`EntryRel`] does not appear here at all — every call site that builds
+    /// a `Climb` [`TemplateKey`] fixes `entry: EntryRel::Still`
+    /// (`search::Search::expand`'s own comment on why). The script presses no
+    /// forward/strafe, so there is no entry momentum for a different entry
+    /// class to model in the first place; `handle_on_climbable`'s clamp
+    /// applies identically from the first simulated tick regardless of how
+    /// the body arrived. This is the vertical frame's answer to
+    /// `docs/autonomous-navigation.md`'s question of whether it admits
+    /// `WalkDiagonal`'s three-way `EntryRel` collapse: it does not need even
+    /// that — it collapses to a single class, not three.
+    fn simulate_climb(&mut self, dir: ClimbDir) -> Template {
+        let world = ClimbStencilWorld;
+        let rise: i32 = match dir {
+            ClimbDir::Up => 1,
+            ClimbDir::Down => -1,
+        };
+        let source_y = 1;
+        let target_y = source_y + rise;
+        let drive = ClimbDrive {
+            column: [0, 0],
+            target_y,
+            target_surface: f64::from(target_y),
+            ascending: matches!(dir, ClimbDir::Up),
+            continuing: true,
+        };
+        // Entry position: "just crossed into the source cell in the
+        // direction of travel" — the same convention `entry_state`'s
+        // `Straight` uses for a cardinal walk (`0.001` past the near face),
+        // applied to the `y` axis instead of `x`.
+        //
+        // **This is the fix for a real bug the first version of this
+        // function had, found by exactly this test file's own admissibility
+        // check going strongly negative.** Seeding at the source cell's
+        // *exact integer floor* (`1.0`) is correct for `Up` — a full cell of
+        // climbing genuinely separates `1.0` from the `2.0` boundary — but it
+        // is a near-zero-distance start for `Down`: `floor(1.0) == 1`, so any
+        // downward drift at all immediately satisfies `floor(y) == 0`, and
+        // `Climb(Down)` measured **one tick** for a whole block, corrupting
+        // `cheapest_ticks_per_block`'s minimum along the way (measured
+        // `h_rate` collapsed to the bare `0.985` deflation constant — i.e.
+        // "one tick per block" became the fastest movement in the entire
+        // table). Seeding `Down` near the source cell's own **ceiling**
+        // instead gives it the same full cell of travel `Up` already had.
+        //
+        // **What this does not model, and why that is the safe direction to
+        // be wrong in:** a body that *freshly mounted* the top of a ladder
+        // (arriving via an ordinary `Walk`, landing exactly at its cell's own
+        // floor height) and immediately descends genuinely starts nearer
+        // `1.0` than `2.0` — a real, smaller distance than this template
+        // simulates. Using the larger, "continuing a chain" distance for that
+        // edge too **overestimates** its true cost, exactly the same bounded,
+        // safe-direction exception this function's own doc comment already
+        // records for `Up`'s ground-jump hop — never an underestimate, so
+        // admissibility is unaffected.
+        const BOUNDARY_EPS: f64 = 0.001;
+        let start_y = match dir {
+            ClimbDir::Up => f64::from(source_y) + BOUNDARY_EPS,
+            ClimbDir::Down => f64::from(source_y + 1) - BOUNDARY_EPS,
+        };
+        let mut state = PlayerState::at(Vec3d::new(0.5, start_y, 0.5), 0.0);
+        state.on_ground = false;
+
+        let mut ticks = 0u32;
+        while ticks < SIM_TICK_CAP {
+            let before = state.position;
+            self.advance_with(&mut state, &world, false, |s| drive.tick(s));
+            ticks += 1;
+            if drive.done(&state) {
+                let fraction = axis_boundary_fraction(before.y, state.position.y, target_y);
+                return Template {
+                    ticks: Ticks::from_f64(f64::from(ticks - 1) + fraction),
+                    ok: true,
+                };
+            }
+        }
+        Template {
+            ticks: Ticks::IMPOSSIBLE,
+            ok: false,
+        }
+    }
+}
+
+/// The synthetic world [`TemplateTable::simulate_climb`] runs against: a
+/// climbable column at `(x, z) = (0, 0)`, every `y`, with **no collision
+/// anywhere** — no floor, because a climbing body never stands on one, and
+/// climbable blocks themselves are `blocks_motion == false`
+/// (`crate::graph::stand_surface`'s own doc comment on `forceSolidOff`).
+///
+/// Deliberately not [`StencilWorld`]: that type's entire shape is a floor
+/// stepping once in `x`, which has no vertical analogue to parameterise —
+/// `Climb` needed a genuinely different world, not a new `rise` value for the
+/// existing one, exactly as `docs/autonomous-navigation.md` predicted.
+#[derive(Debug)]
+struct ClimbStencilWorld;
+
+impl CollisionView for ClimbStencilWorld {
+    fn collision_boxes(&self, _x: i32, _y: i32, _z: i32, _out: &mut Vec<Aabb>) {}
+
+    fn is_climbable(&self, x: i32, _y: i32, z: i32) -> bool {
+        x == 0 && z == 0
     }
 }
 
@@ -689,6 +878,8 @@ const fn decode_kind(id: u8, drop_n: u8) -> Option<MoveKind> {
         2 => Some(MoveKind::Descend(Dir4::East)),
         3 if drop_n > 0 => Some(MoveKind::Drop(Dir4::East, drop_n)),
         4 => Some(MoveKind::WalkDiagonal(Dir4::North, Dir4::East)),
+        5 => Some(MoveKind::Climb(ClimbDir::Up)),
+        6 => Some(MoveKind::Climb(ClimbDir::Down)),
         _ => None,
     }
 }
@@ -1343,5 +1534,184 @@ mod tests {
         // The control that proves this is not vacuously satisfied by taking
         // the minimum instead: with these numbers the two really do differ.
         assert!((fx - fz).abs() > 1e-6, "fx {fx} and fz {fz} must differ for this test to mean anything");
+    }
+
+    // --- `Climb` ---
+
+    fn climb_key(dir: ClimbDir) -> TemplateKey {
+        key_for(MoveKind::Climb(dir), EntryRel::Still, SurfaceClass::Normal)
+    }
+
+    /// Both directions complete and cost more per block than a flat walk —
+    /// climbing is genuinely slower than walking, the property
+    /// `cheapest_ticks_per_block`'s own admissibility depends on staying
+    /// true.
+    #[test]
+    fn climbing_completes_and_costs_more_than_a_flat_walk_in_both_directions() {
+        let mut t = table();
+        let flat = walk(&mut t, EntryRel::Straight, SurfaceClass::Normal);
+        for dir in [ClimbDir::Up, ClimbDir::Down] {
+            let climb = t.get(climb_key(dir));
+            assert!(climb.ok, "{dir:?}");
+            assert!(
+                climb.ticks > flat.ticks,
+                "{dir:?}: climb {} should cost more than a flat walk {}",
+                climb.ticks,
+                flat.ticks
+            );
+        }
+    }
+
+    /// **Predicted, not merely signed**: the steady climb-**up** rate is
+    /// derived directly from `travel_in_air`'s own two cited constants —
+    /// the override's raw `0.2` target, minus one tick of `profile.gravity`,
+    /// times `profile.vertical_air_drag` — computed *outside* this crate's
+    /// own simulation and checked against a hand-run tick loop of the real
+    /// integrator. `docs/baritone-port.md` §4.3's own `0.2` b/t figure is
+    /// the override's raw input, never simulated — this is the real,
+    /// measured steady velocity, and it is a genuinely different number.
+    #[test]
+    fn climb_up_steady_rate_matches_the_gravity_and_drag_derived_formula() {
+        let profile = PhysicsProfile::mc_1_21();
+        let world = ClimbStencilWorld;
+        let drive = ClimbDrive {
+            column: [0, 0],
+            target_y: 1_000_000,
+            target_surface: 0.0,
+            ascending: true,
+            continuing: true,
+        };
+        let mut state = PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0);
+        state.on_ground = false;
+        for _ in 0..SETTLE_TICKS {
+            let step = drive.tick(&state);
+            state.yaw = step.yaw;
+            lodestone_physics::tick(&mut state, step.input, &world, &profile);
+        }
+        let before = state.position.y;
+        let step = drive.tick(&state);
+        state.yaw = step.yaw;
+        lodestone_physics::tick(&mut state, step.input, &world, &profile);
+        let measured = state.position.y - before;
+
+        let predicted = (0.2 - f64::from(profile.gravity)) * f64::from(profile.vertical_air_drag);
+        assert!(
+            (measured - predicted).abs() < 1e-9,
+            "measured {measured} predicted {predicted}"
+        );
+        // The recorded, surprising finding this test exists to pin: climbing
+        // up is *slower* per block than the design doc's own worked table
+        // claims, because the override sets a raw pre-gravity target that
+        // real vanilla's own gravity subtraction reduces every tick before
+        // it ever reaches `move_entity` — and slower than descending's
+        // capped `0.15`, the opposite ordering the doc's raw `0.2`-vs-`0.15`
+        // figures would suggest.
+        assert!(
+            predicted < 0.15,
+            "climbing up ({predicted:.4} b/t) must be slower than descending's capped 0.15 \
+             b/t, or the ordering test below is asserting nothing"
+        );
+    }
+
+    /// The mirror image: descending's steady rate is exactly
+    /// `handle_on_climbable`'s own literal velocity floor, widened through
+    /// `f32` exactly as that function's own doc comment insists on (the
+    /// widened value is observable at the last ULP).
+    #[test]
+    fn climb_down_steady_rate_matches_handle_on_climbables_own_velocity_floor() {
+        let profile = PhysicsProfile::mc_1_21();
+        let world = ClimbStencilWorld;
+        let drive = ClimbDrive {
+            column: [0, 0],
+            target_y: -1_000_000,
+            target_surface: 0.0,
+            ascending: false,
+            continuing: true,
+        };
+        let mut state = PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0);
+        state.on_ground = false;
+        for _ in 0..SETTLE_TICKS {
+            let step = drive.tick(&state);
+            state.yaw = step.yaw;
+            lodestone_physics::tick(&mut state, step.input, &world, &profile);
+        }
+        let before = state.position.y;
+        let step = drive.tick(&state);
+        state.yaw = step.yaw;
+        lodestone_physics::tick(&mut state, step.input, &world, &profile);
+        let measured = before - state.position.y;
+
+        let predicted = f64::from(0.15_f32);
+        assert!(
+            (measured - predicted).abs() < 1e-9,
+            "measured {measured} predicted {predicted}"
+        );
+    }
+
+    /// The real, recorded ordering that follows from the two predicted rates
+    /// above — climbing **down** is faster per block than climbing **up**,
+    /// which is the opposite of what `docs/baritone-port.md` §4.3's own
+    /// `0.2` (up) vs `0.15` (down) figures would predict, since neither of
+    /// those two numbers is the design doc's own simulated steady velocity.
+    #[test]
+    fn climbing_down_costs_fewer_ticks_than_climbing_up() {
+        let mut t = table();
+        let up = t.get(climb_key(ClimbDir::Up));
+        let down = t.get(climb_key(ClimbDir::Down));
+        assert!(up.ok && down.ok);
+        assert!(
+            down.ticks < up.ticks,
+            "down {} should cost fewer ticks than up {}",
+            down.ticks,
+            up.ticks
+        );
+    }
+
+    /// The admissibility contract, folded to cover `Climb`: `h`'s per-block
+    /// rate must stay strictly below both climb directions' own real rates,
+    /// the same claim `the_heuristic_rate_is_strictly_below_every_simulated_rate`
+    /// already makes for the horizontal kinds — `cheapest_ticks_per_block`'s
+    /// own doc comment records *why* this needed checking rather than
+    /// assuming (climbing is slower than the cheapest horizontal rate, but
+    /// "slower-looking" movements have been the wrong assumption before,
+    /// see `WalkDiagonal`'s `Reverse` entry class).
+    #[test]
+    fn the_heuristic_rate_stays_below_every_climb_directions_own_rate() {
+        let mut t = table();
+        let h_rate = t.cheapest_ticks_per_block();
+        for dir in [ClimbDir::Up, ClimbDir::Down] {
+            let climb = t.get(climb_key(dir));
+            assert!(climb.ok, "{dir:?}");
+            let real_rate = climb.ticks.as_f64(); // exactly one block per edge
+            assert!(
+                h_rate < real_rate,
+                "{dir:?}: heuristic {h_rate} t/blk is not below the real climb rate {real_rate}"
+            );
+            // Report the measured margin, per this pass's own evidence
+            // standard: a passing assertion with no stated distance is not
+            // the same claim as "and here is how much slack there is".
+            let margin = real_rate - h_rate;
+            assert!(
+                margin > 1.0,
+                "{dir:?}: margin {margin} t/blk between the heuristic and the real climb rate \
+                 is suspiciously thin for a kind this much slower than the cheapest movement"
+            );
+        }
+    }
+
+    /// The negative control proving `TemplateKey::drop_n`'s own lesson
+    /// generalises: `Climb(Up)` and `Climb(Down)` must occupy distinct
+    /// memoisation slots, not collide into one — `MoveKind::id`'s own doc
+    /// comment states why folding them together would be exactly the
+    /// "search believes 6, executor needs 14" failure this crate's whole
+    /// template-table design exists to make impossible.
+    #[test]
+    fn climb_up_and_down_are_distinct_table_entries_with_distinct_ids() {
+        assert_ne!(MoveKind::Climb(ClimbDir::Up).id(), MoveKind::Climb(ClimbDir::Down).id());
+        let mut t = table();
+        t.get(climb_key(ClimbDir::Up));
+        t.get(climb_key(ClimbDir::Down));
+        t.get(climb_key(ClimbDir::Up));
+        assert_eq!(t.len(), 2, "two distinct climb templates, not memoised together");
     }
 }

@@ -206,17 +206,68 @@ impl Dir4 {
     }
 }
 
+/// Which way a [`MoveKind::Climb`] moves within its column.
+///
+/// Not a [`Dir4`] — climbing has no horizontal heading at all, which is the
+/// whole reason it needs its own script (`docs/autonomous-navigation.md`'s
+/// "`Climb`: stopped, and why"). Up and down are genuinely different
+/// equivalence classes for the cost model (`0.2` b/t vs a capped `0.15` b/t,
+/// `docs/baritone-port.md` §4.3), so — unlike [`Dir4`] for every cardinal
+/// kind — direction is folded into [`MoveKind::id`] rather than being cost-
+/// irrelevant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ClimbDir {
+    /// +1 Y: hold jump. Universal across a ladder (which has a wall to press
+    /// into) and a free-hanging vine strand (which may not) —
+    /// `lodestone_physics::entity::travel_in_air`'s climb override fires on
+    /// `ctx.jumping` alone, no collision required.
+    Up,
+    /// −1 Y: hold nothing. `handle_on_climbable`'s own velocity floor
+    /// (`-0.15`) already caps the descent, unassisted.
+    Down,
+}
+
 /// How the player entered a node.
 ///
 /// Five variants for M1: standing still, or walking in one of four directions. The
 /// plan's `Sprinting(Dir4)` arm is M3 and slots in here without touching the
 /// packing (three bits are reserved for exactly nine states).
+///
+/// **`Climb` needed a sixth, [`Self::Climbing`] — but only for one reason, and
+/// it is not the one every other kind's arrival dimension exists for.** For
+/// *costing*, a node reached by climbing needs no distinction from
+/// [`Self::Still`] at all: the script presses no forward/strafe, so there is
+/// no horizontal momentum for a future edge's [`crate::cost::EntryRel`] to
+/// exploit, and `crate::search::Search::expand`'s own comment records that
+/// `EntryRel::of` never even reads this variant's direction (`dir()` returns
+/// `None` for it, same as `Still`) — a genuinely *stronger* collapse than
+/// [`MoveKind::WalkDiagonal`]'s three-way one.
+///
+/// The reason it exists anyway is the **executor**, not the search: a
+/// dismount-onto-ground node and a mid-column, still-clinging node both come
+/// out of [`climb_step`] as candidates for "where did this edge end", and
+/// [`crate::drive::ClimbDrive::done`] needs to know which one it is — it must
+/// require `on_ground` for a dismount (that is what "arrived" means when
+/// standing) but must **never** require it mid-column, where the body is
+/// never grounded at all and a `Still`-shaped "wait for on_ground" test would
+/// simply hang forever. `to_surface` cannot distinguish the two cases (a
+/// full-block dismount's surface is numerically identical to a continuing
+/// climb's nominal cell-floor reference — both are exactly the destination
+/// cell's own integer `y`), so the fact has to be carried on the node itself.
+/// This is the honest answer to whether the vertical frame admits the
+/// diagonal's collapse: **the cost side does, fully; the executor's own
+/// arrival test does not**, and that is a genuinely different thing than
+/// `EntryRel` from the one the diagonal work found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Arrival {
     /// At rest, or slow enough that entry velocity does not help.
     Still,
     /// Walking in this direction at (roughly) steady speed.
     Walking(Dir4),
+    /// Mid-column on a climbable cell, never grounded. Carries no direction —
+    /// a climb has no horizontal heading — which is why costing treats it
+    /// identically to [`Self::Still`].
+    Climbing,
 }
 
 impl Arrival {
@@ -226,6 +277,7 @@ impl Arrival {
         match self {
             Self::Still => 0,
             Self::Walking(dir) => 1 + dir.index(),
+            Self::Climbing => 5,
         }
     }
 
@@ -238,15 +290,16 @@ impl Arrival {
                 Some(dir) => Some(Self::Walking(dir)),
                 None => None,
             },
+            5 => Some(Self::Climbing),
             _ => None,
         }
     }
 
-    /// The direction of travel, or `None` at rest.
+    /// The direction of travel, or `None` at rest or mid-climb.
     #[must_use]
     pub const fn dir(self) -> Option<Dir4> {
         match self {
-            Self::Still => None,
+            Self::Still | Self::Climbing => None,
             Self::Walking(dir) => Some(dir),
         }
     }
@@ -396,6 +449,15 @@ pub enum MoveKind {
     /// `(d, d.clockwise())` — [`diagonal_step`] and [`successors`] are the only
     /// constructors, and both hold that invariant.
     WalkDiagonal(Dir4, Dir4),
+    /// A single-cell vertical move within a climbable column (a ladder or a
+    /// vine — both are `BlockTags.CLIMBABLE` and `handle_on_climbable`/
+    /// `travel_in_air`'s climb override treats them identically, so one kind
+    /// covers both real block families). No horizontal displacement: `x`
+    /// and `z` are unchanged, which is exactly what forces this to be a
+    /// genuinely different script rather than a parameter to
+    /// [`crate::drive::WalkDrive`] (`docs/autonomous-navigation.md`'s
+    /// "`Climb`: stopped, and why").
+    Climb(ClimbDir),
 }
 
 impl MoveKind {
@@ -409,6 +471,14 @@ impl MoveKind {
     /// id, exactly as every [`Self::Walk`] direction already does — the
     /// canonical-frame simulation in `crate::cost` treats direction as
     /// irrelevant, so the actual `(Dir4, Dir4)` never needs to reach the key.
+    ///
+    /// [`Self::Climb`] is the opposite case: `Up` and `Down` get **separate**
+    /// ids, because — unlike a cardinal direction — the climb direction *is*
+    /// cost-relevant (`0.2` b/t up vs a capped `0.15` b/t down,
+    /// `docs/baritone-port.md` §4.3). Folding them into one id would memoise
+    /// whichever direction was simulated first and silently cost the other
+    /// its ticks — the exact `Drop`/`drop_n` failure mode this doc comment
+    /// already warns about, one level up.
     #[must_use]
     pub const fn id(self) -> u8 {
         match self {
@@ -417,23 +487,30 @@ impl MoveKind {
             Self::Descend(_) => 2,
             Self::Drop(_, _) => 3,
             Self::WalkDiagonal(_, _) => 4,
+            Self::Climb(ClimbDir::Up) => 5,
+            Self::Climb(ClimbDir::Down) => 6,
         }
     }
 
     /// The direction this movement travels — for [`Self::WalkDiagonal`], its
-    /// **first** component only.
+    /// **first** component only, and for [`Self::Climb`], a meaningless
+    /// placeholder.
     ///
     /// That is a real approximation, not a full answer: a diagonal travels
-    /// along two axes at once, and no single [`Dir4`] describes it. It exists
-    /// only so every [`MoveKind`] has *some* answer for callers that have not
-    /// been taught about diagonals specifically (this crate has exactly one,
-    /// [`crate::cost::EntryRel::of_diagonal`] is the diagonal-aware
-    /// replacement `search::Search::expand` actually uses for costing).
+    /// along two axes at once, and no single [`Dir4`] describes it, and a
+    /// climb has no horizontal heading at all. It exists only so every
+    /// [`MoveKind`] has *some* answer for callers that have not been taught
+    /// about either specifically — `crate::search::Search::expand` never
+    /// actually reaches this arm for either kind, since it special-cases both
+    /// (`crate::cost::EntryRel::of_diagonal` for the diagonal, a fixed
+    /// [`crate::cost::EntryRel::Still`] for the climb — see that call site's
+    /// own comment on why a climb needs no entry classification at all).
     #[must_use]
     pub const fn dir(self) -> Dir4 {
         match self {
             Self::Walk(dir) | Self::StepUp(dir) | Self::Descend(dir) | Self::Drop(dir, _) => dir,
             Self::WalkDiagonal(d1, _) => d1,
+            Self::Climb(_) => Dir4::North,
         }
     }
 
@@ -464,7 +541,23 @@ impl MoveKind {
             Self::Descend(dir) => descend_stencil(dir),
             Self::Drop(dir, _) => drop_stencil(dir),
             Self::WalkDiagonal(d1, d2) => diagonal_stencil(d1, d2),
+            Self::Climb(dir) => climb_stencil(dir),
         }
+    }
+}
+
+/// [`MoveKind::Climb`]'s stencil: just the source and destination cells.
+/// Unlike every horizontal kind, a climb reads no body-width shoulder and no
+/// head-room margin — the destination is the same `(x, z)` column, one cell
+/// up or down, and [`climb_step`]'s own legality check reads exactly these
+/// two cells and nothing else.
+const CLIMB_UP: [[i32; 3]; 2] = [[0, 0, 0], [0, 1, 0]];
+const CLIMB_DOWN: [[i32; 3]; 2] = [[0, 0, 0], [0, -1, 0]];
+
+fn climb_stencil(dir: ClimbDir) -> &'static [[i32; 3]] {
+    match dir {
+        ClimbDir::Up => &CLIMB_UP,
+        ClimbDir::Down => &CLIMB_DOWN,
     }
 }
 
@@ -613,7 +706,42 @@ const WALK_NORTH: [[i32; 3]; 8] = [
 #[must_use]
 pub fn stand_surface(view: &dyn NavView, x: i32, y: i32, z: i32) -> Option<f64> {
     let inside = view.facts_at(x, y, z)?;
-    let inside_top = f64::from(inside.top);
+    // A climbable block's own collision shape must never be read as a
+    // support, in **either** branch below — `LadderBlock`/`VineBlock` both
+    // call `forceSolidOff()`
+    // (`.cache/mc/26.2/src/net/minecraft/world/level/block/LadderBlock.java`'s
+    // `Properties` — see `lodestone_model::adapter::block_blocks_motion`'s own
+    // doc comment, which names the ladder's `0.7291666666666666` mean-extent
+    // threshold specifically *because* landing on one produces the wrong
+    // answer), so `blocks_motion` is `false` regardless of its shape.
+    //
+    // The shape itself is real, and — measured against the same doc
+    // comment's `(1 + 1 + 3/16) / 3` figure — it is **full height**: `top ==
+    // 1.0`, thin only in the horizontal axis against the wall. Two distinct,
+    // previously-latent bugs followed from that, both invisible until
+    // `Climb` needed to reason about climbable cells at all (no fixture in
+    // this crate's tests had one before):
+    //
+    // - **The "inside" branch.** A `top == 1.0` cell is "filled" by every
+    //   other rule this function has — a full cube, a fence's `1.5` post —
+    //   so without the exemption below, standing *in* a ladder's own cell was
+    //   refused outright, the same refusal a solid wall gets. A ladder could
+    //   never be mounted at all.
+    // - **The "below" branch.** The exemption in the "inside" branch alone is
+    //   not enough: a climbable one cell **under** a candidate stand cell
+    //   would still read `below_top == 1.0` and pass as a full support,
+    //   letting a body appear to stand *on top of* a ladder or vine from
+    //   above — which vanilla's own collision never permits, since the real
+    //   shape is a thin sliver against a wall, not a horizontal cap.
+    //
+    // Both branches therefore treat a climbable cell exactly like `AIR` for
+    // support purposes: never a floor to stand on top of, always something to
+    // look past for whatever is actually beneath it.
+    let inside_top = if inside.climbable {
+        0.0
+    } else {
+        f64::from(inside.top)
+    };
     if inside_top > 0.0 {
         if inside_top >= 1.0 {
             // Filled (full cube, fence, wall): stand above it, not in it.
@@ -622,7 +750,11 @@ pub fn stand_surface(view: &dyn NavView, x: i32, y: i32, z: i32) -> Option<f64> 
         return Some(f64::from(y) + inside_top);
     }
     let below = view.facts_at(x, y - 1, z)?;
-    let below_top = f64::from(below.top);
+    let below_top = if below.climbable {
+        0.0
+    } else {
+        f64::from(below.top)
+    };
     if (below_top - 1.0).abs() <= SURFACE_EPS {
         Some(f64::from(y))
     } else {
@@ -646,7 +778,18 @@ pub fn head_room(view: &dyn NavView, x: i32, y: i32, z: i32, surface: f64) -> bo
         let Some(facts) = view.facts_at(x, cell, z) else {
             return false;
         };
-        if !facts.passable {
+        // A climbable cell's nonzero collision shape (`graph::stand_surface`'s
+        // own doc comment on `forceSolidOff`) does not meaningfully occupy
+        // headroom either — it is a thin sliver against a wall, and a real
+        // body's head passes it every time it walks past a ladder or under a
+        // vine. Without this, `passable == false` (from the nonzero shape
+        // alone) refused headroom for **every** cell within a body's height
+        // of a climbable block — including the climbable's own stand cell
+        // checking the cell directly above it, which is exactly the ladder's
+        // *next* rung. A `Climb` chain could not even mount the bottom rung
+        // under this bug, since `standable` at the mount cell reads the rung
+        // above as the headroom sweep's first cell.
+        if !facts.passable && !facts.climbable {
             return false;
         }
         if f64::from(cell) + 1.0 >= head - SURFACE_EPS {
@@ -735,28 +878,78 @@ pub struct Step {
 ///
 /// Order is [`Dir4::ALL`], which is vanilla's horizontal order, so expansion is
 /// deterministic — a prerequisite for the byte-identical-plan gate.
+///
+/// # `Climb` broke the "must be standable to have successors" precondition
+///
+/// Every kind before `Climb` shares one physical shape: a body that can move at
+/// all is, by construction, standing on something (`docs/baritone-port.md` §4.3
+/// table). A mid-column climbable rung has no floor at all — the body is
+/// clinging, not standing — so the single unconditional `standable` gate this
+/// function used to open with would refuse to generate **any** successor from
+/// there, `Climb` included, which would make a chain of more than one climb
+/// edge unreachable by construction. The gate is now two independent
+/// preconditions instead of one: the horizontal families still require
+/// `standable`, and `Climb` requires only that the cell itself is climbable.
+///
+/// # Dismounting sideways while clinging, and why only `Walk` gets it
+///
+/// A real ladder almost never lets you climb straight into a standable
+/// landing in its own column — the cell above (or below) a rung is, in the
+/// overwhelmingly common case, either another rung or the wall the ladder is
+/// mounted on, neither of which is a floor (`climb_step`'s own doc comment
+/// works through why). The way vanilla actually gets **off** a ladder
+/// mid-climb is a horizontal step while still clinging
+/// (`docs/baritone-port.md` §2.3's climbable catalogue: pressing a direction
+/// key moves you, it just does not release the grip until you leave the
+/// column). So a climbable-but-not-standable `from` also tries [`walk_step`]
+/// — and **only** that, deliberately: `StepUp`/`Descend`/`Drop`/`WalkDiagonal`
+/// each carry an assumption (jump clearance, a fall's landing scan, the
+/// corner-shoulder rule) verified against a *standing* body's physics, never
+/// against a clinging one, and this pass has not checked whether any of them
+/// still holds. A bot dismounts by a plain sideways step or stays on the
+/// ladder; the rest is an open gap, recorded rather than silently guessed at.
+/// The reference surface for that step's `STEP_HEIGHT` gate is `from.y` itself
+/// — the same convention every node already uses for "where the feet are".
 pub fn successors(view: &dyn NavView, from: NavNode, out: &mut Vec<Step>) {
-    let Some(from_surface) = standable(view, from.x, from.y, from.z) else {
-        return;
-    };
-    for dir in Dir4::ALL {
-        if let Some(step) = walk_step(view, from, from_surface, dir) {
-            out.push(step);
-            continue;
+    let standable_surface = standable(view, from.x, from.y, from.z);
+    let climbing_here = view
+        .facts_at(from.x, from.y, from.z)
+        .is_some_and(|f| f.climbable && !f.must_not_enter);
+
+    if let Some(from_surface) = standable_surface {
+        for dir in Dir4::ALL {
+            if let Some(step) = walk_step(view, from, from_surface, dir) {
+                out.push(step);
+                continue;
+            }
+            if let Some(step) = step_up_step(view, from, from_surface, dir) {
+                out.push(step);
+            }
+            if let Some(step) = fall_step(view, from, from_surface, dir) {
+                out.push(step);
+            }
         }
-        if let Some(step) = step_up_step(view, from, from_surface, dir) {
-            out.push(step);
+        // Diagonals last, in the same clockwise pairing order vanilla's own mob
+        // evaluator iterates them (`WalkNodeEvaluator.java:142-158`) — determinism
+        // for the byte-identical-plan gate, same as the cardinal loop above.
+        for d1 in Dir4::ALL {
+            if let Some(step) = diagonal_step(view, from, from_surface, d1, d1.clockwise()) {
+                out.push(step);
+            }
         }
-        if let Some(step) = fall_step(view, from, from_surface, dir) {
-            out.push(step);
+    } else if climbing_here {
+        for dir in Dir4::ALL {
+            if let Some(step) = walk_step(view, from, f64::from(from.y), dir) {
+                out.push(step);
+            }
         }
     }
-    // Diagonals last, in the same clockwise pairing order vanilla's own mob
-    // evaluator iterates them (`WalkNodeEvaluator.java:142-158`) — determinism
-    // for the byte-identical-plan gate, same as the cardinal loop above.
-    for d1 in Dir4::ALL {
-        if let Some(step) = diagonal_step(view, from, from_surface, d1, d1.clockwise()) {
-            out.push(step);
+
+    if climbing_here {
+        for dir in [ClimbDir::Up, ClimbDir::Down] {
+            if let Some(step) = climb_step(view, from, dir) {
+                out.push(step);
+            }
         }
     }
 }
@@ -920,6 +1113,24 @@ pub fn fall_step(view: &dyn NavView, from: NavNode, from_surface: f64, dir: Dir4
             // cannot skip over a hazard to reach a safe landing beneath it.
             return None;
         }
+        if facts.climbable {
+            // A falling body's feet crossing into a climbable cell does not
+            // keep falling in real vanilla: `travel_in_air`'s climb branch
+            // caps descent to `-0.15` b/t the instant `is_climbable` reads
+            // true at the feet position, regardless of how the body got
+            // there (`lodestone_physics::entity::travel_in_air`'s doc
+            // comment — the clamp is unconditional on entry, not just while
+            // deliberately climbing). `Descend`/`Drop`'s own cost simulation
+            // (`cost::TemplateTable::simulate`'s `StencilWorld`) models plain
+            // gravity with no climbable anywhere, so it would silently
+            // disagree with real physics for exactly this column — the same
+            // "achievability by construction" guarantee `Climb`'s own
+            // template exists to give would be violated for a kind that
+            // predates `Climb` entirely. Refuse the whole direction, the same
+            // way a hazard already does: a real fall through here is not the
+            // fall this cost model can price.
+            return None;
+        }
         let Some(to_surface) = standable(view, tx, ty, tz) else {
             continue;
         };
@@ -1054,6 +1265,79 @@ pub fn diagonal_step(
     None
 }
 
+/// `Climb(dir)` out of `from`, or `None` when illegal.
+///
+/// # Why this needs no support/facing check, unlike vanilla's own `canSurvive`
+///
+/// `LadderBlock.canSurvive` (`.cache/mc/26.2/src/net/minecraft/world/level/block/LadderBlock.java:52-55`)
+/// requires a sturdy neighbour opposite the ladder's `FACING`, and `VineBlock`
+/// has its own multi-face version. This crate's per-state census
+/// (`crate::facts::BlockFacts`) carries no facing or per-face attachment data —
+/// only tag membership (`climbable: bool`) — so re-deriving either check is not
+/// possible from what is available, and it is also unnecessary: a placed block
+/// that failed its own `canSurvive` would already have reverted to air
+/// (`LadderBlock::updateShape`, `VineBlock::updateShape`) before this ever runs.
+/// Trusting a persisted state's own tag membership is the same trust this
+/// crate already places in every other placed block (a gravity-affected block
+/// is never re-derived as "about to fall" either) — legality here is entirely
+/// "is the cell climbable", nothing about *why*.
+///
+/// # Why the destination is (almost) never a same-column dismount for `Up`
+///
+/// A wall-mounted ladder's own column never has a floor directly above its
+/// last rung: [`standable`]'s "below" branch needs a **full** block at
+/// `y - 1`, and that cell is either another climbable rung or the ladder's own
+/// backing wall (which is in an *adjacent* column, not this one) — never a
+/// full block in *this* column, because a full block there would have refused
+/// the ladder extending into it at all. So climbing up into a same-column
+/// landing is legal here (the check below is real, not decorative) but is not
+/// the way a real ladder is normally exited — see [`successors`]'s own doc
+/// comment for how dismounting sideways works instead. `Down` is the opposite
+/// case: a ladder's *base* commonly does have solid ground directly beneath
+/// its lowest rung, which is the ordinary, common way a `Climb` chain ends.
+#[must_use]
+pub fn climb_step(view: &dyn NavView, from: NavNode, dir: ClimbDir) -> Option<Step> {
+    let source = view.facts_at(from.x, from.y, from.z)?;
+    if !source.climbable || source.must_not_enter {
+        return None;
+    }
+    let ty = match dir {
+        ClimbDir::Up => from.y + 1,
+        ClimbDir::Down => from.y - 1,
+    };
+    if ty < view.min_y() || ty > view.max_y() {
+        return None;
+    }
+    let dest = view.facts_at(from.x, ty, from.z)?;
+    if dest.must_not_enter {
+        return None;
+    }
+    let (arrival, to_surface) = if dest.climbable {
+        // Continuing to climb: no real "surface" exists mid-column, so the
+        // destination cell's own floor is the nominal reference height every
+        // other bookkeeping convention in this crate already uses for "where
+        // the feet are". `Arrival::Climbing`, not `Still` — see its own doc
+        // comment for why the executor (not the cost model) needs the two
+        // told apart.
+        (Arrival::Climbing, f64::from(ty))
+    } else if let Some(surface) = standable(view, from.x, ty, from.z) {
+        (Arrival::Still, surface)
+    } else {
+        return None;
+    };
+    Some(Step {
+        kind: MoveKind::Climb(dir),
+        to: NavNode {
+            x: from.x,
+            y: ty,
+            z: from.z,
+            arrival,
+        },
+        from_surface: f64::from(from.y),
+        to_surface,
+    })
+}
+
 /// Where the player's feet cell is **for planning purposes**, from a real position,
 /// or `None` when nothing under them is standable.
 ///
@@ -1115,7 +1399,7 @@ mod tests {
         ] {
             for z in [-33_554_432, -777, 0, 1, 999_999, 33_554_431] {
                 for y in [-64, -1, 0, 63, 64, 319, 447] {
-                    for a in 0..5u8 {
+                    for a in 0..6u8 {
                         let node = NavNode {
                             x,
                             y,
@@ -1666,5 +1950,197 @@ mod tests {
                 "{cell:?} missing from the diagonal stencil"
             );
         }
+    }
+
+    // --- `Climb` ---
+
+    /// A ladder starting **at** the floor: rungs at `y = 1..=3` in column
+    /// `(0, *, 0)`, on the same stone floor `flat()` already gives every
+    /// other column. A platform at `(1, 3, 0)` (support at `(1, 2, 0)`) gives
+    /// the top rung somewhere to dismount sideways onto, at exactly its own
+    /// height — this is the common, "starts at the floor" case, where the
+    /// bottom rung is already both climbable and standable at once, so it
+    /// never needs the "climb down onto solid ground below the lowest rung"
+    /// branch at all (see [`floating_ladder`] for the fixture that does).
+    fn ladder_from_floor() -> GridView {
+        let mut view = flat();
+        view.set(0, 1, 0, FixtureCensus::LADDER);
+        view.set(0, 2, 0, FixtureCensus::LADDER);
+        view.set(0, 3, 0, FixtureCensus::LADDER);
+        view.set(1, 2, 0, FixtureCensus::STONE);
+        view
+    }
+
+    /// A ladder that does **not** reach the floor: rungs at `y = 2..=4` in
+    /// column `(0, *, 0)`, with one cell of open air (`y = 1`, standable off
+    /// the real stone floor at `y = 0`) between the bottom rung and the
+    /// ground. A real, legal placement — `canSurvive` only needs a sturdy
+    /// block behind a rung, never a floor under it — and the fixture that
+    /// makes "climb down onto solid ground below the lowest rung" a genuine
+    /// case rather than a degenerate one. A platform at `(1, 4, 0)` (support
+    /// at `(1, 3, 0)`) gives the fall-through-a-climbable-column control
+    /// somewhere real to stand while it falls.
+    fn floating_ladder() -> GridView {
+        let mut view = flat();
+        view.set(0, 2, 0, FixtureCensus::LADDER);
+        view.set(0, 3, 0, FixtureCensus::LADDER);
+        view.set(0, 4, 0, FixtureCensus::LADDER);
+        view.set(1, 3, 0, FixtureCensus::STONE);
+        view
+    }
+
+    /// Mounting is an ordinary `Walk`, not a `Climb` — you approach a
+    /// climbable column horizontally like any other cell, and
+    /// `graph::stand_surface`'s climbable fix is what makes the bottom rung
+    /// read as ordinary ground (support at `y - 1`) rather than a fake
+    /// partial-block surface at the ladder's own shape height.
+    #[test]
+    fn mounting_a_ladder_is_an_ordinary_walk_not_a_climb() {
+        let view = ladder_from_floor();
+        let step = walk_step(&view, NavNode::still(-1, 1, 0), 1.0, Dir4::East).expect("legal");
+        assert_eq!(step.kind, MoveKind::Walk(Dir4::East));
+        assert!((step.to_surface - 1.0).abs() < 1e-9, "{}", step.to_surface);
+    }
+
+    /// Continuing to climb: both the source and destination rungs are
+    /// climbable, so the exit is `Arrival::Climbing` — never grounded, at the
+    /// destination cell's own nominal height.
+    #[test]
+    fn climbing_up_between_two_climbable_rungs_continues() {
+        let view = ladder_from_floor();
+        let step = climb_step(&view, NavNode::still(0, 1, 0), ClimbDir::Up).expect("legal");
+        assert_eq!(step.kind, MoveKind::Climb(ClimbDir::Up));
+        assert_eq!(
+            step.to,
+            NavNode {
+                x: 0,
+                y: 2,
+                z: 0,
+                arrival: Arrival::Climbing
+            }
+        );
+        assert!((step.to_surface - 2.0).abs() < 1e-9);
+    }
+
+    /// Climbing down off the bottom rung of a ladder that stops one cell
+    /// short of the floor lands on the real floor below it — the genuine
+    /// "dismount onto solid ground" case, distinct from merely continuing to
+    /// another rung.
+    #[test]
+    fn climbing_down_off_a_floating_bottom_rung_dismounts_onto_the_floor() {
+        let view = floating_ladder();
+        let step = climb_step(&view, NavNode::still(0, 2, 0), ClimbDir::Down).expect("legal");
+        assert_eq!(step.kind, MoveKind::Climb(ClimbDir::Down));
+        assert_eq!(
+            step.to,
+            NavNode {
+                x: 0,
+                y: 1,
+                z: 0,
+                arrival: Arrival::Still
+            }
+        );
+        assert!(
+            (step.to_surface - 1.0).abs() < 1e-9,
+            "the real floor's surface, not the ladder's own shape height"
+        );
+    }
+
+    /// Dismounting sideways while clinging: from the top rung — which is
+    /// climbable but **not** standable (nothing full sits below it, only
+    /// another rung) — a plain `Walk` onto the adjacent platform is still
+    /// offered. This is the mechanism `successors`'s own doc comment says is
+    /// how a real wall-mounted ladder is actually exited, since a same-column
+    /// ascend almost never lands on anything.
+    #[test]
+    fn dismounting_sideways_from_the_top_rung_is_a_plain_walk() {
+        let view = ladder_from_floor();
+        assert!(
+            standable(&view, 0, 3, 0).is_none(),
+            "the top rung must not be standable, or this test is not exercising the fallback"
+        );
+        let mut out = Vec::new();
+        successors(&view, NavNode::still(0, 3, 0), &mut out);
+        let walk = out
+            .iter()
+            .find(|s| matches!(s.kind, MoveKind::Walk(Dir4::East)))
+            .expect("a sideways dismount onto the platform");
+        assert_eq!(
+            walk.to,
+            NavNode::still(1, 3, 0).with_arrival(Arrival::Walking(Dir4::East))
+        );
+        assert!((walk.to_surface - 3.0).abs() < 1e-9);
+    }
+
+    /// The unreachable control this pass's brief asks for: climbing past the
+    /// top rung into open air with nothing to land on is refused, not
+    /// invented. Watched to fail by construction — `standable` genuinely
+    /// returns `None` there (nothing full sits at `y = 3`, only the
+    /// non-full top rung).
+    #[test]
+    fn climbing_past_the_top_of_the_ladder_into_nothing_is_refused() {
+        let view = ladder_from_floor();
+        assert!(climb_step(&view, NavNode::still(0, 3, 0), ClimbDir::Up).is_none());
+    }
+
+    /// A second, physically distinct unreachable control: a solid ceiling
+    /// directly above the top rung refuses the climb outright — not because
+    /// there is nothing to land on, but because the destination cell itself
+    /// cannot hold a body at all. `standable`'s "filled" branch is what
+    /// produces the refusal, the same rule that already refuses walking into
+    /// a wall.
+    #[test]
+    fn climbing_into_a_solid_ceiling_is_refused() {
+        let mut view = ladder_from_floor();
+        view.set(0, 4, 0, FixtureCensus::STONE);
+        assert!(climb_step(&view, NavNode::still(0, 3, 0), ClimbDir::Up).is_none());
+    }
+
+    /// The most basic unreachable control: no climbable block, no `Climb`
+    /// edge at all, in either direction — climbing an ordinary column of air
+    /// over stone is refused by construction, never invented.
+    #[test]
+    fn a_column_with_no_climbable_block_has_no_climb_step() {
+        let view = flat();
+        let from = NavNode::still(0, 1, 0);
+        assert!(climb_step(&view, from, ClimbDir::Up).is_none());
+        assert!(climb_step(&view, from, ClimbDir::Down).is_none());
+        let mut out = Vec::new();
+        successors(&view, from, &mut out);
+        assert!(
+            !out.iter().any(|s| matches!(s.kind, MoveKind::Climb(_))),
+            "{out:?}"
+        );
+    }
+
+    /// A full climb chain from `successors` alone, mount to dismount: the
+    /// search-facing surface this whole feature exists to serve.
+    #[test]
+    fn successors_offers_a_climb_up_from_every_rung_but_the_top() {
+        let view = ladder_from_floor();
+        for y in 1..=2 {
+            let mut out = Vec::new();
+            successors(&view, NavNode::still(0, y, 0), &mut out);
+            assert!(
+                out.iter()
+                    .any(|s| matches!(s.kind, MoveKind::Climb(ClimbDir::Up))),
+                "rung at y={y} should offer Climb(Up): {out:?}"
+            );
+        }
+    }
+
+    /// `fall_step` must refuse a direction whose landing scan passes through
+    /// a climbable cell — real physics arrests a fall there
+    /// (`travel_in_air`'s climb branch reads the feet position unconditionally,
+    /// not only while deliberately climbing), so `Descend`/`Drop`'s own
+    /// gravity-only simulation would silently disagree with reality for this
+    /// column. This is the one change `Climb` forced onto a kind that
+    /// predates it.
+    #[test]
+    fn a_fall_through_a_climbable_column_is_refused() {
+        let view = floating_ladder();
+        // From the platform at `(1, 4, 0)`, falling `West` drops straight
+        // through the ladder's own column at `(0, *, 0)`.
+        assert!(fall_step(&view, NavNode::still(1, 4, 0), 4.0, Dir4::West).is_none());
     }
 }

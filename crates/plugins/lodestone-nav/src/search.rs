@@ -171,11 +171,24 @@ impl Search {
     ) -> Self {
         let mut templates = TemplateTable::new(profile);
         let per_block = templates.cheapest_ticks_per_block();
-        // Vertical rate: the cheapest way up a block is a jump, whose airborne
-        // phase is ~12 ticks — but M1 has no `StepUp`, so an admissible bound only
-        // has to be *a* lower bound. Charging one block of horizontal travel is
-        // both a lower bound and cheap to justify; `StepUp` (M2) replaces it with
-        // its own simulated template.
+        // Vertical rate.
+        //
+        // **This comment used to say "M1 has no `StepUp`... `StepUp` (M2)
+        // replaces it with its own simulated template" — stale.** `StepUp`
+        // landed in M2 and this was never revisited; the choice below is not
+        // a placeholder, it is still the right bound. `per_block` is the
+        // cheapest movement rate in the *entire* game (deflated sprint on
+        // blue ice, `cheapest_ticks_per_block`'s own doc comment), which is
+        // safely below every real way to gain height this crate models:
+        // `StepUp`'s ~12-tick airborne jump and `Climb`'s ~5 (up) to ~6.67
+        // (down, capped) ticks/block are both slower per block than the
+        // cheapest horizontal rate, so using it here remains an admissible —
+        // if loose — lower bound rather than a tight one.
+        // `cost::TemplateTable::cheapest_ticks_per_block` folds `Climb`'s own
+        // templates into the same scan defensively (verified, not assumed:
+        // see `crate::cost::tests::the_heuristic_rate_stays_below_every_climb_directions_own_rate`),
+        // so a future, genuinely faster way up would be caught here rather
+        // than silently invalidating this bound.
         let rates = Rates {
             per_block,
             per_block_up: per_block,
@@ -386,7 +399,13 @@ impl Search {
 
         for step in &scratch {
             let arrival_dir = match node.node.arrival {
-                Arrival::Still => None,
+                // `Climbing` carries no direction — a climb has no horizontal
+                // heading — so it costs a following edge identically to
+                // `Still`. See `Arrival::Climbing`'s own doc comment: this is
+                // the one place the vertical frame *does* collapse onto the
+                // existing shape, even though the node's own identity needed
+                // a new variant for the executor's sake.
+                Arrival::Still | Arrival::Climbing => None,
                 Arrival::Walking(dir) => Some(dir),
             };
             // `WalkDiagonal` needs its own entry classification —
@@ -394,8 +413,19 @@ impl Search {
             // diagonal is not. `EntryRel::of_diagonal`'s own doc comment
             // explains why it collapses to `Still`/`Straight`/`Reverse`
             // rather than needing new variants.
+            //
+            // `Climb` needs no classification at all, not even a collapsed
+            // one: the script presses no forward/strafe, so there is no
+            // entry momentum for any `EntryRel` variant to describe, and
+            // `cost::TemplateTable::simulate_climb`'s own doc comment records
+            // that its clamp applies identically from the first simulated
+            // tick regardless of how the body arrived. Fixing `Still`
+            // unconditionally is therefore not an approximation of a real
+            // distinction, the way the diagonal's collapse is — there is
+            // nothing here to collapse.
             let entry = match step.kind {
                 MoveKind::WalkDiagonal(d1, d2) => EntryRel::of_diagonal(arrival_dir, d1, d2),
+                MoveKind::Climb(_) => EntryRel::Still,
                 _ => EntryRel::of(arrival_dir, step.kind.dir()),
             };
             let Some(cost) = self.edge_cost(step, entry) else {
@@ -435,7 +465,7 @@ impl Search {
         // Same idea, one direction pair per diagonal: `MoveKind::stencil`
         // ignores which pair it is (all four translate the same four-column
         // shape), so any one representative per `d1` covers it.
-        crate::graph::Dir4::ALL.iter().any(|d1| {
+        let diagonal = crate::graph::Dir4::ALL.iter().any(|d1| {
             MoveKind::WalkDiagonal(*d1, d1.clockwise())
                 .stencil()
                 .iter()
@@ -444,7 +474,21 @@ impl Search {
                         .state_at(node.x + cell[0], node.y + cell[1], node.z + cell[2])
                         .is_none()
                 })
-        })
+        });
+        if diagonal {
+            return true;
+        }
+        // `Climb` has no direction to iterate — just the two, each a
+        // two-cell stencil.
+        [crate::graph::ClimbDir::Up, crate::graph::ClimbDir::Down]
+            .iter()
+            .any(|dir| {
+                MoveKind::Climb(*dir).stencil().iter().any(|cell| {
+                    self.view
+                        .state_at(node.x + cell[0], node.y + cell[1], node.z + cell[2])
+                        .is_none()
+                })
+            })
     }
 
     /// The simulated cost of one step, plus the policy's additive penalties.
@@ -467,20 +511,36 @@ impl Search {
         // is usually more stone with the same friction, and because until `walk_step`
         // learned to change cells a soul-sand floor was not reachable at all. It is
         // the whole reason `SpeedClass::Slow` exists.
-        let surface_cell = if step.to_surface > f64::from(step.to.y) + crate::graph::SURFACE_EPS {
-            step.to.y
+        //
+        // `Climb` is excluded from this lookup entirely: climbing physics
+        // never consults ground friction at all — the vertical rate is
+        // `handle_on_climbable`'s own hardcoded clamp, and mid-column there
+        // usually is no "surface" to look up in the first place
+        // (`cost::TemplateTable::simulate_climb`'s own doc comment). Deriving
+        // a `SurfaceClass`/`SpeedClass` from whatever block happens to sit
+        // near a climb's destination would bucket the template by an input
+        // its simulation never reads, which is a silent way to pretend a
+        // real distinction exists where none does.
+        let (surface, speed) = if matches!(step.kind, MoveKind::Climb(_)) {
+            (SurfaceClass::Normal, SpeedClass::Normal)
         } else {
-            step.to.y - 1
+            let surface_cell =
+                if step.to_surface > f64::from(step.to.y) + crate::graph::SURFACE_EPS {
+                    step.to.y
+                } else {
+                    step.to.y - 1
+                };
+            let facts = self
+                .view
+                .facts_at(step.to.x, surface_cell, step.to.z)
+                .or_else(|| self.view.facts_at(step.to.x, step.to.y, step.to.z))?;
+            (SurfaceClass::of(facts.friction), SpeedClass::of(facts.speed_factor))
         };
-        let facts = self
-            .view
-            .facts_at(step.to.x, surface_cell, step.to.z)
-            .or_else(|| self.view.facts_at(step.to.x, step.to.y, step.to.z))?;
         let key = TemplateKey {
             kind: step.kind.id(),
             entry,
-            surface: SurfaceClass::of(facts.friction),
-            speed: SpeedClass::of(facts.speed_factor),
+            surface,
+            speed,
             sprint: self.policy.allow_sprint,
             drop_n: if let MoveKind::Drop(_, n) = step.kind { n } else { 0 },
         };
@@ -511,7 +571,14 @@ impl Search {
                     (delta + 1e-6 - crate::graph::SAFE_FALL_DISTANCE).floor().max(0.0);
                 extra = extra.saturating_add(Ticks::from_f64(half_hearts * self.policy.damage_cost));
             }
-            MoveKind::Walk(_) | MoveKind::Descend(_) | MoveKind::WalkDiagonal(_, _) => {}
+            // No preference beyond the simulated cost: climbing is already
+            // priced slower than walking by the template itself, so nothing
+            // additional is needed to make the search prefer a walk-around
+            // where one exists (unlike `jump_penalty`, which exists because
+            // the *simulated* cost of a `StepUp` alone does not reflect that
+            // jumps are the less reliable class).
+            MoveKind::Walk(_) | MoveKind::Descend(_) | MoveKind::WalkDiagonal(_, _)
+            | MoveKind::Climb(_) => {}
         }
         Some(template.ticks.saturating_add(extra))
     }
@@ -850,6 +917,107 @@ mod tests {
         // single-axis `arrived`/`done` could get away with faking.
         assert_eq!(state.position.x.floor() as i32, 5);
         assert_eq!(state.position.z.floor() as i32, 5);
+    }
+
+    /// The `Climb` counterpart: a real-physics replay of a plan that mounts a
+    /// ladder, climbs it, and dismounts sideways — end to end through the
+    /// same integrator the cost model itself simulates against, which is the
+    /// strongest gate available here (`docs/baritone-port.md` §6): a search
+    /// or cost bug could agree with `graph::tests`' own fixture-level checks
+    /// and still disagree with what actually executing the plan costs, and
+    /// only replaying it through real ticks can catch that.
+    #[test]
+    fn the_planned_cost_matches_what_executing_a_climb_plan_costs() {
+        use crate::drive::{ClimbDrive, WalkDrive};
+        use crate::graph::{Arrival, ClimbDir, Dir4};
+        use lodestone_physics::{PlayerState, Vec3d};
+
+        let facts = Arc::new(FactsTable::build(&FixtureCensus));
+        let mut grid = GridView::new(facts, AIR, -64, 320, Some((-8, -8, 8, 8)));
+        grid.fill(-8, 0, -8, 8, 0, 8, STONE);
+        grid.set(3, 1, 0, FixtureCensus::LADDER);
+        grid.set(3, 2, 0, FixtureCensus::LADDER);
+        grid.set(3, 3, 0, FixtureCensus::LADDER);
+        grid.set(4, 2, 0, STONE);
+        let view = Arc::new(grid);
+
+        let mut s = search(
+            view.clone(),
+            Box::new(AtBlock { x: 4, y: 3, z: 0 }),
+            NavPolicy::default(),
+        );
+        assert_eq!(s.run(Budget { nodes: 1_000 }), Outcome::Reached);
+        let plan = s.best_plan().expect("a plan");
+        assert_eq!(
+            plan.edges().iter().map(|e| e.kind).collect::<Vec<_>>(),
+            vec![
+                MoveKind::Walk(Dir4::East),
+                MoveKind::Walk(Dir4::East),
+                MoveKind::Walk(Dir4::East),
+                MoveKind::Climb(ClimbDir::Up),
+                MoveKind::Climb(ClimbDir::Up),
+                MoveKind::Walk(Dir4::East),
+            ],
+            "{:?}",
+            plan.edges()
+        );
+
+        let profile = PhysicsProfile::mc_1_21();
+        let mut state = PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0);
+        state.on_ground = true;
+        let mut actual = 0u32;
+        for (i, edge) in plan.edges().iter().enumerate() {
+            let last = i + 1 == plan.len();
+            let mut edge_ticks = 0;
+            if let MoveKind::Climb(dir) = edge.kind {
+                let drive = ClimbDrive {
+                    column: [edge.to.x, edge.to.z],
+                    target_y: edge.to.y,
+                    target_surface: edge.to_surface,
+                    ascending: matches!(dir, ClimbDir::Up),
+                    continuing: matches!(edge.to.arrival, Arrival::Climbing),
+                };
+                while !drive.done(&state) && edge_ticks < 60 {
+                    let step = drive.tick(&state);
+                    state.yaw = step.yaw;
+                    lodestone_physics::tick(&mut state, step.input, view.as_ref(), &profile);
+                    edge_ticks += 1;
+                    actual += 1;
+                }
+            } else {
+                let drive = WalkDrive {
+                    cell: [edge.to.x, edge.to.y, edge.to.z],
+                    surface: edge.to_surface,
+                    brake: last,
+                    sprint: false,
+                    steer: true,
+                    jump: false,
+                };
+                while !drive.done(&state) && edge_ticks < 60 {
+                    let step = drive.tick(&state);
+                    state.yaw = step.yaw;
+                    state = state.with_movement_speed(f64::from(profile.base_movement_speed));
+                    lodestone_physics::tick(&mut state, step.input, view.as_ref(), &profile);
+                    edge_ticks += 1;
+                    actual += 1;
+                }
+            }
+            assert!(edge_ticks < 60, "edge {i} ({:?}) never completed", edge.kind);
+        }
+
+        let planned = plan.total_cost().as_f64();
+        let error = f64::from(actual) - planned;
+        assert!(
+            error.abs() < 24.0,
+            "planned {planned:.1} ticks, executed {actual} ({error:+.1})"
+        );
+        assert_eq!(state.position.x.floor() as i32, 4);
+        assert!(
+            (state.position.y - 3.0).abs() < 0.15,
+            "expected to have climbed to y ~= 3.0, got {}",
+            state.position.y
+        );
+        assert!(state.on_ground, "expected to have settled on the real platform");
     }
 
     /// The surface a step is costed against is the block the **feet rest on**, which

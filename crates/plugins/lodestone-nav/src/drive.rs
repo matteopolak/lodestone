@@ -229,6 +229,80 @@ impl WalkDrive {
     }
 }
 
+/// The `Climb` script: hold a direction key against a climbable column, not
+/// aim at a cell centre — the genuinely different script
+/// `docs/autonomous-navigation.md`'s "`Climb`: stopped, and why" flagged as
+/// the harder of the two things this kind needs.
+///
+/// Ascending holds jump every tick, never forward/strafe: `ctx.jumping` alone
+/// fires `lodestone_physics::entity::travel_in_air`'s climb override, with no
+/// wall to press into required — the one script that is universal across a
+/// ladder (which has a wall) and a free-hanging vine strand (which may not).
+/// Descending holds nothing at all: `handle_on_climbable`'s own velocity floor
+/// (`-0.15`) already caps the fall, unassisted, and holding jump while
+/// descending would only reverse it into an ascend.
+///
+/// No horizontal aiming, no `steer` flag, no `target()` — a climb has no
+/// horizontal destination to aim at, which is the whole reason it could not
+/// be expressed as a [`WalkDrive`] parameter.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClimbDrive {
+    /// The column this edge climbs within — `x` and `z` never change.
+    pub column: [i32; 2],
+    /// Destination feet cell `y`.
+    pub target_y: i32,
+    /// World-space feet `y` at the destination: the destination cell's own
+    /// floor while continuing to climb, or the real (possibly partial-block)
+    /// stand surface when dismounting.
+    pub target_surface: f64,
+    /// Ascending (hold jump) vs descending (hold nothing).
+    pub ascending: bool,
+    /// Whether the destination cell is itself climbable (continue) or solid
+    /// ground (dismount). [`Self::done`] requires `on_ground` only for the
+    /// latter — a body mid-column is never grounded, and requiring it there
+    /// would make every non-terminal climb edge un-completable.
+    pub continuing: bool,
+}
+
+impl ClimbDrive {
+    /// One tick of input. No steering: yaw is left exactly where it was,
+    /// since nothing here has a horizontal direction to face.
+    #[must_use]
+    pub fn tick(&self, state: &PlayerState) -> DriveTick {
+        DriveTick {
+            input: MovementInput {
+                forward: 0.0,
+                strafe: 0.0,
+                jump: self.ascending,
+                sneak: false,
+                sprint: false,
+            },
+            yaw: state.yaw,
+        }
+    }
+
+    /// Whether the movement is finished.
+    ///
+    /// **Explicitly vertical, not [`WalkDrive::done`]'s horizontal-cell-plus-
+    /// on_ground test** — `docs/autonomous-navigation.md`'s brief for this
+    /// kind is direct about why reusing that test would be wrong: "a climb is
+    /// entirely vertical, so 'arrived' cannot mean an in-cell horizontal test
+    /// at all." Arrival is a **vertical cell-boundary crossing**: the feet
+    /// cell equals the target the instant `position.y` crosses into it,
+    /// mirroring [`WalkDrive::done`]'s own "boundary, not centre" philosophy
+    /// one axis over. `continuing` gates whether `on_ground` is also
+    /// required, exactly as [`Self::continuing`] documents.
+    #[must_use]
+    pub fn done(&self, state: &PlayerState) -> bool {
+        #[allow(clippy::cast_possible_truncation)]
+        let cell_y = state.position.y.floor() as i32;
+        if cell_y != self.target_y {
+            return false;
+        }
+        self.continuing || state.on_ground
+    }
+}
+
 /// Vertical tolerance for [`WalkDrive::arrived`], in blocks —
 /// `docs/baritone-port.md` §4.8's own arrival-tolerance figure ("~0.1
 /// vertical… because lily pads sit slightly above the block floor").
