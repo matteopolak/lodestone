@@ -56,13 +56,16 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   requirement driving [`docs/bevy-migration.md`](./bevy-migration.md).
 - [Benchmark harness](./benchmark-harness.md) — The criterion-based benchmark
   harness for epic [#78](https://github.com/matteopolak/lodestone/issues/78),
-  implemented for four crates so far: `lodestone-worldgen` (chunk generation,
+  implemented for five crates so far: `lodestone-worldgen` (chunk generation,
   sub-issues #84/#85), `lodestone-v770` (protocol decode throughput, sub-issues
-  #137/#142/#146), `lodestone-world` (client-side chunk loading — store insertion,
-  heightmap decode, light propagation) and `lodestone-entity` (mob simulation and
-  pathfinding). It is the concrete implementation of the design recorded in
-  [`docs/roadmap/benchmarks.md`](./roadmap/benchmarks.md) — that doc is the
-  *argument* for the shape; this one is *how it actually works* and how to extend it.
+  #137/#142/#146/#88), `lodestone-world` (client-side chunk loading — store
+  insertion, heightmap decode, light propagation, light *application*, memory
+  footprint), `lodestone-entity` (mob simulation and pathfinding) and
+  `lodestone-physics` (movement integration, collision sweep, pose fit gate, crowd
+  push — sub-issues #115/#120/#124/#102). It is the concrete implementation of the
+  design recorded in [`docs/roadmap/benchmarks.md`](./roadmap/benchmarks.md) — that
+  doc is the *argument* for the shape; this one is *how it actually works* and how to
+  extend it.
 - [Migrating to `bevy_ecs`](./bevy-migration.md) — A staged plan for moving
   Lodestone's world/entity/session state onto `bevy_ecs`, so that third-party
   extensions are native Rust plugins with the same power as built-in code.
@@ -127,6 +130,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Bubble columns](./bubble-columns.md) — The vertical impulse a `bubble_column`
   block applies to the player: soul sand pushes you up (an elevator), a magma block
   drags you down (a drain). Issue #199.
+- [Build caching (`sccache`) and multi-agent build contention](./build-caching.md) —
+  A measured evaluation of `sccache` (Mozilla's compiler cache) for this repo's
+  specific problem: up to eleven agents building concurrently in one shared checkout
+  on a 10-core / 16 GB machine. Verdict, numbers, the adoption playbook, and the traps
+  found on the way. `sccache 0.17.0` is installed at `/opt/homebrew/bin/sccache`
+  (Homebrew). **It is deliberately not yet active in `.cargo/config.toml`** — a
+  commented, ready-to-flip block is there; read "How to turn it on repo-wide" below
+  before uncommenting it.
 - [Chunk column encoding: real block states on the wire (issue #363)](./chunk-column-encoding.md) —
   `V770ServerProtocol::encode_chunk`'s `build_world_column` turns one
   `lodestone-server` [`ChunkColumn`](../crates/lodestone-server/src/chunk.rs) — the
@@ -149,6 +160,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   state as a second resource (`lodestone_shell::mesher::TerrainMesh`) driven by one
   `Update` system. This is Stage 4 of [`bevy-migration.md`](./bevy-migration.md) and
   the §4.1(d) half of its `World` unification.
+- [Continuous integration](./ci.md) — `.github/workflows/ci.yml` runs on every push
+  to `main` and every pull request. It exists so an agent can push and let a
+  GitHub-hosted runner verify the four commands in `CLAUDE.md`'s "Build and test"
+  section, instead of every agent running heavy `cargo` builds on the one shared dev
+  laptop — with ten agents on ten cores, local verification was slower than the work
+  it was checking.
 - [v770 clientbound `play` packet coverage, and the 32-packet remainder](./clientbound-packet-coverage.md) —
   The measured decode/consumer coverage of protocol 776's `play` clientbound packets
   in `crates/protocol/v770`, and a sourced triage of every packet that is still
@@ -381,6 +398,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   button), so nothing in the shell's gameplay input path names a key literally. It
   exists so the Controls menu is a later, small addition rather than a rewrite of
   `app.rs`.
+- [Language screen](./language-screen.md) — `SettingsPage::Language` (issue #415):
+  vanilla's `LanguageSelectScreen`, reached from the root settings screen's own
+  "Language..." grid button (`ROOT_GRID` in
+  `crates/lodestone-shell/src/menu/options.rs`, now live). It is the first of the
+  three settings sub-screens #392's plan always said would need a *different* list
+  widget than this tree's other two (`OptionsList`, `KeyBindsList`) — vanilla's
+  `ObjectSelectionList` — and this issue builds that third kind.
 - [The light ramp: vanilla's lightmap curve](./light-ramp.md) — The scalar every
   terrain, fluid, entity and particle fragment multiplies its texel by, as a function
   of the server's packed sky/block light byte and the time of day. Vanilla calls it a
@@ -584,13 +608,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   closely enough that all seven landed in one pass rather than inventing a second
   pipeline: `lodestone_render::ScreenEffectRenderer`.
 - [Section camera uniform (shared buffer + origin arena)](./section-camera-uniform.md) —
-  The group-0 camera binding the model/fluid terrain pipelines
-  ([`ModelPipeline`](../crates/lodestone-render/src/model_pipeline.rs)) read from,
-  split into a **shared** per-frame half (view-projection + fog) and a **per-section**
-  half (world origin) that lives in one physically resident
+  The group-0 camera binding **every** terrain pipeline reads from — the model/fluid
+  pair ([`ModelPipeline`](../crates/lodestone-render/src/model_pipeline.rs)) and the
+  packed full-cube path ([`BlockPipeline`](../crates/lodestone-render/src/block.rs))
+  — split into a **shared** per-frame half (view-projection + fog) and a
+  **per-section** half (world origin) that lives in one physically resident
   [`ArenaBuffer`](../crates/lodestone-render/src/arena.rs) and is addressed by a
   dynamic offset at draw time, instead of one small buffer + one bind group per
-  section. This is the fix for issue #75.
+  section.
 - [Section mesh invalidation: absent vs. not-yet-loaded neighbours](./section-mesh-invalidation.md) —
   A section's mesh is a function of its whole **3×3×3 = 27-section neighbourhood**,
   not just the section itself: face culling reads the six orthogonal neighbours,
@@ -635,11 +660,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   was deleting the **double fold** that doc's §1.1 measured.
 - [The settings tree, with unsupported controls disabled](./settings-screen.md) —
   `crates/lodestone-shell/src/menu/options.rs` — vanilla's `OptionsScreen` tree as a
-  **table plus arithmetic**: nine `OptionsList` pages, **143 controls**, of which **25
-  or 26 work** (see below) **and the rest are present and greyed out** — plus a
-  tenth page, Key Binds, which is not an `OptionsList` at all and is counted
-  separately (see below). Reached from the title screen's Options button and from the
-  pause menu's, on `Screen::Settings`.
+  **table plus arithmetic**: nine `OptionsList` pages, **143 controls**, of which **26
+  or 27 work** (see below) **and the rest are present and greyed out** — plus two
+  more pages that are not `OptionsList` at all and are counted separately (see below):
+  Key Binds and, since issue #415, Language. Reached from the title screen's Options
+  button and from the pause menu's, on `Screen::Settings`.
 - [Shaders](./shaders.md) — Every WGSL shader in the client lives in its own `.wgsl`
   file under `crates/<crate>/src/shaders/`, pulled into the binary at compile time
   with `include_str!`. There is no runtime file loading, no asset path and nothing to
