@@ -73,6 +73,70 @@ glyph's shadow, matching vanilla's two-layer batch.
 directly on those floats. In linear space the shadow would land at ~54 % on screen —
 a grey outline instead of vanilla's near-black one.
 
+### Styling
+
+`legacy_run` (the `§`-coded path `draw_legacy`/`text_legacy` use — chat, the
+action bar, the held-item name, container tooltips once they exist) tracks a
+`GlyphStyle { bold, italic, underline, strikethrough, obfuscated }` across the
+run alongside the existing colour tracking, with the same reset rule
+`lodestone-model`'s `apply_legacy_code` already uses: a colour code or `§r`
+clears every flag, not just the one it names
+(`lodestone-model/src/text.rs:626-644`). Each glyph is then drawn by
+`glyph_styled`, which — unlike the plain path's `glyph` — also emits the
+underline/strikethrough bar and reports a bold-adjusted advance, so it runs
+for **every** character `legacy_run` visits, ink or not (a space still needs
+its underline segment and its bold-widened advance).
+
+All five rules are transcribed from `.cache/mc/26.2/client-src`, not
+invented:
+
+- **Bold** (`BakedSheetGlyph.renderChar`, `BakedSheetGlyph.java:110-113`):
+  redraw the *same* glyph a second time, offset `+metrics::BOLD_OFFSET` in x —
+  not a font-weight variant. Applies independently to the shadow pass and the
+  main pass (each gets its own doubled draw), which falls out for free here
+  because the two passes are already two separate `legacy_run` calls with
+  different `(x, y)`. The advance also grows by `BOLD_OFFSET`
+  (`GlyphInfo.getAdvance(bold)`, `GlyphInfo.java:6-8`) for *every* glyph,
+  drawable or not.
+- **Italic** (`BakedSheetGlyph.shearTop`/`shearBottom`,
+  `BakedSheetGlyph.java:144-150`, both `1.0F - 0.25F * v`): vanilla shears a
+  glyph as one quad with two sheared edges — a continuous linear function of
+  `v`, the edge's logical-pixel offset from the line's top. This renderer
+  draws ink as per-texel-row quads instead of one quad, so `draw_ink`
+  evaluates that same affine function **per row**, at the row's own centre
+  (`r.top() + (ty + 0.5) * texel_size()`), rather than only at the two glyph
+  edges. `metrics::ITALIC_SHEAR` (`1.0`) and the newly-added
+  `metrics::ITALIC_SHEAR_SLOPE` (`0.25`) are the formula's two constants. For
+  the ordinary ascii sheet (`up = 0`, `down = 8`) this resolves to the top row
+  shifting `+1` px and the bottom row `-1` px — a **2 px** lean across an 8 px
+  glyph, not the 1 px the old doc comment here used to say (fixed alongside
+  this change).
+- **Underline / strikethrough** (`Font.java:274,284-299`): a
+  `metrics::EFFECT_THICKNESS`-tall (`1.0` px) bar per glyph, from that glyph's
+  pen position to `pen + advance`, extended `metrics::EFFECT_LEAD_IN` (`1.0`
+  px) further left **only for the first glyph of the run**
+  (`effectX0 = position == 0 ? x - 1.0F : x`). Strikethrough's bar bottom sits
+  at `metrics::STRIKETHROUGH_Y` (`4.5`) logical px below the line's top;
+  underline's at `metrics::UNDERLINE_Y` (`9.0`) — two different constants, not
+  one "draw a line" helper parameterised by a boolean that happens to share a
+  y.
+- **Obfuscated** (`Font.getGlyph`, `Font.java:82-91`, and `FontSet`'s
+  `glyphsByWidth`, `FontSet.java:58,109,160-163`): every draw call swaps in a
+  **same-width-class** replacement codepoint's pixels — width class is
+  `ceil(original_advance)` — while the *advance* stays the original
+  codepoint's. `VanillaFont::obfuscation_pool` builds that width→codepoints
+  map once at load time, restricted to codepoints this renderer can actually
+  draw (vanilla's own pool also includes the non-rasterisable `space`
+  provider; including it here would occasionally "obfuscate" a glyph into
+  invisible whitespace, so it is left out — a small, documented divergence).
+  `VanillaFont::obfuscation_rng` is a free-running `AtomicU64` advanced once
+  per obfuscated glyph, mirroring `Font.random`
+  (`Font.java:34`, `RandomSource.create()`, **never reseeded**) — every frame's
+  draw call advances the same stream further, which is what makes `§k` read as
+  continuously animated with no timer anywhere. Space is never a candidate for
+  replacement (`codepoint != 32`, `Font.java:85`) and never receives one
+  either, since it has no raster to begin with.
+
 ### Wiring, and why it is not an island
 
 `HudRenderer::render_with_item_models` is the single `HudGeometry::build_inner` call
@@ -92,10 +156,17 @@ site was converted from the free `text_w` to `b.text_width`.
   jar, and `hud/item_icon.rs`'s pixel gates assert against the fixed-width fallback.
   `HudGeometry::build` stays jar-free and byte-deterministic on purpose; use
   `build_with_font` when you want vanilla text from pure geometry.
-- **Bold / italic / obfuscated are not drawn.** The metrics exist
-  (`Font::advance_bold`, `metrics::ITALIC_SHEAR`); the draw side consumes `§l`/`§o`
-  as zero-width state and ignores them, as the old path did. Adding them is a change
-  in `hud/vanilla_font.rs`, not in `lodestone-assets`.
+- **Bold, italic, underline, strikethrough and obfuscated draw real geometry**
+  (issue #117), in `VanillaFont::legacy_run`/`glyph_styled`/`draw_ink` — see
+  [Styling](#styling) below. This used to be the module's one documented gap: the
+  metrics existed (`Font::advance_bold`, `metrics::ITALIC_SHEAR`) and
+  `Font::legacy_width` already zero-widthed `§k`/`§l`/`§m`/`§n`/`§o` correctly for
+  *layout*, but the draw side dropped every flag on the floor — a styling flag
+  parsed but never applied at draw time, the exact island shape `CLAUDE.md` names
+  for FANCY clouds, the skull renderer and `FluidRenderer`. `run()` (the plain
+  `&str` path `draw`/`draw_plain` use for titles, the XP number, etc.) is
+  deliberately untouched — a Rust `&str` can never carry a `§` code, so giving it
+  the styled glyph path would cost every unstyled draw a pool lookup for nothing.
 - **Only bitmap providers rasterise.** `unihex` (CJK) and `ttf` parse but contribute
   no glyphs, so those codepoints draw the hollow missing-glyph box.
 - **`§` pairs are zero-width in both fonts.** `hud::strip_legacy` exists so the
@@ -134,6 +205,11 @@ cargo test -p lodestone-shell  --test vanilla_font_pixels  -- --ignored --nocapt
 cargo test -p lodestone-shell --lib \
   hud::tests::xp_level_number_is_the_right_size_and_the_right_distance_above_the_bar \
   -- --ignored --nocapture
+# Styling (issue #117) — no GPU adapter needed, only the jar; see that
+# module's own doc comment for why these are `#[ignore]`d anyway.
+cargo test -p lodestone-shell --lib hud::vanilla_font::styling_tests -- --ignored --nocapture
+# The held-item name consumer (issue #126), including the #117 tie-in.
+cargo test -p lodestone-shell --test held_item_name_pixels -- --ignored --nocapture
 ```
 
 Both fail closed: a missing jar is a failure, not a skip. The pixel gate asserts
@@ -184,6 +260,10 @@ exact assertion would be impossible to state honestly.
   `generated/reports/blocks.json`. Otherwise discovered under `.cache/mc/<version>`.
 - `metrics::SHADOW_OFFSET`, `metrics::SHADOW_BRIGHTNESS`,
   `metrics::BEARING_TOP_BASE` in `lodestone-assets::font`.
+- `metrics::BOLD_OFFSET`, `metrics::ITALIC_SHEAR`, `metrics::ITALIC_SHEAR_SLOPE`,
+  `metrics::STRIKETHROUGH_Y`, `metrics::UNDERLINE_Y`, `metrics::EFFECT_THICKNESS`,
+  `metrics::EFFECT_LEAD_IN` — the styling constants, same module, same "named so
+  nothing hardcodes a magic number" rationale.
 - GUI scale is still hard-coded (`let scale = 2.0` in `hud::build_inner`); the font
   takes `scale` per call and does not care, but nothing exposes it yet.
 
