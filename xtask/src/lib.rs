@@ -2792,6 +2792,12 @@ fn parse_key_value_string(line: &str) -> Result<(&str, String)> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectednessReport {
     pub families: Vec<ConnectednessFamily>,
+    /// Families whose directory matched `is_protocol_family_name` but could
+    /// not be scanned — missing `packet_ids.rs` or `adapter.rs` — with the
+    /// reason. Named explicitly rather than dropped: the header claims
+    /// "denominators from each family," and that must stay true even for a
+    /// family that has bit-rotted to the point it no longer has these files.
+    pub skipped: Vec<(String, String)>,
 }
 
 impl ConnectednessReport {
@@ -2800,11 +2806,23 @@ impl ConnectednessReport {
         self.unclassified_count() > 0
     }
 
+    /// Total unclassified arms across **both** axes this tool measures:
+    /// clientbound dispatch (the original axis) and, per family capable of
+    /// hosting, serverbound decode's own join against
+    /// `crates/lodestone-server/src/server.rs`. Before this, the serverbound
+    /// axis had no gate at all and was exactly as ignorable as the bare
+    /// `53/69` encode count had been.
     #[must_use]
     pub fn unclassified_count(&self) -> usize {
         self.families
             .iter()
-            .map(|family| family.unclassified.len())
+            .map(|family| {
+                let mut count = family.unclassified.len();
+                if let ServerboundDecodeAxis::Measured(summary) = &family.serverbound_decode {
+                    count += summary.unclassified.len();
+                }
+                count
+            })
             .sum()
     }
 
@@ -2838,6 +2856,38 @@ impl ConnectednessReport {
                 family.play_serverbound_total,
                 family.examined_clientbound_arms
             );
+            match &family.serverbound_decode {
+                ServerboundDecodeAxis::NotApplicable(reason) => {
+                    let _ = write!(out, "; serverbound decode: not applicable ({reason})");
+                }
+                ServerboundDecodeAxis::Measured(summary) => {
+                    let _ = write!(
+                        out,
+                        "; serverbound decoded {}/{}, connected {}/{}; examined {} arm(s)",
+                        summary.decoded,
+                        summary.total,
+                        summary.connected,
+                        summary.total,
+                        summary.examined_arms
+                    );
+                    if !summary.stranded_names.is_empty() {
+                        let _ = write!(
+                            out,
+                            "; decode-but-stranded {} [{}]",
+                            summary.stranded_names.len(),
+                            summary.stranded_names.join(", ")
+                        );
+                    }
+                    if !summary.always_ignored_names.is_empty() {
+                        let _ = write!(
+                            out,
+                            "; decodes-to-Ignored-only {} [{}]",
+                            summary.always_ignored_names.len(),
+                            summary.always_ignored_names.join(", ")
+                        );
+                    }
+                }
+            }
             if !family.play_clientbound_internal.is_empty() {
                 let _ = write!(
                     out,
@@ -2848,7 +2898,7 @@ impl ConnectednessReport {
                 }
             }
             if !family.unclassified.is_empty() {
-                let _ = write!(out, "\n  UNCLASSIFIED:");
+                let _ = write!(out, "\n  UNCLASSIFIED (clientbound):");
                 for arm in &family.unclassified {
                     let _ = write!(
                         out,
@@ -2860,12 +2910,37 @@ impl ConnectednessReport {
             if !family.depth_limited.is_empty() {
                 let _ = write!(
                     out,
-                    "\n  depth-limited at cap {}:",
+                    "\n  depth-limited at cap {} (clientbound):",
                     family.delegation_depth_cap
                 );
                 for arm in &family.depth_limited {
                     let _ = write!(out, "\n    - {} at {}:{}", arm.packet, arm.file, arm.line);
                 }
+            }
+            if let ServerboundDecodeAxis::Measured(summary) = &family.serverbound_decode {
+                if !summary.unclassified.is_empty() {
+                    let _ = write!(out, "\n  UNCLASSIFIED (serverbound decode):");
+                    for arm in &summary.unclassified {
+                        let _ = write!(
+                            out,
+                            "\n    - {} at {}:{} ({})",
+                            arm.packet, arm.file, arm.line, arm.reason
+                        );
+                    }
+                }
+                if !summary.depth_limited.is_empty() {
+                    let _ = write!(out, "\n  depth-limited (serverbound decode):");
+                    for arm in &summary.depth_limited {
+                        let _ =
+                            write!(out, "\n    - {} at {}:{}", arm.packet, arm.file, arm.line);
+                    }
+                }
+            }
+        }
+        if !self.skipped.is_empty() {
+            let _ = write!(out, "\nSKIPPED (could not be scanned):");
+            for (family, reason) in &self.skipped {
+                let _ = write!(out, "\n  - {family}: {reason}");
             }
         }
         out
@@ -2922,6 +2997,11 @@ pub struct ConnectednessFamily {
     pub unclassified: Vec<ConnectednessUnknown>,
     pub depth_limited: Vec<ConnectednessUnknown>,
     pub delegation_depth_cap: usize,
+    /// The serverbound **decode** axis — distinct from
+    /// `play_serverbound_encoded` above, which is client-side encode. `None`
+    /// families (no `src/server_protocol.rs`) don't implement
+    /// `ServerProtocol` and so cannot host; see [`ServerboundDecodeAxis`].
+    pub serverbound_decode: ServerboundDecodeAxis,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2930,6 +3010,51 @@ pub struct ConnectednessUnknown {
     pub file: String,
     pub line: usize,
     pub reason: String,
+}
+
+/// Whether a family's serverbound **decode** connectedness could be measured
+/// at all, before asking how well-connected it is.
+///
+/// Only `v770` implements `ServerProtocol` today (`lodestone-registry` keeps
+/// `Family` and `ServerFamily` as separate tables for exactly this reason —
+/// joining and hosting are different sets). Reporting "0/69" for a family
+/// that structurally cannot host would be exactly the kind of false claim
+/// this tool exists to avoid making about itself.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ServerboundDecodeAxis {
+    /// No `src/server_protocol.rs`, or one with no `impl ServerProtocol for`.
+    NotApplicable(String),
+    Measured(ServerboundDecodeSummary),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServerboundDecodeSummary {
+    /// Denominator: total `play::serverbound` packet ids for this family.
+    pub total: usize,
+    /// Number of `State::Play if packet_id == play::serverbound::…` arms the
+    /// scanner found in `server_protocol.rs`.
+    pub examined_arms: usize,
+    /// Arms that decode to at least one real (non-`Ignored`) `ServerBound`
+    /// variant, or that decode but only ever produce `Ignored` — either way,
+    /// "decoded" means the scanner reached a confident verdict about what
+    /// the arm produces.
+    pub decoded: usize,
+    /// Of `decoded`, how many produce a variant that also has a
+    /// **non-empty** match arm somewhere in
+    /// `crates/lodestone-server/src/server.rs` — the second, cross-crate
+    /// hop. A variant with only empty (`=> {}`) arms counts as stranded, not
+    /// connected, even though the packet decoded successfully.
+    pub connected: usize,
+    /// Decoded to a real variant, but every arm handling that variant in
+    /// `server.rs` is empty — decoded-but-stranded's serverbound analogue.
+    pub stranded_names: Vec<String>,
+    /// Decode arm exists and is unambiguous, but every branch of it produces
+    /// `ServerBound::Ignored` — a vacuous decode, distinct from "no arm at
+    /// all" (which is simply not in this list, since `examined_arms` is
+    /// smaller than `total`).
+    pub always_ignored_names: Vec<String>,
+    pub unclassified: Vec<ConnectednessUnknown>,
+    pub depth_limited: Vec<ConnectednessUnknown>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2974,8 +3099,9 @@ enum ConsumerOutlet {
 pub fn connectedness_report(workspace_root: &Path) -> Result<ConnectednessReport> {
     let protocol_root = workspace_root.join("crates/protocol");
     let mut families = Vec::new();
+    let mut skipped = Vec::new();
     if !protocol_root.exists() {
-        return Ok(ConnectednessReport { families });
+        return Ok(ConnectednessReport { families, skipped });
     }
 
     for entry in std::fs::read_dir(&protocol_root)
@@ -2989,13 +3115,40 @@ pub fn connectedness_report(workspace_root: &Path) -> Result<ConnectednessReport
         if !is_protocol_family_name(&family) {
             continue;
         }
-        if family != "v770" {
-            continue;
-        }
         let family_dir = entry.path();
         let packet_ids_path = family_dir.join("src/generated/packet_ids.rs");
         let adapter_path = family_dir.join("src/adapter.rs");
-        if !packet_ids_path.exists() || !adapter_path.exists() {
+        // Every protocol family is scanned — there is no per-family opt-out
+        // here. A family missing either file cannot be measured, and that is
+        // reported by name rather than silently dropped from the family
+        // list, per the false claim this replaced: the report header says
+        // "denominators from each family," and a family that vanishes with
+        // no trace makes that a lie for exactly the families most likely to
+        // bit-rot unnoticed (the dormant v47/v340/v735 lines).
+        if !packet_ids_path.exists() {
+            skipped.push((
+                family.clone(),
+                format!(
+                    "missing {}",
+                    packet_ids_path
+                        .strip_prefix(workspace_root)
+                        .unwrap_or(&packet_ids_path)
+                        .display()
+                ),
+            ));
+            continue;
+        }
+        if !adapter_path.exists() {
+            skipped.push((
+                family.clone(),
+                format!(
+                    "missing {}",
+                    adapter_path
+                        .strip_prefix(workspace_root)
+                        .unwrap_or(&adapter_path)
+                        .display()
+                ),
+            ));
             continue;
         }
         let packet_ids_source = std::fs::read_to_string(&packet_ids_path)
@@ -3014,6 +3167,8 @@ pub fn connectedness_report(workspace_root: &Path) -> Result<ConnectednessReport
             .unwrap_or(&adapter_path)
             .display()
             .to_string();
+        let serverbound_decode =
+            serverbound_decode_summary(workspace_root, &family_dir, &play_ids.serverbound)?;
 
         let mut stranded = Vec::new();
         let mut internal = Vec::new();
@@ -3075,12 +3230,14 @@ pub fn connectedness_report(workspace_root: &Path) -> Result<ConnectednessReport
             unclassified,
             depth_limited,
             delegation_depth_cap: depth_cap,
+            serverbound_decode,
         });
     }
     families.sort_by(|a, b| {
         protocol_family_sort_key(&a.family).cmp(&protocol_family_sort_key(&b.family))
     });
-    Ok(ConnectednessReport { families })
+    skipped.sort();
+    Ok(ConnectednessReport { families, skipped })
 }
 
 fn is_protocol_family_name(name: &str) -> bool {
@@ -3410,7 +3567,6 @@ fn matching_brace(source: &str, open: usize) -> Option<usize> {
     let mut in_line_comment = false;
     let mut in_block_comment = false;
     let mut in_string = false;
-    let mut in_char = false;
     let mut escaped = false;
     while i < bytes.len() {
         let b = bytes[i];
@@ -3442,13 +3598,212 @@ fn matching_brace(source: &str, open: usize) -> Option<usize> {
             i += 1;
             continue;
         }
-        if in_char {
+        if b == b'/' && next == Some(b'/') {
+            in_line_comment = true;
+            i += 2;
+            continue;
+        }
+        if b == b'/' && next == Some(b'*') {
+            in_block_comment = true;
+            i += 2;
+            continue;
+        }
+        if b == b'"' {
+            in_string = true;
+            i += 1;
+            continue;
+        }
+        if b == b'\'' {
+            // A lifetime (`'a`, `'static`, `'_`) never closes, so treating
+            // every `'` as entering a stateful "in a char literal" mode gets
+            // stuck for the rest of the scan the first time one appears —
+            // see `char_literal_span`'s doc comment for where this bit.
+            i = char_literal_span(bytes, i).unwrap_or(i + 1);
+            continue;
+        }
+        if b == b'{' {
+            depth += 1;
+        } else if b == b'}' {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The byte offset just past a Rust char literal beginning at `quote_pos`
+/// (which must index a `'`), or `None` if what follows isn't actually a
+/// closed char literal.
+///
+/// This distinguishes a real char literal (`'a'`, `'\n'`, `'\u{1F600}'`)
+/// from a lifetime or bare apostrophe (`'a`, `'static`, `'_`) by *looking
+/// ahead* for a closing quote rather than tracking "am I inside a char
+/// literal" as scan state. The stateful version is the trap: a lifetime
+/// never closes, so the first one flips a scanner into "in a char literal"
+/// for the rest of the file, silently disabling comment/string/brace
+/// detection from that point on. Measured here: `find_outside_comments`
+/// scanning `crates/lodestone-server/src/server.rs` — which has
+/// `fn container_title(menu: &str) -> &'static str` — panicked on a
+/// multi-byte character hundreds of lines later, because the stateful
+/// version had been "inside a char literal" (and therefore blindly
+/// advancing one byte at a time without checking for UTF-8 boundaries
+/// before its next real slice) ever since `'static`.
+fn char_literal_span(bytes: &[u8], quote_pos: usize) -> Option<usize> {
+    let mut j = quote_pos + 1;
+    if j >= bytes.len() {
+        return None;
+    }
+    if bytes[j] == b'\\' {
+        j += 1;
+        match *bytes.get(j)? {
+            b'u' => {
+                j += 1;
+                if bytes.get(j) != Some(&b'{') {
+                    return None;
+                }
+                j += 1;
+                while bytes.get(j).is_some_and(|b| *b != b'}') {
+                    j += 1;
+                }
+                if j >= bytes.len() {
+                    return None;
+                }
+                j += 1; // consume '}'
+            }
+            b'\'' | b'"' | b'\\' | b'n' | b'r' | b't' | b'0' => j += 1,
+            b'x' => {
+                j += 1;
+                for _ in 0..2 {
+                    if bytes.get(j).is_some_and(u8::is_ascii_hexdigit) {
+                        j += 1;
+                    }
+                }
+            }
+            _ => return None,
+        }
+    } else {
+        // A single (possibly multi-byte UTF-8) character.
+        let width = match bytes[j] {
+            b0 if b0 & 0x80 == 0 => 1,
+            b0 if b0 & 0xE0 == 0xC0 => 2,
+            b0 if b0 & 0xF0 == 0xE0 => 3,
+            b0 if b0 & 0xF8 == 0xF0 => 4,
+            _ => 1,
+        };
+        j += width;
+    }
+    if bytes.get(j) == Some(&b'\'') {
+        Some(j + 1)
+    } else {
+        None
+    }
+}
+
+fn line_number(source: &str, byte_offset: usize) -> usize {
+    source[..byte_offset.min(source.len())]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+        + 1
+}
+
+// ---------------------------------------------------------------------------
+// Serverbound decode (Job 1b): a second connectedness axis, entirely
+// separate from the clientbound scanner above.
+//
+// `server_protocol.rs`'s `ServerProtocol::decode` dispatches with match
+// arms, not the clientbound adapter's `if packet_id == … { }` chain, and
+// match arms are not reliably brace-delimited: `=> ServerBound::Ignored,` is
+// a single expression ending at a comma, not a `{}` block. A scanner that
+// reused the clientbound classifier's `find('{')` verbatim would silently
+// swallow the *next* arm's body whenever the current one has no brace of
+// its own — see `match_arm_body` below and its test with a deliberately
+// unbraced arm.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ServerboundDecodeArm {
+    packet: String,
+    line: usize,
+    verdict: ServerboundDecodeVerdict,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ServerboundDecodeVerdict {
+    /// Produces at least one real (non-`Ignored`) `ServerBound` variant,
+    /// possibly only on some branches (e.g. `PLAYER_ACTION`, whose ordinals
+    /// 3-7 fall through to `Ignored` but 0-2 produce `BlockAction`).
+    Emits {
+        variants: Vec<String>,
+        #[allow(dead_code)]
+        via: Option<String>,
+    },
+    /// A recognizable decode arm whose every branch produces
+    /// `ServerBound::Ignored` — the serverbound analogue of
+    /// `ClientboundVerdict::DecodedButStranded`.
+    AlwaysIgnored,
+    Unclassified {
+        reason: String,
+        depth_limited: bool,
+    },
+}
+
+/// Finds the end of a match arm's body starting right after its `=>`.
+///
+/// Handles both `{ … }` bodies (delegating to [`matching_brace`], which is
+/// already comment/string/char-aware) and bare expression bodies that end
+/// at the next **top-level** comma — depth-aware across `(){}[]` so a bare
+/// expression containing a struct literal, call, or index is not truncated
+/// early. If no top-level comma is found before a closing bracket would
+/// take the depth negative (the boundary of whatever encloses this arm —
+/// typically the match's own closing brace), the scan stops there instead,
+/// which also correctly handles a final arm with no trailing comma.
+fn match_arm_body(source: &str, arrow_end: usize) -> Option<(usize, usize)> {
+    let bytes = source.as_bytes();
+    let mut i = arrow_end;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if bytes.get(i) == Some(&b'{') {
+        let close = matching_brace(source, i)?;
+        return Some((i + 1, close));
+    }
+
+    let start = i;
+    let mut depth: i32 = 0;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut in_string = false;
+    let mut escaped = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        let next = bytes.get(i + 1).copied();
+        if in_line_comment {
+            if b == b'\n' {
+                in_line_comment = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_block_comment {
+            if b == b'*' && next == Some(b'/') {
+                in_block_comment = false;
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if in_string {
             if escaped {
                 escaped = false;
             } else if b == b'\\' {
                 escaped = true;
-            } else if b == b'\'' {
-                in_char = false;
+            } else if b == b'"' {
+                in_string = false;
             }
             i += 1;
             continue;
@@ -3469,29 +3824,424 @@ fn matching_brace(source: &str, open: usize) -> Option<usize> {
             continue;
         }
         if b == b'\'' {
-            in_char = true;
+            // See `char_literal_span`'s doc comment: a lifetime never
+            // closes, so a stateful "in a char literal" flag here would get
+            // stuck exactly the way it did in `matching_brace` before this
+            // fix, this time swallowing braces/brackets/parens into the
+            // depth count that were never meant to be counted.
+            i = char_literal_span(bytes, i).unwrap_or(i + 1);
+            continue;
+        }
+        match b {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                if depth == 0 {
+                    return Some((start, i));
+                }
+                depth -= 1;
+            }
+            b',' if depth == 0 => return Some((start, i)),
+            _ => {}
+        }
+        i += 1;
+    }
+    Some((start, i))
+}
+
+/// Scans `server_protocol.rs` for `State::Play if packet_id ==
+/// play::serverbound::NAME` decode arms and classifies each one.
+fn classify_serverbound_decode(
+    source: &str,
+    depth_cap: usize,
+) -> Result<BTreeMap<String, ServerboundDecodeArm>> {
+    let functions = extract_functions(source)?;
+    let prefix = "if packet_id == play::serverbound::";
+    let mut search_from = 0;
+    let mut arms = BTreeMap::new();
+    while let Some(relative) = source[search_from..].find(prefix) {
+        let start = search_from + relative;
+        let packet_start = start + prefix.len();
+        let packet_end = source[packet_start..]
+            .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .map(|offset| packet_start + offset)
+            .ok_or_else(|| anyhow!("unterminated serverbound packet id at byte {packet_start}"))?;
+        let packet = source[packet_start..packet_end].to_owned();
+        let arrow = source[packet_end..]
+            .find("=>")
+            .map(|offset| packet_end + offset)
+            .ok_or_else(|| anyhow!("packet arm {packet} has no `=>`"))?;
+        let (body_start, body_end) = match_arm_body(source, arrow + 2)
+            .ok_or_else(|| anyhow!("packet arm {packet} has an unterminated body"))?;
+        let body = &source[body_start..body_end];
+        let line = line_number(source, start);
+        let verdict = classify_serverbound_body(body, &functions, depth_cap, None);
+        if arms
+            .insert(
+                packet.clone(),
+                ServerboundDecodeArm {
+                    packet,
+                    line,
+                    verdict,
+                },
+            )
+            .is_some()
+        {
+            bail!("duplicate play serverbound decode arm");
+        }
+        search_from = body_end;
+    }
+    Ok(arms)
+}
+
+/// All distinct `ServerBound::Name` variant names referenced in `body`, in
+/// first-seen order.
+fn serverbound_variants_in(body: &str) -> Vec<String> {
+    let prefix = "ServerBound::";
+    let mut names = Vec::new();
+    let mut start = 0;
+    while let Some(pos) = body[start..].find(prefix) {
+        let begin = start + pos + prefix.len();
+        let end = body[begin..]
+            .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .map_or(body.len(), |offset| begin + offset);
+        let name = body[begin..end].to_owned();
+        if name.is_empty() {
+            start = begin.max(start + pos + prefix.len());
+            continue;
+        }
+        if !names.contains(&name) {
+            names.push(name);
+        }
+        start = end;
+    }
+    names
+}
+
+fn classify_serverbound_body(
+    body: &str,
+    functions: &BTreeMap<String, FunctionBody<'_>>,
+    remaining_depth: usize,
+    via: Option<String>,
+) -> ServerboundDecodeVerdict {
+    let variants = serverbound_variants_in(body);
+    let real: Vec<String> = variants
+        .iter()
+        .filter(|name| name.as_str() != "Ignored")
+        .cloned()
+        .collect();
+    if !real.is_empty() {
+        return ServerboundDecodeVerdict::Emits { variants: real, via };
+    }
+
+    let delegates = delegate_function_calls(body, functions);
+    if !delegates.is_empty() {
+        if remaining_depth == 0 {
+            return ServerboundDecodeVerdict::Unclassified {
+                reason: format!(
+                    "delegation depth cap reached while following {}",
+                    delegates.join(", ")
+                ),
+                depth_limited: true,
+            };
+        }
+        let mut saw_unclassified = None;
+        for delegate in delegates {
+            let Some(function) = functions.get(&delegate) else {
+                continue;
+            };
+            match classify_serverbound_body(
+                function.body,
+                functions,
+                remaining_depth - 1,
+                Some(delegate.clone()),
+            ) {
+                ServerboundDecodeVerdict::Emits { variants, .. } => {
+                    return ServerboundDecodeVerdict::Emits {
+                        variants,
+                        via: Some(delegate),
+                    };
+                }
+                ServerboundDecodeVerdict::AlwaysIgnored => {}
+                ServerboundDecodeVerdict::Unclassified {
+                    reason,
+                    depth_limited,
+                } => {
+                    saw_unclassified = Some((reason, depth_limited));
+                }
+            }
+        }
+        if let Some((reason, depth_limited)) = saw_unclassified {
+            return ServerboundDecodeVerdict::Unclassified {
+                reason,
+                depth_limited,
+            };
+        }
+    }
+
+    if !variants.is_empty() {
+        // Every branch we could see produced `ServerBound::Ignored` and
+        // nothing else — a recognized, vacuous decode.
+        return ServerboundDecodeVerdict::AlwaysIgnored;
+    }
+
+    ServerboundDecodeVerdict::Unclassified {
+        reason: "no recognized ServerBound variant, explicit Ignored, or classifiable delegate"
+            .to_owned(),
+        depth_limited: false,
+    }
+}
+
+/// Finds the next occurrence of `needle` in `source` at or after `from`,
+/// skipping any occurrence inside a `//`/`/* */` comment or a string/char
+/// literal.
+///
+/// This is the piece the clientbound scanner never needed: `adapter.rs`
+/// doesn't carry doc comments that quote its own dispatch tokens, but
+/// `crates/lodestone-server/src/server.rs` has several
+/// (`/// … [`ServerBound::LoginStart`] …`), and a plain substring search
+/// would let prose manufacture a false match/connection.
+fn find_outside_comments(source: &str, from: usize, needle: &str) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let needle_bytes = needle.as_bytes();
+    let mut i = from;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut in_string = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        let next = bytes.get(i + 1).copied();
+        if in_line_comment {
+            if b == b'\n' {
+                in_line_comment = false;
+            }
             i += 1;
             continue;
         }
-        if b == b'{' {
-            depth += 1;
-        } else if b == b'}' {
-            depth = depth.checked_sub(1)?;
-            if depth == 0 {
-                return Some(i);
+        if in_block_comment {
+            if b == b'*' && next == Some(b'/') {
+                in_block_comment = false;
+                i += 2;
+            } else {
+                i += 1;
             }
+            continue;
+        }
+        if in_string {
+            // `escaped` only needs to survive one iteration, so it's local
+            // rather than hoisted — unlike `matching_brace`'s, this loop
+            // never needs to re-enter the string state mid-escape from
+            // elsewhere.
+            let mut j = i;
+            let mut escaped = false;
+            while j < bytes.len() {
+                if escaped {
+                    escaped = false;
+                } else if bytes[j] == b'\\' {
+                    escaped = true;
+                } else if bytes[j] == b'"' {
+                    j += 1;
+                    break;
+                }
+                j += 1;
+            }
+            i = j;
+            in_string = false;
+            continue;
+        }
+        if b == b'/' && next == Some(b'/') {
+            in_line_comment = true;
+            i += 2;
+            continue;
+        }
+        if b == b'/' && next == Some(b'*') {
+            in_block_comment = true;
+            i += 2;
+            continue;
+        }
+        if b == b'"' {
+            in_string = true;
+            i += 1;
+            continue;
+        }
+        if b == b'\'' {
+            // See `char_literal_span`'s doc comment for why this can't be a
+            // stateful "in a char literal" flag: a lifetime never closes.
+            i = char_literal_span(bytes, i).unwrap_or(i + 1);
+            continue;
+        }
+        // Byte-level comparison, never `source[i..].starts_with(needle)`:
+        // `i` is a valid char boundary in every branch above, but a needle
+        // match is checked on every remaining byte including UTF-8
+        // continuation bytes from any multi-byte character elsewhere in the
+        // file, and `str` indexing panics on those. Comparing bytes against
+        // an ASCII needle can't panic and gives the identical answer.
+        if bytes[i..].starts_with(needle_bytes) {
+            return Some(i);
         }
         i += 1;
     }
     None
 }
 
-fn line_number(source: &str, byte_offset: usize) -> usize {
-    source[..byte_offset.min(source.len())]
-        .bytes()
-        .filter(|byte| *byte == b'\n')
-        .count()
-        + 1
+/// Whether `ServerBound::{variant}` has at least one **connected** (i.e.
+/// non-empty-bodied) match arm anywhere in `dispatch_source`
+/// (`crates/lodestone-server/src/server.rs`) — the cross-crate second hop.
+///
+/// A variant can legitimately appear more than once (the Play-state
+/// dispatcher has real arms; an earlier handshake/login-state dispatcher
+/// no-ops every Play variant, and vice versa for its own variants) — so this
+/// takes the **best** verdict across all occurrences, not the first.
+fn serverbound_variant_is_connected(dispatch_source: &str, variant: &str) -> Result<bool> {
+    let needle = format!("ServerBound::{variant}");
+    let mut search_from = 0;
+    let mut found_any = false;
+    while let Some(pos) = find_outside_comments(dispatch_source, search_from, &needle) {
+        found_any = true;
+        let after = pos + needle.len();
+        let Some(arrow) = find_outside_comments(dispatch_source, after, "=>") else {
+            bail!("ServerBound::{variant} pattern at byte {pos} has no `=>`");
+        };
+        let (body_start, body_end) = match_arm_body(dispatch_source, arrow + 2).ok_or_else(
+            || anyhow!("ServerBound::{variant} arm at byte {pos} has an unterminated body"),
+        )?;
+        if !dispatch_source[body_start..body_end].trim().is_empty() {
+            return Ok(true);
+        }
+        search_from = body_end;
+    }
+    if !found_any {
+        bail!("ServerBound::{variant} has no match arm anywhere in the dispatch source");
+    }
+    Ok(false)
+}
+
+/// Builds the serverbound decode axis for one family: `NotApplicable` if it
+/// has no `src/server_protocol.rs` (only `v770` implements `ServerProtocol`
+/// today), otherwise a full [`ServerboundDecodeSummary`] joined against
+/// `crates/lodestone-server/src/server.rs`.
+fn serverbound_decode_summary(
+    workspace_root: &Path,
+    family_dir: &Path,
+    serverbound: &[PlayPacketEntry],
+) -> Result<ServerboundDecodeAxis> {
+    let server_protocol_path = family_dir.join("src/server_protocol.rs");
+    if !server_protocol_path.exists() {
+        return Ok(ServerboundDecodeAxis::NotApplicable(
+            "no src/server_protocol.rs — family does not implement ServerProtocol, so it \
+             cannot host"
+                .to_owned(),
+        ));
+    }
+    let source = std::fs::read_to_string(&server_protocol_path)
+        .with_context(|| format!("read {}", server_protocol_path.display()))?;
+    if !source.contains("impl ServerProtocol for") {
+        return Ok(ServerboundDecodeAxis::NotApplicable(
+            "src/server_protocol.rs exists but has no `impl ServerProtocol for` — not wired \
+             as a host"
+                .to_owned(),
+        ));
+    }
+
+    let rel_path = server_protocol_path
+        .strip_prefix(workspace_root)
+        .unwrap_or(&server_protocol_path)
+        .display()
+        .to_string();
+    let depth_cap = 4;
+    let arms = classify_serverbound_decode(&source, depth_cap)
+        .with_context(|| format!("classify {}", server_protocol_path.display()))?;
+
+    let dispatch_path = workspace_root.join("crates/lodestone-server/src/server.rs");
+    let dispatch_source = if dispatch_path.exists() {
+        Some(
+            std::fs::read_to_string(&dispatch_path)
+                .with_context(|| format!("read {}", dispatch_path.display()))?,
+        )
+    } else {
+        None
+    };
+
+    let mut decoded = 0usize;
+    let mut connected = 0usize;
+    let mut stranded = Vec::new();
+    let mut always_ignored = Vec::new();
+    let mut unclassified = Vec::new();
+    let mut depth_limited = Vec::new();
+    let mut connectivity_cache: BTreeMap<String, bool> = BTreeMap::new();
+
+    for arm in arms.values() {
+        match &arm.verdict {
+            ServerboundDecodeVerdict::Emits { variants, .. } => {
+                decoded += 1;
+                let Some(dispatch_source) = dispatch_source.as_deref() else {
+                    unclassified.push(ConnectednessUnknown {
+                        packet: arm.packet.clone(),
+                        file: rel_path.clone(),
+                        line: arm.line,
+                        reason: "decodes to a real ServerBound variant, but \
+                                 crates/lodestone-server/src/server.rs is absent so the \
+                                 second hop cannot be measured"
+                            .to_owned(),
+                    });
+                    continue;
+                };
+                let mut any_connected = false;
+                for variant in variants {
+                    let is_connected = if let Some(cached) = connectivity_cache.get(variant) {
+                        *cached
+                    } else {
+                        let joined = serverbound_variant_is_connected(dispatch_source, variant)
+                            .with_context(|| {
+                                format!("join ServerBound::{variant} against {}", dispatch_path.display())
+                            })?;
+                        connectivity_cache.insert(variant.clone(), joined);
+                        joined
+                    };
+                    any_connected |= is_connected;
+                }
+                if any_connected {
+                    connected += 1;
+                } else {
+                    stranded.push(arm.packet.clone());
+                }
+            }
+            ServerboundDecodeVerdict::AlwaysIgnored => {
+                decoded += 1;
+                always_ignored.push(arm.packet.clone());
+            }
+            ServerboundDecodeVerdict::Unclassified {
+                reason,
+                depth_limited: limited,
+            } => {
+                let unknown = ConnectednessUnknown {
+                    packet: arm.packet.clone(),
+                    file: rel_path.clone(),
+                    line: arm.line,
+                    reason: reason.clone(),
+                };
+                if *limited {
+                    depth_limited.push(unknown);
+                } else {
+                    unclassified.push(unknown);
+                }
+            }
+        }
+    }
+    stranded.sort();
+    always_ignored.sort();
+    unclassified.sort_by(|a, b| a.packet.cmp(&b.packet));
+    depth_limited.sort_by(|a, b| a.packet.cmp(&b.packet));
+
+    Ok(ServerboundDecodeAxis::Measured(ServerboundDecodeSummary {
+        total: serverbound.len(),
+        examined_arms: arms.len(),
+        decoded,
+        connected,
+        stranded_names: stranded,
+        always_ignored_names: always_ignored,
+        unclassified,
+        depth_limited,
+    }))
 }
 
 /// One dependency edge that points at the version family being deleted.
@@ -8199,7 +8949,34 @@ fn handle_play(
         let workspace = connectedness_fixture_workspace()?;
 
         let report = connectedness_report(&workspace)?;
-        assert_eq!(report.families.len(), 1);
+        // v9 (the fixture's other family, with an empty adapter.rs and an
+        // all-IGNORED packet_ids.rs) is measured too now that the hard
+        // `family != "v770"` filter is gone — the whole point of job 1a.
+        assert_eq!(
+            report.families.iter().map(|f| f.family.as_str()).collect::<Vec<_>>(),
+            vec!["v9", "v770"]
+        );
+        assert!(
+            report.skipped.is_empty(),
+            "fixture families both have packet_ids.rs and adapter.rs: {:?}",
+            report.skipped
+        );
+        let v9 = report
+            .families
+            .iter()
+            .find(|family| family.family == "v9")
+            .expect("v9 fixture family exists");
+        assert_eq!(v9.play_clientbound_total, 1);
+        assert_eq!(v9.examined_clientbound_arms, 0);
+        assert_eq!(
+            v9.serverbound_decode,
+            ServerboundDecodeAxis::NotApplicable(
+                "no src/server_protocol.rs — family does not implement ServerProtocol, so it \
+                 cannot host"
+                    .to_owned()
+            )
+        );
+
         let family = report
             .families
             .iter()
@@ -8217,10 +8994,228 @@ fn handle_play(
         assert_eq!(family.play_serverbound_encoded, 1);
         assert_eq!(family.examined_clientbound_arms, 5);
         assert_eq!(family.unclassified.len(), 1);
+        // This fixture's v770 has no src/server_protocol.rs either — the
+        // fixture predates job 1b and is intentionally left that way so this
+        // test still isolates the clientbound axis. The serverbound-decode
+        // axis has its own fixture and tests below.
+        assert_eq!(
+            family.serverbound_decode,
+            ServerboundDecodeAxis::NotApplicable(
+                "no src/server_protocol.rs — family does not implement ServerProtocol, so it \
+                 cannot host"
+                    .to_owned()
+            )
+        );
         assert!(report.render().contains(
             "v770  clientbound decoded 4/5; emits 3/5; decoded-but-stranded 1 [SET_OBJECTIVE]"
         ));
         assert!(!report.render().contains("consumed"));
+        Ok(())
+    }
+
+    #[test]
+    fn connectedness_report_names_families_it_could_not_scan_instead_of_dropping_them() -> Result<()>
+    {
+        let workspace = connectedness_fixture_workspace()?;
+        // A third family directory matching the `vNN` naming convention but
+        // missing `adapter.rs` — standing in for a family that has
+        // bit-rotted past scannability. Before job 1a this test would have
+        // been moot (only v770 was ever scanned); now every `vNN` directory
+        // is examined, so a family that can't be measured has to say so.
+        std::fs::create_dir_all(workspace.join("crates/protocol/v5/src/generated"))?;
+        std::fs::write(
+            workspace.join("crates/protocol/v5/src/generated/packet_ids.rs"),
+            "pub mod play { pub mod clientbound { pub const X: i32 = 0; pub static ENTRIES: &[(&str, i32)] = &[(\"minecraft:x\", X)]; } pub mod serverbound { pub const X: i32 = 0; pub static ENTRIES: &[(&str, i32)] = &[(\"minecraft:x\", X)]; } }",
+        )?;
+
+        let report = connectedness_report(&workspace)?;
+        assert_eq!(
+            report
+                .families
+                .iter()
+                .map(|f| f.family.as_str())
+                .collect::<Vec<_>>(),
+            vec!["v9", "v770"],
+            "v5 has no adapter.rs and must be named as skipped, not silently absent"
+        );
+        assert_eq!(report.skipped.len(), 1);
+        assert_eq!(report.skipped[0].0, "v5");
+        assert!(
+            report.skipped[0].1.contains("adapter.rs"),
+            "skip reason should name the missing file: {}",
+            report.skipped[0].1
+        );
+        assert!(report.render().contains("SKIPPED"));
+        assert!(report.render().contains("v5"));
+        Ok(())
+    }
+
+    #[test]
+    fn match_arm_body_stops_at_top_level_comma_for_bare_expression_arms() {
+        // The naive scanner this replaces (`find('{')` from the clientbound
+        // classifier) would, on FOO's bare-expression arm, keep searching
+        // and swallow BAR's entire braced body instead.
+        let source = "State::Play if packet_id == play::serverbound::FOO => ServerBound::Ignored,\nState::Play if packet_id == play::serverbound::BAR => {\n    ServerBound::Bar { id: 1 }\n}\n";
+        let arrow = source.find("=>").expect("first arrow");
+        let (start, end) = match_arm_body(source, arrow + 2).expect("body found");
+        let body = source[start..end].trim();
+        assert_eq!(body, "ServerBound::Ignored");
+        assert!(
+            !body.contains("Bar"),
+            "swallowed the next arm's body: {body:?}"
+        );
+    }
+
+    #[test]
+    fn match_arm_body_handles_braced_arms_and_nested_delimiters_before_the_comma() {
+        let source = "=> { ServerBound::Foo { id: vec![1, 2].len() as i64 } },\nnext";
+        let (start, end) = match_arm_body(source, 2).expect("body found");
+        assert_eq!(
+            source[start..end].trim(),
+            "ServerBound::Foo { id: vec![1, 2].len() as i64 }"
+        );
+
+        let source2 = "=> call(a, (b, c), [d, e]),\nnext";
+        let (start2, end2) = match_arm_body(source2, 2).expect("body found");
+        assert_eq!(source2[start2..end2].trim(), "call(a, (b, c), [d, e])");
+    }
+
+    #[test]
+    fn find_outside_comments_skips_matches_inside_comments_and_strings() {
+        let source = "// ServerBound::Foo mentioned here should not count\nlet s = \"ServerBound::Foo also should not count\";\nServerBound::Foo { x } => real_body(),\n";
+        let found = find_outside_comments(source, 0, "ServerBound::Foo").expect("real occurrence found");
+        let snippet = &source[found..(found + 24).min(source.len())];
+        assert!(
+            snippet.contains("Foo { x }"),
+            "found the wrong occurrence: {snippet:?}"
+        );
+    }
+
+    #[test]
+    fn classify_serverbound_decode_ground_truths_emits_always_ignored_and_unclassified()
+    -> Result<()> {
+        let source = r#"
+fn decode_mystery_action(payload: &[u8]) -> ServerBound {
+    match decode_full::<MysteryAction>(payload) {
+        Some(m) => ServerBound::MysteryAction { id: m.id },
+        None => ServerBound::Ignored,
+    }
+}
+
+impl ServerProtocol for V999ServerProtocol {
+    fn decode(&self, state: lodestone_core::State, packet_id: i32, payload: &[u8]) -> ServerBound {
+        match state {
+            State::Play if packet_id == play::serverbound::KEEP_ALIVE => {
+                match decode_full::<KeepAlive>(payload) {
+                    Some(k) => ServerBound::KeepAlive { id: k.id },
+                    None => ServerBound::Ignored,
+                }
+            }
+            State::Play if packet_id == play::serverbound::PING => ServerBound::Ignored,
+            State::Play if packet_id == play::serverbound::MYSTERY_ACTION => {
+                decode_mystery_action(payload)
+            }
+            State::Play if packet_id == play::serverbound::WEIRD => {
+                external_helper(payload)
+            }
+            _ => ServerBound::Ignored,
+        }
+    }
+}
+"#;
+        let arms = classify_serverbound_decode(source, 4)?;
+        assert_eq!(
+            arms.get("KEEP_ALIVE").map(|arm| &arm.verdict),
+            Some(&ServerboundDecodeVerdict::Emits {
+                variants: vec!["KeepAlive".to_owned()],
+                via: None,
+            })
+        );
+        assert_eq!(
+            arms.get("PING").map(|arm| &arm.verdict),
+            Some(&ServerboundDecodeVerdict::AlwaysIgnored)
+        );
+        assert_eq!(
+            arms.get("MYSTERY_ACTION").map(|arm| &arm.verdict),
+            Some(&ServerboundDecodeVerdict::Emits {
+                variants: vec!["MysteryAction".to_owned()],
+                via: Some("decode_mystery_action".to_owned()),
+            })
+        );
+        assert!(matches!(
+            arms.get("WEIRD").map(|arm| &arm.verdict),
+            Some(ServerboundDecodeVerdict::Unclassified { .. })
+        ));
+        assert!(
+            arms.len() >= 4,
+            "anti-vacuity: classifier saw {}",
+            arms.len()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn classify_serverbound_decode_reports_depth_limited_when_cap_is_too_low() -> Result<()> {
+        let source = r#"
+fn inner(payload: &[u8]) -> ServerBound {
+    ServerBound::Foo { id: 1 }
+}
+fn middle(payload: &[u8]) -> ServerBound {
+    inner(payload)
+}
+impl ServerProtocol for V999ServerProtocol {
+    fn decode(&self, state: lodestone_core::State, packet_id: i32, payload: &[u8]) -> ServerBound {
+        match state {
+            State::Play if packet_id == play::serverbound::CHAINED => {
+                middle(payload)
+            }
+            _ => ServerBound::Ignored,
+        }
+    }
+}
+"#;
+        let arms = classify_serverbound_decode(source, 1)?;
+        match arms.get("CHAINED").map(|arm| &arm.verdict) {
+            Some(ServerboundDecodeVerdict::Unclassified { depth_limited, .. }) => {
+                assert!(*depth_limited, "expected the depth cap to be the reason");
+            }
+            other => panic!("expected a depth-limited unclassified verdict, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn serverbound_decode_axis_detects_a_planted_stranded_variant() -> Result<()> {
+        let workspace = serverbound_decode_fixture_workspace()?;
+        let report = connectedness_report(&workspace)?;
+        let family = report
+            .families
+            .iter()
+            .find(|f| f.family == "v999")
+            .expect("v999 fixture family exists");
+        let ServerboundDecodeAxis::Measured(summary) = &family.serverbound_decode else {
+            panic!(
+                "expected a measured serverbound-decode axis, got {:?}",
+                family.serverbound_decode
+            );
+        };
+        assert_eq!(summary.total, 5);
+        assert_eq!(summary.examined_arms, 4);
+        assert_eq!(summary.decoded, 3);
+        // The control: MYSTERY_ACTION decodes to a real ServerBound variant
+        // whose only dispatch arm in server.rs is the empty `=> {}` group it
+        // shares with `Ignored` — a planted island. If this assertion ever
+        // passes with `connected == 2` (i.e. the planted island stops being
+        // reported as stranded), the detector has gone blind.
+        assert_eq!(summary.connected, 1);
+        assert_eq!(summary.stranded_names, vec!["MYSTERY_ACTION".to_owned()]);
+        assert_eq!(summary.always_ignored_names, vec!["PING".to_owned()]);
+        assert_eq!(summary.unclassified.len(), 1);
+        assert_eq!(summary.unclassified[0].packet, "WEIRD");
+        assert!(report.has_unclassified());
+        assert_eq!(report.unclassified_count(), 1);
+        assert!(report.render().contains("serverbound decoded 3/5, connected 1/5"));
+        assert!(report.render().contains("decode-but-stranded 1 [MYSTERY_ACTION]"));
         Ok(())
     }
 
@@ -10430,6 +11425,109 @@ fn handle_play(
 }
 "#,
         )?;
+        Ok(workspace)
+    }
+
+    /// A family with a `src/server_protocol.rs` (so `ServerboundDecodeAxis`
+    /// is `Measured` rather than `NotApplicable`) plus a minimal
+    /// `crates/lodestone-server/src/server.rs` for the second-hop join.
+    ///
+    /// Deliberately plants one **known** island — `MYSTERY_ACTION` decodes
+    /// to a real `ServerBound::MysteryAction` variant, but the only arm
+    /// handling that variant in `server.rs` is the empty `=> {}` group it
+    /// shares with `Ignored`. This is the control the job's own writeup
+    /// demands: a coverage tool that cannot detect a planted island is
+    /// worthless, so [`serverbound_decode_axis_detects_a_planted_stranded_variant`]
+    /// asserts the exact reported numbers, not just "some islands exist."
+    ///
+    /// Also plants the naive-scanner failure mode `match_arm_body` exists to
+    /// fix: `PING`'s arm is a bare, unbraced expression immediately
+    /// followed by `MYSTERY_ACTION`'s braced arm. A `find('{')`-based
+    /// scanner would swallow `MYSTERY_ACTION`'s whole body as if it were
+    /// `PING`'s.
+    fn serverbound_decode_fixture_workspace() -> Result<TestWorkspace> {
+        let workspace = fresh_test_workspace("serverbound-decode")?;
+        let root = workspace.deref();
+        let family = root.join("crates/protocol/v999");
+        std::fs::create_dir_all(family.join("src/generated"))?;
+        std::fs::write(
+            family.join("src/generated/packet_ids.rs"),
+            r#"
+pub mod play {
+    pub mod clientbound {
+        pub const NOOP: i32 = 0;
+        pub static ENTRIES: &[(&str, i32)] = &[("minecraft:noop", NOOP)];
+    }
+    pub mod serverbound {
+        pub const KEEP_ALIVE: i32 = 0;
+        pub const PING: i32 = 1;
+        pub const MYSTERY_ACTION: i32 = 2;
+        pub const WEIRD: i32 = 3;
+        pub const UNHANDLED: i32 = 4;
+        pub static ENTRIES: &[(&str, i32)] = &[
+            ("minecraft:keep_alive", KEEP_ALIVE),
+            ("minecraft:ping", PING),
+            ("minecraft:mystery_action", MYSTERY_ACTION),
+            ("minecraft:weird", WEIRD),
+            ("minecraft:unhandled", UNHANDLED),
+        ];
+    }
+}
+"#,
+        )?;
+        std::fs::write(family.join("src/adapter.rs"), "")?;
+        std::fs::write(
+            family.join("src/server_protocol.rs"),
+            r#"
+impl ServerProtocol for V999ServerProtocol {
+    fn decode(&self, state: lodestone_core::State, packet_id: i32, payload: &[u8]) -> ServerBound {
+        match state {
+            State::Play if packet_id == play::serverbound::KEEP_ALIVE => {
+                match decode_full::<KeepAlive>(payload) {
+                    Some(k) => ServerBound::KeepAlive { id: k.id },
+                    None => ServerBound::Ignored,
+                }
+            }
+            State::Play if packet_id == play::serverbound::PING => ServerBound::Ignored,
+            State::Play if packet_id == play::serverbound::MYSTERY_ACTION => {
+                decode_mystery_action(payload)
+            }
+            State::Play if packet_id == play::serverbound::WEIRD => {
+                external_helper(payload)
+            }
+            _ => ServerBound::Ignored,
+        }
+    }
+}
+
+fn decode_mystery_action(payload: &[u8]) -> ServerBound {
+    match decode_full::<MysteryAction>(payload) {
+        Some(m) => ServerBound::MysteryAction { id: m.id },
+        None => ServerBound::Ignored,
+    }
+}
+"#,
+        )?;
+
+        let server = root.join("crates/lodestone-server/src");
+        std::fs::create_dir_all(&server)?;
+        std::fs::write(
+            server.join("server.rs"),
+            r#"
+/// Dispatches a decoded [`ServerBound::KeepAlive`] request — this doc
+/// comment itself mentions the variant so a non-comment-aware scanner would
+/// find this line first and get confused about where the real arm is.
+fn dispatch(x: ServerBound) {
+    match x {
+        ServerBound::KeepAlive { id } => {
+            respond(id);
+        }
+        ServerBound::MysteryAction { .. } | ServerBound::Ignored => {}
+    }
+}
+"#,
+        )?;
+
         Ok(workspace)
     }
 
