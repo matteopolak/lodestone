@@ -275,6 +275,26 @@ already had a passing test
 (`the_pick_block_key_clones_even_in_survival_where_the_mouse_does_not`) with
 no `app.rs` call site reaching it.
 
+**Both routes — mouse and keyboard, gameplay and container — are verified
+live on the current tree.** `mouse_action_for` and `resolve_key` both consult
+`Keybinds` generically (neither hardcodes `MouseButton::Middle`), so rebinding
+`key.pickItem` off the middle button silences the mouse route and a keyboard
+rebind reaches `KeyOutcome::PickItem`/`ContainerPickItem` correctly — checked
+by tracing both dispatch sites, not assumed from the table entry existing.
+
+**One stale test surfaced while verifying this**, and it was red on committed
+`main`: `app::tests::the_mouse_path_resolves_the_default_attack_and_use_buttons`
+asserted `mouse_action_for(&binds, MouseButton::Middle) == None` under the
+comment "Middle is the container pick gesture, not a gameplay binding" — true
+before `InputAction::PickItem` existed, false since `9d66cba`, and nothing
+caught it because the assertion is inside a test whose *name* is about
+attack/use, so a reviewer skimming for pick-item coverage would not think to
+look here. `cargo test -p lodestone-shell --lib --no-fail-fast` confirms it as
+the only keybinding-related failure (four unrelated `entities.rs` failures
+also present — not this pass's, not touched). Fix handed to the orchestrator
+in the same brokered `app.rs` patch as the screenshot wiring below, since both
+land in the same file.
+
 ### Screenshot: `key.screenshot`, the one verb with no packet (issue #16)
 
 **The odd one out.** Every other action in this table ends at a
@@ -312,20 +332,73 @@ hoist both arms above the early-return gates.
 
 **Why this verb is brokered further than the other three.** Pick-item, drop
 and swap-offhand all bottom out in something `Sim`/`net.rs` already knows how
-to send. A screenshot needs the live window target's actual surface texture
-and format at the moment a frame is acquired but before it is presented —
-state that lives in `gpu.rs`'s `redraw()`, not in `Sim`. The recommended shape
-is a `pending_screenshot: bool` flag on `WindowApp` (mirroring `ctrl_held`),
-set by `KeyOutcome::Screenshot`'s dispatch arm and drained once per frame in
-`redraw()` right after `target.acquire()` succeeds and before the frame is
-handed to the renderer — copying the acquired frame's texture out is exactly
-`HeadlessTarget::read_texels`'s pattern, just against `AcquiredFrame`'s
-texture instead of `HeadlessTarget`'s. Whether the window surface's texture
-already carries `wgpu::TextureUsages::COPY_SRC` (`HeadlessTarget::USAGE`
-requires it explicitly; a swapchain surface's configured usage is a separate,
-unverified question) is the one open risk in this plan and needs checking
-against `gpu.rs`'s surface configuration before the capture call, not assumed
-from the headless target's own flags.
+to send. A screenshot needs the live window target's actual surface texture,
+and reads it back **after** the frame is drawn rather than before — see the
+correction below.
+
+**Confirmed, not assumed: the open risk this section used to flag was real.**
+`SurfaceTarget::new` (`crates/lodestone-render/src/target.rs`) builds its
+config from `surface.get_default_config(adapter, …)`, which sets only
+`TextureUsages::RENDER_ATTACHMENT` — unlike `HeadlessTarget::USAGE`, which
+explicitly ORs in `COPY_SRC`. A window's `AcquiredFrame` cannot be copied out
+until the config adds `COPY_SRC` before `configure()`, and `AcquiredFrame`
+itself has no accessor to its `wgpu::SurfaceTexture`'s backing `Texture` at
+all (`view()` returns only the `TextureView`, which `copy_texture_to_buffer`
+cannot source from). Both are `lodestone-render` changes, which is why this
+verb reaches a third crate no other action in this table touches.
+
+**One correction to this section's own previous plan, caught by working
+through the actual sequencing rather than trusting the sketch:** capturing
+"right after `target.acquire()` succeeds and before the frame is handed to
+the renderer" would copy out an **undrawn** frame — a swapchain image has no
+defined content until something renders into it, so a capture at that point
+reads garbage, not a screenshot. The correct point is symmetric with
+`frame.present(queue)`: drain `pending_screenshot` and copy the texture out
+**immediately before** `present`, once every render pass (world, HUD, menu
+overlays) has already written into `frame.view()`. This is the kind of stale
+plan CLAUDE.md's §2 warns about — true-sounding when sketched, wrong once
+someone actually traces where pixels land — caught here before it shipped
+rather than after, only because implementing it required tracing `redraw()`'s
+real call order instead of restating the earlier note.
+
+**The patch, drafted end-to-end this pass and handed to the orchestrator**
+(brokered — `app.rs`, `gpu.rs` are choke points; `lodestone-render` is a
+separate off-limits crate):
+
+- `lodestone-render/src/target.rs`: OR `wgpu::TextureUsages::COPY_SRC` into
+  the config in `SurfaceTarget::new` before `surface.configure(device,
+  &config)`; add `AcquiredFrame::texture(&self) -> Option<&wgpu::Texture>`
+  (`None` for a headless frame, whose `surface_texture` field is already
+  `None` — screenshots never run headless, so this is a natural sentinel, not
+  a new case to handle).
+- `app.rs`: `KeyOutcome::Screenshot` (no payload — see the two "not modelled"
+  notes above, both of which still hold), a `resolve_key` arm sitting right
+  after `ToggleDebugOverlay`'s (same tier: gated on `pressed` only, not
+  `gate.gameplay`, matching F3's own precedent since vanilla's `key.screenshot`
+  is `Category.MISC` and screen-independent the same way `key.debug.overlay`
+  is treated here), a `pending_screenshot: bool` field on `WindowApp`
+  (mirrors `ctrl_held`), the effects-match arm setting it, and the actual
+  readback + PNG encode (same `copy_texture_to_buffer` →
+  `map_async(MapMode::Read)` idiom as `HeadlessTarget::read_texels`, plus a
+  BGRA→RGBA channel swap since a Metal/Vulkan swapchain typically hands back
+  `Bgra8*` and the `png` crate only writes RGBA) called from `redraw()`
+  immediately before `frame.present(queue)`.
+- Filename: vanilla's own `yyyy-MM-dd_HH.mm.ss[_N].png` scheme, hand-rolled
+  against `SystemTime` (civil-from-days algorithm) rather than pulling in a
+  calendar crate for one filename — **in UTC, not local time**, a deliberate,
+  named divergence from `Util.getFilenameFormattedDateTime()`'s local clock,
+  worth revisiting if a date crate ever lands in this workspace for another
+  reason.
+- **`#[cfg(test)]`-forked path, not a `cfg!(test)` runtime check** — per
+  CLAUDE.md's "OS-level side effect" hazard (a unit test must never write into
+  a player's real `screenshots/` directory): a `screenshot_dir()` function
+  with two bodies, one under `#[cfg(test)]` returning a temp directory, one
+  without returning `"screenshots"`, plus a test asserting the temp-dir body
+  is the one actually compiled — so deleting the fork fails a test instead of
+  silently reverting to writing into the real directory on every `cargo test`.
+
+Tracked on [#436](https://github.com/matteopolak/lodestone/issues/436) and
+[#16](https://github.com/matteopolak/lodestone/issues/16).
 
 ### Wiring the Controls menu — fully landed
 
@@ -466,6 +539,47 @@ section's original sketch:
   answered symmetrically for both sides, and what decorates a bind button's
   label with `[ … ]` in `key_binds.rs`
 - `Binding::label()` — a short button caption
+
+### Census: what still bypasses this layer, and what does not
+
+Swept with `grep -rn "KeyCode::"` / `"MouseButton::"` across
+`crates/lodestone-shell/src/` outside `keybinds.rs` itself, to find every raw
+physical-input match that is not a table lookup.
+
+**Genuine gaps, closed or being closed this pass:** the two named at the top
+of this doc's own history — `key.pickItem`'s mouse route (verified already
+correct, see above) and `key.screenshot` (drafted, see above).
+
+**Everything else that matched is deliberately literal, not a missed gap**,
+each for a reason already argued elsewhere in this doc or in vanilla's own
+source:
+
+- `app.rs`'s `menu_key_for`/`handle_chat_key` (arrows, Enter, Tab, Backspace,
+  Delete, the server-list F5 refresh) — menu/chat chrome, matching vanilla's
+  `Screen`-level handling. See "Menu navigation and text editing stay
+  literal" below.
+- `app.rs`'s `menu_button_for` (`MouseButton::Left/Right/Middle` →
+  `MenuButton::Left/Right/Pick`) — a container screen's own click-type
+  mapping, hardcoded in vanilla too (`AbstractContainerScreen.mouseClicked`
+  switches on the raw button index, never on a `KeyMapping`). This is *not*
+  the same thing as `key.pickItem`'s keyboard form: the container's
+  **mouse** click-to-clone is vanilla-hardcoded and stays that way regardless
+  of how `key.pickItem` itself is bound, which is why `menu_button_for` and
+  `InputAction::PickItem` can disagree about the middle button without either
+  being wrong.
+- `app.rs`'s `ctrl_held`/`shift_held` tracking (`ShiftLeft`/`ShiftRight`,
+  `ControlLeft`/`ControlRight`) — modifier *state*, read at a dispatch arm
+  (`key.drop`'s stack-vs-one, `key.pickItem`'s `include_data`), not a
+  dispatch itself. See `key.drop`'s section above on why this lives outside
+  `resolve_key`'s table lookups but still inside `resolve_key`'s signature.
+- `config.rs`'s and `menu/nav.rs`'s hits are all test fixtures constructing
+  `Binding`/`Keybinds` values, not input handling.
+
+No other file under `crates/lodestone-shell/src/` matched either pattern at
+all — `hud.rs`, `container.rs`, `chat.rs`, `interact.rs`, `sim.rs` and every
+`sim/*`/`menu/*` module besides `nav.rs`/`key_binds.rs` consume only
+`InputAction`/`Binding`/`ClientAction`/`Click` values that already passed
+through `app.rs`'s dispatch, never a raw key or button of their own.
 
 ## Gotchas
 
