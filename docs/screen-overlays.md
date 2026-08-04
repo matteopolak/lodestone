@@ -545,19 +545,40 @@ writing). `ScreenEffects::wearing_pumpkin`, `stats.pumpkin_overlay_drawn`,
 `load_pumpkin_overlay_texture` are all real and wired end to end through
 `RenderState::render_inner` — proved by the pipeline-level GPU gate above.
 
-## The freeze/spyglass/confusion/portal flags' route to the shell (issues #139, #144, #149, #154 — `app.rs`/`sim.rs` patches pending)
+## The freeze/spyglass/confusion/portal flags' route to the shell (issues #139, #144, #149, #154)
 
 All four render mechanisms (geometry, pipeline, `ScreenEffects` fields,
 `render_inner` dispatch, stats counters) are real and wired end to end,
-proved by the pipeline-level GPU gate above — the pixel-producing half is
-done. What is not yet landed is the **input** half for three of the four,
-since `app.rs`/`sim.rs` are outside this change's ownership (`CLAUDE.md`'s
-file-ownership section). Freeze's input needs no `sim.rs` change at all —
-`Sim::player()` already returns `lodestone_physics::player::PlayerState` by
-value, and `percent_frozen()` is already public on it.
+proved by the pipeline-level GPU gate above, **and `gpu.rs`'s own dispatch is
+now landed too** (the `first_person_group_active`/`camera_agnostic_group_active`
+split and the five draw calls this doc used to describe as "held back" —
+`a2e13c6` deliberately did not commit them because the working tree mixed
+them with another agent's unrelated armour-dye refactor in the same file;
+they were reconstructed from `HEAD` plus only the overlay hunks, verified by
+diffing the result against both `HEAD` and the working tree, and landed
+separately). The pixel-producing half is entirely done.
 
-**`crates/lodestone-shell/src/sim.rs`**, next to `Self::player`
-(`sim.rs:1792`, immediately after its closing brace):
+**Freeze's input is landed too** — `app.rs`'s `screen_effects` construction
+now reads `let freeze_percent = self.sim.player().percent_frozen();`, no
+`sim.rs` change needed since `Sim::player()` already returns
+`lodestone_physics::player::PlayerState` by value.
+
+**Spyglass's FOV-zoom half is landed, but only its composable half.**
+`crates/lodestone-shell/src/camera_rig.rs::apply_spyglass_fov(camera, scoping)`
+exists and is unit-tested (the `0.1` scaling while scoping, no-op while not,
+and a composition check that a non-default `fov_y_degrees` scales relative to
+itself rather than being reset to an absolute constant) — but nothing calls
+it yet. `build_camera`'s only production call site is `Sim::camera` in
+`sim.rs`, outside `camera_rig.rs`'s ownership, so threading a real `scoping`
+bool through to a call is a patch for whoever owns `sim.rs`/`app.rs`, not
+something forced through here.
+
+**What is still not landed is `scoping` itself — one accessor, contended.**
+`Player.isScoping()` is `isUsingItem() && getUseItem().is(Items.SPYGLASS)`
+(`Player.java:1936-1938`); the held-item half is already computed in
+`app.rs`'s `redraw()` (the `held` local, used a few lines above for
+`set_main_hand_source`), but the `isUsingItem()` half needs a two-line
+accessor on `Sim` that does not exist yet:
 
 ```rust
 /// Whether the local player currently has an item "in use" — the
@@ -573,77 +594,34 @@ pub fn using_item(&self) -> bool {
 }
 ```
 
-`UsingItem` is already imported in `sim.rs` (`use ... PlacementPredictor,
-RayTarget, UsingItem;`), so no new `use` line is needed.
-
-**`crates/lodestone-shell/src/app.rs`**, in `redraw()`. First, capture the
-selected hotbar item for the spyglass check **before** `held` is moved into
-`set_main_hand_source` (immediately after the existing `let held = ...`
-computation, around `app.rs:2121-2124`):
-
-```rust
-// The spyglass overlay's held-item half (issue #154) — `held` is about to
-// move into `set_main_hand_source` below, so this is captured first rather
-// than re-reading `player_menu` a second time.
-let held_for_scoping = held.clone();
-```
-
-Then, at the `screen_effects` construction site (`app.rs:2328` as of this
-writing — re-locate by the `let screen_effects = crate::gpu::ScreenEffects {`
-line, since concurrent edits move line numbers), replace the literal:
+next to `Self::player` (`sim.rs:1792`, immediately after its closing brace;
+`UsingItem` is already imported there, so no new `use` line is needed). This
+was not applied directly because `sim.rs` is contended (another agent's
+in-flight work sat there at the time — the held-item name highlight, issue
+#126, unrelated to overlays); it is a prepared patch handed off instead of
+landed by force. Once it exists, `app.rs`'s `screen_effects` construction
+becomes:
 
 ```rust
-// The freeze overlay's per-frame input (issue #139). `PlayerState::
-// percent_frozen` is real, tested physics state (`update_freezing`, issue
-// #212, `lodestone-physics`) -- not a stub.
-let freeze_percent = self.sim.player().percent_frozen();
-
-// The spyglass overlay's per-frame input (issue #154). `Player.isScoping()`
-// is `isUsingItem() && getUseItem().is(Items.SPYGLASS)`.
 let scoping = self.sim.using_item()
-    && held_for_scoping
+    && held
         .as_ref()
         .is_some_and(|loc| loc.namespace() == "minecraft" && loc.path() == "spyglass");
-
-let screen_effects = crate::gpu::ScreenEffects {
-    eye_in_water: self.sim.player().eye_in_water,
-    on_fire,
-    spectator,
-    tick,
-    wearing_pumpkin,
-    freeze_percent,
-    scoping,
-    // Issues #144/#149: the render mechanism (geometry, pipeline, the
-    // shared projection warp) is real and tested -- see this doc's
-    // "Confusion and portal" section -- but no potion-effect-duration
-    // tracker or nether-portal-proximity tracker exists anywhere in this
-    // codebase yet to compute these, and neither is `lodestone-ecs`/
-    // `lodestone-physics` work this change owns. `0.0` is the honest
-    // current answer, not a placeholder pretending to work -- exactly
-    // `on_fire`'s pre-#112 shape.
-    nausea_intensity: 0.0,
-    portal_intensity: 0.0,
-};
 ```
 
-i.e. three new fields fed by real input (`freeze_percent`, `scoping`) and two
-left at an honestly-reported `0.0` pending `lodestone-ecs`/`lodestone-physics`
-work outside this change. `lodestone_assets::ResourceLocation` is already
-imported (used for `wearing_pumpkin`'s own lookup a few lines above), so
-`held_for_scoping`'s `.namespace()`/`.path()` calls need no new `use`.
+(`held` needs capturing before it moves into `set_main_hand_source` a few
+lines above, the same "capture before move" shape `wearing_pumpkin` already
+uses for its own lookup) plus one line in `camera_rig.rs`'s caller —
+`apply_spyglass_fov(build_camera(...), scoping)` — or the equivalent inline
+multiplication, wherever `Sim::camera`/`WindowApp`'s camera construction
+calls `build_camera` today.
 
-**Spyglass's FOV-zoom half (also #154) is a separate, third file:**
-`crates/lodestone-shell/src/camera_rig.rs`, wherever `Camera { fov_y_degrees:
-..., .. }` is assembled per frame (`FOV_Y_DEGREES` today, `camera_rig.rs:724`).
-That file is not brokered through this doc's patches — it is another agent's
-active territory — but the composition it needs is one multiplication:
-`fov_y_degrees *= lodestone_render::spyglass_fov_modifier(scoping)`, composed
-with (not overwriting) whatever else already produces `fov_y_degrees` there.
-See this doc's "Spyglass" section above for the full citation.
-
-**No change needed in `lodestone-shell/src/gpu.rs`, `gpu/screen_effects.rs`,
-`gpu/stats.rs`, or `lodestone-render`/`lodestone-assets`** for any of the four
-— all of that already landed with this doc update.
+**`nausea_intensity`/`portal_intensity` remain honestly at `0.0`** — no
+potion-effect-duration tracker or nether-portal-proximity tracker exists
+anywhere in this codebase yet to compute vanilla's
+`getEffectBlendFactor(NAUSEA, ...)`/`Entity.portalEffectIntensity`. Both
+would be `lodestone-ecs`/`lodestone-physics` work, outside every file this
+section discusses. Exactly `on_fire`'s pre-#112 shape.
 
 ## A session-scoped flag needs an explicit reset (issue #390)
 
