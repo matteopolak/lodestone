@@ -76,8 +76,6 @@ pub(crate) mod generated_path_types;
 pub(crate) mod generated_shade_brightness;
 #[path = "generated/snow_support.rs"]
 pub(crate) mod generated_snow_support;
-#[path = "generated/snow_support.rs"]
-pub(crate) mod generated_snow_support;
 #[path = "generated/sound_events.rs"]
 pub(crate) mod generated_sound_events;
 #[path = "generated/sound_types.rs"]
@@ -104,7 +102,6 @@ pub mod outline_shapes;
 pub mod particle_types;
 pub mod path_types;
 pub mod shade_brightness;
-pub mod snow_support;
 pub mod snow_support;
 pub mod sound_events;
 pub mod sound_types;
