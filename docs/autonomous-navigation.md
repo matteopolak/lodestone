@@ -65,42 +65,19 @@ competing route to the same packet.
 - **No chat command.** `docs/baritone-port.md` §9's M1 milestone names `#goto x z`. Nothing routes
   chat input to `AutopilotGoal` — that plumbing lives in `lodestone-shell`, outside this change's
   ownership.
-- **Not registered into the shipped client.** `lodestone_shell::sim::Sim::new`
-  (`crates/lodestone-shell/src/sim.rs`) is where the real `App` is built and every engine/plugin is
-  added (`app.add_plugins((CorePlugin, LocalPlayerPlugin, ControllerPlugin, …))`). `AutopilotPlugin`
-  is not in that list. Until it is, the plugin is a correct, tested island in exactly `CLAUDE.md`
-  rule 1's sense: built, proven against the real `player_physics` seam in a hermetic test, and
-  reaching zero players because nothing in the running client constructs it. `sim.rs` is outside this
-  change's file ownership (a different agent's cluster as of this writing) — the patch below is what
-  its owner needs to apply.
-
-  ```diff
-  --- a/crates/lodestone-shell/src/sim.rs
-  +++ b/crates/lodestone-shell/src/sim.rs
-  @@ let mut app = lodestone_ecs::app::App::new();
-       app.add_plugins((
-           CorePlugin,
-           LocalPlayerPlugin,
-           ControllerPlugin,
-           SessionHudPlugin,
-           lodestone_ecs::ingest::IngestPlugin,
-           lodestone_ecs::SessionPlugin,
-           crate::entities::EntityInterpPlugin,
-           TerrainPlugin,
-           InteractPlugin,
-  +        // Autonomous navigation (docs/autonomous-navigation.md, issue #38): the
-  +        // M1 walk-only plugin. Adds no systems that fire without an
-  +        // `AutopilotGoal` set, so this is inert for every session until
-  +        // something (a chat command — not yet built either, see the doc)
-  +        // sets one.
-  +        lodestone_autopilot::AutopilotPlugin,
-       ));
-  ```
-
-  and a `lodestone-autopilot = { workspace = true }` line in `crates/lodestone-shell/Cargo.toml`'s
-  `[dependencies]`. Both are small and mechanical; they were not applied here because `sim.rs` is
-  contended (`CLAUDE.md`'s repo-hazards note) and out of this change's ownership, not because either
-  is technically hard.
+- **Now registered.** `lodestone_shell::sim::Sim::new`'s `app.add_plugins((CorePlugin,
+  LocalPlayerPlugin, ControllerPlugin, …, InteractPlugin, lodestone_autopilot::AutopilotPlugin))`
+  tuple has `AutopilotPlugin` in it, plus a `lodestone-autopilot = { workspace = true }` line in
+  `crates/lodestone-shell/Cargo.toml`'s `[dependencies]`. Verified rather than assumed that the
+  plugin's two systems (chained `.after(TickSet::Intent).before(TickSet::Physics)` internally, so
+  registration order in the tuple does not matter) actually *run*, not merely that the plugin is in
+  the list — `AutopilotStatus` defaults to `Idle` and nothing but `plan_route` can move it off that
+  default, so `sim::tests::autopilot_plugin_is_registered_and_its_systems_actually_run` sets a goal,
+  steps one tick, and asserts the status left `Idle`. `cargo check -p lodestone-shell
+  --no-default-features` also stayed clean: none of `lodestone-autopilot`'s production dependencies
+  (`lodestone-nav`, `lodestone-ecs`, `lodestone-model`, `lodestone-physics`, `lodestone-world`,
+  `bevy_ecs`, `bevy_app`) is a version crate, so the workspace dependency does not compromise the
+  version seam.
 
 ## How to change it, and the gotchas
 

@@ -80,6 +80,11 @@ lodestone-auth = { workspace = true }
 # device-code/refresh calls interactively from the account-switcher screen
 # (the same crate `lodestone-auth`'s own chain runs on).
 reqwest = { workspace = true }
+# The M1 walk-only autonomous-navigation plugin (issue #38,
+# `docs/autonomous-navigation.md`). Registered in `Sim::new`'s `add_plugins`
+# tuple; adds no systems that fire without an `AutopilotGoal` set, so it is
+# inert for every session until something sets one.
+lodestone-autopilot = { workspace = true }
 
 # GPU / windowing / math.
 wgpu = { workspace = true }

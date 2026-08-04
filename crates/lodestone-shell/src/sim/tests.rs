@@ -1166,6 +1166,50 @@ fn both_collision_sources_are_send_sync_and_static() {
     assert_resource_shaped::<LiveCollisionSource>();
 }
 
+/// Issue #38: `lodestone_autopilot::AutopilotPlugin` being in `Sim::new`'s
+/// `add_plugins` tuple is not itself proof it does anything — `CLAUDE.md`'s
+/// island rule is exactly "registered, in the right set, in the right
+/// order, and still never runs" — so this drives the actual `GameTick`
+/// schedule rather than trusting registration.
+///
+/// `AutopilotStatus` defaults to `Idle` and nothing but `plan_route`
+/// (a system the plugin adds) can move it off that default — inserting the
+/// resource via `init_resource` in `AutopilotPlugin::build` cannot, by
+/// itself, produce anything but `Idle`. So observing *any* other variant
+/// after setting a goal and stepping is proof the system actually executed
+/// this tick, not just that the plugin's resources exist.
+#[test]
+fn autopilot_plugin_is_registered_and_its_systems_actually_run() {
+    let mut sim = Sim::with_demo_world(test_config());
+    sim.drain_all_meshes();
+
+    let feet = sim.player().position;
+    let goal = lodestone_client::BlockPos {
+        x: feet.x.floor() as i32 + 2,
+        y: feet.y.floor() as i32,
+        z: feet.z.floor() as i32,
+    };
+    sim.write(|w| {
+        w.resource_mut::<lodestone_autopilot::AutopilotGoal>().0 = Some(goal);
+    });
+    assert_eq!(
+        sim.read(|w| *w.resource::<lodestone_autopilot::AutopilotStatus>()),
+        lodestone_autopilot::AutopilotStatus::Idle,
+        "precondition: freshly inserted, untouched by any system yet"
+    );
+
+    sim.step(1.0 / 20.0);
+
+    let status = sim.read(|w| *w.resource::<lodestone_autopilot::AutopilotStatus>());
+    assert_ne!(
+        status,
+        lodestone_autopilot::AutopilotStatus::Idle,
+        "one tick with a goal set must move the status off Idle -- only \
+         plan_route can do that, so Idle here means the system never ran \
+         even though the plugin is in the add_plugins tuple"
+    );
+}
+
 /// The authority test for the stage, at the shell level: the components are
 /// the *only* store, so a write through the `World` — which is what a plugin
 /// gets — changes what the server is told on the next tick.
