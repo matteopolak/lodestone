@@ -1,14 +1,19 @@
-# The underwater and fire screen overlays
+# The underwater, fire and pumpkin screen overlays
 
 ## What it is
 
-Two full-screen post-hand-pass overlays, issues #108 and #112: a blue-ish
-tint plus a scrolling `misc/underwater.png` texture when the camera's eye is
-submerged, and a looping flame texture across the bottom of the screen while
-the local player is on fire. Vanilla draws both from one class,
+Three full-screen post-hand-pass overlays, issues #108, #112 and #185: a
+blue-ish tint plus a scrolling `misc/underwater.png` texture when the
+camera's eye is submerged, a looping flame texture across the bottom of the
+screen while the local player is on fire, and a static full-screen
+`misc/pumpkinblur.png` vignette while a carved pumpkin is worn in the helmet
+slot. Underwater and fire come from one vanilla class,
 `ScreenEffectRenderer.submit` (`.cache/mc/26.2/client-src/net/minecraft/
-client/renderer/ScreenEffectRenderer.java:55-83`), so they landed as one pass:
-`lodestone_render::ScreenEffectRenderer`.
+client/renderer/ScreenEffectRenderer.java:55-83`); the pumpkin overlay is
+vanilla's *different* mechanism (see its own section below), but shares the
+identical "textured, alpha-blended, screen-space quad after the hand pass"
+shape closely enough that it landed in the same pass rather than inventing a
+second pipeline: `lodestone_render::ScreenEffectRenderer`.
 
 ## How it works
 
@@ -140,6 +145,61 @@ independent frames, not a tileable pattern, so linear filtering or
 wraparound at a frame's top/bottom edge would blend in the neighbouring
 frame.
 
+### Pumpkin: not `ScreenEffectRenderer` at all in vanilla, but the same shape
+
+Issue #185's overlay is **not** part of `ScreenEffectRenderer.java` — grepping
+that file for `pumpkin` returns nothing. It is a generic mechanism in
+`Hud.java`: `extractCameraOverlays`
+(`.cache/mc/26.2/client-src/net/minecraft/client/gui/Hud.java:269-291`) walks
+every `EquipmentSlot`, and for any equipped `ItemStack` whose
+`DataComponents.EQUIPPABLE` component has a `cameraOverlay` set, blits that
+texture full-screen at alpha `1.0`
+(`extractTextureOverlay`, `Hud.java:1026-1031`:
+`graphics.blit(RenderPipelines.GUI_TEXTURED, texture, 0, 0, 0, 0, guiWidth, guiHeight, guiWidth, guiHeight, ARGB.white(1.0F))`).
+Carved pumpkin is simply the **one item in the game** that ships this
+component populated:
+
+```json
+// .cache/mc/26.2/generated/reports/minecraft/components/item/carved_pumpkin.json
+"minecraft:equippable": {
+  "camera_overlay": "minecraft:misc/pumpkinblur",
+  "slot": "head",
+  "swappable": false
+}
+```
+
+So vanilla's real mechanism is a per-item lookup table with exactly one
+populated entry today, not a hardcoded pumpkin check. This port takes the
+one-entry version of that table rather than building unused generality:
+`ScreenEffects::wearing_pumpkin` is `true` iff the head slot holds
+`minecraft:carved_pumpkin`, computed in `app.rs`'s `redraw()` from the
+already-in-scope `player_menu` (native inventory index 39 — the same head
+slot `Sim::third_person_body_state`'s `ARMOUR_NATIVE_SLOTS` table uses for
+armour rendering). If a second item ever ships a `camera_overlay`, the
+right generalisation is a `ResourceLocation -> texture` table read off each
+item's own components, not a second bool.
+
+**No tint, no scroll, no tiling.** `pumpkin_overlay_triangles()` is a static
+full-NDC quad built once at construction and never rewritten — unlike
+underwater's per-frame UV scroll and fire's per-frame frame-index rebuild,
+there is nothing here that varies frame to frame, so `draw_pumpkin` takes no
+per-frame arguments beyond the encoder/view. The vertex colour is opaque
+white (`PUMPKIN_TINT = [1,1,1,1]`, matching vanilla's `ARGB.white(1.0F)`):
+the pumpkin-shaped vignette silhouette comes entirely from
+`pumpkinblur.png`'s own alpha channel, the same way underwater's blue cast
+comes entirely from its own texture rather than the vertex tint.
+
+**Gating is a simplification, not a transcription.** Vanilla's
+`extractCameraOverlays` guards the whole per-slot loop on
+`getCameraType().isFirstPerson()` only — no explicit spectator check is
+visible in that method. This port folds `wearing_pumpkin` into the same
+`any_active` gate as underwater/fire (first-person **and** not-spectator),
+matching this codebase's existing "nothing about my own body renders in
+spectator" convention rather than vanilla's literal per-pass gate list. If a
+future gate audit finds vanilla *does* show camera overlays to a spectator
+wearing a pumpkin somewhere else in the call chain, that is the one deviation
+to revisit here.
+
 ### Draw order and gating
 
 `GameRenderer.java:568-577`: the hand pass, then
@@ -147,17 +207,20 @@ frame.
 overlay draw sits in `RenderState::render_inner`, immediately after
 `draw_first_person_hand` and before `queue.submit` — the shell's own HUD
 draws afterward, in a separate pass in `app.rs`, so the ordering matches.
+(The pumpkin overlay's *vanilla* source is `Hud.java`, drawn as part of the
+HUD proper, not this pass — see above for why it landed here anyway.)
 
 Gating mirrors `ScreenEffectRenderer.submit`'s
 `isFirstPerson && !isSleeping && !isSpectator`:
 [`ScreenEffects::any_active`] checks first-person (`!stats.third_person_body_drawn`
 — reusing the existing signal the hand pass already computes, rather than a
-second "am I first person" input) and not-spectator. There is no "sleeping"
+second "am I first person" input) and not-spectator, now across all three
+flags (`eye_in_water || on_fire || wearing_pumpkin`). There is no "sleeping"
 conjunct: this crate has no sleeping state yet, and its absence can only be a
 false *negative* miss (a sleeping player who should not see the overlay but
 does), never a false positive that hides a working feature — see
-`spectator_suppresses_both_overlays` and the `any_active` unit tests in
-`crates/lodestone-shell/src/gpu/screen_effects.rs`.
+`spectator_suppresses_both_overlays`/`spectator_suppresses_pumpkin_too` and
+the `any_active` unit tests in `crates/lodestone-shell/src/gpu/screen_effects.rs`.
 
 ## The on-fire flag's route to the shell (closed, issue #112)
 
@@ -238,6 +301,56 @@ to feed it yet.
 No change needed in `lodestone-shell/src/gpu.rs`, `gpu/screen_effects.rs`, or
 `lodestone-render` — the render half of this feature does not know or care
 where `on_fire` came from.
+
+## The pumpkin flag's route to the shell (issue #185, `app.rs` patch pending)
+
+`ScreenEffects::wearing_pumpkin`, `stats.pumpkin_overlay_drawn`,
+`ScreenEffectRenderer::draw_pumpkin`, `pumpkin_overlay_triangles`, and
+`load_pumpkin_overlay_texture` are all real and wired end to end through
+`RenderState::render_inner` — proved by the pipeline-level GPU gate above.
+The one remaining step is **exactly the same shape** as the on-fire route
+just above: `app.rs` is off-limits to a rendering-focused change (see
+`CLAUDE.md`'s file-ownership section) and needs the following patch applied
+by whoever owns it, landed *with* this feature's commit so it is not an
+island:
+
+**`crates/lodestone-shell/src/app.rs`**, in `redraw()`, immediately after the
+existing `spectator` computation and before the `screen_effects` construction
+(around line 2309 as of this writing — re-locate by the `let screen_effects =
+crate::gpu::ScreenEffects {` line, since concurrent edits move line numbers):
+
+```rust
+// The pumpkin overlay's per-frame input (issue #185). Native inventory
+// index 39 is the head armour slot (`Sim::third_person_body_state`'s own
+// `ARMOUR_NATIVE_SLOTS` table), and `player_menu` is already in scope
+// above (hoisted for the hotbar snapshot), so this costs no second `Menu`
+// clone.
+let wearing_pumpkin = player_menu
+    .player_native(39)
+    .and_then(|st| ResourceLocation::parse(&st.item().to_string()).ok())
+    .is_some_and(|loc| loc.namespace() == "minecraft" && loc.path() == "carved_pumpkin");
+let screen_effects = crate::gpu::ScreenEffects {
+    eye_in_water: self.sim.player().eye_in_water,
+    on_fire,
+    spectator,
+    tick,
+    wearing_pumpkin,
+};
+```
+
+i.e. the only change to the existing `screen_effects` literal is one new
+field, `wearing_pumpkin,`, fed by the four lines above it.
+`lodestone_assets::ResourceLocation` is already imported in `app.rs` (used at
+line 2091 for the hotbar snapshot's own item lookup), so no new `use` is
+needed. `player_menu` is already bound a few dozen lines earlier for the
+hotbar records — this reuses it rather than calling `self.sim.player_menu()`
+a second time.
+
+**No change needed in `lodestone-shell/src/gpu.rs`, `gpu/screen_effects.rs`,
+`gpu/stats.rs`, or `lodestone-render`/`lodestone-assets`** for this patch —
+all of that already landed with this doc update; `app.rs` is the only
+outstanding piece, and it is a strict four-line addition plus one new struct
+field, not a restructure.
 
 ## A session-scoped flag needs an explicit reset (issue #390)
 
@@ -326,20 +439,28 @@ installed, not a startup failure.
 ## Dependencies
 
 - `lodestone-assets::screen_effects` — `load_underwater_texture`/
-  `load_fire_texture`/`fire_frame_count`, the same "plain unatlased `Image`"
-  loader shape `sky::load_cloud_texture` uses, and for the same reason: each
-  texture's own addressing (4×4 tiling with wraparound for the underwater
-  texture; independent-frame-slice, no wraparound for the fire strip) would
-  conflict with an atlas's per-sprite padding.
+  `load_fire_texture`/`fire_frame_count`/`load_pumpkin_overlay_texture`, the
+  same "plain unatlased `Image`" loader shape `sky::load_cloud_texture` uses,
+  and for the same reason: each texture's own addressing (4×4 tiling with
+  wraparound for the underwater texture; independent-frame-slice, no
+  wraparound for the fire strip; a single static image for the pumpkin
+  overlay) would conflict with an atlas's per-sprite padding.
 - `lodestone-render::screen_effects` — the pure geometry
   (`underwater_overlay_quad`/`triangles`, `fire_overlay_triangles`,
-  `underwater_brightness`) and the GPU-owning `ScreenEffectRenderer`.
+  `pumpkin_overlay_triangles`, `underwater_brightness`) and the GPU-owning
+  `ScreenEffectRenderer` (`draw_underwater`/`draw_fire`/`draw_pumpkin`).
 - `lodestone-shell::gpu` — `RenderState::screen_effects`,
-  `install_screen_effects`/`has_screen_effects`, the draw call inside
-  `render_inner`, and `gpu::screen_effects::ScreenEffects` (the per-frame
-  argument type).
+  `install_screen_effects`/`has_screen_effects`, the draw calls inside
+  `render_inner` (including `stats.pumpkin_overlay_drawn`), and
+  `gpu::screen_effects::ScreenEffects` (the per-frame argument type,
+  including `wearing_pumpkin`).
 - `lodestone-shell::resources::load_screen_effects` — the `client.jar` IO,
-  mirroring `load_sky` exactly.
+  mirroring `load_sky` exactly; `ScreenEffectRenderer::new` loads all three
+  textures (underwater, fire, pumpkin) in one call, so there is nothing
+  pumpkin-specific to add here.
+- `lodestone-shell::app::redraw` — computes `wearing_pumpkin` from the
+  already-in-scope `player_menu`'s native slot 39 (head), the same source
+  `Sim::third_person_body_state` reads for armour rendering.
 
 ## The gates, and what they printed
 
@@ -350,18 +471,36 @@ predicted.
 **Pipeline level** (`cargo test -p lodestone-render --test
 screen_effects_pipeline_gpu -- --ignored --nocapture`) — proves the pass
 paints pixels at all, via a synthetic in-memory pack, independent of the
-shell:
+shell. All 4 tests pass, including the two added for the pumpkin overlay:
 
 | test | result |
 |---|---|
 | `control_an_untouched_target_reads_back_as_black` | pass (negative control) |
 | `underwater_overlay_paints_the_whole_frame` | pass |
 | `fire_overlay_paints_only_the_bottom_strip` | pass, with an explicit top/bottom row-band split (not a frame average) |
+| `pumpkin_overlay_paints_the_whole_frame_at_full_strength` | pass — full-frame coverage **and** a predicted magnitude: an opaque, untinted `(40,200,40)` source over black should read back with average green > 150 (the shader's gamma round-trip is a no-op at tint `[1,1,1,1]`), not merely "some green appeared" |
 
 **Shell level** (`cargo test -p lodestone-shell --test screen_overlay_pixels
 -- --ignored --nocapture`) — proves `RenderState::render_inner` actually
 checks `self.screen_effects`/`ScreenEffects`, through the real
-`render_with_effects` path, with executed negative controls:
+`render_with_effects` path, with executed negative controls. **A
+`pumpkin_overlay_reaches_the_screen_through_render_with_effects` test and a
+`spectator_suppresses_pumpkin_too` assertion were added here**, but neither
+has been run yet as of this writing: `lodestone-shell` does not currently
+compile, for two reasons unrelated to this change —
+`crates/lodestone-shell/src/collision.rs`'s `is_solid_face` has drifted from
+the `lodestone_physics` trait's signature (5 params vs. 6, someone else's
+concurrent edit), and several `EntityDraw`/`EntitySnapshot` construction
+sites are missing a `creeper_swelling`/`creeper_swell_dir` field another
+agent is mid-adding — **plus** this change's own `app.rs` gap: the
+`wearing_pumpkin` field literally does not exist in `redraw()`'s
+`ScreenEffects` construction until the broker patch below lands (see "The
+patch, as applied" for the pumpkin version). Re-run the shell-level gate once
+both are resolved; the pipeline-level gate above already proves the pass
+itself is correct independent of the shell.
+
+The **historical** underwater/fire numbers below (pre-pumpkin) are kept as
+the last known-good shell-level run:
 
 ```text
 === underwater overlay pixel gate (through RenderState::render_with_effects) ===

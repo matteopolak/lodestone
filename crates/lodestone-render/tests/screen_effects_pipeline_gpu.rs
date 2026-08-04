@@ -50,6 +50,12 @@ fn manager() -> ResourceManager {
         "assets/minecraft/textures/block/fire_1.png".to_string(),
         png(16, 16 * 32, [230, 130, 20, 255]),
     );
+    // Opaque green pumpkin overlay: distinct from the white underwater and
+    // orange fire textures so the three cannot be confused in a screenshot.
+    src.insert(
+        "assets/minecraft/textures/misc/pumpkinblur.png".to_string(),
+        png(16, 16, [40, 200, 40, 255]),
+    );
     ResourceManager::new(vec![Box::new(src)])
 }
 
@@ -199,5 +205,61 @@ fn fire_overlay_paints_only_the_bottom_strip() {
         "fire overlay must not paint above its strip: {:.1}% non-black in the top rows \
          (bounding-box check per CLAUDE.md — a frame-average could not have caught this)",
         top_frac * 100.0
+    );
+}
+
+/// The pumpkin overlay (issue #185), drawn once onto a black target, must
+/// cover the whole frame like the underwater overlay — it is also a static
+/// full-NDC quad (`pumpkin_overlay_triangles`'s doc), but untinted (opaque
+/// white vertex colour) rather than a 0.1-alpha tint, so it should paint
+/// **more** strongly than the underwater overlay: this distinguishes "the
+/// pass ran" from "the pass ran with the wrong alpha", which a bare
+/// non-black fraction against a black backdrop alone could not.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn pumpkin_overlay_paints_the_whole_frame_at_full_strength() {
+    let Some(ctx) = ctx() else { return };
+    let fx = ScreenEffectRenderer::new(
+        ctx.device(),
+        ctx.queue(),
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        &manager(),
+    )
+    .expect("build screen-effect renderer over the synthetic pack");
+
+    let mut target = HeadlessTarget::new(ctx.device(), WIDTH, HEIGHT, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let frame = target.acquire().expect("acquire");
+
+    let mut encoder = ctx
+        .device()
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("pumpkin-gpu-test-encoder"),
+        });
+    fx.draw_pumpkin(&mut encoder, frame.view());
+    ctx.queue().submit(std::iter::once(encoder.finish()));
+
+    let pixels = target.read_texels(ctx.device(), ctx.queue());
+    let frac = non_black_fraction(&pixels);
+    assert!(
+        frac > 0.99,
+        "expected the pumpkin overlay to fully cover the frame at opaque tint, only {:.1}% non-black",
+        frac * 100.0
+    );
+
+    // Predict the value, not just the sign (CLAUDE.md's "magnitude" species):
+    // the source texture is opaque green (40, 200, 40) with no vertex tint at
+    // all, drawn straight over a black target with standard alpha blending,
+    // so the readback should land close to the source green channel, not some
+    // partially-blended value a wrong tint or wrong blend factor would leave.
+    let mut green_sum = 0u64;
+    let mut n = 0u64;
+    for px in pixels.chunks_exact(4) {
+        green_sum += u64::from(px[1]);
+        n += 1;
+    }
+    let avg_green = green_sum as f64 / n.max(1) as f64;
+    assert!(
+        avg_green > 150.0,
+        "opaque untinted green texture should read back close to 200 on the green channel, got avg {avg_green:.1}"
     );
 }

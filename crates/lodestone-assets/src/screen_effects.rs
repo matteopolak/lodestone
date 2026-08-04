@@ -80,6 +80,33 @@ pub fn fire_frame_count(image: &Image) -> u32 {
     (image.height / FIRE_FRAME_SIZE).max(1)
 }
 
+/// Loads `textures/misc/pumpkinblur.png`, the full-screen texture a worn
+/// carved pumpkin overlays (issue #185). Unlike underwater/fire, this is not
+/// hardcoded in vanilla's renderer at all: it is the `camera_overlay` field of
+/// `carved_pumpkin`'s `minecraft:equippable` data component
+/// (`.cache/mc/26.2/generated/reports/minecraft/components/item/carved_pumpkin.json`,
+/// `"camera_overlay": "minecraft:misc/pumpkinblur"`), drawn generically for
+/// *any* equipped item that declares one by
+/// `Hud.extractCameraOverlays`/`extractTextureOverlay`
+/// (`.cache/mc/26.2/client-src/net/minecraft/client/gui/Hud.java:269-291`) —
+/// carved pumpkin is simply the only item that ships with the field set.
+/// Loaded here as its own standalone plain texture for the same reason
+/// underwater/fire are: this pass is deliberately kept off the model
+/// pipeline's already-full four bind groups (see
+/// `crates/lodestone-render/src/screen_effects.rs`).
+///
+/// # Errors
+///
+/// Returns [`ScreenEffectAssetError`] if the texture is missing or fails to
+/// decode.
+pub fn load_pumpkin_overlay_texture(manager: &ResourceManager) -> Result<Image, ScreenEffectAssetError> {
+    load_plain(
+        manager,
+        "assets/minecraft/textures/misc/pumpkinblur.png",
+        "minecraft:misc/pumpkinblur",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,6 +138,10 @@ mod tests {
             "assets/minecraft/textures/block/fire_1.png".to_string(),
             png(16, 512, [230, 130, 20, 255]),
         );
+        src.insert(
+            "assets/minecraft/textures/misc/pumpkinblur.png".to_string(),
+            png(16, 16, [10, 10, 10, 255]),
+        );
         ResourceManager::new(vec![Box::new(src)])
     }
 
@@ -138,6 +169,19 @@ mod tests {
     fn missing_fire_texture_is_reported() {
         let mgr = ResourceManager::new(vec![Box::new(MemorySource::new("empty"))]);
         let err = load_fire_texture(&mgr).expect_err("must fail closed");
+        assert!(matches!(err, ScreenEffectAssetError::Missing { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn pumpkin_overlay_texture_loads() {
+        let image = load_pumpkin_overlay_texture(&manager()).expect("load");
+        assert_eq!((image.width, image.height), (16, 16));
+    }
+
+    #[test]
+    fn missing_pumpkin_overlay_texture_is_reported() {
+        let mgr = ResourceManager::new(vec![Box::new(MemorySource::new("empty"))]);
+        let err = load_pumpkin_overlay_texture(&mgr).expect_err("must fail closed");
         assert!(matches!(err, ScreenEffectAssetError::Missing { .. }), "{err:?}");
     }
 

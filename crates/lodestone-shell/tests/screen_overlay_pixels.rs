@@ -77,6 +77,10 @@ fn manager() -> ResourceManager {
         "assets/minecraft/textures/block/fire_1.png".to_string(),
         png(16, 16 * 32, [230, 130, 20, 255]),
     );
+    src.insert(
+        "assets/minecraft/textures/misc/pumpkinblur.png".to_string(),
+        png(16, 16, [40, 200, 40, 255]),
+    );
     ResourceManager::new(vec![Box::new(src)])
 }
 
@@ -367,13 +371,15 @@ fn spectator_suppresses_both_overlays() {
             on_fire: true,
             spectator: true,
             tick: 0,
+            wearing_pumpkin: true,
         },
     );
 
     eprintln!("=== spectator control ===");
     eprintln!(
-        "spectator=true, eye_in_water=true, on_fire=true: underwater_overlay_drawn={}, fire_overlay_drawn={}",
-        stats.underwater_overlay_drawn, stats.fire_overlay_drawn
+        "spectator=true, eye_in_water=true, on_fire=true, wearing_pumpkin=true: \
+         underwater_overlay_drawn={}, fire_overlay_drawn={}, pumpkin_overlay_drawn={}",
+        stats.underwater_overlay_drawn, stats.fire_overlay_drawn, stats.pumpkin_overlay_drawn
     );
 
     assert!(
@@ -383,5 +389,116 @@ fn spectator_suppresses_both_overlays() {
     assert!(
         !stats.fire_overlay_drawn,
         "a spectator must not draw the fire overlay even with on_fire=true"
+    );
+    assert!(
+        !stats.pumpkin_overlay_drawn,
+        "a spectator must not draw the pumpkin overlay even with wearing_pumpkin=true"
+    );
+}
+
+/// The pumpkin overlay (issue #185) covers the full NDC screen like the
+/// underwater overlay (see `pumpkin_overlay_triangles`'s doc), so toggling
+/// `wearing_pumpkin` with the pass installed must change essentially the
+/// whole frame, through the real `RenderState::render_with_effects` path —
+/// not just `ScreenEffectRenderer::draw_pumpkin` in isolation.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn pumpkin_overlay_reaches_the_screen_through_render_with_effects() {
+    let ctx = ctx();
+    let (device, queue) = (ctx.device(), ctx.queue());
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    let cam = camera();
+
+    let mut wearing = RenderState::new(device, queue, format, W, H, None);
+    wearing.install_screen_effects(
+        ScreenEffectRenderer::new(device, queue, format, &manager()).expect("build over synthetic pack"),
+    );
+    let frame = target.acquire().expect("acquire");
+    let wearing_stats = wearing.render_with_effects(
+        device,
+        queue,
+        frame.view(),
+        &cam,
+        None,
+        &[],
+        ScreenEffects {
+            wearing_pumpkin: true,
+            ..ScreenEffects::default()
+        },
+    );
+    let wearing_pixels = target.read_texels(device, queue);
+
+    // Control A, EXECUTED: same installed pass, `wearing_pumpkin: false`.
+    // Proves the *flag*, not just installation, gates the draw.
+    let mut bare = RenderState::new(device, queue, format, W, H, None);
+    bare.install_screen_effects(
+        ScreenEffectRenderer::new(device, queue, format, &manager()).expect("build over synthetic pack"),
+    );
+    let frame = target.acquire().expect("acquire");
+    let bare_stats =
+        bare.render_with_effects(device, queue, frame.view(), &cam, None, &[], ScreenEffects::default());
+    let bare_pixels = target.read_texels(device, queue);
+
+    // Control B, EXECUTED: `wearing_pumpkin: true` but no pass installed.
+    // Proves `RenderState::new` does not spontaneously draw an overlay.
+    let uninstalled = RenderState::new(device, queue, format, W, H, None);
+    let frame = target.acquire().expect("acquire");
+    let uninstalled_stats = uninstalled.render_with_effects(
+        device,
+        queue,
+        frame.view(),
+        &cam,
+        None,
+        &[],
+        ScreenEffects {
+            wearing_pumpkin: true,
+            ..ScreenEffects::default()
+        },
+    );
+    let uninstalled_pixels = target.read_texels(device, queue);
+
+    let wearing_vs_bare = differs_fraction(&wearing_pixels, &bare_pixels);
+    let wearing_vs_uninstalled = differs_fraction(&wearing_pixels, &uninstalled_pixels);
+
+    eprintln!("=== pumpkin overlay pixel gate (through RenderState::render_with_effects) ===");
+    eprintln!(
+        "wearing_pumpkin=true: pumpkin_overlay_drawn={}, differs from bare control by {:.1}%",
+        wearing_stats.pumpkin_overlay_drawn,
+        wearing_vs_bare * 100.0
+    );
+    eprintln!(
+        "control A (installed, wearing_pumpkin=false): pumpkin_overlay_drawn={}",
+        bare_stats.pumpkin_overlay_drawn
+    );
+    eprintln!(
+        "control B (not installed, wearing_pumpkin=true): pumpkin_overlay_drawn={}, differs from worn by {:.1}%",
+        uninstalled_stats.pumpkin_overlay_drawn,
+        wearing_vs_uninstalled * 100.0
+    );
+    if wearing_vs_bare < 0.9 {
+        eprintln!("worn-vs-bare detail: {}", differs_bbox(&wearing_pixels, &bare_pixels, W));
+    }
+
+    assert!(wearing_stats.pumpkin_overlay_drawn, "wearing_pumpkin=true must draw the overlay");
+    assert!(
+        !bare_stats.pumpkin_overlay_drawn,
+        "control A failed to fail: wearing_pumpkin=false must not draw the overlay"
+    );
+    assert!(
+        !uninstalled_stats.pumpkin_overlay_drawn,
+        "control B failed to fail: no pass installed must not draw the overlay"
+    );
+    assert!(
+        wearing_vs_bare > 0.9,
+        "expected the pumpkin overlay to change ~the whole frame vs the bare control, \
+         only {:.1}% differed",
+        wearing_vs_bare * 100.0
+    );
+    assert!(
+        wearing_vs_uninstalled > 0.9,
+        "expected the pumpkin overlay to change ~the whole frame vs the uninstalled \
+         control, only {:.1}% differed",
+        wearing_vs_uninstalled * 100.0
     );
 }
