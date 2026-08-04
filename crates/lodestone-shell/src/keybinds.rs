@@ -195,12 +195,12 @@ impl Category {
 /// A rebindable thing the player can ask for.
 ///
 /// Every variant here has a real consumer in `app.rs` — vanilla mappings this
-/// client does not implement (`key.drop`, `key.pickItem`,
-/// `key.screenshot`, `key.advancements`, …) are deliberately **absent** rather
-/// than listed and dead. Adding one is a two-line change here plus the branch
-/// that consumes it; adding one *without* the branch is the island defect
-/// `CLAUDE.md` §1 is about, and a Controls menu offering a binding that does
-/// nothing is exactly how that looks to a player.
+/// client does not implement (`key.pickItem`, `key.screenshot`,
+/// `key.advancements`, …) are deliberately **absent** rather than listed and
+/// dead. Adding one is a two-line change here plus the branch that consumes
+/// it; adding one *without* the branch is the island defect `CLAUDE.md` §1 is
+/// about, and a Controls menu offering a binding that does nothing is exactly
+/// how that looks to a player.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum InputAction {
     // -- movement ---------------------------------------------------------
@@ -228,6 +228,19 @@ pub enum InputAction {
     /// (issue #385). `app.rs`'s `resolve_key` routes the two from different arms
     /// — see [`crate::app::KeyOutcome::SwapOffhand`] and the module docs.
     SwapOffhand,
+    /// Vanilla's `key.drop` (`Options.java:664`). Drop one item, or — with
+    /// Control held — the whole stack.
+    ///
+    /// **Two mechanisms depending on context, the same shape as
+    /// [`Self::SwapOffhand`].** With a container screen open and a slot
+    /// hovered, it is a `ContainerInput::Throw` click against that slot
+    /// (`AbstractContainerScreen.java:495-501`, gated on `hoveredSlot != null
+    /// && hoveredSlot.hasItem()`, not an empty cursor); with no screen open it
+    /// is a bare `ClientAction::DropSelectedItem`/`DropSelectedItemStack`
+    /// (`Minecraft.handleKeybinds`, `PLAYER_ACTION`/`DROP_ITEM`). `app.rs`'s
+    /// `resolve_key` routes the two from different arms — see
+    /// [`crate::app::KeyOutcome::ContainerDrop`]/[`crate::app::KeyOutcome::Drop`].
+    Drop,
     Hotbar1,
     Hotbar2,
     Hotbar3,
@@ -268,7 +281,7 @@ impl InputAction {
     /// category and, within a category, follows `Options.java`'s own
     /// declaration order — so walking `ALL` filtered by [`Category::SORT_ORDER`]
     /// reproduces vanilla's Controls-screen ordering without a sort.
-    pub const ALL: [InputAction; 26] = [
+    pub const ALL: [InputAction; 27] = [
         InputAction::Forward,
         InputAction::Back,
         InputAction::Left,
@@ -280,6 +293,7 @@ impl InputAction {
         InputAction::Use,
         InputAction::Inventory,
         InputAction::SwapOffhand,
+        InputAction::Drop,
         InputAction::Hotbar1,
         InputAction::Hotbar2,
         InputAction::Hotbar3,
@@ -316,6 +330,7 @@ impl InputAction {
             InputAction::Use => "key.use",
             InputAction::Inventory => "key.inventory",
             InputAction::SwapOffhand => "key.swapOffhand",
+            InputAction::Drop => "key.drop",
             InputAction::Hotbar1 => "key.hotbar.1",
             InputAction::Hotbar2 => "key.hotbar.2",
             InputAction::Hotbar3 => "key.hotbar.3",
@@ -357,6 +372,7 @@ impl InputAction {
             InputAction::Attack | InputAction::Use => Category::Gameplay,
             InputAction::Inventory
             | InputAction::SwapOffhand
+            | InputAction::Drop
             | InputAction::Hotbar1
             | InputAction::Hotbar2
             | InputAction::Hotbar3
@@ -396,9 +412,10 @@ impl InputAction {
             // in the source is `keyUse` (button 1) then `keyAttack` (button 0).
             InputAction::Attack => Binding::Mouse(MouseButton::Left),
             InputAction::Use => Binding::Mouse(MouseButton::Right),
-            // `Options.java:662-663` — 69 and 70.
+            // `Options.java:662-664` — 69, 70 and 81.
             InputAction::Inventory => Binding::Key(KeyCode::KeyE),
             InputAction::SwapOffhand => Binding::Key(KeyCode::KeyF),
+            InputAction::Drop => Binding::Key(KeyCode::KeyQ),
             // `Options.java:684-692` — 49..57, i.e. the number row, not the keypad.
             InputAction::Hotbar1 => Binding::Key(KeyCode::Digit1),
             InputAction::Hotbar2 => Binding::Key(KeyCode::Digit2),
@@ -1036,6 +1053,7 @@ mod tests {
             68 => KeyCode::KeyD,
             69 => KeyCode::KeyE,
             70 => KeyCode::KeyF,
+            81 => KeyCode::KeyQ,
             83 => KeyCode::KeyS,
             84 => KeyCode::KeyT,
             87 => KeyCode::KeyW,
@@ -1062,6 +1080,7 @@ mod tests {
             (InputAction::Sneak, 340, Category::Movement),
             (InputAction::Sprint, 341, Category::Movement),
             (InputAction::Inventory, 69, Category::Inventory),
+            (InputAction::Drop, 81, Category::Inventory),
             (InputAction::Chat, 84, Category::Multiplayer),
             (InputAction::PlayerList, 258, Category::Multiplayer),
             (InputAction::Command, 47, Category::Multiplayer),
@@ -1272,11 +1291,10 @@ mod tests {
         assert_eq!(Keybinds::in_category(Category::Creative).count(), 0);
         assert_eq!(Keybinds::in_category(Category::Spectator).count(), 0);
         assert_eq!(Keybinds::in_category(Category::Movement).count(), 7);
-        // Inventory: `key.inventory`, `key.swapOffhand`, and the nine hotbar
-        // slots. Vanilla puts all eleven in `Category.INVENTORY`
-        // (`Options.java:662-663,683-693`); `key.drop` is the twelfth there and
-        // this client does not implement it.
-        assert_eq!(Keybinds::in_category(Category::Inventory).count(), 11);
+        // Inventory: `key.inventory`, `key.swapOffhand`, `key.drop`, and the
+        // nine hotbar slots — all twelve of vanilla's `Category.INVENTORY`
+        // mappings (`Options.java:662-664,683-693`).
+        assert_eq!(Keybinds::in_category(Category::Inventory).count(), 12);
         // Misc lost a member to #382: `key.lodestone.toggleFly` is gone, leaving
         // `key.togglePerspective` and this client's non-vanilla pause entry.
         assert_eq!(Keybinds::in_category(Category::Misc).count(), 2);
@@ -1422,7 +1440,7 @@ mod tests {
             "key.attack": "key.keyboard.zzz.not.a.key",
             "key.back": "key.keyboard.up",
             "key.chat": 42,
-            "key.drop": "key.keyboard.q",
+            "key.pickItem": "key.keyboard.q",
             "key.forward": "key.keyboard.down",
             "key.jump": null,
             "key.left": "scancode.30",
@@ -1442,8 +1460,12 @@ mod tests {
             binds.is(InputAction::Left, KeyCode::KeyA),
             "an unsupported binding *type* must also fall back, not error"
         );
-        // …and unknown *action* names were simply ignored.
-        assert!(InputAction::from_name("key.drop").is_none());
+        // …and unknown *action* names were simply ignored. `key.pickItem` is
+        // deliberately still absent from this table (see `InputAction`'s own
+        // module doc) — `key.drop` used to fill this slot before it gained an
+        // `InputAction::Drop` of its own, which would have made this line
+        // silently start asserting something else instead of failing loudly.
+        assert!(InputAction::from_name("key.pickItem").is_none());
 
         // The load kept going: every good entry after a bad one still applied.
         assert!(

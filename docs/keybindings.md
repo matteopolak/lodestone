@@ -32,9 +32,12 @@ so matching a key costs nothing per event.
 
 ### The precedence chain is a pure function
 
-`app::resolve_key(binds, gate, code, pressed) -> Option<KeyOutcome>` holds the
-entire decision. `KeyGate` is the four booleans it reads off `UiState`
-(`menu`, `chat_open`, `container_open`, `gameplay`); `KeyOutcome` is the one side
+`app::resolve_key(binds, gate, code, pressed, ctrl) -> Option<KeyOutcome>`
+holds the entire decision. `KeyGate` is the four booleans it reads off
+`UiState` (`menu`, `chat_open`, `container_open`, `gameplay`); `ctrl` is
+whether Control is currently held, tracked by the driver the same way
+`shift_held` is (see "One action, two mechanisms: `key.drop`" below — it is
+the only thing that reads this parameter); `KeyOutcome` is the one side
 effect the driver should then perform.
 
 **The order is behaviour, not layout.** Three arms swallow keys:
@@ -124,8 +127,8 @@ A table entry, not a structural change. Four places, all in `keybinds.rs`:
 **Step 4 is not optional.** An action with no consumer is a Controls-menu row
 that does nothing — the island defect of `CLAUDE.md` §1. Only actions this client
 actually dispatches are in the table today, which is why vanilla mappings we do
-not implement (`key.drop`, `key.pickItem`, `key.screenshot`) are absent rather
-than listed and dead.
+not implement (`key.pickItem`, `key.screenshot`) are absent rather than listed
+and dead.
 
 If the new action is a movement one, also add it to `movement()` so it reaches
 `lodestone-controller`.
@@ -175,6 +178,45 @@ reports `serverbound encoded 53/69` with `player_action` among the 53, and is
 **silent on this issue either way**: it measures packet coverage, and the gap was
 one missing `else if` two layers above the wire. A tool that cannot see the
 defect class is not evidence about it.
+
+### One action, two mechanisms: `key.drop` (issues #16, #27)
+
+Landed the same shape as `key.swapOffhand` above, and once that precedent
+existed this one took no new design: same two-mechanism split, same "one
+guard at the driver arm, not in `resolve_key`" boundary, same ordering
+argument. The one genuinely new piece is `ctrl`.
+
+| context | mechanism | our route |
+|---|---|---|
+| screen open, slot hovered | `ContainerInput::Throw`, button `0`/`1` (`AbstractContainerScreen.java:495-501`) | `KeyOutcome::ContainerDrop { ctrl }` → `MenuInput::key_pressed` → `Click::drop_one`/`drop_stack` |
+| no screen, normal play | bare `PLAYER_ACTION`/`DROP_ITEM`\|`DROP_ALL_ITEMS` (`Minecraft.java:1907-1911`) | `KeyOutcome::Drop { ctrl }` → `ClientAction::DropSelectedItem`/`DropSelectedItemStack` |
+
+**`resolve_key` gained a fifth parameter, `ctrl: bool`, instead of the
+modifier being read at the driver's `match` arm.** The rule this follows:
+`resolve_key` is where every other input decision already lives, and a
+decision made outside it is invisible to this function's own tests — the
+same reasoning that keeps the empty-cursor/hovered-slot guards for
+`ContainerSwap` at the driver arm (they are *session* state, not key state)
+while `ctrl` stays inside `resolve_key` (it is read off a tracked *key*
+state, `WindowApp::ctrl_held`, the same shape `shift_held` already has).
+Threading it through was not invasive: one new parameter, one new tracked
+field, and every existing call site took a mechanical `, false`.
+
+**Both wire-side actions were already fully built before this landed, with
+zero producers** — `Click::drop_one`/`drop_stack`/`do_throw`
+(`lodestone-game`, #27) and `ClientAction::DropSelectedItem`/
+`DropSelectedItemStack` (all four protocol adapters). **`MenuInput::
+key_pressed`'s `Drop` arm also already existed** by the time this landed
+(`container.rs`, landed concurrently with the research that scoped this
+work) — the actual gap was purely the `app.rs` call sites on both sides of
+the container-open boundary. Worth recording: a "producer is missing" claim
+needs re-verifying against the current tree before assuming which hop is
+actually the gap, the same lesson `CLAUDE.md`'s staleness section already
+gives for other claims.
+
+See `docs/combat.md`'s "The drop key (`Q`)" for the vanilla-source detail
+(the `hoveredSlot.hasItem()` gate, why it is `else if` not two `if`s, why
+`PickItem` is not creative-gated at this layer) and the live-gate story.
 
 ### Wiring the Controls menu
 
@@ -259,7 +301,7 @@ To capture a rebind, take the `KeyCode` from a `KeyEvent`'s `physical_key` or th
   persisted format is a string and unknown names already fall back to defaults.
 - **`Keybinds` is `Copy` on purpose** — a fixed array, not a map — so `Options`
   stays `Copy` and the menu layer that reads it by value did not have to change.
-  A `HashMap` here would have rippled outward for no benefit at 26 entries.
+  A `HashMap` here would have rippled outward for no benefit at 27 entries.
 - **`Hotbar1` is slot `0`.** The off-by-one lives only in
   `InputAction::hotbar_slot`.
 - **`window_event`'s effects `match` is covered by the compiler and by nothing

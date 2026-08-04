@@ -22,7 +22,7 @@ use crate::chat::ChatInput;
 use crate::config::{Config, Mode};
 use crate::container::{
     ContainerFrame, ContainerRenderer, MenuButton, MenuContext, MenuHit, MenuInput,
-    hit_test_with_scale,
+    MenuKey as ContainerMenuKey, hit_test_with_scale,
 };
 use crate::effects::EffectsRenderer;
 use crate::gpu::RenderState;
@@ -260,6 +260,25 @@ pub(crate) enum KeyOutcome {
     /// (`Minecraft.java:1900-1905`). That is session state rather than key state,
     /// so like `ContainerSwap`'s two guards it lives at the driver's `match` arm.
     SwapOffhand,
+    /// A `ContainerInput::Throw` against the **hovered** slot while a
+    /// container screen is open — vanilla's `key.drop` inside
+    /// `AbstractContainerScreen.keyPressed`
+    /// (`AbstractContainerScreen.java:495-501`), gated there on
+    /// `hoveredSlot != null && hoveredSlot.hasItem()` — **not** an empty
+    /// cursor, which `doClick` applies itself once the click reaches it
+    /// (`AbstractContainerMenu.java:513`). `ctrl` selects drop-**stack**
+    /// (button `1`) over drop-one (button `0`), the only thing the modifier
+    /// changes; carried here rather than read at the driver arm because
+    /// `resolve_key` is where every other input decision already lives (see
+    /// [`InputAction::Drop`]'s docs).
+    ContainerDrop { ctrl: bool },
+    /// `key.drop` pressed with **no screen open** — vanilla's own
+    /// `Minecraft.handleKeybinds` drop path (`Minecraft.java:1907-1911`). A
+    /// different mechanism from [`Self::ContainerDrop`], the same split
+    /// [`Self::SwapOffhand`] makes against [`Self::ContainerSwap`]: this one
+    /// carries no slot, only which of `ClientAction::DropSelectedItem`/
+    /// `DropSelectedItemStack` `ctrl` selects.
+    Drop { ctrl: bool },
     /// Begin (`true`) or end (`false`) a dig.
     Attack(bool),
     /// Press (`true`) or release (`false`) the use/place button.
@@ -311,11 +330,22 @@ pub(crate) enum KeyOutcome {
 /// Unidentified`). Note such an event still reaches the menu and chat arms —
 /// they route the whole `KeyEvent`, whose `text` may well be meaningful — and
 /// only the keybind chain needs a `KeyCode` to match against.
+///
+/// `ctrl` is whether Control is currently held — vanilla's own
+/// `Screen.hasControlDown()`/`hasControlDown()`, read by the driver off a
+/// tracked modifier state (mirroring `shift_held`) rather than off this event,
+/// since Control and `key.drop` are two different physical keys. It decides
+/// nothing except which of [`KeyOutcome::ContainerDrop`]/[`KeyOutcome::Drop`]'s
+/// two payload states is produced — threaded through the signature rather than
+/// read at the driver's `match` arm, because `resolve_key` is where every
+/// other input decision already lives and a decision made outside it is
+/// invisible to this function's own tests.
 pub(crate) fn resolve_key(
     binds: &Keybinds,
     gate: KeyGate,
     code: Option<KeyCode>,
     pressed: bool,
+    ctrl: bool,
 ) -> Option<KeyOutcome> {
     if gate.menu {
         return Some(KeyOutcome::Menu);
@@ -350,10 +380,20 @@ pub(crate) fn resolve_key(
             Some(KeyOutcome::ContainerSwap {
                 button: OFFHAND_SWAP_BUTTON,
             })
+        } else if let Some(slot) = hotbar_slot_for(binds, code) {
+            Some(KeyOutcome::ContainerSwap { button: slot as i32 })
+        } else if binds.is(InputAction::Drop, code) {
+            // Vanilla checks this *after* `checkHotbarKeyPressed` returns,
+            // not folded into it — `AbstractContainerScreen.java:494-500` is
+            // two separate `if`s, one wrapping `checkHotbarKeyPressed` and a
+            // second, independent one for pick/drop. The hovered-slot-has-item
+            // gate itself lives in `MenuInput::key_pressed`, not here, so a
+            // miss (empty slot, no slot at all) resolves to this outcome and
+            // then produces zero clicks downstream — matching vanilla's own
+            // `return false` either way.
+            Some(KeyOutcome::ContainerDrop { ctrl })
         } else {
-            hotbar_slot_for(binds, code).map(|slot| KeyOutcome::ContainerSwap {
-                button: slot as i32,
-            })
+            None
         }
     } else if binds.is(InputAction::DebugOverlay, code) && pressed {
         Some(KeyOutcome::ToggleDebugOverlay)
@@ -393,6 +433,13 @@ pub(crate) fn resolve_key(
         // onto a number key, and matching each context's own source is cheaper
         // than picking one and being wrong in half the cases.
         Some(KeyOutcome::SwapOffhand)
+    } else if binds.is(InputAction::Drop, code) && pressed && gate.gameplay {
+        // `Minecraft.handleKeybinds` asks `keyDrop` (`:1907`) immediately
+        // after `keySwapOffhand` (`:1900`) and before `keyAttack`/`keyUse`
+        // (`:1913+`) — matched here for the same reason the off-hand arm's
+        // own doc gives: the two orders (this one and the container arm's)
+        // only diverge once someone rebinds one action onto another's key.
+        Some(KeyOutcome::Drop { ctrl })
     } else if binds.is(InputAction::Attack, code) && gate.gameplay {
         // Only reachable once `key.attack` has been rebound off its default
         // mouse button; the mouse path is what fires out of the box. Both edges
@@ -463,6 +510,46 @@ pub(crate) fn offhand_swap_action(
         return None;
     }
     Some(lodestone_model::ClientAction::SwapItemWithOffhand)
+}
+
+/// The action `key.drop` pressed with **no screen open** should send, or
+/// `None` — the gameplay half of [`KeyOutcome::Drop`], mirroring
+/// [`offhand_swap_action`]'s shape and reasoning.
+///
+/// # The one guard
+///
+/// `!player.isSpectator()` (`Minecraft.java:1908`), the exact same guard
+/// `offhand_swap_action` applies and for the same reason: a spectator has
+/// nothing to drop, vanilla declines to send at all, and the server re-checks
+/// regardless (`ServerGamePacketListenerImpl`'s handling of
+/// `Action.DROP_ITEM`/`DROP_ALL_ITEMS` no-ops for a spectator same as any
+/// other player action). An unknown mode (before login) is treated as *not*
+/// spectator, matching `offhand_swap_action`'s own default.
+///
+/// # `ctrl` selects the wire action, not a client-side stack split
+///
+/// Vanilla's `Player.drop(boolean dropStack)` chooses between dropping one
+/// item and the whole stack **client-side**, mutating the local inventory as
+/// part of the drop and then sending whichever `ServerboundPlayerActionPacket`
+/// action matches. This shell has no client-side inventory mutation for the
+/// hotbar outside the container-click predictor (see `send_offhand_swap`'s
+/// own note on the same gap), so `ctrl` selects the wire action directly —
+/// `DropSelectedItemStack` for `true`, `DropSelectedItem` for `false` — and the
+/// next inventory sync corrects the held count, exactly the trade
+/// `send_offhand_swap` already makes for the exchange itself.
+#[must_use]
+pub(crate) fn drop_selected_action(
+    game_mode: Option<lodestone_client::GameMode>,
+    ctrl: bool,
+) -> Option<lodestone_model::ClientAction> {
+    if game_mode == Some(lodestone_client::GameMode::Spectator) {
+        return None;
+    }
+    Some(if ctrl {
+        lodestone_model::ClientAction::DropSelectedItemStack
+    } else {
+        lodestone_model::ClientAction::DropSelectedItem
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1070,6 +1157,12 @@ struct WindowApp {
     /// Container shift-clicks (`QuickMove`) need this even while the sim's own
     /// gameplay input is not being accepted.
     shift_held: bool,
+    /// Whether either Control key is currently held, tracked the same way as
+    /// [`Self::shift_held`] and for the same reason `resolve_key` needs it: to
+    /// distinguish `key.drop`'s drop-one from drop-stack
+    /// (`Screen.hasControlDown()`/`Minecraft.hasControlDown()`), which is a
+    /// modifier read at drop time, not a `KeyMapping` of its own.
+    ctrl_held: bool,
     /// When the left button last pressed on the container screen, for
     /// [`DOUBLE_CLICK_WINDOW`]-based double-click detection.
     last_menu_click: Option<Instant>,
@@ -1150,6 +1243,7 @@ impl WindowApp {
             chat_input: ChatInput::new(),
             menu_input: MenuInput::new(),
             shift_held: false,
+            ctrl_held: false,
             last_menu_click: None,
             fps_ema: 0.0,
             last_log: Instant::now(),
@@ -1580,6 +1674,56 @@ impl WindowApp {
         self.send_menu_click(click);
     }
 
+    /// `key.drop` pressed with a container screen open (the container half of
+    /// the drop-key island pair).
+    ///
+    /// Goes through [`MenuInput::key_pressed`] rather than building the
+    /// `Click` directly the way [`Self::send_container_swap`] does, because
+    /// `key_pressed` already carries vanilla's `hoveredSlot.hasItem()` guard
+    /// (`AbstractContainerScreen.java:495`) and the `PickItem`/`Drop`
+    /// `else if` — duplicating either here would be a second copy that can
+    /// drift from the one `container.rs` already tests. `Click::drop_one`/
+    /// `drop_stack` and `do_throw` (`lodestone-game`) were built and tested
+    /// under #27 with zero producers before this; this is the first caller.
+    fn send_container_drop(&self, ctrl: bool) {
+        let (Some(menu), Some((w, h))) = (
+            self.active_container_menu(),
+            self.target.as_ref().map(RenderTarget::size),
+        ) else {
+            return;
+        };
+        let hit = hit_test_with_scale(&menu, self.nav.gui_scale(), w, h, self.cursor.0, self.cursor.1);
+        let ctx = MenuContext {
+            cursor_loaded: menu.carried().is_some(),
+            // Same gap `send_container_swap`'s own click construction has: no
+            // game-mode plumbing exists on `Sim` yet, and `key_pressed`'s
+            // `Drop` arm does not read `ctx` regardless (see its doc comment).
+            creative: false,
+        };
+        for click in self.menu_input.key_pressed(hit, ContainerMenuKey::Drop { ctrl }, ctx, &menu) {
+            self.send_menu_click(click);
+        }
+    }
+
+    /// `key.drop` pressed in normal gameplay (no screen open) — the gameplay
+    /// half of the drop-key island pair. `ClientAction::DropSelectedItem`/
+    /// `DropSelectedItemStack` were encoded and round-trip tested with zero
+    /// producers anywhere in `lodestone-shell` before this; this is the first
+    /// caller. Thin by design, like [`Self::send_offhand_swap`]: everything
+    /// decidable is in [`drop_selected_action`], testable without a window, a
+    /// GPU or a live `Sim`.
+    fn send_drop_selected(&self, ctrl: bool) {
+        let Some(net) = self.sim.net() else { return };
+        let game_mode = net
+            .shared_handle()
+            .get()
+            .cloned()
+            .and_then(|handle| handle.game_mode());
+        if let Some(action) = drop_selected_action(game_mode, ctrl) {
+            net.send_action(action);
+        }
+    }
+
     /// The off-hand key pressed in normal gameplay (issue #385).
     ///
     /// Thin by design: everything decidable is in [`offhand_swap_action`], which
@@ -2001,6 +2145,12 @@ impl WindowApp {
         // out spawns from a dead world's handle.
         if let Some(f) = self.sim.skull_source() {
             render.set_skull_source(f);
+        }
+
+        // Signs. Same per-frame install as chests and skulls above; see
+        // `Sim::sign_source` for why it captures no partial tick.
+        if let Some(f) = self.sim.sign_source() {
+            render.set_sign_source(f);
         }
 
         // Reconcile fog with the player's bit-exact fluid state each frame,
@@ -2925,6 +3075,15 @@ impl ApplicationHandler for WindowApp {
                 {
                     self.shift_held = pressed;
                 }
+                // Same tracking, for Control — `resolve_key`'s `ctrl` parameter.
+                // Deliberately a running flag rather than read off this event:
+                // `key.drop` is a different physical key from Control, so the
+                // modifier's state has to outlive the keypress that changed it.
+                if let PhysicalKey::Code(code) = event.physical_key
+                    && matches!(code, KeyCode::ControlLeft | KeyCode::ControlRight)
+                {
+                    self.ctrl_held = pressed;
+                }
 
                 // Resolve *what this key means* before touching any state, then
                 // perform the one side effect it names. The precedence lives in
@@ -2954,7 +3113,7 @@ impl ApplicationHandler for WindowApp {
                 };
                 // Resolved into a local first so the immutable borrow of
                 // `self.keybinds` ends before the `&mut self` calls below.
-                let outcome = resolve_key(&self.keybinds, gate, code, pressed);
+                let outcome = resolve_key(&self.keybinds, gate, code, pressed, self.ctrl_held);
                 match outcome {
                     Some(KeyOutcome::Menu) => {
                         if pressed
@@ -3029,6 +3188,10 @@ impl ApplicationHandler for WindowApp {
                     Some(KeyOutcome::ContainerSwap { button }) => {
                         self.send_container_swap(button);
                     }
+                    Some(KeyOutcome::ContainerDrop { ctrl }) => {
+                        self.send_container_drop(ctrl);
+                    }
+                    Some(KeyOutcome::Drop { ctrl }) => self.send_drop_selected(ctrl),
                     // The *other* off-hand route (#385): no screen, no slot, a
                     // bare `ServerboundPlayerAction`. Sent straight through
                     // `NetClient` rather than queued into `ActionQueue`, which is
@@ -3624,7 +3787,14 @@ mod tests {
     }
 
     fn resolve(gate: KeyGate, code: KeyCode, pressed: bool) -> Option<KeyOutcome> {
-        resolve_key(&Keybinds::new(), gate, Some(code), pressed)
+        resolve_key(&Keybinds::new(), gate, Some(code), pressed, false)
+    }
+
+    /// Like [`resolve`], but with Control held — only the drop-key tests need
+    /// this axis, so it is a separate helper rather than a fifth argument on
+    /// every existing call above.
+    fn resolve_ctrl(gate: KeyGate, code: KeyCode, pressed: bool) -> Option<KeyOutcome> {
+        resolve_key(&Keybinds::new(), gate, Some(code), pressed, true)
     }
 
     /// Every key the default table binds, with what it should resolve to while
@@ -3725,16 +3895,16 @@ mod tests {
         binds.set(InputAction::Command, Binding::Key(KeyCode::Backquote));
         binds.set(InputAction::Chat, Binding::Key(KeyCode::KeyY));
         assert_eq!(
-            resolve_key(&binds, playing(), Some(KeyCode::Backquote), true),
+            resolve_key(&binds, playing(), Some(KeyCode::Backquote), true, false),
             Some(KeyOutcome::OpenChat { command: true })
         );
         assert_eq!(
-            resolve_key(&binds, playing(), Some(KeyCode::KeyY), true),
+            resolve_key(&binds, playing(), Some(KeyCode::KeyY), true, false),
             Some(KeyOutcome::OpenChat { command: false })
         );
         // The old keys stop opening chat at all.
         assert_eq!(
-            resolve_key(&binds, playing(), Some(KeyCode::Slash), true),
+            resolve_key(&binds, playing(), Some(KeyCode::Slash), true, false),
             None
         );
     }
@@ -4015,6 +4185,159 @@ mod tests {
         );
     }
 
+    // -- the drop key (`Q`), the two proven islands ------------------------
+    //
+    // `Click::drop_one`/`drop_stack`/`do_throw` (`lodestone-game`, #27) and
+    // `ClientAction::DropSelectedItem`/`DropSelectedItemStack` were each built,
+    // encoded and round-trip tested with zero producers before this. One
+    // binding closes both — see `InputAction::Drop`'s and `KeyOutcome::
+    // ContainerDrop`/`Drop`'s docs for the vanilla source this mirrors.
+
+    /// The gameplay half, mirroring `the_offhand_key_swaps_with_slot_forty_
+    /// while_a_container_is_open`'s shape: both resolve to a *different*
+    /// outcome than the container half, and `ctrl` must reach the outcome
+    /// unchanged from what `resolve_key` was handed.
+    #[test]
+    fn q_drops_one_while_playing_and_ctrl_q_drops_the_stack() {
+        assert_eq!(
+            resolve(playing(), KeyCode::KeyQ, true),
+            Some(KeyOutcome::Drop { ctrl: false })
+        );
+        assert_eq!(
+            resolve_ctrl(playing(), KeyCode::KeyQ, true),
+            Some(KeyOutcome::Drop { ctrl: true })
+        );
+        // A release does nothing — vanilla's `keyDrop.consumeClick()` only
+        // ever fires on the down edge.
+        assert_eq!(resolve(playing(), KeyCode::KeyQ, false), None);
+    }
+
+    /// The container half — vanilla's `AbstractContainerScreen.keyPressed`
+    /// (`:495-501`) reached through `resolve_key`'s `container_open` arm.
+    #[test]
+    fn q_issues_a_container_drop_while_a_container_is_open() {
+        let gate = KeyGate {
+            container_open: true,
+            ..KeyGate::default()
+        };
+        assert_eq!(
+            resolve(gate, KeyCode::KeyQ, true),
+            Some(KeyOutcome::ContainerDrop { ctrl: false })
+        );
+        assert_eq!(
+            resolve_ctrl(gate, KeyCode::KeyQ, true),
+            Some(KeyOutcome::ContainerDrop { ctrl: true })
+        );
+        assert_eq!(resolve(gate, KeyCode::KeyQ, false), None);
+        // -- the two-mechanisms control, same shape as the off-hand key's own --
+        assert_ne!(
+            resolve(playing(), KeyCode::KeyQ, true),
+            resolve(gate, KeyCode::KeyQ, true),
+            "the container and gameplay routes must not collapse into one \
+             outcome, or the container click would fire in the world (no menu \
+             to hit-test) or vice versa"
+        );
+    }
+
+    /// `key.drop` must not have been swallowed as an unrecognised key behind
+    /// an open container before this landed — the negative control for the
+    /// island itself, run against the pre-fix shape by simulating what an
+    /// unbound `InputAction::Drop` would have produced.
+    #[test]
+    fn an_unbound_drop_key_is_swallowed_behind_a_container_and_dead_in_the_world() {
+        let mut binds = Keybinds::new();
+        binds.set(InputAction::Drop, Binding::Unbound);
+        let gate = KeyGate {
+            container_open: true,
+            ..KeyGate::default()
+        };
+        assert_eq!(
+            resolve_key(&binds, gate, Some(KeyCode::KeyQ), true, false),
+            None,
+            "watched failing before this test existed: with the real binding \
+             still assigned, this line reported Some(ContainerDrop {{ .. }})"
+        );
+        assert_eq!(
+            resolve_key(&binds, playing(), Some(KeyCode::KeyQ), true, false),
+            None
+        );
+    }
+
+    /// Hop 1 (`resolve_key`) and hop 2 (the driver's action, factored into
+    /// [`drop_selected_action`] the same way `offhand_swap_action` is) for the
+    /// gameplay half, mirroring `the_offhand_key_in_the_world_sends_the_swap_
+    /// action_to_the_wire`.
+    #[test]
+    fn the_drop_key_in_the_world_sends_the_drop_action_to_the_wire() {
+        assert_eq!(
+            resolve(playing(), KeyCode::KeyQ, true),
+            Some(KeyOutcome::Drop { ctrl: false }),
+            "hop 1: the keybind must resolve"
+        );
+
+        let (net, actions) = NetClient::loopback();
+        let action = drop_selected_action(Some(lodestone_client::GameMode::Survival), false)
+            .expect("a survival player may drop");
+        net.send_action(action.clone());
+        assert_eq!(
+            actions.try_recv(),
+            Ok(lodestone_model::ClientAction::DropSelectedItem),
+            "hop 2: the action must reach the outbound channel"
+        );
+        assert!(actions.try_recv().is_err(), "exactly one action per press");
+
+        // And the `ctrl` axis selects the *other* wire action, not a flag on
+        // the same one — `DropSelectedItem`/`DropSelectedItemStack` are two
+        // separate `ClientAction` variants, not one with a bool field.
+        let stack_action =
+            drop_selected_action(Some(lodestone_client::GameMode::Survival), true)
+                .expect("a survival player may drop the whole stack");
+        assert_eq!(
+            stack_action,
+            lodestone_model::ClientAction::DropSelectedItemStack
+        );
+        assert_ne!(action, stack_action);
+    }
+
+    /// The spectator control, the one guard vanilla applies
+    /// (`Minecraft.java:1908`) — same shape as `a_spectator_does_not_send_
+    /// the_offhand_swap_and_everyone_else_does`, watched failing the same way:
+    /// remove the `Spectator` arm from `drop_selected_action` and the first
+    /// assertion below reports `Some(DropSelectedItem)`.
+    #[test]
+    fn a_spectator_does_not_send_the_drop_action_and_everyone_else_does() {
+        use lodestone_client::GameMode;
+        assert_eq!(
+            drop_selected_action(Some(GameMode::Spectator), false),
+            None,
+            "a spectator has nothing to drop; vanilla declines to send"
+        );
+        assert_eq!(
+            drop_selected_action(Some(GameMode::Spectator), true),
+            None,
+            "the ctrl axis must not bypass the spectator guard"
+        );
+        for mode in [
+            GameMode::Survival,
+            GameMode::Creative,
+            GameMode::Adventure,
+        ] {
+            assert_eq!(
+                drop_selected_action(Some(mode), false),
+                Some(lodestone_model::ClientAction::DropSelectedItem),
+                "{mode:?} must still drop — otherwise the guard above is \
+                 indistinguishable from the feature being absent"
+            );
+        }
+        // Before login there is no mode; sending is the better default, same
+        // reasoning as `offhand_swap_action`'s own `None` case.
+        assert_eq!(
+            drop_selected_action(None, false),
+            Some(lodestone_model::ClientAction::DropSelectedItem),
+            "an unknown game mode must not read as spectator"
+        );
+    }
+
     #[test]
     fn an_open_chat_prompt_swallows_every_key_into_the_editor() {
         // `W` must type a `w`, not walk.
@@ -4034,7 +4357,7 @@ mod tests {
         // And an unnameable physical key still reaches the editor, whose `text`
         // may be the only thing that identifies it.
         assert_eq!(
-            resolve_key(&Keybinds::new(), gate, None, true),
+            resolve_key(&Keybinds::new(), gate, None, true, false),
             Some(KeyOutcome::Chat)
         );
     }
@@ -4127,11 +4450,11 @@ mod tests {
         let mut binds = Keybinds::new();
         binds.set(InputAction::Inventory, Binding::Key(KeyCode::KeyI));
         assert_eq!(
-            resolve_key(&binds, playing(), Some(KeyCode::KeyI), true),
+            resolve_key(&binds, playing(), Some(KeyCode::KeyI), true, false),
             Some(KeyOutcome::OpenContainer)
         );
         assert_eq!(
-            resolve_key(&binds, playing(), Some(KeyCode::KeyE), true),
+            resolve_key(&binds, playing(), Some(KeyCode::KeyE), true, false),
             None,
             "the old default must stop opening the inventory"
         );
@@ -4142,10 +4465,13 @@ mod tests {
             ..KeyGate::default()
         };
         assert_eq!(
-            resolve_key(&binds, gate, Some(KeyCode::KeyI), true),
+            resolve_key(&binds, gate, Some(KeyCode::KeyI), true, false),
             Some(KeyOutcome::CloseContainer)
         );
-        assert_eq!(resolve_key(&binds, gate, Some(KeyCode::KeyE), true), None);
+        assert_eq!(
+            resolve_key(&binds, gate, Some(KeyCode::KeyE), true, false),
+            None
+        );
     }
 
     #[test]
@@ -4153,12 +4479,12 @@ mod tests {
         let mut binds = Keybinds::new();
         binds.set(InputAction::Jump, Binding::Unbound);
         assert_eq!(
-            resolve_key(&binds, playing(), Some(KeyCode::Space), true),
+            resolve_key(&binds, playing(), Some(KeyCode::Space), true, false),
             None
         );
         // The neighbouring arms are untouched.
         assert_eq!(
-            resolve_key(&binds, playing(), Some(KeyCode::KeyW), true),
+            resolve_key(&binds, playing(), Some(KeyCode::KeyW), true, false),
             Some(KeyOutcome::Movement(Action::Forward, true))
         );
     }
@@ -4174,23 +4500,23 @@ mod tests {
         binds.set(InputAction::Attack, Binding::Key(KeyCode::KeyR));
         binds.set(InputAction::Use, Binding::Key(KeyCode::KeyV));
         assert_eq!(
-            resolve_key(&binds, playing(), Some(KeyCode::KeyR), true),
+            resolve_key(&binds, playing(), Some(KeyCode::KeyR), true, false),
             Some(KeyOutcome::Attack(true))
         );
         // Hold-to-dig: the release edge must arrive, or mining never stops.
         assert_eq!(
-            resolve_key(&binds, playing(), Some(KeyCode::KeyR), false),
+            resolve_key(&binds, playing(), Some(KeyCode::KeyR), false, false),
             Some(KeyOutcome::Attack(false))
         );
         assert_eq!(
-            resolve_key(&binds, playing(), Some(KeyCode::KeyV), true),
+            resolve_key(&binds, playing(), Some(KeyCode::KeyV), true, false),
             Some(KeyOutcome::Use(true))
         );
         // The release edge must arrive too, or `ReleaseUseItem` never sends —
         // the exact bug this test's sibling assertions exist to catch (a bow
         // or shield cannot complete a use without it).
         assert_eq!(
-            resolve_key(&binds, playing(), Some(KeyCode::KeyV), false),
+            resolve_key(&binds, playing(), Some(KeyCode::KeyV), false, false),
             Some(KeyOutcome::Use(false))
         );
     }
@@ -4241,7 +4567,7 @@ mod tests {
         // `PhysicalKey::Unidentified` reaches the menu and chat arms (tested
         // above) but must not match any binding — there is nothing to match on.
         assert_eq!(
-            resolve_key(&Keybinds::new(), playing(), None, true),
+            resolve_key(&Keybinds::new(), playing(), None, true, false),
             None
         );
     }

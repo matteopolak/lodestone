@@ -217,8 +217,15 @@ recurring defect classes, not because they are generically useful — see
    `minecraft:charged_projectiles`, not on render work.
 6. **Full inventory interaction verbs.** Audit `click.rs` against
    `AbstractContainerMenu.doClick`: drag-split (left even / right one-each / middle fill
-   in creative), double-click gather, number-key swap, offhand swap, drop and drop-stack,
-   creative variants. Each is a distinct wire `ClickType`.
+   in creative), double-click gather, number-key swap, offhand swap, creative variants.
+   Each is a distinct wire `ClickType`. **Drop and drop-stack are done** (`Q`/`Ctrl+Q`,
+   see `docs/keybindings.md`'s "One action, two mechanisms: `key.drop`" — closes #16/#27):
+   `Click::drop_one`/`drop_stack`/`do_throw` and `ClientAction::DropSelectedItem`/
+   `DropSelectedItemStack` were each built and tested with zero producers; `MenuInput::
+   key_pressed`'s `Drop` arm (`crates/lodestone-shell/src/container.rs`, landed in
+   `3ccbbb1` concurrently with this item being scoped) already existed too — the actual
+   gap closed here was purely the `app.rs` dispatch, on both sides of the container-open
+   boundary.
 7. **Combat feel.** Stale as originally written — re-verified against the jar rather
    than assumed (see `docs/combat.md`): the attack-strength cooldown bar and the hurt
    tint both already shipped (#121, #98), and "camera shake" was never a real vanilla
@@ -228,11 +235,28 @@ recurring defect classes, not because they are generically useful — see
    a serverbound island (encoded by all four protocol adapters, zero producers), and
    `use_item_live` returned without sending anything whenever the crosshair was over
    any entity or nothing at all — together making the **shield and the bow
-   functionally dead in combat**, since aiming at a mob is the common case. Genuinely
-   still missing: cooldown-scaled damage (server-side, N/A), crit particles, sweep-arc
-   particle (may already partly work — unverified, see `docs/combat.md`), and
-   `bobHurt` camera roll (blocked on `Camera` gaining a roll DOF).
+   functionally dead in combat**, since aiming at a mob is the common case.
    `EntityDamaged`/`EntityHurtAnimation` decode has consumers (`HurtTime`).
+
+   **Update, this pass (#12 remainder):** cooldown-scaled damage stays server-side,
+   N/A. **Crit particles are done** — local-only prediction in `Sim::attack_entity`
+   (`maybe_spawn_crit_particles`), matching vanilla's own client-side
+   `player.attack(entity)` call in `MultiPlayerGameMode.attack`; see `docs/combat.md`.
+   **The sweep-arc particle is confirmed *not* working, and the scoping note above
+   calling it "may already partly work" was wrong** — verified by reading the actual
+   dispatch, not by a live-oracle guess: `Particles::spawn_one`
+   (`crates/lodestone-shell/src/particles.rs`) has no `"sweep_attack"` arm and falls
+   into its `other => debug!` catch-all, and `lodestone-particle`'s `emit` module has
+   no sweep emitter and `Sheet` has no `SweepAttack` variant at all — the whole
+   rendering path is unbuilt, not merely unwired. Out of this pass's file scope
+   (`lodestone-particle` and `particles.rs` are neither owned by nor brokered to the
+   combat work); flagged as its own follow-up. **`bobHurt` camera roll stays blocked**
+   on `Camera` gaining a roll DOF — re-confirmed against `camera_rig.rs`'s own
+   `bobbed_camera` doc, which is not stale: the view-matrix decomposition it uses
+   structurally cannot carry a roll component today (`Camera` has `position`/`yaw`/
+   `pitch`, no third rotation axis), and fixing it touches ~48 `Camera { .. }`
+   literals across `lodestone-render`, `gpu.rs`/`gpu/*.rs` and `entity.rs` — three
+   other agents' territory at once, not a same-pass fix.
 8. **Riding.** The island was real when this was written and is closed —
    [`riding.md`](./riding.md). Mount (a right-click on an entity, which
    `use_item_live` never even looked for), the 26.2 attachment seat, camera on the
