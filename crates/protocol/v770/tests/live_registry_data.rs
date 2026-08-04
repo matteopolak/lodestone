@@ -574,6 +574,175 @@ async fn biome_sky_colours_from_a_real_server_match_mojangs_own_biome_files() {
     );
 }
 
+/// Live counterpart to `tests/registry_data.rs::biome_climates_resolve_by_holder_id_and_hold_place_for_a_bad_entry`
+/// (issue #25/#26's shared biome lane): captures the same real `registry_data`
+/// bytes the sky-colour gate above does, but checks
+/// [`ClientRegistries::biome_climates`] against Mojang's own
+/// `has_precipitation`/`temperature`/`downfall` fields instead of
+/// `sky_color` — proving the decode this client needed to turn rain into snow
+/// per biome, not merely that *some* NBT under the biome compound parses.
+#[tokio::test]
+#[ignore = "requires the flat creative 26.2 oracle on 127.0.0.1:25570"]
+async fn biome_climates_from_a_real_server_match_mojangs_own_biome_files() {
+    let server = ServerAddress {
+        host: "127.0.0.1".into(),
+        port: 25570,
+    };
+    let profile = LoginProfile {
+        username: unique_username(),
+        uuid: Uuid::new_v4(),
+    };
+    let adapter = V770Adapter::new();
+
+    let mut conn = match Connection::connect(SERVER_ADDR).await {
+        Ok(conn) => conn,
+        Err(err) => panic!("could not reach {SERVER_ADDR}: {err}. {REPAIR}"),
+    };
+    let mut state = ConnectionState::Handshaking;
+    for directive in adapter.begin_login(&profile, &server).expect("begin login") {
+        apply(&mut conn, &mut state, directive).await;
+    }
+
+    let mut registries = ClientRegistries::default();
+    let mut biome_names: Vec<String> = Vec::new();
+    let overall = Duration::from_secs(60);
+
+    let outcome = tokio::time::timeout(overall, async {
+        loop {
+            let (packet_id, payload) = match conn.read_packet().await {
+                Ok(Some(p)) => p,
+                Ok(None) => return false,
+                Err(err) => panic!("read error: {err}"),
+            };
+            if state == ConnectionState::Configuration
+                && packet_id == configuration::clientbound::REGISTRY_DATA
+            {
+                let mut reader = Reader::new(&payload);
+                let data = RegistryData::decode(&mut reader, CTX)
+                    .expect("a real registry_data payload must decode");
+                reader
+                    .ensure_empty()
+                    .unwrap_or_else(|err| panic!("{} left {err}", data.registry));
+                if data.registry == ClientRegistries::BIOME {
+                    biome_names = data.entries.iter().map(|e| e.id.clone()).collect();
+                }
+                registries.apply(data);
+            }
+            let directives =
+                match adapter.handle_packet(&mut World::new(), state, packet_id, &payload) {
+                    Ok(directives) => directives,
+                    Err(err) => panic!("adapter rejected packet {packet_id} in {state:?}: {err}"),
+                };
+            for directive in directives {
+                apply(&mut conn, &mut state, directive).await;
+            }
+            if state == ConnectionState::Play {
+                return true;
+            }
+        }
+    })
+    .await;
+    assert_eq!(outcome, Ok(true), "never reached Play within {overall:?}");
+
+    assert!(
+        !biome_names.is_empty(),
+        "the server must send minecraft:worldgen/biome during Configuration \
+         (registries seen: {:?})",
+        registries.summary().iter().map(|(r, _)| r).collect::<Vec<_>>()
+    );
+
+    let decoded = registries.biome_climates();
+    assert_eq!(
+        decoded.len(),
+        biome_names.len(),
+        "one climate slot per entry — a dropped entry would shift every later holder id"
+    );
+
+    // Entry by entry against Mojang's own file for that entry, parsed at test
+    // time — never transcribed (CLAUDE.md: a transcription is a second copy of
+    // the thing under test, and this repo has shipped real bugs that way).
+    let mut checked = 0usize;
+    let mut resolved = 0usize;
+    for (holder_id, name) in biome_names.iter().enumerate() {
+        let short = name
+            .strip_prefix("minecraft:")
+            .expect("the oracle runs no data packs, so every biome is namespaced minecraft:");
+        let expected = mojang_biome_climate(short);
+        assert_eq!(
+            decoded[holder_id], expected,
+            "{name} (holder {holder_id}): decoded {:?} but Mojang's own \
+             worldgen/biome/{short}.json says {expected:?}",
+            decoded[holder_id]
+        );
+        checked += 1;
+        if expected.is_some() {
+            resolved += 1;
+        }
+    }
+    println!("checked {checked} biomes; {resolved} climates resolved");
+
+    // The premise that makes the equality above meaningful (CLAUDE.md's
+    // "control's premise can be false" trap): vanilla's codec has all three
+    // fields required, so every real biome must resolve. If most came back
+    // `None` the assertions above would mostly be vacuous `None == None`.
+    assert!(
+        resolved > checked * 9 / 10,
+        "only {resolved} of {checked} biomes had a climate parse — the assertions above are \
+         then mostly None == None and prove nothing about the parse"
+    );
+
+    // A concrete, independently-known pair, so a reviewer without the oracle
+    // running can still sanity-check this gate's shape: desert has no
+    // precipitation and is warm; frozen_peaks has precipitation and is cold
+    // enough to snow. Both read straight from the same JSON files above.
+    // `Biome.warmEnoughToRain`'s threshold (`Biome.java:175-176`), inlined
+    // rather than a cross-crate import: this protocol crate must not depend on
+    // `lodestone-render` for one constant, and `lodestone_render::
+    // WARM_ENOUGH_TO_RAIN` already pins the same `0.15` from the same source.
+    const WARM_ENOUGH_TO_RAIN: f32 = 0.15;
+    if let Some(idx) = biome_names.iter().position(|n| n == "minecraft:desert") {
+        let desert = decoded[idx].expect("desert has a climate");
+        assert!(!desert.has_precipitation, "desert must never rain or snow");
+        assert!(
+            desert.temperature >= WARM_ENOUGH_TO_RAIN,
+            "desert's declared temperature must be well above the rain/snow threshold"
+        );
+    }
+    if let Some(idx) = biome_names.iter().position(|n| n == "minecraft:frozen_peaks") {
+        let peaks = decoded[idx].expect("frozen_peaks has a climate");
+        assert!(peaks.has_precipitation, "frozen_peaks does have precipitation");
+        assert!(
+            peaks.temperature < WARM_ENOUGH_TO_RAIN,
+            "frozen_peaks' declared temperature must be below the rain/snow threshold, or it \
+             would rain on a snow biome's peak"
+        );
+    }
+}
+
+/// `has_precipitation`/`temperature`/`downfall` as Mojang's own biome file
+/// declares them (top-level fields, siblings of `attributes` — see
+/// `Biome.ClimateSettings.CODEC`, `Biome.java:358-368`), or `None` if any of
+/// the three required fields is absent from the file.
+fn mojang_biome_climate(short_name: &str) -> Option<lodestone_v770::packets::registry::BiomeClimate> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .join(".cache/mc/26.2/client-src/data/minecraft/worldgen/biome")
+        .join(format!("{short_name}.json"));
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|err| {
+        panic!(
+            "could not read Mojang's own {} ({err}) — this gate's expected values come from \
+             the decompiled jar's data files, so the 26.2 cache must be present",
+            path.display()
+        )
+    });
+    let json: serde_json::Value = serde_json::from_str(&text).expect("Mojang biome json parses");
+    Some(lodestone_v770::packets::registry::BiomeClimate {
+        has_precipitation: json.get("has_precipitation")?.as_bool()?,
+        temperature: json.get("temperature")?.as_f64()? as f32,
+        downfall: json.get("downfall")?.as_f64()? as f32,
+    })
+}
+
 /// `minecraft:visual/sky_color` as Mojang's own biome file declares it, packed
 /// `0x00RR_GGBB`, or `None` where the file declares none.
 ///

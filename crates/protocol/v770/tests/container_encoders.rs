@@ -18,7 +18,9 @@ use lodestone_model::{
 use lodestone_server::{ServerDirective, ServerProtocol};
 use lodestone_v770::V770Adapter;
 use lodestone_v770::V770ServerProtocol;
-use lodestone_world::{BlockEntitySync, ChunkPos, ColumnPatch, LightPatch, LoadedChunk, WorldSink};
+use lodestone_world::{
+    BiomePatch, BlockEntitySync, ChunkPos, ColumnPatch, LightPatch, LoadedChunk, WorldSink,
+};
 
 /// A [`WorldSink`] that ignores every terrain call — these tests only decode
 /// container packets, which never touch the world.
@@ -38,6 +40,7 @@ impl WorldSink for NullSink {
     ) {
     }
     fn merge_light(&mut self, _pos: ChunkPos, _patch: LightPatch) {}
+    fn merge_biomes(&mut self, _pos: ChunkPos, _patch: BiomePatch) {}
     fn unload(&mut self, _pos: ChunkPos) {}
     fn set_block_entity(&mut self, _x: i32, _y: i32, _z: i32, _type_id: u32, _nbt: Nbt) {}
     fn sync_block_entity(

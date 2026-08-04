@@ -101,7 +101,7 @@ pub use packed::PackedArray;
 pub use section::ChunkSection;
 pub use sign_text::{SignDyeColor, SignSide, SignText};
 pub use world::{
-    BlockEntitySync, ChunkPos, ColumnPatch, LightPatch, LoadedChunk, World, WorldSink,
+    BiomePatch, BlockEntitySync, ChunkPos, ColumnPatch, LightPatch, LoadedChunk, World, WorldSink,
 };
 
 /// Errors produced when decoding world structures from untrusted wire data.

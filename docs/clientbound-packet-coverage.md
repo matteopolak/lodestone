@@ -17,7 +17,7 @@ four different ways (`CLAUDE.md`); the tool is the only source of truth.
 
 ## Measured coverage
 
-| | before this session | after |
+| | before *this* row's session | after |
 |---|---|---|
 | clientbound decoded | 108/141 | **109/141** |
 | clientbound emits (reaches a consumer) | 107/141 | **108/141** |
@@ -27,6 +27,23 @@ four different ways (`CLAUDE.md`); the tool is the only source of truth.
 One packet landed: `move_minecart_along_track`. See below for why it was the only one
 of the 32 gap packets that could be decoded into a **real, already-live consumer**
 without editing a crate outside `crates/protocol/v770`.
+
+### A second session's addition: `chunks_biomes`
+
+`cargo run -p xtask -- connectedness` measured **110/141** decoded at the start of the
+biome-climate-lane session (#25/#26) that landed `chunks_biomes` — one higher than the
+"109" row above, from unrelated packet work landing between sessions; per this doc's own
+rule, that is the tool's number, not a hand count. `chunks_biomes` moves it to **111/141**
+decoded / **111/141** emits (it both decodes and reaches `World::merge_biomes` +
+`ClientEvent::ChunkLoaded` in the same arm, so it never has an "decoded but not yet
+emitting" interim state the way a few other rows in this table did). **Not re-confirmed
+by the tool after landing**: `cargo xtask connectedness` panics on the current tree —
+`xtask/src/lib.rs:4021`, a byte-index-not-a-char-boundary slice of a doc comment in
+`crates/lodestone-server/src/server.rs` containing an em dash — reproduced twice,
+unrelated to this session's files (`xtask/` and `lodestone-server` are both outside this
+session's ownership; flagged as a follow-up rather than fixed here). The 111/141 figures
+above are computed by hand from the same denominator this doc already cites and should
+be re-verified with the tool once that panic is fixed.
 
 ## Why the gap is 32, not smaller: the easy tier is already gone
 
@@ -52,12 +69,12 @@ already live and would react, or notes that nothing is.
 | packet | what it is | consumer | notes |
 |---|---|---|---|
 | `MOVE_MINECART_ALONG_TRACK` | `ClientboundMoveMinecartPacket` — the *sole* movement channel `NewMinecartBehavior` uses once a minecart exists (vanilla stops sending ordinary `move_entity_*` for cart entities). A `List<MinecartStep>` of `(position, movement, yRot, xRot, weight)` for smooth spline interpolation across the tick window. | `ClientEvent::EntityMoved`/`EntityVelocity`, ingested by the same generic entity-interpolation path as every other entity (`crates/lodestone-entity/src/interpolation.rs`, not edited here). | Every field decodes with primitives already in this crate (`Vec3` = 3×f64 BE, `ROTATION_BYTE` = the same signed-byte angle `unpack_degrees` already inverts for `rotate_head`). The only approximation: this adapter has no multi-waypoint movement event, so only the **terminal** step's pose is applied as an absolute jump — real movement will look stepped on curved rail rather than eased. Every byte, including interior steps, is still read and validated, so a wire-format drift is still caught. See `crates/protocol/v770/src/adapter.rs`'s `handle_move_minecart_along_track` doc comment and `crates/protocol/v770/tests/move_minecart_along_track.rs`. |
+| `CHUNKS_BIOMES` | `ClientboundChunksBiomesPacket` — `List<(ChunkPos, byte[] buffer))>`, where `buffer` is the concatenated per-section biome `PalettedContainer` for an **already-loaded** column (no block data), so the server can push a biome edit (e.g. `/fillbiome`) without a full chunk resend. | `World::merge_biomes`/`WorldSink::merge_biomes` (`crates/lodestone-world/src/world.rs`) writes the decoded sections straight into the loaded column, then `ClientEvent::ChunkLoaded` (reused, not a new variant) signals the remesh — exactly the pattern this table's own patch spec below described, before it was written. | Landed via the patch spec this row used to hold (kept below, struck through, for the record): the read side reused `PalettedContainer::decode` with the current dimension's `biome_kind`, one section-loop shorter than `level_chunk_with_light`'s because a biomes-only entry has no block container and no leading counts. The write side is `ChunkSection::set_biomes` (whole-container replace, `crates/lodestone-world/src/section.rs`) + `ChunkColumn::set_biome_section` (allocate-on-demand/elide-on-empty, `crates/lodestone-world/src/column.rs`) + a new `BiomePatch`/`World::merge_biomes` pair mirroring `LightPatch`/`merge_light`'s sparse-per-section, no-op-when-absent shape. A live gate against the `/fillbiome`-triggering real sender (`ChunkMap.resendBiomesForChunks`, `.cache/mc/26.2/src/net/minecraft/server/level/ChunkMap.java:1274-1292`) was not run this session (no oracle command wired to trigger it); coverage here is the hermetic decode/world-write path plus the packet's exact wire shape read from `ClientboundChunksBiomesPacket.java`. See `crates/protocol/v770/tests/chunks_biomes.rs`. ~~**Patch spec:** add `fn set_biome(&mut self, x: i32, y: i32, z: i32, biome_id: u32)` (or a section-batched sibling mirroring `set_blocks`) to `WorldSink` + its `World` impl, following the existing no-op-when-chunk-absent contract `set_block` already uses. Once that lands, `CHUNKS_BIOMES` reuses `ClientEvent::ChunkLoaded` as its dirty-region signal exactly like `LIGHT_UPDATE` does today.~~ (superseded — landed as a whole-container `BiomePatch`, not a per-block mutator; a per-`/fillbiome`-edit column can touch every cell in a section, so a batched write was worth it over reusing the single-cell `set_biome`.) |
 
 ### Tier A — spec'd, not landed: needs a small patch in a crate this task doesn't own
 
 | packet | what it is | what's blocking it |
 |---|---|---|
-| `CHUNKS_BIOMES` | `ClientboundChunksBiomesPacket` — `List<(ChunkPos, byte[] buffer))>`, where `buffer` is the concatenated per-section biome `PalettedContainer` for an **already-loaded** column (no block data), so the server can push a biome edit (e.g. `/fillbiome`) without a full chunk resend. | The *read* side is fully in place — the per-section biome-palette decoder already exists inside `LevelChunkWithLight::decode` (`crates/protocol/v770/src/packets/chunk.rs`) for the initial chunk send, and is directly reusable. The *write* side is not: `WorldSink` (`crates/lodestone-world/src/world.rs:608`) has `set_block`/`set_blocks`/`merge`/`merge_light` but no biome-only mutator, and `ChunkSection::set_biome` (`crates/lodestone-world/src/section.rs`) is only reachable through a full-section `ColumnPatch::set_section`, which would require re-supplying block data the adapter cannot read back out of a `dyn WorldSink`. **Patch spec:** add `fn set_biome(&mut self, x: i32, y: i32, z: i32, biome_id: u32)` (or a section-batched sibling mirroring `set_blocks`) to `WorldSink` + its `World` impl, following the existing no-op-when-chunk-absent contract `set_block` already uses. Once that lands, `CHUNKS_BIOMES` reuses `ClientEvent::ChunkLoaded` as its dirty-region signal exactly like `LIGHT_UPDATE` does today. |
 | `EXPLODE` | `ClientboundExplodePacket` — explosion center, radius, a block-removal *count* (not a position list — 26.x no longer sends destroyed-block coordinates in this packet), an `Optional<Vec3>` local-player knockback, a generic `ParticleOptions` explosion particle, a `Holder<SoundEvent>` explosion sound, and a trailing `WeightedList<ExplosionParticleInfo>` of debris particles. | `ClientEvent::Particles` (live-consumed at `crates/lodestone-shell/src/net.rs:938`), `ClientEvent::Sound` (`:970`), and `ClientEvent::EntityVelocity` (ingested at `crates/lodestone-ecs/src/ingest.rs:374`) are all real, wired outlets an `EXPLODE` decode could reuse **without any new `ClientEvent` variant** — this one is blocked by risk, not ownership. `explosionSound` reuses the existing `read_sound_holder` helper (`adapter.rs:1231`ff, already used by `SOUND`/`SOUND_ENTITY`) directly. The blocker is `explosionParticle`: it sits *before* `explosionSound` and `blockParticles` in the wire order, so (unlike `LEVEL_PARTICLES`, whose particle option bytes can be swallowed because they're the packet's last field) its per-particle-type option payload must be decoded with a real width, not skipped — and that means a generic `ParticleOptions` decoder covering every particle type with non-empty extra fields (`dust`, `dust_color_transition`, `block`, `block_marker`, `item`, `sculk_charge`, `shriek`, `trail`, `vibration`, `entity_effect`, …; see `.cache/mc/26.2/src/net/minecraft/core/particles/*.java`), which does not exist anywhere in this crate yet. That is real, substantial, separately-verifiable work — not a one-arm addition — and `CLAUDE.md`'s standing warning against a decoder that "looks right and is wrong" argues for not rushing it into this session without a dedicated live-oracle verification pass (e.g. an actual TNT detonation captured on one of the `scripts/live-oracles/` servers). Also needs one small, in-scope addition: the adapter does not currently track the local player's own entity id (needed to route `playerKnockback` through `EntityVelocity`) — trivial to add via the same `Login`-time capture pattern `set_dimension` already uses. |
 
 ### Tier B — a dormant serverbound `ClientAction` exists, but the UI it belongs to does not

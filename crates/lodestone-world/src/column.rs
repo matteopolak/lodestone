@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::container::PaletteKind;
+use crate::container::{PaletteKind, PalettedContainer};
 use crate::section::ChunkSection;
 
 /// A full-height column of chunk sections at a fixed `(x, z)`.
@@ -238,6 +238,39 @@ impl ChunkColumn {
         }
     }
 
+    /// Replaces the whole biome container of the section at `section_index`,
+    /// leaving block state (and every other section) untouched.
+    ///
+    /// This is [`set_biome`](Self::set_biome)'s whole-container counterpart: a
+    /// `chunks_biomes` update carries no block data at all, only one biome
+    /// container per section, so applying it must not touch `block_states`.
+    /// Allocates the section on demand if absent (unless the new biome
+    /// container is all-default, matching [`set_biome`](Self::set_biome)'s own
+    /// early-out) and elides it back to `None` if the write leaves it empty.
+    ///
+    /// # Panics
+    /// Panics if `section_index >= section_count()`, or `biomes.entry_count() != 64`.
+    pub fn set_biome_section(&mut self, section_index: usize, biomes: PalettedContainer) {
+        assert!(
+            section_index < self.sections.len(),
+            "section index outside column height range"
+        );
+        if self.sections[section_index].is_none() {
+            if biomes.single_value() == Some(self.biome_id) {
+                return;
+            }
+            self.sections[section_index] = Some(Arc::new(self.empty_section()));
+        }
+
+        let section =
+            Arc::make_mut(self.sections[section_index].as_mut().expect("just ensured present"));
+        section.set_biomes(biomes);
+
+        if section.is_empty(self.biome_id) {
+            self.sections[section_index] = None;
+        }
+    }
+
     /// Replaces the section at `section_index`, or clears it with `None`.
     ///
     /// The section is moved behind an [`Arc`] internally; the version crate that
@@ -392,6 +425,82 @@ mod tests {
         assert_eq!(c.allocated_sections(), 1);
         // The block half is still all air.
         assert!(c.section(2).unwrap().is_air_only());
+    }
+
+    // --- `set_biome_section`: the `chunks_biomes` write path (issue #26) ---
+
+    #[test]
+    fn set_biome_section_replaces_biomes_without_touching_blocks() {
+        let mut c = legacy();
+        // Give the target section real block data first. World y = 32 is
+        // section 2's first block row *and* biome cell row (both floor to
+        // local 0), so a raw container index 0 and a `get_biome(_, 32, _)`
+        // read agree on which cell they mean.
+        c.set_block(3, 32, 5, 12);
+        assert_eq!(c.get_block(3, 32, 5), 12);
+
+        let mut biomes = PalettedContainer::new(PaletteKind::biomes(), 0);
+        biomes.set(0, 9);
+        c.set_biome_section(2, biomes);
+
+        assert_eq!(c.get_biome(0, 32, 0), 9, "biome cell (0,0,0) now holds 9");
+        assert_eq!(
+            c.get_block(3, 32, 5),
+            12,
+            "block write from before the biome-only update must survive it"
+        );
+    }
+
+    #[test]
+    fn set_biome_section_on_an_absent_section_allocates_only_for_a_non_default_biome() {
+        let mut c = legacy();
+        assert_eq!(c.allocated_sections(), 0);
+
+        // An all-default biome container over an absent (all-air, all-default)
+        // section must stay elided — this is the same early-out `set_biome`
+        // already has, just at whole-container granularity.
+        let default_biomes = PalettedContainer::new(PaletteKind::biomes(), 0);
+        c.set_biome_section(2, default_biomes);
+        assert_eq!(c.allocated_sections(), 0, "an all-default write stays elided");
+
+        let mut non_default = PalettedContainer::new(PaletteKind::biomes(), 0);
+        non_default.set(0, 3);
+        c.set_biome_section(2, non_default);
+        assert_eq!(c.allocated_sections(), 1);
+        assert_eq!(c.get_biome(0, 32, 0), 3);
+        assert!(
+            c.section(2).unwrap().is_air_only(),
+            "the allocated section still has default (air) blocks"
+        );
+    }
+
+    #[test]
+    fn set_biome_section_elides_a_section_the_write_leaves_empty() {
+        let mut c = legacy();
+        let mut biomes = PalettedContainer::new(PaletteKind::biomes(), 0);
+        biomes.set(0, 5);
+        c.set_biome_section(2, biomes);
+        assert_eq!(c.allocated_sections(), 1);
+
+        // Writing the all-default container back over it must elide the
+        // section again, exactly as `set_biome` does one cell at a time.
+        let all_default = PalettedContainer::new(PaletteKind::biomes(), 0);
+        c.set_biome_section(2, all_default);
+        assert_eq!(c.allocated_sections(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "biome container must hold 64 entries")]
+    fn set_biome_section_rejects_a_wrong_sized_container() {
+        let mut c = legacy();
+        // Force the section to already be allocated, so the wrong-sized
+        // container reaches `ChunkSection::set_biomes` rather than being
+        // short-circuited by the absent-section early-out above.
+        c.set_biome(0, 40, 0, 1);
+        // A block-state-shaped container (4096 entries) must be rejected rather
+        // than silently truncated or panicking somewhere less legible.
+        let wrong = PalettedContainer::new(PaletteKind::block_states(), 0);
+        c.set_biome_section(2, wrong);
     }
 
     // --- Section-granularity Arc / copy-on-write (§12.37) ---

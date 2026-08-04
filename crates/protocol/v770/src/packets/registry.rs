@@ -251,6 +251,61 @@ impl DimensionType {
     }
 }
 
+/// The climate fields `lodestone_render::precipitation_for_temperature` needs
+/// to decide rain versus snow per biome, plus `downfall` for a future
+/// `lodestone_assets::BiomeTint` implementor.
+///
+/// Read from `Biome.ClimateSettings.CODEC` (`Biome.java:358-368`), the same
+/// top-level compound `has_precipitation`/`temperature`/`downfall` live in —
+/// **not** under `attributes` like [`biome_sky_color`]'s field. This is a
+/// **data-pack** registry like the rest of the biome table: a pack can change
+/// a biome's climate, so nothing here is hardcoded from our own jar.
+///
+/// # What is deliberately not modelled
+///
+/// `temperature_modifier` (`"none"`/`"frozen"`) and the per-block height
+/// falloff above `sea_level + 17` are both real inputs to vanilla's exact
+/// `getHeightAdjustedTemperature` (`Biome.java:112-121`) and neither is decoded
+/// here — this is the same documented approximation
+/// `docs/worldgen-biomes.md`'s `cold_enough_to_snow` gotcha already describes
+/// for the *server*-side climate table, carried over to the client-side one
+/// rather than introduced fresh. `temperature` is the biome's *declared*
+/// (sea-level, unmodified) value.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BiomeClimate {
+    /// `has_precipitation` — `false` means the biome never rains or snows at
+    /// all (deserts, most Nether/End biomes), regardless of temperature.
+    pub has_precipitation: bool,
+    /// `temperature`, declared (not height-adjusted). `>= 0.15` is rain,
+    /// otherwise snow, when `has_precipitation` is `true`
+    /// (`Biome.warmEnoughToRain`, `Biome.java:175-176`).
+    pub temperature: f32,
+    /// `downfall`, `0.0..=1.0`. Feeds the grass/foliage colormap sample
+    /// alongside `temperature`; not consulted for precipitation.
+    pub downfall: f32,
+}
+
+/// Reads a biome entry's `has_precipitation`/`temperature`/`downfall` triple
+/// off its network NBT, per [`BiomeClimate`].
+///
+/// `None` — never an error — when any of the three required fields is
+/// missing or the wrong tag, or the value is not a compound at all: an
+/// unparseable *climate* still leaves the entry's index holding its place (see
+/// [`ClientRegistries::biome_climates`]), exactly as an unparseable sky colour
+/// does for [`ClientRegistries::biome_sky_colors`]. Vanilla's own codec has all
+/// three as `fieldOf` (required), so this is genuinely "could not parse", not
+/// "declines to answer" the way an absent `sky_color` is.
+fn biome_climate(value: &Nbt) -> Option<BiomeClimate> {
+    let Nbt::Compound(fields) = value else {
+        return None;
+    };
+    Some(BiomeClimate {
+        has_precipitation: required_bool(fields, "has_precipitation").ok()?,
+        temperature: required_f32(fields, "temperature").ok()?,
+        downfall: required_f32(fields, "downfall").ok()?,
+    })
+}
+
 /// Everything this client keeps from the Configuration `registry_data` stream.
 ///
 /// One instance per connection, folded packet by packet via [`Self::apply`]. A
@@ -283,6 +338,17 @@ pub struct ClientRegistries {
     /// other unmodelled registry; only this one attribute is lifted out, because
     /// only this one has a consumer (the sky disc's tint, issue #96).
     biome_sky_colors: Vec<Option<u32>>,
+    /// `minecraft:worldgen/biome` climates (`has_precipitation`/`temperature`/
+    /// `downfall`), in registry order: index `i` is holder id `i`, exactly as
+    /// for [`Self::biome_sky_colors`]. `None` holds its place for the same
+    /// reason — an unparseable or elided entry must not shift every later
+    /// holder id.
+    ///
+    /// Unlike sky colour, every 26.2 biome declares a climate (vanilla's codec
+    /// has all three fields required, `fieldOf` not `optionalFieldOf`), so a
+    /// `None` here should only ever mean "elided" or "malformed", never "this
+    /// biome legitimately has none".
+    biome_climates: Vec<Option<BiomeClimate>>,
     /// Ordered entry names for every other synchronized registry, keyed by
     /// registry id. Names only — see this module's scope note.
     other: HashMap<String, Vec<String>>,
@@ -331,6 +397,11 @@ impl ClientRegistries {
                         .entries
                         .iter()
                         .map(|entry| entry.data.as_ref().and_then(biome_sky_color))
+                        .collect();
+                    self.biome_climates = data
+                        .entries
+                        .iter()
+                        .map(|entry| entry.data.as_ref().and_then(biome_climate))
                         .collect();
                 }
                 self.other.insert(
@@ -414,6 +485,21 @@ impl ClientRegistries {
     #[must_use]
     pub fn biome_sky_colors(&self) -> &[Option<u32>] {
         &self.biome_sky_colors
+    }
+
+    /// Every biome's climate (`has_precipitation`/`temperature`/`downfall`) in
+    /// registry order.
+    ///
+    /// Index `i` is holder id `i`, the same integer [`biome_sky_colors`]
+    /// indexes with and the same one a chunk section's biome palette stores
+    /// (`ChunkSection::biome_at_block`) — a consumer needs no second lookup to
+    /// go from "which biome is this block in" to "what does it do in the
+    /// weather". Empty before any `registry_data` arrives.
+    ///
+    /// [`biome_sky_colors`]: Self::biome_sky_colors
+    #[must_use]
+    pub fn biome_climates(&self) -> &[Option<BiomeClimate>] {
+        &self.biome_climates
     }
 
     /// Number of dimension types received.

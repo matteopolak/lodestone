@@ -174,6 +174,24 @@ impl ChunkSection {
         self.biomes.set(index, value);
     }
 
+    /// Replaces the whole biome container, leaving block state untouched.
+    ///
+    /// This is the seam a biomes-only update (`chunks_biomes`, id `13`) writes
+    /// through: that packet's wire payload is *only* biome containers, one per
+    /// section, with no block data at all — so there is nothing to fork in
+    /// `block_states` and no non-air count to recompute.
+    ///
+    /// # Panics
+    /// Panics if `biomes.entry_count() != 64`.
+    pub fn set_biomes(&mut self, biomes: PalettedContainer) {
+        assert_eq!(
+            biomes.entry_count(),
+            64,
+            "biome container must hold 64 entries"
+        );
+        self.biomes = biomes;
+    }
+
     /// Heap bytes owned by this section's two containers.
     #[must_use]
     pub fn heap_bytes(&self) -> usize {
