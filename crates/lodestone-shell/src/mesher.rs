@@ -1142,6 +1142,27 @@ impl FluidSectionView for SnapshotFluidView<'_> {
         self.models.fluid_overlay(id)
     }
 
+    /// The live half of the partial-occluder cull, and it exists for exactly the
+    /// reason `overlay_at` above does: `lodestone-render` grew the behaviour and
+    /// the trait default answers `None` everywhere, so without this override the
+    /// fix sits in the crate and never reaches a real server's terrain.
+    ///
+    /// Note this reads **outline** shapes, not collision shapes. Vanilla's
+    /// `getOcclusionShape` is the outline getter, and the two tables disagree for
+    /// roughly half of 26.2's states — reading `collision_shapes` here would be
+    /// wrong for about as many blocks as it was right for.
+    fn partial_occluder_y_range_at(&self, x: i32, y: i32, z: i32) -> Option<(f32, f32)> {
+        let (dx, lx) = split16(x);
+        let (dy, ly) = split16(y);
+        let (dz, lz) = split16(z);
+        if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dy) || !(-1..=1).contains(&dz) {
+            return None;
+        }
+        let id = self.snapshot.at(dx, dy, dz).get_block(lx, ly, lz);
+        let boxes = lodestone_data::outline_shapes::outline_boxes(id)?;
+        lodestone_assets::fluid::full_footprint_y_range(boxes)
+    }
+
     fn light_at(&self, x: usize, y: usize, z: usize) -> u8 {
         // A fluid surface has no single facing (its top slopes and its sides are
         // baked together), so it takes the brightest cell of the immediate
