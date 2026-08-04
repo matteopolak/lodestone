@@ -243,6 +243,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   [`UiState::quit_to_title`](../crates/lodestone-shell/src/menu.rs) — the same
   teardown the pause menu's Disconnect and the death screen's Title Screen button
   already use, not a fourth copy of "clear session state and go to the title".
+- [Damage types and tags](./damage-types.md) — The authoritative
+  `minecraft:damage_type` registry for Minecraft 26.2 — 51 damage types and their 35
+  tags — generated from vanilla's own datapack JSON and consumed by
+  `lodestone-entity`'s `DamageFlags`, so combat, fall, fire and loot code reads one
+  table instead of hand-deriving "does this bypass armour?" at each call site. Closes
+  issue [#263](https://github.com/matteopolak/lodestone/issues/263).
 - [Death screen](./death-screen.md) — Vanilla's `DeathScreen` (issue #103): the
   screen that appears when the local player's health reaches zero — the "You Died!"
   title, the server's death message, a score line, and two buttons (Respawn / Title

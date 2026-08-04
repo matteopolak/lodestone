@@ -132,6 +132,29 @@ const DROWNING_DAMAGE_AIR_THRESHOLD: i32 = -20;
 /// `crate::server`'s `UseItemOn` handling already carries).
 pub const DROWN_DAMAGE: f32 = 2.0;
 
+/// `minecraft:fall`, resolved from the real damage-type registry
+/// ([`lodestone_data::damage_types`], issue #263).
+///
+/// Not a `const`: [`DamageType::from_name`] is a table scan, so this is a
+/// function. It is called once per landing, not per tick, and the panic is
+/// unreachable for a name the generated table is asserted to contain.
+fn fall_damage_type() -> lodestone_data::damage_types::DamageType {
+    lodestone_data::damage_types::DamageType::from_name("minecraft:fall")
+        .expect("minecraft:fall is in the generated damage-type table")
+}
+
+/// `minecraft:drown`. Used only to *assert* the premise behind applying
+/// [`DROWN_DAMAGE`] straight to health (see the tests): `drown` is
+/// `bypasses_armor`-tagged, so with no armour/absorption model the raw
+/// subtraction and the full pipeline agree today. When an equipment model lands,
+/// route drowning through [`lodestone_entity::apply_reductions`] the way
+/// [`PlayerVitals::apply_fall_damage`] already does.
+#[cfg(test)]
+fn drown_damage_type() -> lodestone_data::damage_types::DamageType {
+    lodestone_data::damage_types::DamageType::from_name("minecraft:drown")
+        .expect("minecraft:drown is in the generated damage-type table")
+}
+
 /// Starting/full player health. Matches `V770ServerProtocol::begin_play`'s
 /// `SetHealth { health: 20.0, .. }` fresh-spawn default.
 pub const MAX_HEALTH: f32 = 20.0;
@@ -258,15 +281,20 @@ impl PlayerVitals {
     /// [`crate::fall::FallTracker::on_player_moved`]) of fall damage through
     /// the real reduction pipeline
     /// ([`lodestone_entity::apply_reductions`]), matching
-    /// `LivingEntity.actuallyHurt`'s stage order. Fall damage is tagged
-    /// `bypasses_armor` (`.cache/mc/26.2/src/data/minecraft/tags/
-    /// damage_type/bypasses_armor.json` lists `minecraft:fall`), so armour
-    /// never reduces it here regardless of what `Defenses::default()`
-    /// carries; Resistance and enchantment protection are correctly `None`/
-    /// `0.0` because this crate tracks no potion effects or equipped items
-    /// for the player yet (see this module's own doc comment for the same
-    /// gap already noted for drowning) — not a placeholder, an accurate
-    /// statement of what currently reduces it (nothing).
+    /// `LivingEntity.actuallyHurt`'s stage order.
+    ///
+    /// The flags come from the real `minecraft:damage_type` table
+    /// ([`lodestone_entity::DamageFlags::for_damage_type`], issue #263) rather
+    /// than a hand-written `bypasses_armor: true` — `minecraft:fall` *is*
+    /// `bypasses_armor`-tagged, so the derived flag is `true` and armour never
+    /// reduces fall damage, but that now comes from the datapack instead of from
+    /// a prose citation next to a literal that nothing checked.
+    ///
+    /// Resistance and enchantment protection are correctly `None`/`0.0` because
+    /// this crate tracks no potion effects or equipped items for the player yet
+    /// (see this module's own doc comment for the same gap already noted for
+    /// drowning) — not a placeholder, an accurate statement of what currently
+    /// reduces it (nothing).
     ///
     /// Returns `Some(damage_dealt)` if the hit landed (a dead player is a
     /// no-op, mirroring [`tick`](Self::tick)'s own guard), `None` otherwise.
@@ -277,10 +305,7 @@ impl PlayerVitals {
         let outcome = lodestone_entity::apply_reductions(
             raw,
             &lodestone_entity::Defenses::default(),
-            lodestone_entity::DamageFlags {
-                bypasses_armor: true,
-                ..Default::default()
-            },
+            lodestone_entity::DamageFlags::for_damage_type(fall_damage_type()),
         );
         self.health = (self.health - outcome.to_health).max(0.0);
         Some(outcome.to_health)
@@ -499,6 +524,92 @@ mod tests {
         let dealt = v.apply_fall_damage(7.0);
         assert_eq!(dealt, Some(7.0));
         assert_eq!(v.health(), MAX_HEALTH - 7.0);
+    }
+
+    /// Issue #263: the flags [`PlayerVitals::apply_fall_damage`] passes come
+    /// from the real damage-type table, not a literal.
+    ///
+    /// **What this can and cannot observe, stated plainly.** `apply_fall_damage`
+    /// hardcodes `Defenses::default()`, i.e. `armor: 0.0` — so at that
+    /// function's own output, `bypasses_armor: true` and `bypasses_armor: false`
+    /// are *indistinguishable*: both yield the raw amount. The test above is
+    /// therefore silent about the flag, and a gate written there would be the
+    /// "world" species of vacuous test (correct assertion, input that cannot
+    /// exercise it).
+    ///
+    /// So this asserts the two things that *are* observable: the derivation
+    /// yields the real tag value, and that value is load-bearing when composed
+    /// with armour. The flag matters the moment a player equipment model lands
+    /// (issue #261); until then it is correct-and-inert here, which is worth
+    /// pinning rather than leaving to a comment.
+    #[test]
+    fn fall_flags_come_from_the_damage_type_table_and_are_load_bearing() {
+        let flags = lodestone_entity::DamageFlags::for_damage_type(fall_damage_type());
+
+        // Derived from `bypasses_armor.json`, which lists `minecraft:fall`.
+        assert!(flags.bypasses_armor, "minecraft:fall is bypasses_armor-tagged");
+        assert_ne!(
+            flags,
+            lodestone_entity::DamageFlags::default(),
+            "if the derived flags equalled the default, this wiring would carry no \
+             information and the table would be an island here"
+        );
+        // fall is not in bypasses_effects/resistance/enchantments.
+        assert!(!flags.bypasses_effects);
+        assert!(!flags.bypasses_resistance);
+        assert!(!flags.bypasses_enchantments);
+        // bypasses_cooldown is empty in vanilla 26.2; this call site deliberately
+        // skips the i-frame gate in its own code, not via a tag.
+        assert!(!flags.bypasses_cooldown);
+
+        // The flag is load-bearing: against full diamond armour a raw 10.0 stays
+        // 10.0 with it, and would drop to 3.0 without it. Predicting both
+        // hypotheses, not just the sign.
+        let armoured = lodestone_entity::Defenses {
+            armor: 20.0,
+            armor_toughness: 8.0,
+            ..Default::default()
+        };
+        let with = lodestone_entity::apply_reductions(10.0, &armoured, flags).to_health;
+        let without = lodestone_entity::apply_reductions(
+            10.0,
+            &armoured,
+            lodestone_entity::DamageFlags {
+                bypasses_armor: false,
+                ..flags
+            },
+        )
+        .to_health;
+        assert!((with - 10.0).abs() < 1e-4, "bypassed: expected 10.0, got {with}");
+        assert!((without - 3.0).abs() < 1e-4, "reduced: expected 3.0, got {without}");
+        assert!(
+            with - without > 6.9,
+            "the two hypotheses must differ by the full armour reduction"
+        );
+    }
+
+    /// The premise behind subtracting [`DROWN_DAMAGE`] straight from health:
+    /// `minecraft:drown` is `bypasses_armor`-tagged, so the shortcut and the full
+    /// pipeline agree *today*. Pinned so that if a future version untags it, or
+    /// an equipment model lands, this fails instead of silently over-damaging.
+    #[test]
+    fn the_drowning_shortcut_agrees_with_the_pipeline_for_now() {
+        let flags = lodestone_entity::DamageFlags::for_damage_type(drown_damage_type());
+        assert!(
+            flags.bypasses_armor,
+            "minecraft:drown is bypasses_armor-tagged, which is why applying DROWN_DAMAGE \
+             directly to health is currently equivalent to running the pipeline"
+        );
+        let piped = lodestone_entity::apply_reductions(
+            DROWN_DAMAGE,
+            &lodestone_entity::Defenses::default(),
+            flags,
+        )
+        .to_health;
+        assert_eq!(
+            piped, DROWN_DAMAGE,
+            "the shortcut and the pipeline must agree while there is no armour model"
+        );
     }
 
     /// Fall damage floors health at `0.0`, never going negative, mirroring

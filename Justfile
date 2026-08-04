@@ -105,6 +105,17 @@ regen-collision:
 regen-hardness:
     LODESTONE_REGEN=1 cargo test -p lodestone-data --test hardness {{jflag}} --target-dir {{tdir}} committed_table_matches_dump -- --ignored --nocapture
 
+# Regenerate crates/lodestone-data's damage-type + tag table
+# (src/generated/damage_types.rs) from vanilla's own datapack JSON. Unlike the
+# two above, this needs NO JVM and no container: damage types ship as data
+# files, so step 1 re-extracts them straight out of the jar. Note the OUTER
+# .cache/mc/26.2/server.jar is a bundler and contains none of them. Test:
+# crates/lodestone-data/tests/damage_types.rs :: committed_table_matches_dump
+# (#[ignore]d).
+regen-damage-types:
+    python3 scripts/extract-damage-types.py .cache/mc/26.2/versions/26.2/server-26.2.jar crates/lodestone-data/tests/support/damage_types_jar.txt
+    LODESTONE_REGEN=1 cargo test -p lodestone-data --test damage_types {{jflag}} --target-dir {{tdir}} committed_table_matches_dump -- --ignored --nocapture
+
 # --- Delegating wrappers (scripts/* keep their bodies and paths) ------------
 
 # wasm32 compile + confinement-guard tripwire (debug build, fast). Does NOT

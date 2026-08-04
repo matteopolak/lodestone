@@ -9,14 +9,27 @@
 //! `LivingEntity.actuallyHurt`, reproduced by behaviour and pinned with
 //! known-value tests.
 //!
-//! Two things are deliberately **not** here:
+//! One thing is deliberately **not** here:
 //!   * **Knockback impulse.** `impl-physics` builds the knockback velocity from
 //!     the other side; this crate only decides *whether* a hit lands and *how
 //!     much* it hurts. Coordinate the impulse through the project owner rather
 //!     than growing a second model.
-//!   * **Damage *sources* and their tags.** Which hits bypass armour, cooldown
-//!     or resistance is registry data; a caller passes the relevant [`DamageFlags`]
-//!     rather than this crate hardcoding a version's damage-type table.
+//!
+//! # The damage-type table exists now (issue #263)
+//!
+//! This module's docs used to say that "which hits bypass armour, cooldown or
+//! resistance is registry data; a caller passes the relevant [`DamageFlags`]
+//! rather than this crate hardcoding a version's damage-type table" — and that
+//! the table existed nowhere. **It does now**, in
+//! [`lodestone_data::damage_types`], generated from vanilla 26.2's own datapack
+//! JSON out of the server jar.
+//!
+//! The seam is unchanged in shape and the crate still hardcodes nothing: it
+//! *reads* the table rather than embedding one. What changed is that callers no
+//! longer hand-derive flags. Use [`DamageFlags::for_damage_type`] instead of
+//! writing `bypasses_armor: true` next to a prose citation of
+//! `bypasses_armor.json` — that hand-derivation was the exact pattern #263
+//! existed to remove, and it had already appeared at four call sites.
 //!
 //! # Issue #261 status: the formula is live-verified, the *feed* is not
 //!
@@ -62,9 +75,13 @@
 //! unconsumed per-material armour table now would itself be the kind of
 //! island CLAUDE.md warns about. See issue #261 for the up-to-date status.
 
-/// Per-hit flags a caller derives from the damage source's type tags. Each one
-/// switches off a stage of the pipeline, matching the `DamageTypeTags` checks in
+use lodestone_data::damage_types::{DamageType, DamageTypeTag};
+
+/// Per-hit flags derived from the damage source's type tags. Each one switches
+/// off a stage of the pipeline, matching the `DamageTypeTags` checks in
 /// `LivingEntity`.
+///
+/// Build these with [`DamageFlags::for_damage_type`] rather than by hand.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DamageFlags {
     /// `BYPASSES_ARMOR`: skip the armour-absorb stage (e.g. fall, magic, void).
@@ -77,6 +94,51 @@ pub struct DamageFlags {
     pub bypasses_enchantments: bool,
     /// `BYPASSES_COOLDOWN`: ignore the invulnerability-frame gate.
     pub bypasses_cooldown: bool,
+}
+
+impl DamageFlags {
+    /// Derives the per-hit flags from a real `minecraft:damage_type` and its
+    /// resolved tag memberships — the seam this struct was shaped for
+    /// (issue #263).
+    ///
+    /// Each field is one `DamageTypeTags` query, matching the vanilla checks
+    /// one-for-one:
+    ///
+    /// | field | vanilla check |
+    /// |---|---|
+    /// | `bypasses_armor` | `LivingEntity.java:1903` |
+    /// | `bypasses_effects` | `LivingEntity.java:1912` |
+    /// | `bypasses_resistance` | `LivingEntity.java:1916` |
+    /// | `bypasses_enchantments` | `LivingEntity.java:1936` |
+    /// | `bypasses_cooldown` | `LivingEntity.java:1217` |
+    ///
+    /// Note `bypasses_cooldown` is **empty** in vanilla 26.2 — the tag is
+    /// declared at `DamageTypeTags.java:12` and gates the i-frame window, but no
+    /// damage type opts into it. So this always yields `bypasses_cooldown: false`
+    /// for a vanilla type, which is correct rather than unimplemented. A caller
+    /// that needs to force a hit past the i-frame gate (fall damage in
+    /// `lodestone-server` deliberately does) must set it explicitly and say why.
+    #[must_use]
+    pub fn for_damage_type(ty: DamageType) -> Self {
+        Self {
+            bypasses_armor: ty.is_in(DamageTypeTag::BypassesArmor),
+            bypasses_effects: ty.is_in(DamageTypeTag::BypassesEffects),
+            bypasses_resistance: ty.is_in(DamageTypeTag::BypassesResistance),
+            bypasses_enchantments: ty.is_in(DamageTypeTag::BypassesEnchantments),
+            bypasses_cooldown: ty.is_in(DamageTypeTag::BypassesCooldown),
+        }
+    }
+
+    /// [`for_damage_type`](Self::for_damage_type) by registry name, with or
+    /// without the `minecraft:` namespace.
+    ///
+    /// `None` for an unknown name, so a datapack-added or future-version type
+    /// surfaces as an explicit miss rather than silently reducing like a
+    /// default-flagged hit.
+    #[must_use]
+    pub fn for_damage_type_name(name: &str) -> Option<Self> {
+        DamageType::from_name(name).map(Self::for_damage_type)
+    }
 }
 
 /// Maximum armour points that count (`CombatRules.MAX_ARMOR`).
@@ -253,6 +315,7 @@ impl HurtCooldown {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lodestone_data::damage_types::DamageScaling;
 
     #[test]
     fn armor_formula_matches_known_values() {
@@ -351,6 +414,194 @@ mod tests {
             (out.to_health - 10.0).abs() < 1e-4,
             "armour should be skipped"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #263: DamageFlags derived from the real damage-type table
+    // -----------------------------------------------------------------------
+
+    fn ty(name: &str) -> DamageType {
+        DamageType::from_name(name).unwrap_or_else(|| panic!("{name} is a real damage type"))
+    }
+
+    /// Full diamond armour, the same set the live-verified armour test uses.
+    fn diamond() -> Defenses {
+        Defenses {
+            armor: 20.0,
+            armor_toughness: 8.0,
+            ..Default::default()
+        }
+    }
+
+    /// The **prediction** gate, and the one that would catch a broken tag
+    /// lookup. Two real damage types, one `Defenses`, one raw amount — the only
+    /// difference is the tag data.
+    ///
+    /// `minecraft:generic` **is** `bypasses_armor`-tagged (the trap that cost a
+    /// mid-oracle debugging session: a fully-armoured subject takes full damage
+    /// and the armour maths looks broken). `minecraft:mob_attack` is not.
+    ///
+    /// So against 20 armour / 8 toughness and a raw 10.0:
+    ///   * `mob_attack` → **3.0** (`toughness=2+8/4=4`,
+    ///     `realArmor=clamp(20-10/4,4,20)=17.5`, `frac=0.7`, `10*0.3`)
+    ///   * `generic` → **10.0**, untouched
+    ///
+    /// Those differ by 7.0 of 10.0, so this is a magnitude check, not a
+    /// direction check. If the tag lookup broke such that `bypasses_armor` were
+    /// always `false`, `generic` would measure 3.0 — and the assertion below
+    /// fails by 7.0 rather than passing on a technicality. That is exactly the
+    /// mutation `a_broken_bypasses_armor_lookup_would_be_caught` performs.
+    #[test]
+    fn armour_reduction_lands_on_the_real_tag_data_for_both_types() {
+        let d = diamond();
+
+        let reducible = apply_reductions(10.0, &d, DamageFlags::for_damage_type(ty("mob_attack")));
+        let bypassing = apply_reductions(10.0, &d, DamageFlags::for_damage_type(ty("generic")));
+
+        assert!(
+            (reducible.to_health - 3.0).abs() < 1e-4,
+            "mob_attack is reducible: expected 3.0, got {}",
+            reducible.to_health
+        );
+        assert!(
+            (bypassing.to_health - 10.0).abs() < 1e-4,
+            "generic is bypasses_armor-tagged: expected the full 10.0, got {}",
+            bypassing.to_health
+        );
+
+        // The absence claim ("armour does not reduce generic") is only as good
+        // as evidence that armour *would* have reduced it. Same Defenses, same
+        // amount, 7.0 points of difference — the detector demonstrably fires.
+        assert!(
+            bypassing.to_health - reducible.to_health > 6.9,
+            "the two types must differ by the full armour reduction, or this proves nothing \
+             (bypassing {}, reducible {})",
+            bypassing.to_health,
+            reducible.to_health
+        );
+    }
+
+    /// The **negative control**, run rather than described: mutate the tag
+    /// lookup so `bypasses_armor` is always `false`, and the assertion above
+    /// must fail.
+    #[test]
+    fn a_broken_bypasses_armor_lookup_would_be_caught() {
+        let d = diamond();
+
+        // The mutation: what `for_damage_type` would produce if the
+        // `BypassesArmor` tag query always returned false.
+        let broken = DamageFlags {
+            bypasses_armor: false,
+            ..DamageFlags::for_damage_type(ty("generic"))
+        };
+        let real = DamageFlags::for_damage_type(ty("generic"));
+        assert_ne!(
+            broken, real,
+            "the control is vacuous: the mutation changed nothing, so generic is not actually \
+             carrying bypasses_armor from the table"
+        );
+
+        let mutated = apply_reductions(10.0, &d, broken).to_health;
+        assert!(
+            (mutated - 3.0).abs() < 1e-4,
+            "a broken lookup should reduce generic like an ordinary hit, got {mutated}"
+        );
+        // ...and that is 7.0 away from the value the real gate asserts, so the
+        // real gate fails under this mutation instead of tolerating it.
+        assert!(
+            (mutated - 10.0).abs() > 6.9,
+            "the mutation must move the measurement far outside the real gate's tolerance"
+        );
+    }
+
+    /// Every flag comes from a tag query, checked against memberships read out of
+    /// the datapack by hand (`bypasses_armor.json`, `bypasses_effects.json`,
+    /// `bypasses_resistance.json`, `bypasses_enchantments.json`).
+    #[test]
+    fn each_flag_tracks_its_own_tag() {
+        // fall: bypasses_armor only.
+        let fall = DamageFlags::for_damage_type(ty("fall"));
+        assert!(fall.bypasses_armor);
+        assert!(!fall.bypasses_effects);
+        assert!(!fall.bypasses_resistance);
+        assert!(!fall.bypasses_enchantments);
+
+        // starve is the sole bypasses_effects member, and is also bypasses_armor.
+        let starve = DamageFlags::for_damage_type(ty("starve"));
+        assert!(starve.bypasses_effects);
+        assert!(starve.bypasses_armor);
+
+        // sonic_boom is the sole bypasses_enchantments member.
+        let sonic = DamageFlags::for_damage_type(ty("sonic_boom"));
+        assert!(sonic.bypasses_enchantments);
+        assert!(!sonic.bypasses_resistance);
+
+        // out_of_world / generic_kill are the two bypasses_resistance members.
+        for name in ["out_of_world", "generic_kill"] {
+            let f = DamageFlags::for_damage_type(ty(name));
+            assert!(f.bypasses_resistance, "{name} is bypasses_resistance");
+            assert!(f.bypasses_armor, "{name} is bypasses_armor");
+        }
+
+        // A plain melee hit switches nothing off.
+        assert_eq!(
+            DamageFlags::for_damage_type(ty("player_attack")),
+            DamageFlags::default(),
+            "player_attack runs every reduction stage"
+        );
+    }
+
+    /// `bypasses_cooldown` is empty in vanilla 26.2, so the derived flag is
+    /// always false — asserted, with a control showing the derivation *can*
+    /// produce a true flag, so this is not measuring a dead code path.
+    #[test]
+    fn no_vanilla_type_bypasses_the_iframe_cooldown() {
+        let mut any_cooldown = false;
+        let mut any_flag_at_all = false;
+        for t in DamageType::ALL {
+            let f = DamageFlags::for_damage_type(t);
+            any_cooldown |= f.bypasses_cooldown;
+            any_flag_at_all |= f.bypasses_armor;
+        }
+        assert!(
+            !any_cooldown,
+            "bypasses_cooldown has no data file in 26.2, so no type can set this flag"
+        );
+        assert!(
+            any_flag_at_all,
+            "control: the derivation must be capable of setting a flag, or the assertion \
+             above measures nothing"
+        );
+    }
+
+    /// The by-name entry point, and that an unknown name is a miss rather than a
+    /// silently default-flagged hit.
+    #[test]
+    fn lookup_by_name_accepts_both_forms_and_rejects_unknowns() {
+        assert_eq!(
+            DamageFlags::for_damage_type_name("minecraft:fall"),
+            DamageFlags::for_damage_type_name("fall")
+        );
+        assert!(
+            DamageFlags::for_damage_type_name("fall")
+                .expect("fall resolves")
+                .bypasses_armor
+        );
+        assert!(DamageFlags::for_damage_type_name("minecraft:nonsense").is_none());
+    }
+
+    /// Guards the citation in this module's docs: the table is reachable from
+    /// here and carries the non-flag fields the loot/death-message consumers
+    /// (#272) will read, so those do not need a second table.
+    #[test]
+    fn the_table_carries_more_than_flags() {
+        assert_eq!(ty("mob_attack").message_id(), "mob");
+        assert_eq!(ty("mob_attack").exhaustion(), 0.1);
+        assert_eq!(ty("fall").exhaustion(), 0.0);
+        assert_eq!(ty("explosion").scaling(), DamageScaling::Always);
+        assert!(ty("lava").is_in(DamageTypeTag::IsFire));
+        assert!(ty("fall").is_in(DamageTypeTag::IsFall));
+        assert!(ty("arrow").is_in(DamageTypeTag::IsProjectile));
     }
 
     #[test]

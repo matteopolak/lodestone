@@ -10,6 +10,12 @@ workspace = true
 
 [dependencies]
 lodestone-model = { workspace = true }
+# The `minecraft:damage_type` registry + resolved tag table (issue #263), so
+# `DamageFlags` is derived from real vanilla tag data instead of each caller
+# hand-writing `bypasses_armor: true`. Version-free like lodestone-model, so it
+# does not touch the version seam; no cycle -- lodestone-data depends only on
+# lodestone-model.
+lodestone-data = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
