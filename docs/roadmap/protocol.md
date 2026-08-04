@@ -40,6 +40,60 @@ this pass (`crates/protocol/v770/src/server_protocol.rs` was off-limits). The
 clientbound/serverbound-*encoded* deltas above (111→112, 53→54) are unrelated concurrent work
 by other agents in this same session, not anything filed here.
 
+### `connected` moved to 15/69: `CLIENT_INFORMATION`/`CHUNK_BATCH_RECEIVED` were dead-code decode arms (2026-08-04)
+
+The 13/69 figure above's own decode-arm half turned out to be the exact bug behind a separate,
+concurrently-reported chunk-streaming regression: `cargo test -p lodestone-v770 --test
+block_edit -- dig_and_place_persist_through_forget_and_reload` timed out waiting for a
+forgotten chunk to be re-sent after walking back into it, and `cargo test -p lodestone-v770
+--test server_liveness -- real_client_view_follows_player_across_chunk_boundaries` failed the
+same way. Root cause: `server_protocol.rs`'s `decode()` match had `CLIENT_INFORMATION` and
+`CHUNK_BATCH_RECEIVED` both decode-then-drop to `ServerBound::Ignored` unconditionally — a
+leftover from before this crate had any consumer for either. Issue #270 later added
+`ServerBound::ClientInformationChanged`/`ChunkBatchAcknowledged` and their `crate::server`
+consumers (`ViewTracker::set_view_radius`, the `awaiting_chunk_batch_ack` flow-control gate)
+but never came back to update this decode arm, so both variants were **constructed nowhere** —
+exactly the kind of gap this doc's own `connected` column exists to catch, and exactly why the
+13/69 figure two sections up undercounted by two. Fixed in `30a45aa`; both decode arms now
+match on `decode_full::<T>(payload)` and construct the real variant. `connected` reads **15/69**
+after the fix, with `CLIENT_INFORMATION`/`CHUNK_BATCH_RECEIVED` no longer in the
+`decodes-to-Ignored-only` list:
+
+```
+v770  clientbound decoded 113/141; emits 111/141; decoded-but-stranded 0; serverbound encoded 54/69; examined 113 arm(s); serverbound decoded 60/69, connected 15/69; examined 60 arm(s); decodes-to-Ignored-only 45
+```
+
+Re-verified against `66c895a` (several unrelated commits later): both tests still pass, and
+the full `cargo test -p lodestone-v770 --no-fail-fast` suite (all binaries) stays green. Five
+new regression tests in `server_protocol.rs`'s `view_streaming_decode_tests` module chain the
+real client encoder/adapter into this module's decoder for both packet ids, so a future decode
+arm reverting to `Ignored` fails loudly rather than silently reopening this gap.
+
+### #425: a per-species `SET_ENTITY_DATA` encoder and an `EXPLODE` encoder (2026-08-04)
+
+Not a `connected`-measured gap — that column is clientbound/serverbound **decode**
+connectivity; this is server-side **encode**, the opposite direction. `crates/lodestone-server`
+had exactly one metadata encoder before this (`encode_air_supply_update`, hardcoded to
+`LOCAL_PLAYER_ENTITY_ID` and one `INT` field) and zero `EXPLODE` encoders anywhere, so a
+creeper primed and detonated by `MobSim`'s own real AI (issue #213's exposure/damage maths,
+`SwellGoal`) was invisible to any client connected to *our* server: no swell animation, no
+particle, no sound, even though the client-side decode/render chain for all three was already
+complete and validated against real captured vanilla bytes (see
+[`entity-rendering.md`](../entity-rendering.md)'s creeper section).
+
+Closed by a general `ServerProtocol::encode_set_entity_data(entity_id, fields:
+&[MetadataField])` — replacing "one hardcoded method per field" with one vocabulary type a
+future mob's field reaches through the same `EntityStreamer::sync` diff loop
+position/rotation already use, no new plumbing — plus `ServerProtocol::encode_explode(centre,
+radius)`, fed from a new `MobSim::take_detonations()` drain and an `ExplosionFeed`
+(`crate::tick`, the same publish/drain_all idiom `BlockTickFeed` already establishes).
+`V770ServerProtocol`'s implementations of both are byte-format-verified against the
+`EntityDataIndexOracle` dump (indices 16/18) and Mojang's decompiled
+`ClientboundExplodePacket`/`Level.java`/`ServerExplosion.java` respectively, not guessed from
+our own decoder. See `crates/protocol/v770/tests/server_creeper_metadata_and_explode.rs` for
+the gate: encodes with our own server, decodes with the real, already-live-validated
+`V770Adapter`.
+
 Re-measured 2026-08-04, after landing decode arms for issues #262/#264/#266/#268/#270 (this
 session). **Use this command, never a hand count** — a hand-derived figure for this exact
 domain has been wrong four times in four different ways, and the tool itself has now been

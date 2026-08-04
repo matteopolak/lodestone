@@ -168,6 +168,34 @@ frame edge. `MAX_SWELL_SCALE` is exported for whoever widens the creeper's
 local bounds; this pass deliberately left it alone rather than guess at the
 right conjugated-scale math under time pressure with no dedicated pixel test.
 
+**A separate, server-side gap (issue #425), now also closed.** Everything
+above is the decode/render side — it works against *any* server that sends
+`SET_ENTITY_DATA`/`EXPLODE`, including a real vanilla one, which is what
+every gate above was validated against. Our own integrated server
+(`crates/lodestone-server`, `crates/protocol/v770/src/server_protocol.rs`)
+is a *different* producer, and until #425 it never sent either packet at
+all when hosting: `MobSim::tick` already called `MobSim::explode` the tick
+a creeper's fuse completed (issue #213's own exposure/damage maths, `SwellGoal`
+landed in `1feed17`/`16a5b9f`/`614acb8`), but nothing encoded `DATA_SWELL_DIR`
+for the wire, and no `EXPLODE` encoder existed anywhere in this crate — so a
+client connected to *our* server saw a creeper vanish with real blast damage
+and no swelling animation, no particle, and no sound, even though the
+render-side chain documented above was already complete.
+
+Closed by a general `ServerProtocol::encode_set_entity_data(entity_id,
+fields: &[MetadataField])` (replacing the single hardcoded
+`encode_air_supply_update` local-player arm as the only per-entity metadata
+mechanism) plus `ServerProtocol::encode_explode(centre, radius)`, both fed
+from `SimMob::snapshot`/`MobSim::take_detonations` through the same
+`EntityStreamer::sync` diff loop position/rotation already use. See
+`crates/protocol/v770/tests/server_creeper_metadata_and_explode.rs` for the
+gate: it drives `MobSim` through the same production tick path
+`run_tick_loop` uses, encodes with our own server, and decodes with the
+same `V770Adapter` `tests/live_creeper_explosion.rs` validated against real
+captured vanilla bytes — asserting `creeper_swell_dir == Some(1)` on tick 1
+and a detonation at exactly tick 30 that decodes to a `Particles` directive
+then a `Sound` naming `minecraft:entity.generic.explode`.
+
 ### Walk cycle
 
 `entities.rs` samples the **drawn** (interpolated) position once per 20 Hz tick
