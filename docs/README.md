@@ -195,6 +195,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   Issues #72 (left-click only swung when a dig started), #12 (attacking entities,
   taking knockback), and #121 (the crosshair cooldown reticle). Covers three things
   from the original change, plus the ticker/indicator pair added afterward:
+- [Command block edit screen](./command-block-screen.md) — The command block edit
+  screen (issue #47): vanilla's `CommandBlockEditScreen` — an in-game overlay with a
+  command text field, tab-completion, a read-only "Previous Output" line, a Track
+  Output toggle, and Mode/Conditional/Needs Redstone toggles for the block variants.
 - [Command tree](./command-tree.md) — `crates/lodestone-command` is a standalone,
   **ECS-free, version-free** library for Brigadier-style command trees:
   root/literal/argument nodes with redirects and an `executable` flag, parsers and
@@ -977,7 +981,8 @@ every issue under it inherits.
 
 ## Plans and research
 
-Longer-form artifacts that are not per-subsystem docs: a phased plan, and read-only
+Longer-form artifacts that are not per-subsystem docs: phased plans (everything under
+`docs/plans/`, written to be dispatchable before the work starts), and read-only
 diagnoses produced before the corresponding fix was written. They live here because a
 diagnosis is worth keeping *after* the fix lands -- CLAUDE.md's standing claim is that the
 record of confidently-held false beliefs is the most valuable thing in this repo, and several
@@ -1051,3 +1056,49 @@ of these caught the *brief* being wrong rather than the code.
   green read 1.8x too bright; vanilla's lightmap is a genuine RGB colour (blue
   moonlight, warm torchlight) that this client renders as flat grey. §4 gives
   minimal, low-risk fixes for both, cheapest first.
+- [Plan: the chunk lifecycle — tickets, status, unloading, async generation (#289, #292, #293, #297)](./plans/chunk-lifecycle.md) —
+  The implementation plan for the four chunk-lifecycle issues (#289 ticket/status
+  pipeline, #292 unloading and the save-on-unload hook, #293 non-blocking generation,
+  #297 the spawn ticket), each decomposed into agent-sized units with explicit file
+  ownership, a named consumer, and a gate with a negative control. Written 2026-08-04
+  against a verified tree; two of the four issue bodies contain claims that are false
+  against 26.2 or against the current tree, and those corrections are the first
+  section rather than a footnote.
+- [Mob AI roster: per-species goal-sets and brains](./plans/mob-ai-roster.md) — The
+  implementation plan for GitHub epic
+  [#225](https://github.com/matteopolak/lodestone/issues/225) and its children
+  #226–#233 — assembling real per-species goal sets and Brain behaviour sets on
+  top of `lodestone-entity`'s existing `GoalSelector`/`Brain` infrastructure. Its
+  central finding is that the roster **cannot be built first**: eight of the thirteen
+  implemented goals are structurally incapable of firing in production today, so this
+  plan sequences a perception-and-driver spine ahead of every species unit.
+- [Multi-version protocol: the dispatch plan for epic #343](./plans/multi-version-protocol.md) —
+  The implementation plan for epic #343 (join servers from 1.7.10 through 26.2,
+  children #344–#358): family-per-wire-era with range extension inside an era, a
+  shared canonicalisation crate every legacy family maps through, and a capture-once
+  oracle strategy. Written 2026-08-04 from a verified survey of the tree; every "X
+  exists / X is missing" claim below was re-checked that day, not copied from an older
+  document.
+- [Backing Paper's NMS calls with Rust: census and feasibility](./plans/paper-nms-bridge.md) —
+  The feasibility census issue
+  [#341](https://github.com/matteopolak/lodestone/issues/341) asked for before any
+  design: what it would take to run real, unmodified Bukkit/Spigot/Paper plugin jars
+  against this server by supplying `net.minecraft.*`-shaped classes backed by Rust.
+  The verdict is **viable only as the last plugin, not the first**: every seam the JVM
+  tier needs is a seam the public bevy-plugin API must expose anyway, none of those
+  seams is reachable today, and the JVM tier itself should not start until the
+  adjudication window and player registry exist.
+- [Plan: migrating `lodestone-server` onto its own `bevy_ecs::World` (issue #433)](./plans/server-ecs-migration.md) —
+  The phased migration plan that turns [`docs/server-ecs.md`](../server-ecs.md)'s
+  decision record into dispatchable work: how today's
+  `Arc<Mutex<_>>`-and-`tokio::spawn` server becomes a tick-thread-owned, unlocked
+  `bevy_ecs::World` whose core subsystems are themselves bevy plugins. Written
+  2026-08-04 against a re-verified tree; the state census in "The census" below is the
+  core deliverable, and every phase names its files, its choke-point patch, its gate,
+  its negative control, its performance gate, and the downstream epic it unblocks.
+- [Plan: world state — time, weather, sleeping, border, rules, difficulty, spawn, dimensions (epic #340)](./plans/world-state.md) —
+  The implementation plan for epic #340's eight children (#323–#330): the
+  server-authoritative world-state systems, each planned end-to-end from ECS placement
+  through the wire to a named client consumer. Written 2026-08-04 against a verified
+  tree; every "X doesn't exist" below was re-grepped tree-wide, and three children
+  turned out substantially landed since their issues were written.
