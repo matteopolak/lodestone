@@ -86,6 +86,11 @@ const CHEST_SHEET: (u32, u32) = (64, 64);
 /// [`CHEST_SHEET`].
 const BELL_SHEET: (u32, u32) = (32, 32);
 
+/// The banner sheet is 64×64 (`BannerModel`/`BannerFlagModel`'s
+/// `LayerDefinition.create(mesh, 64, 64)` — both layers share one canvas
+/// size, same as [`CHEST_SHEET`]).
+const BANNER_SHEET: (u32, u32) = (64, 64);
+
 /// `entity::FACE_ORDER` index of the `West` face — see the module doc on why
 /// this is not `Direction as usize`.
 const FACE_WEST: usize = 2;
@@ -148,6 +153,16 @@ pub const BLOCK_ENTITY_MODELS: &[BlockEntityModelEntry] = &[
         name: "bell",
         texture: "entity/bell/bell_body",
         build: bell_model,
+    },
+    BlockEntityModelEntry {
+        name: "banner_body",
+        texture: "entity/banner/banner_base",
+        build: banner_body_model,
+    },
+    BlockEntityModelEntry {
+        name: "banner_flag",
+        texture: "entity/banner/banner_base",
+        build: banner_flag_model,
     },
 ];
 
@@ -376,6 +391,85 @@ pub fn bell_model() -> EntityModelDef {
     EntityModelDef {
         texture_width: BELL_SHEET.0,
         texture_height: BELL_SHEET.1,
+        root,
+    }
+}
+
+/// A standing banner's pole and cross-bar — `BannerModel.createBodyLayer(true)`
+/// (`.cache/mc/26.2/client-src/net/minecraft/client/model/object/banner/BannerModel.java:24-35`):
+///
+/// ```text
+/// pole  texOffs(44, 0)  addBox(-1, -42, -1,  2, 42, 2)  pose ZERO
+/// bar   texOffs(0, 42)  addBox(-10, -44, -1,  20, 2, 2)  pose ZERO
+/// ```
+///
+/// Only `standing = true` is ported (this issue's own scope — a wall banner
+/// is `createBodyLayer(false)`, a second entry later with different box
+/// origins for `bar` and no `pole` at all). Draws through the ordinary
+/// opaque block-entity batcher with [`BlockEntityModelEntry::texture`]'s
+/// sheet (`entity/banner/banner_base` — vanilla's `Sheets.BANNER_BASE`,
+/// `Sheets.java:52`), the *wood/cloth* texture, not a pattern mask; the
+/// coloured pattern masks are a wholly separate translucent draw list (see
+/// `lodestone_render::block_entity`'s banner doc) reusing the *flag* mesh,
+/// never this one.
+#[must_use]
+pub fn banner_body_model() -> EntityModelDef {
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child(
+            "pole",
+            PartDef::new(PartPose::ZERO).with_cube(CubeDef::new(
+                [-1.0, -42.0, -1.0],
+                [2.0, 42.0, 2.0],
+                [44.0, 0.0],
+            )),
+        )
+        .with_child(
+            "bar",
+            PartDef::new(PartPose::ZERO).with_cube(CubeDef::new(
+                [-10.0, -44.0, -1.0],
+                [20.0, 2.0, 2.0],
+                [0.0, 42.0],
+            )),
+        );
+    EntityModelDef {
+        texture_width: BANNER_SHEET.0,
+        texture_height: BANNER_SHEET.1,
+        root,
+    }
+}
+
+/// A standing banner's cloth — `BannerFlagModel.createFlagLayer(true)`
+/// (`.cache/mc/26.2/client-src/net/minecraft/client/model/object/banner/BannerFlagModel.java:21-30`):
+///
+/// ```text
+/// flag  texOffs(0, 0)  addBox(-10, 0, -2,  20, 40, 1)  pose offset(0, -44, 0)
+/// ```
+///
+/// One part, one box — deliberately a single rigid box rather than the
+/// per-vertex cloth-wave geometry an earlier pass through this doc
+/// (mistakenly) assumed vanilla has. `BannerFlagModel.setupAnim` poses only
+/// `flag.xRot`, a single per-part rotation
+/// (`lodestone_render::block_entity::banner_flag_x_rot`) —
+/// [`BlockEntityMesh::part_transforms`](crate::block_entity)'s override
+/// mechanism (already used by the chest lid and the bell body) is the right
+/// shape for it, not a new animation family.
+///
+/// Drawn **twice** by a real consumer: once opaque through the same
+/// `entity/banner/banner_base` sheet [`banner_body_model`] uses (vanilla's
+/// `submitBanner` passes `Sheets.BANNER_BASE` to both the body and the flag
+/// model), and then again, translucent, once per pattern layer — see
+/// `lodestone_render::block_entity`'s module doc for the draw-order and
+/// pipeline split.
+#[must_use]
+pub fn banner_flag_model() -> EntityModelDef {
+    let flag = PartPose::offset(0.0, -44.0, 0.0);
+    let root = PartDef::new(PartPose::ZERO).with_child(
+        "flag",
+        PartDef::new(flag).with_cube(CubeDef::new([-10.0, 0.0, -2.0], [20.0, 40.0, 1.0], [0.0, 0.0])),
+    );
+    EntityModelDef {
+        texture_width: BANNER_SHEET.0,
+        texture_height: BANNER_SHEET.1,
         root,
     }
 }
@@ -649,5 +743,106 @@ mod tests {
         }
         assert!(min_y < 0.0, "min y {min_y} should dip below the pivot");
         assert!(max_y <= 0.0 + 1e-5, "max y {max_y} should not rise above the pivot");
+    }
+
+    // --- banner ---------------------------------------------------------
+
+    /// `pole` and `bar` are siblings under root, both at `PartPose::ZERO` —
+    /// `BannerModel.createBodyLayer` never nests one under the other, and
+    /// both boxes carry their own pivot-relative origin instead.
+    #[test]
+    fn banner_body_has_pole_and_bar_as_zero_pose_siblings() {
+        let def = banner_body_model();
+        assert_eq!(
+            part_names(&def),
+            vec![String::new(), "pole".to_string(), "bar".to_string()]
+        );
+        let parts = bake_entity_parts(&def);
+        let pole = parts.iter().find(|p| p.name == "pole").unwrap();
+        let bar = parts.iter().find(|p| p.name == "bar").unwrap();
+        assert_eq!(pole.rest, PartPose::ZERO);
+        assert_eq!(bar.rest, PartPose::ZERO);
+        assert_eq!(pole.parent, Some(0));
+        assert_eq!(bar.parent, Some(0));
+    }
+
+    /// The flag is one part, offset by `(0, -44, 0)` texels —
+    /// `BannerFlagModel.createFlagLayer(true)`'s `PartPose.offset`. This is
+    /// the pivot [`crate::entity::PartPose`]'s own `x_rot` overrides to swing
+    /// the sway; a wrong offset here would put the sway pivot at the wrong
+    /// height even with the angle formula exactly right.
+    #[test]
+    fn banner_flag_is_one_part_offset_by_the_bar_height() {
+        let def = banner_flag_model();
+        assert_eq!(part_names(&def), vec![String::new(), "flag".to_string()]);
+        let parts = bake_entity_parts(&def);
+        let flag = parts.iter().find(|p| p.name == "flag").unwrap();
+        assert_eq!(flag.rest, PartPose::offset(0.0, -44.0, 0.0));
+        assert_eq!(flag.parent, Some(0));
+    }
+
+    /// Both banner layers are declared on a 64×64 sheet — the same canvas
+    /// size as the chest layers, and unlike the bell's narrower 32×32.
+    #[test]
+    fn banner_layers_use_the_sixty_four_sheet() {
+        assert_eq!(banner_body_model().texture_width, BANNER_SHEET.0);
+        assert_eq!(banner_body_model().texture_height, BANNER_SHEET.1);
+        assert_eq!(banner_flag_model().texture_width, BANNER_SHEET.0);
+        assert_eq!(banner_flag_model().texture_height, BANNER_SHEET.1);
+    }
+
+    /// The pole, bar and flag stack contiguously along Y in model-texel
+    /// space, tallest (most negative — this is Y-down entity space, unlike
+    /// the block-space-up chest/bell) at the crossbar, exactly the physical
+    /// shape a banner has to have: a vertical staff, a crossbar at its top,
+    /// and cloth hanging from the crossbar that stops short of the ground.
+    /// Measured through the real baked quads, not restated from the literal
+    /// `addBox` arguments a copy-paste error could also get wrong.
+    #[test]
+    fn banner_body_and_flag_stack_contiguously_along_the_staff() {
+        let y_span = |def: &EntityModelDef, part: &str| -> (f32, f32) {
+            let baked = bake_entity_parts(def);
+            let index = baked.iter().position(|p| p.name == part).unwrap();
+            let mut chain: Vec<crate::entity::Affine> = Vec::with_capacity(baked.len());
+            for p in &baked {
+                let local = crate::entity::Affine::of_pose(&p.rest);
+                let world = match p.parent {
+                    Some(parent) => chain[parent].compose(&local),
+                    None => local,
+                };
+                chain.push(world);
+            }
+            let mut min = f32::MAX;
+            let mut max = f32::MIN;
+            for quad in &baked[index].quads {
+                for pos in &quad.positions {
+                    let world = chain[index].apply(*pos);
+                    min = min.min(world[1]);
+                    max = max.max(world[1]);
+                }
+            }
+            (min * 16.0, max * 16.0)
+        };
+
+        let body = banner_body_model();
+        let (pole_min, pole_max) = y_span(&body, "pole");
+        let (bar_min, bar_max) = y_span(&body, "bar");
+        let (flag_min, flag_max) = y_span(&banner_flag_model(), "flag");
+
+        assert!((pole_min - -42.0).abs() < 1e-4, "pole min {pole_min}");
+        assert!((pole_max - 0.0).abs() < 1e-4, "pole max {pole_max}");
+        // The crossbar sits directly atop the pole (both in texels).
+        assert!(
+            (bar_max - pole_min).abs() < 1e-4,
+            "bar max {bar_max} should touch pole min {pole_min}"
+        );
+        assert!((bar_min - -44.0).abs() < 1e-4, "bar min {bar_min}");
+        // The flag hangs from the crossbar's own height and stops 4 texels
+        // short of the ground (`BANNER_HEIGHT = 40`, `-44 + 40 = -4`).
+        assert!(
+            (flag_min - bar_min).abs() < 1e-4,
+            "flag min {flag_min} should start at the crossbar {bar_min}"
+        );
+        assert!((flag_max - -4.0).abs() < 1e-4, "flag max {flag_max}");
     }
 }
