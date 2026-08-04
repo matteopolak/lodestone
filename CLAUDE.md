@@ -159,16 +159,30 @@ Oracles (not part of repo state — recreate them):
   bullet. Refreshing one path with `git reset -- <path>` sets that index entry back to `HEAD` and
   leaves the working tree untouched, which is the safe cleanup — but the real fix is never staging in
   the first place (see the pathspec-commit entry).
-  **This is the most frequently observed hazard in the file: three more instances in one session**, and
-  all three were *reversals of a commit that had just landed*, sitting armed for the next agent's `git
-  commit` to ship under their message. Twice on `container.rs` — 632 lines then 268 — found by its owner
-  immediately after each of its own private-index commits. Once on `gpu.rs` at 3 insertions / **115
-  deletions**, a blob from before `662ffeb`, which would have reverted that commit's fog fix. Every
-  affected agent had used `GIT_INDEX_FILE` correctly and none admitted to a bare `git add`, so the
-  source was never identified — which is the point: **you cannot rely on knowing who did it.**
-  Check `git diff --cached` is empty immediately before every commit, and treat anything you did not put
-  there as hostile. `git add` "just to look" is what manufactures these; `git diff -- <path>` shows the
-  same content and touches nothing.
+  **This is the most frequently observed hazard in the file: five instances in one session**, every one a
+  *reversal of a commit that had just landed*, armed for the next agent's `git commit` to ship under
+  their message. Twice on `container.rs` (632 lines, then 268), three times on `gpu.rs` (115, 59 and 290
+  deletions). Every affected agent had used `GIT_INDEX_FILE` correctly and none had run a bare
+  `git add` — truthfully.
+
+  **The cause is the cleanup step itself, in the wrong order.** `git reset -- <paths>` sets the *shared*
+  index entry to whatever `HEAD` is **at that instant**, creating an entry where there was none. Run it
+  *before* `git update-ref`, and it pins the pre-commit blob; `update-ref` then moves `HEAD` forward and
+  that entry becomes a staged reversal of the commit you just made. A deletion-only staged diff
+  (`0` insertions, N deletions) is the signature.
+
+  So the order is not stylistic:
+
+  ```
+  TREE=$(GIT_INDEX_FILE=$priv git write-tree)
+  NEW=$(git commit-tree "$TREE" -p "$OLD" -F msg)
+  git update-ref refs/heads/main "$NEW" "$OLD"   # HEAD moves FIRST
+  git reset -- <paths>                           # then refresh, against the NEW HEAD
+  ```
+
+  And still check `git diff --cached` is empty immediately *before* every commit, because another agent
+  may have left one: a count, not an eyeball, and a verdict that depends on the count — an unconditional
+  `echo "(clean)"` after the check is its own vacuous control, and that mistake was also made here.
 - **The index is shared too: never leave work staged.** Hunk-staging (above) stops *you* shipping
   someone else's lines; it does nothing to stop *them* shipping yours. `git add` writes to the one
   index every agent shares, so any other agent's `git commit` in the gap — however narrow — harvests
