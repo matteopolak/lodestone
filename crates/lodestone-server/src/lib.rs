@@ -81,7 +81,9 @@
 //! [`Transport`]: lodestone_net::Transport
 
 mod chunk;
+mod composter;
 mod fall;
+mod furnace;
 mod integrated;
 mod inventory;
 mod mob_spawn;
@@ -93,7 +95,17 @@ mod vitals;
 mod worldgen_data;
 
 pub use chunk::{ChunkColumn, ChunkSource, OverworldChunkSource, WorldgenChunkSource};
+pub use composter::{
+    Composter, InsertOutcome as ComposterInsertOutcome, MAX_FILL_LEVEL as COMPOSTER_MAX_FILL_LEVEL,
+    READY_DELAY_TICKS as COMPOSTER_READY_DELAY_TICKS, READY_LEVEL as COMPOSTER_READY_LEVEL,
+    compostable_chance,
+};
 pub use fall::{FALL_DAMAGE_MULTIPLIER, FallTracker, SAFE_FALL_DISTANCE};
+pub use furnace::{
+    BURN_COOL_SPEED, CookingRecipe, DEFAULT_COOK_TIME, Furnace, FurnaceKind, FurnaceTick,
+    MAX_STACK_SIZE as FURNACE_MAX_STACK_SIZE, base_burn_duration, effective_burn_duration,
+    experience_for as furnace_experience_for, recipe_for as furnace_recipe_for,
+};
 pub use integrated::IntegratedServer;
 pub use inventory::{HOTBAR_SIZE, OFFHAND_NATIVE, PLAYER_NATIVE_SIZE, PlayerInventory};
 pub use mob_spawn::{
