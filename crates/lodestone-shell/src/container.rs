@@ -46,8 +46,56 @@ use crate::hud::item_icon::{
 };
 
 const FLOATS_PER_VERTEX: usize = 6;
+/// Floats per vertex on the background/GUI-sprite stream: `[x, y, u, v, r, g, b, a]`.
+/// Distinct from [`FLOATS_PER_VERTEX`], which is the untextured colour stream.
+const BG_FLOATS_PER_VERTEX: usize = 8;
 const SLOT: f32 = 18.0;
 const CELL: f32 = 16.0;
+
+/// The hover highlight's two sprite ids, from
+/// `AbstractContainerScreen.java:29-30`. Blitted at
+/// `(slot.x - 4, slot.y - 4, 24, 24)` (`:155`, `:161`) — one *behind* the slot's
+/// item and one *in front of* it, which is the whole reason there are two.
+pub const SLOT_HIGHLIGHT_BACK: &str = "container/slot_highlight_back";
+/// See [`SLOT_HIGHLIGHT_BACK`].
+pub const SLOT_HIGHLIGHT_FRONT: &str = "container/slot_highlight_front";
+
+/// Vanilla's `24` for the highlight blit — the sprite's own native size, so this
+/// is a 1:1 blit and the `nine_slice` scaling in its `.png.mcmeta` (border 4)
+/// never actually stretches anything. Worth stating: implementing the nine-slice
+/// path for this sprite is work with no observable effect.
+const HIGHLIGHT: f32 = 24.0;
+/// Vanilla's `-4` inset (`:155`), which is `(HIGHLIGHT - SLOT) / 2` off the
+/// 18×18 well but is written as the literal vanilla uses, against the 16×16
+/// cell origin.
+const HIGHLIGHT_INSET: f32 = 4.0;
+
+/// Every GUI sprite [`ContainerBackground`] stitches alongside the three panel
+/// sheets: the hover-highlight pair and the five empty-slot placeholders the
+/// player inventory declares.
+///
+/// The placeholders are addressed by the id `Slot::no_item_icon` already
+/// carries, so this list and the draw agree by construction rather than by two
+/// transcriptions of the same table.
+const GUI_SPRITES: &[&str] = &[
+    SLOT_HIGHLIGHT_BACK,
+    SLOT_HIGHLIGHT_FRONT,
+    lodestone_game::menu::EMPTY_ARMOR_SLOT_HELMET,
+    lodestone_game::menu::EMPTY_ARMOR_SLOT_CHESTPLATE,
+    lodestone_game::menu::EMPTY_ARMOR_SLOT_LEGGINGS,
+    lodestone_game::menu::EMPTY_ARMOR_SLOT_BOOTS,
+    lodestone_game::menu::EMPTY_ARMOR_SLOT_SHIELD,
+];
+
+/// A GUI sprite id (`container/slot/helmet`) as the texture location it lives at
+/// (`minecraft:gui/sprites/container/slot/helmet`).
+///
+/// Vanilla's `blitSprite` resolves sprite ids through the GUI sprite atlas,
+/// whose sources are `gui/sprites/**`; this client has no sprite-atlas indirection
+/// so the prefix is applied here.
+fn sprite_location(id: &str) -> Option<ResourceLocation> {
+    ResourceLocation::new("minecraft", &format!("gui/sprites/{id}")).ok()
+}
 
 /// A pixel-space rectangle.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -422,6 +470,24 @@ impl ContainerBackground {
         builder.load(manager, &generic)?;
         builder.load(manager, &crafting)?;
         builder.load(manager, &inventory)?;
+        // The hover highlight and the empty-slot placeholders (issue #376) ride
+        // in this same atlas rather than a second one. They are ordinary
+        // textures with an ordinary `.png.mcmeta`, so `AtlasBuilder` needs no
+        // new capability — and reusing the atlas means reusing the bind group
+        // and pipeline `attach_background` already builds. A separate
+        // `GuiAtlas` would have needed both, which is what
+        // `tests/container_slot_sprites.rs` recorded as "a pipeline/bind-group
+        // job"; it turned out not to be one.
+        //
+        // A missing sprite is a hard error here, matching the three sheets
+        // above, so a pack that drops one **names the sprite** instead of
+        // silently drawing an empty cell.
+        for id in GUI_SPRITES {
+            let loc = sprite_location(id).ok_or_else(|| AtlasError::TextureMissing {
+                location: (*id).to_string(),
+            })?;
+            builder.load(manager, &loc)?;
+        }
         let atlas = builder.build()?;
         Ok(Self {
             atlas,
@@ -444,6 +510,27 @@ impl ContainerBackground {
     /// only if a sheet is missing from the atlas (never true of
     /// [`Self::build`]'s own output), which keeps this total rather than
     /// panicking on a hostile input.
+    /// One whole GUI sprite (by the id [`GUI_SPRITES`] lists, or any
+    /// `Slot::no_item_icon`) as a quad at `(x, y)` sized `w`×`h`.
+    ///
+    /// `None` when the sprite is not in the atlas, which [`Self::build`] makes
+    /// impossible for its own output — the fallible signature exists so a caller
+    /// drawing a `no_item_icon` this module does not know about degrades to
+    /// drawing nothing rather than panicking.
+    #[must_use]
+    fn sprite_quad(&self, id: &str, x: f32, y: f32, w: f32, h: f32) -> Option<GuiSpriteQuad> {
+        let loc = sprite_location(id)?;
+        let sprite = self.atlas.sprite(&loc)?;
+        // `AtlasSprite`'s own normalised UVs cover the whole placed region,
+        // which for these seven is the whole sprite — every one is static
+        // (`frame_count == 1`), so there is no strip to index into.
+        Some(GuiSpriteQuad {
+            dst: [x, y, w, h],
+            uv_min: sprite.uv_min,
+            uv_max: sprite.uv_max,
+        })
+    }
+
     #[must_use]
     fn quads(&self, menu: &Menu, x: f32, y: f32) -> Option<Vec<GuiSpriteQuad>> {
         let (aw, ah) = (self.atlas.width as f32, self.atlas.height as f32);
@@ -523,6 +610,18 @@ pub struct ContainerGeometry {
     /// this stream would otherwise draw are suppressed in favour of the real
     /// art's own baked-in slot wells.
     pub bg_verts: Vec<f32>,
+    /// How many leading vertices of [`bg_verts`](Self::bg_verts) draw **under**
+    /// the slot items: the panel art, the hover highlight's *back* sprite, and
+    /// the empty-slot placeholders. The remainder is the highlight's *front*
+    /// sprite, which vanilla draws after every slot
+    /// (`extractSlotHighlightFront`, `AbstractContainerScreen.java:159-163`) and
+    /// before `extractCarriedItem`'s `nextStratum()`.
+    ///
+    /// A caller drawing all of `bg_verts` in one pass loses the front sprite's
+    /// whole purpose — it would sit under the item it is supposed to frame, which
+    /// looks *almost* right and is why the split is recorded rather than assumed.
+    /// Equal to the full length whenever nothing is hovered.
+    pub bg_slot_vertex_count: usize,
     /// How many leading vertices of [`verts`](Self::verts) are the full-canvas
     /// dim gradient (vanilla's `extractTransparentBackground`, see
     /// [`Builder::gradient_rect_px`]). This has to draw in its own pass
@@ -640,6 +739,7 @@ impl ContainerGeometry {
                 model_verts: Vec::new(),
                 special: Vec::new(),
                 bg_verts: Vec::new(),
+                bg_slot_vertex_count: 0,
                 dim_vertex_count: 0,
                 chrome_vertex_count: 0,
                 slot_vertex_count: 0,
@@ -709,6 +809,92 @@ impl ContainerGeometry {
                 [0.22, 0.20, 0.17, 0.70],
             );
         }
+        // Which slot the pointer is over — vanilla's `hoveredSlot`, set from
+        // `getHoveredSlot(mouseX, mouseY)` every frame
+        // (`AbstractContainerScreen.java:102`). Derived from the **same**
+        // `hit_test_with_scale` the click path calls, with the same `gui_scale`,
+        // so the highlight cannot land on a different slot than a click would —
+        // the failure mode `hit_test_with_scale`'s own doc comment warns about,
+        // here made impossible by construction rather than by matching two
+        // constants.
+        //
+        // `isHighlightable()` is not restated: base `Slot` returns `true` and the
+        // only override in 26.2 is `NonInteractiveResultSlot` (the crafter and
+        // the recipe-book ghost), which no menu this client models uses. In
+        // particular a crafting table's `ResultSlot` does **not** override it, so
+        // the result slot *is* highlighted — easy to assume otherwise given how
+        // many other branches special-case it.
+        let hovered = frame.cursor.and_then(|[cx, cy]| {
+            match hit_test_with_scale(menu, gui_scale, width, height, cx, cy) {
+                MenuHit::Slot(i) => Some(i),
+                MenuHit::Panel | MenuHit::Outside => None,
+            }
+        });
+        let slot_rect = |menu_index: usize| {
+            layout
+                .slots
+                .iter()
+                .find(|r| r.menu_index == menu_index)
+                .map(|r| (x + r.x, y + r.y))
+        };
+
+        // `extractSlotHighlightBack` (`:153-157`), then the empty-slot
+        // placeholders that `extractSlot` blits (`:224-230`), then — past the
+        // marker below — `extractSlotHighlightFront` (`:159-163`). All three ride
+        // the background stream because they sample the same atlas as the panel
+        // art; the marker is what lets the renderer replay the front half *after*
+        // the item passes, which is the entire reason vanilla has two highlight
+        // sprites instead of one.
+        //
+        // Every one of these is gated on a background being attached. The
+        // jar-less fallback path draws none of them, which is both honest (there
+        // is no sprite to draw) and the negative control the tests lean on.
+        if let Some(bg) = background {
+            if let Some((hx, hy)) = hovered.and_then(slot_rect) {
+                if let Some(q) = bg.sprite_quad(
+                    SLOT_HIGHLIGHT_BACK,
+                    hx - HIGHLIGHT_INSET,
+                    hy - HIGHLIGHT_INSET,
+                    HIGHLIGHT,
+                    HIGHLIGHT,
+                ) {
+                    b.bg_sprite(q);
+                }
+            }
+            // `extractSlot`'s `if (itemStack.isEmpty() && slot.isActive())` arm.
+            // The id comes off the slot itself (`Slot::no_item_icon`), never from
+            // a positional rule — `lodestone-game`'s
+            // `no_item_icons::every_other_slot_declares_nothing` is the gate on
+            // that, and its control is that a chest and a crafting table declare
+            // none at all, so this loop draws nothing extra in them.
+            for rect in &layout.slots {
+                if menu.slot_item(rect.menu_index).is_some() {
+                    continue;
+                }
+                let Some(id) = menu.slot(rect.menu_index).and_then(|s| s.no_item_icon) else {
+                    continue;
+                };
+                if let Some(q) = bg.sprite_quad(id, x + rect.x, y + rect.y, CELL, CELL) {
+                    b.bg_sprite(q);
+                }
+            }
+        }
+        // Everything appended to the background stream past here draws **after**
+        // the slot item passes.
+        let bg_slot_floats = b.bg_verts.len();
+        if let Some(bg) = background
+            && let Some((hx, hy)) = hovered.and_then(slot_rect)
+            && let Some(q) = bg.sprite_quad(
+                SLOT_HIGHLIGHT_FRONT,
+                hx - HIGHLIGHT_INSET,
+                hy - HIGHLIGHT_INSET,
+                HIGHLIGHT,
+                HIGHLIGHT,
+            )
+        {
+            b.bg_sprite(q);
+        }
+
         // Both labels, exactly as `AbstractContainerScreen::extractLabels` draws
         // them (`AbstractContainerScreen.java:189-191`):
         //
@@ -926,6 +1112,7 @@ impl ContainerGeometry {
         }
 
         Self {
+            bg_slot_vertex_count: bg_slot_floats / BG_FLOATS_PER_VERTEX,
             dim_vertex_count: dim_floats / FLOATS_PER_VERTEX,
             chrome_vertex_count: chrome_floats / FLOATS_PER_VERTEX,
             slot_vertex_count: slot_floats / FLOATS_PER_VERTEX,
@@ -1307,6 +1494,25 @@ impl MenuButton {
     }
 }
 
+/// A **keyboard** action an open container screen turns into a click, from
+/// vanilla `AbstractContainerScreen.keyPressed` (`:495-501`).
+///
+/// The hotbar/off-hand `SWAP` half of that method (`checkHotbarKeyPressed`,
+/// `:506-522`) is deliberately *not* here: it already goes out through
+/// `app.rs`'s `KeyOutcome::ContainerSwap` (commit `43692c5`) with vanilla's own
+/// two state guards. What was missing is everything below that call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuKey {
+    /// `options.keyPickItem` — middle-click's keyboard twin.
+    PickItem,
+    /// `options.keyDrop` (`Q` by default). `ctrl` selects drop-**stack** over
+    /// drop-one, which is the *only* thing the modifier changes.
+    Drop {
+        /// Whether Control was held (`event.hasControlDown()`).
+        ctrl: bool,
+    },
+}
+
 /// What the caller must tell the input machine about the menu at gesture time.
 #[derive(Debug, Clone, Copy)]
 pub struct MenuContext {
@@ -1368,8 +1574,16 @@ impl MenuInput {
         Self::default()
     }
 
-    /// Whether a paint-drag is currently armed. While this is true the screen
-    /// should draw the drag preview rather than a hover highlight.
+    /// Whether a paint-drag is currently armed.
+    ///
+    /// This used to say "while this is true the screen should draw the drag
+    /// preview rather than a hover highlight." **That is not what vanilla does.**
+    /// `extractSlotHighlightBack`/`Front` (`AbstractContainerScreen.java:153-163`)
+    /// are gated on `hoveredSlot != null && hoveredSlot.isHighlightable()` and on
+    /// nothing else — not on `isQuickCrafting` — so the highlight and the drag
+    /// preview are drawn *together* mid-drag, and `build_inner` does the same.
+    /// The two are independent, and treating them as exclusive would have made
+    /// the highlight vanish the moment the player picked anything up.
     #[must_use]
     pub fn is_dragging(&self) -> bool {
         self.drag.is_some()
@@ -1638,6 +1852,78 @@ impl MenuInput {
             slot,
             button: button.number(),
             input,
+        }]
+    }
+
+    /// A key was pressed while a container screen is open. Returns the clicks to
+    /// send, which is empty for every key that is not one of [`MenuKey`]'s or
+    /// whose state guard fails.
+    ///
+    /// # This closed an island, not a missing branch
+    ///
+    /// `Click::drop_one`/`Click::drop_stack` (`click.rs`), `do_throw` and its
+    /// `can_drop` gate were all implemented and tested by the issue #27 audit —
+    /// and had **zero producers anywhere outside `crates/protocol/`**, the exact
+    /// shape of `ClientAction::SetFlying`. `ContainerInput::Throw` was reachable
+    /// only at [`OUTSIDE_SLOT`] (releasing a loaded cursor off the panel), which
+    /// `Menu::do_click`'s own `slotIndex >= 0` guard makes a no-op — so the
+    /// machine's whole `THROW`-from-a-slot branch could not run in the real
+    /// game. `Q` inside an inventory did nothing.
+    ///
+    /// Vanilla, `AbstractContainerScreen.keyPressed` (`:495-501`):
+    ///
+    /// ```java
+    /// if (this.hoveredSlot != null && this.hoveredSlot.hasItem()) {
+    ///    if (this.minecraft.options.keyPickItem.matches(event)) {
+    ///       this.slotClicked(this.hoveredSlot, this.hoveredSlot.index, 0, ContainerInput.CLONE);
+    ///    } else if (this.minecraft.options.keyDrop.matches(event)) {
+    ///       this.slotClicked(this.hoveredSlot, this.hoveredSlot.index, event.hasControlDown() ? 1 : 0, ContainerInput.THROW);
+    ///    }
+    /// }
+    /// ```
+    ///
+    /// Three things about that are easy to get wrong, and all three are
+    /// transcribed rather than reasoned about:
+    ///
+    /// * **The gate is "the slot has an item", not "the cursor is empty."**
+    ///   Unlike `checkHotbarKeyPressed` (`:507`), this branch does not consult
+    ///   the carried stack at all — `doClick`'s own `getCarried().isEmpty()`
+    ///   guard (`AbstractContainerMenu.java:513`) is what makes a loaded-cursor
+    ///   `THROW` a no-op, one layer down. Adding a `cursor_loaded` check here
+    ///   would suppress a packet vanilla sends, which is a desync in the
+    ///   direction nothing corrects: the server would never see it.
+    /// * **`PickItem` is *not* gated on infinite materials here**, where
+    ///   [`press`](Self::press) gates its middle-click equivalent on
+    ///   `ctx.creative`. The two are not inconsistent: `mouseClicked` (`:285`)
+    ///   uses `hasInfiniteMaterials` to decide *which mouse button means clone*,
+    ///   while the permission itself lives in `doClick`'s CLONE arm
+    ///   (`AbstractContainerMenu.java:508`, `&& player.hasInfiniteMaterials()`).
+    ///   A key has no such ambiguity, so vanilla sends it in survival too and
+    ///   lets the menu drop it.
+    /// * **`else if`, not two `if`s.** A key bound to both actions clones only.
+    ///
+    /// `ctx` is taken for symmetry with the mouse entry points and is currently
+    /// unread, which is the point of the two bullets above; taking it keeps the
+    /// signature stable if a future vanilla version adds a state guard here.
+    pub fn key_pressed(
+        &self,
+        hit: MenuHit,
+        key: MenuKey,
+        _ctx: MenuContext,
+        menu: &Menu,
+    ) -> Vec<Click> {
+        let MenuHit::Slot(i) = hit else {
+            return Vec::new();
+        };
+        // `hoveredSlot.hasItem()`. An empty slot is not a drop target and not a
+        // clone source, so both arms are skipped rather than sent-and-ignored.
+        if menu.slot_item(i).is_none() {
+            return Vec::new();
+        }
+        vec![match key {
+            MenuKey::PickItem => Click::clone_slot(i),
+            MenuKey::Drop { ctrl: false } => Click::drop_one(i),
+            MenuKey::Drop { ctrl: true } => Click::drop_stack(i),
         }]
     }
 
@@ -2340,7 +2626,7 @@ impl ContainerRenderer {
             if !geo.bg_verts.is_empty() {
                 queue.write_buffer(&bg.buffer, 0, bytemuck::cast_slice(&geo.bg_verts));
             }
-            (geo.bg_verts.len() / 8) as u32
+            (geo.bg_verts.len() / BG_FLOATS_PER_VERTEX) as u32
         } else {
             0
         };
@@ -2394,7 +2680,12 @@ impl ContainerRenderer {
             pass.set_vertex_buffer(0, self.buffer.slice(..));
             pass.draw(0..dim_count, 0..1);
         }
-        if bg_count > 0
+        // The background stream draws in **two** ranges, split at
+        // `bg_slot_vertex_count`: the panel art, the back highlight and the
+        // empty-slot placeholders here, and the hover highlight's front sprite
+        // after the slot item passes below. See that field's doc comment.
+        let bg_slot_count = (geo.bg_slot_vertex_count as u32).min(bg_count);
+        if bg_slot_count > 0
             && let Some(bg) = self.background.as_ref()
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2408,7 +2699,7 @@ impl ContainerRenderer {
             pass.set_pipeline(&bg.pipeline);
             pass.set_bind_group(0, &bg.bind_group, &[]);
             pass.set_vertex_buffer(0, bg.buffer.slice(..));
-            pass.draw(0..bg_count, 0..1);
+            pass.draw(0..bg_slot_count, 0..1);
         }
         if chrome_count > dim_count {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2450,6 +2741,27 @@ impl ContainerRenderer {
                 pass.set_vertex_buffer(0, self.buffer.slice(..));
                 pass.draw(chrome_count..slot_colour_count, 0..1);
             }
+        }
+
+        // `extractSlotHighlightFront` (`AbstractContainerScreen.java:159-163`):
+        // the second highlight sprite, over the hovered slot's item and under the
+        // carried stack's stratum — exactly where vanilla calls it, between
+        // `extractSlots` and `extractCarriedItem`.
+        if bg_count > bg_slot_count
+            && let Some(bg) = self.background.as_ref()
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("container-bg-front-pass"),
+                color_attachments: &[Some(item_icon::load_colour_attachment(view))],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&bg.pipeline);
+            pass.set_bind_group(0, &bg.bind_group, &[]);
+            pass.set_vertex_buffer(0, bg.buffer.slice(..));
+            pass.draw(bg_slot_count..bg_count, 0..1);
         }
 
         // Vanilla's `nextStratum()` (issue #377): the carried stack replays all
@@ -2913,6 +3225,102 @@ mod tests {
                 .press(MenuHit::Slot(3), MenuButton::Pick, false, survival(), false, &menu)
                 .is_empty(),
             "middle-click in survival is a hotbar rebind, not a container click"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // The keyboard verbs: `AbstractContainerScreen.keyPressed` (`:495-501`).
+    //
+    // These close an island rather than adding a branch — see
+    // `MenuInput::key_pressed`'s doc comment. Before it, `Click::drop_one` and
+    // `Click::drop_stack` had **no producer** anywhere in the tree, so
+    // `ContainerInput::Throw` could only reach `Menu::do_click` at
+    // `OUTSIDE_SLOT`, where its own `slotIndex >= 0` guard drops it.
+    // ---------------------------------------------------------------------
+
+    /// A player inventory with one stack in the main storage, for the keyboard
+    /// verbs — which are gated on the *slot* holding something, never on the
+    /// cursor.
+    fn menu_with_a_stack(slot: usize, count: i32) -> Menu {
+        let mut menu = Menu::player();
+        menu.set_slot_item(
+            slot,
+            Some(ItemStack::new("minecraft:stick".parse().unwrap(), count)),
+        );
+        menu
+    }
+
+    /// `Q` and `Ctrl+Q` differ **only** in the wire button number (`0` vs `1`,
+    /// `AbstractContainerScreen.java:499`'s `event.hasControlDown() ? 1 : 0`),
+    /// which is what `do_throw` reads to pick drop-one from drop-stack.
+    #[test]
+    fn the_drop_key_throws_from_the_hovered_slot_and_control_makes_it_a_stack() {
+        let menu = menu_with_a_stack(9, 12);
+        let input = MenuInput::new();
+        assert_eq!(
+            input.key_pressed(MenuHit::Slot(9), MenuKey::Drop { ctrl: false }, survival(), &menu),
+            vec![Click::drop_one(9)],
+        );
+        assert_eq!(
+            input.key_pressed(MenuHit::Slot(9), MenuKey::Drop { ctrl: true }, survival(), &menu),
+            vec![Click::drop_stack(9)],
+        );
+        // The two really are distinct on the wire, not two names for one packet
+        // — the whole point of threading `ctrl` through.
+        assert_ne!(Click::drop_one(9).button, Click::drop_stack(9).button);
+    }
+
+    /// The gate is `hoveredSlot.hasItem()` — and *nothing else*. Two controls
+    /// here, because each one alone would pass against a wrong guard: an empty
+    /// slot must send nothing (so the guard exists at all), and a **loaded
+    /// cursor** must still send (so the guard is not `checkHotbarKeyPressed`'s
+    /// `getCarried().isEmpty()`, copied one method too far). Vanilla leaves the
+    /// carried check to `AbstractContainerMenu.java:513`, so suppressing it here
+    /// would withhold a packet the server expects.
+    #[test]
+    fn the_drop_key_needs_an_item_in_the_slot_but_not_an_empty_cursor() {
+        let menu = menu_with_a_stack(9, 12);
+        let input = MenuInput::new();
+        assert!(
+            input
+                .key_pressed(MenuHit::Slot(10), MenuKey::Drop { ctrl: false }, survival(), &menu)
+                .is_empty(),
+            "slot 10 is empty, so `hoveredSlot.hasItem()` fails",
+        );
+        assert!(
+            input
+                .key_pressed(MenuHit::Panel, MenuKey::Drop { ctrl: false }, survival(), &menu)
+                .is_empty(),
+            "no hovered slot at all is vanilla's `hoveredSlot == null`",
+        );
+        assert_eq!(
+            input.key_pressed(MenuHit::Slot(9), MenuKey::Drop { ctrl: false }, loaded(), &menu),
+            vec![Click::drop_one(9)],
+            "a loaded cursor does not suppress the packet — `doClick` drops it, we do not",
+        );
+    }
+
+    /// Unlike middle-click, the pick-block **key** is not gated on infinite
+    /// materials at the screen layer: `keyPressed` (`:496-497`) sends CLONE
+    /// unconditionally and `doClick` (`AbstractContainerMenu.java:508`) is where
+    /// `hasInfiniteMaterials()` lives. The control is the mouse path in the same
+    /// state, which *is* gated — so this asserts a real difference between the
+    /// two entry points rather than restating one of them.
+    #[test]
+    fn the_pick_block_key_clones_even_in_survival_where_the_mouse_does_not() {
+        let menu = menu_with_a_stack(9, 12);
+        let input = MenuInput::new();
+        assert_eq!(
+            input.key_pressed(MenuHit::Slot(9), MenuKey::PickItem, survival(), &menu),
+            vec![Click::clone_slot(9)],
+        );
+        let mut mouse = MenuInput::new();
+        assert!(
+            mouse
+                .press(MenuHit::Slot(9), MenuButton::Pick, false, survival(), false, &menu)
+                .is_empty(),
+            "middle-click in survival is a hotbar rebind; the key is not — the \
+             permission check is one layer down, in `doClick`'s CLONE arm",
         );
     }
 
@@ -3414,8 +3822,227 @@ mod tests {
                 solid_png(256, 256),
             );
         }
+        // Every id in `GUI_SPRITES`, at its real vanilla size so a test asserting
+        // a `dst` rect is asserting the blit and not the stand-in: the highlight
+        // pair is natively 24x24 and the five placeholders are 16x16. Built from
+        // the same const the loader walks, so a sprite added there cannot be
+        // forgotten here — `ContainerBackground::build` would fail instead.
+        for id in GUI_SPRITES {
+            let size = if *id == SLOT_HIGHLIGHT_BACK || *id == SLOT_HIGHLIGHT_FRONT {
+                HIGHLIGHT as u32
+            } else {
+                CELL as u32
+            };
+            src.insert(
+                format!("assets/minecraft/textures/gui/sprites/{id}.png"),
+                solid_png(size, size),
+            );
+        }
         let manager = ResourceManager::new(vec![Box::new(src) as Box<dyn ResourceSource>]);
         ContainerBackground::build(&manager).expect("synthetic background builds")
+    }
+
+    // ---------------------------------------------------------------------
+    // Issue #376: the hover highlight and the empty-slot placeholders.
+    //
+    // Both were reported from play ("hovering draws no highlight", "the armour
+    // and off-hand slots show no icons"). Neither was a missing verb and neither
+    // was an asset gap — `tests/container_slot_sprites.rs` had already measured
+    // the sprites present in the GUI atlas, and `lodestone-game` already
+    // declared `Slot::no_item_icon` per slot. The gap was that nothing in this
+    // module ever asked for a quad.
+    // ---------------------------------------------------------------------
+
+    /// Decode the background stream back into pixel-space `dst` rects, one per
+    /// quad in emission order — the exact inverse of
+    /// `item_icon::push_sprite_quad`'s `to_ndc`.
+    ///
+    /// Asserting on decoded rects rather than on `ContainerBackground::
+    /// sprite_quad`'s return value is deliberate: `sprite_quad` is the thing
+    /// under test's *helper*, so a test built on it would agree with a wrong
+    /// inset. These come out of `bg_verts`, i.e. out of what the GPU is handed.
+    fn bg_rects(geo: &ContainerGeometry, gui_scale: u32) -> Vec<[f32; 4]> {
+        let (vw, vh) = crate::menu::render::logical_canvas(gui_scale, VIEW.0, VIEW.1);
+        geo.bg_verts
+            .chunks(BG_FLOATS_PER_VERTEX * 6)
+            .map(|q| {
+                let px = |i: usize| (q[i * BG_FLOATS_PER_VERTEX] + 1.0) * vw * 0.5;
+                let py = |i: usize| (1.0 - q[i * BG_FLOATS_PER_VERTEX + 1]) * vh * 0.5;
+                // Vertex 0 is the quad's top-left, vertex 2 its bottom-right.
+                let (x0, y0, x1, y1) = (px(0), py(0), px(2), py(2));
+                [x0, y0, x1 - x0, y1 - y0]
+            })
+            .collect()
+    }
+
+    /// Panel-local top-left of a slot's 16x16 cell, in the **logical** canvas —
+    /// the space `bg_rects` decodes into.
+    fn slot_origin(menu: &Menu, menu_index: usize) -> (f32, f32) {
+        let layout = slot_layout(menu);
+        let (px, py) = panel_origin(&layout, VIEW.0, VIEW.1);
+        let rect = layout
+            .slots
+            .iter()
+            .find(|r| r.menu_index == menu_index)
+            .expect("the slot has a rect");
+        (px + rect.x, py + rect.y)
+    }
+
+    fn geo_with_background(menu: &Menu, cursor: Option<[f32; 2]>) -> ContainerGeometry {
+        let bg = synthetic_background();
+        let frame = ContainerFrame::new(Some(menu), "Title").with_cursor(cursor);
+        ContainerGeometry::build_inner(
+            &frame,
+            VIEW.0,
+            VIEW.1,
+            crate::config::AUTO_GUI_SCALE,
+            &IconAssets {
+                items: None,
+                models: None,
+            },
+            None,
+            Some(&bg),
+        )
+    }
+
+    /// `AbstractContainerScreen.java:155`/`:161` —
+    /// `blitSprite(SLOT_HIGHLIGHT_{BACK,FRONT}, slot.x - 4, slot.y - 4, 24, 24)`.
+    /// Both sprites, at the same rect, on opposite sides of the marker.
+    ///
+    /// The *two-sided* part is what makes this worth a test rather than an
+    /// eyeball: a single highlight drawn under the item looks almost right, and
+    /// is what a naive "append it with the panel art" implementation produces.
+    #[test]
+    fn hovering_a_slot_blits_both_highlight_sprites_at_vanillas_own_offsets() {
+        let menu = Menu::player();
+        let (cx, cy) = slot_point(&menu, 9);
+        let geo = geo_with_background(&menu, Some([cx, cy]));
+        let rects = bg_rects(&geo, crate::config::AUTO_GUI_SCALE);
+        let (sx, sy) = slot_origin(&menu, 9);
+        let want = [sx - 4.0, sy - 4.0, 24.0, 24.0];
+
+        let hits: Vec<usize> = rects
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.iter().zip(want).all(|(a, b)| (a - b).abs() < 0.01))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            hits.len(),
+            2,
+            "expected the back and front highlight at {want:?}; background quads were {rects:?}"
+        );
+        // The split: the first is under the items, the second over them.
+        assert!(
+            hits[0] < geo.bg_slot_vertex_count / 6,
+            "the back sprite must fall inside the under-items range"
+        );
+        assert!(
+            hits[1] >= geo.bg_slot_vertex_count / 6,
+            "the front sprite must fall past the marker, or it draws beneath the \
+             item it exists to frame"
+        );
+    }
+
+    /// The control for the above: with no pointer over a slot, neither sprite is
+    /// emitted and the whole stream is under-items. Two arms, because a
+    /// highlight keyed on "a background is attached" rather than on the hover
+    /// would pass the positive test.
+    #[test]
+    fn nothing_hovered_blits_no_highlight_at_all() {
+        let menu = Menu::player();
+        let hovered = geo_with_background(&menu, Some(slot_point(&menu, 9)).map(|(a, b)| [a, b]));
+        let none = geo_with_background(&menu, None);
+        // Far outside the panel: a cursor that exists but hits nothing.
+        let outside = geo_with_background(&menu, Some([0.0, 0.0]));
+
+        let n = |g: &ContainerGeometry| bg_rects(g, crate::config::AUTO_GUI_SCALE).len();
+        assert_eq!(
+            n(&none) + 2,
+            n(&hovered),
+            "hovering adds exactly the two highlight quads and nothing else"
+        );
+        assert_eq!(n(&outside), n(&none), "a cursor over no slot is not a hover");
+        for g in [&none, &outside] {
+            assert_eq!(
+                g.bg_slot_vertex_count,
+                g.bg_verts.len() / BG_FLOATS_PER_VERTEX,
+                "with no front sprite the marker must cover the whole stream, so \
+                 the renderer's second range is empty rather than bogus"
+            );
+        }
+    }
+
+    /// `extractSlot`'s `if (itemStack.isEmpty() && slot.isActive())` arm
+    /// (`:224-230`), blitting `slot.getNoItemIcon()` at the cell origin, 16x16.
+    ///
+    /// The ids come off `Slot::no_item_icon`, so this asserts *five* placeholders
+    /// in a player inventory — the four armour slots and the off-hand.
+    #[test]
+    fn the_armour_and_offhand_slots_blit_their_placeholder_icons() {
+        let menu = Menu::player();
+        let geo = geo_with_background(&menu, None);
+        let rects = bg_rects(&geo, crate::config::AUTO_GUI_SCALE);
+        for slot in [5, 6, 7, 8, 45] {
+            let (sx, sy) = slot_origin(&menu, slot);
+            let want = [sx, sy, 16.0, 16.0];
+            assert!(
+                rects
+                    .iter()
+                    .any(|r| r.iter().zip(want).all(|(a, b)| (a - b).abs() < 0.01)),
+                "slot {slot} declares an empty-slot sprite but nothing blitted it \
+                 at {want:?}; background quads were {rects:?}"
+            );
+        }
+        // One panel blit plus exactly five placeholders — nothing else, so the
+        // crafting result (0) and the 2x2 grid (1..=4) stay bare.
+        assert_eq!(rects.len(), 6, "quads were {rects:?}");
+    }
+
+    /// Three controls for the placeholders, each of which alone would let a
+    /// wrong implementation pass:
+    ///
+    /// * a **filled** armour slot draws none (the `isEmpty()` half of the gate);
+    /// * a chest draws none (so this is not keyed on "menu slots 5..=8", which
+    ///   would paint a helmet into the sixth slot of every chest — the exact
+    ///   trap `lodestone-game`'s `no_item_icons` suite names);
+    /// * a jar-less build draws no background quads at all (the fallback path).
+    #[test]
+    fn control_placeholders_are_keyed_on_the_slot_declaring_one_and_being_empty() {
+        let mut filled = Menu::player();
+        filled.set_slot_item(
+            5,
+            Some(ItemStack::new("minecraft:iron_helmet".parse().unwrap(), 1)),
+        );
+        let n = |g: &ContainerGeometry| bg_rects(g, crate::config::AUTO_GUI_SCALE).len();
+        assert_eq!(
+            n(&geo_with_background(&filled, None)),
+            n(&geo_with_background(&Menu::player(), None)) - 1,
+            "a filled armour slot must not draw its placeholder under the item"
+        );
+
+        for menu in [Menu::generic(27), Menu::crafting(3, 3)] {
+            let geo = geo_with_background(&menu, None);
+            let rects = bg_rects(&geo, crate::config::AUTO_GUI_SCALE);
+            assert!(
+                rects.iter().all(|r| r[2] > 16.0),
+                "a {:?} declares no empty-slot sprite, so every background quad \
+                 must be panel art (wider than a 16px cell); got {rects:?}",
+                menu.kind()
+            );
+        }
+
+        // The fallback path: no background attached, so no sprite exists to ask
+        // for and the stream is empty — which is also why the two features above
+        // are invisible on a jar-less run, by design.
+        let bare = ContainerGeometry::build(
+            &ContainerFrame::new(Some(&Menu::player()), "Title")
+                .with_cursor(Some([100.0, 100.0])),
+            VIEW.0,
+            VIEW.1,
+        );
+        assert!(bare.bg_verts.is_empty());
+        assert_eq!(bare.bg_slot_vertex_count, 0);
     }
 
     #[test]
