@@ -270,6 +270,98 @@ The eleven-islands figure the domain brief cited (`ClientboundAnimatePacket`,
 `Directive::BeginEncryption`, `TakeItemEntity`/`SET_EQUIPMENT`) is **partially stale**:
 see [corrections](#corrections-to-the-briefing-this-roadmap-started-from).
 
+### v47 (1.8.9) / v340 (1.12.2): ten clientbound decode arms landed against #345/#349 (2026-08-04)
+
+Picked by what a player would actually notice, not by packet id order — the two
+families' "under a quarter decoded" figure at the top of this section was concentrated
+in exactly the packets a live session needs continuously, not just at join. Four
+packets decode identically on both families (same shape confirmed against
+minecraft-data's `pc/1.8` and `pc/1.12.2` `protocol.json`) plus a fifth pair unique to
+v340:
+
+- **`update_health`/`respawn` were dead code, not missing.** Both structs already
+  existed in `packets/game.rs` on both crates — `UpdateHealth`/`Respawn` — with a
+  round-trip test in `tests/join_flow.rs` and **zero references from `handle_play`**.
+  This is the exact island shape CLAUDE.md's "nothing consumes this" rule describes:
+  green tests, tested only against this crate's own encoder, never decoded from a real
+  packet. Both are now wired to `ClientEvent::HealthChanged`/`Respawned`; `respawn` also
+  re-arms the adapter's `ChunkShape` (sky-light-or-not) the same way `LOGIN` does, since
+  a portal respawn changes dimension before the next `map_chunk` arrives.
+- **`entity_status`/`entity_head_rotation`** (hurt/death animation flashes, totem
+  particles, and independent head-turn) had no struct at all; both are hand-decoded with
+  a `Reader` directly, matching `lodestone-v770`'s own `ENTITY_EVENT`/`ROTATE_HEAD` arms
+  byte-for-byte (raw `i32` entity id + raw status byte; VarInt entity id + packed yaw
+  byte).
+- **v340 only: `block_change`/`multi_block_change`** → `ClientEvent::SectionBlocksChanged`,
+  the single biggest "player would notice" gap in either family (block breaks/places from
+  other players or the server were invisible before this). This reuses `v340`'s existing
+  `canonical::resolve_or_air` id:meta→26.2-state bridge (built against the real 1.13.2
+  jar's own flattening fix — see `src/canonical.rs`) rather than inventing a second
+  table; `multi_block_change` records can span several of `lodestone-world`'s 16-tall
+  sections in one packet (1.12.2 has no chunk sections on the wire, just full-height
+  columns), so records are grouped by section before emitting. **Not done for v47**: it
+  has no flattening table of its own, and reusing v340's would break each crate's
+  documented "deletable by removing this one folder" independence — filed as follow-up
+  scope below rather than silently borrowed.
+
+**Evidence provenance, explicitly, per the brief's own warning that this is where the
+trap is worst:**
+
+- Every wire shape above came from `vendor/minecraft-data/data/pc/{1.8,1.12.2}/protocol.json`
+  — **not** from this crate's own `Encode` derive. The `tests/join_flow.rs` additions and
+  the new `crates/protocol/v340/tests/block_updates.rs` hand-assemble raw byte vectors
+  from that spec (mirroring `lodestone-v770`'s own `tests/block_updates.rs`), so a
+  symmetric encode/decode bug in the derive macro cannot pass silently the way the
+  `decode(encode(x))` trap allows.
+- **One exception, flagged rather than hidden**: `multi_block_change`'s `horizontalPos`
+  nibble order (which nibble is relative X vs. Z) is not given by `protocol.json` — it
+  only states the field is a `u8`. This pass took the bit order from the long-stable
+  external wire documentation for this exact, decade-old packet shape, **not** from the
+  jar or a live capture. A real 1.12.2 live-oracle gate (`scripts/live-oracles/legacy-1.12.sh`,
+  which this pass located but did not run — see below) would upgrade this from
+  "well-established external doc" to "confirmed against a real server" and is the
+  natural next step if this nibble order is ever in doubt.
+- No live oracle was run this pass. `scripts/live-oracles/legacy-1.12.sh` exists and
+  targets Apple `container`, but this session ran under active memory pressure from
+  several concurrent agents (free pages dropped below 40k twice mid-session), and adding
+  a JVM container on top of that was judged the wrong trade against the four
+  hand-verified byte-level tests already covering the new decode arms. Flagged here as
+  unfinished evidence, not silently skipped.
+- The entity-metadata index tables the brief warned about (`EntityDataIndexOracle`-style
+  hand-count bugs) were **not touched this pass** — no `entity_metadata`/`entity_equipment`
+  decode was added, so there is no legacy metadata index to get wrong yet. Equipment in
+  particular is blocked on a real gap: `ClientEvent::EntityEquipmentUpdated` needs an
+  `ItemStack`, and neither crate has an item-id → `ResourceKey` registry (the same gap
+  `ClientAction::SetCreativeModeSlot`'s existing `Unsupported` arm already names on both
+  families) — filed as follow-up rather than guessed.
+
+**Measured**, `cargo xtask connectedness` before/after this pass:
+
+```
+before: v47  clientbound decoded 17/74; serverbound encoded 17/26
+        v340 clientbound decoded 16/80; serverbound encoded 20/33
+after:  v47  clientbound decoded 21/74; serverbound encoded 17/26
+        v340 clientbound decoded 22/80; serverbound encoded 20/33
+```
+
+`serverbound encoded` is unchanged on both — this pass added no new `ClientAction`
+encode arms, only clientbound decode. Neither family implements `ServerProtocol`, so
+serverbound *decode* stays "not applicable" for both, per the header measurement.
+
+**Follow-up scope, not done here:**
+
+- A v47-native `id:meta`→state table (or a shared version-free bridge both crates use),
+  so `block_change`/`multi_block_change` can land on 1.8.9 too.
+- An item-id → `ResourceKey` registry, unblocking `entity_equipment` on both families and
+  the existing `SetCreativeModeSlot`/`ContainerClick` gaps the interaction tests already
+  document as `Unsupported`.
+- `entity_metadata` decode on both families (mob-visible state: sheep colour, villager
+  profession, health-flash tinting) — deliberately deferred rather than hand-counting a
+  legacy metadata index without an oracle dump to check it against, per the brief's own
+  warning about that exact failure mode.
+- The `legacy-1.12.sh` live-oracle confirmation of `multi_block_change`'s nibble order,
+  above.
+
 ## What was already filed
 
 These pre-existing issues cover ground this domain brief asked about; commented on each
