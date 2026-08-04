@@ -55,21 +55,43 @@ placeholder.
   lands, not a stub. `PauseButton::PlayerReporting`'s doc used to be the only
   place this dependency was written down (a trap the issue itself flagged,
   since comments drift); `social`'s module docs carry it now instead.
-- **Decorative — the online-player list itself, until a queued patch lands**:
-  `entries_from_tablist` is pure and tested, but **nothing calls it in
-  production yet.** Feeding it the live `TabList` needs a per-frame (or
-  per-change) call from `app.rs` into `MenuNav::refresh_social`, and `app.rs`
-  is brokered for this batch of work — see the issue's own report for the
-  exact patch. Until then, the list is empty by construction on every real
-  session, which is correctly-empty (no `TabList` was ever fed in) rather than
-  a fabricated "no players online".
-- **Decorative — hiding a player has no consumer yet either.** This module
-  only *records* the choice (`HiddenPlayers`); nothing in `chat.rs`
-  (off-limits for this batch of work — see the issue's file-ownership note)
-  reads it back to actually suppress a hidden player's messages. So today,
-  toggling Hide persists correctly and changes nothing else on screen — an
-  honestly declared island half, not an implied feature. Wiring `chat.rs` to
-  consult `HiddenPlayers` is the natural follow-up.
+- **Wired since — the online-player list itself.** This section used to say
+  "nothing calls `entries_from_tablist` in production yet"; that queued patch
+  has landed. `app.rs`'s per-frame update now calls
+  `crate::menu::social::entries_from_tablist(&tab_list,
+  self.sim.local_uuid())` and feeds the result to `MenuNav::refresh_social`
+  (`app.rs:1515-1528`), so the roster shown is the real, live tab list, local
+  player excluded, every frame.
+- **Decorative — hiding a player has no consumer yet, and it is a larger gap
+  than it looks.** This module only *records* the choice (`HiddenPlayers`);
+  nothing reads it back to suppress a hidden player's chat. The obvious next
+  step — a `chat.rs` change consulting `HiddenPlayers::load()` — turns out not
+  to be enough on its own: **the received chat pipeline carries no sender
+  identity to filter on.** `crate::chat`'s own module doc says the received
+  log is not even here (it moved to `lodestone_game::chat::ChatLog`), and that
+  log's `push_player`/`ChatLog::push_player` take only a pre-decorated `Text`
+  and a `MessageTrust` — no UUID, no name field to match against
+  `HiddenPlayers::contains(id: Uuid)`. Traced to the wire: `lodestone_model`'s
+  `ClientEvent::Chat { text, kind, ack }` has never carried a sender either.
+  For the one clientbound chat format that actually has one on the wire —
+  26.2's real signed `ClientboundPlayerChatPacket` — the sender UUID **is**
+  decoded and then thrown away: `crates/protocol/v770/src/adapter.rs`'s
+  `PLAYER_CHAT` branch reads it into a binding named `_sender` and never uses
+  it. `DISGUISED_CHAT`/`SYSTEM_CHAT` never had one on the wire to begin with
+  (the server pre-decorates the display name into the text), and the legacy
+  `v340`/`v735` chat packets carry no sender field at all. So today, toggling
+  Hide persists correctly and changes nothing else on screen — an honestly
+  declared island half, not an implied feature — and closing it is **not** a
+  `chat.rs`-only change: it needs a `sender: Option<Uuid>` field threaded onto
+  `ClientEvent::Chat` (`lodestone-model`), populated at four/five adapter call
+  sites (`lodestone_model`/`protocol/*` are off limits to this batch), then
+  carried through `NetUpdate::Chat` (`net.rs`) and `sim/net_apply.rs`'s
+  `Chat` arm (both brokered for this batch) before `chat.rs` ever gets a
+  chance to consult `HiddenPlayers`. Scope is mechanically small — mostly
+  one-line `None`/`Some(sender)` additions across roughly fifteen to twenty
+  files — but every file it touches is outside this batch's file ownership,
+  so it is a real follow-up issue rather than "a real, small win" inside
+  `chat.rs` alone, and it should be filed as one instead of attempted here.
 
 A hidden choice cannot be "wrong" the way a cycled option value can: there is
 no derived state that could drift from it, and toggling it back is a single
@@ -88,17 +110,19 @@ single flat list instead — a documented reduction, not a silent one.
 
 ## How to change it
 
-- **The queued patch**: `app.rs` needs to call
-  `nav.refresh_social(social::entries_from_tablist(tab_list, Some(local_uuid)))`
-  wherever it already has access to the live tab list and the local player's
-  UUID, on the same cadence it would refresh any other per-frame HUD state.
+- **The roster refresh already landed** — see "Wired since" above; there is
+  no queued patch left for this part.
 - **Wiring the Report button** needs secure chat signing to exist first
   (`ChatSession`/message signatures) — not a menu-side change at all once
   that lands; `SocialControl::is_live` is the one place to flip.
-- **Wiring Hide/Show to actually suppress chat** is a `chat.rs` change (off
-  limits for this batch): read `crate::config::HiddenPlayers::load()` (or
-  thread it through the same state `chat.rs` already holds) and skip a
-  message whose sender is hidden.
+- **Wiring Hide/Show to actually suppress chat** needs the sender-identity
+  plumbing described above *first*: a `sender: Option<Uuid>` field on
+  `lodestone_model::ClientEvent::Chat`, populated from the one decode site
+  that already has it (`protocol/v770/src/adapter.rs`'s `PLAYER_CHAT` arm)
+  and `None` everywhere else, carried through `NetUpdate::Chat` and
+  `sim/net_apply.rs`'s `Chat` arm. Only once a sender reaches `chat.rs` does
+  reading `crate::config::HiddenPlayers::load()` there become a real, small
+  change rather than a change with nothing to key on.
 - **Adding the Hidden/Blocked tabs**, if a later pass decides the reduction
   above should be undone: `SocialControl`/`SocialPlacement` would need a tab
   index the way `crates/lodestone-shell/src/menu/key_binds.rs`'s categories
