@@ -48,7 +48,9 @@ use lodestone_world::{BlockEntitySync, ChunkPos, World, WorldSink};
 
 use crate::audio::ShellAudio;
 use crate::blocks::id;
-use crate::camera_rig::{ViewBob, bobbed_camera, build_camera, third_person_camera};
+use crate::camera_rig::{
+    ViewBob, apply_spyglass_fov, bobbed_camera, build_camera, third_person_camera,
+};
 use crate::chat::compose_chat_action;
 use crate::collision::{LiveCollision, WorldCollision};
 use crate::config::{Config, Mode};
@@ -1626,6 +1628,21 @@ impl Sim {
     #[must_use]
     pub fn target(&self) -> Option<RayHit> {
         self.read(|w| w.resource::<RayTarget>().0)
+    }
+
+    /// Whether the use button is currently held down on an item (armed by
+    /// [`Self::use_item`], cleared by [`Self::end_use`]).
+    ///
+    /// Half of vanilla's `Player.isScoping()` (issue #154):
+    /// `isUsingItem() && getUseItem().is(Items.SPYGLASS)`
+    /// (`Player.java:1936-1938`). This crate has no held-item identity check
+    /// — the caller already has `held` (the `ResourceLocation` used for
+    /// `set_main_hand_source`), so `app.rs` combines the two rather than this
+    /// method reaching into inventory state it does not otherwise need. See
+    /// `docs/screen-overlays.md`'s Spyglass section.
+    #[must_use]
+    pub fn using_item(&self) -> bool {
+        self.read(|w| w.resource::<UsingItem>().0)
     }
 
     /// Overwrite the pick target. Only the per-frame raycast and the two edit
@@ -5611,7 +5628,12 @@ impl Sim {
             0.0,
         );
         if !self.third_person {
-            return eye;
+            // Issue #154: vanilla's FOV zoom is gated on `firstPerson &&
+            // isScoping()` (`AbstractClientPlayer.getFieldOfViewModifier`,
+            // `AbstractClientPlayer.java:92-114`) — a third-person camera
+            // never zooms, so this composition only runs on the early
+            // first-person return, not the two third-person branches below.
+            return apply_spyglass_fov(eye, self.spyglass_scoping());
         }
         if self.is_live() {
             match self.live_collision() {
@@ -5624,6 +5646,24 @@ impl Sim {
             let view = WorldCollision::new(&world);
             third_person_camera(eye, true, &view)
         }
+    }
+
+    /// Vanilla's `Player.isScoping()` (issue #154):
+    /// `isUsingItem() && getUseItem().is(Items.SPYGLASS)`
+    /// (`Player.java:1936-1938`), computed entirely from `Sim`'s own state so
+    /// [`Self::render_camera`] needs no new parameter — `app.rs` computes the
+    /// same condition independently for `ScreenEffects::scoping` (it already
+    /// has the held item at hand for the first-person render source), and
+    /// the two are expected to agree rather than share a call, the same way
+    /// `wearing_pumpkin` is computed locally in `app.rs` rather than exposed
+    /// from here.
+    #[must_use]
+    fn spyglass_scoping(&self) -> bool {
+        self.using_item()
+            && self
+                .player_menu()
+                .player_native(self.selected_slot())
+                .is_some_and(|st| st.item().to_string() == "minecraft:spyglass")
     }
 
     /// The local player's own third-person body for this frame, or `None` in

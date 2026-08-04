@@ -27,8 +27,8 @@ landed in one pass rather than inventing a second pipeline:
 Confusion/portal additionally drive a **world-projection warp** — see
 "The nausea/portal projection warp" section below — which is not a
 screen-space quad at all and lives in `camera.rs`, not `screen_effects.rs`.
-Spyglass additionally has an **FOV-zoom** component not yet wired anywhere in
-this codebase — see its own section for exactly what and where.
+Spyglass additionally has an **FOV-zoom** component, now wired end to end —
+see its own section for the exact chain.
 
 ## How it works
 
@@ -295,35 +295,39 @@ texture) covering whatever the lens does not. `spyglass_lens_triangles`/
   multiplying any texel by a zero-RGB tint is black regardless of what is
   sampled.
 
-**The FOV-zoom half is real, tested, and unwired — the vignette above is only
-half of #154.** `AbstractClientPlayer.getFieldOfViewModifier`
+**The FOV-zoom half is real, tested, and now wired — the vignette above was
+only half of #154.** `AbstractClientPlayer.getFieldOfViewModifier`
 (`AbstractClientPlayer.java:92-114`) returns `0.1F` outright (a 10x zoom,
 overriding every other FOV modifier) when `firstPerson && isScoping()`.
 `lodestone_render::spyglass_fov_modifier(scoping: bool) -> f32` in
 `camera.rs` models exactly that (`0.1` scoping, `1.0` otherwise) and is unit
-tested, but **nothing in this codebase multiplies `Camera::fov_y_degrees` by
-it yet**: that value is assigned in `crates/lodestone-shell/src/
-camera_rig.rs` (`FOV_Y_DEGREES`/per-frame construction), a file outside this
-change's ownership (see `CLAUDE.md`'s file-ownership section — it is also
-outside the brokered set, unlike `app.rs`/`sim.rs`, since it is another
-agent's active territory). Whoever owns `camera_rig.rs` needs one
-multiplication: `camera.fov_y_degrees *= spyglass_fov_modifier(scoping)` (or
-vanilla's own smoothed `Camera.fovModifier` lerp, if that ever gets built for
-sprint/flying too) composed with whatever else already produces
-`fov_y_degrees` there — not overwriting it, per issue #154's own scope note
-about this exact trap.
+tested. `camera_rig.rs`'s `apply_spyglass_fov(camera: Camera, scoping: bool)
+-> Camera` is the composable half that multiplies it onto
+`Camera::fov_y_degrees` without overwriting whatever else already produced
+that value — per issue #154's own scope note about that exact trap. `Sim::
+render_camera` (`sim.rs`) calls it on the early first-person return only
+(`if !self.third_person { return apply_spyglass_fov(eye,
+self.spyglass_scoping()); }`), matching vanilla's own `firstPerson &&`
+gate — a third-person camera never zooms, so the composition never runs on
+either of the two third-person branches below that return.
 
-**`scoping`'s input is real, not stubbed**, once the two-line broker patch to
-`sim.rs` lands (see "The spyglass flag's route to the shell" below):
-`Player.isScoping()` is `isUsingItem() && getUseItem().is(Items.SPYGLASS)`
-(`Player.java:1936-1938`), and both halves already exist here —
-`Sim`'s own `UsingItem` ECS resource (armed by `start_use`/cleared by
-`end_use`, `sim.rs`) for the first half, and the already-computed `held`
-`ResourceLocation` in `app.rs`'s `redraw()` (used for
-`set_main_hand_source`) for the second. Issues #54/#57 (held-item pose,
-bow/crossbow draw) are what this depended on and both are closed, so nothing
-here is blocked on missing state — only on the two-line `sim.rs` accessor
-`Sim::using_item` did not have before this change.
+**`scoping`'s input is real, not stubbed.** `Player.isScoping()` is
+`isUsingItem() && getUseItem().is(Items.SPYGLASS)` (`Player.java:1936-1938`),
+and both halves exist: `Sim::using_item()` (a thin accessor over the
+existing `UsingItem` ECS resource, armed by `use_item`/`use_item_live` and
+cleared by `end_use`/`end_use_live`) for the first half, and the held item
+for the second. `Sim::render_camera` computes the condition itself via the
+private `Sim::spyglass_scoping()` (`self.using_item() && self.player_menu()
+.player_native(self.selected_slot())...` checked against
+`"minecraft:spyglass"`), so it needs no new parameter. `app.rs`'s
+`ScreenEffects::scoping` (the vignette half) computes the identical
+condition independently, from `held_for_scoping` — the same item id already
+computed for the first-person hand pass, cloned before it moves into
+`set_main_hand_source`'s closure — rather than sharing a call with `sim.rs`,
+the same way `wearing_pumpkin` is computed locally in `app.rs`. Issues
+#54/#57 (held-item pose, bow/crossbow draw) are what this depended on and
+both are closed, so nothing here was blocked on missing state — only on the
+two-line `sim.rs` accessor `Sim::using_item`, which now exists.
 
 ### Confusion and portal (issues #144, #149): one screen-space pair, one shared projection warp
 
@@ -563,58 +567,24 @@ now reads `let freeze_percent = self.sim.player().percent_frozen();`, no
 `sim.rs` change needed since `Sim::player()` already returns
 `lodestone_physics::player::PlayerState` by value.
 
-**Spyglass's FOV-zoom half is landed, but only its composable half.**
+**Spyglass's FOV-zoom half is fully landed.**
 `crates/lodestone-shell/src/camera_rig.rs::apply_spyglass_fov(camera, scoping)`
 exists and is unit-tested (the `0.1` scaling while scoping, no-op while not,
 and a composition check that a non-default `fov_y_degrees` scales relative to
-itself rather than being reset to an absolute constant) — but nothing calls
-it yet. `build_camera`'s only production call site is `Sim::camera` in
-`sim.rs`, outside `camera_rig.rs`'s ownership, so threading a real `scoping`
-bool through to a call is a patch for whoever owns `sim.rs`/`app.rs`, not
-something forced through here.
-
-**What is still not landed is `scoping` itself — one accessor, contended.**
-`Player.isScoping()` is `isUsingItem() && getUseItem().is(Items.SPYGLASS)`
-(`Player.java:1936-1938`); the held-item half is already computed in
-`app.rs`'s `redraw()` (the `held` local, used a few lines above for
-`set_main_hand_source`), but the `isUsingItem()` half needs a two-line
-accessor on `Sim` that does not exist yet:
-
-```rust
-/// Whether the local player currently has an item "in use" — the
-/// right-mouse-held input state `UsingItem` mirrors (armed by `start_use`,
-/// cleared by `end_use`), not a re-derivation of vanilla's own
-/// `LivingEntity.isUsingItem()` tick counter. Exists so a caller can derive
-/// `Player.isScoping()` (`isUsingItem() && getUseItem().is(Items.SPYGLASS)`,
-/// `Player.java:1936-1938`) without reaching into the ECS resource directly
-/// — see issue #154.
-#[must_use]
-pub fn using_item(&self) -> bool {
-    self.read(|w| w.resource::<UsingItem>().0)
-}
-```
-
-next to `Self::player` (`sim.rs:1792`, immediately after its closing brace;
-`UsingItem` is already imported there, so no new `use` line is needed). This
-was not applied directly because `sim.rs` is contended (another agent's
-in-flight work sat there at the time — the held-item name highlight, issue
-#126, unrelated to overlays); it is a prepared patch handed off instead of
-landed by force. Once it exists, `app.rs`'s `screen_effects` construction
-becomes:
-
-```rust
-let scoping = self.sim.using_item()
-    && held
-        .as_ref()
-        .is_some_and(|loc| loc.namespace() == "minecraft" && loc.path() == "spyglass");
-```
-
-(`held` needs capturing before it moves into `set_main_hand_source` a few
-lines above, the same "capture before move" shape `wearing_pumpkin` already
-uses for its own lookup) plus one line in `camera_rig.rs`'s caller —
-`apply_spyglass_fov(build_camera(...), scoping)` — or the equivalent inline
-multiplication, wherever `Sim::camera`/`WindowApp`'s camera construction
-calls `build_camera` today.
+itself rather than being reset to an absolute constant). `Sim::render_camera`
+(`sim.rs`) calls it on the early first-person return, with `scoping` from the
+private `Sim::spyglass_scoping()` — `self.using_item()` (a thin accessor over
+the `UsingItem` resource, next to `Self::target`) combined with a held-item
+identity check against `"minecraft:spyglass"` via `self.player_menu()
+.player_native(self.selected_slot())`. `app.rs`'s `ScreenEffects::scoping`
+(the vignette half) computes the identical `Player.isScoping()` condition
+independently, from `held_for_scoping` — the same item id already computed
+in `redraw()` for `set_main_hand_source`, cloned before that closure takes
+ownership of the original. See
+`sim::tests::spyglass_scoping_zooms_the_render_camera_by_exactly_a_tenth` for
+the exact-value gate: it predicts `base_fov * spyglass_fov_modifier(true)`
+(`7.0` from vanilla's `70.0` base) rather than asserting only that the FOV
+changed, with a non-spyglass-item and a not-yet-pressed negative control.
 
 **`nausea_intensity`/`portal_intensity` remain honestly at `0.0`** — no
 potion-effect-duration tracker or nether-portal-proximity tracker exists
@@ -748,8 +718,8 @@ installed, not a startup failure.
 - `lodestone-render::camera` — `nausea_portal_warp`/
   `spinning_effect_angle_degrees`/`Camera::view_projection_warped` (issues
   #144/#149's shared world-projection warp) and `spyglass_fov_modifier`
-  (issue #154's FOV-zoom half, not yet wired to any live `Camera` — see the
-  "Spyglass" section above).
+  (issue #154's FOV-zoom half, wired to the live `Camera` via
+  `camera_rig::apply_spyglass_fov` — see the "Spyglass" section above).
 - `lodestone-shell::gpu` — `RenderState::screen_effects`,
   `install_screen_effects`/`has_screen_effects`, the draw calls inside
   `render_inner` (including `stats.pumpkin_overlay_drawn`/
@@ -764,14 +734,14 @@ installed, not a startup failure.
   mirroring `load_sky` exactly; `ScreenEffectRenderer::new` loads every
   texture in one call, so there is nothing per-overlay to add here.
 - `lodestone-shell::sim` — `Sim::player().percent_frozen()` (already public,
-  no patch needed, issue #139) and `Sim::using_item()` (issue #154, patch
-  pending — see "The freeze/spyglass/confusion/portal flags' route to the
-  shell").
+  no patch needed, issue #139), `Sim::using_item()` and the private
+  `Sim::spyglass_scoping()` (issue #154, landed — see "The freeze/spyglass/
+  confusion/portal flags' route to the shell").
 - `lodestone-physics::player` — `PlayerState::frozen_ticks`/`percent_frozen`/
   `is_freezing` (issue #212's mechanic, consumed not duplicated here).
 - `lodestone-shell::app::redraw` — computes `wearing_pumpkin` from the
-  already-in-scope `player_menu`'s native slot 39 (head, landed), and (patch
-  pending) `freeze_percent`/`scoping` the same way.
+  already-in-scope `player_menu`'s native slot 39, and `freeze_percent`/
+  `scoping` the same local-computation way (all landed).
 
 ## The gates, and what they printed
 
