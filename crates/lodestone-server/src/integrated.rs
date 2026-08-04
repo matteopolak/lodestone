@@ -46,9 +46,9 @@ use crate::block_entities::BlockEntityHandle;
 use crate::chunk::ChunkSource;
 use crate::mobs::{LiveMobSource, MobHandle};
 use crate::protocol::ServerProtocol;
-use crate::server::{EntitySource, NoEntities, serve_connection, serve_connection_with_block_ticks};
+use crate::server::{EntitySource, NoEntities, serve_connection, serve_connection_with_mob_events};
 use crate::spawn::{Task, spawn};
-use crate::tick::{BlockTickFeed, TickClock, TickStats};
+use crate::tick::{BlockTickFeed, ExplosionFeed, TickClock, TickStats};
 // `run_tick_loop` (like `open_in_memory_with_mobs`, its one caller) is
 // `#[cfg(not(target_arch = "wasm32"))]`-gated in `tick.rs` — this import must
 // carry the identical `cfg`, or it is an unresolved-import hard error on
@@ -258,6 +258,11 @@ impl IntegratedServer {
         // constructor's own shape) and would need a per-connection cursor
         // for a multi-connection server.
         let block_tick_feed = BlockTickFeed::default();
+        // Issue #425: shared with the tick task the same way `block_tick_feed`
+        // is, above, and for the same reason — see [`ExplosionFeed`]'s own
+        // doc comment for why this is safe with exactly one connection (this
+        // constructor's own shape).
+        let explosion_feed = ExplosionFeed::default();
         // Issue #12: built *synchronously*, here, before the tick task spawns —
         // not inside `run_mob_tick_loop`'s own future the way the pre-handle
         // version built its `ChunkWorld`/`MobSim` — so the exact same handle
@@ -298,11 +303,12 @@ impl IntegratedServer {
         let conn_mobs = mob_handle.clone();
         let conn_source = Arc::clone(&source);
         let conn_block_ticks = block_tick_feed.clone();
+        let conn_explosions = explosion_feed.clone();
         let task = spawn(async move {
             let mut conn = Connection::new(server_end);
             tokio::select! {
                 _ = conn_signal.notified() => {}
-                _ = serve_connection_with_block_ticks(
+                _ = serve_connection_with_mob_events(
                     &mut conn,
                     &protocol,
                     &*conn_source,
@@ -311,6 +317,7 @@ impl IntegratedServer {
                     &conn_block_entities,
                     &conn_mobs,
                     &conn_block_ticks,
+                    &conn_explosions,
                 ) => {}
             }
         });
@@ -326,6 +333,7 @@ impl IntegratedServer {
                 Arc::clone(&source),
                 block_tick_feed,
                 tick_area,
+                explosion_feed,
             ),
         );
 

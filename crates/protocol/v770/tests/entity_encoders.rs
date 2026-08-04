@@ -82,6 +82,7 @@ fn zombie_snapshot(id: i32, uuid: Uuid) -> EntitySnapshot {
         rotation: Rotation::new(-90.0, 5.0),
         head_yaw: -60.0,
         velocity: Vec3::new(0.1, 0.0, -0.05),
+        metadata: Vec::new(),
     }
 }
 

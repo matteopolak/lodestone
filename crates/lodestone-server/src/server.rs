@@ -23,7 +23,7 @@ use crate::fall::FallTracker;
 use crate::inventory::{ContainerMenuSlot, PlayerInventory, container_menu_slot};
 use crate::mobs::MobHandle;
 use crate::protocol::{EntitySnapshot, ServerBound, ServerDirective, ServerProtocol};
-use crate::tick::BlockTickFeed;
+use crate::tick::{BlockTickFeed, ExplosionFeed};
 use crate::vitals::{EYE_HEIGHT, PlayerVitals};
 
 /// Server-initiated keep-alive interval, and the width of the window in
@@ -174,10 +174,28 @@ impl EntityStreamer {
             match self.last_sent.get(&entity.id) {
                 None => {
                     directives.push(proto.encode_add_entity(entity));
+                    // Issue #425: vanilla sends an entity's initial
+                    // non-default metadata as a `SET_ENTITY_DATA` right
+                    // after its `ADD_ENTITY` (`ServerEntity`'s own pairing
+                    // sync) — `ADD_ENTITY` itself carries no metadata on the
+                    // wire. `encode_add_entity` returns exactly one
+                    // `ServerDirective`, so this is a second directive
+                    // rather than folding into that call.
+                    if !entity.metadata.is_empty() {
+                        directives.push(proto.encode_set_entity_data(entity.id, &entity.metadata));
+                    }
                     self.last_sent.insert(entity.id, entity.clone());
                 }
                 Some(prev) if prev != entity => {
                     directives.extend(proto.encode_entity_update(Some(prev), entity));
+                    // Issue #425: a metadata-only change (e.g. a creeper's
+                    // `swell_dir` climbing while it stands still) still
+                    // takes this branch — `EntitySnapshot`'s `PartialEq`
+                    // covers `metadata` too — so this check is independent
+                    // of whether position/rotation also changed this tick.
+                    if prev.metadata != entity.metadata {
+                        directives.push(proto.encode_set_entity_data(entity.id, &entity.metadata));
+                    }
                     self.last_sent.insert(entity.id, entity.clone());
                 }
                 Some(_) => {}
@@ -541,6 +559,14 @@ where
 /// this connection, through the same `container_sync_tick` timer arm inside
 /// [`serve_play`] that already forwards block-entity registry changes with
 /// no packet driving them — see that arm's own doc comment.
+///
+/// Forwards to [`serve_connection_inner`] with a fresh, permanently-empty
+/// [`ExplosionFeed`] — same compatibility shape as [`serve_connection`]'s own
+/// forward, and for the same reason: `crates/protocol/v770/tests/*` call
+/// this directly and are off-limits for this issue's (#425) file-ownership
+/// split. [`crate::IntegratedServer::open_in_memory_with_mobs`] calls
+/// [`serve_connection_with_mob_events`] instead, which does observe
+/// detonations.
 #[allow(clippy::too_many_arguments)]
 pub async fn serve_connection_with_block_ticks<T, P, S, E>(
     conn: &mut Connection<T>,
@@ -551,6 +577,85 @@ pub async fn serve_connection_with_block_ticks<T, P, S, E>(
     block_entities: &BlockEntityHandle,
     mobs: &MobHandle,
     block_ticks: &BlockTickFeed,
+) -> Result<ServeSummary, ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource,
+    E: EntitySource,
+{
+    serve_connection_inner(
+        conn,
+        proto,
+        source,
+        entities,
+        view_radius,
+        block_entities,
+        mobs,
+        block_ticks,
+        &ExplosionFeed::default(),
+    )
+    .await
+}
+
+/// Like [`serve_connection_with_block_ticks`], but also forwards every
+/// detonation published on `explosions` (issue #425: `MobSim::tick` calling
+/// `MobSim::explode` the tick a creeper's fuse completes) to this
+/// connection, as a real `EXPLODE` packet — through the same
+/// `container_sync_tick` timer arm that already forwards `block_ticks`'
+/// changes. The one caller today is
+/// [`crate::IntegratedServer::open_in_memory_with_mobs`], the only
+/// constructor that spawns a [`MobSim`]-driven tick loop capable of
+/// producing a detonation in the first place.
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_connection_with_mob_events<T, P, S, E>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &S,
+    entities: &E,
+    view_radius: i32,
+    block_entities: &BlockEntityHandle,
+    mobs: &MobHandle,
+    block_ticks: &BlockTickFeed,
+    explosions: &ExplosionFeed,
+) -> Result<ServeSummary, ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource,
+    E: EntitySource,
+{
+    serve_connection_inner(
+        conn,
+        proto,
+        source,
+        entities,
+        view_radius,
+        block_entities,
+        mobs,
+        block_ticks,
+        explosions,
+    )
+    .await
+}
+
+/// The real body shared by [`serve_connection`], [`serve_connection_with_block_ticks`]
+/// and [`serve_connection_with_mob_events`] — see those three thin wrappers'
+/// own doc comments for why a fourth, differently-named function exists
+/// instead of adding `explosions` directly to
+/// [`serve_connection_with_block_ticks`]'s own signature (it would break
+/// every off-limits `crates/protocol/v770/tests/*` call site).
+#[allow(clippy::too_many_arguments)]
+async fn serve_connection_inner<T, P, S, E>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &S,
+    entities: &E,
+    view_radius: i32,
+    block_entities: &BlockEntityHandle,
+    mobs: &MobHandle,
+    block_ticks: &BlockTickFeed,
+    explosions: &ExplosionFeed,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -650,6 +755,7 @@ where
                     block_entities,
                     mobs,
                     block_ticks,
+                    explosions,
                 )
                 .await;
             }
@@ -1660,6 +1766,7 @@ async fn serve_play<T, P, S, E>(
     block_entities: &BlockEntityHandle,
     mobs: &MobHandle,
     block_ticks: &BlockTickFeed,
+    explosions: &ExplosionFeed,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -1822,6 +1929,23 @@ where
                 for (x, y, z, block_state) in block_ticks.drain_all() {
                     apply(conn, &mut state, proto.encode_block_update(x, y, z, &block_state)).await?;
                 }
+                // Issue #425: same shape again, one timer tick later —
+                // `MobSim::tick` already calls `MobSim::explode` the tick a
+                // creeper's fuse completes; this is what finally turns that
+                // into a real `EXPLODE` packet reaching this connection.
+                // `ExplosionFeed::drain_all` is single-consumer for the same
+                // reason `BlockTickFeed::drain_all` is (see that type's own
+                // doc comment) — safe here for the same reason: exactly one
+                // connection task per feed instance under
+                // `open_in_memory_with_mobs`.
+                for detonation in explosions.drain_all() {
+                    apply(
+                        conn,
+                        &mut state,
+                        proto.encode_explode(detonation.centre, detonation.radius),
+                    )
+                    .await?;
+                }
             }
         }
     }
@@ -1854,6 +1978,9 @@ async fn serve_play<T, P, S, E>(
     // definition (`serve_connection` calls whichever compiles for the
     // target) and never read here — a real, documented gap, not a silent one.
     _block_ticks: &BlockTickFeed,
+    // Issue #425: same gap, same reason — a detonation has no packet driving
+    // it either, so this target simply never surfaces one.
+    _explosions: &ExplosionFeed,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -1934,6 +2061,7 @@ mod tests {
     use super::*;
     use crate::chunk::ChunkColumn;
     use crate::furnace::{Furnace, FurnaceKind};
+    use crate::protocol::MetadataField;
     use lodestone_model::{Rotation, Vec3};
     use uuid::Uuid;
 
@@ -1946,6 +2074,7 @@ mod tests {
     const ADD: i32 = 1;
     const UPDATE: i32 = 2;
     const REMOVE: i32 = 3;
+    const METADATA: i32 = 4;
 
     impl ServerProtocol for TagProto {
         fn decode(&self, _s: State, _id: i32, _p: &[u8]) -> ServerBound {
@@ -1992,6 +2121,15 @@ mod tests {
                 payload: ids.iter().map(|id| *id as u8).collect(),
             }
         }
+
+        fn encode_set_entity_data(&self, entity_id: i32, fields: &[MetadataField]) -> ServerDirective {
+            ServerDirective::Send {
+                packet_id: METADATA,
+                payload: std::iter::once(entity_id as u8)
+                    .chain(std::iter::once(fields.len() as u8))
+                    .collect(),
+            }
+        }
     }
 
     fn snap(id: i32, x: f64) -> EntitySnapshot {
@@ -2003,6 +2141,7 @@ mod tests {
             rotation: Rotation::new(0.0, 0.0),
             head_yaw: 0.0,
             velocity: Vec3::new(0.0, 0.0, 0.0),
+            metadata: Vec::new(),
         }
     }
 
@@ -2063,6 +2202,70 @@ mod tests {
         let out = s.sync(&TagProto, &[snap(10, 0.0), snap(20, 0.0)]); // 20 back
         assert_eq!(out.len(), 1);
         assert_eq!(sent(&out[0]), (ADD, [20u8].as_slice()));
+    }
+
+    /// [`snap`] with a non-empty `metadata` — issue #425's own field list,
+    /// generic to any entity (not creeper-specific: `EntityStreamer::sync`
+    /// treats `metadata` uniformly, so a `CreeperSwellDir`/`CreeperIgnited`
+    /// pair exercises the same code path the next mob's fields will).
+    fn snap_with_metadata(id: i32, x: f64, metadata: Vec<MetadataField>) -> EntitySnapshot {
+        EntitySnapshot { metadata, ..snap(id, x) }
+    }
+
+    /// A spawn whose snapshot already carries non-empty metadata must send
+    /// `ADD` followed by a metadata sync — vanilla's own `ServerEntity`
+    /// pairing behaviour (an initial non-default metadata sync right after
+    /// `ADD_ENTITY`), and the wiring this issue's report ("no swelling
+    /// animation") needed and did not have before.
+    #[test]
+    fn spawn_with_non_empty_metadata_sends_add_then_metadata() {
+        let mut s = EntityStreamer::default();
+        let fields = vec![MetadataField::CreeperSwellDir(1)];
+        let out = s.sync(&TagProto, &[snap_with_metadata(10, 0.0, fields)]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(sent(&out[0]), (ADD, [10u8].as_slice()));
+        assert_eq!(sent(&out[1]).0, METADATA);
+    }
+
+    /// Control: a spawn with *empty* metadata (every existing test's `snap`)
+    /// must send only `ADD` — proves the metadata branch above is
+    /// conditional, not unconditional padding on every spawn.
+    #[test]
+    fn spawn_with_empty_metadata_sends_only_add() {
+        let mut s = EntityStreamer::default();
+        let out = s.sync(&TagProto, &[snap(10, 0.0)]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(sent(&out[0]), (ADD, [10u8].as_slice()));
+    }
+
+    /// A metadata-only change (position/rotation/velocity all unchanged)
+    /// must still be caught — `EntitySnapshot`'s derived `PartialEq` covers
+    /// `metadata`, so `Some(prev) if prev != entity` fires exactly as it
+    /// would for a moved entity, and re-encodes both the (redundant, but
+    /// harmless) position/rotation update and the metadata sync.
+    #[test]
+    fn metadata_only_change_is_caught_even_with_no_motion() {
+        let mut s = EntityStreamer::default();
+        let _ = s.sync(&TagProto, &[snap_with_metadata(10, 0.0, vec![MetadataField::CreeperSwellDir(-1)])]);
+        let out = s.sync(
+            &TagProto,
+            &[snap_with_metadata(10, 0.0, vec![MetadataField::CreeperSwellDir(1)])],
+        );
+        assert_eq!(out.len(), 2, "expected UPDATE then METADATA, got {out:?}");
+        assert_eq!(sent(&out[0]), (UPDATE, [10u8].as_slice()));
+        assert_eq!(sent(&out[1]).0, METADATA);
+    }
+
+    /// Negative control for the test above: re-syncing the exact same
+    /// metadata (no change at all) must emit nothing, proving the branch is
+    /// a real diff and not "always resend metadata once present."
+    #[test]
+    fn unchanged_metadata_emits_nothing_on_resync() {
+        let mut s = EntityStreamer::default();
+        let snapshot = snap_with_metadata(10, 0.0, vec![MetadataField::CreeperIgnited(true)]);
+        let _ = s.sync(&TagProto, &[snapshot.clone()]);
+        let out = s.sync(&TagProto, &[snapshot]);
+        assert!(out.is_empty(), "unchanged metadata must not re-send: {out:?}");
     }
 
     // -- container screens (Job 1: OPEN_SCREEN/CONTAINER_SET_CONTENT/SLOT/DATA) --

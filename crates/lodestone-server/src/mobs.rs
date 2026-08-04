@@ -86,7 +86,7 @@ use lodestone_model::{Identifier, ResourceKey, Rotation, Vec3};
 use uuid::Uuid;
 
 use crate::chunk::{AIR, ChunkColumn, ChunkSource};
-use crate::protocol::EntitySnapshot;
+use crate::protocol::{EntitySnapshot, MetadataField};
 use crate::mob_spawn::{
     DespawnOutcome, MobCategory, SpawnCandidateSource, SpawnRng, SpawnState, check_despawn,
 };
@@ -830,8 +830,32 @@ impl<'w> SimMob<'w> {
     /// This is the whole identity/motion surface a [`ServerProtocol`] needs to
     /// build spawn/move/remove packets; the server holds the previous snapshot
     /// per connection so the protocol can stay stateless.
+    ///
+    /// Issue #425: `metadata` is the per-species entity-metadata field list —
+    /// general across mobs (see [`MetadataField`]'s own doc comment), not a
+    /// creeper-only mechanism, even though a creeper is the only producer
+    /// today. [`crate::server::EntityStreamer::sync`] diffs this exactly like
+    /// every other field here, so a change reaches [`ServerProtocol::encode_set_entity_data`]
+    /// through the same spawn/update path `position`/`rotation` already use —
+    /// no second wiring for the next mob that needs a metadata field.
+    ///
+    /// `CreeperSwellDir` is always included for a creeper, even at its `-1`
+    /// default: unlike `CreeperIgnited` (monotonic — set once, never
+    /// cleared, so *absence* safely means "still false"), `swell_dir` can
+    /// legitimately return to `-1` mid-episode (`SwellGoal`'s retreat case),
+    /// and that transition must reach the client exactly like the climb to
+    /// `1` did — a client that keeps whatever `swell_dir` it was last sent
+    /// would integrate the fuse in the wrong direction forever if a
+    /// retreat-to-`-1` were ever skipped as "just the default".
     #[must_use]
     pub fn snapshot(&self) -> EntitySnapshot {
+        let mut metadata = Vec::new();
+        if self.entity_type.path() == "creeper" {
+            metadata.push(MetadataField::CreeperSwellDir(self.swell_dir()));
+            if self.is_ignited() {
+                metadata.push(MetadataField::CreeperIgnited(true));
+            }
+        }
         EntitySnapshot {
             id: self.id,
             uuid: self.uuid,
@@ -840,6 +864,7 @@ impl<'w> SimMob<'w> {
             rotation: self.rotation(),
             head_yaw: self.head_yaw(),
             velocity: self.velocity(),
+            metadata,
         }
     }
 }
@@ -918,6 +943,31 @@ pub struct MobSim<'w> {
     item_state: HashMap<i32, ItemState>,
     next_id: i32,
     tick_count: u64,
+    /// Every detonation [`tick`](Self::tick) has triggered since the last
+    /// [`take_detonations`](Self::take_detonations) call (issue #425).
+    /// `tick` itself has no wire access — it only knows `self.world` — so
+    /// this is the handoff point a driver ([`crate::tick::run_tick_loop`])
+    /// drains into an [`crate::tick::ExplosionFeed`] for a connection to
+    /// turn into a real `EXPLODE` packet. See that method's own doc comment
+    /// for why draining, not just reading, is what keeps a detonation from
+    /// being broadcast twice.
+    pending_detonations: Vec<Detonation>,
+}
+
+/// One detonation [`MobSim::tick`] triggered this tick, for
+/// [`take_detonations`](MobSim::take_detonations) to hand a driver — the
+/// minimum a [`ServerProtocol::encode_explode`](crate::protocol::ServerProtocol::encode_explode)
+/// call needs. This crate tracks no block-destruction model, so there is
+/// nothing else (a block list, a knockback vector) to carry yet; see that
+/// method's own doc comment for exactly which vanilla `ClientboundExplodePacket`
+/// fields are therefore stubbed rather than modelled.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Detonation {
+    /// The blast's centre, in world space.
+    pub centre: Vec3,
+    /// The blast radius (`CREEPER_EXPLOSION_RADIUS` for every producer
+    /// today).
+    pub radius: f32,
 }
 
 // The integrated server owns the sim behind an `Arc<Mutex<…>>` and hands it to
@@ -944,6 +994,7 @@ impl<'w> MobSim<'w> {
             item_state: HashMap::new(),
             next_id: 1,
             tick_count: 0,
+            pending_detonations: Vec::new(),
         }
     }
 
@@ -1142,6 +1193,16 @@ impl<'w> MobSim<'w> {
         for (id, pos) in detonations {
             self.explode(pos, CREEPER_EXPLOSION_RADIUS, DamageFlags::default());
             self.mobs.retain(|m| m.id != id);
+            // Issue #425: before this, nothing recorded that a detonation
+            // happened at all beyond the damage `explode` itself just
+            // applied — a connected client had no way to learn "an
+            // explosion happened here" (no particle, no sound), because
+            // `tick` discarded this entirely. See `take_detonations`'s own
+            // doc comment for the drain side.
+            self.pending_detonations.push(Detonation {
+                centre: pos,
+                radius: CREEPER_EXPLOSION_RADIUS,
+            });
         }
 
         // Issues #211/#215: `ProjectileRegistry`/`ItemEntityRegistry` existed
@@ -1166,6 +1227,18 @@ impl<'w> MobSim<'w> {
         for _ in 0..n {
             self.tick();
         }
+    }
+
+    /// Drains and returns every [`Detonation`] [`tick`](Self::tick) has
+    /// triggered since the last call (issue #425) — the handoff
+    /// [`crate::tick::run_tick_loop`] uses to publish onto an
+    /// [`crate::tick::ExplosionFeed`] every server tick, mirroring how
+    /// [`items`](Self::item_count)' own despawn ids are drained rather than
+    /// merely read. Draining (not just reading) is what keeps a detonation
+    /// from being broadcast twice if a caller is slow to call this before
+    /// the next [`tick`](Self::tick) runs.
+    pub fn take_detonations(&mut self) -> Vec<Detonation> {
+        std::mem::take(&mut self.pending_detonations)
     }
 
     /// The number of ticks advanced so far.
@@ -1590,6 +1663,7 @@ impl<'w> MobSim<'w> {
                     rotation: Rotation::new(0.0, 0.0),
                     head_yaw: 0.0,
                     velocity: t.projectile.velocity,
+                    metadata: Vec::new(),
                 });
             }
         }
@@ -1602,6 +1676,7 @@ impl<'w> MobSim<'w> {
                 rotation: Rotation::new(0.0, 0.0),
                 head_yaw: 0.0,
                 velocity: state.motion.velocity,
+                metadata: Vec::new(),
             });
         }
         out

@@ -43,6 +43,45 @@ pub struct EntitySnapshot {
     pub head_yaw: f32,
     /// Velocity in **blocks per tick**.
     pub velocity: Vec3,
+    /// Per-species entity-metadata fields this entity currently wants a
+    /// client to hold (issue #425) — empty for every entity kind that has
+    /// none (projectiles, dropped items, and any mob whose fields are all
+    /// still at their default). [`crate::server::EntityStreamer::sync`]
+    /// diffs this exactly like every other field on this struct: a spawn
+    /// with non-empty metadata, or an update where this changed, calls
+    /// [`ServerProtocol::encode_set_entity_data`] with the entity's *current*
+    /// full field list (not just what changed) — see that method's own doc
+    /// comment for why resending the full set is the simpler and cheap
+    /// choice here.
+    pub metadata: Vec<MetadataField>,
+}
+
+/// One per-species entity-metadata field a [`ServerProtocol`] can push over
+/// `SET_ENTITY_DATA` (issue #425) — the general vocabulary
+/// [`ServerProtocol::encode_set_entity_data`] takes a slice of, replacing
+/// the single hardcoded local-player arm (`encode_air_supply_update`) that
+/// used to be the only metadata encoder anywhere in this crate. Adding a
+/// field for the next mob is a new variant here plus one arm in the
+/// implementor's `encode_set_entity_data` — no second mechanism, and no
+/// change to [`EntityStreamer::sync`](crate::server) at all, since that
+/// diffing loop already treats `EntitySnapshot::metadata` generically.
+///
+/// Each variant names the vanilla field it mirrors, not the wire index or
+/// serializer id — those are the implementor's concern (see
+/// `crates/protocol/v770/src/server_protocol.rs`'s own constants, verified
+/// against the `EntityDataIndexOracle` dump the same way
+/// `crates/protocol/v770/src/packets/metadata.rs`'s decode-side constants
+/// already are), matching every other version-free `Server*`/`Client*`
+/// vocabulary type in this crate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MetadataField {
+    /// `Creeper.DATA_SWELL_DIR` — which way `swell` is currently moving
+    /// (`-1`, `0`, or `1`). See [`crate::mobs::SimMob::snapshot`]'s own doc
+    /// comment for why this is always included for a creeper, even at its
+    /// `-1` default, unlike the monotonic [`CreeperIgnited`](Self::CreeperIgnited).
+    CreeperSwellDir(i32),
+    /// `Creeper.DATA_IS_IGNITED` — set once by `ignite()`, never cleared.
+    CreeperIgnited(bool),
 }
 
 /// A server-bound packet, lifted into the version-free vocabulary the server
@@ -497,6 +536,45 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
+    /// Encodes a `SET_ENTITY_DATA` metadata update for an arbitrary entity id
+    /// (issue #425), given every [`MetadataField`] that entity currently wants
+    /// synced — not a hardcoded single field for a hardcoded entity id, the
+    /// shape [`encode_air_supply_update`](Self::encode_air_supply_update) is
+    /// stuck in for exactly that reason (`LOCAL_PLAYER_ENTITY_ID` only, one
+    /// `INT` field only). [`crate::server::EntityStreamer::sync`] is the one
+    /// caller: it calls this whenever an entity spawns with non-empty
+    /// [`EntitySnapshot::metadata`], or an update changes it, passing the
+    /// entity's *current* full field list each time. The default emits
+    /// nothing, so a protocol without per-species metadata support need not
+    /// override it and a swelling creeper simply never reaches that client's
+    /// screen.
+    fn encode_set_entity_data(&self, entity_id: i32, fields: &[MetadataField]) -> ServerDirective {
+        let _ = (entity_id, fields);
+        ServerDirective::None
+    }
+
+    /// Encodes a detonation (issue #425; vanilla `ClientboundExplodePacket`,
+    /// wire id `explode`), fed from [`crate::mobs::MobSim::take_detonations`]
+    /// via [`crate::tick::ExplosionFeed`] — the handoff that finally gives
+    /// [`crate::mobs::MobSim::explode`] (issue #213's own exposure/damage
+    /// maths) a wire-visible consequence: before this, a creeper's own fuse
+    /// completing removed the creeper and landed real damage on nearby mobs,
+    /// but no connected client ever saw a particle or heard a sound, because
+    /// nothing encoded this packet at all.
+    ///
+    /// `centre`/`radius` are the blast's own. This crate tracks no block-
+    /// destruction model, so an implementor has nothing to report for
+    /// vanilla's `blockCount`/`blockParticles`/`playerKnockback` fields
+    /// beyond a faithful "none of that happened" — see the v770
+    /// implementation's own doc comment for exactly which fields that
+    /// leaves stubbed versus real. The default emits nothing, so a protocol
+    /// without explosion support need not override it and a detonation
+    /// simply stays silent and invisible.
+    fn encode_explode(&self, centre: Vec3, radius: f32) -> ServerDirective {
+        let _ = (centre, radius);
+        ServerDirective::None
+    }
+
     /// Encodes a server-initiated keep-alive challenge (vanilla
     /// `ClientboundKeepAlivePacket`, wire id `keep_alive`). `id` is the
     /// challenge value the loop expects echoed back as
@@ -760,6 +838,14 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         (**self).encode_remove_entity(ids)
     }
 
+    fn encode_set_entity_data(&self, entity_id: i32, fields: &[MetadataField]) -> ServerDirective {
+        (**self).encode_set_entity_data(entity_id, fields)
+    }
+
+    fn encode_explode(&self, centre: Vec3, radius: f32) -> ServerDirective {
+        (**self).encode_explode(centre, radius)
+    }
+
     fn encode_keep_alive(&self, id: i64) -> ServerDirective {
         (**self).encode_keep_alive(id)
     }
@@ -885,6 +971,12 @@ mod tests {
         fn encode_remove_entity(&self, ids: &[i32]) -> ServerDirective {
             send(ids.len() as i32)
         }
+        fn encode_set_entity_data(&self, entity_id: i32, fields: &[MetadataField]) -> ServerDirective {
+            send(700 + entity_id * 10 + fields.len() as i32)
+        }
+        fn encode_explode(&self, centre: Vec3, radius: f32) -> ServerDirective {
+            send(800 + centre.x as i32 + radius as i32)
+        }
         fn encode_keep_alive(&self, id: i64) -> ServerDirective {
             send(id as i32)
         }
@@ -947,6 +1039,7 @@ mod tests {
             rotation: Rotation { yaw: 0.0, pitch: 0.0 },
             head_yaw: 0.0,
             velocity: Vec3::new(0.0, 0.0, 0.0),
+            metadata: Vec::new(),
         }
     }
 
@@ -994,6 +1087,15 @@ mod tests {
         assert_eq!(
             boxed.encode_remove_entity(&[1, 2, 3]),
             direct.encode_remove_entity(&[1, 2, 3])
+        );
+        let fields = [MetadataField::CreeperSwellDir(1), MetadataField::CreeperIgnited(true)];
+        assert_eq!(
+            boxed.encode_set_entity_data(9, &fields),
+            direct.encode_set_entity_data(9, &fields)
+        );
+        assert_eq!(
+            boxed.encode_explode(Vec3::new(1.0, 2.0, 3.0), 3.0),
+            direct.encode_explode(Vec3::new(1.0, 2.0, 3.0), 3.0)
         );
         assert_eq!(boxed.encode_keep_alive(11), direct.encode_keep_alive(11));
         assert_eq!(
@@ -1073,6 +1175,11 @@ mod tests {
         );
         assert_ne!(
             direct.encode_container_data(7, 0, 42),
+            ServerDirective::None
+        );
+        assert_ne!(direct.encode_set_entity_data(9, &fields), ServerDirective::None);
+        assert_ne!(
+            direct.encode_explode(Vec3::new(1.0, 2.0, 3.0), 3.0),
             ServerDirective::None
         );
     }

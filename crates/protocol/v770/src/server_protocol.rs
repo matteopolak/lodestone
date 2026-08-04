@@ -43,10 +43,10 @@
 use std::collections::HashMap;
 
 use lodestone_core::{Ctx, Decode, Encode, Nbt, Reader, Writer, write_network_nbt};
-use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, Vec3};
 use lodestone_server::{
-    ChunkColumn as ServerChunkColumn, EntitySnapshot, HOTBAR_SIZE, ServerBound, ServerDirective,
-    ServerProtocol,
+    ChunkColumn as ServerChunkColumn, EntitySnapshot, HOTBAR_SIZE, MetadataField, ServerBound,
+    ServerDirective, ServerProtocol,
 };
 use lodestone_world::{ChunkColumn as WorldChunkColumn, ChunkSection, ColumnLight, Heightmaps};
 use uuid::Uuid;
@@ -105,6 +105,35 @@ const METADATA_SER_INT: i32 = 1;
 /// `EOF_MARKER`).
 const METADATA_EOF: u8 = 0xFF;
 
+/// `Creeper.DATA_SWELL_DIR` (`Creeper.java:46`) and `Creeper.DATA_IS_IGNITED`
+/// (`Creeper.java:48`) metadata indices plus the `BOOLEAN` serializer id,
+/// restated for the same reason [`METADATA_IDX_AIR_SUPPLY`] restates
+/// `IDX_AIR_SUPPLY`: `crates/protocol/v770/src/packets/metadata.rs`'s own
+/// `IDX_CREEPER_SWELL_DIR`/`IDX_CREEPER_IGNITED`/`SER_BOOLEAN` are private to
+/// that module. **Not hand-counted** — verified against the
+/// `EntityDataIndexOracle` dump already in the tree
+/// (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt:116`:
+/// `16 Creeper.DATA_SWELL_DIR 1 INT`; `:166`: `18 Creeper.DATA_IS_IGNITED 8
+/// BOOLEAN`), the same dump that module's own decode-side constants cite and
+/// whose doc comment records the two shipped off-by-one bugs
+/// (`Sheep.DATA_WOOL_ID`, `Horse.DATA_ID_TYPE_VARIANT`) hand-counting produced
+/// before it existed.
+///
+/// Index 16 also collides with `Display.DATA_BRIGHTNESS_OVERRIDE_ID`,
+/// `EnderDragon.DATA_PHASE` and `Warden.CLIENT_ANGER_LEVEL` (all `INT`), and
+/// index 18 with several unrelated `BOOLEAN`/other-typed fields on other
+/// mobs (see that same file's own doc comment for the full list) — but
+/// unlike `metadata.rs`'s decode side, this *encoder* never needs a class
+/// guard for that collision: [`SimMob::snapshot`](lodestone_server::SimMob)
+/// only ever produces a [`MetadataField::CreeperSwellDir`]/
+/// [`MetadataField::CreeperIgnited`] for a `SimMob` it already knows is a
+/// creeper (`self.entity_type.path() == "creeper"`), so the guard's job is
+/// done by construction at the one call site that builds the field list,
+/// not by re-checking the species here.
+const METADATA_IDX_CREEPER_SWELL_DIR: u8 = 16;
+const METADATA_IDX_CREEPER_IGNITED: u8 = 18;
+const METADATA_SER_BOOLEAN: i32 = 8;
+
 /// The overworld world-clock's registry holder id
 /// (`WorldClocks::bootstrap` registers `minecraft:overworld` first,
 /// `minecraft:the_end` second — see `packets::time::ClockUpdate::holder_id`'s
@@ -145,6 +174,34 @@ fn air_id() -> u32 {
     (0..).find(|&id| block_name(id) == Some("minecraft:air")).expect(
         "generated block-state table has no `minecraft:air` entry — regenerate or fix the table",
     )
+}
+
+/// `ParticleTypes.EXPLOSION_EMITTER`'s network registry id, restated for the
+/// same reason [`METADATA_IDX_AIR_SUPPLY`] restates its decode-side sibling:
+/// `crate::adapter`'s own `PARTICLE_ID_EXPLOSION_EMITTER` is private to that
+/// module. Every real vanilla explosion source (`Creeper.explodeCreeper`,
+/// TNT, beds, respawn anchors) sends this id, never the plain `EXPLOSION`
+/// id `decode_explode` also accepts as a simpler-to-decode alternative.
+const PARTICLE_ID_EXPLOSION_EMITTER: i32 = 29;
+
+/// The `minecraft:sound_event` registry id for
+/// `minecraft:entity.generic.explode` (`SoundEvents.GENERIC_EXPLODE`),
+/// resolved by name the same way [`stone_id`]/[`air_id`] resolve block
+/// states — bounded by [`SOUND_EVENT_COUNT`] so a name this table has never
+/// had (a stale or ahead-of-version generated table) fails loudly here
+/// rather than scanning forever. Used by [`V770ServerProtocol::encode_explode`]
+/// to build the `Holder<SoundEvent>` **registry-reference** encoding a real
+/// vanilla server sends for this sound — see that method's own doc comment
+/// for why that is the byte-accurate choice, verified against
+/// `ByteBufCodecs.holder`'s decompiled encode arm, not the decoder's own
+/// (weaker) direct-literal-name path.
+fn explosion_sound_registry_id() -> i32 {
+    (0..lodestone_data::sound_events::SOUND_EVENT_COUNT as i32)
+        .find(|&id| lodestone_data::sound_events::sound_event_name(id) == Some("minecraft:entity.generic.explode"))
+        .expect(
+            "generated sound-event table has no `minecraft:entity.generic.explode` entry — \
+             regenerate or fix the table",
+        )
 }
 
 /// This port's own biome registry id space (issue #405) — index in this
@@ -1913,6 +1970,132 @@ impl ServerProtocol for V770ServerProtocol {
         w.u8(METADATA_EOF);
         ServerDirective::Send {
             packet_id: play::clientbound::SET_ENTITY_DATA,
+            payload: w.into_vec(),
+        }
+    }
+
+    /// Issue #425: the general per-species `SET_ENTITY_DATA` encoder
+    /// [`encode_air_supply_update`](Self::encode_air_supply_update)'s own doc
+    /// comment says nothing on the server side had ever needed before it —
+    /// that one is still hardcoded to [`LOCAL_PLAYER_ENTITY_ID`] and one
+    /// `INT` field on purpose (a real, still-valid, still-narrower use case:
+    /// syncing the *local player's own* air supply needs no entity-id
+    /// parameter at all). This is the wire-format twin for an arbitrary
+    /// entity id and an arbitrary [`MetadataField`] list, so a creeper's
+    /// `DATA_SWELL_DIR`/`DATA_IS_IGNITED` — and the next mob's fields,
+    /// whatever they are — reach this same encoder with no second mechanism.
+    ///
+    /// Byte-accurate against the same decode side
+    /// `encode_air_supply_update` cites (`crates/protocol/v770/src/packets/metadata.rs`'s
+    /// `read_entity_metadata`): VarInt entity id, then `(index: u8,
+    /// serializer: VarInt, value)` once per field, terminated by the `0xFF`
+    /// sentinel. `fields` empty returns [`ServerDirective::None`] rather than
+    /// a wire-valid-but-pointless empty list — [`crate::server::EntityStreamer::sync`]
+    /// never calls this with an empty list in practice (it only calls this
+    /// when [`EntitySnapshot::metadata`] is non-empty or changed), but a
+    /// defaulted metadata field list from some future caller should not
+    /// spend a packet saying nothing.
+    fn encode_set_entity_data(&self, entity_id: i32, fields: &[MetadataField]) -> ServerDirective {
+        if fields.is_empty() {
+            return ServerDirective::None;
+        }
+        let mut w = Writer::default();
+        w.var_i32(entity_id);
+        for field in fields {
+            match *field {
+                MetadataField::CreeperSwellDir(v) => {
+                    w.u8(METADATA_IDX_CREEPER_SWELL_DIR);
+                    w.var_i32(METADATA_SER_INT);
+                    w.var_i32(v);
+                }
+                MetadataField::CreeperIgnited(b) => {
+                    w.u8(METADATA_IDX_CREEPER_IGNITED);
+                    w.var_i32(METADATA_SER_BOOLEAN);
+                    w.bool(b);
+                }
+            }
+        }
+        w.u8(METADATA_EOF);
+        ServerDirective::Send {
+            packet_id: play::clientbound::SET_ENTITY_DATA,
+            payload: w.into_vec(),
+        }
+    }
+
+    /// Issue #425: the other half of "our server cannot tell a client that
+    /// anything is ... exploding" — `crate::adapter::decode_explode`'s own
+    /// doc comment names the exact `ClientboundExplodePacket` field order
+    /// this mirrors (`.cache/mc/26.2/src/net/minecraft/network/protocol/game/ClientboundExplodePacket.java`):
+    /// `center: Vec3` (three big-endian `f64`s), `radius: f32`,
+    /// `blockCount: i32` (a **plain** `ByteBufCodecs.INT`, not a VarInt —
+    /// verified against that same decompiled record, not guessed from the
+    /// decoder's own `reader.i32()` call, which would be the
+    /// "our decoder validates our encoder" trap this crate's evidence
+    /// standard warns against), `playerKnockback: Optional<Vec3>` (a bool
+    /// presence flag, no `Vec3` following since this crate applies no
+    /// knockback here), `explosionParticle` (a VarInt registry id — always
+    /// [`PARTICLE_ID_EXPLOSION_EMITTER`], matching every real detonation:
+    /// `Creeper.explodeCreeper` and every other vanilla explosion source use
+    /// `ParticleTypes.EXPLOSION_EMITTER`, never the plain `EXPLOSION` id
+    /// `decode_explode` also accepts), `explosionSound` (a `Holder<SoundEvent>`
+    /// — see below), then `blockParticles: WeightedList<ExplosionParticleInfo>`
+    /// (a VarInt-prefixed list, always empty here: this crate tracks no
+    /// block-destruction model, so there is nothing to report — `decode_explode`
+    /// never reads this field at all, by its own doc comment, so an empty
+    /// list costs one byte and loses nothing a client today consumes).
+    ///
+    /// `explosionSound` is encoded as a real registry **reference**, not the
+    /// direct/literal-name path `read_sound_holder`'s decode side also
+    /// accepts: verified against `ByteBufCodecs.holder`'s own encode arm
+    /// (`.cache/mc/26.2/src/net/minecraft/network/codec/ByteBufCodecs.java:607-617`),
+    /// which writes `registryId + 1` for a `Holder.Kind::REFERENCE` — exactly
+    /// what a real vanilla server sends for `SoundEvents.GENERIC_EXPLODE` (a
+    /// registered constant, never a `Holder::direct`). The registry id is
+    /// resolved by name via [`lodestone_data::sound_events::sound_event_name`]
+    /// (the same reverse-by-name-scan idiom [`stone_id`]/[`air_id`] above
+    /// already establish for block states) rather than hand-picking a
+    /// literal index, so a regenerated sound-event table cannot silently
+    /// desync this from the real registry id.
+    ///
+    /// Every creeper detonation — charged or not — uses
+    /// `minecraft:entity.generic.explode`: `Creeper.explodeCreeper`
+    /// (`Creeper.java:230-238`) only varies `explosionMultiplier` (radius,
+    /// `2.0F` when `isPowered()`, else `1.0F`) before calling `Level`'s
+    /// six-argument `explode` overload, and **every** overload up to the
+    /// twelve-argument one this crate's own creeper path effectively mirrors
+    /// defaults `explosionSound` to `SoundEvents.GENERIC_EXPLODE`
+    /// unconditionally (`Level.java:579-679`) — there is no powered-creeper
+    /// sound variant to pick between. This crate has no charged-creeper
+    /// producer today either way ([`lodestone_server::MobSim::take_detonations`]'s
+    /// only source is [`lodestone_server::SwellGoal`]/`ignite()`, neither of
+    /// which ever sets `DATA_IS_POWERED` — see
+    /// `crates/lodestone-entity/src/ai/goals.rs`'s `SwellGoal`), so the
+    /// constant is correct for every detonation this encoder can currently
+    /// be asked to encode, not merely the common case.
+    ///
+    /// [`PARTICLE_ID_EXPLOSION_EMITTER`] is likewise the real choice, not an
+    /// arbitrary pick between the two ids `decode_explode` accepts:
+    /// `ServerLevel::explode` selects `largeExplosionParticles`
+    /// (`ParticleTypes.EXPLOSION_EMITTER`) whenever `ServerExplosion::isSmall`
+    /// is false (`ServerExplosion.java:312`: `radius < 2.0F ||
+    /// !interactsWithBlocks()`), and a creeper's `CREEPER_EXPLOSION_RADIUS`
+    /// (`3.0`) is `>= 2.0` with block-interaction enabled under default game
+    /// rules — the only configuration this crate's `MobSim` models — so
+    /// `isSmall()` is false and vanilla sends this id too.
+    fn encode_explode(&self, centre: Vec3, radius: f32) -> ServerDirective {
+        let mut w = Writer::default();
+        w.f64(centre.x);
+        w.f64(centre.y);
+        w.f64(centre.z);
+        w.f32(radius);
+        w.i32(0); // blockCount: no block-destruction model.
+        w.bool(false); // playerKnockback: Optional<Vec3>, never present.
+        w.var_i32(PARTICLE_ID_EXPLOSION_EMITTER);
+        let sound_id = explosion_sound_registry_id();
+        w.var_i32(sound_id + 1); // Holder::REFERENCE encoding: registryId + 1.
+        w.var_i32(0); // blockParticles: empty WeightedList.
+        ServerDirective::Send {
+            packet_id: play::clientbound::EXPLODE,
             payload: w.into_vec(),
         }
     }

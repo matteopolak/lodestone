@@ -387,6 +387,7 @@ fn entity_encoder_defaults_are_harmless_noops() {
         rotation: Rotation::new(90.0, 0.0),
         head_yaw: 45.0,
         velocity: Vec3::new(0.1, 0.0, 0.0),
+        metadata: Vec::new(),
     };
 
     assert_eq!(proto.encode_add_entity(&snap), ServerDirective::None);
@@ -448,6 +449,7 @@ async fn integrated_server_streams_entity_lifecycle_over_memory_transport() {
         rotation: Rotation::new(0.0, 0.0),
         head_yaw: 0.0,
         velocity: Vec3::new(0.0, 0.0, 0.0),
+        metadata: Vec::new(),
     };
     entities.set(vec![pig(0.0)]);
 
