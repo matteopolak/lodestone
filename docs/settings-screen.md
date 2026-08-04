@@ -202,6 +202,48 @@ keyboard** (`SettingsNav::activate`/`enter`/`click_row`) — the row was drawn
 correctly and did nothing either way, so the gap was invisible until something
 was actually put behind it.
 
+### Two player reports, fixed 2026-08-04
+
+**The root title overlapped the FOV/Online row.** `settings_frame`'s title
+`MenuLabel` used `origin: Origin::Settings(Placement::Root(0))` — already the
+real, arranged, **absolute** y `root_widget_rects` puts the title at (`12`,
+per `the_title_sits_in_its_band_on_every_page`) — and then added `title_y(Root)`
+(also `12.0`) as `dy` on top, because the render loop computes
+`y = anchor.1 + label.dy`. That drew the title at absolute `y = 24`, four
+pixels into the FOV/Online row's own `y = 29`
+(`the_root_title_is_centred_on_the_header_block`'s sibling rects give that row
+directly). No existing test caught it: `the_title_sits_in_its_band_on_every_page`
+checks `title_y` in isolation, and `the_root_title_is_centred_on_the_header_
+block` checks only the *x* centring — neither exercises the composed
+`anchor + dy` the draw actually uses. Fixed by making the root's `dy` `0.0`
+(the anchor already carries the whole offset there; every other page's
+`Origin::ScreenTop` anchor is `0.0`, so `dy` still has to carry all of theirs).
+`options::tests::no_settings_title_ever_overlaps_a_widget` is the regression
+gate — it walks `settings_frame`'s own labels and rows rather than a
+hand-derived rect, at two canvases and, since this client carries no second
+locale, a synthetic long title standing in for "more than one language string
+width".
+
+**In-world Options showed the main-menu panorama instead of the paused
+world.** `render::frame_for`'s `Screen::Settings` arm returned `Some` from
+`settings_frame` unconditionally, which routes through `app.rs`'s `draw_menu`
+Clear pass — the same pass `Screen::MainMenu` uses, and exactly what
+`owns_frame`'s own doc says `Screen::Paused` must *not* go through, for the
+same reason: it stops the world (and its HUD/container passes) rendering
+behind whatever is up. Fixed on the `render.rs` side by returning `None` for
+`Screen::Settings` when
+[`UiState::settings_in_world`](../crates/lodestone-shell/src/menu.rs) is
+`true`, deferring to a `MenuRenderer::render_overlay` block over the
+still-rendering world — the same shape `Screen::Paused`/`Screen::Death`
+already use. `owns_frame(Screen::Settings)` is deliberately left `true`
+regardless of `in_world`, because every other caller of it is about input
+routing (mouse/keyboard treated as menu rows), which is true either way; only
+`frame_for`, the render decision, has the exception. **This is only the
+render-side half** — the `app.rs` overlay block that must draw the deferred
+frame is brokered (`app.rs` is not this module's file) and may not have
+landed yet; `frame_for_defers_to_an_overlay_for_in_world_settings` is the
+regression gate for the half that has.
+
 ### The Key Binds page (issue #15)
 
 `SettingsPage::KeyBinds` — vanilla's `KeyBindsScreen`/`KeyBindsList`. Reached
@@ -360,8 +402,16 @@ gets a `CycleButton` (an `AbstractButton`, so `widget/button*`), a
 **`guiScale` is a cycle button, not a slider**, and getting this backwards would
 draw a slider track under the one option on the Video page that works: its
 `ValueSet` is a `ClampingLazyMaxIntRange`, whose `createCycleButton()` returns
-`true` (`OptionInstance.java:213-216`). So no live option in this client is a
-slider, which is why `MenuRow::slider` is a `bool` and not a value.
+`true` (`OptionInstance.java:213-216`).
+
+This section used to say "no live option in this client is a slider" and
+conclude that `MenuRow::slider` was a `bool` and not a value for that reason.
+That stopped being true when issue #203 gave `mouseWheelSensitivity` a real
+live value — it kept a slider *widget*, unlike `guiScale`. A player report
+(2026-08-04, "no sliders for sound — they are buttons") is what caught the gap
+that stale claim had left uncovered: nothing ever drew a handle for it either,
+because the field it would have needed did not exist. `MenuRow` now also
+carries `slider_value: Option<f32>` — see departure 2, rewritten below.
 
 ## The four deliberate departures from vanilla
 
@@ -376,12 +426,30 @@ fabricated persistence this issue exists to avoid: a row reading
 cannot tell from a working feature. The two live options *do* use
 `genericValueLabel`.
 
-**2. An inactive slider draws its track and no handle.** The handle's position
-*is* the value (`AbstractSliderButton.extractWidgetRenderState`), so putting one
-at 0 is departure 1 in pixels instead of text. This is the one place where the
-absence of a component is the honest render; it is not "disabled art", which
-`menu-widgets.md` correctly forbids for this widget family. `Widget::slider`'s
-doc says where the handle goes when a slider does go live.
+**2. A slider draws a handle only where a real fraction is known — rewritten
+2026-08-04.** This used to say every slider draws its track and *no* handle at
+all, because putting one anywhere would be departure 1 in pixels instead of
+text — but that reasoning only holds when the fraction is genuinely unknown,
+and it is not, for two kinds of slider:
+
+- `mouseWheelSensitivity` (issue #203) is live, so its fraction is the real,
+  persisted config value, run through the same `unlogMouse` +
+  `IntRangeBase.toSliderValue` math the jar uses
+  (`Cell::slider_fraction`/`mouse_wheel_slider_fraction`, `options.rs`).
+- Every other slider is still inactive, but for one built on
+  `OptionInstance.UnitDouble.INSTANCE` (all eleven `SoundSource` volumes among
+  them), vanilla's own `OptionInstance` boots with a concrete default double,
+  and `UnitDouble.toSliderValue` is the identity — so that default *is* the
+  slider fraction, not a guess. `UNIT_DOUBLE_DEFAULTS` in `options.rs` is that
+  table, one entry per accessor, cited to the `Options.java` line it boots
+  from.
+
+A slider whose value set this client has not ported (an `IntRange` or an
+`IntRange.xmap` — `renderDistance`, `chatDelay`, `menuBackgroundBlurriness`, …)
+still draws no handle: that fraction really is unknown, and departure 1's
+reasoning still applies to it unmodified. `Widget::slider_handle_sprite`
+draws the handle sprite itself; `MenuRow::slider_value: Option<f32>` is what
+carries the fraction from `Cell::slider_fraction` to the draw.
 
 **3. The scroll snaps to whole entries, and the visible window is a fixed pixel
 budget.** `AbstractSelectionList` scrolls continuously and scissors the band;

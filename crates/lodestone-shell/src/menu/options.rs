@@ -334,6 +334,156 @@ impl Cell {
             })
         )
     }
+
+    /// The `[0, 1]` fraction along the track where
+    /// `AbstractSliderButton.extractWidgetRenderState` blits the handle
+    /// (`AbstractSliderButton.java:69-77`), or `None` for a non-slider `Cell`
+    /// **or** a slider this client holds no value for at all.
+    ///
+    /// Two sources, neither a guess:
+    ///
+    /// - `mouseWheelSensitivity` (issue #203) is the one live slider on the
+    ///   tree, so its fraction comes from the real, persisted config value
+    ///   via [`mouse_wheel_slider_fraction`].
+    /// - Every other slider is inactive — this client wires no behaviour to
+    ///   it — but vanilla's own `OptionInstance` still boots with a concrete
+    ///   default double, and for an option built on
+    ///   `OptionInstance.UnitDouble.INSTANCE` that default *is* the slider
+    ///   fraction, because `UnitDouble.toSliderValue` is the identity
+    ///   (`OptionInstance.java:587-589`). [`UNIT_DOUBLE_DEFAULTS`] is that
+    ///   set, one entry per accessor, each cited to the `Options.java` line
+    ///   it boots from.
+    ///
+    /// A slider whose accessor is not in [`UNIT_DOUBLE_DEFAULTS`] is built on
+    /// some other value set — an `IntRange` or an `IntRange.xmap` — whose
+    /// range this client has not ported (`renderDistance`,
+    /// `menuBackgroundBlurriness`, `chatDelay`, `notificationDisplayTime`, …).
+    /// Those return `None` rather than a fabricated position; porting each
+    /// range is a bigger job than a handle draw and is tracked separately
+    /// (issue #424).
+    #[must_use]
+    pub fn slider_fraction(self, options: &crate::config::Options) -> Option<f32> {
+        let Cell::Option(spec) = self else { return None };
+        if spec.widget != OptionWidget::Slider {
+            return None;
+        }
+        if spec.live == Some(LiveOption::MouseWheelSensitivity) {
+            return Some(mouse_wheel_slider_fraction(options.mouse_wheel_sensitivity));
+        }
+        unit_double_default_fraction(spec.accessor)
+    }
+}
+
+/// Every settings-tree slider built on `OptionInstance.UnitDouble.INSTANCE`,
+/// paired with the literal default double each one constructs with — see
+/// [`Cell::slider_fraction`]'s doc for why the default *is* the fraction.
+///
+/// `fovEffectScale`/`darknessEffectScale` additionally `.xmap(Mth::square,
+/// Math::sqrt)` (`Options.java:843,853`), i.e. `toSliderValue(v) =
+/// sqrt(v)`; both default to `1.0`, and `sqrt(1.0) == 1.0`, so the xmap does
+/// not change the number recorded here.
+///
+/// Exhaustive over `grep -n "UnitDouble.INSTANCE" Options.java` — every
+/// accessor that string touches is listed, so a slider added later that is
+/// *not* here is provably not one of these, rather than merely uncounted.
+const UNIT_DOUBLE_DEFAULTS: &[(&str, f32)] = &[
+    // `Options.java:1318`, `createSoundSliderOptionInstance`'s fifth
+    // argument — shared by all eleven `SoundSource` categories.
+    ("soundSource.master", 1.0),
+    ("soundSource.music", 1.0),
+    ("soundSource.record", 1.0),
+    ("soundSource.weather", 1.0),
+    ("soundSource.block", 1.0),
+    ("soundSource.hostile", 1.0),
+    ("soundSource.neutral", 1.0),
+    ("soundSource.player", 1.0),
+    ("soundSource.ambient", 1.0),
+    ("soundSource.voice", 1.0),
+    ("soundSource.ui", 1.0),
+    // `Options.java:100-106` — look sensitivity, distinct from the live
+    // `mouseWheelSensitivity` below.
+    ("sensitivity", 0.5),
+    // `Options.java:284-291`.
+    ("chatOpacity", 1.0),
+    // `Options.java:292-294`.
+    ("chatLineSpacing", 0.0),
+    // `Options.java:305-312`.
+    ("textBackgroundOpacity", 0.5),
+    // `Options.java:313-320`.
+    ("panoramaSpeed", 1.0),
+    // `Options.java:363-370`.
+    ("chatScale", 1.0),
+    // `Options.java:371-378`.
+    ("chatWidth", 1.0),
+    // `Options.java:379-386`, default `ChatComponent.defaultUnfocusedPct()`
+    // = `70.0 / (getHeight(1.0) - 20)` = `70.0 / 160.0`
+    // (`ChatComponent.java:422-431`).
+    ("chatHeightUnfocused", 70.0 / 160.0),
+    // `Options.java:387-394`.
+    ("chatHeightFocused", 1.0),
+    // `Options.java:830-837`.
+    ("screenEffectScale", 1.0),
+    // `Options.java:839-847`, `sqrt(1.0)`.
+    ("fovEffectScale", 1.0),
+    // `Options.java:849-856`, `sqrt(1.0)`.
+    ("darknessEffectScale", 1.0),
+    // `Options.java:858-865`.
+    ("glintSpeed", 0.5),
+    // `Options.java:867-874`.
+    ("glintStrength", 0.75),
+    // `Options.java:876-883`.
+    ("damageTiltStrength", 1.0),
+    // `Options.java:884-902`.
+    ("gamma", 0.5),
+];
+
+/// Looks up [`UNIT_DOUBLE_DEFAULTS`] by accessor. A linear scan over ~20
+/// entries, once per visible slider per frame — cheaper than the allocation
+/// a `HashMap` would cost for a table this size.
+#[must_use]
+fn unit_double_default_fraction(accessor: &str) -> Option<f32> {
+    UNIT_DOUBLE_DEFAULTS
+        .iter()
+        .find(|(a, _)| *a == accessor)
+        .map(|(_, v)| *v)
+}
+
+/// `mouseWheelSensitivity`'s slider fraction from the real, live config
+/// value — the one place this module inverts vanilla's own stringifier
+/// rather than restating a table.
+///
+/// Vanilla stores the option as `logMouse(intValue) = 10^(intValue / 100)`
+/// over `IntRange(-200, 100)` (`Options.java:476-484,1195-1197`), and
+/// `IntRangeBase.toSliderValue` maps that int **linearly, except at the two
+/// endpoints** (`OptionInstance.java:295-301`):
+/// `map(intValue + 0.5, min, max + 1, 0, 1)`. This inverts the stored double
+/// back to vanilla's int via `unlogMouse` (`Options.java:1199-1201`,
+/// `Mth.floor` is a plain `floor`) and then applies the same map, so the
+/// shipped config default of `1.0`
+/// ([`crate::config::Options::default`]) lands on the same fraction a fresh
+/// vanilla install shows: `unlogMouse(1.0) == 0`, `map(0.5, -200, 101, 0, 1)
+/// == 200.5 / 301 ≈ 0.6661`.
+///
+/// Clamps to the endpoint fractions for a value outside vanilla's
+/// representable range rather than producing a handle off the track — this
+/// client's own config does not enforce that range today, so a corrupted or
+/// hand-edited `options.json` must not panic or draw off-widget.
+#[must_use]
+pub fn mouse_wheel_slider_fraction(value: f32) -> f32 {
+    const MIN: f64 = -200.0;
+    const MAX: f64 = 100.0;
+    if !(value as f64).is_finite() || value <= 0.0 {
+        return 0.0;
+    }
+    let int_value = ((value as f64).log10() * 100.0).floor().clamp(MIN, MAX);
+    let fraction = if int_value <= MIN {
+        0.0
+    } else if int_value >= MAX {
+        1.0
+    } else {
+        (int_value + 0.5 - MIN) / (MAX + 1.0 - MIN)
+    };
+    fraction as f32
 }
 
 /// `Options.genericValueLabel` (`Options.java:1974-1976`):
@@ -2093,6 +2243,7 @@ pub fn settings_frame(
             label: control.cell.label(options),
             enabled: control.cell.is_live(),
             slider: control.cell.is_slider(),
+            slider_value: control.cell.slider_fraction(options),
             slot: Some(control.slot()),
             ..Default::default()
         })
@@ -2123,7 +2274,27 @@ pub fn settings_frame(
             Origin::ScreenTop
         },
         dx: 0.0,
-        dy: title_y(page),
+        // **Not `title_y(page)` unconditionally — that was the bug.** A player
+        // report (2026-08-04, "the 'Options' text at the top is intersecting
+        // some buttons") traced to exactly this line double-counting the
+        // root's title y: `Origin::Settings(Placement::Root(0))`'s anchor is
+        // already the arranged, **absolute** position `root_widget_rects`
+        // put the title at (12 px, per `the_title_sits_in_its_band_on_every_
+        // page`), and `build`'s draw adds `dy` *on top of* the anchor
+        // (`y = ay + label.dy`, `render.rs`'s label loop). Adding
+        // `title_y(Root)` — also `12.0` — on top of that anchor drew the
+        // title at absolute `y = 24`, four pixels into the FOV/Online row's
+        // own `y = 29` (`the_root_title_is_centred_on_the_header_block`'s
+        // sibling assertions give that row's rect directly). `Origin::
+        // ScreenTop`'s anchor is `0.0`, so every other page's `dy` genuinely
+        // has to carry the whole offset — only Root's anchor already does,
+        // because only Root's title comes from a real arranged layout tree
+        // rather than a bare screen-top anchor.
+        dy: if page == SettingsPage::Root {
+            0.0
+        } else {
+            title_y(page)
+        },
         align: Align::Centre,
         colour: HEADER_COLOUR,
         scale: 1.0,
@@ -2911,5 +3082,86 @@ mod tests {
         assert_eq!((nav.cursor(), nav.first()), (0, 0));
         assert!(!nav.in_world, "reset must also re-derive in_world, not carry the old visit's over");
         assert_eq!(nav.escape(), SettingsOutcome::Close, "with an empty stack");
+    }
+
+    /// Plain AABB overlap, half-open on the touching-edge case (two rects that
+    /// share an edge do not overlap) — used only by
+    /// [`no_settings_title_ever_overlaps_a_widget`], below.
+    fn rects_intersect(a: (f32, f32, f32, f32), b: (f32, f32, f32, f32)) -> bool {
+        let (ax, ay, aw, ah) = a;
+        let (bx, by, bw, bh) = b;
+        ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah
+    }
+
+    #[test]
+    fn rect_intersection_predicate_has_a_working_control() {
+        // Per this repo's own rule that an absence needs a control proving the
+        // detector *can* fire: two manufactured overlaps and two manufactured
+        // non-overlaps (one disjoint, one edge-touching), checked before this
+        // predicate is trusted to find nothing wrong below.
+        assert!(rects_intersect((0.0, 0.0, 10.0, 10.0), (5.0, 5.0, 10.0, 10.0)));
+        assert!(
+            !rects_intersect((0.0, 0.0, 10.0, 10.0), (10.0, 0.0, 10.0, 10.0)),
+            "sharing an edge is not overlapping"
+        );
+        assert!(!rects_intersect((0.0, 0.0, 10.0, 10.0), (20.0, 20.0, 10.0, 10.0)));
+    }
+
+    #[test]
+    fn no_settings_title_ever_overlaps_a_widget() {
+        // The player report this exists for (2026-08-04): "the 'Options' text
+        // at the top is intersecting some buttons". The cause was
+        // `settings_frame`'s title `dy` double-counting the root's already-
+        // absolute anchor (see that assignment's own doc) — fixed there, and
+        // this is the gate that would have caught it, because it walks
+        // `settings_frame`'s **own output**, the same `MenuLabel`/`Slot`s
+        // `build` draws from, rather than a hand-derived y. Covers every
+        // `OptionsList`-shaped page, both `in_world` states (the root's header
+        // button changes, nothing else does — see `controls`'s doc), two
+        // canvases standing in for two GUI scales, and — since this client
+        // carries no second locale to source a real long title from — a
+        // synthetic stand-in a good deal longer than the longest real one
+        // (`"Accessibility Settings"`, 22 chars) for "more than one language
+        // string width".
+        let font = crate::hud::VanillaFont::shared();
+        let text_width = |s: &str, scale: f32| match &font {
+            Some(f) => f.width(s, scale),
+            None => crate::menu::render::text_px(s, scale),
+        };
+        let options = crate::config::Options::default();
+        let long_stand_in = "A Considerably Longer Hypothetical Localized Options Title";
+
+        for &(w, h) in &[(320.0f32, 240.0f32), (854.0, 480.0)] {
+            for page in PAGES {
+                for in_world in [false, true] {
+                    let mut nav = SettingsNav::new();
+                    nav.page = page;
+                    nav.in_world = in_world;
+                    let frame = settings_frame(&nav, &options, None);
+                    for title in [page.title(), long_stand_in] {
+                        let title_label = &frame.labels[0];
+                        let (ax, ay) = title_label.origin.anchor(w, h);
+                        let tw = text_width(title, title_label.scale);
+                        let tx = match title_label.align {
+                            Align::Centre => (ax + title_label.dx - tw * 0.5).floor(),
+                            Align::Left => ax + title_label.dx,
+                            Align::Right => ax + title_label.dx - tw,
+                        };
+                        let title_rect = (tx, ay + title_label.dy, tw, HEADER_LINE_HEIGHT);
+
+                        for row in &frame.rows {
+                            let Some(slot) = row.slot else { continue };
+                            let widget_rect = slot.resolve(w, h);
+                            assert!(
+                                !rects_intersect(title_rect, widget_rect),
+                                "{page:?} in_world={in_world} title {title:?} \
+                                 {title_rect:?} overlaps {widget_rect:?} at \
+                                 canvas {w}x{h}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }
