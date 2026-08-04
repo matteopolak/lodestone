@@ -154,15 +154,22 @@
 //! that engine's own signature to a dense grid too is further work, also
 //! not attempted in this pass.
 //!
-//! # Badlands (issue #405's carried-over gap)
+//! # Badlands (issue #405's carried-over gap, now closed)
 //!
-//! `minecraft:badlands`/`eroded_badlands`/`wooded_badlands` remain excluded
-//! from the searchable biome table (`crate::biome::usable_overworld_table`) —
-//! their surface rule reaches an unported `SurfaceSystem.getBand` subsystem
-//! that would panic. Composing carvers/ores here does not change that: the
-//! same excluded table feeds both surface *and* the per-source-chunk carver
-//! biome and the ore biome, so a column can never resolve to one of the three
-//! excluded names in the first place.
+//! `minecraft:badlands`/`eroded_badlands`/`wooded_badlands` used to be
+//! excluded from the searchable biome table
+//! (`crate::biome::usable_overworld_table`) because their surface rule
+//! reached an unported `SurfaceSystem.getBand` subsystem that would panic.
+//! `getBand` is now ported (`crate::surface::Rule::Bandlands`) and the
+//! exclusion is removed (`usable_overworld_table` is a pass-through), so a
+//! column can resolve to any of the three real names again — which means
+//! the per-source-chunk carver biome and ore biome (both driven through the
+//! same table [`Self::biome_for_carver_source`] resolves) now see them too,
+//! closing the specific gap `docs/worldgen-parity.md` measured: chunk
+//! `(-120,-120)`'s real vanilla biome is badlands, and the substitute biome
+//! this exclusion used to force could never carry badlands' bonus
+//! `ore_gold_extra` gold vein (51 blocks at that chunk, measured zero
+//! before).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
