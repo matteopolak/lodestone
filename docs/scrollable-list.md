@@ -294,13 +294,53 @@ pixel offset to `active_list` without converting the field.
 | screen | offset | hover vs selection | verdict |
 |---|---|---|---|
 | `key_binds.rs` | `first: usize` | hover sets the cursor | **easy** — the canonical shape, ~60-70 lines, nearly all deletions |
-| `social.rs` | `first: usize` | hover sets the cursor | **easy** — ~45-55 lines; needs a "content length changed" clamp its siblings don't exercise |
-| `stats.rs` | `first: usize` | none at all | **easy, cleanest win** — `StatsNav` is one `usize`; also the only screen already deriving an explicit `max_first` |
+| `social.rs` | `first: usize` | hover sets the cursor | **BLOCKED on the primitive, not "easy"** — see below. Its rows are full-width and left-anchored |
+| `stats.rs` | **`scroll: f32`** | none at all | **ADOPTED** (issue #445). One notch = `floor(ROW_H / 2)` = `floor(20 / 2)` = **10 px**, measured; the row-index answer (20) and the page answer (`LIST_WINDOW_PX`) are both asserted excluded |
 | `language.rs` | `first: usize` into a *filtered* list | hover sets the cursor | **medium** — content length is derived per call, and the search-box row offset lives in `nav.rs` |
 | `options.rs` | `first: usize`, **variable** row heights | hover sets the cursor | **medium, and it decides the shape** — cannot adopt a uniform-pitch list |
 | `packs.rs` | none | hover sets the cursor | **not applicable** — adopting means *adding* scroll, a feature not a refactor |
 | `telemetry.rs` | none | hover sets the cursor | **not applicable** — four fixed controls, no list |
 | `world_select.rs` | none | **genuinely separate** (`hovered` + `FocusSet`) | **not a scroll candidate — but it is the hover reference** |
+
+### Two findings from converting `stats.rs` first (issue #445)
+
+**1. A screen whose rows are free text needed a new primitive, and it is
+`MenuFrame::list_labels`.** A pixel-scrolled list routinely has a row half
+outside its band, and the only alternative to clipping it is what every
+unconverted screen still does — skip any row that does not *wholly* fit, which
+is the snap-to-row behaviour this work exists to remove. Rows drawn as `MenuRow`
+already got clipping from `render/draw.rs`'s per-row `with_clip`; `stats.rs`'s
+rows are `MenuLabel`s (a stat row is not a control — vanilla only narrates it)
+and had nowhere to put it. `list_labels` is a second label vector that the draw
+clips to the band `frame.list` declares, and is purely additive: `MenuFrame`
+derives `Default` and every literal site spreads it.
+
+The clip is **vertical only**, deliberately. A list label is positioned from its
+own `Origin`, and on a two-column screen like this one the value column sits on
+the far side of the canvas centre; clipping horizontally to `row_w` would crop
+it. The band is what must be clipped, and the band is vertical.
+
+**2. `social.rs` is NOT "easy", and the audit above was wrong about it.** It is
+the one screen of the five that cannot adopt `ListSpec` as the primitive stands.
+`ListSpec::row_left` is `floor(width / 2) - floor(row_w / 2)` — a **centred,
+fixed-width** row — and `row_right` (hence the scrollbar's x) is derived from it.
+`social.rs`'s rows are **full-width and left-anchored**: `name_x` is a flat
+`NAME_LEFT_INSET` of 4 and the Hide/Report buttons hang off `width -
+RIGHT_MARGIN`. No *constant* `row_w` makes `row_right` land in that right margin
+at every canvas width, so the bar the spec exists to place cannot be positioned
+from it — and there is no gutter reserved for one either.
+
+Checked against the other three so this is a claim about `social.rs` and not a
+guess about all of them: `key_binds.rs` (`ROW_WIDTH` 340), `language.rs` (270)
+and `options.rs` (310, via `ROW_LEFT_INSET` 155) all compute `row_left` as
+`width * 0.5 - ROW_WIDTH * 0.5` or its integer twin, so all three match the
+spec's model and remain unblocked.
+
+**What `social.rs` needs first** is a canvas-relative row edge on `ListSpec` — a
+`row_right` the screen supplies as a function of width, rather than one derived
+from a centred constant. That is a primitive change and belongs ahead of the
+conversion, for the same reason growing variable row heights did: converting a
+screen against a primitive that is about to change is converting it twice.
 
 Two things fall out and both are decisions, not details:
 
