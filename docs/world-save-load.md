@@ -98,7 +98,8 @@ with our own encoder passed throughout, then a live gate produced 49 ×
 | we read what vanilla wrote | `tests/chunk_nbt_vanilla_oracle.rs` — 222,208 block columns across 868 chunks of a real 26.2 world agree with vanilla's own `WORLD_SURFACE` heightmap | **yes** |
 | vanilla can read what we wrote | `tests/write_path_jvm_oracle.rs` + `scripts/anvil-oracle/` — 24 probes read back by Mojang's own `RegionFile`, `BlockState.CODEC` and `SimpleBitStorage` | **yes** |
 | a mutation survives close/reopen | `tests/world_persistence_round_trip.rs` | no — a round trip, and it says so |
-| `level.dat` is written | **not implemented** — see Gaps | — |
+| `level.dat` is written | `crates/lodestone-server/tests/level_dat_round_trip.rs`, whose field-set expectation is a real Mojang file's own key list | **yes**, for the schema |
+| a world's age accumulates across sessions | same file — an **exact** equality between session two's base and session one's final `Time` | no — a round trip |
 
 Every control below was **run and observed**, not described:
 
@@ -230,9 +231,21 @@ seed gate with the observed profile equal to the *requested* seed's terrain
 Named rather than left to be discovered:
 
 - **There is one world, not a list.** See "One implicit world" above.
-- **`level.dat` itself is still neither written nor read.** Only
-  `world_gen_settings.dat` is. The world therefore has no stored name, spawn
-  point, game type, time of day or weather; all of those reset on reopen.
+- **`level.dat` is written and read, but only the server consumes it.**
+  `LevelDatHandle` (`region_source.rs`) creates the file at world open, stamps
+  `Time` and `LastPlayed` on every save and at shutdown, and reads the age back
+  on reopen so a world's total tick count accumulates instead of restarting.
+  The world's **name** comes from the directory, and **spawn** from the
+  constructor's `mob_center` at y=64 — both are written, and **nothing outside
+  the server reads either yet**: the shell still picks its own spawn and shows
+  no world name, so those two fields reach disk and not pixels. That is the
+  remaining half, and it lives in `lodestone-shell`.
+
+  Do **not** add weather or a day time to `level.dat` to close this. Neither is
+  in that file in 26.2 — they are `data/weather.dat` and
+  `data/world_clocks.dat`, and `level.dat`'s `Time` is the world's total age,
+  not the sky clock. See [`world-persistence.md`](./world-persistence.md) for
+  the measured field list and the two issues that got this wrong.
 - **Block entities, entities and scheduled ticks are not persisted.** The chunk
   NBT is written with empty `block_entities`, `block_ticks` and `fluid_ticks`
   lists. A furnace keeps its position but not its contents across a reopen.
