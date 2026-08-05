@@ -1946,6 +1946,12 @@ fn run(
             while let Ok(action) = action_rx.try_recv() {
                 let _ = handle.send_action(action);
                 handed_actions += 1;
+                if handed_actions == 1 {
+                    tracing::info!("client: first action sent to server");
+                }
+                if handed_actions.is_multiple_of(100) {
+                    tracing::info!("client: {} actions sent to server so far (incl. movement, keep-alive)", handed_actions);
+                }
                 if handed_actions == 1 || handed_actions.is_multiple_of(20) {
                     tracing::debug!(target: "net", "handed {handed_actions} action(s) to client handle (encode is the adapter's job)");
                 }
