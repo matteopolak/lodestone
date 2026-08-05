@@ -69,12 +69,27 @@ rasterise the same positions as whatever pass it overlays.
 composite correctly on a real adapter (see *Gates*), but the production draw call
 is recorded in `lodestone-shell`, which is where the remaining work is:
 
-1. **Set `ItemIcon.enchanted` for real.** The field exists
-   (`crates/lodestone-shell/src/hud/item_icon.rs:124`) and every constructor
-   hardcodes `false` — `crates/lodestone-shell/src/app/redraw.rs:160` and
-   `crates/lodestone-shell/src/app/recipe_panel.rs:224`. `glint::has_foil` is the
-   predicate to call.
-2. **Record the second pass.** Wherever an item is drawn, re-bind
+1. ~~**Set `ItemIcon.enchanted` for real.**~~ **Done (#452).** The hotbar producer
+   at `crates/lodestone-shell/src/app/redraw.rs` now fills it from
+   `item_icon::stack_has_foil`, which delegates to
+   **`glint::has_foil_enchantments`** — a sibling of `has_foil` added because the
+   shell cannot call `has_foil` at all: shell stacks are
+   `lodestone_game::item::ItemStack`, whose components are an opaque
+   `BTreeMap<Identifier, ComponentValue>` and a *different type* from the
+   `lodestone_model::item::ItemComponents` `has_foil` takes. The sibling keeps this
+   crate the single owner of the predicate instead of the shell re-spelling
+   `!list.is_empty()` far from the caveats above.
+
+   Two producers are deliberately still `false`. `app/recipe_panel.rs`'s
+   `toast_icon` has **no stack at all** — its only input is an `Identifier` — and a
+   recipe-unlock toast depicts an item *type*, which vanilla also draws without
+   glint; do not plumb a stack in for symmetry. `container/builder.rs` is the
+   container-screen producer and *does* have a stack: it wants the same one-line
+   change, and was left alone only because it sat outside the wiring task's file
+   ownership.
+2. **Record the second pass.** Still open — this is the remaining gap, and
+   `enchanted` currently has **zero readers**, so a foiled stack sets the flag and
+   nothing consumes it. Wherever an item is drawn, re-bind
    `GlintPipeline` and re-draw the same buffers: dropped items at
    `crates/lodestone-shell/src/gpu/frame.rs:667-688`, first-person held at
    `crates/lodestone-shell/src/gpu/first_person.rs:711-735`, GUI icons at
@@ -83,9 +98,43 @@ is recorded in `lodestone-shell`, which is where the remaining work is:
    `glint::textures::ARMOUR`, uploaded **non-sRGB** (see the gotcha below) with
    `glint::glint_sampler`.
 
-The 2-D GUI *sprite* path is a separate problem: it draws flat quads through
-`hud_sprite.wgsl`, not the model pipeline, so it needs either its own glint
-pipeline over the same quads or a switch to the 3-D path for foiled stacks.
+The 2-D GUI *sprite* path is a separate problem, and it is the one that matters
+most: flat sprites are the majority of what a hotbar holds (every sword, tool and
+ingot), so the 3-D hook at `item_icon.rs:1735` covers only block and chest icons.
+It draws flat quads through `hud_sprite.wgsl`, not the model pipeline, so it needs
+its own glint pipeline over the same quads. `GlintPipeline` **cannot be reused**
+there: it mandates a `depth_format` and depth-`EQUAL`, and its vertex layout is
+`ModelVertex`, whereas `draw_sprites_range` records into a caller-owned pass with
+**no depth attachment** and an 8-float `[x, y, u, v, r, g, b, a]` stream.
+
+Three findings for whoever picks this up, each of which costs a design cycle to
+rediscover:
+
+- **Masking is the hard part.** Without depth-`EQUAL` or a stencil, a glint quad
+  over the item's rect paints glint across the sprite's *transparent* pixels too —
+  a sword's glint would fill its whole 16×16 square. The pass therefore has to
+  sample the item atlas for the mask and the glint sheet for the shimmer, and
+  discard on low atlas alpha (vanilla's own `glint.fsh` discards at `a < 0.1`).
+  That means one pipeline with **two** textures bound, not a re-draw of the
+  existing quads.
+- **The glint UV comes from the quad's local 0..1 coords, not its atlas UV.**
+  Vanilla applies `glint_texture_matrix` to the *model's* UVs; our sprite quad's
+  UVs are an atlas sub-rect, so feeding them in scrolls the shimmer at the wrong
+  scale and offset. Transform local coords with `glint_texture_matrix(millis,
+  speed, Scale::Item)` — the same expression the render crate's gate uses.
+- **The plumbing, not the pipeline, is what makes this a bigger change than it
+  looks.** A second draw needs its own *contiguous* vertex range, so it needs a
+  glint stream on `IconSink` and a third count out of `IconRenderer::upload`. Those
+  are constructed and consumed at four call sites in `hud.rs` (×2) and
+  `container/renderer.rs` (×2) — `hud.rs` being the most contended file in the
+  repo. Interleaving the glint quads into the existing sprite stream does *not*
+  avoid this: the blend differs (`SRC_COLOR/ONE` versus `ALPHA_BLENDING`), so it
+  must be a separate draw, and a separate draw needs a range.
+
+Also worth wiring at the same time: `menu/options.rs` already carries live
+`glintSpeed` (0.5) and `glintStrength` (0.75) sliders whose values match
+`glint::DEFAULT_SPEED`/`DEFAULT_STRENGTH`, so feeding them into `GlintUniform::new`
+is behaviour-preserving today and correct once a player moves the slider.
 
 ## How to change it, and the gotchas
 

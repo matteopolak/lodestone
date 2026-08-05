@@ -86,7 +86,8 @@ use glam::Mat4;
 // font's metrics any more — see `COUNT_RIGHT`'s doc comment for why a derived
 // anchor was the defect rather than the off-by-one.
 use lodestone_assets::{
-    Atlas, DisplaySlot, DisplayTransform, IconPart, ItemAtlas, ResourceLocation,
+    Atlas, DisplaySlot, DisplayTransform, IconPart, ItemAtlas, ItemTintContext, ResourceLocation,
+    SpriteLayer,
 };
 use lodestone_render::{
     BlockEntityModelSet, BlockModels, CHEST_SINGLE, CameraUniform, ChestHalf, ChestMaterial,
@@ -104,8 +105,7 @@ use super::{FLOATS_PER_VERTEX, HUD_SPRITE_WGSL, SPRITE_FLOATS_PER_VERTEX};
 /// [`lodestone_game::menu::Menu`]. `item` is the item id
 /// (`minecraft:diamond_pickaxe`) used to look up the resolved icon in the
 /// [`ItemAtlas`]; `count` drives the stack number; `damage`/`max_damage` drive
-/// the durability bar; `enchanted` marks items that should get the glint overlay
-/// (deferred).
+/// the durability bar; `enchanted` marks items that draw the glint overlay.
 ///
 /// Re-exported as [`crate::hud::HotbarSlot`], which is the name the hotbar has
 /// always called it; the container screen builds the same record per menu slot.
@@ -120,8 +120,45 @@ pub struct ItemIcon {
     /// Max durability, `Some` for damageable items; pairs with `damage` for the
     /// bar fraction.
     pub max_damage: Option<u32>,
-    /// Whether the stack is enchanted (glint overlay is deferred; see notes).
+    /// Whether the stack should draw the enchantment glint. Fill it with
+    /// [`stack_has_foil`] rather than by hand — it was hardcoded `false` at every
+    /// producer until issue #452, which is why nothing glinted.
     pub enchanted: bool,
+}
+
+/// `ItemStack.hasFoil()` for a shell-side [`lodestone_game::item::ItemStack`],
+/// delegating the actual predicate to
+/// [`lodestone_render::glint::has_foil_enchantments`].
+///
+/// # Why this adapter exists
+///
+/// [`lodestone_render::glint::has_foil`] wants a
+/// `lodestone_model::item::ItemComponents` — a struct with an `enchantments`
+/// field. What the shell has in hand is `lodestone_game::item::ItemComponents`,
+/// an opaque `BTreeMap<Identifier, ComponentValue>`, so that call does not
+/// compile here and the two types are not interchangeable. This bridges them
+/// without re-spelling the predicate, so the render crate stays the single owner
+/// of *what foil means* and of the shortfalls documented there.
+///
+/// # The invariant this leans on
+///
+/// The key is present **only when the list is non-empty** —
+/// `lodestone_game::item::ItemStack`'s `From<&lodestone_model::ItemStack>` inserts
+/// `minecraft:enchantments` under an `if !stack.components.enchantments.is_empty()`
+/// guard. So an absent key and a present-but-empty list mean the same thing here,
+/// and the `is_empty` check inside `has_foil_enchantments` is what makes this
+/// correct either way rather than dependent on that guard holding.
+#[must_use]
+pub(crate) fn stack_has_foil(stack: &lodestone_game::item::ItemStack) -> bool {
+    match stack
+        .components()
+        .get_str(lodestone_game::item::ENCHANTMENTS_COMPONENT)
+    {
+        Some(lodestone_game::item::ComponentValue::Enchantments(list)) => {
+            lodestone_render::glint::has_foil_enchantments(list)
+        }
+        _ => false,
+    }
 }
 
 /// The baked resources an icon resolves against. Both are optional and both
@@ -277,9 +314,6 @@ pub(crate) fn draw_item_icon_counted(
             match part {
                 IconPart::Sprite { layers } => {
                     for layer in layers {
-                        // Tint resolution (leather/potion/spawn-egg dyes,
-                        // foliage) is deferred; untinted white is correct for
-                        // the vast majority of items.
                         if let Some(spr) = atlas.sprite(&layer.sprite) {
                             push_sprite_quad(
                                 sink.sprite,
@@ -290,7 +324,7 @@ pub(crate) fn draw_item_icon_counted(
                                     uv_min: spr.uv_min,
                                     uv_max: spr.uv_max,
                                 },
-                                [1.0, 1.0, 1.0, 1.0],
+                                sprite_layer_tint(layer),
                             );
                         }
                     }
@@ -465,7 +499,7 @@ pub(crate) fn draw_item_icon_popped(
                                     uv_min: spr.uv_min,
                                     uv_max: spr.uv_max,
                                 },
-                                [1.0, 1.0, 1.0, 1.0],
+                                sprite_layer_tint(layer),
                             );
                         }
                     }
@@ -629,6 +663,65 @@ fn push_special_icon(
         texture,
         placement: gui_item_pose([x, y, size, size], transform),
     });
+}
+
+/// The vertex multiplier for one sprite layer's tint, **converted into the space
+/// `hud_sprite.wgsl` actually multiplies in** rather than forwarded raw.
+///
+/// # Why a conversion is needed at all
+///
+/// Vanilla is not colour-managed: it multiplies the tint into the sampled texel
+/// as raw bytes, so its answer is `texel_byte * tint_byte / 255` — a
+/// **gamma-space** multiply. We cannot reproduce that by passing the same bytes,
+/// because the item atlas is `Rgba8UnormSrgb` ([`GpuAtlas`]) and so is the
+/// swapchain, so the hardware decodes the texel to **linear** before
+/// `hud_sprite.wgsl`'s single `textureSample(...) * in.tint` and re-encodes on
+/// write. The multiply lands in linear light whatever we hand it.
+///
+/// That the round trip is real, and not something to hedge against, is settled by
+/// an observable rather than an assumption: with an sRGB atlas and a *non*-sRGB
+/// target, an untinted `[1.0; 4]` sprite would store `srgb_to_linear(texel)`,
+/// taking a mid-grey 128 down to 55 — every HUD sprite in the game would be
+/// visibly dark. They are not.
+///
+/// Forwarding `tint_byte / 255` therefore scales in the wrong space and pulls
+/// every factor toward 1.0 — the wash-out #452 warns about, and the same
+/// gamma-vs-linear trap #171 measured arriving from the data side. Under sRGB's
+/// pure-power model the correction is exact and, usefully, **texel-independent**,
+/// so it belongs here on the tint and not in the shader:
+///
+/// ```text
+/// want:  linear_to_srgb(L_out) = texel * t   =>  L_out = (texel * t)^2.2
+/// have:  L_out = srgb_to_linear(texel) * m   =        texel^2.2 * m
+///   =>   m = t^2.2 = srgb_to_linear(t)          (texel cancels)
+/// ```
+///
+/// # What is not live yet
+///
+/// [`ItemTintContext`] is left at its default — no components, no colormap. That
+/// is not a stub for `constant` (the majority source, which reads nothing) and it
+/// is vanilla's own answer for an uncustomised stack: an undyed leather helmet's
+/// brown *is* the definition's `dye` default. The one real miss is a **dyed**
+/// stack, and it is a wire-side gap rather than a wiring one —
+/// `lodestone_game::item::ItemComponents` has no `minecraft:dyed_color` member at
+/// all (that crate defines no `DYED_COLOR_COMPONENT`), so the shell holds no live
+/// dye to pass. `grass` resolves to `None` without a colormap, which
+/// [`lodestone_assets::item_tint::resolve`] documents as the honest degradation.
+fn sprite_layer_tint(layer: &SpriteLayer) -> [f32; 4] {
+    let Some(source) = layer.tint.as_ref() else {
+        return [1.0, 1.0, 1.0, 1.0];
+    };
+    let Some(resolved) = lodestone_assets::item_tint::resolve(source, &ItemTintContext::default())
+    else {
+        return [1.0, 1.0, 1.0, 1.0];
+    };
+    // `rgb()` and not `argb`: item tints are opaque multipliers in every vanilla
+    // case, and that method's doc names this as the gamma-space-multiplier form.
+    let rgb = resolved.rgb();
+    let channel = |shift: u32| {
+        lodestone_render::fog::srgb_to_linear_f32(f32::from(((rgb >> shift) & 0xFF) as u8) / 255.0)
+    };
+    [channel(16), channel(8), channel(0), 1.0]
 }
 
 /// Push one textured quad (two triangles) from an absolute-pixel destination
@@ -1777,7 +1870,7 @@ impl IconRenderer {
 
 #[cfg(test)]
 mod pop_tests {
-    use super::pop_squeeze_rect;
+    use super::{ResourceLocation, SpriteLayer, pop_squeeze_rect, sprite_layer_tint, stack_has_foil};
 
     /// `pop <= 0.0` must reproduce the original square rect exactly — the
     /// "not animating" control for [`super::draw_item_icon_popped`]'s early
@@ -1834,5 +1927,176 @@ mod pop_tests {
         // Fully settled (`pop = 0.0`) at the same size must be the plain
         // square again — the opposite phase from the case above.
         assert_eq!(pop_squeeze_rect(10.0, 20.0, 32.0, 0.0), [10.0, 20.0, 32.0, 32.0]);
+    }
+
+    /// The sRGB electro-optical transfer function, **written from the published
+    /// standard** rather than called from `lodestone_render::fog`.
+    ///
+    /// This duplication is the point: it is the external anchor. Asserting
+    /// [`sprite_layer_tint`] against the very function it calls would be
+    /// `decode(encode(x))` — satisfied by two symmetric misunderstandings — so the
+    /// expectation has to come from the spec (IEC 61966-2-1: a 12.92 linear
+    /// segment below 0.04045, then `((c + 0.055) / 1.055) ^ 2.4`).
+    fn srgb_eotf_from_spec(c: f64) -> f64 {
+        if c <= 0.040_45 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    /// A `minecraft:constant` tint layer carrying `argb`.
+    fn constant_layer(argb: u32) -> SpriteLayer {
+        SpriteLayer {
+            sprite: ResourceLocation::parse("minecraft:item/lily_pad").expect("static id parses"),
+            tint: Some(lodestone_assets::TintSource {
+                kind: "minecraft:constant".to_string(),
+                default: Some(argb as i32),
+                grass: None,
+                index: 0,
+            }),
+        }
+    }
+
+    /// [`sprite_layer_tint`] must land on the **converted** hypothesis and be far
+    /// from the **forwarded-raw** one.
+    ///
+    /// This is the *magnitude* discrimination the repo's evidence standard asks
+    /// for, not a direction check: both hypotheses agree on the sign and on the
+    /// ordering of the three channels, so a gate asserting only "darker than
+    /// white, and green is the largest" passes identically for the washed-out
+    /// version that shipped. So predict **both** values and require the
+    /// measurement to land on one.
+    ///
+    /// The subject colour is vanilla's own `lily_pad` **item** tint,
+    /// `0x71C35C` — deliberately not the *block* tint `0x208030`, which is a
+    /// different colour for the same plant. Vanilla never consults `BlockColors`
+    /// for an item, so a wiring that reached for the block table would land here
+    /// on visibly wrong numbers rather than merely on a different code path.
+    #[test]
+    fn a_constant_tint_is_converted_into_the_shaders_space_not_forwarded_raw() {
+        let tint = sprite_layer_tint(&constant_layer(0xFF71_C35C));
+
+        for (i, byte, name) in [(0usize, 0x71u32, "R"), (1, 0xC3, "G"), (2, 0x5C, "B")] {
+            let t = f64::from(byte) / 255.0;
+            let converted = srgb_eotf_from_spec(t);
+            let forwarded = t;
+
+            let got = f64::from(tint[i]);
+            let d_converted = (got - converted).abs();
+            let d_forwarded = (got - forwarded).abs();
+
+            assert!(
+                d_converted < 1e-4,
+                "{name}: tint {got} is not the converted value {converted} \
+                 (spec sRGB EOTF of {t}); off by {d_converted}"
+            );
+            // The two hypotheses are 0.16 to 0.28 apart on these channels, so a
+            // 0.05 floor is nowhere near either boundary — this asserts the gate
+            // can actually tell them apart, rather than that they happen to differ.
+            assert!(
+                d_forwarded > 0.05,
+                "{name}: the forwarded-raw hypothesis {forwarded} is only \
+                 {d_forwarded} away from the measured {got} — this gate cannot \
+                 discriminate, so its pass means nothing"
+            );
+        }
+
+        // Item tints are opaque multipliers in every vanilla case.
+        assert_eq!(tint[3], 1.0, "alpha must stay 1.0, not carry the tint's");
+    }
+
+    /// Control: the conversion must be the *reason* the previous gate passes.
+    ///
+    /// Feeding the same channel bytes through the forwarded-raw formula and
+    /// asserting it *fails* the tight tolerance proves the `< 1e-4` assertion
+    /// above is load-bearing rather than satisfied by any plausible number. Run
+    /// this and the discrimination is real; delete it and a future refactor that
+    /// re-broadens the tolerance goes unnoticed.
+    #[test]
+    fn control_the_forwarded_raw_tint_would_fail_the_conversion_assertion() {
+        for byte in [0x71u32, 0xC3, 0x5C] {
+            let t = f64::from(byte) / 255.0;
+            let converted = srgb_eotf_from_spec(t);
+            assert!(
+                (t - converted).abs() >= 1e-4,
+                "byte {byte}: raw {t} and converted {converted} are within the \
+                 gate's own tolerance, so the gate above proves nothing"
+            );
+        }
+    }
+
+    /// An untinted layer is exactly white — the pre-#452 behaviour, which must
+    /// survive for the ~97% of items that declare no tint at all. A conversion
+    /// applied unconditionally would darken every item in the game.
+    #[test]
+    fn an_untinted_layer_stays_exactly_white() {
+        let layer = SpriteLayer {
+            sprite: ResourceLocation::parse("minecraft:item/stick").expect("static id parses"),
+            tint: None,
+        };
+        assert_eq!(sprite_layer_tint(&layer), [1.0, 1.0, 1.0, 1.0]);
+    }
+
+    /// White (`0xFFFFFF`) is the conversion's fixed point, so a fully-bright
+    /// constant tint must also come out as exact white. This separates "converts"
+    /// from "darkens everything": a wrong conversion applied to white would
+    /// show up here, and nowhere else.
+    #[test]
+    fn a_white_constant_tint_is_the_conversions_fixed_point() {
+        let tint = sprite_layer_tint(&constant_layer(0xFFFF_FFFF));
+        for (i, c) in tint.iter().enumerate() {
+            assert!(
+                (c - 1.0).abs() < 1e-6,
+                "channel {i} of a white tint is {c}, not 1.0"
+            );
+        }
+    }
+
+    /// `stack_has_foil` reads the enchantments component, and reads it through the
+    /// render crate's predicate.
+    ///
+    /// Both directions, because "always true" and "always false" are the two ways
+    /// this can be wrong and `enchanted` was hardcoded `false` for long enough
+    /// that the false case is the regression to fear.
+    #[test]
+    fn stack_has_foil_tracks_the_enchantments_component() {
+        use lodestone_game::item::{ComponentValue, ENCHANTMENTS_COMPONENT, ItemStack};
+
+        let id: lodestone_model::Identifier =
+            "minecraft:diamond_sword".parse().expect("static id parses");
+        let plain = ItemStack::new(id.clone(), 1);
+        assert!(
+            !stack_has_foil(&plain),
+            "an unenchanted stack must not glint"
+        );
+
+        let mut enchanted = ItemStack::new(id, 1);
+        enchanted.components_mut().insert(
+            ENCHANTMENTS_COMPONENT.parse().expect("static id parses"),
+            ComponentValue::Enchantments(vec![lodestone_model::item::ItemEnchantment {
+                id: 0,
+                level: 1,
+            }]),
+        );
+        assert!(
+            stack_has_foil(&enchanted),
+            "a stack carrying one enchantment must glint"
+        );
+
+        // An explicitly *empty* list is the same as no component — the invariant
+        // `stack_has_foil`'s doc leans on, asserted rather than assumed.
+        let mut empty_list = ItemStack::new(
+            "minecraft:stick".parse().expect("static id parses"),
+            1,
+        );
+        empty_list.components_mut().insert(
+            ENCHANTMENTS_COMPONENT.parse().expect("static id parses"),
+            ComponentValue::Enchantments(Vec::new()),
+        );
+        assert!(
+            !stack_has_foil(&empty_list),
+            "an empty enchantments list must not glint"
+        );
     }
 }

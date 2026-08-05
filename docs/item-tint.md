@@ -73,16 +73,53 @@ The two historical background/highlight integers are gone from Java, from
 (`textures/item/creeper_spawn_egg.png`). Spawn eggs need no special handling
 beyond ordinary untinted sprite rendering.
 
-**The 2-D GUI slot path is not wired.** An inventory slot draws through
-`lodestone_shell`'s `push_sprite_quad`, not through this bake, and its two call
-sites pass literal opaque white
-(`crates/lodestone-shell/src/hud/item_icon.rs:293` and `:467`). Everything those
-sites need is already on `SpriteLayer::tint`. Two cautions for whoever does it:
-`hud_sprite.wgsl` has **no** transfer functions, and its atlas is
-`Rgba8UnormSrgb`, so `textureSample` returns linear light and the existing
-`tex * tint` at `hud_sprite.wgsl:26` is a **linear** multiply — feeding a raw ARGB
-into vertex location 2 produces the washed-out result. Either add the gamma
-round-trip to that shader or pre-multiply with `fog::multiply_gamma`.
+**The 2-D GUI slot path is wired as of issue #452** — it was not, for long enough
+that a white lily pad and white leaves were the shipped appearance. Both call
+sites (`crates/lodestone-shell/src/hud/item_icon.rs`, in `draw_item_icon_counted`
+and `draw_item_icon_popped`) now take their multiplier from `sprite_layer_tint`
+instead of a literal opaque white.
+
+**The fix was neither of the two options this doc previously suggested, and the
+reason generalises.** The diagnosis was right — `hud_sprite.wgsl` has no transfer
+functions, its atlas is `Rgba8UnormSrgb`, so `textureSample` returns linear light
+and `tex * tint` is a **linear** multiply, and a raw ARGB there washes out. But
+"add the gamma round-trip to that shader" costs a shader edit and two conversions
+per fragment, and "pre-multiply with `fog::multiply_gamma`" **cannot be done at
+all** from the CPU side: that function needs the *texel*, and the call site has
+only the tint — the texel is not read until the fragment stage.
+
+The correction is exact, needs no shader change, and is **texel-independent**,
+which is why it belongs on the tint. Under sRGB's pure-power model:
+
+```text
+want:  linear_to_srgb(L_out) = texel * t   =>  L_out = (texel * t)^2.2
+have:  L_out = srgb_to_linear(texel) * m   =        texel^2.2 * m
+  =>   m = t^2.2 = srgb_to_linear(t)          (texel cancels)
+```
+
+So the vertex multiplier is `fog::srgb_to_linear_f32(channel_byte / 255)` per
+channel, and a gamma-space multiply falls out of a linear-space shader for free.
+Generally: when a per-fragment correction is a pure function of a per-vertex
+value, push it to the vertex data rather than into the shader.
+
+**That the round trip is real is settled by an observable, not an assumption.**
+With an sRGB atlas and a *non*-sRGB target, an untinted `[1.0; 4]` sprite would
+store `srgb_to_linear(texel)` — a mid-grey 128 landing at 55 — so every HUD sprite
+in the game would be visibly dark. They are not, so the target is sRGB and the
+multiply is in linear light. Note the consequence for gates: the headless gates in
+`gpu/pixel_gates.rs` use `Rgba8Unorm` targets, which do **not** reproduce this
+arithmetic. A pixel gate for a 2-D tint must use `Rgba8UnormSrgb` or it measures a
+different composite than the player sees.
+
+**What is still not live: a dyed stack.** `sprite_layer_tint` passes a default
+`ItemTintContext` (no components, no colormap). That is vanilla's own answer for an
+uncustomised stack — an undyed leather helmet's brown *is* the definition's `dye`
+default — and `constant`, the majority source, reads nothing at all. The gap is a
+wire-side one rather than a wiring one: `lodestone_game::item::ItemComponents`
+defines no `minecraft:dyed_color` member (no `DYED_COLOR_COMPONENT` exists in that
+crate), so the shell holds no live dye to pass. `grass` resolves to `None`
+(untinted) without a colormap, which `item_tint::resolve` documents as the honest
+degradation.
 
 ## How to change it, and the gotchas
 
