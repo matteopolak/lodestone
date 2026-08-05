@@ -472,10 +472,19 @@ impl RenderState {
                 stats.total_quads += section.quad_count;
             }
 
-            // Live vanilla terrain: wide baked-model geometry through the model
-            // pipeline (cross-plants, slabs, stairs, tinted grass, cutout via the
-            // shader's alpha discard). Shares the terrain depth buffer.
             if let Some(model) = &self.model {
+                // Log once: model section count for diagnostics
+                static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    tracing::info!(
+                        "draw: model pipeline has {} sections, camera=({:.1},{:.1},{:.1})",
+                        model.sections.len(),
+                        camera.position.x, camera.position.y, camera.position.z,
+                    );
+                    if model.sections.is_empty() {
+                        tracing::warn!("draw: model pipeline exists but has ZERO sections — GPU has no live terrain!");
+                    }
+                }
                 pass.set_pipeline(&model.pipeline.pipeline);
                 pass.set_bind_group(1, &model.atlas_bind_group, &[]);
                 pass.set_bind_group(2, &model.palette_bind_group, &[]);
