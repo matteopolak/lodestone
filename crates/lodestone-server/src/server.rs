@@ -18,12 +18,13 @@ use lodestone_entity::DamageFlags;
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, Rotation, Text, TextContent, Vec3,
 };
+use lodestone_data::block_items;
 use lodestone_net::{Connection, NetError, Transport};
 
 use crate::block_entities::{BlockEntity, BlockEntityHandle, block_entity_for_item};
 use crate::command::{CommandCaller, CommandDispatch, CommandSession};
 use crate::chunk::{
-    AIR, ChunkColumn, ChunkSource, STONE, generate_columns_offloaded, generate_columns_parallel,
+    AIR, ChunkColumn, ChunkSource, generate_columns_offloaded, generate_columns_parallel,
     is_air_or_fluid, is_water,
 };
 use crate::fall::FallTracker;
@@ -1823,18 +1824,32 @@ where
 /// orientation (stairs/slabs/doors would need a precise cursor hit this
 /// crate does not decode).
 ///
-/// **Placement now honours the held item for the four block-entity blocks**
-/// (issue: `docs/block-entities.md`'s second named gap). `inventory`'s
-/// currently selected item is looked up through
-/// [`block_entity_for_item`]: a furnace/smoker/blast-furnace/composter/
-/// hopper/brewing-stand item writes its own block and inserts a fresh
-/// [`crate::block_entities::BlockEntity`] into `block_entities` at the
-/// target position; anything else (including an empty hand — this crate has
-/// no "consume from an empty hand" concept to reject) still falls back to
-/// [`STONE`], exactly as before this change. This is a deliberately narrow
-/// extension of `docs/block-edit.md`'s existing scope cut, not a general
-/// per-item placement system — see that doc for why a wider one (a real
-/// `BlockItem` registry) is not attempted here.
+/// **Placement honours the held item for every block in the game** (#466).
+/// `inventory`'s currently selected item is resolved through
+/// [`lodestone_data::block_items::block_for_item`] — the 26.2 census of
+/// `BlockItem.getBlock()`, dumped from the real jar — which decides both
+/// whether a placement happens and which block it writes.
+///
+/// Before #466 this went through [`block_entity_for_item`] alone, whose
+/// `None` arm wrote [`crate::chunk::STONE`]. That table by design resolves only the six
+/// block-entity items, so the `None` arm was the path taken by **every
+/// ordinary block**: dirt, planks, wool and glass all placed stone. The two
+/// are now composed rather than swapped — the census gates the placement and
+/// names the block, and `block_entity_for_item` is consulted second, purely
+/// to insert the live [`crate::block_entities::BlockEntity`] the six ticking
+/// blocks need.
+///
+/// **A non-placeable item now places nothing.** A sword, a bucket, a spawn
+/// egg or an empty hand leaves the world untouched, where it previously
+/// substituted stone. That is a deliberate behaviour change and the correct
+/// one; the `block_update` for both cells is still sent below, so a client
+/// that predicted a placement is corrected rather than left desynchronised.
+///
+/// **Block *state* remains out of scope** (`docs/block-edit.md`): stairs,
+/// slabs, logs and redstone dust place with orientation or connection state
+/// derived from the click face, cursor and neighbours, and this path still
+/// writes each block's default state. #466 is about placing the *right
+/// block*; the right *state* is a separate and larger piece of work.
 ///
 /// Sends [`ServerProtocol::encode_block_update`] for **both** `pos` and its
 /// `face`-neighbour unconditionally, matching vanilla's own
@@ -1896,17 +1911,28 @@ where
     let target_state = source.block_state(target.x, target.y, target.z);
     if is_air_or_fluid(&target_state) {
         let held_item = inventory.selected_item().map(|stack| stack.item.to_string());
-        let resolved = held_item
+        // The census is the gate: it decides *whether* a placement happens at
+        // all and *which* block it writes. `block_entity_for_item` no longer
+        // makes that decision — it only supplies the live `BlockEntity` for
+        // the six items this crate ticks, and is consulted second.
+        let placed = held_item
             .as_deref()
-            .and_then(block_entity_for_item);
-        match resolved {
-            Some((block_name, entity)) => {
+            .and_then(|item| block_items::block_for_item(item).map(|block| (item, block)));
+        if let Some((item, block_name)) = placed {
+            if let Some((entity_block, entity)) = block_entity_for_item(item) {
+                // The two sources must agree on the block name, or we would
+                // register a furnace at a position holding some other block.
+                // `lodestone-data`'s `the_block_entity_blocks_still_resolve_
+                // to_themselves` asserts they do for all six today; this
+                // catches a future divergence instead of silently trusting
+                // the older table.
+                debug_assert_eq!(
+                    entity_block, block_name,
+                    "block-entity table and item census disagree on {item}"
+                );
                 block_entities.with(|registry| registry.insert(target, entity));
-                source.set_block(target.x, target.y, target.z, block_name);
             }
-            None => {
-                source.set_block(target.x, target.y, target.z, STONE);
-            }
+            source.set_block(target.x, target.y, target.z, block_name);
         }
     }
     for p in [pos, neighbour] {

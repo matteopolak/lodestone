@@ -454,6 +454,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Sprint food gate, toggle sneak/sprint, and mouse feel](./input-options.md) —
   Three small, related fixes to `lodestone-controller`'s input model and the settings
   screen's mouse/controls pages:
+- [Item → block census](./item-block-census.md) — The authoritative 26.2 answer to
+  "if a player right-clicks holding this item, which block gets placed?" —
+  `lodestone_data::block_items`, generated from a headless dump of the real server's
+  `BuiltInRegistries.ITEM` joined with `BlockItem.getBlock()`.
 - [Item component read/write for plugins](./item-component-access.md) — The typed
   surface a plugin uses to read and write an item stack's data components (issue
   [#143](https://github.com/matteopolak/lodestone/issues/143)) — custom name,

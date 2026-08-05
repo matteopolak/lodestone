@@ -38,6 +38,8 @@
 pub(crate) mod generated_attribute_types;
 #[path = "generated/block_entity_types.rs"]
 pub(crate) mod generated_block_entity_types;
+#[path = "generated/block_items.rs"]
+pub(crate) mod generated_block_items;
 #[path = "generated/block_registry.rs"]
 pub(crate) mod generated_block_registry;
 #[path = "generated/block_solidity.rs"]
@@ -85,6 +87,7 @@ pub(crate) mod generated_tools;
 
 pub mod attribute_types;
 pub mod block_entity_types;
+pub mod block_items;
 pub mod block_solidity;
 pub mod block_states;
 pub mod collision_shapes;

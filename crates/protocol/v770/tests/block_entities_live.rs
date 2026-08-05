@@ -277,13 +277,20 @@ async fn real_client_places_a_furnace_and_the_server_registers_it() {
     );
 }
 
-/// **Control**: an item that is *not* one of the four block-entity blocks
-/// must still fall back to the pre-existing plain-stone placement and must
-/// **not** create a registry entry — proves the furnace test above is
-/// exercising a real branch, not a registry that inserts on every
-/// placement regardless of what was held.
+/// **Control**: an empty hand must place **nothing** and must not create a
+/// registry entry — proves the furnace test above is exercising a real
+/// branch, not a registry that inserts on every placement regardless of what
+/// was held.
+///
+/// Before #466 this asserted the *stone* fallback, which was the pre-existing
+/// behaviour: `block_entity_for_item`'s `None` arm wrote `minecraft:stone`
+/// for anything it did not recognise. That arm was the path every ordinary
+/// block took, so it was removed; a held item that places no block now leaves
+/// the world untouched. The control still does its job — it is still the
+/// negative arm of the furnace test — it just asserts the corrected
+/// behaviour. See `server_block_placement.rs` for the per-item gate.
 #[tokio::test]
-async fn placing_with_an_empty_hand_still_falls_back_to_stone_and_registers_nothing() {
+async fn placing_with_an_empty_hand_places_nothing_and_registers_nothing() {
     let view_radius = 0;
     let (client_io, server_io) = memory_pair();
     let block_entities = BlockEntityHandle::default();
@@ -328,10 +335,14 @@ async fn placing_with_an_empty_hand_still_falls_back_to_stone_and_registers_noth
     // watching it fail: the first draft used `(-3, 64, -3)` and timed out).
     let target_pos = BlockPos::new(5, 5, 5);
     let stone_id = resolve_state("minecraft:stone");
+    let air_id = resolve_state("minecraft:air");
+    assert_ne!(
+        stone_id, air_id,
+        "the two ids must actually differ for this control to mean anything"
+    );
 
-    // No `ContainerClick` at all: hotbar slot 0 stays empty, exactly the
-    // pre-existing "no inventory model" starting condition this landing
-    // extends rather than replaces.
+    // No `ContainerClick` for this slot: hotbar slot 0 stays empty, exactly
+    // the pre-existing "no inventory model" starting condition.
     handle
         .send_action(ClientAction::UseItemOn {
             hand: Hand::Main,
@@ -343,20 +354,55 @@ async fn placing_with_an_empty_hand_still_falls_back_to_stone_and_registers_noth
         })
         .expect("send use item on");
 
-    // Same reasoning as the furnace test above: wait for the *specific*
-    // post-placement id, since the pre-loaded air column already makes
-    // `.is_some()` true before anything happens.
+    // An empty hand now changes *nothing*, so there is no post-placement id to
+    // wait for — the cell was air before the click and is air after it, and a
+    // `wait_for(.. == air)` would resolve before the click was even processed.
+    // A second, *real* placement gives the wait something that genuinely
+    // transitions; because the stream is ordered, the furnace arriving proves
+    // the empty-hand click ahead of it was already processed. Without this the
+    // assertions below would race an unprocessed packet and pass vacuously.
+    let witness_pos = BlockPos::new(9, 5, 9);
+    let furnace_id = resolve_state("minecraft:furnace");
+    handle
+        .send_action(ClientAction::ContainerClick {
+            window_id: 0,
+            state_id: 1,
+            slot: 36,
+            button: 0,
+            click_type: ContainerClickType::Pickup,
+            changed_slots: vec![ContainerSlotChange {
+                slot: 36,
+                item: Some(stack("minecraft:furnace", 1)),
+            }],
+            carried_item: None,
+        })
+        .expect("client still connected");
+    handle
+        .send_action(ClientAction::UseItemOn {
+            hand: Hand::Main,
+            pos: witness_pos,
+            face: BlockFace::Up,
+            cursor: Vec3f::new(0.5, 0.0, 0.5),
+            inside_block: false,
+            sequence: 2,
+        })
+        .expect("send use item on");
     handle
         .wait_for(Duration::from_secs(30), |h| {
-            h.block_at(target_pos) == Some(stone_id)
+            h.block_at(witness_pos) == Some(furnace_id)
         })
         .await
-        .expect("placement confirmation never arrived");
+        .expect("witness placement confirmation never arrived");
 
     assert_eq!(
         handle.block_at(target_pos),
+        Some(air_id),
+        "an empty hand must place nothing at all (#466)"
+    );
+    assert_ne!(
+        handle.block_at(target_pos),
         Some(stone_id),
-        "an empty hand must still place stone, the pre-existing fallback"
+        "an empty hand must not fall back to stone (#466)"
     );
 
     handle.shutdown();
@@ -369,8 +415,8 @@ async fn placing_with_an_empty_hand_still_falls_back_to_stone_and_registers_noth
         .expect("serve_connection returned an error");
 
     assert!(
-        block_entities.with(|reg| reg.is_empty()),
-        "a stone placement must not register any block entity"
+        block_entities.with(|reg| reg.get(target_pos).is_none()),
+        "an empty-hand click must not register any block entity"
     );
 }
 
