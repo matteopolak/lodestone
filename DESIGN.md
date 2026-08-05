@@ -3222,3 +3222,18 @@ Three things worth keeping:
 - **Where a duration is genuinely the subject, report the counter beside it.** Here the counter was already in the failure output, and it is what made the diagnosis take one step instead of a bisect. A gate that prints only the quantity it asserts on gives a reader nothing to cross-check against.
 
 Corollary for §12.19's ratio correction: a ratio of two *sequential* durations is not protected either, and this measurement bounds how badly — a 585× excursion on one arm swamps any ratio whose arms are not measured concurrently.
+
+**12.96 The oracle was frozen, and it answered anyway: `pause-when-empty-seconds` defaults to 60.**
+
+Every live oracle in `scripts/live-oracles/` is driven over RCON with **no player connected**. That is the normal state for a fixture, not an edge case — and vanilla's `pause-when-empty-seconds` defaults to **60**, so after a minute the server pauses the whole world. `gameTime` stops advancing, and because `ServerLevel.tick` calls `blockTicks.tick(getGameTime())`, **no scheduled block tick ever fires again**.
+
+**What makes this a trap rather than an outage is that the rig stays half-alive.** Redstone dust propagates *synchronously*, inside `setBlock` — so a dust probe answers correctly, on a frozen server. Anything with a delay does not: repeaters, comparators, observers, torches, mob spawn cycles. A gate asserting "the signal arrived" passes; a gate asserting *when* reads a stopped clock. Found while oracle-verifying #315/#317, by a falling-sand control that had no business failing.
+
+**It also appears to be the real cause of a rule this repo already wrote down.** `CLAUDE.md` carries "`tick step N` does not advance entity physics; only `tick sprint N` does". The jar sets `runGameElements = !isFrozen || frozenTicksToRun > 0` and gates block ticks on exactly that — **so a paused world and a frozen one present identically**, and a measurement taken on a paused server would produce that conclusion whether or not `tick step` behaves as claimed. The entity-physics half was measured separately (the fall-damage oracle, §12's `NoAI` note) and is not disturbed here. The *scheduled-block-tick* half is a misdiagnosis.
+
+Two things worth generalising:
+
+- **A fixture's default configuration is part of the code under test.** Nothing in our tree was wrong; the oracle was. An expected value sourced from an external oracle is only as good as that oracle being in the state you believe — which is a *third* thing to verify, alongside our code and the expectation.
+- **Partial liveness is worse than no liveness.** Had the server refused connections, this would have cost minutes. Because synchronous work kept answering, the frozen clock was invisible to exactly the probes a developer reaches for first. The general form: **when an external system half-works, ask which half you have been reading.**
+
+Fixed in all three scripts — `creative.sh` and `terrain.sh` rewrite the property before start (their `server.properties` persists across runs), `survival.sh` carries it in the heredoc it regenerates every run. The distinction matters: a `sed` in `survival.sh` would be overwritten by its own next line.

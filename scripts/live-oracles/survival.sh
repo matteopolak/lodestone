@@ -70,6 +70,14 @@ simulation-distance=10
 max-players=10
 enforce-secure-profile=false
 motd=Lodestone survival test world
+# Defaults to 60, which freezes the world whenever nobody is connected:
+# `gameTime` stops, so `blockTicks.tick(getGameTime())` never fires a scheduled
+# tick and anything with a delay — repeaters, comparators, observers, torches,
+# mob spawn cycles — stands still, while synchronous work keeps answering
+# correctly and hides it. Root-caused in #315/#317; see creative.sh's long note.
+# This world is the one a human actually plays, so it is normally occupied, but
+# a gate driving it over RCON before joining would hit exactly the frozen case.
+pause-when-empty-seconds=0
 PROPS
 
 container system start >/dev/null 2>&1 || true

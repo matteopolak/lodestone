@@ -36,6 +36,21 @@ container system start >/dev/null 2>&1 || true
 
 container rm -f "$NAME" >/dev/null 2>&1 || true
 
+# `pause-when-empty-seconds` defaults to 60 and silently freezes the world when
+# nobody is connected — which is every oracle run. See creative.sh's long note:
+# `gameTime` stops, so `blockTicks.tick(getGameTime())` never fires a scheduled
+# tick, while synchronous work (dust propagation inside `setBlock`) keeps
+# answering correctly. Light is baked into chunks so this oracle is less exposed
+# than the redstone gates that found it, but a frozen world is never what a gate
+# means to measure.
+if [ -f "$WORLD/server.properties" ]; then
+  if grep -q '^pause-when-empty-seconds=' "$WORLD/server.properties"; then
+    sed -i '' 's/^pause-when-empty-seconds=.*/pause-when-empty-seconds=0/' "$WORLD/server.properties"
+  else
+    echo 'pause-when-empty-seconds=0' >> "$WORLD/server.properties"
+  fi
+fi
+
 if [ ! -f "$WORLD/server.jar" ]; then
   mkdir -p "$WORLD"
   cp "$ROOT/.cache/mc/creative/server.jar" "$WORLD/server.jar"
