@@ -1317,12 +1317,13 @@ of these caught the *brief* being wrong rather than the code.
   implemented goals are structurally incapable of firing in production today, so this
   plan sequences a perception-and-driver spine ahead of every species unit.
 - [Multi-version protocol: the dispatch plan for epic #343](./plans/multi-version-protocol.md) —
-  The implementation plan for epic #343 (join servers from 1.7.10 through 26.2,
+  The implementation plan for epic #343 (every major version 1.7.10 through 26.2,
   children #344–#358): family-per-wire-era with range extension inside an era, a
-  shared canonicalisation crate every legacy family maps through, and a capture-once
-  oracle strategy. Written 2026-08-04 from a verified survey of the tree; every "X
-  exists / X is missing" claim below was re-checked that day, not copied from an older
-  document.
+  shared canonicalisation crate every legacy family maps through, a capture-once
+  oracle strategy, and the join-versus-host split stated per version with the hosting
+  blockers located in the tree. Re-verified 2026-08-05 at `d197d555`; every "X exists
+  / X is missing" claim below was re-checked against the tree that day, not copied
+  forward from the previous revision.
 - [Backing Paper's NMS calls with Rust: census and feasibility](./plans/paper-nms-bridge.md) —
   The feasibility census issue
   [#341](https://github.com/matteopolak/lodestone/issues/341) asked for before any
