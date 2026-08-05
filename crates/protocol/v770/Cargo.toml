@@ -72,6 +72,23 @@ lodestone-worldgen = { path = "../../lodestone-worldgen" }
 # `lodestone-physics` engine to walk a player and asserts the real server never
 # corrects us. Test-only; production code never depends on physics.
 lodestone-physics = { path = "../../lodestone-physics" }
+# Test-only, and it must stay that way: `lodestone-ecs` is where the plugin
+# `CommandRegistry`, `dispatch` and `Permissions` live, and issues #48/#464
+# exist precisely because `lodestone-server` must never link it (see
+# `lodestone-server/src/command.rs`'s module doc). `tests/command_wire_path.rs`
+# stands in for the real host — the crate that legitimately links both — and
+# drives a real `chat_command` frame from the real client through the real
+# `V770ServerProtocol` into the real registry. Putting the gate here rather
+# than in `lodestone-server` is what keeps that dependency out of the crate
+# under test, in its dev-dependencies as much as its normal ones. No cycle:
+# `cargo tree -p lodestone-ecs --edges normal` contains zero
+# `lodestone-server`/`lodestone-v770`/`lodestone-registry` edges.
+lodestone-ecs = { workspace = true }
+# The `App`/`Plugin` scaffolding `PluginCommandsPlugin` installs into, and the
+# `World` the registry dispatches against. Same versions `lodestone-server`
+# already builds against through `[workspace.dependencies]`.
+bevy_app = { workspace = true }
+bevy_ecs = { workspace = true }
 # Direct dependency (not a workspace alias), per the harness decision in
 # `docs/roadmap/benchmarks.md`: pure in-memory, no-GPU/no-socket benches use
 # criterion. `default-features = false` + only `cargo_bench_support`: the
