@@ -30,7 +30,7 @@ use crate::chunk::{
 use crate::fall::FallTracker;
 use crate::inventory::{ContainerMenuSlot, PlayerInventory, container_menu_slot};
 use crate::mobs::{MobHandle, PlayerPerception};
-use crate::players::{PlayerListStreamer, PlayerRegistry, PlayerTicket};
+use crate::players::{ChatLine, PlayerListStreamer, PlayerRegistry, PlayerTicket};
 use crate::protocol::{EntitySnapshot, ServerBound, ServerDirective, ServerProtocol};
 use crate::tick::{BlockTickFeed, ExplosionFeed};
 use crate::vitals::{EYE_HEIGHT, PlayerVitals};
@@ -1492,6 +1492,7 @@ where
             // the moment Play is reached. Listed rather than folded into a
             // wildcard so that adding a variant stays a compile error.
             | ServerBound::ChatCommand { .. }
+            | ServerBound::Chat { .. }
             | ServerBound::Ignored => {}
         }
     }
@@ -2342,6 +2343,12 @@ async fn dispatch_play_packet<T, P, S>(
     // identity) because this function already takes 24; see
     // [`CommandSession`]'s own doc comment.
     commands: &CommandSession,
+    // Issue #469. Mirrors `player_pos`/`player_rot` exactly — filled here,
+    // read back by the caller, republished to the `PlayerRegistry` so *other*
+    // connections see it. An out-parameter rather than two more parameters (a
+    // registry and this connection's username) because the caller already
+    // owns both, and this function already takes 25.
+    outgoing_chat: &mut Vec<String>,
     packet_id: i32,
     payload: &[u8],
 ) -> Result<(), ServerError>
@@ -2588,6 +2595,22 @@ where
                 apply(conn, state, proto.encode_system_chat(line)).await?;
             }
         }
+        // Issue #469. Nothing is written to the wire here: the message is
+        // handed to the caller, which publishes it to the shared
+        // `PlayerRegistry`, and *every* connection — this one included —
+        // picks it up on its own next drain. Replying directly here instead
+        // would deliver the sender's copy on a different path from everyone
+        // else's, which is exactly how a broadcast ends up working for the
+        // one connection a test happens to look at.
+        //
+        // Empty messages are dropped rather than broadcast. Vanilla rejects
+        // them upstream of the packet (the client will not send one), so a
+        // frame carrying one is malformed rather than meaningful.
+        ServerBound::Chat { message } => {
+            if !message.trim().is_empty() {
+                outgoing_chat.push(message);
+            }
+        }
         // The pre-Play phase signals, unreachable here by construction: a
         // connection in `State::Play` cannot decode a handshake, a login, or
         // (issue #277) a Status-phase status/ping request, because every
@@ -2713,6 +2736,13 @@ where
     // batch, not a later `recenter`/`set_view_radius` one.
     let mut awaiting_chunk_batch_ack = true;
     let mut pending_chunk_batches: VecDeque<Vec<ServerDirective>> = VecDeque::new();
+    // Issue #469. Filled by `dispatch_play_packet`, drained immediately after
+    // it returns — it exists only to carry a message across that call.
+    let mut outgoing_chat: Vec<String> = Vec::new();
+    // This connection's read position in the shared chat log. Started at the
+    // log's *current end* so a joining player is not replayed the backlog of
+    // everything said before they arrived.
+    let mut chat_cursor = entities.players().map_or(0, PlayerRegistry::chat_cursor);
     let mut keep_alive_tick = tokio::time::interval_at(
         tokio::time::Instant::now() + KEEP_ALIVE_INTERVAL,
         KEEP_ALIVE_INTERVAL,
@@ -2775,10 +2805,35 @@ where
                     &mut awaiting_chunk_batch_ack,
                     &mut pending_chunk_batches,
                     &commands,
+                    &mut outgoing_chat,
                     packet_id,
                     &payload,
                 )
                 .await?;
+                // Issue #469: republish this player's chat for *every*
+                // connection to pick up, this one included. Same read-back
+                // idiom as `player_pos`/`player_rot` below, and for the same
+                // reason: the username and the registry both live here.
+                //
+                // With no registry — singleplayer, where `open_in_memory`
+                // builds no `PlayerRegistry` at all — there is nobody else to
+                // broadcast to, so the message is echoed straight back to its
+                // sender. That still matches vanilla, whose broadcast loop
+                // includes the sender; it is the same rule with a roster of
+                // one, not a special case.
+                for message in outgoing_chat.drain(..) {
+                    let line = ChatLine {
+                        sender: username.clone(),
+                        message,
+                    };
+                    match entities.players() {
+                        Some(registry) => registry.say(&line.sender, &line.message),
+                        None => {
+                            apply(conn, &mut state, proto.encode_system_chat(&line.rendered()))
+                                .await?;
+                        }
+                    }
+                }
                 // Issue #438: republish this player's position for *other*
                 // connections to stream. Read back from `player_pos` — which
                 // `dispatch_play_packet` has just updated if the packet was a
@@ -2909,6 +2964,20 @@ where
                     )
                     .await?;
                 }
+                // Issue #469: player chat, riding the same timer as the three
+                // above for the same reason. Unlike them this is *not* a
+                // drain-all feed — `chat_since` advances this connection's own
+                // cursor over a shared append-only log, which is what lets
+                // every connection read every line. A `drain_all` here would
+                // deliver each message to whichever connection's timer fired
+                // first and to nobody else, which is precisely the bug a
+                // broadcast must not have.
+                if let Some(registry) = entities.players() {
+                    for line in registry.chat_since(&mut chat_cursor) {
+                        apply(conn, &mut state, proto.encode_system_chat(&line.rendered()))
+                            .await?;
+                    }
+                }
             }
         }
     }
@@ -2998,6 +3067,8 @@ where
     // `true` (the initial join dump is itself an unacknowledged batch).
     let mut awaiting_chunk_batch_ack = true;
     let mut pending_chunk_batches: VecDeque<Vec<ServerDirective>> = VecDeque::new();
+    // Issue #469 — see the native loop's identical binding.
+    let mut outgoing_chat: Vec<String> = Vec::new();
 
     while let Some((packet_id, payload)) = conn.read_packet().await? {
         dispatch_play_packet(
@@ -3024,10 +3095,31 @@ where
             &mut awaiting_chunk_batch_ack,
             &mut pending_chunk_batches,
             &commands,
+            &mut outgoing_chat,
             packet_id,
             &payload,
         )
         .await?;
+        // Issue #469, identical to the native loop's publish. The *drain*,
+        // though, is a real gap on this target: it rides the native loop's
+        // `container_sync_tick`, which `tokio::time` gives this target none
+        // of — the same documented gap `vitals` and `sync_open_container`
+        // already have here. So a `wasm32`-served connection publishes chat
+        // that other connections receive, and receives none itself unless it
+        // is the sole connection (the no-registry echo below). Named rather
+        // than silent, exactly like its two neighbours.
+        for message in outgoing_chat.drain(..) {
+            let line = ChatLine {
+                sender: username.clone(),
+                message,
+            };
+            match entities.players() {
+                Some(registry) => registry.say(&line.sender, &line.message),
+                None => {
+                    apply(conn, &mut state, proto.encode_system_chat(&line.rendered())).await?;
+                }
+            }
+        }
         // Issue #438, identical to the native loop — see its own comment for
         // why this reads `player_pos` back instead of threading the ticket
         // through `dispatch_play_packet`.

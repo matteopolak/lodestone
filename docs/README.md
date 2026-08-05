@@ -693,6 +693,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   resolver trait a permissions *plugin* can use to take the whole decision over. One
   resource, `lodestone_ecs::permissions::Permissions`, answering one question: does
   this subject hold this permission?
+- [Player chat](./player-chat.md) — The inbound half of chat: a player types a
+  message, our server decodes it, and every connected player sees it. Before #469 the
+  two halves of chat were in opposite states — we could say things to a player
+  (`system_chat` was complete and well-tested) and a player could say nothing to us,
+  because serverbound `minecraft:chat` was never decoded at all.
 - [Player entities](./player-entities.md) — The server-side machinery that makes a
   connected player an **entity other connections receive** (issue #438): a shared
   registry of connected players, a per-connection tab-list diff, and the two

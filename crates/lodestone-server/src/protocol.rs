@@ -505,6 +505,43 @@ pub enum ServerBound {
         /// Command text without the leading `/`.
         command: String,
     },
+    /// A player typed an ordinary chat message (`minecraft:chat`, #469).
+    ///
+    /// The sibling of [`ChatCommand`](Self::ChatCommand), and the half that
+    /// was missing entirely: the outbound direction
+    /// ([`encode_system_chat`](ServerProtocol::encode_system_chat),
+    /// clientbound `system_chat`) has always been complete and well-tested,
+    /// so grepping for "chat" found a finished feature and hid the fact that
+    /// a player could not say anything to us at all.
+    ///
+    /// # Only the text survives decoding, deliberately
+    ///
+    /// The wire packet also carries a timestamp, a salt, an optional 256-byte
+    /// signature and a last-seen acknowledgement block
+    /// (`ServerboundChatPacket`, 26.2). Those are decoded — the layout has to
+    /// be read to find the end of the frame — and then **dropped**, because
+    /// this crate has no session-key infrastructure to verify a signature
+    /// against: it never handles `chat_session_update`, holds no player public
+    /// keys, and reports `enforcesSecureChat = false` in its own status
+    /// response. Carrying an unverifiable signature into the server loop would
+    /// be strictly worse than not carrying it, because a later reader could
+    /// mistake its presence for validation.
+    ///
+    /// Chat is therefore **broadcast unsigned**, as a `system_chat` component
+    /// rendered in vanilla's own `chat.type.text` (`"<%s> %s"`) form, rather
+    /// than as a real `player_chat` packet. Verifying signatures and emitting
+    /// `player_chat` is a separate, larger piece of work; see
+    /// `docs/player-chat.md`.
+    ///
+    /// The acknowledgement `offset` is dropped for the same reason
+    /// `ChatAckInfo` is unreachable from the WASM plugin ABI
+    /// (`lodestone-wasm-host`'s `abi.rs`): the sequence counter belongs to
+    /// whoever drives the connection, and a second writer forks it.
+    Chat {
+        /// The message text exactly as the player typed it, capped at 256
+        /// characters by the wire format.
+        message: String,
+    },
     /// A packet the loop does not need to act on (teleport confirmations,
     /// look-only or status-only movement, and several other decoded-but-
     /// unmodelled families — see `crates/protocol/v770/src/server_protocol.rs`'s

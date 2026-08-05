@@ -68,8 +68,8 @@ use crate::packets::configuration::FinishConfiguration;
 use crate::packets::entity::{pack_degrees, read_lp_vec3, write_lp_vec3};
 use crate::packets::game::{
     AcceptTeleportation, Attack, BlockEntityTagQuery, ChangeDifficultyClientbound,
-    ChangeDifficultyServerbound, ChangeGameMode, ChatCommand, ChunkBatchReceived, ClientCommand,
-    ClientTickEnd,
+    ChangeDifficultyServerbound, ChangeGameMode, ChatCommand, ChatMessage, ChunkBatchReceived,
+    ClientCommand, ClientTickEnd,
     ConfigurationAcknowledged, ContainerButtonClick, ContainerSlotStateChanged, EditBook,
     EntityTagQuery, GameLogin, GameRuleEntry, GameRuleValues, GlobalPos, JigsawGenerate,
     LockDifficulty, MOVE_FLAG_ON_GROUND, MovePlayerPos, MovePlayerPosRot, MovePlayerRot,
@@ -2058,6 +2058,28 @@ impl ServerProtocol for V770ServerProtocol {
             State::Play if packet_id == play::serverbound::CHAT_COMMAND => {
                 match decode_full::<ChatCommand>(payload) {
                     Some(p) => ServerBound::ChatCommand { command: p.command },
+                    None => ServerBound::Ignored,
+                }
+            }
+            // Issue #469: a player typing a message. `ChatMessage` is the
+            // **same** struct `adapter.rs`'s `ClientAction::SendChat` arm
+            // encodes, so decode and encode are pinned to one another exactly
+            // as `CHAT_COMMAND` above is, rather than to a hand-copied layout.
+            // Its field order matches `ServerboundChatPacket`'s own
+            // constructor (26.2): `readUtf(256)`, `readInstant()`,
+            // `readLong()` salt, `readNullable(MessageSignature::read)`, then
+            // `LastSeenMessages.Update` (a VarInt offset, a fixed 20-bit bit
+            // set in 3 bytes, and a checksum byte).
+            //
+            // `decode_full`, not a partial read: the trailing acknowledgement
+            // block is the part most likely to be misread, and a frame we only
+            // half-understand should be dropped rather than broadcast. Every
+            // field but `message` is then discarded — see
+            // `ServerBound::Chat`'s own doc for why an unverifiable signature
+            // is worse than no signature.
+            State::Play if packet_id == play::serverbound::CHAT => {
+                match decode_full::<ChatMessage>(payload) {
+                    Some(p) => ServerBound::Chat { message: p.message },
                     None => ServerBound::Ignored,
                 }
             }
