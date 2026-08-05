@@ -99,6 +99,30 @@ const HISTORY_LEN: usize = 100;
 /// 65536, ...)` (`ServerLevel.java:389,391`).
 const MAX_SCHEDULED_TICKS_PER_TICK: usize = 65536;
 
+/// How many ticks after world open to defer the first random-tick pass
+/// (issue #481). The seed task in
+/// [`crate::IntegratedServer::open_in_memory_with_mobs`] runs
+/// `generate_columns_offloaded` on the blocking pool — that call fans the
+/// `mob_area` columns (49 at the shell's `view_radius.clamp(1, 3)`) out over
+/// scoped OS threads and inserts them through the shared [`crate::ChunkStore`].
+/// At the measured ~222 ms per warm contiguous column and `available_parallelism`
+/// workers (≥ 2 in production), the batch completes in under 1.5 real seconds.
+///
+/// Deferring random ticks for 40 ticks (2.0 s) gives the seeding task time to
+/// finish before the first `world.column()` call lands — so by the time random
+/// ticks start, every column of `tick_area` is a cheap ~3.1 µs clone rather
+/// than a cold ~909 ms generator run on the core thread.
+///
+/// Two seconds of deferred random ticks is imperceptible: grass spreading
+/// takes minutes, and nothing else in the random-tick pass produces a visible
+/// result on a sub-second timescale.
+///
+/// This is not a correctness gate — if the seed task has not finished after
+/// 40 ticks, the random-tick pass pays the remaining cold generations on the
+/// core thread, exactly as it did before this deferral existed. The gate only
+/// removes the common case where the tick loop starts before seeding does.
+const INITIAL_RANDOM_TICK_DEFERRAL_TICKS: u64 = 40;
+
 /// Seeds for [`RandomTickScheduler`]'s two independent generators (issue
 /// #307). Vanilla seeds its position LCG (`Level.randValue`) from an
 /// arbitrary thread-local draw at level creation — this crate has no
@@ -867,14 +891,22 @@ pub(crate) async fn run_tick_loop<W>(
         // #307, after both scheduled-tick queues (`ServerChunkCache.java:403`
         // runs after `ServerLevel`'s own `blockTicks`/`fluidTicks.tick`,
         // `:388-391`).
-        for cz in tick_cz_range.clone() {
-            for cx in tick_cx_range.clone() {
-                let mut column = world.column(cx, cz);
-                let events = random_ticks.tick_chunk(&mut column, cx, cz, DEFAULT_RANDOM_TICK_SPEED, &mut block_ticks, game_tick);
-                for event in events {
-                    let (x, y, z) = event.pos;
-                    world.set_block(x, y, z, &event.to);
-                    block_tick_out.publish(x, y, z, event.to);
+        //
+        // #481: the random-tick pass is deferred for the first few ticks
+        // after world open, so the background column-seeding task has time to
+        // populate the shared [`ChunkStore`] before any `world.column()` call
+        // pays the full per-column generation cost on the core thread. See
+        // [`INITIAL_RANDOM_TICK_DEFERRAL_TICKS`] for the arithmetic.
+        if game_tick > INITIAL_RANDOM_TICK_DEFERRAL_TICKS {
+            for cz in tick_cz_range.clone() {
+                for cx in tick_cx_range.clone() {
+                    let mut column = world.column(cx, cz);
+                    let events = random_ticks.tick_chunk(&mut column, cx, cz, DEFAULT_RANDOM_TICK_SPEED, &mut block_ticks, game_tick);
+                    for event in events {
+                        let (x, y, z) = event.pos;
+                        world.set_block(x, y, z, &event.to);
+                        block_tick_out.publish(x, y, z, event.to);
+                    }
                 }
             }
         }
