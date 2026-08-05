@@ -243,6 +243,37 @@ impl ChunkWorld {
         }
     }
 
+    /// [`from_source`](Self::from_source) over columns that have **already been
+    /// generated** — the same snapshot, assembled from a batch someone else
+    /// fetched.
+    ///
+    /// This exists because `from_source`'s loop is *serial* and synchronous, and
+    /// issue #454's whole subject is that 49 of those calls (~45 s at the 909 ms
+    /// per composed column measured in `crate::chunk_store`) ran on the thread
+    /// that opens a world. `crate::integrated` now fetches the same columns
+    /// through [`crate::chunk::generate_columns_offloaded`] — parallel, on the
+    /// blocking pool, and through the shared [`crate::chunk_store::ChunkStore`]
+    /// so the connection path's copy of each column is the *same* generation —
+    /// and hands the results here.
+    ///
+    /// The vertical extent is taken from the last column, exactly as
+    /// `from_source` does; an empty iterator yields `(0, 1)`, again matching.
+    #[must_use]
+    pub fn from_columns(columns: impl IntoIterator<Item = ((i32, i32), ChunkColumn)>) -> Self {
+        let mut map = HashMap::new();
+        let mut extent: Option<(i32, i32)> = None;
+        for (coord, col) in columns {
+            extent = Some((col.min_y, col.height));
+            map.insert(coord, col);
+        }
+        let (min_y, height) = extent.unwrap_or((0, 1));
+        Self {
+            columns: map,
+            min_y,
+            height,
+        }
+    }
+
     /// Sets a single block's solidity at world coordinates, creating the owning
     /// column on demand. The natural "place a block" primitive for building
     /// arenas and, later, applying server-side edits.
@@ -2438,15 +2469,57 @@ impl MobHandle {
         center_z: i32,
         mob_count: usize,
     ) -> Self {
-        let world = ChunkWorld::from_source(world_source, cx_range, cz_range);
-        let handle = Self::new(world);
-        handle.with(|sim| {
+        let handle = Self::default();
+        handle.reseed(
+            ChunkWorld::from_source(world_source, cx_range, cz_range),
+            center_x,
+            center_z,
+            mob_count,
+        );
+        handle
+    }
+
+    /// Replaces this handle's terrain snapshot **and** its population with a
+    /// fresh [`MobSim`] over `world`, seeded exactly as
+    /// [`seeded`](Self::seeded) would have.
+    ///
+    /// # Why this exists (issue #454)
+    ///
+    /// `seeded` did the whole job inside
+    /// [`crate::IntegratedServer::open_in_memory_with_mobs`]'s body, *before any
+    /// task spawned* — so the 49-column `ChunkWorld::from_source` snapshot it
+    /// needs was on the critical path of opening a world, at ~909 ms per
+    /// composed column. Vanilla does not block world-open on mob population, and
+    /// neither does this crate any more: the constructor now builds a
+    /// [`Default`] handle (empty, mobless, safe to attack against — see that
+    /// impl's own doc comment) and a background task calls this once the terrain
+    /// it needs has been fetched off-thread.
+    ///
+    /// # What is deliberately thrown away
+    ///
+    /// Everything: the old `MobSim` is dropped, not merged. That is correct for
+    /// the one caller — a handle that has only ever been `Default` has no
+    /// population to lose, and `set_next_id(1000)` must be re-applied to the new
+    /// sim anyway. It is **not** a general "load more terrain" primitive; a mob
+    /// spawned in the window before the first reseed would vanish. Widening the
+    /// snapshot as the player walks (this module's long-standing documented
+    /// scope cut) needs a sim that can *extend* its world, not replace it.
+    ///
+    /// Takes `&self`, like every other accessor here, because the sim lives
+    /// behind the handle's own `Mutex` — so this is safe to call from a
+    /// background task while the connection task holds a clone.
+    pub fn reseed(&self, world: ChunkWorld, center_x: i32, center_z: i32, mob_count: usize) {
+        // Leaked for the same reason `new` leaks: `MobSim` borrows its world for
+        // `'static`. See the struct's own doc comment — one bounded snapshot per
+        // reseed, and production reseeds exactly once per world.
+        let world: &'static ChunkWorld = Box::leak(Box::new(world));
+        self.with(|sim| {
+            *sim = MobSim::new(world);
             // See `MobSim::set_next_id`'s own doc comment: id `1` collides
             // with `LOCAL_PLAYER_ENTITY_ID` on the wire.
             sim.set_next_id(1000);
             seed_demo_mobs(sim, center_x, center_z, mob_count);
         });
-        handle
     }
 
     /// Runs `f` against the locked sim, returning its result — the same

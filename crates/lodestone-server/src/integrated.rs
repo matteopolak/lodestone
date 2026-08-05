@@ -44,7 +44,11 @@ use tokio::sync::Notify;
 
 use crate::block_entities::BlockEntityHandle;
 use crate::chunk::ChunkSource;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::chunk::generate_columns_offloaded;
 use crate::chunk_store::ChunkStore;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::mobs::ChunkWorld;
 use crate::mobs::{LiveMobSource, MobHandle};
 use crate::protocol::ServerProtocol;
 use crate::server::{
@@ -182,6 +186,18 @@ pub struct IntegratedServer {
     /// `crate::ecs::ServerTickWitness` for why it is a one-way valve rather
     /// than an accessor.
     server_tick: Option<crate::ecs::ServerTickWitness>,
+    /// The one-shot mob-seeding task (issue #454), `Some` only for
+    /// [`open_in_memory_with_mobs`](Self::open_in_memory_with_mobs).
+    ///
+    /// It exists as a *third* task rather than as a prologue to `tick_task`
+    /// because `tick_task`'s clock must start immediately: putting an `.await`
+    /// in front of `run_tick_loop` delays its first `Instant::now()` by however
+    /// long terrain generation takes, which is both the stall this issue removes
+    /// and a silent break of `integrated_memory.rs`'s paused-clock gate ("5 tick
+    /// periods must produce exactly 5 ticks" cannot hold if the loop has not
+    /// started yet). Seeding races `shutdown` like the tick task does, so it
+    /// still cannot outlive this handle.
+    seed_task: Option<Task>,
 }
 
 impl IntegratedServer {
@@ -276,6 +292,9 @@ impl IntegratedServer {
                 clock: None,
                 // No tick task, so nobody owns a server `World` (issue #433).
                 server_tick: None,
+                // Nothing seeds a mob population through this constructor (see
+                // the `mobs` binding above), so there is nothing to seed.
+                seed_task: None,
             },
             client_end,
         )
@@ -292,12 +311,16 @@ impl IntegratedServer {
     /// [`TickClock`] (issue #285), readable through
     /// [`tick_stats`](Self::tick_stats).
     ///
-    /// `world_source` is a **second, independent instance** of whatever
-    /// [`ChunkSource`] `source` also is — not the same value, and not shared.
-    /// See `mobs::run_mob_tick_loop`'s own doc comment for why two instances
-    /// rather than one shared one: every `ChunkSource` this crate ships is a
-    /// pure function of its construction parameters/seed, so two instances
-    /// built the same way (same seed) produce identical terrain.
+    /// `world_source` is **ignored, and scheduled for removal** (issue #454).
+    /// It used to be a second, independent instance of whatever [`ChunkSource`]
+    /// `source` also is, backing mob pathing on the argument that a
+    /// deterministic generator produces identical terrain from two instances —
+    /// true, and it cost a **second full generation** of the whole `mob_area`
+    /// at world open, serially, before any task spawned. Mob pathing now reads
+    /// the same [`ChunkStore`] the connection does, so a column is generated
+    /// once per world. The parameter survives only so this signature does not
+    /// change under `lodestone-shell/src/net.rs`, which is a brokered choke
+    /// point here; deleting it is a behaviour-free follow-up (issue #436).
     ///
     /// `mob_area` is the `(cx_range, cz_range)` of chunk columns loaded once
     /// into the sim's `ChunkWorld` snapshot — pick a range that covers
@@ -345,13 +368,12 @@ impl IntegratedServer {
         // doc comment for why this is safe with exactly one connection (this
         // constructor's own shape).
         let explosion_feed = ExplosionFeed::default();
-        // Issue #12: built *synchronously*, here, before the tick task spawns —
-        // not inside `run_mob_tick_loop`'s own future the way the pre-handle
-        // version built its `ChunkWorld`/`MobSim` — so the exact same handle
-        // (cloned below) can be shared by the connection task (which mutates
-        // it on an `Attack` packet, through `crate::server::apply_attack`)
-        // and the tick-loop task (which ticks and republishes it). See
-        // `MobHandle`'s own doc comment for why this is `'static`-safe.
+        // Issue #12: the *handle* is still built synchronously here, before any
+        // task spawns, so the exact same `MobSim` can be shared by the
+        // connection task (which mutates it on an `Attack` packet, through
+        // `crate::server::apply_attack`) and the tick-loop task (which ticks and
+        // republishes it). See `MobHandle`'s own doc comment for why this is
+        // `'static`-safe.
         let (cx_range, cz_range) = mob_area;
         // Issues #307/#308: the same small fixed region `mob_area` already
         // names, reused rather than adding a second range parameter — see
@@ -359,14 +381,6 @@ impl IntegratedServer {
         // general "loaded chunks" registry to draw a wider one from yet.
         let tick_area = (cx_range.clone(), cz_range.clone());
         let (center_x, center_z) = mob_center;
-        let mob_handle = MobHandle::seeded(
-            &world_source,
-            cx_range,
-            cz_range,
-            center_x,
-            center_z,
-            mob_count,
-        );
 
         // Issues #307/#308: `source` is now shared between the connection
         // task (which serves it over the wire — chunk generation, and every
@@ -374,10 +388,9 @@ impl IntegratedServer {
         // it) — the same object, not two independent instances, which is
         // exactly what makes a random tick's mutation visible to the client
         // this server actually serves rather than to an unwatched second
-        // copy. Contrast `world_source: M` right above, which stays
-        // deliberately unshared (see this function's own doc comment on
-        // that parameter) — that one backs *mob pathing*, which never needs
-        // to agree with what the client was sent, only with itself.
+        // copy. **Since issue #454 mob pathing shares it too**, so this is now
+        // the one and only terrain source a singleplayer world has; see the
+        // seeding task below and this function's doc comment on `world_source`.
         //
         // Issue #289 / `docs/plans/chunk-lifecycle.md` U3 — **this is the
         // singleplayer starvation fix.** [`ChunkStore`] makes a column
@@ -391,10 +404,65 @@ impl IntegratedServer {
         // exceeds the 50 ms tick budget by more than an order of magnitude.
         // See `crate::chunk_store`'s module docs for the full accounting.
         //
-        // Note `world_source: M` above is deliberately **not** wrapped: it is
-        // read exactly once per column by `MobHandle::seeded`, so retention
-        // would buy it nothing.
+        // Note this is now built *before* anything mob-related, which is
+        // load-bearing rather than cosmetic: the seeding task below reads its
+        // terrain through this same store, so the 49 columns of `mob_area` are
+        // generated **once** for the whole world instead of once here and once
+        // more from a second, independent generator (issue #454).
         let source = Arc::new(ChunkStore::new(source));
+
+        // Issue #454: **mob seeding is off the critical path.**
+        //
+        // `MobHandle::seeded` used to run right here, synchronously, before any
+        // task spawned — a serial `ChunkWorld::from_source` over the whole
+        // `mob_area`. At the shell's `view_radius.clamp(1, 3)` that is 49
+        // columns, and at the 909 ms per composed column measured in release
+        // (see `crate::chunk_store`) that put roughly **45 s** inside the
+        // `runtime.block_on` that opens a world, before the client could even
+        // connect. Vanilla does not block world-open on mob population.
+        //
+        // So the constructor hands back a `Default` handle — empty, mobless, and
+        // already documented as safe to `Attack` against (see that impl) — and
+        // this task fills it in. Two things make that cheap rather than merely
+        // moved:
+        //
+        // * `generate_columns_offloaded` (issue #293/#414) fans the batch out
+        //   over scoped threads **and** runs it on the blocking pool, so it
+        //   neither serialises nor blocks the core thread the connection task
+        //   and `run_tick_loop` share.
+        // * it reads through the shared `source` store above, so every one of
+        //   these columns is either already resident from the connection's
+        //   initial view (`mob_area` is a subset of it in production) or becomes
+        //   resident *for* that view. Either way each column is generated once.
+        let seed_coords: Vec<(i32, i32)> = cz_range
+            .clone()
+            .flat_map(|cz| cx_range.clone().map(move |cx| (cx, cz)))
+            .collect();
+        let seed_source = Arc::clone(&source);
+        let mob_handle = MobHandle::default();
+        let seed_mobs = mob_handle.clone();
+        let seed_task = spawn_tick_task(&shutdown, async move {
+            let columns = generate_columns_offloaded(seed_source, seed_coords.clone()).await;
+            // `generate_columns_offloaded` guarantees the result is aligned
+            // index-for-index with the coordinates it was given, which is what
+            // makes this zip correct rather than merely plausible — see its own
+            // doc comment on why it returns a `Vec` and not a map.
+            seed_mobs.reseed(
+                ChunkWorld::from_columns(seed_coords.into_iter().zip(columns)),
+                center_x,
+                center_z,
+                mob_count,
+            );
+        });
+
+        // `world_source` is no longer read: mob pathing shares the store above.
+        // The parameter survives only because this constructor's signature is
+        // named by `lodestone-shell/src/net.rs`, a brokered choke point in this
+        // repo — removing it is a separate, behaviour-free patch (issue #436).
+        // Dropping it here rather than binding `_world_source` in the signature
+        // keeps that patch to a pure deletion.
+        drop(world_source);
+
         let conn_signal = shutdown.clone();
         let conn_entities = live_mobs.clone();
         let conn_block_entities = block_entities.clone();
@@ -475,6 +543,7 @@ impl IntegratedServer {
                 tick_task: Some(tick_task),
                 clock: Some(clock),
                 server_tick: Some(server_tick),
+                seed_task: Some(seed_task),
             },
             client_end,
         )
@@ -702,6 +771,9 @@ impl IntegratedServer {
             tick_task: Some(tick_task),
             clock: Some(clock),
             server_tick: Some(server_tick),
+            // LAN seeds no mob population (nothing calls `MobHandle::reseed`
+            // here — see the `mobs` binding above), so there is nothing to seed.
+            seed_task: None,
         })
     }
 
@@ -783,6 +855,15 @@ impl IntegratedServer {
         if let Some(mut tick_task) = self.tick_task.take() {
             tick_task.join().await;
         }
+        // Aborted rather than joined, unlike the two above. Seeding's whole
+        // point (issue #454) is that it holds a multi-second generation batch;
+        // joining it would make `shutdown()` wait out the very stall this
+        // removed. It races `shutdown` too, so the notify above has already
+        // asked it to stop — this only covers a task parked on the blocking
+        // pool where the signal cannot reach.
+        if let Some(seed_task) = self.seed_task.take() {
+            seed_task.abort();
+        }
     }
 }
 
@@ -795,5 +876,364 @@ impl Drop for IntegratedServer {
         if let Some(tick_task) = &self.tick_task {
             tick_task.abort();
         }
+        if let Some(seed_task) = &self.seed_task {
+            seed_task.abort();
+        }
+    }
+}
+
+/// Issue #454's gate: **world open must generate nothing at all.**
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    use lodestone_core::State;
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::chunk::ChunkColumn;
+    use crate::protocol::{ServerBound, ServerDirective};
+
+    /// The seven required [`ServerProtocol`] methods, each answering with
+    /// something inert. Nothing here drives a client, so none of them is ever
+    /// actually called — mirrors `crate::ecs::gate`'s `Silent` rather than
+    /// sharing it, because that one is private to that module.
+    #[derive(Debug)]
+    struct Silent;
+
+    impl ServerProtocol for Silent {
+        fn decode(&self, _state: State, _packet_id: i32, _payload: &[u8]) -> ServerBound {
+            ServerBound::Ignored
+        }
+        fn login_success(&self, _username: &str, _uuid: Uuid) -> Vec<ServerDirective> {
+            Vec::new()
+        }
+        fn begin_configuration(&self) -> Vec<ServerDirective> {
+            Vec::new()
+        }
+        fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> {
+            Vec::new()
+        }
+        fn begin_chunk_batch(&self) -> ServerDirective {
+            ServerDirective::None
+        }
+        fn encode_chunk(&self, _cx: i32, _cz: i32, _column: &ChunkColumn) -> ServerDirective {
+            ServerDirective::None
+        }
+        fn end_chunk_batch(&self, _batch_size: i32) -> ServerDirective {
+            ServerDirective::None
+        }
+    }
+
+    /// A [`ChunkSource`] that hands out an all-air column instantly and records
+    /// **per-coordinate** how many times it was asked for one.
+    ///
+    /// Per-coordinate rather than a bare total because the two defects this
+    /// counts are different shapes: "49 columns generated at all" and "these 49
+    /// generated *twice*". A single total cannot tell them apart.
+    ///
+    /// The counter lives behind an [`Arc`] because
+    /// [`IntegratedServer::open_in_memory_with_mobs`] takes both of its sources
+    /// **by value**, so the test cannot keep a borrow of either.
+    #[derive(Debug, Clone)]
+    struct CountingSource {
+        calls: Arc<Mutex<HashMap<(i32, i32), usize>>>,
+    }
+
+    impl CountingSource {
+        fn new(calls: &Arc<Mutex<HashMap<(i32, i32), usize>>>) -> Self {
+            Self {
+                calls: Arc::clone(calls),
+            }
+        }
+    }
+
+    impl ChunkSource for CountingSource {
+        fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+            *self
+                .calls
+                .lock()
+                .expect("counting source lock poisoned")
+                .entry((cx, cz))
+                .or_insert(0) += 1;
+            ChunkColumn::new(0, 16)
+        }
+    }
+
+    fn total(calls: &Arc<Mutex<HashMap<(i32, i32), usize>>>) -> usize {
+        calls
+            .lock()
+            .expect("counting source lock poisoned")
+            .values()
+            .sum()
+    }
+
+    /// The shell's own singleplayer parameters (`lodestone-shell/src/net.rs`),
+    /// so this gate measures the configuration a player actually opens a world
+    /// with rather than a convenient small one: `view_radius = 9`,
+    /// `mob_radius = view_radius.clamp(1, 3) = 3` (a 7×7 = **49**-column tick
+    /// area), mob centre block `(8, 8)`, six demo mobs.
+    const VIEW_RADIUS: i32 = 9;
+    const MOB_RADIUS: i32 = 3;
+
+    fn open_like_the_shell_does(
+        calls: &Arc<Mutex<HashMap<(i32, i32), usize>>>,
+    ) -> (IntegratedServer, DuplexStream) {
+        IntegratedServer::open_in_memory_with_mobs(
+            Silent,
+            CountingSource::new(calls),
+            CountingSource::new(calls),
+            (-MOB_RADIUS..=MOB_RADIUS, -MOB_RADIUS..=MOB_RADIUS),
+            (8, 8),
+            6,
+            VIEW_RADIUS,
+        )
+    }
+
+    /// **Issue #454's gate.** Opening a world must generate **zero** chunk
+    /// columns before returning.
+    ///
+    /// The number is exact and predicted from the code path, not observed and
+    /// written down: the constructor's job is to build handles and spawn tasks,
+    /// so the only column generation it can legitimately do is none. The
+    /// pre-fix figure is **49** — `MobHandle::seeded` ran a serial
+    /// `ChunkWorld::from_source` over the whole `mob_area` inside the
+    /// constructor, before any task spawned, which at the 909 ms per composed
+    /// column measured in `chunk_store` is the ~45 s stall issue #454 is about.
+    /// Observed pre-fix at 49 and post-fix at 0.
+    ///
+    /// # Why this is deterministic, with no polling
+    ///
+    /// `open_in_memory_with_mobs` is a plain `fn`. A spawned task is never
+    /// polled synchronously, and this test reads the counter with **no
+    /// intervening `.await`**, so nothing the constructor spawned can have run
+    /// yet. Do not add an `.await` between the call and the read — the seeding
+    /// task deliberately generates these columns *later*, so a yield would make
+    /// this gate race its own subject.
+    #[tokio::test]
+    async fn world_open_generates_no_columns_at_all() {
+        let calls = Arc::new(Mutex::new(HashMap::new()));
+        let (server, _client) = open_like_the_shell_does(&calls);
+        let generated = total(&calls);
+        assert_eq!(
+            generated,
+            0,
+            "opening a world must generate no columns on the calling thread; got {generated}. \
+             {} would mean mob seeding is back inside the constructor (issue #454).",
+            (2 * MOB_RADIUS + 1) * (2 * MOB_RADIUS + 1)
+        );
+        drop(server);
+    }
+
+    /// The tick area, in the order the seeding task asks for it.
+    fn mob_area_coords() -> Vec<(i32, i32)> {
+        (-MOB_RADIUS..=MOB_RADIUS)
+            .flat_map(|cz| (-MOB_RADIUS..=MOB_RADIUS).map(move |cx| (cx, cz)))
+            .collect()
+    }
+
+    /// **Issue #454's second gate: once the seeding task has run, every column
+    /// of the tick area has been generated exactly once — not twice.**
+    ///
+    /// The duplication was the actual defect (the ~11 s stall was its symptom):
+    /// mob seeding built its own `ChunkWorld` from a **second, independent**
+    /// generator that shared nothing with the `ChunkStore` the connection serves
+    /// from, so opening a world generated the same 49 columns twice. Both sources
+    /// here report into one counter, exactly as two instances of the same seeded
+    /// generator would in production, so a second generation shows up as a count
+    /// of 2 for some coordinate.
+    ///
+    /// Asserted per coordinate, not as a total: "98 generations" and "49
+    /// generations of which one column was fetched 50 times" are different bugs,
+    /// and a bare total cannot tell them apart.
+    #[tokio::test]
+    async fn seeding_generates_each_tick_area_column_exactly_once() {
+        let expected = mob_area_coords();
+        let calls = Arc::new(Mutex::new(HashMap::new()));
+        let (server, _client) = open_like_the_shell_does(&calls);
+
+        // Bounded, and it waits on a *count* rather than a duration: the seeding
+        // task hands its batch to the blocking pool, so there is no synchronous
+        // point to observe instead. 400 × 5 ms is four orders of magnitude more
+        // than 49 all-air columns need and still terminates rather than hanging
+        // if the task never runs at all — which is the failure this would
+        // otherwise mask.
+        let mut waited = 0;
+        while total(&calls) < expected.len() && waited < 400 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            waited += 1;
+        }
+        assert!(
+            waited < 400,
+            "the seeding task never generated the tick area; it is not running at all"
+        );
+
+        let counts = calls.lock().expect("counting source lock poisoned").clone();
+        let worst = counts.iter().max_by_key(|entry| *entry.1);
+        assert_eq!(
+            worst.map(|(_, n)| *n),
+            Some(1),
+            "every column must be generated exactly once; worst offender {worst:?}. \
+             A count of 2 means mob seeding is reading a second generator again \
+             instead of the shared ChunkStore (issue #454)."
+        );
+        let mut generated: Vec<(i32, i32)> = counts.keys().copied().collect();
+        generated.sort_unstable();
+        let mut wanted = expected.clone();
+        wanted.sort_unstable();
+        assert_eq!(
+            generated, wanted,
+            "seeding must fetch exactly the tick area, no more and no less"
+        );
+
+        drop(server);
+    }
+
+    /// **The control for the gate above.** The pre-fix arrangement — two
+    /// independent sources, one for the connection's store and one for mob
+    /// pathing — must generate the tick area **twice**.
+    ///
+    /// Reproduced rather than described: `ChunkStore::new(source)` is what the
+    /// connection path serves from, `MobHandle::seeded(&world_source, …)` is what
+    /// the constructor used to call, and both report into a single counter the
+    /// way two instances of one seeded generator do in production. Predicted
+    /// exactly: 49 columns × 2 paths = **98**, with every coordinate at 2.
+    ///
+    /// If this ever reads 49, the two paths have stopped being independent and
+    /// the gate above is passing for a reason that has nothing to do with the
+    /// fix.
+    #[test]
+    fn control_two_independent_sources_generate_the_tick_area_twice() {
+        let calls = Arc::new(Mutex::new(HashMap::new()));
+        let store = ChunkStore::new(CountingSource::new(&calls));
+        let world_source = CountingSource::new(&calls);
+
+        // The connection path: the initial view, of which the tick area is a
+        // subset. Only the tick area is fetched here — that is the overlap, and
+        // the overlap is the whole point.
+        for &(cx, cz) in &mob_area_coords() {
+            let _ = store.column(cx, cz);
+        }
+        // The mob path, exactly as the pre-#454 constructor called it.
+        let handle = MobHandle::seeded(
+            &world_source,
+            -MOB_RADIUS..=MOB_RADIUS,
+            -MOB_RADIUS..=MOB_RADIUS,
+            8,
+            8,
+            6,
+        );
+
+        let counts = calls.lock().expect("counting source lock poisoned").clone();
+        let area = mob_area_coords().len();
+        assert_eq!(
+            total(&calls),
+            area * 2,
+            "two independent sources must generate the tick area twice ({area} × 2)"
+        );
+        assert!(
+            counts.values().all(|&n| n == 2),
+            "and every single column must be generated twice, not just the total \
+             happening to double: {counts:?}"
+        );
+        drop(handle);
+    }
+
+    /// **The control for the gate above, and it must fail the same assertion.**
+    ///
+    /// `MobHandle::seeded` is *exactly* the call
+    /// `open_in_memory_with_mobs` used to make, inline, before it spawned
+    /// anything — it survives unchanged (see its own doc comment), so the work
+    /// issue #454 moved can still be measured directly rather than described.
+    /// Driving it over the same [`CountingSource`] and the same `mob_area` must
+    /// generate **49** columns, on the calling thread, with nothing spawned.
+    ///
+    /// Two things this proves that the gate alone cannot:
+    ///
+    /// * the detector fires — a `CountingSource` that silently counted nothing
+    ///   would pass `world_open_generates_no_columns_at_all` vacuously, and this
+    ///   is the reading that rules that out;
+    /// * the pre-fix figure was 49 and not some smaller number, so the ~45 s
+    ///   arithmetic in issue #454 is multiplying the right count.
+    ///
+    /// It also pins the area arithmetic: `(2 * 3 + 1)²`, i.e. the `-3..=3`
+    /// square the shell's `view_radius.clamp(1, 3)` produces — **not** the 3×3
+    /// a casual reading of "mob radius 3" suggests.
+    #[test]
+    fn control_the_old_synchronous_seeding_generates_the_whole_mob_area() {
+        const EXPECTED: usize = ((2 * MOB_RADIUS + 1) * (2 * MOB_RADIUS + 1)) as usize;
+        let calls = Arc::new(Mutex::new(HashMap::new()));
+        let source = CountingSource::new(&calls);
+        let handle = MobHandle::seeded(
+            &source,
+            -MOB_RADIUS..=MOB_RADIUS,
+            -MOB_RADIUS..=MOB_RADIUS,
+            8,
+            8,
+            6,
+        );
+        let generated = total(&calls);
+        assert_eq!(
+            generated, EXPECTED,
+            "the pre-#454 constructor generated the whole mob area synchronously; \
+             this control must reproduce that exactly, and 0 would mean the counter \
+             is not wired and the gate beside it is vacuous"
+        );
+        assert!(
+            generated > 0,
+            "a control that counts nothing cannot detect the defect"
+        );
+        drop(handle);
+    }
+
+    /// Wall-clock world-open cost with the **real** composed overworld
+    /// generator, at the shell's own parameters — a *recording*, not a gate.
+    ///
+    /// `#[ignore]`d and duration-shaped on purpose: durations in this repo
+    /// showed a 2.3× spread from machine load alone on an identical release
+    /// binary, so this figure is provisional unless the box is quiet. The
+    /// assertion that actually protects the fix is
+    /// [`world_open_generates_no_columns_at_all`] above, which counts.
+    ///
+    /// Run with:
+    /// `cargo test --release -p lodestone-server --lib -- --ignored --nocapture world_open_wall_clock`
+    #[tokio::test]
+    #[ignore = "wall-clock recording with the real overworld generator; run explicitly \
+                with --release -- --ignored --nocapture"]
+    async fn world_open_wall_clock_with_the_real_generator() {
+        let seed = 42;
+
+        // The pre-fix cost, measured rather than deduced: this is the exact call
+        // the constructor used to make inline. Run first, on the same box in the
+        // same second as the post-fix reading below, so the pair is a comparison
+        // and not two independent samples of a 2.3×-noisy quantity.
+        let started = std::time::Instant::now();
+        let seeded = MobHandle::seeded(
+            &crate::overworld_chunk_source(seed),
+            -MOB_RADIUS..=MOB_RADIUS,
+            -MOB_RADIUS..=MOB_RADIUS,
+            8,
+            8,
+            6,
+        );
+        let before = started.elapsed();
+        drop(seeded);
+
+        let started = std::time::Instant::now();
+        let (server, _client) = IntegratedServer::open_in_memory_with_mobs(
+            Silent,
+            crate::overworld_chunk_source(seed),
+            crate::overworld_chunk_source(seed),
+            (-MOB_RADIUS..=MOB_RADIUS, -MOB_RADIUS..=MOB_RADIUS),
+            (8, 8),
+            6,
+            VIEW_RADIUS,
+        );
+        let after = started.elapsed();
+
+        println!("pre-#454 synchronous mob seeding (49 columns): {before:?}");
+        println!("post-#454 world open (constructor only):       {after:?}");
+        drop(server);
     }
 }
