@@ -22,6 +22,7 @@ use lodestone_data::block_items;
 use lodestone_net::{Connection, NetError, Transport};
 
 use crate::block_entities::{BlockEntity, BlockEntityHandle, block_entity_for_item};
+use crate::brewing::{Bottle, BottleKind, is_ingredient};
 use crate::command::{CommandCaller, CommandDispatch, CommandSession};
 use crate::chunk::{
     AIR, ChunkColumn, ChunkSource, generate_columns_offloaded, generate_columns_parallel,
@@ -1914,6 +1915,188 @@ fn placed_block_state(block: &str, player_yaw: Option<f32>) -> Option<String> {
     }
 }
 
+/// Which of a brewing stand's five slots a held item routes to — decided by
+/// item identity alone, mirroring `BrewingStandBlockEntity.canPlaceItem`
+/// (`:217-227`: slots 0-2 take potions/bottles, slot 3 takes any
+/// `potionBrewing.isIngredient`, slot 4 takes `ItemTags.BREWING_FUEL`).
+enum BrewingSlot {
+    /// Blaze powder — `ItemTags.BREWING_FUEL`'s sole member (slot 4).
+    Fuel,
+    /// A bottle this crate can represent — a water bottle, whose potion the
+    /// item id fully determines. See [`bottle_from_item`] for why the other
+    /// three bottle-shaped items are *not* insertable (slots 0-2).
+    Bottle(Bottle),
+    /// Any [`is_ingredient`] item (slot 3).
+    Ingredient,
+}
+
+/// The outcome of one right-click on a brewing stand — this crate's
+/// one-item-per-click stand-in for the brewing menu it cannot open (see
+/// [`BlockEntity::menu_name`]'s doc comment for why a brewing stand answers
+/// `None` there), the same shape `ComposterBlock.useItemOn` establishes for
+/// the composter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BrewingInsertOutcome {
+    /// An item moved out of the player's hand into the stand; the player's
+    /// selected hotbar slot now holds `selected` (`None` when the last of a
+    /// stack was consumed).
+    Inserted(Option<ItemStack>),
+    /// The right-click was consumed by the stand but nothing moved — a valid
+    /// brewing item whose matching slot was already full (or held a different
+    /// stack). No placement may follow: this stands in for the menu that
+    /// would have consumed the click in vanilla. Distinct from `NotBrewing`
+    /// because some potion ingredients (`minecraft:stone`, `slime_block`,
+    /// `cobweb`) are themselves placeable blocks, and a full brewing stand
+    /// must never silently place one.
+    Consumed,
+    /// The held item belongs to no brewing-stand slot — the caller falls
+    /// through to ordinary placement exactly as before this branch existed.
+    NotBrewing,
+}
+
+/// The one bottle-shaped item this crate can put in a brewing-stand bottle
+/// slot: a water bottle, whose potion is fully determined by its item id.
+///
+/// A `minecraft:potion`/`splash_potion`/`lingering_potion` stack carries its
+/// actual potion in the `minecraft:potion_contents` data component, which
+/// `lodestone_model::ItemComponents` does not model (see `brewing.rs`'s
+/// module doc: "no potion-contents component anywhere in `ItemComponents`"),
+/// so its contents are unknowable here. Inserting one with a guessed potion
+/// would let the mix table brew a *wrong* potion from it, so it is rejected
+/// rather than guessed — the same declared gap the `Bottle` type itself is.
+#[must_use]
+fn bottle_from_item(item: &str) -> Option<Bottle> {
+    match item {
+        "minecraft:water_bottle" => Some(Bottle::new(BottleKind::Potion, "minecraft:water")),
+        _ => None,
+    }
+}
+
+/// Routes `item` to the brewing-stand slot it belongs in, or `None` if it
+/// belongs nowhere — mirroring `BrewingStandBlockEntity.canPlaceItem`
+/// (`:217-227`). Blaze powder is checked first even though it is *also* a
+/// potion ingredient (strength, `brewing.rs`'s `potion_mix`): the fuel slot
+/// wins, matching the slot-4 test vanilla applies.
+#[must_use]
+fn brewing_slot_for(item: &str) -> Option<BrewingSlot> {
+    if item == "minecraft:blaze_powder" {
+        return Some(BrewingSlot::Fuel);
+    }
+    if let Some(bottle) = bottle_from_item(item) {
+        return Some(BrewingSlot::Bottle(bottle));
+    }
+    if is_ingredient(item) {
+        return Some(BrewingSlot::Ingredient);
+    }
+    None
+}
+
+/// One ingredient/fuel stack's cap before a further right-click is refused —
+/// vanilla's default `MAX_STACK_SIZE` (64), the same number `furnace.rs`'s
+/// [`MAX_STACK_SIZE`](crate::furnace::MAX_STACK_SIZE) records for output stacks.
+const BREWING_STACK_CAP: u32 = 64;
+
+/// The window-0 menu slot of the hotbar's first (native) slot — vanilla's
+/// `InventoryMenu`: hotbar menu slots `36..=44` address native hotbar `0..=8`
+/// (see `crate::inventory::PlayerInventory`'s own doc table). The window-0
+/// `container_set_slot` [`apply_use_item_on`] sends after a brewing insert
+/// addresses the selected hotbar slot by this menu index, not its native one.
+const WINDOW_ZERO_HOTBAR_FIRST: i32 = 36;
+
+/// Attempts to insert the player's held item into the brewing stand at `pos`,
+/// consuming one from the selected hotbar stack when it lands — the wiring
+/// that makes `BrewingStand::set_bottle`/`set_ingredient`/`set_fuel_item` (and
+/// therefore the whole brew state machine) reachable from a player at all.
+/// See [`BrewingInsertOutcome`] for the three outcomes.
+///
+/// Merging follows the slot's own shape: fuel and ingredient stacks merge into
+/// an existing matching stack up to [`BREWING_STACK_CAP`], while a bottle only
+/// ever occupies an empty slot (vanilla's `canPlaceItem` empty-slot test,
+/// `:225`, and bottles do not stack).
+fn insert_into_brewing_stand(
+    block_entities: &BlockEntityHandle,
+    inventory: &mut PlayerInventory,
+    pos: BlockPos,
+) -> BrewingInsertOutcome {
+    // The registry lookup happens first, so a right-click on any other block
+    // is untouched by this branch entirely.
+    let is_stand = block_entities.with(|reg| matches!(reg.get(pos), Some(BlockEntity::BrewingStand(_))));
+    if !is_stand {
+        return BrewingInsertOutcome::NotBrewing;
+    }
+    let Some(held) = inventory.selected_item().cloned() else {
+        return BrewingInsertOutcome::NotBrewing;
+    };
+    let item = held.item.to_string();
+    let Some(slot) = brewing_slot_for(&item) else {
+        return BrewingInsertOutcome::NotBrewing;
+    };
+
+    // The slot write happens inside the registry lock — nothing else can see
+    // a half-inserted item, and the write is validated against the live slot
+    // contents in the same critical section.
+    let moved = block_entities.with(|reg| {
+        let Some(entity) = reg.get_mut(pos) else {
+            return false;
+        };
+        let BlockEntity::BrewingStand(stand) = entity else {
+            return false;
+        };
+        match slot {
+            BrewingSlot::Fuel => match stand.fuel_item() {
+                Some(("minecraft:blaze_powder", count)) if count < BREWING_STACK_CAP => {
+                    stand.set_fuel_item(Some(("minecraft:blaze_powder".into(), count + 1)));
+                    true
+                }
+                None => {
+                    stand.set_fuel_item(Some(("minecraft:blaze_powder".into(), 1)));
+                    true
+                }
+                _ => false,
+            },
+            BrewingSlot::Bottle(bottle) => {
+                for index in 0..3 {
+                    if stand.bottle(index).is_none() {
+                        stand.set_bottle(index, Some(bottle));
+                        return true;
+                    }
+                }
+                false
+            }
+            BrewingSlot::Ingredient => match stand.ingredient() {
+                Some((existing, count)) if existing == item.as_str() && count < BREWING_STACK_CAP => {
+                    stand.set_ingredient(Some((item.clone(), count + 1)));
+                    true
+                }
+                None => {
+                    stand.set_ingredient(Some((item.clone(), 1)));
+                    true
+                }
+                _ => false,
+            },
+        }
+    });
+    if !moved {
+        return BrewingInsertOutcome::Consumed;
+    }
+
+    // Consume one from the held stack — vanilla's `itemStack.consume(1)`.
+    let native = usize::from(inventory.selected_hotbar_slot());
+    let remainder = match inventory.native(native).cloned() {
+        Some(mut stack) => {
+            stack.count -= 1;
+            if stack.count == 0 {
+                None
+            } else {
+                Some(stack)
+            }
+        }
+        None => None,
+    };
+    inventory.set_native(native, remainder.clone());
+    BrewingInsertOutcome::Inserted(remainder)
+}
+
 /// Applies a right-click placement, mirroring
 /// `ServerGamePacketListenerImpl.handleUseItemOn`'s replace-vs-relative
 /// choice of placement cell (`BlockPlaceContext`'s constructor: place at the
@@ -1969,11 +2152,18 @@ fn placed_block_state(block: &str, player_yaw: Option<f32>) -> Option<String> {
 /// `ServerGamePacketListenerImpl.handleUseItemOn` runs the clicked block's
 /// own `useItemOn`/`useWithoutItem` (which is what opens a furnace/hopper's
 /// menu) **before** any `BlockPlaceContext` placement logic, and a block
-/// that opens a menu never falls through to placement. See
-/// [`BlockEntity::menu_name`]'s own doc comment for why a composter or
-/// brewing stand at `pos` does *not* take this branch (each for a different
-/// reason) and instead falls through to the placement logic below exactly
-/// as before this change.
+/// that opens a menu never falls through to placement.
+///
+/// **A brewing stand at `pos` is this "clicked block's own use" step too,
+/// but without a menu** (issue #252): it cannot be opened — `menu_name`
+/// answers `None`, because its `Bottle` slots are not real `ItemStack`s — so
+/// [`insert_into_brewing_stand`] stands in for the menu with a direct
+/// one-item-per-click insert, the shape `ComposterBlock.useItemOn` uses for
+/// the composter (which is the *other* kind `menu_name` answers `None` for,
+/// there because vanilla gives a composter no menu at all). A held item that
+/// belongs in a brewing stand is routed into the matching slot and consumed;
+/// an unrelated held item still falls through to the placement logic below
+/// exactly as before this change.
 #[allow(clippy::too_many_arguments)]
 async fn apply_use_item_on<T, P, S>(
     conn: &mut Connection<T>,
@@ -1987,7 +2177,10 @@ async fn apply_use_item_on<T, P, S>(
     // until the first packet carrying angles arrives; placement then falls
     // back to the block's default state.
     player_yaw: Option<f32>,
-    inventory: &PlayerInventory,
+    // `&mut`, not `&`: a brewing-stand insertion consumes one item from the
+    // player's selected hotbar stack (issue #252), and only a mutable
+    // inventory can write the remainder back.
+    inventory: &mut PlayerInventory,
     block_entities: &BlockEntityHandle,
     next_window_id: &mut i32,
     open_container: &mut Option<OpenContainer>,
@@ -2020,6 +2213,35 @@ where
             container_sync,
         )
         .await;
+    }
+
+    // Issue #252, the missing-consumer half: a right-click on a brewing stand
+    // routes the held item into the matching slot (fuel/bottle/ingredient)
+    // and consumes one from the player's hand. See
+    // [`insert_into_brewing_stand`]'s doc comment for the three outcomes.
+    match insert_into_brewing_stand(block_entities, inventory, pos) {
+        BrewingInsertOutcome::Inserted(selected) => {
+            // The stand consumed an item. Tell the client's window-0 hotbar
+            // slot (menu slots `36..=44` -> native `0..=8`, vanilla's
+            // `InventoryMenu`) so the held count visibly drops — the same
+            // server-initiated window-0 slot update vanilla broadcasts after
+            // a composter click consumes one. `state_id` is `0`: this crate
+            // applies a container click's own diff verbatim and never
+            // validates a stale id (`apply_container_clicked`), so the
+            // client adopting the value is harmless.
+            let hotbar_slot = i32::from(inventory.selected_hotbar_slot()) + WINDOW_ZERO_HOTBAR_FIRST;
+            apply(conn, state, proto.encode_container_slot(0, 0, hotbar_slot, selected.as_ref())).await?;
+            return Ok(());
+        }
+        BrewingInsertOutcome::Consumed => {
+            // The stand ate the click but nothing moved (the matching slot
+            // was full). No placement may follow — some ingredients are
+            // themselves placeable blocks, and a full stand must not place one.
+            return Ok(());
+        }
+        BrewingInsertOutcome::NotBrewing => {
+            // Fall through to the ordinary placement logic below.
+        }
     }
 
     let neighbour = relative(pos, face);
@@ -3420,6 +3642,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::brewing::BrewingStand;
     use crate::chunk::ChunkColumn;
     use crate::furnace::{Furnace, FurnaceKind};
     use crate::protocol::MetadataField;
@@ -3871,6 +4094,245 @@ mod tests {
             _ => None,
         });
         assert_eq!(furnace_input, None, "a stale window id must not mutate the block entity");
+    }
+
+    // -- brewing stand interaction (issue #252) --
+
+    /// A brewing stand registered at `pos`, and a player inventory whose
+    /// selected hotbar slot (0) holds `held`.
+    fn brew_scene(held: Option<ItemStack>) -> (BlockEntityHandle, PlayerInventory, BlockPos) {
+        let block_entities = BlockEntityHandle::new();
+        let pos = BlockPos::new(4, 64, 4);
+        block_entities.with(|reg| reg.insert(pos, BlockEntity::BrewingStand(BrewingStand::new())));
+        let mut inventory = PlayerInventory::new();
+        inventory.set_native(0, held);
+        (block_entities, inventory, pos)
+    }
+
+    /// The stand's ingredient slot as owned `(item, count)`, read back through
+    /// the registry.
+    fn ingredient_of(block_entities: &BlockEntityHandle, pos: BlockPos) -> Option<(String, u32)> {
+        block_entities.with(|reg| match reg.get(pos) {
+            Some(BlockEntity::BrewingStand(stand)) => {
+                stand.ingredient().map(|(item, count)| (item.to_string(), count))
+            }
+            _ => None,
+        })
+    }
+
+    /// A water bottle lands in bottle slot 0 and the single held item is fully
+    /// consumed — the basic insert that makes `set_bottle` reachable at all.
+    #[test]
+    fn right_click_puts_a_water_bottle_in_the_first_empty_bottle_slot_and_consumes_it() {
+        let (block_entities, mut inventory, pos) = brew_scene(Some(stack("minecraft:water_bottle", 1)));
+
+        let outcome = insert_into_brewing_stand(&block_entities, &mut inventory, pos);
+
+        assert_eq!(
+            outcome,
+            BrewingInsertOutcome::Inserted(None),
+            "a single bottle is fully consumed"
+        );
+        assert_eq!(inventory.native(0), None, "the selected slot is empty after the click");
+        let bottle = block_entities.with(|reg| match reg.get(pos) {
+            Some(BlockEntity::BrewingStand(stand)) => stand.bottle(0).cloned(),
+            _ => None,
+        });
+        assert_eq!(
+            bottle,
+            Some(Bottle::new(BottleKind::Potion, "minecraft:water")),
+            "the water bottle must land in bottle slot 0"
+        );
+    }
+
+    /// Blaze powder lands in the fuel slot and one of a multi-count stack is
+    /// consumed, leaving the remainder in hand.
+    #[test]
+    fn right_click_puts_blaze_powder_in_the_fuel_slot_and_consumes_one() {
+        let (block_entities, mut inventory, pos) = brew_scene(Some(stack("minecraft:blaze_powder", 3)));
+
+        let outcome = insert_into_brewing_stand(&block_entities, &mut inventory, pos);
+
+        assert_eq!(outcome, BrewingInsertOutcome::Inserted(Some(stack("minecraft:blaze_powder", 2))));
+        let fuel = block_entities.with(|reg| match reg.get(pos) {
+            Some(BlockEntity::BrewingStand(stand)) => {
+                stand.fuel_item().map(|(item, count)| (item.to_string(), count))
+            }
+            _ => None,
+        });
+        assert_eq!(fuel, Some(("minecraft:blaze_powder".to_string(), 1)));
+    }
+
+    /// **Control**: blaze powder is *also* a potion ingredient (strength,
+    /// `brewing.rs`'s `potion_mix`), so this proves the fuel routing wins over
+    /// the ingredient routing — the item lands only in the fuel slot.
+    #[test]
+    fn blaze_powder_routes_to_fuel_not_ingredient_even_though_it_is_both() {
+        let (block_entities, mut inventory, pos) = brew_scene(Some(stack("minecraft:blaze_powder", 1)));
+
+        let outcome = insert_into_brewing_stand(&block_entities, &mut inventory, pos);
+
+        assert_eq!(outcome, BrewingInsertOutcome::Inserted(None));
+        let (fuel, ingredient) = block_entities.with(|reg| match reg.get(pos) {
+            Some(BlockEntity::BrewingStand(stand)) => {
+                (stand.fuel_item().is_some(), stand.ingredient().is_some())
+            }
+            _ => (false, false),
+        });
+        assert!(fuel, "blaze powder must land in the fuel slot");
+        assert!(!ingredient, "it must not also land in the ingredient slot");
+    }
+
+    /// An ingredient lands in the ingredient slot, and a second click with the
+    /// same item **merges** into the existing stack rather than starting a new
+    /// one — one consumed from the hand each time.
+    #[test]
+    fn right_click_puts_an_ingredient_in_the_ingredient_slot_and_a_second_click_merges() {
+        let (block_entities, mut inventory, pos) = brew_scene(Some(stack("minecraft:nether_wart", 2)));
+
+        let first = insert_into_brewing_stand(&block_entities, &mut inventory, pos);
+        assert_eq!(first, BrewingInsertOutcome::Inserted(Some(stack("minecraft:nether_wart", 1))));
+
+        let second = insert_into_brewing_stand(&block_entities, &mut inventory, pos);
+        assert_eq!(second, BrewingInsertOutcome::Inserted(None), "the second of two is fully consumed");
+
+        assert_eq!(
+            ingredient_of(&block_entities, pos),
+            Some(("minecraft:nether_wart".to_string(), 2)),
+            "both clicks must merge into one stack of two"
+        );
+    }
+
+    /// A held item that belongs to no brewing-stand slot falls through without
+    /// consuming anything and without touching the stand — the caller's cue to
+    /// try ordinary placement.
+    #[test]
+    fn a_non_brewing_item_falls_through_without_touching_anything() {
+        let (block_entities, mut inventory, pos) = brew_scene(Some(stack("minecraft:diamond", 1)));
+
+        let outcome = insert_into_brewing_stand(&block_entities, &mut inventory, pos);
+
+        assert_eq!(outcome, BrewingInsertOutcome::NotBrewing);
+        assert_eq!(
+            inventory.native(0),
+            Some(&stack("minecraft:diamond", 1)),
+            "the item must stay in hand"
+        );
+        let empty_stand = block_entities.with(|reg| match reg.get(pos) {
+            Some(BlockEntity::BrewingStand(stand)) => {
+                stand.bottle(0).is_none() && stand.ingredient().is_none() && stand.fuel_item().is_none()
+            }
+            _ => false,
+        });
+        assert!(empty_stand, "nothing may land in the stand");
+    }
+
+    /// **Control**: a valid bottle with all three bottle slots full is consumed
+    /// without placing anything — the `Consumed` distinction exists because
+    /// some ingredients (`minecraft:stone`, `slime_block`, `cobweb`) are
+    /// themselves placeable blocks, and a full stand must never fall through to
+    /// placement and place one.
+    #[test]
+    fn a_valid_bottle_with_all_three_slots_full_is_consumed_without_placing() {
+        let (block_entities, mut inventory, pos) = brew_scene(Some(stack("minecraft:water_bottle", 1)));
+        block_entities.with(|reg| {
+            if let Some(BlockEntity::BrewingStand(stand)) = reg.get_mut(pos) {
+                for slot in 0..3 {
+                    stand.set_bottle(slot, Some(Bottle::new(BottleKind::Potion, "minecraft:awkward")));
+                }
+            }
+        });
+
+        let outcome = insert_into_brewing_stand(&block_entities, &mut inventory, pos);
+
+        assert_eq!(outcome, BrewingInsertOutcome::Consumed);
+        assert_eq!(
+            inventory.native(0),
+            Some(&stack("minecraft:water_bottle", 1)),
+            "nothing may be consumed from a full stand"
+        );
+    }
+
+    /// A different ingredient already in the ingredient slot is not silently
+    /// overwritten — the click is consumed and the original stack survives.
+    #[test]
+    fn a_different_ingredient_does_not_overwrite_the_one_already_in_the_slot() {
+        let (block_entities, mut inventory, pos) = brew_scene(Some(stack("minecraft:redstone", 1)));
+        block_entities.with(|reg| {
+            if let Some(BlockEntity::BrewingStand(stand)) = reg.get_mut(pos) {
+                stand.set_ingredient(Some(("minecraft:nether_wart".into(), 1)));
+            }
+        });
+
+        let outcome = insert_into_brewing_stand(&block_entities, &mut inventory, pos);
+
+        assert_eq!(outcome, BrewingInsertOutcome::Consumed);
+        assert_eq!(inventory.native(0), Some(&stack("minecraft:redstone", 1)), "nothing may be consumed");
+        assert_eq!(
+            ingredient_of(&block_entities, pos),
+            Some(("minecraft:nether_wart".to_string(), 1)),
+            "the original ingredient is untouched"
+        );
+    }
+
+    /// **Control**: a `minecraft:potion`/`splash_potion`/`lingering_potion`
+    /// stack's actual potion lives in an unmodeled `potion_contents` component
+    /// (see [`bottle_from_item`]'s doc comment), so it is rejected rather than
+    /// guessed — inserting it with a wrong potion would let the mix table brew
+    /// the wrong thing from it.
+    #[test]
+    fn an_unmodelable_potion_item_is_rejected_not_guessed() {
+        let (block_entities, mut inventory, pos) = brew_scene(Some(stack("minecraft:potion", 1)));
+
+        let outcome = insert_into_brewing_stand(&block_entities, &mut inventory, pos);
+
+        assert_eq!(outcome, BrewingInsertOutcome::NotBrewing);
+        assert_eq!(inventory.native(0), Some(&stack("minecraft:potion", 1)), "the potion must stay in hand");
+        let no_bottle = block_entities.with(|reg| match reg.get(pos) {
+            Some(BlockEntity::BrewingStand(stand)) => stand.bottle(0).is_none(),
+            _ => false,
+        });
+        assert!(no_bottle, "no bottle may be fabricated from an unmodelable potion");
+    }
+
+    /// **Control**: an ingredient stack already at the 64 cap is not grown past
+    /// it — the click is consumed without moving anything.
+    #[test]
+    fn an_ingredient_stack_at_the_cap_is_not_grown_further() {
+        let (block_entities, mut inventory, pos) = brew_scene(Some(stack("minecraft:nether_wart", 1)));
+        block_entities.with(|reg| {
+            if let Some(BlockEntity::BrewingStand(stand)) = reg.get_mut(pos) {
+                stand.set_ingredient(Some(("minecraft:nether_wart".into(), BREWING_STACK_CAP)));
+            }
+        });
+
+        let outcome = insert_into_brewing_stand(&block_entities, &mut inventory, pos);
+
+        assert_eq!(outcome, BrewingInsertOutcome::Consumed);
+        assert_eq!(
+            inventory.native(0),
+            Some(&stack("minecraft:nether_wart", 1)),
+            "nothing may be consumed when the slot is full"
+        );
+        assert_eq!(
+            ingredient_of(&block_entities, pos),
+            Some(("minecraft:nether_wart".to_string(), BREWING_STACK_CAP)),
+            "the full stack is untouched"
+        );
+    }
+
+    /// A position holding no brewing stand is not a brewing interaction at all,
+    /// regardless of the held item.
+    #[test]
+    fn a_position_without_a_brewing_stand_is_not_a_brewing_interaction() {
+        let block_entities = BlockEntityHandle::new();
+        let mut inventory = PlayerInventory::new();
+        inventory.set_native(0, Some(stack("minecraft:nether_wart", 1)));
+
+        let outcome = insert_into_brewing_stand(&block_entities, &mut inventory, BlockPos::new(9, 9, 9));
+
+        assert_eq!(outcome, BrewingInsertOutcome::NotBrewing);
+        assert_eq!(inventory.native(0), Some(&stack("minecraft:nether_wart", 1)));
     }
 
     /// [`join_view_rings`]'s shape, at the three inputs that matter: the shell's
