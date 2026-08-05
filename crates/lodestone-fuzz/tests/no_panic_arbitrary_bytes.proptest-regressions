@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc bb221b927e9774d686c417a526c7dee83d817e8031523eec39d7bd86ca64b254 # shrinks to family = V340, state = Play, use_declared_id = true, id_pick = 4206400410222768096, arbitrary_id = 0, payload = [8, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]
