@@ -113,6 +113,33 @@ impl Composter {
         Self::default()
     }
 
+    /// Rebuilds a composter from persisted state — see
+    /// [`crate::furnace::Furnace::restore`] for why this is one total
+    /// constructor rather than a setter per field.
+    ///
+    /// **Vanilla has no composter block entity at all**: its fill level is a
+    /// block-state property (`minecraft:composter[level=0..8]`) and the
+    /// 20-tick ready delay is a scheduled block tick. This crate models it as
+    /// a block entity instead (`crate::block_entities`), so
+    /// [`ticks_until_ready`](Self::ticks_until_ready) has no vanilla field to
+    /// live in and [`crate::chunk_nbt`] writes the whole thing under a
+    /// namespaced id. See that module for what a real vanilla server does
+    /// with it.
+    #[must_use]
+    pub fn restore(level: u8, ticks_until_ready: Option<u8>) -> Self {
+        Self {
+            level,
+            ticks_until_ready,
+        }
+    }
+
+    /// Ticks left on the level-7 → level-8 delay, for persistence. `None`
+    /// when no delay is running.
+    #[must_use]
+    pub fn ticks_until_ready(&self) -> Option<u8> {
+        self.ticks_until_ready
+    }
+
     /// The current fill level, `0..=8`.
     #[must_use]
     pub fn level(&self) -> u8 {

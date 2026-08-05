@@ -134,6 +134,26 @@ impl Hopper {
         Self::default()
     }
 
+    /// Rebuilds a hopper from persisted state — see [`Furnace::restore`]'s
+    /// own doc comment for why this is one total constructor rather than a
+    /// setter per field.
+    ///
+    /// `cooldown` is vanilla's `TransferCooldown`, which idles at `0` on disk
+    /// even though a *freshly placed* hopper starts at `NO_COOLDOWN_TIME =
+    /// -1`. Both mean "ready", so loading a vanilla-written `0` is correct
+    /// and not a lost tick.
+    #[must_use]
+    pub fn restore(items: [Option<ItemStack>; HOPPER_SIZE], cooldown: i32) -> Self {
+        Self { items, cooldown }
+    }
+
+    /// Ticks remaining before the next transfer attempt — vanilla's
+    /// `TransferCooldown`, for persistence.
+    #[must_use]
+    pub fn cooldown(&self) -> i32 {
+        self.cooldown
+    }
+
     #[must_use]
     pub fn slots(&self) -> &[Option<ItemStack>; HOPPER_SIZE] {
         &self.items
