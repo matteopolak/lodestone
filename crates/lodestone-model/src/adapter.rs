@@ -702,6 +702,19 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
     fn minecraft_versions(&self) -> &'static [&'static str];
 
     /// Returns whether this adapter supports `protocol`.
+    ///
+    /// **This may legitimately answer `true` for more than one number.** A
+    /// family crate covers a whole *wire era*, not necessarily a single
+    /// protocol revision (epic #343 groups 1.9.4/1.10.2/1.11.2 into one crate,
+    /// and 1.14.4/1.15.2, and 1.17.1/1.18.2), so implementations should test
+    /// membership in the crate's own `PROTOCOLS` slice rather than compare
+    /// against a single `PROTOCOL` constant.
+    ///
+    /// A multi-protocol family must also be **constructed with** the negotiated
+    /// protocol — `lodestone-registry` calls the family's `adapter_for` — since
+    /// that is the only thing it can select its per-protocol `packet_ids` table
+    /// by. [`Self::protocol_version`] then reports the negotiated number, not a
+    /// fixed one.
     fn supports(&self, protocol: i32) -> bool;
 
     /// Returns directives to execute immediately on connect.

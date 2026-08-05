@@ -54,4 +54,4 @@ pub mod packets;
 /// `docs/protocol-340-canonical-bridge.md`.
 pub use lodestone_canonical::{canonical, flattening};
 
-pub use adapter::{PROTOCOL, V340Adapter, adapter};
+pub use adapter::{PROTOCOL, PROTOCOLS, V340Adapter, adapter, adapter_for};
