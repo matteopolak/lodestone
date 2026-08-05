@@ -1084,6 +1084,15 @@ pub struct MenuNav {
     /// producer yet (see [`command_block`]'s module doc), so there is no
     /// non-empty default to construct eagerly.
     command_block: Option<command_block::CommandBlockState>,
+    /// The command tree the connected server sent (issue #471 step 2), pushed
+    /// down by `app`'s right-click handler off `net::CommandTreeCell` — this
+    /// module is pure and holds no client handle, so it cannot pull it.
+    ///
+    /// `None` off a live session, or before the server's `minecraft:commands`
+    /// arrives, and every consumer treats that as "offer no completions"
+    /// rather than as an empty tree. An `Arc` because a real 26.2 server's tree
+    /// is ~2,000 nodes: this is a shared read, never a copy.
+    command_tree: Option<std::sync::Arc<lodestone_model::command_tree::CommandTree>>,
 }
 
 impl Default for MenuNav {
@@ -1165,6 +1174,7 @@ impl MenuNav {
             double_click: super::focus::DoubleClickTracker::new(),
             click_clock: std::time::Instant::now(),
             command_block: None,
+            command_tree: None,
         }
     }
 
@@ -1618,6 +1628,27 @@ impl MenuNav {
     #[must_use]
     pub fn command_block(&self) -> Option<&command_block::CommandBlockState> {
         self.command_block.as_ref()
+    }
+
+    /// The server's command tree, for the screens that complete against it —
+    /// see [`Self::command_tree`]'s own field doc. `None` means "offer no
+    /// completions", never "an empty tree".
+    #[must_use]
+    pub fn command_tree(&self) -> Option<&lodestone_model::command_tree::CommandTree> {
+        self.command_tree.as_deref()
+    }
+
+    /// Push the server's command tree down from `app` (issue #471 step 2).
+    /// Idempotent and cheap — an `Arc` clone — so a caller that has one may
+    /// call this every time it opens a screen rather than tracking whether the
+    /// tree has changed. Passing `None` (no live session, or no
+    /// `minecraft:commands` yet) clears it, which is the honest state: a stale
+    /// tree from a previous server is worse than none.
+    pub fn set_command_tree(
+        &mut self,
+        tree: Option<std::sync::Arc<lodestone_model::command_tree::CommandTree>>,
+    ) {
+        self.command_tree = tree;
     }
 
     /// Opens the command block edit screen (issue #47) with `open`'s data —
@@ -2393,12 +2424,22 @@ impl MenuNav {
                 MenuAction::None
             }
             // Vanilla cycles the suggestion list with Tab/Up/Down
-            // (`CommandSuggestions.SuggestionsList.keyPressed`). With no
-            // command tree ever reaching this client yet (see
-            // `command_block`'s module doc and #436), there is nothing to
-            // cycle — left as a documented no-op rather than wiring input
-            // that has no data to act on.
-            MenuKey::Tab | MenuKey::Up | MenuKey::Down | MenuKey::Refresh => MenuAction::None,
+            // (`CommandSuggestions.SuggestionsList.keyPressed`). This comment
+            // used to end "With no command tree ever reaching this client yet
+            // … there is nothing to cycle" — true when written, stale since
+            // #470/#471: the tree the server sent is in `self.command_tree`,
+            // so Tab now completes against it (see
+            // `CommandBlockState::apply_completion`, including why it commits
+            // rather than cycles). Up/Down stay no-ops: they move a popup
+            // *selection* that is not modelled.
+            MenuKey::Tab => {
+                // `self.command_tree` is a disjoint field from the
+                // `self.command_block` `state` above, so this reads the tree
+                // without a second `&mut self`.
+                state.apply_completion(self.command_tree.as_deref());
+                MenuAction::None
+            }
+            MenuKey::Up | MenuKey::Down | MenuKey::Refresh => MenuAction::None,
         }
     }
 
