@@ -147,8 +147,11 @@
 //! adjacent chunks in a sweep (exactly the access pattern a real server/
 //! shell has), so neighbour work that's shared between two adjacent
 //! `column()` calls is redone from scratch every time. A per-generator
-//! neighbour cache (safe to memoize — generation is pure/deterministic) is
-//! the natural next step, not attempted this session:
+//! neighbour cache (safe to memoize — generation is pure/deterministic) was
+//! the natural next step, and has since **LANDED** — see [`PreOreCache`]/
+//! [`PostOreCache`] and [`Self::pre_ore_stage`] a few hundred lines below
+//! (`6509a97`). The rest of this paragraph is kept as the argument that
+//! produced it, because it named the real design constraint correctly:
 //! [`OverworldGenerator`] is used from multiple threads
 //! (`chunk::tests::parallel_generation_is_deterministic_and_matches_serial`
 //! in `lodestone-server` exercises this directly), so a correct cache needs
