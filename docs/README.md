@@ -665,6 +665,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   result to a runner. This is milestone zero of
   [`docs/plans/runtime-plugin-loading.md`](plans/runtime-plugin-loading.md), and every
   later milestone there — the wasm host included — arrives through it.
+- [The plugin task scheduler](./plugin-scheduler.md) — `TaskScheduler`
+  (`crates/lodestone-ecs/src/scheduler.rs`) is the delayed-and-repeating task API for
+  plugins — Bukkit's `BukkitScheduler.runTaskLater` / `runTaskTimer`, which is the
+  most-used non-event surface in the Java plugin ecosystem. A plugin schedules a
+  closure to run on a future `GameTick`, once or on a period, instead of hand-rolling
+  a countdown component plus a per-tick system that checks it. Issue #113.
 - [Pose-dependent dimensions and the fit gate](./pose-dimensions.md) — The player's
   collision box is `0.6 × 1.8` standing, `0.6 × 1.5` crouching and `0.6 × 0.6`
   swimming or elytra-gliding — and *which* of those applies is decided by a
