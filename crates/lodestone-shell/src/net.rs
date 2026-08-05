@@ -971,6 +971,23 @@ impl std::fmt::Debug for Origin {
 /// echoed into the handshake the server's own decoder ignores.
 const SINGLEPLAYER_ADDRESS: (&str, u16) = ("singleplayer", 0);
 
+/// How long a connected client waits for the server to send **any** packet
+/// before declaring the connection dead (issue #280).
+///
+/// Vanilla arms the same bound at the socket with Netty's
+/// `ReadTimeoutHandler(30)` — `Connection.java:432` — a 30-second stall that
+/// disconnects with `disconnect.timeout`. This mirrors it through the client
+/// library's `read_packet_timeout`, which is a **per-packet** window reset by
+/// every inbound packet. That is why 30 s is safely above the server's keep-alive
+/// cadence (15 s in `ServerCommonPacketListenerImpl.java:121`; our own
+/// `lodestone-server` sends on the same `KEEP_ALIVE_INTERVAL` of 15000 ms): a
+/// healthy session re-arms the window twice over, and only a server that has
+/// stopped sending entirely trips it. When it fires the driver task ends, the
+/// event sender drops, and the shell's existing `Ok(None)` → [`NetUpdate::Disconnected`]
+/// arm reports the loss — no new disconnect wiring, which is why this is one
+/// line on the builder.
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// How often a persistent singleplayer world writes its dirty chunks (issue
 /// #468).
 ///
@@ -1869,6 +1886,11 @@ fn run(
         // Respawn button (`Sim::respawn`) sends the action.
         let mut builder = ClientBuilder::new(server, profile, adapter)
             .connect_timeout(Some(Duration::from_secs(10)))
+            // Issue #280: arm the read timeout so a server that hangs (sends
+            // nothing) surfaces as a disconnect instead of stalling the session
+            // forever. The mechanism is per-packet, so the server's own 15-second
+            // keep-alive keeps a healthy session clear of it — see [`READ_TIMEOUT`].
+            .read_timeout(Some(READ_TIMEOUT))
             .respawn_policy(RespawnPolicy::Manual);
         if let Some(session) = auth {
             builder = builder.online_session(session);
