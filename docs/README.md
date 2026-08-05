@@ -1103,6 +1103,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   this crate, nothing in the workspace could save or load a world at all — `grep
   -rln 'RegionFile\|\.mca\b|region_file|Anvil\b'` across every `.rs` file returned
   nothing.
+- [World save and load](./world-save-load.md) — The wiring that makes a Lodestone
+  world survive quitting: `lodestone-server` loads chunk columns from Anvil region
+  files on disk and writes back everything the world mutated, through
+  `lodestone-anvil`'s container codec. Issue
+  [#437](https://github.com/matteopolak/lodestone/issues/437).
 - [World select, with creation disabled](./world-select.md) — `Screen::WorldSelect`
   — vanilla's `SelectWorldScreen`, reached from the title screen's **Singleplayer**
   button. A title, a search field, a world list, and six footer buttons: Play Selected
