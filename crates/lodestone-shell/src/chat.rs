@@ -36,11 +36,27 @@
 //! greedy phrase or `message` argument swallows the rest of the line; a
 //! quoted phrase reads to its closing `"`; everything else reads to the next
 //! space) and validated where a parser's grammar is simple enough to check
-//! locally (numeric bounds, `bool`, and the small fixed-domain parsers in
-//! [`local_domain`]). The first token that fails to match anything —
+//! locally — the Brigadier primitives via `lodestone-command` (issue #435,
+//! next paragraph), and the small fixed-domain Minecraft parsers via
+//! [`local_domain`]. The first token that fails to match anything —
 //! diverging from every viable child of the tree — ends the walk, and
 //! everything from there to the end of the line is
 //! [`HighlightKind::Unparsed`].
+//!
+//! **Argument validation delegates to `lodestone-command` (issue #435), not a
+//! hand-rolled copy.** [`validate_simple`]'s numeric bounds, `bool`, and
+//! string-kind checks run the matching `lodestone_command` argument type
+//! (`IntegerArgument`/`LongArgument`/`FloatArgument`/`DoubleArgument`/
+//! `BoolArgument`/`StringArgument`) over a `lodestone_command::StringReader`,
+//! and [`read_quoted`] is that reader's `read_string` — Brigadier's
+//! `\"`/`\\` escape handling and its `[0-9A-Za-z_.+-]` unquoted charset are
+//! no longer reimplemented here. Only the Minecraft-flavoured parsers
+//! (`GameMode`, `Operation`, `EntityAnchor`, `TeamColor`, `ScoreboardSlot`)
+//! stay local, because `lodestone-command` deliberately ships no Minecraft
+//! argument types; their fixed value sets remain in [`local_domain`]. One
+//! consequence: `StringReader` counts positions in `char`s while this
+//! module's spans are byte offsets, so [`read_quoted`] converts at the
+//! boundary.
 //!
 //! **That failure is only sometimes fatal to [`complete`], and getting this
 //! wrong was this module's own first bug.** Since the cursor is always at
@@ -128,6 +144,10 @@
 //! Minecraft's font is proportional.
 
 use lodestone_client::ClientAction;
+use lodestone_command::{
+    ArgumentType, BoolArgument, DoubleArgument, FloatArgument, IntegerArgument, LongArgument,
+    StringArgument, StringReader,
+};
 use lodestone_model::command_tree::{
     ArgumentParser, CommandSuggestionEntry, CommandTree, NodeKind, StringKind,
 };
@@ -300,9 +320,13 @@ pub enum Completion {
 /// `None` means "not locally enumerable" — see this module's own doc for why
 /// that routes to the server rather than offering nothing.
 ///
-/// Doubles as the validity check for these same parsers during highlighting:
-/// a value for one of these types is only valid when it is a member of its
-/// domain, which is exactly the completion condition too.
+/// Doubles as the validity check [`validate_simple`] falls back to during
+/// highlighting for the Minecraft-flavoured parsers that have no
+/// `lodestone-command` equivalent: a value for one of those types is only
+/// valid when it is a member of its domain, which is exactly the completion
+/// condition too. (The Brigadier primitives — `Bool` included — are validated
+/// by their `lodestone-command` argument type instead, issue #435; `Bool`
+/// stays in this table because it also drives completion.)
 ///
 /// Each domain is sourced from that parser's own vanilla `listSuggestions`
 /// (or, for `ScoreboardSlot`/`TeamColor`, the enum it suggests every member
@@ -370,60 +394,76 @@ fn next_space(body: &str, start: usize) -> usize {
         .map_or(body.len(), |offset| start + offset)
 }
 
-/// Reads a Brigadier-style quoted string starting at `body[start] == b'"'`.
-/// Supports `\"`/`\\` escapes (`StringReader.readQuotedString`'s own escape
-/// set — Brigadier library behaviour; see [`StringKind`]'s doc for the same
-/// "not sourced from `.cache/mc/26.2` this session" caveat). Returns
-/// `(end, valid)`; `valid` is `false` when the closing quote is never found,
-/// in which case `end == body.len()`.
-fn read_quoted(body: &str, start: usize) -> (usize, bool) {
-    let bytes = body.as_bytes();
-    let mut index = start + 1;
-    let mut escaped = false;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if escaped {
-            escaped = false;
-        } else if byte == b'\\' {
-            escaped = true;
-        } else if byte == b'"' {
-            return (index + 1, true);
-        }
-        index += 1;
-    }
-    (body.len(), false)
+/// The byte offset in `text` of the `char_offset`-th `char`, or `text.len()`
+/// when `char_offset` is past the end. `lodestone_command::StringReader`
+/// counts positions in `char`s while this module's spans are byte offsets;
+/// [`read_quoted`] is where the two meet.
+fn char_index_to_byte(text: &str, char_offset: usize) -> usize {
+    text.char_indices()
+        .nth(char_offset)
+        .map_or(text.len(), |(b, _)| b)
 }
 
-/// Whether `text` is a legal Brigadier unquoted string
-/// (`StringReader.isAllowedInUnquotedString`'s charset — again Brigadier
-/// library behaviour, not from this session's decompile).
-fn is_unquoted_string(text: &str) -> bool {
-    !text.is_empty()
-        && text
-            .bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z' | b'_' | b'-' | b'.' | b'+'))
+/// Reads a Brigadier-style quoted string starting at `body[start] == b'"'`,
+/// delegating to `lodestone_command::StringReader::read_string` (issue #435)
+/// rather than reimplementing `readQuotedString`'s `\"`/`\\` escape handling
+/// (Brigadier library behaviour — see [`StringKind`]'s doc for the "not
+/// sourced from `.cache/mc/26.2` this session" caveat). Returns `(end,
+/// valid)`, with `end` a **byte** offset into `body` (the reader counts in
+/// `char`s, hence [`char_index_to_byte`]); `valid` is `false` when the
+/// closing quote is never found, in which case `end == body.len()`.
+fn read_quoted(body: &str, start: usize) -> (usize, bool) {
+    let tail = &body[start..];
+    let mut reader = StringReader::new(tail);
+    match reader.read_string() {
+        Ok(_) => (start + char_index_to_byte(tail, reader.cursor()), true),
+        Err(_) => (body.len(), false),
+    }
+}
+
+/// Runs a `lodestone-command` argument type over `text` (an already-isolated
+/// token) and reports whether it consumed the token cleanly. The
+/// full-consumption check matters: `StringReader` stops at the first
+/// disallowed char (`read_int` on `12x` parses `12`, `read_unquoted_string`
+/// on `hi!` returns `hi`), and a value with trailing text is a *failed* token
+/// for a space-delimited argument, not a success.
+fn parse_ok(argument_type: &dyn ArgumentType, text: &str) -> bool {
+    let mut reader = StringReader::new(text);
+    argument_type
+        .parse(&mut reader)
+        .is_ok_and(|_| reader.cursor() == reader.len())
 }
 
 /// Whether `text` (already isolated as a single token) is a valid value for
-/// `parser`, for the parsers this module can check locally. Every other
-/// parser — anything with no numeric/`bool`/string-kind rule and no
-/// [`local_domain`] entry — is treated as always valid; see this module's
-/// own doc for why that is the deliberately safe direction to simplify in.
+/// `parser`. The Brigadier primitives — numeric bounds, `bool`, and the
+/// three string kinds — delegate to the matching `lodestone-command` argument
+/// type via [`parse_ok`] (issue #435), and the small fixed-domain Minecraft
+/// parsers check [`local_domain`] membership. Every other parser — opaque
+/// Minecraft types with no locally checkable grammar — is treated as always
+/// valid; see this module's own doc for why that is the deliberately safe
+/// direction to simplify in.
 fn validate_simple(parser: &ArgumentParser, text: &str) -> bool {
     match parser {
         ArgumentParser::Integer { min, max } => {
-            text.parse::<i32>().is_ok_and(|v| v >= *min && v <= *max)
+            parse_ok(&IntegerArgument::bounded(*min, *max), text)
         }
-        ArgumentParser::Long { min, max } => {
-            text.parse::<i64>().is_ok_and(|v| v >= *min && v <= *max)
-        }
+        ArgumentParser::Long { min, max } => parse_ok(&LongArgument::bounded(*min, *max), text),
         ArgumentParser::Float { min, max } => {
-            text.parse::<f32>().is_ok_and(|v| v >= *min && v <= *max)
+            parse_ok(&FloatArgument::bounded(*min, *max), text)
         }
         ArgumentParser::Double { min, max } => {
-            text.parse::<f64>().is_ok_and(|v| v >= *min && v <= *max)
+            parse_ok(&DoubleArgument::bounded(*min, *max), text)
         }
-        ArgumentParser::String(StringKind::SingleWord) => is_unquoted_string(text),
+        ArgumentParser::Bool => parse_ok(&BoolArgument, text),
+        ArgumentParser::String(StringKind::SingleWord) => {
+            parse_ok(&StringArgument::word(), text)
+        }
+        ArgumentParser::String(StringKind::QuotablePhrase) => {
+            parse_ok(&StringArgument::quotable(), text)
+        }
+        ArgumentParser::String(StringKind::GreedyPhrase) => {
+            parse_ok(&StringArgument::greedy(), text)
+        }
         _ => local_domain(parser).is_none_or(|domain| domain.contains(&text)),
     }
 }
