@@ -287,6 +287,32 @@ pub trait ChunkSource: Send + Sync {
     fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
         let _ = (x, y, z, name);
     }
+
+    /// Tells the source that the column at `(cx, cz)` is no longer resident in
+    /// whatever cache sits above it, so a layer that retains state per column
+    /// may release it.
+    ///
+    /// The default is a no-op, which is the correct behaviour for every source
+    /// that owns no per-column state — and for [`OverworldChunkSource`], whose
+    /// edit map *is* the world for a generator-only session and must therefore
+    /// never shrink.
+    ///
+    /// # This is a hint, not an instruction
+    ///
+    /// The caller makes no promise the column will not be asked for again a
+    /// moment later, so an implementor must stay correct if it is: releasing
+    /// state here is only sound when that state can be *reconstructed*.
+    /// [`crate::region_source::RegionChunkSource`] is the one implementor that
+    /// acts on it, and it does so only for a column it has already written to
+    /// disk — see its own doc for the invariant that makes that lossless.
+    ///
+    /// **Do no I/O here.** This is called from `ChunkStore`'s miss path, which
+    /// is the tick thread as often as not; the whole reason region writes go
+    /// through `spawn_blocking` is that a full-region write on that thread was
+    /// the last large performance defect in this crate.
+    fn unload(&self, cx: i32, cz: i32) {
+        let _ = (cx, cz);
+    }
 }
 
 /// Generates every column in `coords` across scoped OS threads over `&source`,

@@ -249,10 +249,22 @@ Named rather than left to be discovered:
 - **Block entities, entities and scheduled ticks are not persisted.** The chunk
   NBT is written with empty `block_entities`, `block_ticks` and `fluid_ticks`
   lists. A furnace keeps its position but not its contents across a reopen.
-- **No unload-driven save.** Chunks are written on the autosave timer and at
-  shutdown, not when evicted from `ChunkStore`. Eviction remains lossless
-  because the edit map is unbounded — which means the edit map is now the
-  process's real memory bound for a heavily-built world.
+- **Unload-driven saving is in** (the edit map is no longer unbounded), but the
+  release is **deferred to the next save**, never done at eviction. That is
+  deliberate: `ChunkStore` evicts on its *miss* path, which is frequently the
+  tick thread, and a region write there is the 10.86 s stall all over again.
+  So `ChunkSource::unload` is a `HashSet` insert, and
+  `WorldSaveHandle::save`'s sweep does the release on the blocking pool. The
+  consequence worth knowing: memory is reclaimed at autosave cadence (30 s),
+  not instantly, so peak retention is one autosave interval of evictions.
+
+  The invariant that makes dropping lossless is worth repeating before
+  changing any of it: *a column in `edits` but not in `dirty` has been written
+  to disk*. It holds because `set_block` marks a chunk dirty **while still
+  holding the `edits` lock**, and the sweep takes those two locks in the same
+  order — so the not-dirty check excludes a mid-flight edit rather than merely
+  making one unlikely. Change that ordering and the sweep silently drops
+  blocks.
 
 ## Configuration
 

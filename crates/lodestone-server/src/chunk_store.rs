@@ -208,7 +208,13 @@ impl Cache {
     /// on a **miss**, which has just paid a generation three to four orders of
     /// magnitude more expensive than 512 integer comparisons. A real LRU here
     /// would be optimising the cheap half.
-    fn evict_down_to(&mut self, capacity: usize) {
+    /// Returns the evicted coordinates so the caller can pass them to
+    /// [`ChunkSource::unload`] **after releasing the cache lock**. Notifying
+    /// from in here would call out into the source while holding this mutex,
+    /// which is both a lock-ordering hazard and a way to put the source's own
+    /// work on the critical section every miss pays.
+    fn evict_down_to(&mut self, capacity: usize) -> Vec<(i32, i32)> {
+        let mut evicted = Vec::new();
         while self.columns.len() > capacity {
             let Some(victim) = self
                 .columns
@@ -220,7 +226,9 @@ impl Cache {
             };
             self.columns.remove(&victim);
             self.evicted += 1;
+            evicted.push(victim);
         }
+        evicted
     }
 }
 
@@ -358,7 +366,15 @@ impl<S: ChunkSource> ChunkStore<S> {
                 });
             }
         }
-        cache.evict_down_to(self.capacity);
+        let evicted = cache.evict_down_to(self.capacity);
+        drop(guard);
+        // Outside the lock, deliberately: see `evict_down_to`. This is what
+        // lets the layer beneath release a column it has already written, so
+        // the edit map is no longer the process's real memory bound for a
+        // heavily-built world.
+        for (vx, vz) in evicted {
+            self.source.unload(vx, vz);
+        }
         None
     }
 
