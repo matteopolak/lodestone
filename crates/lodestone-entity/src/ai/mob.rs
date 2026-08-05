@@ -90,13 +90,63 @@ pub trait MobController {
     /// The nearest position the mob considers an attackable target — the host
     /// applies the version/type-specific filter (hostility, follow range, line
     /// of sight). Drives `NearestAttackableTargetGoal`.
+    ///
+    /// **A host that returns [`attack_target`](MobController::attack_target)
+    /// here has written an island, not an implementation** (issue #455): the
+    /// goal that calls this is the same goal that writes `attack_target` in its
+    /// `start`, so the loop cannot bootstrap and the mob never attacks
+    /// unprovoked. Whatever the host's perception feed is, this must read
+    /// *that*. `NavigatingMob::find_nearest_target` documents where each of the
+    /// three filters ended up.
     fn find_nearest_target(&mut self) -> Option<Vec3> {
         None
+    }
+
+    /// This mob's `FOLLOW_RANGE` attribute value, in blocks.
+    ///
+    /// Vanilla reads it in two places with the *same* number:
+    /// `NearestAttackableTargetGoal` acquires within it
+    /// (`ai/goal/target/TargetGoal.java:74-76`, `getFollowDistance`) and
+    /// `TargetGoal.canContinueToUse` **drops a target that leaves it**
+    /// (`TargetGoal.java:57-60`, `distanceToSqr(target) > within * within`).
+    /// The default is `Mob.createMobAttributes()`' `16.0`
+    /// (`.cache/mc/26.2/src/net/minecraft/world/entity/Mob.java:166-168`), so a
+    /// controller that does not track the attribute still releases targets at a
+    /// vanilla-plausible distance rather than chasing one forever.
+    fn follow_range(&self) -> f64 {
+        16.0
     }
 
     /// The position of the entity that most recently damaged this mob, within
     /// the retaliation window. Drives `HurtByTargetGoal`.
     fn last_hurt_by(&self) -> Option<Vec3> {
+        None
+    }
+
+    /// The position of the entity this mob currently holds a **persistent
+    /// grudge** against, or `None` when its anger has expired or never started.
+    ///
+    /// This is the third hostility state, and it is why a per-species boolean
+    /// would be wrong. Vanilla has always-hostile mobs (zombie, creeper), never-
+    /// hostile ones (cow), and *neutral* ones — zombified piglin, wolf, bee,
+    /// enderman — whose target registration ends in a `this::isAngryAt` selector
+    /// (`NeutralMob.isAngryAt`), which narrows the candidate set to the one
+    /// entity the grudge names. A neutral mob with no grudge has an empty
+    /// candidate set, which is what makes it neutral;
+    /// [`NearestAttackableTargetGoal::anger_gated`](crate::ai::goals::NearestAttackableTargetGoal::anger_gated)
+    /// is the registration shape that reads this.
+    ///
+    /// **The host owns the clock, on purpose.** 26.2 stores an **absolute
+    /// game-time deadline**, not a countdown
+    /// (`.cache/mc/26.2/src/net/minecraft/world/entity/NeutralMob.java:20-22`,
+    /// `:112-120`; `NO_ANGER_END_TIME = -1`), and the grudge is a uniform
+    /// `[400, 780]` ticks for all four species (`rangeOfSeconds(20, 39)` →
+    /// `UniformInt.of(400, 780)`). A decrementing counter is the wrong model —
+    /// it drifts against a stepped tick loop — and this seam has no shared game
+    /// clock to compare a deadline against, so expiry is resolved by the host
+    /// and only the *answer* crosses. That is the same division as
+    /// [`find_love_partner`](MobController::find_love_partner).
+    fn angry_target(&self) -> Option<Vec3> {
         None
     }
 
@@ -282,7 +332,6 @@ impl ProjectileLaunch {
         }
     }
 }
-
 
 /// Squared horizontal+vertical distance between two points.
 #[must_use]

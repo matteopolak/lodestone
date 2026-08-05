@@ -477,6 +477,10 @@ impl Goal for PanicGoal {
 pub struct NearestAttackableTargetGoal {
     random_interval: i32,
     target: Option<Vec3>,
+    /// Whether this registration carries vanilla's `this::isAngryAt` selector,
+    /// i.e. whether it is a *neutral* mob's row. See
+    /// [`anger_gated`](Self::anger_gated).
+    anger_gated: bool,
 }
 
 impl Default for NearestAttackableTargetGoal {
@@ -492,6 +496,38 @@ impl NearestAttackableTargetGoal {
         Self {
             random_interval: 10,
             target: None,
+            anger_gated: false,
+        }
+    }
+
+    /// The **neutral** mob's form of this registration: vanilla passes a
+    /// `this::isAngryAt` selector as the goal's last argument (zombified piglin,
+    /// wolf and bee all do), and `NeutralMob.isAngryAt` narrows the candidate set
+    /// to the single entity the mob's persistent grudge names. So this form does
+    /// not search at all — it targets
+    /// [`MobController::angry_target`](crate::ai::MobController::angry_target),
+    /// and a mob with no live grudge acquires nothing.
+    ///
+    /// **This is the difference between a neutral mob and a hostile one**, and
+    /// without it a predicate-free registration makes piglins, wolves and bees
+    /// attack on sight — which was invisible for as long as
+    /// `NavigatingMob::find_nearest_target` returned its own `attack_target` and
+    /// never searched (issue #455). The neutral family's three anger-gated rows
+    /// are `Coverage::Missing` and must stay that way until a host feeds
+    /// `set_angry_target`; `roster::neutral`'s
+    /// `no_anger_gated_target_row_is_modelled` enforces it, and this constructor
+    /// existing is not permission to flip them.
+    ///
+    /// Not modelled: `isAngryAtAllPlayers` (`NeutralMob.isAngryAt`'s first
+    /// branch), vanilla's universal anger from group alerting, under which *any*
+    /// player is a candidate rather than only the grudge holder. Same-species
+    /// propagation is a census question for `MobSim::feed_perception`, not a
+    /// seam method — this trait hands goals answers, never populations.
+    #[must_use]
+    pub fn anger_gated() -> Self {
+        Self {
+            anger_gated: true,
+            ..Self::new()
         }
     }
 
@@ -512,12 +548,65 @@ impl Goal for NearestAttackableTargetGoal {
         if self.random_interval > 1 && mob.next_i32(self.random_interval) != 0 {
             return false;
         }
-        self.target = mob.find_nearest_target();
+        self.target = if self.anger_gated {
+            mob.angry_target()
+        } else {
+            mob.find_nearest_target()
+        };
         self.target.is_some()
     }
 
+    /// Vanilla `TargetGoal.canContinueToUse`
+    /// (`ai/goal/target/TargetGoal.java:36-71`), which does three things this
+    /// used to skip entirely — it held only `attack_target().is_some()`:
+    ///
+    /// 1. **Releases a target that left follow range** (`:57-60`,
+    ///    `if (this.mob.distanceToSqr(target) > within * within) return false;`).
+    ///    Without it the acquisition cut is a one-way door: acquire at 16
+    ///    blocks, then chase across the world forever.
+    /// 2. **Re-writes the target every tick** (`:70`, `this.mob.setTarget(target)`).
+    ///    Vanilla's target is a *live entity reference*, so its position is
+    ///    always current; ours is a `Vec3` frozen at acquisition, which means a
+    ///    mob pursued a **moving player to where that player used to be** and
+    ///    stopped. Refreshing from the same feed acquisition used is how a
+    ///    position-valued seam reproduces a reference-valued one.
+    /// 3. Releases when the candidate disappears (`:43-45`, `target == null`).
+    ///
+    /// The one divergence worth stating: vanilla keeps the *specific* entity it
+    /// acquired, while our feed answers "the nearest player", so if a second
+    /// player becomes nearer mid-pursuit this switches and vanilla would not.
+    /// That is a property of the seam carrying a position rather than an
+    /// identity — with one player in range the two agree exactly, and the
+    /// alternative (a frozen point) is wrong every time the player moves.
+    ///
+    /// Vanilla's `mustSee`/`unseenMemoryTicks` half (`:62-68`) is not modelled —
+    /// it needs the line of sight `NavigatingMob::find_nearest_target` explains
+    /// is a ray query this seam cannot answer. `canAttack` and the team check
+    /// (`:47-55`) have no analogue here either.
     fn can_continue_to_use(&mut self, mob: &mut dyn MobController) -> bool {
-        mob.attack_target().is_some()
+        if mob.attack_target().is_none() {
+            return false;
+        }
+        // Vanilla's live-reference position, resolved the way the seam can: ask
+        // the same source `can_use` did. `None` covers both of vanilla's exits —
+        // the candidate is gone, or the range re-test failed.
+        let live = if self.anger_gated {
+            mob.angry_target()
+        } else {
+            mob.find_nearest_target()
+        };
+        let Some(target) = live else {
+            return false;
+        };
+        // `angry_target` carries no range cut of its own (a grudge is not
+        // bounded by follow range in the feed), so vanilla's own `:57-60` test
+        // still has to run here rather than being left to the filter.
+        let within = mob.follow_range();
+        if distance_sqr(mob.position(), target) > within * within {
+            return false;
+        }
+        mob.set_attack_target(Some(target));
+        true
     }
 
     fn start(&mut self, mob: &mut dyn MobController) {

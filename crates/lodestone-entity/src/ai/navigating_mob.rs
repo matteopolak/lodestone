@@ -28,7 +28,7 @@
 use lodestone_model::{BlockPos, Vec3};
 
 use super::goal::GoalSelector;
-use super::mob::{MobController, ProjectileLaunch};
+use super::mob::{MobController, ProjectileLaunch, distance_sqr};
 use crate::pathfinding::{
     MobShape, PathFinder, PathNavigator, PathParams, PathStart, PathType, PathWorld,
 };
@@ -80,6 +80,32 @@ pub const LAST_HURT_BY_TICKS: i32 = 100;
 /// attacker for 60 ticks after it stops fleeing. Collapsing them into one
 /// timer would be a silent behaviour change, not a simplification.
 pub const PANIC_DAMAGE_TICKS: i32 = 40;
+
+/// Vanilla's base `FOLLOW_RANGE` attribute value, in blocks — the range at
+/// which a mob acquires an attack target.
+///
+/// `Mob.createMobAttributes()` sets it to `16.0` for **every** mob
+/// (`.cache/mc/26.2/src/net/minecraft/world/entity/Mob.java:166-168`,
+/// `LivingEntity.createLivingAttributes().add(Attributes.FOLLOW_RANGE, 16.0)`).
+/// Note the *registry* default on the attribute itself is `32.0`
+/// (`ai/attributes/Attributes.java:51`) and is the wrong number to copy: no
+/// living entity ever uses it, because the mob supplier always overrides it.
+/// Species that raise it do so in their own `createAttributes` — zombie and
+/// its subclasses `35.0` (`monster/zombie/Zombie.java:133`), blaze `48.0`
+/// (`monster/Blaze.java:55`), enderman `64.0` (`monster/EnderMan.java:118`) —
+/// which is why this is only the *default* and a host is expected to feed the
+/// real per-species value with [`set_follow_range`](NavigatingMob::set_follow_range).
+pub const DEFAULT_FOLLOW_RANGE: f64 = 16.0;
+
+/// The floor vanilla puts under the target-acquisition range, in blocks:
+/// `TargetingConditions.test` compares against
+/// `Math.max(this.range * modifier, 2.0)`
+/// (`ai/targeting/TargetingConditions.java:83`, whose `2.0` is that file's
+/// `MIN_VISIBILITY_DISTANCE_FOR_INVISIBLE_TARGET`). It exists so an invisible
+/// target is still attackable at point-blank range; the floor applies
+/// unconditionally, so a mob whose `FOLLOW_RANGE` is *below* `2.0` still
+/// acquires at `2.0`.
+pub const MIN_TARGET_VISIBILITY_DISTANCE: f64 = 2.0;
 
 /// A tiny deterministic RNG (SplitMix64) so a `NavigatingMob` needs no `rand`
 /// dependency and its stroll behaviour is reproducible in tests.
@@ -287,6 +313,33 @@ pub struct NavigatingMob<'w> {
     /// attacking mob (`ai/goal/PanicGoal.java:61-63`). Read by
     /// [`MobController::is_panicking`].
     damage_ticks: i32,
+    /// This mob's `FOLLOW_RANGE` attribute value, in blocks — the range cut
+    /// [`find_nearest_target`](MobController::find_nearest_target) applies to
+    /// [`nearest_player`](Self::nearest_player). Defaults to
+    /// [`DEFAULT_FOLLOW_RANGE`]; a host feeds the real per-species value with
+    /// [`set_follow_range`](Self::set_follow_range).
+    ///
+    /// **This is the filter, and it is not optional.** The host's
+    /// `nearest_player` feed is deliberately *unbounded* — `mobs.rs`'s
+    /// `feed_perception` passes no range at all, because the range for
+    /// `LookAtPlayerGoal` (its original consumer) lives in the goal — so a
+    /// `find_nearest_target` that returned it raw would make every hostile mob
+    /// in the world target the player from any distance. Vanilla's cut is
+    /// `TargetGoal.getFollowDistance()`, i.e. exactly this attribute
+    /// (`ai/goal/target/TargetGoal.java:74-76`).
+    follow_range: f64,
+    /// Host injection point: the entity this mob holds a live persistent grudge
+    /// against, or `None`. Drives [`MobController::angry_target`] — see that
+    /// method for why the *deadline* stays on the host side and only the answer
+    /// crosses the seam.
+    ///
+    /// Nothing in `lodestone-server` feeds this yet, and no roster row installs
+    /// the goal that reads it, so it is `None` in production today. That is the
+    /// correct state: a neutral mob whose anger cannot be expressed must be
+    /// **passive**, not hostile-on-sight, and the reason the neutral family's
+    /// three anger-gated target rows are deliberately `Coverage::Missing`
+    /// (`roster::neutral`'s `no_anger_gated_target_row_is_modelled`).
+    angry_target: Option<Vec3>,
 }
 
 /// Minecraft body yaw (degrees) for a horizontal movement delta: 0 = +Z (south),
@@ -366,6 +419,8 @@ impl<'w> NavigatingMob<'w> {
             last_hurt_by: None,
             hurt_by_ticks: 0,
             damage_ticks: 0,
+            follow_range: DEFAULT_FOLLOW_RANGE,
+            angry_target: None,
         }
     }
 
@@ -612,6 +667,32 @@ impl<'w> NavigatingMob<'w> {
     /// tick. See the `nearest_player` field's own doc comment.
     pub fn set_nearest_player(&mut self, player: Option<Vec3>) -> &mut Self {
         self.nearest_player = player;
+        self
+    }
+
+    /// Sets this mob's `FOLLOW_RANGE` attribute value in blocks — the range at
+    /// which [`find_nearest_target`](MobController::find_nearest_target)
+    /// acquires the nearest player.
+    ///
+    /// Unlike the `set_*` calls around it this is **not** per-tick perception:
+    /// it is a species attribute, set once at spawn from the same
+    /// `minecraft:follow_range` value `mobs.rs` already reads to size the A\*
+    /// visited budget (`floor(follow_range * 16)`). Leaving it at
+    /// [`DEFAULT_FOLLOW_RANGE`] is correct for most species and *wrong for the
+    /// zombie family*, whose `35.0` is more than twice it
+    /// (`monster/zombie/Zombie.java:133`).
+    pub fn set_follow_range(&mut self, blocks: f64) -> &mut Self {
+        self.follow_range = blocks;
+        self
+    }
+
+    /// Host injection point: the entity this mob holds a live persistent grudge
+    /// against, or `None` once the grudge expires. The host resolves vanilla's
+    /// absolute anger deadline and feeds only the answer — see
+    /// [`MobController::angry_target`] for the citation and for why a countdown
+    /// would be the wrong model.
+    pub fn set_angry_target(&mut self, target: Option<Vec3>) -> &mut Self {
+        self.angry_target = target;
         self
     }
 
@@ -926,8 +1007,62 @@ impl MobController for NavigatingMob<'_> {
         self.attack_target = target;
     }
 
+    /// Vanilla `NearestAttackableTargetGoal.findTarget` for the `Player.class`
+    /// registration: `level.getNearestPlayer(targetConditions, mob, …)`
+    /// (`ai/goal/target/NearestAttackableTargetGoal.java:74`), whose range cut
+    /// is `TargetingConditions.test`
+    /// (`ai/targeting/TargetingConditions.java:81-88`) — a full 3-D
+    /// `distanceToSqr` against `max(range * visibility, 2.0)`, with `range` =
+    /// `TargetGoal.getFollowDistance()` = the `FOLLOW_RANGE` attribute
+    /// (`ai/goal/target/TargetGoal.java:74-76`).
+    ///
+    /// **This used to return `self.attack_target` — the field the goal calling
+    /// it exists to write** (issue #455). `NearestAttackableTargetGoal::can_use`
+    /// asks this and `start` writes the answer back, so the only production
+    /// writers of `attack_target` were that goal and `HurtByTargetGoal`: the
+    /// loop could not bootstrap and no mob ever attacked unprovoked. The data
+    /// was already fed every tick and simply never read.
+    ///
+    /// Its doc on [`MobController`] says the host applies three filters. Where
+    /// each one actually lives:
+    ///
+    /// * **Follow range — here.** See [`follow_range`](Self::follow_range).
+    /// * **Hostility — in the roster, structurally.** A cow must not target the
+    ///   player, and it cannot: this method is reached *only* from
+    ///   [`NearestAttackableTargetGoal`](super::goals::NearestAttackableTargetGoal),
+    ///   which is installed only for species whose vanilla table registers it
+    ///   (`roster::goals_for`). No passive table has that row, so a cow never
+    ///   owns the goal and never asks. Re-testing hostility here would need a
+    ///   species name list — the very thing `mobs.rs`'s `is_hostile_species`
+    ///   already got wrong for `drowned`, `cave_spider`, `zombie_villager` and
+    ///   `parched` — to re-derive an answer the jar-cited table already holds.
+    ///   `no_passive_species_can_acquire_a_target` gates it.
+    /// * **Line of sight — not implemented, and deliberately not faked.**
+    ///   Vanilla's is `mob.getSensing().hasLineOfSight(target)`
+    ///   (`TargetingConditions.java:90`), a `level.clip` ray from eye to eye.
+    ///   That is a **ray** query, not the local block lookup issue #456 adds:
+    ///   it walks arbitrarily many blocks over up to `follow_range`, so neither
+    ///   a neighbourhood snapshot nor a single `PathWorld` cue can answer it.
+    ///   Omitting it errs *permissive* — a mob acquires through a wall it should
+    ///   not see through — which is the honest direction here, since the
+    ///   alternative (a `false` default) would leave the very island this
+    ///   method was fixed to close. Tracked separately; see the issue thread.
     fn find_nearest_target(&mut self) -> Option<Vec3> {
-        self.attack_target
+        let player = self.nearest_player?;
+        // `modifier` is `target.getVisibilityPercent(targeter)`, which is 1.0
+        // for a plainly visible player and only shrinks for an invisible or
+        // sneaking one — neither modelled at this seam. The `max(…, 2.0)` floor
+        // is vanilla's own and applies regardless.
+        let range = self.follow_range.max(MIN_TARGET_VISIBILITY_DISTANCE);
+        (distance_sqr(self.pos, player) <= range * range).then_some(player)
+    }
+
+    fn follow_range(&self) -> f64 {
+        self.follow_range
+    }
+
+    fn angry_target(&self) -> Option<Vec3> {
+        self.angry_target
     }
 
     fn attack(&mut self, target: Vec3) {
