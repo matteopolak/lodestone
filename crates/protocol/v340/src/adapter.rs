@@ -217,6 +217,46 @@ fn dimension_id(value: i32) -> Result<lodestone_model::DimensionId, AdapterError
         .map_err(|_| AdapterError::Decode(format!("invalid dimension identifier {name}")))
 }
 
+/// Largest block coordinate any vanilla world can legitimately contain, on
+/// either horizontal axis: `WorldBorder.absoluteMaxSize` (`WorldBorder.java:37`)
+/// is 29,999,984, and the border is what bounds every world regardless of the
+/// `worldborder` command or the world's own settings. Anything past this is not
+/// an awkward-but-real position, it is invalid input.
+const ABSOLUTE_MAX_BLOCK: i32 = 29_999_984;
+
+/// Turns a wire-supplied chunk coordinate into the block coordinate of its
+/// west/north edge, refusing anything the world border makes impossible.
+///
+/// This exists because of issue #450, a remote panic found by
+/// `lodestone-fuzz`'s `handle_packet_never_panics` target: `multi_block_change`
+/// read `chunk_x`/`chunk_z` straight off the wire and did an unchecked
+/// `chunk_x * 16`. For any `|chunk|` past `i32::MAX / 16` that **panics in
+/// debug** and, worse, **silently wraps in release** — a wrapped coordinate
+/// writes a block at a position the packet never named, which is a corrupted
+/// world rather than a crash. The shrunk failing payload was twelve bytes:
+/// `08 00 00 00 …`, i.e. `chunk_x = 134_217_728`.
+///
+/// Both halves of the guard are deliberate and neither is redundant:
+///
+/// - `checked_mul` is the **structural** half. It cannot overflow whatever the
+///   bound below says, so a future edit that loosens or removes the range check
+///   still cannot reintroduce a panic or a wrap.
+/// - the range check is the **semantic** half. It refuses out-of-range input at
+///   the decode seam instead of clamping it, because a clamp would silently
+///   invent a position exactly the way the release-mode wrap did. Refusal is
+///   the only outcome that cannot write a block somewhere it was never told to.
+fn chunk_origin_block(chunk_coord: i32, axis: &str) -> Result<i32, AdapterError> {
+    chunk_coord
+        .checked_mul(16)
+        .filter(|origin| origin.unsigned_abs() <= ABSOLUTE_MAX_BLOCK.unsigned_abs())
+        .ok_or_else(|| {
+            AdapterError::Decode(format!(
+                "multi_block_change chunk {axis} {chunk_coord} is outside the world border \
+                 (|chunk {axis} * 16| must be <= {ABSOLUTE_MAX_BLOCK})"
+            ))
+        })
+}
+
 /// Maps the 1.8 clientbound chat `position` byte to a canonical [`ChatKind`].
 const fn chat_kind(position: i8) -> ChatKind {
     match position {
@@ -704,6 +744,12 @@ impl V340Adapter {
             let mut reader = Reader::new(payload);
             let chunk_x = reader.i32().map_err(dec_err)?;
             let chunk_z = reader.i32().map_err(dec_err)?;
+            // Resolved *before* the record loop, not inside it: the whole point
+            // of refusing rather than clamping (see `chunk_origin_block`) is
+            // that nothing is written for an out-of-range packet, and a check
+            // inside the loop would already have written earlier records.
+            let origin_x = chunk_origin_block(chunk_x, "x")?;
+            let origin_z = chunk_origin_block(chunk_z, "z")?;
             let count = reader.var_i32().map_err(dec_err)?;
             let count = usize::try_from(count).map_err(|_| {
                 AdapterError::Decode(format!("negative multi_block_change record count {count}"))
@@ -733,8 +779,11 @@ impl V340Adapter {
                 let state = canonical::resolve_or_air(old_block_id, meta, &mut tally);
                 let rel_x = i32::from(horizontal >> 4);
                 let rel_z = i32::from(horizontal & 0xF);
-                let x = chunk_x * 16 + rel_x;
-                let z = chunk_z * 16 + rel_z;
+                // `rel_x`/`rel_z` are 4-bit nibbles (0..=15) and `origin_*` is
+                // already bounded by the world border, so these adds cannot
+                // overflow — the guard is at `chunk_origin_block`, above.
+                let x = origin_x + rel_x;
+                let z = origin_z + rel_z;
                 world.set_block(x, y, z, state);
                 world.sync_block_entity(x, y, z, block_entity_type(state));
                 by_section

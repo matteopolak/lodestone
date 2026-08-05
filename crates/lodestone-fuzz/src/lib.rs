@@ -199,3 +199,19 @@ pub fn v770_fixture_path(name: &str) -> std::path::PathBuf {
         .join("../protocol/v770/tests/fixtures")
         .join(name)
 }
+
+/// Absolute path to this crate's own `tests/fixtures/<name>`, resolved the same
+/// manifest-dir way as [`v770_fixture_path`].
+///
+/// These are *regression* inputs rather than corpus seeds: bytes a fuzz target
+/// actually found a defect with, committed so the gate for that defect is
+/// deterministic instead of "whatever proptest's RNG lands on this run". Issue
+/// #450 is the reason this exists — its panic reproduced in a full-crate run
+/// and passed under a single filtered run, twice, which is exactly how a real
+/// remote panic gets written off as flake. Each fixture's header records where
+/// its bytes came from.
+pub fn regression_fixture_path(name: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
+}
