@@ -655,12 +655,16 @@ mod tests {
             ),
             (
                 "skeleton",
-                "monster/skeleton/AbstractSkeleton.java:76-86 + reassessWeaponGoal :146",
+                // `:144`, not `:146`: `populateDefaultEquipmentSlots` hands out a
+                // BOW unconditionally (`:109-112`), so `reassessWeaponGoal` takes
+                // the bow branch for every normally-spawned skeleton and the melee
+                // `else` is unreachable outside `WitherSkeleton`.
+                "monster/skeleton/AbstractSkeleton.java:76-86 + reassessWeaponGoal :144",
                 &[
                     (Selector::Goal, 2, "RestrictSunGoal"),
                     (Selector::Goal, 3, "FleeSunGoal"),
                     (Selector::Goal, 3, "AvoidEntityGoal(Wolf)"),
-                    (Selector::Goal, 4, "MeleeAttackGoal"),
+                    (Selector::Goal, 4, "RangedBowAttackGoal"),
                     (Selector::Goal, 5, "WaterAvoidingRandomStrollGoal"),
                     (Selector::Goal, 6, "LookAtPlayerGoal(Player)"),
                     (Selector::Goal, 6, "RandomLookAroundGoal"),
