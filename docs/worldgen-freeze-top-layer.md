@@ -96,6 +96,19 @@ Two details that are not incidental:
   chunk (-600, 0). Only `frozen_ocean` and `deep_frozen_ocean` carry the
   modifier in 26.2.
 
+### This is not all the ice in the game
+
+`freeze_top_layer` writes **one** ice block per qualifying column, at the water
+surface, and nothing else. The other cold-biome content is a different set of
+features in *different* steps and is still absent (`docs/plans/worldgen-parity.md`
+census rows 6d and 6f, unit U4): `iceberg_packed`/`iceberg_blue` are
+`LOCAL_MODIFICATIONS` (step 2) and `blue_ice` is `SURFACE_STRUCTURES` (step 4),
+all three frozen-ocean-only. So a frozen ocean generated today is flat surface ice
+with no icebergs — correct for this step, incomplete for the biome. `packed_ice`
+and `blue_ice` also appear in *surface rules* (already composed, a different
+mechanism entirely), which is why they show up in generated terrain despite U4
+being open.
+
 `crate::biome::cold_enough_to_snow` — the pre-existing flat-temperature helper —
 is deliberately **not** reused. Surface rules ask a different question at a
 different Y, and answering it with the height-adjusted value would change

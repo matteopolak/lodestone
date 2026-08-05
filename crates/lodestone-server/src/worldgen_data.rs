@@ -20,10 +20,16 @@
 //! [`OverworldGenerator`] composes shape + the **real** aquifer + surface
 //! rules + real multi-noise biome assignment (issue #405) + real carvers
 //! and ore features (issue #295, the real 3×3 `blockStateWriteRadius(1)`
-//! driver) + grass/flower/tree vegetal decoration (issue #406, **single-
-//! chunk only — no cross-chunk canopy/patch spill**, see
-//! `lodestone_worldgen::feature::vegetation`'s own module doc for the full
-//! scope and named gaps) — real terrain shape, surface, biome variety,
+//! driver) + grass/flower/tree vegetal decoration (issue #406 — **the real
+//! 3×3 driver and a real JVM oracle both landed** in `a27abce`/`04bfb57`
+//! (#427), superseding this comment's former "single-chunk only … no oracle
+//! yet"; the remaining gaps are enumerated per biome in
+//! [`KNOWN_VEGETATION_GAPS`] and in
+//! `lodestone_worldgen::feature::vegetation`'s own module doc) + snow layers
+//! and surface ice (issue #404's U2, `freeze_top_layer` — bit-exact against
+//! the real server at four fixtures; see `docs/worldgen-freeze-top-layer.md`
+//! and the `top_layer_parity` module below) — real terrain shape, surface,
+//! biome variety,
 //! caves/ravines, and now vegetation, block-for-block verified where a JVM
 //! oracle exists for the stage (`docs/worldgen-parity.md`'s harness
 //! measures the composed subset directly; vegetation has no such oracle
