@@ -100,7 +100,7 @@ shared changes: no `mod` line, no registration list, no `mobs.rs` arm.
 
 | module | issue | claims today |
 |---|---|---|
-| `hostile_melee.rs` | #226 | zombie, husk, creeper, spider, cave spider, skeleton family |
+| `hostile_melee.rs` | #226 | zombie, husk, zombie villager, drowned, creeper, spider, cave spider, skeleton family (incl. parched), wither skeleton |
 | `passive.rs` | #228 | cow, mooshroom, sheep, pig, chicken |
 | `ranged.rs` | #227 | — (pre-registered, empty) |
 | `neutral.rs` | #233 | — (pre-registered, empty) |
@@ -186,7 +186,27 @@ None. The tables are `const`, resolved at compile time, and take no feature flag
   preempts strolling instead of racing it. Ours is the more conservative choice in
   both cases — fewer concurrent writers to the navigator — but both are
   discrepancies, not decisions, and belong to whichever unit owns the goal.
-- **`wither_skeleton` shares the base skeleton table** while vanilla gives it one
-  extra target registration (`WitherSkeleton.java:38-41`). That row could only ever
-  be `Missing` today, so it changes no behaviour, but the table is knowingly not a
-  complete transcription and the multiset gate excludes it.
+- **A hostile mob still never acquires a target in the running game**, so every
+  melee and swell row in `hostile_melee.rs` is one hop short of a player.
+  `MobController::find_nearest_target` is documented as "the host applies the
+  version/type-specific filter" (`ai/mob.rs:90-92`), but `NavigatingMob` implements
+  it as `self.attack_target` (`ai/navigating_mob.rs:904`) — it never consults the
+  `nearest_player` that `MobSim::tick`'s perception feed does populate
+  (`mobs.rs:1737`) — and `set_attack_target` has **zero production call sites**
+  (every caller is a test or a bench). So `NearestAttackableTargetGoal::can_use`
+  asks for a target, is handed back the target it was meant to find, and returns
+  `false` forever. This is a perception island one hop beyond the six #441 closed;
+  it needs an owner on `navigating_mob.rs` or `mobs.rs`, and it is why the hostile
+  gates drive the target in explicitly.
+- **`wither_skeleton` has its own table** as of #226, since `WitherSkeleton` is the
+  one class in the family that declares `registerGoals`
+  (`WitherSkeleton.java:38-41`, adding an `AbstractPiglin` target row *before*
+  `super`). It previously shared `SKELETON`, which made that table knowingly not a
+  complete transcription; `wither_skeleton_is_the_base_table_plus_the_piglin_row`
+  now pins the eleven duplicated rows so the two cannot drift.
+- **`Drowned` overrides `addBehaviourGoals`, not `registerGoals`**, which is the
+  one place a family-shaped assumption gets the jar wrong. Because
+  `Zombie.registerGoals` calls `this.addBehaviourGoals()` at `:116`, a drowned
+  keeps exactly `Zombie`'s three own rows and replaces the other nine
+  (`Drowned.java:91-103`). Transcribing zombie's whole table for it would add four
+  goals vanilla never registers and drop six it does.
