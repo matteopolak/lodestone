@@ -237,7 +237,7 @@ impl SleepState {
     /// `day_time == 0` (a world's very first tick) that is `0` itself —
     /// sunrise, exactly as vanilla reports it.
     pub fn morning_after(day_time: i64) -> i64 {
-        day_time.div_ceil(DAY_LENGTH_TICKS) * DAY_LENGTH_TICKS
+        ((day_time + DAY_LENGTH_TICKS - 1) / DAY_LENGTH_TICKS) * DAY_LENGTH_TICKS
     }
 
     /// Vanilla's `sleepersNeeded(pct)` (`SleepStatus.java:21-23`):
