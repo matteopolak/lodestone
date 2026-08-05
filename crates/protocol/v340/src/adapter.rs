@@ -41,6 +41,22 @@ use crate::packets::window::{
 /// Protocol version implemented by this adapter.
 pub const PROTOCOL: i32 = 340;
 
+/// Every protocol number this family speaks — the single source of truth for
+/// its coverage.
+///
+/// [`VersionAdapter::supports`] tests membership here, and
+/// `lodestone-registry`'s `FAMILIES` entry points at this same slice, so the
+/// registry's view of a family cannot drift from the family's own. That
+/// matters more than it looks: the registry needs to answer "does anything
+/// handle protocol N?" *without* constructing an adapter, now that
+/// construction takes the negotiated protocol (epic #343 unit U2).
+///
+/// This family is single-protocol, so the slice has one entry. A
+/// multi-protocol family (the plan's v110/v498/v756 groupings) lists each
+/// protocol in its wire era here and selects the matching generated
+/// `packet_ids` table inside [`adapter_for`].
+pub const PROTOCOLS: &[i32] = &[PROTOCOL];
+
 /// Fixed decoding/encoding context for protocol 340.
 const CTX: Ctx = Ctx { version: PROTOCOL };
 
@@ -108,6 +124,34 @@ impl V340Adapter {
 /// client boxes the returned concrete type as a `dyn VersionAdapter`.
 #[must_use]
 pub fn adapter() -> V340Adapter {
+    V340Adapter::new()
+}
+
+/// Returns an adapter configured for the **negotiated** protocol.
+///
+/// The multi-protocol construction seam (epic #343 unit U2). Before it, every
+/// family was built by a zero-argument `make: fn() -> Box<dyn VersionAdapter>`
+/// and the negotiated number reached the adapter nowhere — which is precisely
+/// what stopped one crate serving several protocol revisions, since it had
+/// nothing to select a per-protocol `packet_ids` table by.
+///
+/// This family is single-protocol, so there is nothing to select and the
+/// argument only states which protocol the caller negotiated. Keeping the
+/// signature uniform is the point: a grouped family substitutes real table
+/// selection here without the registry changing shape.
+///
+/// # Panics
+///
+/// Debug builds assert `protocol` is in [`PROTOCOLS`]. The registry always
+/// checks membership before constructing, so reaching this with anything else
+/// means a caller bypassed that check.
+#[must_use]
+pub fn adapter_for(protocol: i32) -> V340Adapter {
+    debug_assert!(
+        PROTOCOLS.contains(&protocol),
+        "adapter_for({protocol}) is outside this family's PROTOCOLS ({PROTOCOLS:?}); \
+         callers must test membership before constructing"
+    );
     V340Adapter::new()
 }
 
@@ -820,7 +864,7 @@ impl VersionAdapter for V340Adapter {
     }
 
     fn supports(&self, protocol: i32) -> bool {
-        protocol == PROTOCOL
+        PROTOCOLS.contains(&protocol)
     }
 
     fn begin_login(

@@ -658,6 +658,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   is the "not Minecraft" tell issue
   [#22](https://github.com/matteopolak/lodestone/issues/22) named: flat per-block
   light plus directional shade, with no darkening in corners and crevices.
+- [The multi-protocol seam: constructing an adapter for the protocol it negotiated](./multi-protocol-seam.md) —
+  The change that lets one `crates/protocol/vNNN` crate serve several protocol
+  revisions instead of exactly one. Unit U2 of epic #343's dispatch plan
+  ([`plans/multi-version-protocol.md`](./plans/multi-version-protocol.md)), and a
+  prerequisite for every grouped family the plan schedules — `v110`
+  (1.9.4/1.10.2/1.11.2), `v498` (1.14.4/1.15.2), `v756` (1.17.1/1.18.2). Building
+  those single-protocol first and retrofitting the seam afterwards is the expensive
+  order, which is why this landed before any of them.
 - [Situational music selection](./music-selection.md) — The layer that decides
   *when* to play a music track and *which* one — menu music, per-biome overworld
   music, the creative and underwater variants, and the End boss and credits tracks. It

@@ -112,8 +112,10 @@ rule.
    `members`/`default-members` if listed there), `lodestone-server/Cargo.toml` (the direct
    path dependency `v770` takes on `lodestone-server` is the reverse direction and doesn't
    need touching, but anything depending *on* `lodestone-v770` does).
-4. `crates/lodestone-registry/src/lib.rs`: the `FAMILIES` const's `label` and `make`
-   fields, and the `#[cfg(feature = "v770")]` / `"v735"` gates.
+4. `crates/lodestone-registry/src/lib.rs`: the `FAMILIES` const's `label`, `protocols` and
+   `make` fields, and the `#[cfg(feature = "v770")]` / `"v735"` gates. (`protocols` and
+   `make`'s protocol argument arrived with the multi-protocol seam — see
+   [`multi-protocol-seam.md`](./multi-protocol-seam.md).)
 5. Every in-source reference: `grep -rn "lodestone_v770\|lodestone-v770\|\bv770\b"` and the
    `735` equivalent, across `crates/`, `xtask/`, `scripts/`, `docs/`, `DESIGN.md`,
    `HANDOFF.md`, `CLAUDE.md`. This is the bulk of the work — `CLAUDE.md`'s "Active scope is

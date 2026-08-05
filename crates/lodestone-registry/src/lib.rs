@@ -52,14 +52,40 @@ pub mod version_table;
 
 /// A compiled-in protocol version family.
 ///
-/// `make` constructs a fresh boxed adapter; `supports` reports whether the
-/// family handles a given protocol number without allocating.
+/// # The multi-protocol seam (epic #343 unit U2)
+///
+/// `make` takes the **negotiated protocol**. It did not always: families used
+/// to be built by a zero-argument `fn() -> Box<dyn VersionAdapter>`, and
+/// [`adapter_for_protocol`] resolved a family by constructing every adapter in
+/// turn and asking each one `supports`. Two consequences, and the first is the
+/// one that mattered:
+///
+/// 1. **A family could not serve more than one protocol revision**, because
+///    the negotiated number reached the adapter nowhere — there was nothing to
+///    select a per-protocol `packet_ids` table by. The plan for #343 groups
+///    versions by wire era (v110 covering 1.9.4/1.10.2/1.11.2, v498 covering
+///    1.14.4/1.15.2, v756 covering 1.17.1/1.18.2) precisely to avoid eleven
+///    near-duplicate crates, and every one of those groupings needs this.
+/// 2. Resolution allocated and discarded a boxed adapter per family it
+///    skipped. Now `protocols` answers membership with no allocation at all,
+///    and exactly one adapter is ever constructed.
+///
+/// `protocols` deliberately **points at the family crate's own `PROTOCOLS`
+/// const** rather than restating the numbers here — the same reasoning
+/// [`ServerFamily::supports`] gives for delegating. A family's coverage has
+/// one definition, which its `VersionAdapter::supports` also tests membership
+/// in, so this table cannot drift from the adapter it resolves to.
 #[derive(Clone, Copy)]
 struct Family {
     /// Human-readable family label, e.g. `"v47"`.
     label: &'static str,
-    /// Constructs a boxed adapter for this family.
-    make: fn() -> Box<dyn VersionAdapter>,
+    /// Every protocol number this family handles. Borrowed from the family
+    /// crate's own `PROTOCOLS`; never restated here.
+    protocols: &'static [i32],
+    /// Constructs a boxed adapter for this family, configured for the
+    /// negotiated protocol. Only ever called after [`Self::protocols`] has
+    /// confirmed membership.
+    make: fn(i32) -> Box<dyn VersionAdapter>,
 }
 
 impl std::fmt::Debug for Family {
@@ -67,6 +93,7 @@ impl std::fmt::Debug for Family {
         formatter
             .debug_struct("Family")
             .field("label", &self.label)
+            .field("protocols", &self.protocols)
             .finish_non_exhaustive()
     }
 }
@@ -80,35 +107,65 @@ const FAMILIES: &[Family] = &[
     #[cfg(feature = "v47")]
     Family {
         label: "v47",
-        make: || Box::new(lodestone_v47::adapter()),
+        protocols: lodestone_v47::PROTOCOLS,
+        make: |protocol| Box::new(lodestone_v47::adapter_for(protocol)),
     },
     #[cfg(feature = "v770")]
     Family {
         label: "v770",
-        make: || Box::new(lodestone_v770::adapter()),
+        // v770 has no `PROTOCOLS`/`adapter_for` yet, so its coverage is spelled
+        // from its own `PROTOCOL` const and the negotiated number is discarded.
+        // Sound, not a shortcut deferred: v770 is single-protocol (776, the
+        // canonical version and the only `ServerProtocol`), so there is nothing
+        // for it to select between, and #343's plan keeps it single-protocol
+        // deliberately to keep the hosting seam simple. Give it the pair when
+        // it ever gains a second revision.
+        protocols: &[lodestone_v770::PROTOCOL],
+        make: |_protocol| Box::new(lodestone_v770::adapter()),
     },
     #[cfg(feature = "v340")]
     Family {
         label: "v340",
-        make: || Box::new(lodestone_v340::adapter()),
+        protocols: lodestone_v340::PROTOCOLS,
+        make: |protocol| Box::new(lodestone_v340::adapter_for(protocol)),
     },
     #[cfg(feature = "v735")]
     Family {
         label: "v735",
-        make: || Box::new(lodestone_v735::adapter()),
+        // 754, not 735 — the folder name is not the protocol number for this
+        // one family. Reading it from the crate rather than typing it is why
+        // that cannot be got wrong here.
+        protocols: lodestone_v735::PROTOCOLS,
+        make: |protocol| Box::new(lodestone_v735::adapter_for(protocol)),
     },
 ];
 
+/// Resolves `protocol` against an arbitrary family table.
+///
+/// [`adapter_for_protocol`] is this applied to [`FAMILIES`]. It is factored out
+/// so the tests can drive **the production resolution path** with a table of
+/// their own — including a genuinely multi-protocol family, which no compiled-in
+/// family is yet. Testing dispatch against a table the test supplies is the
+/// only way to gate the seam before the first grouped family exists; asserting
+/// against `FAMILIES` alone could not distinguish "carries the negotiated
+/// protocol" from "ignores it", because every real family has exactly one.
+fn resolve_adapter(families: &[Family], protocol: i32) -> Option<Box<dyn VersionAdapter>> {
+    families
+        .iter()
+        .find(|family| family.protocols.contains(&protocol))
+        .map(|family| (family.make)(protocol))
+}
+
 /// Returns a boxed adapter for `protocol`, if a compiled-in family supports it.
+///
+/// The adapter is **constructed for that protocol** (see [`Family`]), which is
+/// what lets one family crate serve a whole wire era rather than one revision.
 ///
 /// Returns `None` when no enabled family handles that protocol number — for
 /// example in a default build with no `vNNN` feature enabled.
 #[must_use]
 pub fn adapter_for_protocol(protocol: i32) -> Option<Box<dyn VersionAdapter>> {
-    FAMILIES.iter().find_map(|family| {
-        let adapter = (family.make)();
-        adapter.supports(protocol).then_some(adapter)
-    })
+    resolve_adapter(FAMILIES, protocol)
 }
 
 /// A compiled-in family's **server** side: the thing that lets the integrated
@@ -189,12 +246,19 @@ pub fn compiled_server_families() -> Vec<&'static str> {
     SERVER_FAMILIES.iter().map(|family| family.label).collect()
 }
 
-/// Returns the primary protocol number of every compiled-in family.
+/// Returns every protocol number any compiled-in family handles.
+///
+/// Formerly "the *primary* protocol of every family", derived by constructing
+/// each adapter and asking `protocol_version()`. Since a family may now cover a
+/// whole wire era, the honest answer is the union of their coverage — and it is
+/// read straight off [`Family::protocols`], so it needs no allocation and
+/// cannot disagree with what [`adapter_for_protocol`] will actually resolve.
+/// Identical output while every compiled family is single-protocol.
 #[must_use]
 pub fn supported_protocols() -> Vec<i32> {
     FAMILIES
         .iter()
-        .map(|family| (family.make)().protocol_version())
+        .flat_map(|family| family.protocols.iter().copied())
         .collect()
 }
 
@@ -282,5 +346,170 @@ mod tests {
     #[test]
     fn unknown_protocol_resolves_to_none() {
         assert!(adapter_for_protocol(-1).is_none());
+    }
+
+    /// Every compiled-in family's registry entry agrees with the family's own
+    /// `VersionAdapter::supports`, in both directions.
+    ///
+    /// This is the drift guard that makes [`Family::protocols`] safe to consult
+    /// *instead of* constructing an adapter and asking it. Without it the
+    /// registry would hold a second, independent protocol list — exactly the
+    /// duplication [`ServerFamily::supports`] delegates to avoid.
+    ///
+    /// The negative half is load-bearing: a family must answer `false` for
+    /// `protocol + 1`. A `supports` that returned `true` unconditionally would
+    /// pass the positive half alone.
+    #[test]
+    fn every_family_entry_agrees_with_its_own_adapter() {
+        for family in FAMILIES {
+            assert!(
+                !family.protocols.is_empty(),
+                "{} declares no protocols at all, so it can never be resolved",
+                family.label
+            );
+            for &protocol in family.protocols {
+                let adapter = (family.make)(protocol);
+                assert!(
+                    adapter.supports(protocol),
+                    "{} is registered for protocol {protocol} but its own adapter \
+                     denies supporting it",
+                    family.label
+                );
+                if !family.protocols.contains(&(protocol + 1)) {
+                    assert!(
+                        !adapter.supports(protocol + 1),
+                        "{}'s adapter claims to support {}, which is not in its \
+                         PROTOCOLS — `supports` is matching too broadly",
+                        family.label,
+                        protocol + 1
+                    );
+                }
+            }
+        }
+    }
+
+    /// A family that really does cover two protocols, used to gate the seam
+    /// itself. No compiled-in family is multi-protocol yet, so nothing else in
+    /// this crate can tell an adapter that *carries* the negotiated protocol
+    /// from one that ignores it.
+    ///
+    /// It is a fake **adapter**, but the dispatch under test is the real
+    /// [`resolve_adapter`] — the same function [`adapter_for_protocol`] is.
+    #[derive(Debug)]
+    struct TwoProtocolFake {
+        negotiated: i32,
+    }
+
+    /// The lower protocol of the fake's era.
+    const FAKE_A: i32 = 900;
+    /// The upper protocol of the fake's era.
+    const FAKE_B: i32 = 901;
+    /// `SendChat`'s serverbound packet id in protocol [`FAKE_A`]'s table.
+    const FAKE_A_CHAT_ID: i32 = 0x03;
+    /// `SendChat`'s serverbound packet id in protocol [`FAKE_B`]'s table —
+    /// renumbered, which is the whole reason a grouped family needs to know
+    /// which protocol it was built for.
+    const FAKE_B_CHAT_ID: i32 = 0x0F;
+
+    impl TwoProtocolFake {
+        /// Stands in for a grouped family's per-protocol `packet_ids` module
+        /// selection.
+        fn chat_packet_id(&self) -> i32 {
+            match self.negotiated {
+                FAKE_A => FAKE_A_CHAT_ID,
+                FAKE_B => FAKE_B_CHAT_ID,
+                other => panic!("built for unsupported protocol {other}"),
+            }
+        }
+    }
+
+    impl VersionAdapter for TwoProtocolFake {
+        fn protocol_version(&self) -> i32 {
+            self.negotiated
+        }
+
+        fn minecraft_versions(&self) -> &'static [&'static str] {
+            &["fake-a", "fake-b"]
+        }
+
+        fn supports(&self, protocol: i32) -> bool {
+            protocol == FAKE_A || protocol == FAKE_B
+        }
+
+        fn begin_login(
+            &self,
+            _profile: &lodestone_model::LoginProfile,
+            _server: &lodestone_model::ServerAddress,
+        ) -> Result<Vec<lodestone_model::Directive>, lodestone_model::AdapterError> {
+            Ok(Vec::new())
+        }
+
+        fn handle_packet(
+            &self,
+            _world: &mut dyn lodestone_model::WorldSink,
+            _state: lodestone_model::ConnectionState,
+            _packet_id: i32,
+            _payload: &[u8],
+        ) -> Result<Vec<lodestone_model::Directive>, lodestone_model::AdapterError> {
+            Ok(Vec::new())
+        }
+
+        fn encode_action(
+            &self,
+            _state: lodestone_model::ConnectionState,
+            _action: &lodestone_model::ClientAction,
+        ) -> Result<Option<(i32, Vec<u8>)>, lodestone_model::AdapterError> {
+            Ok(Some((self.chat_packet_id(), Vec::new())))
+        }
+    }
+
+    const FAKE_FAMILIES: &[Family] = &[Family {
+        label: "fake-two-protocol",
+        protocols: &[FAKE_A, FAKE_B],
+        make: |protocol| Box::new(TwoProtocolFake { negotiated: protocol }),
+    }];
+
+    /// Asks the resolved adapter which packet id it would use for chat — the
+    /// observable that distinguishes one protocol's table from the other's.
+    fn resolved_chat_id(protocol: i32) -> Option<i32> {
+        let adapter = resolve_adapter(FAKE_FAMILIES, protocol)?;
+        let action = lodestone_model::ClientAction::SendChat { text: String::new() };
+        match adapter.encode_action(lodestone_model::ConnectionState::Play, &action) {
+            Ok(Some((packet_id, _))) => Some(packet_id),
+            other => panic!("fake adapter did not encode chat: {other:?}"),
+        }
+    }
+
+    /// **The seam's gate.** A family constructed for protocol A must select A's
+    /// table even though B is also in its set, and vice versa.
+    #[test]
+    fn a_grouped_family_selects_the_table_of_the_protocol_it_was_built_for() {
+        // The control that stops this being vacuous: if the two protocols'
+        // tables agreed on this packet, the assertions below would pass for a
+        // family that ignored the negotiated protocol entirely, and the pair
+        // would have to be replaced with one that actually renumbers.
+        assert_ne!(
+            FAKE_A_CHAT_ID, FAKE_B_CHAT_ID,
+            "the two protocols agree on this packet id, so it cannot separate \
+             the two tables and this gate proves nothing"
+        );
+
+        assert_eq!(resolved_chat_id(FAKE_A), Some(FAKE_A_CHAT_ID));
+        assert_eq!(resolved_chat_id(FAKE_B), Some(FAKE_B_CHAT_ID));
+
+        // And the negotiated number itself reaches the adapter, not just the
+        // table derived from it.
+        let adapter = resolve_adapter(FAKE_FAMILIES, FAKE_B).expect("fake family resolves");
+        assert_eq!(adapter.protocol_version(), FAKE_B);
+    }
+
+    /// The negative control for the resolution half: a protocol adjacent to the
+    /// fake's set must resolve to nothing. Without this, a `find` that matched
+    /// unconditionally would satisfy every assertion above.
+    #[test]
+    fn a_protocol_outside_a_grouped_family_resolves_to_none() {
+        assert!(resolve_adapter(FAKE_FAMILIES, FAKE_A - 1).is_none());
+        assert!(resolve_adapter(FAKE_FAMILIES, FAKE_B + 1).is_none());
+        assert!(resolve_adapter(&[], FAKE_A).is_none());
     }
 }

@@ -38,4 +38,4 @@ pub mod adapter;
 pub mod entity_types;
 pub mod packets;
 
-pub use adapter::{PROTOCOL, V47Adapter, adapter};
+pub use adapter::{PROTOCOL, PROTOCOLS, V47Adapter, adapter, adapter_for};
