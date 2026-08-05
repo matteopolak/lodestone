@@ -1797,6 +1797,111 @@ mod tests {
         assert!(!tags.logs.is_empty());
         assert!(!tags.cannot_replace_below_tree_trunk.is_empty());
     }
+
+    /// Issue #480's **regression gate**: dark_forest must decorate with its
+    /// OWN vegetation feature list, not lush_caves'.
+    ///
+    /// # What it catches, and why the other gates could not
+    ///
+    /// Before the fix, [`OverworldGenerator::vegetation_stage`]
+    /// (`lodestone_worldgen`) resolved each source chunk's feature list
+    /// through `biome_for_carver_source`, which samples climate at **y = 0** —
+    /// the `crate::biome` module doc's "y = 0 trap": at y=0 the `depth`
+    /// gradient is already ≈ +1.0, solidly underground climate, so every
+    /// surface dark_forest chunk resolved as lush_caves and decorated with
+    /// lush_caves' feature list (vines, vegetation_patch, root_system — all
+    /// silent no-ops). dark_forest produced ~zero grass and ~zero trees even
+    /// after the dark oak placer landed (issue #428's 66.7%-weight
+    /// `dark_oak_leaf_litter` branch never dispatched because the wrong
+    /// biome's list was chosen). The resolve-side gates
+    /// ([`vegetation_placer_gaps_are_named_not_silent`],
+    /// [`vegetation_reaches_real_blocks_over_a_production_sweep`]) stayed
+    /// green because neither inspects dark_forest at runtime — this gate does.
+    ///
+    /// # Coordinates and anti-vacuity
+    ///
+    /// The same fixed stride-9 5x5 lattices from chunks (-40,-40) and (0,0) at
+    /// seed 42 this issue's own measurements used (the issue's second sweep
+    /// already fixed (-40,-40); the mirrored (0,0)-origin lattice was this
+    /// issue's own additional probe). Stride 9 so no two centres share a 3x3
+    /// neighbourhood. The gate first asserts the lattice actually CONTAINS
+    /// dark_forest chunks — CLAUDE.md's "world" vacuous-test species: a lattice
+    /// with zero dark_forest chunks would pass every "> 0" assertion by both
+    /// sides being empty, and the biome band boundaries at this seed are
+    /// exactly what an input-coordinate bug could silently move.
+    ///
+    /// # The floors
+    ///
+    /// Measured at the fix's landing state: 5 dark_forest chunks over the two
+    /// lattices, **714 dark_oak_log** and **3000** total vegetation blocks
+    /// (2304 + 696, dominated by dark_oak_leaves). The issue measured the same
+    /// sweeps at the broken state as **0 tree logs and 3 veg blocks**. The
+    /// `dark_oak_log > 0` assertion is the load-bearing one — a plain "some
+    /// vegetation" count would be satisfied by grass alone, but the 66.7%-weight
+    /// dark oak branch only runs when dark_forest's OWN step is selected. The
+    /// `VEGETATION_FLOOR` sits ~170x above the broken state and ~6x below the
+    /// healthy total, so the quiet failure (step runs, but dark_forest's
+    /// grass/flower entries lost) fails here too. Both numbers are
+    /// deterministic for this fixed lattice/seed.
+    #[test]
+    fn dark_forest_runs_its_own_vegetation_step_not_lush_caves() {
+        let generator = overworld_generator(42);
+        const VEGETATION_FLOOR: usize = 500;
+        let lattices: &[(i32, i32)] = &[(-40, -40), (0, 0)];
+        let mut dark_chunks = 0usize;
+        let mut veg = 0usize;
+        let mut dark_oak_logs = 0usize;
+        for (ox, oz) in lattices {
+            for i in 0..5 {
+                for j in 0..5 {
+                    let (cx, cz) = (ox + i * 9, oz + j * 9);
+                    let col = generator.column(cx, cz);
+                    if col.biome_state(8, 8) != "minecraft:dark_forest" {
+                        continue;
+                    }
+                    dark_chunks += 1;
+                    for lz in 0..16 {
+                        for lx in 0..16 {
+                            // Only the band around the surface can carry
+                            // vegetation — scanning the full 384 rows for 50
+                            // columns is the difference between a ~30s gate and
+                            // a ~90s one (same band `vegetation_reaches_real_blocks...`
+                            // uses).
+                            let top = col.top_non_air_y(lx, lz);
+                            let lo = (top - 8).max(col.min_y());
+                            let hi = (top + 40).min(col.min_y() + col.height() - 1);
+                            for y in lo..=hi {
+                                let state = col.block_state(lx, y, lz);
+                                let base = state.split('[').next().unwrap_or(state);
+                                if is_vegetation_state(base) {
+                                    veg += 1;
+                                }
+                                if base == "minecraft:dark_oak_log" {
+                                    dark_oak_logs += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            dark_chunks > 0,
+            "test premise failed: neither lattice at seed 42 contains a dark_forest chunk — \
+             the input cannot exercise dark_forest, so every assertion below is vacuous"
+        );
+        assert!(
+            dark_oak_logs > 0,
+            "zero dark_oak_log over {dark_chunks} dark_forest chunks — the 66.7%-weight \
+             dark oak branch never dispatched, which is the exact issue #480 symptom: \
+             vegetation_stage ran the wrong biome's feature list (lush_caves at y=0)"
+        );
+        assert!(
+            veg >= VEGETATION_FLOOR,
+            "{veg} vegetation blocks over {dark_chunks} dark_forest chunks is below the \
+             {VEGETATION_FLOOR} floor (measured healthy: 3000; broken state: 3)"
+        );
+    }
 }
 
 /// Bit-exact `freeze_top_layer` parity against the real 26.2 server (issue

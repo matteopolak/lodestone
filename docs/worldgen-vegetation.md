@@ -32,10 +32,15 @@ order:
 `crate::compose::build_biome_vegetation` resolves one biome's `VEGETAL_DECORATION` step
 (`GenerationStep.Decoration.ordinal() == 9`) into `(raw step index, PlacedRef)` pairs, preserving each
 entry's raw array position for `setFeatureSeed` — the same "preserve index, not count" convention
-`build_biome_ores` already established. `OverworldGenerator::vegetation_stage` resolves the centre
-chunk's own biome (via the same `biome_for_carver_source` one-biome-per-chunk convention the ore stage
-uses), builds a `VegGrid` from the chunk's post-ore terrain, runs the step, and folds only the written
-cells back (`VegGrid::dirty_cells`).
+`build_biome_ores` already established. `OverworldGenerator::vegetation_stage` resolves each source
+chunk's biome from its own **surface-height** per-quart map (`biome_stage`'s quart 0 — the source's
+min-block corner at its generated surface height), NOT `biome_for_carver_source`'s y=0 answer: issue
+#480, the `crate::biome` module doc's "y = 0 trap". At y=0 the `depth` gradient is already ≈ +1.0, so
+surface dark_forest chunks resolved as lush_caves and decorated with that biome's all-silent feature
+list (vines/vegetation_patch/root_system) — zero grass, zero trees, even after the dark oak placer
+(#428). Carver selection and ore placement keep the y=0 `biome_for_carver_source` convention; only
+vegetation selects its list at the surface the player sees. The stage builds a `VegGrid` from the
+chunk's post-ore terrain, runs the step, and folds only the written cells back (`VegGrid::dirty_cells`).
 
 ## How to change it, and the gotchas
 
