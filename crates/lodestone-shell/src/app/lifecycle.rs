@@ -64,7 +64,13 @@ impl ApplicationHandler for WindowApp {
         // Load the real crafting-recipe corpus from `client.jar`, once. Feeds
         // the container screen's ghost-preview draw and the debug-overlay
         // counter; a jar-less run leaves this `None` and neither draws.
-        self.recipe_book = crate::resources::load_recipe_book();
+        //
+        // Issue #148: the corpus is *adopted into* `lodestone_ecs::RecipeRegistry`
+        // rather than assigned straight to the field, so every recipe a plugin
+        // registered during `Plugin::build` — which ran long before this point —
+        // is folded in before anything reads it. `self.recipe_book` is now a
+        // revision-gated cache of that resource; see `Self::sync_recipe_book`.
+        self.adopt_recipe_corpus(crate::resources::load_recipe_book());
         // Attach the flat item-sprite atlas so hotbar/container slots draw real
         // item icons; jar-less runs leave this `None` and slots stay empty wells.
         // Loaded once and shared: the container screen needs the same atlas, and
@@ -759,5 +765,57 @@ impl ApplicationHandler for WindowApp {
         // `BACKGROUND_POLL` slices so a backgrounded window stops burning a core
         // yet still wakes far more often than the 20 Hz tick needs.
         event_loop.set_control_flow(self.pacer.control_flow(Instant::now()));
+    }
+}
+
+/// The recipe-corpus seam between `lodestone_ecs::RecipeRegistry` — which
+/// plugins write to — and `WindowApp::recipe_book`, which the container screen
+/// reads. Issue #148.
+///
+/// Two functions rather than one because they answer different questions.
+/// [`WindowApp::adopt_recipe_corpus`] runs once, at GPU bring-up, and is the only
+/// thing that *installs* `client.jar`'s corpus; `sync_recipe_book` runs every
+/// frame and only notices that someone else changed it.
+impl WindowApp {
+    /// Hands a freshly loaded corpus to the registry and takes the merged book
+    /// back, so plugin recipes registered during `Plugin::build` are present
+    /// before the first frame draws.
+    ///
+    /// `None` (a jar-less run) is still adopted deliberately: a plugin's recipes
+    /// must be craftable on a run with no `client.jar`, and refusing to adopt
+    /// would leave the registry unadopted and its recipes pending forever.
+    pub(super) fn adopt_recipe_corpus(&mut self, corpus: Option<RecipeBook>) {
+        let corpus = corpus.unwrap_or_default();
+        let (book, revision) = lodestone_ecs::hold_write(self.sim.ecs(), |world| {
+            let mut registry = world.get_resource_or_insert_with(
+                lodestone_ecs::RecipeRegistry::default,
+            );
+            registry.adopt_corpus(corpus);
+            (registry.snapshot(), registry.revision())
+        });
+        self.recipe_book_revision = revision;
+        // An empty book stays `None`, which is what every read site already
+        // treats as "no corpus" — a jar-less run with no plugin recipes must
+        // keep drawing exactly as it did before this seam existed.
+        self.recipe_book = (!book.is_empty()).then_some(book);
+    }
+
+    /// Re-clones the corpus if the registry's revision has moved since the last
+    /// clone — i.e. if a plugin registered or unregistered a recipe.
+    ///
+    /// The revision gate is what makes this callable per frame: the steady state
+    /// is one `u64` read under a short read guard, with no clone and no
+    /// allocation. Without it, a 1585-recipe clone every frame would be a real
+    /// cost for a feature almost no session uses.
+    pub(super) fn sync_recipe_book(&mut self) {
+        let fresh = lodestone_ecs::hold_read(self.sim.ecs(), |world| {
+            let registry = world.get_resource::<lodestone_ecs::RecipeRegistry>()?;
+            (registry.revision() != self.recipe_book_revision)
+                .then(|| (registry.snapshot(), registry.revision()))
+        });
+        if let Some((book, revision)) = fresh {
+            self.recipe_book_revision = revision;
+            self.recipe_book = (!book.is_empty()).then_some(book);
+        }
     }
 }

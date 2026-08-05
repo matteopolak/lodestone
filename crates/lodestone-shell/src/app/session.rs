@@ -47,6 +47,7 @@ impl WindowApp {
             applied_fog,
             ecs,
             recipe_book: None,
+            recipe_book_revision: 0,
             recipe_panel: RecipePanelState::default(),
             recipe_toasts: lodestone_game::recipe::RecipeToastQueue::new(),
             // No session yet, so no weather cell to read; see
