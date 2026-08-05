@@ -165,6 +165,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   for the footprint to be *measured* before anything gets built. This doc is that
   measurement, plus the recommendation it implies. **No pool exists in the tree; this
   doc does not add one.**
+- [The server-side chunk store](./chunk-store.md) — `ChunkStore`
+  (`crates/lodestone-server/src/chunk_store.rs`) is a bounded, least-recently-used
+  cache of generated chunk columns that wraps any `ChunkSource` and *is* a
+  `ChunkSource`. It exists because the integrated server had no column cache at all,
+  so a column was re-generated from scratch on every request — and two different
+  repeating 50 ms timers were requesting them, which made singleplayer effectively
+  unplayable. It is unit **U3** of
+  [`plans/chunk-lifecycle.md`](./plans/chunk-lifecycle.md) (issue #289).
 - [The chunk world as an ECS resource](./chunk-world-resource.md) — One
   `lodestone_world::World` for the whole process, held behind `Arc<RwLock<_>>` as the
   `bevy_ecs` resource `lodestone_ecs::ChunkWorld`, plus all terrain-mesh scheduling
