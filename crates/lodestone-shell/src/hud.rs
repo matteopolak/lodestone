@@ -43,6 +43,116 @@ use item_icon::{ColourStream, IconAssets, IconRenderer, IconSink, SpecialIconDra
 
 use crate::overlay::{BossBarView, Sidebar};
 
+/// Text scale every HUD string is drawn at.
+pub(crate) const HUD_TEXT_SCALE: f32 = 2.0;
+
+/// Padding between a HUD panel's edge and its content.
+pub(crate) const HUD_MARGIN: f32 = 6.0;
+
+/// Vertical pitch between two HUD text lines.
+#[must_use]
+pub(crate) fn hud_line_h() -> f32 {
+    (font::GLYPH_H as f32 + 2.0) * HUD_TEXT_SCALE
+}
+
+/// The Tab player-list overlay's panel geometry.
+///
+/// **Exists so the draw and its gate share one expression rather than two that
+/// agree today.** A pixel gate that recomputed `y` from its own copy of this
+/// arithmetic would keep passing after the panel moved — a control whose
+/// premise is false in the safe-looking direction. `build_inner` constructs one
+/// of these and draws from it; the gate constructs one from the same inputs and
+/// measures against it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct TabPanel {
+    /// Left edge, in logical canvas pixels.
+    pub x: f32,
+    /// Top edge.
+    pub y: f32,
+    /// Panel width.
+    pub w: f32,
+    /// Panel height.
+    pub h: f32,
+    /// Vertical pitch between lines.
+    pub line_h: f32,
+    /// Inset from the panel edge to its content.
+    pub margin: f32,
+    /// How many footer lines the panel was sized for.
+    pub footer_len: usize,
+}
+
+impl TabPanel {
+    /// Lay the panel out for a canvas and a content census.
+    ///
+    /// `widest_banner` is the widest header/footer line in pixels, measured
+    /// with the same font the draw uses; it only ever *widens* the panel, so
+    /// passing `0.0` reproduces the pre-banner geometry exactly — which is why
+    /// the existing no-banner pixel gate is unaffected by this type existing.
+    pub fn new(
+        canvas_w: f32,
+        canvas_h: f32,
+        header_len: usize,
+        rows: usize,
+        footer_len: usize,
+        widest_banner: f32,
+    ) -> Self {
+        let line_h = hud_line_h();
+        let margin = HUD_MARGIN;
+        // Counted before `y`, or the panel stops being centred about its own
+        // content the moment a server sends a banner. The `+ 1` is the
+        // "PLAYERS (n)" caption; `rows.max(1)` keeps an empty list's panel from
+        // collapsing, which is the pre-existing behaviour.
+        let lines = header_len + 1 + rows.max(1) + footer_len;
+        let h = lines as f32 * line_h + margin * 2.0;
+        let w = (canvas_w * 0.5)
+            .max(if widest_banner > 0.0 {
+                widest_banner + margin * 2.0
+            } else {
+                0.0
+            })
+            .min((canvas_w - margin * 2.0).max(0.0));
+        Self {
+            x: (canvas_w * 0.5).floor() - w * 0.5,
+            y: (canvas_h - h) * 0.5,
+            w,
+            h,
+            line_h,
+            margin,
+            footer_len,
+        }
+    }
+
+    /// Baseline of header line `i`, counting down from the panel's top inset.
+    pub fn header_y(&self, i: usize) -> f32 {
+        self.y + self.margin + i as f32 * self.line_h
+    }
+
+    /// Baseline of footer line `i`, anchored off the panel's **bottom**.
+    ///
+    /// Deliberately not `header_y(header_len + 1 + rows + i)`: the panel is
+    /// sized for `rows.max(1)` while the row loop advances by `rows`, so an
+    /// empty player list would pull the footer up into the gap.
+    pub fn footer_y(&self, i: usize) -> f32 {
+        self.y + self.h - self.margin - (self.footer_len - i) as f32 * self.line_h
+    }
+
+    /// x for a line of width `text_w` centred in the panel — the header and
+    /// footer alignment, as vanilla does it.
+    pub fn centred_x(&self, text_w: f32) -> f32 {
+        self.x + (self.w - text_w) * 0.5
+    }
+
+    /// x for the left-aligned caption and player rows.
+    pub fn left_x(&self) -> f32 {
+        self.x + self.margin
+    }
+
+    /// Horizontal centre of the panel, for a gate asking *where* a line sits.
+    pub fn centre_x(&self) -> f32 {
+        self.x + self.w * 0.5
+    }
+}
+
 /// Everything the debug overlay shows for one frame.
 #[derive(Debug, Clone, Default)]
 pub struct DebugStats {
@@ -372,6 +482,18 @@ pub struct HudFrame<'a> {
     pub chat_options: ChatDisplayOptions,
     /// Formatted player-list rows, `Some` only while the tab overlay is held.
     pub players: Option<&'a [String]>,
+    /// The server's tab-list header, one entry per line, drawn centred **above**
+    /// the player rows. Empty when the server sent none — see
+    /// [`crate::tablist::banner_lines`] for why this is a possibly-empty slice
+    /// rather than an `Option`, and [`crate::sim::Sim::tab_banner`] for what it
+    /// closes.
+    ///
+    /// Read only when [`Self::players`] is `Some`: there is no panel to hang a
+    /// header on otherwise.
+    pub tab_header: &'a [String],
+    /// The server's tab-list footer, drawn centred **below** the player rows.
+    /// Same shape and same gating as [`Self::tab_header`].
+    pub tab_footer: &'a [String],
     /// The scoreboard sidebar to draw on the right edge, `Some` when displayed.
     pub sidebar: Option<&'a Sidebar>,
     /// Active boss bars, drawn stacked at the top-centre in render order.
@@ -488,6 +610,8 @@ impl<'a> HudFrame<'a> {
             chat_caret_visible: true,
             chat_options: ChatDisplayOptions::default(),
             players: None,
+            tab_header: &[],
+            tab_footer: &[],
             sidebar: None,
             boss_bars: &[],
             health: None,
@@ -748,10 +872,10 @@ impl HudGeometry {
         let (w, h) = crate::menu::render::logical_canvas(gui_scale, width, height);
         let mut b = Builder::new(w, h, gui, items, models, font);
 
-        let scale = 2.0;
-        let margin = 6.0;
+        let scale = HUD_TEXT_SCALE;
+        let margin = HUD_MARGIN;
         let glyph_h = font::GLYPH_H as f32;
-        let line_h = (glyph_h + 2.0) * scale;
+        let line_h = hud_line_h();
 
         // Debug text, top-left.
         if frame.show_debug {
@@ -1223,24 +1347,45 @@ impl HudGeometry {
             }
         }
 
-        // Tab player-list overlay: a centred panel of rows while Tab is held.
+        // Tab player-list overlay: a centred panel of rows while Tab is held,
+        // with the server's header above and footer below (issue #436's island
+        // sweep). Vanilla centres both about the panel and stacks them outside
+        // the rows (`PlayerTabOverlay.render`); the "PLAYERS (n)" caption is
+        // this client's own affordance and stays between them.
         if let Some(players) = frame.players {
-            let rows = players.len().max(1);
-            let panel_h = (rows as f32 + 1.0) * line_h + margin * 2.0;
-            let panel_w = b.w * 0.5;
-            let px = cx - panel_w * 0.5;
-            let py = (b.h - panel_h) * 0.5;
-            b.rect_px(px, py, panel_w, panel_h, [0.0, 0.0, 0.0, 0.7]);
+            let header = frame.tab_header;
+            let footer = frame.tab_footer;
+            // Measured with the same font the draw uses. `text_width`'s own doc
+            // says every centring site must go through it, and this is the
+            // input that decides whether the panel has to widen at all.
+            let widest_banner = header
+                .iter()
+                .chain(footer.iter())
+                .map(|l| b.text_width(l, scale))
+                .fold(0.0f32, f32::max);
+            let panel = TabPanel::new(b.w, b.h, header.len(), players.len(), footer.len(), widest_banner);
+            b.rect_px(panel.x, panel.y, panel.w, panel.h, [0.0, 0.0, 0.0, 0.7]);
+
+            for (i, line) in header.iter().enumerate() {
+                let x = panel.centred_x(b.text_width(line, scale));
+                b.text(line, x, panel.header_y(i), scale, [1.0, 1.0, 1.0, 1.0]);
+            }
+            // The caption and the rows continue straight on from the header, so
+            // they index the same ladder rather than a second one.
             b.text(
                 &format!("PLAYERS ({})", players.len()),
-                px + margin,
-                py + margin,
+                panel.left_x(),
+                panel.header_y(header.len()),
                 scale,
                 [1.0, 1.0, 0.6, 1.0],
             );
             for (i, row) in players.iter().enumerate() {
-                let y = py + margin + (i as f32 + 1.0) * line_h;
-                b.text(row, px + margin, y, scale, [0.9, 0.95, 1.0, 1.0]);
+                let y = panel.header_y(header.len() + 1 + i);
+                b.text(row, panel.left_x(), y, scale, [0.9, 0.95, 1.0, 1.0]);
+            }
+            for (i, line) in footer.iter().enumerate() {
+                let x = panel.centred_x(b.text_width(line, scale));
+                b.text(line, x, panel.footer_y(i), scale, [1.0, 1.0, 1.0, 1.0]);
             }
         }
 

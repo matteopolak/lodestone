@@ -526,6 +526,13 @@ impl WindowApp {
         } else {
             Vec::new()
         };
+        // Read on the same condition as the rows, and for the same reason: both
+        // are a world clone, and neither is drawn unless the overlay is up.
+        let (tab_header, tab_footer) = if self.tab_held {
+            self.sim.tab_banner()
+        } else {
+            (Vec::new(), Vec::new())
+        };
         let health = self.sim.health();
         let food = self.sim.food();
         // `HudState::MAX_AIR` — the same constant `PlayerSnapshot::air` fills
@@ -574,6 +581,8 @@ impl WindowApp {
             colors: chat_opts.chat_colors,
         };
         hud_frame.players = self.tab_held.then_some(player_rows.as_slice());
+        hud_frame.tab_header = tab_header.as_slice();
+        hud_frame.tab_footer = tab_footer.as_slice();
         hud_frame.sidebar = sidebar.as_ref();
         hud_frame.boss_bars = &boss_bars;
         hud_frame.health = health;
