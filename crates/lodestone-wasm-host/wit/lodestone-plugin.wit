@@ -1,0 +1,188 @@
+// The Lodestone plugin ABI — issue #173's surface, vendored in-repo as the
+// single source of truth for both sides of the boundary.
+//
+// READ THIS BEFORE EDITING. Three properties are load-bearing and none of them
+// is obvious from the syntax:
+//
+//  1. **Every `import` in the world below is a capability**, and the host grants
+//     one by adding it to the wasmtime `Linker` (`src/host.rs`). A guest that
+//     never calls an import does not import it: the wasm linker drops the
+//     unreferenced `extern` and `wit-component` encodes a component whose
+//     import list contains only what the guest actually uses. **Measured**, not
+//     assumed — see `docs/wasm-plugin-host.md` §"The capability probe" for the
+//     exact two component import lists. That is why capability enforcement here
+//     is structural rather than advisory: a plugin whose manifest declares no
+//     filesystem capability but which calls `filesystem.read-file` anyway fails
+//     at *instantiation*, because the interface is absent from the linker.
+//
+//  2. **Events are pushed as an argument and actions come back as a return
+//     value** — deliberately not the `poll-events`/`submit-actions` import pair
+//     `docs/plans/runtime-plugin-loading.md` first proposed. Two reasons, and
+//     the second is the important one. It is one boundary crossing per guest per
+//     tick instead of three; and a return value **cannot** be produced outside
+//     the guest's own tick window, whereas a `submit-actions` import could be
+//     called from anywhere the guest reaches, which would fork the single-writer
+//     invariant `docs/plugin-api.md`'s clause 2 depends on. The host's conductor
+//     stays the one writer of `ActionQueue` by construction.
+//
+//  3. **`event` and `action` are a curated subset of `lodestone_model`'s
+//     `ClientEvent` (~110 variants) and `ClientAction` (~55)**, not a mirror of
+//     them. A full mirror is the staleness factory `lodestone_ecs::events`'s own
+//     module doc refuses for exactly this reason: two enums drift and nothing
+//     forces the second to grow. The subset grows deliberately, and a guest
+//     cannot silently miss an event it wanted — it must *name* the event kinds
+//     it observes in its `plugin.toml`, and a kind this world does not define is
+//     a loud manifest rejection at load time.
+
+package lodestone:plugin@0.1.0;
+
+/// The vocabulary itself: the intent doctrine's own observe/act types, lifted
+/// into WIT. Nothing here is invented for wasm — every record below is a
+/// field-for-field copy of something that already crosses the native plugin
+/// seam as a `Clone` value or a POD struct.
+interface types {
+    /// `lodestone_model::event::ChatKind`.
+    enum chat-kind {
+        chat,
+        system,
+        game-info,
+    }
+
+    /// `lodestone_model::ClientEvent::Chat`.
+    ///
+    /// `text` is the *plain* string (`Text::to_plain_string`), not the styled
+    /// component tree. A guest that needs styling is a v0.2 conversation; the
+    /// flattening is deliberate and lossy, and is recorded as such in
+    /// `docs/wasm-plugin-host.md` §"Where the mapping is lossy".
+    record chat-message {
+        text: string,
+        kind: chat-kind,
+    }
+
+    /// `lodestone_model::ClientEvent::HealthChanged`.
+    record health {
+        health: f32,
+        food: s32,
+        saturation: f32,
+    }
+
+    /// Section coordinates — block coordinate `>> 4` on every axis, exactly
+    /// `lodestone_model::SectionPos`.
+    record section-pos {
+        x: s32,
+        y: s32,
+        z: s32,
+    }
+
+    /// One section-relative cell, each component `0..16`.
+    record block-offset {
+        x: u8,
+        y: u8,
+        z: u8,
+    }
+
+    /// `lodestone_model::ClientEvent::SectionBlocksChanged`.
+    ///
+    /// The section-granular event, not the column-granular one: a guest
+    /// watching for redstone edits must not pay a chunk-sized cost per tick.
+    record section-blocks-changed {
+        section: section-pos,
+        blocks: list<block-offset>,
+    }
+
+    /// A block position in world coordinates — `lodestone_model::BlockPos`.
+    record block-pos {
+        x: s32,
+        y: s32,
+        z: s32,
+    }
+
+    /// One observation the host delivers. The variant set is the curated subset
+    /// described in this file's header; each arm names the `ClientEvent` it is
+    /// lifted from, and `crates/lodestone-wasm-host/src/abi.rs` is the one place
+    /// the lift happens.
+    variant event {
+        /// `ClientEvent::Chat` — capability `observe:chat`.
+        chat(chat-message),
+        /// `ClientEvent::HealthChanged` — capability `observe:health`.
+        health-changed(health),
+        /// `ClientEvent::SectionBlocksChanged` — capability `observe:blocks`.
+        blocks-changed(section-blocks-changed),
+    }
+
+    /// Which hand — `lodestone_model::common::Hand`.
+    enum hand {
+        main,
+        off,
+    }
+
+    /// One thing a guest wants done. Lowered onto `ClientAction` and pushed
+    /// onto `lodestone_ecs::player::ActionQueue` in submission order, which is
+    /// send order on the wire — so a guest's ordering of this list is
+    /// observable, the same guarantee a native plugin gets.
+    variant action {
+        /// `ClientAction::SendChat` — capability `act:chat`.
+        send-chat(string),
+        /// `ClientAction::SendCommand` — capability `act:chat`.
+        send-command(string),
+        /// `ClientAction::SwingArm` — capability `act:interact`.
+        swing-arm(hand),
+    }
+
+    /// What a guest says about itself at `init`. Cross-checked against the
+    /// `plugin.toml` beside it: a mismatch is a load-time rejection, because a
+    /// manifest that disagrees with the module it ships next to is exactly the
+    /// case where trusting either one silently is wrong.
+    record plugin-info {
+        name: string,
+        version: string,
+        /// The world version this guest was built against, e.g.
+        /// `"lodestone:plugin@0.1.0"`.
+        abi: string,
+    }
+
+    enum log-level {
+        trace,
+        debug,
+        info,
+        warn,
+        error,
+    }
+}
+
+/// Capability `log` — granted to every plugin. The host owns the sink, so this
+/// is not an escape hatch: a guest cannot reach a file or a terminal through it,
+/// only the host's own `tracing` subscriber, tagged with the plugin's name.
+interface logging {
+    use types.{log-level};
+
+    log: func(level: log-level, message: string);
+}
+
+/// Capability `fs:read` — **never granted by default**, and the subject of the
+/// denial gate in `tests/capability_denial.rs`.
+///
+/// It exists in this world precisely so that "a plugin that declares no
+/// filesystem capability cannot touch the filesystem" is a *tested* claim about
+/// a guest that genuinely tries, rather than an observation about guests that
+/// never do. `tests/support`'s misbehaving fixture calls this function; the host
+/// refuses to instantiate it.
+interface filesystem {
+    read-file: func(path: string) -> result<list<u8>, string>;
+}
+
+world plugin {
+    use types.{event, action, plugin-info};
+
+    import logging;
+    import filesystem;
+
+    /// Called once, immediately after instantiation. The returned
+    /// [`plugin-info`] is cross-checked against the manifest.
+    export init: func() -> plugin-info;
+
+    /// Called once per `GameTick`, with this tick's subscribed events, returning
+    /// this tick's actions. Called even when `events` is empty, so a guest can
+    /// act on its own clock.
+    export on-tick: func(events: list<event>) -> list<action>;
+}

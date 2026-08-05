@@ -12,6 +12,19 @@ members = [
     "crates/protocol/*",
     "xtask",
 ]
+# Crates that are **guests**, not members: they compile only for
+# `wasm32-unknown-unknown`, so a `cargo check --workspace --all-targets` that swept
+# them in would go red on a native target for a crate that is not meant to be built
+# that way. Their `wit-bindgen` bindings declare `#[link(wasm_import_module = …)]`
+# externs, which do not link into a native `cdylib`.
+#
+# Each also carries its own empty `[workspace]` table, so it is a workspace root in
+# its own right with its own `Cargo.lock` — the exclude here and that table are two
+# halves of one decision, and removing either one breaks the health checks.
+# `crates/lodestone-wasm-host/tests/support/mod.rs` builds them on demand.
+exclude = [
+    "crates/plugins/lodestone-chat-responder-wasm",
+]
 # So `cargo run --release` from the repo root launches the game.
 #
 # Without this, a bare `cargo run` in a virtual workspace fails ("could not
@@ -33,6 +46,7 @@ repository = "https://github.com/matthew/lodestone"
 
 [workspace.dependencies]
 lodestone-core   = { path = "crates/lodestone-core" }
+lodestone-command = { path = "crates/lodestone-command" }
 lodestone-macros = { path = "crates/lodestone-macros" }
 lodestone-model  = { path = "crates/lodestone-model" }
 lodestone-world  = { path = "crates/lodestone-world" }
