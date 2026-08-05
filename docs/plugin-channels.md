@@ -38,7 +38,37 @@ calls `add_plugin_message::<T>()`, so a channel type is an ordinary cross-plugin
 message with the documented `TickSet::Send` aging point, and two plugins may
 declare the same channel type idempotently.
 
-### Two things it does on your behalf, both load-bearing
+### Outbound: from a plugin to the socket
+
+```text
+  a plugin writes T (a #[derive(Message)] type)
+              │
+  dispatch_plugin_channel_outbound::<T>     (GameTick,
+                                             after every
+                                             EventPriority tier)
+  ClientAction::SendCustomPayload { channel, data: T::encode(msg) }
+              │
+           ActionQueue
+              │
+  Sim::drain_action_queue → version adapter → server bytes
+```
+
+`dispatch_plugin_channel_outbound` is scheduled
+`.after(EventPriority::Monitor)` — the inverse anchor to the inbound
+dispatcher's `.before(EventPriority::Lowest)`, so everything a plugin writes
+this tick is queued this tick, even from a writer in the last tier. The sim
+drains the `ActionQueue` right after `GameTick`, so the payload reaches the wire
+on the same tick; nothing here touches a socket or a version crate. Register
+with `add_outbound_plugin_channel::<T>()`, which installs `CorePlugin` (for the
+`EventPriority` chain) and the `ActionQueue` if needed and, unlike
+`add_plugin_channel`, does **not** install the game-event bus — sending has no
+need of `SharedState`.
+
+A type registered **both** ways shares one `Messages<T>` mailbox, so an inbound
+payload it decodes is re-queued outbound on the same tick (echo). A plugin that
+wants echo-free two-way messaging uses two types, one per direction.
+
+### Two things `add_plugin_channel` does on your behalf, both load-bearing
 
 **It installs the game-event bus.** `GameEventBusPlugin` is opt-in and inserts a
 marker resource `SharedState` checks *once, at construction*. Without it
@@ -78,6 +108,28 @@ impl Plugin for ServerBrandPlugin {
 }
 ```
 
+Sending is the mirror. Implement
+[`OutboundPluginChannel`](https://docs.rs/lodestone-ecs/latest/lodestone_ecs/trait.OutboundPluginChannel.html)
+for a `#[derive(Message)]` type, register it with
+`add_outbound_plugin_channel`, and write `T`s from any `GameTick` system:
+
+```rust
+#[derive(Message, Debug, Clone, PartialEq, Eq)]
+pub struct BeaconRequest { pub id: u32 }
+
+impl OutboundPluginChannel for BeaconRequest {
+    const CHANNEL: &'static str = "example:beacon";
+    fn encode(&self) -> Vec<u8> { self.id.to_be_bytes().to_vec() }
+}
+
+impl Plugin for BeaconPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_outbound_plugin_channel::<BeaconRequest>();
+        app.add_systems(GameTick, send_beacons.in_set(EventPriority::Normal));
+    }
+}
+```
+
 Gotchas:
 
 - **Assert the resource, not the plugin.** `App::is_plugin_added::<T>()` stays
@@ -96,14 +148,14 @@ Gotchas:
 
 ## What this deliberately does not do
 
-**It does not send.** Outbound is
-`lodestone_model::ClientAction::SendCustomPayload`, which as of this writing has
-**no producer anywhere in the workspace** — the `v770` encoder arm for it is
-reachable only from outside the tree via `ClientHandle::send_action`. The
-`minecraft:brand` our *client* announces travels a different, already-wired path:
-`ClientAction::SendBrand`, produced by `lodestone_client::driver` on entering
-`Configuration`. Note that gating means legacy families never send it, since
-v47/v340/v735 never enter `Configuration`.
+**It does not touch the socket itself.** Outbound takes the same `ActionQueue`
+every `ClientAction` uses: `dispatch_plugin_channel_outbound` queues
+`SendCustomPayload` after `Monitor`, and the sim's `drain_action_queue` carries
+it to the version adapter. The `minecraft:brand` our *client* announces travels
+a different, already-wired path: `ClientAction::SendBrand`, produced by
+`lodestone_client::driver` on entering `Configuration`. Note that gating means
+legacy families never send either, since v47/v340/v735 never enter
+`Configuration`.
 
 **It does not change `route()`.** `lodestone_model::event::route` sends
 `CustomPayload` to `Route::NOWHERE` and that stays true: nothing in the
@@ -129,11 +181,13 @@ is issue #77's job. See [`server-plugin-channels.md`](./server-plugin-channels.m
 
 ## Configuration
 
-None. No env vars, no features. `add_plugin_channel` is the whole surface.
+None. No env vars, no features. `add_plugin_channel` and
+`add_outbound_plugin_channel` are the whole surface.
 
 ## Dependencies
 
 `lodestone-ecs` (`events` for `GameEvent`/`GameEventBusPlugin`, `plugin_message`
-for registration and aging, `sets::EventPriority` and `schedules::GameTick` for
-ordering) and `lodestone-model` for `ClientEvent`/`ResourceKey`. No protocol
+for registration and aging, `player::ActionQueue` for outbound egress,
+`sets::EventPriority` and `schedules::GameTick` for ordering) and
+`lodestone-model` for `ClientEvent`/`ClientAction`/`ResourceKey`. No protocol
 family, on either side of the seam.
