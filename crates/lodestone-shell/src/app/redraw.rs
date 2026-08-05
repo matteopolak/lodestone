@@ -157,7 +157,7 @@ impl WindowApp {
                         count: st.count().max(0) as u32,
                         damage,
                         max_damage,
-                        enchanted: false,
+                        enchanted: crate::hud::item_icon::stack_has_foil(st),
                     })
                 })
             })

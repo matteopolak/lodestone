@@ -247,7 +247,26 @@ pub fn glint_texture_matrix(millis: f64, speed: f64, scale: Scale) -> glam::Mat4
 /// likewise out of reach.
 #[must_use]
 pub fn has_foil(components: &lodestone_model::item::ItemComponents) -> bool {
-    !components.enchantments.is_empty()
+    has_foil_enchantments(&components.enchantments)
+}
+
+/// [`has_foil`] over a borrowed enchantment list, for a caller that holds the
+/// list but not a [`lodestone_model::item::ItemComponents`].
+///
+/// This exists so the predicate has exactly **one** owner. The shell's stacks are
+/// `lodestone_game::item::ItemStack`, whose component set is an opaque
+/// `BTreeMap<Identifier, ComponentValue>` and a genuinely different type from the
+/// model's struct-of-fields — so `has_foil` cannot be called there, and the
+/// tempting alternative is to re-spell `!list.is_empty()` at each shell call site.
+/// That would put the *interesting* half of this module's doc (the seven baked
+/// `ENCHANTMENT_GLINT_OVERRIDE` items, `enchanted_book`'s `STORED_ENCHANTMENTS`,
+/// `compass`'s code-level override) at a distance from the code a reader is
+/// looking at, which is how a known shortfall turns back into a bug report.
+///
+/// Every caveat in [`has_foil`]'s doc applies here unchanged; read it there.
+#[must_use]
+pub fn has_foil_enchantments(enchantments: &[lodestone_model::item::ItemEnchantment]) -> bool {
+    !enchantments.is_empty()
 }
 
 /// The group-0 uniform for [`shaders/glint.wgsl`](../src/shaders/glint.wgsl).
