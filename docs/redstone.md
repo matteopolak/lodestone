@@ -154,6 +154,35 @@ T-junction, a repeater-locked latch) is the strongest remaining step.
 
 ## How to change it, and the gotchas
 
+- **Player placement is now a third `propagate_and_react` caller, and it is the
+  only one a player can trigger** (issue #465). `server.rs`'s
+  `propagate_placement` runs the same fan-out `tick.rs` already runs after a
+  random tick and after a drained scheduled tick, then persists every returned
+  change through `ChunkSource::set_block` and sends a `BLOCK_UPDATE` for each.
+  Before it existed the subsystem was reachable only by a random tick landing
+  next to a circuit, and dust and torches are not randomly-ticking blocks — so
+  in practice, not at all. Gated by
+  `crates/protocol/v770/tests/server_redstone_placement.rs`.
+- **Placement resolves only the synchronous half.** `propagate_placement`'s
+  `ScheduledTickQueue` is local and discarded, so dust (synchronous in vanilla,
+  measured at 0 ticks) completes, while a torch/repeater/comparator/observer —
+  which react by *scheduling* a recheck the tick loop owns — still does nothing
+  when placed next to a live circuit. Closing that needs `tick.rs` to drain a
+  queue fed from the connection; see #465's own thread for the patch.
+- **A partial block-state string does not survive the v770 encoder.**
+  `resolve_state_id` (`crates/protocol/v770/src/server_protocol.rs`) matches by
+  **exact property set**. `minecraft:redstone_wire` has 1296 states carrying
+  five properties, while `redstone_wire::set_power` deliberately emits only
+  `minecraft:redstone_wire[power=N]` — so no dust state ever matches, and the
+  encoder falls through to the lowest id with that name, `4011`, which is
+  `power=0`. **Every dust change this server sends is delivered to the client
+  as zero**, whatever it computed, and that has always been true — of random
+  ticks and scheduled ticks as much as of placement. It is a fully-connected
+  wire carrying the wrong value, which `cargo xtask connectedness` structurally
+  cannot see. Measured by
+  `server_redstone_placement::the_powered_run_reaches_the_client`, which is
+  `#[ignore]`d and names this as its blocker; the fix is a subset match in
+  `resolve_state_id`, not a change to what this crate emits.
 - **Never reason about `FACING` as "output direction."** It is the direction
   a diode/observer's own `getSignal`/`getDirectSignal`/`getInputSignal` read
   *from* — see "Direction convention" above. Every wrong test in this landing
