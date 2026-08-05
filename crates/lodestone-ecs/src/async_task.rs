@@ -457,7 +457,25 @@ impl Drop for AsyncTaskPool {
         if Arc::strong_count(&self.workers) > 1 {
             return;
         }
-        self.shared.shutdown.store(true, Ordering::Release);
+        // **Take the queue lock before setting the flag.** Without this there is
+        // a lost-wakeup race that hangs `join` below forever, and it is not
+        // theoretical — it hung `cargo test -p lodestone-ecs` on this crate's own
+        // `a_pending_task_survives_the_pool_being_dropped` under load:
+        //
+        //   worker: locks queue, sees shutdown == false, has not yet called wait
+        //   drop:   sets shutdown = true, calls notify_all -> NO waiters, no-op
+        //   worker: calls wait(), releasing the lock, and sleeps forever
+        //   drop:   join() blocks forever
+        //
+        // `wait` releases the lock atomically as it sleeps, so acquiring it here
+        // means the worker is either already waiting (and `notify_all` reaches
+        // it) or has not yet checked the flag (and will see it set). The lock
+        // must be released before `notify_all`, or the woken worker immediately
+        // blocks re-acquiring it.
+        {
+            let _queue = self.shared.queue.lock();
+            self.shared.shutdown.store(true, Ordering::Release);
+        }
         self.shared.ready.notify_all();
         let handles: Vec<_> = std::mem::take(&mut *self.workers.lock());
         for handle in handles {
@@ -944,6 +962,39 @@ mod tests {
                 .initialize(world)
                 .expect("the ordering edge must hold in either registration order");
         });
+    }
+
+    /// **The regression gate for the lost-wakeup race in `Drop`.** Creating and
+    /// dropping many pools, each with several idle workers, is what makes the
+    /// check-then-wait window get hit: the failure mode is `join` blocking
+    /// forever, so a hang here *is* the failure.
+    ///
+    /// Observed failing before the fix — `cargo test -p lodestone-ecs` stalled on
+    /// `a_pending_task_survives_the_pool_being_dropped` with
+    /// "has been running for over 60 seconds" and never finished. A test that can
+    /// only fail by hanging is unusual, so the loop count is high enough to make
+    /// the race overwhelmingly likely rather than relying on one attempt.
+    #[test]
+    fn dropping_many_idle_pools_never_hangs() {
+        for _ in 0..200 {
+            let pool = AsyncTaskPool::with_threads(4);
+            // Idle workers, i.e. all of them parked in `wait` or about to be —
+            // exactly the state the race needs.
+            drop(pool);
+        }
+    }
+
+    /// The same race with work in flight, so a worker may be running a job rather
+    /// than parked when shutdown lands. Both arms of the wait loop matter.
+    #[test]
+    fn dropping_a_busy_pool_never_hangs() {
+        for _ in 0..100 {
+            let pool = AsyncTaskPool::with_threads(2);
+            for _ in 0..8 {
+                let _task = pool.spawn(|| 1u32);
+            }
+            drop(pool);
+        }
     }
 
     /// `drain_completed_tasks` on a `World` with no pool returns quietly.
