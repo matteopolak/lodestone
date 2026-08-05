@@ -942,14 +942,17 @@ impl OverworldGenerator {
         // correctly relative to it — see `VegGrid`'s own doc comment (the
         // island a chunk-local-only grid used to cause) and
         // `crate::feature::vegetation`'s module doc "Scope" section for why
-        // the footprint is widened to `REGION_MIN..REGION_MAX` here.
+        // the footprint is widened beyond `REGION_MIN..REGION_MAX` here: trees
+        // (especially 2×2 trunks and their canopies) can spill past the tight
+        // 48-block 3×3 neighbourhood, and `VegGrid::set_if_in_bounds` drops any
+        // cell outside it — the chunk-border cut-off trees the player sees.
         let mut grid = crate::feature::vegetation::VegGrid::with_footprint(
             self.min_y,
             self.height,
             base_x,
             base_z,
-            crate::feature::REGION_MIN,
-            crate::feature::REGION_MAX,
+            crate::feature::REGION_MIN - crate::feature::VEG_PADDING,
+            crate::feature::REGION_MAX + crate::feature::VEG_PADDING,
         );
 
         Self::stitch_veg_region(&mut grid, cx, cz, &world, self.min_y, self.height);

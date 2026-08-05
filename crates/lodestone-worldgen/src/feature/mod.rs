@@ -538,6 +538,16 @@ pub type RegionGrid = crate::dense_grid::DenseBlockGrid;
 pub const REGION_MIN: i32 = -16;
 pub const REGION_MAX: i32 = 32;
 
+/// Additional padding beyond [`REGION_MIN`]/[`REGION_MAX`] for the vegetation
+/// grid, so a placed tree spilling past the 3×3 neighbourhood's edge is kept
+/// rather than silently dropped. The worst case is a giant jungle tree whose
+/// canopy touches 15×15 at the trunk; an 8-block pad on every side of a 48-block
+/// region gives a 64×64 footprint — enough for any 26.2 tree, including a 2×2
+/// dark oak whose 6×6 canopy at a source-chunk corner reaches 22 blocks from the
+/// centre. The ore driver keeps the tighter bound, since ores are single-block
+/// clusters that never spill.
+pub const VEG_PADDING: i32 = 8;
+
 /// Inputs the ore driver needs beyond the RNG.
 pub struct OreInput<'a> {
     /// The chunk currently placing features — its own origin/seed
