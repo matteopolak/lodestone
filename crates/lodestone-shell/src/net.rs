@@ -383,6 +383,96 @@ impl BiomeNameCell {
 /// threads.
 pub type SharedBiomeNames = Arc<BiomeNameCell>;
 
+/// The server's Brigadier command tree, plus the newest reply to a
+/// `command_suggestion` request (issues #470/#471).
+///
+/// # Why a cell rather than a [`NetUpdate`]
+///
+/// Same shape as [`BiomeNameCell`], which is what
+/// [`ClientEvent::CommandTreeUpdated`]'s own doc points at: the whole tree
+/// replaces at once and there is nothing to queue. It is also read from the
+/// *menu* layer (the chat box and the command-block edit screen), which polls
+/// per frame and wants the latest value rather than a stream — a channel would
+/// have every reader folding it back into one scalar anyway.
+///
+/// `Arc<CommandTree>` rather than a clone per read: a real 26.2 server's tree
+/// is **2,017 nodes / ~30 kB** (`docs/commands.md`), so cloning it on every
+/// keystroke to run a completion would be the wrong default to leave lying
+/// around.
+///
+/// # What consumes this today, honestly
+///
+/// **The fold, and not yet a screen.** This closes the half of issue #471 that
+/// is a live defect — `lodestone_model::event::route` sends both variants to
+/// `SHELL`, so with no arm in [`forward`] they reached the terminal `_ =>` and
+/// tripped its `debug_assert!` on any debug-build join to a real server. The
+/// remaining two steps in #471 — pointing `menu/render/screens.rs`'s
+/// `command_block_frame` at [`Self::tree`] instead of the `None` every caller
+/// passes, and making the chat box's Tab key call `chat::complete` — live in
+/// `chat.rs` and the menu files, which this change does not own.
+///
+/// **So this is deliberately a half-wire, and saying so is the point**:
+/// storing the value where the consumer can reach it is what makes the next
+/// step an arm rather than a re-decode, and dropping it in the arm instead
+/// would be the island pattern the `debug_assert!` above exists to catch.
+#[derive(Debug, Default)]
+pub struct CommandTreeCell {
+    tree: Mutex<Option<Arc<lodestone_model::command_tree::CommandTree>>>,
+    suggestions: Mutex<Option<lodestone_model::command_tree::CommandSuggestionsResponse>>,
+}
+
+impl CommandTreeCell {
+    /// Replace the tree. Called by [`forward`]'s `CommandTreeUpdated` arm.
+    ///
+    /// A server may send `minecraft:commands` more than once per session (an
+    /// op level change re-sends it), so this replaces rather than sets once —
+    /// which is also why it is not a `OnceLock` like [`SharedHandle`].
+    pub(crate) fn apply(&self, tree: lodestone_model::command_tree::CommandTree) {
+        *self.tree.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(tree));
+    }
+
+    /// Record the newest suggestion reply. Called by [`forward`]'s
+    /// `CommandSuggestionsReceived` arm.
+    ///
+    /// Stored whole, **including its transaction id**: the id is the only
+    /// thing that lets the consumer discard a reply to a request the input has
+    /// since outgrown (vanilla's own
+    /// `ClientSuggestionProvider::completeCustomSuggestions` check), so
+    /// flattening this to just the strings here would destroy the one field
+    /// that makes a stale reply detectable.
+    pub(crate) fn apply_suggestions(
+        &self,
+        response: lodestone_model::command_tree::CommandSuggestionsResponse,
+    ) {
+        *self.suggestions.lock().unwrap_or_else(PoisonError::into_inner) = Some(response);
+    }
+
+    /// The current tree, or `None` before the server sends one (a server that
+    /// sends none, or any point before login completes). Callers must treat
+    /// `None` as "offer no completions", never as an empty tree.
+    #[must_use]
+    pub fn tree(&self) -> Option<Arc<lodestone_model::command_tree::CommandTree>> {
+        self.tree
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The newest suggestion reply, if any has arrived.
+    #[must_use]
+    pub fn suggestions(
+        &self,
+    ) -> Option<lodestone_model::command_tree::CommandSuggestionsResponse> {
+        self.suggestions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// A [`CommandTreeCell`] shared between the net thread and the menu layer.
+pub type SharedCommandTree = Arc<CommandTreeCell>;
+
 /// The current dimension's policy for *absent* sky light, shared between the
 /// thread that learns the dimension and the render thread's per-entity light
 /// sampler.
@@ -750,6 +840,11 @@ pub struct NetClient {
     /// is a shared cell rather than a [`NetUpdate`], and for the `&'static
     /// str` leak-intern this is the one caller of.
     biome_names: SharedBiomeNames,
+    /// The server's command tree and newest suggestion reply, folded by
+    /// [`forward`]'s two command arms. See [`CommandTreeCell`] for why this is
+    /// a shared cell rather than a [`NetUpdate`], and for exactly how much of
+    /// issue #471 it closes.
+    command_tree: SharedCommandTree,
     /// The current dimension's absent-sky-light policy. Unlike [`Self::weather`]
     /// the **net thread never writes this** — `Sim::refresh_mesh_policy` is the
     /// sole producer and the render thread's light samplers are the consumers.
@@ -1012,6 +1107,8 @@ impl NetClient {
         let biome_climates_thread = Arc::clone(&biome_climates);
         let biome_names: SharedBiomeNames = Arc::new(BiomeNameCell::default());
         let biome_names_thread = Arc::clone(&biome_names);
+        let command_tree: SharedCommandTree = Arc::new(CommandTreeCell::default());
+        let command_tree_thread = Arc::clone(&command_tree);
         let local_uuid: SharedLocalUuid = Arc::new(OnceLock::new());
         let local_uuid_thread = Arc::clone(&local_uuid);
 
@@ -1028,6 +1125,7 @@ impl NetClient {
                     weather_thread,
                     biome_climates_thread,
                     biome_names_thread,
+                    command_tree_thread,
                     local_uuid_thread,
                     session,
                 )
@@ -1043,6 +1141,7 @@ impl NetClient {
             weather,
             biome_climates,
             biome_names,
+            command_tree,
             sky_default: Arc::new(SkyDefaultCell::default()),
             local_uuid,
             #[cfg(test)]
@@ -1293,6 +1392,19 @@ impl NetClient {
         Arc::clone(&self.biome_climates)
     }
 
+    /// Clone out the `Arc`-backed command-tree cell, for the same reason
+    /// [`shared_weather`](Self::shared_weather) exists: the menu layer reads it
+    /// per frame, after this `NetClient` has been moved into
+    /// `Sim::attach_net`.
+    ///
+    /// See [`CommandTreeCell`] for what does and does not consume it yet —
+    /// today the fold is live and the screens that should read it are still
+    /// passing `None` (issue #471, steps 2 and 3).
+    #[must_use]
+    pub fn shared_command_tree(&self) -> SharedCommandTree {
+        Arc::clone(&self.command_tree)
+    }
+
     /// Clone out the `Arc`-backed biome-name cell, for the same reason
     /// [`shared_weather`](Self::shared_weather) exists: `crate::sim` reads
     /// this once at `TerrainMesh` construction/refresh time and hands the
@@ -1329,6 +1441,7 @@ impl NetClient {
             weather: Arc::new(WeatherCell::default()),
             biome_climates: Arc::new(BiomeClimateCell::default()),
             biome_names: Arc::new(BiomeNameCell::default()),
+            command_tree: Arc::new(CommandTreeCell::default()),
             sky_default: Arc::new(SkyDefaultCell::default()),
             local_uuid: Arc::new(OnceLock::new()),
             // Bound by `Sim::attach_net`; a loopback with no `Sim` folds nothing.
@@ -1383,6 +1496,7 @@ impl NetClient {
             weather: Arc::new(WeatherCell::default()),
             biome_climates: Arc::new(BiomeClimateCell::default()),
             biome_names: Arc::new(BiomeNameCell::default()),
+            command_tree: Arc::new(CommandTreeCell::default()),
             sky_default: Arc::new(SkyDefaultCell::default()),
             local_uuid: Arc::new(OnceLock::new()),
             // Bound by `Sim::attach_net`; a loopback with no `Sim` folds nothing.
@@ -1488,6 +1602,7 @@ fn run(
     weather: SharedWeather,
     biome_climates: SharedBiomeClimates,
     biome_names: SharedBiomeNames,
+    command_tree: SharedCommandTree,
     local_uuid: SharedLocalUuid,
     session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
 ) {
@@ -1786,7 +1901,16 @@ fn run(
             // server is quiet (no inbound events to wake us).
             match tokio::time::timeout(Duration::from_millis(15), events.recv()).await {
                 Ok(Some(event)) => {
-                    if forward(&tx, &weather, &biome_climates, &biome_names, event).is_err() {
+                    if forward(
+                        &tx,
+                        &weather,
+                        &biome_climates,
+                        &biome_names,
+                        &command_tree,
+                        event,
+                    )
+                    .is_err()
+                    {
                         break;
                     }
                 }
@@ -1844,6 +1968,7 @@ fn forward(
     weather: &WeatherCell,
     biome_climates: &BiomeClimateCell,
     biome_names: &BiomeNameCell,
+    command_tree: &CommandTreeCell,
     event: ClientEvent,
 ) -> Result<(), ()> {
     let update = match event {
@@ -2086,6 +2211,40 @@ fn forward(
             biome_names.apply(&names);
             return Ok(());
         }
+        // The server's Brigadier command tree (issue #470's decode, issue
+        // #471's wire). Folded into the shared `CommandTreeCell` and not
+        // forwarded — same shape as the two registry arms above: the whole
+        // tree replaces at once, and the chat box and command-block screen
+        // read it per frame from the menu layer rather than through this
+        // channel.
+        //
+        // **This arm is load-bearing right now even before a screen reads the
+        // cell.** `route` claims `shell`/`must_forward` for both command
+        // variants, so without these two arms they fell through to the
+        // terminal `_ =>` below and its `debug_assert!` fired on any
+        // debug-build join to a real 26.2 server — exactly how the
+        // `BiomeClimates` gap above was found. Release builds were unaffected,
+        // which is what made it easy to miss.
+        ClientEvent::CommandTreeUpdated { tree } => {
+            command_tree.apply(*tree);
+            return Ok(());
+        }
+        ClientEvent::CommandSuggestionsReceived {
+            id,
+            start,
+            length,
+            suggestions,
+        } => {
+            command_tree.apply_suggestions(
+                lodestone_model::command_tree::CommandSuggestionsResponse {
+                    id,
+                    start,
+                    length,
+                    suggestions,
+                },
+            );
+            return Ok(());
+        }
         // The lightning flash (`ClientLevel.java:264-268`). A bolt is an ordinary
         // entity on the wire, so this arm **observes** the spawn and returns
         // without producing a `NetUpdate`: entities already reach the shell
@@ -2205,6 +2364,7 @@ mod tests {
             &weather,
             &BiomeClimateCell::default(),
             &BiomeNameCell::default(),
+            &CommandTreeCell::default(),
             ClientEvent::ExperienceChanged {
                 progress: 0.25,
                 level: 5,
@@ -2217,6 +2377,7 @@ mod tests {
             &weather,
             &BiomeClimateCell::default(),
             &BiomeNameCell::default(),
+            &CommandTreeCell::default(),
             ClientEvent::HealthChanged {
                 health: 12.0,
                 food: 8,
@@ -2237,6 +2398,7 @@ mod tests {
             &weather,
             &BiomeClimateCell::default(),
             &BiomeNameCell::default(),
+            &CommandTreeCell::default(),
             ClientEvent::Death {
                 message: lodestone_client::Text::literal("you died"),
             },
@@ -2263,6 +2425,7 @@ mod tests {
             &WeatherCell::default(),
             &BiomeClimateCell::default(),
             &BiomeNameCell::default(),
+            &CommandTreeCell::default(),
             ClientEvent::WinGame,
         )
         .expect("forward does not stop the loop");
@@ -2288,7 +2451,7 @@ mod tests {
             show_icon: true,
             blend: false,
         };
-        forward(&tx, &WeatherCell::default(), &BiomeClimateCell::default(), &BiomeNameCell::default(), event).expect("forward does not stop the loop");
+        forward(&tx, &WeatherCell::default(), &BiomeClimateCell::default(), &BiomeNameCell::default(), &CommandTreeCell::default(), event).expect("forward does not stop the loop");
         match rx.try_recv().expect("an update was forwarded") {
             NetUpdate::EffectApplied {
                 entity_id,
@@ -2329,7 +2492,7 @@ mod tests {
             max_speed: 0.5,
             count: 12,
         };
-        forward(&tx, &WeatherCell::default(), &BiomeClimateCell::default(), &BiomeNameCell::default(), event).expect("forward does not stop the loop");
+        forward(&tx, &WeatherCell::default(), &BiomeClimateCell::default(), &BiomeNameCell::default(), &CommandTreeCell::default(), event).expect("forward does not stop the loop");
         match rx.try_recv().expect("an update was forwarded") {
             NetUpdate::Particles {
                 kind,
@@ -2452,6 +2615,7 @@ mod tests {
             &WeatherCell::default(),
             &BiomeClimateCell::default(),
             &BiomeNameCell::default(),
+            &CommandTreeCell::default(),
             event,
         )
         .expect("forward does not stop the loop");
@@ -2499,7 +2663,7 @@ mod tests {
             entity_id: 99,
             effect: ResourceKey::from_str("minecraft:levitation").unwrap(),
         };
-        forward(&tx, &WeatherCell::default(), &BiomeClimateCell::default(), &BiomeNameCell::default(), event).expect("forward does not stop the loop");
+        forward(&tx, &WeatherCell::default(), &BiomeClimateCell::default(), &BiomeNameCell::default(), &CommandTreeCell::default(), event).expect("forward does not stop the loop");
         match rx.try_recv().expect("an update was forwarded") {
             NetUpdate::EffectRemoved { entity_id, effect } => {
                 assert_eq!(entity_id, 99);
@@ -2524,6 +2688,7 @@ mod tests {
             &weather,
             &BiomeClimateCell::default(),
             &BiomeNameCell::default(),
+            &CommandTreeCell::default(),
             ClientEvent::WeatherChanged {
                 raining: None,
                 rain_level: Some(0.75),
@@ -2536,6 +2701,7 @@ mod tests {
             &weather,
             &BiomeClimateCell::default(),
             &BiomeNameCell::default(),
+            &CommandTreeCell::default(),
             ClientEvent::WeatherChanged {
                 raining: None,
                 rain_level: None,
@@ -2565,6 +2731,7 @@ mod tests {
             &weather,
             &BiomeClimateCell::default(),
             &BiomeNameCell::default(),
+            &CommandTreeCell::default(),
             ClientEvent::WeatherChanged {
                 raining: Some(true),
                 rain_level: None,
@@ -2596,6 +2763,7 @@ mod tests {
             &weather,
             &climates,
             &BiomeNameCell::default(),
+            &CommandTreeCell::default(),
             ClientEvent::BiomeClimates {
                 temperatures: vec![Some(-0.7), Some(2.0)],
                 downfall: vec![Some(0.9), Some(0.0)],
@@ -2649,6 +2817,7 @@ mod tests {
             &weather,
             &BiomeClimateCell::default(),
             &names,
+            &CommandTreeCell::default(),
             ClientEvent::BiomeRegistryNames {
                 names: vec!["minecraft:swamp".to_string(), "minecraft:desert".to_string()],
             },
@@ -2660,6 +2829,97 @@ mod tests {
             rx.try_recv().is_err(),
             "biome registry names must not cross the NetUpdate channel — the whole \
              table replaces at once, exactly like weather/biome climates"
+        );
+    }
+
+    /// Both command arms fold into [`CommandTreeCell`] and neither crosses the
+    /// channel (issue #471).
+    ///
+    /// The arms are load-bearing before any screen reads the cell:
+    /// `lodestone_model::event::route` claims `shell`/`must_forward` for both
+    /// variants, so without them they reached `forward`'s terminal `_ =>` and
+    /// tripped its `debug_assert!` on any debug-build join to a real 26.2
+    /// server. Asserting the *fold* rather than only the absence of a channel
+    /// message is what stops this being the island shape: an arm that consumed
+    /// the event and dropped it would satisfy `rx.try_recv().is_err()` too.
+    #[test]
+    fn forward_folds_the_command_tree_and_suggestions_into_the_cell() {
+        use lodestone_model::command_tree::{
+            CommandSuggestionEntry, CommandTree, NodeKind, RawCommandNode,
+        };
+
+        let (tx, rx) = mpsc::channel();
+        let weather = WeatherCell::default();
+        let cell = CommandTreeCell::default();
+        assert!(cell.tree().is_none(), "empty before the server sends one");
+        assert!(cell.suggestions().is_none(), "and no reply yet");
+
+        let tree = CommandTree::new(
+            vec![RawCommandNode {
+                kind: NodeKind::Root,
+                executable: false,
+                restricted: false,
+                redirect: None,
+                children: Vec::new(),
+            }],
+            0,
+        )
+        .expect("a root-only tree is valid");
+
+        forward(
+            &tx,
+            &weather,
+            &BiomeClimateCell::default(),
+            &BiomeNameCell::default(),
+            &cell,
+            ClientEvent::CommandTreeUpdated {
+                tree: Box::new(tree.clone()),
+            },
+        )
+        .expect("forward does not stop the loop");
+        assert_eq!(
+            cell.tree().as_deref(),
+            Some(&tree),
+            "the decoded tree must land in the cell, not be dropped by the arm"
+        );
+
+        forward(
+            &tx,
+            &weather,
+            &BiomeClimateCell::default(),
+            &BiomeNameCell::default(),
+            &cell,
+            ClientEvent::CommandSuggestionsReceived {
+                id: 7,
+                start: 10,
+                length: 0,
+                suggestions: vec![CommandSuggestionEntry {
+                    text: "creative".to_string(),
+                    tooltip: None,
+                }],
+            },
+        )
+        .expect("forward does not stop the loop");
+
+        let got = cell.suggestions().expect("the reply must land in the cell");
+        assert_eq!(
+            got.id, 7,
+            "the transaction id must survive the fold — it is the only thing that lets a \
+             consumer discard a reply to a request the input has since outgrown"
+        );
+        assert_eq!(got.start, 10);
+        assert_eq!(
+            got.suggestions
+                .iter()
+                .map(|entry| entry.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["creative"]
+        );
+
+        assert!(
+            rx.try_recv().is_err(),
+            "neither command event may cross the NetUpdate channel — the tree replaces \
+             wholesale and the menu layer polls the cell per frame"
         );
     }
 
@@ -2740,16 +3000,16 @@ mod tests {
 
         // The negative control first, so a passing positive cannot be "every
         // spawn bumps it".
-        forward(&tx, &weather, &BiomeClimateCell::default(), &BiomeNameCell::default(), spawn("minecraft:zombie")).expect("forward continues");
+        forward(&tx, &weather, &BiomeClimateCell::default(), &BiomeNameCell::default(), &CommandTreeCell::default(), spawn("minecraft:zombie")).expect("forward continues");
         assert_eq!(
             weather.snapshot().lightning_seq,
             0,
             "a zombie must not flash the sky"
         );
 
-        forward(&tx, &weather, &BiomeClimateCell::default(), &BiomeNameCell::default(), spawn("minecraft:lightning_bolt")).expect("forward continues");
+        forward(&tx, &weather, &BiomeClimateCell::default(), &BiomeNameCell::default(), &CommandTreeCell::default(), spawn("minecraft:lightning_bolt")).expect("forward continues");
         assert_eq!(weather.snapshot().lightning_seq, 1);
-        forward(&tx, &weather, &BiomeClimateCell::default(), &BiomeNameCell::default(), spawn("minecraft:lightning_bolt")).expect("forward continues");
+        forward(&tx, &weather, &BiomeClimateCell::default(), &BiomeNameCell::default(), &CommandTreeCell::default(), spawn("minecraft:lightning_bolt")).expect("forward continues");
         assert_eq!(
             weather.snapshot().lightning_seq,
             2,
