@@ -217,6 +217,48 @@ changes"), here is exactly what does and does not:
 
 ## How to change it, and the gotchas
 
+- **The two queues are still `run_tick_loop` locals, and that is the one thing
+  standing between scheduled ticks and the disk.** Issue
+  [#468](https://github.com/matteopolak/lodestone/issues/468) built the whole
+  persistence path for them — `chunk_nbt::SavedTick` for the schema and
+  `region_source::ScheduledTickHandle` for the shared queues plus the game tick
+  their `trigger_tick`s are measured against — and both halves are gated
+  (`tests/scheduled_tick_persistence.rs`,
+  `tests/chunk_extras_vanilla_oracle.rs`). What is missing is that
+  `tick::run_tick_loop` still writes:
+
+  ```rust
+  let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+  let mut fluid_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+  ```
+
+  so the queues persistence can read are always empty in production, and a pending
+  repeater tick is still lost on quit. The wiring is deliberately shaped to be a
+  **wrapper rather than a rewrite**, because this function is where the redstone
+  work lives:
+
+  1. Add a parameter `scheduled: crate::region_source::ScheduledTickHandle`, and
+     pass `persistent.scheduled_ticks()` from
+     `IntegratedServer::open_persistent_with_mobs` (the in-memory constructor
+     passes `ScheduledTickHandle::default()`, exactly as it now does for
+     `BlockEntityHandle`).
+  2. Delete the two `let mut` lines above.
+  3. Wrap the existing scheduled-tick section — from the
+     `block_tick_out.drain_scheduled_ticks()` adoption loop through the last use
+     of `fluid_ticks` — in one `scheduled.with(|queues| { … })`, binding
+     `let block_ticks = &mut queues.block; let fluid_ticks = &mut queues.fluid;`
+     at the top so **every existing use site is textually unchanged**.
+  4. Add `scheduled.set_game_tick(game_tick);` right after `game_tick += 1`.
+
+  Two things to know before doing it. `with` hands over both queues in one
+  **synchronous** closure on purpose: a closure cannot contain an `.await`, so
+  the compiler — not a reviewer — guarantees the `MutexGuard` is never held
+  across a suspension point, which would make the tick task non-`Send`. And the
+  game tick must come from *this* counter and not be re-derived: a second clock
+  here is issue [#323](https://github.com/matteopolak/lodestone/issues/323)'s
+  bug in a new place, where `SET_TIME` decoded and really did darken the sky with
+  every link in the wire green while the value was wall-clock
+  elapsed-since-join.
 - **`ChunkColumn`'s `block_state`/`set_block` take LOCAL x/z; every tick
   handler is handed ABSOLUTE x/z plus `min_x`/`min_z` to convert with.** Mixing
   the two was issue #472: grass propagation bounds-checked the local `tlz` and

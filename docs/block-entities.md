@@ -226,6 +226,28 @@ must emit nothing) and a clear-a-slot control.
    window `0`: this crate applies the click's own predicted diff verbatim
    rather than re-deriving vanilla's seven click modes server-side.
 
+## Update: they persist across a reopen
+
+As of [#468](https://github.com/matteopolak/lodestone/issues/468) a registered
+block entity survives the world being closed. `chunk_nbt` owns the schema and
+`region_source` the save/load path — see
+[`world-save-load.md`](./world-save-load.md) for the three rules that make it
+correct (chiefly: a container's chunk is *never* marked dirty by a contents
+change, so it is written on every save and never released from the edit map).
+
+**The one thing to know when adding a field to any of the four types**: each has
+a `restore` associated function taking **every** field at once, and that
+totality is deliberate. Adding a field breaks `restore` at compile time and
+forces the save schema to be updated with it; a setter-based restore would
+silently drop the new field and a world would come back subtly wrong with every
+test still green. Do not replace `restore` with setters.
+
+The composter is the one kind written under a **namespaced** id
+(`lodestone:composter`), because vanilla has no composter block entity at all —
+its level is a block-state property and its ready delay is a scheduled block
+tick. That divergence is this crate's, not a schema mistake, and it is recorded
+at `Composter::restore`.
+
 ## How to change it
 
 - Each mechanic's numbers live entirely inside its own module (`composter.rs`'s
