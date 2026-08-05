@@ -87,6 +87,7 @@ pub mod icon;
 pub mod item;
 pub mod item_atlas;
 pub mod item_model;
+pub mod item_tint;
 pub mod lang;
 mod location;
 mod manager;
@@ -135,6 +136,7 @@ pub use item_model::{
     ItemModel, ItemModelNode, ItemModelOutput, ItemPropertyContext, RangeEntry, SelectCase,
     TintSource,
 };
+pub use item_tint::{ItemTintContext, ResolvedTint, TintProvenance};
 pub use location::ResourceLocation;
 pub use manager::ResourceManager;
 pub use meta::{PackDescription, PackMeta, PackVersion, VersionMeta};
