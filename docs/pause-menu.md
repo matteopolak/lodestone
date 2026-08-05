@@ -241,7 +241,9 @@ re-syncs cursor grab. Mouse clicks on the pause row reach the same
 
 ### `Sim::end_session`: what it resets, what it keeps
 
-**Resets** (`crates/lodestone-shell/src/sim.rs`):
+**Resets** (`crates/lodestone-shell/src/sim/session.rs` — the whole session
+lifecycle moved there in seam 10 of the `sim.rs` decomposition; see
+[`docs/sim-dissolution.md`](./sim-dissolution.md)):
 
 - The connection: `net` is dropped (`NetClient::drop` joins its background
   thread first, so nothing races a reset against an in-flight poll), `phase`
@@ -312,7 +314,8 @@ actually took.
   `owns_frame` — rather than adding a special case inside the `Clear` path.
   [`Screen::Death`](./death-screen.md) (issue #103) is the first screen that
   actually did this, end to end.
-- **Teardown** — `Sim::end_session` in `crates/lodestone-shell/src/sim.rs`.
+- **Teardown** — `Sim::end_session` in
+  `crates/lodestone-shell/src/sim/session.rs`.
   Adding new per-session state anywhere in `Sim`? Check whether it needs a
   line here — the "what it keeps" list is short and deliberate, so anything
   not explicitly listed as kept should be assumed to need resetting, and the

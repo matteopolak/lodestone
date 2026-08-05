@@ -21,7 +21,9 @@ than chosen:
 |---|---|
 | `crates/lodestone-ecs/src/player.rs` | the components, the resources, `CollisionSource`, and `TickSet::Physics` |
 | `crates/lodestone-controller/src/ecs.rs` | `RawInput` plus `TickSet::Input` and `TickSet::Send` |
-| `crates/lodestone-shell/src/sim.rs` | the driver: owns the `World`, resolves this tick's collision, drains the action queue |
+| `crates/lodestone-shell/src/sim.rs` | the `Sim` struct, the two `CollisionSource` adapters, and the lock-scoped accessor layer every seam file reaches the `World` through |
+| `crates/lodestone-shell/src/sim/step.rs` | the driver: the fixed-timestep loop, and draining the action queue |
+| `crates/lodestone-shell/src/sim/collide.rs` | resolving this tick's collision (`tick_collision`, `live_collision`, `tick_nearby_entities`) |
 
 `lodestone-controller` depends on `lodestone-client`, which depends on
 `lodestone-ecs`. So `lodestone-ecs` can never name `InputState`, and the

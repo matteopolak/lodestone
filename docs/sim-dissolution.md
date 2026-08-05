@@ -174,6 +174,97 @@
 > `NetHandle::block_at`), and the per-frame tick call belongs in `app.rs`'s
 > `WindowApp::redraw`, both files owned elsewhere in this session. Left
 > named rather than built around, same as the original gap.
+>
+> **Seams 9–13 landed together, a later session, and they retire the "closing
+> the sequence" claim above.** `sim.rs` was still 3,420 lines — and the two
+> paragraphs above are the reason to distrust a finished-sounding seam log:
+> seam 7's entry says it "clos[ed] the sequence" and that what remained "is
+> exactly what the plan below says should", while `sim/meshing.rs`'s own module
+> doc still calls itself "the last of the sim.rs decomposition sequence". Both
+> were true when written. Neither is now, and `sim/meshing.rs` is deliberately
+> **left as it stands** — this split was a pure move, and editing a
+> neighbour's prose is not part of one. The correction lives here, plus a note
+> in each of the five new files, so a reader arriving through `meshing.rs` is
+> not misled.
+>
+> The split was mechanical, not architectural: five whole line ranges copied
+> verbatim into new files, no renames, no signature changes, no reordering.
+> `sim.rs` **3,420 → 1,221 lines**.
+>
+> - **Seam 9** — construction (`new`, `with_demo_world`, `build`) into
+>   `sim/build.rs`. 311 lines, deliberately under the 400-line floor the rest
+>   aim for: `build` is the single most contended function in the file, since
+>   every new plugin, resource, worker pool or spawn-time component set adds a
+>   line there and nowhere else. Nothing widened — `build`'s only callers are
+>   its two siblings in the same file.
+> - **Seam 10** — the session lifecycle *and* the session scalars, into
+>   `sim/session.rs` (875 lines): `connect`/`attach_net`/`end_session`, the
+>   phase accessors, the death/respawn/win latches, and every HUD-facing read
+>   folded by the net thread (health, food, saturation, air, xp, tab list,
+>   scoreboard, boss bars, the three overlays, attack-strength cooldown, the
+>   folded menus, hotbar selection, difficulty). The two halves stay together
+>   because `end_session`'s doc is a hand-written list of exactly what a
+>   teardown resets, and it is only auditable beside the accessors that would
+>   otherwise leak the previous server's values forward — that comment already
+>   records one such stale claim it had to correct.
+>   `set_phase`, `server_entity_id` and `attack_strength_scale_at` widened to
+>   `pub(crate)`; `vitals`, `attack_strength_delay` and `send_selected_slot`
+>   stayed private (all callers in-file).
+> - **Seam 11** — the collision seam into `sim/collide.rs` (320 lines):
+>   `tick_collision`, `tick_nearby_entities`, `item_collision`,
+>   `live_collision`, `is_live`, `fluid_state`/`set_fluid_state`, and
+>   `NEARBY_ENTITY_RADIUS`. Named `collide.rs`, **not** `collision.rs`: a
+>   `mod collision;` in `sim.rs` would make the bare path `collision::` mean
+>   `sim::collision` for every reader of the root, shadowing
+>   `crate::collision` — it compiles and misleads. Seven methods widened.
+> - **Seam 12** — the per-frame driver into `sim/step.rs` (546 lines): `step`
+>   itself, `apply_mouse`, the mouse/toggle option pushes, the mesh drains,
+>   `drain_action_queue`, the swing pair, `update_target`/
+>   `update_entity_target`, `tick_count` and `refresh_stats`. Kept as one file
+>   because the frame's *ordering* is load-bearing in three places its own
+>   comments record (`Update` before the tick loop so `advance_interp_clocks`
+>   runs first; the walk-bob inputs captured before the tick's movement; the
+>   swing clock ticking before the queue drains, a deliberate one-tick offset
+>   from vanilla) and none of that is checkable across three files.
+>   `drain_action_queue`/`update_entity_target` widened for `sim/tests.rs`.
+> - **Seam 13** — what the renderer pulls out of `Sim` each frame, into
+>   `sim/render_sources.rs` (430 lines): the outline/block-entity/skull/sign/
+>   bell sampler closures, `chest_lid_count`, `entity_draws`,
+>   `crack_target`/`crack_targets`, and the particle
+>   `tick_particles`/`extract_particles`/`particle_instances` trio. One shape
+>   throughout: hand out either a `'static + Send + Sync` closure that captures
+>   an owned `SharedHandle` and re-samples per frame, or owned data — never a
+>   `World` guard that escapes into a GPU upload. `tick_particles` widened.
+>
+> **What the root deliberately kept, and why it is not an omission.** `sim.rs`
+> still holds the struct and its field docs, the two `CollisionSource`
+> adapters, the free helpers — and **the whole lock-scoped accessor layer**
+> (`read`, `write`, `write_local`, the per-resource accessors,
+> `refresh_mesh_policy`, `adopt_live_world`, the local-player/physics-intent
+> reads, `translator`/`resolve_text`). Privacy cascades **downward**: a
+> parent's private item is visible to every descendant, while a child's is
+> invisible to its siblings. So leaving that layer in the root widened
+> *nothing*, whereas moving it out would have made `read`/`write`
+> `pub(crate)` and put this crate's entire lock discipline —
+> `EcsHandle`'s three rules, including "never call into `NetClient` with a
+> guard live" — onto the crate-internal surface. The three-line
+> `chunk_collision` stayed for a sharper version of the same reason: it
+> returns `Arc<ChunkWorldCollision>`, so widening it while its return type
+> stayed private would have tripped `private_interfaces`.
+>
+> **How it was verified**, since a 2,200-line move is unreviewable by reading:
+> a program (not a shell pipeline — `diff | grep -c` has reported 0 in this
+> repo when the true figure was ~15,000) compared the *multiset* of source
+> lines in `sim.rs` at `HEAD` against the union of the new root plus the five
+> new files. Two passes: code-only (non-blank, non-comment) and all-non-blank
+> including every comment. Both reported **zero unexplained removals**; the
+> only additions were `use super::*;`/`impl Sim {`/`}`/`mod` wrappers and the
+> new header prose. The gate carries its own control — deleting one real line
+> makes it name that line — because an emptiness check with no control is
+> exactly the vacuous shape `CLAUDE.md`'s evidence rules warn about. Test
+> counts: the lib-test binary ran **1,117** tests with 50 ignored and 121
+> `sim::` tests both before and after, across 69 binaries, so nothing stopped
+> being compiled.
 
 ## What it is
 
