@@ -30,10 +30,33 @@ classic *named*-root form with an empty root name, not the nameless
   (`SerializableChunkData.java`'s territory in vanilla), only the envelope,
   so the same code should work unchanged for entity-region storage later.
 - **`level.dat`** (`src/level_dat.rs`): a single gzip-wrapped named-NBT
-  file — unnamed root `Compound` containing a `"Data"` compound. This crate
-  models exactly that envelope plus a `DataVersion` accessor into `"Data"`;
-  every other `LevelData` field (seed, spawn, gamerules, weather, world
-  border, ...) is unmodelled on purpose (see "How to change it").
+  file — unnamed root `Compound` containing a `"Data"` compound. Models the
+  envelope plus **the 26.2 world-metadata fields**: `LevelName`, `GameType`,
+  `Time`, `LastPlayed`, the `spawn` compound (`pos` as a 3-entry `IntArray`,
+  `yaw`/`pitch`, `dimension`) and `difficulty_settings`, with
+  `LevelDat::for_new_world` emitting the exact 14-field set a real 26.2 server
+  writes. Unmodelled fields survive a read/modify/write unchanged, in their
+  original order.
+
+  **What is *not* in a 26.2 `level.dat`** is the useful part, because two
+  issues have now guessed wrong about it. Read with an independent Python
+  `gzip`+`struct` parser across all six 26.2 worlds in `.cache/mc`, every file
+  carries the same 14 fields and **none** of them is a seed, weather flag or
+  day time. 26.2 moved each to its own `SavedData` file under `<world>/data/`:
+
+  | what | file | fields |
+  |---|---|---|
+  | seed | `minecraft/world_gen_settings.dat` | modelled here, see below |
+  | weather | `weather.dat` | `raining`, `rain_time`, `thundering`, `thunder_time`, `clear_weather_time` — snake_case, unlike `level.dat` |
+  | day time | `world_clocks.dat` | per-dimension `total_ticks`; `PrimaryLevelData`'s old `DayTime` is now only a datafixer input (`DayTimeToClockFix.java:18`) |
+  | game rules | `game_rules.dat` | keyed by gamerule registry id |
+  | world border | `world_border.dat` | |
+
+  So `level.dat`'s `Time` is the world's **total age in ticks**, not the sky
+  clock. Three version fields also coexist and are not interchangeable:
+  `version` (`Int`, 19133, the storage-format version validated on load),
+  `Version` (`Compound` of `Name`/`Id`/`Snapshot`/`Series`) and `DataVersion`
+  (`Int`, 4903 for 26.2).
 - **`world_gen_settings.dat`** (`src/world_gen_settings.rs`): where 26.2 keeps
   the **world seed** — `<world>/data/minecraft/world_gen_settings.dat`, a
   gzip-wrapped named-NBT `{ data: {…}, DataVersion: Int }`. Added for issue
@@ -89,12 +112,21 @@ classic *named*-root form with an empty root name, not the nameless
   that module's doc for exactly what *is* externally verified (the framing
   constants, read out of the real `lz4-java` jar's class file) versus what
   isn't (an actual `lz4`-compressed byte stream from a real server).
-- **`level.dat`'s schema is deliberately thin.** Issue #300 itself says to
-  sequence full `LevelData` modelling against whichever issue settles each
-  field's in-memory representation first (seed, spawn, gamerules, ...),
-  rather than guess a schema now that would need a second pass per
-  subsystem landed afterward. Add fields to `LevelDat` as those issues land,
-  not preemptively.
+- **`level.dat`'s schema stops at world metadata, and the rest is not in that
+  file to model.** Fields the server does not yet own an in-memory
+  representation for stay unmodelled — but before adding one, check the table
+  above: weather, day time, game rules and the world border are *separate
+  files* in 26.2, so "add it to `LevelDat`" is the wrong move for four of the
+  five things people reach for first. The right move is a sibling module
+  beside `world_gen_settings.rs`, which is what that file already is.
+- **Verify any schema change against a real file, in both directions.**
+  `re_encoding_a_real_vanilla_file_reproduces_mojangs_own_bytes` decodes the
+  checked-in vanilla `level.dat` and re-encodes the NBT payload, then compares
+  **byte for byte** against Mojang's own uncompressed bytes. That is the gate
+  that catches a wrong tag type, a reordered compound or a mis-framed
+  `IntArray` — none of which a round trip through our own codec can see.
+  Compressed bytes are deliberately not compared: gzip output is
+  encoder-dependent and a mismatch there says nothing about the schema.
 - **`build_region` is a single-region primitive.** It does not split a
   mixed-region chunk set across multiple `.mca` files — callers group
   chunks by `chunk_x >> 5, chunk_z >> 5` themselves (`region::region_and_local`
