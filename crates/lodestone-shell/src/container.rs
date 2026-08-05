@@ -54,11 +54,12 @@ pub use recipe_book::{
     RECIPE_GRID_ROWS, RECIPE_GRID_STEP, RECIPE_ITEMS_PER_PAGE, RECIPE_MAGNIFIER, RECIPE_PAGE_BACK,
     RECIPE_PAGE_FORWARD, RECIPE_PANEL_GAP, RECIPE_PANEL_H, RECIPE_PANEL_W, RECIPE_SEARCH_BOX,
     RECIPE_TAB_H, RECIPE_TAB_SPACING, RECIPE_TAB_W, RECIPE_TAB_X, RECIPE_TAB_Y0,
-    RECIPE_TOGGLE_LOCAL, RecipeBookPanelContents, RecipeBookPanelGeometry, RecipeBookPanelHit,
-    RecipeBookPanelLayout, recipe_book_panel_contents, recipe_book_panel_geometry,
+    RECIPE_TOGGLE_LOCAL, RECIPE_TOGGLE_LOCAL_FURNACE, RECIPE_TOGGLE_LOCAL_INVENTORY,
+    RecipeBookPanelContents, RecipeBookPanelGeometry, RecipeBookPanelHit, RecipeBookPanelLayout,
+    recipe_book_panel_contents, recipe_book_panel_geometry,
     recipe_book_panel_geometry_with_icons, recipe_book_panel_hit_test,
     recipe_book_panel_hit_test_with_scale, recipe_book_panel_layout,
-    recipe_book_panel_layout_with_scale,
+    recipe_book_panel_layout_with_scale, recipe_toggle_local,
 };
 pub use renderer::ContainerRenderer;
 

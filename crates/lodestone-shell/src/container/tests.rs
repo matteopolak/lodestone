@@ -2553,3 +2553,142 @@ fn recipe_panel_contents_reports_one_page_for_zero_matches_not_zero() {
     assert_eq!(contents.page, 0);
     assert!(contents.page_ids.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// The recipe-book toggle button's per-screen position (owner bug report:
+// "the book in my inventory is in the wrong spot")
+// ---------------------------------------------------------------------------
+
+/// Vanilla's toggle-button y offset, **local to `topPos`**, recomputed from
+/// the two *absolute* jar expressions rather than restating the derived
+/// constant — the point being that a test which asserts `y == 61.0` against a
+/// draw that also says `61.0` measures nothing but a copy-paste.
+///
+/// `abs_y` is the screen's own `getRecipeBookButtonPosition().y()` as a
+/// function of the logical canvas height, and `topPos` is
+/// `AbstractContainerScreen.java:78`'s `(height - imageHeight) / 2`. Both use
+/// **integer** division, as Java does; `imageHeight` is the `176x166` default
+/// (`AbstractContainerScreen.java:33-34, 57-59`) for all three of these
+/// screens.
+fn vanilla_toggle_local_y(canvas_h: i32, abs_y: impl Fn(i32) -> i32) -> f32 {
+    let top_pos = (canvas_h - 166) / 2;
+    (abs_y(canvas_h) - top_pos) as f32
+}
+
+/// The **logical** canvas the layout was measured against, which is what
+/// vanilla's own `this.height` is — not the physical `VIEW`. Derived through
+/// the same call `recipe_book_panel_layout_with_scale` uses, so the two can
+/// never disagree about the gui scale.
+fn logical_view_h() -> i32 {
+    let (_, h) = crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, VIEW.0, VIEW.1);
+    h as i32
+}
+
+/// The player-inventory screen's toggle sits at local `(104, 61)`, **not** the
+/// crafting table's `(5, 34)`.
+///
+/// This is the owner-reported bug, and the shipped value was the crafting
+/// table's, applied to every screen. `getRecipeBookButtonPosition` is
+/// `abstract` with no default (`AbstractRecipeBookScreen.java:36`) and each
+/// family overrides it:
+///
+/// | screen | absolute (jar) | local |
+/// |---|---|---|
+/// | `InventoryScreen.java:64` | `(leftPos + 104, height/2 - 22)` | `(104, 61)` |
+/// | `CraftingScreen.java:27` | `(leftPos + 5, height/2 - 49)` | `(5, 34)` |
+/// | `AbstractFurnaceScreen.java:44` | `(leftPos + 20, height/2 - 49)` | `(20, 34)` |
+///
+/// The y values are recomputed from those absolute expressions by
+/// [`vanilla_toggle_local_y`], not restated.
+#[test]
+fn recipe_toggle_uses_each_screens_own_jar_derived_offset() {
+    let h = logical_view_h();
+    // Derived from the jar's absolute expressions, per the table above.
+    let inv_y = vanilla_toggle_local_y(h, |ch| ch / 2 - 22);
+    let craft_y = vanilla_toggle_local_y(h, |ch| ch / 2 - 49);
+    // A gate that cannot tell the two apart proves nothing about the fix.
+    assert_ne!(
+        inv_y, craft_y,
+        "the two screens' y offsets must differ or this test is vacuous"
+    );
+
+    for (label, menu, want_x, want_y) in [
+        ("player inventory", Menu::player(), 104.0, inv_y),
+        ("crafting table", Menu::crafting(3, 3), 5.0, craft_y),
+        ("furnace", Menu::furnace(SpecialLayout::Furnace), 20.0, craft_y),
+        (
+            "blast furnace",
+            Menu::furnace(SpecialLayout::BlastFurnace),
+            20.0,
+            craft_y,
+        ),
+        ("smoker", Menu::furnace(SpecialLayout::Smoker), 20.0, craft_y),
+    ] {
+        let main = slot_layout(&menu);
+        let (mx, my) = panel_origin(&main, VIEW.0, VIEW.1);
+        let layout = recipe_book_panel_layout(&menu, VIEW.0, VIEW.1, 4, false, true);
+        // Derived from the same `panel_origin` expression the draw uses, plus
+        // the jar-derived local offset — never a restated absolute pixel.
+        assert_eq!(
+            layout.toggle,
+            Rect { x: mx + want_x, y: my + want_y, w: 20.0, h: 18.0 },
+            "{label}: toggle rect (bbox x {}..{} y {}..{}) is not the jar's own \
+             position (bbox x {}..{} y {}..{})",
+            layout.toggle.x,
+            layout.toggle.x + layout.toggle.w,
+            layout.toggle.y,
+            layout.toggle.y + layout.toggle.h,
+            mx + want_x,
+            mx + want_x + 20.0,
+            my + want_y,
+            my + want_y + 18.0,
+        );
+    }
+}
+
+/// Negative control for the test above: the **shipped** behaviour — one
+/// offset for every screen — must fail it.
+///
+/// Rather than describing what the old code would do, this reproduces it:
+/// `recipe_toggle_local` is bypassed and `RECIPE_TOGGLE_LOCAL` (the crafting
+/// table's own constant, which is what every screen used) is applied to the
+/// player inventory. The assertion is that the result is *not* where the jar
+/// puts it, and by how much — 99 px in x and 27 px in y, which is why the
+/// button landed on the armour column.
+#[test]
+fn recipe_toggle_control_one_offset_for_every_screen_is_wrong_for_the_inventory() {
+    let menu = Menu::player();
+    let main = slot_layout(&menu);
+    let (mx, my) = panel_origin(&main, VIEW.0, VIEW.1);
+    let shipped = Rect {
+        x: mx + RECIPE_TOGGLE_LOCAL.x,
+        y: my + RECIPE_TOGGLE_LOCAL.y,
+        w: RECIPE_TOGGLE_LOCAL.w,
+        h: RECIPE_TOGGLE_LOCAL.h,
+    };
+    let actual = recipe_book_panel_layout(&menu, VIEW.0, VIEW.1, 4, false, true).toggle;
+    assert_ne!(
+        actual, shipped,
+        "the fix is inert: the player inventory still uses the crafting table's offset"
+    );
+    // The magnitude, not merely the direction — a one-pixel nudge would
+    // satisfy `assert_ne!` and would not have been visible to a player.
+    assert!(
+        (actual.x - shipped.x - 99.0).abs() < 0.001,
+        "expected the inventory toggle 99 px right of the shipped position, got {}",
+        actual.x - shipped.x
+    );
+    assert!(
+        (actual.y - shipped.y - 27.0).abs() < 0.001,
+        "expected the inventory toggle 27 px below the shipped position, got {}",
+        actual.y - shipped.y
+    );
+    // And the dispatch itself, so a future refactor that reintroduces one
+    // shared constant fails here too.
+    assert_eq!(recipe_toggle_local(&Menu::player()), RECIPE_TOGGLE_LOCAL_INVENTORY);
+    assert_eq!(recipe_toggle_local(&Menu::crafting(3, 3)), RECIPE_TOGGLE_LOCAL);
+    assert_eq!(
+        recipe_toggle_local(&Menu::furnace(SpecialLayout::Furnace)),
+        RECIPE_TOGGLE_LOCAL_FURNACE
+    );
+}
