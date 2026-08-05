@@ -547,6 +547,68 @@ impl ViewTracker {
     }
 }
 
+/// The join view, split into **Chebyshev rings** ordered outward from the
+/// player's own column — issue #453.
+///
+/// Ring `r` is every column at Chebyshev (chess-king) distance exactly `r` from
+/// the centre, so ring 0 is the single column the player is standing in, ring 1
+/// is the 8 around it, and ring `r > 0` holds `8r` columns. Flattened, the
+/// result is the whole `[-view_radius, view_radius]²` square with **no column
+/// repeated and none missing** — the same set `ViewTracker::new` seeds itself
+/// with, in a different order.
+///
+/// # Why rings, and why this is not a re-sort
+///
+/// Before this, the join enumerated raster-order from `(-view_radius,
+/// -view_radius)`, generated **all** 361 columns, and only then encoded any. Two
+/// separate consequences, and the fix needs both halves:
+///
+/// * the player's own column was item **~180 of 361** on the wire, so terrain
+///   materialised from the far corner inward;
+/// * nothing at all was encoded until the last column finished generating.
+///
+/// Returning *groups* rather than one flat `Vec` is what fixes the second half:
+/// the caller generates and encodes one ring at a time, so the first chunk
+/// reaches the client after **one** column of generation instead of 361. That is
+/// also why this deliberately does not touch `ViewTracker::build_batch`, whose
+/// lexicographic `sort_unstable` exists for byte-reproducibility — proximity
+/// belongs at the enumeration/dispatch layer, and the batch's internal
+/// determinism is left exactly as it was.
+///
+/// Vanilla spirals outward for the same reason, and its priority *is* the ticket
+/// level (`ChunkTaskDispatcher.java:62-69`), so there is no separate heuristic
+/// invented here. This is a slice of issue #289's U4/U5 rather than new design.
+///
+/// # Determinism
+///
+/// Order **within** a ring is the same `dz`-outer/`dx`-inner walk the whole
+/// square used to use, filtered to the ring. So the emitted byte sequence stays
+/// a pure function of `view_radius` — independent of thread scheduling, hash
+/// seeds, and which arm of [`SourceRef`] generated it — exactly as before.
+///
+/// # Cost
+///
+/// The inner rings are smaller than `available_parallelism`, so rings 0 and 1
+/// leave most worker threads idle where one 361-column batch would not. That is
+/// a deliberate trade: it costs a fraction of a second of total generation to
+/// buy time-to-first-chunk falling from *the whole view* to *one column*, which
+/// is the entire reported symptom. Rings 2 and up saturate the fan-out.
+fn join_view_rings(view_radius: i32) -> Vec<Vec<(i32, i32)>> {
+    (0..=view_radius.max(0))
+        .map(|r| {
+            let mut ring = Vec::new();
+            for dz in -r..=r {
+                for dx in -r..=r {
+                    if dx.abs().max(dz.abs()) == r {
+                        ring.push((dx, dz));
+                    }
+                }
+            }
+            ring
+        })
+        .collect()
+}
+
 /// Applies one [`ViewUpdate`]: the non-batch directives immediately, and the
 /// chunk-batch portion (if any) either right away or queued behind
 /// `awaiting_chunk_batch_ack` — the flow-control gate issue #270's
@@ -1054,24 +1116,45 @@ where
 
                 apply(conn, &mut state, proto.begin_chunk_batch()).await?;
                 // Generation is fanned out over scoped OS threads
-                // (`generate_columns_parallel`); the wire order is still the
-                // original `cz`-outer/`cx`-inner walk, which is what makes
-                // the emitted byte sequence independent of thread scheduling
-                // — see that function's doc comment for why the fan-out
-                // cannot desync per-chunk RNG-derived content either.
+                // (`generate_columns_parallel`); the wire order is a fixed
+                // function of `view_radius` alone (see `join_view_rings`), which
+                // is what makes the emitted byte sequence independent of thread
+                // scheduling — see `generate_columns_parallel`'s doc comment for
+                // why the fan-out cannot desync per-chunk RNG-derived content
+                // either.
                 //
                 // Issue #293: on the `SourceRef::Shared` arm the whole fan-out
                 // *also* runs off this runtime's core thread, so this burst —
                 // the largest single generation batch a session performs — no
                 // longer holds up `run_tick_loop`. See `SourceRef`.
-                let coords: Vec<(i32, i32)> = (-view_radius..=view_radius)
-                    .flat_map(|cz| (-view_radius..=view_radius).map(move |cx| (cx, cz)))
-                    .collect();
-                let columns = source.generate(coords.clone()).await;
+                //
+                // Issue #453: **one ring at a time, generated and encoded before
+                // the next is asked for.** This loop used to build all
+                // `(2r+1)²` coordinates up front, `await` a single `generate`
+                // over the lot, and only then start encoding — so at
+                // `view_radius = 9` nothing reached the client until all 361
+                // columns existed, and raster order put the player's own column
+                // at item ~180. Now ring 0 is the player's column, so the first
+                // chunk is encoded after exactly one column of generation, and
+                // the sequence is non-decreasing in distance from the centre
+                // thereafter.
+                //
+                // The centre is `(0, 0)` because that is where this join places
+                // the player (`ViewTracker::new((0, 0), view_radius)` below, and
+                // `begin_play`'s own spawn point); when a real spawn position
+                // arrives this and that line move together.
+                //
+                // Still **one** chunk batch, not one per ring: the batch markers
+                // stay outside this loop, so the client's flow-control
+                // accounting (issue #270) sees the same single
+                // begin/…/end sequence it always did.
                 let mut batch_size = 0;
-                for (&(cx, cz), column) in coords.iter().zip(columns.iter()) {
-                    apply(conn, &mut state, proto.encode_chunk(cx, cz, column)).await?;
-                    batch_size += 1;
+                for ring in join_view_rings(view_radius) {
+                    let columns = source.generate(ring.clone()).await;
+                    for (&(cx, cz), column) in ring.iter().zip(columns.iter()) {
+                        apply(conn, &mut state, proto.encode_chunk(cx, cz, column)).await?;
+                        batch_size += 1;
+                    }
                 }
                 apply(conn, &mut state, proto.end_chunk_batch(batch_size)).await?;
                 let chunks_sent = batch_size as usize;
