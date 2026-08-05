@@ -323,7 +323,7 @@ impl Sim {
     /// (`GameRenderer.java:534-536`) — so the damage tilt must survive View
     /// Bobbing being off. A player who has not been hit recently is unaffected
     /// either way (`frame.hurt` is negative when the countdown has lapsed, and
-    /// [`BobFrame::hurt_roll_degrees`] already returns `0` for that), so this
+    /// `BobFrame::hurt_roll_degrees` already returns `0` for that), so this
     /// differs from the old whole-frame `BobFrame::default()` only in the ten
     /// ticks after a hit.
     #[must_use]
@@ -344,7 +344,7 @@ impl Sim {
     /// (`Player.animateHurt`, `Player.java:1959-1962`, which records
     /// `hurtDir = yaw` after `LivingEntity.animateHurt` resets the ten-tick
     /// countdown). The wire `yaw` is `ClientboundHurtAnimationPacket.yaw`,
-    /// already decoded onto [`ClientEvent::EntityHurtAnimation`]; the server
+    /// already decoded onto `ClientEvent::EntityHurtAnimation`; the server
     /// computes it as `atan2(damage) - playerYaw`
     /// (`ServerPlayer.indicateDamage`, `ServerPlayer.java:2133`), so a hit
     /// from straight ahead is `0` — the pure-roll case.

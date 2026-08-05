@@ -135,15 +135,38 @@ impl Sim {
         self.sensitivity = sensitivity;
     }
 
-    /// Push vanilla's `key.sneak`/`key.sprint` hold-vs-toggle options down
-    /// from the menu layer (issue #202). Stored rather than applied directly
-    /// because the actual [`InputState::set_toggle_modes`] call has to
-    /// happen inside [`Self::step`] (see that field's doc) — `Sim` has no
-    /// `MenuNav` to read from at that point, only whatever was last pushed
-    /// here.
-    pub fn set_toggle_modes(&mut self, toggle_sneak: bool, toggle_sprint: bool) {
+    /// Push vanilla's `key.sneak`/`key.sprint`/`key.attack`/`key.use`
+    /// hold-vs-toggle options down from the menu layer (issues #202/#444).
+    /// Stored rather than applied directly because the actual
+    /// [`InputState::set_toggle_modes`] call has to happen inside
+    /// [`Self::step`] (see that field's doc) — `Sim` has no `MenuNav` to read
+    /// from at that point, only whatever was last pushed here.
+    pub fn set_toggle_modes(
+        &mut self,
+        toggle_sneak: bool,
+        toggle_sprint: bool,
+        toggle_attack: bool,
+        toggle_use: bool,
+    ) {
         self.toggle_sneak = toggle_sneak;
         self.toggle_sprint = toggle_sprint;
+        self.toggle_attack = toggle_attack;
+        self.toggle_use = toggle_use;
+    }
+
+    /// Push vanilla's `options.autoJump` down from the menu layer (issue
+    /// #444), the same shape as [`Self::set_toggle_modes`] — stored here,
+    /// applied inside [`Self::step`] where the physics world is readable.
+    pub fn set_auto_jump(&mut self, auto_jump: bool) {
+        self.auto_jump = auto_jump;
+    }
+
+    /// Push vanilla's `options.sprintWindow` down from the menu layer (issue
+    /// #444) — the double-tap-forward window in 20 Hz ticks. `0` disables
+    /// double-tap sprint. Pushed once per `step` by the shell, so a mid-session
+    /// change from the settings screen applies on the very next tick.
+    pub fn set_sprint_window_ticks(&mut self, ticks: u8) {
+        self.sprint_window_ticks = ticks;
     }
 
     /// Hand everything the `GameTick` systems queued to the socket, in order.
@@ -274,12 +297,22 @@ impl Sim {
     /// confined to stalls).
     pub fn step(&mut self, dt: f64) {
         self.apply_mouse();
-        // Issue #202: apply the hold-vs-toggle option to the live
-        // `InputState` before any `GameTick` schedule this call runs reads
-        // it. One push per `step` call is enough — the option cannot change
-        // mid-frame, and every catch-up tick inside this call shares it.
-        let (toggle_sneak, toggle_sprint) = (self.toggle_sneak, self.toggle_sprint);
-        self.input_mut(|i| i.set_toggle_modes(toggle_sneak, toggle_sprint));
+        // Issues #202/#444: apply the hold-vs-toggle and sprint-window options
+        // to the live `InputState` before any `GameTick` schedule this call
+        // runs reads it. One push per `step` call is enough — the option
+        // cannot change mid-frame, and every catch-up tick inside this call
+        // shares it.
+        let (toggle_sneak, toggle_sprint, toggle_attack, toggle_use) = (
+            self.toggle_sneak,
+            self.toggle_sprint,
+            self.toggle_attack,
+            self.toggle_use,
+        );
+        let sprint_window_ticks = self.sprint_window_ticks;
+        self.input_mut(|i| {
+            i.set_toggle_modes(toggle_sneak, toggle_sprint, toggle_attack, toggle_use);
+            i.set_sprint_window_ticks(sprint_window_ticks);
+        });
         // The **one** accumulator, on the **one** catch-up policy
         // (`lodestone_ecs::MAX_CATCH_UP_SECS` — ten ticks, vanilla's own; see that
         // constant for why the shell's old inner `0.25 s` clamp lost).

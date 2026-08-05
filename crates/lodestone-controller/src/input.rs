@@ -35,8 +35,10 @@ pub enum Action {
 /// Read from `.cache/mc/26.2/client-src/net/minecraft/client/Options.java:631-640`:
 /// the `options.sprintWindow` slider is an `OptionInstance.IntRange(0, 10)` with
 /// default `7` (`0` disables double-tap sprint; `LocalPlayer.java:807` arms the
-/// timer with this value). This crate has no settings plumbing yet, so vanilla's
-/// default is hard-coded rather than exposed as a slider.
+/// timer with this value). Since issue #444 the value is exposed as a settings
+/// slider and pushed down each step by the shell; this constant is the **default**
+/// [`InputState::sprint_window_ticks`] boots with, so a caller that never calls
+/// [`InputState::set_sprint_window_ticks`] keeps vanilla's shipped behaviour.
 pub const SPRINT_TRIGGER_WINDOW_TICKS: u8 = 7;
 
 /// Vanilla's minimum food level to *start* a sprint (issue #200):
@@ -46,7 +48,11 @@ pub const MIN_FOOD_LEVEL_TO_SPRINT: i32 = 6;
 
 /// The set of currently-held actions plus accumulated, not-yet-consumed mouse
 /// motion. Cheap to copy; the platform layer owns one.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+///
+/// `Default` is implemented manually rather than derived since issue #444:
+/// the derived value would boot [`Self::sprint_window_ticks`] to `0` (double-tap
+/// sprint disabled), which is not vanilla's shipped behaviour.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct InputState {
     forward: bool,
     back: bool,
@@ -98,25 +104,113 @@ pub struct InputState {
     toggle_sneak: bool,
     /// As [`Self::toggle_sneak`], for `key.sprint`/`Options::toggleSprint`.
     toggle_sprint: bool,
+    /// Vanilla's `key.attack` toggle option (`Options.java:619-626`, issue
+    /// #444), carried through [`Self::set_toggle_modes`] and preserved across
+    /// [`Self::release_all`] exactly like [`Self::toggle_sneak`].
+    ///
+    /// **Not yet consumed by a press edge.** Attack/use flow through
+    /// `lodestone-shell`'s `interact.rs`, not through this crate's `Action`
+    /// set, so there is no `Action::Attack`/`Action::Use` branch in [`Self::set`]
+    /// to hang the toggle on yet. The flag is wired end to end so a consumer
+    /// can read it without touching the plumbing again — the same shape
+    /// [`Self::sprint_window_ticks`] rides, where the *value* reaches the model
+    /// even before every consumer exists.
+    toggle_attack: bool,
+    /// As [`Self::toggle_attack`], for `key.use`/`Options::toggleUse`
+    /// (`Options.java:627-629`).
+    toggle_use: bool,
+    /// The shell's **one-tick** auto-jump request (issue #444): ORed into the
+    /// jump intent by [`movement_intent`], then cleared by [`Self::tick`] at
+    /// the end of the same physics tick it was consumed in.
+    ///
+    /// Deliberately separate from `jump`: the real key's flag is latched until
+    /// the platform reports a release, so an auto-jump that wrote `jump` would
+    /// leave the player bunny-hopping forever. This is a transient, cleared
+    /// every tick, and never preserved across [`Self::release_all`] — unlike
+    /// the config flags above, it is per-tick state, not an option.
+    auto_jump_requested: bool,
+    /// Vanilla's `options.sprintWindow` (`Options.java:631-640`, issue #444) —
+    /// how many 20 Hz ticks the double-tap-forward window stays armed. `0`
+    /// disables double-tap sprint (`LocalPlayer.java:807` arms
+    /// `sprintTriggerTime` with this value). Pushed down once per `step` by
+    /// the shell via [`Self::set_sprint_window_ticks`]; boots at
+    /// [`SPRINT_TRIGGER_WINDOW_TICKS`].
+    sprint_window_ticks: u8,
     /// Accumulated horizontal mouse delta in pixels since last consume.
     pub mouse_dx: f32,
     /// Accumulated vertical mouse delta in pixels since last consume.
     pub mouse_dy: f32,
 }
 
+impl Default for InputState {
+    fn default() -> Self {
+        Self {
+            forward: false,
+            back: false,
+            left: false,
+            right: false,
+            jump: false,
+            sneak: false,
+            sprint: false,
+            sprint_latched: false,
+            sprint_trigger_ticks: 0,
+            sneak_key_down: false,
+            sprint_key_down: false,
+            toggle_sneak: false,
+            toggle_sprint: false,
+            toggle_attack: false,
+            toggle_use: false,
+            auto_jump_requested: false,
+            // Vanilla's shipped default — see [`Self::sprint_window_ticks`].
+            sprint_window_ticks: SPRINT_TRIGGER_WINDOW_TICKS,
+            mouse_dx: 0.0,
+            mouse_dy: 0.0,
+        }
+    }
+}
+
 impl InputState {
-    /// Sets vanilla's `key.sneak`/`key.sprint` toggle options (issue #202,
-    /// `Options::toggleCrouch`/`toggleSprint`).
+    /// Sets vanilla's `key.sneak`/`key.sprint`/`key.attack`/`key.use` toggle
+    /// options (issues #202/#444 — `Options::toggleCrouch`/`toggleSprint`/
+    /// `toggleAttack`/`toggleUse`).
     ///
     /// A config setter rather than a constructor argument: the platform layer
     /// owns one long-lived `InputState` and the option can change mid-session
     /// from the settings screen, so this has to be callable at any time. Safe
-    /// to call every tick with the same values — it only ever writes the two
-    /// fields, never touches the effective `sneak`/`sprint` state, so calling
-    /// it redundantly is a no-op in every way that matters.
-    pub fn set_toggle_modes(&mut self, toggle_sneak: bool, toggle_sprint: bool) {
+    /// to call every tick with the same values — it only ever writes the four
+    /// flags, never touches the effective state, so calling it redundantly is
+    /// a no-op in every way that matters.
+    pub fn set_toggle_modes(
+        &mut self,
+        toggle_sneak: bool,
+        toggle_sprint: bool,
+        toggle_attack: bool,
+        toggle_use: bool,
+    ) {
         self.toggle_sneak = toggle_sneak;
         self.toggle_sprint = toggle_sprint;
+        self.toggle_attack = toggle_attack;
+        self.toggle_use = toggle_use;
+    }
+
+    /// Set this physics tick's auto-jump request (issue #444).
+    ///
+    /// The shell calls this on a tick its obstacle check fires (auto-jump is
+    /// on, the player is on the ground, and collision clipped this tick's
+    /// horizontal motion). [`Self::tick`] clears it at the end of the same
+    /// schedule, so a stale request can never re-jump a later tick — the
+    /// transient half of the pair whose config half is pushed by the shell,
+    /// never stored here.
+    pub fn set_auto_jump_request(&mut self, request: bool) {
+        self.auto_jump_requested = request;
+    }
+
+    /// Set vanilla's `options.sprintWindow` (issue #444) — the
+    /// double-tap-forward window in 20 Hz ticks. `0` disables double-tap
+    /// sprint. Pushed once per `step` by the shell, so a mid-session change
+    /// from the settings screen applies on the very next tick.
+    pub fn set_sprint_window_ticks(&mut self, ticks: u8) {
+        self.sprint_window_ticks = ticks;
     }
 
     /// Set or clear a held action.
@@ -149,7 +243,11 @@ impl InputState {
                     if self.sprint_trigger_ticks > 0 {
                         self.sprint_latched = true;
                     } else {
-                        self.sprint_trigger_ticks = SPRINT_TRIGGER_WINDOW_TICKS;
+                        // Armed for the *configured* window (issue #444): 0 is
+                        // `LocalPlayer.java:807`'s "double-tap sprint disabled"
+                        // value, so a fresh press arms with 0 and the next one
+                        // never sees a live window.
+                        self.sprint_trigger_ticks = self.sprint_window_ticks;
                     }
                 }
                 // Releasing forward always ends an active double-tap sprint
@@ -206,6 +304,10 @@ impl InputState {
             self.sprint_trigger_ticks = 0;
             self.sprint_latched = false;
         }
+        // Auto-jump requests are one-shot: the intent system consumed it
+        // this tick (it runs before this), so clear it for the next one. A
+        // request that survived here would re-jump on an unrelated later tick.
+        self.auto_jump_requested = false;
     }
 
     /// Accumulate a raw mouse-motion delta (device pixels).
@@ -230,18 +332,31 @@ impl InputState {
     /// mapping, and `ToggleKeyMapping.release()`'s `reset()` sets `isDown`
     /// `false` unconditionally regardless of toggle mode
     /// (`ToggleKeyMapping.java:42-49`). [`Self::toggle_sneak`]/
-    /// [`Self::toggle_sprint`] are preserved across the reset like
-    /// [`Self::mouse_dx`]/[`Self::mouse_dy`] are: they are the *option*, not
+    /// [`Self::toggle_sprint`]/[`Self::toggle_attack`]/[`Self::toggle_use`]
+    /// and [`Self::sprint_window_ticks`] are preserved across the reset like
+    /// [`Self::mouse_dx`]/[`Self::mouse_dy`] are: they are the *options*, not
     /// per-key transient state, and losing them here would silently revert a
-    /// player's toggle-mode choice the next time the cursor is released.
+    /// player's toggle-mode choice or sprint-window setting the next time the
+    /// cursor is released. [`Self::auto_jump_requested`] is deliberately *not*
+    /// preserved — it is one-tick state, reset by [`Self::default`] like every
+    /// held key.
     pub fn release_all(&mut self) {
         let mouse = (self.mouse_dx, self.mouse_dy);
-        let toggles = (self.toggle_sneak, self.toggle_sprint);
+        let options = (
+            self.toggle_sneak,
+            self.toggle_sprint,
+            self.toggle_attack,
+            self.toggle_use,
+            self.sprint_window_ticks,
+        );
         *self = InputState::default();
         self.mouse_dx = mouse.0;
         self.mouse_dy = mouse.1;
-        self.toggle_sneak = toggles.0;
-        self.toggle_sprint = toggles.1;
+        self.toggle_sneak = options.0;
+        self.toggle_sprint = options.1;
+        self.toggle_attack = options.2;
+        self.toggle_use = options.3;
+        self.sprint_window_ticks = options.4;
     }
 
     /// Whether any movement key is held (used to gate sprint etc.).
@@ -269,6 +384,12 @@ impl InputState {
 /// and sprint being *currently effective* are deliberately separate: the flag
 /// says sprint was requested, this gate says whether it's allowed to apply
 /// right now, exactly like vanilla's `isSprinting()` vs `canStartSprinting()`.
+///
+/// Auto-jump surfaces through this same function: the shell decides *when* to
+/// ask (grounded, blocked ahead, moving) and sets
+/// [`InputState::auto_jump_requested`]; this crate only forwards it, and
+/// [`InputState::tick`] clears it so a stale request can never re-fire on an
+/// unrelated later tick.
 #[must_use]
 pub fn movement_intent(state: &InputState) -> MovementInput {
     let forward = f32::from(state.forward) - f32::from(state.back);
@@ -278,7 +399,7 @@ pub fn movement_intent(state: &InputState) -> MovementInput {
     MovementInput {
         forward,
         strafe,
-        jump: state.jump,
+        jump: state.jump || state.auto_jump_requested,
         sneak: state.sneak,
         sprint,
     }
@@ -644,7 +765,7 @@ mod tests {
     #[test]
     fn toggle_mode_flips_on_press_and_ignores_release() {
         let mut s = InputState::default();
-        s.set_toggle_modes(true, false);
+        s.set_toggle_modes(true, false, false, false);
 
         s.set(Action::Sneak, true); // press: flips on
         assert!(movement_intent(&s).sneak, "a press must toggle sneak on");
@@ -660,7 +781,7 @@ mod tests {
     #[test]
     fn toggle_sneak_and_toggle_sprint_are_independent() {
         let mut s = InputState::default();
-        s.set_toggle_modes(true, false);
+        s.set_toggle_modes(true, false, false, false);
         s.set(Action::Sprint, true);
         assert!(
             !movement_intent(&s).sneak,
@@ -682,7 +803,7 @@ mod tests {
         // vanilla relies on the OS not re-delivering `GLFW_PRESS`, but this
         // layer is not allowed to assume that of every platform.
         let mut s = InputState::default();
-        s.set_toggle_modes(false, true);
+        s.set_toggle_modes(false, true, false, false);
         s.set(Action::Sprint, true);
         s.set(Action::Forward, true);
         assert!(movement_intent(&s).sprint, "first press toggles sprint on");
@@ -696,7 +817,7 @@ mod tests {
     #[test]
     fn release_all_clears_toggled_sneak_but_keeps_the_toggle_option() {
         let mut s = InputState::default();
-        s.set_toggle_modes(true, true);
+        s.set_toggle_modes(true, true, false, false);
         s.set(Action::Sneak, true);
         assert!(movement_intent(&s).sneak, "precondition: toggled on");
 

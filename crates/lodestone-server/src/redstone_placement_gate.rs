@@ -163,6 +163,21 @@ impl ChunkSource for RigWorld {
             .clone()
     }
 
+    // Reads the cell out of the retained column rather than cloning one —
+    // `RigWorld::row()` probes this eight times per snapshot, and this source
+    // is the efficient case the trait now wants an implementor to provide
+    // (issue #440). A column that has never been touched is, by
+    // construction, all air — the same value `column()` would materialise.
+    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
+        self.columns
+            .lock()
+            .expect("rig world poisoned")
+            .get(&(cx, cz))
+            .map(|c| c.block_state(x.rem_euclid(16), y, z.rem_euclid(16)).to_string())
+            .unwrap_or_else(|| crate::chunk::AIR.to_string())
+    }
+
     fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
         let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
         self.columns
