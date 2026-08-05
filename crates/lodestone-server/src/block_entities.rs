@@ -259,6 +259,18 @@ impl BlockEntityRegistry {
         Self::default()
     }
 
+    /// Every block entity with its position, in arbitrary order.
+    ///
+    /// **Non-destructive, unlike every other route into the map**, which is the
+    /// whole point: world saving has to read the entire registry without
+    /// disturbing the live simulation. Added for #468's remaining half — until
+    /// this existed, the save path could not see a single block entity, so
+    /// `chunk_nbt.rs` wrote an empty `block_entities` list for every chunk and
+    /// a saved chest came back empty.
+    pub fn iter(&self) -> impl Iterator<Item = (&BlockPos, &BlockEntity)> {
+        self.entities.iter()
+    }
+
     /// How many block entities are currently registered. Mostly for tests
     /// and diagnostics.
     #[must_use]
