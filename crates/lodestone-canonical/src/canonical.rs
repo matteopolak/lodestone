@@ -1,6 +1,6 @@
 //! Bridges [`crate::flattening`]'s `id:meta` &rarr; modern-state table to a
 //! canonical **26.2** block-state id (`lodestone_data::block_states`), the id
-//! space `lodestone-world`'s [`lodestone_world::PalettedContainer`] needs
+//! space `lodestone-world`'s `PalettedContainer` needs
 //! downstream: nothing in `lodestone-world` interprets its `u32` entries (see
 //! its module docs — "opaque non-negative integer ids"), but every consumer
 //! actually wired into a live world today (the mesher's `BlockAtlas`,
@@ -429,8 +429,9 @@ pub struct FallbackTally {
     pub no_table_entry: u32,
     /// Blocks substituted because identity needs TileEntity/neighbour data
     /// this crate does not decode (flower pots, skulls, double-plant upper
-    /// halves — see `crate::packets::chunk`'s module docs for why block
-    /// entities are consumed but not retained here).
+    /// halves — see the consuming family's chunk module, e.g.
+    /// `lodestone_v340::packets::chunk`, for why block entities are consumed
+    /// but not retained there).
     pub requires_additional_context: u32,
     /// Blocks substituted because the pair is the one structurally
     /// out-of-bounds slot (`old_block_id=255, meta=15`).

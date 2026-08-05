@@ -31,21 +31,27 @@ pub mod packet_ids;
 #[path = "generated/entity_types.rs"]
 pub(crate) mod generated_entity_types;
 
-/// Generated `id:meta` (pre-Flattening) → modern block-state table for
-/// protocol 340, derived from the real 1.13.2 server jar's own
-/// `DataFixerUpper` flattening fix rather than from `minecraft-data` (which
-/// has no such table at all — this is *not* a case of "predates Mojang's
-/// data generator" like `packet_ids`/`entity_types` above; the authoritative
-/// source here is the jar itself). See `tests/flattening.rs` for the
-/// generator and `docs/protocol-340-flattening-table.md` for the full
-/// ambiguous-case enumeration.
-#[path = "generated/flattening.rs"]
-pub(crate) mod generated_flattening;
-
 pub mod adapter;
-pub mod canonical;
 pub mod entity_types;
-pub mod flattening;
 pub mod packets;
+
+/// The `id:meta` (pre-Flattening) → modern block-state table and the bridge
+/// from it to canonical 26.2 state ids.
+///
+/// Both used to live in this crate. They now live in `lodestone-canonical`
+/// and are re-exported here unchanged (epic #343 unit U1), because **every**
+/// pre-1.13 family speaks `id:meta` and the dumped table — vanilla's own
+/// 1.13.2 `DataFixerUpper` flattening fix, which upgrades 1.12.2-space ids —
+/// serves all of them: older id spaces are a strict subset, and the
+/// per-version difference is only which slots are populated, which
+/// `NoTableEntry` already expresses. Four private copies of a 9k-line
+/// generated table would drift independently.
+///
+/// Call sites are unchanged: `crate::canonical::…` and `crate::flattening::…`
+/// still resolve. The generator, the committed JVM dump and
+/// `oracle-java/FlatteningOracle.java` moved with the table; see
+/// `docs/protocol-340-flattening-table.md` and
+/// `docs/protocol-340-canonical-bridge.md`.
+pub use lodestone_canonical::{canonical, flattening};
 
 pub use adapter::{PROTOCOL, V340Adapter, adapter};

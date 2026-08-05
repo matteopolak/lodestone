@@ -27,7 +27,7 @@
 # Regenerate (no Docker/live server needed -- a local JDK on PATH suffices):
 #   JAR=.cache/mc/1.13.2/server.jar
 #   javac -cp "$JAR" -d /tmp/flatten-oracle-out \
-#       crates/protocol/v340/oracle-java/FlatteningOracle.java
+#       crates/lodestone-canonical/oracle-java/FlatteningOracle.java
 #   java -cp "/tmp/flatten-oracle-out:$JAR" FlatteningOracle
 # then copy stdout over this file (keeping this header) and regenerate
 # src/generated/flattening.rs per tests/flattening.rs's module docs.

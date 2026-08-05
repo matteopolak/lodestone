@@ -19,8 +19,8 @@ the latter for 1.12.2, **built and verified against the real 1.13.2 server jar's
 `DataFixerUpper` flattening fix** — the same conversion vanilla itself runs to upgrade a
 pre-1.13 world — rather than written by hand or trusted blindly from a community dataset.
 
-The table lives in `crates/protocol/v340/src/generated/flattening.rs` (generated, do not
-hand-edit) with a hand-written public API in `crates/protocol/v340/src/flattening.rs`
+The table lives in `crates/lodestone-canonical/src/generated/flattening.rs` (generated, do not
+hand-edit) with a hand-written public API in `crates/lodestone-canonical/src/flattening.rs`
 (`flattening::lookup(old_block_id, meta) -> LegacyBlockState`). Full module docs live in
 both files; this doc is the narrative version plus every ambiguous case found along the
 way.
@@ -31,7 +31,7 @@ need" below for what that follow-up requires.
 
 **Update: the adapter wiring described below has since landed.** See
 [`protocol-340-canonical-bridge.md`](./protocol-340-canonical-bridge.md) for what
-`crates/protocol/v340/src/canonical.rs` does with each of the four outcomes below, the
+`crates/lodestone-canonical/src/canonical.rs` does with each of the four outcomes below, the
 additional renames/property fixups that direction needed beyond this table's own scope, and the
 live-server evidence gathered for it. This document is left as originally written (the table's
 own construction and verification); only this note and the "What wiring `v340` would need"
@@ -100,7 +100,7 @@ API) for every one of the 4095 slots, sorting property keys for determinism.
 
 Result: **zero mismatches** between the static-source parse and the live-executed dump
 across all 4095 slots. This is the version committed as
-`crates/protocol/v340/tests/support/flattening_1_13_2_jvm.txt`.
+`crates/lodestone-canonical/tests/support/flattening_1_13_2_jvm.txt`.
 
 ### What was downloaded
 
@@ -386,10 +386,10 @@ identity splits) that turned out to be necessary beyond the rename pass alone, a
 
 - Regenerate the dump (pure JDK, no Docker/live server — `yp`'s static initializer runs on
   class-load): see the command block at the top of
-  `crates/protocol/v340/tests/support/flattening_1_13_2_jvm.txt` and
-  `crates/protocol/v340/tests/flattening.rs`'s module docs.
+  `crates/lodestone-canonical/tests/support/flattening_1_13_2_jvm.txt` and
+  `crates/lodestone-canonical/tests/flattening.rs`'s module docs.
 - Regenerate the committed table:
-  `LODESTONE_REGEN=1 cargo test -p lodestone-v340 --test flattening committed_table_matches_dump -- --ignored --nocapture`.
+  `LODESTONE_REGEN=1 cargo test -p lodestone-canonical --test flattening committed_table_matches_dump -- --ignored --nocapture`.
 - **If the source jar ever changes, `yp`/`yw`/`aah` will almost certainly not be the class
   names any more** — obfuscated names are jar-build-specific. Rediscover them with the
   grep-then-decompile method in `FlatteningOracle.java`'s class doc before touching

@@ -62,6 +62,11 @@ lodestone-testsupport = { path = "crates/lodestone-testsupport" }
 lodestone-physics = { path = "crates/lodestone-physics" }
 lodestone-entity = { path = "crates/lodestone-entity" }
 lodestone-data   = { path = "crates/lodestone-data" }
+# Shared canonicalisation layer for every pre-1.13 family (epic #343 U1): the
+# JVM-dumped `id:meta` flattening table plus the bridge to canonical 26.2
+# block-state ids. Version-free — it names no protocol family, so it does not
+# weaken per-family deletability.
+lodestone-canonical = { path = "crates/lodestone-canonical" }
 lodestone-v770   = { path = "crates/protocol/v770" }
 lodestone-v47    = { path = "crates/protocol/v47" }
 lodestone-v340 = { path = "crates/protocol/v340" }
