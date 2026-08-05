@@ -129,14 +129,26 @@ pub enum MenuAction {
     /// just resubmits the same request — harmless, since `Sim::respawn` is a
     /// no-op once `Sim::is_dead` has already gone false.
     Respawn,
-    // A `SetCommandBlock(command_block::CommandBlockSubmit)` variant belongs
-    // here — issue #47's Done button already computes exactly that payload
-    // (`CommandBlockState::to_submit`, fully tested) — but adding it now
-    // would break `app.rs`'s exhaustive `match action` (a brokered file this
-    // crate cannot edit) with no compiling counterpart on the other side.
-    // Left out rather than landed half-broken; see #436 and
-    // `activate_command_block_row`'s `Done` arm for the exact two-file patch
-    // this needs, applied together.
+    /// The command-block screen's **Done** button was activated (issue #47):
+    /// `app.rs` must send the `ClientAction::SetCommandBlock` this payload
+    /// rebuilds. `MenuNav` holds no session to send it through, the same
+    /// division of labour [`MenuAction::Respawn`] has.
+    ///
+    /// Carries a [`command_block::CommandBlockSubmit`] rather than a
+    /// [`lodestone_client::ClientAction`] directly because this enum derives
+    /// `Eq` and `ClientAction` cannot (a sibling variant holds a float) — see
+    /// that struct's own doc. `app.rs`'s arm calls
+    /// [`command_block::CommandBlockSubmit::into_action`] to cross back.
+    ///
+    /// **Nothing can open this screen from a real interaction yet**, and that is
+    /// worth naming here rather than leaving for someone to rediscover: there is
+    /// no command-block block-entity NBT decode in the workspace and no
+    /// `interact.rs` trigger, so the screen has no production producer even
+    /// though this variant now has a real consumer. Tracked as
+    /// [#442](https://github.com/matteopolak/lodestone/issues/442). What #47's
+    /// half fixes is the *submit* path, which was the island: the Done button
+    /// computed a fully-tested payload and dropped it on the floor.
+    SetCommandBlock(command_block::CommandBlockSubmit),
 }
 
 /// Which field of the add/edit form has focus.
@@ -993,15 +1005,29 @@ pub struct MenuNav {
     /// are visible at once: the selected *server* keeps its outline while a footer
     /// button under the mouse draws highlighted.
     list_button: Option<usize>,
-    /// How many rows the multiplayer list is scrolled down, in whole rows
-    /// (issue #402). Row-quantized rather than vanilla's continuous
-    /// `scrollAmount` — see [`super::render::server_row_top`]'s doc on why this
-    /// draw pipeline (no scissor) cannot show a partial row.
+    /// How far the multiplayer list is scrolled down, **in logical pixels** —
+    /// vanilla's `AbstractScrollArea.scrollAmount`, which is a `double` and is
+    /// subtracted straight from a row's y (`AbstractSelectionList.java:143-150`).
     ///
-    /// Not persisted and reset to `0` whenever the screen is (re)opened from the
-    /// title, matching vanilla building a fresh `JoinMultiplayerScreen` — see
-    /// [`Self::key_main`]'s `MainButton::Multiplayer` arm.
-    server_scroll: usize,
+    /// **This was a `usize` row counter until issue #445**, and that was the
+    /// whole of the owner's bug report: one wheel notch is
+    /// `scrollY * scrollRate()` where `scrollRate = defaultEntryHeight / 2`
+    /// (`AbstractScrollArea.java:34`, `:141-142`, `AbstractSelectionList.java:44`
+    /// via `defaultSettings`), i.e. **18 px** for a 36 px row — a value a row
+    /// index structurally cannot hold, so the list jumped a whole entry per
+    /// notch. See [`Self::scroll_server_list`], which now delegates to
+    /// [`super::widget::ScrollList`] rather than reimplementing the clamp.
+    ///
+    /// Row-quantization was not arbitrary when it landed: this pipeline had no
+    /// scissor, so a straddling row would have painted over the footer. It has
+    /// one now — `render.rs` wraps `draw_server_entry` in `Quads::with_clip`
+    /// against the same band this offset is clamped against — which is the
+    /// precondition that makes a pixel offset safe to draw.
+    ///
+    /// Not persisted and reset to `0.0` whenever the screen is (re)opened from
+    /// the title, matching vanilla building a fresh `JoinMultiplayerScreen` —
+    /// see [`Self::key_main`]'s `MainButton::Multiplayer` arm.
+    server_scroll: f32,
     /// The last known mouse position in **logical** pixels, and the canvas it was
     /// measured in (#396).
     ///
@@ -1130,7 +1156,7 @@ impl MenuNav {
             accounts: crate::menu::accounts::AccountsNav::with_path(profiles_path),
             world_select: crate::menu::world_select::WorldSelectNav::new(),
             list_button: None,
-            server_scroll: 0,
+            server_scroll: 0.0,
             menu_cursor: None,
             settings: crate::menu::options::SettingsNav::new(),
             social: crate::menu::social::SocialNav::with_path(hidden_players_path),
@@ -1325,53 +1351,75 @@ impl MenuNav {
         self.list_button
     }
 
-    /// How many rows the multiplayer list is scrolled down (issue #402).
+    /// How far the multiplayer list is scrolled down, **in logical pixels**
+    /// (issues #402, #445). See [`Self::server_scroll`]'s field doc.
     #[must_use]
-    pub fn server_scroll(&self) -> usize {
+    pub fn server_scroll(&self) -> f32 {
         self.server_scroll
     }
 
-    /// Scrolls the multiplayer list by `rows` (positive = down, revealing later
-    /// entries), clamping to `[0, server_list_max_scroll(len, canvas_height)]` —
-    /// vanilla's `AbstractScrollArea::mouseScrolled` /
-    /// `setScrollAmount`'s clamp, in rows rather than pixels.
+    /// Scrolls the multiplayer list by `notches` of mouse wheel — vanilla's
+    /// `AbstractScrollArea::mouseScrolled`,
+    /// `setScrollAmount(scrollAmount() - scrollY * scrollRate())`
+    /// (`AbstractScrollArea.java:34`).
+    ///
+    /// `notches` is winit's `scrollY` verbatim, so **positive scrolls up**
+    /// (toward entry 0), matching vanilla's sign — the negation lives in
+    /// [`super::widget::ScrollList::mouse_scrolled`], not here, so there is
+    /// exactly one place the sign can be got wrong.
+    ///
+    /// **Delegates to [`super::widget::ScrollList`] rather than reimplementing
+    /// the arithmetic**, which is what makes one notch land on 18 px rather than
+    /// a whole 36 px entry: that type owns `scrollRate = defaultEntryHeight / 2`
+    /// and `setScrollAmount`'s `Mth.clamp`, both already gated against the jar.
+    /// A fractional notch (a trackpad `PixelDelta`) therefore moves a
+    /// proportional number of pixels instead of being rounded to a row, and
+    /// three notches reach 54 px — a position the old `usize` model could not
+    /// represent at all.
     ///
     /// Takes the real canvas height because the mouse wheel is the one call site
     /// that has it (`app.rs` already resolves the framebuffer to a logical
     /// canvas for every cursor event) — unlike keyboard scroll-into-view, which
     /// runs on every arrow press and uses the canvas-independent
     /// [`super::render::server_list_window_rows`] instead so it needs no new
-    /// plumbing from `app.rs`. A no-op on an empty list, so `max` (which would
-    /// otherwise be `0.saturating_sub(0) = 0`, i.e. already a no-op) does not
-    /// need to special-case it, but an early return reads clearer than relying
-    /// on that.
-    pub fn scroll_server_list(&mut self, rows: i32, canvas_height: f32) {
-        if self.list.is_empty() {
+    /// plumbing from `app.rs`. A no-op on an empty list, where there is no band
+    /// to clamp against.
+    pub fn scroll_server_list(&mut self, notches: f32, canvas_height: f32) {
+        let Some(mut list) =
+            super::render::server_scroll_model(self.list.len(), canvas_height)
+        else {
             return;
-        }
-        let max = super::render::server_list_max_scroll(self.list.len(), canvas_height) as i32;
-        let cur = self.server_scroll as i32;
-        self.server_scroll = (cur + rows).clamp(0, max.max(0)) as usize;
+        };
+        list.set_scroll(self.server_scroll);
+        list.mouse_scrolled(notches);
+        self.server_scroll = list.scroll();
     }
 
     /// Keeps [`Self::server`] inside the scrolled window — vanilla's
-    /// `AbstractSelectionList.scrollToEntry` at row granularity, modelled on
+    /// `AbstractSelectionList.scrollToEntry` (`:251-261`), in pixels, modelled on
     /// [`super::accounts`]'s `scroll_to_show`. Uses the canvas-independent
     /// [`super::render::server_list_window_rows`] rather than a real canvas
     /// height, so a keyboard press needs no new plumbing from `app.rs` — see
     /// that function's doc on why the result is safe (never wrong direction)
     /// even when it under-uses a larger canvas.
+    ///
+    /// Both deltas are measured against the *current* offset and applied in
+    /// order, exactly as `scrollToEntry` does, so this is the minimum move that
+    /// brings the row fully into the band — an arrow press off the bottom edge
+    /// advances by one row's 36 px, not by a whole window.
     fn scroll_server_to_show(&mut self) {
-        let window = super::render::server_list_window_rows();
-        if self.server < self.server_scroll {
-            self.server_scroll = self.server;
-        } else if self.server >= self.server_scroll + window {
-            self.server_scroll = self.server + 1 - window;
+        let row_h = super::render::SERVER_LIST_ITEM_H;
+        let window_px = super::render::server_list_window_rows() as f32 * row_h;
+        let row_top = self.server as f32 * row_h;
+        if row_top < self.server_scroll {
+            self.server_scroll = row_top;
+        } else if row_top + row_h > self.server_scroll + window_px {
+            self.server_scroll = row_top + row_h - window_px;
         }
         // Never leave the window scrolled past the point where it has nothing
         // left to reveal, e.g. right after a delete shrinks the list.
-        let max = self.list.len().saturating_sub(1);
-        self.server_scroll = self.server_scroll.min(max);
+        let max = (self.list.len() as f32 * row_h - window_px).max(0.0);
+        self.server_scroll = self.server_scroll.clamp(0.0, max);
     }
 
     /// Records the mouse position in logical pixels, and the canvas it was
@@ -1998,7 +2046,7 @@ impl MenuNav {
                         // window from wherever `self.server` already points,
                         // matching a fresh screen whose selection just happens
                         // to already be scrolled to (#402).
-                        self.server_scroll = 0;
+                        self.server_scroll = 0.0;
                         self.clamp_server();
                         MenuAction::Reprobe(None)
                     }
@@ -2269,15 +2317,14 @@ impl MenuNav {
                 MenuAction::None
             }
             CommandBlockRow::Done => {
-                // `state.to_submit()` is the real, tested payload
-                // (`ClientAction::SetCommandBlock`'s `Eq`-able subset) —
-                // nothing sends it yet. See `MenuAction`'s own doc comment
-                // on why a `SetCommandBlock` variant is not landed here
-                // until the matching `app.rs` arm lands with it; #436 tracks
-                // the pair.
-                let _submit = state.to_submit();
+                // `populateAndSendPacket(); this.onClose();`
+                // (`CommandBlockEditScreen.java:111-114`) — vanilla sends first
+                // and closes second, and the order matters here for the same
+                // reason: `close_command_block` drops `self.command_block`, so
+                // the payload has to be taken off `state` before it goes.
+                let submit = state.to_submit();
                 self.close_command_block(ui);
-                MenuAction::None
+                MenuAction::SetCommandBlock(submit)
             }
             CommandBlockRow::Cancel => {
                 self.close_command_block(ui);
@@ -5473,7 +5520,7 @@ mod tests {
     /// The centre of a quadrant of row `row`'s favicon, in logical pixels,
     /// unscrolled.
     fn icon_point(row: usize, fx: f32, fy: f32) -> (f32, f32) {
-        let (ix, iy, iw, ih) = crate::menu::render::server_entry_icon_rect(row, 854.0, 0);
+        let (ix, iy, iw, ih) = crate::menu::render::server_entry_icon_rect(row, 854.0, 0.0);
         (ix + iw * fx, iy + ih * fy)
     }
 
@@ -5524,7 +5571,7 @@ mod tests {
         // cursor on the row it just created.
         assert_eq!(nav.server_index(), n - 1, "precondition: cursor on the last row");
         assert!(
-            nav.server_scroll() > 0,
+            nav.server_scroll() > 0.0,
             "selecting a row past the window must have scrolled to show it"
         );
 
@@ -5566,6 +5613,12 @@ mod tests {
     /// #402: the mouse wheel scrolls the list too, independently of the
     /// keyboard path above, and clamps at both ends rather than running past
     /// the list.
+    ///
+    /// **Sign convention (#445):** `notches` is winit's `scrollY` verbatim, so
+    /// **positive scrolls up** — the same sign vanilla's
+    /// `setScrollAmount(scrollAmount() - scrollY * scrollRate())` uses
+    /// (`AbstractScrollArea.java:34`). This is the *opposite* of the `rows`
+    /// parameter it replaced, where positive meant down.
     #[test]
     fn the_mouse_wheel_scrolls_the_server_list_and_clamps() {
         // `server_list_max_scroll` is dynamic (the real canvas, not the
@@ -5577,21 +5630,231 @@ mod tests {
         let n = 15;
         let (mut nav, _ui, _) = listing("list-scroll-wheel", n);
         let max = crate::menu::render::server_list_max_scroll(n, V_H);
-        assert!(max > 0, "precondition: {n} rows must overflow an 854x480 canvas");
+        assert!(
+            max > 0.0,
+            "precondition: {n} rows must overflow an 854x480 canvas"
+        );
 
-        // Scroll to the very top and past it — must clamp at 0, not go negative
-        // (which `usize` would panic on if the clamp were wrong).
-        nav.scroll_server_list(-1000, V_H);
-        assert_eq!(nav.server_scroll(), 0, "wheel-up clamps at the top");
+        // Scroll to the very top and past it — must clamp at 0, never negative.
+        nav.scroll_server_list(1000.0, V_H);
+        assert_eq!(nav.server_scroll(), 0.0, "wheel-up clamps at the top");
 
         // Scroll to the very bottom and past it — must clamp at
         // `server_list_max_scroll`, not run off the end of the list.
-        nav.scroll_server_list(1000, V_H);
-        assert_eq!(nav.server_scroll(), max, "wheel-down clamps at the bottom");
+        nav.scroll_server_list(-1000.0, V_H);
+        assert_eq!(
+            nav.server_scroll(),
+            max,
+            "wheel-down clamps at the bottom"
+        );
 
-        // One notch back up must move by exactly one row, not snap or drift.
-        nav.scroll_server_list(-1, V_H);
-        assert_eq!(nav.server_scroll(), max - 1);
+        // One notch back up moves by exactly one *scroll rate* — half a row,
+        // 18 px — not a whole entry. See the dedicated gate below.
+        nav.scroll_server_list(1.0, V_H);
+        assert_eq!(nav.server_scroll(), max - SCROLL_RATE_PX);
+    }
+
+    /// `scrollRate = defaultEntryHeight / 2` for the 36 px server row —
+    /// `AbstractScrollArea.defaultSettings(defaultEntryHeight / 2)`
+    /// (`AbstractSelectionList.java:44`), read back by `scrollRate()`
+    /// (`AbstractScrollArea.java:141-142`) and applied by `mouseScrolled`
+    /// (`:34`). Transcribed from `.cache/mc/26.2/client-src`, not guessed.
+    const SCROLL_RATE_PX: f32 = 18.0;
+
+    /// **The player-reported bug (issue #445), as a value rather than a
+    /// direction.** The owner: *"scrolling the server list should actually
+    /// scroll — not jump by increments of the height of a server entry."*
+    ///
+    /// One notch must land on **18 px** and three on **54 px**. That second
+    /// number is the load-bearing one: 54 is not a multiple of the 36 px row
+    /// height, so **no row index can represent it** — the assertion is
+    /// unsatisfiable by the implementation this replaced, whatever else that
+    /// implementation got right. Asserting merely that "the offset increased"
+    /// would have passed both, which is the *magnitude* species of vacuous test
+    /// `CLAUDE.md` names.
+    ///
+    /// The negative control is
+    /// [`a_row_quantized_wheel_cannot_reach_the_predicted_offset`], which runs
+    /// the old model and observes it fail exactly this predicate.
+    #[test]
+    fn three_wheel_notches_land_on_fifty_four_pixels() {
+        const V_H: f32 = 480.0;
+        let n = 15;
+        let (mut nav, _ui, _) = listing("list-scroll-notch", n);
+        // A precondition, not decoration: with `max_scroll` below 54 px the
+        // clamp would answer these assertions instead of the notch rate, and
+        // the gate would be measuring the wrong thing.
+        let max = crate::menu::render::server_list_max_scroll(n, V_H);
+        assert!(
+            max >= 3.0 * SCROLL_RATE_PX,
+            "precondition: {n} rows must leave room for three notches ({max} px of travel)"
+        );
+        // **A load-bearing precondition, and it caught itself.** `listing` adds
+        // through the real add-form path, which leaves the cursor on the last row
+        // — and `scroll_server_to_show` has therefore *already* scrolled the list
+        // to the bottom. Without this the first assertion below measured 157.0,
+        // an offset that is neither 18 nor 36 and would have read as a defect in
+        // the notch rate rather than as the wrong starting point. Start from a
+        // known top so the numbers below are the notch's own.
+        nav.scroll_server_list(1000.0, V_H);
+        assert_eq!(
+            nav.server_scroll(),
+            0.0,
+            "precondition: the measurement must start from the top of the list"
+        );
+
+        // Negative `notches` is down, per `mouseScrolled`'s own sign.
+        nav.scroll_server_list(-1.0, V_H);
+        assert_eq!(
+            nav.server_scroll(),
+            SCROLL_RATE_PX,
+            "one notch is half an entry, not a whole one"
+        );
+
+        nav.scroll_server_list(-1.0, V_H);
+        nav.scroll_server_list(-1.0, V_H);
+        assert_eq!(
+            nav.server_scroll(),
+            3.0 * SCROLL_RATE_PX,
+            "three notches must reach 54 px — a position no row index can hold"
+        );
+        // Stated separately so a failure names the impossibility directly.
+        assert_ne!(
+            nav.server_scroll() % crate::menu::render::SERVER_LIST_ITEM_H,
+            0.0,
+            "54 px must not be a whole number of rows, or this gate has stopped \
+             discriminating against the row-index model"
+        );
+    }
+
+    /// The row-quantized wheel this replaced, kept **executable** so the gate
+    /// above is a control rather than a description of one — the same discipline
+    /// `widget.rs`'s `RowIndexList` uses for the primitive.
+    ///
+    /// This is `scroll_server_list(rows: i32, …)` and `server_row_top`'s
+    /// `scroll as f32 * ITEM_H` as they actually were: one notch, one row.
+    /// Observed: it lands on 36.0 and 108.0 where the real implementation lands
+    /// on 18.0 and 54.0, so it **fails** both predicted values.
+    #[test]
+    fn a_row_quantized_wheel_cannot_reach_the_predicted_offset() {
+        struct RowQuantizedWheel {
+            rows: i32,
+        }
+        impl RowQuantizedWheel {
+            /// The old handler: `app.rs` collapsed `dy` to ±1 and `nav.rs`
+            /// added it to a row counter.
+            fn wheel(&mut self, dy: f32) {
+                let rows = if dy > 0.0 {
+                    -1
+                } else if dy < 0.0 {
+                    1
+                } else {
+                    0
+                };
+                self.rows = (self.rows + rows).max(0);
+            }
+            fn scroll_px(&self) -> f32 {
+                self.rows as f32 * crate::menu::render::SERVER_LIST_ITEM_H
+            }
+        }
+
+        const V_H: f32 = 480.0;
+        let n = 15;
+        let (mut nav, _ui, _) = listing("list-scroll-control", n);
+        let mut old = RowQuantizedWheel { rows: 0 };
+        // Both models must start from the same place, or the `assert_ne!`s below
+        // pass on the offset rather than on the granularity — see the sibling
+        // gate's note on `listing` leaving the list scrolled to the bottom.
+        nav.scroll_server_list(1000.0, V_H);
+        assert_eq!(nav.server_scroll(), 0.0, "precondition: both start at 0");
+
+        nav.scroll_server_list(-1.0, V_H);
+        old.wheel(-1.0);
+        assert_eq!(old.scroll_px(), 36.0, "the old model lands on a whole entry");
+        assert_ne!(
+            old.scroll_px(),
+            nav.server_scroll(),
+            "control must FAIL the one-notch prediction: 36 != 18"
+        );
+
+        nav.scroll_server_list(-1.0, V_H);
+        nav.scroll_server_list(-1.0, V_H);
+        old.wheel(-1.0);
+        old.wheel(-1.0);
+        assert_eq!(old.scroll_px(), 108.0, "three notches, three whole entries");
+        assert_ne!(
+            old.scroll_px(),
+            nav.server_scroll(),
+            "control must FAIL the three-notch prediction: 108 != 54"
+        );
+        // And the reason it cannot be fixed by scaling: every offset a row
+        // counter can express is a multiple of the row height, so 54 is not in
+        // its range at all.
+        assert_eq!(
+            old.scroll_px() % crate::menu::render::SERVER_LIST_ITEM_H,
+            0.0,
+            "a row counter can only ever land on a multiple of the row height"
+        );
+    }
+
+    /// The scrollbar thumb is placed from **the same number the rows are** —
+    /// `ServerEntryView::scroll`, which is `MenuNav::server_scroll()`.
+    ///
+    /// A thumb computed from its own expression is how a bar and its rows
+    /// desynchronise, so this asserts the join rather than the arithmetic: after
+    /// a wheel notch, the offset `render::server_scroll_model` clamps and the
+    /// offset every row carries are one value, and `server_row_top` moves by
+    /// exactly that many pixels.
+    #[test]
+    fn the_scrollbar_and_the_rows_read_the_same_offset() {
+        const V_W: f32 = 854.0;
+        const V_H: f32 = 480.0;
+        let n = 15;
+        let (mut nav, ui, _) = listing("list-scroll-join", n);
+        // `listing` leaves the cursor on the last row, which has already
+        // scrolled; start from a known top so the numbers below are the notch's.
+        nav.scroll_server_list(1000.0, V_H);
+        assert_eq!(nav.server_scroll(), 0.0, "precondition: scrolled to the top");
+        let top_before = crate::menu::render::server_row_top(0, nav.server_scroll());
+
+        nav.scroll_server_list(-1.0, V_H);
+        let offset = nav.server_scroll();
+        assert_eq!(offset, SCROLL_RATE_PX, "one notch of travel");
+
+        let mut favicons = crate::menu::render::FaviconCache::new();
+        let frame = crate::menu::render::frame_for(
+            &ui,
+            &nav,
+            &crate::menu::status::StatusCache::with_probe(
+                crate::menu::status::unavailable_probe(),
+            ),
+            &mut favicons,
+        )
+        .expect("the multiplayer screen owns its frame");
+
+        // Every entry in the frame carries the offset the wheel produced — this
+        // is the value `server_scroll_list` hands `ScrollList::set_scroll`, so
+        // the thumb cannot be reading anything else.
+        let carried: Vec<f32> = frame
+            .rows
+            .iter()
+            .filter_map(|r| r.entry.as_ref().map(|e| e.scroll))
+            .collect();
+        assert_eq!(carried.len(), n, "every row must carry the offset");
+        assert!(
+            carried.iter().all(|s| *s == offset),
+            "the offset the rows draw from must be the offset the wheel set: \
+             {offset} vs {carried:?}"
+        );
+
+        // And the rows actually moved by it — a carried-but-ignored offset would
+        // pass the assertion above and change nothing on screen.
+        let top_after = crate::menu::render::server_row_top(0, offset);
+        assert_eq!(
+            top_before - top_after,
+            SCROLL_RATE_PX,
+            "row 0 must rise by exactly the offset, not by a whole row"
+        );
     }
 
     /// **Hovering a server row does not select it.** Reported by a player: the
