@@ -141,7 +141,7 @@ This is the actionable part. Each row is a gap in the AI seam, not in this file:
 
 | # | primitive | file that must change | unblocks |
 |---|---|---|---|
-| 1 | anger deadline + anger target, with `advance()` integrating it | `ai/mob.rs` (trait method) + `ai/navigating_mob.rs` (state) | all four species' anger-gated targeting |
+| 1 | ~~anger deadline + anger target~~ — **landed**, see below | `mobs.rs` (host state + resolution), seam already had the rest | all four species' anger-gated targeting |
 | 2 | a gaze test — "is that player looking at me", needing the player's **view vector**, which `PlayerPerception` does not carry | `ai/mob.rs` + `mobs.rs` (feed) | enderman freeze + stare |
 | 3 | instant relocation of a mob | `ai/mob.rs` + `ai/navigating_mob.rs` (must also invalidate the active path) | enderman teleport |
 | 4 | a mob damaging **itself** (drain-flag shape) | `ai/navigating_mob.rs` + a `MobSim::tick` arm | bee sting-then-die |
@@ -150,6 +150,37 @@ This is the actionable part. Each row is a gap in the AI seam, not in this file:
 Plus a sixth that is not a trait method: **same-species propagation**, which belongs in
 `MobSim::feed_perception`'s census rather than in a goal, because the seam deliberately hands a goal
 `Option<Vec3>` answers and never a population.
+
+#### Primitive 1, as landed (#458)
+
+The row above predicted this would change `ai/mob.rs` and `ai/navigating_mob.rs`. **It did not** —
+both already carried `MobController::angry_target` and `NavigatingMob::set_angry_target`, and the
+seam had already made the deliberate choice that the *deadline* is the host's: `angry_target` is a
+pre-computed **answer**, not a query, because the seam has no shared game clock to compare an
+absolute deadline against. The only missing half was the host, so the whole change is in
+`lodestone-server/src/mobs.rs`.
+
+- **State.** `SimMob::anger` holds `{ end_time, target }`, where `end_time` is an absolute
+  `MobSim::tick_count`. Not a countdown — 26.2 compares against an absolute game time
+  (`NeutralMob.java:112-120`), and a decrementing counter drifts against a stepped tick loop.
+- **Start.** In `MobSim::attack`, beside the existing `note_hurt` — vanilla starts the grudge and
+  the retaliation record from the same event.
+- **Expiry.** `feed_perception` clears the grudge outright once `now >= end_time` and feeds
+  `set_angry_target`, mirroring `stopBeingAngry`.
+- **Duration.** `UniformInt.of(400, 780)` **inclusive**, drawn `lo + nextInt(hi - lo + 1)`.
+- **No species list.** Anger starts for every mob, reusing #455's structural route: only a species
+  whose roster registers an anger-gated row can *read* it, so a zombie's unread grudge is inert,
+  whereas a name list here would be another `is_hostile_species` waiting to go stale.
+
+**The gotcha, and it cost a vacuous test.** The first version of the gate read its expected bounds
+from `ANGER_TICKS`, the constant under test. Setting that constant to `(20, 39)` — the
+seconds-as-ticks misreading these tests exist to exclude — left **every assertion passing**, because
+the expectation moved with the subject. The bounds are now jar literals stated independently in the
+test module, and the control fails as it must. If you touch these tests, keep that separation.
+
+**The rows are still `Coverage::Missing`, deliberately.** Anger resolving is necessary but not
+sufficient: flipping a row means retiring `no_anger_gated_target_row_is_modelled`, which is a
+maintainer's call and not a side effect of landing a primitive.
 
 ### Gotchas
 
@@ -166,10 +197,10 @@ Plus a sixth that is not a trait method: **same-species propagation**, which bel
   returns `self.attack_target` instead of searching (`ai/navigating_mob.rs:904-906`) — the day that
   self-loop is fixed, a `Modelled` row here turns three neutral species hostile.
   `no_anger_gated_target_row_is_modelled` is the guard.
-- **`attribute.rs`'s `type_spec` has no arms for these four species**, so they currently spawn with
-  the generic registry `movement_speed` default rather than the jar's 0.3/0.23/0.3/0.3. Every speed
-  multiplier in the tables is therefore correct but scaled against the wrong base in production. The
-  speed gate feeds the jar's value explicitly and says so; fixing it means four arms in
+- **Fixed by #457: `attribute.rs`'s `type_spec` now has arms for all four**, so they spawn at the
+  jar's 0.3/0.23/0.3/0.3 rather than the registry's 0.7. Every rostered species now resolves, pinned
+  structurally by `every_rostered_species_has_a_type_spec_arm`. The paragraph below describes the
+  pre-#457 state and is kept for the reasoning, not the status: it used to mean four arms in
   `attribute.rs`.
 - **These species have no production spawn path.** `seed_demo_mobs` hardcodes `minecraft:zombie`, and
   it is the only production caller of `spawn_species`. So a neutral mob can be spawned and ticked in

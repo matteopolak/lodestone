@@ -25,8 +25,9 @@ IntegratedServer::open_in_memory_with_mobs(protocol, source, world_source, mob_a
        │  snapshot of the same deterministic terrain the connection streams
        │  (same seed ⇒ identical terrain; see the function's own doc comment
        │  for why two instances rather than one shared one)
-       ├─ seed_demo_mobs(..) — spawns a small fixed zombie population with
-       │  RandomStroll + RandomLookAround goals, once, at startup
+       ├─ seed_demo_mobs(..) — spawns a small fixed population once, at
+       │  startup, cycling `DEMO_SPECIES` (see below); each mob gets its own
+       │  jar-cited roster goal set via `MobSim::spawn_species`
        └─ loop: sleep_until(next_tick_at) (20Hz) → sim.tick() + block_entities.tick_all()
                 → out.publish(snapshots), recording MSPT/TPS/overrun on `clock`
 ```
@@ -93,6 +94,18 @@ call `set_next_id`.
   population once instead, purely so #217's actual subject (AI motion
   reaching the wire) has something to move. A caller that wants real spawning
   swaps in `MobSim::run_spawn_cycle` once a real `SpawnCandidateSource` exists.
+- **`DEMO_SPECIES`, and why its order matters (#457).** `seed_demo_mobs` used
+  to hardcode `minecraft:zombie`, and being the only production path that
+  creates a client-visible mob, that left four of the five roster families —
+  twenty-six species of jar-cited goal tables — at **zero pixels**, invisible
+  to every one of their own tests because each is a closed loop around a table
+  nothing instantiates. It now cycles `DEMO_SPECIES`, whose **first six**
+  entries are one per roster family plus a creeper, because production seeds
+  exactly six (`lodestone-shell/src/net.rs`). `zombie` stays at index 0: mob
+  ids start at 1000 in spawn order, and `live_mob_sim.rs` depends on that.
+  Adding an entry no roster family claims spawns it with `roster::FALLBACK` —
+  visible, proving nothing — which
+  `demo_species_are_all_rostered_and_span_every_family` rejects.
 - **No despawn pass.** `MobSim::despawn_pass` needs a player position the tick
   task has no way to learn (`EntitySource` is deliberately read-only,
   one-directional). A long singleplayer session keeps the same fixed demo
