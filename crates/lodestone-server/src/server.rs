@@ -594,7 +594,19 @@ impl ViewTracker {
 /// buy time-to-first-chunk falling from *the whole view* to *one column*, which
 /// is the entire reported symptom. Rings 2 and up saturate the fan-out.
 fn join_view_rings(view_radius: i32) -> Vec<Vec<(i32, i32)>> {
-    (0..=view_radius.max(0))
+    // A negative radius yields **no rings**, not ring 0. `view_radius.max(0)`
+    // reads as the harmless guard and is not: the raster walk this replaced built
+    // `(-r..=r)`, which is an *empty* range for `r < 0`, so a negative radius
+    // sent zero chunks. Clamping to 0 would send one — and `ViewTracker::new`
+    // would still record an empty loaded set for the same input, so the tracker
+    // and the wire would disagree about a column the client actually has.
+    // Nothing produces a negative radius today (`dispatch_play_packet` clamps
+    // with `view_radius.max(0)` precisely as an invariant against it), which is
+    // exactly why the divergence would have gone unnoticed.
+    if view_radius < 0 {
+        return Vec::new();
+    }
+    (0..=view_radius)
         .map(|r| {
             let mut ring = Vec::new();
             for dz in -r..=r {
@@ -3011,5 +3023,54 @@ mod tests {
             _ => None,
         });
         assert_eq!(furnace_input, None, "a stale window id must not mutate the block entity");
+    }
+
+    /// [`join_view_rings`]'s shape, at the three inputs that matter: the shell's
+    /// own radius, the degenerate 0, and a negative one.
+    ///
+    /// Ring sizes are `1, 8, 16, …, 8r` and must sum to `(2r+1)²` with no
+    /// coordinate repeated — a ring walk that double-counted a corner or skipped
+    /// an edge would still be non-decreasing in distance, so the end-to-end gate
+    /// in `tests/serve_play.rs` checks set equality and this checks the counts.
+    #[test]
+    fn join_view_rings_partitions_the_square_exactly() {
+        let rings = join_view_rings(9);
+        assert_eq!(rings.len(), 10, "radius 9 has rings 0..=9");
+        assert_eq!(rings[0], vec![(0, 0)], "ring 0 is the player's own column");
+        for (r, ring) in rings.iter().enumerate() {
+            let expected = if r == 0 { 1 } else { 8 * r };
+            assert_eq!(ring.len(), expected, "ring {r} must hold {expected} columns");
+            for &(dx, dz) in ring {
+                assert_eq!(
+                    dx.abs().max(dz.abs()) as usize,
+                    r,
+                    "({dx}, {dz}) is not on ring {r}"
+                );
+            }
+        }
+        let flat: Vec<(i32, i32)> = rings.iter().flatten().copied().collect();
+        let unique: HashSet<(i32, i32)> = flat.iter().copied().collect();
+        assert_eq!(flat.len(), 361, "the rings must sum to (2*9+1)^2");
+        assert_eq!(unique.len(), flat.len(), "no column may appear on two rings");
+    }
+
+    /// Radius 0 is one ring holding one column — the configuration several tests
+    /// in this crate join with.
+    #[test]
+    fn join_view_rings_at_radius_zero_is_a_single_column() {
+        assert_eq!(join_view_rings(0), vec![vec![(0, 0)]]);
+    }
+
+    /// **A negative radius must yield no rings at all**, matching the raster walk
+    /// this replaced: `(-r..=r)` is an empty range for `r < 0`, so a negative
+    /// radius sent zero chunks. `view_radius.max(0)` would send one, and
+    /// `ViewTracker::new` would still record an empty loaded set for the same
+    /// input — the tracker and the wire disagreeing about a column the client
+    /// actually has. Nothing produces a negative radius today, which is why this
+    /// needs a test rather than a reading.
+    #[test]
+    fn join_view_rings_at_a_negative_radius_is_empty() {
+        assert!(join_view_rings(-1).is_empty());
+        assert!(join_view_rings(i32::MIN).is_empty());
     }
 }
