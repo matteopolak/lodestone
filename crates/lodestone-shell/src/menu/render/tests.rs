@@ -2315,7 +2315,7 @@ fn an_account_row_straddling_the_band_is_clipped_not_drawn_over_the_footer() {
     let list = spec.model(h).expect("and it has a band at 240 px");
     let band_bottom = list.top() + list.height();
     let col_x = spec.row_left(w);
-    let col_w = spec.row_w;
+    let col_w = spec.row_w(w);
 
     // Precondition, executed rather than assumed: a row really does straddle the
     // bottom edge at this offset. Without it this test could pass on a list that

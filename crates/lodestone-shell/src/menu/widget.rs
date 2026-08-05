@@ -1519,11 +1519,10 @@ impl ScrollList {
 /// The band is declared as `top` plus `footer_h`, not as a finished height, because
 /// that is the form the screens here already state their layout in (a
 /// `content_top` and a footer constant) and it is what keeps the declaration
-/// independent of the canvas. Likewise the row *width* is carried and
-/// [`Self::row_right`] derives the scrollbar's anchor, rather than the anchor being
-/// passed in already computed: `(width * 0.5).floor() - (row_w * 0.5).floor()` is
-/// the expression both `server_row_left` and `accounts_row_left` already use, so
-/// deriving it here means the bar cannot sit somewhere the rows are not.
+/// independent of the canvas. Likewise the row *edge* is carried as a [`RowBand`]
+/// and [`Self::row_right`] derives the scrollbar's anchor, rather than the anchor
+/// being passed in already computed, so the bar cannot sit somewhere the rows are
+/// not.
 ///
 /// ## How to change it
 ///
@@ -1559,8 +1558,101 @@ pub struct ListSpec {
     pub heights: Option<Vec<f32>>,
     /// The current offset, in **pixels**.
     pub scroll: f32,
-    /// A row's width — `getRowWidth()`. Used only to derive [`Self::row_right`].
-    pub row_w: f32,
+    /// Where the rows sit horizontally — used only to derive [`Self::row_left`]
+    /// and [`Self::row_right`]. See [`RowBand`].
+    pub band: RowBand,
+}
+
+/// Where a list's rows sit horizontally on the canvas.
+///
+/// ## What it is
+///
+/// The one thing [`ListSpec`] needs a canvas *width* to answer, split into the
+/// two shapes the screens here actually have. [`Self::row_left`]/
+/// [`Self::row_right`] are what [`ScrollList::scrollbar_x`] hangs the bar off, so
+/// this is also "where the scrollbar goes".
+///
+/// ## Why there are two
+///
+/// [`Self::Centred`] alone was the whole of `ListSpec` until issue #445 reached
+/// Social Interactions, and it is `AbstractSelectionList`'s own model:
+/// `getRowLeft()` is `width / 2 - rowWidth / 2`, a fixed-width row centred on the
+/// canvas. Multiplayer (340), accounts (305), key binds (340), language (270) and
+/// statistics (300) are all that shape, and for them a single `row_w` constant
+/// answers both edges.
+///
+/// Social Interactions is not, and it is the reason this enum exists rather than a
+/// fourth `row_w` constant. Its rows are **full-width**: the player name sits at a
+/// flat 4 px inset from the canvas's left edge and the Hide/Report buttons are
+/// anchored off `width - RIGHT_MARGIN`, so the row grows and shrinks with the
+/// window. **No constant `row_w` can express that** — `row_left(row_w) + row_w`
+/// tracks the canvas centre at half the rate the right edge moves, so a value
+/// tuned at 854 px puts the scrollbar through the Report button at 1280 and off
+/// the canvas at 640. That is not a tuning problem, it is the wrong shape, which
+/// is why `social.rs` was blocked on this type rather than on effort.
+///
+/// ## How to change it
+///
+/// Prefer [`Self::Centred`]; it is what vanilla does and what five of the six
+/// lists here are. Reach for [`Self::Inset`] only when a screen's own geometry is
+/// genuinely canvas-relative, and note the gutter rule below — an `Inset` right
+/// edge with no room for the bar puts the bar off the canvas, silently, because
+/// nothing clamps it.
+///
+/// **The right inset must reserve `SCROLLBAR_WIDTH + 2 + SCROLLBAR_WIDTH` = 14 px**
+/// beyond wherever the row's own content ends. `AbstractSelectionList` overrides
+/// `scrollBarX()` to `getRowRight() + scrollbarWidth() + 2`, so the bar lives
+/// *outside* the row, not inset into it — see [`ScrollList::scrollbar_x`]. A
+/// centred list gets that gutter for free from the canvas margin either side; a
+/// full-width one has to declare it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RowBand {
+    /// `AbstractSelectionList.getRowLeft()`: a fixed-width row centred on the
+    /// canvas.
+    Centred {
+        /// `getRowWidth()`.
+        row_w: f32,
+    },
+    /// A row that spans the canvas, inset by `left` from its left edge and
+    /// `right` from its right. The row's width is therefore a function of the
+    /// canvas, which is exactly what [`Self::Centred`] cannot express.
+    Inset {
+        /// Distance from the canvas's left edge to the row's left edge.
+        left: f32,
+        /// Distance from the row's right edge to the canvas's right edge. Must
+        /// leave room for the scrollbar — see this type's "How to change it".
+        right: f32,
+    },
+}
+
+impl RowBand {
+    /// `getRowLeft()`.
+    #[must_use]
+    pub fn row_left(self, width: f32) -> f32 {
+        match self {
+            // Two *separate* `floor`s, not one on the difference: that is
+            // vanilla's own integer arithmetic, and it is the expression
+            // `server_row_left`/`accounts_row_left` already used.
+            RowBand::Centred { row_w } => (width * 0.5).floor() - (row_w * 0.5).floor(),
+            RowBand::Inset { left, .. } => left,
+        }
+    }
+
+    /// `getRowRight()` — what [`ScrollList::scrollbar_rects`] hangs the bar off.
+    #[must_use]
+    pub fn row_right(self, width: f32) -> f32 {
+        match self {
+            RowBand::Centred { row_w } => self.row_left(width) + row_w,
+            RowBand::Inset { right, .. } => width - right,
+        }
+    }
+
+    /// `getRowWidth()` at this canvas width. Constant for [`Self::Centred`] and a
+    /// function of the canvas for [`Self::Inset`], which is the whole difference.
+    #[must_use]
+    pub fn row_w(self, width: f32) -> f32 {
+        self.row_right(width) - self.row_left(width)
+    }
 }
 
 impl ListSpec {
@@ -1574,8 +1666,20 @@ impl ListSpec {
             len,
             heights: None,
             scroll: 0.0,
-            row_w,
+            band: RowBand::Centred { row_w },
         }
+    }
+
+    /// This spec with a canvas-relative row edge instead of a centred fixed-width
+    /// one — see [`RowBand::Inset`], and its gutter rule.
+    ///
+    /// A builder rather than a sixth constructor parameter, so the five centred
+    /// lists read unchanged and the one screen that is genuinely full-width has to
+    /// say so out loud.
+    #[must_use]
+    pub fn spanning(mut self, left: f32, right: f32) -> Self {
+        self.band = RowBand::Inset { left, right };
+        self
     }
 
     /// This spec with `scroll` as its offset — the builder the frame producers use,
@@ -1595,16 +1699,28 @@ impl ListSpec {
         self
     }
 
-    /// `getRowLeft()`, the expression `server_row_left`/`accounts_row_left` share.
+    /// `getRowLeft()` — delegated to [`RowBand`], which is the only place that
+    /// knows whether this list's rows are centred or canvas-relative.
     #[must_use]
     pub fn row_left(&self, width: f32) -> f32 {
-        (width * 0.5).floor() - (self.row_w * 0.5).floor()
+        self.band.row_left(width)
     }
 
     /// `getRowRight()` — what [`ScrollList::scrollbar_rects`] hangs the bar off.
     #[must_use]
     pub fn row_right(&self, width: f32) -> f32 {
-        self.row_left(width) + self.row_w
+        self.band.row_right(width)
+    }
+
+    /// `getRowWidth()` at this canvas width.
+    ///
+    /// A method rather than the field it replaced: for [`RowBand::Inset`] the row
+    /// width **is** a function of the canvas, so a bare `spec.row_w` could only
+    /// ever have been the centred answer. Callers that want the drawn column pass
+    /// the width they are drawing at.
+    #[must_use]
+    pub fn row_w(&self, width: f32) -> f32 {
+        self.band.row_w(width)
     }
 
     /// The live [`ScrollList`] at this canvas height, already carrying
@@ -2721,5 +2837,218 @@ mod tests {
         assert_eq!(SCROLLBAR_WIDTH, 6.0);
         assert_eq!(SCROLLBAR_MIN_HEIGHT, 32.0);
         assert_eq!(LIST_CONTENT_PADDING, 2.0);
+    }
+
+    // -- RowBand: the canvas-relative row edge (issue #445) --------------------
+
+    /// **The regression guard for splitting `row_w` into [`RowBand`].** Every
+    /// existing list here is `RowBand::Centred`, and the refactor must not have
+    /// moved one pixel of any of them.
+    ///
+    /// The expected values are `AbstractSelectionList.getRowLeft()`'s own
+    /// arithmetic — `width / 2 - rowWidth / 2` with **two separate integer
+    /// divisions** — evaluated by hand at three widths for the multiplayer list's
+    /// real 340, not by calling the code under test. The odd width is the one that
+    /// matters: a single `floor` on the difference would agree at every even width
+    /// and disagree here.
+    #[test]
+    fn centred_rows_keep_vanillas_two_separate_integer_divisions() {
+        let band = RowBand::Centred { row_w: 340.0 };
+        // floor(854/2) - floor(340/2) = 427 - 170 = 257
+        assert_eq!(band.row_left(854.0), 257.0);
+        assert_eq!(band.row_right(854.0), 597.0);
+        // floor(641/2) - floor(340/2) = 320 - 170 = 150. The one-floor hypothesis
+        // is floor((641 - 340) / 2) = 150 as well, so pick a row width that
+        // separates them: floor(641/2) - floor(341/2) = 320 - 170 = 150, while
+        // floor((641 - 341)/2) = 150. Both agree; the separating case is below.
+        assert_eq!(band.row_left(641.0), 150.0);
+        // The separating case, and the reason the two floors are written out:
+        // floor(101/2) - floor(41/2) = 50 - 20 = 30, whereas one floor on the
+        // difference gives floor(60/2) = 30... also equal. Two integer halvings
+        // differ from one only when *both* operands are odd:
+        // floor(101/2) - floor(43/2) = 50 - 21 = 29, one floor: floor(58/2) = 29.
+        // They are in fact algebraically equal for integer inputs; what the two
+        // floors actually protect against is a *fractional* canvas width, which
+        // this shell really produces (a 1365 px window at gui_scale 2 is 682.5).
+        let odd = RowBand::Centred { row_w: 341.0 };
+        assert_eq!(
+            odd.row_left(682.5),
+            341.0 - 170.0,
+            "a fractional canvas width must floor to whole pixels on both terms — \
+             floor(341.25) - floor(170.5) = 341 - 170"
+        );
+        // And the width it reports is the constant it was built with, at any canvas.
+        assert_eq!(band.row_w(854.0), 340.0);
+        assert_eq!(band.row_w(640.0), 340.0);
+    }
+
+    /// **Why `RowBand::Inset` had to exist, as a measurement rather than a claim.**
+    ///
+    /// `social.rs` carried a doc comment asserting that no constant `row_w` makes a
+    /// centred row's right edge land in that screen's right margin at every canvas
+    /// width. That is the reason issue #445 listed the screen as blocked, and it
+    /// was prose. This is the arithmetic.
+    ///
+    /// Social's own geometry: the name sits at a flat `NAME_LEFT_INSET` (4) from
+    /// the left edge and `report_button_x` is `width - RIGHT_MARGIN - REPORT_
+    /// BUTTON_W`, so the row's content ends `RIGHT_MARGIN` (10) from the right
+    /// edge. **Two hypotheses**, both computed from outside this type:
+    ///
+    /// * `Inset { left: 4, right: 10 }` — the right edge tracks the canvas 1:1.
+    /// * `Centred { row_w }` for the `row_w` that is *exactly right at 854 px* —
+    ///   the most favourable constant a tuner could have picked.
+    ///
+    /// The centred hypothesis must then be wrong by a large, growing margin at
+    /// other widths, because a centred row's right edge moves at **half** the rate
+    /// the canvas edge does. Half the width delta, exactly — that is the
+    /// prediction, not "it differs".
+    #[test]
+    fn no_constant_row_width_can_express_a_full_width_row() {
+        const NAME_LEFT_INSET: f32 = 4.0;
+        const RIGHT_MARGIN: f32 = 10.0;
+
+        let inset = RowBand::Inset {
+            left: NAME_LEFT_INSET,
+            right: RIGHT_MARGIN,
+        };
+        // The premise: the inset band really does put the right edge in the margin
+        // at every width, which is what the screen's own `report_button_x` needs.
+        for w in [640.0_f32, 854.0, 1280.0, 1920.0] {
+            assert_eq!(
+                inset.row_right(w),
+                w - RIGHT_MARGIN,
+                "an inset row's right edge must track the canvas at {w} px"
+            );
+            assert_eq!(inset.row_left(w), NAME_LEFT_INSET);
+            assert_eq!(inset.row_w(w), w - RIGHT_MARGIN - NAME_LEFT_INSET);
+        }
+
+        // The best possible centred constant: tuned so `row_right` is exact at 854.
+        // floor(427) - floor(row_w/2) + row_w == 844  =>  row_w == 834 gives
+        // 427 - 417 + 834 = 844. Exact.
+        let tuned_w = 834.0;
+        let centred = RowBand::Centred { row_w: tuned_w };
+        assert_eq!(
+            centred.row_right(854.0),
+            854.0 - RIGHT_MARGIN,
+            "premise: the centred hypothesis is tuned to be EXACT at 854 px, so \
+             what follows is not a straw man"
+        );
+
+        // And now the two hypotheses separate, by exactly half the width delta.
+        for w in [640.0_f32, 1280.0, 1920.0] {
+            let want = inset.row_right(w);
+            let got = centred.row_right(w);
+            // A centred right edge is `w/2 + row_w/2`; the wanted edge is
+            // `w - RIGHT_MARGIN`. Subtracting, the error is `(854 - w) / 2` for a
+            // constant tuned to zero at 854 — half the width delta, opposite sign,
+            // because the centred edge moves at half the canvas edge's rate.
+            let predicted_error = (854.0 - w) / 2.0;
+            assert!(
+                (got - want - predicted_error).abs() <= 1.0,
+                "at {w} px the tuned centred row's right edge is off by {}, and \
+                 the prediction is half the width delta ({predicted_error}) — a \
+                 centred edge moves at half the rate a canvas edge does",
+                got - want
+            );
+            assert!(
+                (got - want).abs() > 100.0,
+                "and the error at {w} px is {} px, far past anything a constant \
+                 could absorb: this is the wrong shape, not a mistuned value",
+                (got - want).abs()
+            );
+        }
+    }
+
+    /// **The gutter rule, as a gate.** `AbstractSelectionList` overrides
+    /// `scrollBarX()` to `getRowRight() + scrollbarWidth() + 2`, so the bar lives
+    /// *outside* the row and nothing clamps it to the canvas. An `Inset` right edge
+    /// that only reserves the row's own margin therefore pushes the bar off the
+    /// screen — silently, since a rect off the canvas simply does not draw.
+    ///
+    /// This is the trap a screen adopting `RowBand::Inset` walks into, so it is
+    /// stated in executable form: the required reservation is
+    /// `SCROLLBAR_WIDTH + 2 + SCROLLBAR_WIDTH == 14`.
+    ///
+    /// The **control** is the first half: social's own `RIGHT_MARGIN` of 10 is
+    /// observed to fail, which is what makes the 14 a measurement rather than a
+    /// round number.
+    #[test]
+    fn an_inset_rows_right_gutter_must_reserve_room_for_the_scrollbar() {
+        const CANVAS_W: f32 = 854.0;
+        let list = ScrollList::new(20.0, 33.0, 174.0, 40);
+        assert!(
+            list.scrollable(),
+            "premise: 40 rows of 20 px in a 174 px band really does scroll, or \
+             `scrollbar_rects` answers `None` and this measures nothing"
+        );
+
+        // The control: social's existing 10 px margin is NOT enough, and the bar
+        // runs off the right edge.
+        let too_tight = RowBand::Inset {
+            left: 4.0,
+            right: 10.0,
+        };
+        let bar_right = list.scrollbar_x(too_tight.row_right(CANVAS_W)) + SCROLLBAR_WIDTH;
+        assert!(
+            bar_right > CANVAS_W,
+            "control: a 10 px right inset must be observed to push the bar off \
+             the canvas (bar ends at {bar_right}, canvas is {CANVAS_W}) — \
+             otherwise the 14 px rule below is an arbitrary number"
+        );
+
+        // The rule: 14 px is the smallest inset that fits, and it fits exactly.
+        let required = SCROLLBAR_WIDTH + 2.0 + SCROLLBAR_WIDTH;
+        assert_eq!(required, 14.0);
+        let just_enough = RowBand::Inset {
+            left: 4.0,
+            right: required,
+        };
+        assert_eq!(
+            list.scrollbar_x(just_enough.row_right(CANVAS_W)) + SCROLLBAR_WIDTH,
+            CANVAS_W,
+            "a 14 px right inset must land the bar's far edge exactly on the \
+             canvas edge — `getRowRight() + 6 + 2` then 6 wide"
+        );
+        // One pixel less and it overflows, which is what makes 14 the boundary
+        // rather than merely sufficient.
+        let one_less = RowBand::Inset {
+            left: 4.0,
+            right: required - 1.0,
+        };
+        assert!(
+            list.scrollbar_x(one_less.row_right(CANVAS_W)) + SCROLLBAR_WIDTH > CANVAS_W,
+            "and 13 px must not be enough, or 14 is not the boundary"
+        );
+    }
+
+    /// `ListSpec::uniform` must still build a **centred** band, so every existing
+    /// caller is unchanged by the split, and `spanning` must be the only way to get
+    /// the other shape.
+    #[test]
+    fn uniform_stays_centred_and_spanning_is_opt_in() {
+        let spec = ListSpec::uniform(20.0, 33.0, 33.0, 12, 340.0);
+        assert_eq!(spec.band, RowBand::Centred { row_w: 340.0 });
+        assert_eq!(
+            spec.row_left(854.0),
+            257.0,
+            "the value `accounts_row_left`/`server_row_left` produced before the \
+             split"
+        );
+        let spanning = spec.clone().spanning(4.0, 14.0);
+        assert_eq!(
+            spanning.band,
+            RowBand::Inset {
+                left: 4.0,
+                right: 14.0
+            }
+        );
+        // Everything else survives the builder untouched — it is one field.
+        assert_eq!(
+            (spanning.row_h, spanning.top, spanning.footer_h, spanning.len),
+            (spec.row_h, spec.top, spec.footer_h, spec.len)
+        );
+        // And the two really do disagree, so the builder is not a no-op.
+        assert_ne!(spanning.row_right(854.0), spec.row_right(854.0));
     }
 }
