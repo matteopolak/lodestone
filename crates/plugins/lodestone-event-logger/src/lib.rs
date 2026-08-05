@@ -10,11 +10,30 @@
 //! no opinion about any of them and no way to affect anything else that
 //! reads state afterward. It exists to prove the substrate end to end —
 //! bus on, event written, `EventPriority::Monitor`-ordered reader sees it,
-//! structurally checked read-only — not to be a useful logger. It has
-//! exactly one consumer today: its own test
-//! (`tests/observes_the_game_event_bus.rs`). Nothing in the shipped client
-//! registers it; see `docs/plugin-api.md` and issue #436 for the follow-ups
-//! this island is sanctioned against.
+//! structurally checked read-only — not to be a useful logger.
+//!
+//! # What consumes it, and why that is deliberately not the shipped client
+//!
+//! Issue #436 listed this crate as a declared island: "consumed only by its own
+//! test... nothing in the shipped client registers it". The second half is still
+//! true **and is the intended design**, not the outstanding half of the work.
+//!
+//! A logger plugin is in the same category as `lodestone-autopilot`, which
+//! `lodestone_shell::sim::build` removed from the shipped client on purpose and
+//! documents at length: the client does not navigate itself, and it does not
+//! log every decoded packet into an unbounded `Vec` either. `GameEventBus` is
+//! opt-in for exactly this reason — `lodestone_ecs::events`' own doc calls it
+//! "zero cost when unused", and a default registration here would turn that cost
+//! on for every player to serve no player. The route in is the documented one:
+//! `Sim::client_app()` + `add_plugins` + `Sim::from_app`.
+//!
+//! What *was* genuinely missing is a consumer proving the plugin is reachable at
+//! all. `tests/observes_the_game_event_bus.rs` registers it correctly but then
+//! supplies its own events, so it could not distinguish a registered plugin from
+//! an unreachable one. `tests/observes_a_real_session.rs` is that consumer: a
+//! real integrated server, the real 26.2 wire format and the real client driver,
+//! with this plugin registered through the same public composition path a
+//! third-party embedder uses. See `docs/plugin-api.md`.
 //!
 //! # How it works
 //!

@@ -332,11 +332,37 @@ guarantee — tracked on issue #110, not solved here).
 appends every observed `ClientEvent` to a plain `Arc<Mutex<Vec<_>>>` captured by its system's closure —
 outside the ECS entirely, which is what lets a genuinely read-only `Monitor` system still report
 findings anywhere it likes, exactly as a Bukkit `MONITOR` logger does. Nothing in the shipped client
-registers it (`lodestone_shell::sim::Sim::new` does not know it exists); it is a sanctioned island per
-`CLAUDE.md`'s rule 1, landed with its own end-to-end test
-(`crates/plugins/lodestone-event-logger/tests/observes_the_game_event_bus.rs`) in the same commit, with
-the follow-ups (`Sim::new` registration, a bot-path opt-in for `SharedState::default`, a real
-non-toy consumer) named on issue #436.
+registers it (`lodestone_shell::sim::Sim::new` does not know it exists), and **that is the settled
+design rather than an outstanding follow-up** — see below.
+
+**Its consumer, and the decision not to register it by default** (issue #436's ledger entry, resolved).
+The crate landed with `tests/observes_the_game_event_bus.rs`, which registers the plugin through
+`add_plugins` and then writes its own events with `World::write_message`. That proves the *reader*
+works and cannot prove the plugin is reachable from a real session: the producer in it is the test, so
+it is the **world** species of vacuous test — the flaw is in the input data, not anywhere readable in
+the assertion. `crates/plugins/lodestone-event-logger/tests/observes_a_real_session.rs` is the real
+consumer: a live `IntegratedServer` over `memory_pair` speaking the **real** 26.2 wire format, the real
+client driver, and the plugin registered through `lodestone_app::client_app()` + `add_plugins` +
+`ClientBuilder::ecs` — the same public composition path `Sim::client_app()` + `Sim::from_app` gives an
+embedder, with nothing privileged. Because `lodestone_client::state::SharedState::apply` is
+`pub(crate)`, there is no shortcut to it; an actual connection is the only way in, which is why that
+test carries the dev-dependency set it does. Its oracle is the `EventStream`: `Driver::dispatch` calls
+`read_model.apply(&event)` *before* `events.send(event)`, so the stream is a second, independent
+delivery path for the same events and the log is asserted against it value for value, in order.
+
+**It is deliberately not in the shipped client's plugin set**, for the same reason
+`lodestone-autopilot` is not (`lodestone_shell::sim::build` documents that removal at length): the
+client does not navigate itself and it does not log every decoded packet into an unbounded `Vec`
+either. `GameEventBus` is opt-in precisely so it costs nothing when unused, and a default registration
+would turn that cost on for every player to serve none. The negative control in that test file pins the
+decision down — if anyone adds `EventLoggerPlugin` to `Sim::client_app`'s tuple, the control fails.
+
+Still genuinely open from the same landing, and **not** closed by the above: `SharedState::default()`'s
+bot/test path has no `GameEventBus` opt-in at all (it calls `new_ingest_handle()`, which never adds
+`GameEventBusPlugin`, so `game_event_bus_enabled` is `false` for every `SharedState::default` — the
+constructor's own comment at `crates/lodestone-client/src/state.rs` says so). A bot with no driver
+therefore cannot use the bus by any route; only the `adopting` path, which the test above exercises,
+can. Tracked on issue #436.
 
 ### What stays privileged, and why
 
