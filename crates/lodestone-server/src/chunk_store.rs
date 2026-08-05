@@ -762,9 +762,11 @@ mod tests {
     ///
     /// `crate::server`'s `vitals_tick` does exactly this every 50 ms once the
     /// client has sent a position, on the connection task — the task that
-    /// streams chunks. Against `ChunkSource::block_state`'s *default*
-    /// implementation each probe is a full column generation, which is why
-    /// chunk streaming stops at the first movement packet rather than at join.
+    /// streams chunks. Against the column-regenerating form (once
+    /// `ChunkSource::block_state`'s default, now each non-retaining source's
+    /// explicit choice — issue #440) each probe is a full column generation,
+    /// which is why chunk streaming stops at the first movement packet rather
+    /// than at join.
     ///
     /// Negative control in the same body: the unwrapped source, where the same
     /// 40 probes cost 40 generations.
@@ -811,9 +813,9 @@ mod tests {
     ///
     /// Property 2 is the one that licenses bounding the store at all. It is
     /// checked against `OverworldChunkSource`, because that is the only source
-    /// in this crate with real retention beneath — the `ChunkSource::set_block`
-    /// default is a no-op, so a source without it could not possibly pass and
-    /// testing against one would be a world-species vacuity.
+    /// in this crate with real retention beneath — a source whose `set_block`
+    /// discards the edit (no retention) could not possibly pass, and testing
+    /// against one would be a world-species vacuity.
     #[test]
     fn edits_survive_both_a_reread_and_an_eviction() {
         // Capacity 1, so touching a second column evicts the first
