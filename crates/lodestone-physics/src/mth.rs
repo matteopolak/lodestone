@@ -221,6 +221,39 @@ pub fn compute_modified_friction(friction: f32, modifier: f32) -> f32 {
     clamp_f32(1.0 - (1.0 - friction) * modifier, 0.0, 1.0)
 }
 
+/// `org.joml.Math.invsqrt(float)` — the float inverse square root that
+/// `Mth.invSqrt(float)` delegates to (`Mth.java:440-442`).
+///
+/// **Not** the Quake-style magic-constant Newton iterate: JOML 1.10.8 (the
+/// version 26.2 ships in `libraries/org/joml/joml/1.10.8`) compiles
+/// `invsqrt(float)` to exactly
+///
+/// ```text
+/// fconst_1
+/// fload_0
+/// f2d                       // (double)x — IEEE widening, lossless
+/// invokestatic Math.sqrt    // correctly-rounded double sqrt
+/// d2f                       // round back to float
+/// fdiv                      // 1.0f / (float)sqrt(x)
+/// ```
+///
+/// i.e. `1.0F / (float)Math.sqrt((double)x)`. The magic constant `0x5f375a86`
+/// appears in *no* class file in that jar — a fast-inverse-sqrt port would be a
+/// divergence of up to ~0.17% from the reference, verified by disassembling
+/// `Math.class` from the 26.2 cache.
+///
+/// The only consumer is the client's own steering (`LocalPlayer.updateAutoJump`
+/// normalises its look-ahead direction through it), so a divergence could never
+/// be seen by the server's anti-cheat — but the `LocalPlayer` is the reference
+/// for client-side movement, and a wrong look-ahead changes *when* auto-jump
+/// fires, so the bits are reproduced exactly. All three widths (`f64::sqrt` is
+/// IEEE-754 correctly rounded, like `Math.sqrt`; both roundings are
+/// round-to-nearest-even, like `f2d`/`d2f`) match the JVM, so this is exact.
+#[must_use]
+pub fn inv_sqrt_f32(x: f32) -> f32 {
+    1.0_f32 / (f64::from(x).sqrt() as f32)
+}
+
 /// `Math.signum(double)` — **not** Rust's [`f64::signum`].
 ///
 /// The two disagree on zero, which is the whole reason this exists. Java returns
@@ -318,5 +351,38 @@ mod tests {
         // Default modifier 1.0 leaves friction unchanged.
         assert_eq!(compute_modified_friction(0.6, 1.0), 0.6);
         assert_eq!(compute_modified_friction(0.91, 1.0), 0.91);
+    }
+
+    #[test]
+    fn inv_sqrt_matches_joml_reference_bits() {
+        // Authoritative regression guard: `Mth.invSqrt(float)` delegates to
+        // `org.joml.Math.invsqrt(float)` (Mth.java:440-442), which JOML 1.10.8
+        // compiles to `1.0f / (float)Math.sqrt((double)x)` — NOT a magic-constant
+        // Newton iterate. These raw `Float.floatToRawIntBits` values were dumped
+        // by running the actual `joml-1.10.8.jar` from the 26.2 cache
+        // (`org/joml/Math.class` disassembled to confirm the `fdiv`/`sqrt` form).
+        // Asserting bits, not values, catches a subtly-wrong-but-close port
+        // (e.g. fast-inverse-sqrt) that a 1e-7 tolerance would wave through.
+        let cases: &[(f32, u32)] = &[
+            (0.0001, 1120403456), // 100.0
+            (0.001, 1107098481),  // 31.622774
+            (0.01, 1092616192),   // 10.0, exact
+            (0.1, 1078616770),    // 3.1622777
+            (0.5, 1068827891),    // 1.4142135
+            (1.0, 1065353216),    // 1.0, exact
+            (2.0, 1060439283),    // 0.70710677
+            (4.0, 1056964608),    // 0.5, exact
+            (16.0, 1048576000),   // 0.25, exact
+            (100.0, 1036831949),  // 0.1
+            (0.0, 2139095040),    // +Inf
+            (-1.0, 2143289344),   // NaN (Math.sqrt of a negative double)
+            (1.0E-30, 1482907561),
+            (1.0E30, 646978941),
+            (f32::INFINITY, 0),   // 0.0
+        ];
+        for &(x, want) in cases {
+            let got = inv_sqrt_f32(x).to_bits();
+            assert_eq!(got, want, "inv_sqrt_f32({x}) diverges from JOML");
+        }
     }
 }

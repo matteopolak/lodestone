@@ -361,6 +361,105 @@ fn slab_step_matches_golden() {
     });
 }
 
+/// Auto-jump (#201): walking forward on the ground into a 1-block step arms the
+/// vanilla detector (`LocalPlayer.updateAutoJump`, `LocalPlayer.java:1001-1097`),
+/// and the next tick spends the deferred `autoJumpTime` as a forced jump that
+/// carries the player onto the step. The control (option off) stays pinned at
+/// the step — the 0.6 auto-step cannot mount a 1.0 rise, so without the jump
+/// nothing lifts the player.
+#[test]
+fn auto_jump_carries_the_player_over_a_one_block_step() {
+    let mut world = World::flat_floor(4);
+    // A full-height step across the player's path; its top face at y=2.0 is a
+    // 1.0 rise from the feet (y=1.0) — above the 0.6 auto-step, within the 1.2
+    // jump ceiling.
+    for x in -2..=2 {
+        world.solid(x, 1, 1);
+    }
+    let profile = PhysicsProfile::mc_1_21();
+    let input = MovementInput {
+        forward: 1.0,
+        ..MovementInput::NONE
+    };
+
+    let mut on = grounded(0.5, 1.0, 0.5);
+    let mut peak_y_on = 1.0f64;
+    for _ in 0..20 {
+        tick_air(&mut on, input, &world, &profile);
+        peak_y_on = peak_y_on.max(on.position.y);
+    }
+    assert!(
+        peak_y_on > 1.9,
+        "auto-jump must lift the player onto the step; peak feet y = {peak_y_on}"
+    );
+
+    let mut off = grounded(0.5, 1.0, 0.5).with_auto_jump(false);
+    let mut peak_y_off = 1.0f64;
+    for _ in 0..20 {
+        tick_air(&mut off, input, &world, &profile);
+        peak_y_off = peak_y_off.max(off.position.y);
+    }
+    assert!(
+        peak_y_off < 1.1,
+        "without auto-jump the player must stay pinned at the step; peak feet y = {peak_y_off}"
+    );
+}
+
+/// A half-slab is auto-stepped, never auto-jumped: its top (y=1.5) sits below
+/// the raised probe segments (y=feet+0.51), so the detector sees no obstacle —
+/// and even if it did, a 0.5 rise is not `> 0.5`. Assert the negative via the
+/// observable that distinguishes the two: a real auto-jump spikes `velocity.y`
+/// to `0.42`, while the auto-step resolves collision with no such spike.
+#[test]
+fn auto_jump_does_not_fire_on_a_half_slab() {
+    let mut world = World::flat_floor(4);
+    for x in -2..=2 {
+        world.boxed(x, 1, 1, Aabb::new(0.0, 0.0, 0.0, 1.0, 0.5, 1.0));
+    }
+    let profile = PhysicsProfile::mc_1_21();
+    let input = MovementInput {
+        forward: 1.0,
+        ..MovementInput::NONE
+    };
+
+    let mut state = grounded(0.5, 1.0, 0.5);
+    let mut jumped = false;
+    for _ in 0..20 {
+        tick_air(&mut state, input, &world, &profile);
+        if state.velocity.y > 0.3 {
+            jumped = true;
+        }
+    }
+    assert!(!jumped, "a half-slab must be auto-stepped, not auto-jumped");
+}
+
+/// The `!isStayingOnGroundSurface()` gate (`LocalPlayer.java:1121`, where it is
+/// `isShiftKeyDown()`, `Player.java:300-302`): a sneaking player never
+/// auto-jumps, even straight into a step.
+#[test]
+fn auto_jump_is_suppressed_while_sneaking() {
+    let mut world = World::flat_floor(4);
+    for x in -2..=2 {
+        world.solid(x, 1, 1);
+    }
+    let profile = PhysicsProfile::mc_1_21();
+    let input = MovementInput {
+        forward: 1.0,
+        sneak: true,
+        ..MovementInput::NONE
+    };
+
+    let mut state = grounded(0.5, 1.0, 0.5);
+    let mut jumped = false;
+    for _ in 0..20 {
+        tick_air(&mut state, input, &world, &profile);
+        if state.velocity.y > 0.3 {
+            jumped = true;
+        }
+    }
+    assert!(!jumped, "sneaking must suppress auto-jump");
+}
+
 #[test]
 fn diagonal_walk_matches_golden() {
     let world = World::flat_floor(8);

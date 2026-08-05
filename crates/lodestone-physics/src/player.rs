@@ -134,6 +134,16 @@ pub struct PlayerState {
     pub horizontal_collision: bool,
     /// `noJumpDelay` countdown that gates repeated jumps.
     pub no_jump_delay: i32,
+    /// `LocalPlayer.autoJumpEnabled` — the client Options Auto-Jump toggle,
+    /// defaulting **on** exactly like the `LocalPlayer` field
+    /// (`LocalPlayer.java:152-153, 299`). The shell's settings toggle wires into
+    /// this field; until then it stays at vanilla's default.
+    pub auto_jump_enabled: bool,
+    /// `LocalPlayer.autoJumpTime` — the one-tick deferral that carries the
+    /// auto-jump *decision* (made at the end of `move()` by [`update_auto_jump`])
+    /// across to the next `aiStep`, where it is spent as a forced jump
+    /// (`LocalPlayer.java:784-789`). `0` means idle.
+    pub auto_jump_time: i32,
     /// Whether the player is currently sprinting (affects movement speed).
     pub sprinting: bool,
     /// Whether the player is gliding with an elytra (`isFallFlying()`). When set,
@@ -465,6 +475,10 @@ impl PlayerState {
             on_ground: false,
             horizontal_collision: false,
             no_jump_delay: 0,
+            // Vanilla's `LocalPlayer` field defaults to `true` and is read from
+            // Options when the player is created (`LocalPlayer.java:152, 299`).
+            auto_jump_enabled: true,
+            auto_jump_time: 0,
             sprinting: false,
             fall_flying: false,
             effects: StatusEffects::default(),
@@ -649,6 +663,14 @@ impl PlayerState {
     #[must_use]
     pub fn with_movement_speed(mut self, value: f64) -> Self {
         self.movement_speed = Some(value);
+        self
+    }
+
+    /// Returns a copy of this state with the Auto-Jump option engaged or
+    /// disabled (see [`Self::auto_jump_enabled`]).
+    #[must_use]
+    pub fn with_auto_jump(mut self, enabled: bool) -> Self {
+        self.auto_jump_enabled = enabled;
         self
     }
 
@@ -1348,6 +1370,280 @@ fn block_jump_factor(position: Vec3d, view: &dyn CollisionView) -> f32 {
     }
 }
 
+/// `LocalPlayer.canAutoJump()` (`LocalPlayer.java:1117-1125`) — the gate before
+/// any auto-jump detection.
+///
+/// `isStayingOnGroundSurface()` is just `isShiftKeyDown()`
+/// (`Player.java:300-302`), so a sneaking player never auto-jumps. `isMoving()`
+/// reads the *input* move-vector, not the actual movement — the detector still
+/// fires for a standing player pressing forward into a step. This engine has no
+/// riding state, so the `!isPassenger()` conjunct is vacuous.
+fn can_auto_jump(state: &PlayerState, input: MovementInput, view: &dyn CollisionView) -> bool {
+    let (mv_x, mv_y) = normalized_move_vector(input);
+    state.auto_jump_enabled
+        && state.auto_jump_time <= 0
+        && state.on_ground
+        && !input.sneak
+        && mv_x * mv_x + mv_y * mv_y > 0.0
+        && block_jump_factor(state.position, view) >= 1.0
+}
+
+/// `LocalPlayer.updateAutoJump(float, float)` (`LocalPlayer.java:1001-1097`) —
+/// the client-side auto-jump detector. Called at the end of `move()` with the
+/// **actual** x/z deltas the sweep produced (post-collision, cast to `float`).
+///
+/// When it decides the player is about to walk into a stepable obstacle (rise
+/// strictly greater than `0.5` and at most the jump height, clear headroom, and
+/// the movement generally facing the player) it arms
+/// [`PlayerState::auto_jump_time`], which the next tick's prologue spends as a
+/// forced jump — the one-tick deferral `LocalPlayer` spells
+/// `this.input.makeJump()` (`LocalPlayer.java:784-789`).
+///
+/// This is **client-only** steering: the server never sees the detector, only
+/// the resulting jump, so an exact port matters for *feel* (and for the
+/// reference JVM oracle), not for anti-cheat.
+fn update_auto_jump(
+    state: &mut PlayerState,
+    input: MovementInput,
+    view: &dyn CollisionView,
+    profile: &PhysicsProfile,
+    xa: f32,
+    za: f32,
+) {
+    if !can_auto_jump(state, input, view) {
+        return;
+    }
+
+    // `position()` at this point is the post-move feet position (move() has
+    // completed); the look-ahead is anchored there.
+    let move_begin = state.position;
+    let mut move_diff = Vec3d::new(f64::from(xa), 0.0, f64::from(za));
+    let move_end = move_begin.add(move_diff);
+    let current_speed = effective_speed(profile, state);
+    let mut move_dist_sq = move_diff.length_sqr() as f32;
+
+    // The player barely moved this tick (standing still, or fully blocked): fall
+    // back to the *intended* input vector — `input.getMoveVector()` (the
+    // normalised strafe/forward) rotated into world space by the yaw.
+    if move_dist_sq <= 0.001 {
+        let (mv_x, mv_y) = normalized_move_vector(input);
+        let input_xa = current_speed * mv_x;
+        let input_za = current_speed * mv_y;
+        let angle = state.yaw * (core::f32::consts::PI / 180.0);
+        let sin = mth::sin(f64::from(angle));
+        let cos = mth::cos(f64::from(angle));
+        move_diff = Vec3d::new(
+            f64::from(input_xa * cos - input_za * sin),
+            move_diff.y,
+            f64::from(input_za * cos + input_xa * sin),
+        );
+        move_dist_sq = move_diff.length_sqr() as f32;
+        if move_dist_sq <= 0.001 {
+            return;
+        }
+    }
+
+    // `Mth.invSqrt(moveDistSq)` — JOML's fast inverse sqrt, not `1/sqrt`.
+    let move_dist_inverted = mth::inv_sqrt_f32(move_dist_sq);
+    let move_dir = move_diff.scale(f64::from(move_dist_inverted));
+
+    // `Entity.getForward()` — `Vec3.directionFromRotation(xRot, yRot)`
+    // (`Entity.java:2603-2605`, `Vec3.java:267-273`).
+    let facing = forward_direction(state.pitch, state.yaw);
+    let facing_dot = (facing.x * move_dir.x + facing.z * move_dir.z) as f32;
+    if facing_dot < -0.15 {
+        return;
+    }
+
+    // `BlockPos.containing(getX(), boundingBox.maxY, getZ())` and the cell one
+    // above: both must be free of collision for the jump to have headroom.
+    let bb = state.bounding_box(profile);
+    let cx = mth::floor(state.position.x);
+    let cz = mth::floor(state.position.z);
+    let mut ceiling_y = mth::floor(bb.max_y);
+    if !block_has_no_collision(view, cx, ceiling_y, cz)
+        || !block_has_no_collision(view, cx, ceiling_y + 1, cz)
+    {
+        return;
+    }
+
+    // `1.2F` plus `(amplifier + 1) * 0.75F` per Jump Boost level.
+    let mut jump_height = 1.2f32;
+    if let Some(amp) = state.effects.jump_boost {
+        jump_height += (amp as f32 + 1.0) * 0.75;
+    }
+
+    // `Math.max(currentSpeed * 7.0F, 1.0F / moveDistInverted)` — both floats
+    // widened to double for the max; the result stays a double.
+    let look_ahead_dist =
+        f64::from(current_speed * 7.0f32).max(f64::from(1.0f32 / move_dist_inverted));
+
+    let seg_begin = move_begin;
+    let seg_end = move_end.add(move_dir.scale(look_ahead_dist));
+    let dims = state.dimensions();
+    let player_width = dims.width;
+    let player_height = dims.height;
+
+    // `new AABB(segBegin, segEnd + (0, playerHeight, 0)).inflate(playerWidth, 0, playerWidth)`
+    // — the constructor normalises min/max per coordinate (`AABB.java:22-29`).
+    let far = seg_end.add(Vec3d::new(0.0, f64::from(player_height), 0.0));
+    let test_box = Aabb::new(
+        move_begin.x.min(far.x) - f64::from(player_width),
+        move_begin.y.min(far.y),
+        move_begin.z.min(far.z) - f64::from(player_width),
+        move_begin.x.max(far.x) + f64::from(player_width),
+        move_begin.y.max(far.y),
+        move_begin.z.max(far.z) + f64::from(player_width),
+    );
+
+    // The probe segments are the swept line raised by `0.51F` (just above a
+    // stair's low face, so a low step is *seen* but its near face is not
+    // mistaken for a tall wall), offset left/right by `rightDir = moveDir × up`,
+    // scaled by `width * 0.5F`.
+    let seg_begin = seg_begin.add(Vec3d::new(0.0, f64::from(0.51f32), 0.0));
+    let seg_end = seg_end.add(Vec3d::new(0.0, f64::from(0.51f32), 0.0));
+    let right_dir = Vec3d::new(-move_dir.z, 0.0, move_dir.x);
+    let right_offset = right_dir.scale(f64::from(player_width * 0.5));
+    let left_begin = seg_begin.subtract(right_offset);
+    let left_end = seg_end.subtract(right_offset);
+    let right_begin = seg_begin.add(right_offset);
+    let right_end = seg_end.add(right_offset);
+
+    // `level().getCollisions(this, testBox)` — every block collision box the
+    // swept box touches, over `BlockCollisions`' cursor range
+    // (`Mth.floor(box ± 1.0E-7) ∓ 1 .. floor(box ± 1.0E-7) ± 1`,
+    // `BlockCollisions.java:51-58`). A box only counts if it intersects either
+    // probe segment.
+    let mut boxes: Vec<Aabb> = Vec::new();
+    let x0 = mth::floor(test_box.min_x - 1.0e-7) - 1;
+    let x1 = mth::floor(test_box.max_x + 1.0e-7) + 1;
+    let y0 = mth::floor(test_box.min_y - 1.0e-7) - 1;
+    let y1 = mth::floor(test_box.max_y + 1.0e-7) + 1;
+    let z0 = mth::floor(test_box.min_z - 1.0e-7) - 1;
+    let z1 = mth::floor(test_box.max_z + 1.0e-7) + 1;
+    for x in x0..=x1 {
+        for y in y0..=y1 {
+            for z in z0..=z1 {
+                view.collision_boxes(x, y, z, &mut boxes);
+            }
+        }
+    }
+
+    // Java's `Float.MIN_VALUE` sentinel is the smallest *positive* subnormal
+    // (`1.0E-45`), not the most-negative float — Rust's `f32::MIN` is the wrong
+    // sentinel and would compare unequal to every real height.
+    let no_obstacle = f32::from_bits(1);
+    let mut obstacle_height = no_obstacle;
+
+    for box_ in &boxes {
+        if segment_intersects(box_, left_begin, left_end)
+            || segment_intersects(box_, right_begin, right_end)
+        {
+            obstacle_height = box_.max_y as f32;
+            // `box.getCenter()` is `Mth.lerp(0.5, min, max)` per axis
+            // (`AABB.java:447-449`); `BlockPos.containing` floors it.
+            let center = Vec3d::new(
+                mth::lerp_f64(0.5, box_.min_x, box_.max_x),
+                mth::lerp_f64(0.5, box_.min_y, box_.max_y),
+                mth::lerp_f64(0.5, box_.min_z, box_.max_z),
+            );
+            let obstacle_x = mth::floor(center.x);
+            let obstacle_y = mth::floor(center.y);
+            let obstacle_z = mth::floor(center.z);
+
+            // `for (int steps = 1; steps < jumpHeight; steps++)` — an int
+            // compared against a float, so the body runs once for the default
+            // `1.2` and twice only when Jump Boost pushes the height past `2`.
+            for steps in 1..(jump_height.ceil() as i32) {
+                let above_y = obstacle_y + steps;
+                if !block_has_no_collision(view, obstacle_x, above_y, obstacle_z) {
+                    // `(float)shape.max(Y) + abovePos.getY()` — the block-local
+                    // top (uncapped) plus the block's own y, in float math.
+                    obstacle_height =
+                        view.collision_top(obstacle_x, above_y, obstacle_z) as f32 + above_y as f32;
+                    if f64::from(obstacle_height) - state.position.y > f64::from(jump_height) {
+                        return;
+                    }
+                }
+                if steps > 1 {
+                    ceiling_y += 1;
+                    if !block_has_no_collision(view, cx, ceiling_y, cz) {
+                        return;
+                    }
+                }
+            }
+            break;
+        }
+    }
+
+    if obstacle_height != no_obstacle {
+        // `(float)(obstacleHeight - getY())` then the double-sided gate
+        // `!(ydelta <= 0.5F) && !(ydelta > jumpHeight)`.
+        let ydelta = (f64::from(obstacle_height) - state.position.y) as f32;
+        if ydelta > 0.5 && ydelta <= jump_height {
+            state.auto_jump_time = 1;
+        }
+    }
+}
+
+/// `KeyboardInput`'s `moveVector` — `Vec2(leftImpulse, forwardImpulse)`
+/// normalised with `Mth.sqrt` and a `1.0E-4F` zero-threshold
+/// (`Vec2.normalized()`, `Vec2.java:59-62`). `x` is the strafe axis and `y` the
+/// forward axis, matching `MovementInput`'s `strafe`/`forward`.
+fn normalized_move_vector(input: MovementInput) -> (f32, f32) {
+    let dist = (input.strafe * input.strafe + input.forward * input.forward).sqrt();
+    if dist < 1.0e-4f32 {
+        (0.0, 0.0)
+    } else {
+        (input.strafe / dist, input.forward / dist)
+    }
+}
+
+/// `Entity.getForward()` — `Vec3.directionFromRotation(xRot, yRot)`
+/// (`Entity.java:2603-2605`, `Vec3.java:267-273`). Only `x` and `z` are read by
+/// the auto-jump dot product, but the whole expression is reproduced so the
+/// bits match the reference — the `-PI` yaw term and the `-cos(pitch)` x scale
+/// are real float arithmetic, not simplifiable.
+fn forward_direction(pitch: f32, yaw: f32) -> Vec3d {
+    let y_arg = -yaw * (core::f32::consts::PI / 180.0) - core::f32::consts::PI;
+    let x_arg = -pitch * (core::f32::consts::PI / 180.0);
+    let y_cos = mth::cos(f64::from(y_arg));
+    let y_sin = mth::sin(f64::from(y_arg));
+    let x_cos = -mth::cos(f64::from(x_arg));
+    let x_sin = mth::sin(f64::from(x_arg));
+    Vec3d::new(
+        f64::from(y_sin * x_cos),
+        f64::from(x_sin),
+        f64::from(y_cos * x_cos),
+    )
+}
+
+/// `BlockState.getCollisionShape(...).isEmpty()` for one cell — true when the
+/// block appends no collision boxes (air, most plants).
+fn block_has_no_collision(view: &dyn CollisionView, x: i32, y: i32, z: i32) -> bool {
+    let mut boxes = Vec::new();
+    view.collision_boxes(x, y, z, &mut boxes);
+    boxes.is_empty()
+}
+
+/// `AABB.intersects(Vec3, Vec3)` (`AABB.java:249-253`) — the min/max of each
+/// coordinate pair, then the strict overlap test (a flush contact is *not* an
+/// intersection).
+fn segment_intersects(box_: &Aabb, first: Vec3d, second: Vec3d) -> bool {
+    let min_x = first.x.min(second.x);
+    let min_y = first.y.min(second.y);
+    let min_z = first.z.min(second.z);
+    let max_x = first.x.max(second.x);
+    let max_y = first.y.max(second.y);
+    let max_z = first.z.max(second.z);
+    box_.min_x < max_x
+        && box_.max_x > min_x
+        && box_.min_y < max_y
+        && box_.max_y > min_y
+        && box_.min_z < max_z
+        && box_.max_z > min_z
+}
+
 /// `LivingEntity.aiStep`'s `noJumpDelay` countdown, run at the top of every
 /// travel path before the velocity snap-to-zero.
 fn decrement_no_jump_delay(state: &mut PlayerState) {
@@ -1403,6 +1699,18 @@ pub fn tick_air(
     view: &dyn CollisionView,
     profile: &PhysicsProfile,
 ) {
+    // `LocalPlayer.aiStep`'s auto-jump spend (`LocalPlayer.java:784-789`): a
+    // decision made by [`update_auto_jump`] at the end of the *previous* tick's
+    // move is spent here as a forced jump, one tick later, via the same
+    // `this.input.makeJump()` deferral vanilla uses. The forced flag flows
+    // through the ordinary jump block below (and into `AirTravelContext`'s
+    // `jumping`, which is exactly what `makeJump` does in vanilla).
+    let mut input = input;
+    if state.auto_jump_time > 0 {
+        state.auto_jump_time -= 1;
+        input.jump = true;
+    }
+
     // --- aiStep prologue: velocity snap-to-zero -------------------------------
     decrement_no_jump_delay(state);
     state.velocity = snap_small_velocity(state.velocity);
@@ -1455,7 +1763,9 @@ pub fn tick_air(
     // seam (shared with mobs); the player supplies only the transformed input,
     // `getSpeed()`, and its per-situation flags. Thread the player's motion state
     // through `EntityMotion` and back so the arithmetic is byte-identical.
+    let old_x = state.position.x;
     let old_y = state.position.y;
+    let old_z = state.position.z;
     let mut motion = EntityMotion {
         position: state.position,
         velocity: state.velocity,
@@ -1518,6 +1828,21 @@ pub fn tick_air(
     // (`Entity.java:783-784`) — not in water on this path (see
     // `accumulate_fall_distance`'s doc).
     accumulate_fall_distance(state, state.position.y - old_y, false);
+
+    // `LocalPlayer.move()` calls `updateAutoJump(deltaX, deltaZ)` after
+    // `super.move()` (`LocalPlayer.java:981-990`) — the detector sees the
+    // *actual* post-collision delta (cast to `float`), not the pre-collision
+    // intent, and arms the one-tick-deferred jump spent at the top of the next
+    // tick. This is a client-only steering effect: the server only ever sees the
+    // resulting jump, whose velocity the crate already reproduces bit-exactly.
+    update_auto_jump(
+        state,
+        input,
+        view,
+        profile,
+        (state.position.x - old_x) as f32,
+        (state.position.z - old_z) as f32,
+    );
 }
 
 /// `LivingEntity.handleOnClimbable(Vec3)` — the pre-move clamp applied while on
