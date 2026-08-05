@@ -145,12 +145,6 @@ impl<'a> ContainerFrame<'a> {
         self
     }
 
-    /// Attach a recipe book so an **empty** crafting result slot draws a
-    /// dimmed ghost preview of what the grid would produce — never the real
-    /// (undimmed) icon, and never written into `menu` itself. The server's own
-    /// `container_set_slot` remains the only thing that ever fills the result
-    /// slot for real; see `docs/crafting.md`'s "who computes the result slot".
-    #[must_use]
     /// Attach the server's own `menu_type`, so [`menu_type_title_anchor`] can
     /// correct the title anchor for the screens [`label_layout`] does not model.
     /// `None` (the default) keeps the existing anchor.
@@ -178,6 +172,12 @@ impl<'a> ContainerFrame<'a> {
         self
     }
 
+    /// Attach a recipe book so an **empty** crafting result slot draws a
+    /// dimmed ghost preview of what the grid would produce — never the real
+    /// (undimmed) icon, and never written into `menu` itself. The server's own
+    /// `container_set_slot` remains the only thing that ever fills the result
+    /// slot for real; see `docs/crafting.md`'s "who computes the result slot".
+    #[must_use]
     pub fn with_recipe_book(mut self, book: Option<&'a RecipeBook>) -> Self {
         self.recipe_book = book;
         self

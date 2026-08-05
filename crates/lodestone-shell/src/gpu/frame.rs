@@ -36,6 +36,9 @@ use super::{CrackTarget, RenderState, RenderStats, ScreenEffects};
 
 impl RenderState {
 
+    /// Render every section into `view` using `camera`. Writes all section
+    /// camera uniforms first, then draws. If `outline` names a block, a
+    /// wireframe box is drawn around it after the terrain.
     pub fn render(
         &self,
         device: &wgpu::Device,
