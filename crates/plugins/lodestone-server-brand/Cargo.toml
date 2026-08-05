@@ -1,0 +1,40 @@
+# A **plugin**, not part of the engine: it consumes the public plugin API
+# (`docs/plugin-api.md`) and nothing in the engine consumes it. Issue #301's
+# consumer half — the thing that makes `custom_payload` reach a plugin instead of
+# being decoded into a `ClientEvent` nobody folds.
+#
+# `minecraft:brand` is deliberately the channel: it is the one plugin channel a
+# real vanilla server always sends, so this plugin's gate can be fed **captured
+# server bytes** rather than bytes produced by our own encoder.
+[package]
+name = "lodestone-server-brand"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# `PluginChannelAppExt::add_plugin_channel`, plus the `GameTick` schedule and the
+# `EventPriority` ordering anchor. Re-exports `bevy_app`/`bevy_ecs` as
+# `lodestone_ecs::{app, ecs}`.
+lodestone-ecs = { workspace = true }
+# Direct, in addition to `lodestone-ecs`'s re-export: `#[derive(Message)]` and
+# `#[derive(Resource)]` emit absolute `bevy_ecs::` paths, which only resolve if
+# this crate has `bevy_ecs` as a direct dependency under that exact name. Same
+# `[workspace.dependencies]` pin `lodestone-ecs` builds against, so there is only
+# ever one `bevy_ecs` in the graph. `docs/plugin-api.md`'s "how to change it"
+# documents this trap.
+bevy_ecs = { workspace = true }
+bevy_app = { workspace = true }
+
+[dev-dependencies]
+# The gate decodes **captured vanilla bytes** through the real version adapter
+# rather than hand-building a `ClientEvent`, so the fixture proves the whole path
+# from wire bytes to plugin resource. Dev-only: the plugin itself is version-free
+# and must never link a protocol family.
+lodestone-v770 = { workspace = true }
+lodestone-model = { workspace = true }
+# `VersionAdapter::handle_packet` takes a `&mut lodestone_world::World`.
+lodestone-world = { workspace = true }

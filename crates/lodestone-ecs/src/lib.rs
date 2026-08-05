@@ -138,6 +138,7 @@ pub mod items;
 pub mod permissions;
 pub mod player;
 mod plugin;
+pub mod plugin_channel;
 pub mod plugin_message;
 pub mod recipes;
 mod resources;
@@ -192,6 +193,10 @@ pub use player::{
     reset_local_player, spawn_local_player, tick_attack_strength,
 };
 pub use plugin::CorePlugin;
+pub use plugin_channel::{
+    PluginChannel, PluginChannelAppExt, PluginChannelPlugin, PluginChannelState,
+    dispatch_plugin_channel,
+};
 pub use plugin_message::{PluginMessageAppExt, PluginMessagePlugin};
 pub use recipes::{RecipeRegistry, RecipeRegistryExt, RecipeRegistryPlugin};
 pub use resources::{
