@@ -286,17 +286,21 @@ measures band-bottom to the *button row's* own arranged `y`.
 
 ## Adoption audit — the other list screens
 
-Measured, not guessed. **Five screens** now draw a scrollbar and respond to the
-wheel — the server list, the accounts screen, statistics, key binds, language and
-social interactions — through one `MouseWheel` arm rather than one arm each. Only
-`options.rs` still holds a `first: usize` **entry index**, which is what stops a
-screen reporting a pixel offset to `active_list`.
+Measured, not guessed. **Every list screen in this tree now draws a scrollbar and
+responds to the wheel** — the server list, accounts, statistics, key binds,
+language, social interactions and every `OptionsList` settings page — through one
+`MouseWheel` arm rather than one arm each. No screen holds a `first: usize` entry
+index any more, which was the thing stopping a screen reporting a pixel offset to
+`active_list`.
 
-Each adopted screen's notch is `floor(ROW_H / 2)`, predicted from its **own**
-`ROW_H` and then measured. The row height differing per screen is the point: a
-screen that borrowed `options::WIDGET_H` (20) when its real pitch is 18 reports 10
-where it should report 9, which is a plausible-looking wrong answer, so each gate
-names the wrong value as an excluded hypothesis.
+Each screen's notch is `floor(row_h / 2)`, predicted from its **own** row height
+and then measured. The row height differing per screen is the point, and it is the
+mistake each gate is built to catch: a screen that borrowed `options::WIDGET_H`
+(20) when its real pitch is 18 reports **10** where it should report **9**, and a
+screen that borrowed it when the real pitch is `DEFAULT_ITEM_HEIGHT` (25) reports
+10 where it should report **12**. Both are plausible-looking wrong answers, so
+every gate names the wrong value as an explicitly excluded hypothesis rather than
+asserting only that the offset moved.
 
 | screen | offset | hover vs selection | verdict |
 |---|---|---|---|
@@ -304,7 +308,43 @@ names the wrong value as an excluded hypothesis.
 | `key_binds.rs` | **`scroll: f32`** | hover sets the cursor | **ADOPTED** (#445). `ROW_H` 20 → notch **10 px**. Control observed: with `scroll_by`/`scroll_to_cursor` snapped to whole rows, both notch gates fail |
 | `language.rs` | **`scroll: f32`** into a *filtered* list | hover sets the cursor | **ADOPTED** (#445). `ROW_H` **18** → notch **9 px**. `active_list` reports the post-filter count, so the search box shortens the bar. 10 is asserted excluded — it is `floor(WIDGET_H / 2)` |
 | `social.rs` | **`scroll: f32`** | hover sets the cursor | **ADOPTED** (#445), and the **only user of `RowBand::Inset`**. `ROW_H` 20 → notch **10 px**. `RIGHT_MARGIN` grew 10 → 14 to reserve the bar's gutter |
-| `options.rs` | `first: usize`, **variable** row heights | hover sets the cursor | **the one left** — needs `ListSpec::with_heights`, which exists; see "What `options.rs` still needs" |
+| `options.rs` | **`scroll: f32`**, **variable** entry heights | hover sets the cursor | **ADOPTED** (#445), the only user of `ListSpec::with_heights`. `DEFAULT_ITEM_HEIGHT` **25** → notch **12 px**, and the gate proves the `heights` table does **not** change it — `scrollRate` is defined against `defaultEntryHeight`, so a page whose entry 0 is a 31 px header still scrolls 12. `Root` reports no list at all |
+| `packs.rs` | none | hover sets the cursor | **not applicable** — adopting means *adding* scroll, a feature not a refactor |
+| `telemetry.rs` | none | hover sets the cursor | **not applicable** — four fixed controls, no list |
+| `world_select.rs` | none | **genuinely separate** (`hovered` + `FocusSet`) | **not a scroll candidate — but it is the hover reference** |
+
+### What converting `options.rs` last established
+
+**The `heights` table must not touch the scroll rate, and that needed its own
+assertion.** `ListSpec.row_h` stays `DEFAULT_ITEM_HEIGHT` even when `heights` is
+`Some`: it is `defaultEntryHeight`, what `scrollRate` is defined against, and
+**not** "the height of the row you are on". The Video page's entry 0 is a header
+taller than 25 px, so
+`one_wheel_notch_is_half_a_default_entry_and_ignores_the_heights_table` names half
+*that* height as a fourth excluded hypothesis alongside 10, 25 and the entry-index
+answer — and asserts the premise that entry 0's height really does differ, so the
+claim is measured rather than assumed.
+
+**`entry_offset` became absolute, and that fixed a latent inconsistency.** It was
+`(first..index).map(entry_height).sum()`, so entry `first` sat at offset 0 and its
+own `header_padding_top` was never counted at the top of the window. Summing from
+0 is vanilla's own absolute layout, and the scroll is subtracted once in
+`list_cell_origin`.
+
+**One gate's *behaviour* had to change rather than its units, and that is the
+interesting one.** `the_frame_carries_a_header_label_for_every_visible_header`
+asserted that a scrolled-past header is **absent** from `frame.labels` — which was
+true only because `settings_frame` emitted the visible window, so absence *was* the
+mechanism. Emitting every entry and clipping is the conversion, so the header is
+still emitted; what must change is its **position**. Asserting absence would have
+been asserting the old implementation. It now asserts the split (`labels` carries
+the non-scrolling title, `list_labels` the headers) and that the header's resolved
+y moves *above the band's top*, where `render::draw` clips it. The same reasoning
+retired the canvas bound in `every_placement_resolves_to_a_rect_on_screen`: a
+control below the band now resolves below the canvas on purpose, so the vertical
+assertion is bounded by the band and carries an `in_band > 200` premise guard so a
+filter that skipped everything cannot pass vacuously. The x bound is unchanged and
+still catches the `-1000` sentinel, which is negative in both axes.
 | `packs.rs` | none | hover sets the cursor | **not applicable** — adopting means *adding* scroll, a feature not a refactor |
 | `telemetry.rs` | none | hover sets the cursor | **not applicable** — four fixed controls, no list |
 | `world_select.rs` | none | **genuinely separate** (`hovered` + `FocusSet`) | **not a scroll candidate — but it is the hover reference** |
@@ -399,21 +439,38 @@ Two things fall out and both are decisions, not details:
   warning that used to live here is discharged, and the four conversions now each
   produce real pixels the moment their offset becomes an `f32`.
 
-  The prerequisite that remains is per-screen and is the *field*, not the hook: each
-  of the five below positions its rows as `list_top + (row - first) * ROW_H` through
-  an `Origin::*(Placement { row, first })`. Converting one means replacing
-  `first * ROW_H` with a pixel offset in that placement, exactly as
-  `accounts_row_top` now does — see the accounts section above for the three changes
-  that have to land together.
+  ~~The prerequisite that remains is per-screen and is the *field*, not the hook.~~
+  **All five conversions have landed.** Each screen positioned its rows as
+  `list_top + (row - first) * ROW_H` through an `Origin::*(Placement { row, first })`;
+  every one of those placements now carries a `scroll: f32` and subtracts
+  `scroll.floor()` once. The uniform shape that repeated five times:
+
+  1. the nav's `first: usize` becomes `scroll: f32` (and `Eq` goes with it — an
+     `f32` field cannot derive it, which `options::SettingsNav` had already paid for)
+  2. the `Placement`/`Origin` variant carries pixels, and its `checked_sub`
+     underflow sentinel disappears — there is nothing left to underflow
+  3. the frame producer stops slicing and emits **every** row; `render::draw` clips
+  4. free-text row labels move from `labels` to `list_labels`, which is the vector
+     that gets the band's clip rect (`MenuRow`s already had one per row)
+  5. `scroll_to_cursor`'s hand-rolled `while … { self.first += 1 }` walk becomes
+     `ScrollList::scroll_to_entry`, against `MIN_SCALED_HEIGHT` because a keypress
+     has no canvas in hand
+  6. two `MenuNav` arms — `active_list` and `scroll_active_list` — guarded
+     identically, so "the wheel reaches this screen" and "a bar is drawn beside it"
+     cannot drift apart
+
 - **`world_select.rs` is the model for the hover half, not the six `self.cursor = row`
   screens.** It is the only screen that already keeps hover and focus apart. If the
   primitive's hover concept is copied from any of the others, a mouse-over will steal
   the keyboard out of a search field.
 
-Net: five thin adoptions removing roughly 180-210 lines of near-duplicated
-window/clamp/hover code. Both blockers are now discharged — the variable-height
-decision (`new_variable`) and the generic hook (`ListSpec`) — so what is left is
-per-screen field conversion with no shared prerequisite in front of it.
+Net: five thin adoptions, all landed, replacing per-screen window/clamp code with
+one declaration each. Both blockers were discharged before any screen was converted
+— the variable-height decision (`new_variable`) and the generic hook (`ListSpec`) —
+and the third, `social.rs`'s canvas-relative row edge (`RowBand`), was discharged
+the same way rather than by special-casing the screen. That ordering was the whole
+strategy: **converting a screen against a primitive that is about to change is
+converting it twice.**
 
 ## Dependencies
 
