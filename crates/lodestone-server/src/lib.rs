@@ -114,6 +114,7 @@ mod inventory;
 mod mob_spawn;
 mod mobs;
 mod neighbor_update;
+mod players;
 mod protocol;
 mod random_tick;
 mod redstone;
@@ -160,7 +161,13 @@ pub use mobs::{
     SimMob,
 };
 pub use neighbor_update::{Direction, NeighborPropagator, Notification, UPDATE_ORDER};
-pub use protocol::{EntitySnapshot, MetadataField, ServerBound, ServerDirective, ServerProtocol};
+pub use players::{
+    PLAYER_ENTITY_ID_BASE, PlayerAwareSource, PlayerListStreamer, PlayerRegistry, PlayerTicket,
+    PlayerView,
+};
+pub use protocol::{
+    EntitySnapshot, MetadataField, PlayerListing, ServerBound, ServerDirective, ServerProtocol,
+};
 pub use random_tick::{
     DEFAULT_RANDOM_TICK_SPEED, GrassOutcome, RandomTickEvent, RandomTickScheduler,
     can_propagate_onto, grass_random_tick, is_air_variant, is_randomly_ticking,

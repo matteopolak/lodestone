@@ -47,8 +47,8 @@ use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, Text, TextContent, Vec3,
 };
 use lodestone_server::{
-    ChunkColumn as ServerChunkColumn, EntitySnapshot, HOTBAR_SIZE, MetadataField, ServerBound,
-    ServerDirective, ServerProtocol,
+    ChunkColumn as ServerChunkColumn, EntitySnapshot, HOTBAR_SIZE, MetadataField, PlayerListing,
+    ServerBound, ServerDirective, ServerProtocol,
 };
 use lodestone_world::{ChunkColumn as WorldChunkColumn, ChunkSection, ColumnLight, Heightmaps};
 use uuid::Uuid;
@@ -185,6 +185,24 @@ fn air_id() -> u32 {
 /// TNT, beds, respawn anchors) sends this id, never the plain `EXPLOSION`
 /// id `decode_explode` also accepts as a simpler-to-decode alternative.
 const PARTICLE_ID_EXPLOSION_EMITTER: i32 = 29;
+
+/// The `EnumSet<ClientboundPlayerInfoUpdatePacket.Action>` bit set
+/// [`V770ServerProtocol::encode_player_info_add`] sends: `ADD_PLAYER` (ordinal
+/// 0), `UPDATE_GAME_MODE` (2), `UPDATE_LISTED` (3), `UPDATE_LATENCY` (4).
+///
+/// `1 | 4 | 8 | 16 = 29`. Written as the shifted ordinals rather than the
+/// literal so it cannot drift from the ordinals the entry body below writes
+/// fields for, in that order — a mask and a body that disagree produce a
+/// misparse the client reports as trailing bytes, not as a missing field. The
+/// ordinals themselves match `crate::packets::player_info`'s own `action`
+/// module, the decode-side statement of the same table.
+const PLAYER_INFO_ADD_ACTIONS: u8 = (1 << 0) | (1 << 2) | (1 << 3) | (1 << 4);
+
+/// The game mode a tab-list entry reports, restated from
+/// [`V770ServerProtocol::begin_play`]'s own `game_type: 0` (survival) — see
+/// [`V770ServerProtocol::encode_player_info_add`]'s doc comment for why this is
+/// a restatement rather than a read.
+const JOIN_GAME_MODE: i32 = 0;
 
 /// The `minecraft:sound_event` registry id for
 /// `minecraft:entity.generic.explode` (`SoundEvents.GENERIC_EXPLODE`),
@@ -2452,6 +2470,98 @@ impl ServerProtocol for V770ServerProtocol {
     /// (`3.0`) is `>= 2.0` with block-interaction enabled under default game
     /// rules — the only configuration this crate's `MobSim` models — so
     /// `isSmall()` is false and vanilla sends this id too.
+    /// Issue #438. Hand-written rather than derived, for the same reason
+    /// `crate::packets::player_info`'s *decoder* is: `player_info_update` is an
+    /// action-bitmask packet whose per-entry fields are conditional on the
+    /// leading `EnumSet`, which the derive macros cannot express.
+    ///
+    /// Wire layout, mirroring that decoder exactly (it is the checked-in
+    /// specification for this packet, written independently of this encoder and
+    /// gated in `tests/player_list.rs`): a fixed bit set of `ceil(8/8) = 1`
+    /// byte with bit `i` selecting action ordinal `i`
+    /// (`FriendlyByteBuf.writeFixedBitSet`), a VarInt entry count, then per
+    /// entry the profile uuid followed by the fields for each set bit **in
+    /// action ordinal order**.
+    ///
+    /// # Which action bits, and why not all nine
+    ///
+    /// Vanilla's own join broadcast (`ClientboundPlayerInfoUpdatePacket
+    /// .createPlayerInitializing`, `:43-55`) sets all nine actions. This sets
+    /// four — `ADD_PLAYER`, `UPDATE_GAME_MODE`, `UPDATE_LISTED`,
+    /// `UPDATE_LATENCY` — because those are the four `lodestone-server` has any
+    /// value for. The bitmask exists precisely so a subset is legal, and the
+    /// client merges per action
+    /// (`ClientPacketListener.handlePlayerInfoUpdate`, `:2011-2020`).
+    ///
+    /// `ADD_PLAYER` is the one that is **not** optional: it is the only action
+    /// that carries a `GameProfile`, so it is the only one that creates the
+    /// `PlayerInfo` entry (`:2004-2009`, `packet.newEntries()`) — and without
+    /// that entry the player's own `ADD_ENTITY` is discarded (see
+    /// [`ServerProtocol::encode_player_info_add`]'s doc comment for the exact
+    /// jar lines).
+    ///
+    /// The omitted four are omitted rather than stubbed: `INITIALIZE_CHAT` and
+    /// `UPDATE_DISPLAY_NAME` would each be a nullability `false` (no chat
+    /// session, no scoreboard display name), and `UPDATE_LIST_ORDER`/
+    /// `UPDATE_HAT` a `0`/`false`. Sending those bits would claim we had
+    /// consulted a source of truth that does not exist here; leaving the bit
+    /// clear says nothing at all, which is the accurate statement.
+    ///
+    /// The values for the three we do send:
+    /// * game mode `0` (survival) — restated from
+    ///   [`begin_play`](Self::begin_play)'s own `game_type: 0` rather than
+    ///   invented, so a player's tab-list entry cannot contradict the game mode
+    ///   their own Login packet announced. There is no per-connection game mode
+    ///   in `lodestone-server` to read instead.
+    /// * `listed: true` — an unlisted player is one deliberately hidden from
+    ///   the tab list (vanilla's own default is listed), and nothing here hides
+    ///   anyone.
+    /// * latency `0` ms — this server measures no round-trip time. The
+    ///   keep-alive loop has the timestamps to compute one; wiring that is a
+    ///   separate change, and `0` renders as a full-bars ping rather than as a
+    ///   plausible-looking lie.
+    fn encode_player_info_add(&self, players: &[PlayerListing]) -> Vec<ServerDirective> {
+        if players.is_empty() {
+            return Vec::new();
+        }
+        let mut w = Writer::default();
+        w.u8(PLAYER_INFO_ADD_ACTIONS);
+        w.var_i32(i32::try_from(players.len()).unwrap_or(i32::MAX));
+        for player in players {
+            w.uuid(player.uuid);
+            // ADD_PLAYER (ordinal 0): name, then the profile-property multimap.
+            w.string(&player.username);
+            w.var_i32(0); // no profile properties: no skin/cape signature to relay.
+            // UPDATE_GAME_MODE (2), UPDATE_LISTED (3), UPDATE_LATENCY (4).
+            w.var_i32(JOIN_GAME_MODE);
+            w.bool(true);
+            w.var_i32(0);
+        }
+        vec![ServerDirective::Send {
+            packet_id: play::clientbound::PLAYER_INFO_UPDATE,
+            payload: w.into_vec(),
+        }]
+    }
+
+    /// Issue #438. `ClientboundPlayerInfoRemovePacket` is a plain
+    /// VarInt-prefixed list of profile uuids — see
+    /// `crate::packets::player_info::PlayerInfoRemove`'s decoder, this
+    /// encoder's independent specification.
+    fn encode_player_info_remove(&self, uuids: &[Uuid]) -> Vec<ServerDirective> {
+        if uuids.is_empty() {
+            return Vec::new();
+        }
+        let mut w = Writer::default();
+        w.var_i32(i32::try_from(uuids.len()).unwrap_or(i32::MAX));
+        for uuid in uuids {
+            w.uuid(*uuid);
+        }
+        vec![ServerDirective::Send {
+            packet_id: play::clientbound::PLAYER_INFO_REMOVE,
+            payload: w.into_vec(),
+        }]
+    }
+
     fn encode_explode(&self, centre: Vec3, radius: f32) -> ServerDirective {
         let mut w = Writer::default();
         w.f64(centre.x);
