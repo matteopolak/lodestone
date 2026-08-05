@@ -94,7 +94,7 @@ recurring defect classes, not because they are generically useful — see
   | issue | real cause |
   |---|---|
   | #33 drops | already fixed |
-  | #50 container block items | `app.rs:1273` calls `render_scaled`, which hardcodes `models: None` — an island; see [`container-screen.md`](./container-screen.md) |
+  | #50 container block items | `container/renderer.rs::ContainerRenderer::render_scaled` hardcodes `models: None` — an island; see [`container-screen.md`](./container-screen.md) |
   | #54 first-person hand | nothing told `RenderState` what the player was holding; see [`first-person-held-item.md`](./first-person-held-item.md) |
   | #56 projectiles | no projectile renderer existed at all; see [`thrown-projectiles.md`](./thrown-projectiles.md) |
 

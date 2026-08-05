@@ -17,7 +17,7 @@ implementations, and one of them was already dead:
 | implementation | folded where | read by | reached pixels? |
 |---|---|---|---|
 | `lodestone_client::scoreboard::Scoreboard` | net thread, `Inner::apply` | `ClientHandle::scoreboard()`; `NetClient::sidebar()` → `overlay::sidebar_from` | **no** — `NetClient::sidebar()` had zero callers |
-| `lodestone_game::scoreboard::Scoreboard` | driver thread, `Sim::poll_net` on `NetUpdate::ScoreboardEvent` | `Sim::sidebar()` → `crate::scoreboard::sidebar_from` → `app.rs:989` | yes |
+| `lodestone_game::scoreboard::Scoreboard` | driver thread, `Sim::poll_net` on `NetUpdate::ScoreboardEvent` | `Sim::sidebar()` → `crate::scoreboard::sidebar_from` → `app.rs::WindowApp::redraw` | yes |
 | `lodestone_game::bossbar::BossBarSet` | nowhere | nothing | no |
 
 They also **disagreed**, which is what makes this a defect rather than an

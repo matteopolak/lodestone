@@ -165,7 +165,7 @@ these is plausible to mistake for missing from a summary description alone:
   `tests/animated_block_pixels.rs`.
 - **Third-person camera switching** is landed and wired every frame
   (`crates/lodestone-shell/src/camera_rig.rs:103`, F5 → `Sim::toggle_third_person` →
-  `render.set_third_person_body_source` at `app.rs:1212-1213`). Only vanilla's third
+  `render.set_third_person_body_source` in `app.rs::WindowApp::redraw`). Only vanilla's third
   (front-facing) F5 stage is missing — filed narrowly as #186, not as a full
   "third-person perspectives" rewrite.
 - **The generic sound-event engine, and spatial/directional audio**, are both real: any named
@@ -193,7 +193,7 @@ original briefing text. Two things in the briefing itself were wrong:
    narrow sense (the front-facing F5 stage). The camera-mode switch itself is landed and
    currently wired; an earlier line inside `docs/third-person-player-body.md` itself claims a
    stale `None` for the render-state wiring, which is also now corrected by this pass — the
-   doc's own later "Wired" section and the current `app.rs:1212-1213` call site already
+   doc's own later "Wired" section and the current `app.rs::WindowApp::redraw` call site already
    contradicted its own earlier sentence before this roadmap pass even started.
 
 ## Traps that apply across this whole area

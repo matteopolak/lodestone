@@ -326,7 +326,7 @@ now **un**pickable when not holding a light item, matching vanilla — the proxy
 "no fluid ⇒ pickable" clause used to keep it targetable as a side effect of
 having no baked model geometry.
 
-**2. The selection box (`app.rs::install_outline_source`, `app.rs:853-857`).**
+**2. The selection box (`app.rs::session::WindowApp::install_outline_source`).**
 `Sim::outline_shape_source` (`sim.rs`) hands `RenderState::set_outline_shape_source`
 a `'static` closure over `VersionAdapter::block_outline`, and
 `OutlineRenderer::prepare` draws the boxes it returns. An empty result still

@@ -51,7 +51,7 @@ Staleness corrections, each confirmed against the tree — the issue bodies pred
   (ingest / session / shell stream), and its own doc warns: never flip a route without landing
   the consumer in the same commit.
 - **`DESIGN.md:2243`'s write-only-events list is stale** — `WeatherChanged` now folds into the
-  shell's `WeatherCell` (`net.rs:1868`, read at `app.rs:1075`).
+  shell's `WeatherCell` (`net.rs:1868`, read in `app.rs::WindowApp::redraw`).
 
 ## The 26.2 rework: constants and mechanics (all cites into `.cache/mc/26.2/src/`)
 
@@ -312,7 +312,7 @@ pathspec commits.
   `advance_weather` gate (reads R1). Keep the interpolated levels — the issue's own trap warning
   stands, and the client's `WeatherCell` consumes the ramp.
 - **Consumer (already wired):** client decodes GAME_EVENT → `WeatherChanged` → `net.rs:1868`
-  fold → `WeatherCell` → `app.rs:1075`. Rain *particles/overlay rendering* is the Tier-1 backlog
+  fold → `WeatherCell` → `app.rs::WindowApp::redraw`. Rain *particles/overlay rendering* is the Tier-1 backlog
   client item, explicitly not this unit.
 - **Gate:** (a) seeded-RNG unit test pinning exact transition ticks for a known seed (expected
   values derived by hand from the UniformInt sampling, not from our own code); (b) duty-cycle

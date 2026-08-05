@@ -17,10 +17,10 @@ The chain, end to end, all of which exists:
 | `EXPLODE` (36, `minecraft:explode`) decode → `ClientEvent::Sound` | `adapter.rs`'s `decode_explode` — one packet's `explosionSound` field, no separate event type |
 | → `ClientEvent::Sound` / `EntitySound` | `adapter.rs:1340`, `:1362` |
 | → `NetUpdate::Sound` / `EntitySound` | `crates/lodestone-shell/src/net.rs:1212`, `:1228` |
-| → `ShellAudio::play_sound` | `crates/lodestone-shell/src/sim.rs:4631`, `:4644` |
+| → `ShellAudio::play_sound` | `crates/lodestone-shell/src/audio.rs::ShellAudio::play_sound` |
 | event → `sounds.json` → weighted pick → decode → mixer | `crates/lodestone-sound/` |
 | decode / mix / spatialise | `crates/lodestone-audio/` |
-| `cpal` device, listener from the render camera | `ShellAudio`, `Sim::set_audio_listener` (called from `app.rs:1735`) |
+| `cpal` device, listener from the render camera | `ShellAudio`, `Sim::set_audio_listener` (called from `app.rs::WindowApp::redraw`) |
 
 `net.rs`'s `forward` is the only router involved. `ingest::handles_event` and
 `session::handles_event` are correctly silent on the two sound variants: a sound is

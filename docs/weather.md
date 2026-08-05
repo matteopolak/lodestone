@@ -266,7 +266,7 @@ Gotchas beyond the three above:
   (`lodestone_render::RainAmbience`, vanilla's `rainSoundTime` including the
   above/below split); it has no producer. One `pub fn play_local_sound` on
   `crate::sim::Sim`, forwarding to `self.audio` exactly as the `NetUpdate::Sound` arm
-  at `sim.rs:4722` already does, is the whole remaining wiring. `weather.rain` resolves
+  in `sim.rs::Sim::poll_net` already does, is the whole remaining wiring. `weather.rain` resolves
   to 8 real samples (`ambient/weather/rain{1..8}.ogg`, confirmed present in the 26.2
   asset index), so vanilla's repeated-one-shot cadence needs no looping API at all —
   a true loop would be *less* faithful, because it would lose the sample variation.

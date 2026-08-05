@@ -60,7 +60,7 @@ placeholder.
   has landed. `app.rs`'s per-frame update now calls
   `crate::menu::social::entries_from_tablist(&tab_list,
   self.sim.local_uuid())` and feeds the result to `MenuNav::refresh_social`
-  (`app.rs:1515-1528`), so the roster shown is the real, live tab list, local
+  (`menu/nav.rs::MenuNav::refresh_social`), so the roster shown is the real, live tab list, local
   player excluded, every frame.
 - **Decorative — hiding a player has no consumer yet, and it is a larger gap
   than it looks.** This module only *records* the choice (`HiddenPlayers`);

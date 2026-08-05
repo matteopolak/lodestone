@@ -233,7 +233,7 @@ assumed from the stage numbering:
 - **The sanctioned egress exists, as a resource rather than a message.**
   `player.rs`'s `ActionQueue(pub Vec<ClientAction>)` is `app.init_resource`'d
   (`player.rs:530`) and drained every tick by the driver
-  (`lodestone-shell/src/sim.rs:1697`, `resource_mut::<ActionQueue>()`). A plugin
+  (`sim.rs::Sim::drain_action_queue`, `resource_mut::<ActionQueue>()`). A plugin
   system can push a `ClientAction` onto it via `ResMut<ActionQueue>` today — the
   capability `docs/bevy-migration.md` §6 asked for (`MessageWriter<SendAction>`)
   exists under a different shape (a plain `Vec` resource, not a bevy `Message`),
@@ -244,7 +244,7 @@ assumed from the stage numbering:
 - **Session/HUD state is components too.** `crates/lodestone-ecs/src/session.rs`
   holds the scoreboard/tab-list/boss-bar/menu/health/food/experience/phase fold,
   with the `ambiguity_detection: LogLevel::Error` gate `docs/bevy-migration.md`
-  §Stage 3 asked for (`session.rs:681`). See
+  §Stage 3 asked for, asserted by the `session.rs::net_ingest_is_ambiguous` test. See
   [`docs/session-components.md`](./session-components.md).
 - **What is still genuinely missing:** `RawPacket`/raw-event observation
   (`grep -rn RawPacket crates` is still empty — re-verified for this pass, not

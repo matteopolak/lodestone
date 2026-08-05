@@ -768,7 +768,7 @@ recording: vanilla's own trigger
 `LEVEL_PARTICLES` broadcast, and that packet already forwards through
 `ClientEvent::Particles` → `NetUpdate::Particles` → `Particles::
 spawn_particles` → `spawn_one` generically (`crates/lodestone-shell/src/
-net.rs:1466-1478`, `sim.rs:5043-5077`) — the same path `"flame"`/`"crit"`/etc.
+net.rs:1466-1478`, `sim.rs::Sim::poll_net`) — the same path `"flame"`/`"crit"`/etc.
 already used. Adding the dispatch arm was the entire wiring job; a
 `/particle minecraft:sweep_attack` command or any server broadcasting the
 type reaches pixels immediately.

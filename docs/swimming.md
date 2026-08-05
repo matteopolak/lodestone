@@ -30,9 +30,9 @@ vanilla's sprint-swim speed boost is gated server-side on `isSprinting()`;
 without the `PlayerCommand` edge, a "sprinting" swim was really just a
 normal-speed swim the whole time.
 
-The fix is `Sim::send_is_sprinting_if_needed`
-(`crates/lodestone-shell/src/sim.rs:1858`), called from
-`Sim::drive_interaction` once per live physics tick. It's edge-triggered
+The fix is `send_sprint_command`
+(`crates/lodestone-shell/src/interact.rs::send_sprint_command`), a `GameTick`
+system. It's edge-triggered
 against `last_sprinting_sent`: a rising edge sends
 `ClientAction::PlayerCommand { command: PlayerCommand::StartSprinting }`, a
 falling edge sends `StopSprinting`, and a tick with no change sends nothing.

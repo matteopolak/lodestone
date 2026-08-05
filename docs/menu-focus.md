@@ -216,7 +216,7 @@ not own.
 ## Deliberate gaps, each with the reason
 
 - **Left/Right/Home/End and every modifier are implemented and unreachable.**
-  `app.rs:1237-1260` translates exactly seven winit keys into `MenuKey`: Up, Down,
+  `app.rs::menus::WindowApp::menu_key_for` translates exactly seven winit keys into `MenuKey`: Up, Down,
   Enter, Escape, Tab, Backspace, Delete. `EditBox::handle_key` handles the rest and
   is unit-tested on them; four `KeyCode` arms in `app.rs` would light them up, with
   no change needed in `focus.rs` or `edit_box.rs`. Adding `MenuKey` variants

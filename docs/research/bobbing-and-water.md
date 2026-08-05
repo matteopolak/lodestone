@@ -30,18 +30,18 @@ and the fix is unmodified since it landed.
 
 Chain, with citations:
 
-- `crates/lodestone-shell/src/sim.rs:3090-3096` — `ViewBob::tick` is called once
+- `crates/lodestone-shell/src/sim.rs::Sim::step` — `ViewBob::tick` is called once
   per 20 Hz `GameTick`, unconditionally (not gated on the option).
-- `crates/lodestone-shell/src/sim.rs:5134-5147` — `Sim::set_view_bobbing`/
-  `Sim::bob_frame()`: `bob_frame()` returns `BobFrame::default()` when the option
+- `crates/lodestone-shell/src/sim.rs::Sim::set_view_bobbing` /
+  `sim.rs::Sim::bob_frame()`: `bob_frame()` returns `BobFrame::default()` when the option
   is off, else `self.view_bob.frame(interp_alpha)`.
-- `crates/lodestone-shell/src/sim.rs:5150-5189` — `Sim::render_camera` folds the
+- `crates/lodestone-shell/src/sim.rs::Sim::render_camera` folds the
   bob via `bobbed_camera(self.camera(aspect), self.bob_frame(), 0.0)`, **not**
   gated on third-person (verified against `.cache/mc/26.2/client-src`'s
   `GameRenderer.java:534-536`, which has no camera-type check in 26.2).
-- `crates/lodestone-shell/src/app.rs:1879` — `render_camera` computed every
-  frame; `:2113` and `:2123` — it is what's actually handed to `render.render_*`.
-- `crates/lodestone-shell/src/app.rs:1823` — `self.sim.set_view_bobbing(self.nav.view_bobbing())`
+- `crates/lodestone-shell/src/app.rs::WindowApp::redraw` — `render_camera` computed every
+  frame; it is what's actually handed to `render.render_*`.
+- `crates/lodestone-shell/src/app.rs::WindowApp::redraw` — `self.sim.set_view_bobbing(self.nav.view_bobbing())`
   pushed down every presented frame.
 - `crates/lodestone-shell/src/menu/nav.rs:1699-1706` — `apply_settings` maps
   `SettingsOutcome::Cycle(LiveOption::ViewBobbing)` → `toggle_view_bobbing()`.
@@ -226,7 +226,8 @@ I found that the **singleplayer integrated server**, added *after* #389 in
 (2026-08-02 21:35:47 — ~21 hours after the #389 fix), does not reproduce
 vanilla's neighbour-padding:
 
-- `crates/lodestone-shell/src/app.rs:1289-1294` (`begin_singleplayer`):
+- `crates/lodestone-shell/src/app.rs::launch::launch_singleplayer` (the `view_radius` computation
+  that feeds it):
   ```rust
   // Vanilla streams `simulationDistance`/`viewDistance` chunks around the
   // player; ours is the same number the camera's far plane and the mesher
@@ -236,7 +237,7 @@ vanilla's neighbour-padding:
   match launch_singleplayer(self.config.protocol, view_radius, session) {
   ```
   This `view_radius` is threaded unmodified through
-  `launch_singleplayer` (`app.rs:736-750`) → `NetClient::open_singleplayer`
+  `launch_singleplayer` (`app.rs::launch::launch_singleplayer`) → `NetClient::open_singleplayer`
   (`net.rs:767-783`) → `Origin::Integrated { view_radius, .. }` →
   `IntegratedServer::open_in_memory` → `serve_connection` →
   `ViewTracker::new`/`recenter` (`crates/lodestone-server/src/server.rs:176-184`,
@@ -305,8 +306,8 @@ servers already send the `+1` ring vanilla always has.
 
 For Candidate B (concrete, actionable, low-risk):
 
-`crates/lodestone-shell/src/app.rs:1293` — pad the singleplayer view radius by
-one, mirroring vanilla's `ChunkTrackingView` exactly:
+In `crates/lodestone-shell/src/app.rs::launch::launch_singleplayer`'s caller — pad the singleplayer
+view radius by one, mirroring vanilla's `ChunkTrackingView` exactly:
 
 ```rust
 let view_radius = i32::try_from(self.config.render_distance)

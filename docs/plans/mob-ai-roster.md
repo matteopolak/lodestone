@@ -152,7 +152,7 @@ instance of it across five issues at once.
    `check_despawn` at `:178` taking a `DespawnCtx`) versus
    `lodestone_server::mob_spawn::MobCategory` (`mob_spawn.rs:105`, 7 variants + a `SPAWNING: [_; 7]`
    const at `:127`, `check_despawn` at `:303` taking 5 scalars). **`lodestone-server` uses its own
-   and re-exports it from `lib.rs:152-155`**, so every `MobCategory` hit outside `lodestone-entity`
+   and re-exports it from `lib.rs::mob_spawn::MobCategory`**, so every `MobCategory` hit outside `lodestone-entity`
    is the server's type, not the entity crate's. `lodestone-entity`'s entire `spawn.rs` — except the
    shadowed `MobCategory` — is reachable only from its own test module. Unit D1 must pick a winner.
 7. **#234/#237 are partially landed and their landed half is itself an island.** `7bf2873`

@@ -189,8 +189,8 @@ both are 0 in the ordinary case.
 
 Ramp math: `crates/lodestone-render/src/fog.rs`.
 Shader: `crates/lodestone-render/src/shaders/{model,entity,fluid}.wgsl` (`fog_amount`, line 129 in `model.wgsl`).
-Preset selection: `crates/lodestone-shell/src/sim.rs:237-241`, `:3441-3466`.
-Upload: `crates/lodestone-shell/src/gpu.rs:624-628` (`fog_with_clock`).
+Preset selection: `sim.rs::fog_for_render_distance`.
+Upload: `gpu.rs::state::RenderState::fog_with_clock`.
 
 **Ruled in as correct:**
 
@@ -201,9 +201,10 @@ Upload: `crates/lodestone-shell/src/gpu.rs:624-628` (`fog_with_clock`).
 
 ### F1 — the fog colour has no clock (this is the "too extreme" at night)
 
-`sim::fog_for_render_distance` (`sim.rs:237-241`) returns `SKY_COLOR` flat. `app.rs:1974-2004`
+`sim::fog_for_render_distance` returns `SKY_COLOR` flat. `app.rs::WindowApp::redraw`
 folds in **weather only** (`weather_darken_linear`, `lightning_flash_linear`). `set_fog`
-(`gpu.rs:545-548`) just stores it. `fog_with_clock` (`gpu.rs:624-628`) folds in the clock for
+(`gpu.rs::state::RenderState::set_fog`) just stores it. `fog_with_clock`
+(`gpu.rs::state::RenderState::fog_with_clock`) folds in the clock for
 the **sky-darken lane only**:
 
 ```rust
@@ -460,12 +461,14 @@ fn fog_with_clock(&self, eye: glam::Vec3) -> FogUniform {
 
 Why here and not in `app.rs`:
 
-* `self.time_of_day` already lives on `RenderState` (`gpu.rs:249`) and is already read by the
-  sky pass at `gpu.rs:1548`. One clock, one place.
+* `self.time_of_day` already lives on `RenderState` (`gpu.rs::state::RenderState::time_of_day`)
+  and is already read by the sky pass in `gpu.rs::frame::RenderState::render_inner`. One clock,
+  one place.
 * `fog_with_clock` is the *only* producer of the fogged passes' uniform — three call sites
-  (`gpu.rs:1379`, `:2290`, `:2697`), covering terrain/models, entities and block entities. One
-  edit reaches every fogged pixel.
-* **Critical: `self.fog.color` must stay the un-tracked day base.** `gpu.rs:1551` passes it to
+  (`gpu.rs::frame::RenderState::render_inner`, `gpu.rs::entity_passes::prepare_entities`,
+  `gpu.rs::entity_passes::prepare_block_entities`), covering terrain/models, entities and block
+  entities. One edit reaches every fogged pixel.
+* **Critical: `self.fog.color` must stay the un-tracked day base.** `gpu.rs::frame::RenderState::render_inner` passes it to
   `SkyFrame::with_fog_color`, and the sky pass applies `fog_color_for_time_of_day` itself
   (`sky_pipeline.rs:861`). Pre-multiplying it in `app.rs` or inside `set_fog` would
   **double-apply the track to the sky disc** — `#161616²/255` ≈ `#020202`. Doing it inside
@@ -481,11 +484,10 @@ Why here and not in `app.rs`:
 
 **No bind group change. No uniform change. No shader change.**
 
-Loose end (pre-existing, not made worse): `app.rs:2000` still calls
-`set_clear_color(desired_fog.color)` with the un-tracked colour. With a sky installed the sky
-pass overwrites the clear with `frame.clear_color_wgpu(...)`, which *is* tracked, so this is
-invisible in practice. In a jar-less run with no sky it leaves a bright-blue void at night.
-Worth a follow-up, not part of A.
+Former loose end, now closed: `app.rs::WindowApp::redraw` calls
+`set_clear_color_tracked(desired_fog.color)` (`gpu.rs::state::RenderState::set_clear_color_tracked`),
+which applies the same `FOG_COLOR` day/night track as `fog_with_clock`, so the clear colour and
+the terrain fog cannot drift — no separate jar-less-with-no-sky follow-up remains.
 
 ### FIX B+C — the environmental term and cylindrical distance (F2, F3). Ship together.
 

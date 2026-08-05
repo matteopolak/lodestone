@@ -115,6 +115,78 @@ The deferral cannot become permanent for an interior section, because
 `mark_neighbours_dirty` re-drives it the moment the missing column lands. That is
 why the two mechanisms are one design and not two alternatives.
 
+### Three facts, not two — the departed column (issue #479)
+
+**The paragraph directly above was true for an interior section and false for a
+trailing-edge one, and that gap was issue #479.** "The moment the missing column
+lands" assumes the missing column is going to land. For a column on the trailing
+edge of a moving view the column it waits on *already came and went*, so the
+deferral is permanent and nothing re-queues it. The player walks away from spawn
+and new chunks stop being drawn while their collision — which re-reads the store
+every tick and needs only the player's own column — is perfectly present.
+
+So `ColumnSource`'s two facts were not enough. An absent column is one of **three**
+things, and only the first two were representable:
+
+| absent because | air is | mechanism |
+|---|---|---|
+| the world ends there (`Complete`) | the truth | `Neighbour::Air`, `Ready` |
+| it has not arrived yet (`Streaming`) | a guess | `Neighbour::Unloaded`, `Deferred`, re-driven on arrival |
+| **it left the view** | the truth, and nothing will ever say otherwise | `TerrainMesh::departed` + `forced_columns`, forced re-mesh |
+
+The third is learned from the unload signal rather than from the store, because
+the store cannot tell it from the second — both are simply absent. Vanilla does
+not need this: its client tracks the view rectangle and can ask directly whether a
+column is outside it.
+
+Two pieces:
+
+* `TerrainMesh::forget_column` drops the departing column's own GPU sections and
+  records it in `departed`. `force_neighbours_of_departed` queues its **loaded**
+  neighbours into `forced_columns`.
+* `heal_dirty_columns` drains `forced_columns` first, on its own
+  `DIRTY_COLUMN_BUDGET`, through `mesh_column_forced` — which forces `route` only
+  when `all_absent_neighbours_departed` agrees.
+
+**That predicate is the load-bearing part, and the harness caught its absence.**
+Forcing every loaded neighbour of a departing column also drags in the *outermost*
+ring of the view — the buffer ring singleplayer streams `render_distance + 1` to
+keep off screen — and a section meshed without its outer neighbour bakes its seam
+against air, which is the "blocky water far away" report `app/session.rs` already
+documents. Measured: 32 columns resident against 30 expected, before the predicate
+went in.
+
+`departed` is bounded rather than a second leak: an entry is dropped once it has no
+loaded neighbour, at which point it cannot influence any decision.
+
+### Why this was latency-coupled, and why that made it look like starvation
+
+Whether a given column was lost was a race between the 4-columns-per-frame heal
+budget and the player's speed. A column the budget reached *while the column behind
+it was still loaded* uploaded and was thereafter exempt via the `uploaded_sections`
+clause; one it reached later was dropped forever. That is why the symptom worsened
+with distance and with falling frame rate, and why it was initially indistinguishable
+from mesh workers merely being starved by a `Can't keep up! 99 ticks behind`
+integrated server.
+
+`standing_still_drains_the_heal_backlog_and_no_column_is_lost` separates them, and
+does it with **counts of frames and columns rather than any duration** — a
+millisecond figure on a shared machine gets attributed to the wrong cause:
+
+| measurement | value |
+|---|---|
+| peak heal backlog over a 12-step walk | 45 columns |
+| frames to drain it standing still | 12 |
+| resident columns before the fix | 25 of 30 |
+| resident columns after | 30 of 30 |
+
+The backlog draining is what rules out a stuck queue. The test models mesh workers
+as **infinitely fast** (they are drained to completion every frame), so worker
+throughput cannot influence the outcome and what remains under test is purely
+scheduling — which makes 25 of 30 a scheduling defect and not starvation. The
+integrated server's tick lag is a real, separate throughput problem; it is the
+*trigger* that made this reachable in ordinary play, not the cause.
+
 ### Why deferring the frontier costs nothing
 
 Vanilla's server sends **`viewDistance + 1`** columns in each direction

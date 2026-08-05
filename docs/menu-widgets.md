@@ -101,7 +101,7 @@ measures vanilla's real art at vanilla's rects.
   time instead of restating coordinates.
 - **The 89 `container/*.png` textures are invisible to `GuiAtlas` and that is
   correct.** It globs `gui/sprites/**`; `resources.rs:363` documents the gap and
-  `container.rs:355-369` works around it on purpose, because vanilla blits
+  `container.rs::background::ContainerBackground` works around it on purpose, because vanilla blits
   hand-placed sub-rects of those 256×256 sheets and `GuiScaling` has no variant for
   an arbitrary sub-rect. Do not widen the glob.
 
