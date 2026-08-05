@@ -42,12 +42,27 @@ name.
 `type_spec` table — zombie's `20`/`3.0`/`2.0` vs. pig's `10`/generic/`0`, for
 example.
 
-`is_hostile_species` is a coarse classifier (zombie/husk/skeleton/stray/
-wither_skeleton/bogged/creeper/spider = hostile; everything else = passive),
-covering exactly the `Monster`-templated families `type_spec` already names —
-not a full per-species roster. A hostile species gets a `MeleeAttackGoal`
-behind its wander/look baseline; a passive species never does, structurally,
-regardless of what `attack_target` it is later given.
+`is_hostile_species` is a coarse classifier deciding only the spawn
+`MobCategory` and despawn persistence — goal sets have belonged to
+`lodestone_entity::ai::roster` since the roster landed.
+
+**Updated by #457.** It listed eight species for a long time after the roster
+grew to twenty-seven, so `drowned`, `cave_spider`, `zombie_villager`,
+`parched`, `guardian`, `elder_guardian`, `ghast`, `blaze`, `enderman` and
+`zombified_piglin` all got the wrong category. It now lists seventeen, each
+read from that species' own `EntityType.Builder.of(X::new, MobCategory.…)`
+registration in `EntityTypes.java` — **not** inferred from the `type_spec`
+attribute template, which is a different question with a different answer:
+
+- a **ghast** is `MobCategory.MONSTER` while its attribute builder is a bare
+  `Mob.createMobAttributes()` with no `attack_damage` at all;
+- a **snow golem** is `MobCategory.MISC`, which this boolean cannot represent
+  — it lands as `Creature`, the safe direction, and that gap is #221's.
+
+It is still a name list, and a name list still ages. What keeps it honest is
+`every_rostered_species_has_a_decided_category`, which drives
+`roster::*::SPECIES` through a jar-cited table so a new species with no decided
+category fails rather than silently defaulting.
 
 `MobSim::spawn` (the pre-existing, zombie-hardcoded entry point) is unchanged
 for its own callers — both now share a private `spawn_with_type` helper that
