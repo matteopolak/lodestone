@@ -292,6 +292,22 @@ Oracles (not part of repo state — recreate them):
   the message as a pathspec and silently commits nothing — a probe written the wrong way round here
   reported "index clean" from a commit that never happened, which is a vacuous control on top of a
   no-op.
+
+  **And the pathspec form cannot introduce an untracked file. It fails by committing nothing.**
+  `git commit -m "…" -- <paths>` dies with `error: pathspec … did not match any file(s) known to git`
+  when any named path is new, so **anything that creates a file needs an explicit `git add <files>`
+  first**. Hit independently by **two agents in one session**, both mid-refactor where creating files
+  was the whole point.
+
+  The reason it is dangerous rather than merely annoying: with output redirected, the *only* signal was
+  that `git rev-parse HEAD` printed **another agent's** sha. A no-op commit in a busy shared checkout
+  does not look like a failure — it looks like a successful commit belonging to someone else, and an
+  agent that reports that sha publishes a wrong provenance for work that is still uncommitted on disk.
+
+  **What catches it: read your own sha in the same shell invocation as the commit, and `git show --stat`
+  it.** Both agents caught it that way and neither would have otherwise. This is the same
+  *two-observations-at-two-different-moments* hazard as everywhere else in this file — a `rev-parse` one
+  tool call later is a different moment, and in this repo another commit lands in that gap routinely.
   "Stage, verify and commit in one shell invocation" was tried and is **not sufficient** — a single
   invocation is not an atomic transaction. An agent staged six files, asserted
   `git diff --cached --name-only` matched exactly, and then its plain `git commit` swept in **14
