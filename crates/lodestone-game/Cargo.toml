@@ -19,13 +19,6 @@ serde_json = { workspace = true, optional = true }
 lodestone-core = { workspace = true, optional = true }
 lodestone-net = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
-# Used only by the live end-to-end tests, which drive the *real* high-level
-# client and assert through its public `ClientHandle` API. `lodestone-registry`
-# is a version-free shared crate (it aggregates version families behind optional
-# features), so this crate still never names a `crates/protocol/*` family and
-# isolation stays clean. NOTE: `lodestone-client` itself is a **dev-dependency**
-# (below), not a normal optional dep — see the rationale there.
-lodestone-registry = { workspace = true, optional = true }
 
 [features]
 # JSON loading of recipes/tags from Mojang generated data. Off by default so the
@@ -37,14 +30,14 @@ json = ["dep:serde_json"]
 live-reconcile = ["dep:lodestone-core", "dep:lodestone-net", "dep:tokio"]
 # The `live-*` client oracles below drive the *real* client. `lodestone-client`
 # is a dev-dependency (see `[dev-dependencies]`), so these features do NOT list
-# `dep:lodestone-client` — they only turn on the registry + tokio and enable the
-# client's `live-v770` family so the real v770 adapter is available to the test.
+# `dep:lodestone-client` — they only turn on tokio and enable the client's
+# `live-v770` family so the real v770 adapter is available to the test (the
+# registry itself is a dev-dependency, present whenever the test targets build).
 # `lodestone-game` still names no version crate, so isolation stays clean.
 #
 # Wires the tab list end-to-end through the real client and asserts the server's
 # `player_info_update` reaches `ClientHandle::players()`. `#[ignore]`d.
 live-tablist = [
-    "dep:lodestone-registry",
     "dep:tokio",
     "lodestone-client/live-v770",
 ]
@@ -52,7 +45,6 @@ live-tablist = [
 # RCON `/scoreboard`, `/team`, `/bossbar`, then asserts through
 # `ClientHandle::scoreboard()` / `boss_bars()`. `#[ignore]`d.
 live-scoreboard = [
-    "dep:lodestone-registry",
     "dep:tokio",
     "lodestone-client/live-v770",
 ]
@@ -62,7 +54,6 @@ live-scoreboard = [
 # `ClientHandle::send_action` and assert the server's authoritative response
 # matches the click machine's prediction (serverbound). `#[ignore]`d.
 live-inventory = [
-    "dep:lodestone-registry",
     "dep:tokio",
     "lodestone-client/live-v770",
 ]
@@ -73,7 +64,6 @@ live-inventory = [
 # break-*timing* (stone bare-handed vs a diamond pickaxe, and instant break on
 # START). `#[ignore]`d.
 live-mining = [
-    "dep:lodestone-registry",
     "dep:tokio",
     "lodestone-client/live-v770",
 ]
@@ -85,7 +75,6 @@ live-mining = [
 # vanilla. The pre-fix raw-key output is captured as the negative control.
 # `#[ignore]`d.
 live-chat = [
-    "dep:lodestone-registry",
     "dep:tokio",
     "lodestone-client/live-v770",
 ]
@@ -97,7 +86,6 @@ live-chat = [
 # gates a rejected placement rolling back and the sneak-vs-interact ordering.
 # `#[ignore]`d.
 live-place = [
-    "dep:lodestone-registry",
     "dep:tokio",
     "lodestone-client/live-v770",
 ]
@@ -109,7 +97,6 @@ live-place = [
 # server's own `container_set_slot` / `container_set_content`; the client never
 # matches a recipe. `#[ignore]`d.
 live-craft = [
-    "dep:lodestone-registry",
     "dep:tokio",
     "lodestone-client/live-v770",
 ]
@@ -117,6 +104,15 @@ live-craft = [
 [dev-dependencies]
 serde_json = { workspace = true }
 lodestone-testsupport = { workspace = true }
+# `lodestone-registry` is a **dev-dependency** for the same reason
+# `lodestone-client` below is. The live end-to-end tests resolve protocol 776
+# through `lodestone_registry::adapter_for_protocol`, and the registry's
+# optional `v770` feature names `lodestone-v770`, which (issue #286) now depends
+# on this crate for its chat signature cache. A normal
+# `game -> registry -> v770 -> game` edge would be a dependency cycle; dev-deps
+# do not count toward the dependency cycle, so the version-free normal graph
+# stays acyclic. Only the `live-*` test targets (`tests/live_*.rs`) use it.
+lodestone-registry = { workspace = true }
 # `lodestone-client` is a **dev-dependency**, not a normal dependency, and this
 # is load-bearing architecture, not a convenience. `lodestone-game` is the
 # version-free game-state layer: it folds `lodestone_model::ClientEvent`s into

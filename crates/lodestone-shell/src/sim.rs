@@ -103,7 +103,10 @@ const PLACE_BLOCK: u32 = id::STONE;
 /// track, so every session uses the unmodified survival default.
 const ENTITY_REACH: f64 = 3.0;
 /// Number of hotbar slots (vanilla is a fixed 9).
-const HOTBAR_SLOTS: usize = 9;
+///
+/// `pub(crate)` so `interact.rs`'s `drive_select_slot` can apply the same range
+/// gate `Sim::select_slot` does, without a second copy of the `9` to drift.
+pub(crate) const HOTBAR_SLOTS: usize = 9;
 
 /// The live [`Mining`] predictor's [`BreakInputs`] for one dig tick, built from
 /// the version's block-state hardness census, the resolved held-item

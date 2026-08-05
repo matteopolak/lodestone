@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use lodestone_game::chat_ack::{LastSeenTracker, MessageSignature};
 use lodestone_model::{
-    AdapterError, ClientAction, ClientEvent, ConnectionState, Directive, LoginProfile, ResourceKey,
-    ServerAddress, VersionAdapter,
+    AdapterError, ClientAction, ClientEvent, ConnectionState, Directive, LoginProfile,
+    PackedMessageSignature, ResourceKey, ServerAddress, VersionAdapter,
 };
 use lodestone_net::{Connection, NetError, Transport};
 #[cfg(not(target_arch = "wasm32"))]
@@ -682,6 +682,20 @@ impl<T: Transport> Driver<T> {
                     port: *port,
                     cookies: self.cookies.clone(),
                 });
+            }
+            ClientEvent::ChatMessageDeleted { signature } => {
+                // Withdraw a still-pending entry (vanilla's `ChatScreen` calling
+                // `lastSeenMessages.ignorePendingSignature` when a `delete_chat`
+                // arrives), so the next acknowledgement neither reports nor
+                // acknowledges a message the server has withdrawn. The adapter
+                // resolves cache references to full signatures before emitting,
+                // so a still-`Cached` variant here means the id was
+                // unresolvable and should not have been emitted; treat it as a
+                // no-op.
+                if let PackedMessageSignature::Full(bytes) = signature {
+                    self.chat_tracker
+                        .ignore_pending(&MessageSignature::from(bytes.as_slice()));
+                }
             }
             _ => {}
         }

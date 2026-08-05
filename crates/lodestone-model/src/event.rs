@@ -111,8 +111,11 @@ pub struct ChatAckInfo {
 ///
 /// The wire form is either a full 256-byte signature (for a signature the
 /// client has not cached yet) or an index into the last-seen signature
-/// cache. This adapter does not track that cache, so `Cached` indices are
-/// carried as-is rather than resolved.
+/// cache. The v770 adapter resolves `Cached` references against its
+/// per-connection signature cache before emitting — dropping the event on a
+/// miss — so a `ChatMessageDeleted` normally carries a `Full` signature; the
+/// `Cached` variant remains for adapters that pass the wire form through
+/// unresolved.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PackedMessageSignature {
     /// A full 256-byte signature.
@@ -1884,7 +1887,9 @@ pub enum ClientEvent {
     /// A previously sent chat message was deleted/withdrawn, from
     /// `ClientboundDeleteChatPacket`.
     ChatMessageDeleted {
-        /// The message's identity as carried on the wire.
+        /// The message's signature; the adapter resolves wire-level cache
+        /// references to the full 256 bytes before emitting, so this is
+        /// normally [`PackedMessageSignature::Full`].
         signature: PackedMessageSignature,
     },
     /// The local player should look toward a fixed point or another entity,

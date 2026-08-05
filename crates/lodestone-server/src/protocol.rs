@@ -143,6 +143,26 @@ pub enum MetadataField {
     CreeperIgnited(bool),
 }
 
+/// Which worldgen data bundle a [`ServerProtocol`]'s hosting needs (issue
+/// #407) — the version gate between the worldgen data this crate embeds and
+/// the protocol family being served.
+///
+/// The only bundle `lodestone-server` embeds is 26.2 (protocol 776): the
+/// `assets/worldgen/` table [`crate::worldgen_data`] serves. A family whose
+/// worldgen is **not** the embedded 26.2 bundle must say so and supply its own
+/// data — per `docs/plans/worldgen-parity.md` §4 that will be a second engine
+/// behind [`crate::ChunkSource`], not a second JSON bundle. The
+/// [`None`](Self::None) report is what makes "no worldgen for this version"
+/// surfaced rather than silently serving the wrong terrain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorldgenScope {
+    /// 26.2 (protocol 776) worldgen data — the one bundle this crate embeds.
+    V26_2,
+    /// No worldgen data: the protocol does not host world generation, or has
+    /// not declared a bundle this crate can serve.
+    None,
+}
+
 /// A server-bound packet, lifted into the version-free vocabulary the server
 /// loop understands.
 ///
@@ -1315,6 +1335,24 @@ pub trait ServerProtocol: Send + Sync {
         let _ = tab;
         ServerDirective::None
     }
+
+    /// Which worldgen data bundle this protocol's hosting needs, for the
+    /// [`crate::worldgen_data`] version gate (issue #407).
+    ///
+    /// The only bundle this crate embeds is 26.2
+    /// ([`WorldgenScope::V26_2`]) — the `assets/worldgen/` data
+    /// [`crate::overworld_generator`] serves. A hosting family must report
+    /// [`WorldgenScope::V26_2`] if and only if that bundle is the terrain it
+    /// actually wants to serve. The default reports [`WorldgenScope::None`],
+    /// so a protocol that has not adopted the gate — every test double, and
+    /// every family whose worldgen is not the embedded 26.2 bundle — is
+    /// treated as "no worldgen data", never silently served the wrong
+    /// bundle. The one production override is the v770 host (→
+    /// [`WorldgenScope::V26_2`]): that is the family the embedded data
+    /// belongs to.
+    fn worldgen_scope(&self) -> WorldgenScope {
+        WorldgenScope::None
+    }
 }
 
 /// Forwards every method to the boxed implementor, so a **trait object** can be
@@ -1551,6 +1589,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
     fn encode_select_advancements_tab(&self, tab: Option<&str>) -> ServerDirective {
         (**self).encode_select_advancements_tab(tab)
     }
+
+    fn worldgen_scope(&self) -> WorldgenScope {
+        (**self).worldgen_scope()
+    }
 }
 
 #[cfg(test)]
@@ -1713,6 +1755,13 @@ mod tests {
         }
         fn encode_select_advancements_tab(&self, tab: Option<&str>) -> ServerDirective {
             send(1900 + tab.map_or(0, |t| t.len() as i32))
+        }
+        fn worldgen_scope(&self) -> WorldgenScope {
+            // Non-default on purpose: this is the value that proves the box
+            // forward works rather than both sides silently using the trait
+            // default (the exact failure the `a_boxed_protocol_answers...`
+            // control section exists to catch).
+            WorldgenScope::V26_2
         }
     }
 
@@ -1909,6 +1958,11 @@ mod tests {
             boxed.encode_select_advancements_tab(None),
             direct.encode_select_advancements_tab(None)
         );
+        assert_eq!(
+            boxed.worldgen_scope(),
+            direct.worldgen_scope(),
+            "the box must forward worldgen_scope, not answer with the trait default"
+        );
 
         // -- control ---------------------------------------------------------
         // Every assertion above compares two answers, so it would also pass if
@@ -1973,5 +2027,11 @@ mod tests {
             ServerDirective::None
         );
         assert_ne!(direct.encode_select_advancements_tab(None), ServerDirective::None);
+        assert_ne!(
+            direct.worldgen_scope(),
+            WorldgenScope::None,
+            "worldgen_scope answered with the trait default through the box, so the \
+             forward is missing and a boxed v770 would silently report 'no worldgen'"
+        );
     }
 }
