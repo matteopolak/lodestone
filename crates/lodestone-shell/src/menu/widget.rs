@@ -821,12 +821,21 @@ pub const SCROLLER_BACKGROUND_SPRITE: &str = "widget/scroller_background";
 ///   **integer** arithmetic (`:104-108`). The `floor`s here are that arithmetic,
 ///   not defensive rounding — deleting them moves the thumb by up to a pixel and
 ///   no test of ours would say why.
-/// - **`row_h` is uniform.** `AbstractSelectionList` allows a per-entry height
-///   (`addEntry(entry, height)`, `:122-129`) and `super::options`' settings list
-///   genuinely needs it. Supporting that here means replacing [`Self::row_top`]
-///   and [`Self::content_height`] with a prefix-sum walk; until a second screen
-///   needs it, the uniform case is honest and the variable one is a documented
-///   absence rather than a wrong answer.
+/// - **Row heights may be uniform or per-entry, and uniform is the degenerate
+///   case of the same arithmetic.** `AbstractSelectionList` allows a per-entry
+///   height (`addEntry(entry, height)`, `:122-129`) and `super::options`'
+///   settings list genuinely needs it, so [`Self::new_variable`] takes the
+///   heights and every offset goes through [`Self::row_offset`] /
+///   [`Self::row_height`]. `row_h` remains `defaultEntryHeight` in both modes,
+///   because that is what `scrollRate` is defined against (`:44`) — it is *not*
+///   "the height of a row" once the heights are explicit, and conflating the two
+///   is the one way to get this wrong.
+/// - **[`Self::visible_range`] is closed-form only in the uniform case.** The
+///   algebra below inverts a multiply, which a prefix sum does not have; the
+///   variable case walks, exactly as vanilla's `repositionEntries` does. Both
+///   are held to agreeing with [`Self::row_visible`] entry-by-entry by
+///   `visible_range_agrees_with_row_visible_at_every_offset`, which now sweeps
+///   both modes.
 ///
 /// ## Dependencies
 ///
@@ -838,8 +847,20 @@ pub struct ScrollList {
     /// (`:18`). Always inside `0..=max_scroll()`; every writer goes through
     /// [`Self::set_scroll`].
     scroll: f32,
-    /// Uniform entry height — `AbstractSelectionList.defaultEntryHeight` (`:37`).
+    /// `AbstractSelectionList.defaultEntryHeight` (`:37`) — the height of an
+    /// entry added without one, **and** the basis of
+    /// [`Self::scroll_rate`] (`:44`) in both modes. When [`Self::prefix`] is
+    /// `None` it is also every entry's height.
     row_h: f32,
+    /// Running sum of per-entry heights when the list is **not** uniform:
+    /// `prefix[i]` is the total height of entries `0..i`, so it has `len + 1`
+    /// elements and `prefix[len]` is the content's entry height.
+    ///
+    /// `None` is the uniform case, where `prefix[i]` would be `i * row_h` — kept
+    /// as an absence rather than a materialised table so the common list costs
+    /// no allocation and the closed-form [`Self::visible_range`] stays
+    /// reachable.
+    prefix: Option<Box<[f32]>>,
     /// The band's top y — `getY()`.
     top: f32,
     /// The band's height — `getHeight()`.
@@ -866,12 +887,97 @@ impl ScrollList {
         Self {
             scroll: 0.0,
             row_h,
+            prefix: None,
             top,
             height,
             len,
             selected: None,
             hovered: None,
             dragging: false,
+        }
+    }
+
+    /// A list whose entries have **individual** heights — vanilla's
+    /// `addEntry(entry, height)` (`AbstractSelectionList.java:122-129`), where
+    /// `repositionEntries` advances its running `y` by each child's own height
+    /// (`:143-152`) rather than by a constant.
+    ///
+    /// `default_row_h` is `defaultEntryHeight`, which is **not** derivable from
+    /// `heights`: it is what [`Self::scroll_rate`] is defined against (`:44`),
+    /// so a settings list of mixed 20 px and 25 px rows still scrolls at its
+    /// declared default rate. Passing `heights.first()` instead would make the
+    /// wheel rate depend on which entry happens to be first.
+    ///
+    /// `len` comes from `heights.len()`, so the two can never disagree — the
+    /// failure mode a separate count would allow is an index into `prefix` that
+    /// is in range for `len` and out of range for the table.
+    #[must_use]
+    pub fn new_variable(default_row_h: f32, top: f32, height: f32, heights: &[f32]) -> Self {
+        Self {
+            scroll: 0.0,
+            row_h: default_row_h,
+            prefix: Some(Self::build_prefix(heights)),
+            top,
+            height,
+            len: heights.len(),
+            selected: None,
+            hovered: None,
+            dragging: false,
+        }
+    }
+
+    /// `heights` accumulated into a `len + 1` running sum, starting at 0.
+    ///
+    /// A negative or non-finite height is clamped to 0 rather than rejected: a
+    /// caller derives these from a layout, and one bad value must not make every
+    /// *subsequent* offset nonsense (a `NaN` in a prefix sum poisons the whole
+    /// tail, and `row_top` would then place every later row off-screen).
+    fn build_prefix(heights: &[f32]) -> Box<[f32]> {
+        let mut out = Vec::with_capacity(heights.len() + 1);
+        let mut running = 0.0_f32;
+        out.push(0.0);
+        for &h in heights {
+            running += if h.is_finite() { h.max(0.0) } else { 0.0 };
+            out.push(running);
+        }
+        out.into_boxed_slice()
+    }
+
+    /// Whether entry heights are per-entry rather than all [`Self::row_h`].
+    #[must_use]
+    pub fn is_variable(&self) -> bool {
+        self.prefix.is_some()
+    }
+
+    /// The distance from the first entry's top to entry `index`'s top —
+    /// `repositionEntries`' running `y` minus its start (`:143-152`).
+    ///
+    /// `index == len` is legal and yields the content's full entry height, which
+    /// is what makes [`Self::content_height`] the same expression in both modes.
+    #[must_use]
+    pub fn row_offset(&self, index: usize) -> f32 {
+        match &self.prefix {
+            Some(p) => p.get(index).copied().unwrap_or_else(|| {
+                // Past the end: the last running total. Reachable only through
+                // a stale index, and answering the content height is the
+                // clamped answer rather than a panic mid-draw.
+                p.last().copied().unwrap_or(0.0)
+            }),
+            None => index as f32 * self.row_h,
+        }
+    }
+
+    /// Entry `index`'s own height — `child.getHeight()`.
+    ///
+    /// Falls back to [`Self::row_h`] for an out-of-range index so that callers
+    /// hit-testing a stale index get a sane box rather than a zero-height one
+    /// that silently matches nothing.
+    #[must_use]
+    pub fn row_height(&self, index: usize) -> f32 {
+        match &self.prefix {
+            Some(p) if index + 1 < p.len() => p[index + 1] - p[index],
+            Some(_) => self.row_h,
+            None => self.row_h,
         }
     }
 
@@ -925,6 +1031,12 @@ impl ScrollList {
         self.top = top;
         self.height = height;
         self.len = len;
+        // A uniform resize on a variable list would leave a `prefix` of the old
+        // length, so every offset past the change would be read from stale data
+        // — worse than a wrong count, because `row_offset` would still answer
+        // plausibly. Dropping to uniform is the honest degradation, and
+        // `resize_variable` is the call that keeps the heights.
+        self.prefix = None;
         if let Some(s) = self.selected
             && s >= len
         {
@@ -932,6 +1044,29 @@ impl ScrollList {
         }
         if let Some(h) = self.hovered
             && h >= len
+        {
+            self.hovered = None;
+        }
+        self.refresh_scroll();
+    }
+
+    /// [`Self::resize`] for a list with per-entry heights: re-seat the band and
+    /// **replace** the height table, then re-clamp.
+    ///
+    /// `len` is taken from `heights`, for the same reason
+    /// [`Self::new_variable`] does it.
+    pub fn resize_variable(&mut self, top: f32, height: f32, heights: &[f32]) {
+        self.top = top;
+        self.height = height;
+        self.len = heights.len();
+        self.prefix = Some(Self::build_prefix(heights));
+        if let Some(s) = self.selected
+            && s >= self.len
+        {
+            self.selected = None;
+        }
+        if let Some(h) = self.hovered
+            && h >= self.len
         {
             self.hovered = None;
         }
@@ -949,7 +1084,7 @@ impl ScrollList {
     /// and the 2 px below the last.
     #[must_use]
     pub fn content_height(&self) -> f32 {
-        self.len as f32 * self.row_h + 2.0 * LIST_CONTENT_PADDING
+        self.row_offset(self.len) + 2.0 * LIST_CONTENT_PADDING
     }
 
     /// `maxScrollAmount() = max(0, contentHeight() - height)`
@@ -976,7 +1111,7 @@ impl ScrollList {
     /// outside the multiply for that reason.
     #[must_use]
     pub fn row_top(&self, index: usize) -> f32 {
-        self.first_entry_y() - self.scroll.floor() + index as f32 * self.row_h
+        self.first_entry_y() - self.scroll.floor() + self.row_offset(index)
     }
 
     /// Whether entry `index` is inside the band —
@@ -995,7 +1130,7 @@ impl ScrollList {
             return false;
         }
         let top = self.row_top(index);
-        top + self.row_h >= self.top && top <= self.bottom()
+        top + self.row_height(index) >= self.top && top <= self.bottom()
     }
 
     /// The half-open range of entries that overlap the band at all.
@@ -1021,7 +1156,34 @@ impl ScrollList {
     /// rather than adjusted until the obvious cases passed.
     #[must_use]
     pub fn visible_range(&self) -> core::ops::Range<usize> {
-        if self.len == 0 || self.row_h <= 0.0 {
+        if self.len == 0 {
+            return 0..0;
+        }
+        // The variable case has no multiply to invert, so it walks — vanilla's
+        // own `repositionEntries` does too. Cheap in practice because the walk
+        // stops at the first entry past the band's bottom, and a settings page
+        // is tens of rows, not thousands.
+        if self.is_variable() {
+            let mut first = None;
+            let mut end = 0;
+            for i in 0..self.len {
+                if self.row_visible(i) {
+                    if first.is_none() {
+                        first = Some(i);
+                    }
+                    end = i + 1;
+                } else if first.is_some() {
+                    // Heights are non-negative, so visibility is one contiguous
+                    // run; the first miss after a hit ends it.
+                    break;
+                }
+            }
+            return match first {
+                Some(f) => f..end,
+                None => 0..0,
+            };
+        }
+        if self.row_h <= 0.0 {
             return 0..0;
         }
         let d = self.scroll.floor() - LIST_CONTENT_PADDING;
@@ -1100,7 +1262,8 @@ impl ScrollList {
         if top_delta < 0.0 {
             self.set_scroll(self.scroll + top_delta);
         }
-        let bottom_delta = self.bottom() - self.row_top(index) - self.row_h - LIST_CONTENT_PADDING;
+        let bottom_delta =
+            self.bottom() - self.row_top(index) - self.row_height(index) - LIST_CONTENT_PADDING;
         if bottom_delta < 0.0 {
             self.set_scroll(self.scroll - bottom_delta);
         }
@@ -1111,7 +1274,7 @@ impl ScrollList {
         if index >= self.len {
             return;
         }
-        let y = index as f32 * self.row_h + self.row_h / 2.0;
+        let y = self.row_offset(index) + self.row_height(index) / 2.0;
         self.set_scroll(y - self.height / 2.0);
     }
 
@@ -1137,7 +1300,7 @@ impl ScrollList {
         if let Some(i) = self.selected {
             let top_clipped = self.row_top(i) + LIST_CONTENT_PADDING < self.top;
             let bottom_clipped =
-                self.row_top(i) + self.row_h - LIST_CONTENT_PADDING > self.bottom();
+                self.row_top(i) + self.row_height(i) - LIST_CONTENT_PADDING > self.bottom();
             if keyboard || top_clipped || bottom_clipped {
                 self.scroll_to_entry(i);
             }
@@ -1178,7 +1341,7 @@ impl ScrollList {
         }
         let hit = self
             .visible_range()
-            .find(|&i| y >= self.row_top(i) && y < self.row_top(i) + self.row_h);
+            .find(|&i| y >= self.row_top(i) && y < self.row_top(i) + self.row_height(i));
         self.set_hovered(hit);
     }
 
@@ -1195,7 +1358,7 @@ impl ScrollList {
             return None;
         }
         self.visible_range()
-            .find(|&i| y >= self.row_top(i) && y < self.row_top(i) + self.row_h)
+            .find(|&i| y >= self.row_top(i) && y < self.row_top(i) + self.row_height(i))
     }
 
     // -- the scrollbar ----------------------------------------------------
@@ -1924,6 +2087,234 @@ mod tests {
             }
             offset += 9.0;
         }
+    }
+
+    // -- variable row heights (#445) ----------------------------------------
+
+    /// The settings list's real shape: alternating 25 px control rows and 20 px
+    /// header rows, which is why the primitive needed per-entry heights at all.
+    fn settings_shaped() -> ScrollList {
+        let heights: Vec<f32> = (0..12)
+            .map(|i| if i % 3 == 0 { 20.0 } else { 25.0 })
+            .collect();
+        ScrollList::new_variable(25.0, 32.0, 160.0, &heights)
+    }
+
+    /// A uniform list and an explicit list of equal heights must agree on
+    /// **every** observable, at every offset.
+    ///
+    /// This is the load-bearing structural test for growing the primitive: it is
+    /// what makes the uniform case the *degenerate case of the same arithmetic*
+    /// rather than a second implementation that happens to look similar. A
+    /// prefix-sum bug that shifted every row by one padding unit would pass a
+    /// hand-picked spot check and fail here.
+    #[test]
+    fn an_explicit_equal_height_list_is_indistinguishable_from_a_uniform_one() {
+        let mut uniform = ScrollList::new(36.0, 32.0, 200.0, 10);
+        let mut variable = ScrollList::new_variable(36.0, 32.0, 200.0, &[36.0; 10]);
+        assert!(!uniform.is_variable() && variable.is_variable(), "two modes");
+
+        assert_eq!(uniform.content_height(), variable.content_height());
+        assert_eq!(uniform.max_scroll(), variable.max_scroll());
+        assert_eq!(uniform.scroll_rate(), variable.scroll_rate());
+        assert_eq!(uniform.scroller_height(), variable.scroller_height());
+
+        let mut offset = 0.0_f32;
+        while offset <= uniform.max_scroll() {
+            uniform.set_scroll(offset);
+            variable.set_scroll(offset);
+            assert_eq!(uniform.scroll(), variable.scroll(), "offset {offset}");
+            assert_eq!(
+                uniform.visible_range(),
+                variable.visible_range(),
+                "visible_range diverged at offset {offset} — the walk and the \
+                 closed form disagree, so one of them is wrong"
+            );
+            assert_eq!(uniform.scrollbar_y(), variable.scrollbar_y(), "at {offset}");
+            for i in 0..uniform.len() {
+                assert_eq!(uniform.row_top(i), variable.row_top(i), "row {i} @ {offset}");
+                assert_eq!(uniform.row_height(i), variable.row_height(i), "row {i}");
+                assert_eq!(
+                    uniform.row_visible(i),
+                    variable.row_visible(i),
+                    "row {i} @ {offset}"
+                );
+            }
+            offset += 4.5;
+        }
+    }
+
+    /// Offsets come from the running sum, and `content_height` is that sum plus
+    /// vanilla's 4 px of padding — not `len * row_h`, which is what the uniform
+    /// formula would have answered.
+    #[test]
+    fn variable_offsets_are_a_prefix_sum_not_a_multiply() {
+        let list = settings_shaped();
+        // heights: 20,25,25, 20,25,25, 20,25,25, 20,25,25  = 4*(20+50) = 280
+        assert_eq!(list.row_offset(0), 0.0);
+        assert_eq!(list.row_offset(1), 20.0);
+        assert_eq!(list.row_offset(2), 45.0);
+        assert_eq!(list.row_offset(3), 70.0);
+        assert_eq!(list.row_offset(12), 280.0, "the whole content");
+        assert_eq!(list.row_height(0), 20.0, "a header");
+        assert_eq!(list.row_height(1), 25.0, "a control");
+        assert_eq!(
+            list.content_height(),
+            280.0 + 4.0,
+            "prefix[len] + 2*LIST_CONTENT_PADDING"
+        );
+        // The wrong hypothesis, computed from outside: the uniform formula.
+        assert_ne!(
+            list.content_height(),
+            12.0 * 25.0 + 4.0,
+            "a multiply by the default height must NOT reproduce this — if it \
+             does, the test shape has stopped exercising variable heights"
+        );
+    }
+
+    /// `visible_range`'s walk must agree with `row_visible` entry-by-entry
+    /// across the whole span, exactly as the uniform sweep demands of the
+    /// closed form.
+    #[test]
+    fn the_variable_visible_range_agrees_with_row_visible_at_every_offset() {
+        let mut list = settings_shaped();
+        let mut offset = 0.0_f32;
+        while offset <= list.max_scroll() {
+            list.set_scroll(offset);
+            let range = list.visible_range();
+            for i in 0..list.len() {
+                assert_eq!(
+                    range.contains(&i),
+                    list.row_visible(i),
+                    "row {i} at offset {offset}: range {range:?}"
+                );
+            }
+            offset += 2.5;
+        }
+    }
+
+    /// **The smooth-scroll magnitude gate for a variable list.**
+    ///
+    /// `scrollRate` is `defaultEntryHeight / 2` (`AbstractSelectionList.java:44`),
+    /// and `defaultEntryHeight` is the *declared* default, **not** the height of
+    /// whichever entry happens to be first. A settings list declaring 25 px
+    /// therefore moves `floor(25/2) = 12` px per notch.
+    ///
+    /// Three hypotheses, and the measurement must land on exactly one:
+    ///
+    /// | hypothesis | one notch |
+    /// |---|---|
+    /// | vanilla: `floor(default/2)` | **12** |
+    /// | rate from the first entry (20 px header) | 10 |
+    /// | a row-index model, one notch one row | 20 (that row's height) |
+    ///
+    /// 12 is not a multiple of any row height here, which is the point: it is a
+    /// state a row counter structurally cannot hold, so "it scrolled" cannot
+    /// pass for "it scrolled smoothly".
+    #[test]
+    fn one_notch_on_a_variable_list_is_half_the_declared_default_height() {
+        let mut list = settings_shaped();
+        list.mouse_scrolled(-1.0);
+        assert_eq!(
+            list.scroll(),
+            12.0,
+            "one notch must be floor(25/2) = 12 px — 10 would mean the rate came \
+             from the first entry's 20 px, and 20 would mean a row-index model"
+        );
+        list.mouse_scrolled(-1.0);
+        assert_eq!(list.scroll(), 24.0, "and it accumulates in pixels");
+
+        // 24 px is mid-row: it is inside row 1 (which spans 20..45), so no
+        // row index maps onto this offset.
+        assert!(
+            list.row_offset(1) < 24.0 && 24.0 < list.row_offset(2),
+            "24 px must land strictly inside a row, not on a boundary"
+        );
+        for i in 0..=list.len() {
+            assert_ne!(
+                list.row_offset(i),
+                list.scroll(),
+                "offset {} coincides with row {i}'s top, so this gate no longer \
+                 discriminates against a row-index model",
+                list.scroll()
+            );
+        }
+    }
+
+    /// The trap named in `new_variable`'s doc, asserted rather than trusted:
+    /// the scroll rate comes from the declared default and ignores the heights.
+    #[test]
+    fn the_scroll_rate_ignores_the_entry_heights_entirely() {
+        let tall = ScrollList::new_variable(25.0, 0.0, 100.0, &[80.0, 90.0, 100.0]);
+        assert_eq!(
+            tall.scroll_rate(),
+            12.0,
+            "floor(25/2) — derived from defaultEntryHeight, not from any entry"
+        );
+        let same_heights_different_default =
+            ScrollList::new_variable(36.0, 0.0, 100.0, &[80.0, 90.0, 100.0]);
+        assert_eq!(same_heights_different_default.scroll_rate(), 18.0);
+    }
+
+    /// A click and a hover hit-test the entry's **own** height. With the uniform
+    /// height they would both mis-aim on every row after the first differing
+    /// one.
+    #[test]
+    fn hit_testing_uses_each_entrys_own_height() {
+        let list = settings_shaped();
+        let (left, w) = (0.0, 200.0);
+        // Row 0 is the 20 px header at first_entry_y = 34.
+        assert_eq!(list.row_top(0), 34.0);
+        assert_eq!(list.entry_at(10.0, 34.0, left, w), Some(0));
+        assert_eq!(list.entry_at(10.0, 53.9, left, w), Some(0), "still row 0");
+        assert_eq!(
+            list.entry_at(10.0, 54.0, left, w),
+            Some(1),
+            "20 px in, row 1 starts — a uniform 25 px would still say row 0"
+        );
+        // And the control: the uniform list of the same default really would
+        // answer row 0 there, so the assertion above is discriminating.
+        let uniform = ScrollList::new(25.0, 32.0, 160.0, 12);
+        assert_eq!(
+            uniform.entry_at(10.0, 54.0, left, w),
+            Some(0),
+            "the wrong hypothesis must give the wrong answer here"
+        );
+    }
+
+    /// `resize` on a variable list drops to uniform rather than keeping a
+    /// stale height table — the honest degradation named in its doc.
+    #[test]
+    fn a_uniform_resize_drops_the_stale_height_table() {
+        let mut list = settings_shaped();
+        assert!(list.is_variable());
+        list.resize(32.0, 160.0, 4);
+        assert!(
+            !list.is_variable(),
+            "a uniform resize must not leave a 12-entry prefix behind a 4-entry len"
+        );
+        assert_eq!(list.row_offset(2), 50.0, "now 2 * 25");
+        // And the variable path keeps them.
+        list.resize_variable(32.0, 160.0, &[10.0, 30.0]);
+        assert!(list.is_variable());
+        assert_eq!(list.len(), 2, "len follows the heights");
+        assert_eq!(list.row_offset(2), 40.0);
+    }
+
+    /// A non-finite or negative height must not poison the tail of the prefix
+    /// sum. One bad row is a bad row; a `NaN` would put every *later* row
+    /// off-screen.
+    #[test]
+    fn a_bad_height_does_not_poison_the_rest_of_the_prefix_sum() {
+        let list = ScrollList::new_variable(25.0, 0.0, 100.0, &[20.0, f32::NAN, -5.0, 25.0]);
+        assert_eq!(list.row_offset(1), 20.0);
+        assert_eq!(list.row_offset(2), 20.0, "NaN contributes 0");
+        assert_eq!(list.row_offset(3), 20.0, "negative contributes 0");
+        assert_eq!(list.row_offset(4), 45.0, "and the good row still counts");
+        assert!(
+            list.content_height().is_finite(),
+            "content height must stay finite"
+        );
     }
 
     #[test]
