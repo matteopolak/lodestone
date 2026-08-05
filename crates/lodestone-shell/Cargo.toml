@@ -129,6 +129,16 @@ memory-stats = "1"
 # real image (IHDR/IDAT/IEND, zlib, CRCs) rather than bytes only our own decoder
 # would accept.
 png = { workspace = true }
+# Same pin as every other bench site in the workspace. `default-features = false`
+# is load-bearing: it drops plotters and criterion's own rayon.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+# Entity tick throughput and interpolation cost (issues #97/#99). CPU-only: no
+# GPU adapter, no window, no server. Must stay free of anything version-gated so
+# `--no-default-features` keeps working.
+[[bench]]
+name = "entity_tick"
+harness = false
 
 [features]
 # `live` compiles the vanilla-26.2 (protocol 776) family into the registry so
