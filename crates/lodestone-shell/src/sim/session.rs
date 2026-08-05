@@ -1117,6 +1117,68 @@ impl Sim {
     /// static case, which is what the gates pin, is exact either way because
     /// `StaticBorderExtent.getLerpSpeed()` returns `0.0`
     /// (`WorldBorder.java:534-535`) and the floor wins outright.
+    /// The command block the crosshair is on, resolved into the edit screen's
+    /// opening state — issue #47's missing trigger, tracked on #436.
+    ///
+    /// `None` when the crosshair is on nothing, on a block that is not a
+    /// command block, or when the chunk store has no data at that cell. Only
+    /// the first of those is a "no interaction"; the others are "not this
+    /// interaction", and both mean the ordinary use-item path should run.
+    ///
+    /// # Why this reads the raw NBT rather than waiting for a typed decode
+    ///
+    /// See `crate::command_block_source`'s module doc. In short: the ledger
+    /// entry's `grep -rn "CommandBlock" crates/lodestone-model crates/protocol`
+    /// is true and answers a neighbouring question — there is no *typed*
+    /// decode, and none is needed, because `BlockEntity::nbt` already carries
+    /// the payload and `block_states` already answers what block is there.
+    ///
+    /// # Deliberately no permission gate
+    ///
+    /// Vanilla guards on `player.canUseGameMasterBlocks()`
+    /// (`CommandBlock.useWithoutItem`), which is op level 2 **and** creative.
+    /// This client tracks neither: there is no op level anywhere in the
+    /// workspace, and the server is the authority regardless — it rejects a
+    /// `SetCommandBlock` from an unauthorised player, exactly as it rejects
+    /// every other unauthorised action we optimistically send. Opening a local
+    /// editor that the server then refuses is the honest failure; refusing to
+    /// open it on a *guessed* permission would be a dead control.
+    #[must_use]
+    pub fn targeted_command_block(
+        &self,
+    ) -> Option<crate::menu::command_block::CommandBlockOpen> {
+        let hit = self.target()?;
+        let pos = lodestone_model::BlockPos::new(hit.block[0], hit.block[1], hit.block[2]);
+        let store = self.read(|w| w.resource::<ChunkWorld>().clone());
+        let world = store.read();
+        let chunk_pos = lodestone_world::ChunkPos {
+            x: pos.x.div_euclid(16),
+            z: pos.z.div_euclid(16),
+        };
+        let chunk = world.get(chunk_pos)?;
+        let rel_x = pos.x.rem_euclid(16) as usize;
+        let rel_z = pos.z.rem_euclid(16) as usize;
+        let state_id = chunk.column.get_block(rel_x, pos.y, rel_z);
+        // The block state is the truth about *whether* this is a command
+        // block; the record is only where the payload lives. So this resolves
+        // the state first and treats a missing record as an empty payload
+        // rather than as "not a command block" — the same
+        // state-wins-over-record rule `crate::block_entities` follows, and the
+        // reason a freshly placed command block (state written, no record yet)
+        // still opens.
+        crate::command_block_source::mode_for_state(state_id)?;
+        let nbt = chunk
+            .block_entities
+            .iter()
+            .find(|be| {
+                usize::from(be.rel_x) == rel_x
+                    && usize::from(be.rel_z) == rel_z
+                    && i32::from(be.y) == pos.y
+            })
+            .map_or(&lodestone_core::Nbt::End, |be| &be.nbt);
+        crate::command_block_source::command_block_open(pos, state_id, nbt)
+    }
+
     /// `(distance_to_border, warning_distance, warning_strength)`, or `None`
     /// until the server has actually sent a border packet.
     ///

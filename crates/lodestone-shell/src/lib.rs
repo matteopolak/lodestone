@@ -31,6 +31,7 @@ pub mod blocks;
 pub mod camera_rig;
 pub mod chat;
 pub mod collision;
+pub mod command_block_source;
 pub mod config;
 pub mod container;
 pub mod effects;

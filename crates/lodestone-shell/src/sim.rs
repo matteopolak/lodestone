@@ -800,6 +800,19 @@ impl Sim {
         self.read(|w| w.resource::<RayTarget>().0)
     }
 
+    /// Place a crosshair target directly, for gates that need one without
+    /// standing up the whole raycast (which needs a camera, a player pose and a
+    /// meshed world).
+    ///
+    /// `#[cfg(test)]` rather than a runtime flag, deliberately: the fork is
+    /// then *absent* from the shipped binary instead of being a branch nothing
+    /// takes, which is the shape `docs/` records for `cfg!(test)` early-returns
+    /// that silently skip in production.
+    #[cfg(test)]
+    pub(crate) fn set_ray_target_for_test(&mut self, hit: Option<RayHit>) {
+        self.write(|w| w.resource_mut::<RayTarget>().0 = hit);
+    }
+
     /// Whether the use button is currently held down on an item (armed by
     /// [`Self::use_item`], cleared by [`Self::end_use`]).
     ///

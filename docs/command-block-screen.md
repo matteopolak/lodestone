@@ -64,28 +64,64 @@ byte offset back by one and drop the synthetic slash's own span. See
 
 ## What is missing (tracked on [#436](https://github.com/matteopolak/lodestone/issues/436))
 
-Two islands, named rather than hidden:
+**One island left, and it is not the one this section used to list first.**
 
 1. **No command tree ever reaches this client.** `COMMANDS` (id 16) /
    `COMMAND_SUGGESTIONS` (id 15) have no decode arm anywhere in
    `crates/protocol/**` (off-limits to this crate), so `complete`/`highlight`
    always run with `tree: None` in production and degrade to "no
-   completions, no highlighting" rather than a fabricated list.
-2. **Nothing opens this screen from a real interaction.** There is no
-   command-block-entity NBT decode anywhere in this workspace and no
-   right-click-detects-a-command-block path in `interact.rs`, so
-   `UiState::open_command_block`/`MenuNav::open_command_block` have no
-   producer. The screen, its layout, and its (tree-less) completion adapter
-   are real and unit-tested regardless — see `command_block.rs`'s own tests
-   for predicted rects and an exact completion ordering with a rejected
-   hypothesis.
+   completions, no highlighting" rather than a fabricated list. Re-measured
+   for #436: the two ids appear **only** in `v770/src/generated/packet_ids.rs`
+   — the id table, which proves the id is known and nothing more.
 
-A third, smaller gap: `MenuAction` has no `SetCommandBlock` variant yet, and
-`activate_command_block_row`'s Done arm computes `CommandBlockState::to_submit()`
-but discards it (`let _submit = ...`) rather than sending it — landing the
-variant now would break `app.rs`'s exhaustive `match action` with no
-compiling counterpart there (a brokered file). `CommandBlockSubmit::into_action`
-is ready for whichever agent adds both halves together.
+### Closed: the screen is now reachable from a real right-click
+
+This section used to read: *"Nothing opens this screen from a real
+interaction. There is no command-block-entity NBT decode anywhere in this
+workspace and no right-click-detects-a-command-block path in `interact.rs`."*
+
+**The first sentence of that was a wrong conclusion drawn from a true
+observation**, and it is worth keeping as a worked example. There is indeed no
+*typed* command-block decode in `lodestone-model` or `crates/protocol` — the
+grep that established it was correct — but none was ever needed:
+`lodestone_world::BlockEntity` already carries the server's **raw NBT** for
+every block entity in a loaded chunk, and `lodestone_data::block_states`
+already answers which block sits at a position. `SignText` had been reading
+sign lines that same way the whole time. The estimate of "a substantially
+bigger lift, since the data to open the screen *with* does not exist yet
+either" was therefore wrong in the expensive direction: it argued for
+deferring work that was reachable that day.
+
+The reader is `crates/lodestone-shell/src/command_block_source.rs`, and the
+split it enforces is vanilla's own:
+
+| field | source | vanilla |
+|---|---|---|
+| mode | **block state** | `CommandBlockEntity.getMode()` matches on the three block ids |
+| conditional | **block state** | `isConditional()` reads `CommandBlock.CONDITIONAL` |
+| command, `TrackOutput`, `auto`, `LastOutput` | **NBT** | `BaseCommandBlock.save` / `saveAdditional` |
+
+There is no mode field on the wire at all, so a reader that consulted only the
+NBT would show every chain block as Redstone — a plausible-looking wrong
+answer, and the reason `mode_for_state` exists as its own gated function.
+
+The trigger is `WindowApp::try_use`, **not** `interact.rs`, and that is
+deliberate. `drive_placement` returns `PlaceRejection::NothingPlaceableHeld`
+before it ever looks at the clicked block, so a right-click with an empty hand
+— the normal way to open a command block — never reaches its body. It is also
+the faithful place: vanilla resolves this screen client-side with no packet
+(`CommandBlock.useWithoutItem` → `LocalPlayer.openCommandBlock`).
+
+Two behaviours worth preserving if you touch it:
+
+- **No permission gate.** Vanilla guards on `canUseGameMasterBlocks()` (op
+  level 2 **and** creative); this client tracks neither, and the server rejects
+  an unauthorised `SetCommandBlock` regardless. Refusing to open on a *guessed*
+  permission would be a dead control.
+- **Fail open, never fail blank.** `Nbt::End` — what a block the server sent no
+  data for carries, the common case for one just placed — opens an empty
+  editor, which is exactly what vanilla shows. Note `TrackOutput` defaults to
+  **`true`**, the one field here whose default is not `false`/empty.
 
 ## Configuration
 

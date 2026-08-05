@@ -123,10 +123,14 @@ impl WindowApp {
             // no-op in single-player-menu or pre-join states rather than a
             // panic.
             //
-            // **This makes the screen submit; it does not make it reachable.**
-            // Nothing opens `Screen::CommandBlock` from a real interaction yet —
-            // no command-block block-entity NBT decode, no `interact.rs`
-            // trigger. That is issue #442, deliberately not fixed here.
+            // This makes the screen *submit*; [`WindowApp::try_use`] is what
+            // makes it reachable. The two landed separately, and this comment
+            // used to end "Nothing opens `Screen::CommandBlock` from a real
+            // interaction yet — no command-block block-entity NBT decode, no
+            // `interact.rs` trigger. That is issue #442." — true when written,
+            // stale now: `crate::command_block_source` reads the payload the
+            // chunk already carries, and the trigger is in `try_use` rather
+            // than `interact.rs` for the reason that method's doc gives.
             MenuAction::SetCommandBlock(submit) => {
                 if let Some(net) = self.sim.net() {
                     net.send_action(submit.into_action());
@@ -284,5 +288,49 @@ impl WindowApp {
         if let Some(text) = &event.text {
             self.chat_input.push_str(text.as_str());
         }
+    }
+
+    /// `key.use` in the world — vanilla's `Minecraft.startUseItem`, plus the one
+    /// block whose right-click is resolved **entirely client-side**.
+    ///
+    /// # Why the command block forks here rather than in `interact.rs`
+    ///
+    /// Every other right-click in this client is a packet: `drive_placement`
+    /// resolves the intent, sends `UseItemOn`, and the server decides. A
+    /// command block is different in vanilla too — `CommandBlock.useWithoutItem`
+    /// calls `player.openCommandBlock(be)`, which is a no-op on the server and
+    /// is overridden by `LocalPlayer` to open the screen locally
+    /// (`CommandBlock.java`, `LocalPlayer.openCommandBlock`). The data comes
+    /// from the block entity the client already has, not from a response.
+    ///
+    /// So this is not a shortcut around `interact.rs`; it is the client-side
+    /// half vanilla itself has. It also cannot live in `drive_placement`: that
+    /// system returns `PlaceRejection::NothingPlaceableHeld` before it ever
+    /// looks at the clicked block, so a right-click with an empty hand — the
+    /// normal way to open a command block — never reaches its body.
+    ///
+    /// Closes issue #47's last hop: `UiState::open_command_block` and
+    /// `MenuNav::open_command_block` had **zero production callers**, so the
+    /// screen, its layout and its completion were real, unit-tested and
+    /// unreachable. Tracked on #436.
+    pub(super) fn try_use(&mut self) {
+        // Only from the world. `Screen::Playing` is `open_command_block`'s own
+        // guard as well, so this is belt-and-braces rather than the only check
+        // — but asking here keeps the ordinary use path from being skipped on a
+        // screen where the open would be refused anyway.
+        if self.ui.screen() == crate::menu::Screen::Playing
+            && let Some(open) = self.sim.targeted_command_block()
+        {
+            // Vanilla returns `InteractionResult.SUCCESS` and sends no use
+            // packet for this block, so the ordinary path is skipped, not run
+            // as well: running both would place a block against the command
+            // block behind the screen that just opened.
+            self.sim.input_mut(InputState::release_all);
+            self.nav.open_command_block(&mut self.ui, open);
+            self.tab_held = false;
+            self.set_grab(false);
+            return;
+        }
+        self.sim.use_item();
     }
 }

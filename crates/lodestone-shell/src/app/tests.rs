@@ -2327,3 +2327,127 @@ fn without_the_rule_the_same_death_still_raises_the_death_screen() {
          never shows the screen"
     );
 }
+
+/// **Issue #47's last hop, closed: a real right-click opens the command block
+/// edit screen.**
+///
+/// `Screen::CommandBlockEdit`, `command_block::CommandBlockState` and
+/// `render::command_block_frame` landed in `c76510b` real and unit-tested, and
+/// `UiState::open_command_block`/`MenuNav::open_command_block` had **zero
+/// production callers** — the screen was reachable only from a test. Issue
+/// #436's ledger entry.
+///
+/// This drives the production path: a real `WindowApp`, a real command block
+/// written into the real `ChunkWorld`, a real `RayTarget` (what the crosshair
+/// raycast writes), and `WindowApp::try_use` — the method the `KeyOutcome::
+/// Use(true)` arm now calls instead of `Sim::use_item`.
+#[test]
+fn right_clicking_a_command_block_opens_the_edit_screen() {
+    use crate::raycast::RayHit;
+
+    let Some(state_id) = (0u32..40_000).find(|id| {
+        lodestone_data::block_states::block_type_name(*id)
+            .is_some_and(|n| n == "minecraft:command_block")
+    }) else {
+        return;
+    };
+
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    app.ui.enter_dev_world();
+
+    // A real command block in the real store the accessor reads.
+    let block = [8, 64, 8];
+    let world = app.sim.chunk_world();
+    {
+        let mut w = world.write();
+        crate::sim::write_predicted_block(&mut *w, block, state_id);
+    }
+    // `face_center` is the real constructor the raycast itself uses, so this
+    // cannot disagree with a production hit's shape.
+    app.sim
+        .set_ray_target_for_test(Some(RayHit::face_center(block, [0, 1, 0])));
+
+    assert_ne!(
+        app.ui.screen(),
+        crate::menu::Screen::CommandBlockEdit,
+        "precondition: the screen must not already be up, or this proves nothing"
+    );
+
+    app.try_use();
+
+    assert_eq!(
+        app.ui.screen(),
+        crate::menu::Screen::CommandBlockEdit,
+        "a right-click on a command block must open the edit screen — this is \
+         the hop that did not exist"
+    );
+    let state = app
+        .nav
+        .command_block()
+        .expect("the screen's widget state must be built alongside the screen");
+    assert_eq!(
+        state.to_submit().pos,
+        lodestone_model::BlockPos::new(8, 64, 8),
+        "and it must open on the block that was actually clicked, not a default          — `to_submit` is what the Done button would actually send"
+    );
+}
+
+/// **The control, run and observed**: the same right-click on a block that is
+/// *not* a command block must fall through to the ordinary use path and leave
+/// the screen shut.
+///
+/// Without this, the gate above is satisfied by a `try_use` that opens the
+/// command block screen on every right-click anywhere — which would be a far
+/// worse bug than the island it replaces, and would read as a pass.
+#[test]
+fn right_clicking_a_normal_block_does_not_open_the_command_block_screen() {
+    use crate::raycast::RayHit;
+
+    let Some(stone) = (0u32..4096).find(|id| {
+        lodestone_data::block_states::block_type_name(*id).is_some_and(|n| n == "minecraft:stone")
+    }) else {
+        return;
+    };
+
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    app.ui.enter_dev_world();
+
+    let block = [8, 64, 8];
+    let world = app.sim.chunk_world();
+    {
+        let mut w = world.write();
+        crate::sim::write_predicted_block(&mut *w, block, stone);
+    }
+    // `face_center` is the real constructor the raycast itself uses, so this
+    // cannot disagree with a production hit's shape.
+    app.sim
+        .set_ray_target_for_test(Some(RayHit::face_center(block, [0, 1, 0])));
+
+    app.try_use();
+
+    assert_ne!(
+        app.ui.screen(),
+        crate::menu::Screen::CommandBlockEdit,
+        "stone is not a command block — the screen must stay shut and the \
+         ordinary use path must run"
+    );
+    assert!(
+        app.nav.command_block().is_none(),
+        "and no widget state may be built"
+    );
+
+    // The other half of the fork: nothing targeted at all.
+    app.sim.set_ray_target_for_test(None);
+    app.try_use();
+    assert_ne!(
+        app.ui.screen(),
+        crate::menu::Screen::CommandBlockEdit,
+        "and a right-click on empty air must not open it either"
+    );
+}
