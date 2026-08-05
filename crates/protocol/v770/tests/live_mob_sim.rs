@@ -222,10 +222,38 @@ async fn a_real_client_observes_a_real_ai_ticked_mob_sim() {
         mob_ids.len(),
         "not every demo mob reached the client within 60s"
     );
+    // **Issue #457's wire assertion.** `seed_demo_mobs` used to be a hardcoded
+    // `minecraft:zombie` ring and this loop asserted exactly that. It now
+    // cycles `lodestone_server::DEMO_SPECIES`, whose first three entries are
+    // one per roster family, so `mob_count` of 3 must produce one of each.
+    //
+    // This is an assertion about the **streamed type id**, not merely that an
+    // entity arrived, even though it reads a name. `encode_add_entity_body`
+    // writes `entity_type_id(&key).unwrap_or(0)` and index 0 is
+    // `minecraft:acacia_boat`, so a species key that fails to resolve reaches
+    // the client as a boat and lands here as `"acacia_boat"`. The client folded
+    // these names *from* the ids on the wire — there is no other source for
+    // them — so `"cow"` here is `30` on the wire and nothing else.
+    let mut species: Vec<&str> = initial
+        .values()
+        .map(|view| view.entity_type.path())
+        .collect();
+    species.sort_unstable();
     for view in initial.values() {
         assert_eq!(view.entity_type.namespace(), "minecraft");
-        assert_eq!(view.entity_type.path(), "zombie");
+        assert_ne!(
+            view.entity_type.path(),
+            "acacia_boat",
+            "entity type 0 reached the client, which is what unwrap_or(0) \
+             streams for a species key entity_type_id could not resolve"
+        );
     }
+    assert_eq!(
+        species,
+        vec!["cow", "wolf", "zombie"],
+        "the first three DEMO_SPECIES entries must each reach the client; a \
+         result of [zombie, zombie, zombie] is the pre-#457 single-species ring"
+    );
 
     // Move: poll for *any* mob's client-folded position to diverge from its
     // spawn snapshot — proof this is a *ticking* simulation (`MobSim::tick`
