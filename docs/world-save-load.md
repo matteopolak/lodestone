@@ -145,19 +145,94 @@ Every control below was **run and observed**, not described:
   the marker matches nothing and reads as "the oracle returned no results" —
   indistinguishable from a broken write path.
 
+## Reaching a real session (issue #468)
+
+Everything above landed in #437 and reached **zero players**: the shell opened
+every singleplayer session through `open_in_memory_with_mobs`, the
+non-persistent constructor. That is this repo's dominant defect class — the
+island — one layer above the code, and no server-side gate can see it, because
+a server-side test constructs the persistent server itself.
+
+Three things had to change, and only the first is the one the issue named.
+
+### 1. The constructor swap, and the world directory
+
+`crates/lodestone-shell/src/saves.rs` is the shell's new concept of where a
+world lives. `Origin::Integrated` carries an `Option<PathBuf>`; `Some` selects
+`open_persistent_with_mobs`.
+
+**One implicit world, not a save list.** `saves::default_world_dir()` is
+`<data dir>/saves/world`, and every singleplayer session opens it. This is a
+product decision, argued in that module's own doc: a save list is what vanilla
+does and what the `CreateWorld` screen implies, but `world_select` renders one
+hardcoded row with disabled Edit/Delete buttons and pixel gates pinning that
+row, so a real list is a feature rather than a wiring fix. The honest cost is
+that **"Create New World" cannot create a second world** — it reopens the
+existing one, and the typed seed only takes effect on the very first launch.
+Nothing deletes a world.
+
+`min_y`/`height` are read off the source via `OverworldChunkSource::min_y`/
+`height` rather than written as `(-64, 384)` at the call site, because this
+module's own gotcha is that they must match the world the columns came from.
+
+### 2. The shutdown flush, which was a second island
+
+The shell called `IntegratedServer::trigger_shutdown()` — a fire-and-forget
+notify — and then dropped the handle, whose `Drop` **aborts** the tick and
+serving tasks. `save_now` lives in `shutdown()`, which nothing awaited. So even
+with the persistent constructor wired in, every edit since the last autosave
+tick would be lost on every quit. `net.rs` now `await`s `shutdown()`, which
+joins the serving and tick tasks *before* flushing, so an in-flight edit cannot
+be dropped between the last tick and the write. Quitting to the title blocks
+until the world is on disk; that is what vanilla's "Saving world" screen is.
+
+### 3. The seed — and it is **not** in `level.dat`
+
+#437's gap list said `level.dat`. That is right for 1.16.5 and **wrong for
+26.2**, which is the trap: a 26.2 `level.dat` contains no seed field at all.
+Verified by decompressing four real world folders with Python's stdlib `gzip`
+and hand-parsing the NBT with `struct.unpack`:
+
+| world | `level.dat` | `DataVersion` | seed inside it? |
+|---|---|---|---|
+| `.cache/mc/26.2/world` | 513 B | 4903 | **none** |
+| `.cache/mc/creative/world` | 517 B | 4903 | **none** |
+| `.cache/mc/survival/world` | 515 B | 4903 | **none** |
+| `.cache/mc/1.16.5/world` | 2719 B | 2586 | `Data.WorldGenSettings.seed` |
+
+26.2 moved it to **`<world>/data/minecraft/world_gen_settings.dat`**
+(`LevelStorageSource.writeWorldGenSettings` → `writeSavedData`, which wraps the
+codec output as `{ data: …, DataVersion: … }` and gzips it). Modelled by the new
+`lodestone_anvil::world_gen_settings`, and resolved at world open by
+`region_source::resolve_world_seed`.
+
+**The stored seed always wins.** A requested seed is a *creation* parameter; an
+existing world's own seed is authoritative, or reopening it would regenerate
+every unexplored chunk from different terrain — a world self-inconsistent
+exactly at the edge of where the player had been. Vanilla's own fallback when
+that file is unreadable is `WorldOptions.defaultWithRandomSeed()`, i.e. exactly
+this bug, which is why an unreadable-but-present file is an **error** here
+rather than a silent re-roll.
+
+### Gates
+
+`crates/lodestone-shell/tests/singleplayer_persistence.rs` drives
+`NetClient::open_singleplayer` — the shell path, not `IntegratedServer` — and
+mutates by sending a dig over the wire, so nothing can pass by consulting a
+world handle the product does not have. Both directions were controlled:
+forcing the in-memory constructor fails the block gate ("the session ended
+without writing any region file"), and bypassing `resolve_world_seed` fails the
+seed gate with the observed profile equal to the *requested* seed's terrain
+(all `62`) rather than the stored seed's (`69`/`70`).
+
 ## Gaps
 
 Named rather than left to be discovered:
 
-- **The shell does not use this yet.** `lodestone-shell/src/net.rs` still calls
-  `IntegratedServer::open_in_memory_with_mobs`, the non-persistent constructor,
-  so a real singleplayer session still does not save. Switching it to
-  `open_persistent_with_mobs` with a world directory is the remaining wire, and
-  it lives in a crate this work did not own.
-- **`level.dat` is not written or read.** `lodestone_anvil::level_dat` exists and
-  models `DataVersion`; nothing here calls it. The consequence is real: the
-  world seed is not persisted, so reopening a world with a different seed
-  regenerates different terrain outside the saved region files.
+- **There is one world, not a list.** See "One implicit world" above.
+- **`level.dat` itself is still neither written nor read.** Only
+  `world_gen_settings.dat` is. The world therefore has no stored name, spawn
+  point, game type, time of day or weather; all of those reset on reopen.
 - **Block entities, entities and scheduled ticks are not persisted.** The chunk
   NBT is written with empty `block_entities`, `block_ticks` and `fluid_ticks`
   lists. A furnace keeps its position but not its contents across a reopen.
@@ -168,8 +243,14 @@ Named rather than left to be discovered:
 
 ## Configuration
 
-- `world_dir` — passed to `IntegratedServer::open_persistent_with_mobs`.
-- `autosave` — a `Duration`, same call.
+- `world_dir` — passed to `IntegratedServer::open_persistent_with_mobs`. For a
+  real session it is `lodestone::saves::default_world_dir()`, i.e.
+  `<data dir>/saves/world`, so the `LODESTONE_DATA_DIR` environment variable
+  relocates saves along with `options.json` and `servers.json`.
+- `autosave` — a `Duration`, same call. The shell passes
+  `net::AUTOSAVE_INTERVAL`, 30 s. Far shorter than vanilla's 6000 ticks because
+  a save writes only the dirty set, off-thread: a player standing still writes
+  nothing. A clean quit does not depend on it, since `shutdown()` flushes.
 - Chunks are written with `CompressionScheme::Zlib`, vanilla's
   `RegionFileVersion.DEFAULT`.
 - `chunk_nbt::DATA_VERSION` is `4903`, read off a real 26.2 world.

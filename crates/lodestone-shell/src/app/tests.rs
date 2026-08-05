@@ -1661,7 +1661,11 @@ fn an_unnameable_physical_key_is_ignored_by_the_binding_chain() {
 fn pressing_play_reaches_a_running_integrated_server() {
     let protocol = Config::default().protocol;
     let seed = crate::menu::world_select::BUNDLED_WORLD.seed;
-    let net = match launch_singleplayer(protocol, 0, None, seed) {
+    // `None` world dir: this gate is about the seam reaching a running server,
+    // not about persistence (issue #468 gates that in
+    // `tests/singleplayer_persistence.rs`), and an in-memory world leaves
+    // nothing in the developer's real data directory.
+    let net = match launch_singleplayer(protocol, 0, None, seed, None) {
         Ok(net) => net,
         Err(e) => {
             // A build with no hostable family must *report*, which is the

@@ -47,6 +47,7 @@ pub mod overlay;
 pub mod particles;
 pub mod raycast;
 pub mod resources;
+pub mod saves;
 pub mod scoreboard;
 pub mod screenshot;
 pub mod sim;

@@ -94,6 +94,7 @@ pub mod compression;
 mod lz4_block;
 pub mod level_dat;
 pub mod region;
+pub mod world_gen_settings;
 
 pub use compression::CompressionScheme;
 
@@ -244,8 +245,25 @@ pub enum Error {
     /// `level.dat`'s root NBT compound had no `"Data"` field.
     #[error(r#"level.dat has no top-level "Data" compound"#)]
     MissingDataCompound,
-    /// `level.dat`'s `"Data"` compound had no `"DataVersion"` field, or it
-    /// was not an `Int`.
-    #[error(r#"level.dat's "Data" compound has no integer "DataVersion" field"#)]
+    /// A gzip-NBT world file had no `"DataVersion"` field where one was
+    /// expected, or it was not an `Int`. Raised by both [`level_dat`] (inside
+    /// its `"Data"` compound) and [`world_gen_settings`] (at the root, where
+    /// `NbtUtils.addCurrentDataVersion` puts it).
+    #[error(r#"no integer "DataVersion" field"#)]
     MissingDataVersion,
+
+    /// A [`world_gen_settings`] file's root had no lowercase `"data"`
+    /// compound — the wrapper `LevelStorageSource.writeSavedData` puts the
+    /// codec output under. Deliberately distinct from
+    /// [`Error::MissingDataCompound`], which is `level.dat`'s **capital**
+    /// `"Data"`; the two files really do differ in case, and conflating them
+    /// is the kind of thing that reads as a corrupt world.
+    #[error(r#"world_gen_settings.dat has no top-level "data" compound"#)]
+    MissingDataField,
+    /// A [`world_gen_settings`] file carried no numeric `"seed"`. For a world
+    /// this code wrote, that means the seed is unrecoverable and reopening
+    /// would silently regenerate unexplored chunks from a different one —
+    /// issue #468's whole subject, so it is an error rather than a default.
+    #[error(r#"world_gen_settings.dat has no numeric "seed" field"#)]
+    MissingSeed,
 }

@@ -303,7 +303,21 @@ impl WindowApp {
         let view_radius = i32::try_from(self.config.render_distance)
             .unwrap_or(i32::MAX)
             .saturating_add(1);
-        match launch_singleplayer(self.config.protocol, view_radius, session, seed) {
+        // Issue #468: singleplayer now opens **one implicit persistent world**
+        // rather than a fresh in-memory one per launch. The choice of "one
+        // world" over "a save list" is a product decision, argued in
+        // `crate::saves`' module doc — read that before adding a second world
+        // here. `seed` only takes effect if this world does not exist yet.
+        #[cfg(not(target_arch = "wasm32"))]
+        let world_dir = Some(crate::saves::default_world_dir());
+        match launch_singleplayer(
+            self.config.protocol,
+            view_radius,
+            session,
+            seed,
+            #[cfg(not(target_arch = "wasm32"))]
+            world_dir,
+        ) {
             Ok(net) => {
                 self.sim.attach_net(net);
                 self.install_session_render_sources();
