@@ -73,18 +73,19 @@ use lodestone_entity::ai::roster::{self, SpeciesContext};
 use lodestone_entity::ai::navigating_mob::{
     BABY_START_AGE, DEFAULT_FOLLOW_RANGE, PARENT_AGE_AFTER_BREEDING,
 };
+use lodestone_entity::ai::mob::EatenBlock;
 use lodestone_entity::ai::{Goal, GoalSelector, MobController, NavigatingMob};
 use lodestone_entity::attribute::default_attributes;
 use lodestone_entity::explosion::Aabb as ExplosionAabb;
 use lodestone_entity::item_entity::{ItemEntityRegistry, ItemLifecycle, ItemMotion};
-use lodestone_entity::pathfinding::{Aabb, MobShape, PathType, PathWorld};
+use lodestone_entity::pathfinding::{Aabb, BlockCues, MobShape, PathType, PathWorld};
 use lodestone_entity::projectile::{Projectile, ProjectileRegistry, TrackedProjectile};
 use lodestone_entity::{
     AttributeMap, DamageFlags, Defenses, HurtCooldown, HurtDecision, RayView, entity_damage,
     seen_percent,
 };
 use lodestone_model::PathType as CensusPathType;
-use lodestone_model::{Identifier, ResourceKey, Rotation, Vec3};
+use lodestone_model::{BlockPos, Identifier, ResourceKey, Rotation, Vec3};
 use uuid::Uuid;
 
 use crate::chunk::{AIR, ChunkColumn, ChunkSource};
@@ -367,6 +368,52 @@ impl PathWorld for ChunkWorld {
                 },
                 census_to_pathfinding_type,
             )
+    }
+
+    /// Block *identity*, which [`base_path_type`](PathWorld::base_path_type)
+    /// deliberately erases — `grass_block`, `dirt` and `stone` are one
+    /// `Blocked` there (issue #456).
+    ///
+    /// # The tag is read from the jar's own census, never hand-written
+    ///
+    /// `#minecraft:edible_for_sheep` is resolved through
+    /// [`lodestone_data::tool::block_tag_members`], which is generated from the
+    /// jar. That is not fastidiousness: the obvious hand-written
+    /// `short_grass | tall_grass` guess is **wrong in both directions**. The
+    /// real tag (`data/minecraft/tags/block/edible_for_sheep.json`) is
+    /// `short_grass`, `short_dry_grass`, `tall_dry_grass`, `fern` — so
+    /// `tall_grass` is not a member at all, and three members would have been
+    /// missing. A sheep would have refused to graze ferns and dry grass, and
+    /// nothing would have failed. This repo has been wrong about a hand-written
+    /// tag set twice before (`pig_food`/`chicken_food`).
+    ///
+    /// # Two id spaces, and mixing them is silent
+    ///
+    /// `block_tag_members` answers in **`minecraft:block` registry ids**, while
+    /// [`state_id`](ChunkWorld::state_id) yields **block-*state*** ids — a
+    /// 32,366-entry space against a ~1,100-entry one. Comparing one against the
+    /// other compiles, type-checks, and matches whatever unrelated blocks happen
+    /// to share those small integers. `tool::block_registry_id` is the bridge, so
+    /// the lookup is state → block → tag.
+    ///
+    /// `grass_block` stays block equality, because vanilla's test is equality
+    /// rather than a tag (`ai/goal/EatBlockGoal.java:34`, `:71`).
+    fn block_cues(&self, x: i32, y: i32, z: i32) -> BlockCues {
+        let state = self.block_state(x, y, z);
+        // `block_state` yields a full state string; strip the property list so
+        // `minecraft:short_grass[...]` compares as its block path.
+        let path = state.split('[').next().unwrap_or(state);
+        let edible_for_sheep = self
+            .state_id(x, y, z)
+            .and_then(lodestone_data::tool::block_registry_id)
+            .is_some_and(|block| {
+                lodestone_data::tool::block_tag_members("minecraft:edible_for_sheep")
+                    .is_some_and(|members| members.binary_search(&block).is_ok())
+            });
+        BlockCues {
+            edible_for_sheep,
+            grass_block: path == "minecraft:grass_block",
+        }
     }
 
     fn collision_top(&self, x: i32, y: i32, z: i32) -> f64 {
@@ -1328,6 +1375,19 @@ pub struct MobSim<'w> {
     /// for why draining, not just reading, is what keeps a detonation from
     /// being broadcast twice.
     pending_detonations: Vec<Detonation>,
+    /// Grazed blocks awaiting the driver's world mutation (issue #456), as
+    /// `(mob block position, which of the two blocks)`.
+    ///
+    /// The same handoff shape as [`pending_detonations`](Self::pending_detonations)
+    /// above, and for a stronger reason: this sim holds `world: &'w ChunkWorld`
+    /// **immutably**, so [`tick`](Self::tick) structurally *cannot* apply the
+    /// eat. Drained by [`take_grazes`](Self::take_grazes).
+    ///
+    /// Position is the mob's own block position, not the eaten block's, because
+    /// the two `EatenBlock` variants are relative to it: `AtFeet` is that cell,
+    /// `Below` is one down. Storing the mob's cell keeps the arithmetic with the
+    /// consumer that knows what each variant means.
+    pending_grazes: Vec<(BlockPos, EatenBlock)>,
     /// Every connected player's perception-relevant state, refreshed by a
     /// driver through [`set_players`](Self::set_players) and consumed by
     /// [`tick`](Self::tick) to feed each mob's `nearest_player`/`temptation`.
@@ -1379,6 +1439,7 @@ impl<'w> MobSim<'w> {
             next_id: 1,
             tick_count: 0,
             pending_detonations: Vec::new(),
+            pending_grazes: Vec::new(),
             players: Vec::new(),
         }
     }
@@ -1634,6 +1695,11 @@ impl<'w> MobSim<'w> {
         let mut hits: Vec<(Option<i32>, f32, Vec3)> = Vec::new();
         let mut detonations: Vec<(i32, Vec3)> = Vec::new();
         let mut bred: Vec<(i32, Vec3, ResourceKey)> = Vec::new();
+        // Issue #456: accumulated into a local and moved into
+        // `self.pending_grazes` after the loop, not pushed directly — `self` is
+        // mutably borrowed by `&mut self.mobs` for the whole loop, exactly as it
+        // is for `hits`/`detonations`/`bred`.
+        let mut grazes: Vec<(BlockPos, EatenBlock)> = Vec::new();
         for m in &mut self.mobs {
             // Vanilla ages `invulnerableTime`/`hurtTime` every tick regardless
             // of whether the mob was hit this tick.
@@ -1660,7 +1726,18 @@ impl<'w> MobSim<'w> {
             if m.mob.take_bred() {
                 bred.push((m.id, m.position(), m.entity_type().clone()));
             }
+            // Issue #456. The goal records *that* a block was eaten and which of
+            // the two positions it was; it cannot mutate the world, because this
+            // sim borrows `world: &'w ChunkWorld` immutably. So this takes the
+            // same route `pending_detonations` does — accumulate here, and let
+            // `crate::tick::run_tick_loop` (which owns mutable chunk access)
+            // apply it. `docs/plans/…`/#238's plan says "a `MobSim::tick` drain";
+            // that is not achievable as written, and this is why.
+            for what in m.mob.take_new_eaten() {
+                grazes.push((m.mob.block_position(), what));
+            }
         }
+        self.pending_grazes.extend(grazes);
         for (target_id, raw_damage, attacker_pos) in hits {
             if let Some(target_id) = target_id
                 && let Some(target) = self.mobs.iter_mut().find(|m| m.id == target_id)
@@ -1923,6 +2000,35 @@ impl<'w> MobSim<'w> {
     /// the next [`tick`](Self::tick) runs.
     pub fn take_detonations(&mut self) -> Vec<Detonation> {
         std::mem::take(&mut self.pending_detonations)
+    }
+
+    /// Drains every graze [`tick`](Self::tick) has recorded since the last call
+    /// (issue #456), as `(mob block position, which block)`.
+    ///
+    /// Drained rather than read for [`take_detonations`](Self::take_detonations)'
+    /// reason — a slow consumer must not apply the same eat twice — and it exists
+    /// at all because this sim cannot apply it itself: `world: &'w ChunkWorld` is
+    /// an immutable borrow.
+    ///
+    /// # What the consumer owes vanilla
+    ///
+    /// Per `ai/goal/EatBlockGoal.java:59-80`, with `mobGriefing` on:
+    ///
+    /// * [`EatenBlock::AtFeet`] → destroy the block at that cell, **no drops**
+    ///   (`destroyBlock(pos, false)`).
+    /// * [`EatenBlock::Below`] → set the cell one down to `minecraft:dirt`, plus
+    ///   level event `2001` for the break particles.
+    ///
+    /// And the part worth not re-deriving: vanilla calls `mob.ate()` **even when
+    /// `mobGriefing` suppresses the block change**, so the wool-regrowth effect
+    /// and the world mutation are separable — the gamerule check belongs on the
+    /// consumer, never in the goal.
+    ///
+    /// Nothing drains this yet, which is the honest state: #238's remaining half
+    /// is `Sheep.ate()`'s wool regrowth (`setSheared(false)` + `ageUp(60)`), which
+    /// is entity metadata on the wire.
+    pub fn take_grazes(&mut self) -> Vec<(BlockPos, EatenBlock)> {
+        std::mem::take(&mut self.pending_grazes)
     }
 
     /// The number of ticks advanced so far.
@@ -2903,6 +3009,218 @@ mod follow_range_tests {
              not the registry's 32.0. Acquiring here means `attr`'s registry \
              fallback is reaching the controller — the exact defect #455's brokered \
              patch would have left in place, since its `> 0.0` guard cannot fire"
+        );
+    }
+}
+
+/// Issue #456's host half: block-identity cues read from the jar's own tag
+/// census, and the graze handoff out of an immutably-borrowed world.
+#[cfg(test)]
+mod block_cues_tests {
+    use super::*;
+
+    /// The jar's real `#minecraft:edible_for_sheep` membership
+    /// (`data/minecraft/tags/block/edible_for_sheep.json`), transcribed here
+    /// **only as the expectation**. The implementation does not contain this
+    /// list — it resolves the tag through `lodestone_data::tool`, which is
+    /// generated from the jar — so this is an independent statement of the answer
+    /// rather than a restatement of the code under test.
+    const JAR_EDIBLE: &[&str] = &[
+        "minecraft:short_grass",
+        "minecraft:short_dry_grass",
+        "minecraft:tall_dry_grass",
+        "minecraft:fern",
+    ];
+
+    /// A single cell of `block` with air around it, at a fixed position.
+    fn world_of(block: &str) -> ChunkWorld {
+        let mut world = ChunkWorld::new(-64, 384);
+        world.set_block(0, 0, 0, block);
+        world
+    }
+
+    /// **The gate that a hand-written tag list fails.**
+    ///
+    /// Every member of the jar's tag must classify as edible. Three of the four
+    /// would have been missed by the obvious `short_grass | tall_grass` guess:
+    /// `short_dry_grass`, `tall_dry_grass` and `fern`. A sheep would have refused
+    /// to graze a fern, and no test in the tree would have said so.
+    #[test]
+    fn every_jar_tag_member_classifies_as_edible_for_sheep() {
+        for block in JAR_EDIBLE {
+            let world = world_of(block);
+            assert!(
+                world.block_cues(0, 0, 0).edible_for_sheep,
+                "{block} is in #minecraft:edible_for_sheep and must classify as edible — \
+                 a hand-written list missing it is exactly how this stays silently wrong"
+            );
+        }
+    }
+
+    /// **The other half of the same mistake: the guess's false positive.**
+    ///
+    /// `tall_grass` is *not* in `#minecraft:edible_for_sheep` — the jar tag has
+    /// four entries and that is not one of them. It is the block most likely to be
+    /// added by anyone writing the list from memory, and asserting only the
+    /// positives above would let it through.
+    #[test]
+    fn tall_grass_is_not_edible_for_sheep_despite_looking_like_it_should_be() {
+        let world = world_of("minecraft:tall_grass");
+        assert!(
+            !world.block_cues(0, 0, 0).edible_for_sheep,
+            "minecraft:tall_grass is absent from the jar's edible_for_sheep tag; \
+             classifying it as edible means the tag is being guessed, not read"
+        );
+    }
+
+    /// `grass_block` is the *equality* cue, not a tag member — vanilla tests it
+    /// with block equality (`ai/goal/EatBlockGoal.java:34`, `:71`). So it must set
+    /// `grass_block` and must **not** set `edible_for_sheep`: a sheep standing on
+    /// grass eats the block below, a sheep standing in short grass eats the block
+    /// at its feet, and conflating the two would make either mechanism fire in the
+    /// wrong place.
+    #[test]
+    fn grass_block_is_the_equality_cue_and_not_a_tag_member() {
+        let cues = world_of("minecraft:grass_block").block_cues(0, 0, 0);
+        assert!(cues.grass_block, "grass_block must set its own cue");
+        assert!(
+            !cues.edible_for_sheep,
+            "grass_block is not in the edible tag — the two cues are independent"
+        );
+    }
+
+    /// The negative control. Ordinary blocks and air must set neither cue,
+    /// otherwise the positives above are satisfied by a classifier that says yes
+    /// to everything.
+    #[test]
+    fn control_ordinary_blocks_set_no_cue_at_all() {
+        for block in ["minecraft:stone", "minecraft:dirt", "minecraft:oak_log"] {
+            let cues = world_of(block).block_cues(0, 0, 0);
+            assert!(
+                !cues.edible_for_sheep && !cues.grass_block,
+                "{block} must set no cue; a classifier that says yes to everything \
+                 passes every positive assertion above"
+            );
+        }
+    }
+
+    /// Property strings must not defeat the lookup: `block_state` yields a full
+    /// state string, so a cue keyed on the raw string would miss any block with
+    /// properties. `tall_dry_grass` is a real tag member *and* carries a
+    /// `half`/`facing`-style property list in some states, which is why this is a
+    /// distinct case rather than a restatement of the first test.
+    #[test]
+    fn a_state_with_properties_still_classifies() {
+        let mut world = ChunkWorld::new(-64, 384);
+        world.set_block(0, 0, 0, "minecraft:short_grass");
+        assert!(world.block_cues(0, 0, 0).edible_for_sheep);
+        // The `grass_block` arm goes through the same property strip.
+        world.set_block(0, 1, 0, "minecraft:grass_block[snowy=false]");
+        assert!(
+            world.block_cues(0, 1, 0).grass_block,
+            "a state with a property list must still match the equality cue — \
+             `block_state` returns the full string, properties included"
+        );
+    }
+
+    /// **The handoff gate.** A grazing mob's eat must survive `MobSim::tick` and
+    /// come out of [`MobSim::take_grazes`].
+    ///
+    /// The goal is installed directly rather than through the roster, because
+    /// `roster/passive.rs`'s sheep row is still `Registration::missing` — that flip
+    /// is #456's other brokered patch and is not this file. So this gate is about
+    /// the *handoff* (`take_new_eaten` → `pending_grazes` → `take_grazes`), which
+    /// is the half that lives here, and it will keep passing unchanged once the
+    /// roster row lands.
+    ///
+    /// It is deliberately **not** an assertion about the eat interval. That is
+    /// `lodestone-entity`'s `block_perception.rs` gate, which distinguishes 444
+    /// predicted eats from 286 — and which also recorded that a rate measured in a
+    /// mutating world measures grass scarcity instead. Nothing drains the world
+    /// here, so supply is infinite and the tick budget only has to make "at least
+    /// one eat" overwhelmingly likely: at the halved 1-in-500 adult interval,
+    /// 20,000 ticks puts the probability of zero at about e^-40.
+    #[test]
+    fn a_grazing_mob_hands_its_eat_to_the_driver() {
+        let mut world = ChunkWorld::new(-64, 384);
+        // Grass to stand on, short grass to stand in — so both cues are live and
+        // whichever arm fires, the handoff is exercised.
+        //
+        // Wide enough that `RandomStrollGoal` cannot walk the sheep off it in
+        // 20,000 ticks. That is not padding: at 5×5 the sheep reached the edge and
+        // grazed at (-2, 0, -2), and outside the patch there is no floor at all,
+        // so a narrower world tests falling rather than grazing.
+        for x in -24..=24 {
+            for z in -24..=24 {
+                world.set_block(x, -1, z, "minecraft:grass_block");
+                world.set_block(x, 0, z, "minecraft:short_grass");
+            }
+        }
+
+        let mut sim = MobSim::new(&world);
+        let id = sim
+            .spawn_species(
+                ResourceKey::from_str("minecraft:sheep").expect("valid key"),
+                Vec3::new(0.5, 0.0, 0.5),
+            )
+            .id();
+        sim.get_mut(id).expect("just spawned").add_goal(
+            5,
+            Box::new(lodestone_entity::ai::goals::EatBlockGoal::new()),
+        );
+
+        assert!(
+            sim.take_grazes().is_empty(),
+            "precondition: nothing is pending before any tick, so the assertion \
+             below cannot be satisfied by a stale entry"
+        );
+
+        let mut grazes = Vec::new();
+        for _ in 0..20_000 {
+            sim.tick();
+            grazes.extend(sim.take_grazes());
+            if !grazes.is_empty() {
+                break;
+            }
+        }
+
+        assert!(
+            !grazes.is_empty(),
+            "a sheep standing in short grass on a grass block must record an eat \
+             that reaches take_grazes; empty means the handoff is broken and #238 \
+             can never mutate the world"
+        );
+        // The recorded position must be the *mob's* cell, not the eaten block's —
+        // the consumer resolves `AtFeet` as that cell and `Below` as one down, so
+        // reporting the eaten cell would make the `Below` arm write dirt a block
+        // too low.
+        //
+        // **`y` is the whole assertion.** `x`/`z` are identical for both
+        // candidates, so they carry no information about which one this is; only
+        // the height distinguishes the mob's feet (`0`) from the grass block it
+        // stands on (`-1`). An earlier draft of this pinned the full triple to
+        // `(0, 0, 0)` and failed at `(-2, 0, -2)` — `RandomStrollGoal` had walked
+        // the sheep two blocks before it grazed, so that assertion was testing a
+        // false premise (that the mob holds still) rather than the handoff.
+        let (pos, _what) = grazes[0];
+        assert_eq!(
+            pos.y, 0,
+            "the handoff must carry the mob's own feet cell (y=0), not the grass \
+             block below it (y=-1) — the EatenBlock variants are relative to the mob"
+        );
+        assert!(
+            (-24..=24).contains(&pos.x) && (-24..=24).contains(&pos.z),
+            "the graze must be recorded somewhere on the prepared patch, got \
+             ({}, {}) — off-patch means the sheep grazed a cell with no grass",
+            pos.x,
+            pos.z
+        );
+
+        // Draining really drains: a second read must not re-report the same eat,
+        // or a slow consumer would apply it twice.
+        assert!(
+            sim.take_grazes().is_empty(),
+            "take_grazes must drain, not merely read"
         );
     }
 }
