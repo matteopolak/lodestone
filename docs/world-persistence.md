@@ -48,15 +48,18 @@ classic *named*-root form with an empty root name, not the nameless
 
 ## How to change it, and the gotchas
 
-- **Not wired into `lodestone-server`.** Nothing in the workspace calls
-  into this crate — a declared island, tracked on the standing ledger
-  ([#436](https://github.com/matteopolak/lodestone/issues/436)). The
-  wiring — hooking chunk load/save into `lodestone-server`'s (currently
-  nonexistent) chunk source, deciding the in-memory chunk schema an `Nbt`
-  tree maps to/from, and `level.dat` load/save on world open — is its own
-  issue, [#437](https://github.com/matteopolak/lodestone/issues/437). Land
-  that there; keep this crate free of a `lodestone-server` (or
-  `lodestone-world`, or any protocol crate) dependency.
+- **No longer an island** (issue
+  [#437](https://github.com/matteopolak/lodestone/issues/437), landed).
+  This crate had zero production callers — a declared island on the
+  standing ledger ([#436](https://github.com/matteopolak/lodestone/issues/436))
+  — until `lodestone-server`'s `region_source` became its first. The chunk
+  *schema* that #437 had to decide lives in `lodestone-server`'s
+  `chunk_nbt`, **not here**, and the separation below still holds.
+  See [`world-save-load.md`](./world-save-load.md) for the wiring, and for
+  what remains unwired (the shell still opens worlds through the
+  non-persistent constructor).
+  Keep this crate free of a `lodestone-server` (or `lodestone-world`, or
+  any protocol crate) dependency — it is depended *on*, never depends back.
 - **The container format and the chunk NBT schema are two different
   problems** (issue #298's own stated trap). Don't grow `region.rs` a
   dependency on chunk internals "for convenience" — that belongs in #437's
