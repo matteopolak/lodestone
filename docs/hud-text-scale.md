@@ -33,7 +33,7 @@ Note the horizontal centring is *not* a bug in vanilla despite looking like one:
 
 Two independent scale factors are in play in `HudGeometry::build_inner`, and they multiply:
 
-1. `crates/lodestone-shell/src/hud.rs:748` — `logical_canvas(gui_scale, width, height)` divides the **physical** framebuffer down by the resolved GUI scale (`menu/render.rs:3929-3935`). Every pixel constant below it is therefore already laid into vanilla's own GUI pixel unit. This is correct and is the fix for "the HUD draws half-size on Retina".
+1. `crates/lodestone-shell/src/hud.rs:748` — `logical_canvas(gui_scale, width, height)` divides the **physical** framebuffer down by the resolved GUI scale (`menu/render/measure.rs`, `logical_canvas`). Every pixel constant below it is therefore already laid into vanilla's own GUI pixel unit. This is correct and is the fix for "the HUD draws half-size on Retina".
 2. `crates/lodestone-shell/src/hud.rs:751` — `let scale = 2.0;`, a fixed "legibility factor" applied on top.
 
 The three draw sites then multiply vanilla's factor by that `scale`:
@@ -110,7 +110,7 @@ Adding a non-vanilla per-surface size option would be a parity divergence with n
 ## Dependencies
 
 * `crates/lodestone-shell/src/hud.rs` — `HudGeometry::build_inner`, the three draw sites, and the `scale` constant.
-* `crates/lodestone-shell/src/menu/render.rs` — `logical_canvas`, shared with the menu screens so the two cannot disagree.
+* `crates/lodestone-shell/src/menu/render/measure.rs` — `logical_canvas`, shared with the menu screens so the two cannot disagree. Still re-exported as `menu::render::logical_canvas`; only the file it lives in changed.
 * `crates/lodestone-shell/src/hud/item_icon.rs` — `ColourStream::rect`'s NDC mapping, which the gate inverts.
 * `crates/lodestone-shell/tests/hud_text_scale.rs` — the gate.
 * `docs/options-consumption-census.md` — the wider options picture, including the eight live chat options.
