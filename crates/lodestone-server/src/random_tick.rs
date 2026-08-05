@@ -737,6 +737,84 @@ fn wire_update_fan_out(pos: BlockPos) -> Vec<Notification> {
 ///
 /// Neighbours outside this column's 16×16 footprint are skipped — the same
 /// cross-chunk limitation `tick_grass_block`'s own spread already accepts.
+/// [`propagate_and_react`], preceded by the reaction the **placed block itself**
+/// owes (issue #465).
+///
+/// # Why this is a separate entry point and not a flag on the one above
+///
+/// `NeighborPropagator::propagate` issues notifications to the origin's six
+/// *neighbours* and never to the origin — faithfully, because it models
+/// `Level.updateNeighborsAt`, which does exactly that. Every existing caller of
+/// [`propagate_and_react`] is a *change* whose origin has already had its say
+/// (a drained scheduled tick has just run the block's own callback; a random
+/// tick has just mutated it), so the omission is correct there.
+///
+/// A **placement** is the one case where it is not. Vanilla splits the two
+/// halves across different callbacks, and the placed block's own half lives in
+/// `BlockBehaviour.setPlacedBy`, called from `BlockItem.place` — nowhere near
+/// the neighbour pass. Without it, placing a repeater into an already-powered
+/// line does nothing at all: the fan-out notifies the dust either side, neither
+/// dust changes power, no cascade reaches the repeater, and the repeater is
+/// never asked whether it should turn on.
+///
+/// # What the jar says, per family
+///
+/// | family | `setPlacedBy` | modelled here |
+/// |---|---|---|
+/// | repeater, comparator (`DiodeBlock:160-165`) | `if (shouldTurnOn) scheduleTick(pos, this, 1)` | yes |
+/// | redstone torch (`RedstoneTorchBlock`) | none — only `onPlace`'s neighbour notify | nothing to do |
+/// | observer (`ObserverBlock`) | none; its `onPlace:115-123` only *cancels* a stale pulse on a block it replaced, which cannot apply to a placement into air | nothing to do |
+///
+/// **The delay is 1, not `getDelay(state)`, and that is not a slip.** A
+/// repeater dropped into a live line lights one game tick later at *every* one
+/// of its four delay settings; the `2d` delay governs signal *changes* reaching
+/// an already-placed repeater, through `checkTickOnNeighbor`
+/// (`DiodeBlock:88-104`), which is a different callback with a different delay.
+/// `redstone_placement_gate` measures both and separates them, because reading
+/// `2d` here is the single most plausible wrong model of this function.
+pub(crate) fn react_at_placement(
+    column: &mut crate::chunk::ChunkColumn,
+    min_x: i32,
+    min_z: i32,
+    x: i32,
+    y: i32,
+    z: i32,
+    block_ticks: &mut ScheduledTickQueue<String>,
+    current_tick: u64,
+) -> Vec<RandomTickEvent> {
+    let tlx = x - min_x;
+    let tlz = z - min_z;
+    let in_column = (0..16).contains(&tlx)
+        && (0..16).contains(&tlz)
+        && y >= column.min_y
+        && y < column.min_y + column.height;
+    if in_column {
+        let state = column.block_state(tlx, y, tlz).to_string();
+        let pos = BlockPos::new(x, y, z);
+        let placed_kind = if redstone::is_repeater(&state) {
+            let facing = redstone::diode_facing(&state);
+            redstone_diode::repeater_should_turn_on(&redstone::make_lookup(column, min_x, min_z), pos, facing)
+                .then_some(redstone::TICK_REPEATER)
+        } else if redstone::is_comparator(&state) {
+            let facing = redstone::diode_facing(&state);
+            let input = redstone::input_signal(&redstone::make_lookup(column, min_x, min_z), pos, facing);
+            let side = redstone::alternate_signal(&redstone::make_lookup(column, min_x, min_z), pos, facing, false);
+            let subtract = redstone::comparator_mode_subtract(&state);
+            redstone_diode::comparator_should_turn_on(input, side, subtract).then_some(redstone::TICK_COMPARATOR)
+        } else {
+            None
+        };
+        if let Some(kind) = placed_kind {
+            if !block_ticks.has_scheduled((x, y, z), &kind.to_string()) {
+                // `level.scheduleTick(pos, this, 1)` — the three-argument
+                // overload, so `TickPriority.NORMAL`.
+                block_ticks.schedule((x, y, z), kind.to_string(), current_tick + 1, TickPriority::Normal);
+            }
+        }
+    }
+    propagate_and_react(column, min_x, min_z, x, y, z, block_ticks, current_tick)
+}
+
 pub(crate) fn propagate_and_react(
     column: &mut crate::chunk::ChunkColumn,
     min_x: i32,

@@ -132,6 +132,14 @@ mod redstone_observer;
 /// Test-only — it holds the oracle table and the gates, no production code.
 #[cfg(test)]
 mod redstone_oracle_gate;
+/// Issue #465's delayed half: a component a player mutates must flip at the
+/// tick the live 26.2 server flipped it, and the flip must reach the wire —
+/// driven through the real `tick::run_tick_loop` rather than through
+/// `propagate_and_react` directly, because "does anything drain the queue this
+/// schedules into" is exactly what the other two gates structurally cannot
+/// see. Test-only.
+#[cfg(test)]
+mod redstone_placement_gate;
 mod redstone_torch;
 mod redstone_wire;
 /// World persistence (issue #437). Native only: a browser singleplayer world
