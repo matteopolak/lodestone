@@ -217,43 +217,70 @@ exactly as `Screen.keyPressed`'s ordering requires.
 
 Each of these is a scope cut, not an oversight:
 
-- **No scrollbar.** The wheel and the keyboard both scroll the list (issue
-  #402, below), but there is no `widget/scroller` thumb drawn in the 6 px
-  gutter vanilla reserves for one. A player has no visual cue for how much
-  list is off-screen beyond the row outline reaching the band's edge.
-- **Scrolling is row-quantized, not vanilla's continuous pixel
-  `scrollAmount`.** This pipeline has no scissor — `server_row_visible` stands
-  in for one by skipping a row entirely rather than half-drawing it — so a
-  fractional-row scroll offset would paint a sliver of a row over the header
-  or the footer. `server_row_top`'s `scroll` parameter is therefore a row
-  count. One wheel notch moves one row (vanilla's own `scrollRate` is half an
-  item's height per notch, `itemHeight / 2` at `AbstractSelectionList.java:44`
-  — half a row has no meaning in a row-only model).
-  `AbstractSelectionList`'s scissored viewport and scrollbar are shared with
-  `Screen::WorldSelect`, which has exactly one row today and so has nothing to
-  scroll yet — see `world_select.rs`'s module doc.
+Two entries that used to be here are **done** and were removed rather than
+re-listed: the scrollbar (`render::draw_scrollbar`, see
+[`scrollable-list.md`](./scrollable-list.md)) and row-quantized scrolling
+(issue #445 — see the scrolling section below). `AbstractSelectionList`'s
+viewport and scrollbar are shared with `Screen::WorldSelect`, which has exactly
+one row today and so has nothing to scroll yet — see `world_select.rs`'s module
+doc.
 
-### Scrolling (issue #402)
+### Scrolling (issues #402, #445)
 
 The list scrolls, and the fix has two halves — the issue named both by name:
 
-- **The offset.** `MenuNav::server_scroll` is a row count. The keyboard
-  (`Up`/`Down` in `key_list`, and `swap_rows` after a reorder) keeps the
-  selection in view via `scroll_server_to_show`, which uses the
-  canvas-independent `render::server_list_window_rows` — rows guaranteed to
-  fit at `config::MIN_SCALED_HEIGHT`, the same trade `options::LIST_WINDOW_PX`
-  and `accounts::VISIBLE_ROWS` already make, for the same reason: a window
-  that ever *overestimates* what fits paints a row over the footer, where
+- **The offset.** `MenuNav::server_scroll` is a **pixel** amount (`f32`),
+  vanilla's `AbstractScrollArea.scrollAmount`. The keyboard (`Up`/`Down` in
+  `key_list`, and `swap_rows` after a reorder) keeps the selection in view via
+  `scroll_server_to_show`, which uses the canvas-independent
+  `render::server_list_window_rows` — rows guaranteed to fit at
+  `config::MIN_SCALED_HEIGHT`, the same trade `options::LIST_WINDOW_PX` and
+  `accounts::VISIBLE_ROWS` already make, for the same reason: a window that
+  ever *overestimates* what fits paints a row over the footer, where
   underestimating only leaves a larger canvas showing fewer rows than it
-  could. The mouse wheel (`MenuNav::scroll_server_list`, called from
-  `app.rs`'s `MouseWheel` handler) instead uses the *real* canvas height,
-  which it has at the moment it fires, through `render::server_list_max_scroll`
-  — vanilla's `AbstractScrollArea::maxScrollAmount` in rows. Because the two
-  clamps use different heights, keyboard-only navigation on a canvas taller
-  than `MIN_SCALED_HEIGHT` can leave the list scrolled further than the real
-  canvas needs — bounded (never negative, never past the list's end) and
+  could. The mouse wheel (`MenuNav::scroll_server_list`, called from `app.rs`'s
+  `MouseWheel` handler) instead uses the *real* canvas height, which it has at
+  the moment it fires, and delegates to `widget::ScrollList` through
+  `render::server_scroll_model` — so `scrollRate` and `setScrollAmount`'s clamp
+  come from the primitive rather than being restated. Because the two clamps
+  use different heights, keyboard-only navigation on a canvas taller than
+  `MIN_SCALED_HEIGHT` can leave the list scrolled further than the real canvas
+  needs — bounded (never negative, never past the list's end) and
   self-correcting the instant the wheel is used, since its dynamic clamp pulls
   the offset back down to what the real canvas actually requires.
+
+  **This was a `usize` row count until #445, and that was a player-reported
+  bug**: *"scrolling the server list should actually scroll — not jump by
+  increments of the height of a server entry."* One wheel notch is
+  `scrollY * scrollRate()` with `scrollRate = defaultEntryHeight / 2`
+  (`AbstractScrollArea.java:34`, `:141-142`;
+  `AbstractSelectionList.java:44` via `defaultSettings`), i.e. **exactly 18 px**
+  for a 36 px row — a value a row index cannot hold, so the list moved a whole
+  entry per notch. `app.rs`'s handler also collapsed `dy` to `±1`, destroying
+  the magnitude at the input; it now passes the real `dy` through, so a
+  trackpad's fractional `PixelDelta` moves proportionally.
+
+  Two things worth not re-deriving. **26.2 has no scroll animation** —
+  `smoothScroll`/`scrollAnimation`/`targetScroll` appear nowhere in
+  `client/gui` and `setScrollAmount` is an immediate `Mth.clamp` (`:67-69`), so
+  "smooth" is pixel granularity and nothing else; **do not add easing.** And
+  the *reason* row-quantization was correct when it landed has since expired:
+  the pipeline had no scissor, so a straddling row had to be dropped whole.
+  `Quads::with_clip` now cuts it, which is the precondition that made the pixel
+  offset safe. `server_row_visible`'s `index < scroll` early reject was removed
+  with it — at an 18 px offset, row 0 straddling the band is the *normal* case,
+  and rejecting it would drop a row at every intermediate scroll position.
+
+  Gated by `three_wheel_notches_land_on_fifty_four_pixels` (`menu/nav.rs`),
+  which predicts **54 px** rather than asserting a direction: 54 is not a
+  multiple of 36, so no row index can represent it. Its executed control,
+  `a_row_quantized_wheel_cannot_reach_the_predicted_offset`, runs the old model
+  and lands on 36 and 108. Neutering the real implementation to snap to whole
+  rows was observed to fail the gate at `left: 36.0, right: 18.0`, and to trip
+  the control's own "these must not agree" guard.
+  `the_scrollbar_and_the_rows_read_the_same_offset` asserts the thumb and the
+  rows read one value — `ServerEntryView::scroll` — since a thumb computed from
+  its own expression is how the two desynchronise.
 - **The hit test.** `ServerEntryView` now carries the frame's `scroll` on every
   row, and `row_rect` calls `server_row_visible` *before* answering a rect —
   so a row scrolled out of the band, or overflowing the footer, returns `None`
@@ -264,7 +291,7 @@ The list scrolls, and the fix has two halves — the issue named both by name:
   without it, "the off-window row returns `None`" would pass just as well
   against a detector that always returns `None`.
 
-Not persisted, and reset to `0` whenever Multiplayer is opened from the title
+Not persisted, and reset to `0.0` whenever Multiplayer is opened from the title
 — vanilla builds a fresh `JoinMultiplayerScreen` (`scrollAmount` starts at 0)
 every time.
 - **No LAN discovery**, so no `LANHeader` row and no `NetworkServerEntry`. That is

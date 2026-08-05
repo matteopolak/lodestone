@@ -117,10 +117,15 @@ Three options, three different depths of wiring:
   above `1.0` can cross several in one notch, rather than a threshold on the
   old fixed ±1 step) — see `app::tests::accumulate_scroll_*` for the exact
   scaled amounts and the direction-reversal reset. The multiplayer server
-  list's own `MouseWheel` arm (issue #402, `nav.scroll_server_list`) is a
-  separate, unscaled arm — one notch moves one row, per
-  `docs/server-list.md`'s scrolling section on why a fractional row has no
-  meaning in this pipeline's row-quantized model.
+  list's own `MouseWheel` arm (issues #402/#445, `nav.scroll_server_list`) is a
+  separate, unscaled arm — it passes `dy` straight through to
+  `widget::ScrollList::mouse_scrolled`, which moves vanilla's
+  `scrollRate = defaultEntryHeight / 2` (**18 px** for a 36 px row) per notch.
+  It needs no accumulator precisely *because* its offset is pixels: a fraction
+  of a notch is already a meaningful number of pixels, where `cycle_slot` takes
+  a discrete slot step and so must accumulate fractions until one is due. See
+  `docs/server-list.md`'s scrolling section — and note this bullet described the
+  arm as row-quantized until #445, which it no longer is.
 - **`invertMouseX`/`invertMouseY`** are wired end to end: `Sim` gained
   `invert_mouse_x`/`invert_mouse_y` fields and `Sim::set_mouse_invert`,
   pushed from `app.rs`'s `redraw()` (`nav.invert_mouse_x()`/`invert_mouse_y()`)

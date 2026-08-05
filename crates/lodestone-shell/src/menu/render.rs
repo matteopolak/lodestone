@@ -1344,7 +1344,12 @@ const SERVER_LIST_TOP_BUTTON_W: f32 = 100.0;
 const SERVER_LIST_LOWER_BUTTON_W: f32 = 74.0;
 /// The `itemHeight` the list is constructed with: the last argument of
 /// `new ServerSelectionList(…, 36)` (`:61-62`).
-const SERVER_LIST_ITEM_H: f32 = 36.0;
+///
+/// **Public because `MenuNav::scroll_server_to_show` needs it** (issue #445):
+/// with the scroll offset in pixels, the keyboard scroll-into-view path has to
+/// turn a row index into a pixel top, and a second copy of `36.0` in `nav.rs`
+/// is exactly how the draw and the hit-test drift apart.
+pub const SERVER_LIST_ITEM_H: f32 = 36.0;
 /// `ServerSelectionList.getRowWidth()` (`ServerSelectionList.java:139-141`) — a
 /// 305 px override of `AbstractSelectionList`'s 220.
 const SERVER_LIST_ROW_W: f32 = 305.0;
@@ -1604,28 +1609,28 @@ pub fn server_row_left(width: f32) -> f32 {
     (width * 0.5).floor() - (SERVER_LIST_ROW_W * 0.5).floor()
 }
 
-/// The top of list row `index`: `getFirstEntryY() + (index - scrollAmount) *
-/// itemHeight` (`AbstractSelectionList.java:143-150`), with `scrollAmount`
-/// quantized to whole rows (issue #402).
+/// The top of list row `index`: `getFirstEntryY() + index * itemHeight -
+/// scrollAmount` — `repositionEntries` (`AbstractSelectionList.java:993-996`).
 ///
-/// **Row-quantized rather than vanilla's continuous pixel `scrollAmount`.**
-/// Vanilla scissors the band, so a row can be half on-screen; this pipeline has
-/// no scissor (see [`server_row_visible`]), so a partially-clipped row would
-/// paint over the header or the footer instead of being cut. Skipping whole
-/// rows is the only offset this draw model can express safely — [`MenuNav`
-/// (`super::nav::MenuNav`)]'s `server_scroll` is therefore a row count, not a
-/// pixel amount, and this is where that count is turned back into pixels.
+/// **`scroll` is pixels, not rows (issue #445).** It was a row count when this
+/// landed for #402, for a reason that was true then and is not now: the pipeline
+/// had no scissor, so a straddling row would have painted over the header or the
+/// footer instead of being cut. `draw_server_entry` is wrapped in
+/// [`Quads::with_clip`] against the list's band now, so a partial row is clipped
+/// exactly as vanilla's `enableScissor` clips it — which is what lets this take
+/// the continuous offset vanilla's `scrollAmount` has always been. The player-
+/// visible consequence of the old model was one wheel notch jumping a whole 36 px
+/// entry; see `super::nav::MenuNav::server_scroll`.
 #[must_use]
-pub fn server_row_top(index: usize, scroll: usize) -> f32 {
-    server_list_block().content_top
-        + SERVER_LIST_FIRST_ENTRY_Y
-        + (index as f32 - scroll as f32) * SERVER_LIST_ITEM_H
+pub fn server_row_top(index: usize, scroll: f32) -> f32 {
+    server_list_block().content_top + SERVER_LIST_FIRST_ENTRY_Y + index as f32 * SERVER_LIST_ITEM_H
+        - scroll
 }
 
 /// The rect of list row `index` at a `width`-wide canvas, scrolled by `scroll`
-/// rows (issue #402).
+/// **pixels** (issues #402, #445).
 #[must_use]
-pub fn server_row_rect(index: usize, width: f32, scroll: usize) -> (f32, f32, f32, f32) {
+pub fn server_row_rect(index: usize, width: f32, scroll: f32) -> (f32, f32, f32, f32) {
     (
         server_row_left(width),
         server_row_top(index, scroll),
@@ -1639,7 +1644,7 @@ pub fn server_row_rect(index: usize, width: f32, scroll: usize) -> (f32, f32, f3
 /// (`AbstractSelectionList.java:477-506`). Everything an
 /// `OnlineServerEntry` draws is measured from this, not from the row.
 #[must_use]
-pub fn server_row_content_rect(index: usize, width: f32, scroll: usize) -> (f32, f32, f32, f32) {
+pub fn server_row_content_rect(index: usize, width: f32, scroll: f32) -> (f32, f32, f32, f32) {
     let (x, y, w, h) = server_row_rect(index, width, scroll);
     (
         x + SERVER_LIST_ENTRY_PADDING,
@@ -1650,26 +1655,28 @@ pub fn server_row_content_rect(index: usize, width: f32, scroll: usize) -> (f32,
 }
 
 /// Whether row `index` is inside the list's band on a `height`-tall canvas at
-/// `scroll` rows of offset — `extractListItems`' own visibility test,
+/// `scroll` **pixels** of offset — `extractListItems`' own visibility test,
 /// `child.getY() + child.getHeight() >= getY() && child.getY() <= getBottom()`
 /// (`AbstractSelectionList.java:346-352`).
 ///
-/// This stands in for vanilla's **scissor**, which this pipeline has no
-/// equivalent of: a row that would overflow into the footer is skipped entirely
-/// rather than half-drawn, and — as of #402 — a row scrolled above the band
-/// (`index < scroll`) is rejected outright rather than relying on the geometry
-/// producing a negative top that happens to fail the bottom check, which is
-/// what made the *old*, scroll-less version of this function look complete
-/// while `row_rect` still answered for a row it would never draw. `row_rect`
-/// now calls this too (through [`MenuRow::entry`]'s carried `scroll`), so a
-/// click can no longer land on a row that is not on screen — see
+/// `row_rect` calls this too (through [`MenuRow::entry`]'s carried `scroll`), so
+/// a click can no longer land on a row that is not on screen — see
 /// `docs/server-list.md`'s `hit_testing_matches_what_is_drawn_after_scrolling`
 /// for the executed control.
+///
+/// **The `index < scroll` early reject is gone (issue #445), and its removal is
+/// the point rather than a tidy-up.** With a row-quantized offset this function
+/// stood in for a scissor the pipeline did not have, so it rejected a row
+/// *partly* above the band outright rather than let it be half-drawn over the
+/// header. `draw_server_entry` runs inside [`Quads::with_clip`] now, so a
+/// straddling row is cut exactly as vanilla cuts it — and with a pixel offset a
+/// straddling row is the *normal* case, not an edge one: at `scroll = 18.0`, row
+/// 0 is half above the band and must still draw its visible half. Keeping the
+/// reject would have made every intermediate scroll position drop a row, which
+/// is a worse artefact than the 36 px stepping this replaced. The inclusive band
+/// test below is now the only gate, and it is vanilla's.
 #[must_use]
-pub fn server_row_visible(index: usize, height: f32, scroll: usize) -> bool {
-    if index < scroll {
-        return false;
-    }
+pub fn server_row_visible(index: usize, height: f32, scroll: f32) -> bool {
     let top = server_row_top(index, scroll);
     let list_top = server_list_block().content_top;
     let list_bottom = height - SERVER_LIST_FOOTER_H;
@@ -1691,19 +1698,51 @@ pub fn server_list_window_rows() -> usize {
     (band / SERVER_LIST_ITEM_H).floor().max(1.0) as usize
 }
 
-/// The largest legal `scroll` for `entry_count` rows at a `height`-tall canvas —
-/// vanilla's `AbstractScrollArea::maxScrollAmount`, `max(0, contentHeight -
-/// height)`, expressed in rows instead of pixels for [`server_row_top`]'s
-/// reason. Used by the mouse wheel (`MenuNav::scroll_server_list`), which knows
-/// the real canvas at the moment it fires — unlike keyboard scroll-into-view,
-/// which uses the canvas-independent [`server_list_window_rows`] instead.
+/// The multiplayer list's scroll model — a [`widget::ScrollList`] over
+/// `entry_count` rows in the band this screen's rows are actually placed in, or
+/// `None` when there is no band (an empty list, or a canvas too short to have
+/// one).
+///
+/// **This is the single expression the whole screen's scrolling derives from**
+/// (issue #445), and that is its entire reason to exist. `MenuNav`'s wheel
+/// handler drives `mouse_scrolled`/`set_scroll` through it, so the 18 px notch
+/// rate and `setScrollAmount`'s clamp come from the primitive rather than being
+/// restated; [`server_scroll_list`] rebuilds it per frame for the scrollbar; and
+/// [`server_row_top`] places the rows from the offset it produced. A thumb
+/// computed from a separate expression is how a bar and its rows desynchronise,
+/// which is the failure the pixel-offset conversion had to avoid.
+///
+/// Band and pitch are derived, never restated: `server_list_block().content_top`,
+/// [`SERVER_LIST_FOOTER_H`] and [`SERVER_LIST_ITEM_H`] are the same three values
+/// the draw uses.
 #[must_use]
-pub fn server_list_max_scroll(entry_count: usize, height: f32) -> usize {
-    let list_top = server_list_block().content_top;
-    let visible = ((height - SERVER_LIST_FOOTER_H - list_top) / SERVER_LIST_ITEM_H)
-        .floor()
-        .max(0.0) as usize;
-    entry_count.saturating_sub(visible)
+pub fn server_scroll_model(entry_count: usize, height: f32) -> Option<widget::ScrollList> {
+    if entry_count == 0 {
+        return None;
+    }
+    let top = server_list_block().content_top;
+    let band = height - SERVER_LIST_FOOTER_H - top;
+    if band <= 0.0 {
+        return None;
+    }
+    Some(widget::ScrollList::new(
+        SERVER_LIST_ITEM_H,
+        top,
+        band,
+        entry_count,
+    ))
+}
+
+/// The largest legal `scroll` for `entry_count` rows at a `height`-tall canvas,
+/// **in pixels** — vanilla's `AbstractScrollArea::maxScrollAmount`,
+/// `max(0, contentHeight - height)`.
+///
+/// Delegates to [`server_scroll_model`] rather than recomputing the band, so the
+/// clamp the wheel applies and the extent the scrollbar draws cannot disagree.
+/// `0.0` when the list does not scroll at all.
+#[must_use]
+pub fn server_list_max_scroll(entry_count: usize, height: f32) -> f32 {
+    server_scroll_model(entry_count, height).map_or(0.0, |l| l.max_scroll())
 }
 
 /// The favicon's rect in row `index` — the content origin, 32×32
@@ -1714,7 +1753,7 @@ pub fn server_list_max_scroll(entry_count: usize, height: f32) -> usize {
 /// rect the cursor is in, and a second copy of the arithmetic is how the
 /// highlighted quadrant and the acting quadrant drift apart.
 #[must_use]
-pub fn server_entry_icon_rect(index: usize, width: f32, scroll: usize) -> (f32, f32, f32, f32) {
+pub fn server_entry_icon_rect(index: usize, width: f32, scroll: f32) -> (f32, f32, f32, f32) {
     let (cx, cy, _, _) = server_row_content_rect(index, width, scroll);
     (cx, cy, SERVER_ENTRY_ICON, SERVER_ENTRY_ICON)
 }
@@ -1725,7 +1764,7 @@ pub fn server_entry_icon_rect(index: usize, width: f32, scroll: usize) -> (f32, 
 /// `statusIconX = getContentRight() - 10 - 5` (`ServerSelectionList.java:329`),
 /// at `getContentY()` — the icon is **not** vertically centred in the row.
 #[must_use]
-pub fn server_status_icon_rect(index: usize, width: f32, scroll: usize) -> (f32, f32, f32, f32) {
+pub fn server_status_icon_rect(index: usize, width: f32, scroll: f32) -> (f32, f32, f32, f32) {
     let (cx, cy, cw, _) = server_row_content_rect(index, width, scroll);
     (
         cx + cw - SERVER_STATUS_ICON_W - SERVER_ENTRY_SPACING,
@@ -2005,12 +2044,18 @@ pub struct ServerEntryView {
     pub can_move_up: bool,
     /// `index < servers.size() - 1` — the move-down guard (`:386`).
     pub can_move_down: bool,
-    /// The list's current scroll offset, in rows (issue #402). Denormalized
-    /// onto every entry (rather than added as a parameter to [`row_rect`] and
-    /// every render function it calls) so `row_rect` — which `app.rs`'s
-    /// hit-test reads too — can resolve a row's position and visibility from
-    /// the row alone, with no second plumbing path from `MenuNav` to the draw.
-    pub scroll: usize,
+    /// The list's current scroll offset, **in logical pixels** (issues #402,
+    /// #445). Denormalized onto every entry (rather than added as a parameter to
+    /// [`row_rect`] and every render function it calls) so `row_rect` — which
+    /// `app.rs`'s hit-test reads too — can resolve a row's position and
+    /// visibility from the row alone, with no second plumbing path from
+    /// `MenuNav` to the draw.
+    ///
+    /// **Pixels rather than rows since #445**, which is what makes the wheel
+    /// scroll by vanilla's 18 px half-entry instead of jumping a whole row. This
+    /// is also the value [`server_scroll_list`] hands the scrollbar, so the thumb
+    /// and the rows read the same number — see [`server_scroll_model`].
+    pub scroll: f32,
 }
 
 /// Everything one menu screen draws.
@@ -4904,46 +4949,38 @@ fn draw_account_entry(b: &mut Quads<'_>, rows: &[MenuRow], i: usize, width: f32,
 ///
 /// ## Why the frame is reconstructed rather than carried
 ///
-/// `MenuNav` does not own a `ScrollList` yet — its `server_scroll` is still the
-/// `usize` row counter — so this rebuilds the list's geometry per frame from the
-/// frame's own rows. Everything here is *derived*, never restated: the band comes
-/// from `server_list_block().content_top` and [`SERVER_LIST_FOOTER_H`], the pitch
-/// from [`SERVER_LIST_ITEM_H`], and the entry count from the rows themselves. So
-/// the bar cannot disagree with the rows about where the list is.
+/// `MenuNav` owns a bare `f32` offset rather than a whole `ScrollList` — the
+/// keyboard paths run with no canvas, so a resident list could not be kept sized
+/// — so this rebuilds the geometry per frame through [`server_scroll_model`],
+/// the *same* constructor `MenuNav::scroll_server_list` drives the wheel through.
+/// The entry count comes from the frame's own rows and the offset from
+/// `entry.scroll`, so the bar cannot disagree with the rows about where the list
+/// is.
 ///
-/// ## The offset is still row-quantized, and the bar shows it honestly
+/// ## The offset is pixels, and the thumb is continuous (issue #445)
 ///
-/// `entry.scroll` is a **row count**, converted here by multiplying by the row
-/// height. That makes the thumb move in 36 px steps rather than continuously —
-/// which is the *input* still being quantized, not the geometry. Making it
-/// continuous is a change to `MenuNav::server_scroll`'s type and to `app.rs`'s
-/// wheel handler, neither of which is this function's file; [`widget::ScrollList`]
-/// already holds the offset as `f32` and needs nothing further. Until then the bar
-/// is correct about extent and position and merely coarse about intermediate
-/// states, which is strictly better than no bar.
+/// `entry.scroll` is a **pixel** amount now, handed to `set_scroll` verbatim with
+/// no multiply — which is exactly what the thumb needs to move continuously, and
+/// what the rows are placed by in [`server_row_top`]. When this was a row count
+/// it was multiplied up here, and the thumb consequently stepped 36 px at a time:
+/// the geometry was already continuous, the *input* was not. There is now one
+/// number for both, which is the property that keeps them in sync — a thumb
+/// computed from its own expression is how these drift.
 fn server_scroll_list(
     frame: &MenuFrame<'_>,
     _width: f32,
     height: f32,
 ) -> Option<widget::ScrollList> {
     let mut count = 0usize;
-    let mut scroll_rows = 0usize;
+    let mut scroll_px = 0.0f32;
     for row in &frame.rows {
         if let Some(view) = row.entry.as_ref() {
             count += 1;
-            scroll_rows = view.scroll;
+            scroll_px = view.scroll;
         }
     }
-    if count == 0 {
-        return None;
-    }
-    let top = server_list_block().content_top;
-    let band = height - SERVER_LIST_FOOTER_H - top;
-    if band <= 0.0 {
-        return None;
-    }
-    let mut list = widget::ScrollList::new(SERVER_LIST_ITEM_H, top, band, count);
-    list.set_scroll(scroll_rows as f32 * SERVER_LIST_ITEM_H);
+    let mut list = server_scroll_model(count, height)?;
+    list.set_scroll(scroll_px);
     Some(list)
 }
 
@@ -6751,29 +6788,38 @@ mod tests {
         assert_eq!(SERVER_LIST_BUTTONS.len(), 7);
 
         // The rows, unscrolled.
-        assert_eq!(server_row_rect(0, V_W, 0), (275.0, 35.0, 305.0, 36.0));
+        assert_eq!(server_row_rect(0, V_W, 0.0), (275.0, 35.0, 305.0, 36.0));
         assert_eq!(
-            server_row_rect(1, V_W, 0),
+            server_row_rect(1, V_W, 0.0),
             (275.0, 71.0, 305.0, 36.0),
             "rows stack by itemHeight with no gap"
         );
         assert_eq!(
-            server_row_content_rect(0, V_W, 0),
+            server_row_content_rect(0, V_W, 0.0),
             (277.0, 37.0, 301.0, 32.0),
             "CONTENT_PADDING insets the entry by 2, and 36 - 4 is the icon's 32"
         );
-        assert_eq!(server_entry_icon_rect(0, V_W, 0), (277.0, 37.0, 32.0, 32.0));
+        assert_eq!(server_entry_icon_rect(0, V_W, 0.0), (277.0, 37.0, 32.0, 32.0));
         assert_eq!(
-            server_status_icon_rect(0, V_W, 0),
+            server_status_icon_rect(0, V_W, 0.0),
             (563.0, 37.0, 10.0, 8.0),
             "contentRight - 10 - 5, at contentY"
         );
-        // A scroll of 1 shifts every row up by one `itemHeight` (#402): row 1
-        // at scroll 0 lands exactly where row 0 sits at scroll 1.
+        // A scroll of one whole row shifts every row up by one `itemHeight`
+        // (#402): row 1 at scroll 0 lands exactly where row 0 sits at scroll 36.
         assert_eq!(
-            server_row_rect(1, V_W, 1),
-            server_row_rect(0, V_W, 0),
+            server_row_rect(1, V_W, SERVER_LIST_ITEM_H),
+            server_row_rect(0, V_W, 0.0),
             "scrolling by one row is the same shift as re-indexing by one row"
+        );
+        // #445: and a *half*-row scroll is expressible at all, which is the whole
+        // conversion. 18 px is one wheel notch; the row lands 18 px above where
+        // it started, not a whole entry above it and not nowhere.
+        assert_eq!(
+            server_row_top(0, SERVER_LIST_ITEM_H / 2.0),
+            server_row_top(0, 0.0) - 18.0,
+            "a one-notch offset moves the row by 18 px — the value a row index \
+             could not represent"
         );
         // `getRowLeft()` is not `(width - rowWidth) / 2`, and the difference shows
         // at an odd canvas: 855/2 = 427 either way here, 856 is where they split.
@@ -6914,10 +6960,10 @@ mod tests {
         assert_eq!(dim_at(&f), None, "no cursor must mean no hover overlay");
 
         // Row 0, then row 1: the same overlay, one `itemHeight` lower.
-        let icon0 = server_entry_icon_rect(0, V_W, 0);
+        let icon0 = server_entry_icon_rect(0, V_W, 0.0);
         f.cursor = Some((icon0.0 + 4.0, icon0.1 + 4.0));
         is(dim_at(&f), icon0, "row 0's icon");
-        let icon1 = server_entry_icon_rect(1, V_W, 0);
+        let icon1 = server_entry_icon_rect(1, V_W, 0.0);
         f.cursor = Some((icon1.0 + 4.0, icon1.1 + 20.0));
         is(dim_at(&f), icon1, "row 1's icon");
         assert_eq!(
@@ -7070,7 +7116,7 @@ mod tests {
         }
 
         // Row 1 of three, so both move arrows apply.
-        let (ix, iy, iw, ih) = server_entry_icon_rect(1, V_W, 0);
+        let (ix, iy, iw, ih) = server_entry_icon_rect(1, V_W, 0.0);
         let cases = [
             // (cursor, which of the three is highlighted)
             ((ix + iw * 0.75, iy + ih * 0.5), 0usize),
@@ -7106,7 +7152,7 @@ mod tests {
 
         // Row 0 has nowhere to move up to, so its arrow must not be drawn at all —
         // vanilla's `if (index > 0)` guard (`ServerSelectionList.java:375`).
-        let (ix0, iy0, iw0, ih0) = server_entry_icon_rect(0, V_W, 0);
+        let (ix0, iy0, iw0, ih0) = server_entry_icon_rect(0, V_W, 0.0);
         f.cursor = Some((ix0 + 4.0, iy0 + 4.0));
         let sprite = build(&f, Some(&atlas), None, V_W, V_H).sprite;
         let up = region(SERVER_MOVE_UP_SPRITES.0);
@@ -7200,7 +7246,7 @@ mod tests {
 
         // 400 ms is the middle bucket. Asserted at the status icon's own rect, so
         // this is both "the right sprite" and "in the right place".
-        let rect = server_status_icon_rect(0, V_W, 0);
+        let rect = server_status_icon_rect(0, V_W, 0.0);
         let uvs = uvs_in_dest(&stream, V_W, V_H, rect);
         assert!(!uvs.is_empty(), "no status sprite at {rect:?}");
         let (min, max) = sprite_uv_bounds(&atlas, PING_SPRITES[2]);

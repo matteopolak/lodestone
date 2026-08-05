@@ -173,14 +173,22 @@ scrollbar colours".
 | scrollbar on the server list | **done** — `render::draw_scrollbar` |
 | hover must not focus (accounts) | **done** — `accounts::AccountsNav::hover` |
 | both screens share one primitive | **partly** — the geometry is shared; the two screens still own their offsets |
-| pixel-granular ("smooth") scrolling | **not yet at the input** |
+| pixel-granular ("smooth") scrolling | **done for the server list** (#445) — still row-indexed on the accounts screen |
 
-The last row is the honest gap. `ScrollList` holds the offset as `f32` and the
-scrollbar geometry is continuous, but `MenuNav::server_scroll` is still a `usize` and
-`app.rs`'s wheel handler still converts a notch into one row, so the thumb steps in
-36 px increments. Finishing it is a type change in `menu/nav.rs` plus a handler change
-in `app.rs` — neither of which is `widget.rs` or `render.rs`, which is why it is a
-separate change rather than a half-applied one.
+That last row is now the honest gap, and it is narrower than it was.
+`MenuNav::server_scroll` is an `f32` pixel offset and `app.rs`'s wheel handler
+passes the real `dy` through to `ScrollList::mouse_scrolled`, so the server list
+moves vanilla's 18 px per notch and the thumb is continuous — see
+[`server-list.md`](./server-list.md)'s scrolling section for the gates and the
+observed control.
+
+**`accounts::State::scroll` is still a `usize` row index**, deliberately. It was
+checked rather than assumed while #445's input half landed: the accounts screen
+has **no mouse-wheel arm at all** in `app.rs`, so its offset only ever moves by
+whole rows anyway (`scroll_to_show`, driven by keyboard cursor-follow), and
+converting the field alone would change no pixel while touching a file outside
+that change's ownership. The conversion belongs with wiring a wheel arm for that
+screen, not before it — see the adoption audit below.
 
 ## Adoption audit — the other list screens
 

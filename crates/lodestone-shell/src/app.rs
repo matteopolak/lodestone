@@ -2519,6 +2519,31 @@ impl WindowApp {
             // costs nothing. `UiState` stays on `Screen::Death` until
             // `net::NetUpdate::Respawned` arrives; see `drive_ui_from_session`.
             MenuAction::Respawn => self.sim.respawn(),
+            // The command-block screen's Done button (issue #47):
+            // `populateAndSendPacket` (`CommandBlockEditScreen.java:96-114`).
+            //
+            // `into_action` is the one step `MenuAction`'s `Eq` derive cannot
+            // cross — `ClientAction` holds a float in a sibling variant, so
+            // `nav.rs` carries the `Eq`-able `CommandBlockSubmit` and rebuilds
+            // the real action here. See `command_block::CommandBlockSubmit`.
+            //
+            // Goes out through `Sim`'s own `NetClient`, not a `Sim` method:
+            // there is no `Sim::set_command_block` to add, and unlike
+            // `Sim::respawn` there is no state-dependent guard to enforce (a
+            // command block edit is unconditional — the server validates op
+            // level). `Sim::net()` is `None` off a live session, so this is a
+            // no-op in single-player-menu or pre-join states rather than a
+            // panic.
+            //
+            // **This makes the screen submit; it does not make it reachable.**
+            // Nothing opens `Screen::CommandBlock` from a real interaction yet —
+            // no command-block block-entity NBT decode, no `interact.rs`
+            // trigger. That is issue #442, deliberately not fixed here.
+            MenuAction::SetCommandBlock(submit) => {
+                if let Some(net) = self.sim.net() {
+                    net.send_action(submit.into_action());
+                }
+            }
         }
     }
 
@@ -3938,15 +3963,32 @@ impl ApplicationHandler for WindowApp {
                     self.sim.cycle_slot(-step);
                 }
             }
-            // The multiplayer server list (issue #402): one notch moves one
-            // row, matching this pipeline's row-quantized scroll model (see
-            // `docs/server-list.md`'s scrolling section on why a fractional
-            // row has no meaning here) — deliberately not run through
-            // `accumulate_scroll`, which exists only for the hotbar's
-            // sub-notch case. Needs the *real* canvas height, which this
-            // handler has via `RenderTarget::size` and `gui_scale`, unlike
-            // keyboard scroll-into-view which uses the canvas-independent
-            // window estimate (see `MenuNav::scroll_server_list`'s doc).
+            // The multiplayer server list (issues #402, #445): the notch count
+            // goes through **verbatim**, as vanilla's `scrollY`, and
+            // `MenuNav::scroll_server_list` turns it into
+            // `scrollY * scrollRate()` pixels — 18 px for a 36 px row
+            // (`AbstractScrollArea.java:34`, `AbstractSelectionList.java:44`).
+            //
+            // **This used to collapse `dy` to `-1`/`0`/`+1` rows**, and that was
+            // the owner's bug report: a list that jumps a whole 36 px entry per
+            // notch instead of scrolling. The information was destroyed here, at
+            // the input, not in the geometry — a row index cannot represent the
+            // half-entry position vanilla lands on, so no amount of work
+            // downstream could have recovered it. Passing the real `dy` also
+            // makes a trackpad's fractional `PixelDelta` move proportionally
+            // rather than snapping to a whole row.
+            //
+            // Deliberately not run through `accumulate_scroll`, which exists for
+            // the hotbar's sub-notch *quantization* — the opposite problem:
+            // `cycle_slot` takes a discrete slot step, so it has to accumulate
+            // fractions until one whole step is due. A pixel offset needs no
+            // accumulator, because a fraction of a notch is already a meaningful
+            // number of pixels.
+            //
+            // Needs the *real* canvas height, which this handler has via
+            // `RenderTarget::size` and `gui_scale`, unlike keyboard
+            // scroll-into-view which uses the canvas-independent window estimate
+            // (see `MenuNav::scroll_server_list`'s doc).
             WindowEvent::MouseWheel { delta, .. }
                 if self.ui.screen() == crate::menu::Screen::ServerList =>
             {
@@ -3954,19 +3996,12 @@ impl ApplicationHandler for WindowApp {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => f64::from(y),
                     winit::event::MouseScrollDelta::PixelDelta(p) => p.y,
                 };
-                let rows = if dy > 0.0 {
-                    -1
-                } else if dy < 0.0 {
-                    1
-                } else {
-                    0
-                };
-                if rows != 0
+                if dy != 0.0
                     && let Some((fb_w, fb_h)) = self.target.as_ref().map(RenderTarget::size)
                 {
                     let (_, canvas_h) =
                         crate::menu::render::logical_canvas(self.nav.gui_scale(), fb_w, fb_h);
-                    self.nav.scroll_server_list(rows, canvas_h);
+                    self.nav.scroll_server_list(dy as f32, canvas_h);
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -4352,6 +4387,156 @@ mod tests {
     fn java_string_hash_code_matches_the_known_constant() {
         assert_eq!(java_string_hash_code("hello"), 99_162_322);
         assert_eq!(java_string_hash_code(""), 0);
+    }
+
+    /// **Issue #47's queued patch, exercised through production code.**
+    ///
+    /// The command-block screen's Done button computed a fully-tested payload
+    /// and **dropped it on the floor** — `activate_command_block_row`'s `Done`
+    /// arm bound it to `let _submit` because `MenuAction` had no variant to
+    /// carry it and `app.rs` had no arm to consume it. This drives the whole
+    /// chain rather than re-asserting either half: the real
+    /// [`crate::menu::nav::MenuNav::key`] on the real `Done` row produces the
+    /// action, the real [`WindowApp::apply_menu_action`] consumes it, and the
+    /// `ClientAction` is read off the socket seam a live session would write to.
+    ///
+    /// **The expected value is predicted, not round-tripped.** Every field is
+    /// stated from the edits made below (a typed command, a cycled mode, two
+    /// toggles) rather than from `to_submit()`'s own output, so a payload that
+    /// dropped or transposed a field fails here — `decode(encode(x)) == x` would
+    /// not.
+    ///
+    /// **Negative control, executed:** deleting the
+    /// `MenuAction::SetCommandBlock` arm from `apply_menu_action` (replacing it
+    /// with `{}`) makes this fail at `try_recv`, `Err(Empty)` — nothing reaches
+    /// the socket. That is the island this patch closes, and it is invisible to
+    /// `cargo check`: an arm that matches and does nothing compiles perfectly.
+    ///
+    /// Reachability is a **separate** and still-open matter: nothing opens this
+    /// screen from a real interaction (no command-block block-entity NBT decode,
+    /// no `interact.rs` trigger), which is issue #442. This test opens it
+    /// directly, exactly as `MenuNav::open_command_block` is written to allow.
+    #[test]
+    fn the_command_block_done_button_sends_a_real_set_command_block_action() {
+        use crate::menu::command_block::{CommandBlockOpen, CommandBlockRow, COMMAND_BLOCK_ROWS};
+        use crate::menu::nav::MenuKey;
+        use lodestone_model::{BlockPos, CommandBlockMode};
+
+        let mut app = WindowApp::new(Config {
+            mode: Mode::Headless,
+            ..Config::default()
+        });
+        let (net, actions, _feed) = NetClient::loopback_with_feed();
+        app.sim.attach_net(net);
+
+        // `MenuNav::open_command_block` and `UiState::open_command_block` both
+        // guard on `Screen::Playing` (a command block is opened from the world,
+        // not from a menu), so reach that first — `enter_dev_world` is the
+        // headless entry point's own route to it.
+        app.ui.enter_dev_world();
+
+        // Open the screen on a specific block with known stored contents, then
+        // *edit* it — an unedited screen would let a `to_submit` that returned
+        // `CommandBlockOpen`'s values verbatim pass.
+        let pos = BlockPos::new(12, -7, 340);
+        app.nav.open_command_block(
+            &mut app.ui,
+            CommandBlockOpen {
+                pos,
+                command: "say hi".into(),
+                track_output: false,
+                previous_output: None,
+                mode: CommandBlockMode::Redstone,
+                conditional: false,
+                automatic: false,
+            },
+        );
+        assert_eq!(
+            app.ui.screen(),
+            crate::menu::Screen::CommandBlockEdit,
+            "precondition: the screen must actually be open, or every key below \
+             lands somewhere else"
+        );
+
+        // Type into the command field, through the real key path.
+        for ch in "!".chars() {
+            let action = app.nav.key(&mut app.ui, MenuKey::Char(ch));
+            app.apply_menu_action(action);
+        }
+        // Cycle the mode once (Redstone -> its successor) and flip two toggles,
+        // each by activating that row the way a click or Enter does.
+        for row in [
+            CommandBlockRow::Mode,
+            CommandBlockRow::TrackOutput,
+            CommandBlockRow::Conditional,
+        ] {
+            let idx = COMMAND_BLOCK_ROWS
+                .iter()
+                .position(|r| *r == row)
+                .expect("every CommandBlockRow is in COMMAND_BLOCK_ROWS");
+            let action = app.nav.click(&mut app.ui, idx);
+            app.apply_menu_action(action);
+        }
+
+        // Read the mode the cycle actually produced from the screen itself, so
+        // this test does not hardcode `next_mode`'s table (which has its own
+        // gate in `command_block.rs`) — but every *other* field is predicted.
+        let expected_mode = app
+            .nav
+            .command_block()
+            .expect("the screen is still open")
+            .mode;
+        assert_ne!(
+            expected_mode,
+            CommandBlockMode::Redstone,
+            "precondition: cycling the mode must have changed it, or this field \
+             is not under test"
+        );
+
+        // Nothing may have reached the socket yet — the control for the
+        // assertion below, and it is not vacuous: the toggle rows above all
+        // return `MenuAction::None`, so a `_ =>` arm that sent something for
+        // every action would be caught here.
+        assert!(
+            actions.try_recv().is_err(),
+            "no action may be sent before Done is pressed"
+        );
+
+        // Press Done.
+        let done = COMMAND_BLOCK_ROWS
+            .iter()
+            .position(|r| *r == CommandBlockRow::Done)
+            .expect("Done is a CommandBlockRow");
+        let action = app.nav.click(&mut app.ui, done);
+        assert!(
+            matches!(action, crate::menu::nav::MenuAction::SetCommandBlock(_)),
+            "the Done row must produce the action, not swallow it: {action:?}"
+        );
+        app.apply_menu_action(action);
+
+        // And it reached the wire, with exactly the edited payload.
+        let sent = actions
+            .try_recv()
+            .expect("Done must put a ClientAction on the outbound seam");
+        assert_eq!(
+            sent,
+            lodestone_model::ClientAction::SetCommandBlock {
+                pos,
+                command: "say hi!".into(),
+                mode: expected_mode,
+                track_output: true,
+                conditional: true,
+                automatic: false,
+            },
+            "the action must carry the screen's edits, field for field"
+        );
+
+        // Vanilla closes after sending (`CommandBlockEditScreen.java:111-114`).
+        assert_ne!(
+            app.ui.screen(),
+            crate::menu::Screen::CommandBlockEdit,
+            "Done sends and then closes"
+        );
     }
 
     /// `WorldOptions.parseSeed` (issue #190): a valid `i64` literal is used
