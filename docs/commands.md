@@ -34,13 +34,74 @@ clientbound id 15). Both route `SHELL` in `event::route` — the same shape as
 `BiomeRegistryNames`: a registry-generation table with one obvious consumer
 and no per-entity/per-session scalar to fold.
 
-**This crate cannot decode the packet bytes itself.** `crates/protocol/**` is
-owned by a different session (input-verb actions were in flight there while
-this landed), so the actual `if packet_id == play::clientbound::COMMANDS`
-adapter arm — and the matching arm for `COMMAND_SUGGESTIONS` — is a **named
-follow-up**, not built here. What exists is everything the arm needs to
-construct: `CommandTree::new(nodes, root)` takes exactly
-`ClientboundCommandsPacket`'s own `(entries, rootIndex)` shape, index-for-index.
+`lodestone-model` cannot decode the packet bytes itself — it has no protocol
+dependency by design. The decode lives in `crates/protocol/v770/src/adapter.rs`
+(issue #470), which is the only family that implements it:
+
+- `decode_command_tree` reads `ClientboundCommandsPacket`'s private constructor
+  order — **the node list first, the root index last** — and each node as
+  `readNode` writes it: a flags byte, a VarInt child-index array, the redirect
+  index only when `FLAG_REDIRECT` (`0x08`) is set, then the type-dependent stub.
+- `read_argument_parser` reads the thirteen payload-carrying
+  `ArgumentTypeInfo`s. Everything else is a `SingletonArgumentInfo` whose
+  `deserializeFromNetwork` consumes nothing, so falling through to
+  `ArgumentParser::from_registry_id_no_payload` reads zero bytes and is correct
+  rather than a guess.
+- `decode_command_suggestions` reads three VarInts then a list of
+  `(String, Optional<Component>)`.
+
+**The unknown-parser rule is a deliberate divergence from vanilla, and it is
+the safer one.** `ClientboundCommandsPacket.read` bails out of the *whole node*
+the moment `BuiltInRegistries.COMMAND_ARGUMENT_TYPE.byId` returns `null` — after
+consuming the name and id, but without consuming the payload or the
+custom-suggestions id — which leaves its own reader mid-node and corrupts every
+entry that follows. We instead assume "no payload" (true for 44 of the 57 ids),
+still consume the custom-suggestions id when the flag claims one, and mark the
+node `NodeKind::Unrecognized { parser_id }`. A datapack or mod argument type we
+do not model therefore costs one unusable node instead of the entire tree.
+
+### Why the gates use captured server bytes
+
+The tree is a self-describing, variable-length node stream with **no per-node
+length prefix**, so a single wrong payload width does not error — it silently
+reinterprets every following node. `decode(encode(x)) == x` is worthless here:
+two symmetric misunderstandings satisfy it.
+
+So `crates/protocol/v770/tests/live_command_tree.rs` (feature `live-commands`,
+`#[ignore]`d) captures the real thing from the flat creative oracle and checks
+it in under `tests/fixtures/`:
+
+| fixture | what it is |
+|---|---|
+| `command_tree_creative.hex` | a real 26.2 server's `minecraft:commands` payload — 30 248 bytes, 2 017 nodes |
+| `command_suggestions_gamemode.hex` | that same server's reply to a real serverbound `command_suggestion` for `/gamemode ` |
+
+`Reader::ensure_empty` landing exactly on the last byte of a 30 kB, 2 000-node
+walk is the end-to-end evidence that every payload width is right. Measured
+control: making `minecraft:time` read one spurious leading flags byte desyncs
+the stream immediately and the decode fails with a half-eaten identifier
+(`invalid command suggestions provider key inecraft:ask_server`).
+
+The `command_tree_creative.hex` fixture is **not byte-stable** across captures —
+`enumerateNodes` orders nodes by a BFS over a hash map, and the joining player's
+permission level decides which nodes are sent at all. The hermetic siblings
+therefore assert structure and completion behaviour, never a byte count.
+
+### The completion gate, and why it is not in the protocol crate
+
+`crates/lodestone-shell/tests/command_tree_completion.rs` is the gate that
+matters: a tree can decode perfectly, every wire link green, and still yield no
+suggestions — the connected-wire-carrying-a-wrong-value failure
+`cargo xtask connectedness` structurally cannot see. It lives in the shell
+because that is the only crate linking both `lodestone_registry::adapter_for_protocol`
+(the same call the live client makes) and `chat::complete`.
+
+Its expected values come from **outside this tree**: the same live session that
+captured the tree also asked the server for `/gamemode ` suggestions and got
+`start=10 length=0 texts=["adventure", "creative", "spectator", "survival"]`.
+`complete()` must independently produce that exact list, in that order, by
+walking the tree and applying `GameType`'s own value set — two different
+mechanisms landing on the same four strings.
 
 ### The chat-box engine — `lodestone_shell::chat`
 
@@ -73,6 +134,27 @@ is `HighlightKind::Unparsed`, and `complete` offers nothing past that point.
 - `Completion::None` — not a command, a prior token already failed, or the
   current position has no reachable children.
 
+**The trailing space is data, not whitespace.** A token that runs all the way
+to the cursor with no space after it is *still being typed*, so completion is
+offered by its **parent**, filtered by the token as a prefix — `parse_line`
+returns via `still_typing` rather than advancing into the matched node. This is
+vanilla's behaviour, not a simplification:
+`CommandContextBuilder.findSuggestionContext(cursor)` only takes its
+`range.getEnd() < cursor` branch when the cursor is strictly *past* the parsed
+range; sitting exactly on the end it returns
+`SuggestionContext(prev, nodeRange.getStart())`. So `/gamemode` suggests
+`gamemode`, and only `/gamemode ` suggests the four game modes.
+
+Getting this wrong is silent, and it was: the walker advanced into the matched
+node, which made every fully-typed command name complete to its own arguments
+and stopped any half-typed name completing to itself. It was invisible to the
+hermetic unit tests because every one of them completes a line ending in a
+space; the real-server gate found it on the first run. It is the same class of
+defect as a `canonicalize` that `.trim()`s the line. Gated by
+`command_tree_completion.rs`'s
+`a_trailing_space_decides_between_finishing_a_token_and_starting_the_next`,
+which asserts **both** halves.
+
 `SuggestionRequests` tracks the one in-flight serverbound round trip: a
 monotonically increasing transaction id, and a reply is honoured only when
 its id matches the request currently pending (mirroring vanilla's
@@ -94,30 +176,36 @@ hypothetical one).
 
 ## How to change it
 
-- **Wire the actual decode** (the named follow-up): add a `COMMANDS`/
-  `COMMAND_SUGGESTIONS` arm to `crates/protocol/v770/src/adapter.rs`'s
-  clientbound dispatch, next to `PLAYER_INFO_UPDATE`'s. `COMMANDS`'s wire
-  shape (`ClientboundCommandsPacket`) is a `List<Entry>` then a root VarInt;
-  each `Entry` is a flags byte, a VarInt array of child indices, an optional
-  VarInt redirect (`flags & 8`), and — for literal/argument types — a name
-  and (for arguments) a parser id plus that parser's own network template.
-  `ArgumentParser::has_network_payload`/`from_registry_id_no_payload` in
-  `lodestone-model` tell you which ids need extra bytes read; everything
-  else is `SingletonArgumentInfo` (zero payload). `COMMAND_SUGGESTIONS` is
-  three VarInts (`id`, `start`, `length`) then a `List<Entry>` of
-  (UTF-8 string, optional NBT-component tooltip). Lift both into the two
-  `ClientEvent` variants this doc names above.
-- **Wire the chat box's Tab key and draw**: `app.rs` (keyboard input) and
-  `hud.rs` (the suggestion popup and the grey/red inline highlighting) are
-  both out of this session's file ownership — send exact lines plus a few of
-  anchor rather than editing them directly. The call shape is:
-  `chat::complete(&tree, input.as_str())`, branching on `Completion::Local`
-  (show immediately) vs `Completion::NeedsServer` (call
-  `SuggestionRequests::request`, send the resulting `ClientAction`, and wait
-  for `ClientEvent::CommandSuggestionsReceived` to reach `SuggestionRequests::receive`).
-  The tree itself needs a shell-owned cell (matching `net::BiomeNameCell`'s
-  shape) fed by `ClientEvent::CommandTreeUpdated` — that cell does not exist
-  yet either; see the follow-up issue this landed with.
+- **Adding a payload-carrying argument type**: add the variant in
+  `lodestone_model::command_tree::ArgumentParser`, the id to
+  `ArgumentParser::has_network_payload`, and a branch to
+  `read_argument_parser` in `crates/protocol/v770/src/adapter.rs`. Read the
+  type's own `deserializeFromNetwork` — not `serializeToNetwork`, and not a
+  summary of it. Then **re-capture the live fixture**, because a width that is
+  wrong in both directions still round-trips.
+- **The one remaining gap: the tree never reaches the shell.** The decode is
+  done and gated, but `net::forward` has **no arm** for either
+  `CommandTreeUpdated` or `CommandSuggestionsReceived`, and `event::route`
+  sends both to `SHELL`. So `forward`'s catch-all `debug_assert!` — which reads
+  `route(other).must_forward()` — **will fire on a debug-build join to a real
+  server**. Release builds are unaffected. What is needed, in order:
+  1. A `net::CommandTreeCell` / `SharedCommandTree` matching `BiomeNameCell`'s
+     shape exactly (that pattern is what `ClientEvent::CommandTreeUpdated`'s
+     own doc points at), threaded into `forward` alongside `biome_names`, plus
+     the two arms folding into it and returning `Ok(())`.
+  2. `menu/render/screens.rs`'s `command_block_frame` already takes
+     `tree: Option<&CommandTree>` and threads it into `state.completions(tree)`
+     — it just needs the cell's contents instead of the `None` every caller
+     passes today. That is the shortest path to real pixels, now that #47
+     landed and the command-block edit screen actually opens.
+  3. The chat box's Tab key: `app/menus.rs`'s `handle_chat_key` swallows Tab in
+     its `_ => {}` arm, and `menu/nav.rs`'s command-block `MenuKey::Tab` arm is
+     a documented no-op "with no command tree ever reaching this client yet".
+     Both comments are now the only thing that is stale. The call shape is
+     `chat::complete(&tree, input.as_str())`, branching on `Completion::Local`
+     (show immediately) vs `Completion::NeedsServer` (call
+     `SuggestionRequests::request`, send the resulting `ClientAction`, and route
+     `ClientEvent::CommandSuggestionsReceived` into `SuggestionRequests::receive`).
 - **Add an argument type's local domain**: `local_domain` in `chat.rs`. Only
   add an entry when the *entire* vanilla suggestion set is a small fixed
   list independent of world/session state — check the type's own
