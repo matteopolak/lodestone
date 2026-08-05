@@ -1339,11 +1339,16 @@ impl MeshScheduler {
             workers.push(thread::spawn(move || {
                 loop {
                     let job = {
+                        let _span = tracing::trace_span!("mesh_worker_lock_wait").entered();
                         let lock = job_rx.lock().expect("mesh job queue poisoned");
                         lock.recv()
                     };
                     match job {
                         Ok(Job::Mesh(snap)) => {
+                            let _span = tracing::info_span!(
+                                "mesh_section",
+                                cx = snap.key.cx, cz = snap.key.cz, si = snap.key.si,
+                            ).entered();
                             // The vanilla classifier carries baked models → mesh
                             // through the model path; the demo classifier has none
                             // → mesh through the packed full-cube path.
@@ -1362,6 +1367,7 @@ impl MeshScheduler {
                                 }
                                 None => SectionGeometry::Packed(mesh_snapshot(&snap, &classifier)),
                             };
+                            drop(_span);
                             if result_tx
                                 .send(Meshed {
                                     key: snap.key,
@@ -2037,6 +2043,7 @@ impl TerrainMesh {
 /// backlog the ordinary queue happens to hold. That backlog reached 45 columns in
 /// a twelve-step walk, i.e. eleven frames of latency, which is exactly the window
 /// in which the old code lost them for good.
+#[tracing::instrument(skip_all, fields(dirty = terrain.dirty_columns.len(), forced = terrain.forced_columns.len()))]
 pub fn heal_dirty_columns(store: Res<ChunkWorld>, mut terrain: ResMut<TerrainMesh>) {
     for _ in 0..DIRTY_COLUMN_BUDGET {
         let Some((cx, cz)) = terrain.forced_columns.pop_first() else {
