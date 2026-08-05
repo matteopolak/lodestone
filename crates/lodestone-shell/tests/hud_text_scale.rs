@@ -196,9 +196,6 @@ fn vertex_layout_is_still_six_floats() {
 }
 
 #[test]
-#[ignore = "fails until hud.rs's three draw sites stop multiplying vanilla's \
-            pose factor by the hardcoded `let scale = 2.0;` — remove this \
-            attribute as part of that patch (see docs/hud-text-scale.md)"]
 fn title_subtitle_and_action_bar_match_vanillas_pose_scales() {
     let stats = DebugStats::default();
 
@@ -304,9 +301,6 @@ fn title_subtitle_and_action_bar_match_vanillas_pose_scales() {
 /// wrong: a pure size regression fails that test, a pure position regression
 /// fails this one.
 #[test]
-#[ignore = "fails until hud.rs's title block is rebuilt on vanilla's own pose \
-            translate — remove this attribute as part of that patch (see \
-            docs/hud-text-scale.md)"]
 fn the_title_block_sits_where_vanillas_pose_translate_puts_it() {
     let stats = DebugStats::default();
     let (_, ch) = canvas();

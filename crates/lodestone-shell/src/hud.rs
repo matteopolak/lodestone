@@ -1094,13 +1094,18 @@ impl HudGeometry {
 
         // Action bar: a single centred line just above the vitals/XP cluster,
         // fading with the server-driven alpha. Legacy `§` colour codes render.
+        // Unscaled: `extractOverlayMessage` (`Hud.java:327-355`) makes **no**
+        // `pose().scale()` call at all, like the held-item name below. This used
+        // `scale`, which is 2.0 — and since `logical_canvas` has already divided
+        // by the GUI scale, that was a flat 2x on top of vanilla's own factor.
+        // See `docs/hud-text-scale.md`.
         if let Some((msg, alpha)) = frame.action_bar.as_ref().filter(|(_, a)| *a > 0.0) {
-            let tw = b.legacy_width(msg, scale);
+            let tw = b.legacy_width(msg, 1.0);
             b.text_legacy(
                 msg,
                 cx - tw * 0.5,
                 bars_y - line_h - 6.0,
-                scale,
+                1.0,
                 [1.0, 1.0, 1.0],
                 *alpha,
             );
@@ -1129,19 +1134,37 @@ impl HudGeometry {
         // Title / subtitle: a large centred overlay mid-screen, fading with the
         // server-driven alpha. Drawn only while a server-sent title is active,
         // so it costs nothing off a server that sends none.
+        // `extractTitle` (`Hud.java:374-390`) translates once to the screen centre
+        // (`:376`), then draws each string at an offset *inside* its own pose
+        // scale — title `scale(4.0)` at `y = -10` (`:378,381`), subtitle
+        // `scale(2.0)` at `y = 5` (`:385,387`). Multiplied out, those are the two
+        // anchors below.
+        //
+        // Vanilla's factors are used **whole**. Multiplying them by this HUD's
+        // `scale` drew both at 2x (`logical_canvas` has already applied the GUI
+        // scale, so `scale` is a second application) and, worse, made the
+        // subtitle's offset depend on the *title's* scale via `ty + ts * 9.0` —
+        // so correcting the scale alone would have moved the subtitle. The
+        // position was independently wrong too: `b.h * 0.40` is not `h/2 - 40`.
         if let Some((title, subtitle, alpha)) = frame.title.as_ref().filter(|(_, _, a)| *a > 0.0) {
-            let ts = scale * 4.0;
-            let tw = b.text_width(title, ts);
-            let ty = b.h * 0.40;
-            b.text(title, (b.w - tw) * 0.5, ty, ts, [1.0, 1.0, 1.0, *alpha]);
+            const TITLE_POSE: f32 = 4.0;
+            const SUBTITLE_POSE: f32 = 2.0;
+            let cy = b.h * 0.5;
+            let tw = b.text_width(title, TITLE_POSE);
+            b.text(
+                title,
+                (b.w - tw) * 0.5,
+                cy - 10.0 * TITLE_POSE,
+                TITLE_POSE,
+                [1.0, 1.0, 1.0, *alpha],
+            );
             if let Some(sub) = subtitle {
-                let ss = scale * 2.0;
-                let sw = b.text_width(sub, ss);
+                let sw = b.text_width(sub, SUBTITLE_POSE);
                 b.text(
                     sub,
                     (b.w - sw) * 0.5,
-                    ty + ts * 9.0,
-                    ss,
+                    cy + 5.0 * SUBTITLE_POSE,
+                    SUBTITLE_POSE,
                     [1.0, 1.0, 1.0, *alpha],
                 );
             }
