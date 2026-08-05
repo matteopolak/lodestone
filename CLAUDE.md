@@ -590,17 +590,37 @@ wrongly:
 
   | family | clientbound decoded | serverbound encoded |
   |---|---|---|
-  | v47 | 17/74 | 17/26 |
-  | v340 | 16/80 | 20/33 |
-  | v735 | 17/92 | 21/48 |
-  | v770 | 111/141 | 53/69 |
+  | family | first reading (kept for the ratio) | measured 2026-08-04 |
+  |---|---|---|
+  | v47 | 17/74 | **21**/74 |
+  | v340 | 16/80 | **22**/80 |
+  | v735 | 17/92 | 17/92 |
+  | v770 clientbound | 111/141 | **114**/141 |
+  | v770 serverbound encoded | 53/69 | **54**/69 |
 
   **The legacy families decode under a quarter of their clientbound packets**, which nobody knew, because
   the instrument that would have said so was skipping them. Do not assume a legacy family is well covered.
-  It now also measures **serverbound decode** (v770: 13/69, all connected, zero stranded), and reports
-  *"not applicable"* rather than a false `0/69` for the three families with no `server_protocol.rs` — only
-  `v770` implements `ServerProtocol`. Note `serverbound encoded` remains a *client*-side figure: bare token
-  presence in the client adapter, no arm and no direction check.
+  It now also measures **serverbound decode**, and reports *"not applicable"* rather than a false `0/69`
+  for the three families with no `server_protocol.rs` — only `v770` implements `ServerProtocol`. Note
+  `serverbound encoded` remains a *client*-side figure: bare token presence in the client adapter, no arm
+  and no direction check.
+
+  **Four of the six figures in this table were stale within days, in the table that exists to stop staleness.**
+  Re-measured 2026-08-04 during a tracker sweep; the second column above is that reading. The serverbound
+  decode figure was the worst: this file said **13/69**, when the truth was **60/69 decoded and 17/69
+  connected** — the wrong *axis*, not merely a stale count, and five issue bodies had inherited the same
+  error. **Do not quote a number from this table. Run `cargo xtask connectedness` and quote that.** The
+  table is here for the *shape* of the finding — legacy families are thin, decode and connectedness are
+  different axes — not for its digits.
+
+  **And the instrument has a blind spot it cannot report: a fully-connected wire carrying the wrong value.**
+  Issue #323 is the worked example. The server broadcasts `SET_TIME`, the client decodes it and really does
+  darken the sky — every link measured, nothing stranded, `connectedness` perfectly green — and the value on
+  the wire is **wall-clock elapsed-since-join**, while `tick.rs`'s real tick counter never reaches the
+  encoder. So `connectedness` answers "is this packet reaching something", and **cannot** answer "is it
+  carrying the right number". That is a distinct failure from the *island* (built, reaches nothing) and from
+  the *magnitude* species (right direction, wrong amount): here the plumbing is complete and the source is
+  wrong. Only a gate whose expected value originates **outside** our own producer can see it.
 - **Our source scanners were silently broken by Rust lifetimes, and it took a UTF-8 panic to notice.**
   `matching_brace` was described as comment-, string- and char-literal-aware. Its "in a char literal" flag
   **never closes on a lifetime** — `&'static str` opens it and nothing shuts it — so from the first
