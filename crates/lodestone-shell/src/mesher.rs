@@ -1257,7 +1257,6 @@ pub struct Meshed {
 
 enum Job {
     Mesh(SectionSnapshot),
-    Stop,
 }
 
 /// A fixed pool of worker threads that mesh snapshots off the main thread.
@@ -1289,7 +1288,13 @@ enum Job {
 /// arbitrarily.
 #[derive(Debug, Resource)]
 pub struct MeshScheduler {
-    job_tx: Sender<Job>,
+    /// Per-worker senders for lock-free job submission. Round-robin indexed
+    /// via `next_worker` — each worker has its own `Receiver`, so no mutex
+    /// is needed to dequeue a job. The `Arc<Mutex<Receiver>>` this used to be
+    /// was the dominant bottleneck in the flamegraph: every worker contended
+    /// on one lock for `recv()`.
+    job_tx: Vec<Sender<Job>>,
+    next_worker: usize,
     result_rx: Mutex<Receiver<Meshed>>,
     workers: Vec<JoinHandle<()>>,
     pending: usize,
@@ -1327,58 +1332,54 @@ impl MeshScheduler {
             ColumnSource::Complete
         };
         let worker_count = worker_count.max(1);
-        let (job_tx, job_rx) = mpsc::channel::<Job>();
         let (result_tx, result_rx) = mpsc::channel::<Meshed>();
-        let job_rx = Arc::new(Mutex::new(job_rx));
 
         let mut workers = Vec::with_capacity(worker_count);
+        let mut job_tx = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
-            let job_rx = Arc::clone(&job_rx);
+            // Each worker gets its own channel — zero mutex contention on
+            // dequeue. The submit side round-robins across senders.
+            let (tx, rx) = mpsc::channel::<Job>();
+            job_tx.push(tx);
             let result_tx = result_tx.clone();
             let classifier = classifier.clone();
             workers.push(thread::spawn(move || {
                 loop {
-                    let job = {
-                        let _span = tracing::trace_span!("mesh_worker_lock_wait").entered();
-                        let lock = job_rx.lock().expect("mesh job queue poisoned");
-                        lock.recv()
+                    let snap = match rx.recv() {
+                        Ok(Job::Mesh(snap)) => snap,
+                        Err(_) => break,
                     };
-                    match job {
-                        Ok(Job::Mesh(snap)) => {
-                            let _span = tracing::info_span!(
-                                "mesh_section",
-                                cx = snap.key.cx, cz = snap.key.cz, si = snap.key.si,
-                            ).entered();
-                            // The vanilla classifier carries baked models → mesh
-                            // through the model path; the demo classifier has none
-                            // → mesh through the packed full-cube path.
-                            let mesh = match classifier.models() {
-                                Some(models) => {
-                                    let mut opaque = mesh_snapshot_models(&snap, models);
-                                    let fluids = mesh_snapshot_fluids(&snap, models);
-                                    // Lava is opaque and full-bright: fold it into
-                                    // the opaque pass. Water is translucent and
-                                    // drawn separately.
-                                    opaque.merge(&fluids.lava);
-                                    SectionGeometry::Model {
-                                        opaque,
-                                        water: fluids.water,
-                                    }
-                                }
-                                None => SectionGeometry::Packed(mesh_snapshot(&snap, &classifier)),
-                            };
-                            drop(_span);
-                            if result_tx
-                                .send(Meshed {
-                                    key: snap.key,
-                                    mesh,
-                                })
-                                .is_err()
-                            {
-                                break;
+                    let _span = tracing::info_span!(
+                        "mesh_section",
+                        cx = snap.key.cx, cz = snap.key.cz, si = snap.key.si,
+                    ).entered();
+                    // The vanilla classifier carries baked models → mesh
+                    // through the model path; the demo classifier has none
+                    // → mesh through the packed full-cube path.
+                    let mesh = match classifier.models() {
+                        Some(models) => {
+                            let mut opaque = mesh_snapshot_models(&snap, models);
+                            let fluids = mesh_snapshot_fluids(&snap, models);
+                            // Lava is opaque and full-bright: fold it into
+                            // the opaque pass. Water is translucent and
+                            // drawn separately.
+                            opaque.merge(&fluids.lava);
+                            SectionGeometry::Model {
+                                opaque,
+                                water: fluids.water,
                             }
                         }
-                        Ok(Job::Stop) | Err(_) => break,
+                        None => SectionGeometry::Packed(mesh_snapshot(&snap, &classifier)),
+                    };
+                    drop(_span);
+                    if result_tx
+                        .send(Meshed {
+                            key: snap.key,
+                            mesh,
+                        })
+                        .is_err()
+                    {
+                        break;
                     }
                 }
             }));
@@ -1386,6 +1387,7 @@ impl MeshScheduler {
 
         Self {
             job_tx,
+            next_worker: 0,
             result_rx: Mutex::new(result_rx),
             workers,
             pending: 0,
@@ -1401,10 +1403,15 @@ impl MeshScheduler {
     }
 
     /// Queue a snapshot for meshing.
+    ///
+    /// Round-robins across per-worker channels so no two workers contend on a
+    /// mutex to dequeue — each worker owns its own `Receiver`, and the sender side
+    /// distributes jobs with zero locking.
     pub fn submit(&mut self, snapshot: SectionSnapshot) {
         self.pending += 1;
-        // Send failure only happens if all workers died; drop the job then.
-        if self.job_tx.send(Job::Mesh(snapshot)).is_err() {
+        let idx = self.next_worker % self.job_tx.len().max(1);
+        self.next_worker = idx + 1;
+        if self.job_tx[idx].send(Job::Mesh(snapshot)).is_err() {
             self.pending -= 1;
         }
     }
@@ -1444,9 +1451,9 @@ impl MeshScheduler {
 
 impl Drop for MeshScheduler {
     fn drop(&mut self) {
-        for _ in &self.workers {
-            let _ = self.job_tx.send(Job::Stop);
-        }
+        // Dropping the per-worker senders unblocks every recv() as Err,
+        // so each worker exits its loop naturally. No explicit Stop needed.
+        self.job_tx.clear();
         for w in self.workers.drain(..) {
             let _ = w.join();
         }
