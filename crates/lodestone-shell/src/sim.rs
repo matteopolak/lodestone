@@ -634,6 +634,23 @@ pub struct Sim {
 #[derive(Debug, Default, Resource)]
 pub struct AudioEngine(pub Option<ShellAudio>);
 
+/// Vanilla's `MusicManager` and its RNG, as a resource beside [`AudioEngine`].
+///
+/// Config-scoped for the same reason [`AudioEngine`] is: a reconnect must not
+/// restart the music or re-roll its delay clock, so this must never gain a line in
+/// [`Sim::end_session`]'s reset list.
+///
+/// # Why an `Option` rather than a plain `ShellMusic`
+///
+/// It is a **move-out slot**, not an "audio might be missing" flag — music state
+/// always exists. [`Sim::tick_music`] has to hold `ShellMusic` and
+/// [`AudioEngine`] mutably at the same instant, and two `World::resource_mut`
+/// borrows cannot coexist, so the state is taken out for the duration of the tick
+/// and put straight back. `None` is therefore only ever observable *during* a
+/// tick, from inside the tick itself.
+#[derive(Debug, Default, Resource)]
+pub struct MusicState(pub Option<crate::audio::music::ShellMusic>);
+
 impl Sim {
     // -----------------------------------------------------------------------
     // The local player, which lives in `self.ecs` and nowhere else

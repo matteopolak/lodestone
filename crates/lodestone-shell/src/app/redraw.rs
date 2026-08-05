@@ -291,6 +291,33 @@ impl WindowApp {
         // player hears is spatialised to match what they see. No-op when audio
         // is disabled.
         self.sim.set_audio_listener(&camera);
+        // In-world music, beside the listener update because both are "audio
+        // follows the frame we actually drew".
+        //
+        // The three inputs are the ones `Minecraft.java:2601-2621` uses, and two of
+        // them are easy to get wrong: `creative` is `instabuild && mayfly` and not
+        // a gamemode check (`Sim::music_creative`), and `underwater` is
+        // water-specific rather than any fluid (`Sim::music_underwater`).
+        //
+        // `background_music` is the **dimension** default rather than the biome's
+        // three-slot record, and that is a known narrowing rather than the wrong
+        // input: `BackgroundMusic::overworld()` is exactly what vanilla falls back
+        // to for a biome that sets no `audio/background_music` attribute, and
+        // `biome_music::overworld_music_for` already collapses to it. Reaching the
+        // per-biome record needs a biome *name* here, and the only id→name mapping
+        // in the shell is `mesher::biome_name_at`, which is private to that module
+        // and keyed to a provisional table (see its own doc). Threading it out is
+        // separate wiring, so the honest state is the dimension default.
+        let background = lodestone_sound::music::BackgroundMusic::overworld();
+        self.sim.tick_music(
+            std::time::Instant::now(),
+            &crate::audio::music::world_situation(
+                &background,
+                self.sim.music_creative(),
+                self.sim.music_underwater(),
+                1.0,
+            ),
+        );
         let outline = self.sim.target().map(|hit| hit.block);
         let entity_draws = self.sim.entity_draws();
         // Extraction lives in `Sim` because resolving each particle's light
