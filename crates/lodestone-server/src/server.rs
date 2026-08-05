@@ -28,6 +28,7 @@ use crate::chunk::{
 use crate::fall::FallTracker;
 use crate::inventory::{ContainerMenuSlot, PlayerInventory, container_menu_slot};
 use crate::mobs::{MobHandle, PlayerPerception};
+use crate::players::{PlayerListStreamer, PlayerRegistry, PlayerTicket};
 use crate::protocol::{EntitySnapshot, ServerBound, ServerDirective, ServerProtocol};
 use crate::tick::{BlockTickFeed, ExplosionFeed};
 use crate::vitals::{EYE_HEIGHT, PlayerVitals};
@@ -182,6 +183,25 @@ const SPRINT_ATTACK_KNOCKBACK_POWER: f64 = 0.5;
 #[cfg(not(target_arch = "wasm32"))]
 const VITALS_TICK_INTERVAL: Duration = Duration::from_millis(50);
 
+/// Where a joining player's entity is placed until its client sends a first
+/// movement packet (issue #438).
+///
+/// This must agree with the position the version crate's
+/// [`ServerProtocol::begin_play`] teleports the client to, or every other
+/// connection sees the newcomer standing somewhere they are not for the
+/// fraction of a second before the first `PlayerMoved` arrives. `v770` uses
+/// `(8, 100, 8)` (`crates/protocol/v770/src/server_protocol.rs`'s
+/// `spawn_x`/`spawn_y`/`spawn_z`), inside chunk `(0, 0)` — the same column
+/// `ViewTracker::new((0, 0), view_radius)` centres this join on.
+///
+/// It is a constant here rather than a value read back from the protocol
+/// because [`ServerProtocol`] has no "where is spawn" query and inventing one
+/// for this would be a wider seam change than the problem warrants; when a real
+/// spawn position exists this, `ViewTracker::new((0, 0), …)` and `begin_play`'s
+/// own literals all move together, exactly as that call site's existing comment
+/// already says.
+const JOIN_SPAWN_POSITION: Vec3 = Vec3::new(8.0, 100.0, 8.0);
+
 /// A read-only view of the entities in the world right now, supplied by the
 /// caller that owns the simulation and its tick.
 ///
@@ -191,6 +211,69 @@ const VITALS_TICK_INTERVAL: Duration = Duration::from_millis(50);
 pub trait EntitySource: Send + Sync {
     /// The entities that should currently be visible to the client.
     fn snapshots(&self) -> Vec<EntitySnapshot>;
+
+    /// The registry of connected **players**, if this source tracks them
+    /// (issue #438).
+    ///
+    /// This is the one conduit by which a connection reaches the players
+    /// sharing its world, and it exists as a defaulted method on this trait
+    /// rather than a new parameter for a specific reason:
+    /// [`serve_connection`] and its five sibling entry points are called
+    /// directly from `crates/protocol/v770/tests/*`, and adding an argument
+    /// would have churned every one of those call sites for a feature none of
+    /// them uses. Every pre-existing [`EntitySource`] — [`NoEntities`],
+    /// [`crate::LiveMobSource`], [`MobHandle`], and every test double —
+    /// inherits `None` and keeps its exact previous behaviour.
+    ///
+    /// Returning `Some` is what turns on player streaming for a connection:
+    /// [`crate::players::PlayerAwareSource`] is the composition production
+    /// uses, pairing the mob source with the registry. Note that players are
+    /// deliberately **not** reachable through [`snapshots`](Self::snapshots) —
+    /// that call has no viewer, and a viewer-less player list is exactly how a
+    /// connection would be sent its own entity. See
+    /// [`crate::players::PlayerRegistry::view`].
+    fn players(&self) -> Option<&PlayerRegistry> {
+        None
+    }
+}
+
+/// Runs one full streaming pass for a connection: tab-list diff first, then the
+/// entity diff over the mob source **and** every other connected player.
+///
+/// The order is load-bearing and the reason this is one function rather than
+/// two call sites. A client that receives an `ADD_ENTITY` of type
+/// `minecraft:player` before it holds a `PlayerInfo` for that uuid **discards
+/// the spawn** — `ClientPacketListener.createEntityFromPacket` returns `null`
+/// and logs "Server attempted to add player prior to sending player info"
+/// (`.cache/mc/26.2/client-src/net/minecraft/client/multiplayer/
+/// ClientPacketListener.java:591-604`). So the roster adds must precede the
+/// spawn, in the same pass, and both must come from
+/// [`crate::players::PlayerRegistry::view`]'s single lock acquisition — two
+/// separate reads could interleave a join between them and produce precisely
+/// the dropped spawn.
+///
+/// `ticket` is this connection's own player registration; its id is what gets
+/// excluded, so a connection never receives itself.
+fn stream_pass<P, E>(
+    proto: &P,
+    entities: &E,
+    streamer: &mut EntityStreamer,
+    player_list: &mut PlayerListStreamer,
+    ticket: Option<&PlayerTicket>,
+) -> Vec<ServerDirective>
+where
+    P: ServerProtocol,
+    E: EntitySource,
+{
+    let mut snapshots = entities.snapshots();
+    let mut directives = Vec::new();
+    if let Some(registry) = entities.players() {
+        let view = registry.view(ticket.map(PlayerTicket::entity_id));
+        directives.extend(player_list.sync(proto, &view.roster));
+        snapshots.extend(view.entities);
+    }
+    directives.extend(streamer.sync(proto, &snapshots));
+    directives
 }
 
 /// An [`EntitySource`] carrying no entities — for callers that only stream
@@ -1036,7 +1119,14 @@ where
 {
     let mut state = State::Handshaking;
     let mut username: Option<String> = None;
+    // Issue #438: kept alongside `username` because the player entity's uuid
+    // must be the *same* uuid `login_success` echoed back to this client — the
+    // client resolves a player spawn by looking that uuid up in its own
+    // `PlayerInfo` map, so a second, independently derived uuid would produce a
+    // spawn every client silently discards.
+    let mut login_uuid: Option<uuid::Uuid> = None;
     let mut streamer = EntityStreamer::default();
+    let mut player_list = PlayerListStreamer::default();
     // Vanilla's `ServerStatusPacketListenerImpl.hasRequestedStatus`
     // (`ServerStatusPacketListenerImpl.java:17`): one status reply per
     // connection, a second request is a disconnect.
@@ -1101,6 +1191,7 @@ where
                     return Err(ServerError::InvalidUsername);
                 }
                 username = Some(name.clone());
+                login_uuid = Some(uuid);
                 for directive in proto.login_success(&name, uuid) {
                     apply(conn, &mut state, directive).await?;
                 }
@@ -1175,14 +1266,6 @@ where
                     apply(conn, &mut state, directive).await?;
                 }
 
-                // Initial entity sync — the same pass the old single-loop
-                // version ran on this same iteration via its trailing
-                // `if state == State::Play` check, now made explicit because
-                // `serve_play` below takes over the loop entirely.
-                for directive in streamer.sync(proto, &entities.snapshots()) {
-                    apply(conn, &mut state, directive).await?;
-                }
-
                 // `ConfigurationFinished` cannot be reached without an
                 // earlier `LoginStart` in any correct `ServerProtocol` (the
                 // documented ack-driven state machine above), so `username`
@@ -1190,6 +1273,39 @@ where
                 // rather than panicking keeps a protocol that violates that
                 // contract merely wrong, not a crash.
                 let username = username.clone().unwrap_or_default();
+
+                // Issue #438: this connection becomes a player *entity*,
+                // before the initial sync below, so (a) every other
+                // connection's next pass already sees it and (b) this
+                // connection's own initial sync knows which id to exclude.
+                // The ticket is moved into `serve_play`; its `Drop` is what
+                // deregisters the player on **every** exit path out of that
+                // function, of which there are many — see
+                // `PlayerRegistry::join`'s own doc comment.
+                let player_ticket = entities.players().map(|registry| {
+                    registry.join(
+                        &username,
+                        login_uuid.unwrap_or_else(uuid::Uuid::nil),
+                        JOIN_SPAWN_POSITION,
+                    )
+                });
+
+                // Initial entity sync — the same pass the old single-loop
+                // version ran on this same iteration via its trailing
+                // `if state == State::Play` check, now made explicit because
+                // `serve_play` below takes over the loop entirely. Since #438
+                // this also carries the tab-list adds and the other players'
+                // spawns, in that order; see [`stream_pass`].
+                for directive in stream_pass(
+                    proto,
+                    entities,
+                    &mut streamer,
+                    &mut player_list,
+                    player_ticket.as_ref(),
+                ) {
+                    apply(conn, &mut state, directive).await?;
+                }
+
                 let view = ViewTracker::new((0, 0), view_radius);
                 return serve_play(
                     conn,
@@ -1199,6 +1315,8 @@ where
                     view_radius,
                     state,
                     streamer,
+                    player_list,
+                    player_ticket,
                     view,
                     username,
                     chunks_sent,
@@ -2256,6 +2374,14 @@ async fn serve_play<T, P, S, E>(
     view_radius: i32,
     mut state: State,
     mut streamer: EntityStreamer,
+    mut player_list: PlayerListStreamer,
+    // Issue #438: owned, not borrowed. This function's `Drop` is the player's
+    // deregistration, so the ticket must die with the connection task — on the
+    // clean-disconnect return, on every `?`, and on a task cancelled at
+    // shutdown alike. Holding it by reference would put that lifetime
+    // somewhere else and reintroduce the ghost-player leak the RAII exists to
+    // prevent.
+    player_ticket: Option<PlayerTicket>,
     mut view: ViewTracker,
     username: String,
     chunks_sent: usize,
@@ -2359,7 +2485,27 @@ where
                     &payload,
                 )
                 .await?;
-                for directive in streamer.sync(proto, &entities.snapshots()) {
+                // Issue #438: republish this player's position for *other*
+                // connections to stream. Read back from `player_pos` — which
+                // `dispatch_play_packet` has just updated if the packet was a
+                // `PlayerMoved` — rather than passing the ticket down into
+                // that function: same information, and it keeps
+                // `dispatch_play_packet`'s already-`too_many_arguments`
+                // signature untouched.
+                if let (Some(ticket), Some(registry), Some((x, y, z))) = (
+                    player_ticket.as_ref(),
+                    entities.players(),
+                    player_pos,
+                ) {
+                    registry.set_position(ticket.entity_id(), Vec3::new(x, y, z));
+                }
+                for directive in stream_pass(
+                    proto,
+                    entities,
+                    &mut streamer,
+                    &mut player_list,
+                    player_ticket.as_ref(),
+                ) {
                     apply(conn, &mut state, directive).await?;
                 }
             }
@@ -2479,6 +2625,12 @@ async fn serve_play<T, P, S, E>(
     view_radius: i32,
     mut state: State,
     mut streamer: EntityStreamer,
+    mut player_list: PlayerListStreamer,
+    // Issue #438: see the native definition's identical parameter for why the
+    // ticket is owned rather than borrowed. Player streaming itself works
+    // identically on this target: it is entirely packet-driven, exactly like
+    // `FallTracker`, so it needs none of the timers this loop lacks.
+    player_ticket: Option<PlayerTicket>,
     mut view: ViewTracker,
     username: String,
     chunks_sent: usize,
@@ -2562,7 +2714,21 @@ where
             &payload,
         )
         .await?;
-        for directive in streamer.sync(proto, &entities.snapshots()) {
+        // Issue #438, identical to the native loop — see its own comment for
+        // why this reads `player_pos` back instead of threading the ticket
+        // through `dispatch_play_packet`.
+        if let (Some(ticket), Some(registry), Some((x, y, z))) =
+            (player_ticket.as_ref(), entities.players(), player_pos)
+        {
+            registry.set_position(ticket.entity_id(), Vec3::new(x, y, z));
+        }
+        for directive in stream_pass(
+            proto,
+            entities,
+            &mut streamer,
+            &mut player_list,
+            player_ticket.as_ref(),
+        ) {
             apply(conn, &mut state, directive).await?;
         }
     }

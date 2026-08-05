@@ -56,6 +56,34 @@ pub struct EntitySnapshot {
     pub metadata: Vec<MetadataField>,
 }
 
+/// One connected player as the tab list carries them (issue #438) — the
+/// version-free vocabulary
+/// [`ServerProtocol::encode_player_info_add`] takes a slice of.
+///
+/// Only the two fields `ADD_PLAYER` cannot do without. Vanilla's own
+/// `ClientboundPlayerInfoUpdatePacket.Entry` also carries a game mode, a
+/// latency, a `listed` flag, a display-name component, a chat session and a
+/// list-order — each behind its own action bit. None of those has a
+/// server-side source of truth in this crate yet (there is no per-connection
+/// game mode, no measured latency, no scoreboard), so rather than invent
+/// plausible values here the implementor supplies the defaults vanilla itself
+/// uses for a fresh join; see the `v770` implementation's own doc comment for
+/// which bits it sets and why.
+///
+/// Not `Copy`: `username` is owned, because the registry that produces these
+/// (`crate::players::PlayerRegistry`) holds the string and a borrow would tie
+/// every reader to its lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerListing {
+    /// The player's profile uuid — the key the client stores the entry under,
+    /// and the same uuid their entity's `ADD_ENTITY` carries. These two
+    /// **must** agree: the client resolves the spawn by looking the uuid up in
+    /// this map (see [`ServerProtocol::encode_player_info_add`]).
+    pub uuid: Uuid,
+    /// The player's username.
+    pub username: String,
+}
+
 /// One per-species entity-metadata field a [`ServerProtocol`] can push over
 /// `SET_ENTITY_DATA` (issue #425) — the general vocabulary
 /// [`ServerProtocol::encode_set_entity_data`] takes a slice of, replacing
@@ -666,6 +694,43 @@ pub trait ServerProtocol: Send + Sync {
     fn encode_set_entity_data(&self, entity_id: i32, fields: &[MetadataField]) -> ServerDirective {
         let _ = (entity_id, fields);
         ServerDirective::None
+    }
+
+    /// Encodes the tab-list additions for players this connection has not been
+    /// told about yet (issue #438; vanilla `ClientboundPlayerInfoUpdatePacket`
+    /// with the `ADD_PLAYER` action, wire id `player_info_update`).
+    ///
+    /// **This is not cosmetic, and it is not optional for player entities.** A
+    /// real client *drops* an `ADD_ENTITY` whose type is `minecraft:player`
+    /// when it holds no `PlayerInfo` for that uuid:
+    /// `ClientPacketListener.createEntityFromPacket` logs
+    /// `"Server attempted to add player prior to sending player info"` and
+    /// returns `null`, so the entity is never added to the level
+    /// (`.cache/mc/26.2/client-src/net/minecraft/client/multiplayer/
+    /// ClientPacketListener.java:591-604`). [`crate::players::PlayerListStreamer`]
+    /// is the one caller and `crate::server`'s streaming pass emits its
+    /// directives **before** the entity diff for exactly that reason.
+    ///
+    /// The default emits nothing, like every other encoder here, so a protocol
+    /// with no tab-list support need not override it — at the cost that a
+    /// player entity will not reach that version's clients at all, which is
+    /// the honest consequence rather than a half-sent spawn.
+    fn encode_player_info_add(&self, players: &[PlayerListing]) -> Vec<ServerDirective> {
+        let _ = players;
+        Vec::new()
+    }
+
+    /// Encodes the tab-list removals for players that have left (issue #438;
+    /// vanilla `ClientboundPlayerInfoRemovePacket`, wire id
+    /// `player_info_remove`) — the counterpart to
+    /// [`encode_player_info_add`](Self::encode_player_info_add), emitted by the
+    /// same [`crate::players::PlayerListStreamer`] pass. Without it a departed
+    /// player's `PlayerInfo` lingers, so their name stays in the tab list even
+    /// though the entity diff already sent a `REMOVE_ENTITIES` for them. The
+    /// default emits nothing, for the same reason as above.
+    fn encode_player_info_remove(&self, uuids: &[Uuid]) -> Vec<ServerDirective> {
+        let _ = uuids;
+        Vec::new()
     }
 
     /// Encodes a detonation (issue #425; vanilla `ClientboundExplodePacket`,
