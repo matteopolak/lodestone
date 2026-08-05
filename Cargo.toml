@@ -53,6 +53,10 @@ lodestone-v47    = { path = "crates/protocol/v47" }
 lodestone-v340 = { path = "crates/protocol/v340" }
 lodestone-v735 = { path = "crates/protocol/v735" }
 lodestone-ecs  = { path = "crates/lodestone-ecs" }
+# The composed client `App` (`docs/plugin-registration.md`), between
+# `lodestone-controller` and `lodestone-shell`: `client_app()` is the one
+# registration point the shell and an external consumer both use.
+lodestone-app  = { path = "crates/lodestone-app" }
 # Plugins (`crates/plugins/`, `docs/autonomous-navigation.md`). Listed here so a
 # plugin that depends on another plugin does not spell a relative path, and so the
 # licence boundary is visible in one place: both are LGPL-3.0-or-later, unlike the
