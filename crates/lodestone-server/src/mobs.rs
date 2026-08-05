@@ -3055,11 +3055,26 @@ mod follow_range_tests {
     /// 0.0, `attr` changed and the `attr_present` split is redundant.
     #[test]
     fn control_the_attribute_lookup_misses_to_the_registry_default_not_zero() {
-        let unlisted = Identifier::from_str("minecraft:zombie_villager").expect("valid id");
+        // **Structurally** unlistable, not merely unlisted (#457).
+        //
+        // This precondition used to name `minecraft:zombie_villager`, with its
+        // own instruction to "pick another unlisted species or this control is
+        // vacuous" if that species ever gained an arm. It did — and picking
+        // another real species only defers the same breakage to the next batch
+        // of arms, which is not a fix but a rescheduling.
+        //
+        // So the precondition is now pinned to a property no future commit can
+        // take away: `default_attributes` returns `None` for **any** id outside
+        // the `minecraft` namespace, before it ever consults `type_spec`. That
+        // keeps the miss case reachable permanently, at the cost of the claim
+        // that it is reachable from a *real species* — see
+        // `an_unlisted_species_still_falls_back_at_the_spawn_path` below, which
+        // is where that half now lives.
+        let unlisted = Identifier::from_str("modded:not_a_vanilla_mob").expect("valid id");
         assert!(
             default_attributes(&unlisted).is_none(),
-            "precondition: zombie_villager must have no type_spec arm (#457) — if it \
-             gained one, pick another unlisted species or this control is vacuous"
+            "default_attributes must answer None outside the minecraft namespace, \
+             or the miss case below is not reachable at all"
         );
 
         let empty = AttributeMap::new();
@@ -3120,34 +3135,73 @@ mod follow_range_tests {
         );
     }
 
-    /// The **unlisted-species** half, and the honest record of what it costs.
+    /// The **unlisted-species** half, retired at the acquisition layer and
+    /// re-established at the spawn layer (#457).
     ///
-    /// `zombie_villager` has the full `ZOMBIE` goal table (so it really does own
-    /// `NearestAttackableTargetGoal`) and **no** `type_spec` arm, which is exactly
-    /// the combination the fallback governs. It must now behave like a plain
-    /// vanilla mob — acquiring at 15 and not at 17 — rather than at the registry's
-    /// 32.0, which is what it silently used before.
+    /// # Why the previous test was retired rather than repointed
     ///
-    /// **This is still a wrong value and the test says so.** Vanilla's
-    /// `ZombieVillager` extends `Zombie`, so the jar says 35.0. 16.0 is further
-    /// from 35.0 than the 32.0 it replaces, and that is accepted deliberately:
-    /// 32.0 was right for this species only by coincidence and wrong for the
-    /// majority of mobs, whose real value *is* 16.0. The fix is more `type_spec`
-    /// arms (#457), not a fallback chosen to flatter the zombie family. When #457
-    /// lands, this test should start failing at 17 — and that failure is the
-    /// signal to retire it, not to widen it.
+    /// `an_unlisted_species_falls_back_to_the_mob_default_not_the_registry_default`
+    /// drove `zombie_villager` — a species with the full `ZOMBIE` goal table
+    /// (so a real `NearestAttackableTargetGoal`) and no `type_spec` arm — and
+    /// asserted it acquired at 15 and not at 17. Its own doc said that when
+    /// #457 landed it would start failing at 17, and that the failure was "the
+    /// signal to retire it, not to widen it". It did, and it is.
+    ///
+    /// The obvious salvage — repoint it at some *other* species that is both
+    /// unlisted and owns a modelled target goal — **has no candidate, and
+    /// cannot acquire one.** Every species any roster family claims now has a
+    /// `type_spec` arm, and `attribute.rs`'s
+    /// `every_rostered_species_has_a_type_spec_arm` fails if that stops being
+    /// true. A species *outside* the roster gets `roster::FALLBACK`, which is
+    /// wander-and-look and contains no target goal at all. So "unlisted
+    /// attributes" and "modelled target goal" are now mutually exclusive by
+    /// construction, and no rescheduling of this test survives the next commit.
+    ///
+    /// # What survives, and where
+    ///
+    /// The property itself is still live and still production-reachable:
+    /// [`MobSim::spawn_species`] reads `attr_present(…).unwrap_or(DEFAULT_FOLLOW_RANGE)`
+    /// for **any** key, so an id with no template still has to land on
+    /// `Mob.createMobAttributes()`' 16.0 rather than the registry's 32.0. Only
+    /// the *observable* had to move: from "does it acquire a player at 17
+    /// blocks" to the range the spawn path actually installed on the
+    /// controller. That is a strictly narrower claim — it no longer proves the
+    /// number reaches targeting — and saying so is the point.
+    ///
+    /// 16 against 32 is still the whole distinction, and both are asserted, so
+    /// this cannot pass by reading some third number.
     #[test]
-    fn an_unlisted_species_falls_back_to_the_mob_default_not_the_registry_default() {
-        assert!(
-            acquires_at("zombie_villager", 15.0, TICKS),
-            "an unlisted species must still acquire inside DEFAULT_FOLLOW_RANGE"
+    fn an_unlisted_species_still_falls_back_at_the_spawn_path() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        // Outside the `minecraft` namespace, so `default_attributes` answers
+        // `None` structurally — see the control above.
+        let key = ResourceKey::from_str("modded:not_a_vanilla_mob").expect("valid key");
+        let id = sim.spawn_species(key, Vec3::new(0.0, 0.0, 0.0)).id();
+
+        let got = MobController::follow_range(&sim.get(id).expect("alive").mob);
+        assert_eq!(
+            got, DEFAULT_FOLLOW_RANGE,
+            "an unlisted species must fall back to Mob.createMobAttributes' 16.0"
         );
-        assert!(
-            !acquires_at("zombie_villager", 17.0, TICKS),
-            "an unlisted species must fall back to Mob.createMobAttributes' 16.0, \
-             not the registry's 32.0. Acquiring here means `attr`'s registry \
-             fallback is reaching the controller — the exact defect #455's brokered \
-             patch would have left in place, since its `> 0.0` guard cannot fire"
+        assert_ne!(
+            got, 32.0,
+            "32.0 is the registry default and the one value follow_range never \
+             legitimately holds — reading it here means `attr`'s registry \
+             fallback is reaching the controller, the exact defect #455's \
+             brokered patch would have left in place"
+        );
+
+        // Control: a *listed* species must read its own jar value through the
+        // same accessor, so the assertions above are a property of the fallback
+        // and not of `follow_range` always answering 16.
+        let zombie = ResourceKey::from_str("minecraft:zombie").expect("valid key");
+        let zid = sim.spawn_species(zombie, Vec3::new(2.0, 0.0, 0.0)).id();
+        assert_eq!(
+            MobController::follow_range(&sim.get(zid).expect("alive").mob),
+            35.0,
+            "Zombie.java:133 — if this also reads 16.0 the accessor is not \
+             observing what spawn_species installed"
         );
     }
 }
