@@ -467,6 +467,27 @@ pub struct RecipeBookPanelGeometry {
     /// threading a chest recipe through needs no struct change here.
     #[allow(dead_code)]
     pub(crate) special: Vec<SpecialIconDraw>,
+    /// How many leading vertices of [`verts`](Self::verts) are the panel's own
+    /// **chrome** — the panel body, search box, filter button, tabs, the 20
+    /// slot wells and the page arrows. Everything from here on belongs to a
+    /// recipe result's *icon*: its stack-count digits, its durability bar and
+    /// (on a jar-less run) its fallback swatch.
+    ///
+    /// A caller **must** draw the two ranges in separate passes with the
+    /// sprite and model passes sandwiched between them, exactly as
+    /// [`ContainerGeometry::chrome_vertex_count`] requires. This is not
+    /// bookkeeping for its own sake — it is the whole fix for an owner-reported
+    /// bug. The stream used to be unsplit, so a recipe result's count digits
+    /// (emitted into this same colour stream by
+    /// [`Builder::draw_stack`](super::builder::Builder::draw_stack)) were
+    /// submitted **before** the 3-D block models and flat sprites and
+    /// disappeared underneath them.
+    ///
+    /// The GUI path here has no meaningful depth compare, so **submission
+    /// order alone decides z** and there is nothing else that could fix this:
+    /// a caller that draws all of `verts` in one pass reproduces the bug
+    /// exactly, whichever end it draws it from.
+    pub chrome_vertex_count: usize,
 }
 
 impl RecipeBookPanelGeometry {
@@ -579,11 +600,16 @@ fn recipe_book_panel_geometry_inner(
     let mut b = Builder::new(w, h, None);
     b.rect_px(layout.toggle.x, layout.toggle.y, layout.toggle.w, layout.toggle.h, TOGGLE_COLOUR);
     if !open {
+        // A closed panel is chrome and nothing else, so the split point is the
+        // end of the stream — the caller's second colour range is empty and its
+        // icon passes draw nothing.
+        let chrome_vertex_count = b.verts.len() / FLOATS_PER_VERTEX;
         return RecipeBookPanelGeometry {
             verts: b.verts,
             item_verts: b.item_verts,
             model_verts: b.model_verts,
             special: b.special,
+            chrome_vertex_count,
         };
     }
 
@@ -608,13 +634,18 @@ fn recipe_book_panel_geometry_inner(
         b.rect_px(r.x, r.y, r.w, r.h, colour);
     }
 
-    for (i, r) in layout.recipes.iter().enumerate() {
+    // Every slot **well**, before any icon. This loop used to be one pass that
+    // interleaved `rect_px` and `draw_stack` per cell, which is what made the
+    // stream unsplittable and put every count digit under its own icon — see
+    // `RecipeBookPanelGeometry::chrome_vertex_count`. Wells are chrome; the
+    // icons that sit on them are drawn in the second loop below.
+    for r in &layout.recipes {
         b.rect_px(r.x, r.y, r.w, r.h, RECIPE_SLOT_COLOUR);
-        if let Some(stack) = page_results.get(i) {
-            b.draw_stack(assets, stack, r.x + RECIPE_ICON_INSET, r.y + RECIPE_ICON_INSET);
-        }
     }
 
+    // Still chrome, and deliberately still *before* the split: the page arrows
+    // are widgets, not icon overlays, so they must not end up in the range the
+    // caller draws over the item passes.
     if let Some(r) = layout.page_forward {
         b.rect_px(r.x, r.y, r.w, r.h, BUTTON_COLOUR);
     }
@@ -622,11 +653,25 @@ fn recipe_book_panel_geometry_inner(
         b.rect_px(r.x, r.y, r.w, r.h, BUTTON_COLOUR);
     }
 
+    // ---- the chrome/icon split point ----
+    let chrome_vertex_count = b.verts.len() / FLOATS_PER_VERTEX;
+
+    // Now the icons. Each `draw_stack` appends to the sprite/model streams and
+    // to the *tail* of the colour stream (count digits, durability bar, or the
+    // whole fallback swatch on a jar-less run), which the caller draws in a
+    // pass after both item passes.
+    for (i, r) in layout.recipes.iter().enumerate() {
+        if let Some(stack) = page_results.get(i) {
+            b.draw_stack(assets, stack, r.x + RECIPE_ICON_INSET, r.y + RECIPE_ICON_INSET);
+        }
+    }
+
     RecipeBookPanelGeometry {
         verts: b.verts,
         item_verts: b.item_verts,
         model_verts: b.model_verts,
         special: b.special,
+        chrome_vertex_count,
     }
 }
 
@@ -647,5 +692,8 @@ const TAB_COLOUR: [f32; 4] = [0.24, 0.21, 0.17, 1.0];
 /// See [`PANEL_COLOUR`]. Brighter than [`TAB_COLOUR`] — the selected tab's
 /// only visual distinction in this flat-fill fallback.
 const TAB_SELECTED_COLOUR: [f32; 4] = [0.52, 0.45, 0.33, 1.0];
-/// See [`PANEL_COLOUR`].
-const RECIPE_SLOT_COLOUR: [f32; 4] = [0.16, 0.14, 0.12, 1.0];
+/// See [`PANEL_COLOUR`]. `pub(super)` so the ordering gate can identify a slot
+/// **well** vertex by the same constant the draw fills it with, rather than
+/// restating the literal — a gate that restates it stops measuring the draw the
+/// moment someone retunes the palette.
+pub(super) const RECIPE_SLOT_COLOUR: [f32; 4] = [0.16, 0.14, 0.12, 1.0];

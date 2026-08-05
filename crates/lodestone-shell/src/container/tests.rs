@@ -2692,3 +2692,193 @@ fn recipe_toggle_control_one_offset_for_every_screen_is_wrong_for_the_inventory(
         RECIPE_TOGGLE_LOCAL_FURNACE
     );
 }
+
+// ---------------------------------------------------------------------------
+// The recipe panel's colour-stream split (owner bug report: "the item counts
+// are behind the items (at least the blocks)")
+// ---------------------------------------------------------------------------
+
+/// Indices of every vertex in a colour stream whose RGBA equals `ink`.
+///
+/// Colour is the only handle a CPU-side test has on *which* vertex is which:
+/// the stream is flat `[x, y, r, g, b, a]` with the positions already in NDC,
+/// and the fills are the same constants the draw uses (see
+/// [`RECIPE_SLOT_COLOUR`] and [`FALLBACK_COUNT_INK`]), so this identifies a
+/// vertex by the draw's own value rather than by a restated literal.
+fn colour_vertex_indices(verts: &[f32], ink: [f32; 4]) -> Vec<usize> {
+    verts
+        .chunks_exact(FLOATS_PER_VERTEX)
+        .enumerate()
+        .filter(|(_, v)| v[2..6] == ink)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// One page holding a single stack of `count` oak planks — a 4-output recipe,
+/// which is the common real case for a count > 1 in the book, and a *block*
+/// item, which is the class the owner singled out.
+fn planks(count: i32) -> ItemStack {
+    ItemStack::new("minecraft:oak_planks".parse().expect("valid id"), count)
+}
+
+fn panel_geo_for(results: &[&ItemStack]) -> (RecipeBookPanelLayout, RecipeBookPanelGeometry) {
+    let menu = Menu::crafting(3, 3);
+    let layout = recipe_book_panel_layout(&menu, VIEW.0, VIEW.1, 4, false, true);
+    let geo = recipe_book_panel_geometry(
+        &layout,
+        true,
+        Some(0),
+        results,
+        crate::config::AUTO_GUI_SCALE,
+        VIEW.0,
+        VIEW.1,
+    );
+    (layout, geo)
+}
+
+/// **The bug 2 gate.** A recipe result's stack-count digits must be submitted
+/// *after* every piece of panel chrome, because this GUI path has no depth
+/// compare and submission order alone decides z.
+///
+/// The load-bearing assertion is the last one: the highest-indexed slot-**well**
+/// vertex must come before the lowest-indexed count-**digit** vertex. That is
+/// the bug stated exactly. The shipped code emitted well and icon per cell in
+/// one interleaved loop, so cell 1's well was submitted after cell 0's digits,
+/// and — with the whole colour stream drawn in a single pass before the item
+/// passes — every digit ended up under its own icon.
+///
+/// A test that merely checked both kinds of vertex *exist* passes under the bug,
+/// which is why the ordering is asserted and not the presence.
+#[test]
+fn recipe_panel_count_digits_are_submitted_after_every_piece_of_chrome() {
+    let stack = planks(4);
+    let (_, geo) = panel_geo_for(&[&stack]);
+
+    let wells = colour_vertex_indices(&geo.verts, super::recipe_book::RECIPE_SLOT_COLOUR);
+    let digits = colour_vertex_indices(&geo.verts, super::builder::FALLBACK_COUNT_INK);
+
+    // Preconditions, so a layout change that stops emitting either one turns
+    // this into a failure rather than a silent pass over an empty set.
+    assert_eq!(
+        wells.len(),
+        RECIPE_ITEMS_PER_PAGE * 6,
+        "expected six vertices per slot well for all {RECIPE_ITEMS_PER_PAGE} cells"
+    );
+    assert!(!digits.is_empty(), "a count of 4 must emit count-digit geometry");
+
+    let last_well = *wells.iter().max().expect("non-empty");
+    let first_digit = *digits.iter().min().expect("non-empty");
+    assert!(
+        last_well < first_digit,
+        "count digits are drawn under the chrome: last well vertex is #{last_well} \
+         but the first count digit is #{first_digit} -- a well submitted after a \
+         digit paints over it, since this path has no depth compare"
+    );
+
+    // And the split the renderer keys off must sit between the two, so the
+    // digits land in the range drawn *after* the sprite and model passes.
+    assert!(
+        geo.chrome_vertex_count > last_well,
+        "chrome_vertex_count {} must cover the last well vertex #{last_well}",
+        geo.chrome_vertex_count
+    );
+    assert!(
+        geo.chrome_vertex_count <= first_digit,
+        "chrome_vertex_count {} must not include the first count digit #{first_digit}",
+        geo.chrome_vertex_count
+    );
+}
+
+/// The split point is exactly the chrome/icon boundary, pinned by an
+/// independent route: the chrome a *populated* page emits must be
+/// byte-for-byte the same quantity an **empty** page emits in total.
+///
+/// This is what catches chrome leaking into the icon range (or an icon leaking
+/// into the chrome range) without needing to know a single coordinate — and it
+/// is exactly what the interleaved loop violated.
+#[test]
+fn recipe_panel_chrome_range_equals_an_empty_pages_whole_stream() {
+    let stack = planks(4);
+    let (_, populated) = panel_geo_for(&[&stack]);
+    let (_, empty) = panel_geo_for(&[]);
+
+    assert_eq!(
+        populated.chrome_vertex_count,
+        empty.vertex_count(),
+        "the chrome range must be invariant to what the page holds"
+    );
+    assert_eq!(
+        empty.chrome_vertex_count,
+        empty.vertex_count(),
+        "an empty page is all chrome, so its split is the end of its stream"
+    );
+    assert!(
+        populated.vertex_count() > populated.chrome_vertex_count,
+        "a populated page must have a non-empty icon-overlay range or the \
+         renderer's second colour pass is dead"
+    );
+}
+
+/// The count digits, and *only* the count digits, are what the icon range gains
+/// from a count > 1 — so the extra vertices really are the digits rather than
+/// some other per-stack geometry, and the chrome range does not move.
+///
+/// `count == 1` draws no number at all (vanilla, and
+/// `draw_item_icon_counted`'s own `slot.count > 1` guard), which makes this a
+/// clean differential with no atlas and no font.
+#[test]
+fn recipe_panel_count_digits_land_in_the_icon_range_not_the_chrome_range() {
+    let one = planks(1);
+    let four = planks(4);
+    let (_, geo1) = panel_geo_for(&[&one]);
+    let (_, geo4) = panel_geo_for(&[&four]);
+
+    assert_eq!(
+        geo1.chrome_vertex_count, geo4.chrome_vertex_count,
+        "the count must not change how much chrome is emitted"
+    );
+    assert!(
+        colour_vertex_indices(&geo1.verts, super::builder::FALLBACK_COUNT_INK).is_empty(),
+        "a count of 1 draws no number -- the differential is vacuous otherwise"
+    );
+    let tail1 = geo1.vertex_count() - geo1.chrome_vertex_count;
+    let tail4 = geo4.vertex_count() - geo4.chrome_vertex_count;
+    assert!(
+        tail4 > tail1,
+        "the icon-overlay range must grow by the digits: {tail1} -> {tail4}"
+    );
+    assert_eq!(
+        tail4 - tail1,
+        colour_vertex_indices(&geo4.verts, super::builder::FALLBACK_COUNT_INK).len(),
+        "every vertex the count added must be a count-digit vertex"
+    );
+}
+
+/// Liveness sweep, reused from the recipe-book agent's own instrument: every
+/// vertex the panel submits must land inside the `[-1, 1]` NDC clip range.
+///
+/// Re-run here because reordering the emission is exactly the kind of change
+/// that could drop or duplicate a rect, and this catches a vertex that stopped
+/// being on screen at all — which is how two earlier bugs in this panel were
+/// found (tabs off-canvas once `bx` clamped, and a placeholder canvas size that
+/// put *every* vertex outside the range).
+#[test]
+fn recipe_panel_split_stream_still_draws_entirely_inside_the_clip_range() {
+    let stack = planks(4);
+    for results in [&[][..], &[&stack][..]] {
+        let (_, geo) = panel_geo_for(results);
+        let mut out_of_range: Vec<(usize, f32, f32)> = Vec::new();
+        for (i, v) in geo.verts.chunks_exact(FLOATS_PER_VERTEX).enumerate() {
+            if !(-1.0..=1.0).contains(&v[0]) || !(-1.0..=1.0).contains(&v[1]) {
+                out_of_range.push((i, v[0], v[1]));
+            }
+        }
+        assert!(
+            out_of_range.is_empty(),
+            "{} of {} vertices fall outside the [-1, 1] clip range, first few: {:?}",
+            out_of_range.len(),
+            geo.vertex_count(),
+            &out_of_range[..out_of_range.len().min(4)]
+        );
+    }
+}

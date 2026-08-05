@@ -2661,16 +2661,31 @@ impl HudRenderer {
     /// a mismatched triple does (every vertex lands outside the `[-1, 1]` clip
     /// range and the panel draws nothing at all).
     ///
-    /// # Pass order, and one known cosmetic gap
+    /// # Pass order
     ///
-    /// Colour first (panel, tabs, buttons, slot wells), then the flat item
-    /// sprites, then the 3-D block-item models — so icons land *over* their
-    /// wells. Unlike [`crate::container::ContainerGeometry`], the panel geometry
-    /// keeps **one unsplit colour stream** with no `chrome_vertex_count`
-    /// equivalent, so a recipe result's stack-count digits (emitted into that
-    /// same stream by `draw_stack`) end up *under* its icon rather than over it.
-    /// Splitting the stream belongs to the geometry's owner in `container.rs`,
-    /// not to this draw call; it affects only multi-output recipes' count text.
+    /// Four passes, in the order
+    /// [`ContainerRenderer::render_with_icons_scaled`](crate::container::ContainerRenderer)
+    /// already uses for the main panel:
+    ///
+    /// 1. `verts[..chrome]` — panel, tabs, buttons, slot wells, page arrows.
+    /// 2. the 3-D block-item models.
+    /// 3. the flat item sprites.
+    /// 4. `verts[chrome..]` — stack-count digits, durability bars, and the
+    ///    jar-less fallback swatches.
+    ///
+    /// **The split is load-bearing and this used to be wrong.** The geometry
+    /// previously kept one unsplit colour stream drawn entirely in pass 1, so a
+    /// recipe result's count digits were submitted before its icon and vanished
+    /// underneath it — the owner-reported "the item counts are behind the items
+    /// (at least the blocks)". The "at least" is the tell: a flat item sprite is
+    /// mostly transparent around its edges so some digits bled through, whereas
+    /// a 3-D block model fills the bottom-right corner opaquely and hid them
+    /// completely.
+    ///
+    /// There is no depth compare on this path, so submission order is the *only*
+    /// thing deciding z. Collapsing these four passes back into fewer, or
+    /// drawing all of `verts` in pass 1, reproduces the bug — see
+    /// [`crate::container::RecipeBookPanelGeometry::chrome_vertex_count`].
     #[allow(clippy::too_many_arguments)]
     pub fn render_recipe_book_panel(
         &mut self,
@@ -2721,10 +2736,15 @@ impl HudRenderer {
         );
 
         let colour_count = geo.vertex_count() as u32;
+        // Clamped against what the stream actually holds, so a geometry built
+        // by an older producer (or a hand-built one in a test) can never make
+        // this draw a range past the end of its own buffer.
+        let chrome_count = (geo.chrome_vertex_count as u32).min(colour_count);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("hud-recipe-panel"),
         });
-        if colour_count > 0
+        // Pass 1: chrome, under everything.
+        if chrome_count > 0
             && let Some(buffer) = &self.recipe_panel_buffer
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2737,9 +2757,22 @@ impl HudRenderer {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_vertex_buffer(0, buffer.slice(..));
-            pass.draw(0..colour_count, 0..1);
+            pass.draw(0..chrome_count, 0..1);
         }
-        {
+        // Pass 2: the 3-D block-item models, over the wells.
+        self.icons.draw_models(
+            &mut encoder,
+            view,
+            depth,
+            model_count,
+            "hud-recipe-panel-item-model-pass",
+        );
+        // Passes 3 and 4: flat sprites, then the icon-overlay colour range —
+        // count digits and durability bars — which must land over *both* kinds
+        // of icon. Sharing one pass matches
+        // `ContainerRenderer::render_with_icons_scaled`'s own
+        // `container-item-pass`.
+        if item_count > 0 || colour_count > chrome_count {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("hud-recipe-panel-sprite-pass"),
                 color_attachments: &[Some(item_icon::load_colour_attachment(view))],
@@ -2749,14 +2782,14 @@ impl HudRenderer {
                 multiview_mask: None,
             });
             self.icons.draw_sprites(&mut pass, item_count);
+            if colour_count > chrome_count
+                && let Some(buffer) = &self.recipe_panel_buffer
+            {
+                pass.set_pipeline(&self.pipeline);
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw(chrome_count..colour_count, 0..1);
+            }
         }
-        self.icons.draw_models(
-            &mut encoder,
-            view,
-            depth,
-            model_count,
-            "hud-recipe-panel-item-model-pass",
-        );
         queue.submit(std::iter::once(encoder.finish()));
     }
 }
