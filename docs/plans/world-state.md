@@ -363,6 +363,20 @@ pathspec commits.
 
 ### B2 — border client consumer (#326, client half; pairs with B1, same PR train)
 
+> **Stale as of issue #436's island sweep — re-verify before following this bullet.** The
+> border events did **not** route to SHELL and there is no `BorderCell`. They route
+> `session` (`event.rs`'s own table, `ClientEvent::WorldBorder* => SESSION`) and fold into
+> `lodestone_ecs::session::SessionWorldBorder` via `apply_world_border`, stamped off
+> `FrameClock`. So the "route flip" this section's *Rule respected* line turns on **already
+> happened, differently**, and no `net.rs` change is needed at all.
+>
+> What is genuinely still open is only the consumer, and it is bigger than "tint the screen
+> edge red": vanilla's warning is a **cyan tint on the vignette** inside `Hud.extractVignette`
+> (`Hud.java:1057-1078`), needing `misc/vignette.png` plus a **multiply** blend state that
+> `lodestone-render/src/screen_effects.rs` does not have. The formula itself is ported and
+> gated (`sim::session::border_warning`) and reaches the debug overlay today. See
+> `docs/screen-overlays.md`'s "The world-border warning" section for the exact remaining list.
+
 - **Files:** `event.rs:2191` route table (six border events → SHELL — world state, so neither
   `ingest` nor `session`, per the established fork); `net.rs` fold into a new `BorderCell`
   (mirror `WeatherCell`, `net.rs:1868`); consumer: warning vignette — when

@@ -5084,3 +5084,207 @@ fn end_session_clears_the_entity_tracks() {
     assert_eq!(sim.read(crate::entities::tracked_entity_count), 0);
     assert!(sim.entity_draws().is_empty());
 }
+
+// -- world border + spawn point + game rules (issue #436) --------------
+//
+// `SessionWorldBorder`, `SessionSpawnPoint` and `SessionGameRules` were
+// folded, reset on quit-to-title and gated through the real
+// `SharedState::apply` path with **no reader anywhere in the shell**. These
+// gates drive the real fold and the real accessor.
+
+/// **Vanilla's border-warning formula, against values computed outside this
+/// code.**
+///
+/// `Hud.extractVignette` (`Hud.java:1057-1069`) on a *static* border reduces
+/// to `warningDistance == warningBlocks` exactly, because
+/// `StaticBorderExtent.getLerpSpeed()` returns `0.0`
+/// (`WorldBorder.java:534-535`) and `max(warningBlocks, 0)` is
+/// `warningBlocks`. That makes the arithmetic hand-checkable:
+///
+/// A border of diameter 100 centred on the origin has its edge at ±50. A
+/// player at `x = 47` is `3` blocks from it. With `warning_blocks = 5`:
+/// `strength = 1 - 3/5 = 0.4`. Every number here comes from vanilla's
+/// constants and the packet, not from our implementation.
+#[test]
+fn the_border_warning_strength_matches_vanillas_hand_computed_value() {
+    use lodestone_game::worldborder::{BorderExtent, WorldBorder};
+
+    let border = WorldBorder {
+        center_x: 0.0,
+        center_z: 0.0,
+        extent: BorderExtent::Static { size: 100.0 },
+        warning_blocks: 5,
+        ..WorldBorder::default()
+    };
+
+    let (dist, warn_at, strength) = super::session::border_warning(&border, 47.0, 0.0, 0.0);
+    assert!((dist - 3.0).abs() < 1e-9, "edge at 50, player at 47 => 3 blocks: got {dist}");
+    assert!(
+        (warn_at - 5.0).abs() < 1e-9,
+        "a static border's warning distance is warning_blocks exactly, since \
+         getLerpSpeed() is 0.0: got {warn_at}"
+    );
+    assert!(
+        (strength - 0.4).abs() < 1e-6,
+        "1 - 3/5 = 0.4, hand-computed from vanilla's own expression: got {strength}"
+    );
+
+    // Well inside: no warning at all. `6 > 5`, so the `<` fails.
+    let (_, _, none) = super::session::border_warning(&border, 44.0, 0.0, 0.0);
+    assert!(
+        (none - 0.0).abs() < 1e-9,
+        "6 blocks out is beyond the 5-block warning band: got {none}"
+    );
+
+    // Exactly at the edge is full strength; outside is clamped to 1.0 rather
+    // than exceeding it, which is what vanilla's own `Mth.clamp` does one
+    // step later (`Hud.java:1073`).
+    let (_, _, at_edge) = super::session::border_warning(&border, 50.0, 0.0, 0.0);
+    assert!((at_edge - 1.0).abs() < 1e-6, "at the edge => 1 - 0/5 = 1.0: got {at_edge}");
+    let (outside, _, beyond) = super::session::border_warning(&border, 80.0, 0.0, 0.0);
+    assert!(outside < 0.0, "outside the border the distance is negative: got {outside}");
+    assert!(
+        (beyond - 1.0).abs() < 1e-6,
+        "and the strength clamps at 1.0 rather than running away: got {beyond}"
+    );
+}
+
+/// **The control for the gate above, and it rejects the wrong hypothesis
+/// rather than merely accepting the right one.**
+///
+/// The obvious wrong port is to use the border's *radius* where vanilla uses
+/// the distance to the nearest edge, or the *diameter* where it uses the
+/// radius. Both produce a plausible-looking number. A player at `x = 47`
+/// inside a 100-diameter border is `3` blocks from the edge, `47` from the
+/// centre and `53` from the far edge — three candidate values, only one of
+/// which lands inside a 5-block warning band at all.
+#[test]
+fn the_border_warning_rejects_the_radius_and_diameter_hypotheses() {
+    use lodestone_game::worldborder::{BorderExtent, WorldBorder};
+
+    let border = WorldBorder {
+        extent: BorderExtent::Static { size: 100.0 },
+        warning_blocks: 5,
+        ..WorldBorder::default()
+    };
+    let (dist, _, _) = super::session::border_warning(&border, 47.0, 0.0, 0.0);
+
+    assert!(
+        (dist - 47.0).abs() > 1.0,
+        "must NOT be the distance from the centre (47) — that hypothesis \
+         would never warn inside any normal border: got {dist}"
+    );
+    assert!(
+        (dist - 53.0).abs() > 1.0,
+        "must NOT be the distance to the far edge (53): got {dist}"
+    );
+    assert!(
+        (dist - 3.0).abs() < 1e-9,
+        "it is the distance to the NEAREST edge (3): got {dist}"
+    );
+}
+
+/// **The world border reaches the shell through the real fold**, not through a
+/// hand-built `WorldBorder`.
+///
+/// Drives `ClientEvent`s through the same `NetIngest` schedule the net thread
+/// runs, then reads `Sim::world_border_warning` — the accessor `app/redraw.rs`
+/// calls every frame. Before this accessor, `SessionWorldBorder` had zero
+/// readers in the entire shell.
+#[test]
+fn a_folded_world_border_reaches_the_shells_own_accessor() {
+    use lodestone_client::ClientEvent;
+
+    let mut sim = Sim::new(test_config());
+    ingest(&mut sim, login_event(1));
+
+    // The precondition that makes the assertion meaningful: an unreported
+    // border must answer `None`, so a passing result below cannot be the
+    // default leaking through.
+    assert!(
+        sim.world_border_warning().is_none(),
+        "precondition: with no border packet the accessor must report nothing, \
+         not the MAX_SIZE default dressed up as a real border"
+    );
+
+    ingest(
+        &mut sim,
+        ClientEvent::WorldBorderInitialized {
+            x: 0.0,
+            z: 0.0,
+            old_size: 100.0,
+            new_size: 100.0,
+            lerp_time_ms: 0,
+            absolute_max_size: 29_999_984,
+            warning_blocks: 5,
+            warning_time: 15,
+        },
+    );
+
+    // Pin the position rather than assuming it. The first draft of this gate
+    // predicted `50.0` on the belief that a fresh `Sim` starts the player at
+    // the origin; it starts at the block *centre* (`x = 0.5`), so the real
+    // answer was `49.5` and the assertion caught the assumption. Setting the
+    // position makes the prediction independent of that default entirely.
+    sim.player_mut(|p| {
+        p.position.x = 47.0;
+        p.position.z = 0.0;
+    });
+
+    let (dist, warn_at, strength) = sim
+        .world_border_warning()
+        .expect("a reported border must reach the accessor");
+    assert!(
+        (warn_at - 5.0).abs() < 1e-9,
+        "the folded warning_blocks must be the packet's 5, not the default: got {warn_at}"
+    );
+    // Edge of a 100-diameter border centred on the origin is x = 50, so a
+    // player at x = 47 is 3 blocks out. This proves the *centre and size*
+    // folded too, not merely the warning band.
+    assert!(
+        (dist - 3.0).abs() < 1e-6,
+        "x=47 inside a 100-diameter border centred on the origin is 3 blocks \
+         from the edge: got {dist}"
+    );
+    assert!(
+        (strength - 0.4).abs() < 1e-6,
+        "and the strength through the real fold must equal the hand-computed \
+         1 - 3/5: got {strength}"
+    );
+}
+
+/// **`SessionSpawnPoint` and `SessionGameRules` reach their shell accessors**,
+/// through the same real fold.
+#[test]
+fn folded_spawn_point_and_game_rules_reach_the_shells_own_accessors() {
+    use lodestone_client::ClientEvent;
+
+    let mut sim = Sim::new(test_config());
+    ingest(&mut sim, login_event(1));
+
+    assert!(
+        sim.spawn_point().pos().is_none(),
+        "precondition: no spawn reported yet"
+    );
+    assert_eq!(
+        sim.game_rules().immediate_respawn(),
+        None,
+        "precondition: no game rule reported yet — `None` is 'unreported', \
+         which is NOT the same as `Some(false)`"
+    );
+
+    ingest(
+        &mut sim,
+        ClientEvent::SpawnPositionChanged {
+            dimension: "minecraft:overworld".parse().expect("valid dimension id"),
+            pos: lodestone_model::BlockPos::new(12, 64, -30),
+            angle: 90.0,
+            pitch: 0.0,
+        },
+    );
+    assert_eq!(
+        sim.spawn_point().pos(),
+        Some(lodestone_model::BlockPos::new(12, 64, -30)),
+        "the folded spawn position must reach the accessor the HUD reads"
+    );
+}

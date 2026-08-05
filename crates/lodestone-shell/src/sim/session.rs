@@ -1043,4 +1043,163 @@ impl Sim {
             });
         }
     }
+
+    /// The server's game rules, as `GAME_EVENT`/`CHANGE_GAME_STATE` last
+    /// reported them (issue #436's `SessionGameRules` island).
+    ///
+    /// Cloned rather than `Copy`ed: [`GameRuleValues`] wraps a `BTreeMap`. The
+    /// map is small (a handful of rules a server actually reports), and the
+    /// alternative — handing out a reference — would mean handing out a live
+    /// read guard, which [`Self::player`]'s doc rules out.
+    #[must_use]
+    pub fn game_rules(&self) -> lodestone_game::levelstate::GameRuleValues {
+        self.read(|w| {
+            w.get::<lodestone_ecs::session::SessionGameRules>(self.local)
+                .expect("the local player always carries SessionGameRules")
+                .0
+                .clone()
+        })
+    }
+
+    /// The player's spawn point, as `SET_DEFAULT_SPAWN_POSITION` last reported
+    /// it (issue #436's `SessionSpawnPoint` island).
+    ///
+    /// `is_reported()` on the result separates "the server never sent one" from
+    /// "the server sent the origin" — the distinction a compass needle needs in
+    /// order to spin rather than point north.
+    #[must_use]
+    pub fn spawn_point(&self) -> lodestone_game::levelstate::SpawnPoint {
+        self.read(|w| {
+            w.get::<lodestone_ecs::session::SessionSpawnPoint>(self.local)
+                .expect("the local player always carries SessionSpawnPoint")
+                .0
+                .clone()
+        })
+    }
+
+    /// The world border's warning-overlay strength for this frame, in `0.0..=1.0`
+    /// — issue #436's `SessionWorldBorder` island reaching pixels.
+    ///
+    /// A direct port of `Hud.extractVignette` (`Hud.java:1057-1069`,
+    /// `.cache/mc/26.2/client-src`):
+    ///
+    /// ```text
+    /// distToBorder         = worldBorder.getDistanceToBorder(camera)
+    /// movingBlocksThreshold = min(getLerpSpeed() * getWarningTime(),
+    ///                             abs(getLerpTarget() - getSize()))
+    /// warningDistance      = max(getWarningBlocks(), movingBlocksThreshold)
+    /// strength             = distToBorder < warningDistance
+    ///                        ? 1 - distToBorder / warningDistance : 0
+    /// ```
+    ///
+    /// # The clock is `FrameClock`, deliberately
+    ///
+    /// Not `WorldTime`: the server can freeze `WorldTime` with `advance_time`,
+    /// and a frozen clock would freeze a resize mid-flight. `apply_world_border`
+    /// stamps the extent off `FrameClock` for the same reason
+    /// (`lodestone-ecs/src/session.rs:566-596`), so reading it with anything
+    /// else would compare two different time bases.
+    ///
+    /// # A unit hazard, recorded rather than silently resolved
+    ///
+    /// Vanilla's `getLerpSpeed()` is `abs(from - to) / (lerpEnd - lerpBegin)`
+    /// (`WorldBorder.java:403-405`) where that denominator is
+    /// `lerpSizeBetween`'s third parameter — named **`ticks`**
+    /// (`WorldBorder.java:195`), not milliseconds. Our `BorderExtent::Moving`
+    /// stores `duration_ms`, documented as milliseconds as the server sent it,
+    /// so the conversion below is explicit at [`MILLIS_PER_TICK`].
+    ///
+    /// **If `duration_ms` is really ticks, the moving term is 20× too small.**
+    /// It fails safe — the `max(warning_blocks, …)` floor still applies, so the
+    /// overlay appears at the static distance and only the *early* warning for
+    /// an incoming shrink is short. What would falsify it: a live server
+    /// shrinking a border and a measurement of when the tint first appears. The
+    /// static case, which is what the gates pin, is exact either way because
+    /// `StaticBorderExtent.getLerpSpeed()` returns `0.0`
+    /// (`WorldBorder.java:534-535`) and the floor wins outright.
+    /// `(distance_to_border, warning_distance, warning_strength)`, or `None`
+    /// until the server has actually sent a border packet.
+    ///
+    /// `WorldBorder::initialized` is the gate rather than a size comparison:
+    /// the default border is a real, legal `MAX_SIZE` border at the origin, so
+    /// "looks like the default" cannot distinguish an unreported border from a
+    /// server that genuinely set one that big.
+    #[must_use]
+    pub fn world_border_warning(&self) -> Option<(f64, f64, f32)> {
+        // `clock()` and `player()` are themselves `read`s, so both must be
+        // taken *before* the one below — the deadlock discipline
+        // `sim/session.rs`'s chat-age accessor follows.
+        let now = self.clock().secs;
+        let pos = self.player().position;
+        let border = self.read(|w| {
+            w.get::<lodestone_ecs::session::SessionWorldBorder>(self.local)
+                .expect("the local player always carries SessionWorldBorder")
+                .0
+        });
+        if !border.initialized {
+            return None;
+        }
+        let (dist, warn_at, strength) = border_warning(&border, pos.x, pos.z, now);
+        Some((dist, warn_at, strength))
+    }
+}
+
+/// Milliseconds per tick — the conversion `world_border_warning` needs to read
+/// `BorderExtent::Moving::duration_ms` as vanilla's tick-denominated lerp
+/// duration. See that method's "unit hazard" section.
+const MILLIS_PER_TICK: f64 = 50.0;
+
+/// The pure half of [`Sim::world_border_warning`], so the formula is testable
+/// against hand-computed vanilla values with no ECS, no clock and no player.
+///
+/// Split out for exactly the reason `recipe_toast_view` is a free function: a
+/// gate that had to stand up a `Sim` to check an arithmetic port would be
+/// measuring the harness as much as the formula.
+/// Returns `(distance_to_border, warning_distance, strength)` — all three,
+/// because the first two are what make a failing gate diagnosable. A gate that
+/// only saw `strength` could not tell "the distance is wrong" from "the
+/// threshold is wrong".
+#[must_use]
+pub(crate) fn border_warning(
+    border: &lodestone_game::worldborder::WorldBorder,
+    x: f64,
+    z: f64,
+    now_secs: f64,
+) -> (f64, f64, f32) {
+    use lodestone_game::worldborder::BorderExtent;
+
+    // `StaticBorderExtent.getLerpSpeed()` is `0.0`; only a moving border has a
+    // speed at all.
+    let lerp_speed = match border.extent {
+        BorderExtent::Static { .. } => 0.0,
+        BorderExtent::Moving {
+            from,
+            to,
+            duration_ms,
+            ..
+        } => {
+            #[allow(clippy::cast_precision_loss)]
+            let duration_ticks = duration_ms as f64 / MILLIS_PER_TICK;
+            if duration_ticks > 0.0 {
+                (from - to).abs() / duration_ticks
+            } else {
+                0.0
+            }
+        }
+    };
+    let size = border.extent.size_at(now_secs);
+    let moving_blocks = (lerp_speed * f64::from(border.warning_time))
+        .min((border.target_size() - size).abs());
+    let warning_distance = f64::from(border.warning_blocks).max(moving_blocks);
+    let dist = border.distance_to_border(x, z, now_secs);
+    if warning_distance <= 0.0 || dist >= warning_distance {
+        return (dist, warning_distance, 0.0);
+    }
+    // Vanilla does not clamp the low end here, but `distance_to_border` goes
+    // negative outside the border, which would push this above 1.0. Vanilla
+    // clamps immediately afterwards (`Mth.clamp(borderWarningStrength, 0, 1)`,
+    // `Hud.java:1073`), so clamping here is the same answer one step earlier.
+    #[allow(clippy::cast_possible_truncation)]
+    let strength = (1.0 - dist / warning_distance).clamp(0.0, 1.0) as f32;
+    (dist, warning_distance, strength)
 }
