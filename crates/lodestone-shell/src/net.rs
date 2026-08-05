@@ -1166,6 +1166,34 @@ impl NetClient {
         self.handle.get().map(|h| h.player_menu())
     }
 
+    /// Predict a `key.drop` press on hotbar slot `selected` (`0..9`), returning
+    /// whether anything was dropped. A no-op returning `false` before login or
+    /// off a live connection.
+    ///
+    /// # This is half of a pair, and the other half is the caller's
+    ///
+    /// Call it immediately **before** `send_action(DropSelectedItem …)`, which is
+    /// vanilla's order (`LocalPlayer.java:316-317`: `removeFromSelected` then
+    /// `connection.send`). The send is deliberately *not* folded in here so the
+    /// spectator gate stays in one place — `App::drop_selected_action` already
+    /// returns `None` for a spectator, and calling this inside that `if let`
+    /// gives the prediction the same gate for free.
+    ///
+    /// # Why the count is wrong without it
+    ///
+    /// `DROP_ITEM`/`DROP_ALL_ITEMS` are the one inventory change a vanilla server
+    /// applies **silently**: `ServerGamePacketListenerImpl.java:1303-1314` calls
+    /// `player.drop(…)` and returns without any slot or content packet. So
+    /// [`player_menu`](Self::player_menu) — which is what the HUD hotbar and the
+    /// inventory screen both read — keeps reporting the pre-drop count forever
+    /// unless this runs. Nothing is late here; without the prediction there is no
+    /// second chance.
+    pub fn predict_drop_selected(&self, selected: usize, all: bool) -> bool {
+        self.handle
+            .get()
+            .is_some_and(|h| h.drop_selected(selected, all))
+    }
+
     /// The currently open non-player menu, if the server has one open.
     #[must_use]
     pub fn open_menu(&self) -> Option<OpenMenuSnapshot> {

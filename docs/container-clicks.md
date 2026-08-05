@@ -571,6 +571,75 @@ round-trip tested, exercised by an `#[ignore]`d live gate, and produced by
 nothing. One `Q` binding closes both, which is why this is not the "half a
 feature" that `43692c5` correctly refused for the off-hand key.
 
+### The two `Q` paths disagreed about prediction, and only one of them was wrong (issue #436)
+
+Once the binding above landed, `Q` reached the wire from both sides — and the two
+sides did **not** behave the same. A player found it: *"throwing out items with Q
+doesn't update the count in my inventory or hotbar, but it does work properly
+otherwise."*
+
+| screen open? | shell entry point | lowers to | predicted? |
+| --- | --- | --- | --- |
+| yes | `App::send_container_drop` | `ContainerMenuKey::Drop` → `Click::drop_one`/`drop_stack` → `ContainerInput::Throw` → `Menu::do_throw`, through `Menus::click` → `ClientMenu::predict` | **yes**, always did |
+| no | `App::send_drop_selected` | `ClientAction::DropSelectedItem`/`DropSelectedItemStack`, straight to `NetClient::send_action` | **no** — this was the bug |
+
+Measured, not read off the call sites:
+`drop_selected_prediction::the_container_screen_drop_key_predicts_too` drives the
+container path and reads `4` from five cobblestone, and it stays green when the
+gameplay port is neutered — the two paths are genuinely independent.
+
+**Why the gameplay path could not be "late" rather than wrong.** `THROW` is a
+container click, so the server answers it with a state id and, on a mismatch,
+`broadcastFullState()` — a missed prediction there self-heals within a round trip.
+`DROP_ITEM`/`DROP_ALL_ITEMS` are not container clicks at all. They reach
+`ServerGamePacketListenerImpl.java:1303-1314`, which calls `this.player.drop(false)`
+/ `drop(true)` and **returns without sending any slot or content packet**. So the
+count stayed stale *forever*, and the local mutation is the only thing that will
+ever change it. Vanilla's client has always done it: `LocalPlayer.java:314-319`
+calls `getInventory().removeFromSelected(all)` into a variable it literally names
+`prediction`, and *then* sends the packet.
+
+**Where the fix lives, and why not at the call site.** The prediction is
+`Menus::drop_selected` → `ClientMenu::remove_from_selected` →
+`Menu::remove_from_selected`, a port of `Inventory.removeFromSelected`
+(`Inventory.java:527-530` → `removeItem` `:332-346` →
+`ContainerHelper.removeItem` `ContainerHelper.java:13-15` → `ItemStack.split`).
+Three things about that chain are load-bearing:
+
+* **It routes through `inventory_owner_mut`**, for *One inventory, one owner*'s
+  reason above. A drop while a container screen is open must mutate the
+  container's menu, because window 0's player section is an empty husk then.
+* **It writes `predicted` *and* `confirmed`.** This is the one place that is
+  correct, and it is the opposite of what `predict` does. A container click leaves
+  `confirmed` alone because the server echoes and `reconcile` decides; a drop gets
+  no echo, and the server has already performed the identical removal. Leaving
+  `confirmed` one item richer would make the next full `container_set_content`
+  diff as a *visible correction that never happened*.
+  `a_container_click_moves_only_the_prediction` is the control for that asymmetry.
+* **A zero remainder becomes `None`, not `Some(count: 0)`.** `app/redraw.rs` maps
+  any present stack to a `HotbarSlot` unconditionally and `hud/item_icon.rs:357`
+  draws the number only `if slot.count > 1`, so a surviving zero-count stack draws
+  an icon with no number in a slot the player just emptied.
+
+The serverbound half stays at the call site: `NetClient::predict_drop_selected` is
+prediction *only*, called immediately before `send_action` (vanilla's order), and
+inside `drop_selected_action`'s `Some` arm so the **spectator** gate is not
+duplicated — a spectator predicts nothing and sends nothing, decided once.
+
+#### A limit of the pixel gate, worth knowing before extending it
+
+`hotbar_drop_prediction_pixels.rs` compares `HudGeometry::build`'s colour stream,
+which needs no GPU. With no item atlas attached, `item_verts` is empty, so a
+**one**-item cell and an **empty** cell produce byte-identical streams — the stack
+digits are suppressed at `count == 1` and the icon art is the only other
+slot-dependent ink. Any assertion that has to separate "emptied" from "one left"
+must therefore read `hotbar_records()[SELECTED]` (which is
+`HudFrame::hotbar_items`' own element type, the value `draw_hotbar_items` forks on)
+rather than the stream. Two smaller measured facts from the same file: `"5"` and
+`"4"` do *not* cost the same number of vertices — the procedural glyph path is
+stroke-based and a `5` is six quads more (101,016 floats against 100,800) — and a
+count-1 frame is strictly shorter than either.
+
 ### `checkHotbarMouseClicked` is not modelled, and that is a real gap
 
 `:341-355` runs the hotbar/off-hand `SWAP` off a **mouse** button that is neither

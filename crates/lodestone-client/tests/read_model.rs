@@ -396,6 +396,92 @@ async fn read_model_folds_window_zero_inventory_into_player_menu() {
     );
 }
 
+/// Issue #436: `ClientHandle::drop_selected` must change the count
+/// [`ClientHandle::player_menu`] reports — the read every UI in the tree makes.
+///
+/// # Why this is a separate test from the model's own
+///
+/// `lodestone-game/tests/drop_selected_prediction.rs` proves
+/// `Menus::drop_selected` is a faithful port of `Inventory.removeFromSelected`.
+/// This proves the *plumbing*: that the mutation lands in the one authoritative
+/// `SessionMenus` component and is therefore visible through the accessor
+/// `Sim::player_menu` reads. A prediction applied to a clone would satisfy the
+/// model tests and reach no pixel — `SharedState::player_menu` hands out clones,
+/// which is precisely why `drop_selected` had to be a method on the state rather
+/// than something a caller does to a snapshot.
+///
+/// The fixture is the same window-0 `container_set_content` the test above uses,
+/// so the seeded count originates on the wire and not from our own setter.
+#[tokio::test]
+async fn drop_selected_predicts_into_the_menu_the_ui_reads() {
+    const TRIGGER: i32 = 1;
+    let mut items = vec![None; 46];
+    // Menu slot 36 is native hotbar 0 — what `SelectedSlot(0)` selects.
+    items[36] = Some(stack("cobblestone", 5));
+    let adapter = FakeAdapter::new()
+        .begin(vec![Directive::SetState(ConnectionState::Play)])
+        .on(
+            ConnectionState::Play,
+            TRIGGER,
+            vec![Directive::Emit(ClientEvent::ContainerContent {
+                window_id: 0,
+                state_id: 7,
+                items,
+                carried_item: None,
+            })],
+        );
+    let (handle, mut events, mut peer) = start(adapter);
+
+    peer.write_packet(TRIGGER, &[]).await.unwrap();
+    events.recv().await.unwrap();
+
+    assert_eq!(
+        handle
+            .player_menu()
+            .slot_item(36)
+            .map(lodestone_game::item::ItemStack::count),
+        Some(5),
+        "precondition: the fold must have seeded five, or nothing below is measuring a \
+         decrement"
+    );
+
+    assert!(
+        handle.drop_selected(0, false),
+        "a non-empty slot reports that something was dropped — vanilla's \
+         `LocalPlayer.drop` returns `!prediction.isEmpty()` and the arm swing depends on it"
+    );
+
+    assert_eq!(
+        handle
+            .player_menu()
+            .slot_item(36)
+            .map(lodestone_game::item::ItemStack::count),
+        Some(4),
+        "the prediction must be visible through `player_menu` — the accessor the HUD \
+         hotbar and the inventory screen both read. This is the whole bug: the server \
+         sends no slot update back for DROP_ITEM \
+         (`ServerGamePacketListenerImpl.java:1303-1314`), so nothing else will ever fix it"
+    );
+
+    // Ctrl+Q takes the rest, and the slot must read empty rather than count 0.
+    assert!(handle.drop_selected(0, true));
+    assert!(
+        handle.player_menu().slot_item(36).is_none(),
+        "the emptied slot is `None`, not `Some(count: 0)`"
+    );
+
+    // And the detector works in the other direction: an empty slot reports false
+    // and stays empty. Without this, the two `assert!(…)` above are satisfied by a
+    // method that unconditionally returns `true`.
+    assert!(
+        !handle.drop_selected(0, false),
+        "control: dropping from an empty slot drops nothing and says so"
+    );
+    assert!(handle.player_menu().slot_item(36).is_none());
+
+    drop(handle);
+}
+
 #[tokio::test]
 async fn read_model_folds_generic_container_with_player_inventory_tail() {
     const TRIGGER: i32 = 1;

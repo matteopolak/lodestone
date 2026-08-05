@@ -781,6 +781,68 @@ impl Menu {
         self.containers[container].set(native_index, normalize_opt(stack))
     }
 
+    /// Removes items from the hotbar slot `selected` (a **native** index, `0..9`)
+    /// and returns what was removed, or `None` if nothing was.
+    ///
+    /// `all == false` takes **one** item (plain `Q`); `all == true` takes the
+    /// whole stack (`Ctrl`+`Q`). A slot whose count reaches zero becomes `None`
+    /// rather than a zero-count stack, so no draw path can render an item with a
+    /// blank or `0` number.
+    ///
+    /// # Why this exists, and why it is a *prediction*
+    ///
+    /// Port of `Inventory.removeFromSelected`
+    /// (`.cache/mc/26.2/src/net/minecraft/world/entity/player/Inventory.java:527-530`):
+    ///
+    /// ```java
+    /// public ItemStack removeFromSelected(final boolean all) {
+    ///    ItemStack selectedItem = this.getSelectedItem();
+    ///    return selectedItem.isEmpty() ? ItemStack.EMPTY : this.removeItem(this.selected, all ? selectedItem.getCount() : 1);
+    /// }
+    /// ```
+    ///
+    /// which lowers through `Inventory.removeItem` (`:332-346`) →
+    /// `ContainerHelper.removeItem` (`ContainerHelper.java:13-15`) →
+    /// [`ItemStack::split`] — hence the `split` below rather than a hand-rolled
+    /// decrement. Note `ContainerHelper.removeItem` guards `count > 0`, which is
+    /// why `all == true` on an already-empty slot cannot produce a phantom
+    /// removal: the empty check above it returns first.
+    ///
+    /// **The dropped-item entity is not ours to make.** Vanilla's client calls
+    /// this from `LocalPlayer.drop`
+    /// (`.cache/mc/26.2/client-src/net/minecraft/client/player/LocalPlayer.java:314-319`),
+    /// which names the result `prediction` and then sends only a bare
+    /// `ServerboundPlayerActionPacket(DROP_ITEM | DROP_ALL_ITEMS, …)`. The server
+    /// (`ServerGamePacketListenerImpl.java:1303-1314`) calls `player.drop(…)` and
+    /// **sends no slot update back**, so this local mutation is the *only* thing
+    /// that will ever change the count the hotbar draws. Without it the count is
+    /// stale forever, not merely late — which is the bug this closes.
+    ///
+    /// The return value exists because vanilla's does, and it is used for exactly
+    /// one thing there: `LocalPlayer.drop` returns `!prediction.isEmpty()` and
+    /// `Minecraft.java:1907-1911` swings the arm only when it is `true`. Nothing
+    /// downstream needs the stack itself — the item entity is spawned by the
+    /// server and arrives as an ordinary entity-spawn packet.
+    pub fn remove_from_selected(&mut self, selected: usize, all: bool) -> Option<ItemStack> {
+        let container = self.player_container;
+        // `getSelectedItem().isEmpty()` — an out-of-range index reads as empty
+        // too, matching `ContainerHelper.removeItem`'s own bounds guard.
+        let Some(stack) = self.containers[container].get(selected) else {
+            return None;
+        };
+        if stack.is_empty() {
+            return None;
+        }
+        let count = if all { stack.count() } else { 1 };
+        let mut stack = stack.clone();
+        let removed = stack.split(count);
+        // `set` normalises a zero-count remainder to `None`: vanilla leaves a
+        // `count == 0` `ItemStack` in the list and relies on `isEmpty()`
+        // everywhere downstream, which `Option` models directly.
+        self.containers[container].set(selected, normalize_opt(Some(stack)));
+        crate::item::normalize(removed)
+    }
+
     /// Returns the underlying container by menu-container index.
     #[must_use]
     pub fn container(&self, index: usize) -> Option<&Container> {
