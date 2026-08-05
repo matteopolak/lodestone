@@ -55,12 +55,72 @@ const RECIPE_PANEL_MIN_X: f32 = 4.0;
 /// panel's own origin** (not the book panel's). Derived, not guessed:
 /// `CraftingScreen.getRecipeBookButtonPosition` returns `(leftPos + 5,
 /// height/2 - 49)` (`CraftingScreen.java:27`) and `topPos == (height -
-/// imageHeight) / 2` for every `AbstractContainerScreen`, so subtracting the
-/// two — `(leftPos+5) - leftPos = 5`, `(height/2-49) - (height/2-83) = 34`
-/// for `imageHeight = 166` — cancels the screen height and leftPos out
-/// entirely, leaving a width/height-independent local offset of `(5, 34)`,
-/// size `20x18` (`AbstractRecipeBookScreen.java:40`).
+/// imageHeight) / 2` for every `AbstractContainerScreen`
+/// (`AbstractContainerScreen.java:78`), so subtracting the two —
+/// `(leftPos+5) - leftPos = 5`, `(height/2-49) - (height/2-83) = 34` for
+/// `imageHeight = 166` — cancels the screen height and leftPos out entirely,
+/// leaving a width/height-independent local offset of `(5, 34)`, size `20x18`
+/// (`AbstractRecipeBookScreen.java:40`).
+///
+/// **This is the crafting *table*'s offset only.** See
+/// [`recipe_toggle_local`] — `getRecipeBookButtonPosition` is `abstract`
+/// (`AbstractRecipeBookScreen.java:36`, no default) and each of the three
+/// screen families overrides it with a *different* answer. Using this one
+/// everywhere is what the owner saw as "the book in my inventory is in the
+/// wrong spot": the player inventory's real offset is 99 px further right and
+/// 27 px further down, so the button landed on the armour column instead.
 pub const RECIPE_TOGGLE_LOCAL: Rect = Rect { x: 5.0, y: 34.0, w: 20.0, h: 18.0 };
+
+/// The **player inventory** screen's toggle offset —
+/// `InventoryScreen.getRecipeBookButtonPosition` returns
+/// `new ScreenPosition(this.leftPos + 104, this.height / 2 - 22)`
+/// (`InventoryScreen.java:64`). Same cancellation as
+/// [`RECIPE_TOGGLE_LOCAL`]'s: `x = 104`, and
+/// `y = (height/2 - 22) - (height/2 - 83) = 61`.
+///
+/// Geometrically this is not an arbitrary difference — the survival
+/// inventory's 2×2 grid sits in the panel's *upper right* (the player model
+/// occupies the left), so vanilla puts the button beside that grid, whereas
+/// the crafting table's 3×3 grid is centred and its button goes to the far
+/// left.
+pub const RECIPE_TOGGLE_LOCAL_INVENTORY: Rect = Rect { x: 104.0, y: 61.0, w: 20.0, h: 18.0 };
+
+/// The **furnace family**'s toggle offset (furnace, blast furnace, smoker,
+/// which all inherit it) — `AbstractFurnaceScreen.getRecipeBookButtonPosition`
+/// returns `new ScreenPosition(this.leftPos + 20, this.height / 2 - 49)`
+/// (`AbstractFurnaceScreen.java:44`), i.e. the crafting table's `y = 34` but
+/// `x = 20` rather than `5`. `FurnaceScreen`, `BlastFurnaceScreen` and
+/// `SmokerScreen` declare no override of their own.
+pub const RECIPE_TOGGLE_LOCAL_FURNACE: Rect = Rect { x: 20.0, y: 34.0, w: 20.0, h: 18.0 };
+
+/// Which of the three jar-derived toggle offsets `menu`'s screen uses.
+///
+/// Dispatched through [`background_kind`](super::background::background_kind)
+/// rather than a second hand-written `match` on
+/// [`Menu::special_layout`]/[`Menu::kind`], for the same reason that function
+/// exists: it already encodes "which vanilla screen class is this menu",
+/// **including** the trap that a `special_layout` menu is mechanically a
+/// [`MenuKind::Generic`](lodestone_game::menu::MenuKind::Generic) and would
+/// otherwise fall through to the crafting-table case. Two independent
+/// dispatches on the same question is how they drift apart.
+///
+/// Screens with no recipe book at all (a chest, an anvil, …) never reach a
+/// draw of the toggle — `app`'s `recipe_book_type_for` returns `None` and no
+/// geometry is built — so their arm here is unreachable in practice rather
+/// than a claim about vanilla. It falls back to the crafting-table offset
+/// because that is the shape a future book-bearing screen is most likely to
+/// share, not because vanilla says so.
+#[must_use]
+pub fn recipe_toggle_local(menu: &Menu) -> Rect {
+    use super::background::BackgroundKind;
+    match super::background::background_kind(menu) {
+        BackgroundKind::Inventory => RECIPE_TOGGLE_LOCAL_INVENTORY,
+        BackgroundKind::Furnace | BackgroundKind::BlastFurnace | BackgroundKind::Smoker => {
+            RECIPE_TOGGLE_LOCAL_FURNACE
+        }
+        _ => RECIPE_TOGGLE_LOCAL,
+    }
+}
 
 /// The search box, local to the book panel's own origin —
 /// `EditBox(font, xo + 25, yo + 13, 81, 9 + 5, ...)`
@@ -210,7 +270,7 @@ pub fn recipe_book_panel_layout_with_scale(
 
     RecipeBookPanelLayout {
         panel: Rect { x: bx, y: by, w: RECIPE_PANEL_W, h: RECIPE_PANEL_H },
-        toggle: main_at(RECIPE_TOGGLE_LOCAL),
+        toggle: main_at(recipe_toggle_local(menu)),
         search_box: at(RECIPE_SEARCH_BOX),
         magnifier: at(RECIPE_MAGNIFIER),
         filter_button: at(RECIPE_FILTER_BUTTON),
