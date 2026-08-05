@@ -101,7 +101,7 @@ shared changes: no `mod` line, no registration list, no `mobs.rs` arm.
 | module | issue | claims today |
 |---|---|---|
 | `hostile_melee.rs` | #226 | zombie, husk, zombie villager, drowned, creeper, spider, cave spider, skeleton family (incl. parched), wither skeleton |
-| `passive.rs` | #228 | cow, mooshroom, sheep, pig, chicken |
+| `passive.rs` | #228 | cow, mooshroom, sheep, pig, chicken, rabbit |
 | `ranged.rs` | #227 | — (pre-registered, empty) |
 | `neutral.rs` | #233 | — (pre-registered, empty) |
 | `specialist.rs` | #232 | — (pre-registered, empty) |
