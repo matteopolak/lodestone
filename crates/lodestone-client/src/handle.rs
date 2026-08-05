@@ -354,6 +354,19 @@ impl ClientHandle {
         self.state.chunk_world()
     }
 
+    /// The write half of the store split (issue #423), paired with
+    /// [`chunk_world`](Self::chunk_world) on the **same** `Arc`.
+    ///
+    /// The driver adopts both (`Sim::adopt_live_world`) so that the store its
+    /// placement prediction edits is the store its mesher reads; a test harness
+    /// reaches for this when it must load columns by hand. Deliberately *not* a
+    /// method that can be reached from the read handle — the read side of the
+    /// split yields no write side.
+    #[must_use]
+    pub fn chunk_world_write(&self) -> lodestone_ecs::ChunkWorldWrite {
+        self.state.chunk_world_write()
+    }
+
     /// Returns whether the chunk at `pos` is currently loaded.
     #[must_use]
     pub fn is_chunk_loaded(&self, pos: ChunkPos) -> bool {

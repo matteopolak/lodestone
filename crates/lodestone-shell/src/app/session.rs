@@ -336,6 +336,12 @@ impl WindowApp {
     /// installed at connect time, not after login (see the long note at the
     /// `resumed` call site for why).
     pub(super) fn connect_to(&mut self, host: String, port: u16) {
+        // Issue #449: leave the menu for the `Connecting` screen *before*
+        // dialing, mirroring `begin_singleplayer`. Without this, multiplayer
+        // never shows a loading screen for the handshake/configuration phase —
+        // the screen stays on the server list until `session_ready()` flips it
+        // straight to Playing.
+        self.ui.begin(crate::menu::SessionKind::Multiplayer);
         // §4.1(c): `Sim::connect` builds the client *with* the shell's one `World`
         // and attaches it, so the render sources below are installed from the
         // already-attached client's shared handle rather than from a `NetClient`

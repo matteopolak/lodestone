@@ -107,7 +107,7 @@ pub use frame::{
 pub use measure::{EDIT_BOX_H, field_rect, field_row_rects, logical_canvas, row_rect, text_px};
 pub use origin::{Origin, Slot};
 pub use renderer::MenuRenderer;
-pub use screens::{command_block_frame, death_frame, pause_frame};
+pub use screens::{command_block_frame, death_frame, loading_frame, pause_frame};
 pub use server_list::{
     SERVER_LIST_ITEM_H, server_entry_icon_rect, server_list_footer_slot, server_list_max_scroll,
     server_list_title_label, server_list_window_rows, server_row_content_rect, server_row_left,

@@ -67,15 +67,25 @@ pub struct ServerStatus {
     pub motd_spans: Vec<lodestone_model::text::TextSpan>,
     /// Player count, pre-rendered as `online/max`.
     pub players: String,
+    /// Players online, when the server reports it — the *numeric* truth behind
+    /// the [`Self::players`] line's first term.
+    ///
+    /// Carried alongside the rendered string rather than folded into it because
+    /// the tooltip needs the count, not the line: vanilla appends
+    /// `multiplayer.status.and_more` ("... and N more ...") when the sample is
+    /// short of it (`ServerStatusPinger.java:90-110`), and that arithmetic is
+    /// [`player_sample_lines`]'s job, not the probe's.
+    pub online: Option<u32>,
     /// Online players' names, from the status `sample`, in server order.
     ///
     /// This is what a "who's online" tooltip reads (vanilla
     /// `ServerSelectionList.java:410,430`). Plain names rather than the full
     /// `(id, name)` pairs the net layer decodes, because the row only displays
-    /// names — the anonymous-profile and "and N more" shaping vanilla applies
-    /// (`ServerStatusPinger.java:90-110`) is tooltip work, not model work, and
-    /// wants the numeric `online` count this display model deliberately does
-    /// not carry.
+    /// names — the anonymous-profile shaping vanilla applies per id
+    /// (`ServerStatusPinger.java:99-104`) needs the profile the shell drops,
+    /// and the "and N more" shaping needs the numeric [`Self::online`] count
+    /// carried alongside; both belong to the tooltip ([`player_sample_lines`]),
+    /// not to this model.
     pub sample: Vec<String>,
     /// Server version name, e.g. `"26.2"`.
     pub version: String,
@@ -93,6 +103,36 @@ pub struct ServerStatus {
     pub favicon_png: Option<Vec<u8>>,
     /// Ping round-trip, in milliseconds.
     pub latency_ms: Option<u64>,
+}
+
+/// The lines a "who's online" tooltip draws for a status's sample — vanilla's
+/// `data.playerList` (`ServerStatusPinger.java:90-110`): the sample's names in
+/// order, then `multiplayer.status.and_more` ("... and %s more ...") when the
+/// sample is short of the reported online count.
+///
+/// An empty sample returns an empty list, matching vanilla's
+/// `else { data.playerList = List.of() }` (`:109`) — and an empty
+/// `playerList` draws no tooltip at all (`setTooltipForNextFrameInternal`'s
+/// `if (!lines.isEmpty())` guard), so "no tooltip" and "nothing to say" are
+/// the same value here, by design.
+///
+/// Vanilla's anonymous-player shaping
+/// (`MinecraftServer.ANONYMOUS_PLAYER_PROFILE` →
+/// `multiplayer.status.anonymous_player`, `:99-104`) needs the profile id this
+/// display model deliberately drops, so it is not reproduced; the shell shows
+/// the name the server sent.
+#[must_use]
+pub fn player_sample_lines(sample: &[String], online: Option<u32>) -> Vec<String> {
+    if sample.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = sample.to_vec();
+    if let Some(online) = online
+        && sample.len() < online as usize
+    {
+        lines.push(format!("... and {} more ...", online as usize - sample.len()));
+    }
+    lines
 }
 
 /// The state of one row's status.
@@ -311,6 +351,7 @@ pub fn net_probe(protocol: i32) -> Probe {
             motd: s.motd,
             motd_spans: s.motd_spans,
             players,
+            online: s.online,
             sample: s.sample.iter().map(|p| p.name.clone()).collect(),
             version: s.version.unwrap_or_default(),
             protocol: s.protocol,
@@ -830,5 +871,38 @@ mod tests {
             pinging_sprite(100, 0),
             "control: 100ms is one animation frame"
         );
+    }
+
+    /// #421: the "who's online" tooltip is the sample's names, plus vanilla's
+    /// `multiplayer.status.and_more` — "... and N more ..." — when the sample is
+    /// short of the reported online count (`ServerStatusPinger.java:90-110`).
+    #[test]
+    fn player_sample_lines_shapes_the_tooltip() {
+        // The full case: 2 of 5 named.
+        assert_eq!(
+            player_sample_lines(&["Alice".into(), "Bob".into()], Some(5)),
+            ["Alice", "Bob", "... and 3 more ..."]
+        );
+        // Sample exactly the count — no and-more line, matching vanilla's
+        // `if (players.sample().size() < players.online())` (`:105`).
+        assert_eq!(
+            player_sample_lines(&["Alice".into(), "Bob".into()], Some(2)),
+            ["Alice", "Bob"]
+        );
+        // A sample *larger* than the count is the server lying; vanilla trusts
+        // the sample and drops the tail line, so this does too.
+        assert_eq!(
+            player_sample_lines(&["A".into(), "B".into(), "C".into()], Some(1)),
+            ["A", "B", "C"]
+        );
+        // No count reported: names only.
+        assert_eq!(
+            player_sample_lines(&["Alice".into()], None),
+            ["Alice"]
+        );
+        // No sample: empty — and an empty `playerList` draws no tooltip at all
+        // in vanilla (`setTooltipForNextFrameInternal`'s `!lines.isEmpty()`),
+        // so "nothing to say" and "no tooltip" are deliberately one value.
+        assert_eq!(player_sample_lines(&[], Some(5)), Vec::<String>::new());
     }
 }

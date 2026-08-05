@@ -16,6 +16,32 @@ use super::measure::{advance, clip};
 use super::renderer::FLOATS_PER_VERTEX;
 use super::server_list::{SERVER_ENTRY_BAD, SERVER_ENTRY_DIM, SERVER_ENTRY_ICON, SERVER_ENTRY_INCOMPATIBLE, SERVER_ENTRY_MOTD_INSET, SERVER_ENTRY_MOTD_LINES, SERVER_ENTRY_MOTD_Y, SERVER_ENTRY_SPACING, SERVER_ENTRY_TEXT_GAP, SERVER_ICON_DARKEN, SERVER_JOIN_SPRITES, SERVER_LIST_ROW_W, SERVER_LIST_SELECTION_FILL, SERVER_MOVE_DOWN_SPRITES, SERVER_MOVE_UP_SPRITES, SERVER_UNKNOWN_ICON};
 
+/// The multiplayer list's "who's online" tooltip fill — `tooltip/background.png`'s
+/// centre pixel, `0xF0100010`: translucent near-black (16, 0, 16, 240). The sprite
+/// is a 1-bit indexed, 9 px-border nine-slice with nothing but this in its opaque
+/// centre, so one flat quad is the whole of it. Decoded straight out of the 26.2
+/// `client.jar`. `pub(super)` so the draw's gate can assert the box by colour.
+pub(super) const TOOLTIP_BG: [f32; 4] = [16.0 / 255.0, 0.0, 16.0 / 255.0, 240.0 / 255.0];
+/// `tooltip/frame.png`'s top bar and the light end of its side gradient —
+/// (80, 0, 255, 80).
+const TOOLTIP_FRAME_TOP: [f32; 4] = [80.0 / 255.0, 0.0, 1.0, 80.0 / 255.0];
+/// `tooltip/frame.png`'s bottom bar and the dark end of its side gradient —
+/// (40, 0, 127, 80).
+const TOOLTIP_FRAME_BOTTOM: [f32; 4] = [40.0 / 255.0, 0.0, 127.0 / 255.0, 80.0 / 255.0];
+/// `TooltipRenderUtil.PADDING` (`TooltipRenderUtil.java:14`) — the text's inset
+/// from the tooltip's fill edges: 3 px each side, so a `w×h` content box carries
+/// a `(w+6)×(h+6)` fill.
+const TOOLTIP_PAD: f32 = 3.0;
+/// `TooltipRenderUtil.MOUSE_OFFSET` (`TooltipRenderUtil.java:11`) — the content
+/// box's top-left starts this far right of, and this far above, the cursor.
+const TOOLTIP_MOUSE_OFFSET: f32 = 12.0;
+/// `ClientTextTooltip`'s line box: vanilla's 9 px `Font.lineHeight` plus a 1 px
+/// drop-shadow overhang (`ClientTextTooltip.java:20-22`), and the +2 interline
+/// gap vanilla adds after the first line brings that second line's offset back to
+/// the same 12 as [`TOOLTIP_MOUSE_OFFSET`]. The first line starts at `y`; a
+/// 1-line tooltip is 8 px tall, an `n`-line one `10n`.
+const TOOLTIP_LINE_H: f32 = 10.0;
+
 /// Both vertex streams one menu frame produces.
 ///
 /// Two streams because the buttons are **textured** (nine-slice sprites off the
@@ -190,6 +216,11 @@ pub fn build(
         }
     }
 
+    // The multiplayer list's "who's online" tooltip, hoisted out of the row loop:
+    // only one row can be hovered at a time, so the last request wins, and the
+    // tooltip itself is drawn last of all, after the footer, so it sits over
+    // everything (vanilla's `render` draws tooltips after `renderables`, too).
+    let mut pending_tooltip: Option<Vec<String>> = None;
     for (i, row) in frame.rows.iter().enumerate() {
         // A multiplayer-list entry (#396) is neither a button nor a field: it is
         // an `ObjectSelectionList` row with a favicon, two text columns, a status
@@ -209,15 +240,30 @@ pub fn build(
             //
             // The rect is the band `server_scroll_list` derived, not a restated
             // one, so the clip and the row placement cannot disagree.
+            //
+            // The entry draw also reports the tooltip request — whether the cursor
+            // is over *this* row's status text — which escapes the clip the same
+            // way the row did: a tooltip near the bottom of the list must not be
+            // scissored to the band, or it would vanish mid-screen.
             match active_list.as_ref() {
                 Some((list, _)) => {
                     let (bx, bw) = (server_row_left(width), SERVER_LIST_ROW_W);
                     let (by, bh) = (list.top(), list.height());
+                    let mut tooltip = None;
                     b.with_clip(bx, by, bw, bh, |b| {
-                        draw_server_entry(b, &frame.rows, i, width, height, frame.cursor);
+                        tooltip = draw_server_entry(b, &frame.rows, i, width, height, frame.cursor);
                     });
+                    if let Some(lines) = tooltip {
+                        pending_tooltip = Some(lines);
+                    }
                 }
-                None => draw_server_entry(&mut b, &frame.rows, i, width, height, frame.cursor),
+                None => {
+                    if let Some(lines) =
+                        draw_server_entry(&mut b, &frame.rows, i, width, height, frame.cursor)
+                    {
+                        pending_tooltip = Some(lines);
+                    }
+                }
             }
             continue;
         }
@@ -376,6 +422,17 @@ pub fn build(
         }
     }
 
+    // The "who's online" tooltip, drawn last so it sits over every row and the
+    // footer. Vanilla shows one on hover regardless of the row's own hover state
+    // (its trigger is geometric — over the status text), so the only gates here
+    // are "there are lines" and "the cursor is somewhere"; which row the cursor is
+    // over was already decided by `draw_server_entry`.
+    if let Some(lines) = pending_tooltip
+        && let Some(at) = frame.cursor
+    {
+        draw_tooltip(&mut b, &lines, at, width, height);
+    }
+
     MenuGeometry {
         colour: b.verts,
         backdrop_floats,
@@ -394,6 +451,11 @@ pub fn build(
 /// colour and which arrows apply are all resolved into [`ServerEntryView`] by
 /// [`server_list_frame`]. What it does own is everything canvas-dependent — the
 /// rects, and therefore the quadrant the cursor is in.
+///
+/// Returns the row's "who's online" tooltip lines when the cursor is over its
+/// status text (vanilla's `onlinePlayersTooltip` hover, `:356-361`) — `None`
+/// otherwise. The one piece of this entry that *escapes* the row: the caller
+/// draws the tooltip last, outside the band clip.
 ///
 /// ## Two things that are not vanilla's, named rather than hidden
 ///
@@ -416,18 +478,18 @@ fn draw_server_entry(
     width: f32,
     height: f32,
     cursor: Option<(f32, f32)>,
-) {
-    let Some(row) = rows.get(i) else { return };
-    let Some(view) = row.entry.as_ref() else { return };
+) -> Option<Vec<String>> {
+    let Some(row) = rows.get(i) else { return None };
+    let Some(view) = row.entry.as_ref() else { return None };
     // `extractListItems` only draws the rows inside the band (`:346-352`); this is
     // that test, standing in for the scissor this pipeline has no equivalent of.
     // `row_rect` below now performs the same check on the way to its rect
     // (#402), so this one is a fast-out, not the only guard.
     if !server_row_visible(view.index, height, view.scroll) {
-        return;
+        return None;
     }
     let Some((x, y, w, h)) = row_rect(rows, i, width, height) else {
-        return;
+        return None;
     };
 
     // `extractItem`: the selected row gets a 1 px outline of `-1` when the list is
@@ -519,9 +581,9 @@ fn draw_server_entry(
     // The hover overlay (`:364-395`). All three sprites blit at the *same* 32×32
     // icon rect, and only the one whose quadrant holds the cursor is drawn
     // highlighted — so the discriminator is position, not which row is hovered.
-    let Some((mx, my)) = cursor else { return };
+    let Some((mx, my)) = cursor else { return None };
     if mx < x || mx >= x + w || my < y || my >= y + h {
-        return;
+        return None;
     }
     b.rect(ix, iy, iw, ih, SERVER_ICON_DARKEN);
     let (rx, ry) = (mx - ix, my - iy);
@@ -544,6 +606,99 @@ fn draw_server_entry(
             widget::over_bottom_left_quarter(rx, ry, iw),
             SERVER_MOVE_DOWN_SPRITES,
         ));
+    }
+
+    // Vanilla's "who's online" tooltip. It is not row-wide: it fires only when
+    // the cursor is over the status *text* — the player count, or an
+    // incompatible server's version string —
+    // `mouseX >= statusX && mouseX <= statusX + statusWidth && mouseY >=
+    // getContentY() && mouseY <= getContentY() - 1 + 9`
+    // (`ServerSelectionList.java:356-361`). The ping-latency tooltip vanilla
+    // checks first (`:358-362`) is deliberately absent — the "who's online"
+    // half of the screen is the half this shell has the model for, and the icon
+    // and text rects are disjoint either way.
+    if !view.online_players.is_empty()
+        && mx >= status_x
+        && mx <= status_x + status_w
+        && my >= cy
+        && my <= cy + 8.0
+    {
+        return Some(view.online_players.clone());
+    }
+    None
+}
+
+/// Draws the multiplayer list's "who's online" tooltip — vanilla's
+/// `DefaultTooltipPositioner`-positioned `TooltipRenderUtil` box
+/// (`DefaultTooltipPositioner.java`, `TooltipRenderUtil.java`), which this
+/// pipeline has no sprite path for, so it draws the two sprites' *visible*
+/// pixels as flat quads instead.
+///
+/// ## Why these exact rects
+///
+/// `TooltipRenderUtil.renderTooltipInternal` positions the **content** box
+/// (text only, `w×h`), then blits `tooltip/background.png` inset by
+/// [`TOOLTIP_PAD`] + its 9 px transparent border, and `tooltip/frame.png` with
+/// its 10 px border — i.e. the fill at `[x-3, y-3, w+6, h+6]`, the frame at
+/// `[x-2, y-2, w+5, h+5]`. The background sprite was decoded out of `client.jar`
+/// (a 1-bit indexed, 9 px-border nine-slice): its whole opaque centre is one
+/// colour, [`TOOLTIP_BG`]. The frame sprite is a 10 px-border nine-slice whose
+/// only opaque pixels are 1 px bars along the four border rows/columns — top and
+/// left at [`TOOLTIP_FRAME_TOP`], bottom and right at
+/// [`TOOLTIP_FRAME_BOTTOM`], the two ends of the gradient its vertical bars
+/// carry. So the outline below is not a stylised box; it is the frame sprite's
+/// nine-slice geometry, corners open.
+///
+/// Positioning is `DefaultTooltipPositioner` (`:13-29`) exactly: content top-left
+/// at the cursor + ([`TOOLTIP_MOUSE_OFFSET`], -[`TOOLTIP_MOUSE_OFFSET`]),
+/// flipping left of the cursor when that runs past the right edge, and clamped
+/// to the bottom. Text is drawn white with vanilla's drop shadow, which this
+/// pipeline's two fonts already draw.
+fn draw_tooltip(b: &mut Quads<'_>, lines: &[String], at: (f32, f32), width: f32, height: f32) {
+    if lines.is_empty() {
+        return;
+    }
+    let w = lines
+        .iter()
+        .map(|l| b.text_width(l, 1.0))
+        .fold(0.0_f32, f32::max);
+    // `ClientTextTooltip.getHeight` (`:20-22`): `(n == 1 ? -2 : 0) + 10n`.
+    let h = if lines.len() == 1 {
+        8.0
+    } else {
+        TOOLTIP_LINE_H * lines.len() as f32
+    };
+    let mut rx = at.0 + TOOLTIP_MOUSE_OFFSET;
+    let mut ry = at.1 - TOOLTIP_MOUSE_OFFSET;
+    if rx + w > width {
+        rx = (rx - 2.0 * TOOLTIP_MOUSE_OFFSET - w).max(4.0);
+    }
+    let padded = h + TOOLTIP_PAD;
+    if ry + padded > height {
+        ry = height - padded;
+    }
+    // The fill.
+    b.rect(
+        rx - TOOLTIP_PAD,
+        ry - TOOLTIP_PAD,
+        w + 2.0 * TOOLTIP_PAD,
+        h + 2.0 * TOOLTIP_PAD,
+        TOOLTIP_BG,
+    );
+    // The frame's four 1 px bars, at the nine-slice geometry above.
+    b.rect(rx - 2.0, ry - TOOLTIP_PAD, w + 4.0, 1.0, TOOLTIP_FRAME_TOP);
+    b.rect(rx - TOOLTIP_PAD, ry - 2.0, 1.0, h + 4.0, TOOLTIP_FRAME_TOP);
+    b.rect(rx - 2.0, ry + h + 2.0, w + 4.0, 1.0, TOOLTIP_FRAME_BOTTOM);
+    b.rect(rx + w + 2.0, ry - 2.0, 1.0, h + 4.0, TOOLTIP_FRAME_BOTTOM);
+    // `ClientTextTooltip.renderText` (`:33-36`): first line at `y`, then the
+    // +2 interline gap brings each later line to `y + 12 + 10*(i-1)`.
+    for (i, line) in lines.iter().enumerate() {
+        let ly = if i == 0 {
+            ry
+        } else {
+            ry + TOOLTIP_MOUSE_OFFSET + TOOLTIP_LINE_H * (i - 1) as f32
+        };
+        b.text(line, rx, ly, 1.0, LABEL);
     }
 }
 

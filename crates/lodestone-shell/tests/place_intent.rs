@@ -211,6 +211,10 @@ impl Harness {
         };
 
         let chunk_world = client.chunk_world();
+        // Issue #423: the write side, paired with the read handle on the same
+        // `Arc`. The store's columns are loaded through *this*; `drive_placement`
+        // then needs the matching resource installed (below).
+        let chunk_world_write = client.chunk_world_write();
         {
             // Grouped by chunk column first, same reasoning as
             // `break_intent.rs`'s identical loop: two positions sharing a
@@ -229,7 +233,7 @@ impl Harness {
                     *state,
                 );
             }
-            let mut store = chunk_world.write();
+            let mut store = chunk_world_write.write();
             for ((cx, cz), column) in columns {
                 store.load(
                     ChunkPos::new(cx, cz),
@@ -249,6 +253,7 @@ impl Harness {
             // this resource and a read through that one see each other —
             // exactly `Sim::adopt_live_world`'s invariant, reproduced by hand.
             world.insert_resource(chunk_world);
+            world.insert_resource(chunk_world_write);
             let mut schedule = Schedule::new(GameTick);
             schedule.add_systems(lodestone::interact::drive_placement);
             world.add_schedule(schedule);

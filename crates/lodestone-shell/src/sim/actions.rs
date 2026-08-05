@@ -796,7 +796,7 @@ impl Sim {
     /// block-entity record the moment it is placed instead of one round trip
     /// later.
     fn predict_block(&mut self, block: [i32; 3], state: u32) -> BlockEntitySync {
-        let store = self.chunk_world();
+        let store = self.chunk_world_write();
         // The chunk guard is taken and dropped before `remesh_around` reaches for
         // the ECS resource again, so the two are never held together.
         let outcome = {

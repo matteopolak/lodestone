@@ -821,6 +821,24 @@ impl WindowApp {
             menu.render_overlay(device, queue, frame.view(), &death_frame, w, h);
         }
 
+        // Issue #449's terrain half. `Screen::Connecting` covers the
+        // handshake/configuration phase as a full frame (see `frame_for`); this
+        // block covers the moments after login while the player's own chunk is
+        // still streaming in. Drawn as an overlay over the still-rendering
+        // world rather than replacing it, for the same reason Paused/Death are
+        // overlays: chunks must keep meshing and uploading behind the text —
+        // the very thing a full-frame `owns_frame` screen would stop. The
+        // predicate is vanilla's own `DownloadingTerrainScreen` rule (the chunk
+        // column under the player is loaded), so the text clears the moment the
+        // ground the player is standing on arrives.
+        if self.ui.is_playing()
+            && self.sim.terrain_loading()
+            && let Some(menu) = self.menu.as_mut()
+        {
+            let loading_frame = crate::menu::render::loading_frame("Loading terrain...");
+            menu.render_overlay(device, queue, frame.view(), &loading_frame, w, h);
+        }
+
         // In-world Options, from a player report: settings opened mid-game used
         // to draw the *panorama* behind itself, which belongs to the main menu
         // only. `menu::render::frame_for` now returns `None` for

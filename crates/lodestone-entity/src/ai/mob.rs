@@ -171,6 +171,32 @@ pub trait MobController {
         None
     }
 
+    /// The position of this mob's owner, if it has one — vanilla
+    /// `TamableAnimal.getOwner()` (`animal/TamableAnimal.java:180-182`), read
+    /// as a position because that is all this seam carries.
+    ///
+    /// # Why the owner's identity does not cross
+    ///
+    /// The seam deliberately carries positions, never entity ids — the same
+    /// division [`angry_target`](MobController::angry_target) documents — and
+    /// a *tamed* owner is, in vanilla, a **player**:
+    /// `TamableAnimal.DATA_OWNERUUID_ID` stores a `UUID` and `getOwner`
+    /// resolves it against the level (`animal/TamableAnimal.java:41`,
+    /// `:127-142`). This seam has no notion of a player at all, so the host
+    /// resolves "who owns me" and feeds only the owner's current position,
+    /// exactly as it feeds [`parent_position`](MobController::parent_position).
+    /// The host's own record of *which id owns which mob* — the thing a
+    /// wolf-pack `alertOthers` same-owner filter needs
+    /// (`ai/goal/target/HurtByTargetGoal.java:88`) — is a census question this
+    /// crate cannot answer; `lodestone_server`'s `SimMob::owner_id` is where
+    /// it lives.
+    ///
+    /// Defaults to `None` — a wild, ownerless mob, which is every mob in the
+    /// roster today (taming is not implemented).
+    fn owner_position(&self) -> Option<Vec3> {
+        None
+    }
+
     /// Performs a melee attack against `target`.
     fn attack(&mut self, target: Vec3) {
         let _ = target;
@@ -183,6 +209,28 @@ pub trait MobController {
 
     /// Whether the mob is currently panicking (e.g. was just hurt).
     fn is_panicking(&self) -> bool {
+        false
+    }
+
+    /// Whether a player is currently staring at this mob — vanilla
+    /// `LivingEntity.isLookingAtMe(player, coneSize, adjustForDistance, …)`
+    /// (`entity/LivingEntity.java:1756-1775`), wrapped for the enderman by
+    /// `isBeingStaredBy` (`monster/EnderMan.java:209-211`).
+    ///
+    /// The host computes the answer from each player's eye position **and view
+    /// vector** and feeds only the boolean: the geometric half is the free
+    /// function [`is_in_view_cone`], which mirrors vanilla's exact
+    /// `dot > 1.0 - coneSize / dist` test, and the line-of-sight half is a
+    /// world raycast — the same disclosed gap
+    /// [`find_nearest_target`](MobController::find_nearest_target) names for
+    /// its own `hasLineOfSight`, omitted rather than faked, erring permissive.
+    ///
+    /// Defaults to `false` (nobody staring). The only consumers are the
+    /// enderman's stare-gated goals, and they are not registered yet, so a
+    /// host that never feeds this and a species that cannot read it must agree
+    /// on `false` — a default of `true` would make every enderman react to
+    /// every player on sight.
+    fn is_being_stared_at(&self) -> bool {
         false
     }
 
@@ -320,6 +368,41 @@ pub trait MobController {
         let _ = launch;
     }
 
+    /// Teleports the mob directly to `target` — vanilla `Entity.teleportTo`
+    /// (`entity/Entity.java:1513-1515`) or, for the enderman, its
+    /// `teleport()` / `teleportTowards` displacement variants
+    /// (`monster/EnderMan.java:256-275`).
+    ///
+    /// An **instant** relocation, not a fast path-follow: the position is
+    /// rewritten immediately and any in-progress path is abandoned (vanilla's
+    /// `teleportTo` also zeroes the velocity). The enderman's own variants
+    /// pick the destination — `teleport()` a random point within ±32 blocks on
+    /// each axis (`:256-264`), `teleportTowards` 16 blocks past the target in
+    /// its facing direction (`:267-275`) — so the goal or host resolves
+    /// *where* and this primitive resolves *that it happens*.
+    ///
+    /// Defaults to a no-op — a controller without a position to move silently
+    /// declines, rather than every implementor having to say so.
+    fn teleport_to(&mut self, target: Vec3) {
+        let _ = target;
+    }
+
+    /// Records that this mob wants to damage itself by `amount` — the bee's
+    /// sting self-destruct, where `customServerAiStep` eventually calls
+    /// `this.hurtServer(level, this.damageSources().generic(), this.getHealth())`
+    /// (`animal/Bee.java:374-379`).
+    ///
+    /// An **intent**, exactly like [`attack`](MobController::attack) and
+    /// [`launch_projectile`](MobController::launch_projectile): health lives on
+    /// the host, so this seam only records the request and the host drains it
+    /// once per tick and applies it through its normal damage pipeline
+    /// (i-frames and armour reductions included, matching vanilla's
+    /// `hurtServer`). Defaults to a no-op so a controller that cannot model
+    /// self-harm drops it.
+    fn damage_self(&mut self, amount: f32) {
+        let _ = amount;
+    }
+
     /// This controller viewed as a [`BrainMob`], if it can drive vanilla's *other*
     /// AI architecture (issue #209). `None` — the default — means it cannot.
     ///
@@ -454,4 +537,57 @@ impl ProjectileLaunch {
 pub fn distance_sqr(a: Vec3, b: Vec3) -> f64 {
     let d = a - b;
     d.x * d.x + d.y * d.y + d.z * d.z
+}
+
+/// The geometric half of vanilla `LivingEntity.isLookingAtMe`
+/// (`entity/LivingEntity.java:1756-1775`): whether the point `target` lies
+/// inside a viewer's acceptance cone.
+///
+/// `viewer_eye` is the viewer's eye position and `look` its view vector
+/// (normalised internally, matching vanilla's `getViewVector(1.0F).normalize()`);
+/// `target` is the point being stared at — for the enderman,
+/// `EnderMan.isBeingStaredBy` passes `(this.getX(), getEyeY(), this.getZ())`
+/// (`monster/EnderMan.java:209-211`). Vanilla accepts a stare when
+///
+/// ```text
+/// look · dir > 1.0 - coneSize / (adjustForDistance ? dist : 1.0)
+/// ```
+///
+/// with `dir` the unit vector from `viewer_eye` to `target` and `dist` its
+/// length. **The tolerance is divided by distance when `adjustForDistance` is
+/// true, so the acceptance cone *widens* with range** — the opposite of a
+/// fixed-angle cone, and the reason this is a faithful port rather than an
+/// approximation (the enderman passes `0.025, true`).
+///
+/// The full vanilla test is this cone *and* line of sight
+/// (`target.hasLineOfSight(viewer, …)`, a world raycast) — the same disclosed
+/// gap [`find_nearest_target`](MobController::find_nearest_target) names for
+/// its own `hasLineOfSight`, omitted here rather than faked, erring permissive.
+///
+/// One deliberate divergence: a viewer whose eye is **at** `target` (distance
+/// below `1e-9`) reads `false`. Vanilla's own formula divides by `dist` and
+/// `dir.normalize()` returns ZERO, so a zero distance yields a degenerate
+/// `dot > -infinity` which is `true` for `adjustForDistance`; treating
+/// "viewer inside the target" as not-a-stare is the saner reading of a
+/// position that is physically impossible to hold.
+#[must_use]
+pub fn is_in_view_cone(
+    viewer_eye: Vec3,
+    look: Vec3,
+    target: Vec3,
+    cone_size: f64,
+    adjust_for_distance: bool,
+) -> bool {
+    let dir = target - viewer_eye;
+    let dist = dir.length();
+    if dist < 1.0e-9 {
+        return false;
+    }
+    let dot = look.normalize().dot(dir / dist);
+    let tolerance = if adjust_for_distance {
+        cone_size / dist
+    } else {
+        cone_size
+    };
+    dot > 1.0 - tolerance
 }

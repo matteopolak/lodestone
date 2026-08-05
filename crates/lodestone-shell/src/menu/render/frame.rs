@@ -277,6 +277,15 @@ pub struct ServerEntryView {
     /// Draw `status` in [`SERVER_ENTRY_INCOMPATIBLE`] rather than
     /// [`SERVER_ENTRY_DIM`].
     pub status_is_error: bool,
+    /// The lines a "who's online" tooltip draws when the cursor is over this
+    /// row's status text — the sample's names plus vanilla's
+    /// `... and N more ...` when applicable ([`super::status::player_sample_lines`]).
+    ///
+    /// Empty means the row has no tooltip: an empty sample, or a state vanilla
+    /// never shows one for. Resolved by [`server_list_frame`] exactly like the
+    /// other presentation fields; the draw ([`super::draw::draw_server_entry`])
+    /// only decides *whether* the cursor is over the status text.
+    pub online_players: Vec<String>,
     /// The `server_list/*` sprite for this row's state — see
     /// [`super::status::status_sprite`], which is the only thing that picks one.
     pub status_sprite: &'static str,
@@ -489,6 +498,14 @@ impl FaviconCache {
 /// game is paused, which is exactly the regression [`super::Screen::Paused`]'s
 /// own doc comment warns against.
 ///
+/// [`Screen::Connecting`] is **included** (issue #449): it is the full-frame
+/// loading screen, with a flat dark backdrop and no rows to interact with, and
+/// nothing behind it worth rendering — no chunk packets arrive until after
+/// login, so the Clear pass that replaces the frame costs nothing. The
+/// *post-login* terrain stream is a different screen ([`Screen::Playing`]) and
+/// stays on the world path as an overlay in `app::redraw` (see its loading
+/// block), for the same reason `Paused`/`Death` do.
+///
 /// **This function does not have the one exception `frame_for` does.**
 /// `Screen::Settings` stays in the set unconditionally, because every caller
 /// here is about input routing (mouse/keyboard treated as menu rows) and that
@@ -510,6 +527,7 @@ pub fn owns_frame(screen: super::Screen) -> bool {
             | Screen::WorldSelect
             | Screen::Settings
             | Screen::Accounts
+            | Screen::Connecting
             | Screen::Error
             | Screen::Credits
             | Screen::Social

@@ -1179,7 +1179,10 @@ fn run_eviction_gate(evict: bool) {
             crate::worldgen::generate_column(cx, cz),
         );
     }
-    let store = lodestone_ecs::ChunkWorld::new(world);
+    // Issue #423: the test edits the store (unload below), so it holds the write
+    // handle and hands the paired read handle to the mesher.
+    let write = lodestone_ecs::ChunkWorldWrite::new(world);
+    let store = write.read_handle();
     let mut terrain = TerrainMesh::new(MeshScheduler::new(
         2,
         crate::blocks::ShellClassifier::Demo(crate::blocks::DemoClassifier),
@@ -1302,7 +1305,7 @@ fn run_eviction_gate(evict: bool) {
     // --- the subject: the client drops the column ---------------------------
     // Production order: the adapter unloads the column from the one store
     // *before* it emits, and the shell then evicts what the GPU still holds.
-    store
+    write
         .write()
         .unload(lodestone_world::ChunkPos::new(subject.0, subject.1));
     if evict {

@@ -67,6 +67,17 @@ pub enum Origin {
     /// puts that centring a half-pixel off whole, which blurs the text drawn
     /// there.
     ScreenBottom,
+    /// `(floor(w / 2), floor(h / 2))` — the canvas centre, for the loading
+    /// screen's one centred line (issue #449).
+    ///
+    /// Not vanilla-sourced like the others above: nothing in `TitleScreen`/
+    /// `PauseScreen` anchors a widget to the canvas centre (the loading screens
+    /// vanilla *does* have centre their text differently — see `loading_frame`'s
+    /// doc on why this client's is deliberately simpler). Added for the one
+    /// screen whose text should sit at the middle of whatever canvas the
+    /// window is, which no fixed-dy origin can express. Both terms `floor`ed
+    /// for the same reason as [`Origin::ScreenTop`] (issue #401).
+    Centre,
     /// `(floor(w / 4), 0)` — the death screen's title anchor (issue #103).
     /// `DeathScreen.visitText` draws it at `middleLine / 2` where
     /// `middleLine = this.width / 2` (`DeathScreen.java:118-120`), i.e.
@@ -176,6 +187,7 @@ impl Origin {
             Origin::BottomRight => (width, height),
             Origin::TopRight => (width, 0.0),
             Origin::ScreenBottom => ((width * 0.5).floor(), height),
+            Origin::Centre => ((width * 0.5).floor(), (height * 0.5).floor()),
             Origin::DeathTitle => ((width * 0.25).floor(), 0.0),
             // Unlike every arm above, this one *runs a layout* rather than
             // evaluating an expression — `OptionsScreen`'s tree cannot be

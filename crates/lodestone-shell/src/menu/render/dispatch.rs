@@ -9,7 +9,7 @@
 use super::*;
 use super::account_screen::{accounts_failed_frame, accounts_flow_frame, accounts_idle_frame};
 use super::measure::{MANAGE_SERVER_TITLE_Y, manage_server_slot};
-use super::screens::{COPYRIGHT, credits_frame, error_frame, version_line};
+use super::screens::{COPYRIGHT, credits_frame, error_frame, loading_frame, version_line};
 use super::server_list::SERVER_LIST_FOOTER_H;
 
 /// Builds vanilla's `JoinMultiplayerScreen` (#396): one row per saved server at
@@ -104,6 +104,17 @@ fn server_list_frame(
                     status: status_text,
                     status_is_error,
                     status_sprite: status::status_sprite(state, latency, millis, i),
+                    // Vanilla's `onlinePlayersTooltip` — set for SUCCESSFUL and
+                    // INCOMPATIBLE rows in `refreshStatus`
+                    // (`ServerSelectionList.java:410,430`), never for INITIAL,
+                    // PINGING or UNREACHABLE.
+                    online_players: match (state, slot) {
+                        (
+                            ServerState::Successful | ServerState::Incompatible,
+                            StatusSlot::Ok(s),
+                        ) => status::player_sample_lines(&s.sample, s.online),
+                        _ => Vec::new(),
+                    },
                     selected: i == nav.server_index(),
                     can_move_up: i > 0,
                     can_move_down: i < last,
@@ -440,12 +451,20 @@ pub fn frame_for<'a>(
                 SignInView::Failed { message } => accounts_failed_frame(&message),
             })
         }
+        // The loading screen (issue #449): "Connecting..." over a flat dark
+        // backdrop while the handshake/configuration phase runs. Safe to take
+        // the whole frame here — no chunk packets arrive until after login, so
+        // nothing meshes or uploads behind the loading screen and the world
+        // path (`app::redraw`) is not needed under it. This supersedes the
+        // older note that `Screen::Connecting` was deliberately absent so the
+        // world "keeps rendering so chunks mesh and upload as they stream in":
+        // that concern belongs to the *post-login* terrain stream, which stays
+        // on the world path as an overlay in `app::redraw` (see its loading
+        // block) rather than piling behind a full screen.
+        Screen::Connecting => Some(loading_frame("Connecting...")),
         // The error screen is drawn by this renderer too, even though it is not
         // an `is_menu()` screen: a session that dies mid-game used to leave a
-        // frozen world on screen with no explanation. `Screen::Connecting` is
-        // deliberately *not* here — it keeps rendering the world so chunks mesh
-        // and upload as they stream in, rather than piling up behind a loading
-        // screen and landing as one spike at login. See `error_frame` for the
+        // frozen world on screen with no explanation. See `error_frame` for the
         // vanilla `DisconnectedScreen` this now reproduces.
         Screen::Error => Some(error_frame(ui.error())),
         // The credits/end-poem screen (#192) — see `credits_frame`'s own doc

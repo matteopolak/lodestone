@@ -233,7 +233,7 @@ impl Harness {
                     STONE,
                 );
             }
-            let store = client.chunk_world();
+            let store = client.chunk_world_write();
             let mut store = store.write();
             for ((cx, cz), column) in columns {
                 store.load(

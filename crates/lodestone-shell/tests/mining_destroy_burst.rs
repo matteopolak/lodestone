@@ -338,7 +338,7 @@ impl Harness {
             (Arc::new(client), server_io)
         };
 
-        client.chunk_world().write().load(
+        client.chunk_world_write().write().load(
             ChunkPos::new(TARGET[0].div_euclid(16), TARGET[2].div_euclid(16)),
             column_with(TARGET, version.state),
         );

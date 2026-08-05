@@ -27,7 +27,9 @@ use lodestone_ecs::session::{
     ActionBarOverlay, HudEffects, Phase, RespawnCount, ServerDifficulty, ServerEntityId,
     SessionBlockDestruction, SessionChat, TitleOverlay, Vitals, Xp,
 };
-use lodestone_ecs::{ChunkWorld, EcsHandle, Extract, FrameClock, GameTick, Update, VersionData};
+use lodestone_ecs::{
+    ChunkWorld, ChunkWorldWrite, EcsHandle, Extract, FrameClock, GameTick, Update, VersionData,
+};
 use lodestone_entity::attribute::attribute_value;
 use lodestone_entity::pose::EntityPose;
 use lodestone_game::menu::Menu;
@@ -772,16 +774,31 @@ impl Sim {
     // The chunk world and terrain meshing, which live in `self.ecs` (Stage 4)
     // -----------------------------------------------------------------------
 
-    /// The **one** chunk store this session meshes, collides against and edits.
+    /// The **one** chunk store this session meshes, collides against and edits,
+    /// as the read handle (issue #423's split).
     ///
     /// A handle, cheap to clone, onto the same `lodestone_world::World` the net
     /// thread writes decoded columns into once
     /// [`adopt_live_world`](Self::adopt_live_world) has run. Before Stage 4 there
     /// were two of these — `Sim`'s offline one and the client's live one — and
-    /// every read site branched on which it meant.
+    /// every read site branched on which it meant. The read handle has no write
+    /// path; to edit the store, take [`chunk_world_write`](Self::chunk_world_write)
+    /// instead.
     #[must_use]
     pub fn chunk_world(&self) -> ChunkWorld {
         self.read(|w| w.resource::<ChunkWorld>().clone())
+    }
+
+    /// The write handle paired with [`chunk_world`](Self::chunk_world) — the
+    /// only way this session may mutate the one chunk store.
+    ///
+    /// Installed at the same site as the read resource and always naming the
+    /// same `Arc`; panics if it is missing, which is a bug in the installer, not
+    /// a recoverable absence — every `Sim` construction routes through
+    /// `sim/build.rs`, which pairs the two.
+    #[must_use]
+    pub fn chunk_world_write(&self) -> ChunkWorldWrite {
+        self.read(|w| w.resource::<ChunkWorldWrite>().clone())
     }
 
     /// Loaded column count in [`Self::chunk_world`]. The debug overlay's
@@ -1036,6 +1053,7 @@ impl Sim {
             return;
         };
         let live = handle.chunk_world();
+        let live_write = handle.chunk_world_write();
         let adopt = self.read(|w| {
             let mine = w.resource::<ChunkWorld>();
             !(mine.is_same_store(&live) || !mine.is_empty())
@@ -1043,7 +1061,13 @@ impl Sim {
         if !adopt {
             return;
         }
-        self.write(|w| w.insert_resource(live));
+        // Issue #423: adopt the *write* handle alongside the read one, so the
+        // store `drive_placement` / `Sim::predict_block` edit is the store the
+        // mesher reads — one `Arc`, both resources.
+        self.write(|w| {
+            w.insert_resource(live_write);
+            w.insert_resource(live);
+        });
         self.adopted_live_world = true;
     }
 
