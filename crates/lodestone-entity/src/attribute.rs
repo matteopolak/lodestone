@@ -603,14 +603,41 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
         ("armor", 2.0),
         ("spawn_reinforcements", 0.0),
     ];
+    // `Drowned.createAttributes()` is `Zombie`'s plus `STEP_HEIGHT 1.0`
+    // (`monster/zombie/Drowned.java:81-82`) — spelled out rather than derived
+    // from `ZOMBIE`, because `overrides` is a `&'static [_]` and there is no
+    // const concatenation. Keep the first five rows in sync with `ZOMBIE`;
+    // `zombie_family_variants_share_their_parents_bases` pins that.
+    const DROWNED: &[(&str, f64)] = &[
+        ("follow_range", 35.0),
+        ("movement_speed", 0.23),
+        ("attack_damage", 3.0),
+        ("armor", 2.0),
+        ("spawn_reinforcements", 0.0),
+        ("step_height", 1.0),
+    ];
     let spec = match path {
-        "zombie" | "husk" => TypeSpec {
+        // `ZombieVillager` declares no `createAttributes`, so it shares
+        // `Zombie`'s (`monster/zombie/Zombie.java:131-137`) — checked per
+        // class, since `Drowned` in the same family does override.
+        "zombie" | "husk" | "zombie_villager" => TypeSpec {
             template: BaseTemplate::Monster,
             overrides: ZOMBIE,
+        },
+        "drowned" => TypeSpec {
+            template: BaseTemplate::Monster,
+            overrides: DROWNED,
         },
         "skeleton" | "stray" | "wither_skeleton" | "bogged" => TypeSpec {
             template: BaseTemplate::Monster,
             overrides: &[("movement_speed", 0.25)],
+        },
+        // `Parched.createAttributes()` is `AbstractSkeleton`'s plus
+        // `MAX_HEALTH 16.0` (`monster/skeleton/Parched.java:32-33`). A 26.2
+        // variant that no issue's species list mentions.
+        "parched" => TypeSpec {
+            template: BaseTemplate::Monster,
+            overrides: &[("movement_speed", 0.25), ("max_health", 16.0)],
         },
         "creeper" => TypeSpec {
             template: BaseTemplate::Monster,
@@ -619,6 +646,15 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
         "spider" => TypeSpec {
             template: BaseTemplate::Monster,
             overrides: &[("max_health", 16.0), ("movement_speed", 0.3)],
+        },
+        // `CaveSpider.createAttributes()` is `Spider`'s with `MAX_HEALTH`
+        // re-`add`ed as 12.0 (`monster/spider/CaveSpider.java:26`), so it keeps
+        // the 0.3 speed and loses 4 health. Written flat rather than as
+        // "spider's, overridden", because `add` in vanilla replaces and the
+        // flat form is what `default_attributes` applies in order anyway.
+        "cave_spider" => TypeSpec {
+            template: BaseTemplate::Monster,
+            overrides: &[("max_health", 12.0), ("movement_speed", 0.3)],
         },
         "pig" => TypeSpec {
             template: BaseTemplate::Animal,
@@ -635,6 +671,20 @@ fn type_spec(path: &str) -> Option<TypeSpec> {
         "chicken" => TypeSpec {
             template: BaseTemplate::Animal,
             overrides: &[("max_health", 4.0), ("movement_speed", 0.25)],
+        },
+        // `Rabbit.createAttributes()` (`animal/rabbit/Rabbit.java:292-293`).
+        // The only `Animal` here that carries `ATTACK_DAMAGE`: the killer
+        // bunny uses it, and vanilla puts it on every rabbit's supplier rather
+        // than on that variant, so it belongs in the base set and not behind
+        // `setRabbitType`. Its 0.3 speed is also why an unlisted rabbit was
+        // the clearest symptom of this bug — the registry default is 0.7.
+        "rabbit" => TypeSpec {
+            template: BaseTemplate::Animal,
+            overrides: &[
+                ("max_health", 3.0),
+                ("movement_speed", 0.3),
+                ("attack_damage", 3.0),
+            ],
         },
         _ => return None,
     };
@@ -860,6 +910,104 @@ mod tests {
     fn unknown_type_has_no_supplier() {
         assert!(default_attributes(&id("minecraft:item")).is_none());
         assert!(default_attributes(&id("modded:thing")).is_none());
+    }
+
+    /// Issue #457: five species with landed, jar-cited goal rosters had **no**
+    /// `type_spec` arm, so `default_attributes` returned `None` and every
+    /// consumer fell through to `AttributeMap::value`'s registry default.
+    ///
+    /// **The symptom ran the wrong way from the obvious guess**, which is why
+    /// this asserts exact values rather than plausibility: `movement_speed`'s
+    /// registry default is **0.7** (`attribute.rs`'s `default_def` table), not
+    /// zero and not a combat fallback. So an unlisted rabbit ran at 0.7 against
+    /// its jar 0.3 — more than **twice too fast**, not sluggish. A mob moving
+    /// at 0.7 reads as a pathfinding or interpolation defect, which is how this
+    /// would have cost someone a day.
+    ///
+    /// Every number below is read from that species' own `createAttributes()`
+    /// in `.cache/mc/26.2/`, not inferred from a sibling — the roster work
+    /// found this family non-uniform in three separate ways, and hand-written
+    /// tables have been wrong three times in this repo.
+    #[test]
+    fn species_with_rosters_have_jar_exact_bases_not_registry_defaults() {
+        // `movement_speed`'s registry default, and therefore the value every one
+        // of these species had before this fix. **Measured here rather than
+        // asserted from a comment**: a bare `AttributeMap` is exactly what a
+        // consumer holds when `default_attributes` answers `None`, so this is
+        // the wrong value the fix removes, read from the same table the
+        // production fallback reads. Writing `0.7` as a bare constant would
+        // make the check below a claim about a number nothing verifies.
+        let registry_default_speed = AttributeMap::new()
+            .value(&id("minecraft:movement_speed"))
+            .expect("movement_speed is a registry attribute, so a bare map answers its default");
+        assert!(
+            (registry_default_speed - 0.7).abs() < 1e-9,
+            "the fallback this fix removes should be 0.7; got {registry_default_speed}. \
+             If the registry default changed, the numbers below still stand — but the \
+             claim about what the bug *was* needs rewriting."
+        );
+
+        // (type, jar movement_speed, jar max_health, jar cite)
+        let cases: &[(&str, f64, f64, &str)] = &[
+            ("rabbit", 0.3, 3.0, "animal/rabbit/Rabbit.java:292"),
+            ("drowned", 0.23, 20.0, "monster/zombie/Drowned.java:81"),
+            ("cave_spider", 0.3, 12.0, "monster/spider/CaveSpider.java:26"),
+            ("zombie_villager", 0.23, 20.0, "monster/zombie/Zombie.java:131"),
+            ("parched", 0.25, 16.0, "monster/skeleton/Parched.java:32"),
+        ];
+
+        for &(ty, speed, health, cite) in cases {
+            let map = default_attributes(&id(&format!("minecraft:{ty}")))
+                .unwrap_or_else(|| panic!("{ty} must have a type_spec arm (#457)"));
+
+            let got = map.value(&id("minecraft:movement_speed")).unwrap();
+            assert!(
+                (got - speed).abs() < 1e-9,
+                "{ty} must move at {speed} per {cite}, got {got}"
+            );
+            assert!(
+                (got - registry_default_speed).abs() > 1e-9,
+                "{ty} measured exactly the {registry_default_speed} registry \
+                 default, so it is still falling through type_spec rather than \
+                 reading {cite}"
+            );
+
+            let got_health = map.value(&id("minecraft:max_health")).unwrap();
+            assert!(
+                (got_health - health).abs() < 1e-9,
+                "{ty} must have {health} max health per {cite}, got {got_health}"
+            );
+        }
+    }
+
+    /// The `DROWNED` const duplicates `ZOMBIE`'s five rows because `overrides`
+    /// is a `&'static [_]` with no const concatenation. This pins the two
+    /// against each other so the copy cannot drift, and pins the one row that
+    /// is *meant* to differ: a drowned wades, so vanilla gives it
+    /// `STEP_HEIGHT 1.0` where every other mob inherits `0.6`.
+    #[test]
+    fn zombie_family_variants_share_their_parents_bases() {
+        let zombie = default_attributes(&id("minecraft:zombie")).unwrap();
+        let drowned = default_attributes(&id("minecraft:drowned")).unwrap();
+        let villager = default_attributes(&id("minecraft:zombie_villager")).unwrap();
+
+        for path in ["movement_speed", "follow_range", "attack_damage", "armor"] {
+            let key = id(&format!("minecraft:{path}"));
+            assert_eq!(
+                drowned.value(&key),
+                zombie.value(&key),
+                "drowned's {path} must match zombie's — DROWNED has drifted from ZOMBIE"
+            );
+            assert_eq!(
+                villager.value(&key),
+                zombie.value(&key),
+                "zombie_villager declares no createAttributes, so its {path} must match zombie's"
+            );
+        }
+
+        let step = id("minecraft:step_height");
+        assert_eq!(drowned.value(&step), Some(1.0), "Drowned.java:82");
+        assert_eq!(zombie.value(&step), Some(0.6), "the inherited living default");
     }
 
     /// The Depth Strider path, end to end through the wire-shaped conversion:
