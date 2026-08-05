@@ -1,0 +1,43 @@
+# The example plugin's manifest — issue #175's format, and a real file the host's
+# own test suite parses (`crates/lodestone-wasm-host/tests/manifest_loading.rs`),
+# so it cannot drift out of being valid.
+#
+# To install this plugin into a running client:
+#
+#   cargo build --release --target wasm32-unknown-unknown \
+#     --manifest-path crates/plugins/lodestone-chat-responder-wasm/Cargo.toml
+#   mkdir -p plugins/chat-responder
+#   cp crates/plugins/lodestone-chat-responder-wasm/plugin.toml plugins/chat-responder/
+#   cp crates/plugins/lodestone-chat-responder-wasm/target/wasm32-unknown-unknown/release/\
+#      lodestone_chat_responder_wasm.wasm plugins/chat-responder/chat_responder.wasm
+#
+# That is a plain `cargo build`, producing a plain core module — no `cargo-component`
+# needed. The host sniffs the wasm preamble and encodes it into a component itself.
+
+name = "chat-responder"
+version = "0.1.0"
+
+# The WIT world this module was built against. The host refuses anything it does not
+# speak, naming both versions, rather than letting it fail later as an
+# unresolved-import error.
+abi = "lodestone:plugin@0.1.0"
+
+# The module, relative to this file.
+module = "chat_responder.wasm"
+
+# Conductor ordering, using EventPriority's own six Bukkit names. `monitor` runs
+# last.
+priority = "normal"
+
+description = "Replies pong to any chat message containing ping, counting what it has seen."
+
+# Everything this plugin may do. **Anything not listed is denied** — there is no
+# default grant, and an unrecognised name here is a load-time rejection that lists
+# what the host does know.
+#
+# Note what is absent and stays absent: `fs:read`. This plugin has no business
+# touching the filesystem, so it does not ask, and the host does not add the
+# `lodestone:plugin/filesystem` interface to its linker. A build of this same source
+# with `--features misbehave` calls that interface anyway and fails to instantiate,
+# which is the gate in the host's `tests/capability_denial.rs`.
+capabilities = ["log", "observe:chat", "act:chat"]

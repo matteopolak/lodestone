@@ -45,7 +45,7 @@
 //! | `wit/lodestone-plugin.wit` | [#173](https://github.com/matteopolak/lodestone/issues/173) | the ABI surface — the WIT world, vendored as the single source of truth |
 //! | [`abi`] | #173 | the lift from `ClientEvent` and the lower to `ClientAction`, each capability-gated |
 //! | [`conductor`] | #173 | [`WasmHostPlugin`]: the one native system that drives every guest and is the single writer of `ActionQueue` on their behalf |
-//! | `manifest` | [#175](https://github.com/matteopolak/lodestone/issues/175) | `plugin.toml`: name, version, ABI world, priority, declared capabilities |
+//! | [`manifest`] | [#175](https://github.com/matteopolak/lodestone/issues/175) | `plugin.toml`: name, version, ABI world, priority, declared capabilities |
 //!
 //! # Why the ABI is the intent doctrine, not a new vocabulary
 //!
@@ -106,15 +106,22 @@ mod bindings;
 pub mod capability;
 pub mod conductor;
 pub mod host;
+pub mod manifest;
 
 pub use abi::{capability_for, lift_event, lower_action};
 pub use capability::{Capability, CapabilitySet};
 pub use conductor::{WasmHostPlugin, WasmPlugins, drive_wasm_plugins};
 pub use host::{
     ABI_WORLD, Action, BlockOffset, ChatKind, ChatMessage, DEFAULT_FUEL_PER_TICK,
-    DEFAULT_MEMORY_LIMIT, Event, Hand, Health, HostError, LoadedPlugin, LogLevel, PluginHost,
-    PluginInfo, SectionBlocksChanged, SectionPos,
+    DEFAULT_MEMORY_LIMIT, Event, Hand, Health, HostError, LoadError, LoadedPlugin, LogLevel,
+    PluginHost, PluginInfo, SectionBlocksChanged, SectionPos,
 };
+pub use manifest::{Manifest, ManifestError, Priority, scan_directory};
+
+/// The default directory a host scans for plugins, relative to the working
+/// directory — `plugins/`, one subdirectory per plugin, matching what a Bukkit user
+/// already expects. Not created automatically: its absence means "no plugins".
+pub const DEFAULT_PLUGIN_DIR: &str = "plugins";
 
 /// The WIT world this host speaks, as text — the same bytes `include_str!` pulled
 /// out of `wit/lodestone-plugin.wit` at compile time.
