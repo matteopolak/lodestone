@@ -1,8 +1,12 @@
 # A toy MONITOR-tier reader plugin (issues #104/#105/#110): the first, and
 # so far only, consumer of `lodestone_ecs::GameEvent`/`GameEventBus`/
-# `EventPriority`. Named as a deliberate island landing in
-# `docs/plugin-api.md` and on issue #436's ledger — nothing in the shipped
-# client wires this in yet.
+# `EventPriority`.
+#
+# Issue #436's ledger listed this as a declared island. It is no longer one:
+# `tests/observes_a_real_session.rs` registers it through the public plugin API
+# against a real integrated server. It is still deliberately **not** registered
+# in the shipped client — same call, for the same reason, as
+# `lodestone-autopilot` (see this crate's lib.rs and `docs/plugin-api.md`).
 [package]
 name = "lodestone-event-logger"
 version.workspace = true
@@ -31,3 +35,42 @@ lodestone-model = { workspace = true }
 # `bevy_ecs`/`bevy_app` in the graph.
 bevy_ecs = { workspace = true }
 bevy_app = { workspace = true }
+
+[dev-dependencies]
+# --- the real end-to-end transport (issue #436, item 2) -------------------
+#
+# `tests/observes_a_real_session.rs` proves this plugin observes events that a
+# **real server** produced, delivered by the **real** `SharedState::apply` — not
+# by a hand-written `World::write_message`. `SharedState::apply` is
+# `pub(crate)`, so there is no shortcut: the only way to reach it is an actual
+# connection, which is exactly why this dev-dependency set is the size it is.
+#
+# None of this is a runtime dependency. The plugin itself still depends on
+# nothing but `lodestone-ecs`/`lodestone-model`, so it stays version-free and
+# embeddable; `cargo xtask check-isolation` sees these as dev edges only.
+#
+# `client_app()` (the six version-free plugins production composes) and
+# `spawn_session` — whose own doc names `ClientBuilder::ecs` as its consumer.
+lodestone-app = { workspace = true }
+# `ClientBuilder::ecs`/`connect_with` — the public seam a third-party embedder
+# registers plugins through, and the one `lodestone_shell::net` uses.
+lodestone-client = { workspace = true }
+# `memory_pair`, the in-process duplex the integrated server is served over.
+lodestone-net = { workspace = true }
+# `IntegratedServer::open_in_memory` + `ChunkSource`: a real server on the far
+# end, so every observed event originates outside this crate entirely.
+# A path dependency rather than `workspace = true`: `lodestone-server` has no
+# `[workspace.dependencies]` entry, and every crate that needs it (the shell,
+# `lodestone-registry`, `lodestone-v770`) names it by path for that reason.
+lodestone-server = { path = "../../lodestone-server" }
+# The **real** 26.2 wire format, via the designated aggregator rather than by
+# naming `lodestone-v770` directly. A hand-rolled stand-in protocol pair (the
+# shape `lodestone-server/tests/client_integration.rs` uses) would be ~300 lines
+# of test-owned codec; this is two constructor calls and is what production
+# actually runs. The version-lock is the documented cost, paid in tests only —
+# same bargain `lodestone-autopilot`'s `lodestone-data` dev-dependency records.
+lodestone-registry = { workspace = true, features = ["v770"] }
+# `PlayerState`, the one argument `lodestone_app::spawn_session` takes.
+lodestone-physics = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
