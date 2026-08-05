@@ -53,7 +53,7 @@ non-`keybinds` field of `config::Options` has a row that reaches it.
 
 ## The census
 
-### Wired (40 rows, 15 distinct options)
+### Wired (42 rows outside a world / 41 inside, 17 distinct options)
 
 | option | page(s) | type | vanilla default | consumer |
 |---|---|---|---|---|
@@ -70,12 +70,17 @@ non-`keybinds` field of `config::Options` has a row that reaches it.
 | `chatLineSpacing` | Chat, **Accessibility** | slider `UnitDouble` | `0.0` | per-row stride |
 | `chatOpacity` | Chat, **Accessibility** | slider `UnitDouble` | `1.0` | text alpha |
 | `textBackgroundOpacity` | Chat, **Accessibility** | slider `UnitDouble` | `0.5` | row background alpha |
+| `sensitivity` | Mouse | slider `UnitDouble` | `0.5` (label reads **100%** — `2.0 * value`) | `sim/step.rs`'s `apply_mouse`, **via `Config::resolve_persisted`** (#443) |
+| `renderDistance` | Video | slider `IntRange(2, 32)` | `12` in vanilla, **`8` here** — see `config::DEFAULT_RENDER_DISTANCE` | `sim/build.rs` world radius + `sim/camera.rs` fog, via `resolve_persisted` (#443) |
 
 Three options appear on **two pages each** — that is vanilla's own shape, one
 `OptionInstance` placed on both `ChatOptionsScreen` and
 `AccessibilityOptionsScreen`, so editing either row moves the other's label too.
 This is why `LiveOption` is keyed by the option and not by the row, and why the
-live *row* count (40) exceeds the distinct-option count (15).
+live *row* count (42 outside a world, 41 inside) exceeds the distinct-option
+count (17). Both numbers are asserted by
+`the_disabled_majority_is_the_point_and_it_is_measured`, so they cannot drift
+here without a build failure.
 
 ### Present and greyed, by what they are waiting on
 
@@ -85,7 +90,7 @@ live *row* count (40) exceeds the distinct-option count (15).
 | **Window / display** | `fullscreen`, `exclusiveFullscreen`, `fullscreenResolution`, `enableVsync`, `framerateLimit`, `inactivityFpsLimit`, `preferredGraphicsBackend` | runtime window and surface reconfiguration |
 | **Renderer quality** | `graphicsPreset`, `gamma`, `mipmapLevels`, `ambientOcclusion`, `biomeBlendRadius`, `particles`, `cloudStatus`, `cloudRange`, `entityShadows`, `entityDistanceScaling`, `improvedTransparency`, `textureFiltering`, `maxAnisotropyBit`, `weatherRadius`, `chunkSectionFadeInTime`, `vignette` | each needs its own renderer knob; several are whole features |
 | **Post-process / screen effects** | `screenEffectScale`, `fovEffectScale`, `darknessEffectScale`, `damageTiltStrength`, `glintSpeed`, `glintStrength` | the effects exist in varying degrees; the scale factors are not plumbed |
-| **Distances** | `renderDistance`, `simulationDistance`, `fov`, `sensitivity` | **these are not `Options` fields at all** — see the gotcha below |
+| **Distances** | ~~`renderDistance`~~, `simulationDistance`, `fov`, ~~`sensitivity`~~ | `renderDistance` and `sensitivity` are **live since #443**; the other two have no consumer at all — see the gotcha below |
 | **Chat behaviour** | `chatVisibility`, `chatLinks`, `chatLinksPrompt`, `chatDelay`, `autoSuggestions`, `hideMatchedNames`, `onlyShowSecureChat`, `saveChatDrafts`, `reducedDebugInfo` | chat *behaviour* rather than chat *appearance*; the appearance half is now wired |
 | **Narrator / high contrast** | `narrator`, `narratorHotkey`, `highContrast`, `highContrastBlockOutline` | no narrator, and high contrast is a resource pack swap |
 | **Skin & model parts** | all 7 `modelPart.*`, `mainHand` | needs the parts to reach the entity renderer *and* the serverbound client-settings packet |
@@ -138,13 +143,47 @@ handles the click, and `slider_fraction` already returns the live value because
   prints `99%`. Predict `floor`, not `round`.
 - **`guiScale` is a cycle button, not a slider**, even though it is an int
   range — `ClampingLazyMaxIntRange.createCycleButton()` returns `true`.
-- **`renderDistance`, `simulationDistance`, `fov` and `sensitivity` are not
-  persisted options here.** `renderDistance` and `sensitivity` live on
-  `config::Config`, which is parsed from argv every run and **never written
-  back**. Their consumers already exist (`sim.rs`), so a row that appeared to
-  set them would be fabricated persistence: the value would revert on restart.
-  Wiring them is a *migration* — decide whether argv or `options.json` wins —
-  not a threading job, and the consumer edit lands in `sim.rs`, a brokered file.
+- ~~**`renderDistance`, `simulationDistance`, `fov` and `sensitivity` are not
+  persisted options here.**~~ **`renderDistance` and `sensitivity` now are
+  (issue #443).** They were argv-only `config::Config` fields that were never
+  written back, so a row for them would have been fabricated persistence. Both
+  are now `config::Options` fields with a `LiveOption`, a live row, an
+  `apply_settings` arm and a real consumer.
+
+  **The migration resolves precedence in one place rather than at each
+  consumer**, and that is the part worth copying. `Config::resolve_persisted`
+  folds `options.json` into the argv-parsed `Config` once, at launch, so the
+  seven existing readers (`sim/step.rs`'s `apply_mouse`, `sim/build.rs`'s world
+  radius, `sim/camera.rs`'s fog, four `app/*` call sites) read the resolved value
+  **unchanged** — the migration adds no consumer and touches no brokered file.
+  Teaching each site to consult both structs would have been seven chances to
+  miss one.
+
+  An explicit flag still wins for that run, which needs
+  `Config::sensitivity_given`/`render_distance_given` — `address_given`'s exact
+  shape, because `--render-distance 8` is byte-identical to passing nothing and
+  the *value* therefore cannot answer "was it given". A resolver that compared
+  against `Config::default()` would silently discard the flag;
+  `passing_the_default_explicitly_is_still_an_explicit_flag` executes that wrong
+  hypothesis and shows it answering false.
+
+  **Known limitation, and it is a real one:** the fold happens at launch, so a
+  change made in the settings screen applies on the **next** launch. For
+  `renderDistance` that is close to vanilla, which also defers
+  (`applyValueImmediately = false`, a 600 ms debounce, because each change
+  reloads chunks). For `sensitivity` vanilla applies immediately, so this is a
+  departure. Closing it means pushing the value into `Sim` every frame the way
+  `app/redraw.rs` already does for `set_mouse_invert` — a brokered file, so it
+  needs the orchestrator.
+
+  `simulationDistance` and `fov` stay inactive: neither has any consumer in this
+  shell, so wiring them would be the fabrication this bullet used to warn about.
+  `the_disabled_majority_is_the_point_and_it_is_measured` now uses
+  `simulationDistance` as its inactive control, read off the real page — the old
+  control constructed a synthetic `slider("renderDistance", …)` cell, which had
+  `live: None` by construction and so was asserting a property of the
+  constructor rather than of the tree. It would have kept passing after #443
+  made the real row live.
 - **A settings test must not write the real `options.json`.** Use
   `MenuNav::with_paths` with a temp path, as the existing tests do. This is the
   same class as the accounts-screen test that spawned `open` and launched a

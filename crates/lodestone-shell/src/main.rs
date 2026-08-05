@@ -11,8 +11,15 @@ fn main() -> anyhow::Result<()> {
     // Resolve --help and argument errors *before* logging, a window, a GPU, or a
     // world exist — so the binary is discoverable and `--help` never boots a game.
     match Config::from_args(std::env::args().skip(1)) {
-        CliOutcome::Run(config) => {
+        CliOutcome::Run(mut config) => {
             init_logging();
+            // Fold `options.json` into the argv-parsed config, for the settings
+            // that live in both (issue #443). An explicit flag still wins for
+            // this run; everything else takes the persisted value, so the
+            // consumers in `sim`/`app` read the resolved number without knowing
+            // a settings screen exists. Must happen before `app::run`, which
+            // hands `config` straight to `Sim`.
+            config.resolve_persisted(&lodestone::config::Options::load());
             tracing::info!(?config.mode, "starting lodestone");
             app::run(config)
         }
