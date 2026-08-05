@@ -613,14 +613,63 @@ fn species_shape(entity_type: &ResourceKey, attrs: &AttributeMap) -> MobShape {
 /// `check_despawn` signature), the roster deliberately takes no side in that fork,
 /// and unifying them is issue #221's call.
 ///
-/// It still covers exactly the families
-/// [`lodestone_entity::attribute::default_attributes`] templates as `Monster`.
-/// A species outside this list is treated as a persistent `Creature`, which is
-/// the safe direction: it will not be despawned out from under a player.
+/// # Where these names come from, and the heuristic that was wrong (issue #457)
+///
+/// Every path below was read from that species' own registration in
+/// `EntityTypes.java` (`.cache/mc/26.2/src/net/minecraft/world/entity/`), which
+/// is where vanilla's `MobCategory` actually lives — `EntityType.Builder.of(X::new,
+/// MobCategory.MONSTER)`. The list previously held the original **eight** and its
+/// doc claimed it "covers exactly the families
+/// [`lodestone_entity::attribute::default_attributes`] templates as `Monster`".
+/// That heuristic is **not equivalent to vanilla's category**, and reading the
+/// registrations is what showed it:
+///
+/// * A **ghast** is `MobCategory.MONSTER` (`EntityTypes.java:473-474`) while its
+///   attribute builder is a bare `Mob.createMobAttributes()` with no
+///   `attack_damage` at all (`monster/Ghast.java:116-122`). Deriving the category
+///   from the attribute template would have made it a persistent `Creature`.
+/// * A **snow golem** is `MobCategory.MISC` (`EntityTypes.java:886`) — neither
+///   `Monster` nor `Creature`. This function is a boolean, so it lands as
+///   `Creature`; that is *not* vanilla's category, merely the safe direction
+///   (`Misc` also never natural-despawns). Recorded here rather than papered
+///   over, because it is the one species in the roster this predicate cannot
+///   represent, and it is the argument for #221's category unification.
+///
+/// A species outside this list is still treated as a persistent `Creature`,
+/// which is the safe direction: it will not be despawned out from under a
+/// player. The failure mode this list has is therefore under-listing (a monster
+/// that never despawns), not over-listing.
+///
+/// This is still a name list, and a name list still ages — see #455 for why the
+/// *goal* half took the structural route instead. What keeps this one honest is
+/// `every_rostered_monster_is_categorised_hostile` below, which drives the
+/// roster's own species set through it rather than restating the names.
 fn is_hostile_species(entity_type: &ResourceKey) -> bool {
     matches!(
         entity_type.path(),
-        "zombie" | "husk" | "skeleton" | "stray" | "wither_skeleton" | "bogged" | "creeper" | "spider"
+        // Zombie family — `EntityTypes.java:1090, 534, 345, 1116, 1126`.
+        "zombie"
+            | "husk"
+            | "drowned"
+            | "zombie_villager"
+            | "zombified_piglin"
+            // Skeleton family — `:844, 931, 1058, 238, 736`.
+            | "skeleton"
+            | "stray"
+            | "wither_skeleton"
+            | "bogged"
+            | "parched"
+            // `:315`, `:903`, `:265`.
+            | "creeper"
+            | "spider"
+            | "cave_spider"
+            // `:513`, `:359` — both `MONSTER` despite being water-bound.
+            | "guardian"
+            | "elder_guardian"
+            // `:473` (bare-`Mob` attributes, `MONSTER` category), `:231`, `:368`.
+            | "ghast"
+            | "blaze"
+            | "enderman"
     )
 }
 
@@ -3311,6 +3360,162 @@ mod block_cues_tests {
         assert!(
             sim.take_grazes().is_empty(),
             "take_grazes must drain, not merely read"
+        );
+    }
+}
+
+/// Gates on [`is_hostile_species`] (issue #457), which stood at the original
+/// eight names long after the roster grew to twenty-seven species.
+#[cfg(test)]
+mod hostility_category_tests {
+    use super::*;
+    use lodestone_entity::ai::roster;
+
+    /// Every species any roster family claims, paired with the `MobCategory`
+    /// vanilla registers it under in `EntityTypes.java`.
+    ///
+    /// **This is an independent statement of the answer, not a restatement of
+    /// the code under test**: the values were read from the jar's
+    /// `EntityType.Builder.of(X::new, MobCategory.…)` registrations, which is a
+    /// different file and a different mechanism from the `matches!` under test.
+    /// `true` here means `MONSTER`.
+    ///
+    /// Note the two rows a "derive it from the attribute template" heuristic
+    /// gets wrong, and which are the reason this table exists rather than a
+    /// clever predicate: **`ghast` is `MONSTER`** despite a bare-`Mob`
+    /// attribute builder with no `attack_damage`, and **`snow_golem` is
+    /// `MISC`** — neither `Monster` nor `Creature`, so it is `false` here for
+    /// want of a third state (see [`is_hostile_species`]'s own doc).
+    const JAR_CATEGORY: &[(&str, bool)] = &[
+        // hostile_melee
+        ("zombie", true),
+        ("husk", true),
+        ("zombie_villager", true),
+        ("drowned", true),
+        ("creeper", true),
+        ("spider", true),
+        ("cave_spider", true),
+        ("skeleton", true),
+        ("stray", true),
+        ("bogged", true),
+        ("parched", true),
+        ("wither_skeleton", true),
+        // ranged
+        ("blaze", true),
+        ("snow_golem", false), // MobCategory.MISC — see above
+        // passive
+        ("cow", false),
+        ("mooshroom", false),
+        ("sheep", false),
+        ("pig", false),
+        ("chicken", false),
+        ("rabbit", false),
+        // neutral — all four are non-`MONSTER` *or* conditionally hostile;
+        // enderman and zombified_piglin are registered `MONSTER`, bee and wolf
+        // `CREATURE`. Hostility-on-sight is a separate axis the roster owns.
+        ("enderman", true),
+        ("zombified_piglin", true),
+        ("bee", false),
+        ("wolf", false),
+        // specialist
+        ("guardian", true),
+        ("elder_guardian", true),
+        ("ghast", true), // MobCategory.MONSTER, bare-`Mob` attributes
+    ];
+
+    fn key(path: &str) -> ResourceKey {
+        ResourceKey::from_str(&format!("minecraft:{path}")).expect("valid key")
+    }
+
+    /// The coverage half: **every species the roster claims must appear in
+    /// [`JAR_CATEGORY`]**, so adding a species to a family without deciding its
+    /// spawn category fails here instead of silently defaulting to `Creature`.
+    ///
+    /// This is the assertion the old eight-name list could never have had, and
+    /// it is driven from `roster::*::SPECIES` — the same lists `goals_for`
+    /// dispatches on — rather than from a copy of them.
+    #[test]
+    fn every_rostered_species_has_a_decided_category() {
+        let all: Vec<&str> = roster::hostile_melee::SPECIES
+            .iter()
+            .chain(roster::ranged::SPECIES)
+            .chain(roster::passive::SPECIES)
+            .chain(roster::neutral::SPECIES)
+            .chain(roster::specialist::SPECIES)
+            .copied()
+            .collect();
+        assert!(
+            !all.is_empty(),
+            "the roster exported no species, so this gate measured nothing"
+        );
+
+        let undecided: Vec<&str> = all
+            .iter()
+            .copied()
+            .filter(|s| !JAR_CATEGORY.iter().any(|(name, _)| name == s))
+            .collect();
+        assert!(
+            undecided.is_empty(),
+            "these rostered species have no jar-cited spawn category, so they \
+             silently fall through to persistent Creature (#457): {undecided:?}"
+        );
+    }
+
+    /// The value half: the predicate must agree with the jar for every row.
+    #[test]
+    fn hostility_matches_the_jar_registration_for_every_rostered_species() {
+        let mut wrong = Vec::new();
+        for &(path, want) in JAR_CATEGORY {
+            let got = is_hostile_species(&key(path));
+            if got != want {
+                wrong.push(format!("{path}: want {want}, got {got}"));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "is_hostile_species disagrees with EntityTypes.java: {wrong:?}"
+        );
+
+        // Control: the predicate is capable of answering `false`, so the
+        // agreement above is not "everything is hostile". A species with no
+        // roster entry and no reason to be a monster must still be `false`.
+        assert!(
+            !is_hostile_species(&key("armadillo")),
+            "an unlisted species must fall through to Creature — if this is \
+             true, the predicate has stopped discriminating and the whole \
+             table above passes vacuously"
+        );
+    }
+
+    /// The category the predicate feeds must actually reach the spawned mob:
+    /// [`MobSim::spawn_species`] is the production path, and a predicate whose
+    /// answer never lands on a `SimMob` is the island shape this repo keeps
+    /// paying for.
+    #[test]
+    fn the_decided_category_reaches_a_spawned_mob() {
+        let mut world = ChunkWorld::new(-64, 384);
+        for x in -4..=4 {
+            for z in -4..=4 {
+                world.set_solid(x, -1, z, true);
+            }
+        }
+        let world: &'static ChunkWorld = Box::leak(Box::new(world));
+        let mut sim = MobSim::new(world);
+
+        let pos = Vec3::new(0.5, 0.0, 0.5);
+        let ghast = sim.spawn_species(key("ghast"), pos).category();
+        let wolf = sim.spawn_species(key("wolf"), pos).category();
+
+        assert_eq!(
+            ghast,
+            MobCategory::Monster,
+            "a ghast is MobCategory.MONSTER (EntityTypes.java:473); if this is \
+             Creature the widened list is not reaching spawn_species"
+        );
+        assert_eq!(
+            wolf,
+            MobCategory::Creature,
+            "a wolf is MobCategory.CREATURE (EntityTypes.java:1073)"
         );
     }
 }
