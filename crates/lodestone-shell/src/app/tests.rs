@@ -450,10 +450,11 @@ fn the_hotbar_survives_every_screen_drawn_over_the_world() {
 
     // -- negative control ------------------------------------------------
     // The predicate has to be able to say no, or the loop above is vacuous.
-    // `Connecting` reaches the world render path (it is not an `owns_frame`
-    // screen) but has no world yet; the menu screens never get here at all
-    // because `draw_menu` returns first — asserted anyway so a future
-    // `owns_frame` change cannot quietly turn this into `true` everywhere.
+    // `Connecting` has no world yet; the menu screens never get here at all
+    // because `draw_menu` returns first. Since issue #449 `Connecting` is an
+    // `owns_frame` screen, so it is one of the `draw_menu`-returns-first set —
+    // asserted anyway, because the world-path hotbar gate must never come true
+    // for a screen that draws no world.
     for screen in [
         Screen::Connecting,
         Screen::MainMenu,
@@ -2364,10 +2365,30 @@ fn right_clicking_a_command_block_opens_the_edit_screen() {
 
     // A real command block in the real store the accessor reads.
     let block = [8, 64, 8];
-    let world = app.sim.chunk_world();
+    let world = app.sim.chunk_world_write();
     {
         let mut w = world.write();
         crate::sim::write_predicted_block(&mut *w, block, state_id);
+        // The block entity's payload, overwriting the empty record
+        // `write_predicted_block`'s `sync_block_entity` just created — the
+        // shape a server sends for a command block whose command has been set.
+        // Without it the screen opens through the "fail open" default (empty
+        // command), and the issue's gate — "opens populated with the block's
+        // actual command text" — would be untested.
+        w.set_block_entity(
+            block[0],
+            block[1],
+            block[2],
+            lodestone_data::block_entity_types::block_entity_type(state_id)
+                .expect("a command block state owns a block entity type"),
+            lodestone_core::Nbt::Compound(vec![
+                (
+                    "Command".to_string(),
+                    lodestone_core::Nbt::String("say hello".into()),
+                ),
+                ("TrackOutput".to_string(), lodestone_core::Nbt::Byte(1)),
+            ]),
+        );
     }
     // `face_center` is the real constructor the raycast itself uses, so this
     // cannot disagree with a production hit's shape.
@@ -2397,6 +2418,13 @@ fn right_clicking_a_command_block_opens_the_edit_screen() {
         lodestone_model::BlockPos::new(8, 64, 8),
         "and it must open on the block that was actually clicked, not a default          — `to_submit` is what the Done button would actually send"
     );
+    assert_eq!(
+        state.command.value(),
+        "say hello",
+        "and it must open populated with the block's actual command text — the \
+         issue's gate, carried through the real interaction path: block-entity \
+         NBT in the store -> `targeted_command_block` -> the edit screen"
+    );
 }
 
 /// **The control, run and observed**: the same right-click on a block that is
@@ -2423,7 +2451,7 @@ fn right_clicking_a_normal_block_does_not_open_the_command_block_screen() {
     app.ui.enter_dev_world();
 
     let block = [8, 64, 8];
-    let world = app.sim.chunk_world();
+    let world = app.sim.chunk_world_write();
     {
         let mut w = world.write();
         crate::sim::write_predicted_block(&mut *w, block, stone);

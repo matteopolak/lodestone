@@ -250,7 +250,16 @@ impl Sim {
         // never adopted, so its terrain is not the live store and survives, which
         // is the behaviour `resident_after_connect`'s control asserts.
         if std::mem::take(&mut self.adopted_live_world) {
-            self.write(|w| w.insert_resource(ChunkWorld::default()));
+            // Issue #423: the two halves are always replaced *together* with one
+            // fresh store — a write handle left pointing at the released server
+            // store while the read resource names a new empty one would be the
+            // two-worlds defect this resource design exists to delete.
+            let write_handle = ChunkWorldWrite::default();
+            let chunk_world = write_handle.read_handle();
+            self.write(|w| {
+                w.insert_resource(write_handle);
+                w.insert_resource(chunk_world);
+            });
         }
 
         // Back to whatever spawn this `Sim` was built around — the demo world's
@@ -306,6 +315,27 @@ impl Sim {
     #[must_use]
     pub fn net(&self) -> Option<&NetClient> {
         self.net.as_ref()
+    }
+
+    /// Whether the terrain under the player is still streaming in — the
+    /// post-login half of the loading screen (issue #449). `false` with no live
+    /// session: the demo/dev world has no net client and is never "loading
+    /// terrain".
+    ///
+    /// Vanilla's `DownloadingTerrainScreen` predicate: the chunk column under
+    /// the player's feet is not yet in the client-owned world. The same column
+    /// math as `live_collision` (`sim/collide.rs`), the other reader of this
+    /// exact question, so the two cannot disagree about which chunk the player
+    /// is standing on.
+    #[must_use]
+    pub fn terrain_loading(&self) -> bool {
+        let Some(net) = self.net() else {
+            return false;
+        };
+        let position = self.player().position;
+        let pcx = (position.x.floor() as i32).div_euclid(16);
+        let pcz = (position.z.floor() as i32).div_euclid(16);
+        !net.is_chunk_loaded(lodestone_client::ChunkPos { x: pcx, z: pcz })
     }
 
     /// The coarse session phase, for the menu state machine.

@@ -411,6 +411,46 @@ pub fn command_block_frame(
     }
 }
 
+/// Builds the loading screen's frame (issue #449): a flat dark backdrop with
+/// one centred line of text — "Connecting..." while the handshake /
+/// configuration phase runs, "Loading terrain..." while the player's own chunk
+/// streams in after login. The issue asks for exactly this: a dark background
+/// with the text, no vanilla `LevelLoadingScreen` chrome.
+///
+/// Same shape as [`error_frame`]: a `vanilla` frame whose only geometry is the
+/// backdrop and one [`MenuLabel`]. Unlike every other `vanilla` frame it
+/// carries no [`MenuRow`]s — there is nothing to click on a loading screen, and
+/// input is deliberately inert for its whole lifetime (see
+/// [`super::Screen::Connecting`]'s doc and [`super::nav::MenuNav::key`]'s
+/// catch-all arm, which routes only Escape, and Escape is a no-op there).
+///
+/// `overlay` is always `true`, for both callers, and that one flag serves both:
+/// - The `Connecting` screen is routed through [`frame_for`]'s `Clear` pass
+///   (`MenuRenderer::render`), where `overlay` is what suppresses the panorama —
+///   the "flat dark" the issue asks for, rather than the main-menu background
+///   behind the text.
+/// - The post-login terrain state is drawn by `app::redraw` with
+///   [`MenuRenderer::render_overlay`] over the still-rendering world, where
+///   `overlay` gives the translucent dim that keeps the streaming chunks
+///   visible behind the text instead of a hard opaque panel.
+#[must_use]
+pub fn loading_frame(text: &'static str) -> MenuFrame<'static> {
+    MenuFrame {
+        vanilla: true,
+        overlay: true,
+        labels: vec![MenuLabel {
+            text: text.to_string(),
+            origin: Origin::Centre,
+            dx: 0.0,
+            dy: 0.0,
+            align: Align::Centre,
+            colour: LABEL,
+            scale: 1.0,
+        }],
+        ..Default::default()
+    }
+}
+
 // -- vanilla's `DisconnectedScreen` metrics -----------------------------------
 
 /// `Button.builder(…).width(200)`, every call site

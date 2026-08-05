@@ -108,7 +108,7 @@ use lodestone_ecs::player::{
 };
 use lodestone_ecs::session::{Abilities, ServerEntityId, SessionMenus};
 use lodestone_ecs::veto::{ActionVetoes, VerbContext, Verdict};
-use lodestone_ecs::{ChunkWorld, FrameClock, GameTick, TickSet, VersionData};
+use lodestone_ecs::{ChunkWorld, ChunkWorldWrite, FrameClock, GameTick, TickSet, VersionData};
 use lodestone_game::mining::Mining;
 use lodestone_game::placement::{Placement, UseOnContext, UseOnDecision};
 use lodestone_model::{BlockFace, PlayerCommand};
@@ -805,9 +805,9 @@ pub fn drive_mining(
 /// [`PlacementPredictor`], whose [`Placement::use_on`] threads the counter
 /// internally — no sequence anywhere on [`PlaceIntent`] itself; the wire via
 /// [`ActionQueue`] — never [`ClientHandle::send_action`] from a system, per
-/// this module's own docs; the predicted write via [`ChunkWorld::write`] +
+/// this module's own docs; the predicted write via [`ChunkWorldWrite::write`] +
 /// [`write_predicted_block`], state and block entity together; the re-mesh
-/// via [`TerrainMesh::remesh_around`].
+/// via [`TerrainMesh::remesh_around`] through the read handle.
 ///
 /// # Human input wins, exactly as `BreakIntent`'s own docs describe
 ///
@@ -833,6 +833,10 @@ pub fn drive_placement(
     net: Res<NetHandle>,
     version: Res<VersionData>,
     chunk_world: Res<ChunkWorld>,
+    // Issue #423: the write side of the split. The read handle above is for the
+    // re-mesh; only this one may touch the store — a system that took only
+    // `Res<ChunkWorld>` compiles nowhere in `drive_placement`'s role.
+    write: Res<ChunkWorldWrite>,
     clock: Res<FrameClock>,
     profile: Res<Profile>,
     mut placement: ResMut<PlacementPredictor>,
@@ -1001,7 +1005,7 @@ pub fn drive_placement(
     // point. Chunk guard taken and dropped before `remesh_around` reaches for
     // the `TerrainMesh` resource, same rule `Sim::predict_block` follows.
     {
-        let mut world = chunk_world.write();
+        let mut world = write.write();
         write_predicted_block(&mut *world, block, state_id);
     }
     terrain.remesh_around(&chunk_world, block);

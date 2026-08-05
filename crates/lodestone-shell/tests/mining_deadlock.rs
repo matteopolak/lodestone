@@ -220,7 +220,7 @@ impl Harness {
         // The block the pick ray "hit", written into the *client's* chunk store —
         // which is what `NetHandle::block_at` reads, and which `ClientHandle`
         // hands out as the same `Arc` it writes decoded columns into.
-        client.chunk_world().write().load(
+        client.chunk_world_write().write().load(
             ChunkPos::new(TARGET[0].div_euclid(16), TARGET[2].div_euclid(16)),
             column_with(TARGET, STONE),
         );

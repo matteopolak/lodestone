@@ -29,7 +29,7 @@ use lodestone_ecs::session::{
     ServerAlive, ServerBiomeSkyColors, ServerDimension, ServerDimensionType, ServerEntityId,
     ServerGameMode, SessionBossBars, SessionMenus, SessionScoreboard, SessionTabList, Vitals, Xp,
 };
-use lodestone_ecs::{ChunkWorld, EcsHandle, WorldTime};
+use lodestone_ecs::{ChunkWorld, ChunkWorldWrite, EcsHandle, WorldTime};
 use lodestone_game::bossbar::BossBarSet;
 use lodestone_game::scoreboard::Scoreboard;
 use lodestone_game::tablist::TabList;
@@ -399,6 +399,11 @@ impl Default for SharedState {
             // names. A system or plugin in this `World` can therefore read
             // chunks without a second copy existing anywhere.
             world_ecs.insert_resource(ChunkWorld::from_shared(Arc::clone(&world)));
+            // Issue #423: the write half of the split, on the same `Arc` — so a
+            // system in *this* ECS that legitimately edits the store has a
+            // sanctioned route (`ChunkWorldWrite`) instead of reaching for the
+            // raw lock `world_write` guards.
+            world_ecs.insert_resource(ChunkWorldWrite::from_shared(Arc::clone(&world)));
             let session = lodestone_ecs::spawn_session(&mut world_ecs);
             // Issue #104: `new_ingest_handle()` above never adds
             // `GameEventBusPlugin`, so this is `false` for every
@@ -606,6 +611,14 @@ impl SharedState {
     #[must_use]
     pub(crate) fn chunk_world(&self) -> ChunkWorld {
         ChunkWorld::from_shared(Arc::clone(&self.world))
+    }
+
+    /// The write half of the store split (issue #423), on the **same** `Arc`
+    /// [`chunk_world`](Self::chunk_world) hands out — the sanctioned route for a
+    /// driver (`Sim::adopt_live_world`) or a test harness that must edit the
+    /// store, paired with the read handle so the two never name different worlds.
+    pub(crate) fn chunk_world_write(&self) -> ChunkWorldWrite {
+        ChunkWorldWrite::from_shared(Arc::clone(&self.world))
     }
 
     /// Records the player's own outgoing movement so subsequent look/step
@@ -1650,8 +1663,12 @@ mod tests {
         // guard is visible through the handle without any propagation step.
         assert_eq!(handed_out.len(), 0);
         assert!(state.world_write().is_empty());
+        // `ChunkWorld` exposes no `Arc` (issue #423) — identity is compared by
+        // rebuilding a read handle from the same field `world_write` locks and
+        // using the store's own `is_same_store`, which is `Arc::ptr_eq` inside.
+        let from_write_target = ChunkWorld::from_shared(Arc::clone(&state.world));
         assert!(
-            Arc::ptr_eq(handed_out.shared(), &state.world),
+            handed_out.is_same_store(&from_write_target),
             "`chunk_world()` must clone the `Arc` `world_write` locks, not a copy of it"
         );
     }

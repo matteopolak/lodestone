@@ -346,6 +346,34 @@ pub struct NavigatingMob<'w> {
     /// [`attacks`](Self::attacks)/[`launches`](Self::launches) shape, for the
     /// same reason: this crate can write neither a block nor entity metadata.
     eaten: Vec<EatenBlock>,
+    /// Host injection point, refreshed once per tick: whether a player is
+    /// currently staring at this mob. Drives
+    /// [`MobController::is_being_stared_at`] and therefore the enderman's
+    /// stare-gated goals. The host computes vanilla's `isLookingAtMe` cone +
+    /// line-of-sight from real player view vectors and feeds the boolean —
+    /// see that method and [`is_in_view_cone`](super::mob::is_in_view_cone).
+    ///
+    /// Nothing feeds this in production yet (the enderman's gaze goals are not
+    /// registered), so it stays `false` — the value the trait default is
+    /// pinned to.
+    stared_at: bool,
+    /// Host injection point, refreshed once per tick: the position of this
+    /// mob's owner, or `None` when it has none. Drives
+    /// [`MobController::owner_position`].
+    ///
+    /// Host-injected exactly like [`parent_candidate`](Self::parent_candidate):
+    /// the host owns the owner *identity* (`lodestone_server`'s
+    /// `SimMob::owner_id`) and resolves it to a position each tick. `None` for
+    /// every mob in production today (taming is not implemented).
+    owner: Option<Vec3>,
+    /// Self-damage requests this mob recorded via
+    /// [`MobController::damage_self`], awaiting a host drain via
+    /// [`take_self_damage`](Self::take_self_damage) — the
+    /// [`attacks`](Self::attacks)/[`launches`](Self::launches) shape, for the
+    /// same reason: health lives on the host, so this crate can only record
+    /// the *intent*. The bee's sting self-destruct is the production consumer
+    /// (`animal/Bee.java:374-379`).
+    self_damage: Vec<f32>,
 }
 
 /// Minecraft body yaw (degrees) for a horizontal movement delta: 0 = +Z (south),
@@ -437,6 +465,9 @@ impl<'w> NavigatingMob<'w> {
             follow_range: DEFAULT_FOLLOW_RANGE,
             angry_target: None,
             eaten: Vec::new(),
+            stared_at: false,
+            owner: None,
+            self_damage: Vec::new(),
         }
     }
 
@@ -761,6 +792,42 @@ impl<'w> NavigatingMob<'w> {
     pub fn set_no_action_time(&mut self, ticks: i32) -> &mut Self {
         self.no_action_time = ticks;
         self
+    }
+
+    /// Host injection point: whether a player is currently staring at this
+    /// mob. Computed by the host from vanilla's `isLookingAtMe` cone plus line
+    /// of sight — see [`MobController::is_being_stared_at`] and
+    /// [`is_in_view_cone`](super::mob::is_in_view_cone).
+    pub fn set_stared_at(&mut self, stared_at: bool) -> &mut Self {
+        self.stared_at = stared_at;
+        self
+    }
+
+    /// Host injection point: refreshes this mob's owner position from the
+    /// host's owner-identity census. `None` for a wild (ownerless) mob — the
+    /// state every mob starts in.
+    pub fn set_owner(&mut self, owner: Option<Vec3>) -> &mut Self {
+        self.owner = owner;
+        self
+    }
+
+    /// The self-damage requests a goal or host logic recorded (for tests).
+    #[must_use]
+    pub fn self_damage(&self) -> &[f32] {
+        &self.self_damage
+    }
+
+    /// Drains the self-damage requests recorded since the last call — the
+    /// [`take_new_attacks`](Self::take_new_attacks) shape. The host applies
+    /// each amount through its normal damage pipeline (i-frames and reductions
+    /// included, matching vanilla's `hurtServer`).
+    ///
+    /// **A host that never calls this turns a mob's self-harm into a no-op
+    /// with no error**: the request lands in this `Vec` and no health ever
+    /// changes. `lodestone_server::mobs::MobSim::tick` is the one production
+    /// caller.
+    pub fn take_self_damage(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.self_damage)
     }
 
     /// Records that this mob just took damage, optionally from an attacker at
@@ -1106,6 +1173,14 @@ impl MobController for NavigatingMob<'_> {
         self.angry_target
     }
 
+    fn owner_position(&self) -> Option<Vec3> {
+        self.owner
+    }
+
+    fn is_being_stared_at(&self) -> bool {
+        self.stared_at
+    }
+
     /// Answered from the [`PathWorld`] this mob already borrows for
     /// pathfinding — the whole reason issue #456's seam needs no world handle on
     /// [`MobController`] and no per-tick block feed.
@@ -1125,6 +1200,24 @@ impl MobController for NavigatingMob<'_> {
 
     fn attack(&mut self, target: Vec3) {
         self.attacks.push(target);
+    }
+
+    fn teleport_to(&mut self, target: Vec3) {
+        // Vanilla `Entity.teleportTo` rewrites position immediately and zeroes
+        // velocity (`Entity.java:1513-1515`); the path is abandoned because a
+        // stale route to the old location is worse than none. Position is
+        // written directly — the same "one-shot instant" treatment
+        // `apply_knockback` gives an impulse — and the next `advance()` (path
+        // following) recomputes fresh from the new position, exactly as it
+        // does after knockback.
+        self.pos = target;
+        self.velocity = Vec3::new(0.0, 0.0, 0.0);
+        // Fully-qualified: `BrainMob` also declares `stop_navigation`.
+        MobController::stop_navigation(self);
+    }
+
+    fn damage_self(&mut self, amount: f32) {
+        self.self_damage.push(amount);
     }
 
     fn launch_projectile(&mut self, launch: ProjectileLaunch) {
@@ -1340,6 +1433,7 @@ mod tests {
 
     use super::*;
     use crate::ai::goal::Goal;
+    use crate::ai::mob::is_in_view_cone;
     use crate::ai::goals::{
         AvoidEntityGoal, FloatGoal, HurtByTargetGoal, LookAtPlayerGoal, MeleeAttackGoal, PanicGoal,
         RandomStrollGoal, SwellGoal, TemptGoal,
@@ -1994,6 +2088,129 @@ mod tests {
             Vec3::new(0.0, 0.0, 0.0),
             "with no path, advance() must not perpetuate the knockback velocity"
         );
+    }
+
+    // ---- Issue #458, primitives 2-5: gaze / teleport / self-damage / ownership
+
+    #[test]
+    fn is_in_view_cone_implements_vanillas_exact_tolerance() {
+        // Hand-computed from `LivingEntity.isLookingAtMe`
+        // (`LivingEntity.java:1756-1775`): accept iff
+        // `look · dir > 1.0 - coneSize / (adjustForDistance ? dist : 1.0)`.
+        // Every case below is a closed-form dot and distance, so the expected
+        // verdict is exact rather than a re-derivation of the code.
+        let eye = Vec3::new(0.0, 0.0, 0.0);
+        let look = Vec3::new(1.0, 0.0, 0.0);
+
+        // On-axis: dot 1.0, tolerance 0.025/10 = 0.0025 → 1.0 > 0.9975.
+        assert!(is_in_view_cone(eye, look, Vec3::new(10.0, 0.0, 0.0), 0.025, true));
+        // 90° off: dot 0.0 → 0.0 > 0.9975 is false.
+        assert!(!is_in_view_cone(eye, look, Vec3::new(0.0, 0.0, 10.0), 0.025, true));
+        // Behind: dot −1.0 → false.
+        assert!(!is_in_view_cone(eye, look, Vec3::new(-10.0, 0.0, 0.0), 0.025, true));
+
+        // The load-bearing pair: the tolerance is **divided by distance**, so
+        // the cone widens with range. A 3-4-5 triangle gives dot 0.6 at both
+        // distances; cone 1.0 makes the thresholds 0.5 (dist 2) and 0.8
+        // (dist 5). The same angular offset is a stare close up and not far
+        // away — a fixed-angle cone would answer identically at both, so this
+        // pair is what distinguishes the distance-scaled model from an
+        // approximation.
+        assert!(is_in_view_cone(eye, look, Vec3::new(1.2, 0.0, 1.6), 1.0, true));
+        assert!(!is_in_view_cone(eye, look, Vec3::new(3.0, 0.0, 4.0), 1.0, true));
+
+        // Same 3-4-5 point with adjustForDistance=false: the tolerance is the
+        // plain coneSize (1.0 → threshold 0.0), so even 53° off is accepted.
+        assert!(is_in_view_cone(eye, look, Vec3::new(3.0, 0.0, 4.0), 1.0, false));
+
+        // Degenerate: a viewer standing exactly on the target is not a stare
+        // (documented divergence from vanilla's divide-by-zero `true`).
+        assert!(!is_in_view_cone(eye, look, eye, 1.0, true));
+    }
+
+    #[test]
+    fn teleport_to_relocates_instantly_and_abandons_the_active_path() {
+        let world = Arena {
+            walls: HashSet::new(),
+        };
+        let shape = MobShape::land(0.6, 1.95);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.5, 0.0, 0.5), 0.25, 8000, 0);
+        // Establish a real path first, then teleport away from it.
+        assert!(
+            crate::ai::mob::MobController::move_to(&mut mob, Vec3::new(10.5, 0.0, 0.5), 1.0),
+            "a reachable target must yield a path"
+        );
+        assert!(mob.has_path());
+
+        let target = Vec3::new(-40.0, 0.0, -40.0);
+        mob.teleport_to(target);
+
+        assert_eq!(
+            mob.position(),
+            target,
+            "teleport must rewrite position exactly, not walk there"
+        );
+        assert!(
+            !mob.has_path(),
+            "teleport must abandon any in-progress path to the old destination"
+        );
+        assert_eq!(
+            mob.velocity(),
+            Vec3::new(0.0, 0.0, 0.0),
+            "teleport must zero velocity (vanilla Entity.teleportTo)"
+        );
+    }
+
+    #[test]
+    fn damage_self_records_intents_that_the_host_drains() {
+        let world = Arena {
+            walls: HashSet::new(),
+        };
+        let shape = MobShape::land(0.6, 1.95);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400, 0);
+        mob.damage_self(5.0);
+        mob.damage_self(3.0);
+        assert_eq!(
+            mob.take_self_damage(),
+            vec![5.0, 3.0],
+            "each damage_self request must be recorded in order"
+        );
+        assert!(
+            mob.take_self_damage().is_empty(),
+            "the drain must be one-shot, like take_new_attacks"
+        );
+    }
+
+    #[test]
+    fn stared_at_is_host_injected_and_read_back() {
+        let world = Arena {
+            walls: HashSet::new(),
+        };
+        let shape = MobShape::land(0.6, 1.95);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400, 0);
+        assert!(
+            !mob.is_being_stared_at(),
+            "a mob nobody has fed must read not-stared-at"
+        );
+        mob.set_stared_at(true);
+        assert!(mob.is_being_stared_at(), "the host-fed boolean must read back");
+        mob.set_stared_at(false);
+        assert!(!mob.is_being_stared_at(), "it must also clear");
+    }
+
+    #[test]
+    fn owner_is_host_injected_and_read_back() {
+        let world = Arena {
+            walls: HashSet::new(),
+        };
+        let shape = MobShape::land(0.6, 1.95);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400, 0);
+        assert_eq!(mob.owner_position(), None, "a wild mob has no owner");
+        let owner = Vec3::new(4.0, 0.0, 4.0);
+        mob.set_owner(Some(owner));
+        assert_eq!(mob.owner_position(), Some(owner));
+        mob.set_owner(None);
+        assert_eq!(mob.owner_position(), None, "ownership must be clearable");
     }
 
     // ---- Creeper fuse (issue: creepers never prime or detonate) -----------

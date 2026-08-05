@@ -11,25 +11,28 @@
 //! #233 names in its title — enderman teleport-on-stare, zombified-piglin group
 //! aggro, bee sting-then-die, wolf pack aggro — are **not** in these tables as
 //! [`Coverage::Modelled`] rows, and that is a finding rather than an omission.
-//! Each of the four needs a primitive that does not exist on
-//! [`MobController`](super::MobController), so each is a
-//! [`Coverage::Missing`] row naming the primitive it waits on.
+//! Each of the four waits on a primitive that did not exist on
+//! [`MobController`](super::MobController) when the tables were written; all
+//! five have since landed (issue #458), but a primitive is necessary, not
+//! sufficient — each mechanism still needs its goal and its host census — so
+//! each is a [`Coverage::Missing`] row naming what it still waits on.
 //!
 //! # Why the four headline mechanisms are `Missing`
 //!
 //! A roster entry can only be as good as the goals it can build, and a goal can
 //! only ask [`MobController`](super::MobController) questions it has methods
-//! for. Measured against the trait as it stands (`crate::ai::mob`, 33 methods),
-//! **five primitives are absent**, and between them they account for every one of
-//! the four:
+//! for. Measured against the trait, **five primitives were absent** and between
+//! them accounted for every one of the four. All five have landed (issue #458);
+//! the table is kept as the record of what each needed, with the landed state
+//! marked:
 //!
-//! | absent primitive | blocks | evidence |
+//! | absent primitive | blocks | landed as |
 //! |---|---|---|
-//! | the anger timer + anger target (a *grudge*) | all four | no `is_angry`/`anger_target`/`alert_others` on the trait; `SimMob` has no anger field |
-//! | "is that player looking at me" (a gaze test) | enderman freeze + stare | no raycast or view-vector primitive; `SwellGoal` already discloses the same gap for `hasLineOfSight` |
-//! | relocating a mob instantly (a teleport) | enderman teleport | `NavigatingMob`'s position is private and moves only in `advance` and `apply_knockback`; neither is on the trait |
-//! | a mob damaging **itself** | bee sting-then-die | `attack(target)` records an *intent* against another entity; nothing reaches the mob's own health, which lives on `SimMob` |
-//! | an owner relationship | wolf tame half | no ownership model exists tree-wide, and `PlayerPerception` carries no player identity to own *by* |
+//! | the anger timer + anger target (a *grudge*) | all four | host-side `SimMob::anger` + `MobController::angry_target` (the deadline stays on the host) |
+//! | "is that player looking at me" (a gaze test) | enderman freeze + stare | `MobController::is_being_stared_at` + free `is_in_view_cone` geometry; the **feed is blocked** — `PlayerPerception` carries no view vector |
+//! | relocating a mob instantly (a teleport) | enderman teleport | `MobController::teleport_to`, host-commanded via `SimMob::teleport_to` |
+//! | a mob damaging **itself** | bee sting-then-die | `MobController::damage_self`, drained by `MobSim::tick` through the damage pipeline |
+//! | an owner relationship | wolf tame half | `MobController::owner_position` + host-side `SimMob::owner_id`; the **player** half is blocked — `PlayerPerception` carries no player identity to own *by* |
 //!
 //! Group propagation needs a sixth thing that is not a trait method at all: a
 //! same-species census, which the seam deliberately does not expose (a goal sees
@@ -38,10 +41,15 @@
 //! `alertOthers` belongs.
 //!
 //! So the honest state of #233 is: **the tables are complete and cited; the
-//! mechanisms are blocked on the seam, in five specific, named places.** Writing
-//! an anger state machine *here* would produce a type with no possible
-//! consumer — the island this repo's dominant defect class is named after — so
-//! this module does not contain one.
+//! mechanisms are blocked on the seam, in five specific, named places — all of
+//! which now have a landed primitive (issue #458).** A primitive is not a
+//! mechanism: each of the four still needs its goal (the enderman's
+//! `EndermanFreezeWhenLookedAt`/`EndermanLookForPlayerGoal`, a bee sting hook,
+//! a tame interaction) and its census (`alertOthers`) before it can be a
+//! [`Coverage::Modelled`] row. Writing one of those *here* before its goal
+//! exists would produce a type with no possible consumer — the island this
+//! repo's dominant defect class is named after — so this module does not
+//! contain one.
 //!
 //! # The trap that decided the target rows
 //!

@@ -224,7 +224,10 @@ impl Sim {
         let resources = BlockResources::load(!demo_world);
         let render_live = resources.vanilla_atlas.is_some();
         let mut terrain = TerrainMesh::new(MeshScheduler::new(workers, resources.classifier));
-        let chunk_world = ChunkWorld::new(world);
+        // Issue #423: build the write handle and derive the read handle from it,
+        // so the resource this session installs pairs two halves of one `Arc`.
+        let write_handle = ChunkWorldWrite::new(world);
+        let chunk_world = write_handle.read_handle();
 
         // `BlockResources::load(false)` always yields the demo palette, so this
         // never schedules demo ids under the vanilla atlas.
@@ -317,6 +320,7 @@ impl Sim {
         // the one this session actually meshes. The worker pool cannot come from a
         // plugin at all: it has to be built with the classifier for whichever
         // block-id space that store holds.
+        ecs.insert_resource(write_handle);
         ecs.insert_resource(chunk_world);
         ecs.insert_resource(terrain);
         // Config-scoped, not session-scoped — see `AudioEngine`'s own doc and

@@ -140,7 +140,7 @@ impl Sim {
             x: block[0].div_euclid(16),
             z: block[2].div_euclid(16),
         };
-        let store = self.chunk_world();
+        let store = self.chunk_world_write();
         let mut world = store.write();
         let Some(chunk) = world.get_mut(pos) else {
             return false;

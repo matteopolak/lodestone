@@ -925,6 +925,19 @@ pub struct SimMob<'w> {
     /// `Vec3` (which only drives movement — the goal/navigation seam has no
     /// entity identity, just positions).
     attack_target_id: Option<i32>,
+    /// The id of the entity that owns this mob, if any — issue #458's
+    /// primitive 5, the ownership relation. Vanilla stores a tamed animal's
+    /// owner as a **player** `UUID` (`TamableAnimal.DATA_OWNERUUID_ID`,
+    /// `animal/TamableAnimal.java:41`), but player identity does not exist at
+    /// this seam — [`PlayerPerception`] carries only position and held item —
+    /// so today this can only name another [`SimMob`]. The seam carries the
+    /// resolved *position* ([`MobController::owner_position`]); the identity
+    /// lives here, because only a census of entities can hold it.
+    ///
+    /// `None` for a wild mob — which is every mob in production today (taming
+    /// is not implemented; nothing calls [`set_owner_id`](SimMob::set_owner_id)
+    /// yet).
+    owner_id: Option<i32>,
     /// `minecraft:knockback_resistance` attribute value (`0.0..=1.0`),
     /// `lodestone_physics::knockback::knockback_impulse`'s own
     /// `knockback_resistance` parameter for a hit landing on *this* mob. See
@@ -1058,6 +1071,48 @@ impl<'w> SimMob<'w> {
     #[must_use]
     pub fn partner_candidate(&self) -> Option<Vec3> {
         self.mob.love_partner_position()
+    }
+
+    /// The id of this mob's owner, if any (issue #458, primitive 5). `None`
+    /// for a wild (untamed) mob.
+    #[must_use]
+    pub fn owner_id(&self) -> Option<i32> {
+        self.owner_id
+    }
+
+    /// Sets this mob's owner id (vanilla `TamableAnimal.tame` /
+    /// `setOwnerUUID`). A future tame interaction is the producer; nothing
+    /// calls it in production yet.
+    pub fn set_owner_id(&mut self, owner_id: Option<i32>) -> &mut Self {
+        self.owner_id = owner_id;
+        self
+    }
+
+    /// The position of this mob's owner as the [`MobController`] seam reports
+    /// it — what [`MobSim::tick`]'s feed last resolved from
+    /// [`owner_id`](Self::owner_id). `None` until the feed has run, and for a
+    /// wild mob.
+    #[must_use]
+    pub fn owner_position(&self) -> Option<Vec3> {
+        self.mob.owner_position()
+    }
+
+    /// Teleports this mob directly to `pos` (issue #458, primitive 3: instant
+    /// relocation) — the host command the enderman's damage-triggered
+    /// `teleport()` and gaze-triggered `teleportTowards` reduce to. Rewrites
+    /// position immediately and abandons any in-progress path (vanilla
+    /// `Entity.teleportTo`, `entity/Entity.java:1513-1515`).
+    pub fn teleport_to(&mut self, pos: Vec3) -> &mut Self {
+        self.mob.teleport_to(pos);
+        self
+    }
+
+    /// Records a self-inflicted damage request (issue #458, primitive 4) — the
+    /// bee's sting self-destruct (`animal/Bee.java:374-379`). Drained and
+    /// applied by [`MobSim::tick`] through the normal damage pipeline.
+    pub fn damage_self(&mut self, amount: f32) -> &mut Self {
+        self.mob.damage_self(amount);
+        self
     }
 
     /// The mob's current attack-target *position* (what a `MeleeAttackGoal`
@@ -1649,6 +1704,7 @@ impl<'w> MobSim<'w> {
             attack_damage,
             hurt_cooldown: HurtCooldown::default(),
             attack_target_id: None,
+            owner_id: None,
             knockback_resistance,
         });
         self.mobs.last_mut().expect("just pushed")
@@ -1896,6 +1952,9 @@ impl<'w> MobSim<'w> {
         // is for `hits`/`detonations`/`bred`.
         let mut grazes: Vec<(BlockPos, EatenBlock)> = Vec::new();
         let mut launches: Vec<ProjectileLaunch> = Vec::new();
+        // Issue #458, primitive 4: self-inflicted damage requests, drained per
+        // mob and resolved below — see the resolution pass after `hits`.
+        let mut self_damage: Vec<(i32, f32)> = Vec::new();
         for m in &mut self.mobs {
             // Vanilla ages `invulnerableTime`/`hurtTime` every tick regardless
             // of whether the mob was hit this tick.
@@ -1933,6 +1992,9 @@ impl<'w> MobSim<'w> {
                 grazes.push((m.mob.block_position(), what));
             }
             launches.extend(m.mob.take_new_launches());
+            for amount in m.mob.take_self_damage() {
+                self_damage.push((m.id, amount));
+            }
         }
         self.pending_grazes.extend(grazes);
         for launch in launches {
@@ -1952,6 +2014,18 @@ impl<'w> MobSim<'w> {
             {
                 target.apply_damage(raw_damage, DamageFlags::default());
                 target.mob.note_hurt(Some(attacker_pos));
+            }
+        }
+        // Issue #458, primitive 4: self-inflicted damage — the bee's sting
+        // self-destruct (`animal/Bee.java:374-379`). `damage_self` only
+        // records the intent; health lives here, so it is applied through the
+        // same pipeline a melee hit uses (i-frames and armour reductions
+        // included, matching vanilla's `hurtServer`). Resolved before the
+        // retain below, so a mob that kills itself leaves the sim in the same
+        // tick, exactly as a fatal melee hit does.
+        for (id, amount) in self_damage {
+            if let Some(m) = self.get_mut(id) {
+                m.apply_damage(amount, DamageFlags::default());
             }
         }
         self.mobs.retain(|m| m.health > 0.0);
@@ -2019,6 +2093,7 @@ impl<'w> MobSim<'w> {
         let mut threat = vec![None; n];
         let mut partner = vec![None; n];
         let mut parent = vec![None; n];
+        let mut owner = vec![None; n];
 
         // --- persistent anger (issue #458, primitive 1) --------------------
         //
@@ -2130,6 +2205,27 @@ impl<'w> MobSim<'w> {
                     Some((FOLLOW_PARENT_RANGE, FOLLOW_PARENT_RANGE_Y)),
                 );
             }
+
+            // --- owner ----------------------------------------------------
+            // Issue #458, primitive 5. The owner *identity* is a census fact
+            // (`SimMob::owner_id`); only the resolved position can cross the
+            // seam (`MobController::owner_position`), so this is resolved here
+            // exactly like partner/parent. Vanilla's owner is a player
+            // (`TamableAnimal.DATA_OWNERUUID_ID`), and player identity does not
+            // exist at this seam — `PlayerPerception` carries only position and
+            // held item — so today this can only resolve mob-to-mob ownership.
+            // Player ownership stays blocked until `PlayerPerception` grows an
+            // identity; until then a tamed-by-player mob reads `None`, which is
+            // the correct neutral default rather than a wrong feed.
+            if let Some(oid) = me.owner_id {
+                owner[i] = nearest_by(
+                    &self.mobs,
+                    pos,
+                    SimMob::position,
+                    |other| other.id == oid,
+                    None,
+                );
+            }
         }
 
         for (i, m) in self.mobs.iter_mut().enumerate() {
@@ -2143,7 +2239,8 @@ impl<'w> MobSim<'w> {
                 // suppression read the trait default `0` and never fired.
                 .set_no_action_time(m.no_action_time)
                 .set_love_partner_candidate(partner[i])
-                .set_parent_candidate(parent[i]);
+                .set_parent_candidate(parent[i])
+                .set_owner(owner[i]);
         }
     }
 
@@ -3548,6 +3645,102 @@ mod anger_tests {
             "the second hit must extend the deadline from the tick it landed on; \
              a grudge that has already expired here means the deadline was not \
              recomputed against the current clock"
+        );
+    }
+}
+
+/// Issue #458, primitives 3-5 (instant relocation / self-damage / ownership):
+/// the `MobSim` host half of the four seam primitives that landed in
+/// `lodestone-entity`. The gaze feed is the one documented gap — see
+/// [`PlayerPerception`]'s lack of a view vector.
+#[cfg(test)]
+mod primitives_tests {
+    use super::*;
+
+    fn flat_world() -> ChunkWorld {
+        let mut world = ChunkWorld::new(-64, 384);
+        for x in -8..=8 {
+            for z in -8..=8 {
+                world.set_solid(x, -1, z, true);
+            }
+        }
+        world
+    }
+
+    /// Primitive 3: a host teleport command rewrites position immediately and
+    /// survives the next tick — an instant relocation, not a fast walk.
+    #[test]
+    fn teleport_to_moves_the_mob_instantly_and_survives_a_tick() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let key = ResourceKey::from_str("minecraft:enderman").expect("valid key");
+        let id = sim.spawn_species(key, Vec3::new(0.0, 0.0, 0.0)).id();
+
+        let target = Vec3::new(30.0, 0.0, 30.0);
+        sim.get_mut(id).expect("alive").teleport_to(target);
+        assert_eq!(
+            sim.position(id),
+            Some(target),
+            "teleport must move the mob to exactly the target"
+        );
+
+        sim.tick();
+        assert_eq!(
+            sim.position(id),
+            Some(target),
+            "a tick after teleport must not undo it"
+        );
+    }
+
+    /// Primitive 4: a `damage_self` request is drained by [`MobSim::tick`] and
+    /// resolved into real health change — a bee that damages itself for its
+    /// full health is gone at the end of the same tick, matching vanilla's
+    /// immediate death removal.
+    #[test]
+    fn damage_self_is_resolved_into_a_real_self_kill() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let key = ResourceKey::from_str("minecraft:bee").expect("valid key");
+        let id = sim.spawn_species(key, Vec3::new(0.0, 0.0, 0.0)).id();
+        let health = sim.get(id).expect("alive").health();
+
+        sim.get_mut(id).expect("alive").damage_self(health);
+        assert_eq!(
+            sim.get(id).expect("alive").health(),
+            health,
+            "the request alone must not change health — only the tick drain resolves it"
+        );
+        sim.tick();
+        assert!(
+            sim.get(id).is_none(),
+            "a mob that damaged itself for its full health must be removed by \
+             the end of the tick"
+        );
+    }
+
+    /// Primitive 5: an owner id set on the host resolves to an owner *position*
+    /// across the seam each tick.
+    #[test]
+    fn owner_id_resolves_to_an_owner_position_across_the_seam() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let wolf = ResourceKey::from_str("minecraft:wolf").expect("valid key");
+        let owner_id = sim.spawn_species(wolf.clone(), Vec3::new(0.0, 0.0, 0.0)).id();
+        let pet_id = sim.spawn_species(wolf, Vec3::new(3.0, 0.0, 3.0)).id();
+        sim.get_mut(pet_id).expect("alive").set_owner_id(Some(owner_id));
+
+        assert_eq!(
+            sim.get(pet_id).expect("alive").owner_position(),
+            None,
+            "before the first tick the seam has not resolved the owner"
+        );
+
+        sim.tick();
+        let owner_pos = sim.get(owner_id).expect("alive").position();
+        assert_eq!(
+            sim.get(pet_id).expect("alive").owner_position(),
+            Some(owner_pos),
+            "the feed must resolve the owner id to the owner's current position"
         );
     }
 }
