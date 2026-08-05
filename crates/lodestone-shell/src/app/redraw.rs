@@ -602,6 +602,14 @@ impl WindowApp {
             .recipe_book
             .as_ref()
             .map(|book| (book.len(), book.tags().len()));
+        // Issue #436's `SessionWorldBorder`/`SessionSpawnPoint` folds reaching
+        // the screen. Both were folded, reset on quit-to-title and gated
+        // through the real `SharedState::apply` path with **no reader
+        // anywhere in the shell**; these two lines are the first. See
+        // `HudFrame::border_debug` for why this is the debug overlay and not
+        // yet the vignette tint vanilla draws.
+        hud_frame.border_debug = self.sim.world_border_warning();
+        hud_frame.spawn_debug = self.sim.spawn_point().pos();
         // The recipe-unlock toast (issue #163). `None` on every real session
         // today, because the queue's only possible producer is the
         // `recipe_book_add` decode that does not exist yet — see the field's own

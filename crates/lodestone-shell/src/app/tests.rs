@@ -2214,3 +2214,116 @@ fn a_crafting_panel_does_not_restore_the_furnace_books_settings() {
         "same for `filtering`"
     );
 }
+
+/// **Issue #436's `SessionGameRules` island, closed through production code.**
+///
+/// `doImmediateRespawn` is the most user-visible game rule there is: vanilla
+/// never puts the death screen up at all when it is on. `SessionGameRules`
+/// was folded, reset on quit-to-title and gated through the real
+/// `SharedState::apply` path with **no reader anywhere in the shell**, so the
+/// rule did nothing.
+///
+/// Drives the real chain: a real `WindowApp`, a real `NetUpdate::Death`
+/// through the loopback feed (`Sim::poll_net`'s own arm, which sets the `Dead`
+/// marker), a real `ClientEvent::GameRulesChanged` through the same
+/// `NetIngest` schedule the net thread runs, and `drive_ui_from_session`
+/// itself — the method `redraw()` calls every frame.
+#[test]
+fn immediate_respawn_skips_the_death_screen_entirely() {
+    use crate::net::NetUpdate;
+    use lodestone_client::ClientEvent;
+
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    app.sim.attach_net(net);
+    feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
+    app.sim.step(1.0 / 20.0);
+    app.ui.enter_dev_world();
+
+    app.sim
+        .net()
+        .expect("net attached above")
+        .ingest_session_event(ClientEvent::GameRulesChanged {
+            values: vec![(
+                "immediate_respawn".parse().expect("valid identifier"),
+                "true".into(),
+            )],
+        });
+    assert_eq!(
+        app.sim.game_rules().immediate_respawn(),
+        Some(true),
+        "precondition: the rule must actually have folded, or this gate is \
+         measuring the default and not the rule"
+    );
+
+    feed.send(NetUpdate::Death { message: "you died".into() }).unwrap();
+    app.sim.step(1.0 / 20.0);
+    assert!(
+        app.sim.is_dead(),
+        "precondition: the death must have landed, or 'no death screen' is vacuous"
+    );
+
+    app.drive_ui_from_session();
+
+    assert!(
+        !app.ui.is_death(),
+        "with doImmediateRespawn on, the death screen must never appear — not \
+         'appear and close next frame', which would flash it for a frame"
+    );
+    assert_ne!(
+        app.ui.screen(),
+        crate::menu::Screen::Death,
+        "and the screen state must not be Death by any other route"
+    );
+}
+
+/// **The negative control, run and observed**: the *same* death with the rule
+/// off must still raise the death screen.
+///
+/// Without this, `immediate_respawn_skips_the_death_screen_entirely` is
+/// satisfied by a client that never shows a death screen at all — which is
+/// exactly the state a broken `is_dead` or a broken loopback feed would
+/// produce, and it would read as a pass.
+#[test]
+fn without_the_rule_the_same_death_still_raises_the_death_screen() {
+    use crate::net::NetUpdate;
+    use lodestone_client::ClientEvent;
+
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    app.sim.attach_net(net);
+    feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
+    app.sim.step(1.0 / 20.0);
+    app.ui.enter_dev_world();
+
+    // Explicitly `false`, not merely absent: `Some(false)` and `None` take
+    // different branches in `immediate_respawn()`, and the shipped behaviour
+    // must be identical for both.
+    app.sim
+        .net()
+        .expect("net attached above")
+        .ingest_session_event(ClientEvent::GameRulesChanged {
+            values: vec![(
+                "immediate_respawn".parse().expect("valid identifier"),
+                "false".into(),
+            )],
+        });
+    assert_eq!(app.sim.game_rules().immediate_respawn(), Some(false));
+
+    feed.send(NetUpdate::Death { message: "you died".into() }).unwrap();
+    app.sim.step(1.0 / 20.0);
+    app.drive_ui_from_session();
+
+    assert!(
+        app.ui.is_death(),
+        "with the rule off, the death screen must still appear — this is what \
+         proves the gate above is measuring the rule and not a client that \
+         never shows the screen"
+    );
+}

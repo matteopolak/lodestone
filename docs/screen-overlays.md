@@ -868,3 +868,86 @@ confusion/portal flags' route to the shell" above. The gates prove the
 mechanism; three-quarters of the mechanism is one merge away from being told
 the truth, one-quarter needs new `lodestone-ecs`/`lodestone-physics` work
 first.
+
+## The world-border warning: what landed, and what it still needs (issue #436)
+
+Vanilla's world-border warning is **not** one of the overlays this module
+draws, and that is worth stating plainly because it looks like it should be.
+It is a *tint applied to the vignette* inside `Hud.extractVignette`
+(`Hud.java:1057-1078`, `.cache/mc/26.2/client-src`), not a member of
+`extractCameraOverlays`:
+
+```text
+distToBorder          = worldBorder.getDistanceToBorder(camera)
+movingBlocksThreshold = min(getLerpSpeed() * getWarningTime(),
+                            abs(getLerpTarget() - getSize()))
+warningDistance       = max(getWarningBlocks(), movingBlocksThreshold)
+strength              = distToBorder < warningDistance
+                        ? 1 - distToBorder / warningDistance : 0
+red   = brightness * (1 - strength)
+green = blue = brightness + (1 - brightness) * strength
+```
+
+— i.e. the vignette goes cyan as you approach the wall, it does not gain a new
+full-screen quad.
+
+**What landed for #436**: the formula, ported and gated, as
+`crate::sim::session::border_warning` and read through
+`Sim::world_border_warning`. `app/redraw.rs` puts its three values
+(`dist`, `warn_at`, `strength`) on screen as a debug-overlay line, the same
+"did this datum actually reach the running client" role `recipe_stats` plays
+for the recipe corpus. Before it, `SessionWorldBorder` was folded from five
+real border packets, reset on quit-to-title, gated through the real
+`SharedState::apply` path, and had **zero readers anywhere in the shell**.
+
+**What it still needs to be the real overlay**, and why it was not done in the
+same change:
+
+1. `misc/vignette.png` loaded through `ResourceManager` — mechanical, and the
+   asset is present in the jar (confirmed, `assets/minecraft/textures/misc/vignette.png`).
+2. **A second blend state.** Vanilla blits it with `RenderPipelines.VIGNETTE`,
+   which is a *multiply* blend, not the `ALPHA_BLENDING` every pipeline in
+   `lodestone-render/src/screen_effects.rs` uses. Drawing the tint through the
+   existing pipeline would wash the whole frame cyan instead of darkening the
+   edges — a visible deviation, not a subtle one.
+3. A `ScreenEffects` field, a `camera_agnostic_group_active` term, a
+   `gpu/frame.rs` branch and a `gpu/stats.rs` flag, exactly like freeze.
+
+That field was deliberately **not** added ahead of the draw. An un-drawn
+`ScreenEffects::border_warning` would be a new island one hop further out than
+the one being closed — the `HudSnapshot` shape, where every grep looks green
+because the fold really does reach a struct that nothing renders.
+
+### A unit hazard in the formula, recorded because it fails safe
+
+`getLerpSpeed()` is `abs(from - to) / (lerpEnd - lerpBegin)`
+(`WorldBorder.java:403-405`), and that denominator is `lerpSizeBetween`'s third
+parameter — named **`ticks`** (`WorldBorder.java:195`), not milliseconds. Our
+`BorderExtent::Moving` stores `duration_ms`, documented as milliseconds as the
+server sent it, so `border_warning` converts at an explicit `MILLIS_PER_TICK`.
+
+**If `duration_ms` is really ticks, the moving term comes out 20× too small.**
+It fails safe: `max(warning_blocks, …)` still floors the warning distance, so
+the tint appears at the static distance and only the *early* warning for an
+incoming shrink is short. The static case — which is what the gates pin, since
+`StaticBorderExtent.getLerpSpeed()` returns `0.0` (`WorldBorder.java:534-535`)
+— is exact either way. **What would falsify it**: a live server shrinking a
+border, and a measurement of when the tint first appears.
+
+## Game rules reaching behaviour: `doImmediateRespawn` (issue #436)
+
+Not an overlay, but the same island and the same commit. `SessionGameRules`
+was folded and read by nothing. Its most user-visible member is
+`doImmediateRespawn`, whose entire meaning is that vanilla **never raises the
+death screen at all** — `app/session.rs`'s `drive_ui_from_session` now forks on
+`game_rules().immediate_respawn() == Some(true)` and calls `Sim::respawn`
+directly.
+
+Two things to keep if you touch it:
+
+- **`Some(false)` and `None` must behave identically** (screen shown). `None`
+  is "the server never reported the rule", and defaulting an unreported rule to
+  *on* would silently break every vanilla server.
+- **Do not implement it as "open the screen, then close it next frame."** At
+  60 Hz that is a visible one-frame flash of the death screen, which is worse
+  than the bug it replaces.

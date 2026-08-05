@@ -572,6 +572,31 @@ pub struct HudFrame<'a> {
     /// `0 0`, the same convention [`Self::hotbar_items`] uses for "not yet
     /// known" versus "known empty".
     pub recipe_stats: Option<(usize, usize)>,
+    /// `(distance_to_border, warning_distance, warning_strength)` for the
+    /// folded world border (issue #436), appended to the debug overlay as one
+    /// extra line when `Some`.
+    ///
+    /// `None` until the server has actually sent a border packet
+    /// (`WorldBorder::initialized`), so an unbounded default border omits the
+    /// line rather than drawing a meaningless `2.999e7` — the same
+    /// "omit rather than mislead" convention [`Self::recipe_stats`] uses.
+    ///
+    /// **This is a diagnostic, not the real consumer.** Vanilla's border
+    /// warning is a blue tint applied to the vignette in
+    /// `Hud.extractVignette` (`Hud.java:1057-1078`), which needs a
+    /// multiply-blend `RenderPipelines.VIGNETTE` equivalent and
+    /// `misc/vignette.png` — neither of which exists in `lodestone-render`
+    /// yet. This line is the same "did the datum actually reach the running
+    /// client" signal `recipe_stats` plays for the corpus loader, and the
+    /// strength it prints is the *exact* value that overlay will consume.
+    pub border_debug: Option<(f64, f64, f32)>,
+    /// The player's spawn point (issue #436), appended to the debug overlay as
+    /// one extra line when the server has reported one.
+    ///
+    /// `None` when `SpawnPoint::is_reported()` is false, which is the honest
+    /// distinction the compass needs too — see
+    /// [`Sim::spawn_point`](crate::sim::Sim::spawn_point).
+    pub spawn_debug: Option<lodestone_model::BlockPos>,
     /// The attack-cooldown fraction (`0.0..=1.0`, full strength at `1.0`) the
     /// crosshair indicator fills to — `Sim::attack_strength_scale`'s value,
     /// vanilla's `getAttackStrengthScale(0.0F)`. Drawn only while
@@ -625,6 +650,8 @@ impl<'a> HudFrame<'a> {
             action_bar: None,
             held_item: None,
             recipe_stats: None,
+            border_debug: None,
+            spawn_debug: None,
             attack_cooldown: None,
             recipe_toast: None,
         }
@@ -882,6 +909,14 @@ impl HudGeometry {
             let mut debug_lines = frame.stats.lines();
             if let Some((recipes, tags)) = frame.recipe_stats {
                 debug_lines.push(format!("recipes={recipes} tags={tags}"));
+            }
+            if let Some((dist, warn_at, strength)) = frame.border_debug {
+                debug_lines.push(format!(
+                    "border dist={dist:.1} warn_at={warn_at:.1} warning={strength:.2}"
+                ));
+            }
+            if let Some(spawn) = frame.spawn_debug {
+                debug_lines.push(format!("spawn {} {} {}", spawn.x, spawn.y, spawn.z));
             }
             for (i, line) in debug_lines.iter().enumerate() {
                 let y = margin + i as f32 * line_h;

@@ -104,8 +104,23 @@ impl WindowApp {
         // exactly once per death rather than re-latching (and re-cloning) the
         // message every frame the screen stays up; the `respawn_confirmed`
         // side needs no such guard — it is already a no-op off `Screen::Death`.
+        //
+        // `doImmediateRespawn` (issue #436's `SessionGameRules` island) forks
+        // this: vanilla's `ClientPacketListener.handleRespawn` never puts the
+        // death screen up at all when the rule is on, it respawns on the spot.
+        // That is the rule's entire user-visible meaning, and it is the reason
+        // the fold had a reader worth writing — `SessionGameRules` was folded,
+        // reset on quit-to-title, gated through the real `SharedState::apply`
+        // path, and read by nothing.
         if self.sim.is_dead() {
-            if !self.ui.is_death() {
+            if self.sim.game_rules().immediate_respawn() == Some(true) {
+                // No screen, ever — not "open it and close it next frame",
+                // which would flash the death screen for one frame at 60 Hz.
+                // `Sim::respawn` is already a no-op unless `is_dead`, so this
+                // cannot fire twice for one death: the second frame sees the
+                // server's confirmation and `is_dead` is false.
+                self.sim.respawn();
+            } else if !self.ui.is_death() {
                 self.ui.die(self.sim.death_message().map(str::to_string));
             }
         } else if self.ui.is_death() {
