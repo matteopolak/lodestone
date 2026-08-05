@@ -11,9 +11,35 @@ use lodestone_assets::sound::SoundRegistry;
 use lodestone_assets::{ResourceSource, SoundError as ResolveError};
 use lodestone_audio::{
     AudioError, JavaRandom, Mixer, PcmBuffer, PlayHandle, SoundCategory as AudioCategory,
-    SoundInstance, decode_vorbis,
+    SoundInstance, VorbisStream, decode_vorbis,
 };
 use lodestone_model::event::SoundCategory as ModelCategory;
+
+/// A resolved but **undecoded** long sound (a music track or a jukebox record),
+/// produced by [`SoundResolver::resolve_streaming`].
+///
+/// Holds the compressed bitstream plus the playback parameters the eager path
+/// would have applied, so a music sink can feed the mixer incrementally instead of
+/// materialising a few hundred megabytes of PCM.
+#[derive(Debug)]
+pub struct StreamingSound {
+    /// The lazily decoding bitstream. Compressed bytes are resident (~11 MiB for
+    /// the largest track); decoded PCM is not.
+    pub stream: VorbisStream,
+    /// The in-pack path the event resolved to, for logging.
+    pub path: String,
+    /// The `sounds.json` entry's volume, to multiply into the instance volume.
+    pub volume: f32,
+    /// The `sounds.json` entry's pitch.
+    pub pitch: f32,
+    /// The entry's attenuation distance. Music is head-relative, so this is
+    /// carried for completeness rather than used.
+    pub attenuation_distance: f32,
+    /// Whether the entry declared `"stream": true`. Every music entry in real 26.2
+    /// data does; a `false` here means the caller is streaming something vanilla
+    /// would have decoded eagerly, which is wasteful but not wrong.
+    pub declares_stream: bool,
+}
 
 /// Why a sound failed to play.
 #[derive(Debug, thiserror::Error)]
@@ -108,6 +134,69 @@ impl SoundResolver {
         instance.pitch = packet_pitch * resolved.pitch;
         instance.attenuation_distance = resolved.attenuation_distance as f32;
         Ok(Some(instance))
+    }
+
+    /// Resolves a **music-length** event without decoding it, yielding a lazily
+    /// decoding [`VorbisStream`] plus the same volume/pitch/attenuation the eager
+    /// path would produce. Returns `Ok(None)` for vanilla's silent empty sound, and
+    /// `Ok(None)` — *not* an error — when the resolved file's bytes are absent from
+    /// the source.
+    ///
+    /// # Why music must not go through [`SoundResolver::resolve_instance`]
+    ///
+    /// That method calls [`decode_vorbis`] and **caches the result forever**, which
+    /// is right for a footstep and catastrophic for a track. Measured in
+    /// `lodestone-audio`'s `stream` module: `music/game/end/the_end.ogg` is
+    /// 10.76 MiB compressed and **304.33 MiB resident** decoded, a 28.3x expansion,
+    /// and the eight largest music/record objects are each 130–300 MiB. The world
+    /// layer's whole measured budget is 77.6 MiB. Caching two tracks would exceed
+    /// the entire client's memory footprint.
+    ///
+    /// This is not a hypothetical distinction that might be safe to ignore:
+    /// **every** music entry in the real 26.2 `sounds.json` carries
+    /// `"stream": true` (checked by `tests/music_assets.rs` against the on-disk
+    /// file), which is vanilla saying exactly this. `ResolvedSound::stream` has
+    /// been parsed by `lodestone-assets` all along and ignored here; this is the
+    /// method that honours it.
+    ///
+    /// # The missing-file asymmetry, and why it is deliberate
+    ///
+    /// [`SoundResolver::resolve_instance`] reports [`DriverError::MissingFile`] for
+    /// absent bytes, because for an ordinary event that means a broken pack or a
+    /// mis-wired source. For music it means neither: `cargo xtask fetch-sounds`
+    /// **excludes music by default** (70 tracks + 22 records, 293 MB, only with
+    /// `--all`), so absent bytes are the *normal* state of a checkout. Reporting an
+    /// error would make every music tick log a failure. `Ok(None)` here is
+    /// therefore the honest answer, and it is what lets
+    /// [`MusicStart::Silent`](crate::music::MusicStart::Silent) be an ordinary
+    /// outcome rather than an error path.
+    pub fn resolve_streaming(
+        &mut self,
+        event_name: &str,
+        seed: i64,
+    ) -> Result<Option<StreamingSound>, DriverError> {
+        let mut rng = JavaRandom::new(seed);
+        let resolved = self
+            .registry
+            .resolve(event_name, &mut |bound| rng.roll(bound))?;
+        let Some(resolved) = resolved else {
+            return Ok(None);
+        };
+
+        let path = resolved.file_path();
+        // Absent bytes are silence, not an error — see above.
+        let Some(bytes) = self.source.read(&path) else {
+            return Ok(None);
+        };
+        let stream = VorbisStream::new(bytes)?;
+        Ok(Some(StreamingSound {
+            stream,
+            path,
+            volume: resolved.volume,
+            pitch: resolved.pitch,
+            attenuation_distance: resolved.attenuation_distance as f32,
+            declares_stream: resolved.stream,
+        }))
     }
 
     fn decode_cached(&mut self, path: &str) -> Result<Arc<PcmBuffer>, DriverError> {

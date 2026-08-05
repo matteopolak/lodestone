@@ -40,6 +40,13 @@ tokio = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 
+[dev-dependencies]
+# The biome-music table's generate-or-assert gate parses
+# `crates/lodestone-server/assets/worldgen/biome/*.json` — the vanilla-derived
+# oracle those values come from. Dev-only: the generated table is plain `const`
+# data, so the shipped crate needs no json parser.
+serde_json = { workspace = true }
+
 [features]
 # Turn on the v770 family inside the registry and pull the live-test stack. The
 # live gate is additionally `#[ignore]`d, so even with this feature the default

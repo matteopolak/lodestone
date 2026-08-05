@@ -49,7 +49,19 @@
 
 mod driver;
 
-pub use driver::{DriverError, SoundDriver, SoundResolver};
+pub use driver::{DriverError, SoundDriver, SoundResolver, StreamingSound};
+
+/// Situational music: *when* to play a music track and *which* one.
+///
+/// The driver above happily plays a music event if asked; nothing ever asked.
+/// This module is the thing that decides, transcribed from `MusicManager` /
+/// `Musics` / `BackgroundMusic` and — like the driver — device-free and
+/// clock-free, so ticking it cannot make a sound.
+pub mod music;
+
+/// The generated biome-id → [`music::BackgroundMusic`] table, derived from the
+/// biome assets already in this repository.
+pub mod biome_music;
 
 /// The native, device-backed engine ([`AudioEngine`]) and the audio types a
 /// consumer needs to drive it, re-exported so a caller depends on this one crate
