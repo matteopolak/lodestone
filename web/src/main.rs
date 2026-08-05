@@ -82,10 +82,15 @@ use glam::Vec3;
 use input::{Controls, FlyCamera};
 use lodestone_assets::{ResourceManager, ZipSource};
 use lodestone_net::WsWebTransport;
-use lodestone_render::block::{camera_buffer, sprite_uv_buffer};
+// `shared_camera_buffer` + `section_origin_buffer`, not the old
+// `camera_buffer(device, CameraUniform)`. Issue #76 split group 0 into a shared
+// per-frame uniform (view-projection + fog, binding 0) and a dynamic-offset
+// section-origin slot (binding 1), precisely to stop the whole-struct write per
+// section per frame this file used to do.
+use lodestone_render::block::{shared_camera_buffer, sprite_uv_buffer};
 use lodestone_render::{
-    BlockPipeline, CameraUniform, DepthBuffer, FramePacer, GpuAtlas, GpuContext, GpuMesh,
-    RenderTarget, SurfaceTarget, TimeSource,
+    BlockPipeline, DepthBuffer, FramePacer, GpuAtlas, GpuContext, GpuMesh, RenderTarget,
+    SurfaceTarget, TimeSource, section_origin_buffer,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use wasm_bindgen::JsCast;
@@ -207,16 +212,30 @@ impl State {
         let aspect = WIDTH as f32 / HEIGHT as f32;
         let camera = self.fly.advance(&self.controls, self.last_dt, aspect);
 
-        // Each section's vertices are section-local (0..16); `CameraUniform`
-        // carries the section's world origin, so we need one camera bind group
-        // per section. A handful of sections → a handful of tiny uniform writes.
+        // Each section's vertices are section-local (0..16), so group 0 needs the
+        // section's world origin. Since issue #76 that origin is a *separate*
+        // binding from the view-projection: one shared buffer for the frame,
+        // built once here, and a 16-byte origin slot per section. Fog is
+        // `disabled()` — this spike has no sky, and a fog uniform whose ranges
+        // are degenerate reports `enabled = 0.0` rather than fogging to black.
+        //
+        // A bind group per section is still one draw's worth of setup here
+        // because the spike has a handful of sections; the arena + dynamic-offset
+        // route `camera_bind_group`'s doc describes is what the native client
+        // uses and what this would grow into.
         let atlas_bg = self.pipeline.atlas_bind_group(device, &self.atlas, &self.uv);
+        let shared_cam = shared_camera_buffer(
+            device,
+            camera.view_projection().to_cols_array_2d(),
+            lodestone_render::fog::FogUniform::disabled(),
+        );
         let cam_bgs: Vec<wgpu::BindGroup> = self
             .meshes
             .iter()
             .map(|(_, origin)| {
-                let buf = camera_buffer(device, CameraUniform::new(&camera, *origin));
-                self.pipeline.camera_bind_group(device, &buf)
+                let origin_buf = section_origin_buffer(device, *origin);
+                self.pipeline
+                    .camera_bind_group(device, &shared_cam, &origin_buf)
             })
             .collect();
 

@@ -99,6 +99,23 @@ console_error_panic_hook = "0.1"
 log = "0.4"
 console_log = "1"
 
+# **Not used by any code here — this edge exists only to turn a feature on.**
+# `getrandom` 0.2 has a hard `compile_error!` on `wasm*-unknown-unknown` unless
+# its `js` feature is enabled, and it reaches this graph three levels down:
+# `lodestone-v770` -> `rand` 0.8 -> `rand_core` 0.6 -> `getrandom` 0.2. None of
+# those can enable it (the parent workspace builds natively, where `js` would be
+# wrong), so under Cargo's feature unification the only crate that can is this
+# one. Symptom without it: `cargo build --target wasm32-unknown-unknown` fails in
+# `getrandom/src/lib.rs:346` with no mention of Lodestone at all, which is why
+# `just wasm-size` was unrunnable and the 1.6 MB gzip ceiling therefore
+# **unenforced** for as long as it stood broken.
+#
+# Scoped to wasm32 rather than declared unconditionally so a native build of this
+# crate — which nothing does today, but which is one `cargo build` away — does not
+# silently get the browser RNG backend.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
 # Release profile tuned for a browser bundle: small code + stripped symbols. LTO
 # and a single codegen unit let the linker drop cross-crate dead code (most of
 # wgpu's native backends), `panic = "abort"` removes unwinding tables, and
