@@ -7,9 +7,10 @@
 //! Terrain here is the **real** [`OverworldChunkSource`] (unlike
 //! `server_liveness.rs`'s cheap gradient stand-in): the whole point of this
 //! file is `OverworldChunkSource`'s new edit-retention cache, which
-//! `WorldgenChunkSource` does not have (its `ChunkSource::set_block` is the
-//! trait's no-op default — see `crates/lodestone-server/src/chunk.rs`'s
-//! module docs). Seed `1234`, chunk `(0, 0)` — the coordinates and their
+//! `WorldgenChunkSource` does not have (its `ChunkSource::set_block` is a
+//! `todo!()` since issue #440 — a solidity-only source with no retention — see
+//! `crates/lodestone-server/src/chunk.rs`'s module docs). Seed `1234`, chunk
+//! `(0, 0)` — the coordinates and their
 //! pre-edit content are pinned by `set_up`'s own doc comment below and cross
 //! -checked against `lodestone-server`'s hermetic
 //! `set_block_persists_across_repeated_column_calls` test, which asserts the

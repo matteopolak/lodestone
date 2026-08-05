@@ -38,13 +38,13 @@ use lodestone_v770::{V770ServerProtocol, adapter};
 /// `server_inventory_live.rs` makes for its own `AirSource`. **Unlike**
 /// that one, this one needs `set_block`/`block_state` overrides: this test
 /// asserts the placement's *effect* (a real furnace block on the wire), and
-/// `ChunkSource`'s default `set_block` is a documented no-op
-/// (`crate::chunk`'s own module doc comment — the same trap
-/// `WorldgenChunkSource` deliberately leaves unfixed for the transport-only
-/// tests it exists for). Caught by running this test the first time with a
-/// unit-struct `AirSource` and watching `apply_use_item_on`'s own confirming
-/// `block_update` re-read the *unedited* default (still air) — the exact
-/// silent-discard `docs/block-edit.md` already documents for
+/// `ChunkSource::set_block` has no default since issue #440 — an implementor
+/// must choose explicitly, and a source with no retention cannot persist the
+/// edit (the same trap `WorldgenChunkSource`'s `todo!()` documents for the
+/// solidity-only transport source). Caught by running this test the first
+/// time with a unit-struct `AirSource` and watching `apply_use_item_on`'s own
+/// confirming `block_update` re-read the *unedited* default (still air) —
+/// the exact silent-discard `docs/block-edit.md` already documents for
 /// `WorldgenChunkSource`.
 #[derive(Default)]
 struct AirSource {

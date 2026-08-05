@@ -36,6 +36,23 @@ impl ChunkSource for AirSource {
     fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
         ChunkColumn::new(0, 16)
     }
+
+    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        // The column-regenerating form (correct, just not cheap); this
+        // fixture is small and this path is not hot.
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).block_state(lx, y, lz).to_string()
+    }
+
+    // No storage: this fixture serves fresh columns and edits are discarded by
+    // design (an edit a test needs to survive goes through a source with real
+    // retention). Explicit rather than inherited — issue #440.
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+        // No storage; edits are discarded by design.
+    }
 }
 
 fn profile(name: &str) -> LoginProfile {

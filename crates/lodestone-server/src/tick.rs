@@ -50,11 +50,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::block_entities::BlockEntityHandle;
+use crate::border::WorldBorder;
 use crate::chunk::ChunkSource;
 use crate::mobs::{Detonation, LiveMobSource, MobHandle, MobSim};
 use lodestone_entity::ai::mob::EatenBlock;
 use crate::random_tick::{DEFAULT_RANDOM_TICK_SPEED, RandomTickScheduler};
 use crate::scheduled_tick::{ScheduledTick, TickPriority};
+use crate::weather::{WeatherFeed, WeatherState};
 use lodestone_model::BlockPos;
 
 /// Vanilla's `mobGriefing` game rule, which gates whether a mob may change the
@@ -77,6 +79,29 @@ use lodestone_model::BlockPos;
 /// player expects to see, and modelling it as off would hide the feature behind
 /// a rule nobody can currently turn back on.
 fn mob_griefing() -> bool {
+    true
+}
+
+/// Vanilla's `advanceWeather` game rule, which gates whether the weather
+/// cycle's timers advance at all — issue #324 / `docs/plans/world-state.md`
+/// W1, read by [`crate::weather::WeatherState::tick`]. Vanilla's
+/// `GameRules.ADVANCE_WEATHER` defaults to **true**
+/// (`ServerLevel.java:713` gates `advanceWeatherCycle`'s timer block on it).
+///
+/// A function returning vanilla's default rather than a real rule lookup, and
+/// that is the same disclosed gap as [`mob_griefing`] just above: this crate
+/// has **no world-level `GameRules` registry** (R1 of the world-state plan).
+/// The nearest thing, `crate::server::WorldAdminState`'s `game_rules`, is
+/// per-*connection* state owned by `serve_play` — the wrong side of the
+/// world for a tick loop that runs with no connection at all. When R1 lands
+/// a world-level `GameRules` every connection shares, this function is the
+/// only call site to change.
+///
+/// Returning the default is the conservative choice for the *observable*
+/// behaviour: vanilla ships `advanceWeather` on, so rain and thunder actually
+/// cycle, and modelling it as off would freeze the sky behind a rule nobody
+/// can currently turn back on.
+fn advance_weather() -> bool {
     true
 }
 
@@ -627,6 +652,71 @@ pub(crate) async fn run_tick_loop<W>(
     block_tick_out: BlockTickFeed,
     tick_area: (RangeInclusive<i32>, RangeInclusive<i32>),
     explosion_out: ExplosionFeed,
+    scheduled: crate::region_source::ScheduledTickHandle,
+) where
+    W: ChunkSource,
+{
+    // Issue #324 / `docs/plans/world-state.md` W1. Forwards to the real body
+    // with a fresh, permanently-drained-by-nobody [`WeatherFeed`] — the same
+    // compatibility shape every `serve_connection*` wrapper uses for a
+    // feed it does not carry, and for the same reason: the world-loop's
+    // non-weather callers (`crate::chunk_store`'s gate,
+    // `crate::redstone_placement_gate`, and this module's own tests) are not
+    // this issue's to edit, so the weather feed is additive rather than a
+    // tenth parameter. The weather *still advances* here — `WeatherState` is
+    // ticked either way — it just publishes into a feed no connection reads.
+    // Production (`crate::IntegratedServer::open_in_memory_with_mobs`, and
+    // `bind` since #439) calls the `_with_weather` variant with a real feed.
+    run_tick_loop_with_weather(
+        mobs,
+        mob_out,
+        block_entities,
+        clock,
+        world,
+        block_tick_out,
+        tick_area,
+        explosion_out,
+        WeatherFeed::default(),
+        WeatherState::default(),
+        scheduled,
+    )
+    .await
+}
+
+/// The real body shared by [`run_tick_loop`] and
+/// [`run_tick_loop_with_weather`] — the latter only differs in that it
+/// carries a real [`WeatherFeed`] the connection drains instead of the
+/// wrapper's discarded default. See the wrapper's own doc comment for why a
+/// second, differently-named function exists instead of adding `weather_out`
+/// to [`run_tick_loop`]'s own signature (it would break the world-loop's
+/// non-weather call sites in `crate::chunk_store`/`crate::redstone_placement_gate`,
+/// which are not this issue's to edit).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn run_tick_loop_with_weather<W>(
+    mobs: MobHandle,
+    mob_out: LiveMobSource,
+    block_entities: BlockEntityHandle,
+    clock: Arc<TickClock>,
+    world: Arc<W>,
+    block_tick_out: BlockTickFeed,
+    tick_area: (RangeInclusive<i32>, RangeInclusive<i32>),
+    explosion_out: ExplosionFeed,
+    // Issue #324 / `docs/plans/world-state.md` W1: the weather transitions
+    // this loop publishes into (`WeatherState::tick`'s return), drained by
+    // the connection — `serve_play`'s `container_sync_tick` arm — into real
+    // `GAME_EVENT` packets. Same single-consumer snapshot-feed shape as
+    // `block_tick_out`/`explosion_out`, so it is safe for the one connection
+    // `open_in_memory_with_mobs` spawns and is fanned out per-connection by
+    // `bind`'s LAN relay.
+    weather_out: WeatherFeed,
+    // The weather machine, seeded by the caller and owned by this loop from
+    // here on (a plain struct, with no lock — see `crate::weather`'s module
+    // doc). Production passes `WeatherState::default()`; passing it in rather
+    // than constructing it here is what lets a world seed drive the cycle
+    // when #437 lands a per-world seed store, and what lets this module's own
+    // test start a world already mid-cycle instead of waiting out a
+    // 12k-180k-tick rain delay.
+    weather: WeatherState,
     // Issue #468's last wire. The two scheduled-tick queues used to be locals
     // here, so the queues the persistence path reads were always empty in
     // production and a pending repeater tick was lost on quit — the schema
@@ -651,6 +741,12 @@ pub(crate) async fn run_tick_loop<W>(
     let mut next_tick_at = tokio::time::Instant::now();
     let mut last_overload_warning_at: Option<tokio::time::Instant> = None;
     let mut game_tick: u64 = 0;
+    // Issue #324 / `docs/plans/world-state.md` W1: the weather cycle, owned
+    // by the tick thread with no lock, exactly like `game_tick`/`block_ticks`
+    // — the plain-struct shape the ECS migration (shape A) turns into a
+    // `Resource` mechanically later. Seeded by the caller (see the parameter
+    // comment); this binding is what makes it mutable for the loop.
+    let mut weather = weather;
     // #308: one queue per vanilla queue (`ServerLevel.blockTicks`/
     // `fluidTicks`, `ServerLevel.java:209-210`). Owned by `scheduled` rather
     // than by this function since #468, which is what lets them be saved; they
@@ -658,6 +754,16 @@ pub(crate) async fn run_tick_loop<W>(
     // #307.
     let mut random_ticks = RandomTickScheduler::new(RANDOM_TICK_POSITION_SEED, RANDOM_TICK_BEHAVIOR_SEED);
     let (tick_cx_range, tick_cz_range) = tick_area;
+    // Issue #326 / `docs/plans/world-state.md` B1: the world border, ticked
+    // first each loop (per `ServerLevel.tick`'s order) and owned by this
+    // thread with no lock, exactly like `weather`/`game_tick`. A **static
+    // default today** — nothing calls `lerp_size_between`/`set_size` yet, so
+    // the loop ticks an inert border and every connection joins against the
+    // same full-size default (see `crate::border`'s module doc for why both
+    // halves agree and what shape B deletes). The resize entry point is
+    // `BorderFeed::with`; wiring it to the world loop is the follow-up this
+    // landing deliberately does not claim.
+    let mut border = WorldBorder::default();
 
     loop {
         let now = tokio::time::Instant::now();
@@ -680,6 +786,11 @@ pub(crate) async fn run_tick_loop<W>(
         tokio::time::sleep_until(next_tick_at).await;
 
         let tick_start = tokio::time::Instant::now();
+        // Issue #326 B1: border ticks first, per `ServerLevel.tick`'s order
+        // (`WorldBorder.tick` then the rest of the level's tick). Inert today —
+        // a static full-size default — but this is where a resize's lerp
+        // advances once a caller exists to start one.
+        border.tick();
         mobs.with(MobSim::tick);
         mob_out.publish(mobs.with(|sim| sim.snapshots()));
         // Issue #425: `MobSim::tick` already calls `MobSim::explode` the
@@ -747,6 +858,13 @@ pub(crate) async fn run_tick_loop<W>(
         });
 
         game_tick += 1;
+        // Issue #324 / `docs/plans/world-state.md` W1: the weather cycle is
+        // world-global state, so it belongs to the world tick (not to any
+        // connection — the straddle the world-state plan's migration exists
+        // to delete). `advance_weather()` stands in for the R1 game rule.
+        for event in weather.tick(advance_weather()) {
+            weather_out.publish(event);
+        }
         // Issue #468: the tick every pending `trigger_tick` is relative to, so a
         // saved queue can be rebased on load. One relaxed atomic store — the
         // tick-thread cost is a count of one, no I/O and no encoding.
@@ -919,6 +1037,10 @@ pub(crate) async fn run_tick_loop<W>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `LEVEL_STEP`/`WeatherEvent` are referenced only by the weather loop gates
+    // below, so they live here rather than at module scope (the lib build
+    // warns on imports that only tests touch).
+    use crate::weather::{LEVEL_STEP, WeatherEvent};
     use crate::mobs::ChunkWorld;
     // No longer imported at module scope: `run_tick_loop` borrows its queues out
     // of `ScheduledTickHandle` since #468 and names the type nowhere.
@@ -1531,5 +1653,148 @@ mod tests {
             published.contains(&(x, y, z, state.clone())),
             "published = {published:?}"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Issue #324 / `docs/plans/world-state.md` W1: weather reaches the feed.
+    // These gate the **production loop**, so they fail if the weather drain
+    // is removed from `run_tick_loop` rather than merely if `WeatherState`
+    // regresses — the `crate::weather` unit gates and this one would be
+    // exactly the "hermetic green, island red" pair CLAUDE.md's rule 1 names.
+    // ---------------------------------------------------------------------
+
+    /// The loop ticks [`WeatherState`] once per iteration and publishes its
+    /// transitions into [`WeatherFeed`].
+    ///
+    /// The state is seeded **mid-cycle** (rain already on, level mid-ramp)
+    /// rather than left at `WeatherState::default()`: a fresh world's first
+    /// rain is `RAIN_DELAY`'s 12k-180k ticks away, and waiting that out would
+    /// make this gate measure nothing but tokio's clock. With rain on and a
+    /// long `rain_time`, the very first loop tick must move the level by
+    /// exactly `LEVEL_STEP` and publish it — a one-tick, exact-value gate.
+    #[tokio::test(start_paused = true)]
+    async fn the_loop_ticks_weather_and_publishes_its_transitions() {
+        let (mobs, out, block_entities) = handles();
+        let clock = Arc::new(TickClock::new());
+        let (world, block_tick_out, tick_area) = world_tick_args();
+        let weather_out = WeatherFeed::default();
+        // `/weather rain` mid-spell: raining, a long way from its next flip,
+        // level ramping up from 0.5.
+        let mut weather = WeatherState::default();
+        weather.raining = true;
+        weather.thundering = false;
+        weather.rain_time = i32::MAX;
+        weather.thunder_time = i32::MAX;
+        weather.rain_level = 0.5;
+
+        tokio::spawn(run_tick_loop_with_weather(
+            mobs,
+            out,
+            block_entities,
+            Arc::clone(&clock),
+            world,
+            block_tick_out,
+            tick_area,
+            ExplosionFeed::default(),
+            weather_out.clone(),
+            weather,
+            crate::region_source::ScheduledTickHandle::default(),
+        ));
+        // See `ten_periods_advance_exactly_ten_ticks_with_no_overrun`: the
+        // spawned task must reach its first `Instant::now()` before the first
+        // `advance`, or every tick prediction shifts by one period.
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(TICK_PERIOD).await;
+        tokio::task::yield_now().await;
+
+        let events = weather_out.drain_all();
+        assert_eq!(
+            events.len(),
+            1,
+            "one tick of rain on must broadcast exactly one transition: {events:?}"
+        );
+        match events[0] {
+            WeatherEvent::RainLevelChanged(level) => {
+                assert!(
+                    (level - 0.51).abs() < 1e-5,
+                    "level must ramp 0.01 from 0.5 to 0.51, got {level}"
+                );
+            }
+            other => panic!("expected a rain ramp, got {other:?}"),
+        }
+    }
+
+    /// Gate (c)'s magnitude half, driven through the **production** loop
+    /// rather than at `WeatherState::tick` directly: rain forced on from a
+    /// dry start, the level must ramp exactly `LEVEL_STEP` per tick and
+    /// reach exactly `1.0` (clamped), each ramp broadcast as a `(7, level)`
+    /// wire pair — the same 100-tick 0→1.0 ramp `docs/plans/world-state.md`
+    /// W1's gate (c) names, against real `GAME_EVENT` ids rather than the
+    /// event enum. (The exact v770 *bytes* for those pairs are pinned by
+    /// `encode_game_event_wire_layout`; the serve_play drain that turns the
+    /// drained pairs into packets is pinned by `tests/serve_play.rs`.)
+    #[tokio::test(start_paused = true)]
+    async fn rain_forced_on_ramps_exactly_level_step_per_tick_through_the_loop() {
+        let (mobs, out, block_entities) = handles();
+        let clock = Arc::new(TickClock::new());
+        let (world, block_tick_out, tick_area) = world_tick_args();
+        let weather_out = WeatherFeed::default();
+        // `/weather rain`: raining, never flipping, level starting dry.
+        let mut weather = WeatherState::default();
+        weather.raining = true;
+        weather.thundering = false;
+        weather.rain_time = i32::MAX;
+        weather.thunder_time = i32::MAX;
+        weather.rain_level = 0.0;
+
+        tokio::spawn(run_tick_loop_with_weather(
+            mobs,
+            out,
+            block_entities,
+            Arc::clone(&clock),
+            world,
+            block_tick_out,
+            tick_area,
+            ExplosionFeed::default(),
+            weather_out.clone(),
+            weather,
+            crate::region_source::ScheduledTickHandle::default(),
+        ));
+        tokio::task::yield_now().await;
+
+        for _ in 0..110 {
+            tokio::time::advance(TICK_PERIOD).await;
+        }
+        tokio::task::yield_now().await;
+
+        let events = weather_out.drain_all();
+        // Ticks 1..=100 ramp toward 1.0 (the 100th reaches 0.99999934 — 100
+        // × 0.01 accumulated in f32 — and the 101st clamps to exactly 1.0);
+        // after that old == new, so no further ramps broadcast. That is the
+        // count and the clamp; both are load-bearing.
+        assert_eq!(
+            events.len(),
+            101,
+            "expected the 100-tick ramp plus the clamp tick, got {events:?}"
+        );
+        let mut previous = -1.0f32;
+        for (i, event) in events.iter().enumerate() {
+            let WeatherEvent::RainLevelChanged(level) = event else {
+                panic!("tick {i} must be a rain ramp, got {event:?}");
+            };
+            let expected = ((i + 1) as f32 * LEVEL_STEP).clamp(0.0, 1.0);
+            assert!(
+                (level - expected).abs() < 1e-4,
+                "tick {i}: level must be ≈{expected}, got {level}"
+            );
+            assert!(
+                *level > previous,
+                "tick {i}: the ramp must be monotonic: {previous} -> {level}"
+            );
+            previous = *level;
+            assert_eq!(event.wire(), (7, *level), "rain ramp must be GAME_EVENT id 7");
+        }
+        assert_eq!(previous, 1.0, "the ramp must land exactly on 1.0");
     }
 }

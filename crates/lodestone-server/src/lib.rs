@@ -98,6 +98,7 @@
 //!
 //! [`Transport`]: lodestone_net::Transport
 
+mod advancements;
 mod block_entities;
 mod border;
 mod brewing;
@@ -114,11 +115,21 @@ mod growth_tick;
 mod hopper;
 mod integrated;
 mod inventory;
+/// Loot-table loading and rolling (issue #337): parses Mojang's datapack
+/// loot-table JSON from the bundled `assets/loot_table/` set and rolls it with
+/// the server's deterministic RNG for the empty loot context.
+pub mod loot;
 mod mob_spawn;
 mod mobs;
 mod neighbor_update;
 mod players;
+mod plugin_channels;
 mod protocol;
+/// The GameSpy4 / UT3 server-query protocol (issue #332): a UDP listener
+/// answering the challenge-response dance server-list aggregators use, wired
+/// into `IntegratedServer::bind` (native targets only — the socket half of the
+/// module is `cfg`-gated, the protocol logic compiles everywhere).
+pub mod query;
 mod random_tick;
 mod redstone;
 mod redstone_diode;
@@ -148,14 +159,25 @@ mod redstone_wire;
 /// crate's `Cargo.toml` for the matching target-gated dependency.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod region_source;
+/// The Source RCON listener (issue #331). Native only, like `region_source`:
+/// the listener is a `tokio::net::TcpListener`, and a browser singleplayer
+/// world has no network listener for an admin console.
+#[cfg(not(target_arch = "wasm32"))]
+mod rcon;
 mod scheduled_tick;
 mod server;
 mod spawn;
 mod tick;
 mod vitals;
 mod weather;
+mod world_spawn;
 mod worldgen_data;
 
+pub use advancements::{
+    Advancement, AdvancementError, AdvancementManager, AdvancementProgress, AdvancementProgressUpdate,
+    AdvancementUpdate, GrantOutcome, PlayerAdvancementState, PlayerProgress, PlayerStatistics, StatKey,
+    StatType,
+};
 pub use block_entities::{BlockEntity, BlockEntityHandle, BlockEntityRegistry, block_entity_for_item};
 pub use border::{ABSOLUTE_MAX_SIZE, MAX_CENTER_COORDINATE, MAX_SIZE, BorderFeed, WorldBorder};
 pub use brewing::{
@@ -183,6 +205,7 @@ pub use hopper::{
 };
 pub use integrated::IntegratedServer;
 pub use inventory::{HOTBAR_SIZE, OFFHAND_NATIVE, PLAYER_NATIVE_SIZE, PlayerInventory};
+pub use loot::{LootContext, LootTable, LootTableBuilder, LootTableResolver, LootTableSet, roll_loot};
 pub use mob_spawn::{
     DespawnOutcome, MAGIC_NUMBER, MobCategory, SpawnCandidate, SpawnCandidateSource, SpawnRng,
     SpawnState, check_despawn, resolve_mob_shape,
@@ -196,18 +219,26 @@ pub use players::{
     PLAYER_ENTITY_ID_BASE, ChatLine, PlayerAwareSource, PlayerListStreamer, PlayerRegistry,
     PlayerTicket, PlayerView,
 };
+pub use plugin_channels::{
+    ClientChannels, PluginChannelHandler, PluginChannelRegistry, REGISTER_CHANNEL,
+    UNREGISTER_CHANNEL,
+};
 pub use protocol::{
-    EntitySnapshot, MetadataField, PlayerListing, ServerBound, ServerDirective, ServerProtocol,
+    EntitySnapshot, MetadataField, PlayerListing, ResourcePackPush, ServerBound, ServerDirective,
+    ServerProtocol,
 };
 pub use random_tick::{
     DEFAULT_RANDOM_TICK_SPEED, GrassOutcome, RandomTickEvent, RandomTickScheduler,
     can_propagate_onto, grass_random_tick, is_air_variant, is_randomly_ticking,
     next_random_tick_pos,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use rcon::{DEFAULT_RCON_PORT, RconConfig};
 pub use scheduled_tick::{ScheduledTick, ScheduledTickQueue, TickPriority};
 pub use server::{
-    EntitySource, NoEntities, ServeSummary, ServerError, serve_connection,
+    EntitySource, NoEntities, ResourcePackPushFeed, ServeSummary, ServerError, serve_connection,
     serve_connection_with_commands, serve_connection_with_mob_events,
+    serve_connection_with_plugin_channels, serve_connection_with_resource_pack,
 };
 pub use tick::{BlockTickFeed, ExplosionFeed, TickClock, TickStats};
 pub use weather::{WeatherEvent, WeatherFeed, WeatherState};

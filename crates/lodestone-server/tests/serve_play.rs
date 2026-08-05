@@ -38,8 +38,9 @@ use lodestone_core::{Reader, State, Writer};
 use lodestone_model::{Difficulty, ItemStack};
 use lodestone_net::{Connection, NetError, memory_pair};
 use lodestone_server::{
-    BlockEntityHandle, ChunkColumn, ChunkSource, ChunkWorld, MobHandle, MobSim, NoEntities,
-    ServerBound, ServerDirective, ServerError, ServerProtocol, serve_connection,
+    BlockEntityHandle, BlockTickFeed, ChunkColumn, ChunkSource, ChunkWorld, ExplosionFeed,
+    MobHandle, MobSim, NoEntities, ServerBound, ServerDirective, ServerError, ServerProtocol,
+    WeatherEvent, WeatherFeed, serve_connection, serve_connection_with_mob_events,
 };
 use std::str::FromStr;
 use tokio::io::DuplexStream;
@@ -75,6 +76,7 @@ const CLIENT_COMMAND_C2S: i32 = 51;
 const CLIENT_INFORMATION_C2S: i32 = 52;
 const CHUNK_BATCH_RECEIVED_C2S: i32 = 53;
 const GAME_RULE_VALUES_S2C: i32 = 54;
+const GAME_EVENT_S2C: i32 = 55;
 
 /// A [`ChunkSource`] that hands out an all-air column instantly — these
 /// tests are about packet scheduling, not terrain, so real worldgen would
@@ -375,6 +377,19 @@ impl ServerProtocol for FakeProtocol {
         w.var_i32(entries.len() as i32);
         ServerDirective::Send {
             packet_id: GAME_RULE_VALUES_S2C,
+            payload: w.as_slice().to_vec(),
+        }
+    }
+
+    /// Issue #324. Mirrors the real v770 wire shape (`writeByte` event +
+    /// `writeFloat` param) so the weather-drain gate can assert on actual
+    /// bytes, not just on "a packet arrived".
+    fn encode_game_event(&self, kind: u8, value: f32) -> ServerDirective {
+        let mut w = Writer::default();
+        w.u8(kind);
+        w.f32(value);
+        ServerDirective::Send {
+            packet_id: GAME_EVENT_S2C,
             payload: w.as_slice().to_vec(),
         }
     }
@@ -1766,4 +1781,74 @@ fn control_the_old_raster_order_fails_the_proximity_assertion() {
         message.contains("non-decreasing in Chebyshev distance"),
         "the distance rule must be what rejects this one, got: {message}"
     );
+}
+
+/// Issue #324 / `docs/plans/world-state.md` W1, gate (c)'s serve half:
+/// `serve_play`'s `container_sync_tick` arm must actually drain the
+/// [`WeatherFeed`] and turn each transition into an `encode_game_event`
+/// broadcast — the piece with no inbound packet driving it, exactly like the
+/// block-tick and explosion drains it sits beside. The feed is published to
+/// directly here (the loop that fills it in production is gated in `crate::tick`'s
+/// own module); a failure means the drain is missing or miswired, not the
+/// weather machine.
+#[tokio::test(start_paused = true)]
+async fn weather_feed_transitions_reach_the_client_as_game_event_bytes() {
+    let (client_end, server_end) = memory_pair();
+    let source = AirSource;
+    let weather = WeatherFeed::default();
+    // A second handle for the server task, so this test can keep publishing
+    // into the feed after the spawn (a `WeatherFeed` is an `Arc`-backed
+    // shared buffer — cloning the handle is not cloning the events).
+    let server_weather = weather.clone();
+
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection_with_mob_events(
+            &mut conn,
+            &FakeProtocol,
+            &source,
+            &NoEntities,
+            0,
+            &BlockEntityHandle::default(),
+            &MobHandle::default(),
+            &BlockTickFeed::default(),
+            &ExplosionFeed::default(),
+            &server_weather,
+        )
+        .await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "Stormwatcher", 1).await;
+
+    // Publish a rain ramp, a thunder ramp, then a rain flip, and wait one
+    // `CONTAINER_SYNC_INTERVAL` (50 ms — the timer the drain rides) for the
+    // arm to fire. `start_paused` freezes the clock except for explicit
+    // advances, so one 50 ms advance is exactly one interval tick and the
+    // three events all drain on it, in publish order.
+    weather.publish(WeatherEvent::RainLevelChanged(0.5));
+    weather.publish(WeatherEvent::ThunderLevelChanged(0.0));
+    weather.publish(WeatherEvent::StartRaining);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    tokio::task::yield_now().await;
+
+    // The three transitions arrive as three `GAME_EVENT_S2C` frames, each
+    // carrying the exact `(event, param)` pair the real v770 `GAME_EVENT`
+    // packet would carry (ids 7/8/1) — asserted on bytes, not on "a packet
+    // arrived".
+    let mut seen = Vec::new();
+    while seen.len() < 3 {
+        let (id, payload) = client.read_packet().await.expect("read").expect("packet");
+        assert_eq!(id, GAME_EVENT_S2C, "expected only game events, got id {id}");
+        let mut r = Reader::new(&payload);
+        seen.push((r.u8().expect("event id"), r.f32().expect("param")));
+    }
+    assert_eq!(
+        seen,
+        vec![(7, 0.5), (8, 0.0), (1, 0.0)],
+        "the drain must forward each transition in publish order with its wire pair"
+    );
+
+    drop(client);
+    let _ = server.await.expect("server task panicked");
 }

@@ -225,6 +225,26 @@ pub struct IntegratedServer {
     /// lives there rather than in [`TickClock`].
     #[cfg(not(target_arch = "wasm32"))]
     level_dat: Option<std::sync::Arc<crate::region_source::LevelDatHandle>>,
+    /// The RCON listener task (issue #331), `Some` once
+    /// [`start_rcon`](Self::start_rcon) has been called.
+    ///
+    /// Races the same `shutdown` notify every other background task races, so
+    /// it cannot outlive this handle — `shutdown()` and `Drop` both abort it as
+    /// a belt-and-suspenders, exactly like `autosave_task`, because a task
+    /// parked in `accept()` cannot see the notify until a new connection
+    /// arrives.
+    #[cfg(not(target_arch = "wasm32"))]
+    rcon_task: Option<Task>,
+    /// The GameSpy4/UT3 query listener task (issue #332), `Some` only for
+    /// [`bind`](Self::bind), which starts it automatically on the same address
+    /// as the game TCP socket (UDP and TCP port spaces are independent).
+    ///
+    /// Unlike the RCON listener it is **joined** on shutdown rather than
+    /// aborted: the run loop races the `shutdown` notify directly (through
+    /// [`spawn_tick_task`]), so once the notify fires the task returns promptly
+    /// and the UDP port is released before `shutdown()` returns.
+    #[cfg(not(target_arch = "wasm32"))]
+    query_task: Option<Task>,
 }
 
 impl IntegratedServer {
@@ -328,6 +348,15 @@ impl IntegratedServer {
                 autosave_task: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 level_dat: None,
+                // No RCON listener (issue #331) unless the caller starts one
+                // explicitly with `start_rcon` — a listener needs a password
+                // and a command dispatch, which these constructors do not take.
+                #[cfg(not(target_arch = "wasm32"))]
+                rcon_task: None,
+                // No query listener (issue #332): it starts only on the TCP
+                // `bind` path, which is the host-facing entry point.
+                #[cfg(not(target_arch = "wasm32"))]
+                query_task: None,
             },
             client_end,
         )
@@ -631,6 +660,10 @@ impl IntegratedServer {
                 autosave_task: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 level_dat: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                rcon_task: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                query_task: None,
             },
             client_end,
         )
@@ -993,6 +1026,42 @@ impl IntegratedServer {
         // the sole inhabitant of their own world — the bug this fixes, wearing
         // a different hat.
         let relay_players = PlayerRegistry::new();
+        // Issue #332: the GameSpy4/UT3 query listener, on the same address as
+        // the game TCP socket — vanilla's own default (query port = server
+        // port), and free because UDP and TCP port spaces are independent. It
+        // reads the *same* shared `relay_players` every connection uses, so its
+        // online count and player list are real, unlike a status reply, which
+        // must report `0` (see `serve_connection`'s comment on why). The run
+        // loop races the `shutdown` notify through `spawn_tick_task`, so it
+        // ends (and releases the UDP port) when the server shuts down.
+        //
+        // Deliberately non-fatal: if the UDP bind fails (some other process
+        // holds the port's UDP space) the game still serves; the query side
+        // just does not come up, and the failure is logged once rather than
+        // taking the whole `bind` down with it.
+        let query_task = match local_addr {
+            Some(query_addr) => {
+                let query_config = crate::query::QueryConfig {
+                    host_ip: query_addr.ip().to_string(),
+                    host_port: query_addr.port(),
+                    ..crate::query::QueryConfig::default()
+                };
+                match crate::query::QueryServer::bind(
+                    query_addr,
+                    query_config,
+                    relay_players.clone(),
+                )
+                .await
+                {
+                    Ok(query) => Some(spawn_tick_task(&shutdown, query.run())),
+                    Err(err) => {
+                        tracing::warn!("query listener disabled (UDP {query_addr}): {err}");
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
         let task = spawn(async move {
             // Issue #439's fan-out. `BlockTickFeed`/`ExplosionFeed` are
             // append-and-**drain-all**: the first consumer takes everything
@@ -1096,6 +1165,16 @@ impl IntegratedServer {
             autosave_task: None,
             #[cfg(not(target_arch = "wasm32"))]
             level_dat: None,
+            // No RCON listener (issue #331) unless the caller starts one
+            // explicitly — it needs a password and a command dispatch, which
+            // `bind` does not take.
+            #[cfg(not(target_arch = "wasm32"))]
+            rcon_task: None,
+            // `bind` starts the query listener (issue #332) automatically;
+            // `None` only if the UDP bind failed and the warning above was
+            // logged.
+            #[cfg(not(target_arch = "wasm32"))]
+            query_task,
         })
     }
 
@@ -1105,6 +1184,28 @@ impl IntegratedServer {
     #[must_use]
     pub fn local_addr(&self) -> Option<std::net::SocketAddr> {
         self.local_addr
+    }
+
+    /// Starts an RCON listener on this server (issue #331), racing the same
+    /// shutdown signal every other background task races.
+    ///
+    /// The listener is bound synchronously before this returns, so a port
+    /// conflict is reported here rather than later, and the returned address
+    /// is immediately connectable — give the config a port of `0` to let the
+    /// OS assign one. The listener task is stored on the handle, so
+    /// [`shutdown`](Self::shutdown) (and `Drop`) stop it with the server.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`std::io::Error`] from binding the listener.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn start_rcon(
+        &mut self,
+        config: crate::rcon::RconConfig,
+    ) -> std::io::Result<std::net::SocketAddr> {
+        let (task, addr) = crate::rcon::spawn_listener(self.shutdown.clone(), config)?;
+        self.rcon_task = Some(task);
+        Ok(addr)
     }
 
     /// A snapshot of this server's MSPT/TPS/overrun accounting (issue #285),
@@ -1192,6 +1293,22 @@ impl IntegratedServer {
         if let Some(autosave_task) = self.autosave_task.take() {
             autosave_task.abort();
         }
+        // Aborted, not joined: the accept loop parks in `accept()`, where the
+        // notify above cannot reach it until a connection arrives. It also
+        // cannot outlive the handle, which is all this abort guarantees.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(rcon_task) = self.rcon_task.take() {
+            rcon_task.abort();
+        }
+        // Joined, not aborted, unlike the two above: the query listener races
+        // the `shutdown` notify directly (through `spawn_tick_task`), so the
+        // notify above has already ended it — joining just makes sure the UDP
+        // port is actually released before this returns, so a caller that
+        // immediately rebinds the same address does not race the old listener.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(mut query_task) = self.query_task.take() {
+            query_task.join().await;
+        }
         // The final flush, **after** the tick and connection tasks have
         // stopped. Ordering is load-bearing: saving first would race a tick
         // that mutates a block between the write and the shutdown, and that
@@ -1235,6 +1352,14 @@ impl Drop for IntegratedServer {
         }
         if let Some(seed_task) = &self.seed_task {
             seed_task.abort();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(rcon_task) = &self.rcon_task {
+            rcon_task.abort();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(query_task) = &self.query_task {
+            query_task.abort();
         }
     }
 }

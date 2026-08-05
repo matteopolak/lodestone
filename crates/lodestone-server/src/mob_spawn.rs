@@ -394,6 +394,17 @@ impl SpawnRng {
     pub fn next_f64(&mut self) -> f64 {
         (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
     }
+
+    /// A uniform `f32` in `[0.0, 1.0)` with a 24-bit mantissa, matching Java
+    /// `RandomSource.nextFloat()`'s contract (`nextInt(24) * 2^-24`) — the roll
+    /// loot-table conditions and functions make (`random_chance`, binomial
+    /// draws, `survives_explosion`). Takes the top 24 bits of one draw and
+    /// scales by `2^-24`, which is distributionally identical to Java's 24-bit
+    /// draw; only the exact stream differs (see `crate::loot`'s module doc for
+    /// why that stream divergence is a follow-up, not a bug here).
+    pub fn next_f32(&mut self) -> f32 {
+        (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32
+    }
 }
 
 #[cfg(test)]
