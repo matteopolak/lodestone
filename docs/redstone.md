@@ -85,15 +85,29 @@ neighbour:
 
 1. Gravity settle (#311, unchanged).
 2. **Dust**: recomputes target strength; if changed, writes the new `power`
-   and cascades the same six-direction fan-out (`UPDATE_ORDER`) from the
-   wire's own position — mirroring `RedStoneWireBlock.updatePowerStrength`'s
-   `level.updateNeighborsAt` calls. **Named deviation**: vanilla additionally
-   fans out from each of those six neighbours' own positions too (a second
-   layer, collected through a `HashSet` whose iteration order vanilla itself
-   does not guarantee) — this landing implements the first layer only, which
-   is the deterministic part. A straight or right-angled run of dust updates
-   correctly; a diagonal-over-conductor corner update may lag by one extra
-   notification round versus vanilla.
+   and re-fans-out through `random_tick::wire_update_fan_out`, which is
+   `DefaultRedstoneWireEvaluator.updatePowerStrength`'s **complete** update
+   set: seven *centres* — the wire's own position plus each of its six
+   neighbours — each getting a full six-direction `updateNeighborsAt`, so 42
+   notifications with duplicates among them. Vanilla issues those duplicates
+   too; its `HashSet` dedupes the centres, not the notifications. Vanilla's
+   iteration order over that set is unspecified and cannot be copied, so this
+   picks the one deterministic order available: centres in
+   `[pos] ++ UPDATE_ORDER`, six directions in `UPDATE_ORDER` within each.
+
+   **The second layer is not a corner case, and this cost a landing.** An
+   earlier version implemented centre 0 only and described the omission as "a
+   diagonal-over-conductor corner update". The geometry it actually misses is
+   the **standard torch-inverter** — dust on top of a block with a torch on
+   that block's side. The torch is diagonal to the dust, so it is a neighbour
+   of a *neighbour* and appears only in the second layer.
+
+   **Both halves of the fix are load-bearing.** Applying the seven centres
+   only to a wire reached mid-cascade is not enough: `propagate_and_react`'s
+   own origin needs them too, because `NeighborPropagator::propagate` fans out
+   exactly one layer from whatever position it is handed. Only dust gets this
+   treatment — every other mutation family mirrors `setBlockAndUpdate`, a
+   single `updateNeighborsAt(pos)`.
 3. **Torches/repeaters/comparators/observers**: schedule a delayed recheck
    into `block_ticks` when steady-state disagrees with current state. No
    immediate mutation — the flip runs when the schedule drains.
@@ -164,16 +178,24 @@ T-junction, a repeater-locked latch) is the strongest remaining step.
   `redstone::own_signal`/`weak_signal`/`direct_signal`/`is_signal_source`
   with the new predicate, following the same per-block-class dispatch every
   existing family uses.
-- **The first-layer-only fan-out is not a corner case.** `propagate_and_react`
-  implements only the first layer of `DefaultRedstoneWireEvaluator`'s update
-  fan-out (the wire's own position); vanilla also fans out from each of the
-  six neighbours' own positions. The geometry that omission misses is the
-  **standard torch-inverter** — dust on top of a block with a torch on that
-  block's side, where the torch is diagonal to the dust and only the second
-  layer ever reaches it. Measured live: the real server inverts that torch
-  reliably; we never notify it. Pinned by
-  `redstone_oracle_gate::the_second_layer_fan_out_gap_leaves_a_side_torch_unnotified`,
-  which asserts today's behaviour and fails loudly when the second layer lands.
+- **The second-layer fan-out has landed — do not re-narrow it.** See "How it
+  works" above for the shape. Gated by
+  `redstone_oracle_gate::the_second_layer_fan_out_reaches_a_side_torch_and_inverts_it`,
+  with `..._is_left_alone_when_the_source_is_unlit` as its paired control.
+  Reverting `wire_update_centres` to `vec![pos]` was run as a control and both
+  that gate **and** the comparator end-to-end gate fail, the former naming the
+  coordinate: *"the torch at (x=6, y=1, z=8) was never notified … the dust on
+  its attachment block at (x=5, y=2, z=8) is at power 13"*.
+- **A rig that seeds dust at its settled power is vacuous once the second
+  layer is live.** The pinning test written while the gap was open set the
+  dust to 15 by hand with nothing feeding it. That was harmless then (the
+  first layer never re-evaluated the dust) and is fatal now, in the
+  *safe-looking* direction: the cascade reaches the dust, it correctly
+  recomputes to 0 for want of a source, the attachment block stops being
+  powered, and the torch is then correctly **not** scheduled — a passing test
+  proving nothing. A premise check does not catch this, because the premise is
+  true when checked and false by the time it matters. **Give the rig a real
+  source, start the dust at zero, and check the premise *after* propagation.**
 - **Nothing triggers redstone from player action.** The only callers of
   `propagate_and_react` are a random tick that mutated a block and the
   `block_ticks` drain. `server.rs`'s block-placement path (`apply_use_item_on`)
@@ -184,8 +206,9 @@ T-junction, a repeater-locked latch) is the strongest remaining step.
 
 ### Oracle traps, if you build a live redstone gate
 
-Both of these cost real time and both fail in the *safe-looking* direction —
-the rig reports a plausible "nothing happened" rather than an error:
+Every one of these cost real time, and they all fail in the *safe-looking*
+direction — the rig reports a plausible "nothing happened" rather than an
+error:
 
 - **`/setblock` does not reproduce a power source's natural update fan-out.**
   `LeverBlock.updateNeighbours` — which notifies the attached block *and that
@@ -194,14 +217,50 @@ the rig reports a plausible "nothing happened" rather than an error:
   notifies a torch two blocks away, which sits there lit forever. Use redstone
   **dust** as the trigger: its evaluator does that fan-out on every power
   change, through the ordinary neighbour-update path.
-- **`/tick step N` does not advance scheduled *block* ticks** — the known
-  `tick step`/`tick sprint` trap extends past entity physics. Measured against
-  a rig *proven* to work: two seconds of real time inverted the torch every
-  time, while eight consecutive `/tick step 1` calls on the identical rig
-  never did. Settle with real time, and take delay constants from the jar.
-  Also note `/tick sprint N` returns immediately and a following `/tick
-  unfreeze` **interrupts it**, so a sprint used to settle a rig may run almost
-  no ticks at all.
+- **`pause-when-empty-seconds` defaults to `60`, and this is the one that will
+  waste your afternoon.** With no player connected the dedicated server pauses
+  the whole world after a minute. `gameTime` stops dead, and since
+  `ServerLevel.tick` runs `this.blockTicks.tick(this.getGameTime(), ...)`,
+  **no scheduled block tick ever fires again**. Redstone then looks simply
+  dead: dust still propagates (it is synchronous, inside the `setBlock`
+  itself) while every repeater, comparator, observer and torch sits inert
+  forever, and `/tick step` appears to do nothing. Set
+  `pause-when-empty-seconds=0` in the oracle world's `server.properties` and
+  restart. **Control first, every session**: `/setblock` a `minecraft:sand`
+  block in the air; if it does not land, nothing is ticking and every timing
+  reading you are about to take is vacuous.
+- **`/tick step N` *does* advance scheduled block ticks.** An earlier revision
+  of this document said it did not. `TickRateManager.tick` sets
+  `runGameElements = !isFrozen || frozenTicksToRun > 0`, and `ServerLevel.tick`
+  gates `blockTicks.tick(...)` on exactly that (`ServerLevel.java:358,386-389`)
+  — a stepped tick runs them normally. The original observation was the
+  paused-world symptom above. `/tick freeze` plus one `/tick step 1` at a
+  time, confirming each landed by reading `time query gametime`, is the way to
+  take a tick-exact redstone measurement.
+- **`/tick sprint N` returns immediately and a following `/tick unfreeze`
+  interrupts it**, so a sprint used to settle a rig may run almost no ticks.
+- **Force-loading is enough; a player is not needed.** `TicketType.FORCED`
+  carries `FLAG_SIMULATION`, so `/forceload add` gives a ticking region — once
+  the pause above is disabled.
+- **A `powered=true` comparator does not lock a repeater.** A diode's lock
+  contribution is its *output signal*, and a comparator's is its stored analog
+  output, not its `powered` flag. A freshly `/setblock`-ed
+  `comparator[powered=true]` has output 0 and locks nothing — measured, and it
+  looks like a modelling bug when it is not.
+
+### What the live 26.2 oracle measured (#315/#317)
+
+Tables live in `redstone_diode_oracle_gate.rs`; the summary:
+
+| quantity | measured |
+|---|---|
+| repeater delay, property `d` | **`2d` game ticks** (2/4/6/8), identical on the rising and falling edge |
+| repeater orientation | `facing` names the **input** side; output leaves the opposite face |
+| repeater lock | only a **powered diode** whose own `facing` matches the queried side; a lit torch, a `redstone_block`, an unpowered repeater and a wrong-way repeater all fail to lock |
+| comparator delay | **2 game ticks**, both edges, both modes |
+| comparator output | 30 rows across both modes, all reproduced by `calculate_comparator_output` |
+| observer pulse | back face high on ticks **2 and 3**, i.e. starts at 2 and is **2 game ticks** wide |
+| observer trigger | block placed, block removed **and** a pure block-state change all pulse identically; a change behind it does not, and a no-op `setblock` does not |
 
 ## Configuration
 
