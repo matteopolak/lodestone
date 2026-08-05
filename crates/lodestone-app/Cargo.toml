@@ -1,0 +1,60 @@
+# The composed client `App` — milestone zero of
+# `docs/plans/runtime-plugin-loading.md`.
+#
+# This crate exists so that the *composition* of the client's plugin set lives
+# below `lodestone-shell` rather than inside `Sim::build`, where it was closed at
+# compile time: `build` took the `World` out of the `App` and dropped the `App`,
+# and `Plugin::build` needs `&mut App`, so no downstream crate holding a `Sim`
+# could register a plugin. `client_app()` hands out the `App` *before* it is
+# finalised, which is the one registration point both the shell and an external
+# consumer use — there is deliberately no second "internal" composition path
+# (`docs/plugin-api.md`).
+#
+# **The dependency list is the load-bearing part of this manifest.** The gate for
+# M0 is that a headless consumer depending on this crate has no `wgpu` and no
+# `winit` anywhere in `cargo tree`
+# (`tests/headless_consumer_registers_a_plugin.rs`, plus
+# `tests/renderer_free_graph.rs` which asserts it from the manifest side). Adding
+# a dependency here that reaches the renderer silently converts the plugin seam
+# back into a shell-only one, so every edge below is one of the four crates the
+# plugin tuple itself names and nothing more.
+[package]
+name = "lodestone-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The `App`, the schedules, and five of the six plugins in the tuple
+# (`CorePlugin`, `LocalPlayerPlugin`, `SessionHudPlugin`, `IngestPlugin`,
+# `SessionPlugin`), plus the three entity-spawn helpers `spawn_session` calls.
+lodestone-ecs = { workspace = true }
+# `ControllerPlugin` — `TickSet::Input` and `TickSet::Send`. The crate's own
+# charter is "the wasm-safe player-controller core", so this edge carries no
+# windowing: the winit key/mouse mapping lives in the shell on top of it.
+lodestone-controller = { path = "../lodestone-controller" }
+# `PlayerState`, the value `spawn_session` seeds the local player from.
+lodestone-physics = { workspace = true }
+# Direct, in addition to `lodestone-ecs`'s re-export, because `spawn_session`
+# names `bevy_ecs::entity::Entity` in its signature.
+bevy_ecs = { workspace = true }
+
+[dev-dependencies]
+# The conformance plugin for milestone zero, per the plan: autopilot was removed
+# from the shell entirely (`crates/lodestone-shell/Cargo.toml`'s note where the
+# dependency line used to be), which makes it a genuinely external plugin and
+# therefore the honest test of whether an external plugin can be registered at
+# all. `tests/headless_consumer_registers_a_plugin.rs` drives its real
+# goal-arrival behaviour through a `client_app()`-composed `App`.
+#
+# **Dev-only, deliberately.** `lodestone-autopilot` is LGPL-3.0-or-later while
+# this crate is MIT-OR-Apache-2.0 (`crates/plugins/README.md` §Licensing); a
+# normal dependency here would put the copyleft boundary inside an engine crate.
+lodestone-autopilot = { workspace = true }
+# The fixture collision world and version adapter the conformance test walks on,
+# reusing the plugin's own gate rather than a weaker hand-rolled one.
+lodestone-world = { workspace = true }
+lodestone-model = { workspace = true }
