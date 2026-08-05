@@ -1463,11 +1463,13 @@ impl Drop for MeshScheduler {
 // Terrain meshing as ECS state (Stage 4)
 // ---------------------------------------------------------------------------
 
-/// Budget for [`heal_dirty_columns`]: how many stale-boundary columns to re-mesh
-/// per frame. Bounds the cost of a chunk-load burst — during a spiral load the
-/// same column is named by several arrivals and coalesced into one re-mesh, so a
-/// small budget is enough to keep seams closed without stalling a frame.
-pub const DIRTY_COLUMN_BUDGET: usize = 4;
+/// Budget for [`heal_dirty_columns`]: max columns to re-mesh per frame.
+/// Was 4 before crossbeam MPMC + full-core workers — the old mutex-contended
+/// pool couldn't keep up with more. Now each column's sections fan out across
+/// all cores via lock-free MPMC, so draining the full backlog every frame is
+/// both safe and correct: duplicate dirty signals are coalesced by the
+/// BTreeSet, and the worker pool absorbs the burst.
+pub const DIRTY_COLUMN_BUDGET: usize = 64;
 
 /// The two facts terrain meshing needs that the [`ChunkWorld`] store cannot
 /// answer, because they are properties of the *session* rather than of the
