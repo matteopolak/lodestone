@@ -122,6 +122,11 @@ mod random_tick;
 mod redstone;
 mod redstone_diode;
 mod redstone_observer;
+/// Issue #314's end-to-end gate: redstone propagation driven through the
+/// production entry point against values measured on a real 26.2 server.
+/// Test-only — it holds the oracle table and the gates, no production code.
+#[cfg(test)]
+mod redstone_oracle_gate;
 mod redstone_torch;
 mod redstone_wire;
 /// World persistence (issue #437). Native only: a browser singleplayer world
