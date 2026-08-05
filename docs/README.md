@@ -874,6 +874,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   a connection asks for a burst of terrain: `serve_connection`'s initial `view_radius`
   join, and `ViewTracker::recenter`'s "chunks that entered the view" diff (both in
   `crates/lodestone-server/src/server.rs`).
+- [Server-side command execution](./server-commands.md) — The path a `/command`
+  typed by a player takes from a serverbound `chat_command` frame to a registered
+  plugin command's handler and back as system chat — and, more importantly, the
+  **seam** that path has to cross, because the crate that receives the frame is
+  deliberately forbidden from linking the crate that dispatches it. Issues [#48] (the
+  Brigadier dispatcher server-side) and [#464] (the wire gap that kept any command
+  from reaching a dispatcher).
 - [Server-side disconnect packets](./server-disconnect.md) — How Lodestone's
   integrated server tells a client **why** it is being disconnected, instead of
   silently closing the socket. Issue #279.
