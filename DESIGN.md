@@ -2070,6 +2070,834 @@ Not closable today: position bit-packing (~15 lines/family) is a per-family-loca
 
 ---
 
+---
+
+The entries below (**12.19** onward) are the operational record that used to live in
+[`CLAUDE.md`](./CLAUDE.md). They were moved here verbatim when that file was trimmed from 990 lines to
+roughly 300, because a rule nobody finishes reading is not a control. **`CLAUDE.md` keeps the
+imperative; this log keeps the measurement that paid for it.** Nothing was deleted -- each rule still
+states itself there, and the incident, sha and count are here.
+
+
+**12.19 A timing taken while other agents build is not a measurement.**
+
+- **A *timing* taken while other agents build is not a measurement either, and it will be attributed
+  to the wrong cause.** Measured: an agent recorded 2.66 ticks/s in debug versus 19.29 in release and
+  wrote the build profile into both its test and its doc as the explanation. Re-run on an idle
+  machine, the **same unoptimised build** hit 19.29/s. The real variable was concurrent machine load;
+  the profile explained nothing. It caught this itself and corrected both in `3380fb0`.
+
+  This is worse than a noisy number, because the *story* survives the correction: "debug is 7×
+  slower" is plausible, memorable, and gets quoted downstream. Note
+  `docs/plans/worldgen-parity.md`'s risk 3 rests on debug-profile figures for exactly this reason —
+  treat any debug-vs-release attribution recorded during a multi-agent session as unproven until
+  re-measured quiet.
+
+  What survives contention: a **ratio** between two arms measured in the same run. That agent's
+  tick-loop gate asserted a ratio and was never affected. Prefer one; when you need an absolute,
+  re-measure on an idle machine and say which it was.
+
+  **But a ratio is only protected if both arms see the same load, and two *sequential* timings do
+  not.** Corrected within the hour of writing the paragraph above, which overstated it.
+  `sim::tests::extract_particles_does_not_hold_the_world_guard_across_the_per_particle_work` takes
+  `small_ns` then `large_ns` and asserts `large_ns < small_ns * HOLD_SCALING_LIMIT` — a ratio, and
+  it still failed on committed `main` under four concurrent agents, because a load spike between the
+  two calls inflates one arm and not the other. Run alone it passes.
+
+  So the real rule is the *two observations at two different moments* hazard again, one scope
+  smaller: it applies **inside a single test**, not just between a test run and a diff. A ratio
+  survives contention only when the arms are measured **concurrently**, or when the quantity is a
+  count rather than a duration. Counts are immune; sequential durations are not, however you divide
+  them. Before reporting a timing-shaped test as a regression, re-run it **alone** — and if you are
+  the one writing it, prefer a counter (that gate's companion asserts particle *volume* at both
+  ends, which is the part that never flaked).
+
+
+**12.20 The shared checkout: `git checkout -- <path>` is the same command, narrowed.**
+
+**`git checkout -- <path>` is the same command as `git checkout .`, narrowed — and it is banned
+too.** An agent read the ban above as covering only the `.` form and ran
+`git checkout -- docs/README.md` to discard a regeneration it did not want to commit. That path
+happened to be a generated file, so nothing was lost, but the operation discards *whatever* is in
+the working tree for the named path — including another agent's uncommitted edit, with no diff and
+no reflog to recover from. There is no safe pathspec for it in a shared checkout. If you have a
+working-tree change you do not want in your commit, **just do not name that path** — the pathspec
+commit form ignores everything you do not list, which is the whole reason it is the standard here.
+
+
+**12.21 `docs/README.md` drift is red-`main`-shaped, and reverting it makes it worse.**
+
+- **`docs/README.md` drift is red-`main`-shaped, and reverting it makes it worse.** `cargo test -p
+  xtask` fails when the committed index does not match the generator, and the usual cause is a
+  *different* agent changing a doc's H1 or `## What it is` summary and not regenerating. That is what
+  happened above: the summary change was already **committed**, so reverting the regeneration left
+  `main` red and the next agent inherited it. If you find that test red and the drift is not yours,
+  **regenerate and commit `docs/README.md` alone** (`cargo xtask docs-index`, or
+  `LODESTONE_REGEN=1 cargo test -p xtask docs_index_matches_committed`) — committing a one-file
+  regeneration under your own message is correct and expected, not a foreign-line violation. Check
+  `git status` first: if the drift is *uncommitted*, its author is mid-flight and will regenerate
+  themselves; only a committed drift is yours to fix.
+
+
+**12.22 Rewriting a shared file wholesale is a fourth way to clobber.**
+
+- **Never rewrite a shared file wholesale — edit the lines you mean.** This is a *fourth* way to
+  clobber, and no git command is involved, so none of the rules above catch it: writing a full new
+  copy of a file silently discards every concurrent edit in it, and the loser finds out only when
+  their own change stops existing. An agent overwrote `sim.rs` this way and destroyed three edits
+  another agent had already made there; that agent recovered by re-routing its work through
+  `resources.rs` and `app.rs`, but nothing warned either of them. `sim.rs`, `app.rs`, `gpu.rs` and
+  `docs/README.md` are the usual victims because everyone needs a line in them. Prefer a targeted
+  edit over a rewrite, and **re-read a shared file immediately before writing to it** — not at the
+  start of your task, which may be an hour of other agents' commits ago.
+
+
+**12.23 `cargo fmt` in a shared checkout, and why the cleanup is the damage.**
+
+- **Never run `cargo fmt` (or `rustfmt`) in this checkout.** It rewrites files you do not own, and
+  the damage is not the reformatting — it is that your diff becomes inseparable from everyone
+  else's, so the *cleanup* is what destroys work. An agent ran `cargo fmt` on `sim.rs`, then tried
+  to strip the reformatting by reversing hunks against `HEAD`; the reversal deleted another agent's
+  concurrent `particle_atlas`/`particle_sheet_atlas` additions, because new content added since
+  `HEAD` is indistinguishable from "collateral formatting" when you diff against `HEAD`. It was
+  caught only by a build error naming a method that had stopped existing, and re-applying the patch
+  forward recovered it. Format the lines you wrote, by hand.
+
+
+**12.24 Staging hunks rather than files.**
+
+- **When a shared file already holds someone else's work, stage your hunks, not the file.**
+  `git add -p`, or `git diff -- <file> | …` filtered and applied with `git apply --cached`, then
+  read `git diff --cached` to confirm the commit contains no foreign lines. This is the working
+  practice that let one agent commit into `gpu.rs`, `gpu/stats.rs`, `resources.rs` and
+  `docs/README.md` while three other agents held in-flight edits in all four.
+
+
+**12.25 A red test may be someone else's deliberate neuter.**
+
+- **A red test in this checkout may be someone else's *deliberate* neuter, and no diff can tell you.**
+  Every control in this file works by breaking something on purpose and watching a test fail — so at
+  any moment another agent's two-minute neuter window looks exactly like a real regression. It
+  happened: one agent reported "two `entity::tests::*projectile*` lib tests are red on committed
+  `main`", and they were the exact pair another agent's `arrow_NEUTERED` experiment produced. `main`
+  was green throughout.
+  **The `git diff HEAD` substitute does not save you here**, which is the part worth internalising,
+  because that substitute is otherwise excellent (see the entry below). The neuter lived in
+  `lodestone-assets` while the failures surfaced in `lodestone-render`, and — more fundamentally —
+  a clean diff and a test run are **two observations at two different moments**. Emptiness at 19:31
+  says nothing about the tree at 19:33.
+  So: before reporting a red `main`, re-run at the **committed sha in an isolated worktree**, which is
+  the only observation that excludes concurrent edits by construction. And when *you* neuter
+  something, keep the window as short as possible and restore by `cp` from a scratchpad backup with an
+  md5 check — never `git checkout`.
+
+
+**12.26 The scratchpad directory is shared between agents too.**
+
+- **The scratchpad directory is shared between agents too, so the md5 check above is load-bearing.**
+  The path is per-*session*, and every agent in a session gets the same one — so a
+  `scratch/probe.rs` or `msg.txt` is exactly as contended as a file in the checkout, with none of the
+  git-level protections and no diff to show you what happened. Observed: an agent wrote two scripts
+  by heredoc and **read back different content than it wrote**, and found a `msg.txt` it had never
+  created already sitting there. That nearly had it classify its hunks against the shared *index*
+  instead of `HEAD`, which is the one mistake that ships another agent's lines.
+  **Use uniquely-named files** (include the issue number or a nonce), write them with the file tools
+  rather than shell heredocs, and re-read anything you are about to reason from. A `#[path]` harness
+  is the common case here: it compiles whatever is on disk at that instant, so a clean run proves
+  nothing about the file you thought you wrote. This is the same "two observations at two different
+  moments" failure as the entry above, one directory over.
+
+
+**12.27 The stale index blob: the most frequently observed hazard, and its cause.**
+
+- **Never leave a stale blob in the shared index.** A `docs/README.md` blob sat staged at `7b506a8`
+  while `HEAD` had `3432cb3`; committing the index would have **deleted** a newer agent's index
+  bullet. Refreshing one path with `git reset -- <path>` sets that index entry back to `HEAD` and
+  leaves the working tree untouched, which is the safe cleanup — but the real fix is never staging in
+  the first place (see the pathspec-commit entry).
+  **This is the most frequently observed hazard in the file: five instances in one session**, every one a
+  *reversal of a commit that had just landed*, armed for the next agent's `git commit` to ship under
+  their message. Twice on `container.rs` (632 lines, then 268), three times on `gpu.rs` (115, 59 and 290
+  deletions). Every affected agent had used `GIT_INDEX_FILE` correctly and none had run a bare
+  `git add` — truthfully.
+
+  **The cause is the cleanup step itself, in the wrong order.** `git reset -- <paths>` sets the *shared*
+  index entry to whatever `HEAD` is **at that instant**, creating an entry where there was none. Run it
+  *before* `git update-ref`, and it pins the pre-commit blob; `update-ref` then moves `HEAD` forward and
+  that entry becomes a staged reversal of the commit you just made. A deletion-only staged diff
+  (`0` insertions, N deletions) is the signature.
+
+  So the order is not stylistic:
+
+  ```
+  TREE=$(GIT_INDEX_FILE=$priv git write-tree)
+  NEW=$(git commit-tree "$TREE" -p "$OLD" -F msg)
+  git update-ref refs/heads/main "$NEW" "$OLD"   # HEAD moves FIRST
+  git reset -- <paths>                           # then refresh, against the NEW HEAD
+  ```
+
+
+**12.28 `git write-tree` against a missing index writes the EMPTY tree.**
+
+- **`git write-tree` against a missing index writes the EMPTY tree, silently — and that commit
+  deletes the entire repository.** This is the worst outcome available from the escape hatch and it
+  has already reached `refs/heads/main` once, for a few seconds, before its author caught it in
+  `git show --stat` and reverted with a compare-and-swap.
+
+  The trigger is mundane: **shell state does not persist between tool calls.** A private-index path
+  built with a `$$` nonce in one invocation is an *empty string* in the next, so `GIT_INDEX_FILE=""`
+  and `write-tree` has nothing to write. No error, no warning — a valid commit object whose tree
+  contains nothing.
+
+  Three defences, and use all three because each catches a different slip:
+  1. **One invocation** for `read-tree` → `add` → `write-tree` → `commit-tree` → `update-ref`. Not
+     "one per step, carefully ordered" — the variables do not survive.
+  2. **A literal nonce**, not `$$` or `$RANDOM`: `idx-fog-7f3a`, chosen by you and typed out.
+  3. **Sanity-check the tree before moving the ref.** `git ls-tree -r "$TREE" --name-only | grep -c ""`
+     against a plausible floor is one line and it makes this class impossible:
+     ```
+     n=$(git ls-tree -r "$TREE" --name-only | grep -c "")
+     [ "$n" -gt 1000 ] || { echo "ABORT: tree has only $n files"; exit 1; }
+     ```
+  And always `git show --stat` your own commit afterwards. That is what caught it.
+
+  And still check `git diff --cached` is empty immediately *before* every commit, because another agent
+  may have left one: a count, not an eyeball, and a verdict that depends on the count — an unconditional
+  `echo "(clean)"` after the check is its own vacuous control, and that mistake was also made here.
+
+
+**12.29 The shared index, and why the pathspec commit form is the standard.**
+
+- **The index is shared too: never leave work staged.** Hunk-staging (above) stops *you* shipping
+  someone else's lines; it does nothing to stop *them* shipping yours. `git add` writes to the one
+  index every agent shares, so any other agent's `git commit` in the gap — however narrow — harvests
+  whatever you have staged into **their** commit, under their message. This happened to a whole
+  26-file change: the `registry_data` ingest for #288 was staged, verified, and then committed by
+  another agent as `a19e5e4 feat(shell): chests reach pixels`. Nothing was lost and nothing foreign
+  was shipped, but the change set has no commit that describes it, and a reviewer reading `a19e5e4`
+  is misled about what it contains. The same gap cost that work three re-stagings, because a
+  concurrent broad `git add` also reset the index for `docs/` twice mid-flight, and a
+  `git diff --cached` read one command later was already describing a different index.
+  **Use the pathspec form: `git commit -m "…" -- <your paths>`. This is the standard here, not a
+  fallback.** It commits exactly those paths and **ignores the index entirely**, which is the only
+  property that makes it safe.
+
+  Measured in a throwaway worktree, because the whole point is that it needs no cleanup step:
+
+  | | result |
+  |---|---|
+  | commit created | yes, `HEAD` moved |
+  | contents | only the named path |
+  | **index afterwards** | **clean — no `git reset` needed** |
+  | working tree | untouched |
+  | another file's edits | survived on disk, excluded from the commit |
+
+  That third row is the important one. **`git reset -- <paths>` is the source of every stale-index
+  incident in this file** — nine in one session — and it only exists to clean up after the private-index
+  route. The pathspec form leaves nothing to clean up, so **do not run `git reset` after it.** Adding
+  that step back is how the hazard returns.
+
+  Argument order matters: `git commit -m "msg" -- <paths>`. Put `-m` *before* the `--` or git parses
+  the message as a pathspec and silently commits nothing — a probe written the wrong way round here
+  reported "index clean" from a commit that never happened, which is a vacuous control on top of a
+  no-op.
+
+  **And the pathspec form cannot introduce an untracked file. It fails by committing nothing.**
+  `git commit -m "…" -- <paths>` dies with `error: pathspec … did not match any file(s) known to git`
+  when any named path is new, so **anything that creates a file needs an explicit `git add <files>`
+  first**. Hit independently by **two agents in one session**, both mid-refactor where creating files
+  was the whole point.
+
+  The reason it is dangerous rather than merely annoying: with output redirected, the *only* signal was
+  that `git rev-parse HEAD` printed **another agent's** sha. A no-op commit in a busy shared checkout
+  does not look like a failure — it looks like a successful commit belonging to someone else, and an
+  agent that reports that sha publishes a wrong provenance for work that is still uncommitted on disk.
+
+  **What catches it: read your own sha in the same shell invocation as the commit, and `git show --stat`
+  it.** Both agents caught it that way and neither would have otherwise. This is the same
+  *two-observations-at-two-different-moments* hazard as everywhere else in this file — a `rev-parse` one
+  tool call later is a different moment, and in this repo another commit lands in that gap routinely.
+  "Stage, verify and commit in one shell invocation" was tried and is **not sufficient** — a single
+  invocation is not an atomic transaction. An agent staged six files, asserted
+  `git diff --cached --name-only` matched exactly, and then its plain `git commit` swept in **14
+  files** belonging to another agent who had run `git add` in the window between the assert and the
+  commit. One of those files was captured **mid-keystroke**, so `main` was briefly red from a commit
+  whose author never touched the broken file. Review-then-commit cannot be made race-free while the
+  index is shared; the fix is not to look harder but to stop consulting the index at all.
+  `git add` "to see the diff" is the most expensive way to look — `git diff -- <paths>` shows the
+  same thing and touches nothing.
+
+  **The pathspec form commits *working-tree* content, so a path you name carries whatever is in it.**
+  It defeats the index race, not the shared checkout. **That is an accepted cost, not a blocker** —
+  the repo owner's call: shipping a few of another agent's lines under your message is far cheaper than
+  agents stalling on each other, and it is recoverable by reading the diff. So:
+
+  - **Name only paths in your own assigned cluster.** That is what actually prevents this, and it is
+    why ownership is assigned per agent up front.
+  - `git diff -- <path>` before naming it, so you *know* what is going in. If a foreign edit is there,
+    say so in the commit message rather than abandoning the commit.
+  - **Do not block on it.** Waiting for another agent to finish is usually the wrong trade, and
+    splitting your change to avoid a shared file is worse — it produces two half-commits neither of
+    which reaches pixels.
+  - The one case still worth avoiding: a file that is **mid-keystroke** rather than merely modified. If
+    it does not compile and you did not break it, wait a beat, do not commit it.
+
+  Only reach for the temp-index route below when you need **partial-file** granularity — committing two
+  hunks out of a file whose remaining hunks belong to someone else. That is a real need (it happened
+  once here) and it is the only thing the pathspec form cannot express.
+
+
+**12.30 `git pull --rebase --autostash` left a staged deletion of another agent's file.**
+
+- **Never `git pull --rebase`, and never `--autostash`.** The `git stash` ban above is easy to keep
+  when you type it; `--autostash` runs one *for* you, on the whole shared tree, silently. An agent ran
+  `git pull --rebase --autostash`, the rebase aborted, and it was left with a spurious **staged
+  deletion of another agent's brand-new test file** — content intact but the index claiming a removal,
+  which the next commit would have shipped. It repaired the index entry by hand. There is also a live
+  `stash@{0}: autostash` entry holding a full-tree snapshot, left in place deliberately as someone
+  else's safety net: **do not `stash drop` or `stash pop` it.** If you need to move to a newer commit,
+  do it in a throwaway `git worktree add --detach`, which touches nothing here.
+
+
+**12.31 `git commit --amend` orphaned another agent's commit.**
+
+- **Never `git commit --amend`.** It rewrites a commit that other agents have already built on, and in
+  a shared checkout the thing it sweeps up is not yours. Measured: an agent amended its own `#299`
+  commit and thereby absorbed **another agent's staged-but-uncommitted `feat(chat)` work** into it.
+  The content survived — verified byte-identical in `HEAD` afterwards — but the other agent's commit
+  is now **orphaned**, so the change set has no commit describing it and a reviewer reading the
+  history is misled about what `#299` contains. The same agent then ran a bare `git reset`, which
+  unstaged several other agents' in-progress work.
+
+  Both are the shared-index hazards already in this file, reached by a route the file did not name.
+  **The fix is the same as everywhere else: pathspec-form commits from the start**
+  (`git commit -m "…" -- <paths>`), which ignore the index entirely, so there is never a reason to
+  amend. If your last commit was wrong, **land a follow-up commit** — a second commit is cheap and
+  honest; rewriting shared history is neither, and `git push --force` to fix the amend would be worse
+  still.
+
+
+**12.32 The private-index escape hatch and its stale tree.**
+
+- **`GIT_INDEX_FILE` + `commit-tree` is the escape hatch, and it has its own trap: a stale tree.**
+  When you need partial-file granularity that a pathspec commit cannot express, build the commit in a
+  **private** index so the shared one is never touched. But the ref compare-and-swap in
+  `git update-ref <new> <old>` protects the *parent*, **not the tree you built**. An agent read a tree,
+  two commits landed while it worked, and committing that stale tree onto the fresh parent **reverted
+  2,173 lines** of another agent's chest and metadata fixes. It was caught immediately in
+  `git show --stat` and repaired, but the lesson is: **read the tree and commit it in one step**, and
+  always `git show --stat` your own commit afterwards to confirm it contains only additions you
+  intended and no deletions you did not.
+
+
+**12.33 `git clean` destroyed a plugin crate and a doc that were in no commit.**
+
+- **`git clean` is the worst of the git-level mistakes, because it destroys what nothing can
+  recover.** The others discard *modifications* to tracked files, which at least existed in a commit
+  once.
+  `git clean` deletes **untracked** files — which in this repo means whole new crates, new
+  `docs/*.md`, new oracle dumps and new test files, none of which are in any commit or reflog.
+  It has already cost real work: an agent ran it while others were mid-flight and destroyed
+  `docs/autonomous-navigation.md` outright, plus `crates/plugins/lodestone-autopilot`'s manifest
+  and source, leaving only the `LICENSE` behind and the workspace unloadable. The author had to
+  rewrite it from nothing. There is **no legitimate use** for it here: build output is already
+  gitignored, and "tidying up" a shared checkout is not a thing any single agent has the standing
+  to do.
+- **Stage explicit *file* paths, never a directory.** `git add docs/` is the same mistake as
+  `git add -A`, just narrower — it sweeps up whatever else happens to be in there. This bit me
+  personally: `53850ce` swept another agent's then-unfinished `docs/block-break-timing.md` into a
+  render commit. Nothing was lost, but the commit contains 169 lines its author never wrote, and a
+  reviewer reading that diff would be misled about what the change was. `git add <file>` or
+  `git add -p`, always.
+- **Read `git diff --cached` before every commit.** Explicit file paths are necessary but not
+  sufficient: a *shared* file can already contain someone else's in-flight edit. `0b95b4e` staged
+  `docs/README.md` by exact path and still captured another agent's index line pointing at a doc
+  that commit did not include — shipping a broken link. Review the staged diff, not just the file
+  list.
+
+
+**12.34 `rtk` is not a transparent proxy.**
+
+- **`rtk` is not a transparent proxy. Do not trust it for evidence — use `/usr/bin/grep` and the
+  real `cargo`/`git`.** It is a token-saving filter, and its filtering silently destroys exactly the
+  output a search exists to produce. Verified here directly, on one file, one pattern:
+
+  | | output for `ambient_occlusion_at` in `mesher.rs` |
+  |---|---|
+  | `rtk grep -n` | `usize, y: usize, z: usize) -> bool {` |
+  | `/usr/bin/grep -n` | `fn ambient_occlusion_at(&self, x: usize, y: usize, z: usize) -> bool {` |
+
+  **It strips the matched pattern and everything before it on the line** — it deletes the one thing
+  you searched for, so you cannot tell a real match from a near-miss, and a symbol looks absent when
+  it is present. This is the `| head` trap with no visible pipe: rule 2's whole class of "X doesn't
+  exist yet" mistakes can now be manufactured by the search tool itself.
+
+  Also observed by agents, each nearly producing a wrong conclusion: `rtk proxy cargo test` reporting
+  **exit 0 while its own output said 7 failed**, and rewriting `-p lodestone-render` into a run that
+  executed `lodestone-physics`' tests; and `rtk proxy git diff HEAD -- $LONG_VAR` returning **zero
+  hunks while the content plainly differed**, which nearly had an agent conclude its work was already
+  committed (single literal paths worked). Exit-code preservation *is* fine for `cargo check`
+  failures — measured 101 both through `rtk proxy` and through `~/.cargo/bin/cargo` — so the failure
+  is not uniform, which is worse than if it were: it is unpredictable per subcommand.
+
+  Practical rule: `rtk` for reading something you already believe, the real binary for anything a
+  conclusion rests on. **Re-read every exit code from a captured file with a program, not from a
+  pipeline.**
+
+
+**12.35 Docker's memory cost is the machine's real ceiling.**
+
+- **Docker's memory cost is the machine's real ceiling, and this entry used to say the opposite of
+  what to do.** It previously warned that the machine was shared with an unrelated project whose
+  `mht-*`, postgres, valkey and seaweedfs containers must never be pruned. **Checked 2026-08-04:
+  none of those containers or images exist**, and the owner confirmed nothing else in Docker matters
+  to them. That stale warning had every agent — and me — avoiding Docker maintenance all session
+  while the box suffocated.
+
+  What was actually there, measured: the three JVM oracle containers holding **2.75 GB**, the Docker
+  VM reserving **7.26 GB**, **22 GB** of build cache, **19 GB** of dangling images, and two dead
+  `temurin:8-jdk` containers. Free memory was down to about **87 MB** with load average **91**, and a
+  single-crate `cargo check` took **10m44s**. Stopping the oracles, pruning, and quitting Docker
+  Desktop recovered roughly **5.5 GB** of RAM — free pages went 5,542 → 360,121 and the compressor
+  dropped from 259k to 67k pages.
+
+  So: **Docker is fair game to stop and prune when no live gate needs it.** Prefer stopping the
+  oracles over leaving them idle — they are explicitly not repo state and
+  `scripts/live-oracles/{creative,survival,terrain}.sh` recreates them. Quitting Docker Desktop
+  entirely (`osascript -e 'quit app "Docker"'`) reclaims the VM reservation, which is the single
+  largest win available; restart it before any `#[ignore]`d live-oracle gate. Still name targets
+  explicitly rather than trusting a filter — Docker's `name=` filter is a *substring* match — and
+  still prefer `--rm`. Lodestone containers are `lodestone-*`.
+
+  **Volumes are the one thing to keep hesitating over.** 81 local volumes / 2.18 GB survive here
+  untouched; they are cheap, and a volume is the only Docker object that can hold data nothing
+  recreates. Prune images and build cache freely; think before pruning volumes.
+
+
+**12.36 Test-binary memory froze the machine, and `Pages free` is not headroom.**
+
+- **`-j` bounds rustc, not test binaries — and unbounded *test* memory froze the machine.** On
+  2026-08-04 the box ran out of memory and had to be force-rebooted while roughly a dozen agents were
+  live. It was not their idle footprint: single test binaries in this workspace have been measured at
+  **4.8 GB and 5.2 GB RSS**, and with 16 GB total, two or three concurrent `cargo test` runs is the
+  whole budget. `-j 4` caps *compile* parallelism and does nothing about a linked test binary's
+  runtime footprint, which is why the existing per-agent `-j` guidance did not prevent this.
+
+  So, when many agents are live: **pass `-- --test-threads=2` to `cargo test`** (test threads each
+  hold their own fixtures — that is the knob that actually caps peak RSS), **prefer `cargo check`
+  when you only need to know it compiles**, and **never run two cargo commands concurrently or
+  background one and start another**.
+
+  **`Pages free` is NOT headroom, and a threshold on it is actively harmful.** This entry first said
+  "free pages under ~50,000 → wait", and that gate **stalled an agent** which correctly obeyed it:
+  macOS deliberately keeps `free` low and reclaims from `inactive`, so a reading of 33,550 free pages
+  (~137 MB) sat alongside ~1.1 GB of reclaimable `inactive` and **zero swapouts**. There was no
+  pressure at all. Measured minutes later: free 343 MB, inactive 1,146 MB, `vm.swapusage` total
+  **0.00M** — the machine had not swapped once since boot.
+
+  The signals that actually mean pressure, in order: **`sysctl -n vm.swapusage` showing non-zero
+  `used`**, **`Swapouts` in `vm_stat` climbing**, and **`memory_pressure`'s own "System-wide memory
+  free percentage"** (it was 85% during the supposed danger). Compressor *growth* over successive
+  readings matters; a single absolute value does not. **Load average is the worst proxy of all** —
+  right after a reboot it sat at **31** purely from Spotlight/ML reindexing (`mds_stores`,
+  `mediaanalysisd`, `ANECompilerService`) while memory was 85% free.
+
+  And **"wait" must never mean arming a background monitor.** An agent that stops to wait for a
+  monitor is marked complete by the harness and its notification is discarded — that is the most
+  repeated operational failure in this repo (**nine instances across seven agents in one session**),
+  and a memory gate that tells agents to wait without saying *how* manufactures it. If you must
+  wait, re-read `vm_stat` a bounded number of times **inside one shell invocation**, or just run the
+  cheaper command (`check` instead of `test`, one crate instead of the workspace) and move on.
+
+
+**12.37 Phantom `cargo check` errors naming another agent's worktree.**
+
+- **A `cargo check` in this checkout can report hundreds of phantom errors naming another agent's
+  worktree.** Measured: `cargo check -p lodestone-shell --no-default-features` produced **435 error
+  lines**, mostly `couldn't read …/scratchpad/wt-route-9a4c/crates/lodestone-server/assets/worldgen/
+  biome/*.json: No such file or directory` — a path inside a *throwaway worktree that was being
+  removed while cargo read from it*. The named files exist perfectly well in this checkout, and all
+  430 of them are tracked. Re-running minutes later gave **3** errors, all real and all one agent's
+  in-flight edit.
+  The trap is that this looks exactly like a catastrophic breakage — hundreds of missing data files
+  reads as "someone deleted the assets" or "the embed path is wrong", and it names real filenames.
+
+  **The cause, and the rule that prevents it: never point `CARGO_TARGET_DIR` at the shared `target/`
+  from a throwaway worktree.** Doing so bakes the worktree's absolute path into a build script's
+  output, and when the worktree is removed the shared cache keeps serving those dead paths to
+  *everyone else's* build. The agent who did it found and fixed it with
+  `cargo clean -p lodestone-server` — **34,735 files, 3.7 GiB**. A throwaway worktree must use its own
+  target dir; the cost is one extra build, and the alternative is poisoning every other agent's
+  output for as long as it takes someone to notice.
+
+  **A correction worth keeping, because it is a live example of §2.** This entry first recorded that
+  `cargo clean -p <crate>` reported `Removed 0 files`, and concluded "the artifact cache was never the
+  cause." That was exactly backwards. The clean printed zero because the agent responsible had already
+  run it minutes earlier — the cache was the whole cause. Two observations at two different moments,
+  and the second one read as evidence about the first. **A no-op result from a repair step is not
+  evidence the thing you repaired was healthy** — check whether someone else already fixed it before
+  concluding it never needed fixing.
+
+  So: **an error whose path contains `/scratchpad/` or a `wt-` prefix is not about your code.** Ignore
+  it, re-run, and remember the general rule this is one more instance of — a check run in a shared
+  checkout while a dozen agents edit is a **sample, not a measurement**. Before believing any verdict
+  about `main`, re-run at the committed sha in a fresh isolated worktree, and prefer
+  `git worktree remove` over leaving worktrees around.
+
+
+**12.38 Island factories: the event routers and their terminal `_ =>` arms.**
+
+**One specific island factory: `ingest::handles_event`'s routing switch.** A system can be correct,
+registered in the right set, in the right order, and unit-tested green — and still never run in
+production, because `SharedState::apply` only forwards events the switch lists. A hermetic test that
+calls the system directly passes either way, so nothing catches it. This has now hidden working code
+**twice in one session** (`EntityDamaged`/`EntityHurtAnimation`, then air supply). When adding an
+ingest system, the switch is the first thing to check, not the last.
+
+**Generalise it: every terminal `_ =>` arm in an event router is an island factory, and there are
+three.** A `_ => {}` that silently discards is indistinguishable, at the call site, from one that has
+nothing left to handle.
+
+| router | carries | missed instance |
+|---|---|---|
+| `ingest::handles_event` | per-entity ECS state | `EntityDamaged`/`EntityHurtAnimation`, air supply |
+| `session::handles_event` | local-player session scalars | — (but see below) |
+| `net.rs`'s `forward` | the shell's own `ClientEvent` stream | `BLOCK_EVENT`, so chest lids could never animate |
+
+**`ingest` vs `session` is a real fork and guessing it wrong has cost work twice.** `SharedState::apply`
+consults *both*, so an arm added to the wrong one compiles, tests green as a unit, and never runs.
+`DimensionTypeChanged` is claimed by `session`, and so is `AbilitiesChanged` — for which both the issue
+and the dispatch briefing said `ingest`, where an arm would have produced a fold that never fires.
+The rule of thumb that has held: **per-entity state is `ingest`, local-player scalars are `session`**,
+and block/world events are neither, travelling the shell stream instead — the chest work needed no
+`handles_event` arm at all.
+
+So when a decoded packet reaches no pixels, grep its variant in *every* router before concluding the
+decode is wrong, and check the sibling router before adding an arm to the one you thought of first.
+
+**Islands come in both directions.** All of the above are *inbound*. `ClientAction::SetFlying` was the
+mirror image: encoded by four protocol adapters with **zero producers** anywhere outside
+`crates/protocol/`, so flight was applied locally and the server kicked us with
+`multiplayer.disconnect.flying`. Ask what *sends* a serverbound action, not only what consumes a
+clientbound one.
+
+
+**12.39 The two staleness traps that cost real work.**
+
+- **Zero hits in the file a stale note names is not evidence a feature is unwired.** A note said the
+  shell didn't consume the chat resolver, citing `chat.rs:88`. Grepping `chat.rs` returned nothing —
+  correctly, because the consumer is one layer up in `sim.rs`, at ingest. **Grep for the producer
+  across the whole tree, not for the consumer in one named file.**
+- **Read the record definition, not a summary of the call site.** `HANDOFF.md` transcribed vanilla's
+  `DepthStencilState(…, 1.0F, 10.0F)` as "constant 1.0, slope 10.0". The record is
+  `(depthTest, writeDepth, depthBiasScaleFactor, depthBiasConstant)` — i.e. slope 1.0, constant
+  10.0. Backwards.
+
+
+**12.40 What `cargo xtask connectedness` does and does not measure.**
+
+**But know what it measures, because it is silent rather than wrong outside that scope — and it is
+narrower than its name suggests.** Measured twice today, each time by an agent I had pointed at it
+wrongly:
+
+- **Both defects below are fixed as of `e164d06` (issue #412) — kept because the numbers matter and the
+  failure modes recur.** It used to measure `v770` **only**, via a hard
+  `if family != "v770" { continue; }`, while its own header claimed "denominators from each family". So
+  for months a green number said nothing whatever about three of the four families. With the filter gone,
+  the first per-family reading was:
+
+  | family | clientbound decoded | serverbound encoded |
+  |---|---|---|
+  | family | first reading (kept for the ratio) | measured 2026-08-04 |
+  |---|---|---|
+  | v47 | 17/74 | **21**/74 |
+  | v340 | 16/80 | **22**/80 |
+  | v735 | 17/92 | 17/92 |
+  | v770 clientbound | 111/141 | **114**/141 |
+  | v770 serverbound encoded | 53/69 | **54**/69 |
+
+  **The legacy families decode under a quarter of their clientbound packets**, which nobody knew, because
+  the instrument that would have said so was skipping them. Do not assume a legacy family is well covered.
+  It now also measures **serverbound decode**, and reports *"not applicable"* rather than a false `0/69`
+  for the three families with no `server_protocol.rs` — only `v770` implements `ServerProtocol`. Note
+  `serverbound encoded` remains a *client*-side figure: bare token presence in the client adapter, no arm
+  and no direction check.
+
+  **Four of the six figures in this table were stale within days, in the table that exists to stop staleness.**
+  Re-measured 2026-08-04 during a tracker sweep; the second column above is that reading. The serverbound
+  decode figure was the worst: this file said **13/69**, when the truth was **60/69 decoded and 17/69
+  connected** — the wrong *axis*, not merely a stale count, and five issue bodies had inherited the same
+  error. **Do not quote a number from this table. Run `cargo xtask connectedness` and quote that.** The
+  table is here for the *shape* of the finding — legacy families are thin, decode and connectedness are
+  different axes — not for its digits.
+
+  **And the instrument has a blind spot it cannot report: a fully-connected wire carrying the wrong value.**
+  Issue #323 is the worked example. The server broadcasts `SET_TIME`, the client decodes it and really does
+  darken the sky — every link measured, nothing stranded, `connectedness` perfectly green — and the value on
+  the wire is **wall-clock elapsed-since-join**, while `tick.rs`'s real tick counter never reaches the
+  encoder. So `connectedness` answers "is this packet reaching something", and **cannot** answer "is it
+  carrying the right number". That is a distinct failure from the *island* (built, reaches nothing) and from
+  the *magnitude* species (right direction, wrong amount): here the plumbing is complete and the source is
+  wrong. Only a gate whose expected value originates **outside** our own producer can see it.
+- **Our source scanners were silently broken by Rust lifetimes, and it took a UTF-8 panic to notice.**
+  `matching_brace` was described as comment-, string- and char-literal-aware. Its "in a char literal" flag
+  **never closes on a lifetime** — `&'static str` opens it and nothing shuts it — so from the first
+  lifetime in a file, comment detection was disabled for the rest of it. Fixed in all three scanners with
+  a lookahead-based `char_literal_span`. Two lessons worth keeping: any coverage number produced before
+  that fix, for a file containing a lifetime before a comment, was **unreliable in an unknown direction**;
+  and the bug surfaced only as an unrelated-looking crash in new code, never as a wrong answer, which is
+  how a scanner bug normally behaves. **A hand-rolled Rust lexer will be wrong about lifetimes** — test
+  one against a file with `&'a` before a `//`.
+- **Serverbound decode does not live in `lodestone-server` at all** —
+  `/usr/bin/grep -rn "serverbound::" crates/lodestone-server/src/` returns **zero hits**. It is in
+  `crates/protocol/v770/src/server_protocol.rs:880`, as `State::Play if packet_id ==
+  play::serverbound::NAME =>` arms. **This entry previously said `lodestone-server` and quoted
+  "5/69 → 8/69"; both were wrong** — there are **10 Play arms**, and `docs/roadmap/protocol.md`'s
+  "completely zero" is stale too. Two hand-counted figures in two documents, both stale within a day,
+  which is the argument for automating the axis rather than re-counting it.
+  Note the count alone is not connectedness: a variant that decodes and lands only in `server.rs`'s
+  `ServerBound::Ignored => {}` group is stranded exactly as a clientbound packet would be, so the
+  serverbound axis is a **two-file join** across crates, not a one-file scan.
+- It does not measure **Rust call graphs** either. Pointed at a *crate-internal* island — an
+  implemented type nothing in the workspace constructs — it returns **byte-identical output before and
+  after the fix**, which reads as "no change" rather than "not applicable". The agent closing
+  `projectile.rs`/`item_entity.rs`'s missing tick drivers hit this and correctly reported the identical
+  output as meaningless rather than quoting it.
+
+So: right instrument for "is this clientbound packet reaching anything", wrong one for everything else.
+For a crate-internal island, grep for constructors tree-wide plus a test that drives the *registry*
+rather than the type. For server decode, grep the packet ids.
+
+
+**12.41 A control's premise can be false before the feature under test existed.**
+
+**A control's premise can be false before the feature under test ever existed.** This is subtler
+than a wrong assertion and it fails in the *safe*-looking direction: the control fires, so the gate
+looks rigorous, and what it actually measures is unrelated. Two instances while wiring the sky:
+
+- A control asserted that a sky-less frame "clears uniformly to `SKY_COLOR`". It failed at 3.5%. The
+  offenders were at `x221..255 y180..255` in dark browns — the **first-person bare arm**, which the
+  hand pass draws whenever `third_person_body_drawn` is false, i.e. always, in first person, with
+  nothing installed. The premise had been false since long before the sky existed.
+- A HUD gate's rect hardcoded the *with-hotbar* `cluster_top`. `sprite_vitals` stacks upward from a
+  **moving** anchor (pulled up only `if frame.hotbar`, again only `if frame.xp`), so the gate
+  measured ~20 logical pixels above a row that was drawing perfectly and reported 0 px — a dead
+  wiring chain that was not dead.
+
+So: before believing a control, ask **what else already paints here**, and derive layout from the
+same expression the draw uses rather than restating a constant. And per *measure by location, never
+by frame average* below — both were diagnosed in one step by printing a **bounding box** instead of
+a percentage. A gate that reports only a fraction cannot tell a uniform-but-wrong frame from a
+localised blob; make failure output say *where*.
+
+
+**12.42 Shell pipelines that invented a green.**
+
+**A shell pipeline will destroy the evidence you are about to reason from.** Two instances in one
+session, both of which produced a confident wrong conclusion:
+
+- **`| head` read as absence.** `grep -rn -A4 0.085 …/world/entity/ | head -24` was flooded by
+  `DropChances.java` and showed no hit in `Player.java`, so the swim-descent constants were declared
+  unverifiable and an agent was told to distrust them. They are real, at `Player.java:1408`. A
+  truncated search is not a negative result — `grep -c`, or narrow the path, before concluding a
+  thing does not exist.
+- **`| grep | tail` swallowed a non-zero exit.** `cargo test --workspace | grep … | tail -30`
+  reported "exit code 0" because that is `tail`'s status, while cargo's own last line was
+  `error: 1 target failed:` — and the grep pattern then cut the target name off. This came within
+  one command of a commit on a red tree. **Let cargo write its own output to a file and check its
+  real exit status**; filter the file afterwards.
+
+- **`| tail` with no `-f` buffers until EOF, so a backgrounded build looks hung.** An agent backgrounded
+  `cargo test … | tail -80`, watched the output file stay **empty** for the whole compile, and concluded
+  the run had hung — it was compiling normally, and `tail` was simply holding everything until the pipe
+  closed. It killed a healthy run. Redirect straight to a file (`> log 2>&1`) and read the file; never put
+  a buffering filter between a long build and your only view of it. Same family as the entries above: the
+  transform that makes output readable is the transform that lies about it.
+- **zsh does not word-split an unquoted `$var`, so a path list in a variable is *one* argument.**
+  An audit built as `P="a.rs b.rs …"; git diff --numstat -- $P` printed **nothing** and its companion
+  `git diff -- $P | grep -E "<foreign markers>"` printed **none** — both correct answers about an
+  empty diff, because git was handed a single nonexistent path with spaces in it. The check whose
+  entire job was "prove this commit contains no other agent's lines" returned a green by measuring
+  nothing, one command before the commit. Caught only because the empty `numstat` was *also*
+  surprising. **Write the paths out, or `set -- a b c` and use `"$@"`** — and treat an audit that
+  prints nothing as a failure to run, never as a pass.
+
+The general rule: the transform that makes output readable is also the transform that can invent a
+green. When a conclusion depends on what was *not* in the output, re-run without the filter.
+
+**And `rtk` rewrites pipelines, so this reaches controls that have nothing to do with cargo.** A
+zero-deletion control on a regenerated data table ran `diff | grep -c '^<'` and reported **0**. The
+true figure was about **15,000**; it surfaced only as 20,251 deletions in `git diff --cached`, and
+the control had to be redone as a semantic parse (43 statics carrying over with all 30,360 literals
+byte-identical). The generator emits one line per tick where the committed file is reflowed to four,
+so a line-oriented control was the wrong instrument even before the pipeline ate the count. **Do not
+build a control out of a shell pipeline here.** Count with a program that reads the file.
+
+
+**12.43 The five species of vacuous test, worked.**
+
+The *magnitude* species is new and it is subtle because everything else about the gate is right. The
+hurt-overlay gate asserted that silhouette pixels **"moved toward vanilla's overlay red"** and
+reported 3440/3440, with a working negative control. It measured **direction, not magnitude** — and
+the shader was rendering ~70% red where vanilla renders ~30%, a predicate satisfied identically by
+both. Wiring genuinely proven, strength never under test, and a player saw it immediately.
+
+The repair generalises: **predict the value, do not merely assert the sign of the change.** Compute
+*both* the correct and the suspected-wrong hypothesis from constants that originate outside the code,
+and require the measurement to land on the right one. Here vanilla's overlay green is 0, so the blend
+is a pure scaling in gamma space and green retention is `0.698` if right and `0.302` if inverted —
+measured `0.6969`, control `0.3057`. A ratio needs no knowledge of the subject's own colours.
+
+The *world* species is the live one here. A colour fix was verified against `--headless` and
+measured byte-identical, concluding it was inert. There are two meshers: `--headless` renders
+through `mesh_simple`, whose `ao` is corner-occlusion only, while `face_shade`'s per-face constants
+live in `mesh_models`, which is what live terrain uses. **The change was verified against the one
+scene in the tree that structurally cannot exercise it.**
+
+**A second instance, and it is worse, because the test is end-to-end and looks unimpeachable.**
+`c4ad474` added four `ServerBound` variants with four fully-written `apply_*` consumers and updated
+only **two** decode arms. Issue #425 later found two of the strandings and missed the other two. One
+of those was `CLIENT_COMMAND`, so `apply_client_command`'s `PERFORM_RESPAWN` was unreachable — and
+per *Live-server hazards* below, **a dead player is held on the death screen and sent no chunks**, so
+any player who died entered a permanent silent chunk blackout with keep-alives still flowing, and the
+one packet that would have recovered it was the discarded one. The other was
+`SET_CREATIVE_MODE_SLOT`: every creative inventory write from a real client, decoded field by field
+and thrown away.
+
+`serve_play.rs::creative_mode_slot_write_lands_in_the_real_inventory` is a genuine end-to-end test
+over a real transport through a full login/join — and it runs against **`FakeProtocol`, which has its
+own decode arms on invented packet ids 50/51**. So it proved dispatch and consumer against the one
+`ServerProtocol` in the tree that structurally *cannot* exercise the production decoder. Nothing about
+the test reads wrong; "end-to-end over a real transport" is exactly what you would ask for.
+
+So the audit question is not "is this test integration-level?" but **"which implementation does this
+test's transport actually resolve to, and is it the one production uses?"** A test double that is
+*complete enough to pass* is the most dangerous kind. `serverbound_wiring.rs` now gates the class
+structurally — every `ServerBound` variant must be constructed in non-test code — and it failed at
+pristine `HEAD` naming exactly `["ClientCommand", "CreativeModeSlotSet"]`.
+
+Two riders. That gate's own first draft was **half-vacuous**: a *comment* mentioning
+`CreativeModeSlotSet` masked one of the two islands, so it now blanks comments, literals and
+`#[cfg(test)]` modules before scanning — and it is lifetime-aware by lookahead rather than by the
+toggle that silently broke three scanners here (see *Re-verify* above). And the stale claim ran the
+**opposite** way from what everyone assumed: all five serverbound issues said "0/N decoded" when the
+real figure was **60/69 decoded and 17/69 connected**. Decode was nearly finished; connectedness was
+the whole gap. Check which axis is actually short before staffing a decode sweep.
+
+Audit questions: *does any server-side counter accumulate past this gate's lifetime?* and *does the
+input actually contain the structure the code under test exists to handle?*
+
+
+**12.44 A test suite that opened a browser on the owner's desktop.**
+
+**A test that performs an OS-level side effect is a defect with a user-visible symptom, and no health
+check in this file can see it — the suite passes.** The owner reported that
+`https://login.live.com/oauth20_remoteconnect.srf` kept opening in their browser unprompted. It was
+**our test suite**: an accounts-screen unit test feeds a `Prompt` fixture, `nav.pump()` treats the
+browser open as an *effect*, and `Command::new("open").spawn()` fires — so to the OS a unit test and
+a player pressing **Add account** are indistinguishable. The fixture URL `https://microsoft.com/link`
+301s to the device-code endpoint in one hop, which is why the symptom named a flow production has not
+used since `c33e325`. It fired once per `cargo test -p lodestone-shell` run, which is constantly.
+
+Two things generalise. **Fork on `#[cfg(test)]` rather than early-returning on `cfg!(test)`**, so the
+interception is *assertable* instead of a silent skip — the gate that catches this asserts the
+`cfg(test)` arm is the compiled one, and fails if the fork is deleted. And **grep for the effect, not
+the feature**: `Command::new("open")` / `xdg-open` / `cmd /C start` tree-wide found a second latent
+instance in `menu/telemetry.rs`, which had escaped only because no test activates those two rows.
+Fixtures should use RFC 2606 `.invalid` hostnames as a second layer. Chasing this cost two passes,
+and the first one's guess — a stale binary — was disprovable from the owner's own bug report that
+morning.
+
+**Measure by location, never by frame average.** Averaging a frame once gave G/R ≈ 1.13 and read as
+"global gamma"; clustering by *location* revealed two spatially distinct populations, which a global
+transform cannot produce. Ask *where*, not *what*.
+
+
+**12.45 Shaders live in `.wgsl` files: the double-quote trap that bit four times.**
+
+- **Shaders live in `.wgsl` files. Never inline one in Rust again.**
+  `crates/lodestone-render/src/shaders/` and `crates/lodestone-shell/src/shaders/`, pulled in with
+  `include_str!` — still compile-time, still a `&'static str`, no runtime asset loading. See
+  [`docs/shaders.md`](./docs/shaders.md). "Just for a quick test" is not an exception:
+  `no_wgsl_is_inlined_in_rust_sources` fails on any `@vertex`/`@fragment` under a crate's `src/`.
+  The rule this replaces was *never put a double quote inside a shader, not even in a comment* —
+  because a `"` terminated the enclosing Rust raw string and rustc then parsed the remaining WGSL
+  and your *prose* as code: `error: prefix 'yet' is unknown`, pointing at English. The errors
+  looked nothing like the cause, and it bit **four times**, twice inside comments that were
+  themselves warning about the trap. Deleting the trap beat remembering it.
+  Two things worth keeping from that history. First, **a `"` in a `.wgsl` comment is now legal and
+  inert** — measured, not assumed: one put into `sky_disc.wgsl`'s comment left the suite green,
+  while the same `"` in *code* position failed with `expected expression, found "\""`. Write shader
+  comments normally. Second, **`cargo check` has never compiled a shader at any feature setting**,
+  so before `wgsl_valid` a WGSL syntax error could reach `main` with all three required checks
+  green — the only thing that read the WGSL was `create_shader_module`, inside an `#[ignore]`d GPU
+  gate. `cargo test --workspace` now runs all 22 shaders through naga's front end in ~0.02s with no
+  adapter.
+
+
+**12.46 A file path in a document is a claim like any other.**
+
+**This citation said `crates/protocol/v770/tests/` until 2026-08-04 and was wrong** — the tables moved
+to `lodestone-data` in the #361 extraction and nothing updated the pointer. `v770/tests/` does contain
+a `block_hardness_seam.rs`, which is a *different* test, so the stale path looked plausible enough to
+survive review. It was caught only when an agent tried to build a `just` recipe from it and found no
+such file. A file path in this document is a claim like any other; verify it before relying on it.
+
+
+**12.47 Never hand-count an entity metadata index.**
+
+**Never hand-count an entity metadata index. Run `EntityDataIndexOracle.java`.** It dumps every
+`EntityDataAccessor` in the game sorted by index, so collisions land on adjacent lines. The first
+time it was run it immediately found **two shipped bugs**: `Sheep.DATA_WOOL_ID` and
+`Horse.DATA_ID_TYPE_VARIANT` were each off by one, both hand counts having missed
+`AgeableMob.AGE_LOCKED`. **Every sheep in the game was rendering its default colour** while the
+decoder reported a clean parse — invisible precisely because the tests encode with the same
+constants they decode with, which is the `decode(encode(x))` trap in its most expensive form, and
+because every sheep pixel gate builds its `EntityDraw` *downstream* of the wire.
+
+Indices are reused across classes and **the guard you need depends on which classes collide**:
+- Index 8 is `LivingEntity.DATA_LIVING_ENTITY_FLAGS` **and** `AbstractArrow.ID_FLAGS`, both `BYTE`,
+  with the arrow's crit bit `0x01` bit-identical to "using item" — living vs **non**-living, so
+  `entity_census::is_living` is the right guard.
+- Index 15 is `Mob`'s flags (aggressive `0x04`) **and** `ArmorStand.DATA_CLIENT_FLAGS`, whose `0x04`
+  is `CLIENT_FLAG_SHOW_ARMS` — and an armour stand *is* a `LivingEntity`, so `is_living` would report
+  **every decorative armour stand with arms as an aggressive mob**. That collision is living vs
+  living and needs `entity_census::is_mob`. `Display` also claims 15 as a `BYTE`.
+
+So: check the oracle dump for the index, then pick the census column that separates the *actual*
+claimants. Assuming the previous collision's guard generalises is how the armour-stand bug would
+have shipped.
+
+
+**12.48 The generated docs index, and the directory it silently omitted.**
+
+This replaced a standing instruction to update the index by hand, and the reason is measured: at 77
+commit-touches in 30 days `docs/README.md` was the **single most contended file in the repo** — more
+than `sim.rs` — because every feature needed one line in it. It caused real damage in both directions:
+a stale staged blob of it would have *deleted* a newer agent's bullet, and `0b95b4e` shipped a broken
+link by capturing another agent's in-flight line. Those 77 touches per month now do not exist. A
+generated index also cannot drift from the docs, which is the failure this repo's whole §2 is about.
+Note that a doc with no usable summary makes the generator **fail loudly naming the file**, rather
+than emitting a blank entry.
+
+**But the drift gate proves consistency, not coverage — and it silently omitted a whole directory.**
+The generator scanned `docs/`, `docs/roadmap/` and `docs/research/`, and **not `docs/plans/`**. Six
+plan documents landed invisible to `docs/README.md`, each one written to satisfy the H1 +
+`## What it is` contract that only matters *because* the generator reads it. Nothing failed:
+`docs_index_matches_committed` compares the generator against the committed index, and both agreed
+the directory did not exist. Fixed in `5bf792c`, but the general shape is worth keeping — **a gate
+that compares two things you control cannot tell you that a third thing exists.** Ask of any
+drift/parity gate: what is *in scope* for it, and how would I find out if something fell outside?
+This is `decode(encode(x)) == x` wearing different clothes.
+
+Two operational notes from the same episode. `read_md_dir_sorted` **errors on a missing directory**,
+so deleting `docs/plans/` breaks the generator rather than degrading — same as `roadmap`/`research`,
+so it is consistent, not a new trap, but do not create a fourth scanned directory lazily. And a
+regenerated `docs/README.md` left sitting in the working tree **was swept into an unrelated agent's
+pathspec commit** within minutes, briefly reddening `main` because the index moved without the
+generator. If you regenerate, commit the generator change and the index **together and immediately**;
+the window is measured in minutes, not hours.
+
 ## 13. Prior art, and the one risk that could sink this
 
 Four known strategies, and where Lodestone sits:
