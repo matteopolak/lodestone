@@ -44,6 +44,11 @@ lodestone-worldgen = { path = "../lodestone-worldgen" }
 # this crate's benches need — see the matching note in
 # `lodestone-worldgen/Cargo.toml`. Dev-only.
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+# Issue #151's resident-set growth over a synthetic session. In-process RSS
+# sampling: the same OS counter `/usr/bin/time -l` reports, but sampled per churn
+# cycle inside one run rather than once per process, and with no output parsing.
+# Already in the lockfile via `lodestone-shell`. Dev-only.
+memory-stats = "1"
 
 [[bench]]
 name = "chunk_load"
@@ -63,4 +68,8 @@ harness = false
 
 [[bench]]
 name = "memory_footprint"
+harness = false
+
+[[bench]]
+name = "session_rss"
 harness = false
