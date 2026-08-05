@@ -255,12 +255,33 @@ pub fn row_of_action(action: InputAction) -> Option<usize> {
         .position(|r| matches!(r, Row::Action(a) if *a == action))
 }
 
-/// The rows visible with `first` at the top of the window.
+/// This screen's list, as the generic [`super::widget::ListSpec`] the scrollbar
+/// draw and the mouse wheel both go through (issue #445).
+///
+/// `top` is the **un-inset** [`options::SUB_HEADER_HEIGHT`], not
+/// `SUB_HEADER_HEIGHT + LIST_TOP_INSET`, because
+/// [`super::widget::ScrollList`] adds [`super::widget::LIST_CONTENT_PADDING`]
+/// itself as its `first_entry_y` and the two constants are the same 2 px. Adding
+/// the inset here as well would double it and put every row 2 px low — the same
+/// note `stats::list_spec` carries.
+///
+/// [`ROW_WIDTH`] is the row band, so the bar lands at
+/// [`scrollbar_x`]'s own answer: `ListSpec::row_right` is
+/// `floor(w/2) - floor(340/2) + 340`, which is this module's [`row_right`],
+/// and `ScrollList::scrollbar_x` then adds the same `6 + 2` [`SCROLLBAR_GAP`]
+/// does. Asserted in this module's tests rather than left to agree by eye —
+/// the reset and bind buttons are positioned off `scrollbar_x`, so a bar that
+/// drifted would drag them with it.
 #[must_use]
-pub fn visible_rows(first: usize) -> std::ops::Range<usize> {
-    let len = all_rows().len();
-    let end = (first + visible_rows_len()).min(len);
-    first.min(len)..end
+pub fn list_spec(scroll: f32) -> super::widget::ListSpec {
+    super::widget::ListSpec::uniform(
+        ROW_H,
+        options::SUB_HEADER_HEIGHT,
+        options::FOOTER_HEIGHT,
+        all_rows().len(),
+        ROW_WIDTH,
+    )
+    .at(scroll)
 }
 
 /// One focusable widget on this screen: a bind button, a per-action reset, the
@@ -328,30 +349,38 @@ impl KeyControl {
 
 /// Where one [`KeyControl`] sits — [`super::render::Origin::KeyBinds`]'s whole
 /// body. Unlike [`super::options::Placement`], every list-content variant
-/// here shares the same `{row, first}` shape because every row is the same
+/// here shares the same `{row, scroll}` shape because every row is the same
 /// height; only the x differs per widget, and that is a `match` in
 /// [`placement_anchor`] rather than a fourth field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// **`scroll` is pixels, not a row index (issue #445).** It was `first: u16`,
+/// the index of the row at the top of the window, which is the snap-to-row
+/// behaviour pixel scrolling exists to remove: a row-index offset is always a
+/// multiple of [`ROW_H`], so the list could only ever jump a whole 20 px at a
+/// time and a half-scrolled row was not expressible. `Eq` had to go with it —
+/// `f32` — matching [`super::options::SettingsNav`], which dropped `Eq` for the
+/// same reason and records it.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum KeyPlacement {
     /// The bind button, at absolute row `row` (an index into [`all_rows`]),
-    /// with `first` scrolled to the top of the window.
-    Bind { row: u16, first: u16 },
+    /// with the list scrolled `scroll` pixels down.
+    Bind { row: u16, scroll: f32 },
     /// The per-row reset button, same row.
-    Reset { row: u16, first: u16 },
+    Reset { row: u16, scroll: f32 },
     /// The action's name label (not a [`KeyControl`] — a
     /// [`super::render::MenuLabel`], like an `OptionsList` header).
-    Name { row: u16, first: u16 },
+    Name { row: u16, scroll: f32 },
     /// The category header label, also a [`super::render::MenuLabel`].
-    Category { row: u16, first: u16 },
+    Category { row: u16, scroll: f32 },
 }
 
 impl KeyPlacement {
-    fn row_first(self) -> (u16, u16) {
+    fn row_scroll(self) -> (u16, f32) {
         match self {
-            KeyPlacement::Bind { row, first }
-            | KeyPlacement::Reset { row, first }
-            | KeyPlacement::Name { row, first }
-            | KeyPlacement::Category { row, first } => (row, first),
+            KeyPlacement::Bind { row, scroll }
+            | KeyPlacement::Reset { row, scroll }
+            | KeyPlacement::Name { row, scroll }
+            | KeyPlacement::Category { row, scroll } => (row, scroll),
         }
     }
 }
@@ -361,15 +390,17 @@ impl KeyPlacement {
 /// [`super::options::placement_anchor`] for the sibling this mirrors.
 #[must_use]
 pub fn placement_anchor(placement: KeyPlacement, width: f32, _height: f32) -> (f32, f32) {
-    let (row, first) = placement.row_first();
-    // A row scrolled above the window (or a stale placement from a page that
-    // no longer has this many rows) resolves off-canvas rather than
-    // underflowing — the same anti-island sentinel
-    // `super::options::placement_anchor` uses for `Placement::Root`.
-    let Some(index) = row.checked_sub(first) else {
-        return (-1000.0, -1000.0);
-    };
-    let row_y = options::SUB_HEADER_HEIGHT + options::LIST_TOP_INSET + f32::from(index) * ROW_H;
+    let (row, scroll) = placement.row_scroll();
+    // Pixel scrolling (issue #445), so a row's y is its *absolute* offset in the
+    // list minus the scroll — no `checked_sub` sentinel any more. That guard
+    // existed because a row above the window underflowed a `u16` subtraction;
+    // here a row scrolled off the top simply resolves to a y above the band and
+    // `render::draw` clips it, which is the same answer without a magic
+    // coordinate. `scroll.floor()` is vanilla's `(int)scrollAmount` cast — the
+    // rows land on whole pixels while the offset itself stays fractional, which
+    // is what lets a trackpad's sub-notch delta accumulate.
+    let row_y = options::SUB_HEADER_HEIGHT + options::LIST_TOP_INSET + f32::from(row) * ROW_H
+        - scroll.floor();
     match placement {
         KeyPlacement::Bind { .. } => (bind_button_x(width), row_y),
         KeyPlacement::Reset { .. } => (reset_button_x(width), row_y),
@@ -406,20 +437,33 @@ pub fn all_controls() -> Vec<KeyControl> {
     out
 }
 
-/// Every control on screen, scrolled so row `first` is at the top of the
-/// window, then the footer. Mirrors [`super::options::controls`].
+/// **Every** control on screen at scroll offset `scroll`, then the footer.
+/// Mirrors [`super::options::controls`].
+///
+/// Emits every row rather than a `visible_rows(first)` window (issue #445). The
+/// window slice was the row-index model's other half: it had to skip any row
+/// that did not *wholly* fit, because a partially-visible row drawn in full
+/// would spill over the footer. Clipping to the band is now
+/// [`super::render::draw`]'s job — it wraps each row in the band's own clip
+/// rect — so a half-scrolled row draws its visible half instead of vanishing,
+/// which is the whole point of the conversion.
+///
+/// The consequence for callers: a row's index in this vector is no longer a
+/// *visible* position, it is an absolute one. That is what
+/// [`KeyBindsNav::selected_row`] and [`KeyBindsNav::hover_row`] key off, and
+/// they are unchanged because they always matched on the `control` rather than
+/// on the index.
 #[must_use]
-pub fn controls(first: usize) -> Vec<KeyControlView> {
+pub fn controls(scroll: f32) -> Vec<KeyControlView> {
     let mut out = Vec::new();
-    let rows = all_rows();
-    for row in visible_rows(first) {
-        if let Row::Action(action) = rows[row] {
+    for (row, entry) in all_rows().iter().enumerate() {
+        if let Row::Action(action) = *entry {
             out.push(KeyControlView {
                 control: KeyControl::Bind(action),
                 slot: Slot {
                     origin: Origin::KeyBinds(KeyPlacement::Bind {
                         row: row as u16,
-                        first: first as u16,
+                        scroll,
                     }),
                     dx: 0.0,
                     dy: 0.0,
@@ -432,7 +476,7 @@ pub fn controls(first: usize) -> Vec<KeyControlView> {
                 slot: Slot {
                     origin: Origin::KeyBinds(KeyPlacement::Reset {
                         row: row as u16,
-                        first: first as u16,
+                        scroll,
                     }),
                     dx: 0.0,
                     dy: 0.0,
@@ -489,10 +533,12 @@ pub enum KeyBindsOutcome {
 
 /// This screen's own cursor: which control, how far scrolled, and which
 /// action (if any) is mid-capture.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct KeyBindsNav {
     cursor: usize,
-    first: usize,
+    /// Scroll offset in **pixels** (issue #445), not a row index. `Eq` went with
+    /// the change — see [`KeyPlacement`]'s doc.
+    scroll: f32,
     awaiting: Option<InputAction>,
 }
 
@@ -510,9 +556,28 @@ impl KeyBindsNav {
         self.cursor
     }
 
+    /// The scroll offset, in pixels.
     #[must_use]
-    pub fn first(&self) -> usize {
-        self.first
+    pub fn scroll(&self) -> f32 {
+        self.scroll
+    }
+
+    /// The live [`super::widget::ScrollList`] at this canvas height, or `None`
+    /// when there is nothing to scroll.
+    #[must_use]
+    fn model(&self, canvas_height: f32) -> Option<super::widget::ScrollList> {
+        list_spec(self.scroll).model(canvas_height)
+    }
+
+    /// One mouse-wheel notch, through the primitive. Positive scrolls **up**;
+    /// the negation lives in [`super::widget::ScrollList::mouse_scrolled`] and
+    /// nowhere else, so there is exactly one place the sign can be wrong.
+    pub fn scroll_by(&mut self, notches: f32, canvas_height: f32) {
+        let Some(mut list) = self.model(canvas_height) else {
+            return;
+        };
+        list.mouse_scrolled(notches);
+        self.scroll = list.scroll();
     }
 
     /// The action a bind button is currently capturing input for, if any.
@@ -527,7 +592,7 @@ impl KeyBindsNav {
 
     #[must_use]
     pub fn visible(&self) -> Vec<KeyControlView> {
-        controls(self.first)
+        controls(self.scroll)
     }
 
     /// The cursor's position within [`Self::visible`], for the highlight.
@@ -555,6 +620,20 @@ impl KeyBindsNav {
         self.scroll_to_cursor();
     }
 
+    /// Bring the cursor's row into the band — vanilla's
+    /// `AbstractSelectionList.ensureVisible`, through
+    /// [`super::widget::ScrollList::scroll_to_entry`] (issue #445).
+    ///
+    /// This used to be a hand-rolled `while !visible_rows(self.first).contains(
+    /// &row) { self.first += 1 }` walk, which is where the snap-to-row behaviour
+    /// came from: every step moved a whole [`ROW_H`]. `scroll_to_entry` moves the
+    /// **minimum** number of pixels instead, so a row one pixel below the band
+    /// scrolls one pixel.
+    ///
+    /// [`crate::config::MIN_SCALED_HEIGHT`] rather than the live canvas, for the
+    /// reason `stats::step` records: a keypress has no canvas in hand, and the
+    /// smallest supported canvas is the conservative choice — it can only
+    /// over-scroll into a region a larger canvas also shows.
     fn scroll_to_cursor(&mut self) {
         let all = all_controls();
         let Some(&control) = all.get(self.cursor) else {
@@ -568,23 +647,17 @@ impl KeyBindsNav {
         let Some(row) = row_of_action(action) else {
             return;
         };
-        let rows = all_rows();
-        if row < self.first {
-            self.first = row;
+        let Some(mut list) = self.model(crate::config::MIN_SCALED_HEIGHT as f32) else {
             return;
-        }
-        while !visible_rows(self.first).contains(&row) {
-            if self.first + 1 >= rows.len() {
-                break;
-            }
-            self.first += 1;
-        }
+        };
+        list.scroll_to_entry(row);
+        self.scroll = list.scroll();
     }
 
     /// Puts the cursor on the control at visible row `row` — the mouse's
     /// half. Mirrors [`super::options::SettingsNav::hover_row`].
     pub fn hover_row(&mut self, row: usize) {
-        let visible = controls(self.first);
+        let visible = controls(self.scroll);
         let Some(view) = visible.get(row).copied() else {
             return;
         };
@@ -701,14 +774,23 @@ pub fn frame(nav: &KeyBindsNav, keybinds: &Keybinds) -> MenuFrame<'static> {
         colour: super::widget::ACTIVE_LABEL,
         scale: 1.0,
     }];
-    let all_rows_list = all_rows();
-    for row in visible_rows(nav.first()) {
-        match all_rows_list[row] {
-            Row::Category(category) => labels.push(MenuLabel {
+    // **`list_labels`, not `labels` (issue #445).** These are the only labels on
+    // this screen that scroll, and `render::draw` clips that vector to the band
+    // `frame.list` declares. Putting them in `labels` — where the title, which
+    // does *not* scroll, correctly lives — would draw a scrolled-away category
+    // header over the footer, because a free text label has nowhere else to carry
+    // a clip rect. `MenuRow`s already get one from draw.rs's per-row `with_clip`,
+    // which is why the bind/reset buttons above need nothing here. Same split
+    // `stats::frame` landed.
+    let mut list_labels = Vec::new();
+    for (row, entry) in all_rows().iter().enumerate() {
+        let scroll = nav.scroll();
+        match *entry {
+            Row::Category(category) => list_labels.push(MenuLabel {
                 text: category_caption(category).to_string(),
                 origin: Origin::KeyBinds(KeyPlacement::Category {
                     row: row as u16,
-                    first: nav.first() as u16,
+                    scroll,
                 }),
                 dx: 0.0,
                 dy: 0.0,
@@ -716,11 +798,11 @@ pub fn frame(nav: &KeyBindsNav, keybinds: &Keybinds) -> MenuFrame<'static> {
                 colour: super::widget::ACTIVE_LABEL,
                 scale: 1.0,
             }),
-            Row::Action(action) => labels.push(MenuLabel {
+            Row::Action(action) => list_labels.push(MenuLabel {
                 text: action_caption(action).to_string(),
                 origin: Origin::KeyBinds(KeyPlacement::Name {
                     row: row as u16,
-                    first: nav.first() as u16,
+                    scroll,
                 }),
                 dx: 0.0,
                 dy: 0.0,
@@ -738,6 +820,13 @@ pub fn frame(nav: &KeyBindsNav, keybinds: &Keybinds) -> MenuFrame<'static> {
         selected: selected.unwrap_or(usize::MAX),
         vanilla: true,
         labels,
+        list_labels,
+        // **`list` is deliberately not set here.** `render::dispatch` stamps
+        // `f.list = nav.active_list(ui)` on every frame it returns, so the
+        // scrollbar the draw paints and the offset the wheel clamps are two
+        // readers of *one* declaration. Setting it here as well would be a second
+        // declaration that agrees today — see `dispatch`'s own comment, and
+        // `stats::frame`, which likewise leaves it alone.
         ..Default::default()
     }
 }
@@ -925,9 +1014,9 @@ mod tests {
         for _ in 0..total * 2 {
             assert!(
                 nav.selected_row().is_some(),
-                "cursor {} off-window at first={}",
+                "cursor {} off-window at scroll={}",
                 nav.cursor(),
-                nav.first()
+                nav.scroll()
             );
             seen_controls.insert(nav.cursor());
             nav.step(true);
@@ -943,7 +1032,7 @@ mod tests {
         // Scroll Forward into view (it is the very first action, so first=0
         // already shows it, but drive it through the real API rather than
         // assuming that).
-        nav.first = 0;
+        nav.scroll = 0.0;
         let visible = nav.visible();
         let row = visible
             .iter()
@@ -1073,50 +1162,237 @@ mod tests {
         );
     }
 
+    /// A row scrolled above the band resolves **above** the band rather than at a
+    /// wrapped `u16`, and `render::draw` clips it.
+    ///
+    /// This replaces `placement_off_the_window_is_the_anti_island_sentinel`, which
+    /// asserted the old `(-1000, -1000)` sentinel. That sentinel existed because
+    /// `row.checked_sub(first)` underflowed for a row above the window; with a
+    /// pixel offset there is nothing to underflow — the y is simply negative
+    /// relative to the band, which is a real coordinate the clip handles, not a
+    /// magic one.
     #[test]
-    fn placement_off_the_window_is_the_anti_island_sentinel() {
-        // A row scrolled above `first` must not underflow into a huge y —
-        // the same guard `super::options::placement_anchor` has for
-        // `Placement::Root`.
-        let (x, y) = placement_anchor(KeyPlacement::Bind { row: 0, first: 5 }, 480.0, 320.0);
-        assert!(x < 0.0 && y < 0.0, "off-canvas sentinel, not a wrapped u16");
+    fn a_row_scrolled_above_the_band_resolves_above_it_not_at_a_sentinel() {
+        let band_top = options::SUB_HEADER_HEIGHT + options::LIST_TOP_INSET;
+        // Row 0 with the list scrolled five rows down.
+        let (_, y) = placement_anchor(
+            KeyPlacement::Bind {
+                row: 0,
+                scroll: 5.0 * ROW_H,
+            },
+            480.0,
+            320.0,
+        );
+        assert_eq!(
+            y,
+            band_top - 5.0 * ROW_H,
+            "the y must be the row's absolute offset minus the scroll — five rows \
+             above the band's top, exactly"
+        );
+        // And the row that *is* at the top of the band lands on the band's top.
+        let (_, at_top) = placement_anchor(
+            KeyPlacement::Bind {
+                row: 5,
+                scroll: 5.0 * ROW_H,
+            },
+            480.0,
+            320.0,
+        );
+        assert_eq!(at_top, band_top);
     }
 
+    /// Every row inside the band resolves inside the band, at every scroll offset
+    /// the list can reach — the horizontal half unchanged, the vertical half now
+    /// bounded by the band rather than by the canvas.
+    ///
+    /// The old version asserted every placement fits *on the canvas*, which pixel
+    /// scrolling makes false on purpose: a partially-scrolled row hangs over the
+    /// band edge and is clipped rather than skipped. Asserting the band is the
+    /// honest form of the same property.
     #[test]
-    fn every_visible_placement_resolves_on_screen() {
-        // `Slot::resolve` dispatches on whichever `Origin` the row actually
-        // carries — `Origin::KeyBinds` for the scrolled content,
-        // `Origin::Settings` for the footer (see `footer_controls`) — so one
-        // call covers both without the test needing to know which is which.
-        for first in 0..all_rows().len() {
-            for view in controls(first) {
-                let (x, y, w, h) = view.slot.resolve(480.0, 320.0);
+    fn every_row_inside_the_band_resolves_inside_the_band() {
+        const W: f32 = 480.0;
+        const H: f32 = 320.0;
+        let spec = list_spec(0.0);
+        let list = spec.model(H).expect("this canvas has a band");
+        let band_top = list.top();
+        let band_bottom = list.top() + list.height();
+        let mut checked = 0usize;
+        for step in 0..=20 {
+            let scroll = (step as f32) * 17.0; // deliberately not a multiple of ROW_H
+            for view in controls(scroll) {
+                let (x, y, w, h) = view.slot.resolve(W, H);
+                // The footer rows use `Origin::Settings` and do not scroll, so
+                // they are outside this property; skip them by position.
+                if y > band_bottom {
+                    continue;
+                }
+                if y < band_top {
+                    continue;
+                }
+                checked += 1;
                 assert!(
-                    x >= 0.0 && y >= 0.0 && x + w <= 480.0 && y + h <= 320.0,
-                    "first={first} {:?} at ({x}, {y}) size {w}x{h}",
+                    x >= 0.0 && x + w <= W,
+                    "scroll={scroll} {:?} at x={x} w={w} runs off a {W}px canvas",
+                    view.control
+                );
+                assert!(
+                    y + h <= band_bottom + h,
+                    "scroll={scroll} {:?} at y={y} h={h} is past the band bottom \
+                     {band_bottom} by more than one row",
                     view.control
                 );
             }
         }
+        assert!(
+            checked > 100,
+            "premise: this must actually have examined rows inside the band \
+             ({checked} seen) — a filter that skipped everything would pass \
+             vacuously"
+        );
     }
 
     #[test]
-    fn hover_and_the_cursor_agree_on_every_visible_row() {
-        for first in 0..all_rows().len() {
-            let mut nav = KeyBindsNav {
-                first,
-                ..KeyBindsNav::default()
-            };
-            let len = nav.visible().len();
-            for row in 0..len {
-                nav.first = first;
-                nav.hover_row(row);
-                assert_eq!(
-                    nav.selected_row(),
-                    Some(row),
-                    "first={first}: hovering row {row} must select row {row}"
-                );
+    fn hover_and_the_cursor_agree_on_every_row() {
+        // Absolute row indices now (see `controls`'s doc), so one pass over the
+        // whole list covers what the old `first`-windowed double loop did.
+        let mut nav = KeyBindsNav::default();
+        let len = nav.visible().len();
+        assert!(len > 0, "premise: there are controls to hover");
+        for row in 0..len {
+            nav.hover_row(row);
+            assert_eq!(
+                nav.selected_row(),
+                Some(row),
+                "hovering row {row} must select row {row}"
+            );
+        }
+    }
+
+    /// **One notch is `floor(ROW_H / 2)` = `floor(20 / 2)` = 10 px** (issue #445),
+    /// and the offset must land somewhere that is **not** a row top.
+    ///
+    /// The second half is the load-bearing one. "It scrolled" is satisfied by the
+    /// row-index implementation this replaced — that is the *magnitude* species of
+    /// vacuous test — so the two competing hypotheses are named and the
+    /// measurement is required to land on one:
+    ///
+    /// | hypothesis | one notch | three notches |
+    /// |---|---|---|
+    /// | row index (what this screen did) | 20 | 60 |
+    /// | page (`LIST_WINDOW_PX`) | 174 | 522 (clamped) |
+    /// | **pixels, `scrollRate` = `floor(row_h / 2)`** | **10** | **30** |
+    ///
+    /// 10 and 30 are both non-multiples of `ROW_H`, which no row-index
+    /// implementation can produce at all, and that is the cross-check.
+    #[test]
+    fn one_wheel_notch_is_half_a_row_and_lands_off_every_row_top() {
+        const CANVAS_H: f32 = 240.0;
+        let mut nav = KeyBindsNav::default();
+        assert_eq!(nav.scroll(), 0.0, "precondition: starts at the top");
+        // Premise, executed: this list is long enough to scroll at this canvas.
+        assert!(
+            list_spec(0.0)
+                .model(CANVAS_H)
+                .is_some_and(|l| l.scrollable()),
+            "premise: the key binds list must actually scroll at {CANVAS_H} px, or \
+             every assertion below is vacuous"
+        );
+
+        // Negative notches scroll *down* — the sign lives in `mouse_scrolled`.
+        nav.scroll_by(-1.0, CANVAS_H);
+        assert_eq!(
+            nav.scroll(),
+            (ROW_H / 2.0).floor(),
+            "one notch must be floor(ROW_H / 2) = 10 px, not the row-index \
+             answer ({ROW_H}) and not a page ({LIST_WINDOW_PX})"
+        );
+        assert_ne!(
+            nav.scroll(),
+            ROW_H,
+            "control: the row-index hypothesis is 20, and it must be excluded"
+        );
+
+        nav.scroll_by(-2.0, CANVAS_H);
+        assert_eq!(nav.scroll(), 3.0 * (ROW_H / 2.0).floor(), "three notches: 30");
+
+        // The cross-check the brief calls for: three notches must land somewhere
+        // that is **not** a row top. A row-index implementation reports an offset
+        // that is always a multiple of ROW_H, so this single assertion excludes
+        // the whole family rather than one member of it.
+        assert_ne!(
+            nav.scroll() % ROW_H,
+            0.0,
+            "the offset {} must coincide with no row top — a multiple of {ROW_H} \
+             is exactly what snap-to-row produces",
+            nav.scroll()
+        );
+    }
+
+    /// The keyboard half, and the same cross-check: `scroll_to_cursor` must be
+    /// able to produce an offset that is not a row top.
+    ///
+    /// The old implementation walked `self.first += 1` until the row was in the
+    /// window, so its answer was *always* a multiple of `ROW_H`.
+    /// [`super::super::widget::ScrollList::scroll_to_entry`] moves the minimum
+    /// number of pixels instead, which lands on `row_bottom - band_height` — a
+    /// number derived from the band, not from the row pitch.
+    #[test]
+    fn stepping_to_a_row_below_the_band_scrolls_by_pixels_not_whole_rows() {
+        let mut nav = KeyBindsNav::default();
+        // Walk the cursor forward until something actually scrolls.
+        let mut moved = false;
+        for _ in 0..all_controls().len() {
+            nav.step(true);
+            if nav.scroll() > 0.0 {
+                moved = true;
+                break;
             }
+        }
+        assert!(
+            moved,
+            "premise: stepping the cursor down the list must eventually scroll \
+             it, or this measures nothing"
+        );
+        assert_ne!(
+            nav.scroll() % ROW_H,
+            0.0,
+            "keyboard scroll-into-view landed on {}, a multiple of {ROW_H} — that \
+             is the snap-to-row answer, and `scroll_to_entry` should have moved \
+             the minimum pixels instead",
+            nav.scroll()
+        );
+        // And the cursor's row really is visible now, so the offset is not just
+        // an arbitrary non-multiple.
+        assert!(
+            nav.selected_row().is_some(),
+            "and the cursor's control must be in the emitted set"
+        );
+    }
+
+    /// The scrollbar the draw paints must hang off the same x this module's own
+    /// [`scrollbar_x`] answers — the reset and bind buttons are positioned from
+    /// it, so a bar that drifted would take them with it.
+    ///
+    /// Two expressions from two modules required to agree, rather than one
+    /// asserted against itself: [`list_spec`]'s [`ROW_WIDTH`] band goes through
+    /// `ListSpec::row_right` and `ScrollList::scrollbar_x`, while [`scrollbar_x`]
+    /// here is this screen's transcription of `AbstractSelectionList:289-291`.
+    #[test]
+    fn the_shared_primitive_puts_the_bar_where_this_screen_already_drew_it() {
+        for w in [640.0_f32, 854.0, 1280.0] {
+            let spec = list_spec(0.0);
+            let list = spec.model(240.0).expect("a band at 240 px");
+            assert_eq!(
+                spec.row_right(w),
+                row_right(w),
+                "the primitive's row_right must equal this screen's at {w} px"
+            );
+            assert_eq!(
+                list.scrollbar_x(spec.row_right(w)),
+                scrollbar_x(w),
+                "and the bar must land on this screen's own scrollbar_x at {w} px"
+            );
         }
     }
 }
