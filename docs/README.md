@@ -562,6 +562,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `MobSim::spawn_species` consults it with one loop, so no per-species behaviour data
   lives in `lodestone-server` any more, and five parallel roster units can each own
   one file without touching a shared one.
+- [Mob neutral roster: the grudge-holding species](./mob-neutral-roster.md) — The
+  `neutral` family of the per-species goal roster — enderman, zombified piglin, bee
+  and wolf — plus the record of why the four mechanisms issue
+  [#233](https://github.com/matteopolak/lodestone/issues/233) names in its title are
+  **not** implemented as goals. The tables are complete transcriptions of the jar; the
+  mechanisms are blocked on five named primitives that do not exist on
+  `MobController`, and this doc is the list of what has to be added and where.
 - [Mob perception: what a goal is allowed to know](./mob-perception.md) — The seam
   that lets a goal ask questions about the world — *am I in water, who hurt me,
   where is the nearest player, is there a threat nearby* — and the server-side feed
