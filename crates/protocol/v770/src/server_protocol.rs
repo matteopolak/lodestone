@@ -68,7 +68,8 @@ use crate::packets::configuration::FinishConfiguration;
 use crate::packets::entity::{pack_degrees, read_lp_vec3, write_lp_vec3};
 use crate::packets::game::{
     AcceptTeleportation, Attack, BlockEntityTagQuery, ChangeDifficultyClientbound,
-    ChangeDifficultyServerbound, ChangeGameMode, ChunkBatchReceived, ClientCommand, ClientTickEnd,
+    ChangeDifficultyServerbound, ChangeGameMode, ChatCommand, ChunkBatchReceived, ClientCommand,
+    ClientTickEnd,
     ConfigurationAcknowledged, ContainerButtonClick, ContainerSlotStateChanged, EditBook,
     EntityTagQuery, GameLogin, GameRuleEntry, GameRuleValues, GlobalPos, JigsawGenerate,
     LockDifficulty, MOVE_FLAG_ON_GROUND, MovePlayerPos, MovePlayerPosRot, MovePlayerRot,
@@ -2015,6 +2016,30 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
+            // Issues #48/#464. `ServerboundChatCommandPacket` is a single
+            // string carrying the command **without** its leading `/`; the
+            // client-side encoder in this same crate
+            // (`adapter.rs`'s `ClientAction::SendCommand` arm) writes exactly
+            // this struct to exactly this id, so decode and encode are pinned
+            // to one another rather than to a hand-copied layout.
+            //
+            // `decode_full` (not a lenient partial read) because a trailing
+            // byte here means we misread the packet, and a misread command is
+            // worse than an ignored one: it would run *something*.
+            //
+            // `CHAT_COMMAND_SIGNED` is deliberately **not** decoded and falls
+            // to the wildcard. Its body carries a timestamp, salt, per-argument
+            // signatures and a last-seen acknowledgement block, none of which
+            // this crate has a session key to verify — and a client only sends
+            // it for arguments the server declared signable in a `COMMANDS`
+            // tree we do not yet send, so in practice every command from a real
+            // client arrives here unsigned.
+            State::Play if packet_id == play::serverbound::CHAT_COMMAND => {
+                match decode_full::<ChatCommand>(payload) {
+                    Some(p) => ServerBound::ChatCommand { command: p.command },
+                    None => ServerBound::Ignored,
+                }
+            }
             State::Play if packet_id == play::serverbound::CHUNK_BATCH_RECEIVED => {
                 match decode_full::<ChunkBatchReceived>(payload) {
                     Some(p) => ServerBound::ChunkBatchAcknowledged {
@@ -2255,6 +2280,18 @@ impl ServerProtocol for V770ServerProtocol {
             packet_id: play::clientbound::SYSTEM_CHAT,
             payload: encode_system_chat("Welcome to Lodestone", false),
         }]
+    }
+
+    /// `overlay: false` — command feedback belongs in the chat history, not
+    /// the action bar. Vanilla's own `CommandSourceStack::sendSuccess` routes
+    /// to `ServerPlayer::sendSystemMessage(component, false)` for the same
+    /// reason: an action-bar line is transient and a player who mistyped a
+    /// command needs to be able to scroll back and read why it failed.
+    fn encode_system_chat(&self, message: &str) -> ServerDirective {
+        ServerDirective::Send {
+            packet_id: play::clientbound::SYSTEM_CHAT,
+            payload: encode_system_chat(message, false),
+        }
     }
 
     fn encode_add_entity(&self, entity: &EntitySnapshot) -> ServerDirective {

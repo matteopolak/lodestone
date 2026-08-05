@@ -103,6 +103,7 @@ mod brewing;
 mod chunk;
 pub mod chunk_nbt;
 mod chunk_store;
+mod command;
 mod composter;
 pub mod ecs;
 mod fall;
@@ -123,6 +124,11 @@ mod redstone_diode;
 mod redstone_observer;
 mod redstone_torch;
 mod redstone_wire;
+/// World persistence (issue #437). Native only: a browser singleplayer world
+/// has no filesystem, and `lodestone-anvil` is a `std::fs` crate — see this
+/// crate's `Cargo.toml` for the matching target-gated dependency.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod region_source;
 mod scheduled_tick;
 mod server;
 mod spawn;
@@ -136,6 +142,9 @@ pub use brewing::{
     mix_bottle,
 };
 pub use chunk::{ChunkColumn, ChunkSource, OverworldChunkSource, WorldgenChunkSource};
+pub use command::{
+    CommandCaller, CommandDispatch, CommandResponse, CommandSink, UNKNOWN_COMMAND,
+};
 pub use composter::{
     Composter, InsertOutcome as ComposterInsertOutcome, MAX_FILL_LEVEL as COMPOSTER_MAX_FILL_LEVEL,
     READY_DELAY_TICKS as COMPOSTER_READY_DELAY_TICKS, READY_LEVEL as COMPOSTER_READY_LEVEL,
@@ -175,7 +184,10 @@ pub use random_tick::{
     next_random_tick_pos,
 };
 pub use scheduled_tick::{ScheduledTick, ScheduledTickQueue, TickPriority};
-pub use server::{EntitySource, NoEntities, ServeSummary, ServerError, serve_connection};
+pub use server::{
+    EntitySource, NoEntities, ServeSummary, ServerError, serve_connection,
+    serve_connection_with_commands,
+};
 pub use tick::{BlockTickFeed, ExplosionFeed, TickClock, TickStats};
 pub use vitals::{DROWN_DAMAGE, EYE_HEIGHT, MAX_AIR_SUPPLY, MAX_HEALTH, PlayerVitals, VitalsTick};
 pub use worldgen_data::{overworld_chunk_source, overworld_generator};

@@ -21,6 +21,7 @@ use lodestone_model::{
 use lodestone_net::{Connection, NetError, Transport};
 
 use crate::block_entities::{BlockEntity, BlockEntityHandle, block_entity_for_item};
+use crate::command::{CommandCaller, CommandDispatch, CommandSession};
 use crate::chunk::{
     AIR, ChunkColumn, ChunkSource, STONE, generate_columns_offloaded, generate_columns_parallel,
     is_air_or_fluid, is_water,
@@ -947,6 +948,7 @@ where
         mobs,
         &BlockTickFeed::default(),
         &ExplosionFeed::default(),
+        &CommandDispatch::none(),
     )
     .await
 }
@@ -987,6 +989,7 @@ where
         mobs,
         block_ticks,
         explosions,
+        &CommandDispatch::none(),
     )
     .await
 }
@@ -1031,6 +1034,7 @@ where
         mobs,
         block_ticks,
         &ExplosionFeed::default(),
+        &CommandDispatch::none(),
     )
     .await
 }
@@ -1084,6 +1088,60 @@ where
         mobs,
         block_ticks,
         explosions,
+        &CommandDispatch::none(),
+    )
+    .await
+}
+
+/// [`serve_connection`], plus a host-installed command dispatcher (issues #48,
+/// #464).
+///
+/// This is the **only** entry point that can make a `/command` from a real
+/// player do anything. Every other one above passes
+/// [`CommandDispatch::none()`], under which a `chat_command` frame decodes,
+/// reaches this crate, and is answered with
+/// [`UNKNOWN_COMMAND`](crate::UNKNOWN_COMMAND) — the fail-closed direction.
+///
+/// A new entry point rather than a changed signature, for the same reason
+/// [`serve_connection_with_block_ticks`] and
+/// [`serve_connection_with_mob_events`] are: `crates/protocol/v770/tests/*`
+/// call the older ones directly and are off-limits under this issue's
+/// file-ownership split, and every added parameter here would break all of
+/// them.
+///
+/// # Errors
+///
+/// As [`serve_connection`].
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_connection_with_commands<T, P, S, E>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &S,
+    entities: &E,
+    view_radius: i32,
+    block_entities: &BlockEntityHandle,
+    mobs: &MobHandle,
+    block_ticks: &BlockTickFeed,
+    explosions: &ExplosionFeed,
+    commands: &CommandDispatch,
+) -> Result<ServeSummary, ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource + 'static,
+    E: EntitySource,
+{
+    serve_connection_inner(
+        conn,
+        proto,
+        SourceRef::Borrowed(source),
+        entities,
+        view_radius,
+        block_entities,
+        mobs,
+        block_ticks,
+        explosions,
+        commands,
     )
     .await
 }
@@ -1110,6 +1168,10 @@ async fn serve_connection_inner<T, P, S, E>(
     mobs: &MobHandle,
     block_ticks: &BlockTickFeed,
     explosions: &ExplosionFeed,
+    // Issues #48/#464. `CommandDispatch::none()` — the `Default` — is the
+    // inert value every pre-existing entry point passes, so adding this
+    // changed no caller's behaviour and no caller's wire bytes.
+    commands: &CommandDispatch,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -1307,6 +1369,28 @@ where
                 }
 
                 let view = ViewTracker::new((0, 0), view_radius);
+                // Issues #48/#464. Built here, at the Play handoff, because
+                // this is the first point where both halves of a caller's
+                // identity are known and settled: `login_uuid` is the uuid
+                // `login_success` echoed to this client, and `username` is the
+                // name that survived `is_valid_player_name`. Nothing the
+                // player later *sends* can change either, which is exactly the
+                // property the seam needs — see the `ServerBound::ChatCommand`
+                // arm in `dispatch_play_packet`.
+                //
+                // `login_uuid` cannot be `None` here: reaching Play requires
+                // `ConfigurationFinished`, which requires `LoginAcknowledged`,
+                // which requires the `LoginStart` arm that sets it. The
+                // `unwrap_or_default` is a total fallback rather than a panic
+                // because a nil uuid resolves to no player and therefore no
+                // permissions — failing closed, not open.
+                let commands = CommandSession {
+                    dispatch: commands.clone(),
+                    caller: CommandCaller::new(
+                        login_uuid.unwrap_or_default(),
+                        username.clone(),
+                    ),
+                };
                 return serve_play(
                     conn,
                     proto,
@@ -1324,6 +1408,7 @@ where
                     mobs,
                     block_ticks,
                     explosions,
+                    commands,
                 )
                 .await;
             }
@@ -1343,6 +1428,12 @@ where
             | ServerBound::ClientCommand { .. }
             | ServerBound::ClientInformationChanged { .. }
             | ServerBound::ChunkBatchAcknowledged { .. }
+            // Unreachable here by construction, like the Play-phase variants
+            // above it: every `ServerProtocol::decode` arm producing this is
+            // gated on `State::Play`, and this loop hands off to `serve_play`
+            // the moment Play is reached. Listed rather than folded into a
+            // wildcard so that adding a variant stays a compile error.
+            | ServerBound::ChatCommand { .. }
             | ServerBound::Ignored => {}
         }
     }
@@ -2120,6 +2211,10 @@ async fn dispatch_play_packet<T, P, S>(
     sprinting: &mut bool,
     awaiting_chunk_batch_ack: &mut bool,
     pending_chunk_batches: &mut VecDeque<Vec<ServerDirective>>,
+    // Issues #48/#464. One parameter rather than two (a dispatch and an
+    // identity) because this function already takes 24; see
+    // [`CommandSession`]'s own doc comment.
+    commands: &CommandSession,
     packet_id: i32,
     payload: &[u8],
 ) -> Result<(), ServerError>
@@ -2303,6 +2398,30 @@ where
                 }
             }
         }
+        // Issues #48/#464: the wire path for commands, and the *whole* of it
+        // on this side of the seam.
+        //
+        // This arm deliberately does no parsing, no permission check and no
+        // name lookup. It cannot: the Brigadier tree, the registry and the
+        // `Permissions` resource all live in `lodestone-ecs`, which this crate
+        // does not depend on (see `crate::command`'s module doc for why, and
+        // for the two alternatives that were rejected). What it does is the
+        // one thing only it can do — attach the connection's **authenticated**
+        // identity, taken from the login this connection actually performed
+        // rather than from anything in the command text — and hand both to the
+        // host.
+        //
+        // With no sink installed, `CommandDispatch::run` refuses. That
+        // direction is load-bearing and is not an implementation detail: an
+        // absent dispatcher must never read as blanket permission, the same
+        // property `dispatch_refuses_rather_than_ungates_when_permissions_are_missing`
+        // holds one layer in.
+        ServerBound::ChatCommand { command } => {
+            let response = commands.dispatch.run(&commands.caller, &command);
+            for line in response.lines() {
+                apply(conn, state, proto.encode_system_chat(line)).await?;
+            }
+        }
         // The pre-Play phase signals, unreachable here by construction: a
         // connection in `State::Play` cannot decode a handshake, a login, or
         // (issue #277) a Status-phase status/ping request, because every
@@ -2389,6 +2508,10 @@ async fn serve_play<T, P, S, E>(
     mobs: &MobHandle,
     block_ticks: &BlockTickFeed,
     explosions: &ExplosionFeed,
+    // Issues #48/#464. Owned rather than borrowed: it is built once, here at
+    // the Play handoff, from *this* connection's login, and it is cheap
+    // (an `Option<Arc>` plus a `Uuid` and a `String`).
+    commands: CommandSession,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -2481,6 +2604,7 @@ where
                     &mut sprinting,
                     &mut awaiting_chunk_batch_ack,
                     &mut pending_chunk_batches,
+                    &commands,
                     packet_id,
                     &payload,
                 )
@@ -2646,6 +2770,11 @@ async fn serve_play<T, P, S, E>(
     // Issue #425: same gap, same reason — a detonation has no packet driving
     // it either, so this target simply never surfaces one.
     _explosions: &ExplosionFeed,
+    // Issues #48/#464 — **not** a gap on this target. Commands are entirely
+    // packet-driven (a `chat_command` frame arrives, the sink answers, system
+    // chat goes back), so the missing timers cost nothing here and this loop
+    // dispatches commands identically to the native one.
+    commands: CommandSession,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -2710,6 +2839,7 @@ where
             &mut sprinting,
             &mut awaiting_chunk_batch_ack,
             &mut pending_chunk_batches,
+            &commands,
             packet_id,
             &payload,
         )
