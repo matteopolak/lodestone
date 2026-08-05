@@ -23,7 +23,8 @@ snapshot away. That is still deliberately not a finished bot.
 **And it is not in the shipped client.** `lodestone-shell` does not depend on `lodestone-autopilot`
 — there is no cargo feature to turn it on, and `#goto` no longer exists. It is a pre-implemented
 *external* plugin for people building on the library. See "Not wired into the shell" below for the
-two routes to using it and for the one-way constraint on `Sim`'s plugin set.
+three routes to using it — one of which now reaches the *rendered* client, which it could not before
+milestone zero of the plugin plan.
 
 ## How it works
 
@@ -217,18 +218,34 @@ equally good:
    `crates/plugins/lodestone-autopilot/tests/drives_to_goal.rs` already does, so the route is
    test-covered rather than aspirational. You get no window and no `#goto`; you set `AutopilotGoal`
    yourself, which is the honest shape for a bot.
-2. **Clone the repo and add the three lines back.** The only route that gets the autopilot into the
-   *graphical* client, because of the constraint in the next paragraph.
+2. **Register it into the rendered client** — `Sim::client_app()`, `add_plugins(AutopilotPlugin)`,
+   `Sim::from_app(app, config)`. This is the route that did not exist until milestone zero landed and
+   is now the answer for anyone who wants a window *and* the autopilot. See
+   [`plugin-registration.md`](plugin-registration.md).
+3. **Clone the repo and add the three lines back.** Still available, and now the *worst* of the three:
+   it forks the shell to get something registration already gives you.
 
-**The constraint worth knowing before you plan around it: `Sim`'s plugin set is closed at compile
-time.** `Sim::build` ends with `let mut ecs = std::mem::take(app.world_mut())` — it takes the `World`
-and **drops the `App`** — and `Sim` stores only an `EcsHandle` (`Arc<RwLock<World>>`). But
-`bevy_app::Plugin::build` needs `&mut App`. So although `Sim::ecs()` is `pub` and hands out
-`&mut World` (enough to insert resources, spawn entities, or run a schedule), **no downstream crate
-holding a `Sim` can register a plugin into it.** There is no supported way to merge one `App`'s
-`Schedules` into another `World`'s. That is why route 1 goes around `Sim` rather than through it, and
-it is the real finding for [#77](https://github.com/matteopolak/lodestone/issues/77): the plugin
-boundary is *sound for anything that builds its own `App`* and **one-way for the shell**.
+**Route 1 also improves: `lodestone_app::client_app()` composes the six version-free plugins for
+you**, so a bot gets the same set the shipped client runs rather than the three-plugin approximation
+`drives_to_goal.rs` hand-assembles. That difference is not cosmetic — `ControllerPlugin` writes
+`MovementIntent` in `TickSet::Input`, one set *before* the autopilot's `TickSet::Intent`, so a plugin
+tested against the smaller stack and losing every tick to the controller in the real one would pass
+its own gate and fail in production.
+`crates/lodestone-app/tests/headless_consumer_registers_a_plugin.rs` is that gate.
+
+**This reverses the constraint this section carried until 2026-08-04**, which was true when written:
+*"`Sim`'s plugin set is closed at compile time — `Sim::build` ends with
+`std::mem::take(app.world_mut())`, dropping the `App`, and `bevy_app::Plugin::build` needs
+`&mut App`, so no downstream crate holding a `Sim` can register a plugin into it."* The `mem::take`
+is still there; what changed is that composition moved *above* it into `Sim::client_app()`, so every
+plugin is already built by the time the `World` is taken. The `App` never needed to survive — only to
+be reachable. `Sim::ecs()`'s `&mut World` remains insufficient for registration and always will be:
+there is no supported way to merge one `App`'s `Schedules` into another `World`'s.
+
+So the finding for [#77](https://github.com/matteopolak/lodestone/issues/77) is no longer "one-way for
+the shell". Both halves of the boundary are now reachable, which is what
+[`docs/plans/runtime-plugin-loading.md`](plans/runtime-plugin-loading.md) needed before any of its
+wasm milestones could mean anything.
 
 **`#goto` should move into the plugin once
 [#118](https://github.com/matteopolak/lodestone/issues/118) (plugin command registration) lands**,

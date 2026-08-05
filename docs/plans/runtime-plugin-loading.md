@@ -50,6 +50,16 @@ problem is:
 
 ## Milestone zero: the library exposes the app
 
+> **Status: landed.** `lodestone-app` exists, `client_app()` is the registration point, and `Sim`
+> adopts a pre-built `App` — see [`docs/plugin-registration.md`](../plugin-registration.md) for the
+> shipped shape and the measured gates. Two predictions below were wrong and are corrected there
+> rather than edited out of this plan: **the three shell plugins did not move down** (the "no `wgpu`
+> type in the file" evidence is real but is about the wrong axis — `interact.rs` imports fourteen
+> items from `crate::sim`, a cycle with the type that adopts the `App`), and the **wasm headroom is
+> 47%, not 10–13%** (gzip 844,527 B against the 1,600,000 B ceiling, measured after repairing the
+> two `web/` breaks; the 1.21–1.24 MiB baseline this plan cites is stale). The rest of the section
+> stands as written and is left as the record of what was reasoned before it was built.
+
 **This refactor is upstream of every other milestone in this plan, and it is not about wasm at
 all.** A runtime-loaded wasm plugin and a compiled-in one must arrive at the same registration
 point — `add_plugins` on the one `App` — and today that point is unreachable from outside the
