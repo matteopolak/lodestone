@@ -43,17 +43,16 @@
 //! [`eat_block`] is installed by the [`SHEEP`] table below.
 //!
 //! **What that achieves, and what it does not.** The goal is installed on a real
-//! mob and reads the seam. **A sheep in a running game still does not graze**:
-//! the host half is `ChunkWorld::block_cues` — the classification, which
+//! mob and reads the seam, and a sheep in a running game grazes end to end: the
+//! host half landed as `ChunkWorld::block_cues` — the classification, which
 //! `base_path_type` deliberately erases, since `grass_block`, `dirt` and `stone`
-//! are one `Blocked` — plus a `pending_grazes` handoff drained where mutable
-//! chunk access lives. `MobSim` borrows the world immutably, so the mutation must
-//! take the `pending_detonations` route through the tick driver rather than
-//! happening in `MobSim::tick`. Until that lands the cue feed answers
-//! `BlockCues::NONE`, which leaves this row inert rather than wrong. Wool
-//! regrowth — `Sheep.ate()`'s `setSheared(false)` plus `ageUp(60)`
-//! (`animal/sheep/Sheep.java:292-297`) — is entity metadata on the wire and is
-//! still to come. `docs/mob-block-perception.md` is the doc.
+//! are one `Blocked` — plus a `pending_grazes` handoff drained in
+//! `run_tick_loop`, the one place mutable chunk access lives (`MobSim` borrows
+//! the world immutably, so the mutation takes the `pending_detonations` route
+//! through the tick driver). What remains is wool regrowth — `Sheep.ate()`'s
+//! `setSheared(false)` plus `ageUp(60)` (`animal/sheep/Sheep.java:292-297`),
+//! which is entity metadata on the wire. `docs/mob-block-perception.md` is the
+//! doc.
 //!
 //! **A generalisation not to inherit.** #456's body grouped seven `Missing` rows
 //! across two families as one seam capability. Measured against the jar it closes
@@ -213,10 +212,13 @@ pub const CHICKEN: &[Registration] = &[
 /// Adding them as rows would make the cited line range a lie.
 pub const RABBIT: &[Registration] = &[
     Registration::goal(1, "FloatGoal", float_goal),
-    // `ClimbOnTopOfPowderSnowGoal(this, this.level())` (`:121`) — it has to read
-    // the block the mob is standing in, and `MobController` exposes no block
-    // access whatsoever (see this module's header). Not a missing goal so much
-    // as the missing seam capability every unmodelled row in the roster shares.
+    // `ClimbOnTopOfPowderSnowGoal(this, this.level())` (`:121`). The *cue* half
+    // is now answerable — issue #456's `MobController::block_cues_*` could carry
+    // "the block above is powder snow or has empty collision" — but the goal
+    // also gates on `isInPowderSnow`/`wasInPowderSnow`, which no physics here
+    // sets, and `#powder_snow` identity is not a `BlockCues` field. Blocked on
+    // powder-snow physics, not on block access;
+    // `docs/mob-block-perception.md`.
     Registration::missing(Selector::Goal, 1, "ClimbOnTopOfPowderSnowGoal"),
     Registration::goal(1, "Rabbit.RabbitPanicGoal", panic_2_2),
     Registration::goal(2, "BreedGoal", breed_0_8),
@@ -251,9 +253,11 @@ pub const RABBIT: &[Registration] = &[
         "Rabbit.RabbitAvoidEntityGoal(Player)",
     ),
     // `Rabbit.RaidGardenGoal(this)` (`:128`) — a `MoveToBlockGoal` that hunts
-    // carrot crops and eats them. Same missing block access as the powder-snow
-    // row, plus a block mutation; see the header's `EatBlockGoal` note, which is
-    // the same feature under a different name.
+    // carrot crops and eats them. Not a local-cue question: it needs a
+    // host-computed candidate block position (the `MoveToBlockGoal` spiral over
+    // 16 blocks), the `#supports_crops` tag, and `CarrotBlock.AGE` — a
+    // block-state *property*, not a boolean cue. The mutation half is the
+    // `ate`-style intent; `docs/mob-block-perception.md` has the full shape.
     Registration::missing(Selector::Goal, 5, "Rabbit.RaidGardenGoal"),
     Registration::goal(6, "WaterAvoidingRandomStrollGoal", stroll_0_6),
     Registration::goal(11, "LookAtPlayerGoal(Player)", look_at_player_10),
