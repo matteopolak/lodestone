@@ -50,7 +50,7 @@ repo-wide claim.
 | crate | what |
 |---|---|
 | `lodestone-nav` | version-free autonomous-navigation search core: world view, movement graph, simulation-derived cost model, goals, resumable A\*. No bevy, no ECS, no threads. |
-| `lodestone-autopilot` | the bevy plugin: chat commands, search driver, per-tick closed-loop executor. |
+| `lodestone-autopilot` | the bevy plugin: search driver, per-tick closed-loop executor. **Not a dependency of `lodestone-shell`** — a pre-implemented *external* plugin, for headless bots built on the library. It has no chat commands: `#goto` lived in the shell and was removed with the dependency, and a plugin cannot register its own commands until [#118](https://github.com/matteopolak/lodestone/issues/118). |
 | `lodestone-event-logger` | a toy `EventPriority::Monitor` reader plugin (issues #104/#105/#110): observes `lodestone_ecs::GameEvent`, the plugin event bus, and reports through a plain `Arc<Mutex<_>>` outside the ECS rather than a resource. `MIT OR Apache-2.0`, no licensing table row needed. |
 
 `lodestone-nav`/`lodestone-autopilot` are documented in

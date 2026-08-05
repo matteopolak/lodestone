@@ -218,20 +218,25 @@ impl Sim {
             // `ControllerPlugin` because it asserts that plugin is present rather
             // than adding it itself — `add_systems` does not deduplicate.
             InteractPlugin,
-            // Autonomous navigation (`docs/autonomous-navigation.md`, issue #38):
-            // the M1 walk-only plugin. Registration order relative to the rest of
-            // this tuple does not matter — its two systems are chained
-            // `.after(TickSet::Intent).before(TickSet::Physics)` internally,
-            // rather than `.in_set(TickSet::Intent)`, specifically so it never has
-            // to be ordered against `compute_movement_intent` by name (see that
-            // doc's "Why `.after(TickSet::Intent)`" section) — but that is a claim
-            // about the plugin's own `.add_systems` calls, not proof this call
-            // site actually reaches them, which is exactly the shape of bug
-            // `CLAUDE.md`'s island rule warns about. Adds no systems that fire
-            // without an `AutopilotGoal` set, so this is inert for every session
-            // until something (a chat command, not yet built) sets one.
-            lodestone_autopilot::AutopilotPlugin,
         ));
+        // **`lodestone_autopilot::AutopilotPlugin` used to be the last entry in
+        // that tuple and was removed on purpose** (issue #38, and #77's plugin
+        // boundary). The shipped client does not navigate itself: the autopilot is
+        // a pre-implemented *external* plugin, so the shell does not depend on it
+        // at all — not even optionally behind a feature. `Cargo.toml`'s own note
+        // where the dependency line was says the same thing, and
+        // `docs/autonomous-navigation.md`'s "Not wired into the shell" section
+        // carries the two routes a user has to get it back.
+        //
+        // **This tuple is the only place a plugin can be installed, and that is a
+        // real constraint on the boundary, not an incidental one.** The line below
+        // takes the `World` and drops the `App`, and `Sim` stores only an
+        // `EcsHandle` (`Arc<RwLock<World>>`) — while `Plugin::build` needs
+        // `&mut App`. So the shell's plugin set is closed at compile time: no
+        // downstream crate holding a `Sim` can add one afterwards, even though
+        // `Sim::ecs()` is public and hands out `&mut World`. A user wanting the
+        // autopilot therefore builds their own `App` on `lodestone-ecs` and hands
+        // its `World` to `ClientBuilder::ecs`, rather than reaching into a `Sim`.
         let mut ecs = std::mem::take(app.world_mut());
         ecs.insert_resource(Profile(PhysicsProfile::mc_1_21()));
         // Stage 5. `ParticleSim` cannot come from `InteractPlugin`: like the mesh

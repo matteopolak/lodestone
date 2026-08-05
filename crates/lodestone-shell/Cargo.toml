@@ -80,11 +80,20 @@ lodestone-auth = { workspace = true }
 # device-code/refresh calls interactively from the account-switcher screen
 # (the same crate `lodestone-auth`'s own chain runs on).
 reqwest = { workspace = true }
-# The M1 walk-only autonomous-navigation plugin (issue #38,
-# `docs/autonomous-navigation.md`). Registered in `Sim::new`'s `add_plugins`
-# tuple; adds no systems that fire without an `AutopilotGoal` set, so it is
-# inert for every session until something sets one.
-lodestone-autopilot = { workspace = true }
+
+# **`lodestone-autopilot` is deliberately NOT a dependency here, and must not
+# become one — not even `optional = true` behind a feature.** It is a
+# pre-implemented *external* plugin: the shipped client does not navigate
+# itself, and a user who wants it either clones the repo and adds this line
+# back, or — the intended route — builds their own headless bot on
+# `lodestone-ecs` + `lodestone-client` and registers `AutopilotPlugin` in an
+# `App` they own. See `docs/autonomous-navigation.md`'s "Not wired into the
+# shell" section for both routes and for what `Sim` can and cannot host.
+#
+# The autopilot's own gates live with the plugin
+# (`crates/plugins/lodestone-autopilot/tests/drives_to_goal.rs`), drive a real
+# `GameTick` schedule, and assert real displacement on jar-derived collision —
+# so nothing about its correctness depended on the shell registering it.
 
 # GPU / windowing / math.
 wgpu = { workspace = true }

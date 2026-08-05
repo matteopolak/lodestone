@@ -276,25 +276,14 @@ pub(crate) fn face_from_normal(normal: [i32; 3]) -> BlockFace {
     }
 }
 
-/// Parse a `goto x z` body — the text of a `#goto x z` command with the
-/// leading `#` already stripped by [`Sim::send_chat`] — into the two
-/// coordinates (issue #38, M1: `docs/baritone-port.md`'s "walk to a
-/// coordinate over flat ground"). `None` for anything that is not exactly
-/// `goto`, one whitespace-separated `i32`, another, and nothing else —
-/// deliberately strict, since a line this doesn't recognise is dropped
-/// rather than leaked to chat (see `send_chat`'s doc).
-fn parse_goto_command(body: &str) -> Option<(i32, i32)> {
-    let mut parts = body.split_whitespace();
-    if parts.next()? != "goto" {
-        return None;
-    }
-    let x: i32 = parts.next()?.parse().ok()?;
-    let z: i32 = parts.next()?.parse().ok()?;
-    if parts.next().is_some() {
-        return None;
-    }
-    Some((x, z))
-}
+// `parse_goto_command` lived here — a strict `goto x z` parser for the
+// `#goto` chat command (issue #38, M1). It went with the command: the shell no
+// longer depends on `lodestone-autopilot`, so there is nothing for a parsed
+// coordinate pair to be handed to. See `Sim::send_chat`, which still reserves
+// the `#` namespace so such a line cannot leak to chat, and issue #118, which
+// is where a plugin will eventually register its own commands (and its own
+// argument parsing — `crates/lodestone-command` already exists for that, and
+// re-adding a bespoke parser here would be the wrong direction).
 
 /// [`BlockFace`] to [`particle_emit::Face`] — the two enumerate the same six
 /// directions under different names because they come from different crates

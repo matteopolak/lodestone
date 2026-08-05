@@ -1204,227 +1204,134 @@ fn both_collision_sources_are_send_sync_and_static() {
     assert_resource_shaped::<LiveCollisionSource>();
 }
 
-/// Issue #38: `lodestone_autopilot::AutopilotPlugin` being in `Sim::new`'s
-/// `add_plugins` tuple is not itself proof it does anything — `CLAUDE.md`'s
-/// island rule is exactly "registered, in the right set, in the right
-/// order, and still never runs" — so this drives the actual `GameTick`
-/// schedule rather than trusting registration.
+// **Issue #38's three autopilot gates lived here.** They were
+// `autopilot_plugin_is_registered_and_its_systems_actually_run` (the island
+// gate: one tick with a goal set must move `AutopilotStatus` off `Idle`),
+// `goto_chat_command_drives_the_player_toward_the_goal_over_real_ticks` (real
+// displacement down a hand-carved corridor, with a sealed-corridor control),
+// and `goto_chat_command_never_reaches_the_outbound_action_queue`.
+//
+// **They went with the dependency, and none of them was weakened to do it.**
+// `lodestone-autopilot` is a pre-implemented *external* plugin now, so
+// `lodestone-shell` does not depend on it at all — not optionally, not behind a
+// feature — and a test here cannot name `AutopilotStatus` any more than
+// production code can. The first two gates' subject moved rather than
+// disappearing: `crates/plugins/lodestone-autopilot/tests/drives_to_goal.rs`
+// installs `AutopilotPlugin` in a real `App`, drives a real `GameTick`
+// schedule, and asserts real arrival against **jar-derived** collision, with
+// unreachable-goal controls. That is strictly stronger evidence than the two
+// gates here were, because it does not depend on the shell registering
+// anything. What is genuinely gone is only the claim the shell ever registered
+// it — which is the decision, not a regression in the plugin.
+//
+// The third gate's *surviving* half is directly below, and its `#goto`-specific
+// half is what issue #118 (plugin command registration) will restore.
+
+/// The `#` client-local namespace is still reserved by [`Sim::send_chat`] even
+/// though nothing fills it: a `#`-prefixed line must be consumed and refused,
+/// never composed into an outbound chat action where every other player on the
+/// server would read it.
 ///
-/// `AutopilotStatus` defaults to `Idle` and nothing but `plan_route`
-/// (a system the plugin adds) can move it off that default — inserting the
-/// resource via `init_resource` in `AutopilotPlugin::build` cannot, by
-/// itself, produce anything but `Idle`. So observing *any* other variant
-/// after setting a goal and stepping is proof the system actually executed
-/// this tick, not just that the plugin's resources exist.
-#[test]
-fn autopilot_plugin_is_registered_and_its_systems_actually_run() {
-    let mut sim = Sim::with_demo_world(test_config());
-    sim.drain_all_meshes();
-
-    let feet = sim.player().position;
-    let goal = lodestone_client::BlockPos {
-        x: feet.x.floor() as i32 + 2,
-        y: feet.y.floor() as i32,
-        z: feet.z.floor() as i32,
-    };
-    sim.write(|w| {
-        w.resource_mut::<lodestone_autopilot::AutopilotGoal>().0 = Some(goal);
-    });
-    assert_eq!(
-        sim.read(|w| *w.resource::<lodestone_autopilot::AutopilotStatus>()),
-        lodestone_autopilot::AutopilotStatus::Idle,
-        "precondition: freshly inserted, untouched by any system yet"
-    );
-
-    sim.step(1.0 / 20.0);
-
-    let status = sim.read(|w| *w.resource::<lodestone_autopilot::AutopilotStatus>());
-    assert_ne!(
-        status,
-        lodestone_autopilot::AutopilotStatus::Idle,
-        "one tick with a goal set must move the status off Idle -- only \
-         plan_route can do that, so Idle here means the system never ran \
-         even though the plugin is in the add_plugins tuple"
-    );
-}
-
-/// Issue #38's remaining half, closed: the `#goto x z` chat command
-/// (`docs/baritone-port.md`'s M1 section) actually reaching
-/// `AutopilotGoal` through `Sim::send_chat`, and the plugin actually
-/// **moving the player**, not just flipping a status enum.
+/// This is the surviving half of issue #38's
+/// `goto_chat_command_never_reaches_the_outbound_action_queue`. That test also
+/// asserted `#goto 3 4` returned `true` and reached
+/// `lodestone_autopilot::AutopilotGoal`; both are gone with the dependency (see
+/// `send_chat`'s doc and `sim/build.rs`), so the *interception* is what is left
+/// to pin — and it is worth pinning on its own, because deleting it would
+/// restore no capability and would start leaking `#` lines onto the wire.
 ///
-/// `autopilot_plugin_is_registered_and_its_systems_actually_run` above is
-/// the isolated unit this must not repeat: it pokes `AutopilotGoal` directly
-/// and checks one tick's status. What was still unproven is (a) whether a
-/// *typed chat line* reaches the resource at all, and (b) whether driving it
-/// for real over many ticks produces real displacement toward the goal, on
-/// real jar-derived collision (`Sim::set_block_world` + the live collision
-/// path every other movement test in this file uses) — not that the command
-/// merely parsed.
+/// # The control is the point
 ///
-/// Two runs on the same flat corridor (`docs/baritone-port.md`'s own M1
-/// scope: "walk to a coordinate over flat ground"), differing only in
-/// whether a full-height wall seals the only path — the unreachable-goal
-/// control that proves this detector can actually fail. Both goals sit well
-/// inside `lodestone_autopilot::SNAPSHOT_RADIUS` (8 blocks) of spawn.
+/// `assert!(actions.try_recv().is_err())` is the load-bearing line, and on its
+/// own it is the *precondition* species of vacuous test: an empty outbound
+/// queue is also exactly what a `Sim` produces when nothing is wired to it at
+/// all. So an ordinary `/say` line runs first on the **same** `Sim` and must
+/// land in the queue. Without that, this gate would pass on a `send_chat` that
+/// had been gutted to send nothing whatsoever.
 #[test]
-fn goto_chat_command_drives_the_player_toward_the_goal_over_real_ticks() {
-    // Player spawns at (0.5, feet, 0.5) facing north — see the walking-bob
-    // test above, which found this the hard way. The corridor runs +Z.
-    fn flat_corridor(sim: &mut Sim, feet_y: i32) {
-        for dz in -1..=6 {
-            for dx in -1..=1 {
-                sim.set_block_world([dx, feet_y - 1, dz], id::STONE);
-                sim.set_block_world([dx, feet_y, dz], id::AIR);
-                sim.set_block_world([dx, feet_y + 1, dz], id::AIR);
-                sim.set_block_world([dx, feet_y + 2, dz], id::AIR);
-            }
-        }
-    }
-    fn dist_to_goal(pos: lodestone_physics::player::PlayerState) -> f64 {
-        // Goal block (0, _, 5)'s centre.
-        ((pos.position.x - 0.5).powi(2) + (pos.position.z - 5.5).powi(2)).sqrt()
-    }
-    fn settle(sim: &mut Sim) {
-        for _ in 0..20 {
-            sim.step(1.0 / 20.0);
-        }
-    }
-    fn drive(sim: &mut Sim) {
-        for _ in 0..200 {
-            sim.step(1.0 / 20.0);
-        }
-    }
-
-    // -- Reachable: the corridor is open all the way to the goal. --
-    let mut sim = Sim::new(test_config());
-    let feet_y = sim.player().position.y.floor() as i32;
-    flat_corridor(&mut sim, feet_y);
-    settle(&mut sim);
-    let start_dist = dist_to_goal(sim.player());
-    assert!(
-        sim.send_chat("#goto 0 5"),
-        "a well-formed #goto must be consumed locally, needing no live connection"
-    );
-    drive(&mut sim);
-    let end_dist = dist_to_goal(sim.player());
-    assert!(
-        end_dist < start_dist - 2.0,
-        "the player must actually have walked toward the goal: \
-         start_dist={start_dist:.2} end_dist={end_dist:.2}"
-    );
-    assert!(
-        end_dist < 1.5,
-        "on an open flat corridor the player should reach the goal cell, \
-         got {end_dist:.2} blocks away"
-    );
-    assert_eq!(
-        sim.read(|w| *w.resource::<lodestone_autopilot::AutopilotStatus>()),
-        lodestone_autopilot::AutopilotStatus::Arrived,
-        "the command's goal must be reported arrived, not merely close"
-    );
-
-    // -- Unreachable control: same corridor, sealed by a full-height wall
-    // between spawn and the goal. M1 supports no breaking, so a sealed
-    // corridor is a genuine, not contrived, "no path" case. --
-    //
-    // A lone forward wall used to be enough on its own, back when the only
-    // move kind was flat walking. It stopped being enough once
-    // `lodestone-nav` grew StepUp/Descend/Drop (M2): `test_config()` is
-    // `Mode::Headless`, which builds `Sim` on `worldgen::generate`'s real
-    // terrain (`Sim::build`), and that terrain surrounds this hand-carved
-    // corridor on every side. The forward wall only ever sealed the 3-wide
-    // dx=-1..=1 slice; a bot that can step up or drop a block can leave the
-    // corridor sideways into the *undisturbed* natural terrain next to it —
-    // which the wall never touched — walk around outside, and re-enter past
-    // the plug. So this now boxes the corridor in explicit stone on every
-    // side (floor, ceiling, both side walls, both tunnel-mouth end caps —
-    // otherwise the same escape is available through either open end — all
-    // six blocks taller than the one-block riser StepUp allows) rather than
-    // sealing only the one face the straight-line path crosses, which makes
-    // the control's premise hold regardless of what shape the surrounding
-    // real terrain happens to be or which move kinds the autopilot has.
-    //
-    // First attempt at this fix sealed the sides and ceiling but left the
-    // tunnel's own mouths (dz=-1 and dz=6, where `flat_corridor`'s carved air
-    // meets the *undisturbed* terrain beyond) open — measured: the bot still
-    // closed to 1.98 blocks of the goal (needed `> start_dist - 1.0 = 4.0`)
-    // by walking out one mouth, around the box outside, and back in the
-    // other. The end caps below are what actually finishes the seal.
-    let mut sim = Sim::new(test_config());
-    let feet_y = sim.player().position.y.floor() as i32;
-    flat_corridor(&mut sim, feet_y);
-    for dz in -1..=6 {
-        // Side walls, well above anything a jump/step/drop could clear.
-        for dy in -1..=5 {
-            sim.set_block_world([-2, feet_y + dy, dz], id::STONE);
-            sim.set_block_world([2, feet_y + dy, dz], id::STONE);
-        }
-        // Ceiling, closing off the ledge `flat_corridor` left open above.
-        for dx in -1..=1 {
-            sim.set_block_world([dx, feet_y + 3, dz], id::STONE);
-            sim.set_block_world([dx, feet_y + 4, dz], id::STONE);
-            sim.set_block_world([dx, feet_y + 5, dz], id::STONE);
-        }
-    }
-    // End caps at both tunnel mouths (one column past each end of the
-    // corridor `flat_corridor` carved), spanning the full width of the box
-    // including the side walls, so the enclosure has no opening left at all.
-    for dz in [-2, 7] {
-        for dx in -2..=2 {
-            for dy in -1..=5 {
-                sim.set_block_world([dx, feet_y + dy, dz], id::STONE);
-            }
-        }
-    }
-    // The plug that actually blocks the straight-line path — same as before,
-    // just extended to the same height as the box around it.
-    for dx in -1..=1 {
-        for dy in -1..=5 {
-            sim.set_block_world([dx, feet_y + dy, 2], id::STONE);
-        }
-    }
-    settle(&mut sim);
-    let start_dist = dist_to_goal(sim.player());
-    assert!(sim.send_chat("#goto 0 5"));
-    drive(&mut sim);
-    let blocked_dist = dist_to_goal(sim.player());
-    assert!(
-        blocked_dist > start_dist - 1.0,
-        "control: a sealed corridor must actually stop the autopilot short \
-         of the goal, got start_dist={start_dist:.2} blocked_dist={blocked_dist:.2}"
-    );
-    assert_ne!(
-        sim.read(|w| *w.resource::<lodestone_autopilot::AutopilotStatus>()),
-        lodestone_autopilot::AutopilotStatus::Arrived,
-        "control: must never report arrival when walled off — if it does, \
-         this detector cannot tell a real path from a blocked one"
-    );
-}
-
-/// `#goto` must not leak onto the network as an ordinary chat line — it has
-/// no server-side meaning, and typing it must never let other players read
-/// a client-local command. Complements the drive gate above, which proves
-/// the *positive* path; this is the negative one for the interception
-/// itself, hermetic and not dependent on any particular corridor.
-#[test]
-fn goto_chat_command_never_reaches_the_outbound_action_queue() {
+fn a_hash_prefixed_line_is_consumed_locally_and_never_reaches_the_outbound_queue() {
     let (net, actions, _feed) = crate::net::NetClient::loopback_with_feed();
     let mut sim = Sim::new(test_config());
     sim.attach_net(net);
 
-    assert!(sim.send_chat("#goto 3 4"));
     assert!(
-        actions.try_recv().is_err(),
-        "#goto must be consumed locally, never handed to the outbound action queue"
+        sim.send_chat("/say hi"),
+        "control: an ordinary command line must report that it sent"
+    );
+    assert!(
+        actions.try_recv().is_ok(),
+        "control: the outbound action queue must actually carry an ordinary \
+         line -- otherwise the emptiness asserted below proves nothing"
     );
 
-    // A malformed `#goto` (not enough coordinates) must fall through to
-    // ordinary chat handling rather than silently vanish — `send_chat`
-    // returning `false` for garbage, matching a blank line's contract.
+    for line in ["#goto 3 4", "#goto", "#follow 1 2", "#"] {
+        assert!(
+            !sim.send_chat(line),
+            "`{line}` is client-local and unhandled, so send_chat must report \
+             that nothing was sent"
+        );
+        assert!(
+            actions.try_recv().is_err(),
+            "`{line}` must be consumed locally, never handed to the outbound \
+             action queue where other players would read it"
+        );
+    }
+}
+
+/// The runtime half of the boundary decision: **the shipped client does not
+/// navigate itself.** A type-level absence (`cargo tree` reporting no
+/// `lodestone-autopilot` edge) says the crate is not linked; it does not say
+/// the *behaviour* is gone, because the shell could in principle have grown its
+/// own walker. This asserts the behaviour.
+///
+/// Deliberately the exact mirror of the deleted
+/// `goto_chat_command_drives_the_player_toward_the_goal_over_real_ticks`: the
+/// same flat corridor, the same `#goto 0 5`, the same 200 driven ticks. That
+/// test measured the player closing to within 1.5 blocks of (0, _, 5) from
+/// about 5 blocks out. Here the player must **not move**, which is why the
+/// corridor is worth building at all — it removes the "they were stuck on
+/// terrain anyway" explanation for a stationary result.
+///
+/// This is not a test that nothing is registered; it is a test that no chat
+/// line makes the player walk. Re-registering `AutopilotPlugin` alone would
+/// leave it passing (nothing sets an `AutopilotGoal`), which is correct: the
+/// capability under test is the `#goto`-drives-the-player pair, and that pair
+/// is what was removed.
+#[test]
+fn no_chat_line_makes_the_shipped_client_walk_itself() {
+    let mut sim = Sim::new(test_config());
+    let feet_y = sim.player().position.y.floor() as i32;
+    // Same corridor the deleted drive gate carved, running +Z from spawn.
+    for dz in -1..=6 {
+        for dx in -1..=1 {
+            sim.set_block_world([dx, feet_y - 1, dz], id::STONE);
+            sim.set_block_world([dx, feet_y, dz], id::AIR);
+            sim.set_block_world([dx, feet_y + 1, dz], id::AIR);
+            sim.set_block_world([dx, feet_y + 2, dz], id::AIR);
+        }
+    }
+    for _ in 0..20 {
+        sim.step(1.0 / 20.0);
+    }
+
+    let before = sim.player().position;
     assert!(
-        !sim.send_chat("#goto"),
-        "a malformed #goto must not be silently swallowed as if it succeeded"
+        !sim.send_chat("#goto 0 5"),
+        "`#goto` must be refused now that no plugin claims the `#` namespace"
+    );
+    for _ in 0..200 {
+        sim.step(1.0 / 20.0);
+    }
+    let after = sim.player().position;
+
+    let moved = ((after.x - before.x).powi(2) + (after.z - before.z).powi(2)).sqrt();
+    assert!(
+        moved < 0.5,
+        "no chat line may drive the player: moved {moved:.2} blocks \
+         horizontally over 200 ticks after `#goto 0 5` \
+         (from {before:?} to {after:?}). The deleted issue-#38 drive gate \
+         measured ~4 blocks of travel on this same corridor, so movement here \
+         means something in the shell is navigating for the player again."
     );
 }
 

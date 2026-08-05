@@ -38,10 +38,17 @@ and is visible on its own.
 > by a hermetic test that drives a real `GameTick` schedule and asserts the local player arrives at a
 > commanded block (`crates/plugins/lodestone-autopilot/tests/drives_to_goal.rs`). What is missing now
 > is narrower and structural rather than a capability gap: nothing in the shipped client's `App`
-> registers it yet (`lodestone-shell::sim::Sim::new`'s `add_plugins` call does not name it), so it is
-> an island in `CLAUDE.md`'s specific sense — built, tested, and reaching zero players until that one
-> line is added by whoever owns `sim.rs`. See [`docs/autonomous-navigation.md`](./autonomous-navigation.md)
-> for the plugin as it stands today and exactly what that registration needs.
+> registers it (`lodestone-shell::sim::Sim::new`'s `add_plugins` call does not name it).
+>
+> **Update 2026-08-04: that is now the intended end state, not a gap to close.** It was briefly
+> registered, and the registration plus the `#goto` command were then removed on purpose — the
+> autopilot is a pre-implemented *external* plugin for people building headless bots on the library,
+> so the graphical client does not link it, and there is no cargo feature to turn it on. So it is
+> **not** an island in `CLAUDE.md`'s sense: that rule is about code reaching zero pixels *by
+> accident*, and this reaches zero pixels by decision, with its own gates driving a real `GameTick`
+> schedule in `crates/plugins/lodestone-autopilot/tests/drives_to_goal.rs`. See
+> [`docs/autonomous-navigation.md`](./autonomous-navigation.md)'s "Not wired into the shell" for the
+> two routes a user has to run it, and for why `Sim`'s plugin set cannot be extended from outside.
 >
 > The original text is kept below because the *reasoning* about why executability matters more than
 > search quality is still the right frame. Only the measurements are stale.
@@ -1724,15 +1731,19 @@ executor with corridor, drift and stall budgets, one search dispatch (no segment
   the correction counter is flat throughout**. Negative control: the same run with
   `collide_against_live_world = false` must show the correction burst.
 - **Needs:** Stage 2, Stage 4, and M0.
-- **Status, corrected this pass:** **closed**, and this box was stale — the search core, the executor
-  (`AutopilotGoal` resource in, `MovementIntent`/`LookIntent` out via `WalkDrive`), a hermetic gate
-  proving arrival through the real physics seam (`crates/plugins/lodestone-autopilot`), the `#goto`
-  chat command and the plugin's registration into the shipped client's `App` all exist now
-  (`crates/lodestone-shell/src/sim.rs`'s `#goto` handling and its `AutopilotPlugin` registration,
-  gated by `sim::tests::goto_chat_command_drives_the_player_toward_the_goal_over_real_ticks` and
-  `sim::tests::autopilot_plugin_is_registered_and_its_systems_actually_run` — outside this document's
-  ownership, landed by whoever closed issue #38). Re-verified rather than assumed: read both tests and
-  `sim.rs`'s registration directly, this pass, before writing this correction. M0's own precondition
+- **Status:** **closed** — the search core and the executor (`AutopilotGoal` resource in,
+  `MovementIntent`/`LookIntent` out via `WalkDrive`) exist, with a gate proving arrival through the
+  real physics seam (`crates/plugins/lodestone-autopilot/tests/drives_to_goal.rs`).
+
+  **Corrected 2026-08-04.** This box previously also claimed "the `#goto` chat command and the
+  plugin's registration into the shipped client's `App` all exist now", citing two
+  `lodestone-shell` tests. Both were true when written and are now **deliberately false**: the shell
+  no longer depends on `lodestone-autopilot` at all, `#goto` is gone, and those two tests were
+  deleted with it (their subject is covered more strongly by the plugin's own suite, which asserts
+  arrival on jar-derived collision). The autopilot is an external plugin; see
+  [`docs/autonomous-navigation.md`](./autonomous-navigation.md)'s "Not wired into the shell". M1's
+  own scope — search plus executor plus arrival gate — is unaffected by that, which is why this is
+  still `closed` rather than reopened. M0's own precondition
   (`LiveCollision` answering all twelve `CollisionView` questions rather than three) was **not**
   re-checked this pass — a different piece of work from M1/M2's — so do not assume it from this box.
 

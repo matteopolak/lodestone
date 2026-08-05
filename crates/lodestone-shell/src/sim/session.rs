@@ -774,29 +774,37 @@ impl Sim {
     ///
     /// A leading `#`, unlike `/`, is a **client-local** command namespace and
     /// is intercepted before `compose_chat_action` ever sees it —
-    /// deliberately the opposite policy from `/`. `#goto` (issue #38, M1) has
-    /// no server-side meaning and must never appear in chat for anyone else
-    /// to read; `docs/baritone-port.md`'s later milestones name the same
-    /// prefix for `#follow`/`#mine`. So **any** `#`-prefixed line is consumed
-    /// here, matched or not — a malformed one is dropped rather than falling
-    /// through to `compose_chat_action` and leaking as literal chat text,
-    /// which would be worse than silently refusing it.
+    /// deliberately the opposite policy from `/`. So **any** `#`-prefixed line
+    /// is consumed here and refused, rather than falling through to
+    /// `compose_chat_action` and leaking as literal chat text for every other
+    /// player to read, which would be worse than silently dropping it.
+    ///
+    /// # Why the namespace is reserved but empty
+    ///
+    /// It used to hold exactly one command, `#goto x z` (issue #38, M1), which
+    /// set `lodestone_autopilot::AutopilotGoal`. **Both the command and the
+    /// dependency were removed on purpose**: the autopilot is a
+    /// pre-implemented *external* plugin and the shipped client does not
+    /// navigate itself (see `sim/build.rs`'s note where the plugin was
+    /// registered, and `docs/autonomous-navigation.md`'s "Not wired into the
+    /// shell"). A chat command in the shell that reaches into a plugin's
+    /// resource is backwards for a plugin architecture — the plugin should
+    /// register its own commands, which is
+    /// [#118](https://github.com/matteopolak/lodestone/issues/118).
+    ///
+    /// **The reservation itself is kept, and is not autopilot-specific.**
+    /// Deleting it would not restore any capability; it would only start
+    /// leaking `#`-prefixed lines onto the wire as ordinary chat. So this arm
+    /// stays as the shell's own guarantee about the namespace, and #118 is
+    /// what will eventually give a plugin somewhere to hang a command off it.
     pub fn send_chat(&mut self, line: &str) -> bool {
         if let Some(rest) = line.trim().strip_prefix('#') {
-            let Some((x, z)) = parse_goto_command(rest) else {
-                return false;
-            };
-            // M1's own scope is "walk to a coordinate over **flat ground**"
-            // (`docs/baritone-port.md`) — the player's current y is the
-            // honest target for that scope. A real height lookup at the
-            // destination column is M2's "real terrain" scope, not this
-            // command's.
-            let y = self.player().position.y.floor() as i32;
-            self.write(|w| {
-                w.resource_mut::<lodestone_autopilot::AutopilotGoal>().0 =
-                    Some(BlockPos::new(x, y, z));
-            });
-            return true;
+            tracing::debug!(
+                command = rest,
+                "client-local # command refused: no plugin registers commands \
+                 yet (issue #118). Consumed rather than leaked to chat."
+            );
+            return false;
         }
         let Some(action) = compose_chat_action(line) else {
             return false;
