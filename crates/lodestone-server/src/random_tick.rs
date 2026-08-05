@@ -561,8 +561,16 @@ impl RandomTickScheduler {
                     return false;
                 }
                 let ty = y + dy;
-                let target_state = column_ref.block_state(tlx, ty, tz);
-                let above_target = column_ref.block_state(tlx, ty + 1, tz);
+                // `block_state` takes LOCAL x/z (issue #472): passing the
+                // absolute `tz` here tripped `ChunkColumn::index`'s
+                // `debug_assert` on every singleplayer session, and in
+                // release silently aliased onto a different cell — the
+                // index is `((y_local * 16 + z) * 16 + x)`, so an absolute
+                // `z` of `min_z + tlz` reads local z `tlz` at a y-level
+                // `min_z / 16` sections higher. Invisible at chunk (0, 0),
+                // where the two coordinates coincide.
+                let target_state = column_ref.block_state(tlx, ty, tlz);
+                let above_target = column_ref.block_state(tlx, ty + 1, tlz);
                 can_propagate_onto(target_state, above_target)
             })
         };
@@ -1431,5 +1439,122 @@ mod tests {
         assert!(both_settled, "both stacked gravity blocks must settle, the gravel directly atop the sand");
         assert_eq!(column.block_state(6, 5, 5), "minecraft:air");
         assert_eq!(column.block_state(6, 6, 5), "minecraft:air");
+    }
+
+    // # Issue #472: local vs absolute `z` in grass propagation
+    //
+    // Every other test in this module ticks chunk `(0, 0)`, where `min_z` is
+    // 0 and so local `z` == absolute `z`. That makes the two coordinates
+    // indistinguishable and the bug structurally invisible — the *world*
+    // species of vacuous test, where the flaw is in the fixture rather than
+    // in anything readable in the test body. The two gates below tick chunk
+    // `(2, 3)` instead, so `min_z = 48` and local 5 is absolute 53.
+    //
+    // ## Where the wrong read lands
+    //
+    // `ChunkColumn::index` is `((y_local * 16 + z) * 16 + x)` with a
+    // `debug_assert!((0..16).contains(&z))`. Passing an absolute
+    // `tz = cz * 16 + tlz` therefore panics in a debug build, and in a
+    // release build (where the assert compiles out) silently aliases onto
+    // local `(tlx, ty + cz, tlz)` — the same column, `cz` y-levels too high.
+    // For chunk `(2, 3)` and a target at local `(6, 5, 5)`:
+    //
+    //   index(6, y_local=5, z=53) = (5 * 16 + 53) * 16 + 6 = 2134
+    //   index(6, y_local=8, z= 5) = (8 * 16 +  5) * 16 + 6 = 2134
+    //
+    // so the misread lands on local `(6, 8, 5)`, and its `ty + 1` companion
+    // on local `(6, 9, 5)`. Both are inside the 4096-cell backing store, so
+    // release genuinely misreads rather than panicking on a slice bound.
+    // The two cells are stocked deliberately in each gate below.
+
+    /// #472, forward direction: an eligible dirt block must still be found
+    /// when the chunk's `min_z` is non-zero. The two cells the absolute-`z`
+    /// misread aliases onto are stocked with stone, so under the bug
+    /// `can_propagate_onto("minecraft:stone", ..)` is false and the spread
+    /// can never happen — a release build fails on the loop exhausting, a
+    /// debug build fails on `ChunkColumn::index`'s `debug_assert`.
+    #[test]
+    fn grass_spreads_at_a_chunk_whose_local_and_absolute_z_differ() {
+        const CX: i32 = 2;
+        const CZ: i32 = 3;
+        let (min_x, min_z) = (CX * 16, CZ * 16);
+
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block(5, 5, 5, GRASS_BLOCK); // source, air above
+        column.set_block(6, 5, 5, DIRT_BLOCK); // one step east, air above
+        // The cells an absolute-`z` read would alias onto (see the block
+        // comment above): stone rejects `can_propagate_onto`, so the buggy
+        // read cannot accidentally agree with the correct one.
+        column.set_block(6, 8, 5, "minecraft:stone");
+        column.set_block(6, 9, 5, "minecraft:stone");
+
+        let target_abs = (min_x + 6, 5, min_z + 5); // (38, 5, 53)
+        assert_ne!(target_abs.2, 5, "fixture must have absolute z != local z, or it cannot see #472");
+
+        let mut scheduler = RandomTickScheduler::new(2, 2);
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        // Same two-independent-events reasoning as
+        // `an_eligible_neighboring_dirt_block_eventually_becomes_grass`:
+        // ~0.0042 per call, so 3000 calls gives ~12.7 expected hits.
+        let mut spread = false;
+        for _ in 0..3000 {
+            let events = scheduler.tick_chunk(&mut column, CX, CZ, 200, &mut block_ticks, 0);
+            if events.iter().any(|e| e.pos == target_abs && e.to == GRASS_BLOCK) {
+                spread = true;
+                break;
+            }
+        }
+        assert!(
+            spread,
+            "dirt at local (6, 5, 5) = absolute {target_abs:?} in chunk ({CX}, {CZ}) must become grass; \
+             it did not, so the propagation probe read the wrong cell (#472). \
+             local (6,5,5) is {:?}, the absolute-z alias local (6,8,5) is {:?}",
+            column.block_state(6, 5, 5),
+            column.block_state(6, 8, 5),
+        );
+        assert_eq!(column.block_state(6, 5, 5), GRASS_BLOCK, "at local (6, 5, 5)");
+        // Nothing may have been written at the alias cells.
+        assert_eq!(column.block_state(6, 8, 5), "minecraft:stone", "at alias cell local (6, 8, 5)");
+        assert_eq!(column.block_state(6, 9, 5), "minecraft:stone", "at alias cell local (6, 9, 5)");
+    }
+
+    /// #472, misread direction: the *write* at the end of `tick_grass_block`
+    /// always used the local `tlz` — only the probe read was wrong — so the
+    /// bug converts a block that is not dirt, at the correct coordinate,
+    /// having consulted a cell three y-levels up. Here local `(6, 5, 5)` is
+    /// stone (a correct probe rejects it) while the alias cells hold
+    /// dirt-under-air (a buggy probe accepts). Under the bug a release build
+    /// finds grass at a coordinate that was stone; a debug build panics.
+    ///
+    /// The detector for this absence assertion is
+    /// `grass_spreads_at_a_chunk_whose_local_and_absolute_z_differ`: same
+    /// chunk, same scheduler seeds, same tick budget, and it does observe a
+    /// spread — so "no spread here" is a discrimination, not a dead loop.
+    /// The offset needed to reach local `(6, 8, 5)` legitimately is
+    /// `dy = +3`, outside `grass_random_tick`'s `next_int(5) - 3` range of
+    /// `-3..=+1`, so a correct probe can never reach those cells at all.
+    #[test]
+    fn an_absolute_z_misread_would_convert_a_non_dirt_block_at_the_correct_coordinate() {
+        const CX: i32 = 2;
+        const CZ: i32 = 3;
+
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block(5, 5, 5, GRASS_BLOCK); // source, air above
+        column.set_block(6, 5, 5, "minecraft:stone"); // NOT a legal target
+        column.set_block(6, 8, 5, DIRT_BLOCK); // alias cell: dirt, air above
+
+        let mut scheduler = RandomTickScheduler::new(2, 2);
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        for _ in 0..3000 {
+            let events = scheduler.tick_chunk(&mut column, CX, CZ, 200, &mut block_ticks, 0);
+            assert!(
+                !events.iter().any(|e| e.to == GRASS_BLOCK),
+                "no grass conversion is legal here, but one landed at {:?} (#472: the probe read \
+                 the absolute-z alias local (6, 8, 5) and the write used the correct local (6, 5, 5))",
+                events.iter().find(|e| e.to == GRASS_BLOCK).map(|e| e.pos),
+            );
+        }
+        assert_eq!(column.block_state(6, 5, 5), "minecraft:stone", "at local (6, 5, 5) in chunk (2, 3)");
+        assert_eq!(column.block_state(6, 8, 5), DIRT_BLOCK, "at alias cell local (6, 8, 5)");
     }
 }

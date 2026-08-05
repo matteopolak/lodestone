@@ -217,6 +217,20 @@ changes"), here is exactly what does and does not:
 
 ## How to change it, and the gotchas
 
+- **`ChunkColumn`'s `block_state`/`set_block` take LOCAL x/z; every tick
+  handler is handed ABSOLUTE x/z plus `min_x`/`min_z` to convert with.** Mixing
+  the two was issue #472: grass propagation bounds-checked the local `tlz` and
+  then passed the absolute `tz` to `block_state`. The guard reads as present
+  and correct — the defect is the argument passed *after* it. `index` is
+  `((y_local * 16 + z) * 16 + x)` with a `debug_assert` on `z`, so an absolute
+  `z` panics only in a debug build; in the release build that actually ships it
+  silently aliases onto local `(x, y + cz, z)`, `cz` y-levels too high, and
+  grass still spreads — just not from where it should. **Test any coordinate
+  handling at a chunk with a non-zero `min_z`**: at chunk `(0, 0)` local and
+  absolute coincide, so the obvious fixture structurally cannot fail. The gates
+  are `random_tick.rs`'s `grass_spreads_at_a_chunk_whose_local_and_absolute_z_differ`
+  and `an_absolute_z_misread_would_convert_a_non_dirt_block_at_the_correct_coordinate`,
+  both at chunk `(2, 3)`, and both fail in *both* profiles if the mix-up returns.
 - **Adding a new randomly-ticking block**: extend [`is_randomly_ticking`] and
   add a branch to `RandomTickScheduler::tick_randomly_ticking_block`'s
   dispatch (grass lives directly in this module; crop/sapling/leaf logic
