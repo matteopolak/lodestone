@@ -242,6 +242,106 @@ radius.
 kept apart from the layout function on purpose, so geometry never needs a
 loaded `RecipeBook` and the data query never needs a viewport size.
 
+#### The toggle button's position is per-screen, and getting this wrong shipped
+
+`getRecipeBookButtonPosition` is **abstract with no default**
+(`AbstractRecipeBookScreen.java:36`) and all three book-bearing screen families
+override it with a different answer. The first cut of this panel used the
+crafting table's for every screen, and the owner found the button in the wrong
+place in the player inventory — 99 px left and 27 px above vanilla's, landing on
+the armour column.
+
+Local offsets off `(leftPos, topPos)`, with `topPos = (height - imageHeight)/2`
+(`AbstractContainerScreen.java:78`) and `imageHeight` the `176x166` default for
+all three, so the screen height and `leftPos` cancel:
+
+| screen | jar expression | local |
+|---|---|---|
+| `InventoryScreen.java:64` | `(leftPos + 104, height/2 - 22)` | `(104, 61)` |
+| `CraftingScreen.java:27` | `(leftPos + 5, height/2 - 49)` | `(5, 34)` |
+| `AbstractFurnaceScreen.java:44` | `(leftPos + 20, height/2 - 49)` | `(20, 34)` |
+
+`recipe_toggle_local` dispatches on `background_kind`, not a second `match` on
+`special_layout`/`kind` — that function already answers "which vanilla screen
+class is this menu", including the trap that a special-layout menu is
+mechanically a `MenuKind::Generic`.
+
+**Do not conflate this with the screen-shift gap above.** The local offset is
+*invariant* to the shift: `AbstractRecipeBookScreen.java:42-44` re-derives the
+button position off the already-shifted `leftPos`, and `topPos` is never
+re-derived at all. So the button's position was a plain per-screen-constant bug
+and the screen shift remains deliberately unfixed.
+
+### Panel art — the real 26.2 textures
+
+The panel first shipped drawing **flat fill colours** with no textures at all,
+which the owner reported as "completely incorrectly textured". It was not
+slightly off: vanilla's page is an opaque **white** sheet and our fill was
+near-black.
+
+Vanilla's art comes from two places, and the split matters:
+
+- **The page** is a raw texture path, not a sprite:
+  `RECIPE_BOOK_LOCATION = "textures/gui/recipe_book.png"`
+  (`RecipeBookComponent.java:59`), blitted as a fixed `147x166` window at
+  `(1, 1)` of a `256x256` sheet (`:305`). The one-pixel inset is real — decoding
+  the PNG shows its opaque region is exactly `x 1..147, y 1..166`. It has **no**
+  `.mcmeta` and is not nine-sliced (the only recipe-book sprite that is, is
+  `overlay_recipe`, which this client does not draw).
+- **Everything else** — `recipe_book/button`, `tab`, `tab_selected`,
+  `filter_disabled`, `page_forward`, `page_backward`, `slot_craftable` — lives
+  under `gui/sprites/recipe_book/**` and was therefore **already** in the atlas:
+  `GuiAtlas::build` stitches every `assets/<ns>/textures/gui/sprites/**.png` in
+  the pack. Wiring the art needed no new atlas, pipeline or bind group.
+
+So the geometry carries `Vec<RecipeBookSprite>` — **ids and destination rects
+only, no UVs and no atlas**. The producer runs with no GPU and no `GuiAtlas` in
+scope, and `HudRenderer::render_recipe_book_panel` resolves each against
+whatever atlas is bound, skipping unknown ids. The page needed
+`GuiAtlas::subregion_quad`, because `geometry` maps the *whole* sprite through
+its `GuiScaling` and would have stretched all 256x256 into the 147x166 rect.
+
+The page is registered as a **loose extra** on the HUD's atlas
+(`resources::RECIPE_BOOK_TEXTURES`, id `recipe_book/panel` — a name vanilla does
+not use, so it can never collide with a real sprite, which matters because
+`build_with_extras` silently skips an extra whose id is already claimed).
+
+Three things to know before changing this:
+
+- **The flat fills are still there, and should stay.** They are the jar-less
+  picture, every existing headless geometry gate measures them, and the opaque
+  page hides them completely when an atlas is bound.
+- **List order is draw order.** The page must be first (it is opaque and would
+  erase anything before it) and the toggle **last** (the panel is clamped and may
+  overlap the main panel's left edge, so a page drawn over the toggle buries a
+  live control).
+- **Two documented deviations.** Slot frames are emitted for *populated* cells
+  only, matching vanilla hiding an unused `RecipeButton` — the sheet's grid
+  region is uniform white with no frames baked in, so drawing all 20 would add a
+  grid vanilla lacks. And the filter button always uses the crafting art, never
+  `furnace_filter_disabled`: the geometry function is not given the `Menu`, and
+  threading one in changes a caller outside this module. Craftability is not
+  modelled either, so `slot_craftable` is used unconditionally — this panel
+  browses the whole corpus rather than only what the inventory can make, so
+  greying everything out would be the more misleading of the two.
+
+### Stack counts must be submitted after the icons they sit on
+
+There is **no depth compare** on this GUI path, so submission order alone decides
+z. The panel originally emitted a slot well and then that cell's icon, per cell,
+in one interleaved loop, and drew the whole colour stream in a single pass before
+the item passes — so every count digit went down before its own icon and
+vanished. The owner reported it as "the item counts are behind the items (at
+least the blocks)", and the "at least" is the diagnostic: a flat item sprite is
+transparent around its edges so digits bled through, whereas a 3-D block model
+fills the bottom-right corner opaquely and hid them outright.
+
+Fixed the way `ContainerGeometry` already did it: the geometry emits all chrome
+first, records `chrome_vertex_count`, then the icons, and the draw is four
+passes — chrome, art, models, then sprites plus the icon-overlay colour range.
+This was **recipe-panel only**; the main container and inventory path was
+already correct.
+
 ### Recipe-unlock tracking — `RecipeUnlockState` (`recipe.rs`)
 
 **Nothing populates this today.** The server signal is

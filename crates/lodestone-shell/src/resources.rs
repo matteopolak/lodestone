@@ -276,11 +276,42 @@ pub fn load_block_entity_textures()
 /// procedural fallback rather than the whole run failing. Only the jar is needed
 /// (no `blocks.json`), so this succeeds even on a pack that can't build the block
 /// atlas.
+/// The recipe book's **panel background**, which is the one piece of its art
+/// vanilla does not put through the sprite atlas.
+///
+/// `RecipeBookComponent.java:59` declares it as a raw texture path
+/// (`RECIPE_BOOK_LOCATION = "textures/gui/recipe_book.png"`) and `:305` blits a
+/// `147×166` window at `(1, 1)` out of the `256×256` sheet. Everything else the
+/// book draws — the toggle button, tabs, filter, page arrows and recipe slots —
+/// lives under `gui/sprites/recipe_book/**` and so is already in
+/// [`GuiAtlas::build`]'s own enumeration with no help from this list.
+///
+/// It is an **extra** on the HUD's atlas rather than a second stitch because
+/// the recipe-book panel draws through `HudRenderer`'s existing sprite pipeline
+/// and bind group (see `HudRenderer::render_recipe_book_panel`); a separate
+/// atlas would mean a second texture, bind group and pipeline for one quad.
+/// Unlike [`MENU_TEXTURES`]'s 1024×256 logo, this is a 256×256 sheet, and the
+/// concern recorded on [`load_menu_gui_atlas`] — that an extra repacks every
+/// other sprite — is harmless here: nothing reads a UV as a constant. Every
+/// consumer resolves UVs from the atlas at runtime.
+pub const RECIPE_BOOK_TEXTURES: &[(&str, &str)] = &[(
+    "recipe_book/panel",
+    "assets/minecraft/textures/gui/recipe_book.png",
+)];
+
+/// The sprite id [`RECIPE_BOOK_TEXTURES`] registers the panel sheet under.
+///
+/// Deliberately *inside* the `recipe_book/` namespace but a name vanilla does
+/// not use (vanilla has no `recipe_book/panel` sprite), so it can never collide
+/// with a real sprite — and `build_with_extras` skips an extra whose id is
+/// already claimed, which would otherwise fail silently.
+pub const RECIPE_BOOK_PANEL_SPRITE: &str = "recipe_book/panel";
+
 #[must_use]
 pub fn load_gui_atlas() -> Option<Arc<GuiAtlas>> {
     let root = asset_root()?;
     let manager = open_client_jar(&root)?;
-    match GuiAtlas::build(&manager) {
+    match GuiAtlas::build_with_extras(&manager, RECIPE_BOOK_TEXTURES) {
         Ok(atlas) => {
             tracing::info!(
                 target: "assets",

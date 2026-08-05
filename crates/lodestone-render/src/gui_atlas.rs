@@ -313,6 +313,44 @@ impl GuiAtlas {
             })
             .collect()
     }
+
+    /// A **sub-rectangle** of a sprite, sampled at `src` (in the sprite's own
+    /// native pixel space) and drawn at `dst` (`[x, y, w, h]` in target pixels).
+    ///
+    /// [`geometry`](Self::geometry) always maps the *whole* sprite through its
+    /// [`GuiScaling`], which is right for every real `gui/sprites/**` entry —
+    /// vanilla blits those through `blitSprite`, which does exactly that. It is
+    /// wrong for the handful of GUI textures vanilla blits by **raw path** from
+    /// a larger sheet, which [`build_with_extras`](Self::build_with_extras)
+    /// stitches in whole: the recipe book's panel is
+    /// `blit(RECIPE_BOOK_LOCATION, xo, yo, 1.0F, 1.0F, 147, 166, 256, 256)`
+    /// (`RecipeBookComponent.java:305`) — a `147×166` window at `(1, 1)` of a
+    /// `256×256` sheet. Passing that sheet to `geometry` would *stretch* all
+    /// 256×256 of it into a 147×166 rect instead.
+    ///
+    /// `None` for an unknown id, so a caller can emit the request
+    /// unconditionally and draw nothing on a pack that lacks the texture. The
+    /// sprite's own `GuiScaling` is deliberately **ignored**: a sub-rect request
+    /// is by definition a fixed window, and a nine-slice of an arbitrary window
+    /// is not a thing vanilla ever does.
+    #[must_use]
+    pub fn subregion_quad(&self, id: &str, src: [f32; 4], dst: [f32; 4]) -> Option<GuiSpriteQuad> {
+        let entry = self.sprites.get(id)?;
+        let sprite = self.atlas.sprite(&entry.location)?;
+        let (atlas_w, atlas_h) = (self.atlas.width as f32, self.atlas.height as f32);
+        let [sx, sy, sw, sh] = src;
+        Some(GuiSpriteQuad {
+            dst,
+            uv_min: [
+                (sprite.x as f32 + sx) / atlas_w,
+                (sprite.y as f32 + sy) / atlas_h,
+            ],
+            uv_max: [
+                (sprite.x as f32 + sx + sw) / atlas_w,
+                (sprite.y as f32 + sy + sh) / atlas_h,
+            ],
+        })
+    }
 }
 
 /// True for `assets/<ns>/textures/gui/sprites/<id>.png` (and not its `.mcmeta`).
