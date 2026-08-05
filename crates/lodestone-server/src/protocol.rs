@@ -188,14 +188,21 @@ pub enum ServerBound {
     },
     /// The client's absolute position changed (`move_player_pos` /
     /// `move_player_pos_rot` — the only two serverbound movement packets that
-    /// carry a position; `move_player_rot` and `move_player_status_only`
-    /// carry none and stay [`Ignored`](Self::Ignored)). This drives
-    /// chunk-cache-center/view-streaming updates (needs only `x`/`z`) and
-    /// [`crate::fall::FallTracker`] (issue #265, needs `y`/`on_ground`) — the
-    /// loop still needs no look data, but `on_ground` is no longer dropped:
-    /// a landing that happens to arrive via a rotation-only or status-only
-    /// packet (no net position change in that sample) is not observed here,
-    /// a known gap noted on [`FallTracker`]'s own doc comment.
+    /// carry a position). This drives chunk-cache-center/view-streaming
+    /// updates (needs only `x`/`z`) and [`crate::fall::FallTracker`]
+    /// (issue #265, needs `y`/`on_ground`).
+    ///
+    /// `rotation` is `Some` only for `move_player_pos_rot`, which is the
+    /// packet a client sends whenever position *and* look both changed in a
+    /// tick — i.e. the overwhelmingly common case of a player walking while
+    /// turning. It was decoded and discarded here until issue #262's wiring:
+    /// a player who walks and turns never sends `move_player_rot` at all
+    /// (vanilla's `LocalPlayer.sendPosition` picks exactly one of the four
+    /// movement packets per tick), so handling only the rotation-*only*
+    /// sibling would have left the common case frozen at yaw 0. `None` for
+    /// `move_player_pos`, whose wire body genuinely has no angles — a
+    /// distinction the consumer must keep, since "no angles in this sample"
+    /// is not the same as "facing due south".
     PlayerMoved {
         /// New absolute x position, in blocks.
         x: f64,
@@ -203,6 +210,35 @@ pub enum ServerBound {
         y: f64,
         /// New absolute z position, in blocks.
         z: f64,
+        /// New body/head rotation, when this sample carried one.
+        rotation: Option<Rotation>,
+        /// Whether the client reports itself as grounded in this sample.
+        on_ground: bool,
+    },
+    /// The client's look changed but its position did not
+    /// (`move_player_rot`), the packet a player standing still and turning on
+    /// the spot sends every tick.
+    ///
+    /// Decoded-and-dropped until issue #262's wiring. It is the difference
+    /// between an avatar that tracks where its player is looking and one that
+    /// only ever re-aims when it also happens to be walking, so it is not
+    /// redundant with [`PlayerMoved`](Self::PlayerMoved)'s `rotation`.
+    PlayerRotated {
+        /// New body/head yaw, in degrees.
+        yaw: f32,
+        /// New pitch, in degrees.
+        pitch: f32,
+        /// Whether the client reports itself as grounded in this sample.
+        on_ground: bool,
+    },
+    /// Neither position nor look changed enough to be dirty, but the client's
+    /// grounded/collision status flipped (`move_player_status_only`).
+    ///
+    /// Carries no pose data at all — the flags byte is the whole body. Its
+    /// one consumer is [`crate::fall::FallTracker`]: this is the packet that
+    /// reports the landing of a fall whose final sample had no net position
+    /// change, the exact gap that type's own doc comment used to disclose.
+    PlayerStatusOnly {
         /// Whether the client reports itself as grounded in this sample.
         on_ground: bool,
     },

@@ -150,6 +150,12 @@ impl ServerProtocol for FakeProtocol {
                     // harmless choice (a landing sample every packet, never
                     // producing a multi-tick accumulated fall).
                     on_ground: true,
+                    // Likewise: this stand-in format carries no angles, and
+                    // `None` is the honest lowering of that — the same value
+                    // the real `move_player_pos` arm produces. Player-facing
+                    // is gated in `tests/player_rotation.rs` against the real
+                    // v770 decoder instead.
+                    rotation: None,
                 }
             }
             // Issue #268: a minimal stand-in wire format for the

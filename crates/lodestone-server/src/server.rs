@@ -16,7 +16,7 @@ use std::time::Duration;
 use lodestone_core::State;
 use lodestone_entity::DamageFlags;
 use lodestone_model::{
-    BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, Text, TextContent, Vec3,
+    BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, Rotation, Text, TextContent, Vec3,
 };
 use lodestone_net::{Connection, NetError, Transport};
 
@@ -1469,6 +1469,8 @@ where
             }
             ServerBound::KeepAlive { .. }
             | ServerBound::PlayerMoved { .. }
+            | ServerBound::PlayerRotated { .. }
+            | ServerBound::PlayerStatusOnly { .. }
             | ServerBound::BlockAction { .. }
             | ServerBound::UseItemOn { .. }
             | ServerBound::DifficultyChanged { .. }
@@ -2243,6 +2245,44 @@ fn apply_attack(mobs: &MobHandle, player_pos: Option<(f64, f64, f64)>, sprinting
 /// Every other packet decodes to [`ServerBound::Ignored`] in `State::Play`
 /// under the current protocols (no further state transitions are modeled —
 /// no dimension change yet) and is a no-op here.
+/// Feeds one `on_ground` sample to the [`FallTracker`] from a movement packet
+/// that carried **no** y coordinate, reusing the last position this connection
+/// reported (issue #262).
+///
+/// Reusing the remembered y is not an approximation: `move_player_rot` and
+/// `move_player_status_only` are precisely the two packets vanilla's
+/// `LocalPlayer.sendPosition` picks when position did *not* change this tick,
+/// so the last reported y is the current y by construction. Feeding it back
+/// with the new `on_ground` is therefore the same `(y, on_ground)` pair the
+/// tracker would have seen had the client sent a position packet.
+///
+/// Returns without touching the tracker when no position has been reported
+/// yet — a status packet before the first movement packet has no y to pair
+/// with, and inventing one (say, the spawn point) would fabricate a fall.
+async fn fall_status_sample<T, P>(
+    conn: &mut Connection<T>,
+    state: &mut State,
+    proto: &P,
+    player_pos: &Option<(f64, f64, f64)>,
+    fall: &mut FallTracker,
+    vitals: &mut PlayerVitals,
+    on_ground: bool,
+) -> Result<(), ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+{
+    let Some((_, y, _)) = *player_pos else {
+        return Ok(());
+    };
+    if let Some(raw) = fall.on_player_moved(y, on_ground)
+        && vitals.apply_fall_damage(raw as f32).is_some()
+    {
+        apply(conn, state, proto.encode_set_health(vitals.health())).await?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_play_packet<T, P, S>(
     conn: &mut Connection<T>,
@@ -2254,6 +2294,12 @@ async fn dispatch_play_packet<T, P, S>(
     pending_keep_alive: &mut Option<i64>,
     pending_break: &mut Option<BlockPos>,
     player_pos: &mut Option<(f64, f64, f64)>,
+    // Issue #262. Mirrors `player_pos` exactly — updated here, read back by
+    // the caller, republished to the `PlayerRegistry` so *other* connections
+    // stream this player's facing. `Option` because "no angles reported yet"
+    // is distinct from "facing due south"; the registry keeps its join
+    // default until a packet that actually carries angles arrives.
+    player_rot: &mut Option<Rotation>,
     fall: &mut FallTracker,
     vitals: &mut PlayerVitals,
     admin: &mut WorldAdminState,
@@ -2284,8 +2330,23 @@ where
                 *pending_keep_alive = None;
             }
         }
-        ServerBound::PlayerMoved { x, y, z, on_ground } => {
+        ServerBound::PlayerMoved {
+            x,
+            y,
+            z,
+            rotation,
+            on_ground,
+        } => {
             *player_pos = Some((x, y, z));
+            // Issue #262: `move_player_pos_rot` carries angles and
+            // `move_player_pos` does not, so this is `if let`, not an
+            // assignment — overwriting with `None` on every straight-line
+            // step would snap the avatar back to yaw 0 between turns, which
+            // is a worse failure than never turning at all because it only
+            // shows up while moving.
+            if let Some(rotation) = rotation {
+                *player_rot = Some(rotation);
+            }
 
             // Issue #441: feed mob perception the player's position and held
             // item. This is the *producer* for `MobController::nearest_player`
@@ -2336,6 +2397,30 @@ where
             {
                 apply(conn, state, proto.encode_set_health(vitals.health())).await?;
             }
+        }
+        // Issue #262. A player turning on the spot sends `move_player_rot`
+        // and nothing else, so without this arm their avatar only ever
+        // re-aimed on ticks where they also happened to walk.
+        //
+        // No view-streaming recentre here, deliberately: this packet carries
+        // no position, so the chunk column cannot have changed and calling
+        // `view.recenter` would re-derive the same centre from a stale
+        // `player_pos` for no reason.
+        ServerBound::PlayerRotated {
+            yaw,
+            pitch,
+            on_ground,
+        } => {
+            *player_rot = Some(Rotation { yaw, pitch });
+            fall_status_sample(conn, state, proto, player_pos, fall, vitals, on_ground).await?;
+        }
+        // Issue #262. Carries nothing but the flags byte, so its whole job is
+        // the `on_ground` edge — which is exactly the landing sample
+        // `FallTracker`'s doc comment used to disclose as unobservable,
+        // because a fall that ends with no net position change in its final
+        // tick reports the touchdown on *this* packet and no other.
+        ServerBound::PlayerStatusOnly { on_ground } => {
+            fall_status_sample(conn, state, proto, player_pos, fall, vitals, on_ground).await?;
         }
         ServerBound::BlockAction {
             action,
@@ -2577,6 +2662,9 @@ where
     let mut pending_keep_alive: Option<i64> = None;
     let mut pending_break: Option<BlockPos> = None;
     let mut player_pos: Option<(f64, f64, f64)> = None;
+    // Issue #262, alongside `player_pos` — see `dispatch_play_packet`'s own
+    // parameter comment.
+    let mut player_rot: Option<Rotation> = None;
     let mut vitals = PlayerVitals::default();
     let mut fall = FallTracker::default();
     let mut admin = WorldAdminState::default();
@@ -2647,6 +2735,7 @@ where
                     &mut pending_keep_alive,
                     &mut pending_break,
                     &mut player_pos,
+                    &mut player_rot,
                     &mut fall,
                     &mut vitals,
                     &mut admin,
@@ -2677,6 +2766,16 @@ where
                     player_pos,
                 ) {
                     registry.set_position(ticket.entity_id(), Vec3::new(x, y, z));
+                }
+                // Issue #262: the same republish for facing. A separate
+                // `if let` rather than a third binding in the tuple above,
+                // because rotation and position arrive on different packets
+                // — requiring both to be `Some` would mean a player who has
+                // turned but not yet moved publishes neither.
+                if let (Some(ticket), Some(registry), Some(rotation)) =
+                    (player_ticket.as_ref(), entities.players(), player_rot)
+                {
+                    registry.set_rotation(ticket.entity_id(), rotation);
                 }
                 for directive in stream_pass(
                     proto,
@@ -2851,6 +2950,9 @@ where
     // `vitals` still needs to exist as somewhere for `apply_fall_damage` to
     // carry health, even though nothing else fills it in on this target.
     let mut player_pos: Option<(f64, f64, f64)> = None;
+    // Issue #262, alongside `player_pos` — see `dispatch_play_packet`'s own
+    // parameter comment.
+    let mut player_rot: Option<Rotation> = None;
     let mut vitals = PlayerVitals::default();
     let mut fall = FallTracker::default();
     let mut admin = WorldAdminState::default();
@@ -2882,6 +2984,7 @@ where
             &mut pending_keep_alive,
             &mut pending_break,
             &mut player_pos,
+            &mut player_rot,
             &mut fall,
             &mut vitals,
             &mut admin,
@@ -2906,6 +3009,12 @@ where
             (player_ticket.as_ref(), entities.players(), player_pos)
         {
             registry.set_position(ticket.entity_id(), Vec3::new(x, y, z));
+        }
+        // Issue #262, identical to the native loop — see its own comment.
+        if let (Some(ticket), Some(registry), Some(rotation)) =
+            (player_ticket.as_ref(), entities.players(), player_rot)
+        {
+            registry.set_rotation(ticket.entity_id(), rotation);
         }
         for directive in stream_pass(
             proto,
