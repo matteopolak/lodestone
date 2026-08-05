@@ -84,7 +84,7 @@
 //! [`super::compose::build_biome_vegetation`] (this module is reached from)
 //! resolves **every** biome's `VEGETAL_DECORATION` step at generator
 //! construction time, including biomes this issue never asked for (jungle's
-//! `GiantTrunkPlacer`/`JungleFoliagePlacer`, dark oak's `FancyTrunkPlacer`,
+//! `GiantTrunkPlacer`/`JungleFoliagePlacer`, fancy oak's `FancyTrunkPlacer`,
 //! acacia's `RotatedBlockProvider` trunk, azalea's `EnvironmentScanPlacement`,
 //! `FallenTreeFeature`, and more) — a `panic!` on any one of those would
 //! break world generation for **every** biome table, not just the one that
@@ -134,11 +134,17 @@
 //! column + branch, not oak's straight-trunk-plus-variant shape), landed
 //! because savanna is a common, visible biome and `ForkingTrunkPlacer` is
 //! self-contained (no multi-block-wide "giant" trunk footprint the way
-//! jungle/dark-oak/mangrove/cherry all have). Jungle (`GiantTrunkPlacer`+
-//! `MegaJungleFoliagePlacer`), dark oak (`DarkOakTrunkPlacer`+
-//! `DarkOakFoliagePlacer`, a real 2×2 trunk with branches), mangrove
-//! (`UpwardsBranchingTrunkPlacer` — has real above-water roots) and cherry
-//! (`CherryTrunkPlacer`+`CherryFoliagePlacer`) remain
+//! jungle/mangrove/cherry all have). Dark oak
+//! (`TrunkPlacerCfg::DarkOak`+`FoliagePlacerCfg::DarkOak`, a real 2×2 trunk
+//! with hanging branches — plus the `ThreeLayersFeatureSize` it pairs with)
+//! landed later in the same issue, because it gates dark_forest's defining
+//! tree at 66.7% weight in `dark_forest_vegetation` (the acacia-style
+//! argument, applied to the biome where the gap was loudest); it also
+//! carries pale oak for free — `pale_oak`/`pale_oak_creaking` reuse the same
+//! trunk/foliage placer types with their own providers, closing pale_garden's
+//! tree gap alongside. Jungle (`GiantTrunkPlacer`+`MegaJungleFoliagePlacer`),
+//! mangrove (`UpwardsBranchingTrunkPlacer` — has real above-water roots) and
+//! cherry (`CherryTrunkPlacer`+`CherryFoliagePlacer`) remain
 //! [`ConfiguredFeature::Unsupported`] — each is a structurally distinct
 //! trunk/foliage shape, not a small extension of `Straight`/`Forking`, and
 //! none was attempted this session; see
@@ -581,6 +587,11 @@ pub struct VegTags {
     /// explicit sibling `any_of`/`matching_fluids` predicate — see
     /// [`BlockPredicate::MatchingFluid`].
     pub supports_sugar_cane: HashSet<String>,
+    /// `#minecraft:leaves` — `TreeFeature.isAirOrLeaves`, the anchor gate
+    /// [`place_dark_oak_trunk`] checks before attempting each 2×2 log layer
+    /// (a dark oak trunk can grow up through a neighbour's already-placed
+    /// canopy; dense dark forests depend on that).
+    pub leaves: HashSet<String>,
 }
 
 /// Resolves [`VegTags`] from a [`Resolver`]. Empty sets (never a panic) if
@@ -601,6 +612,7 @@ pub fn build_veg_tags(resolver: &dyn Resolver) -> VegTags {
         logs: resolve("minecraft:logs"),
         supports_cactus: resolve("minecraft:supports_cactus"),
         supports_sugar_cane: resolve("minecraft:supports_sugar_cane"),
+        leaves: resolve("minecraft:leaves"),
     }
 }
 
@@ -845,6 +857,17 @@ pub enum TrunkPlacerCfg {
         height_rand_a: i32,
         height_rand_b: i32,
     },
+    /// `DarkOakTrunkPlacer` — dark oak's real trunk (issue #428): a 2×2 log
+    /// column (four logs per level) that leans one step for its upper
+    /// portion, on a 2×2 `below_trunk_provider` base, plus up to a few short
+    /// hanging branches around the canopy top. See [`place_dark_oak_trunk`]
+    /// for the port of `placeTrunk` itself. Shared with pale oak, which uses
+    /// the same placer type with its own providers.
+    DarkOak {
+        base_height: i32,
+        height_rand_a: i32,
+        height_rand_b: i32,
+    },
 }
 
 impl TrunkPlacerCfg {
@@ -856,6 +879,7 @@ impl TrunkPlacerCfg {
         match ty.strip_prefix("minecraft:").unwrap_or(ty) {
             "straight_trunk_placer" => Some(Self::Straight { base_height, height_rand_a, height_rand_b }),
             "forking_trunk_placer" => Some(Self::Forking { base_height, height_rand_a, height_rand_b }),
+            "dark_oak_trunk_placer" => Some(Self::DarkOak { base_height, height_rand_a, height_rand_b }),
             _ => None,
         }
     }
@@ -863,7 +887,8 @@ impl TrunkPlacerCfg {
     fn heights(&self) -> (i32, i32, i32) {
         match *self {
             Self::Straight { base_height, height_rand_a, height_rand_b }
-            | Self::Forking { base_height, height_rand_a, height_rand_b } => {
+            | Self::Forking { base_height, height_rand_a, height_rand_b }
+            | Self::DarkOak { base_height, height_rand_a, height_rand_b } => {
                 (base_height, height_rand_a, height_rand_b)
             }
         }
@@ -892,15 +917,13 @@ struct Attachment {
     /// attachment this module produces uses `0`. Consumed by
     /// [`FoliagePlacerCfg::Acacia`]'s `create_foliage`.
     radius_offset: i32,
-    /// `FoliageAttachment.doubleTrunk` — always `false` for every trunk
-    /// placer this module implements (`Straight`, `Forking`); kept as a
-    /// real field rather than assumed, since a future `DarkOakTrunkPlacer`
-    /// port would set it `true` for its primary attachment. Not read by
-    /// anything yet (no implemented foliage placer branches on it — see
-    /// [`FoliagePlacerCfg::should_skip_location`]'s own doc on why even
-    /// `Acacia` never needs it), hence the explicit allow rather than
-    /// deleting a field the next placer family will need on day one.
-    #[allow(dead_code)]
+    /// `FoliageAttachment.doubleTrunk` — `true` only for
+    /// [`TrunkPlacerCfg::DarkOak`]'s primary (2×2-trunk) attachment;
+    /// `false` for every other attachment this module produces (`Straight`,
+    /// `Forking`, and DarkOak's branch attachments). Consumed by
+    /// [`FoliagePlacerCfg::DarkOak`]'s `create_foliage`, which widens its
+    /// rows by one in the positive direction (and applies a different skip
+    /// rule) when it is set.
     double_trunk: bool,
 }
 
@@ -1005,6 +1028,128 @@ fn place_forking_trunk<R: RandomSource>(
         }
         if let Some(y) = ey {
             attachments.push(Attachment { pos: BlockPos { x: tx, y, z: tz }, radius_offset: 0, double_trunk: false });
+        }
+    }
+
+    (attachments, trunk_positions, placed_any)
+}
+
+/// `DarkOakTrunkPlacer.placeTrunk` — dark oak's real trunk (issue #428),
+/// also the trunk of pale oak (both use `dark_oak_trunk_placer`). A 2×2 log
+/// column: four `placeBelowTrunkBlock`s at the origin's `(0,0)`, `east`,
+/// `south`, `south().east()` base, then per level (gated by the anchor's
+/// `TreeFeature.isAirOrLeaves` — a dark oak trunk can grow up through a
+/// neighbour's already-placed canopy, which dense dark forests depend on) up
+/// to four `placeLog`s at the same 2×2 footprint, the whole column leaning
+/// one step for its upper portion (`leanHeight`/`leanSteps`, the same
+/// `Direction.Plane.HORIZONTAL.getRandomDirection` indexing
+/// [`place_forking_trunk`]'s `STEP` table). Around the top, up to a few
+/// short hanging branches descend from just below `ey` and end in their own
+/// [`Attachment`]s. The primary attachment is `double_trunk: true` (the 2×2
+/// footprint — consumed by [`FoliagePlacerCfg::DarkOak`]); branch
+/// attachments are `false`.
+/// Returns `(attachments, trunk_positions, placed_any)` in the same shape as
+/// [`place_forking_trunk`] — `trunk_positions` is every position
+/// `trunkSetter`/`placeBelowTrunkBlock` fired at (the below-origin 2×2
+/// included), seeding [`update_leaf_distances`]'s BFS.
+fn place_dark_oak_trunk<R: RandomSource>(
+    random: &mut R,
+    origin: BlockPos,
+    tree_height: i32,
+    grid: &mut VegGrid,
+    tags: &VegTags,
+    trunk_provider: &BlockStateProvider,
+    below_trunk_provider: &Option<BlockStateProvider>,
+) -> (Vec<Attachment>, Vec<BlockPos>, bool) {
+    let mut trunk_positions = Vec::new();
+    // The 2×2 base: `below`, `below.east()`, `below.south()`,
+    // `below.south().east()` — each via `placeBelowTrunkBlock`, in exactly
+    // vanilla's order.
+    for (dx, dz) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+        if let Some(below_provider) = below_trunk_provider {
+            let below_pos = BlockPos {
+                x: origin.x + dx,
+                y: origin.y - 1,
+                z: origin.z + dz,
+            };
+            if let Some(state) = below_provider.get_state(grid, tags, random, below_pos) {
+                grid.set_if_in_bounds(below_pos.x, below_pos.y, below_pos.z, state);
+                trunk_positions.push(below_pos);
+            }
+        }
+    }
+
+    let mut attachments = Vec::new();
+    let mut placed_any = false;
+
+    const STEP: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)]; // NORTH, EAST, SOUTH, WEST
+    let lean_direction = STEP[random.next_int_bounded(4) as usize];
+    let lean_height = tree_height - random.next_int_bounded(4);
+    let mut lean_steps = 2 - random.next_int_bounded(3);
+    let mut tx = origin.x;
+    let mut tz = origin.z;
+    let ey = origin.y + tree_height - 1;
+
+    for dy in 0..tree_height {
+        if dy >= lean_height && lean_steps > 0 {
+            tx += lean_direction.0;
+            tz += lean_direction.1;
+            lean_steps -= 1;
+        }
+        let yy = origin.y + dy;
+        // `TreeFeature.isAirOrLeaves` at the anchor — the outer gate before
+        // the four `placeLog` calls; each log itself still individually
+        // checks `validTreePos` (air or `#replaceable_by_trees`) below,
+        // matching vanilla exactly.
+        let base = base_id(grid.get(tx, yy, tz));
+        if is_air(base) || tags.leaves.contains(base) {
+            for (dx, dz) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                let (lx, lz) = (tx + dx, tz + dz);
+                let lbase = base_id(grid.get(lx, yy, lz));
+                if is_air(lbase) || tags.replaceable_by_trees.contains(lbase) {
+                    if let Some(state) = trunk_provider.get_state(grid, tags, random, BlockPos { x: lx, y: yy, z: lz }) {
+                        grid.set_if_in_bounds(lx, yy, lz, state);
+                        placed_any = true;
+                        trunk_positions.push(BlockPos { x: lx, y: yy, z: lz });
+                    }
+                }
+            }
+        }
+    }
+
+    attachments.push(Attachment {
+        pos: BlockPos { x: tx, y: ey, z: tz },
+        radius_offset: 0,
+        double_trunk: true,
+    });
+
+    // The hanging branches: a 4×4 loop over `ox`/`oz` in `-1..=2`; only the
+    // 12 cells outside the trunk's own 2×2 interior roll
+    // `random.nextInt(3)` (`&&` short-circuits on the interior, so those 4
+    // cells draw nothing), and on a `0` a branch of `nextInt(3) + 2` logs
+    // descends from `ey - 1`.
+    for ox in -1..=2 {
+        for oz in -1..=2 {
+            if (ox < 0 || ox > 1 || oz < 0 || oz > 1) && random.next_int_bounded(3) <= 0 {
+                let length = random.next_int_bounded(3) + 2;
+                let (bx, bz) = (origin.x + ox, origin.z + oz);
+                for branch_y in 0..length {
+                    let by = ey - branch_y - 1;
+                    let bbase = base_id(grid.get(bx, by, bz));
+                    if is_air(bbase) || tags.replaceable_by_trees.contains(bbase) {
+                        if let Some(state) = trunk_provider.get_state(grid, tags, random, BlockPos { x: bx, y: by, z: bz }) {
+                            grid.set_if_in_bounds(bx, by, bz, state);
+                            placed_any = true;
+                            trunk_positions.push(BlockPos { x: bx, y: by, z: bz });
+                        }
+                    }
+                }
+                attachments.push(Attachment {
+                    pos: BlockPos { x: bx, y: ey, z: bz },
+                    radius_offset: 0,
+                    double_trunk: false,
+                });
+            }
         }
     }
 
@@ -1206,6 +1351,18 @@ pub enum FoliagePlacerCfg {
         radius: IntProvider,
         offset: IntProvider,
     },
+    /// `DarkOakFoliagePlacer` — dark oak's real foliage (issue #428), paired
+    /// with [`TrunkPlacerCfg::DarkOak`] (and shared with pale oak). Rows are
+    /// drawn relative to each [`Attachment`] with radii that depend on
+    /// `double_trunk` (`leafRadius + 2/-1`, `leafRadius + 3/0`,
+    /// `leafRadius + 2/1`, plus a `nextBoolean`-gated `leafRadius/2` row for
+    /// the primary 2×2-trunk attachment only), and the skip logic overrides
+    /// the signed wrapper too — see [`Self::should_skip_location_signed`].
+    /// `foliageHeight` is the constant `4`, no RNG.
+    DarkOak {
+        radius: IntProvider,
+        offset: IntProvider,
+    },
 }
 
 impl FoliagePlacerCfg {
@@ -1230,6 +1387,7 @@ impl FoliagePlacerCfg {
                 offset,
             }),
             "acacia_foliage_placer" => Some(FoliagePlacerCfg::Acacia { radius, offset }),
+            "dark_oak_foliage_placer" => Some(FoliagePlacerCfg::DarkOak { radius, offset }),
             _ => None,
         }
     }
@@ -1244,6 +1402,9 @@ impl FoliagePlacerCfg {
             // `AcaciaFoliagePlacer.foliageHeight` ignores every one of its
             // own arguments and returns the constant `0` — no RNG draw.
             FoliagePlacerCfg::Acacia { .. } => 0,
+            // `DarkOakFoliagePlacer.foliageHeight` returns the constant `4`
+            // — no RNG draw.
+            FoliagePlacerCfg::DarkOak { .. } => 4,
         }
     }
 
@@ -1251,7 +1412,8 @@ impl FoliagePlacerCfg {
         match self {
             FoliagePlacerCfg::Blob { radius, .. }
             | FoliagePlacerCfg::Spruce { radius, .. }
-            | FoliagePlacerCfg::Acacia { radius, .. } => radius.sample(random),
+            | FoliagePlacerCfg::Acacia { radius, .. }
+            | FoliagePlacerCfg::DarkOak { radius, .. } => radius.sample(random),
             FoliagePlacerCfg::Pine { radius, .. } => {
                 radius.sample(random) + random.next_int_bounded(trunk_len.max(0) + 1)
             }
@@ -1263,19 +1425,18 @@ impl FoliagePlacerCfg {
             FoliagePlacerCfg::Blob { offset, .. }
             | FoliagePlacerCfg::Spruce { offset, .. }
             | FoliagePlacerCfg::Pine { offset, .. }
-            | FoliagePlacerCfg::Acacia { offset, .. } => offset.sample(random),
+            | FoliagePlacerCfg::Acacia { offset, .. }
+            | FoliagePlacerCfg::DarkOak { offset, .. } => offset.sample(random),
         }
     }
 
-    /// `FoliagePlacer.shouldSkipLocation`/`shouldSkipLocationSigned`.
-    /// `double_trunk` is always `false` for every trunk placer this module
-    /// implements (`Straight`, `Forking`), so the signed wrapper's default
-    /// implementation (`shouldSkipLocationSigned`, not overridden by
-    /// `AcaciaFoliagePlacer`) reduces to calling `shouldSkipLocation` with
-    /// `dx.abs()`/`dz.abs()` — exactly what every call site already passes,
-    /// so this stays a plain (non-signed) check rather than adding a second
-    /// entry point that only `DarkOakFoliagePlacer` (not implemented) would
-    /// ever need to override.
+    /// `FoliagePlacer.shouldSkipLocation` — the plain (already-abs'd,
+    /// `doubleTrunk`-free) skip predicate, the leaf of
+    /// [`Self::should_skip_location_signed`]'s default path for every placer
+    /// except [`FoliagePlacerCfg::DarkOak`] (which overrides the signed
+    /// wrapper *and* the inner predicate, so its own arm here is unreachable
+    /// by construction — kept as `false` rather than `unreachable!()` to
+    /// honour this module's degrade-don't-panic rule).
     fn should_skip_location<R: RandomSource>(
         &self,
         random: &mut R,
@@ -1308,6 +1469,68 @@ impl FoliagePlacerCfg {
                     dx == current_radius && dz == current_radius && current_radius > 0
                 }
             }
+            // Unreachable — [`Self::should_skip_location_signed`] handles
+            // DarkOak entirely (see that method's own doc).
+            FoliagePlacerCfg::DarkOak { .. } => false,
+        }
+    }
+
+    /// `FoliagePlacer.shouldSkipLocationSigned` — the entry
+    /// [`place_leaves_row`] always uses (vanilla's `placeLeavesRow` calls the
+    /// signed wrapper, never the plain predicate). For every placer except
+    /// [`FoliagePlacerCfg::DarkOak`] this is exactly the wrapper's default:
+    /// `shouldSkipLocation(|dx|, |dz|)` — identical to what the callers
+    /// previously passed to [`Self::should_skip_location`] directly, so no
+    /// draw-count or result changes for oak/birch/spruce/pine/acacia.
+    ///
+    /// `DarkOakFoliagePlacer` overrides BOTH the signed wrapper and the inner
+    /// predicate in real vanilla, so it gets its own arm. The wrapper
+    /// override short-circuits to `true` (skip) only for the double-trunk
+    /// `y == 0` row when `dx` AND `dz` are both at the row's extremes
+    /// (`dx == -r || dx >= r` and the same for `dz` — the corner 2×2s of the
+    /// widened row); everything else delegates to the default wrapper, which
+    /// for a double trunk computes `min(|dx|, |dx - 1|)`/`min(|dz|, |dz - 1|)`
+    /// (the distance to the nearer of the 2×2 trunk's two columns) before the
+    /// inner predicate: `y == -1 && !doubleTrunk` skips the corners, and
+    /// `y == 1` skips where `minDx + minDz > 2 * r - 2`. All pure geometry —
+    /// `DarkOakFoliagePlacer` draws no RNG in its skip logic.
+    fn should_skip_location_signed<R: RandomSource>(
+        &self,
+        random: &mut R,
+        dx: i32,
+        y: i32,
+        dz: i32,
+        current_radius: i32,
+        double_trunk: bool,
+    ) -> bool {
+        match self {
+            FoliagePlacerCfg::DarkOak { .. } => {
+                // `DarkOakFoliagePlacer.shouldSkipLocationSigned`'s
+                // short-circuit head: delegate to the superclass unless
+                // `y == 0 && doubleTrunk && dx && dz` are all "at the edge".
+                let delegate = y != 0
+                    || !double_trunk
+                    || (dx != -current_radius && dx < current_radius)
+                    || (dz != -current_radius && dz < current_radius);
+                if !delegate {
+                    return true;
+                }
+                // `FoliagePlacer.shouldSkipLocationSigned`'s default (the
+                // super call), then `DarkOakFoliagePlacer.shouldSkipLocation`.
+                let (min_dx, min_dz) = if double_trunk {
+                    (dx.abs().min((dx - 1).abs()), dz.abs().min((dz - 1).abs()))
+                } else {
+                    (dx.abs(), dz.abs())
+                };
+                if y == -1 && !double_trunk {
+                    min_dx == current_radius && min_dz == current_radius
+                } else if y == 1 {
+                    min_dx + min_dz > current_radius * 2 - 2
+                } else {
+                    false
+                }
+            }
+            _ => self.should_skip_location(random, dx.abs(), y, dz.abs(), current_radius),
         }
     }
 
@@ -1320,6 +1543,7 @@ impl FoliagePlacerCfg {
         leaf_radius: i32,
         offset: i32,
         radius_offset: i32,
+        double_trunk: bool,
         grid: &mut VegGrid,
         tags: &VegTags,
         provider: &BlockStateProvider,
@@ -1332,7 +1556,7 @@ impl FoliagePlacerCfg {
                 for yo in (offset - foliage_height..=offset).rev() {
                     let radius = (leaf_radius - 1 - yo / 2).max(0);
                     place_leaves_row(
-                        random, attachment, radius, yo, grid, tags, self, provider, placed_any,
+                        random, attachment, radius, yo, grid, tags, self, provider, placed_any, false,
                     );
                 }
             }
@@ -1352,6 +1576,7 @@ impl FoliagePlacerCfg {
                         self,
                         provider,
                         placed_any,
+                        false,
                     );
                     if current_radius >= max_radius {
                         current_radius = min_radius;
@@ -1378,6 +1603,7 @@ impl FoliagePlacerCfg {
                         self,
                         provider,
                         placed_any,
+                        false,
                     );
                     if current_radius >= 1 && yo == lower + 1 {
                         current_radius -= 1;
@@ -1399,12 +1625,37 @@ impl FoliagePlacerCfg {
             // than an engine bug.
             FoliagePlacerCfg::Acacia { .. } => {
                 place_leaves_row(
-                    random, attachment, leaf_radius + radius_offset, -1 - foliage_height, grid, tags, self, provider, placed_any,
+                    random, attachment, leaf_radius + radius_offset, -1 - foliage_height, grid, tags, self, provider, placed_any, false,
                 );
-                place_leaves_row(random, attachment, leaf_radius - 1, -foliage_height, grid, tags, self, provider, placed_any);
+                place_leaves_row(random, attachment, leaf_radius - 1, -foliage_height, grid, tags, self, provider, placed_any, false);
                 place_leaves_row(
-                    random, attachment, leaf_radius + radius_offset - 1, 0, grid, tags, self, provider, placed_any,
+                    random, attachment, leaf_radius + radius_offset - 1, 0, grid, tags, self, provider, placed_any, false,
                 );
+            }
+            // `DarkOakFoliagePlacer.createFoliage` — `pos =
+            // foliageAttachment.pos().above(offset)`, then three rows whose
+            // radii depend on `doubleTrunk` (`leafRadius + 2`, `+ 3`, `+ 2`
+            // at `y = -1, 0, 1`), plus a `nextBoolean`-gated `leafRadius` row
+            // at `y = 2` for the primary 2×2-trunk attachment only. The
+            // non-double branches get two rows (`leafRadius + 2` at `-1`,
+            // `leafRadius + 1` at `0`).
+            FoliagePlacerCfg::DarkOak { .. } => {
+                let pos = BlockPos {
+                    x: attachment.x,
+                    y: attachment.y + offset,
+                    z: attachment.z,
+                };
+                if double_trunk {
+                    place_leaves_row(random, pos, leaf_radius + 2, -1, grid, tags, self, provider, placed_any, true);
+                    place_leaves_row(random, pos, leaf_radius + 3, 0, grid, tags, self, provider, placed_any, true);
+                    place_leaves_row(random, pos, leaf_radius + 2, 1, grid, tags, self, provider, placed_any, true);
+                    if random.next_bool() {
+                        place_leaves_row(random, pos, leaf_radius, 2, grid, tags, self, provider, placed_any, true);
+                    }
+                } else {
+                    place_leaves_row(random, pos, leaf_radius + 2, -1, grid, tags, self, provider, placed_any, false);
+                    place_leaves_row(random, pos, leaf_radius + 1, 0, grid, tags, self, provider, placed_any, false);
+                }
             }
         }
     }
@@ -1421,10 +1672,17 @@ fn place_leaves_row<R: RandomSource>(
     placer: &FoliagePlacerCfg,
     provider: &BlockStateProvider,
     placed_any: &mut bool,
+    double_trunk: bool,
 ) {
-    for dx in -current_radius..=current_radius {
-        for dz in -current_radius..=current_radius {
-            if !placer.should_skip_location(random, dx.abs(), y, dz.abs(), current_radius) {
+    // `FoliagePlacer.placeLeavesRow`: for a double trunk the loop is widened
+    // by one in the positive direction (`offset = doubleTrunk ? 1 : 0`) to
+    // cover the 2×2 trunk footprint, and every cell is gated by the placer's
+    // SIGNED skip logic (the non-signed `should_skip_location` is only ever
+    // reached through it).
+    let offset = if double_trunk { 1 } else { 0 };
+    for dx in -current_radius..=current_radius + offset {
+        for dz in -current_radius..=current_radius + offset {
+            if !placer.should_skip_location_signed(random, dx, y, dz, current_radius, double_trunk) {
                 let pos = BlockPos {
                     x: origin.x + dx,
                     y: origin.y + y,
@@ -1468,34 +1726,71 @@ fn try_place_leaf<R: RandomSource>(
     *placed_any = true;
 }
 
-/// `net.minecraft.world.level.levelgen.feature.featuresize.TwoLayersFeatureSize`
-/// — the only `FeatureSize` this module implements (and, per the decompiled
-/// source, the only one vanilla itself ships).
+/// `net.minecraft.world.level.levelgen.feature.featuresize.FeatureSize` — both
+/// subclasses vanilla ships, each reachable from tree configs this module
+/// implements: `TwoLayersFeatureSize` (oak, birch, spruce, pine, acacia) and
+/// `ThreeLayersFeatureSize` (dark oak, pale oak — the 2×2-trunk species,
+/// issue #428). The two share the `getSizeAtHeight(treeHeight, yo)` shape but
+/// answer it differently: `TwoLayers` splits at `limit`; `ThreeLayers` splits
+/// into lower/middle/upper bands using `upper_limit` measured down from the
+/// tree's own height, which is why the caller must pass `tree_height`.
 #[derive(Clone, Copy, Debug)]
-pub struct FeatureSizeCfg {
-    limit: i32,
-    lower_size: i32,
-    upper_size: i32,
+pub enum FeatureSizeCfg {
+    TwoLayers {
+        limit: i32,
+        lower_size: i32,
+        upper_size: i32,
+    },
+    ThreeLayers {
+        limit: i32,
+        upper_limit: i32,
+        lower_size: i32,
+        middle_size: i32,
+        upper_size: i32,
+    },
 }
 
 impl FeatureSizeCfg {
     fn try_parse(v: &Value) -> Option<Self> {
         let ty = v["type"].as_str()?;
-        if ty.strip_prefix("minecraft:").unwrap_or(ty) != "two_layers_feature_size" {
-            return None;
+        match ty.strip_prefix("minecraft:").unwrap_or(ty) {
+            "two_layers_feature_size" => Some(Self::TwoLayers {
+                limit: v.get("limit").and_then(Value::as_i64).unwrap_or(1) as i32,
+                lower_size: v.get("lower_size").and_then(Value::as_i64).unwrap_or(0) as i32,
+                upper_size: v.get("upper_size").and_then(Value::as_i64).unwrap_or(1) as i32,
+            }),
+            "three_layers_feature_size" => Some(Self::ThreeLayers {
+                limit: v.get("limit").and_then(Value::as_i64).unwrap_or(1) as i32,
+                upper_limit: v.get("upper_limit").and_then(Value::as_i64).unwrap_or(1) as i32,
+                lower_size: v.get("lower_size").and_then(Value::as_i64).unwrap_or(0) as i32,
+                middle_size: v.get("middle_size").and_then(Value::as_i64).unwrap_or(1) as i32,
+                upper_size: v.get("upper_size").and_then(Value::as_i64).unwrap_or(1) as i32,
+            }),
+            _ => None,
         }
-        Some(Self {
-            limit: v.get("limit").and_then(Value::as_i64).unwrap_or(1) as i32,
-            lower_size: v.get("lower_size").and_then(Value::as_i64).unwrap_or(0) as i32,
-            upper_size: v.get("upper_size").and_then(Value::as_i64).unwrap_or(1) as i32,
-        })
     }
 
-    fn size_at_height(&self, y: i32) -> i32 {
-        if y < self.limit {
-            self.lower_size
-        } else {
-            self.upper_size
+    /// `FeatureSize.getSizeAtHeight(treeHeight, yo)`. The `tree_height`
+    /// argument only matters for `ThreeLayers` (the upper band is `yo >=
+    /// treeHeight - upperLimit`); `TwoLayers` ignores it.
+    fn size_at_height(&self, tree_height: i32, y: i32) -> i32 {
+        match *self {
+            Self::TwoLayers { limit, lower_size, upper_size } => {
+                if y < limit {
+                    lower_size
+                } else {
+                    upper_size
+                }
+            }
+            Self::ThreeLayers { limit, upper_limit, lower_size, middle_size, upper_size } => {
+                if y < limit {
+                    lower_size
+                } else if y >= tree_height - upper_limit {
+                    upper_size
+                } else {
+                    middle_size
+                }
+            }
         }
     }
 }
@@ -2445,7 +2740,7 @@ fn place_tree<R: RandomSource>(
     // the vine half of vanilla's check never applies.
     let mut clipped = tree_height;
     'scan: for y in 0..=tree_height + 1 {
-        let r = cfg.feature_size.size_at_height(y);
+        let r = cfg.feature_size.size_at_height(tree_height, y);
         for dx in -r..=r {
             for dz in -r..=r {
                 let base = base_id(grid.get(origin.x + dx, origin.y + y, origin.z + dz));
@@ -2530,6 +2825,15 @@ fn place_tree<R: RandomSource>(
             &cfg.trunk_provider,
             &cfg.below_trunk_provider,
         ),
+        TrunkPlacerCfg::DarkOak { .. } => place_dark_oak_trunk(
+            random,
+            origin,
+            tree_height,
+            grid,
+            tags,
+            &cfg.trunk_provider,
+            &cfg.below_trunk_provider,
+        ),
     };
 
     // `foliageAttachments.forEach(a -> foliagePlacer.createFoliage(...))` —
@@ -2549,6 +2853,7 @@ fn place_tree<R: RandomSource>(
             leaf_radius,
             offset,
             attachment.radius_offset,
+            attachment.double_trunk,
             grid,
             tags,
             &cfg.foliage_provider,
@@ -2774,7 +3079,7 @@ mod tests {
                 radius: IntProvider::Constant(2),
                 offset: IntProvider::Constant(0),
             },
-            feature_size: FeatureSizeCfg {
+            feature_size: FeatureSizeCfg::TwoLayers {
                 limit: 1,
                 lower_size: 0,
                 upper_size: 1,
@@ -2833,7 +3138,7 @@ mod tests {
                 radius: IntProvider::Constant(2),
                 offset: IntProvider::Constant(0),
             },
-            feature_size: FeatureSizeCfg {
+            feature_size: FeatureSizeCfg::TwoLayers {
                 limit: 1,
                 lower_size: 0,
                 upper_size: 1,
@@ -2880,7 +3185,7 @@ mod tests {
                 offset: IntProvider::Uniform { min: 0, max: 2 },
                 trunk_height: IntProvider::Uniform { min: 1, max: 2 },
             },
-            feature_size: FeatureSizeCfg {
+            feature_size: FeatureSizeCfg::TwoLayers {
                 limit: 2,
                 lower_size: 0,
                 upper_size: 2,
@@ -2909,6 +3214,153 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// `DarkOakTrunkPlacer`+`DarkOakFoliagePlacer` over flat open ground must
+    /// place a 2×2 trunk: at the base level (before any lean can start — a
+    /// 5-tall tree's `leanHeight = 5 - nextInt(4)` is always ≥ 2, so `dy=0`
+    /// can never lean) exactly four logs occupy the origin's 2×2 footprint,
+    /// and the canopy must reach at least one leaf block. The 2×2 base is the
+    /// dark oak signature `Straight`/`Forking` structurally cannot produce,
+    /// so this is the gate that would catch a placer that silently placed a
+    /// 1-wide trunk.
+    #[test]
+    fn dark_oak_trunk_places_a_two_by_two_base_and_canopy() {
+        let cfg = TreeConfig {
+            below_trunk_provider: None,
+            trunk_provider: BlockStateProvider::Simple("minecraft:dark_oak_log[axis=y]".to_string()),
+            foliage_provider: BlockStateProvider::Simple(
+                "minecraft:dark_oak_leaves[distance=7,persistent=false,waterlogged=false]".to_string(),
+            ),
+            trunk_placer: TrunkPlacerCfg::DarkOak {
+                base_height: 5,
+                height_rand_a: 0,
+                height_rand_b: 0,
+            },
+            foliage_placer: FoliagePlacerCfg::DarkOak {
+                radius: IntProvider::Constant(0),
+                offset: IntProvider::Constant(0),
+            },
+            feature_size: FeatureSizeCfg::ThreeLayers {
+                limit: 1,
+                upper_limit: 1,
+                lower_size: 0,
+                middle_size: 1,
+                upper_size: 2,
+            },
+            decorators: Vec::new(),
+        };
+        let mut grid = grid_with_flat_ground(-64, 384, 69);
+        let mut tags = VegTags::default();
+        // `place_dark_oak_trunk`'s `isAirOrLeaves` anchor gate needs the
+        // leaves tag populated (real vanilla's `#minecraft:leaves`).
+        tags.leaves.insert("minecraft:dark_oak_leaves".to_string());
+        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(99));
+        let origin = BlockPos { x: 8, y: 70, z: 8 };
+        place_tree(&mut random, origin, &cfg, &mut grid, &tags);
+
+        let mut base_logs = 0;
+        for dx in 0..2 {
+            for dz in 0..2 {
+                if base_id(grid.get(8 + dx, 70, 8 + dz)) == "minecraft:dark_oak_log" {
+                    base_logs += 1;
+                }
+            }
+        }
+        assert_eq!(
+            base_logs, 4,
+            "the y=0 level must be a full 2×2 log footprint (no lean has started yet)"
+        );
+
+        let mut leaf_count = 0;
+        for y in 70..95 {
+            for x in 0..16 {
+                for z in 0..16 {
+                    if base_id(grid.get(x, y, z)) == "minecraft:dark_oak_leaves" {
+                        leaf_count += 1;
+                    }
+                }
+            }
+        }
+        assert!(leaf_count > 0, "a placed dark oak must carry at least one leaf block");
+    }
+
+    /// The real `configured_feature/dark_oak.json` (`crates/lodestone-server
+    /// /assets/worldgen/configured_feature/dark_oak.json`, transcribed here —
+    /// the same convention as the cactus test above) must parse to
+    /// [`ConfiguredFeature::Tree`], not [`ConfiguredFeature::Unsupported`] —
+    /// the regression control for this module's dark oak increment: before
+    /// it, this exact JSON degraded to `"tree: unsupported
+    /// trunk/foliage/size/provider"` (the `dark_oak_trunk_placer`/
+    /// `dark_oak_foliage_placer`/`three_layers_feature_size` kinds were all
+    /// unmodelled), leaving dark_forest's 66.7%-weight branch a silent no-op.
+    #[test]
+    fn real_dark_oak_configured_feature_parses_as_tree() {
+        struct EmptyResolver;
+        impl Resolver for EmptyResolver {
+            fn density_function(&self, _id: &str) -> Value {
+                Value::Null
+            }
+            fn noise(&self, _id: &str) -> crate::density::NoiseParams {
+                unimplemented!()
+            }
+        }
+        let doc = serde_json::json!({
+            "type": "minecraft:tree",
+            "config": {
+                "below_trunk_provider": {
+                    "type": "minecraft:rule_based_state_provider",
+                    "rules": [{
+                        "if_true": {
+                            "type": "minecraft:not",
+                            "predicate": {
+                                "type": "minecraft:matching_block_tag",
+                                "tag": "minecraft:cannot_replace_below_tree_trunk"
+                            }
+                        },
+                        "then": {
+                            "type": "minecraft:simple_state_provider",
+                            "state": {"Name": "minecraft:dirt"}
+                        }
+                    }]
+                },
+                "decorators": [],
+                "foliage_placer": {
+                    "type": "minecraft:dark_oak_foliage_placer",
+                    "offset": 0,
+                    "radius": 0
+                },
+                "foliage_provider": {
+                    "type": "minecraft:simple_state_provider",
+                    "state": {
+                        "Name": "minecraft:dark_oak_leaves",
+                        "Properties": {"distance": "7", "persistent": "false", "waterlogged": "false"}
+                    }
+                },
+                "minimum_size": {
+                    "type": "minecraft:three_layers_feature_size",
+                    "upper_size": 2
+                },
+                "trunk_placer": {
+                    "type": "minecraft:dark_oak_trunk_placer",
+                    "base_height": 6,
+                    "height_rand_a": 2,
+                    "height_rand_b": 1
+                },
+                "trunk_provider": {
+                    "type": "minecraft:simple_state_provider",
+                    "state": {
+                        "Name": "minecraft:dark_oak_log",
+                        "Properties": {"axis": "y"}
+                    }
+                }
+            }
+        });
+        let feature = parse_configured_feature_doc(&EmptyResolver, &doc);
+        assert!(
+            matches!(feature, ConfiguredFeature::Tree(_)),
+            "expected Tree, got {feature:?}"
+        );
     }
 
     #[test]
