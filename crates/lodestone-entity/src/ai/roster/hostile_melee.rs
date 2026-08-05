@@ -49,11 +49,27 @@
 //!
 //! # Known gaps, all disclosed in the tables
 //!
-//! * **No ranged goals exist in this repo**, so the skeleton family gets the
-//!   melee half of `reassessWeaponGoal()` unconditionally rather than swapping to
-//!   a bow, and a drowned never throws its trident.
-//!   [`GoalSelector::remove`](crate::ai::GoalSelector::remove) now exists for that
-//!   swap; the bow and trident goals themselves are issue #227's.
+//! * **The skeleton family shoots. Only the wither skeleton punches.** This entry
+//!   used to say no ranged goals existed here, so the family took the melee half
+//!   of `reassessWeaponGoal()` unconditionally. They exist now
+//!   ([`super::ranged`]), and `48062b7` *replaced* [`SKELETON`]'s priority-4 row
+//!   with `RangedBowAttackGoal` rather than adding to it — both candidates claim
+//!   MOVE and vanilla removes both before re-adding exactly one (`:132-148`), so
+//!   a second row would make the winner registration-order dependent.
+//!   `AbstractSkeleton.populateDefaultEquipmentSlots` puts a `BOW` in the main
+//!   hand **unconditionally** (`:111` — no random roll, no difficulty gate), so
+//!   `reassessWeaponGoal`'s `is(Items.BOW)` test at `:137` holds for every
+//!   normally-spawned skeleton and the melee `else` at `:146` never runs.
+//!   **The boundary is the *equipment* override, not the goal method**:
+//!   [`WITHER_SKELETON`] genuinely keeps melee, because
+//!   `WitherSkeleton.java:74` overrides that method with a `STONE_SWORD` and so
+//!   fails the bow test — it does not override `reassessWeaponGoal` at all, only
+//!   calls it (`:88`). `Skeleton`, `Stray`, `Bogged` and `Parched` override
+//!   neither. So [`melee_attack_1_2`] survives with exactly one reachable caller,
+//!   and "skeletons shoot" is *not* the whole rule.
+//!   A drowned still never throws its trident: [`super::ranged`] has a
+//!   `trident_attack` builder, but [`DROWNED`]'s row is still
+//!   [`Coverage::Missing`].
 //! * **Nothing in the sim is a villager, iron golem, turtle, armadillo, axolotl or
 //!   piglin**, so every target registration naming one is [`Coverage::Missing`]
 //!   rather than a goal that would search for an entity class that cannot be
@@ -69,23 +85,29 @@
 //!
 //! # What these tables cannot fix, and where the behaviour actually stops
 //!
-//! Every melee row below depends on the mob having an attack target, and
-//! **nothing in production ever gives one.** `MobController::find_nearest_target`
-//! is documented as "the host applies the version/type-specific filter"
-//! (`ai/mob.rs:90-92`), but `NavigatingMob` implements it as
-//! `self.attack_target` (`ai/navigating_mob.rs:904`) — it does not consult the
-//! `nearest_player` the server's perception feed *does* populate
-//! (`lodestone-server/src/mobs.rs:1737`). And `set_attack_target` has zero
-//! production call sites tree-wide: every caller is a test or a bench. So
-//! `NearestAttackableTargetGoal::can_use` asks for a target, gets back the target
-//! it was supposed to be finding, and returns `false` forever; `MeleeAttackGoal`
-//! then never starts.
+//! Every melee row below depends on the mob having an attack target, and this
+//! section **used to say nothing in production ever gives one** —
+//! `NavigatingMob::find_nearest_target` returned the `self.attack_target` its own
+//! caller writes, so `NearestAttackableTargetGoal::can_use` asked for a target,
+//! got back the target it was supposed to be finding, and returned `false`
+//! forever. That was measured and true when written. It is not true now: issue
+//! #455 (`23b3dd2`) made `find_nearest_target` read the `nearest_player` the
+//! server's perception feed populates, cut by vanilla's `FOLLOW_RANGE` (a
+//! `distanceToSqr` against `max(range, 2.0)`), and `mobs.rs` now passes the
+//! per-species attribute through. A hosted zombie acquires a player it was never
+//! told about and walks at it.
 //!
-//! That is a perception island one hop beyond the six issue #441 closed, it is
-//! **not** in this file's reach (`navigating_mob.rs` and `mobs.rs` are both owned
-//! elsewhere), and it is why the gates below drive the target in explicitly. A
-//! hostile mob's *table* is correct; a hostile mob in the running game still does
-//! not chase anyone.
+//! **`set_attack_target` still has no production caller** — every one is a test,
+//! a bench or `SimMob`'s wrapper — and that is why the gates below hand the
+//! target over directly rather than waiting for acquisition. It keeps a failure
+//! in this file attributable to a **table row**;
+//! `crates/lodestone-entity/tests/target_acquisition.rs` is what proves
+//! acquisition itself.
+//!
+//! What is still missing is **line of sight**: vanilla's is an eye-to-eye
+//! `level.clip` ray (`TargetingConditions.java:90`), which #456's local block
+//! cues structurally cannot answer, so it is unimplemented. That errs
+//! *permissive* — a mob can acquire through a wall.
 //!
 //! [#226]: https://github.com/matteopolak/lodestone/issues/226
 
@@ -783,11 +805,11 @@ mod tests {
     /// implementor of `MobController`, so the goals run against the same
     /// perception the running game gives them.
     ///
-    /// The attack target is set explicitly because **nothing in production sets
-    /// one** (see this module's header): `find_nearest_target` returns
-    /// `self.attack_target`, so a mob with no target can never acquire one. Fixing
-    /// that is outside this file; a roster gate that waited for it would measure
-    /// nothing.
+    /// The attack target is set explicitly so this gate stays about the *roster*
+    /// rather than about acquisition: `find_nearest_target` reads the perception
+    /// feed as of #455, and `tests/target_acquisition.rs` is what proves that.
+    /// Handing the target over directly keeps this file's failures attributable
+    /// to a table row.
     fn run(species: &str, movement_speed: f64, at: Vec3, ticks: usize) -> Outcome {
         let world = Flat::new();
         let ctx = SpeciesContext::new(movement_speed);
