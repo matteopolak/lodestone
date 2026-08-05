@@ -963,3 +963,425 @@ fn zombie_wears_its_real_skin_not_the_flat_placeholder() {
         off_syn * 100.0
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #479: an unloaded column must stop reaching pixels
+// ---------------------------------------------------------------------------
+
+/// Which pixels of `pixels` differ from the empty-scene render `reference`.
+///
+/// A `Vec<bool>` in row-major order, one entry per pixel — a *mask*, not a
+/// bounding box, and measured against a **rendered** reference rather than
+/// against [`sky_clear_bytes`]. Two premise-check rejections produced that
+/// signature, and both are worth keeping:
+///
+/// * *bounding box → mask.* A distant column at a shallow angle has a
+///   176 × 112 box that is 99.9% painted by the columns in front of it, so "the
+///   box went to sky" would have measured the neighbours. A silhouette mask is
+///   the only form of "the subject's screen rect" that survives perspective.
+/// * *constant → rendered reference.* The flat sky clear is **not** what the sky
+///   actually renders as: `RenderState` draws a gradient sky disc whose end
+///   distance moves with the fog setting, so a band near the horizon sits more
+///   than the classifier's threshold away from `SKY_COLOR` and reads as terrain.
+///   That misclassification contaminated 46.4% of the subject's silhouette, and
+///   the tell was that the count was **byte-identical (4291 px, same bounding
+///   box) after doubling the camera distance** — a contaminant that does not move
+///   with the camera is not in the world. Differencing against a frame rendered
+///   with nothing uploaded makes the reference per-pixel and immune to the
+///   gradient, the fog setting and the sky disc alike.
+fn diff_mask(pixels: &[u8], reference: &[u8]) -> Vec<bool> {
+    pixels
+        .chunks_exact(4)
+        .zip(reference.chunks_exact(4))
+        .map(|(px, rf)| {
+            let d = (i32::from(px[0]) - i32::from(rf[0])).abs()
+                + (i32::from(px[1]) - i32::from(rf[1])).abs()
+                + (i32::from(px[2]) - i32::from(rf[2])).abs();
+            d > 60
+        })
+        .collect()
+}
+
+/// How much of `subject` is terrain in `frame`, plus the bounding box of the
+/// pixels that are.
+///
+/// The box is returned because a fraction cannot distinguish a uniform-but-wrong
+/// frame from a localised blob — a failure here has to be able to say *where*.
+fn coverage_within(
+    frame: &[bool],
+    subject: &[bool],
+    w: u32,
+) -> (usize, usize, Option<(u32, u32, u32, u32)>) {
+    let mut total = 0usize;
+    let mut hit = 0usize;
+    let mut bbox: Option<(u32, u32, u32, u32)> = None;
+    for (i, &in_subject) in subject.iter().enumerate() {
+        if !in_subject {
+            continue;
+        }
+        total += 1;
+        if frame[i] {
+            hit += 1;
+            let (x, y) = ((i as u32) % w, (i as u32) / w);
+            bbox = Some(match bbox {
+                None => (x, y, x, y),
+                Some((bx0, by0, bx1, by1)) => (bx0.min(x), by0.min(y), bx1.max(x), by1.max(y)),
+            });
+        }
+    }
+    (hit, total, bbox)
+}
+
+/// **The #479 pixel gate: a column the client no longer has must stop
+/// painting.**
+///
+/// A count of resident sections cannot see this — a chunk can be meshed and not
+/// drawn, and (the actual #479 failure) *drawn and not meshed*. So this asserts
+/// coverage inside one column's own screen rect, and the rect is **measured from
+/// the real draw** rather than restated as a constant: a first render with only
+/// the subject column uploaded gives its exact pixel footprint through the same
+/// projection, pipeline and atlas the gate then re-renders with. The camera's aim
+/// is likewise solved from the yaw convention in `lodestone_render::camera`'s
+/// module doc rather than hand-tuned.
+///
+/// Three premise checks come first, in the order this repo's doctrine asks for:
+///
+/// 1. *isolated* — the subject alone. Establishes the rect and that it is a
+///    substantial one.
+/// 2. *without the subject* — every other column uploaded, subject absent. This
+///    is "what else already paints here", and it must be near zero or the rect
+///    is unusable and every later assertion is satisfied by a neighbour. Five
+///    premise-false controls were found in this repo by *not* asking this.
+/// 3. *full* — every column including the subject. Coverage must return, or the
+///    gate would pass on a client that draws nothing at all.
+///
+/// Then the subject: drive the **production** eviction path
+/// ([`crate::mesher::TerrainMesh::forget_column`] → `drain_removals` →
+/// `remove_section`, in `app/redraw.rs`'s order) and require the rect to go back
+/// to sky. Its negative control is
+/// [`control_unevicted_column_keeps_painting_after_the_client_drops_it`], which
+/// runs the identical sequence with the one call omitted and observes this
+/// assertion fail.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn unloaded_column_stops_painting_its_screen_rect() {
+    run_eviction_gate(true);
+}
+
+/// **The negative control for the gate above, and it fails that gate's
+/// assertion.**
+///
+/// Identical sequence with `forget_column` omitted — i.e. the pre-#479 client,
+/// whose store loses the column while the GPU keeps it. The subject's rect stays
+/// covered, which is the state that grows into an exhausted section-origin arena
+/// and the reported "collide with terrain you cannot see".
+///
+/// Asserting the *buggy* coverage rather than describing it is the point: if a
+/// future change makes the gate above pass for an unrelated reason (a blanked
+/// frame, a broken clear, a camera that sees nothing), this test goes red too
+/// and names it.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn control_unevicted_column_keeps_painting_after_the_client_drops_it() {
+    run_eviction_gate(false);
+}
+
+fn run_eviction_gate(evict: bool) {
+    use crate::mesher::{ColumnSource, MeshScheduler, TerrainMesh};
+
+    let ctx = lodestone_render::GpuContext::new_headless_blocking().expect(
+        "headless GPU test opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU (or a software adapter such as \
+         LIBGL_ALWAYS_SOFTWARE=1 / WGPU_BACKEND=gl), don't 'skip' — a silent pass here \
+         would assert nothing",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let (w, h) = (320u32, 240u32);
+    let mut target = HeadlessTarget::new(device, w, h, format);
+
+    // One isolated column, seen side-on against void, with the other columns
+    // **laterally** offset so they cannot share a pixel with it.
+    //
+    // Premise check 2 rejected four earlier versions of this gate, on measurement
+    // rather than on taste. Each number is what it reported for the subject's
+    // silhouette **with the subject genuinely absent** — i.e. the share of the
+    // gate that would have been measuring something other than its subject:
+    //
+    // | version                                            | contaminated | real cause |
+    // |----------------------------------------------------|--------------|------------|
+    // | bounding box, across a contiguous 5 × 5 world       |       99.9% | occlusion |
+    // | silhouette mask, straight down at that world        |       71.8% | culled shared faces |
+    // | straight down, columns two apart                    |       55.4% | 70-block-tall side sprawl |
+    // | side-on, isolated column, flat sky reference        |       46.4% | **the sky gradient** |
+    //
+    // The first three are geometry, and separating the columns and viewing side-on
+    // fixes them: the silhouette becomes a tall slab, what lies behind it is void,
+    // and the other columns sit beside it on screen rather than behind it.
+    //
+    // The fourth was not geometry at all, and it is the one worth remembering. The
+    // contaminant did not move when the camera distance was **doubled** — the count
+    // stayed byte-identical at 4291 px in the same bounding box — which is only
+    // possible if it is not in the world. It was the gradient sky disc being
+    // classified as terrain by a threshold against the flat `sky_clear_bytes()`.
+    // Three rounds of moving the camera were spent on a contaminant that a camera
+    // could never have moved; the fix was to make the reference a *rendered* frame
+    // (see `diff_mask`). "What else already paints here" has an answer that is not
+    // in the scene, and a premise check that only ever considers geometry cannot
+    // reach it.
+    //
+    // Adjacency and spacing are irrelevant to everything actually under test here
+    // (eviction bookkeeping, `remove_section`, and the uncalled draw loop), so
+    // buying attributability with them is a fair trade. The distractors are not
+    // decoration either: they are what makes "the frame was not simply blanked" a
+    // measurement at the end of this test.
+    let subject = (0i32, 0i32);
+    let distractors: Vec<(i32, i32)> = vec![(2, 0), (2, 1), (-2, 0), (-2, 1)];
+    let surface = crate::worldgen::surface_height(subject.0 * 16 + 8, subject.1 * 16 + 8);
+    // Aim at the slab's mid-height so the whole silhouette is in frame with sky
+    // above it and void below.
+    let subject_centre = glam::Vec3::new(
+        (subject.0 * 16 + 8) as f32,
+        surface as f32 / 2.0,
+        (subject.1 * 16 + 8) as f32,
+    );
+    // Square on, from `-z`. The distance is not load-bearing now that fog is
+    // pushed out and the reference is a rendered frame (see `new_state` and
+    // `diff_mask`); it was chosen while chasing a contaminant that turned out not
+    // to be in the world at all.
+    let position = subject_centre - glam::Vec3::new(0.0, 0.0, 90.0);
+    // Solved, not tuned. `lodestone_render::camera`'s module doc gives forward as
+    // `(-sin(yaw)cos(pitch), -sin(pitch), cos(yaw)cos(pitch))`, so aiming at a
+    // horizontal offset `(dx, dz)` means `yaw = atan2(-dx, dz)` — and yaw `0`
+    // facing `+Z` with yaw `90` facing `-X` is exactly what that inverts to.
+    let delta = subject_centre - position;
+    let yaw = (-delta.x).atan2(delta.z).to_degrees();
+    let pitch = (-delta.y)
+        .atan2((delta.x * delta.x + delta.z * delta.z).sqrt())
+        .to_degrees();
+    let camera = Camera {
+        position,
+        yaw,
+        pitch,
+        fov_y_degrees: 70.0,
+        aspect: w as f32 / h as f32,
+        near: 0.05,
+        far: Camera::far_for_render_distance(8, 0),
+    };
+
+    // Mesh every column once, keyed by column, so the renders below differ only
+    // in which columns are uploaded.
+    let mut world = lodestone_world::World::new();
+    for &(cx, cz) in std::iter::once(&subject).chain(distractors.iter()) {
+        world.load(
+            lodestone_world::ChunkPos::new(cx, cz),
+            crate::worldgen::generate_column(cx, cz),
+        );
+    }
+    let store = lodestone_ecs::ChunkWorld::new(world);
+    let mut terrain = TerrainMesh::new(MeshScheduler::new(
+        2,
+        crate::blocks::ShellClassifier::Demo(crate::blocks::DemoClassifier),
+    ));
+    // The demo classifier yields `Complete`; the live path is `Streaming`. The
+    // eviction path under test is id-space and column-source agnostic, and
+    // `Complete` keeps every column drawable so the rect is not confounded by a
+    // deferred frontier.
+    terrain.column_source = ColumnSource::Complete;
+
+    let mut by_column: HashMap<(i32, i32), Vec<crate::mesher::Meshed>> = HashMap::new();
+    for &(cx, cz) in std::iter::once(&subject).chain(distractors.iter()) {
+        terrain.mesh_column(&store, cx, cz);
+        let meshes = terrain.drain_all_meshes();
+        let _ = terrain.drain_removals();
+        by_column.insert((cx, cz), meshes);
+    }
+    assert!(
+        by_column.get(&subject).is_some_and(|m| !m.is_empty()),
+        "the subject column must mesh to something, else every rect below is empty"
+    );
+
+    // Fog pushed out past the far plane on every one of the four renders below.
+    // Not a convenience: the terrain/sky classifier is a distance from the sky
+    // clear, and default fog (which starts near `8 * 16` blocks) fades distant
+    // terrain *toward that clear*, so at this camera distance a fogged slab would
+    // read as sky and the gate would report an eviction that never happened —
+    // passing for the one reason that would make it worthless. Fog is orthogonal
+    // to eviction, so removing it narrows the gate to its subject rather than
+    // weakening it.
+    let new_state = || {
+        let mut s = RenderState::new(device, queue, format, w, h, None);
+        s.set_fog(
+            lodestone_render::fog::FogSettings::for_render_distance(SKY_COLOR, 32),
+            32,
+        );
+        s
+    };
+    let render_once = |state: &RenderState, target: &mut HeadlessTarget| -> Vec<u8> {
+        let frame = target.acquire().expect("headless acquire");
+        let _ = state.render(device, queue, frame.view(), &camera, None, &[]);
+        target.read_texels(device, queue)
+    };
+    let upload_all = |state: &mut RenderState, skip: Option<(i32, i32)>| {
+        for (col, meshes) in &by_column {
+            if Some(*col) == skip {
+                continue;
+            }
+            for m in meshes {
+                state.upload_section(device, queue, m.key, &m.mesh);
+            }
+        }
+    };
+
+    eprintln!("=== #479 eviction pixel gate (evict={evict}) ===");
+    eprintln!("subject column    = {subject:?}");
+    eprintln!("camera            = pos {position:?} yaw {yaw:.1} pitch {pitch:.1}");
+
+    // --- the reference: this camera's sky, with nothing uploaded ------------
+    // Every mask below is a difference against *this*, not against the flat
+    // `sky_clear_bytes()`. See `diff_mask` for the measurement that forced it.
+    let sky_state = new_state();
+    let sky_frame = render_once(&sky_state, &mut target);
+
+    // --- premise check 1: the subject alone, to measure its silhouette ------
+    let mut isolated = new_state();
+    for m in &by_column[&subject] {
+        isolated.upload_section(device, queue, m.key, &m.mesh);
+    }
+    let subject_mask = diff_mask(&render_once(&isolated, &mut target), &sky_frame);
+    let mask_px = subject_mask.iter().filter(|&&b| b).count();
+    let frame_px = (w * h) as usize;
+    eprintln!(
+        "subject silhouette= {mask_px} px ({:.1}% of frame)",
+        mask_px as f64 / frame_px as f64 * 100.0
+    );
+    assert!(
+        mask_px > 2_000,
+        "the subject's silhouette must be a substantial share of the frame for a \
+         coverage fraction over it to mean anything: {mask_px} px of {frame_px}"
+    );
+
+    // --- premise check 2: what else already paints here ---------------------
+    let mut without = new_state();
+    upload_all(&mut without, Some(subject));
+    let bg = diff_mask(&render_once(&without, &mut target), &sky_frame);
+    let (bg_hit, bg_total, bg_box) = coverage_within(&bg, &subject_mask, w);
+    let bg_frac = bg_hit as f64 / bg_total as f64;
+    eprintln!(
+        "silhouette w/o it = {:.1}% ({bg_hit}/{bg_total}, box {bg_box:?})",
+        bg_frac * 100.0
+    );
+    assert!(
+        bg_frac < 0.15,
+        "premise check: with the subject column absent, {:.1}% of its silhouette \
+         is still terrain (box {bg_box:?}) — something else paints here, so 'the \
+         silhouette went to sky' could not be attributed to the subject and this \
+         gate would be unusable as written",
+        bg_frac * 100.0
+    );
+
+    // --- premise check 3: full frame, coverage returns ----------------------
+    let mut state = new_state();
+    upload_all(&mut state, None);
+    let full = diff_mask(&render_once(&state, &mut target), &sky_frame);
+    let (full_hit, _, full_box) = coverage_within(&full, &subject_mask, w);
+    let full_frac = full_hit as f64 / bg_total as f64;
+    eprintln!(
+        "silhouette full   = {:.1}% (box {full_box:?})",
+        full_frac * 100.0
+    );
+    assert!(
+        full_frac > 0.90,
+        "the subject must paint its own silhouette in a full frame, got {:.1}% \
+         (box {full_box:?}) — if this is low the detector is broken and every \
+         later assertion passes for free",
+        full_frac * 100.0
+    );
+
+    // --- the subject: the client drops the column ---------------------------
+    // Production order: the adapter unloads the column from the one store
+    // *before* it emits, and the shell then evicts what the GPU still holds.
+    store
+        .write()
+        .unload(lodestone_world::ChunkPos::new(subject.0, subject.1));
+    if evict {
+        terrain.forget_column(subject.0, subject.1);
+    }
+    // `app/redraw.rs`'s drain, in its order (removals before uploads).
+    let removals = terrain.drain_removals();
+    for key in &removals {
+        state.remove_section(key);
+    }
+    for m in terrain.drain_meshes() {
+        state.upload_section(device, queue, m.key, &m.mesh);
+    }
+    let after = diff_mask(&render_once(&state, &mut target), &sky_frame);
+    let (after_hit, _, after_box) = coverage_within(&after, &subject_mask, w);
+    let after_frac = after_hit as f64 / bg_total as f64;
+    // Everything *outside* the subject's silhouette — the distractor columns.
+    // Without this a frame that lost all its terrain would sail through the
+    // assertion below, which is the "correctly rendered nothing" failure the
+    // older gates in this file guard with a two-sided sky check.
+    let elsewhere = |mask: &[bool]| -> usize {
+        mask.iter()
+            .zip(subject_mask.iter())
+            .filter(|(m, s)| **m && !**s)
+            .count()
+    };
+    let (rest_full, rest_after) = (elsewhere(&full), elsewhere(&after));
+    eprintln!("removals drained  = {}", removals.len());
+    eprintln!(
+        "silhouette after  = {:.1}% (box {after_box:?})",
+        after_frac * 100.0
+    );
+    eprintln!("terrain elsewhere = {rest_full} -> {rest_after}");
+    assert!(
+        rest_after * 100 >= rest_full * 95 && rest_full > 2_000,
+        "the columns that did NOT unload must be unaffected: {rest_full} px of \
+         terrain outside the subject's silhouette became {rest_after}. An \
+         eviction that blanks the frame would otherwise pass the assertion below \
+         for entirely the wrong reason."
+    );
+
+    if evict {
+        assert!(
+            !removals.is_empty(),
+            "the eviction path produced no removals at all — `forget_column` \
+             derived nothing from `uploaded_sections`"
+        );
+        // Back to the floor premise check 2 measured for this exact rect, rather
+        // than to a restated constant.
+        assert!(
+            after_frac < bg_frac.max(0.15),
+            "a column the client no longer has is still painting {:.1}% of its own \
+             on-screen silhouette (terrain bounding box {after_box:?}); with the \
+             column genuinely absent that same silhouette measures {:.1}% (premise \
+             check 2). The renderer is drawing blocks the store does not have, and \
+             its section-origin arena never gets those slots back — walk far \
+             enough and `upload_section` drops new geometry instead.",
+            after_frac * 100.0,
+            bg_frac * 100.0
+        );
+    } else {
+        assert!(
+            removals.is_empty(),
+            "the control must not evict, but {} removals were drained",
+            removals.len()
+        );
+        assert!(
+            after_frac > 0.60,
+            "control premise: without `forget_column` the stale column must keep \
+             painting, got {:.1}% (box {after_box:?}) — if this is low then \
+             something *else* already evicts it, and the gate above proves \
+             nothing about `forget_column`",
+            after_frac * 100.0
+        );
+        eprintln!(
+            "CONTROL: the gate's assertion fails here as required — {:.1}% \
+             coverage remains against a {:.1}% floor",
+            after_frac * 100.0,
+            bg_frac * 100.0
+        );
+    }
+}
