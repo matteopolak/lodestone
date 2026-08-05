@@ -74,7 +74,8 @@ a host-computed *candidate block position*, the `MoveToBlockGoal` shape, in the
 `partner_candidate`/`parent_candidate` style already on `NavigatingMob`. That
 belongs on the census side, because the search is over a population of blocks and
 this seam hands goals answers rather than queries. Do **not** try to serve it by
-widening `block_cues`: a 24-block spiral is 1 700-odd lookups per attempt and
+widening `block_cues`: `RemoveBlockGoal`'s search box alone is 49×49 columns ×
+7 y-levels, up to ~17k positions per attempt, and pre-feeding anything like it
 would put a per-tick cost on every mob for a goal two species register.
 
 ## How to change it
