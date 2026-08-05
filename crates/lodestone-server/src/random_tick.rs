@@ -129,6 +129,7 @@ use crate::neighbor_update::{Direction, NeighborPropagator, Notification, UPDATE
 use crate::redstone;
 use crate::redstone_diode;
 use crate::redstone_observer;
+use crate::redstone_openable;
 use crate::redstone_torch;
 use crate::redstone_wire;
 use crate::scheduled_tick::{ScheduledTickQueue, TickPriority};
@@ -1026,6 +1027,63 @@ fn react_to_notification(
             return Vec::new();
         }
 
+        // 3e. Redstone-openable blocks (#319): doors, trapdoors and fence
+        // gates. `DoorBlock.neighborChanged` / `TrapDoorBlock.neighborChanged` /
+        // `FenceGateBlock.neighborChanged` read whether the block is
+        // redstone-powered and, when that differs from the stored `powered`,
+        // write both `open` and `powered` to the new value — **immediately**,
+        // with a flag-2 `setBlock` (no `scheduleTick`, no neighbour fan-out),
+        // exactly like the hopper arm above rather than the delayed torch/
+        // diode/observer families. See `crate::redstone_openable`'s module doc
+        // for the full citation and for why the door's two-high half is synced
+        // here (this crate has no `updateShape` pass for vanilla's to live in).
+        if redstone_openable::is_openable(&state) {
+            let has_signal = redstone_openable::has_neighbor_signal(
+                &redstone::make_lookup(column, min_x, min_z),
+                n.pos,
+                &state,
+            );
+            if let Some(new_state) = redstone_openable::react(&state, has_signal) {
+                // Resolve the other door half before `state` is moved into
+                // the event below (this function has no `updateShape`, so the
+                // half-sync vanilla performs there is done right here).
+                let other_half = redstone_openable::other_door_half_pos(n.pos, &state);
+                column.set_block(tlx, n.pos.y, tlz, &new_state);
+                events.push(RandomTickEvent {
+                    pos: (n.pos.x, n.pos.y, n.pos.z),
+                    from: state,
+                    to: new_state,
+                });
+                // A door occupies two cells; both halves must flip together.
+                // Vanilla keeps them in sync through `DoorBlock.updateShape`;
+                // this crate has no such pass, so the same `signal` is applied
+                // to the other half here. The other half is not re-notified
+                // (empty cascade below), matching flag 2's no-fan-out.
+                if let Some(other) = other_half {
+                    let other_lx = other.x - min_x;
+                    let other_lz = other.z - min_z;
+                    if (0..16).contains(&other_lx)
+                        && (0..16).contains(&other_lz)
+                        && other.y >= column.min_y
+                        && other.y < column.min_y + column.height
+                    {
+                        let other_state = column.block_state(other_lx, other.y, other_lz).to_string();
+                        if redstone_openable::is_door(&other_state) {
+                            if let Some(other_new) = redstone_openable::react(&other_state, has_signal) {
+                                column.set_block(other_lx, other.y, other_lz, &other_new);
+                                events.push(RandomTickEvent {
+                                    pos: (other.x, other.y, other.z),
+                                    from: other_state,
+                                    to: other_new,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            return Vec::new();
+        }
+
         Vec::new()
     }
 }
@@ -1680,5 +1738,163 @@ mod tests {
         }
         assert_eq!(column.block_state(6, 5, 5), "minecraft:stone", "at local (6, 5, 5) in chunk (2, 3)");
         assert_eq!(column.block_state(6, 8, 5), DIRT_BLOCK, "at alias cell local (6, 8, 5)");
+    }
+
+    // # Issue #319 end-to-end: redstone-openable blocks through
+    // `propagate_and_react` — the production reaction dispatch (the same call
+    // site `tick::run_tick_loop` uses after a scheduled redstone flip or a
+    // random-tick mutation). The pure per-family decisions live in
+    // `crate::redstone_openable`'s own test module; these tests are about the
+    // WIRING — that a neighbour notification reaches an adjacent door/trapdoor
+    // and that a door's two halves flip together.
+
+    /// The trigger shape used throughout: a lit redstone torch adjacent to the
+    /// openable block, "flipped" in place (as `tick.rs` writes a torch's new
+    /// state before re-propagating), then `propagate_and_react` fanned out
+    /// from the torch's own position — the exact entry a torch's scheduled-tick
+    /// flip uses.
+    fn flip_torch_and_propagate(
+        column: &mut ChunkColumn,
+        torch_pos: (i32, i32, i32),
+        lit: bool,
+    ) -> Vec<RandomTickEvent> {
+        let (tx, ty, tz) = torch_pos;
+        column.set_block(tx - 0, ty, tz, &format!("minecraft:redstone_torch[lit={lit}]"));
+        let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        propagate_and_react(column, 0, 0, tx, ty, tz, &mut block_ticks, 0)
+    }
+
+    /// A two-high door, one half adjacent to a lit torch: both halves must
+    /// open when the torch is lit, and both must close when it goes out —
+    /// through the real `propagate_and_react` dispatch, not the pure
+    /// functions.
+    #[test]
+    fn a_powered_door_opens_and_closes_both_halves_through_the_reaction_dispatch() {
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block(3, 5, 3, "minecraft:oak_door[half=lower,open=false,powered=false]");
+        column.set_block(3, 6, 3, "minecraft:oak_door[half=upper,open=false,powered=false]");
+        let torch = (2, 5, 3); // west of the bottom half
+
+        // Power on: the torch fan-out notifies the door; both halves flip.
+        let events = flip_torch_and_propagate(&mut column, torch, true);
+        assert_eq!(
+            column.block_state(3, 5, 3),
+            "minecraft:oak_door[half=lower,open=true,powered=true]",
+            "the bottom half must open when powered"
+        );
+        assert_eq!(
+            column.block_state(3, 6, 3),
+            "minecraft:oak_door[half=upper,open=true,powered=true]",
+            "the top half must open together with the bottom half"
+        );
+        let flipped: Vec<(i32, i32, i32)> = events.iter().map(|e| e.pos).collect();
+        assert!(
+            flipped.contains(&(3, 5, 3)) && flipped.contains(&(3, 6, 3)),
+            "both half flips must be reported for the client: {flipped:?}"
+        );
+
+        // Power off: the same fan-out closes both halves.
+        let events = flip_torch_and_propagate(&mut column, torch, false);
+        assert_eq!(
+            column.block_state(3, 5, 3),
+            "minecraft:oak_door[half=lower,open=false,powered=false]"
+        );
+        assert_eq!(
+            column.block_state(3, 6, 3),
+            "minecraft:oak_door[half=upper,open=false,powered=false]"
+        );
+        let flipped: Vec<(i32, i32, i32)> = events.iter().map(|e| e.pos).collect();
+        assert!(
+            flipped.contains(&(3, 5, 3)) && flipped.contains(&(3, 6, 3)),
+            "both half closures must be reported for the client: {flipped:?}"
+        );
+    }
+
+    /// The two-high power check, end to end in the other direction: a source
+    /// adjacent to the TOP half must open the door — and the BOTTOM half must
+    /// follow.
+    #[test]
+    fn a_door_opens_from_power_at_the_top_half_too() {
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block(3, 5, 3, "minecraft:oak_door[half=lower,open=false,powered=false]");
+        column.set_block(3, 6, 3, "minecraft:oak_door[half=upper,open=false,powered=false]");
+        let torch = (2, 6, 3); // west of the TOP half
+
+        flip_torch_and_propagate(&mut column, torch, true);
+        assert_eq!(
+            column.block_state(3, 6, 3),
+            "minecraft:oak_door[half=upper,open=true,powered=true]",
+            "the notified top half must open"
+        );
+        assert_eq!(
+            column.block_state(3, 5, 3),
+            "minecraft:oak_door[half=lower,open=true,powered=true]",
+            "the bottom half must follow a signal at the top half"
+        );
+    }
+
+    /// A single-block family: a trapdoor opens when its adjacent torch lights
+    /// and closes when it goes out, and the door half-sync does not fire (the
+    /// event list is exactly the trapdoor's own flip, no spurious second
+    /// event).
+    #[test]
+    fn a_powered_trapdoor_opens_and_closes_with_exactly_one_event() {
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block(3, 5, 3, "minecraft:oak_trapdoor[half=bottom,open=false,powered=false]");
+        let torch = (2, 5, 3);
+
+        let events = flip_torch_and_propagate(&mut column, torch, true);
+        assert_eq!(
+            column.block_state(3, 5, 3),
+            "minecraft:oak_trapdoor[half=bottom,open=true,powered=true]"
+        );
+        assert_eq!(events.len(), 1, "a trapdoor is one block — exactly one flip event");
+        assert_eq!(events[0].pos, (3, 5, 3));
+
+        let events = flip_torch_and_propagate(&mut column, torch, false);
+        assert_eq!(
+            column.block_state(3, 5, 3),
+            "minecraft:oak_trapdoor[half=bottom,open=false,powered=false]"
+        );
+        assert_eq!(events.len(), 1);
+    }
+
+    /// Negative control: an UNLIT torch adjacent to the trapdoor is not a
+    /// signal, so the trapdoor stays closed even though it IS notified —
+    /// proving the `signal != powered` gate discriminates in the wiring, not
+    /// just in the pure decision.
+    #[test]
+    fn an_unpowered_trapdoor_does_not_flip_even_when_notified() {
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block(3, 5, 3, "minecraft:oak_trapdoor[half=bottom,open=false,powered=false]");
+        let torch = (2, 5, 3);
+
+        let events = flip_torch_and_propagate(&mut column, torch, false);
+        assert!(events.is_empty(), "an unlit torch must produce no reaction events");
+        assert_eq!(
+            column.block_state(3, 5, 3),
+            "minecraft:oak_trapdoor[half=bottom,open=false,powered=false]",
+            "the trapdoor must stay closed"
+        );
+    }
+
+    /// A fence gate follows the same shape as the trapdoor — opens when
+    /// powered, closes when not, one event.
+    #[test]
+    fn a_powered_fence_gate_opens_and_closes() {
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block(3, 5, 3, "minecraft:oak_fence_gate[open=false,powered=false]");
+        let torch = (2, 5, 3);
+
+        flip_torch_and_propagate(&mut column, torch, true);
+        assert_eq!(
+            column.block_state(3, 5, 3),
+            "minecraft:oak_fence_gate[open=true,powered=true]"
+        );
+        flip_torch_and_propagate(&mut column, torch, false);
+        assert_eq!(
+            column.block_state(3, 5, 3),
+            "minecraft:oak_fence_gate[open=false,powered=false]"
+        );
     }
 }

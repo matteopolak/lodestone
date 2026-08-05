@@ -139,6 +139,7 @@ mod redstone_diode;
 #[cfg(test)]
 mod redstone_diode_oracle_gate;
 mod redstone_observer;
+mod redstone_openable;
 /// Issue #314's end-to-end gate: redstone propagation driven through the
 /// production entry point against values measured on a real 26.2 server.
 /// Test-only — it holds the oracle table and the gates, no production code.

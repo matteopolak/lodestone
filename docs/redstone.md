@@ -30,6 +30,11 @@ gravity blocks:
   `DiodeBlock`/`RepeaterBlock`/`ComparatorBlock.java`).
 - [`redstone_observer.rs`](../crates/lodestone-server/src/redstone_observer.rs)
   — the 1-tick-wide pulse out the back face.
+- [`redstone_openable.rs`](../crates/lodestone-server/src/redstone_openable.rs)
+  — doors, trapdoors and fence gates opening when powered and closing when
+  unpowered (issue #319). The *consumer* families: unlike the four above they
+  emit no signal, so they live entirely outside `redstone.rs`'s
+  source/conductor model.
 
 ## How it works
 
@@ -111,6 +116,14 @@ neighbour:
 3. **Torches/repeaters/comparators/observers**: schedule a delayed recheck
    into `block_ticks` when steady-state disagrees with current state. No
    immediate mutation — the flip runs when the schedule drains.
+4. **Redstone-openable blocks (#319)**: doors/trapdoors/fence gates read
+   `best_neighbor_signal > 0` and, when it differs from their stored
+   `powered`, write both `open` and `powered` to it **immediately** — the
+   hopper arm's shape (vanilla's flag-2 `neighborChanged`, no `scheduleTick`),
+   not the delayed-recheck families'. A two-high door flips **both** halves in
+   one go: this crate has no `updateShape` pass for vanilla's half-sync to
+   live in, so the other half is written by the same arm and no cascade is
+   returned (matching flag 2's no-fan-out).
 
 ### Scheduled-tick production (the second real producer, after nothing)
 
@@ -232,6 +245,13 @@ T-junction, a repeater-locked latch) is the strongest remaining step.
   the held item, so dust cannot be placed by a player at all. Until both are
   addressed, redstone is reachable only from a random tick that happens to
   mutate a block adjacent to a circuit.
+- **The openable families are the one redstone family with *no* producer of
+  any kind yet** (#319): doors/trapdoors/fence gates are absent from
+  `placed_block_state` and from worldgen, so the reaction code in
+  `redstone_openable.rs` is exercised only by tests until placement or
+  worldgen lands one. It is wired into the same `react_to_notification` arm
+  every other family uses, so the moment a door exists in a column next to a
+  circuit it starts working — the wiring is not the gap, the producer is.
 
 ### Oracle traps, if you build a live redstone gate
 
