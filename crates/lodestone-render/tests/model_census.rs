@@ -416,3 +416,122 @@ fn item_model_coverage() {
         "every item model must bake once its textures are seeded; missing: {misses_after:?}"
     );
 }
+
+/// **Vegetation bakes real geometry** — the located suspect from issue #478,
+/// tested rather than assumed.
+///
+/// `mesh_models` skips any cell whose `quads_at` is empty
+/// (`lodestone-render/src/models.rs`), and `BlockModels::quads` falls back to an
+/// empty model for an id it has no entry for, so a coverage gap in plants would
+/// be a **silent** skip: grass and flowers would simply not draw, with nothing
+/// anywhere reporting a problem. That is the same shape as the bug it was
+/// proposed to explain, which is exactly why it needed a measurement instead of
+/// an argument.
+///
+/// The whole-registry census above already reports 32366 of 32366 states baking
+/// with 1377 empty, but that aggregate cannot say *which* states are the empty
+/// ones — a plant among them would be invisible inside a 4% bucket that is
+/// legitimately full of air, fluids and block-entity-only blocks. This names the
+/// population instead, so a regression points at a block rather than at a
+/// fraction.
+///
+/// Cross-shaped plants and cutout leaves are precisely the blocks whose geometry
+/// is *not* a full cube, so they exercise the non-cube path rather than the
+/// packed fast path.
+#[test]
+#[ignore = "requires a fetched vanilla client.jar and generated/reports/blocks.json"]
+fn vegetation_states_bake_non_empty_geometry() {
+    let jar = require_client_jar();
+    let report_path = require_blocks_report(&jar);
+    let source = ZipSource::open(&jar).expect("open client.jar");
+    let manager = ResourceManager::new(vec![Box::new(source)]);
+    let resolver = ModelResolver::new(&manager);
+    let atlas = full_block_atlas(&manager, &resolver, &[]);
+    let baker = BlockBaker::new(&manager, &resolver, &atlas);
+    let report = BlocksReport::load(&report_path).expect("load blocks.json");
+
+    // The blocks #478's worldgen sweep reported placing, plus the leaf and log
+    // species a tree is actually built from.
+    let wanted: BTreeSet<&str> = [
+        "minecraft:short_grass",
+        "minecraft:tall_grass",
+        "minecraft:fern",
+        "minecraft:large_fern",
+        "minecraft:dandelion",
+        "minecraft:poppy",
+        "minecraft:oak_sapling",
+        "minecraft:birch_sapling",
+        "minecraft:oak_leaves",
+        "minecraft:birch_leaves",
+        "minecraft:spruce_leaves",
+        "minecraft:acacia_leaves",
+        "minecraft:jungle_leaves",
+        "minecraft:oak_log",
+        "minecraft:birch_log",
+        "minecraft:acacia_log",
+        "minecraft:dead_bush",
+        "minecraft:sugar_cane",
+        "minecraft:cactus",
+    ]
+    .into_iter()
+    .collect();
+
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut empty_states: Vec<(String, u32)> = Vec::new();
+    let mut bake_failures: Vec<(String, u32)> = Vec::new();
+    let mut checked = 0usize;
+
+    for id in 0..report.state_count() {
+        let Some(resolved) = report.resolve(id) else {
+            continue;
+        };
+        let name = resolved.block.to_string();
+        if !wanted.contains(name.as_str()) {
+            continue;
+        }
+        seen.insert(name.clone());
+        checked += 1;
+        match baker.bake_state(&report, id, &FirstWeight) {
+            Err(_) => bake_failures.push((name, id)),
+            Ok(model) if model.quads.is_empty() => empty_states.push((name, id)),
+            Ok(_) => {}
+        }
+    }
+
+    eprintln!("=== #478 vegetation model coverage ===");
+    eprintln!("blocks requested: {}", wanted.len());
+    eprintln!("blocks found:     {}", seen.len());
+    eprintln!("states checked:   {checked}");
+    eprintln!("bake failures:    {}", bake_failures.len());
+    eprintln!("empty geometry:   {}", empty_states.len());
+
+    // Premise check: a typo in `wanted` would make every assertion below pass
+    // over an empty set. This is the failure mode that let the *deleted*
+    // `VegGrid` gate's surviving doc comment read as coverage — an assertion
+    // whose subject does not exist looks identical to one that holds.
+    let missing: Vec<&&str> = wanted
+        .iter()
+        .filter(|w| !seen.contains(**w))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these block names resolved to no state at all, so they asserted \
+         nothing — fix the names, do not delete them: {missing:?}"
+    );
+    assert!(
+        checked > 40,
+        "expected many states across these blocks (leaves alone carry several \
+         each), got {checked} — the registry walk is not reaching them"
+    );
+
+    assert!(
+        bake_failures.is_empty(),
+        "vegetation states failed to bake: {bake_failures:?}"
+    );
+    assert!(
+        empty_states.is_empty(),
+        "these vegetation states baked ZERO quads, so `mesh_models`' \
+         `quads.is_empty()` skip drops them and they are invisible in game with \
+         nothing reporting it: {empty_states:?}"
+    );
+}
