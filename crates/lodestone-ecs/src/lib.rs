@@ -137,6 +137,7 @@ mod resources;
 pub mod riding;
 mod runner;
 mod schedules;
+pub mod scheduler;
 pub mod session;
 mod sets;
 
@@ -171,6 +172,7 @@ pub use resources::{
     FrameClock, MAX_CATCH_UP_SECS, MAX_CATCH_UP_TICKS, TICK_PERIOD, VersionData, WorldTime,
 };
 pub use runner::Runner;
+pub use scheduler::{SchedulerPlugin, TaskId, TaskScheduler, run_due_tasks};
 pub use schedules::{Extract, GameTick, NetIngest, Update};
 pub use session::{
     Abilities, ActionBarOverlay, HudEffects, Phase, RespawnCount, Riding, ServerAlive,
