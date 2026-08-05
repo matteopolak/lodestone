@@ -10,7 +10,7 @@
 
 use lodestone_core::State;
 use lodestone_model::{
-    BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, ResourceKey, Rotation, Vec3,
+    BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, ResourceKey, Rotation, Text, Vec3,
 };
 use uuid::Uuid;
 
@@ -551,6 +551,37 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
+    /// Encodes a disconnect packet carrying `reason`, for the phase the
+    /// connection is currently in (issue #279).
+    ///
+    /// **The packet is phase-specific in both id *and* encoding**, which is the
+    /// one thing to get right here:
+    ///
+    /// | phase | vanilla packet | reason encoded as |
+    /// |---|---|---|
+    /// | Login | `ClientboundLoginDisconnectPacket` | **JSON string** (`ByteBufCodecs.lenientJson(262144)`, `login/ClientboundLoginDisconnectPacket.java:18`) |
+    /// | Configuration | `ClientboundDisconnectPacket` | **NBT** (`TRUSTED_CONTEXT_FREE_STREAM_CODEC`, `common/ClientboundDisconnectPacket.java:11-12`) |
+    /// | Play | `ClientboundDisconnectPacket` | **NBT**, same codec |
+    ///
+    /// Login is the odd one out for historical reasons — the login phase predates
+    /// NBT components on the wire — and an implementor that writes NBT there
+    /// produces a packet a real client cannot parse. `Status` has no disconnect
+    /// packet at all in 26.2 (its clientbound set is `status_response` and
+    /// `pong_response` only), so vanilla just closes the channel there; an
+    /// implementor should return [`ServerDirective::None`] for it rather than
+    /// inventing an id.
+    ///
+    /// Sending this does **not** close the connection — the caller does that,
+    /// after the write, exactly as vanilla's `Connection::disconnect` flushes the
+    /// packet before closing.
+    ///
+    /// The default emits nothing, so a protocol without disconnect support closes
+    /// silently, which is how every family behaved before this method existed.
+    fn encode_disconnect(&self, state: State, reason: &Text) -> ServerDirective {
+        let _ = (state, reason);
+        ServerDirective::None
+    }
+
     /// Encodes the reply to a [`ServerBound::PingRequest`] (vanilla
     /// `ClientboundPongResponsePacket`: the same single big-endian `long`,
     /// echoed unchanged —
@@ -907,6 +938,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn encode_pong_response(&self, time: i64) -> ServerDirective {
         (**self).encode_pong_response(time)
+    }
+
+    fn encode_disconnect(&self, state: State, reason: &Text) -> ServerDirective {
+        (**self).encode_disconnect(state, reason)
     }
 
     fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective> {
