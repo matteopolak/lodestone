@@ -140,11 +140,35 @@ cutting it, which is worth naming because it still looks like a picture.
   when the entry is clipped **or** when the last input was the keyboard (`:58`). A
   click passes `false`, which is what stops a click on a partly-visible row from
   yanking the list.
-- **Row heights are uniform.** `AbstractSelectionList` allows per-entry heights
-  (`:122-129`) and `menu::options`' settings list genuinely needs them. Supporting
-  that means replacing `row_top` and `content_height` with a prefix-sum walk. Until
-  a second screen needs it, the uniform case is honest and the variable one is a
-  documented absence rather than a wrong answer — see the adoption table below.
+- **Row heights may be uniform or per-entry** — `ScrollList::new_variable` (and
+  `resize_variable`) take the heights, and `row_offset`/`row_height` are what
+  every other method consults. This is `AbstractSelectionList`'s own
+  `addEntry(entry, height)` (`:122-129`), whose `repositionEntries` advances a
+  running `y` by each child's height (`:143-152`). **Uniform is the degenerate
+  case of the same arithmetic, not a second implementation**, and
+  `an_explicit_equal_height_list_is_indistinguishable_from_a_uniform_one` holds
+  it to that: it sweeps both modes across the whole span and compares every
+  observable, so a prefix-sum off-by-one cannot hide behind a spot check.
+- **`row_h` is `defaultEntryHeight`, and once heights are explicit it is *not*
+  "the height of a row".** It is only what `scroll_rate` is defined against
+  (`:44`). Deriving the rate from `heights.first()` would make the wheel speed
+  depend on which entry happens to be first — a settings list declaring 25 px
+  scrolls **12** px per notch even when its first row is a 20 px header.
+  `the_scroll_rate_ignores_the_entry_heights_entirely` pins it, and
+  `one_notch_on_a_variable_list_is_half_the_declared_default_height` separates 12
+  from the two rivals (10 = rate taken from the first entry, 20 = a row-index
+  model landing on that row's height).
+- **`visible_range` is closed-form only when uniform.** A prefix sum has no
+  multiply to invert, so the variable case walks — as vanilla's own
+  `repositionEntries` does. Both modes are held to agreeing with `row_visible`
+  entry by entry across the whole span.
+- **A uniform `resize` on a variable list drops to uniform on purpose.** Keeping
+  a stale height table behind a new `len` is worse than a wrong count, because
+  `row_offset` would keep answering *plausibly*. `resize_variable` is the call
+  that keeps them.
+- **A non-finite or negative height contributes 0 rather than propagating.** A
+  `NaN` in a running sum poisons the entire tail, which would put every *later*
+  row off-screen — one bad row must stay one bad row.
 - **Nesting `with_clip` replaces rather than intersects**, matching
   `enableScissor`'s absolute bounds. No list nests one today.
 
@@ -209,12 +233,24 @@ scroll only by keyboard cursor-follow.
 
 Two things fall out and both are decisions, not details:
 
-- **`options.rs` decides whether `ScrollList` grows variable row heights.** Its
-  `entry_height`/`visible_entries`/`entry_offset` walk exists only because headers
-  and controls differ in height. If the primitive models that, the other four become
-  the degenerate uniform case and everything unifies; if it stays uniform-only,
-  `options.rs` is permanently forked from its own four imitators, whose docs all
-  cross-reference its `LIST_WINDOW_PX` as the authority.
+- ~~**`options.rs` decides whether `ScrollList` grows variable row heights.**~~
+  **Decided (#445): it grows them.** `new_variable` landed, so `options.rs`'s
+  mixed header/control heights are expressible and the other four screens are the
+  degenerate uniform case of the same arithmetic. This was settled *before*
+  converting any screen, deliberately — converting the four against a uniform-only
+  primitive and then again against a variable one is the one sequencing mistake
+  available here.
+
+  **What is still outstanding is the adoption itself**, and one thing found while
+  sizing it is worth writing down because it changes the estimate: the scrollbar
+  draw is **not** generic today. `render/draw.rs:145-149` calls
+  `server_scroll_list` by name, so it is the *multiplayer list's* scrollbar rather
+  than "the active screen's". Adopting the primitive on a second screen therefore
+  means adding that hook — the issue's own suggested shape, "one arm that asks the
+  active screen for its list" — before any of the four conversions produces a
+  single new pixel. Do that first; a screen converted to `ScrollList` while the
+  draw still asks for the server list is a textbook island (green tests, no
+  scrollbar, no wheel).
 - **`world_select.rs` is the model for the hover half, not the six `self.cursor = row`
   screens.** It is the only screen that already keeps hover and focus apart. If the
   primitive's hover concept is copied from any of the others, a mouse-over will steal
