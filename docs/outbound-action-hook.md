@@ -90,6 +90,19 @@ filter cannot see an attack, a use-item or an inventory click**. That is a limit
 specifies, not an implementation shortfall, and it is why #109's veto is a separate mechanism at the
 verb level rather than a special case of this one.
 
+### This is the outbound half only — the inbound half is not wired
+
+Worth stating so nobody records plugin egress/ingress as end-to-end when one direction is missing. This
+hook covers **outbound** `ClientAction`s (client → server), with the coverage table above bounding even
+that. There is no inbound counterpart: the plugin command registry that landed alongside this
+(`30e8f1b`, `684b95a`) is **unreachable from the wire**, because nothing decodes a serverbound
+`CHAT_COMMAND` into the dispatcher. Closing that gap reportedly requires revisiting `lodestone-server`'s
+deliberate refusal to depend on `lodestone-ecs`, which is a larger architectural decision than a hook.
+
+So: outbound actions can be inspected, replaced and suppressed (within the five-file limit above);
+inbound commands do not arrive at all yet. Different directions, different states, and the
+version-opaque `RawPacket` half of issue #104 is a third thing again, still unbuilt.
+
 ## How to change it, and the gotchas
 
 - **Do not give a filter `&World`.** The drain runs inside the driver's write guard; a `hold_read` from

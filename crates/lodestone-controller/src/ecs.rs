@@ -211,6 +211,9 @@ pub fn send_move_action(
 pub fn send_player_input(
     egress: Res<Egress>,
     mut queue: ResMut<ActionQueue>,
+    // Issue #109's veto registry. `Option`, so a client with no plugin installed
+    // is unchanged.
+    vetoes: Option<Res<lodestone_ecs::veto::ActionVetoes>>,
     mut players: Query<(&MovementIntent, &mut LastPlayerInput), With<LocalPlayer>>,
 ) {
     if !(egress.in_world && egress.live) {
@@ -228,6 +231,22 @@ pub fn send_player_input(
             sprint: intent.sprint,
         };
         if last.0 == Some(next) {
+            continue;
+        }
+        // Issue #109's player-move veto. Asked only when the input actually
+        // CHANGED (after the edge check above), so a plugin freezing a player
+        // is asked once per real input change rather than 20 times a second --
+        // and, more importantly, so a denial does not latch `LastPlayerInput`.
+        // Latching a value that was never sent is the exact bug `Egress`'s own
+        // doc comment describes: the first real change after the veto lifts
+        // would be suppressed as a redundant resend.
+        if let Some(vetoes) = &vetoes
+            && vetoes.allows(&lodestone_ecs::veto::VerbContext::PlayerMove {
+                moving: next.forward || next.backward || next.left || next.right,
+                jumping: next.jump,
+                sprinting: next.sprint,
+            }) == lodestone_ecs::veto::Verdict::Deny
+        {
             continue;
         }
         last.0 = Some(next);
