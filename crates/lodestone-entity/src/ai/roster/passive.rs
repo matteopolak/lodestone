@@ -640,6 +640,7 @@ mod tests {
             Vec3::new(0.5, 0.0, 0.5),
             WALK,
             560,
+            0,
         );
         let mut ai = GoalSelector::new();
         if let Some(s) = species {
@@ -767,6 +768,7 @@ mod tests {
             Vec3::new(0.5, 0.0, 0.5),
             WALK,
             256,
+            0,
         );
         mob.set_age(crate::ai::navigating_mob::BABY_START_AGE);
 

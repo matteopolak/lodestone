@@ -117,7 +117,7 @@ const TARGET: Vec3 = Vec3::new(30.5, 0.0, 0.5); // ~30 blocks + the fence detour
 
 fn fresh_mob(world: &Arena) -> (NavigatingMob<'_>, GoalSelector) {
     let shape = MobShape::land(0.6, 1.95);
-    let mut mob = NavigatingMob::new(world, shape, START, 0.25, 20_000);
+    let mut mob = NavigatingMob::new(world, shape, START, 0.25, 20_000, 0);
     mob.set_attack_target(Some(TARGET));
     let mut ai = GoalSelector::new();
     ai.add(1, Box::new(MeleeAttackGoal::new(1.0, 2.0)));

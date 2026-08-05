@@ -379,6 +379,14 @@ impl<'w> NavigatingMob<'w> {
     ///
     /// `visited_budget` bounds the A\* open set (vanilla derives it as
     /// `floor(followRange * 16)`).
+    ///
+    /// `seed` seeds the per-mob deterministic RNG (a SplitMix64). Callers
+    /// **must** pass a seed that is unique per entity — e.g. the entity's
+    /// network id (`id as u64`) — so two mobs of the same species do not act
+    /// in lockstep. The seed is deterministic by design: the same world and
+    /// seed replayed produces byte-identical mob behaviour. Vanilla seeds
+    /// `Entity.random` from `RandomSource.create()` per-entity; this is our
+    /// equivalent, minus the non-determinism.
     #[must_use]
     pub fn new(
         world: &'w dyn PathWorld,
@@ -386,6 +394,7 @@ impl<'w> NavigatingMob<'w> {
         pos: Vec3,
         step_per_tick: f64,
         visited_budget: i32,
+        seed: u64,
     ) -> Self {
         let width = shape.width;
         Self {
@@ -395,7 +404,7 @@ impl<'w> NavigatingMob<'w> {
             navigator: PathNavigator::new(width),
             pos,
             step_per_tick,
-            rng: SplitMix64(0x1234_5678_9ABC_DEF0),
+            rng: SplitMix64(seed),
             attack_target: None,
             active_target_block: None,
             last_look: None,
@@ -429,13 +438,6 @@ impl<'w> NavigatingMob<'w> {
             angry_target: None,
             eaten: Vec::new(),
         }
-    }
-
-    /// Overrides the RNG seed (affects stroll target selection only).
-    #[must_use]
-    pub fn with_seed(mut self, seed: u64) -> Self {
-        self.rng = SplitMix64(seed);
-        self
     }
 
     /// The mob's current position.
@@ -1419,7 +1421,7 @@ mod tests {
 
     fn run_to_target(world: &dyn PathWorld, target: Vec3) -> (bool, f64, Vec<Vec3>) {
         let shape = MobShape::land(0.6, 1.95);
-        let mut mob = NavigatingMob::new(world, shape, Vec3::new(0.5, 0.0, 0.5), 0.25, 8000);
+        let mut mob = NavigatingMob::new(world, shape, Vec3::new(0.5, 0.0, 0.5), 0.25, 8000, 0);
         mob.set_attack_target(Some(target));
 
         let mut ai = GoalSelector::new();
@@ -1487,7 +1489,7 @@ mod tests {
         let world = fence_wall();
         let shape = MobShape::land(0.6, 1.95);
         let target = Vec3::new(10.5, 0.0, 0.5);
-        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.5, 0.0, 0.5), 0.25, 8000);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.5, 0.0, 0.5), 0.25, 8000, 0);
         mob.set_attack_target(Some(target));
         let mut ai = GoalSelector::new();
         ai.add(1, Box::new(MeleeAttackGoal::new(1.0, 2.0)));
@@ -1541,7 +1543,7 @@ mod tests {
         let world = Arena { walls };
         let shape = MobShape::land(0.6, 1.95);
         let target = Vec3::new(10.5, 0.0, 0.5);
-        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.5, 0.0, 0.5), 0.25, 3000);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.5, 0.0, 0.5), 0.25, 3000, 0);
         mob.set_attack_target(Some(target));
 
         // move_to yields a (partial) path, matching vanilla best-effort behaviour.
@@ -1629,6 +1631,7 @@ mod tests {
             Vec3::new(0.5, 0.0, 0.5),
             0.25,
             600,
+            0,
         );
         mob.set_attack_target(Some(target));
         let mut ai = GoalSelector::new();
@@ -1683,6 +1686,7 @@ mod tests {
             Vec3::new(0.5, 0.0, 0.5),
             0.25,
             800,
+            0,
         );
         mob.set_attack_target(Some(target));
         let mut ai = GoalSelector::new();
@@ -1757,8 +1761,8 @@ mod tests {
             walls: HashSet::new(),
         };
         let shape = MobShape::land(0.6, 1.95);
-        let mut a = NavigatingMob::new(&world, shape.clone(), Vec3::new(0.0, 0.0, 0.0), 1.0, 400);
-        let mut b = NavigatingMob::new(&world, shape, Vec3::new(2.0, 0.0, 0.0), 1.0, 400);
+        let mut a = NavigatingMob::new(&world, shape.clone(), Vec3::new(0.0, 0.0, 0.0), 1.0, 400, 0);
+        let mut b = NavigatingMob::new(&world, shape, Vec3::new(2.0, 0.0, 0.0), 1.0, 400, 0);
         a.set_in_love();
         b.set_in_love();
 
@@ -1807,8 +1811,8 @@ mod tests {
             walls: HashSet::new(),
         };
         let shape = MobShape::land(0.6, 1.95);
-        let mut a = NavigatingMob::new(&world, shape.clone(), Vec3::new(0.0, 0.0, 0.0), 1.0, 400);
-        let mut b = NavigatingMob::new(&world, shape, Vec3::new(2.0, 0.0, 0.0), 1.0, 400);
+        let mut a = NavigatingMob::new(&world, shape.clone(), Vec3::new(0.0, 0.0, 0.0), 1.0, 400, 0);
+        let mut b = NavigatingMob::new(&world, shape, Vec3::new(2.0, 0.0, 0.0), 1.0, 400, 0);
         a.set_in_love();
         b.set_in_love();
         let mut ai_a = GoalSelector::new();
@@ -1835,7 +1839,7 @@ mod tests {
             walls: HashSet::new(),
         };
         let shape = MobShape::land(0.6, 1.95);
-        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 1.0, 400);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 1.0, 400, 0);
         mob.set_in_love();
         assert_eq!(mob.love_time(), LOVE_TICKS);
         for _ in 0..LOVE_TICKS {
@@ -1870,7 +1874,7 @@ mod tests {
         let shape = MobShape::land(0.6, 1.95);
 
         // Control: unlocked, same starting age, ages normally over 50 ticks.
-        let mut control = NavigatingMob::new(&world, shape.clone(), Vec3::new(0.0, 0.0, 0.0), 1.0, 400);
+        let mut control = NavigatingMob::new(&world, shape.clone(), Vec3::new(0.0, 0.0, 0.0), 1.0, 400, 0);
         control.set_age(-10);
         for _ in 0..50 {
             control.advance();
@@ -1882,7 +1886,7 @@ mod tests {
         );
 
         // Subject: locked, identical starting age, must not move at all.
-        let mut locked = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 1.0, 400);
+        let mut locked = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 1.0, 400, 0);
         locked.set_age(-10);
         locked.set_age_locked(true);
         for _ in 0..50 {
@@ -1914,7 +1918,7 @@ mod tests {
         let shape = MobShape::land(0.6, 1.95);
         let baby_start = Vec3::new(0.0, 0.0, 0.0);
         let parent_pos = Vec3::new(10.0, 0.0, 0.0);
-        let mut baby = NavigatingMob::new(&world, shape, baby_start, 0.25, 8000);
+        let mut baby = NavigatingMob::new(&world, shape, baby_start, 0.25, 8000, 0);
         baby.set_age(-10); // is_baby() == true, far from BABY_START_AGE so it
         // does not grow up mid-test.
         baby.set_parent_candidate(Some(parent_pos));
@@ -1952,7 +1956,7 @@ mod tests {
         };
         let shape = MobShape::land(0.6, 1.95);
         let start = Vec3::new(5.0, 0.0, 5.0);
-        let mut mob = NavigatingMob::new(&world, shape, start, 0.25, 400);
+        let mut mob = NavigatingMob::new(&world, shape, start, 0.25, 400, 0);
 
         let impulse = Vec3::new(-0.6, 0.4, 0.2);
         mob.apply_knockback(impulse);
@@ -1980,7 +1984,7 @@ mod tests {
             walls: HashSet::new(),
         };
         let shape = MobShape::land(0.6, 1.95);
-        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400, 0);
         mob.apply_knockback(Vec3::new(1.0, 0.0, 0.0));
         assert_eq!(mob.velocity(), Vec3::new(1.0, 0.0, 0.0));
 
@@ -2002,7 +2006,7 @@ mod tests {
             walls: HashSet::new(),
         };
         let shape = MobShape::land(0.6, 1.95);
-        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400, 0);
         mob.ignite();
 
         for expected in 1..MAX_SWELL {
@@ -2037,7 +2041,7 @@ mod tests {
             walls: HashSet::new(),
         };
         let shape = MobShape::land(0.6, 1.95);
-        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400, 0);
 
         for _ in 0..500 {
             mob.advance();
@@ -2056,7 +2060,7 @@ mod tests {
             walls: HashSet::new(),
         };
         let shape = MobShape::land(0.6, 1.95);
-        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400, 0);
         mob.set_attack_target(Some(Vec3::new(1.0, 0.0, 0.0))); // distSqr 1 < 9
 
         let mut ai = GoalSelector::new();
@@ -2086,7 +2090,7 @@ mod tests {
             walls: HashSet::new(),
         };
         let shape = MobShape::land(0.6, 1.95);
-        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400);
+        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400, 0);
         mob.set_attack_target(Some(Vec3::new(20.0, 0.0, 0.0))); // distSqr 400
 
         let mut ai = GoalSelector::new();
@@ -2168,7 +2172,7 @@ mod tests {
     }
 
     fn perception_mob<'w>(world: &'w dyn PathWorld, at: Vec3) -> NavigatingMob<'w> {
-        NavigatingMob::new(world, MobShape::land(0.6, 1.95), at, 0.25, 400)
+        NavigatingMob::new(world, MobShape::land(0.6, 1.95), at, 0.25, 400, 0)
     }
 
     /// Whether each of the six previously-dead goals reports `can_use` for the
@@ -2436,6 +2440,109 @@ mod tests {
         assert!(
             !RandomStrollGoal::new(1.0).with_interval(1).can_use(&mut suppressed),
             "no_action_time 100 must suppress stroll (RandomStrollGoal.java:43)"
+        );
+    }
+
+    // ── per-mob RNG seed gates (issue #463) ──────────────────────────
+
+    /// Divergence gate: two mobs at the same position with different seeds
+    /// produce different stroll targets on the very first call — the mobs do
+    /// not act in lockstep.
+    ///
+    /// The bounded tick is zero: `random_stroll_target` consumes two
+    /// `next_unit` draws, and the SplitMix64 streams separate on the first
+    /// draw. The negative control below proves this assertion would *pass*
+    /// (not fire) under the old shared seed.
+    #[test]
+    fn different_seeds_produce_different_stroll_targets() {
+        let world = Arena {
+            walls: HashSet::new(),
+        };
+        let shape = MobShape::land(0.6, 1.95);
+        let pos = Vec3::new(0.5, 0.0, 0.5);
+
+        let mut mob_a =
+            NavigatingMob::new(&world, shape.clone(), pos, 0.25, 400, 0xAAAA_AAAA_AAAA_AAAA);
+        let mut mob_b =
+            NavigatingMob::new(&world, shape, pos, 0.25, 400, 0xBBBB_BBBB_BBBB_BBBB);
+
+        let target_a = mob_a.random_stroll_target();
+        let target_b = mob_b.random_stroll_target();
+
+        assert_ne!(
+            target_a, target_b,
+            "different seeds at the same position must produce different stroll \
+             targets; otherwise two mobs of the same species act in lockstep \
+             (issue #463)"
+        );
+    }
+
+    /// Determinism gate: the same seed and starting state produces the same
+    /// stroll target every time — replaying a world yields byte-identical
+    /// mob behaviour.
+    #[test]
+    fn same_seed_and_position_produces_identical_stroll_target() {
+        let world = Arena {
+            walls: HashSet::new(),
+        };
+        let shape = MobShape::land(0.6, 1.95);
+        let pos = Vec3::new(0.5, 0.0, 0.5);
+
+        let mut mob_a =
+            NavigatingMob::new(&world, shape.clone(), pos, 0.25, 400, 0xC0DE_C0DE_C0DE_C0DE);
+        let mut mob_b =
+            NavigatingMob::new(&world, shape, pos, 0.25, 400, 0xC0DE_C0DE_C0DE_C0DE);
+
+        assert_eq!(
+            mob_a.random_stroll_target(),
+            mob_b.random_stroll_target(),
+            "same seed + same position must produce identical stroll targets; \
+             determinism requires replay yields byte-identical behaviour"
+        );
+    }
+
+    /// Negative control: with the **same** seed, two mobs at different
+    /// positions get the same random offset, so the separation between
+    /// their targets is exactly the position delta — lockstep, the
+    /// behaviour this issue fixes.
+    ///
+    /// This is the counter-assertion for the divergence gate above: if
+    /// someone restores a shared seed, this test still passes (it measures
+    /// the lockstep property) while `different_seeds_produce_different_stroll_targets`
+    /// would fail — the two mobs would get the same target because both
+    /// position and seed match, or would differ only by position delta if
+    /// positions differ.
+    #[test]
+    fn shared_seed_yields_lockstep_offset_across_different_positions() {
+        let world = Arena {
+            walls: HashSet::new(),
+        };
+        let shape = MobShape::land(0.6, 1.95);
+
+        let pos_a = Vec3::new(0.5, 0.0, 0.5);
+        let pos_b = Vec3::new(10.5, 0.0, 10.5);
+        let shared = 0x1234_5678_9ABC_DEF0;
+
+        let mut mob_a =
+            NavigatingMob::new(&world, shape.clone(), pos_a, 0.25, 400, shared);
+        let mut mob_b =
+            NavigatingMob::new(&world, shape, pos_b, 0.25, 400, shared);
+
+        let target_a = mob_a.random_stroll_target().unwrap();
+        let target_b = mob_b.random_stroll_target().unwrap();
+
+        let pos_delta = pos_b - pos_a;
+        let target_delta = target_b - target_a;
+
+        // With the same seed, the random offset (dx, dz) is identical for
+        // both mobs, so target_b - target_a must equal pos_b - pos_a
+        // (both mobs move in the same direction by the same amount).
+        assert!(
+            (target_delta.x - pos_delta.x).abs() < 1e-9
+                && (target_delta.z - pos_delta.z).abs() < 1e-9,
+            "same seed => identical random offsets: target delta \
+             ({target_delta:?}) must equal position delta ({pos_delta:?}); \
+             this is the lockstep the per-mob seed eliminates"
         );
     }
 }

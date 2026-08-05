@@ -644,6 +644,7 @@ mod tests {
             Vec3::new(0.5, 0.0, 0.5),
             speed,
             160,
+            0,
         );
         let mut ai = GoalSelector::new();
         for (priority, goal) in goals_for(species, &ctx) {

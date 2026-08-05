@@ -141,6 +141,7 @@ fn run(species: &str, follow_range: f64, step: f64, player: Vec3, ticks: usize) 
         // Vanilla's own budget: `floor(followRange * 16)`, the same expression
         // `mobs.rs:1510` uses.
         (follow_range * 16.0).floor() as i32,
+        0,
     );
     mob.set_follow_range(follow_range);
 
@@ -289,6 +290,7 @@ fn the_range_cut_is_the_jars_and_not_a_rounded_guess() {
                 Vec3::new(0.5, 0.0, 0.5),
                 0.25,
                 256,
+                0,
             );
             mob.set_follow_range(follow_range);
             mob.set_nearest_player(Some(Vec3::new(0.5 + d, 0.0, 0.5)));
@@ -322,6 +324,7 @@ fn a_pursued_player_is_tracked_while_in_range_and_released_when_it_leaves() {
         Vec3::new(0.5, 0.0, 0.5),
         0.25,
         256,
+        0,
     );
     mob.set_follow_range(DEFAULT_FOLLOW_RANGE);
     let mut ai = GoalSelector::new();
@@ -443,6 +446,7 @@ fn an_anger_gated_registration_targets_only_the_grudge_holder() {
             Vec3::new(0.5, 0.0, 0.5),
             0.25,
             256,
+            0,
         );
         mob.set_follow_range(DEFAULT_FOLLOW_RANGE);
         mob.set_nearest_player(Some(nearby_player));

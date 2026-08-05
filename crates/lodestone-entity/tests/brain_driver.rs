@@ -171,7 +171,7 @@ fn run(species: &str, ticks: usize, player: Option<Vec3>, install_goals: bool) -
     let world = Flat::new();
     let ctx = SpeciesContext::new(STEP);
     let spawn = start();
-    let mut mob = NavigatingMob::new(&world, MobShape::land(0.6, 1.95), spawn, STEP, 560);
+    let mut mob = NavigatingMob::new(&world, MobShape::land(0.6, 1.95), spawn, STEP, 560, 0);
 
     let mut ai = GoalSelector::new();
     let mut goals_installed = 0;
