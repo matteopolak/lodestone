@@ -44,6 +44,22 @@ use crate::vitals::{EYE_HEIGHT, PlayerVitals};
 #[cfg(not(target_arch = "wasm32"))]
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_millis(15_000);
 
+/// MOTD reported in the server-list status reply (issue #277).
+///
+/// Vanilla's own default is `server.properties`' `motd=A Minecraft Server`
+/// (`net/minecraft/server/dedicated/DedicatedServerProperties.java`, and the
+/// `.cache/mc/26.2/server.properties` this repo's oracles run against). This
+/// crate has no properties file, so the equivalent constant names Lodestone
+/// instead of impersonating vanilla.
+pub const STATUS_MOTD: &str = "A Lodestone Server";
+
+/// Player cap reported in the server-list status reply, matching the
+/// `max_players` this crate's join sequence already reports in-game (the
+/// `GameLogin` body every `ServerProtocol::begin_play` builds). The two are
+/// deliberately the same number: a client that sees `0/20` in its list and then
+/// joins a 20-slot server should not see the cap change.
+pub const STATUS_MAX_PLAYERS: i32 = 20;
+
 /// Cadence of the periodic time-of-day broadcast.
 ///
 /// Vanilla re-broadcasts the world's monotonic game time every 20 ticks
@@ -547,6 +563,22 @@ pub enum ServerError {
     /// `serve_play`'s doc comment).
     #[error("keep-alive timeout: client did not echo the server's challenge in time")]
     KeepAliveTimeout,
+    /// The connection completed a server-list status exchange and was
+    /// terminated (issue #277). **Not a failure**: vanilla itself ends a status
+    /// connection exactly this way, and calls it a disconnect —
+    /// `ServerStatusPacketListenerImpl` closes the channel with reason
+    /// `multiplayer.status.request_handled` after answering a ping, and also
+    /// after a *second* status request on one connection
+    /// (`net/minecraft/server/network/ServerStatusPacketListenerImpl.java:14,
+    /// 34-47`).
+    ///
+    /// It is an `Err` rather than an `Ok` only because [`ServeSummary`] is
+    /// shaped around a session that logged in: a status connection has no
+    /// username, no chunks, and no inventory, so there is nothing truthful to
+    /// put in one. Callers discard the result either way (see
+    /// [`crate::IntegratedServer`]'s accept loops).
+    #[error("server-list status request handled; connection closed (not an error)")]
+    StatusRequestHandled,
 }
 
 async fn apply<T: Transport>(
@@ -871,11 +903,50 @@ where
     let mut state = State::Handshaking;
     let mut username: Option<String> = None;
     let mut streamer = EntityStreamer::default();
+    // Vanilla's `ServerStatusPacketListenerImpl.hasRequestedStatus`
+    // (`ServerStatusPacketListenerImpl.java:17`): one status reply per
+    // connection, a second request is a disconnect.
+    let mut status_requested = false;
 
     while let Some((packet_id, payload)) = conn.read_packet().await? {
         match proto.decode(state, packet_id, &payload) {
             ServerBound::Handshake { next_state } => {
                 state = next_state;
+            }
+            // Issue #277. Mirrors `ServerStatusPacketListenerImpl
+            // .handleStatusRequest` exactly (`:34-41`): answer the first
+            // request, disconnect on any subsequent one. The repeat case is not
+            // pedantry — it is what stops a peer holding a connection open
+            // forever cheaply re-asking, which is the same class of leak issue
+            // #280 closes for Play.
+            ServerBound::StatusRequest => {
+                if status_requested {
+                    return Err(ServerError::StatusRequestHandled);
+                }
+                status_requested = true;
+                // `players_online` is reported as `0` because this crate has no
+                // cross-connection player registry to count: a status request
+                // arrives on its *own* connection, before and independent of
+                // any join, so a per-connection loop cannot see the sessions
+                // other connections are serving. Everything else in the row a
+                // client renders (MOTD, cap, version, protocol) is real. See
+                // `docs/server-status.md` for what a truthful count needs.
+                let directive = proto.encode_status_response(
+                    STATUS_MOTD,
+                    0,
+                    STATUS_MAX_PLAYERS,
+                    &[],
+                    None,
+                    false,
+                );
+                apply(conn, &mut state, directive).await?;
+            }
+            // `ServerStatusPacketListenerImpl.handlePingRequest` (`:44-47`):
+            // echo the payload, then close. Note vanilla does *not* require a
+            // preceding status request here, so neither does this.
+            ServerBound::PingRequest { time } => {
+                apply(conn, &mut state, proto.encode_pong_response(time)).await?;
+                return Err(ServerError::StatusRequestHandled);
             }
             ServerBound::LoginStart {
                 username: name,
@@ -1945,10 +2016,16 @@ where
                 }
             }
         }
+        // The pre-Play phase signals, unreachable here by construction: a
+        // connection in `State::Play` cannot decode a handshake, a login, or
+        // (issue #277) a Status-phase status/ping request, because every
+        // `ServerProtocol::decode` arm for those is gated on the state.
         ServerBound::Handshake { .. }
         | ServerBound::LoginStart { .. }
         | ServerBound::LoginAcknowledged
         | ServerBound::ConfigurationFinished
+        | ServerBound::StatusRequest
+        | ServerBound::PingRequest { .. }
         | ServerBound::Ignored => {}
     }
     Ok(())
