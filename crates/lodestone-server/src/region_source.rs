@@ -145,6 +145,74 @@ fn io(path: &Path) -> impl FnOnce(std::io::Error) -> Error + '_ {
     }
 }
 
+/// What [`resolve_world_seed`] found: the seed the world will actually
+/// generate with, and whether this call created the world's metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedSeed {
+    /// The seed to hand [`crate::overworld_chunk_source`]. For an existing
+    /// world this is the **stored** seed, not the requested one.
+    pub seed: i64,
+    /// `true` when no settings file existed and one was written with the
+    /// requested seed — i.e. this open created the world.
+    pub created: bool,
+}
+
+/// The seed `world_dir` must generate with, writing the world's metadata on
+/// first open.
+///
+/// # Why this exists, and why it is not optional
+///
+/// Issue [#437](https://github.com/matteopolak/lodestone/issues/437) made
+/// blocks survive a restart but left the seed unstored, and the two together
+/// are worse than neither: chunks the player *had* visited come back from disk
+/// while chunks they had not are regenerated from a **different** seed, so the
+/// world is discontinuous exactly at the edge of where they explored. A
+/// blocks-only gate structurally cannot see it, because every block such a gate
+/// checks is one that was saved. Issue
+/// [#468](https://github.com/matteopolak/lodestone/issues/468).
+///
+/// # The stored seed always wins
+///
+/// `requested` is a **creation** parameter, not an open parameter. Once a world
+/// exists, its own seed is authoritative and `requested` is ignored — the only
+/// rule under which an existing world stays the world it was. Callers that want
+/// to know whether their seed was honoured read
+/// [`ResolvedSeed::created`].
+///
+/// # Where the seed lives (it is *not* `level.dat`)
+///
+/// See [`lodestone_anvil::world_gen_settings`]: 26.2 moved world-gen settings
+/// out of `level.dat` into `<world>/data/minecraft/world_gen_settings.dat`, and
+/// a 26.2 `level.dat` contains no seed field at all. Vanilla's own behaviour
+/// when that file is missing or unreadable is to fall back to
+/// `WorldOptions.defaultWithRandomSeed()` — precisely the bug above — which is
+/// why an unreadable-but-present file here is an **error** rather than a
+/// silent re-roll.
+///
+/// # Errors
+///
+/// [`Error::Anvil`] if a settings file exists but cannot be decoded or carries
+/// no seed, or if a new one cannot be written. A *missing* file is not an
+/// error: that is every world's first open.
+pub fn resolve_world_seed(world_dir: &Path, requested: i64) -> Result<ResolvedSeed, Error> {
+    let path = lodestone_anvil::world_gen_settings::path_in(world_dir);
+    if path.exists() {
+        let settings =
+            lodestone_anvil::world_gen_settings::read_from_file(&path).map_err(Error::Anvil)?;
+        let seed = settings.seed().map_err(Error::Anvil)?;
+        return Ok(ResolvedSeed {
+            seed,
+            created: false,
+        });
+    }
+    let settings = lodestone_anvil::world_gen_settings::WorldGenSettings::from_seed(requested);
+    lodestone_anvil::world_gen_settings::write_to_file(&settings, &path).map_err(Error::Anvil)?;
+    Ok(ResolvedSeed {
+        seed: requested,
+        created: true,
+    })
+}
+
 /// Counters for what the save/load path actually did.
 ///
 /// Deliberately counters and not timings: a duration measured while five other

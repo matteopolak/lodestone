@@ -76,11 +76,16 @@ impl std::fmt::Display for LaunchError {
 /// successful return means a server is running and a client is talking to it —
 /// though login is asynchronous, so "running" is proven by the session reaching
 /// `Screen::Playing`, not by this returning `Ok`.
+/// `world_dir` is where this world saves (issue #468); `None` opens a
+/// throwaway in-memory world, which is what a test that must leave nothing
+/// behind asks for. [`crate::saves::default_world_dir`] is what the menu
+/// passes — see that module for the "one implicit world" product decision.
 pub(crate) fn launch_singleplayer(
     protocol: i32,
     view_radius: i32,
     session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
     seed: i64,
+    #[cfg(not(target_arch = "wasm32"))] world_dir: Option<std::path::PathBuf>,
 ) -> Result<NetClient, LaunchError> {
     let server_protocol = lodestone_registry::server_protocol_for_protocol(protocol)
         .ok_or(LaunchError::NoVersionFamily { protocol })?;
@@ -90,6 +95,8 @@ pub(crate) fn launch_singleplayer(
         seed,
         view_radius,
         session,
+        #[cfg(not(target_arch = "wasm32"))]
+        world_dir,
     ))
 }
 

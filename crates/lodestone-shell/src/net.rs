@@ -800,10 +800,22 @@ enum Origin {
     Integrated {
         /// The serverbound half of the version family, from the registry.
         protocol: Box<dyn lodestone_server::ServerProtocol>,
-        /// World seed for the bundled overworld generator.
+        /// World seed for the bundled overworld generator — a **creation**
+        /// parameter only. When `world_dir` names a world that already exists,
+        /// that world's stored seed wins and this is ignored; see
+        /// [`lodestone_server::region_source::resolve_world_seed`].
         seed: i64,
         /// Chunk radius the server streams around the player.
         view_radius: i32,
+        /// Where to save this world, or `None` for a throwaway in-memory one.
+        ///
+        /// `Some` is what makes singleplayer persist (issue #468) — it selects
+        /// `IntegratedServer::open_persistent_with_mobs` over the in-memory
+        /// constructor. `None` is not dead: it is what `wasm32` gets (a browser
+        /// world has no filesystem) and what a test wanting a world that leaves
+        /// nothing behind asks for.
+        #[cfg(not(target_arch = "wasm32"))]
+        world_dir: Option<std::path::PathBuf>,
     },
 }
 
@@ -839,6 +851,23 @@ impl std::fmt::Debug for Origin {
 /// single-player world is synthetic. Nothing routes on the value; it is only
 /// echoed into the handshake the server's own decoder ignores.
 const SINGLEPLAYER_ADDRESS: (&str, u16) = ("singleplayer", 0);
+
+/// How often a persistent singleplayer world writes its dirty chunks (issue
+/// #468).
+///
+/// Vanilla autosaves every 6000 ticks (5 minutes). This is far shorter because
+/// the cost model is different, not because 5 minutes is wrong: a save here
+/// writes **only the dirty set**, so a player standing still writes nothing at
+/// all, and three mutated chunks write exactly three columns rather than the
+/// ~512 a residency-proportional save would. The work happens inside
+/// `spawn_blocking`, off the thread `run_tick_loop` shares. So the interval
+/// trades almost nothing for a much smaller window of unsaved building if the
+/// process is killed rather than quit cleanly.
+///
+/// A clean quit does not depend on this at all — `shutdown()` flushes at the
+/// end of the session.
+#[cfg(not(target_arch = "wasm32"))]
+const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30);
 
 impl NetClient {
     /// Spawn a background thread that connects to `host:port` speaking the given
@@ -932,6 +961,15 @@ impl NetClient {
     /// `session` means what it does for [`Self::connect`] (§4.1(c)): pass the
     /// caller's `World` or the fold lands somewhere nothing reads. Prefer
     /// [`crate::sim::Sim`]'s own launch path over calling this with `None`.
+    /// `world_dir` is where the world is saved (issue #468). `Some` opens it
+    /// persistently, creating it on first use and writing it back on autosave
+    /// and on session end; `None` is the old throwaway in-memory world.
+    /// [`crate::saves::default_world_dir`] is what the menu passes.
+    ///
+    /// `seed` is only consulted when `world_dir` names a world that does not
+    /// exist yet — an existing world's own stored seed always wins, or
+    /// reopening it would regenerate every unexplored chunk from different
+    /// terrain.
     #[must_use]
     pub fn open_singleplayer(
         server_protocol: Box<dyn lodestone_server::ServerProtocol>,
@@ -939,12 +977,15 @@ impl NetClient {
         seed: i64,
         view_radius: i32,
         session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
+        #[cfg(not(target_arch = "wasm32"))] world_dir: Option<std::path::PathBuf>,
     ) -> Self {
         Self::connect_impl(
             Origin::Integrated {
                 protocol: server_protocol,
                 seed,
                 view_radius,
+                #[cfg(not(target_arch = "wasm32"))]
+                world_dir,
             },
             protocol,
             session,
@@ -1484,7 +1525,46 @@ fn run(
                 protocol: server_protocol,
                 seed,
                 view_radius,
+                #[cfg(not(target_arch = "wasm32"))]
+                world_dir,
             } => {
+                // Issue #468: the world's **stored** seed wins over the
+                // requested one, so this has to be resolved before the
+                // generator is built — the generator is seeded once and never
+                // reseeded. A failure here is reported and the session falls
+                // back to a non-persistent world rather than being aborted:
+                // losing saves is bad, but refusing to open the game at all
+                // because a data directory is read-only is worse, and a silent
+                // re-roll of the seed (which is what vanilla itself does here)
+                // is the exact defect this issue exists to fix.
+                #[cfg(not(target_arch = "wasm32"))]
+                let seed = match &world_dir {
+                    Some(dir) => {
+                        match lodestone_server::region_source::resolve_world_seed(dir, seed) {
+                            Ok(resolved) => {
+                                tracing::info!(
+                                    target: "net",
+                                    world_dir = %dir.display(),
+                                    seed = resolved.seed,
+                                    created = resolved.created,
+                                    "opening a persistent singleplayer world"
+                                );
+                                resolved.seed
+                            }
+                            // Fatal for the same reason the open below is: a
+                            // world whose stored seed we cannot read is one we
+                            // would silently regenerate differently.
+                            Err(e) => {
+                                let _ = tx.send(NetUpdate::Error(format!(
+                                    "cannot read the world seed for {}: {e}",
+                                    dir.display()
+                                )));
+                                return;
+                            }
+                        }
+                    }
+                    None => seed,
+                };
                 tracing::info!(
                     target: "net",
                     seed,
@@ -1528,14 +1608,70 @@ fn run(
                     // since this only needs to be big enough for a handful
                     // of wandering mobs, not the whole streamed view.
                     let mob_radius = view_radius.clamp(1, 3);
-                    lodestone_server::IntegratedServer::open_in_memory_with_mobs(
-                        server_protocol,
-                        source,
-                        (-mob_radius..=mob_radius, -mob_radius..=mob_radius),
-                        (8, 8),
-                        6,
-                        view_radius,
-                    )
+                    let mob_area = (-mob_radius..=mob_radius, -mob_radius..=mob_radius);
+                    // Issue #468: the whole point. `open_persistent_with_mobs`
+                    // wraps `source` in a `RegionChunkSource` *below* the
+                    // `ChunkStore` and above the generator, so every existing
+                    // mutation path (player edits, random ticks, the mob sim's
+                    // grazing) is carried without any of them being touched.
+                    // The autosave it spawns does its filesystem work inside
+                    // `spawn_blocking`, so a full-region write never lands on
+                    // the thread `run_tick_loop` shares — deliberate, because
+                    // the world-open stall (10.86 s → 75.6 ms,
+                    // `docs/world-open-latency.md`) had exactly that shape.
+                    //
+                    // `min_y`/`height` come off the source rather than being
+                    // written as `(-64, 384)` here: `region_source`'s own
+                    // gotcha is that they must match the world the columns came
+                    // from, and a literal at this call site is a copy that can
+                    // drift from the generator that produced them.
+                    match &world_dir {
+                        Some(dir) => {
+                            let (min_y, height) = (source.min_y(), source.height());
+                            match lodestone_server::IntegratedServer::open_persistent_with_mobs(
+                                server_protocol,
+                                dir,
+                                source,
+                                min_y,
+                                height,
+                                mob_area,
+                                (8, 8),
+                                6,
+                                view_radius,
+                                AUTOSAVE_INTERVAL,
+                            ) {
+                                // The third element is a second handle to the
+                                // same world, for callers that mutate outside
+                                // the connection loop. The shell mutates
+                                // through the wire like any client, so it
+                                // wants none.
+                                Ok((server, client_io, _world)) => (server, client_io),
+                                // **Fatal, deliberately.** The tempting
+                                // alternative is to fall back to an in-memory
+                                // world and report a warning, and it is worse:
+                                // the player builds for an hour on top of a
+                                // toast they did not read, and loses all of it.
+                                // Refusing to open a world we cannot save is
+                                // the honest failure. (The only cause is the
+                                // region directory being uncreatable.)
+                                Err(e) => {
+                                    let _ = tx.send(NetUpdate::Error(format!(
+                                        "cannot open {} for saving: {e}",
+                                        dir.display()
+                                    )));
+                                    return;
+                                }
+                            }
+                        }
+                        None => lodestone_server::IntegratedServer::open_in_memory_with_mobs(
+                            server_protocol,
+                            source,
+                            mob_area,
+                            (8, 8),
+                            6,
+                            view_radius,
+                        ),
+                    }
                 };
                 #[cfg(target_arch = "wasm32")]
                 let (server, client_io) = lodestone_server::IntegratedServer::open_in_memory(
@@ -1668,13 +1804,29 @@ fn run(
             }
         }
 
-        // Singleplayer only: stop the server we started. Dropping the handle at
-        // the end of this block would do it too, but saying so is what keeps the
-        // *reason* `integrated_server` is a binding at all from looking like an
-        // unused variable — and it is the read that stops the compiler saying so.
+        // Singleplayer only: stop the server we started, **and wait for it**.
+        //
+        // This used to be `trigger_shutdown()`, a fire-and-forget notify, after
+        // which the binding dropped and `impl Drop for IntegratedServer`
+        // *aborted* the tick and serving tasks. That was a second island one
+        // layer above issue #468's: even with the persistent constructor wired
+        // in, the final save could never run, because `save_now` lives in
+        // `shutdown()` and nothing awaited it. Every edit since the last
+        // autosave tick would have been lost on every quit — including, for a
+        // short session, all of them.
+        //
+        // `shutdown()` joins the serving and tick tasks *before* flushing, so
+        // an in-flight block edit cannot be dropped between the last tick and
+        // the write, and the write itself is a `spawn_blocking` of only the
+        // dirty columns. It is awaited here on the net thread, which
+        // `NetClient::drop` joins — so quitting to the title screen blocks until
+        // the world is on disk. That is intentional and is what vanilla's own
+        // "Saving world" screen is: the alternative is a save racing process
+        // exit.
         if let Some(server) = integrated_server {
-            tracing::info!(target: "net", "stopping the integrated server");
-            server.trigger_shutdown();
+            tracing::info!(target: "net", "stopping the integrated server and saving the world");
+            server.shutdown().await;
+            tracing::info!(target: "net", "integrated server stopped");
         }
     });
 }

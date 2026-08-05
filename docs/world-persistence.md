@@ -34,6 +34,16 @@ classic *named*-root form with an empty root name, not the nameless
   models exactly that envelope plus a `DataVersion` accessor into `"Data"`;
   every other `LevelData` field (seed, spawn, gamerules, weather, world
   border, ...) is unmodelled on purpose (see "How to change it").
+- **`world_gen_settings.dat`** (`src/world_gen_settings.rs`): where 26.2 keeps
+  the **world seed** — `<world>/data/minecraft/world_gen_settings.dat`, a
+  gzip-wrapped named-NBT `{ data: {…}, DataVersion: Int }`. Added for issue
+  [#468](https://github.com/matteopolak/lodestone/issues/468). **The seed is
+  not in `level.dat`** in 26.2, unlike 1.16.5 where it sits at
+  `Data.WorldGenSettings.seed`; a 26.2 `level.dat` has no seed field at all,
+  which is the trap that makes it look unpersisted. Reads and writes the seed,
+  preserving unknown fields (notably the whole `dimensions` tree) across a
+  round trip. Gated against a checked-in real vanilla file,
+  `tests/support/world_gen_settings_26_2_vanilla.dat`.
 - **Compression** (`src/compression.rs`): the scheme byte both formats use —
   gzip (id 1), zlib/"deflate" (id 2, the default and the only scheme this
   crate has real-file evidence for), uncompressed (id 3), and LZ4 (id 4).

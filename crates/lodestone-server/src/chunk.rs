@@ -462,6 +462,26 @@ impl OverworldChunkSource {
             edits: Mutex::new(HashMap::new()),
         }
     }
+
+    /// The lowest world `y` this source's columns contain.
+    ///
+    /// Exposed for [`crate::region_source::RegionChunkSource::new`]'s
+    /// `min_y`/`height` arguments, which **must** match the world the columns
+    /// came from — that module's own gotcha, because vanilla writes light-only
+    /// sections past both ends and a mismatch silently mis-slices every saved
+    /// column. Reading them off the generator makes the pair impossible to get
+    /// wrong; hardcoding `(-64, 384)` at each call site is a guess that drifts
+    /// the moment the overworld's shape changes. Free — no column is generated.
+    #[must_use]
+    pub fn min_y(&self) -> i32 {
+        self.generator.min_y()
+    }
+
+    /// How many `y` levels this source's columns contain. See [`Self::min_y`].
+    #[must_use]
+    pub fn height(&self) -> i32 {
+        self.generator.height()
+    }
 }
 
 impl std::fmt::Debug for OverworldChunkSource {
