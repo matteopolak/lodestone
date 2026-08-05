@@ -42,12 +42,24 @@
 //!
 //! # How it works
 //!
-//! [`InteractPlugin`] registers two systems in `TickSet::Send`, ordered after
+//! [`InteractPlugin`] registers four systems in `TickSet::Send`, ordered after
 //! `lodestone_controller::ecs::send_player_input` by virtue of being added later
 //! into the same set via an explicit `.after()`:
 //!
-//! 1. [`send_sprint_command`] — vanilla's `LocalPlayer.sendIsSprintingIfNeeded`.
-//! 2. [`drive_mining`] — one tick of the hold-to-mine predictor.
+//! 1. [`send_abilities`] — the flight/abilities state the server acks.
+//! 2. [`send_sprint_command`] — vanilla's `LocalPlayer.sendIsSprintingIfNeeded`.
+//! 3. [`drive_mining`] — one tick of the hold-to-mine predictor.
+//! 4. [`drive_placement`] — one tick of the placement predictor.
+//!
+//! **This list said "two systems" and named two while the code registered
+//! three, and `drive_placement` was registered in no schedule at all** — found
+//! by #436's island sweep. Prose and code agreed with each other and both were
+//! wrong, which is why nothing looked amiss: the only `add_systems` naming
+//! `drive_placement` lived in `tests/place_intent.rs`'s hand-built `Schedule`,
+//! so a plugin's `PlaceIntent` sat unconsumed forever while `BreakIntent`
+//! worked. Human placement was unaffected throughout, going through
+//! `Sim::use_item_live` rather than this path — which is what kept it hidden.
+//! **If you add a system here, update this list in the same edit.**
 //!
 //! Both queue into [`ActionQueue`], which the driver drains to the socket once
 //! per tick. **That is what preserves wire order**: before Stage 5 these two ran
@@ -1057,7 +1069,23 @@ impl Plugin for InteractPlugin {
         app.init_resource::<VersionData>();
         app.add_systems(
             GameTick,
-            (send_abilities, send_sprint_command, drive_mining)
+            // `drive_placement` was defined but registered in **no** schedule
+            // until #436's island sweep found it: its only `add_systems` was a
+            // hand-built `Schedule` in `tests/place_intent.rs`. A plugin's
+            // `PlaceIntent` therefore sat unconsumed forever while `BreakIntent`
+            // worked. Player impact was nil — human placement goes through
+            // `Sim::use_item_live` — so nothing looked wrong, and this module's
+            // own doc agreed with the code by listing the wrong count.
+            //
+            // It must stay **inside** the `.chain()`: it shares
+            // `ResMut<ActionQueue>` with `drive_mining`, and this app runs with
+            // `ambiguity_detection: LogLevel::Error`.
+            (
+                send_abilities,
+                send_sprint_command,
+                drive_mining,
+                drive_placement,
+            )
                 .chain()
                 .after(lodestone_controller::ecs::send_player_input)
                 .in_set(TickSet::Send),
