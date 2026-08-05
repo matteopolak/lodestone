@@ -604,6 +604,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   paragraphs of prose.) Read this before building any of them — several requirements
   below are things a stage must deliver, and finding that out at Baritone time
   (`docs/baritone-port.md`) would mean reopening finished stages.
+- [Plugin registration — how a consumer gets their plugin into the client](./plugin-registration.md) —
+  The seam that lets a crate outside this repo register a `bevy_app::Plugin` into
+  Lodestone's client, headless *or* rendered. `lodestone-app`'s `client_app()` returns
+  the composed but unfinalised `App`; the caller `add_plugins` on it and hands the
+  result to a runner. This is milestone zero of
+  [`docs/plans/runtime-plugin-loading.md`](plans/runtime-plugin-loading.md), and every
+  later milestone there — the wasm host included — arrives through it.
 - [Pose-dependent dimensions and the fit gate](./pose-dimensions.md) — The player's
   collision box is `0.6 × 1.8` standing, `0.6 × 1.5` crouching and `0.6 × 0.6`
   swimming or elytra-gliding — and *which* of those applies is decided by a
