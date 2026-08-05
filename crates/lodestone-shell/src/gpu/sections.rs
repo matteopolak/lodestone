@@ -21,9 +21,14 @@
 //! reference, so a caller may build a bind group from one of these borrows and
 //! outlive it. Uploading a second copy of the block atlas for the hotbar would
 //! cost tens of megabytes to draw nine 16 px icons.
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use lodestone_render::{DepthBuffer, GpuMesh, GpuModelMesh, Mesh, update_model_anim_buffer};
 
 use crate::mesher::{SectionGeometry, SectionKey};
+
+/// PERF INSTRUMENT: set to true on first `upload_section` to log first-mesh timing once.
+static FIRST_SECTION_UPLOADED: AtomicBool = AtomicBool::new(false);
 
 use super::RenderState;
 use super::terrain::{ModelSectionGpu, SectionGpu, anim_slots_at};
@@ -55,6 +60,14 @@ impl RenderState {
         key: SectionKey,
         mesh: &SectionGeometry,
     ) {
+        // PERF INSTRUMENT: log when the first section reaches the GPU
+        if !FIRST_SECTION_UPLOADED.swap(true, Ordering::Relaxed) {
+            tracing::info!(
+                "first section uploaded to GPU: ({}, {}, {}), {:?} quads",
+                key.x, key.y, key.z,
+                mesh.quad_count(),
+            );
+        }
         match mesh {
             SectionGeometry::Packed(mesh) => self.upload_packed_section(device, queue, key, mesh),
             SectionGeometry::Model { opaque, water } => {

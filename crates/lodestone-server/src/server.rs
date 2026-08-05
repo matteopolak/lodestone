@@ -11,7 +11,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 #[cfg(not(target_arch = "wasm32"))]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lodestone_core::State;
 use lodestone_entity::{DamageFlags, ItemLifecycle};
@@ -1543,6 +1543,8 @@ where
                 }
             }
             ServerBound::ConfigurationFinished => {
+                // PERF INSTRUMENT: timing the whole configuration→play transition
+                let t_cfg = Instant::now();
                 // Issue #329: the world spawn point is a *search*, not a
                 // fixed local `(8, 8)` in the origin column. Vanilla's
                 // `MinecraftServer.setInitialSpawn` walks a ±5-chunk spiral
@@ -1601,17 +1603,42 @@ where
                 // stay outside this loop, so the client's flow-control
                 // accounting (issue #270) sees the same single
                 // begin/…/end sequence it always did.
+                let t_chunks = Instant::now();
                 let mut batch_size = 0;
+                let mut ring_idx = 0u32;
                 for ring in join_view_rings(view_radius) {
+                    let t_ring = Instant::now();
                     let columns = source.generate(ring.clone()).await;
+                    let gen_ms = t_ring.elapsed().as_millis();
+                    let encode_start = Instant::now();
                     for (&(cx, cz), column) in ring.iter().zip(columns.iter()) {
                         apply(conn, &mut state, proto.encode_chunk(cx, cz, column)).await?;
                         batch_size += 1;
                     }
+                    let encode_ms = encode_start.elapsed().as_millis();
+                    let ring_columns = ring.len();
+                    tracing::info!(
+                        "join ring {}/{}: {} columns, gen={}ms encode={}ms",
+                        ring_idx,
+                        view_radius,
+                        ring_columns,
+                        gen_ms,
+                        encode_ms,
+                    );
+                    ring_idx += 1;
                 }
                 apply(conn, &mut state, proto.end_chunk_batch(batch_size)).await?;
+                let chunk_ms = t_chunks.elapsed().as_millis();
                 let chunks_sent = batch_size as usize;
+                tracing::info!(
+                    "join chunks: {} columns in {}ms ({:.0} col/s), {} rings",
+                    chunks_sent,
+                    chunk_ms,
+                    chunks_sent as f64 / (chunk_ms as f64 / 1000.0),
+                    ring_idx,
+                );
 
+                let t_welcome = Instant::now();
                 for directive in proto.welcome_message() {
                     apply(conn, &mut state, directive).await?;
                 }
@@ -1700,6 +1727,14 @@ where
                 let mut advancements = AdvancementManager::builtin();
                 let initial = advancements.initial_update(player_uuid, true);
                 apply(conn, &mut state, proto.encode_update_advancements(&initial)).await?;
+                let total_ms = t_cfg.elapsed().as_millis();
+                let welcome_ms = t_welcome.elapsed().as_millis() - 1; // approx, minus advancement encode
+                tracing::info!(
+                    "Configuration -> Play: {}ms total (chunks={}ms, welcome/entities/advancements={}ms)",
+                    total_ms,
+                    chunk_ms,
+                    welcome_ms,
+                );
                 return serve_play(
                     conn,
                     proto,
