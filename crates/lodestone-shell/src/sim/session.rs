@@ -745,6 +745,18 @@ impl Sim {
     /// bug survived a fix to the key dispatch that reached this function correctly.
     pub fn close_open_menu(&mut self) {
         let Some(open) = self.open_menu() else { return };
+        // Issue #145: a plugin-opened local menu has no server-side container, so
+        // a `ContainerClose` naming its window id would be addressed to something
+        // the server has never heard of. Close it locally and send nothing.
+        //
+        // This branch is the reason `Menus::opened_is_local` exists rather than
+        // callers comparing against `LOCAL_MENU_WINDOW_ID`: the wire send is
+        // *unconditional* here otherwise, and that unconditional send is what made
+        // the synthetic-event route to a local menu a correctness bug rather than
+        // a cosmetic one.
+        if self.close_local_menu() {
+            return;
+        }
         if let Some(net) = &self.net {
             net.send_action(ClientAction::ContainerClose {
                 window_id: open.window_id,
@@ -758,6 +770,86 @@ impl Sim {
                     .apply(&lodestone_model::ClientEvent::ScreenClosed { window_id });
             }
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // Plugin-opened local menus (issue #145)
+    // -----------------------------------------------------------------------
+
+    /// Open a menu a plugin built, with no server container behind it —
+    /// `Bukkit.createInventory` + `Player.openInventory`.
+    ///
+    /// The plugin supplies the whole [`Menu`], so any of its constructors work,
+    /// including the `SpecialLayout` ones. The screen draws through exactly the
+    /// path a server-opened container draws through (`Sim::open_menu` →
+    /// `ContainerFrame`), because it *is* the same `OpenMenu` slot — the only
+    /// difference is that nothing about it reaches the wire.
+    ///
+    /// Off a live session this still works: a local menu needs no connection,
+    /// which is the whole point (a client-side settings or waypoint screen must
+    /// open at the title screen too).
+    pub fn open_local_menu(
+        &mut self,
+        menu: Menu,
+        menu_type: lodestone_model::ResourceKey,
+        title: lodestone_model::Text,
+    ) {
+        self.write_local(|w, local| {
+            if let Some(mut menus) = w.get_mut::<lodestone_ecs::SessionMenus>(local) {
+                menus.0.open_local(menu, menu_type, title);
+            }
+        });
+    }
+
+    /// Close the open menu **only if it is a plugin-opened local one**, returning
+    /// whether it closed.
+    ///
+    /// Narrower than [`Self::close_open_menu`] on purpose, and the narrowness is
+    /// the safety property: this can never close a real server container, so it
+    /// cannot desynchronise the server's own open container with no packet
+    /// explaining why.
+    pub fn close_local_menu(&mut self) -> bool {
+        self.write_local(|w, local| {
+            w.get_mut::<lodestone_ecs::SessionMenus>(local)
+                .is_some_and(|mut menus| menus.0.close_local())
+        })
+    }
+
+    /// Whether the open screen is a plugin-opened local menu.
+    ///
+    /// The predicate every wire-facing container path consults before sending —
+    /// see [`Self::close_open_menu`] and `WindowApp::send_menu_click`.
+    #[must_use]
+    pub fn open_menu_is_local(&self) -> bool {
+        self.read(|w| {
+            w.get::<lodestone_ecs::SessionMenus>(self.local)
+                .is_some_and(|menus| menus.0.opened_is_local())
+        })
+    }
+
+    /// Predict a click against a plugin-opened local menu, sending nothing.
+    ///
+    /// The local counterpart to `ClientHandle::menu_click`. That one predicts *and*
+    /// returns a `ClientAction` the caller puts on the wire; for a local menu there
+    /// is no wire, so the prediction is the whole operation and it is authoritative
+    /// rather than provisional — no `container_set_slot` is ever coming to correct
+    /// it.
+    ///
+    /// No-op (returns `false`) unless a local menu is open, so a caller that has
+    /// not checked cannot accidentally mutate a server container through this.
+    pub fn click_local_menu(&mut self, click: lodestone_game::click::Click) -> bool {
+        self.write_local(|w, local| {
+            let Some(mut menus) = w.get_mut::<lodestone_ecs::SessionMenus>(local) else {
+                return false;
+            };
+            if !menus.0.opened_is_local() {
+                return false;
+            }
+            let _ = menus
+                .0
+                .click(click, lodestone_game::click::PlayerCtx::survival());
+            true
+        })
     }
 
     /// Compose a typed chat line onto the outbound [`ClientAction`] seam and hand
