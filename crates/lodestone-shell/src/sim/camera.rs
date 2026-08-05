@@ -313,15 +313,51 @@ impl Sim {
         self.view_bobbing = on;
     }
 
-    /// The interpolated walk bob this frame, or an all-zero frame when the option
-    /// is off. Exposed so a gate can assert the *input* to the camera fold
-    /// separately from the fold itself.
+    /// The interpolated walk bob this frame, or a frame with the walk terms
+    /// zeroed when the option is off. Exposed so a gate can assert the *input*
+    /// to the camera fold separately from the fold itself.
+    ///
+    /// The option zeroes **only the walk terms**, never the hurt half of the
+    /// frame: vanilla's `bobHurt` is unconditional — `GameRenderer.renderLevel`
+    /// applies it outside the `optionsRenderState.bobView` check
+    /// (`GameRenderer.java:534-536`) — so the damage tilt must survive View
+    /// Bobbing being off. A player who has not been hit recently is unaffected
+    /// either way (`frame.hurt` is negative when the countdown has lapsed, and
+    /// [`BobFrame::hurt_roll_degrees`] already returns `0` for that), so this
+    /// differs from the old whole-frame `BobFrame::default()` only in the ten
+    /// ticks after a hit.
     #[must_use]
     pub fn bob_frame(&self) -> crate::camera_rig::BobFrame {
-        if !self.view_bobbing {
-            return crate::camera_rig::BobFrame::default();
+        let frame = self.view_bob.frame(self.clock().interp_alpha);
+        if self.view_bobbing {
+            frame
+        } else {
+            crate::camera_rig::BobFrame {
+                walk_phase: 0.0,
+                bob: 0.0,
+                ..frame
+            }
         }
-        self.view_bob.frame(self.clock().interp_alpha)
+    }
+
+    /// The local player was hurt: start the damage tilt
+    /// (`Player.animateHurt`, `Player.java:1959-1962`, which records
+    /// `hurtDir = yaw` after `LivingEntity.animateHurt` resets the ten-tick
+    /// countdown). The wire `yaw` is `ClientboundHurtAnimationPacket.yaw`,
+    /// already decoded onto [`ClientEvent::EntityHurtAnimation`]; the server
+    /// computes it as `atan2(damage) - playerYaw`
+    /// (`ServerPlayer.indicateDamage`, `ServerPlayer.java:2133`), so a hit
+    /// from straight ahead is `0` — the pure-roll case.
+    ///
+    /// The camera-side half of the `bobHurt` wiring: `ViewBob` owns the
+    /// countdown and direction here, and the ECS `HurtTime` component
+    /// (`lodestone_ecs::entity::HurtTime`, folded by
+    /// `apply_entity_hurt_animation`) is a separate consumer that exists for
+    /// the red hurt-flash overlay. Called by the net-apply layer when
+    /// `EntityHurtAnimation` names the local player's own id — see
+    /// `docs/view-bobbing.md` for that hop.
+    pub fn on_local_player_hurt(&mut self, yaw_degrees: f32) {
+        self.view_bob.hurt(yaw_degrees);
     }
 
     #[must_use]
@@ -342,12 +378,20 @@ impl Sim {
         let eye = bobbed_camera(
             self.camera(aspect),
             self.bob_frame(),
-            // `bobHurt` is deliberately **not** driven from here yet: it is almost
-            // entirely a roll, and `bobbed_camera` cannot carry roll, so wiring it
-            // would produce a visibly wrong tilt rather than a slightly imprecise
-            // one. `ViewBob::hurt` and `BobFrame::hurt_roll_degrees` are
-            // implemented and tested against vanilla; see `docs/view-bobbing.md`
-            // for what the last hop needs.
+            // `bobHurt` is deliberately **not** driven from here yet. It is almost
+            // entirely a roll, and `bobbed_camera` cannot carry roll — `Camera`
+            // has `position`/`yaw`/`pitch` and `view_matrix` hardcodes `Vec3::Y`
+            // as up — so wiring it would produce a visibly wrong tilt rather than
+            // a slightly imprecise one. Verified against the jar: the server
+            // sends `hurtDir = atan2(damage) - playerYaw`
+            // (`ServerPlayer.java:2133`), so a hit from straight ahead is `0`
+            // and `bobHurt`'s tilt is *pure* roll — exactly the component this
+            // fold drops, leaving the most common hit with no visible response
+            // at all. `ViewBob::hurt` / `BobFrame::hurt_roll_degrees` /
+            // [`Self::on_local_player_hurt`] are implemented and tested against
+            // vanilla; the last hops are `Camera` roll support (workspace-wide)
+            // and the net-apply feed of the local player's `EntityHurtAnimation`
+            // into that hook. See `docs/view-bobbing.md`.
             0.0,
         );
         if !self.third_person {
