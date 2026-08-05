@@ -16,12 +16,24 @@ hand-derived coverage numbers that were wrong in four different ways).
 
 | axis | measured | meaning |
 |---|---|---|
-| serverbound **decoded** | **60/69** | `decode` has a real arm and reads the wire |
-| serverbound **connected** | **17/69** | that arm produces a `ServerBound` variant a consumer acts on |
-| decodes-to-`Ignored`-only | **43** | examined, understood, reaching nothing |
-| never examined | **9** | no arm at all |
+| serverbound **decoded** | **61/69** | `decode` has a real arm and reads the wire |
+| serverbound **connected** | **20/69** | that arm produces a `ServerBound` variant a consumer acts on |
+| decodes-to-`Ignored`-only | **41** | examined, understood, reaching nothing |
+| never examined | **8** | no arm at all |
 
-The nine with no arm at all: `CHAT`, `CHAT_ACK`, `CHAT_COMMAND`, `CHAT_COMMAND_SIGNED`,
+Reading taken at `7e3cd17`. **Watch the arithmetic when comparing to an older
+copy of this table**, because the two counts move independently and a naive
+subtraction misreads what happened. An earlier revision recorded
+`decoded 60 / connected 13 / Ignored-only 47`; the delta to today is *not*
+"four packets were wired". `CLIENT_INFORMATION` and `CHUNK_BATCH_RECEIVED`
+(`30a45aa`), then `CLIENT_COMMAND` and `SET_CREATIVE_MODE_SLOT` (`e6c1363`),
+moved from `Ignored` into connected — four. `CHAT_COMMAND` (`1c7ffd4`) moved
+from the *never-examined* bucket straight to connected, which is a **decode
+gap being closed, a different kind of fix** — that is why connected rose by
+five while `Ignored`-only fell by only four. `MOVE_PLAYER_ROT` and
+`MOVE_PLAYER_STATUS_ONLY` (`7e3cd17`) account for the remaining two.
+
+The eight with no arm at all: `CHAT`, `CHAT_ACK`, `CHAT_COMMAND_SIGNED`,
 `CHAT_SESSION_UPDATE`, `COMMAND_SUGGESTION` (the whole chat/command family — issue #271,
 which additionally needs signature verification that does not exist anywhere in the tree),
 plus `COOKIE_RESPONSE`, `DEBUG_SUBSCRIPTION_REQUEST` and `TEST_INSTANCE_BLOCK_ACTION`.
@@ -126,7 +138,6 @@ separately, and it means the wire work is not the blocker when the subsystem lan
 
 | family | packets | missing subsystem / what would consume it |
 |---|---|---|
-| movement remainder | `MOVE_PLAYER_ROT`, `MOVE_PLAYER_STATUS_ONLY` | `FallTracker` sees `on_ground` only via `PlayerMoved`, so a landing arriving on a rotation-only or status-only sample is missed — a gap `ServerBound::PlayerMoved`'s own doc comment already discloses. Smallest real next step in this family: a `ServerBound` ground-state variant feeding `FallTracker`. |
 | flight / load / tick / teleport / vehicle | `PLAYER_ABILITIES`, `PLAYER_LOADED`, `CLIENT_TICK_END`, `ACCEPT_TELEPORTATION`, `MOVE_VEHICLE`, `PADDLE_BOAT` | no flight model, no client-load timeout, no tick alignment, no teleport-confirmation tracking, no vehicle entities. `ACCEPT_TELEPORTATION` becomes meaningful once the server tracks outstanding teleport ids and ignores movement until confirmed, as vanilla does. |
 | interaction / combat remainder | `INTERACT`, `SWING`, `USE_ITEM`, `PLAYER_COMMAND`, `SPECTATOR_ACTION`, `TELEPORT_TO_ENTITY` | no entity-interaction model (taming/feeding/mounting), and no multi-player entity broadcast — `SWING` and `PLAYER_COMMAND`'s sneak/sprint pose exist to be *shown to other players*, and this server serves one connection's view. |
 | container remainder | `CONTAINER_BUTTON_CLICK`, `CONTAINER_SLOT_STATE_CHANGED`, `PLACE_RECIPE`, `RECIPE_BOOK_*`, `SELECT_TRADE`, `SET_BEACON`, `EDIT_BOOK`, `SIGN_UPDATE`, `RENAME_ITEM`, `PICK_ITEM_FROM_*`, `BUNDLE_ITEM_SELECTED` | `PlayerInventory` models window 0's 41 native slots and nothing else: no recipe book, beacon, anvil, bundle, book or trade state. `SIGN_UPDATE` is miscategorised in #266 — sign text belongs to `lodestone-world`, not the inventory. |

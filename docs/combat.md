@@ -920,9 +920,10 @@ new ones this pass introduces.
 
 **Knockback.** `lodestone_physics::knockback::knockback_impulse` needs a
 horizontal push *direction* — real vanilla uses the **attacker's facing**
-(`attack_direction(yaw)`), but nothing server-side tracks player rotation at
-all (only `x`/`y`/`z`/`on_ground` — see `ServerBound::PlayerMoved`'s own doc
-comment for why look-only movement stays `Ignored`). `apply_attack` uses the
+(`attack_direction(yaw)`), which nothing server-side tracked when this was
+written. Issue #262 has since changed that (`PlayerRegistry::set_rotation`,
+fed by all four movement packets), so the blocker is now only that
+`apply_attack` has not been switched over. `apply_attack` still uses the
 horizontal vector from the attacker's last known position to the target
 instead. This is a smaller divergence than it sounds: a melee attack
 requires the crosshair to already be on the target, so facing and
@@ -1214,16 +1215,14 @@ pre-existing entity-snapshot stream with no new encoder.
   `dir`/`block_hit` it just used) — computing them independently would let the
   two disagree about, e.g., a diagonal look direction.
 - **Getting a real attacker-facing knockback direction** (instead of the
-  attacker→target stand-in `apply_attack` uses): needs player rotation
-  tracked server-side at all. The cheapest route is decoding
-  `move_player_pos_rot`/`move_player_rot`'s yaw/pitch fields (currently
-  discarded — `ServerBound::PlayerMoved`'s own doc comment names exactly
-  this as the reason look-only movement stays `Ignored`) into a new tracked
-  `player_yaw: Option<f32>` alongside `player_pos`, then feed it through
-  `lodestone_physics::knockback::attack_direction` in `apply_attack` instead
-  of the position-delta vector. Not attempted here — a real, separate
-  change, not a one-line swap, since it also touches the decode side for two
-  more packets.
+  attacker→target stand-in `apply_attack` uses): **the yaw is now available.**
+  Issue #262 added exactly the `player_rot: Option<Rotation>` this entry used
+  to propose, tracked alongside `player_pos` in `serve_play` and fed by all
+  four movement packets, so the decode-side work this entry warned about is
+  done. What remains is the swap itself: pass that yaw into
+  `lodestone_physics::knockback::attack_direction` in `apply_attack` in place
+  of the position-delta vector. Note `apply_attack` currently takes
+  `player_pos` by value and would need the rotation threaded the same way.
 - **Wiring the cooldown-scaled damage/crit-bonus formula server-side**:
   needs an attack-strength ticker tracked *server*-side (today it is
   client-only, for the cosmetic crosshair indicator) plus a weapon/item
