@@ -2891,6 +2891,74 @@ impl V770Adapter {
             // the message entirely.
             return decode_custom_payload(payload);
         }
+        if packet_id == configuration::clientbound::RESOURCE_PACK_PUSH {
+            // Issue #294: `handle_play` decoded this before now; vanilla
+            // servers commonly push a required resource pack during
+            // Configuration, before the client reaches Play, and the
+            // fall-through below dropped it silently. Wire format is
+            // identical in both states.
+            let mut reader = Reader::new(payload);
+            let id = reader.uuid().map_err(dec_err)?;
+            let url = reader.string(32767).map_err(dec_err)?;
+            let hash = reader.string(40).map_err(dec_err)?;
+            let required = reader.bool().map_err(dec_err)?;
+            let has_prompt = reader.bool().map_err(dec_err)?;
+            let prompt = if has_prompt {
+                let component = read_network_nbt(&mut reader).map_err(dec_err)?;
+                Some(Text::from_nbt(&component))
+            } else {
+                None
+            };
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::ResourcePackPushed {
+                id,
+                url,
+                hash,
+                required,
+                prompt,
+            })]);
+        }
+        if packet_id == configuration::clientbound::RESOURCE_PACK_POP {
+            // Issue #294, same story as `RESOURCE_PACK_PUSH` just above: the
+            // pop for a pack pushed during Configuration never arrived at the
+            // client before now.
+            let mut reader = Reader::new(payload);
+            let has_id = reader.bool().map_err(dec_err)?;
+            let id = if has_id {
+                Some(reader.uuid().map_err(dec_err)?)
+            } else {
+                None
+            };
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::ResourcePackPopped { id })]);
+        }
+        if packet_id == configuration::clientbound::STORE_COOKIE {
+            // Same gap as the two above, found by the same scan: the
+            // configuration-phase `minecraft:store_cookie` fell through and was
+            // lost, while `handle_play` decoded it. Format is state-independent.
+            let mut reader = Reader::new(payload);
+            let key = reader.string(32767).map_err(dec_err)?;
+            let key = parse_key(&key, "cookie")?;
+            let cookie_payload = reader.var_bytes(5120).map_err(dec_err)?.to_vec();
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::CookieStored {
+                key,
+                payload: cookie_payload,
+            })]);
+        }
+        if packet_id == configuration::clientbound::TRANSFER {
+            // Same gap: `minecraft:transfer` is valid in Configuration (a
+            // redirect during the handshake), but only `handle_play` decoded
+            // it before now. Format is state-independent.
+            let mut reader = Reader::new(payload);
+            let host = reader.string(32767).map_err(dec_err)?;
+            let port = reader.var_i32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::TransferRequested {
+                host,
+                port,
+            })]);
+        }
         if packet_id == configuration::clientbound::CODE_OF_CONDUCT {
             return Ok(vec![send(
                 configuration::serverbound::ACCEPT_CODE_OF_CONDUCT,
