@@ -945,6 +945,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   range, biome)` entries. Different climate → different biome → different surface
   material (sand in deserts, snow in taiga, terracotta-adjacent in savanna, etc.) and,
   once a render-layer consumer exists, different grass/foliage tint.
+- [Snow layers and surface ice: `freeze_top_layer` (`TOP_LAYER_MODIFICATION`)](./worldgen-freeze-top-layer.md) —
+  The port of vanilla's `freeze_top_layer` — the whole of the eleventh and last
+  decoration step, `TOP_LAYER_MODIFICATION` — into `lodestone-worldgen`, composed
+  into the live generator, and gated bit-exactly against the real 26.2 server. This is
+  issue #404's unit U2. Before it, nothing in this engine ever wrote `minecraft:snow`
+  or surface ice: every snowy biome generated bare, which the parity census called the
+  most player-visible absent feature in worldgen.
 - [Surface-stage generation performance](./worldgen-surface-perf.md) — Two
   profile-driven optimisations to `lodestone-worldgen`'s surface stage
   (`crates/lodestone-worldgen/src/surface/mod.rs`, consumed by

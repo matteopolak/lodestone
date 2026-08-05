@@ -43,7 +43,7 @@ prose — several worldgen claims in this repo's own files are stale (see §"sta
 | 6f | `SURFACE_STRUCTURES` step *features* (`blue_ice` in frozen oceans; `desert_well` etc.) | **absent** | |
 | 6g | `UNDERGROUND_DECORATION` (`dripstone_cluster`, `pointed_dripstone`, sculk...) | **absent** — and unreachable until 3-D biomes, since only cave biomes carry these | |
 | 6h | `FLUID_SPRINGS` (`spring_water`, `spring_lava`) | **absent** | in every biome's list |
-| 6i | `TOP_LAYER_MODIFICATION` (`freeze_top_layer` — snow layers + ice) | **absent** | in **every** biome's list (self-gates on temperature); the most player-visible gap in this table: every snowy biome currently generates bare |
+| 6i | `TOP_LAYER_MODIFICATION` (`freeze_top_layer` — snow layers + ice) | **ported + composed, bit-exact at 4 fixtures** | U2, closed. `top_layer_parity` (in `lodestone-server/src/worldgen_data.rs`) loads vanilla's own post-vegetation field and requires the same writes at the same coordinates: snowy_plains 250 snow + 250 `snowy` flips, frozen_ocean 36 ice + 0 snow, windswept_hills 115 snow, desert 0. Plus 1,024 columns of `MOTION_BLOCKING` heightmap against vanilla's own `getHeight`. Four controls run and observed. See [`worldgen-freeze-top-layer.md`](../worldgen-freeze-top-layer.md) |
 | 7 | structures proper (`structure_starts`/`structure_references` statuses + jigsaw assembly) | **absent entirely** | #136: "do not start implementation"; no Rust module; data exists (34 `structure`, 20 `structure_set`, 188 `template_pool`, 40 `processor_list` JSON) |
 | 8 | `initialize_light` / `light`; heightmaps | **absent from the served wire** | `crates/protocol/v770/src/server_protocol.rs:1058-1061`: heightmaps sent empty, light all-`Missing` — documented gap; client relights locally |
 | 9 | `spawn` (initial mob generation, `disable_mob_generation`) | **absent from generation** | runtime spawning is `lodestone-server/src/mobs.rs` (a different mechanism, currently another agent's file) |
@@ -59,7 +59,7 @@ diff so it never inflates real-mismatch counts.
 oracle/harness expansion (U1)  ──────────────┐  (gates *measuring* everything below)
                                              ▼
 independent, parallel now:          whole-chunk gate per stage
-  freeze_top_layer (U2)
+  freeze_top_layer (U2)  ── CLOSED
   lakes + springs (U3)
   geodes + dungeons + fossils + icebergs (U4)
   glow lichen / multiface_growth (U5)
@@ -125,6 +125,17 @@ test**, (3) engine port, (4) composed gate with a measured floor and a control t
    every oracle fixture must contain content that is structurally impossible to be absent (the
    savanna tree-rate argument), and a zero from a new oracle is a defect report about the oracle
    until proven otherwise.
+
+   **U2 found the fix, and it is cheap: make the proxy's `default:` arm THROW.** `TopLayerOracle`
+   raises `UnsupportedOperationException` for any `WorldGenLevel` method it does not model, and
+   emits the set of methods that were actually called as `meta.proxyCall` lines the Rust gate then
+   asserts on. That arm fired **three times for real** while the oracle was written, and **all
+   three are still latent in `VegetationOracle` today**: `getRandom()` (returns `null` there, so
+   every tree's `updateShapeAtEdge` gets a null `RandomSource`), `scheduleTick` (waterlogged
+   leaves), and `getRawBrightness` (mushroom survival). U5 should adopt the throwing arm before
+   trusting any further vegetation number. Also: `chunk.setPersistedStatus(ChunkStatus.FEATURES)`
+   is required before reading `MOTION_BLOCKING`, or only the `*_WG` heightmaps are maintained and a
+   feature-placed block does not raise the surface.
 2. **Same distribution, wrong draw count desyncs the whole RNG stream.** `TrapezoidInt`
    approximated as `Uniform` preserved mean and support and broke everything downstream — placed
    positions entirely disjoint from vanilla's. Rule: port `sample()` exactly, never approximate a
@@ -186,7 +197,7 @@ orchestrator-brokered per standing practice; `chunk.rs`, `server.rs`, `tick.rs`,
 | unit | delivers | owns exclusively | waits on |
 |---|---|---|---|
 | U1 harness expansion | 3×3 `postfeatures`, `postvegetation`, `final` stages; ~6 new fixture chunks / 2nd seed; anvil-based end-to-end control | `crates/lodestone-worldgen-parity/**`, `scripts/worldgen-oracle/ComposedChunkOracle.java` | anvil control half waits on #437 |
-| U2 freeze_top_layer | snow/ice engine + oracle + composed gate | `feature/top_layer.rs` (new), its oracle/test files | overworld.rs hook (serialized) |
+| ~~U2 freeze_top_layer~~ **CLOSED** | snow/ice engine + `TopLayerOracle.java` + 4 bit-exact fixtures + 4 observed controls; `lodestone_data::snow_support` (5 jar-dumped columns); the **first release-profile** composed figure | `feature/top_layer.rs`, `noise/perlin_simplex.rs`, `TopLayerOracle.java`, `lodestone-data/{src,oracle-java}/snow_support*` | — |
 | U3 lakes + springs | `LakeFeature`/`SpringFeature` kinds + oracle | `feature/lake.rs`, `feature/spring.rs` (new) | same |
 | U4 geodes, dungeons, fossils, icebergs | `GeodeFeature`, `MonsterRoomFeature`, `FossilFeature`, `IcebergFeature` + oracle | `feature/geode.rs`, `feature/misc_structures.rs` (new) | same |
 | U5 vegetation gap burn-down | `multiface_growth` (every biome), fancy/giant trunk placers, `fallen_tree` (#428) | `feature/vegetation.rs`, `vegetation_parity.rs`, `VegetationOracle.java`, `KNOWN_VEGETATION_GAPS` | one agent only — all in one file |
@@ -198,16 +209,29 @@ orchestrator-brokered per standing practice; `chunk.rs`, `server.rs`, `tick.rs`,
 
 ### 6. Performance: predicted, then measured
 
-Every number currently on record for the composed pipeline is **debug-profile** — the 144-chunk
-sweep at ~68 s pre-ore-composition and 700.57 s after (`overworld.rs` module doc), the dense-grid
-~12.7 %/chunk win, the ore-sweep 700 s figure. Debug timings are ordering evidence only; **no
-release number for the full composed pipeline exists yet** — producing one is U9's first
-deliverable, and every future claim must state its profile.
+**A release-profile baseline now exists, from U2**: the composed `column()` costs **853.5 ms/chunk**
+in release, measured over 8 chunks (snowy, frozen and warm) by
+`worldgen_data::tests::freeze_stage_release_timing`. Every *other* number on record for the
+composed pipeline is still **debug**-profile — the 144-chunk sweep at ~68 s pre-ore-composition and
+700.57 s after (`overworld.rs` module doc), the dense-grid ~12.7 %/chunk win, the ore-sweep 700 s
+figure. Debug timings are ordering evidence only; every claim must state its profile. U9 still owns
+the full sweep and the persisted split.
+
+`StageTimes` grew a `top_layer` field for this (it had four: shape / fluid_heightmap / surface /
+intern), which is the mechanism U9 should extend rather than replace. **Note `column_timed` is a
+second copy of the pipeline, not a wrapper** — adding a stage to `column()` and not to
+`column_timed` makes the timed path silently diverge, which happened once during U2 and was caught
+only because the new field would have read zero.
 
 Predictions to verify (the *predict-then-measure* discipline, not direction-only):
 
 - New decoration steps (U2–U4, U6) are per-chunk RNG walks over existing machinery: predicted
-  <5 % each of composed column cost; verified by the extended `StageTimes` split.
+  <5 % each of composed column cost; verified by the extended `StageTimes` split. **U2 measured:
+  2.196 ms/chunk = 0.257 %** of the composed column, release profile — inside the prediction by an
+  order of magnitude, and the gate asserts the 5 % ceiling so a regression fails rather than being
+  absorbed. Note `freeze_top_layer` needs no 3×3 driver at all (it writes only within its own
+  chunk), so it is the *cheapest* shape in this group; U3/U4/U6 do spill and should not inherit
+  this figure.
 - 3-D biomes without an index: 16 → 1536 samples/chunk × 7594 rows ≈ **~96×** the biome stage.
   That is why U7 carries the `RTree` port and a perf gate, with vanilla's own
   `findValueBruteForce` (`Climate.java:182`) as the correctness control for the index.
@@ -234,6 +258,12 @@ Predictions to verify (the *predict-then-measure* discipline, not direction-only
    runtime spawner respectively).
 
 ### Staleness found while writing this plan (rule-2 hygiene, for the next reader)
+
+**Added by U2, for the same reason:** this plan said "`freeze_top_layer` fits `VegetationOracle`'s
+shape". It does not — `VegetationOracle` runs a step that *consumes RNG* and spills across chunks,
+while `freeze_top_layer` consumes **zero** draws and never leaves its own chunk, so it needed a
+separate oracle with a different (centre-only, no-3×3) driver. The oracle *proxy* pattern was
+reusable; the driver was not.
 
 - `worldgen_data.rs`'s "Honest scope" doc comment still says vegetation is "single-chunk only…no
   oracle yet" — false since `a27abce`/`04bfb57` (oracle + 3×3 driver landed). Owner of U5/U8
