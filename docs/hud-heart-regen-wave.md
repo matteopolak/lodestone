@@ -68,7 +68,7 @@ The absence is not a stale claim: `heartOffsetIndex`, `heart_offset`, `regen_wav
 
 The wave needs one bit of state the HUD frame does not yet carry — "is the local player regenerating" — plus a per-tick index. The plumbing already exists at both ends:
 
-* **Source.** `Sim::active_effects()` (`crates/lodestone-shell/src/sim/session.rs`) returns `lodestone_game::effect::ActiveEffects`, which has `get(&lodestone_model::Identifier)`. `app.rs:3241` already calls it in the same function that fills `hud_frame`, for the status-effect overlay, so producing the bool costs one line and no new read.
+* **Source.** `Sim::active_effects()` (`crates/lodestone-shell/src/sim/session.rs`) returns `lodestone_game::effect::ActiveEffects`, which has `get(&lodestone_model::Identifier)`. `WindowApp::redraw` (`crates/lodestone-shell/src/app/redraw.rs`) already calls it in the same function that fills `hud_frame`, for the status-effect overlay, so producing the bool costs one line and no new read.
 * **Sink.** `HudAnim` (`hud.rs:1363-1390`) is the established carrier for per-tick animation state, computed in `HudRenderer` at `hud.rs:2466-2480` alongside `heart_blink`. The wave index belongs there, next to `heart_blink`, not recomputed in the draw.
 
 Gotchas:

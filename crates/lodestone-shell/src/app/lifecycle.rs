@@ -1,0 +1,763 @@
+//! The winit `ApplicationHandler`: window lifecycle and raw event routing.
+//!
+//! Split out of `app.rs`; see that module's own header for the layout.
+
+use super::*;
+
+impl ApplicationHandler for WindowApp {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_some() {
+            return;
+        }
+        let attrs = Window::default_attributes()
+            .with_title("Lodestone")
+            .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0));
+        let window = match event_loop.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                eprintln!("failed to create window: {e}");
+                event_loop.exit();
+                return;
+            }
+        };
+
+        let (gpu, target) = match attach_window(window.clone()) {
+            Ok(pair) => pair,
+            Err(e) => {
+                eprintln!("failed to attach GPU to window: {e}");
+                event_loop.exit();
+                return;
+            }
+        };
+
+        let (w, h) = target.size();
+        let format = target.format();
+        let mut render = RenderState::new(
+            gpu.device(),
+            gpu.queue(),
+            format,
+            w,
+            h,
+            self.sim.vanilla_atlas(),
+        );
+        // Size the sky fog to our real render distance so terrain fades into the
+        // sky where chunks actually stop, not at the render crate's 8-chunk default.
+        render.set_fog(sky_fog(self.config.render_distance), self.config.render_distance);
+        // Upload the stitched particle sheet the emitter already resolves its
+        // flame/smoke/crit UVs against (issue #45). `load_particle_atlas` is
+        // memoised, so this is the **same** `ParticleAtlas` object `Sim` built
+        // its `(Sheet, frame) -> UV` table from — not a second stitch that
+        // happens to pack the same way. The bug being closed here is a UV table
+        // addressing a different image than the one bound, and every counter
+        // reads perfectly healthy while it is happening, so the identity is made
+        // structural rather than assumed.
+        if let Some(sheet) = crate::resources::load_particle_atlas() {
+            render.install_particle_sheet_atlas(gpu.device(), gpu.queue(), sheet.atlas());
+        }
+        let mut hud = HudRenderer::new(gpu.device(), format);
+        // Attach the vanilla GUI sprite atlas so the survival vitals draw from
+        // real textures; on a jar-less run this is `None` and the HUD keeps its
+        // procedural fallback.
+        if let Some(gui) = crate::resources::load_gui_atlas() {
+            hud.attach_gui(gpu.device(), gpu.queue(), format, gui);
+        }
+        // Load the real crafting-recipe corpus from `client.jar`, once. Feeds
+        // the container screen's ghost-preview draw and the debug-overlay
+        // counter; a jar-less run leaves this `None` and neither draws.
+        self.recipe_book = crate::resources::load_recipe_book();
+        // Attach the flat item-sprite atlas so hotbar/container slots draw real
+        // item icons; jar-less runs leave this `None` and slots stay empty wells.
+        // Loaded once and shared: the container screen needs the same atlas, and
+        // `ItemAtlas` is behind an `Arc` precisely so the second consumer is a
+        // refcount bump rather than a second stitch of the whole item corpus.
+        let item_atlas = crate::resources::load_item_atlas();
+        if let Some(items) = item_atlas.clone() {
+            hud.attach_items(gpu.device(), gpu.queue(), format, items);
+        }
+        // Attach the 3-D block-item pass, which borrows the world renderer's own
+        // block atlas, tint palette and animation slots rather than uploading a
+        // second copy of any of them. Present only on the live vanilla path (the
+        // demo world bakes no models), where block items would otherwise draw an
+        // empty well.
+        if let (Some(atlas_view), Some(atlas_sampler), Some(palette), Some(anim)) = (
+            render.model_atlas_view(),
+            render.model_atlas_sampler(),
+            render.model_palette_buffer(),
+            render.model_anim_buffer(),
+        ) {
+            hud.attach_item_models(
+                gpu.device(),
+                format,
+                atlas_view,
+                atlas_sampler,
+                palette,
+                anim,
+            );
+        }
+        let effects = EffectsRenderer::new(gpu.device(), format);
+
+        // The container screen draws real item icons through the *same* shared
+        // pass the hotbar uses (`hud::item_icon`), so both must be attached or
+        // slots fall back to hash-derived colour swatches. Without this the
+        // capability is complete, gated and reaches zero pixels — the island
+        // pattern this project has hit eleven times.
+        let mut container = ContainerRenderer::new(gpu.device(), format);
+        if let Some(items) = item_atlas {
+            container.attach_items(gpu.device(), gpu.queue(), format, items);
+        }
+        if let (Some(atlas_view), Some(atlas_sampler), Some(palette), Some(anim)) = (
+            render.model_atlas_view(),
+            render.model_atlas_sampler(),
+            render.model_palette_buffer(),
+            render.model_anim_buffer(),
+        ) {
+            container.attach_item_models(
+                gpu.device(),
+                format,
+                atlas_view,
+                atlas_sampler,
+                palette,
+                anim,
+            );
+        }
+        // Vanilla's real `container/*.png` panel art (issue #51). A jar-less
+        // run leaves this `None` and the screen keeps its flat programmatic
+        // fill — the same "is a thing attached" degradation as the two calls
+        // above.
+        if let Some(background) = crate::resources::load_container_background() {
+            container.attach_background(gpu.device(), gpu.queue(), format, background);
+        }
+
+        // Upload whatever has already meshed; the rest streams in per frame.
+        for meshed in self.sim.drain_meshes() {
+            render.upload_section(gpu.device(), gpu.queue(), meshed.key, &meshed.mesh);
+        }
+
+        let menu = MenuRenderer::new(gpu.device(), format);
+
+        // Choose the session per config. A connection target on the command line
+        // dials it immediately (and shows a loading screen until login);
+        // otherwise the window opens on the **main menu**, which is now the GUI
+        // entry point. Singleplayer from the menu enters the local worldgen world
+        // — *not* the integrated server, which isn't wired yet (see
+        // `WindowApp::begin_singleplayer`).
+        if requested_a_connection(&self.config) {
+            self.ui.begin(SessionKind::Multiplayer);
+            self.sim.connect(
+                self.config.host.clone(),
+                self.config.port,
+                self.config.protocol,
+            );
+            let net = self
+                .sim
+                .net()
+                .expect("Sim::connect always leaves a client attached");
+            // Install the entity light sampler now, at connect time, not after
+            // login: `set_entity_light_source` wants a `'static` closure
+            // installed *once*, and the shared handle it needs is available
+            // immediately (it is an `Arc<OnceLock<_>>` the net thread resolves
+            // later — see `net::SharedHandle`). Waiting for `LoggedIn` would
+            // just delay the install for no benefit, since the closure already
+            // tolerates an unresolved handle (`entity_light_at` reads `None`
+            // and the sampler falls back to full-bright, exactly matching the
+            // "no world yet" state during connect). This has to happen before
+            // `attach_net` moves `net` into `self.sim` — `NetClient` itself
+            // isn't `Clone` and doesn't outlive this function, only the shared
+            // handle inside it does.
+            let entity_light_handle = net.shared_handle();
+            // See `connect_to`: same clock for terrain and mobs, installed here
+            // too because this is the second, independent connect path.
+            let clock = net.shared_handle();
+            // See `connect_to`: the sky pass's own clock, next to (but distinct
+            // from) `set_sky_darken_source`'s already-derived factor.
+            let sky_clock = net.shared_handle();
+            // See `connect_to`: extrapolates between the ~1/sec `SET_TIME`
+            // packets so the cloud scroll advances smoothly instead of
+            // stepping once a second.
+            let continuous_time_of_day = ContinuousTimeOfDay::new();
+            // See `install_session_render_sources` for why weather rides the
+            // `sky_darken` lane rather than getting its own uniform. Installed on
+            // this path too, or a `--connect` launch renders a storm at full
+            // daylight brightness while a menu-launched session does not: the
+            // duplicated-source hazard this whole function's doc warns about.
+            let weather = Arc::new(WeatherTracker::new(net.shared_weather()));
+            self.weather = Some(weather.clone());
+            render.set_sky_darken_source(move || {
+                let base = clock.get().map(|h| {
+                    lodestone_render::entity::sky_darken_for_time_of_day(h.world_time().1)
+                })?;
+                Some(lodestone_render::weather_sky_light_factor(
+                    base,
+                    &weather.state(),
+                ))
+            });
+            // Same cell as `install_session_render_sources`, installed on this path
+            // too for the reason that function's doc gives about duplicated
+            // sources: a `--connect` launch that skipped it would black out mobs in
+            // open air while a menu-launched session did not.
+            let light_policy = net.shared_sky_default();
+            render.set_entity_light_source(move |feet| {
+                crate::net::entity_light_at(
+                    &entity_light_handle,
+                    feet.x.floor() as i32,
+                    feet.y.floor() as i32,
+                    feet.z.floor() as i32,
+                    // Read per call, not captured: a portal changes this mid-session.
+                    light_policy.get(),
+                )
+            });
+            render.set_time_of_day_source(move || {
+                sky_clock
+                    .get()
+                    .map(|h| continuous_time_of_day.advance(h.world_time().1))
+            });
+            // See `install_session_render_sources`: the sky pass itself, from the
+            // GPU handles this path already has locally (`self.gpu`/`self.target`
+            // are not set until the end of this function).
+            if !render.has_sky()
+                && let Some(sky) = crate::resources::load_sky(gpu.device(), gpu.queue(), format)
+            {
+                render.install_sky(sky);
+            }
+            // See `install_session_render_sources`: the overlay pass, from the
+            // same local GPU handles.
+            if !render.has_screen_effects()
+                && let Some(fx) =
+                    crate::resources::load_screen_effects(gpu.device(), gpu.queue(), format)
+            {
+                render.install_screen_effects(fx);
+            }
+            // See `install_session_render_sources`: the rain/snow pass, from the
+            // same local GPU handles.
+            if !render.has_weather()
+                && let Some(textures) = crate::resources::load_weather_textures()
+            {
+                render.install_weather(gpu.device(), gpu.queue(), format, &textures);
+            }
+        }
+        // No target requested: stay on `Screen::MainMenu`, which `UiState::new`
+        // already put us on. Nothing else to do.
+
+        self.window = Some(window);
+        self.gpu = Some(gpu);
+        self.target = Some(target);
+        self.render = Some(render);
+        // Now that `self.render` exists and `attach_net` has already run above,
+        // the outline source can be installed on this path too.
+        self.install_outline_source();
+        // Debug lines need no connection at all (see the method doc), so this
+        // is the one call that actually matters — the two above are just
+        // keeping the three connect paths uniform.
+        self.install_debug_lines_source();
+        self.hud = Some(hud);
+        self.effects = Some(effects);
+        self.container = Some(container);
+        self.menu = Some(menu);
+        // Grab only if the chosen screen wants it (menus and loading: no).
+        self.set_grab(self.ui.wants_cursor_grab());
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        _window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        match event {
+            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Resized(size) => {
+                if let (Some(gpu), Some(target), Some(render)) = (
+                    self.gpu.as_ref(),
+                    self.target.as_mut(),
+                    self.render.as_mut(),
+                ) {
+                    target.resize(gpu.device(), size.width, size.height);
+                    render.resize(gpu.device(), size.width, size.height);
+                }
+            }
+            WindowEvent::Focused(false) => {
+                // Losing focus pauses (and releases the pointer) so we don't
+                // keep grabbing the mouse of a backgrounded window. The *world*
+                // is not paused by this: `Screen::Paused` is local UI state and
+                // the sim keeps ticking (see `FramePacer`), which is what keeps
+                // keep-alives and movement flowing to the server.
+                self.ui.pause();
+                self.set_grab(false);
+                self.pacer.set_focused(false);
+            }
+            WindowEvent::Focused(true) => {
+                // Presentation resumes at full rate. The pointer is *not*
+                // re-grabbed here — the player clicks to resume, as before.
+                self.pacer.set_focused(true);
+            }
+            WindowEvent::Occluded(occluded) => {
+                // Fully covered or minimised: there is nothing on screen to
+                // update and acquiring a drawable is what stalls, so drop
+                // presentation entirely while continuing to tick.
+                self.pacer.set_occluded(occluded);
+            }
+            // Hovering a menu row highlights it, so the mouse and the keyboard
+            // drive one selection rather than two. `Screen::Paused` shares this
+            // arm too even though it is not `owns_frame` — see `menu_row_at`'s
+            // doc — because it has its own row navigation to hover just like
+            // every screen this renderer owns.
+            WindowEvent::CursorMoved { position, .. }
+                if crate::menu::render::owns_frame(self.ui.screen())
+                    || self.ui.is_paused()
+                    || self.ui.is_death() =>
+            {
+                self.cursor = (position.x as f32, position.y as f32);
+                if let Some(row) = self.menu_row_at(self.cursor.0, self.cursor.1) {
+                    self.nav.hover(&self.ui, row);
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. }
+                if crate::menu::render::owns_frame(self.ui.screen())
+                    || self.ui.is_paused()
+                    || self.ui.is_death() =>
+            {
+                if state == ElementState::Pressed {
+                    // Issue #15's other capture half: a mouse-button rebind
+                    // (vanilla defaults `key.attack` to the left button,
+                    // `key.pickItem` to the middle one — real cases, not
+                    // hypothetical) needs *any* button, not only Left, and must
+                    // run before the "click acts on the row under the cursor"
+                    // branch below — otherwise a capture would immediately
+                    // consume its own confirming click as a hover-row
+                    // activation instead of finishing the rebind.
+                    if self.nav.awaiting_key_capture() {
+                        self.nav.capture_binding(Binding::Mouse(button));
+                    } else if button == MouseButton::Left {
+                        // Only a click *on a row* activates: clicking the backdrop
+                        // must not confirm whatever happens to be highlighted.
+                        //
+                        // `MenuNav::click` and not `hover` + `MenuKey::Enter`: that
+                        // pair is still what happens on every screen with a single
+                        // row cursor and a single meaning of Enter, and it was wrong
+                        // on the settings screen, which had no cursor and gave each
+                        // control its own key. There, a click on the GUI SCALE row
+                        // arrived as `Enter` and therefore as "toggle View Bobbing" —
+                        // issue #391, where the whole bob chain was working and the
+                        // option had been silently persisted off by a click on an
+                        // unrelated row. Issue #55 gave that screen 135 controls and
+                        // a real cursor, so a click now resolves its row to that
+                        // row's own control; `MenuNav::click`'s doc has the history.
+                        if let Some(row) = self.menu_row_at(self.cursor.0, self.cursor.1) {
+                            let action = self.nav.click(&mut self.ui, row);
+                            self.apply_menu_action(action);
+                        }
+                    }
+                }
+                // Every `owns_frame` action handles its own grab (each of them
+                // either stays on a menu screen, which never grabs, or moves to
+                // Playing through a path that already calls `set_grab`).
+                // `PauseButton::BackToGame` does not — `handle_menu_key` only
+                // calls `MenuNav::key`, which flips `UiState` to `Playing` and
+                // returns, with nothing here to notice. Without this a click on
+                // Back to Game resumes play with the pointer still released:
+                // visible but unusable.
+                let want = self.ui.wants_cursor_grab();
+                if want != self.grabbed {
+                    self.set_grab(want);
+                }
+            }
+            // Track the cursor and, mid-drag, the slots it paints while a
+            // container screen is up. This is a separate arm from the menu one
+            // above because `Screen::Container` is not `owns_frame` — the
+            // container overlay draws over the world, it does not replace it.
+            WindowEvent::CursorMoved { position, .. } if self.ui.is_container_open() => {
+                self.cursor = (position.x as f32, position.y as f32);
+                if self.menu_input.is_dragging() {
+                    if let (Some(menu), Some((w, h))) = (
+                        self.active_container_menu(),
+                        self.target.as_ref().map(RenderTarget::size),
+                    ) {
+                        let hit = hit_test_with_scale(
+                            &menu,
+                            self.nav.gui_scale(),
+                            w,
+                            h,
+                            self.cursor.0,
+                            self.cursor.1,
+                        );
+                        // `&menu` supplies the cursor stack and the slot rules
+                        // vanilla's `shouldAddSlotToQuickCraft` gate needs — see
+                        // `MenuInput::dragged`, and issue #378 part 1 for what an
+                        // unfiltered paint set costs.
+                        self.menu_input.dragged(hit, &menu);
+                    }
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } if self.ui.is_container_open() => {
+                if let Some(menu_button) = menu_button_for(button)
+                    && let (Some(menu), Some((w, h))) = (
+                        self.active_container_menu(),
+                        self.target.as_ref().map(RenderTarget::size),
+                    )
+                {
+                    // The recipe-book panel gets first refusal on the click
+                    // (issue #163). It overlaps the main panel's left edge at
+                    // narrow canvases by `container.rs`'s documented design, so
+                    // testing it *after* the slot layout would make its own
+                    // widgets unclickable there. Only a press is offered: a
+                    // release landing on the panel must still reach
+                    // `MenuInput::release` so an in-flight drag that started on
+                    // a real slot can terminate.
+                    // Deliberately not an early `return`: the tail of
+                    // `window_event` latches `quit_requested`, and returning
+                    // from here would skip it.
+                    let consumed_by_recipe_panel = matches!(state, ElementState::Pressed)
+                        && menu_button == MenuButton::Left
+                        && self.handle_recipe_panel_click(&menu, w, h);
+                    if !consumed_by_recipe_panel {
+                        let hit = hit_test_with_scale(
+                            &menu,
+                            self.nav.gui_scale(),
+                            w,
+                            h,
+                            self.cursor.0,
+                            self.cursor.1,
+                        );
+                        let ctx = MenuContext {
+                            cursor_loaded: menu.carried().is_some(),
+                            // No game-mode plumbing exists on `Sim` to source this
+                            // from yet — see the report on this change.
+                            creative: false,
+                        };
+                        let clicks = match state {
+                            ElementState::Pressed => {
+                                let now = Instant::now();
+                                let is_repeat = menu_button == MenuButton::Left
+                                    && self.last_menu_click.is_some_and(|t| {
+                                        now.duration_since(t) < DOUBLE_CLICK_WINDOW
+                                    });
+                                self.last_menu_click = Some(now);
+                                self.menu_input
+                                    .press(hit, menu_button, self.shift_held, ctx, is_repeat, &menu)
+                            }
+                            ElementState::Released => {
+                                self.menu_input
+                                    .release(hit, menu_button, self.shift_held, ctx, &menu)
+                            }
+                        };
+                        for click in clicks {
+                            self.send_menu_click(click);
+                        }
+                    }
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                // `Screen::Paused` no longer reaches this catch-all at all — the
+                // `owns_frame(...) || self.ui.is_paused()` arm above now handles
+                // every click while paused (hover + activate the highlighted
+                // pause-menu row, including Back to Game via `MenuKey::Enter`).
+                if self.grabbed {
+                    // `key.attack` mines (hold-to-mine on live; one-shot break on
+                    // demo) and `key.use` uses/places against the targeted face.
+                    // Both default to a mouse button — left and right
+                    // respectively — which is exactly why `Binding` has to be
+                    // able to hold a mouse button and not just a key.
+                    match (mouse_action_for(&self.keybinds, button), state) {
+                        (Some(InputAction::Attack), ElementState::Pressed) => {
+                            self.sim.begin_attack();
+                        }
+                        (Some(InputAction::Attack), ElementState::Released) => {
+                            self.sim.end_attack();
+                        }
+                        (Some(InputAction::Use), ElementState::Pressed) => {
+                            self.sim.use_item();
+                        }
+                        (Some(InputAction::Use), ElementState::Released) => {
+                            self.sim.end_use();
+                        }
+                        // Middle-click by default (`Options.java:669` binds
+                        // `key.pickItem` to `Type.MOUSE, 2`), so unlike
+                        // attack/use this is the *primary* route rather than the
+                        // rebound one. Press-only: `pickBlockOrEntity` is a
+                        // one-shot with no release edge.
+                        (Some(InputAction::PickItem), ElementState::Pressed) => {
+                            self.sim.pick_block_or_entity(self.ctrl_held);
+                        }
+                        // A movement action bound to a mouse button still drives
+                        // the controller, on both edges.
+                        (Some(action), _) => {
+                            if let Some(movement) = action.movement() {
+                                let held = state == ElementState::Pressed;
+                                self.sim.input_mut(|i| i.set(movement, held));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // Scroll cycles the hotbar (down = right, like vanilla) only
+            // during active play; menus and the chat prompt ignore it. The
+            // step is scaled by `mouseWheelSensitivity` (issue #203) through
+            // the same fractional accumulator vanilla's `ScrollWheelHandler`
+            // uses, so sensitivity below 1.0 can take more than one notch to
+            // move a slot and sensitivity above 1.0 can cross several in one
+            // notch — not just a threshold on the existing ±1 step.
+            WindowEvent::MouseWheel { delta, .. } if self.ui.accepts_gameplay_input() => {
+                let dy = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => f64::from(y),
+                    winit::event::MouseScrollDelta::PixelDelta(p) => p.y,
+                };
+                let scaled = dy * f64::from(self.nav.mouse_wheel_sensitivity());
+                let step = accumulate_scroll(&mut self.scroll_accum, scaled);
+                if step != 0 {
+                    self.sim.cycle_slot(-step);
+                }
+            }
+            // The multiplayer server list (issues #402, #445): the notch count
+            // goes through **verbatim**, as vanilla's `scrollY`, and
+            // `MenuNav::scroll_server_list` turns it into
+            // `scrollY * scrollRate()` pixels — 18 px for a 36 px row
+            // (`AbstractScrollArea.java:34`, `AbstractSelectionList.java:44`).
+            //
+            // **This used to collapse `dy` to `-1`/`0`/`+1` rows**, and that was
+            // the owner's bug report: a list that jumps a whole 36 px entry per
+            // notch instead of scrolling. The information was destroyed here, at
+            // the input, not in the geometry — a row index cannot represent the
+            // half-entry position vanilla lands on, so no amount of work
+            // downstream could have recovered it. Passing the real `dy` also
+            // makes a trackpad's fractional `PixelDelta` move proportionally
+            // rather than snapping to a whole row.
+            //
+            // Deliberately not run through `accumulate_scroll`, which exists for
+            // the hotbar's sub-notch *quantization* — the opposite problem:
+            // `cycle_slot` takes a discrete slot step, so it has to accumulate
+            // fractions until one whole step is due. A pixel offset needs no
+            // accumulator, because a fraction of a notch is already a meaningful
+            // number of pixels.
+            //
+            // Needs the *real* canvas height, which this handler has via
+            // `RenderTarget::size` and `gui_scale`, unlike keyboard
+            // scroll-into-view which uses the canvas-independent window estimate
+            // (see `MenuNav::scroll_server_list`'s doc).
+            WindowEvent::MouseWheel { delta, .. }
+                if self.ui.screen() == crate::menu::Screen::ServerList =>
+            {
+                let dy = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => f64::from(y),
+                    winit::event::MouseScrollDelta::PixelDelta(p) => p.y,
+                };
+                if dy != 0.0
+                    && let Some((fb_w, fb_h)) = self.target.as_ref().map(RenderTarget::size)
+                {
+                    let (_, canvas_h) =
+                        crate::menu::render::logical_canvas(self.nav.gui_scale(), fb_w, fb_h);
+                    self.nav.scroll_server_list(dy as f32, canvas_h);
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                let pressed = event.state == ElementState::Pressed;
+
+                // Tracked unconditionally (not gated on `accepts_gameplay_input`
+                // like the movement bindings below): a container shift-click is a
+                // `QuickMove`, not movement, and must still work while gameplay
+                // input is not being accepted.
+                //
+                // **Deliberately still a literal key, and vanilla agrees**: it
+                // checks `Screen.hasShiftDown()` — the raw modifier state — not
+                // `options.keyShift`, so rebinding sneak does *not* move
+                // shift-click. Same boundary as `menu_button_for`: container
+                // gestures are UI chrome, not gameplay bindings. Both shifts
+                // count, because this is asking "is a shift modifier down".
+                if let PhysicalKey::Code(code) = event.physical_key
+                    && matches!(code, KeyCode::ShiftLeft | KeyCode::ShiftRight)
+                {
+                    self.shift_held = pressed;
+                }
+                // Same tracking, for Control — `resolve_key`'s `ctrl` parameter.
+                // Deliberately a running flag rather than read off this event:
+                // `key.drop` is a different physical key from Control, so the
+                // modifier's state has to outlive the keypress that changed it.
+                if let PhysicalKey::Code(code) = event.physical_key
+                    && matches!(code, KeyCode::ControlLeft | KeyCode::ControlRight)
+                {
+                    self.ctrl_held = pressed;
+                }
+
+                // Resolve *what this key means* before touching any state, then
+                // perform the one side effect it names. The precedence lives in
+                // [`resolve_key`] — a pure function, so the swallowing order can
+                // be unit-tested without a window (see its docs and the tests at
+                // the bottom of this file). This match is only the effects half.
+                let gate = KeyGate {
+                    menu: crate::menu::render::owns_frame(self.ui.screen())
+                        || self.ui.is_paused()
+                        || self.ui.is_death(),
+                    chat_open: self.ui.is_chat_open(),
+                    // `active_container_menu`, **not** `ui.is_container_open()`.
+                    // That flag only tracks the *locally* opened player inventory;
+                    // a server-opened menu (crafting table, chest, furnace) lives
+                    // in `sim.open_menu()` and leaves it `false`. Reading the flag
+                    // meant the swallow arm never fired for a server menu, so the
+                    // inventory binding could not close a crafting table and every
+                    // gameplay key stayed live behind it. This is the same
+                    // predicate `redraw` draws from, so hit-testing, drawing and
+                    // key dispatch cannot disagree about what is on screen.
+                    container_open: self.active_container_menu().is_some(),
+                    gameplay: self.ui.accepts_gameplay_input(),
+                };
+                let code = match event.physical_key {
+                    PhysicalKey::Code(code) => Some(code),
+                    _ => None,
+                };
+                // Resolved into a local first so the immutable borrow of
+                // `self.keybinds` ends before the `&mut self` calls below.
+                let outcome = resolve_key(&self.keybinds, gate, code, pressed, self.ctrl_held);
+                match outcome {
+                    Some(KeyOutcome::Menu) => {
+                        // Issue #15's last hop: a bind button mid-capture needs the
+                        // *next raw key*, not `menu_key_for`'s translation —
+                        // `menu_key_for` silently drops any physical key with no
+                        // printable `text` (F-keys, modifiers, arrows other than
+                        // Up/Down), which is exactly the common rebind case
+                        // (`docs/keybindings.md`'s "Wiring the Controls menu").
+                        // Checked *before* calling `menu_key_for` at all, not only
+                        // when it returns `None`: a capture target can be a
+                        // printable key too, and `menu_key_for` would otherwise
+                        // consume it as `MenuKey::Char` first.
+                        if pressed && self.nav.awaiting_key_capture() {
+                            match capture_key_for(event.physical_key) {
+                                Some(CaptureKey::Cancel) => {
+                                    self.handle_menu_key(MenuKey::Escape);
+                                }
+                                Some(CaptureKey::Bind(code)) => {
+                                    self.nav.capture_binding(Binding::Key(code));
+                                }
+                                None => {}
+                            }
+                        } else if pressed
+                            && let Some(key) = Self::menu_key_for(&event)
+                        {
+                            self.handle_menu_key(key);
+                            // Entering the world grabs; leaving it releases.
+                            let want = self.ui.wants_cursor_grab();
+                            if want != self.grabbed {
+                                self.set_grab(want);
+                            }
+                        }
+                    }
+                    Some(KeyOutcome::Chat) => {
+                        if pressed {
+                            self.handle_chat_key(&event);
+                        }
+                    }
+                    Some(KeyOutcome::Pause) => {
+                        // Escape on a container screen **closes the container and
+                        // returns to gameplay** — it does not open the pause menu.
+                        // That is `Screen.onClose()` in vanilla, and it is why this
+                        // is an `else` rather than a close followed by `on_escape`:
+                        // the old form paused *as well*, leaving the pause menu
+                        // drawn over a menu that was still open server-side.
+                        //
+                        // Also note it must clear both halves. `close_open_menu`
+                        // only releases the *server* menu; `close_container` clears
+                        // the local inventory flag. Whichever one was showing, the
+                        // other is already false and clearing it is a no-op.
+                        if self.active_container_menu().is_some() {
+                            self.sim.close_open_menu();
+                            self.ui.close_container();
+                        } else {
+                            // Context-sensitive: Playing↔Paused, Error→menu, etc.
+                            self.ui.on_escape();
+                        }
+                        self.set_grab(self.ui.wants_cursor_grab());
+                    }
+                    Some(KeyOutcome::CloseContainer) => {
+                        self.sim.close_open_menu();
+                        self.ui.close_container();
+                        self.set_grab(self.ui.wants_cursor_grab());
+                    }
+                    Some(KeyOutcome::ToggleDebugOverlay) => {
+                        // Toggle the debug instrument (§S4). Unlike older
+                        // vanilla, 26.2 makes this a real `KeyMapping`, so it
+                        // belongs in the table — see `keybinds`' module docs.
+                        self.show_debug = !self.show_debug;
+                    }
+                    Some(KeyOutcome::PlayerList(held)) => self.tab_held = held,
+                    Some(KeyOutcome::OpenChat { command }) => {
+                        // Release held movement so we don't walk while typing.
+                        self.sim.input_mut(InputState::release_all);
+                        let _ = self.chat_input.take();
+                        if command {
+                            self.chat_input.push_char('/');
+                        }
+                        self.ui.open_chat();
+                        self.tab_held = false;
+                        self.set_grab(false);
+                    }
+                    Some(KeyOutcome::OpenContainer) => {
+                        self.sim.input_mut(InputState::release_all);
+                        self.ui.open_container();
+                        self.tab_held = false;
+                        self.set_grab(false);
+                    }
+                    // Vanilla's own third-/first-person toggle.
+                    Some(KeyOutcome::TogglePerspective) => self.sim.toggle_third_person(),
+                    Some(KeyOutcome::SelectSlot(slot)) => self.sim.select_slot(slot),
+                    Some(KeyOutcome::ContainerSwap { button }) => {
+                        self.send_container_swap(button);
+                    }
+                    Some(KeyOutcome::ContainerDrop { ctrl }) => {
+                        self.send_container_drop(ctrl);
+                    }
+                    Some(KeyOutcome::ContainerPickItem) => self.send_container_pick_item(),
+                    Some(KeyOutcome::Drop { ctrl }) => self.send_drop_selected(ctrl),
+                    Some(KeyOutcome::PickItem { ctrl }) => self.sim.pick_block_or_entity(ctrl),
+                    // The *other* off-hand route (#385): no screen, no slot, a
+                    // bare `ServerboundPlayerAction`. Sent straight through
+                    // `NetClient` rather than queued into `ActionQueue`, which is
+                    // the sanctioned shape for a per-frame input-driven action —
+                    // see `interact.rs`' module doc on why `end_attack`,
+                    // `use_item_live` and `send_chat` do the same.
+                    Some(KeyOutcome::SwapOffhand) => self.send_offhand_swap(),
+                    Some(KeyOutcome::Attack(true)) => self.sim.begin_attack(),
+                    Some(KeyOutcome::Attack(false)) => self.sim.end_attack(),
+                    Some(KeyOutcome::Use(true)) => self.sim.use_item(),
+                    Some(KeyOutcome::Use(false)) => self.sim.end_use(),
+                    Some(KeyOutcome::Movement(action, held)) => {
+                        self.sim.input_mut(|i| i.set(action, held));
+                    }
+                    // Either nothing is bound to this key, or a screen above
+                    // swallowed it. Both are "do nothing", deliberately.
+                    None => {}
+                }
+            }
+            WindowEvent::RedrawRequested => self.redraw(),
+            _ => {}
+        }
+
+        // Clean shutdown path: any handler may latch a quit request.
+        if self.ui.quit_requested() {
+            event_loop.exit();
+        }
+    }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: DeviceId,
+        event: DeviceEvent,
+    ) {
+        if let DeviceEvent::MouseMotion { delta } = event
+            && self.ui.is_playing()
+            && self.grabbed
+        {
+            self.sim
+                .input_mut(|i| i.add_mouse(delta.0 as f32, delta.1 as f32));
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+        // Spin while focused (vsync paces the loop); otherwise sleep in short
+        // `BACKGROUND_POLL` slices so a backgrounded window stops burning a core
+        // yet still wakes far more often than the 20 Hz tick needs.
+        event_loop.set_control_flow(self.pacer.control_flow(Instant::now()));
+    }
+}

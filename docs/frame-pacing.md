@@ -148,7 +148,11 @@ rather than better.
 ## How to change it
 
 - The constants (`MAX_TICKS_PER_UPDATE`, `TICK_SECS`, `UNFOCUSED_FPS`,
-  `BACKGROUND_POLL`) are all in the "Frame pacing" section of `app.rs`.
+  `BACKGROUND_POLL`) and `FramePacer` itself are all in
+  `crates/lodestone-shell/src/app/pacing.rs` — the "Frame pacing" section of the
+  old monolithic `app.rs`, moved verbatim when that file became a directory.
+  They are still re-exported as `app::MAX_TICKS_PER_UPDATE` and friends, so no
+  caller's path changed.
 - `FramePacer` is pure and takes an injected `Instant`, so every behaviour above
   is testable with a synthetic clock and a real `Sim`, with no window and no GPU.
   Add tests there, not to an integration gate.

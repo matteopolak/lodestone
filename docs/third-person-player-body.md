@@ -227,7 +227,7 @@ reachable in principle, but on the one path a shipped binary actually runs.
   vice versa.** See "The deliberate split" above — this is the one invariant
   most likely to get "simplified" away by someone who does not know why the
   split exists.
-- **The camera mode is wired**: `app.rs`'s `redraw()` calls
+- **The camera mode is wired**: `app/redraw.rs`'s `redraw()` calls
   `render.set_third_person_body_source(move || body_state.clone())` fresh
   every frame, where `body_state = self.sim.third_person_body_state()`. If you
   need a *different* camera-mode source (a settings toggle instead of `F5`,

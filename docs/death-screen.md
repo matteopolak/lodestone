@@ -153,7 +153,7 @@ Respawn returns the new `MenuAction::Respawn`; `Enter` on Title Screen calls
 
 - **Layout** — `crates/lodestone-shell/src/menu/render.rs` (`death_slot`,
   `Origin::DeathTitle`, `death_frame`). Change a rect here and nowhere else:
-  `row_rect` resolves the slot and `app.rs`'s `menu_row_at` calls `row_rect`,
+  `row_rect` resolves the slot and `app/menus.rs`'s `menu_row_at` calls `row_rect`,
   so the draw and the hit-test cannot disagree — same rule as every other
   vanilla-laid-out screen (see `docs/pause-menu.md`).
 - **Navigation/actions** — `crates/lodestone-shell/src/menu/nav.rs`
@@ -165,8 +165,9 @@ Respawn returns the new `MenuAction::Respawn`; `Enter` on Title Screen calls
   `crates/lodestone-shell/src/{net.rs,sim.rs}`: `net::run`'s
   `RespawnPolicy::Manual`, `NetUpdate::Death { message }`, `Sim::death_message`,
   `Sim::respawn`.
-- **Wiring** — `WindowApp::apply_menu_action`'s `MenuAction::Respawn` arm and
-  `drive_ui_from_session`'s reconciliation block, both in `app.rs`.
+- **Wiring** — `WindowApp::apply_menu_action`'s `MenuAction::Respawn` arm (in
+  `app/menus.rs`) and `drive_ui_from_session`'s reconciliation block (in
+  `app/session.rs`).
 
 ### What was deliberately left out, named rather than half-done
 

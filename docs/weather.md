@@ -220,10 +220,12 @@ consults it. **Not** a new packet and **not** a proxy.
 * **The pass**: `crates/lodestone-render/src/weather_pipeline.rs` and
   `src/shaders/weather.wgsl`.
 * **Wire → state**: `net.rs`'s `forward`, and `WeatherCell` above it.
-* **Per-frame composition**: `app.rs`'s `WeatherTracker`, `ShellWeatherProbe` and
-  `weather_columns_for_frame`, plus the `desired_fog` block in `redraw`.
+* **Per-frame composition**: `app/weather.rs`'s `WeatherTracker`,
+  `ShellWeatherProbe` and `weather_columns_for_frame`, plus the `desired_fog`
+  block in `app/redraw.rs`.
 * **Install**: `resources::load_weather_textures` →
-  `RenderState::install_weather`, at both connect paths in `app.rs`.
+  `RenderState::install_weather`, at both connect paths — `app/session.rs`'s
+  `install_session_render_sources` and `app/lifecycle.rs`'s `resumed`.
 
 Gotchas beyond the three above:
 
