@@ -111,6 +111,7 @@ impl WindowApp {
         } else if self.ui.is_death() {
             self.ui.respawn_confirmed();
         }
+        self.restore_recipe_book_settings();
         // The credits screen (issue #192): `Sim::has_won()` is the ground
         // truth `NetUpdate::WinGame` sets in `poll_net`, reconciled here the
         // same way `is_dead()` is reconciled above. The `!= Screen::Credits`
@@ -148,6 +149,52 @@ impl WindowApp {
                 crate::menu::social::entries_from_tablist(&tab_list, self.sim.local_uuid());
             self.nav.refresh_social(entries);
         }
+    }
+
+    /// Apply the server's `RECIPE_BOOK_SETTINGS` (76) to the recipe-book panel,
+    /// once per book type per session — issue #436's `SessionRecipeBookSettings`
+    /// island.
+    ///
+    /// Before this, the panel always started closed and unfiltered no matter
+    /// what the server said, so a player who had left their book open came back
+    /// to it shut. The fold landed in `fd53995` and had **no reader**; this is
+    /// it.
+    ///
+    /// Three guards, each load-bearing:
+    ///
+    /// * `settings.reported` — an unreported record is all-`false`, which is
+    ///   indistinguishable from "the server wants it closed". Restoring on an
+    ///   unreported record would be restoring *our own default*, a wire that
+    ///   looks connected and carries nothing.
+    /// * `restored_type != Some(book_type)` — the settings are per book type
+    ///   while the panel state is one shared instance, so this re-restores when
+    ///   the player opens a furnace after a crafting table, and does **not**
+    ///   re-restore every frame (which would fight the user's own clicks).
+    /// * an open menu with a recipe book at all — `recipe_book_type_for`
+    ///   returns `None` for a chest, and there is nothing to restore into.
+    ///
+    /// Deliberately does **not** call `send_recipe_book_settings`: this is the
+    /// server's own value coming back, and echoing it would be a write loop.
+    /// That asymmetry is why the two click arms report and this does not.
+    pub(super) fn restore_recipe_book_settings(&mut self) {
+        let Some(menu) = self.active_container_menu() else {
+            return;
+        };
+        let Some(book_type) = super::recipe_panel::recipe_book_type_for(&menu) else {
+            return;
+        };
+        if self.recipe_panel.restored_type == Some(book_type) {
+            return;
+        }
+        let settings = self.sim.recipe_book_settings();
+        if !settings.reported {
+            return;
+        }
+        let per_type = settings.for_type(book_type);
+        self.recipe_panel.open = per_type.open;
+        self.recipe_panel.filtering = per_type.filtering;
+        self.recipe_panel.page = 0;
+        self.recipe_panel.restored_type = Some(book_type);
     }
 
     /// Staged Singleplayer entry point. Vanilla's singleplayer starts an

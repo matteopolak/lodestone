@@ -31,6 +31,20 @@ pub(super) struct RecipePanelState {
     /// flag is what stops `search` being a field nothing ever writes — an
     /// island one layer down.
     pub(super) search_focused: bool,
+    /// Vanilla's All/Craftable cycle-button state (`RecipeBookComponent`'s
+    /// `filtering`): `true` hides every recipe the player cannot currently
+    /// make. Drives both the button art
+    /// ([`crate::container::RECIPE_SPRITE_FILTER_ENABLED`]) and the browsed set
+    /// ([`crate::container::recipe_book_panel_contents_filtered`]).
+    pub(super) filtering: bool,
+    /// Whether [`WindowApp::restore_recipe_book_settings`] has already applied
+    /// the server's `RECIPE_BOOK_SETTINGS` to this panel for `restored_type`.
+    ///
+    /// A latch, not a one-shot: the settings are **per book type** while this
+    /// panel state is one shared instance (see the type doc), so opening a
+    /// furnace after a crafting table must restore again with the furnace's
+    /// own values. `None` means nothing has been restored yet this session.
+    pub(super) restored_type: Option<lodestone_model::RecipeBookType>,
 }
 
 /// Wall-clock milliseconds for the recipe-toast window.
@@ -98,7 +112,7 @@ pub(super) fn recipe_panel_layout(
     tab_count: usize,
     total_pages: usize,
 ) -> crate::container::RecipeBookPanelLayout {
-    crate::container::recipe_book_panel_layout_with_scale(
+    let mut layout = crate::container::recipe_book_panel_layout_with_scale(
         menu,
         gui_scale,
         w,
@@ -106,7 +120,30 @@ pub(super) fn recipe_panel_layout(
         tab_count,
         panel.page > 0,
         panel.page + 1 < total_pages,
-    )
+    );
+    // The geometry layer has no panel state, so the filter art is selected
+    // here — see `RecipeBookPanelLayout::filtering`'s own doc. Set in the
+    // shared layout builder rather than at the draw site so the hit-test and
+    // the draw cannot disagree about which button is on screen.
+    layout.filtering = panel.filtering;
+    layout
+}
+
+/// The Craftable-filter predicate for `menu`: can the player make `id` right
+/// now, out of the inventory this menu owns?
+///
+/// Built from [`lodestone_game::menu::Menu::plan_recipe_auto_fill`] — the same
+/// call `auto_fill_recipe` makes when the cell is *clicked*. Sharing the
+/// primitive is the point: a Craftable-filtered panel that offered a recipe
+/// whose click then did nothing would be worse than no filter at all.
+fn craftable_in(
+    book: &RecipeBook,
+    menu: &Menu,
+    id: &lodestone_model::Identifier,
+) -> bool {
+    book.get(id)
+        .and_then(|recipe| menu.plan_recipe_auto_fill(recipe, book.tags()))
+        .is_some()
 }
 
 /// The panel's contents for one frame as `(tab_count, total_pages, page_ids)`,
@@ -118,17 +155,22 @@ pub(super) fn recipe_panel_layout(
 pub(super) fn recipe_panel_contents(
     book: Option<&RecipeBook>,
     panel: &RecipePanelState,
+    menu: &Menu,
     book_type: lodestone_model::RecipeBookType,
 ) -> (usize, usize, Vec<lodestone_model::Identifier>) {
     let Some(book) = book else {
         return (0, 1, Vec::new());
     };
-    let contents = crate::container::recipe_book_panel_contents(
+    // `&|_| true` when not filtering, so the per-recipe auto-fill plan — which
+    // walks the inventory for every browsed id — is only computed in the state
+    // that asked for it.
+    let contents = crate::container::recipe_book_panel_contents_filtered(
         book,
         book_type,
         panel.tab,
         &panel.search,
         panel.page,
+        &|id| !panel.filtering || craftable_in(book, menu, id),
     );
     (
         contents.tabs.len(),
@@ -162,12 +204,16 @@ pub(super) fn recipe_panel_geometry(
     let book_type = recipe_book_type_for(menu)?;
     let (tab_count, total_pages, results) = match book {
         Some(book) => {
-            let contents = crate::container::recipe_book_panel_contents(
+            let contents = crate::container::recipe_book_panel_contents_filtered(
                 book,
                 book_type,
                 panel.tab,
                 &panel.search,
                 panel.page,
+                // Same predicate the hit-test path uses (`recipe_panel_contents`
+                // above): if these two disagreed, a click would resolve against
+                // a different page than the one on screen.
+                &|id| !panel.filtering || craftable_in(book, menu, id),
             );
             // `map_while`, not `filter_map`: `page_results[i]` must line up with
             // `layout.recipes[i]`, so a recipe with no result stack has to *end*

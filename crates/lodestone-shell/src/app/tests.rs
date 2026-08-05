@@ -2067,3 +2067,150 @@ async fn live_precipitation_matches_vanillas_own_threshold_for_real_biomes() {
 
     drain.abort();
 }
+
+/// **Issue #436's `SessionRecipeBookSettings` island, closed through
+/// production code.**
+///
+/// `RECIPE_BOOK_SETTINGS` (76) decoded and folded as of `fd53995` and
+/// **nothing read it**: the recipe-book panel started closed and unfiltered
+/// on every join no matter what the server said. This does not call
+/// `RecipeBookSettings::for_type` a second time by hand — that would be the
+/// existing unit test again, which proves nothing about production. It drives
+/// the real chain: a real `WindowApp`, a real `ClientEvent` folded through the
+/// same `NetIngest` schedule the net thread runs, and
+/// `drive_ui_from_session` itself — the method `redraw()` calls every frame.
+///
+/// The `open` bit is the pixel-visible one: `RecipePanelState::open` is what
+/// `recipe_panel_geometry` turns into the panel body's vertices, gated by
+/// `an_open_panel_covers_its_own_screen_rect` / the closed-panel control in
+/// `recipe_book_wiring.rs`.
+#[test]
+fn drive_ui_from_session_restores_the_recipe_book_panel_the_server_reported() {
+    use crate::net::NetUpdate;
+    use lodestone_client::ClientEvent;
+    use lodestone_model::event::RecipeBookTypeSettings;
+
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    app.sim.attach_net(net);
+    feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
+    app.sim.step(1.0 / 20.0);
+
+    // The restore only runs with a recipe-book-bearing menu on screen: the
+    // player inventory's own 2x2 grid makes `recipe_book_type_for` answer
+    // `Crafting`. Reach it the way a player does.
+    app.ui.enter_dev_world();
+    app.ui.open_container();
+
+    // Precondition, and it is load-bearing: an unreported record is all-false,
+    // which is indistinguishable from "the server wants it closed". If the
+    // panel were somehow already open, the assertion below would pass without
+    // the restore ever running.
+    assert!(
+        !app.recipe_panel.open,
+        "precondition: the panel must start closed — that is the defect being fixed"
+    );
+    app.drive_ui_from_session();
+    assert!(
+        !app.recipe_panel.open,
+        "control: with nothing reported, the restore must NOT fire — otherwise \
+         this gate cannot tell a real restore from the default it replaces"
+    );
+
+    app.sim
+        .net()
+        .expect("net attached above")
+        .ingest_session_event(ClientEvent::RecipeBookSettingsChanged {
+            crafting: RecipeBookTypeSettings { open: true, filtering: true },
+            furnace: RecipeBookTypeSettings::default(),
+            blast_furnace: RecipeBookTypeSettings::default(),
+            smoker: RecipeBookTypeSettings::default(),
+        });
+
+    app.drive_ui_from_session();
+
+    assert!(
+        app.recipe_panel.open,
+        "the crafting book's reported `open` must reach the panel the draw reads"
+    );
+    assert!(
+        app.recipe_panel.filtering,
+        "and so must `filtering` — the All/Craftable state"
+    );
+
+    // The latch: a user who closes the panel must not have it reopened on the
+    // very next frame by the same reported settings.
+    app.recipe_panel.open = false;
+    app.drive_ui_from_session();
+    assert!(
+        !app.recipe_panel.open,
+        "the restore is once per book type, not every frame — otherwise it \
+         would fight the user's own clicks"
+    );
+}
+
+/// The **negative control** for the gate above, run and observed: the furnace
+/// book's settings must not restore into a crafting panel.
+///
+/// # What this control can and cannot see — measured, not assumed
+///
+/// Neutering `for_type(book_type)` to `settings.furnace` fails **both** this
+/// test and the positive one above (observed). So the pair really does pin the
+/// per-type read in that direction.
+///
+/// It does **not** catch a restore hardcoded to `settings.crafting`: that was
+/// tried, and both tests stayed green. The reason is a property of the
+/// harness, not of the assertions — `active_container_menu` here resolves to
+/// the *player inventory*, whose 2×2 grid makes `recipe_book_type_for` answer
+/// `Crafting`, so `crafting` **is** the correct field for every scenario this
+/// harness can construct. Putting a furnace on screen needs a server-opened
+/// menu (`Sim::open_menu`), which this loopback feed has no route to.
+///
+/// Recorded rather than quietly left as a gap: a control whose premise is
+/// false fails in the safe-looking direction, and the way to find that out is
+/// to run the neuter and watch it *not* fire. Whoever gains a furnace-menu
+/// harness should extend this test rather than write a third one.
+#[test]
+fn a_crafting_panel_does_not_restore_the_furnace_books_settings() {
+    use crate::net::NetUpdate;
+    use lodestone_client::ClientEvent;
+    use lodestone_model::event::RecipeBookTypeSettings;
+
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    let (net, _actions, feed) = NetClient::loopback_with_feed();
+    app.sim.attach_net(net);
+    feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
+    app.sim.step(1.0 / 20.0);
+    app.ui.enter_dev_world();
+    app.ui.open_container();
+
+    // Only the *furnace* book is open, and it is a different book than the
+    // player-inventory crafting grid on screen.
+    app.sim
+        .net()
+        .expect("net attached above")
+        .ingest_session_event(ClientEvent::RecipeBookSettingsChanged {
+            crafting: RecipeBookTypeSettings::default(),
+            furnace: RecipeBookTypeSettings { open: true, filtering: true },
+            blast_furnace: RecipeBookTypeSettings::default(),
+            smoker: RecipeBookTypeSettings::default(),
+        });
+
+    app.drive_ui_from_session();
+
+    assert!(
+        !app.recipe_panel.open,
+        "the furnace book's `open` must NOT open the crafting panel — the \
+         restore has to read `for_type(book_type)`, not the first field"
+    );
+    assert!(
+        !app.recipe_panel.filtering,
+        "same for `filtering`"
+    );
+}

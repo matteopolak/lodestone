@@ -1001,4 +1001,46 @@ impl Sim {
                 .0
         })
     }
+
+    /// The server's own recipe-book panel state, as `RECIPE_BOOK_SETTINGS` (76)
+    /// last reported it (issue #436's `SessionRecipeBookSettings` island).
+    ///
+    /// Same shape as [`Self::difficulty`], and the same story: the fold landed
+    /// in `fd53995`, was gated through the real `SharedState::apply` path, and
+    /// nothing in the shell read it. `RecipeBookSettings::reported` is what
+    /// separates "the server never sent it" from "the server sent all-false" —
+    /// the caller must check it, because the all-false record is
+    /// indistinguishable from the default otherwise.
+    #[must_use]
+    pub fn recipe_book_settings(&self) -> lodestone_game::recipe::RecipeBookSettings {
+        self.read(|w| {
+            // Full module path: unlike `SessionTabList`, this one is not
+            // re-exported at `lodestone_ecs`'s crate root.
+            w.get::<lodestone_ecs::session::SessionRecipeBookSettings>(self.local)
+                .expect("the local player always carries SessionRecipeBookSettings")
+                .0
+        })
+    }
+
+    /// Report the recipe-book panel's open/filter state for one book type —
+    /// vanilla's `ServerboundRecipeBookChangeSettingsPacket`.
+    ///
+    /// The first producer of [`ClientAction::SetRecipeBookSettings`] anywhere
+    /// outside `crates/protocol/`: all four families encoded it and nothing
+    /// ever constructed one. Best-effort like [`Self::send_selected_slot`] — a
+    /// closed session drops it.
+    pub fn send_recipe_book_settings(
+        &self,
+        book_type: lodestone_model::RecipeBookType,
+        open: bool,
+        filtering: bool,
+    ) {
+        if let Some(net) = &self.net {
+            net.send_action(ClientAction::SetRecipeBookSettings {
+                book_type,
+                open,
+                filtering,
+            });
+        }
+    }
 }

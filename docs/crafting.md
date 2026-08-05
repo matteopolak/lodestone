@@ -169,16 +169,88 @@ result slot's server authority:
 Remaining gaps:
 
 - The v770 adapter encodes the serverbound `place_recipe`,
-  `recipe_book_change_settings` and `recipe_book_seen_recipe` packets, but
-  decodes **none** of the clientbound recipe packets (`update_recipes`,
-  `recipe_book_add`/`remove`/`settings`, `place_ghost_recipe`). There is no
-  `ClientEvent` for them yet. **Confirmed again for issue #163**: `grep -n
-  "PLACE_GHOST_RECIPE\|RECIPE_BOOK_ADD\|RECIPE_BOOK_REMOVE\|RECIPE_BOOK_SETTINGS\|UPDATE_RECIPES"
-  crates/protocol/v770/src/adapter.rs` returns zero hits, even though the
-  packet-id constants themselves exist in `generated/packet_ids.rs` (that
-  file only proves the *id* is known, not that anything decodes it — see
-  `docs/README.md`'s own connectedness caveats). This is why "recipe-unlock
-  tracking" below is real scaffolding with no live producer yet.
+  `recipe_book_change_settings` and `recipe_book_seen_recipe` packets. It
+  decodes **one** of the five clientbound recipe packets: `recipe_book_settings`
+  (76), which landed in `fd53995` as `ClientEvent::RecipeBookSettingsChanged`.
+  The other four — `update_recipes`, `recipe_book_add`, `recipe_book_remove`,
+  `place_ghost_recipe` — still have no decode and no `ClientEvent`.
+
+  **The blanket "zero hits" claim that stood here was true when written for
+  issue #163 and went stale the moment `fd53995` landed.** Re-run the grep
+  rather than trusting this paragraph:
+
+  ```
+  grep -n "PLACE_GHOST_RECIPE\|RECIPE_BOOK_ADD\|RECIPE_BOOK_REMOVE\|RECIPE_BOOK_SETTINGS\|UPDATE_RECIPES" \
+      crates/protocol/v770/src/adapter.rs
+  ```
+
+  The packet-id constants in `generated/packet_ids.rs` prove only that the *id*
+  is known, never that anything decodes it — see `docs/README.md`'s own
+  connectedness caveats.
+
+- **The four undecoded packets are not blocked on the packets.** Their shared
+  prerequisite is a recursive `SlotDisplay` decoder (11 registry-dispatched
+  variants, one carrying a `DataComponentPatch` whose field order differs from
+  `ItemStack.OPTIONAL_STREAM_CODEC`, one carrying a `Holder<TrimPattern>` whose
+  `0` discriminator is an inline definition containing a full chat `Component`)
+  plus a `RecipeDisplay` dispatcher (5 variants). Recursion is unbounded on the
+  wire and vanilla does not bound it, so a depth cap is required. Measured for
+  issue #436: `grep -rn "SlotDisplay\|RecipeDisplay" --include="*.rs" crates/`
+  returns **5 hits, every one of them prose in a doc comment** — not a line of
+  the codec exists. Estimate 400–600 lines.
+
+  Ahead of the codec there is a **design blocker**, and it is the reason
+  "the consumer is already built" is only half true: `RecipeUnlockState::unlock`
+  and `remove` key on `Identifier` (`recipe.rs:1304`/`:1312`), the wire carries
+  a `RecipeDisplayId` — a session-assigned integer (`v770/src/packets/game.rs:454`,
+  `:467`) — and a `RecipeDisplay` contains no recipe id at all. So decoding
+  `recipe_book_add` does not by itself let anything call `unlock`. Either the
+  event carries the index plus a resolved result and something owns the
+  index→`Identifier` map, or `RecipeUnlockState` gains an index-keyed path.
+  `recipe_book_remove` is trivial to decode and **useless alone**, because that
+  mapping arrives only in `recipe_book_add`. The toast renderer and its
+  `app.rs`/`hud.rs` wiring *are* done; it is the key type that does not match.
+
+### Recipe-book settings round trip (issue #436)
+
+`recipe_book_settings` (76) folds into
+`lodestone_ecs::session::SessionRecipeBookSettings`, and as of this section the
+shell **reads** it: `WindowApp::restore_recipe_book_settings`
+(`app/session.rs`, called every frame from `drive_ui_from_session`) applies
+`RecipeBookSettings::for_type(book_type)` to `RecipePanelState`, so a player who
+left the book open comes back to it open instead of always starting closed and
+unfiltered.
+
+Three things are easy to get wrong here:
+
+- **`reported` is not decoration.** An unreported record is all-`false`, which
+  is byte-identical to "the server wants it closed". Restoring without checking
+  `reported` restores *our own default* — a wire that looks connected and
+  carries nothing.
+- **The restore must not report back.** The two click arms
+  (`handle_recipe_panel_click`'s `Toggle` and `FilterButton`) call
+  `Sim::send_recipe_book_settings`; the restore deliberately does not, or the
+  server's own value would echo straight back at it.
+- **Settings are per book type, `RecipePanelState` is one shared instance.** The
+  latch is `restored_type: Option<RecipeBookType>`, not a `bool`, so opening a
+  furnace after a crafting table restores again with the furnace's values —
+  while still not re-restoring every frame and fighting the user's clicks.
+
+`Sim::send_recipe_book_settings` is also the **first producer anywhere outside
+`crates/protocol/`** of `ClientAction::SetRecipeBookSettings`: all four families
+encoded it and nothing ever constructed one, the same outbound-island shape
+`ClientAction::SetFlying` was caught in.
+
+The All/Craftable filter is now modelled too (it previously was not, and
+`RECIPE_SPRITE_FILTER` carried a doc comment saying the disabled art was the
+only reachable state). `RecipePanelState::filtering` drives both the button art
+and `recipe_book_panel_contents_filtered`, whose predicate is built from
+`Menu::plan_recipe_auto_fill` — **the same primitive the click path uses**, so a
+Craftable-filtered panel can never offer a recipe whose click would then refuse
+to place it. The predicate runs over the whole browsed corpus rather than the
+visible page, because pagination has to be computed from the filtered set; it is
+only evaluated when `filtering` is set, so the cost is paid only in the state
+that asks for it.
 
 ## Recipe-book UI (issue #163)
 
