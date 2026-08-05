@@ -3151,7 +3151,7 @@ impl V770Adapter {
         if packet_id == play::clientbound::PLAYER_CHAT {
             let mut reader = Reader::new(payload);
             let global_index = reader.var_i32().map_err(dec_err)?;
-            let _sender = reader.uuid().map_err(dec_err)?;
+            let sender = reader.uuid().map_err(dec_err)?;
             let _index = reader.var_i32().map_err(dec_err)?;
             let signature = if reader.bool().map_err(dec_err)? {
                 reader.bytes(256).map_err(dec_err)?.to_vec()
@@ -3196,6 +3196,10 @@ impl V770Adapter {
             return Ok(vec![Directive::Emit(ClientEvent::Chat {
                 text,
                 kind: ChatKind::Chat,
+                // Issue #419: `PLAYER_CHAT` is the one chat format whose wire
+                // carries the sender's profile UUID — this is what the Social
+                // Interactions Hide-in-Chat filter keys on.
+                sender: Some(sender),
                 ack: Some(ChatAckInfo {
                     signature,
                     global_index,
@@ -3211,6 +3215,9 @@ impl V770Adapter {
             return Ok(vec![Directive::Emit(ClientEvent::Chat {
                 text: Text::from_nbt(&component),
                 kind: ChatKind::Chat,
+                // Disguised chat is server-decorated and unsigned; it carries
+                // no profile UUID on the wire, so nothing to filter on.
+                sender: None,
                 ack: None,
             })]);
         }
@@ -3229,6 +3236,7 @@ impl V770Adapter {
             return Ok(vec![Directive::Emit(ClientEvent::Chat {
                 text: Text::from_nbt(&component),
                 kind,
+                sender: None,
                 ack: None,
             })]);
         }
@@ -3261,6 +3269,7 @@ impl V770Adapter {
             return Ok(vec![Directive::Emit(ClientEvent::Chat {
                 text: Text::from_nbt(&component),
                 kind: ChatKind::GameInfo,
+                sender: None,
                 ack: None,
             })]);
         }

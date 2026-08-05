@@ -429,6 +429,8 @@ impl V47Adapter {
             return Ok(vec![Directive::Emit(ClientEvent::Chat {
                 text: Text::from_json(&body.message),
                 kind: chat_kind(body.position),
+                // 1.8's chat packet carries no sender field — nothing to filter on.
+                sender: None,
                 ack: None,
             })]);
         }

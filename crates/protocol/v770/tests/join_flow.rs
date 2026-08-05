@@ -521,6 +521,7 @@ fn system_chat_emits_chat_event() {
         &[ClientEvent::Chat {
             text: Text::literal("hello"),
             kind: ChatKind::System,
+            sender: None,
             ack: None,
         }],
     );
@@ -543,6 +544,7 @@ fn system_chat_overlay_is_game_info() {
         &[ClientEvent::Chat {
             text: Text::literal("hi"),
             kind: ChatKind::GameInfo,
+            sender: None,
             ack: None,
         }],
     );

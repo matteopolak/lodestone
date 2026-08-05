@@ -62,36 +62,23 @@ placeholder.
   self.sim.local_uuid())` and feeds the result to `MenuNav::refresh_social`
   (`menu/nav.rs::MenuNav::refresh_social`), so the roster shown is the real, live tab list, local
   player excluded, every frame.
-- **Decorative — hiding a player has no consumer yet, and it is a larger gap
-  than it looks.** This module only *records* the choice (`HiddenPlayers`);
-  nothing reads it back to suppress a hidden player's chat. The obvious next
-  step — a `chat.rs` change consulting `HiddenPlayers::load()` — turns out not
-  to be enough on its own: **the received chat pipeline carries no sender
-  identity to filter on.** `crate::chat`'s own module doc says the received
-  log is not even here (it moved to `lodestone_game::chat::ChatLog`), and that
-  log's `push_player`/`ChatLog::push_player` take only a pre-decorated `Text`
-  and a `MessageTrust` — no UUID, no name field to match against
-  `HiddenPlayers::contains(id: Uuid)`. Traced to the wire: `lodestone_model`'s
-  `ClientEvent::Chat { text, kind, ack }` has never carried a sender either.
-  For the one clientbound chat format that actually has one on the wire —
-  26.2's real signed `ClientboundPlayerChatPacket` — the sender UUID **is**
-  decoded and then thrown away: `crates/protocol/v770/src/adapter.rs`'s
-  `PLAYER_CHAT` branch reads it into a binding named `_sender` and never uses
-  it. `DISGUISED_CHAT`/`SYSTEM_CHAT` never had one on the wire to begin with
-  (the server pre-decorates the display name into the text), and the legacy
-  `v340`/`v735` chat packets carry no sender field at all. So today, toggling
-  Hide persists correctly and changes nothing else on screen — an honestly
-  declared island half, not an implied feature — and closing it is **not** a
-  `chat.rs`-only change: it needs a `sender: Option<Uuid>` field threaded onto
-  `ClientEvent::Chat` (`lodestone-model`), populated at four/five adapter call
-  sites (`lodestone_model`/`protocol/*` are off limits to this batch), then
-  carried through `NetUpdate::Chat` (`net.rs`) and `sim/net_apply.rs`'s
-  `Chat` arm (both brokered for this batch) before `chat.rs` ever gets a
-  chance to consult `HiddenPlayers`. Scope is mechanically small — mostly
-  one-line `None`/`Some(sender)` additions across roughly fifteen to twenty
-  files — but every file it touches is outside this batch's file ownership,
-  so it is a real follow-up issue rather than "a real, small win" inside
-  `chat.rs` alone, and it should be filed as one instead of attempted here.
+- **Wired since this patch (issue #419) — Hide in Chat suppresses signed
+  player chat.** This section used to say hiding a player had no consumer and
+  no sender identity to key on. That plumbing now exists end to end: a
+  `sender: Option<Uuid>` field on `lodestone_model::ClientEvent::Chat`,
+  populated at the one decode site that has it on the wire
+  (`crates/protocol/v770/src/adapter.rs`'s `PLAYER_CHAT` arm reads the sender
+  UUID and emits `Some(sender)`; `DISGUISED_CHAT`/`SYSTEM_CHAT`/action-bar
+  and every legacy-family chat emit `None`), carried verbatim through
+  `net.rs`'s `NetUpdate::Chat` into `sim/net_apply.rs`'s `Chat` arm. There a
+  signed player message is dropped before it reaches the feed unless
+  `crate::menu::social::should_show_message` — the predicate this screen's
+  module now owns — says show it, re-reading `HiddenPlayers::load()` (the
+  same file the toggle writes) so a hide made seconds ago is already in force.
+  `None` always shows: system/disguised/action-bar chat and legacy-family
+  player chat have no sender key to filter on, matching vanilla's Hide in Chat
+  being signed-chat-only. `live_chat.rs`'s `tellraw` path is unaffected — a
+  system message with no sender.
 
 A hidden choice cannot be "wrong" the way a cycled option value can: there is
 no derived state that could drift from it, and toggling it back is a single
@@ -115,14 +102,15 @@ single flat list instead — a documented reduction, not a silent one.
 - **Wiring the Report button** needs secure chat signing to exist first
   (`ChatSession`/message signatures) — not a menu-side change at all once
   that lands; `SocialControl::is_live` is the one place to flip.
-- **Wiring Hide/Show to actually suppress chat** needs the sender-identity
-  plumbing described above *first*: a `sender: Option<Uuid>` field on
-  `lodestone_model::ClientEvent::Chat`, populated from the one decode site
-  that already has it (`protocol/v770/src/adapter.rs`'s `PLAYER_CHAT` arm)
-  and `None` everywhere else, carried through `NetUpdate::Chat` and
-  `sim/net_apply.rs`'s `Chat` arm. Only once a sender reaches `chat.rs` does
-  reading `crate::config::HiddenPlayers::load()` there become a real, small
-  change rather than a change with nothing to key on.
+- **Wiring Hide/Show to actually suppress chat** — **done (issue #419)**.
+  `sender: Option<Uuid>` on `ClientEvent::Chat` (populated at
+  `protocol/v770/src/adapter.rs`'s `PLAYER_CHAT` arm, `None` everywhere else)
+  → `NetUpdate::Chat` → `sim/net_apply.rs`'s `Chat` arm, which consults
+  `crate::menu::social::should_show_message` against `HiddenPlayers::load()`.
+  The predicate lives with this screen (`menu/social.rs`) and is unit-tested
+  there. If a sender ever needs to reach the feed itself (a "from" label in
+  the scrollback), thread `NetUpdate::Chat`'s `sender` past the arm instead of
+  dropping it.
 - **Adding the Hidden/Blocked tabs**, if a later pass decides the reduction
   above should be undone: `SocialControl`/`SocialPlacement` would need a tab
   index the way `crates/lodestone-shell/src/menu/key_binds.rs`'s categories

@@ -107,7 +107,7 @@ fn player_chat(
     filter_ordinal: i32,
 ) -> Vec<u8> {
     let mut out = var_i32(global_index);
-    out.extend_from_slice(&[0u8; 16]); // sender UUID
+    out.extend_from_slice(&[0u8; 16]); // sender UUID — nil, pinned in the decode test below
     out.extend_from_slice(&var_i32(0)); // index
     match signature {
         Some(sig) => {
@@ -146,9 +146,19 @@ fn player_chat_signed_surfaces_ack_info() {
         )
         .expect("handle player_chat");
     match directives.as_slice() {
-        [Directive::Emit(ClientEvent::Chat { text, kind, ack })] => {
+        [Directive::Emit(ClientEvent::Chat {
+            text,
+            kind,
+            ack,
+            sender,
+            ..
+        })] => {
             assert_eq!(text.to_plain_string(), "hello world");
             assert_eq!(*kind, ChatKind::Chat);
+            // The wire sender UUID must reach `ClientEvent::Chat` — issue
+            // #419's filter key. `player_chat` writes a nil sender, so the
+            // expected value is exact, not a `is_some` direction.
+            assert_eq!(*sender, Some(uuid::Uuid::nil()));
             let ChatAckInfo {
                 signature,
                 global_index,
@@ -257,7 +267,7 @@ fn disguised_chat_emits_chat_without_ack() {
         )
         .expect("handle disguised_chat");
     match directives.as_slice() {
-        [Directive::Emit(ClientEvent::Chat { text, kind, ack })] => {
+        [Directive::Emit(ClientEvent::Chat { text, kind, ack, .. })] => {
             assert_eq!(text.to_plain_string(), "a disguise");
             assert_eq!(*kind, ChatKind::Chat);
             assert!(ack.is_none(), "disguised chat is unsigned, no ack");
