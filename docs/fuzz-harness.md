@@ -190,6 +190,82 @@ bound than "as many elements as fit in the remaining bytes" for fields where the
 one (e.g. a registry with a known maximum entry count). That tightening is optional follow-up
 work, not a gap left open by this fix.
 
+### Bug found and fixed: a remote panic from `multi_block_change`'s coordinate maths (issue #450)
+
+`handle_packet_never_panics` found a real remote panic in `v340`'s `multi_block_change` decode
+(`crates/protocol/v340/src/adapter.rs`, added by `714209b` for #349):
+
+```rust
+let x = chunk_x * 16 + rel_x;   // chunk_x is straight off the wire
+```
+
+An unchecked `i32` multiply on a wire-supplied chunk coordinate. For `|chunk_x| > i32::MAX / 16`
+(= 134,217,727) it **panics in debug** and — worse — **silently wraps in release**, writing a
+block at a position the packet never named. Note the direction, which is the opposite of #417's:
+this is the *client* decoding a *server* packet, so the hostile party is a malicious or buggy
+**server**.
+
+**Fixed** with a two-part guard, `chunk_origin_block` in that same file, applied to both axes
+*before* the record loop runs so nothing reaches the world sink for a packet that will be
+refused:
+
+- `checked_mul(16)` — the **structural** half. Cannot panic or wrap whatever the bound says, so
+  a later edit that loosens the range check still cannot reintroduce either failure.
+- a range check against `WorldBorder.absoluteMaxSize` (`WorldBorder.java:37`) at ±29,999,984
+  blocks — the **semantic** half. A chunk coordinate past the border names a position no vanilla
+  world can contain, so it is refused at the seam with an `AdapterError::Decode`. Deliberately
+  **not clamped**: a clamp invents a position exactly the way the release-mode wrap did, and
+  "wrote the wrong block" is not an improvement on "crashed".
+
+**Reproduction was intermittent, and that was the more important half of the fix.** The full
+crate run failed; the same target run alone with a name filter passed, twice. An intermittent
+red is easier to write off as flake than a deterministic one, which is roughly what happened
+before the issue was traced. Both durable fixes are committed:
+
+- `tests/no_panic_arbitrary_bytes.proptest-regressions` — proptest's own seed file, so the
+  generator case replays first on every run.
+- `tests/fixtures/v340_multi_block_change_chunk_overflow.hex` plus `tests/fuzz_regressions.rs` —
+  the literal twelve bytes proptest shrank to (`08 00 00 00 00 00 00 00 01 00 00 00`, i.e.
+  `chunk_x = 134_217_728`, one record of air), asserted directly. Neither replaces the other:
+  the seed file re-runs the whole strategy and would go stale if the strategy changed, while
+  the fixture pins the payload and asserts *what* the decoder does with it.
+
+The fixture gate asserts **refusal**, not survival, because "did not panic" is satisfied by the
+release-mode wrap — the worse of the two original outcomes — and "did not panic, and clamped" is
+satisfied by inventing a position. So it requires an `AdapterError::Decode` naming the offending
+coordinate *and* **zero** `set_block` calls on a recording `WorldSink` (`lodestone_fuzz::NullSink`
+discards writes and therefore cannot tell refused from wrapped). A separate test pins the bound
+to the world border rather than to `i32` range: `chunk_x = 1_875_000` multiplies to 30,000,000,
+which fits an `i32` fine — so a `checked_mul`-only fix accepts it — while `1_874_999` lands
+exactly on 29,999,984 and must still be accepted.
+
+Both halves were run as negative controls, restoring the pre-fix source from an md5-verified
+backup:
+
+| variant | overflow fixture | world-border pair | ordinary coordinate |
+|---|---|---|---|
+| pre-fix `chunk_x * 16` | `PANIC: attempt to multiply with overflow` | fails | passes |
+| `checked_mul` only, no border check | passes | **fails** | passes |
+| shipped fix | passes | passes | passes |
+
+That middle row is the load-bearing one: without the border test, a `checked_mul`-only fix would
+have looked complete.
+
+**Sibling paths checked** (`/usr/bin/grep -rn '\* 16'` across all four families' `src/`), since
+this is a shape rather than a one-off. Nothing else is reachable from the wire:
+
+- `v340`'s own `block_change` reads a **packed** `Position` instead of chunk coordinates, so its
+  x/z arrive pre-bounded at ±33,554,431 by the 26-bit field width, and it only ever does `>> 4`
+  and `rem_euclid(16)` — no multiply, no overflow. (It can still name a position 3.5M blocks
+  outside the border; that is a wrong-but-harmless write, not a panic, and out of #450's scope.)
+- `v47/packets/chunk.rs:356`, `v340/packets/chunk.rs:470` (`block_z * 16 + block_x`) and
+  `v735/packets/chunk.rs:272` (`cy_global * 16 + cz * 4 + cx`) all multiply **loop indices**
+  bounded by `0..4`/`0..16` in the source, never wire values.
+- `v340/flattening.rs:128` and `v340/canonical.rs:117,155` (`old_block_id * 16 + meta`) promote a
+  `u8` to `usize` first; the maximum is `255 * 16 + 15 = 4095`.
+- `v47` does store raw packed `(id << 4) | meta` composites, but that is a value, not a
+  coordinate, and it is already range-checked against the 4,095-slot legacy table.
+
 ## How to change it, and the gotchas
 
 - **Add a family or state to the sweep**: `Family::clientbound_entries` and `Family::STATES`
@@ -197,16 +273,49 @@ work, not a gap left open by this fix.
   property read from. A fifth family only needs a `Family` variant plus one `match` arm in
   `adapter()` and one in `clientbound_entries()`.
 - **A process-wide `#[global_allocator]` in one test file measures every allocation in that
-  test *binary*, including other `#[test]`s in the same file running concurrently.**
-  `length_prefix_allocation.rs` hit this directly while writing it: its "small payload, small
-  allocation" control failed only when run alongside the "huge payload" test, both reporting
-  the same 48,000,000-byte peak, because `cargo test` runs `#[test]`s in parallel threads
-  within one process by default and the counting atomic is necessarily global. Fixed with a
-  `Mutex` held for the whole reset-call-read span of each measurement — serializes just the
-  two tests in that file rather than needing `--test-threads=1` for the entire binary. If you
-  add a third test to that file that also measures allocation, it gets the serialization for
-  free through the same lock; if you add allocation-measuring code to a *different* file,
-  it's a separate test binary and cannot see this one's counter at all.
+  test *binary*, including other `#[test]`s in the same file running concurrently — and a
+  `Mutex` is the wrong fix.** This bullet used to recommend one, and it flaked; the corrected
+  history is worth keeping because the second attempt looked airtight.
+
+  `length_prefix_allocation.rs` hit the raw version while being written: the "small payload,
+  small allocation" control failed only when run alongside the "huge payload" test, both
+  reporting the same 48,000,000-byte peak, because `cargo test` runs `#[test]`s in parallel
+  threads within one process. That was fixed with a `MEASUREMENT_LOCK: Mutex<()>` held for the
+  reset-call-read span of every measurement — which serialises the *measuring* tests and does
+  nothing whatever about the others. **A lock only excludes code that takes it.**
+  `real_registry_data_fixture_still_decodes_cleanly_after_the_fix`, in the very same file, never
+  calls `peak_alloc_during`, so it never takes the lock, and its fixture read plus
+  `RegistryData::decode` allocate into the shared atomic from a parallel harness thread. Result:
+  issue #417's own DoS regression gate passed alone and failed in a full parallel run — issue
+  #450's second half, and `CLAUDE.md`'s *accumulator* species of vacuous test (a global
+  outliving the gate's own window).
+
+  **Fixed by scoping the counter, not by serialising the tests**: `PEAK_SINGLE_ALLOC` is now a
+  `thread_local!` `Cell<usize>`, `const`-initialised so reading it from inside `alloc` cannot
+  itself allocate and recurse, read with `try_with` so a teardown-time allocation records
+  nowhere instead of panicking in the allocator. Other threads' allocations land in *their*
+  cell and are structurally invisible — no cooperation needed from code that has never heard of
+  this file. The `Mutex` is gone.
+
+  **The property is now itself gated**, which is the durable part:
+  `a_sibling_threads_allocation_does_not_contaminate_a_measurement` spawns a thread whose
+  48,000,000-byte allocation is pinned by two `Barrier`s to the window strictly between this
+  thread's reset and its read — deterministic, no scheduling luck — and asserts the reading
+  stays under `SMALL_CEILING`. Observed against both older designs: `measured as 48000000
+  bytes`. Against the thread-local: 0.
+
+  **Do not widen `SMALL_CEILING` (4,096) to make a measurement pass.** It sits deliberately far
+  below the old ~48,000,000-byte figure rather than merely under it, so a *partial* regression
+  is still caught. Every reason so far to want it wider has been contamination of the
+  measurement, not a genuinely larger correct allocation. A DoS guard that flakes gets muted,
+  and a muted guard stops guarding.
+- **When a target finds a bug, commit the input — a generated repro is not a gate.** Drop the
+  bytes into `tests/fixtures/` in the same `#`-commented hex format (with a header recording
+  where they came from — proptest's shrink line, a live capture, whichever) and assert them in
+  `tests/fuzz_regressions.rs` via `lodestone_fuzz::regression_fixture_path`. Keep the
+  `.proptest-regressions` seed file too; they fail for independent reasons. And assert what the
+  decoder *does*, not merely that it survived: #450's release-mode behaviour was a silent wrong
+  write, which every "no panic" assertion in this crate accepts by construction.
 - **Raising `ProptestConfig::with_cases`** raises run time roughly linearly; see "Cost, in
   numbers" for the current baseline before changing it.
 - **A new captured `.hex` fixture** (closing the `v47`/`v340`/`v735` corpus gap, or adding

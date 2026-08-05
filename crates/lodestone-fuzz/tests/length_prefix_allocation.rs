@@ -55,29 +55,54 @@ use lodestone_core::{Ctx, Decode, Reader, Writer};
 use lodestone_v770::packets::game::GameLogin;
 use lodestone_v770::packets::registry::RegistryData;
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell;
 
 struct CountingAlloc;
 
-/// Largest single allocation request observed since the last reset.
-static PEAK_SINGLE_ALLOC: AtomicUsize = AtomicUsize::new(0);
-
-/// `cargo test` runs `#[test]` functions in parallel threads *within one
-/// process* by default, and the counting allocator below is necessarily
-/// process-global — so without this, one test's allocation shows up in the
-/// other's measurement. Caught exactly that way: both tests passed in
-/// isolation (`--test length_prefix_allocation huge_length_prefix…`) and the
-/// "small payload" one failed only when run alongside the "huge" one, with
-/// the identical 48,000,000-byte peak leaking across. Every measurement in
-/// this file holds this lock for the reset-call-read span of each measurement,
-/// which serializes the tests in it without needing `--test-threads=1` for
-/// the whole binary.
-static MEASUREMENT_LOCK: Mutex<()> = Mutex::new(());
+thread_local! {
+    /// Largest single allocation request observed **on the calling thread**
+    /// since that thread's last reset.
+    ///
+    /// ## Why per-thread, and the two designs this replaces (issue #450)
+    ///
+    /// A `#[global_allocator]` is unavoidably process-wide: it sees every
+    /// allocation on every thread. What is *not* forced is where it records
+    /// them, and the first two attempts both recorded process-wide too:
+    ///
+    /// 1. A bare `static PEAK_SINGLE_ALLOC: AtomicUsize`. One test's
+    ///    allocation showed up in another's measurement — caught when the
+    ///    "small payload" test failed only when run alongside the "huge" one,
+    ///    with the identical 48,000,000-byte peak leaking across.
+    /// 2. The same atomic plus a `MEASUREMENT_LOCK: Mutex<()>` held across each
+    ///    reset-call-read span, serialising the *measuring* tests. This is the
+    ///    one that flaked, and the reason is instructive: a lock only excludes
+    ///    code that takes it. `real_registry_data_fixture_still_decodes_cleanly_after_the_fix`
+    ///    in this same file never calls `peak_alloc_during`, so it never takes
+    ///    the lock, and its fixture read plus `RegistryData` decode allocate
+    ///    freely into the shared atomic from a parallel harness thread. The
+    ///    result passed alone and failed in a full parallel run — the classic
+    ///    order-dependent green, on issue #417's own DoS regression gate.
+    ///
+    /// A thread-local needs no cooperation from anything: allocations made by
+    /// other threads land in *their* cell and are structurally invisible here,
+    /// whether or not those threads know this file exists. That property is
+    /// asserted by `a_sibling_threads_allocation_does_not_contaminate_a_measurement`
+    /// below, which fails against both designs above.
+    ///
+    /// `const`-initialised on a `Cell<usize>` deliberately: that form compiles
+    /// to a plain per-thread slot with no lazy initialisation and no
+    /// destructor, so reading it from inside `alloc` cannot itself allocate and
+    /// recurse.
+    static PEAK_SINGLE_ALLOC: Cell<usize> = const { Cell::new(0) };
+}
 
 unsafe impl GlobalAlloc for CountingAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        PEAK_SINGLE_ALLOC.fetch_max(layout.size(), Ordering::SeqCst);
+        // `try_with`, not `with`: an allocation during thread teardown (after
+        // TLS destruction) must be recorded nowhere rather than panic inside
+        // the global allocator. No measurement can be in flight at that point
+        // anyway, so a dropped sample cannot mask a regression.
+        let _ = PEAK_SINGLE_ALLOC.try_with(|peak| peak.set(peak.get().max(layout.size())));
         unsafe { System.alloc(layout) }
     }
 
@@ -89,14 +114,29 @@ unsafe impl GlobalAlloc for CountingAlloc {
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc;
 
+/// Peak single allocation performed by `f` **on this thread**.
+///
+/// `f` must not move its allocation onto another thread; nothing here does, and
+/// a decode of a byte slice structurally cannot.
 fn peak_alloc_during<R>(f: impl FnOnce() -> R) -> (R, usize) {
-    let _guard = MEASUREMENT_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    PEAK_SINGLE_ALLOC.store(0, Ordering::SeqCst);
+    PEAK_SINGLE_ALLOC.with(|peak| peak.set(0));
     let result = f();
-    (result, PEAK_SINGLE_ALLOC.load(Ordering::SeqCst))
+    (result, PEAK_SINGLE_ALLOC.with(Cell::get))
 }
 
 const CTX: Ctx = Ctx { version: 776 };
+
+/// A little slack above an exact prediction of 0: the tests using this assert
+/// "no disproportionate allocation happened", not "the allocator's internal
+/// bookkeeping is byte-exact", so a small ceiling is used instead of an exact
+/// equality.
+///
+/// **Do not widen this.** It is deliberately *far* below the old
+/// ~48,000,000-byte measurement rather than merely under it, so that a partial
+/// regression is still caught. Every observed reason to want it wider so far has
+/// been contamination of the measurement (issue #450) rather than a genuinely
+/// larger correct allocation — fix the measurement, not the ceiling.
+const SMALL_CEILING: usize = 4096;
 
 /// `entity_id: i32 = 0`, `hardcore: bool = false`, then a `levels: Vec<String>`
 /// length prefix of `claimed_len`, followed by `trailing_bytes` more bytes
@@ -140,12 +180,6 @@ fn huge_length_prefix_no_longer_forces_disproportionate_allocation() {
     );
 
     const PREDICTED_PEAK: usize = 0;
-    // A little slack above the exact prediction: this asserts "no
-    // disproportionate allocation happened", not "the allocator's internal
-    // bookkeeping is byte-exact", so a small ceiling is used instead of an
-    // exact equality — but it must stay far below the old ~48,000,000-byte
-    // measurement, not just "smaller than that".
-    const SMALL_CEILING: usize = 4096;
     assert!(
         peak <= SMALL_CEILING,
         "predicted a peak allocation of {PREDICTED_PEAK} bytes (capacity capped at \
@@ -201,6 +235,72 @@ fn claimed_length_beyond_remaining_bytes_caps_allocation_to_remaining_not_zero()
         "measured only {peak} bytes for a cap of {TRAILING} elements — suspiciously small, as \
          though the cap collapsed to 0 regardless of how many bytes were actually available \
          (which would make this test pass for the wrong reason)."
+    );
+}
+
+/// The gate on the measurement technique itself (issue #450's second half).
+///
+/// Every other test in this file measures a peak allocation and compares it to
+/// a prediction. That is only meaningful if the number it reads back was
+/// produced by the code under test and nothing else — which the original
+/// process-global `static PEAK_SINGLE_ALLOC: AtomicUsize` could not guarantee,
+/// and which no amount of reading the assertions would reveal. So this test
+/// asserts the *isolation property* directly rather than trusting it.
+///
+/// It is deterministic, not probabilistic: the two barriers pin the sibling's
+/// 48,000,000-byte allocation to the window strictly between this thread's reset
+/// and its read. There is no interleaving in which the sibling allocates outside
+/// the measurement window, so this cannot pass by luck of scheduling — which
+/// matters, because scheduling luck is exactly what made the real defect look
+/// like flake (passing under a filter, failing in a full run).
+///
+/// 48,000,000 is not an arbitrary large number: it is the exact single
+/// allocation issue #417 measured, so a contaminated reading here is
+/// indistinguishable from the very regression `huge_length_prefix_…` exists to
+/// catch. That is the whole reason this matters — a DoS guard that reports its
+/// sibling's allocations flakes, a flaky guard gets muted, and a muted guard
+/// stops guarding.
+///
+/// Observed before the fix: `measured 48000000 bytes`. After: 0.
+#[test]
+fn a_sibling_threads_allocation_does_not_contaminate_a_measurement() {
+    use std::sync::{Arc, Barrier};
+
+    const SIBLING_ALLOC: usize = 48_000_000;
+
+    // Both barriers are constructed and both threads spawned *before* the
+    // measurement window opens, so the thread-spawn bookkeeping itself cannot
+    // land inside the reading.
+    let opened = Arc::new(Barrier::new(2));
+    let allocated = Arc::new(Barrier::new(2));
+    let sibling = {
+        let opened = Arc::clone(&opened);
+        let allocated = Arc::clone(&allocated);
+        std::thread::spawn(move || {
+            opened.wait();
+            // `with_capacity` rather than a growing push loop: one allocator
+            // call of exactly the size we are asserting about.
+            let hog: Vec<u8> = Vec::with_capacity(SIBLING_ALLOC);
+            std::hint::black_box(&hog);
+            allocated.wait();
+            drop(hog);
+        })
+    };
+
+    let ((), peak) = peak_alloc_during(|| {
+        opened.wait();
+        allocated.wait();
+    });
+
+    sibling.join().expect("sibling thread panicked");
+
+    assert!(
+        peak <= SMALL_CEILING,
+        "a sibling thread's {SIBLING_ALLOC}-byte allocation showed up in this thread's \
+         measurement as {peak} bytes (ceiling {SMALL_CEILING}). The allocation counter is not \
+         scoped to the measuring thread, so every prediction-vs-measurement assertion in this \
+         file is reading a number other tests contributed to. Do NOT relax the ceilings to make \
+         them pass — scope the counter."
     );
 }
 
