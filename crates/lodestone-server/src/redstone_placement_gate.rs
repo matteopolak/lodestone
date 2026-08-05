@@ -1171,3 +1171,335 @@ async fn the_re_run_shape_the_brokered_patch_specified_cannot_work() {
         log(&published_b)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #321 -- the hopper redstone lock
+// ---------------------------------------------------------------------------
+
+/// Where the two hoppers sit. They must be vertically adjacent, because this
+/// crate's hopper model transfers only to `below` and from `above`
+/// (`BlockEntityRegistry::tick_hopper`).
+const HOP_X: i32 = 4;
+const HOP_UPPER_Y: i32 = 2;
+const HOP_LOWER_Y: i32 = 1;
+
+/// `Hopper::TRANSFER_COOLDOWN_TICKS` is 8 and a fresh hopper starts at vanilla's
+/// `NO_COOLDOWN_TIME = -1`, so a hopper acts on tick 1 and every 8th tick after:
+/// **ticks 1 and 9** within a 16-tick drive. Transcribed from `hopper.rs`'s own
+/// constant and initial value rather than counted by hand.
+const HOPPER_ACTS_ON_TICKS: usize = 2;
+
+/// A two-hopper stack: five items in the upper hopper, an empty lower one, and a
+/// lit redstone torch beside the **upper** hopper only, so exactly one of the two
+/// is powered.
+///
+/// Powering only the upper one is deliberate and is what makes the prediction
+/// discriminating. Locking a hopper stops *its own* pushing and pulling; it does
+/// not stop an unlocked neighbour pushing into it or pulling out of it. So the
+/// lower hopper keeps pulling either way and the two arms differ by exactly the
+/// upper hopper's own pushes -- two distinct item distributions rather than
+/// "some" versus "fewer".
+fn hopper_rig(power_the_upper: bool) -> (Arc<RigWorld>, BlockEntityHandle) {
+    let world = Arc::new(RigWorld::new());
+    // Support for the torch, then the torch itself beside the upper hopper.
+    world.set_block(HOP_X + 1, HOP_LOWER_Y, ROW_Z, "minecraft:stone");
+    if power_the_upper {
+        world.set_block(
+            HOP_X + 1,
+            HOP_UPPER_Y,
+            ROW_Z,
+            &redstone_torch::set_standing_lit(true),
+        );
+    }
+    // Both hoppers start `enabled=true`, as vanilla's default state does
+    // (`HopperBlock.java:55`); the lock is what has to change one of them.
+    for y in [HOP_LOWER_Y, HOP_UPPER_Y] {
+        world.set_block(HOP_X, y, ROW_Z, "minecraft:hopper[enabled=true,facing=down]");
+    }
+
+    let block_entities = BlockEntityHandle::default();
+    let mut upper = crate::hopper::Hopper::new();
+    upper.set_slot(
+        0,
+        Some(lodestone_model::ItemStack::new(
+            "minecraft:diamond".parse().expect("valid resource key"),
+            5,
+        )),
+    );
+    block_entities.with(|registry| {
+        registry.insert(
+            BlockPos::new(HOP_X, HOP_UPPER_Y, ROW_Z),
+            crate::block_entities::BlockEntity::Hopper(upper),
+        );
+        registry.insert(
+            BlockPos::new(HOP_X, HOP_LOWER_Y, ROW_Z),
+            crate::block_entities::BlockEntity::Hopper(crate::hopper::Hopper::new()),
+        );
+    });
+    (world, block_entities)
+}
+
+/// Total item count held by the hopper at `(HOP_X, y, ROW_Z)`.
+fn hopper_count(block_entities: &BlockEntityHandle, y: i32) -> u32 {
+    block_entities.with(|registry| match registry.get(BlockPos::new(HOP_X, y, ROW_Z)) {
+        Some(crate::block_entities::BlockEntity::Hopper(h)) => {
+            h.slots().iter().flatten().map(|stack| stack.count).sum()
+        }
+        _ => panic!("no hopper registered at (x={HOP_X}, y={y}, z={ROW_Z})"),
+    })
+}
+
+/// Drives the real loop over a hopper rig, returning `(upper count, lower count,
+/// published changes)`.
+async fn drive_hoppers(
+    world: Arc<RigWorld>,
+    block_entities: &BlockEntityHandle,
+    feed: &BlockTickFeed,
+    ticks: u64,
+) -> Vec<Published> {
+    tokio::spawn(run_tick_loop(
+        MobHandle::new(ChunkWorld::new(MIN_Y, HEIGHT)),
+        LiveMobSource::default(),
+        block_entities.clone(),
+        Arc::new(TickClock::new()),
+        world,
+        feed.clone(),
+        (0..=0, 0..=0),
+        ExplosionFeed::default(),
+    ));
+    tokio::task::yield_now().await;
+    let mut published = Vec::new();
+    for tick in 1..=ticks {
+        tokio::time::advance(TICK_PERIOD).await;
+        tokio::task::yield_now().await;
+        for (x, y, z, state) in feed.drain_all() {
+            published.push(Published { tick, pos: (x, y, z), state });
+        }
+    }
+    published
+}
+
+/// **The load-bearing #321 gate.** A powered hopper stops transferring, and the
+/// prediction is an exact item distribution rather than "fewer items moved".
+///
+/// # Predicting the value, not the sign
+///
+/// Both hypotheses are computed from `hopper.rs`'s own constants, and they are
+/// two different distributions rather than a magnitude and a smaller magnitude:
+///
+/// | arm | the upper hopper acts? | after 16 ticks |
+/// |---|---|---|
+/// | upper hopper powered (locked) | no -- only the lower one pulls | upper 3, lower 2 |
+/// | upper hopper unpowered (control) | yes -- both act | upper 1, lower 4 |
+///
+/// A hopper acts on ticks 1 and 9 (cooldown 8, initial `-1`), so each arm has
+/// exactly two acting ticks; the locked arm moves one item per acting tick and
+/// the unlocked arm two. `tick_all`'s hardcoded `enabled: true` produces the
+/// control column, so this gate fails on the pre-#321 tree at both cells.
+///
+/// The distribution is order-independent, which matters because
+/// `tick_all_with_hopper_lock` iterates `HashMap` keys: whichever hopper is
+/// visited first, each acts once per cycle and the totals are identical. Checked
+/// by [`the_hopper_prediction_does_not_depend_on_registry_iteration_order`].
+#[tokio::test(start_paused = true)]
+async fn a_powered_hopper_stops_transferring_and_an_unpowered_one_does_not() {
+    let mut arms: Vec<(u32, u32)> = Vec::new();
+    for powered in [true, false] {
+        let (world, block_entities) = hopper_rig(powered);
+        let feed = BlockTickFeed::default();
+
+        // Premise: the rig really is/is not powered, read through the same
+        // signal walk production uses.
+        let column = world.column(0, 0);
+        let signal = redstone::best_neighbor_signal(
+            &redstone::make_lookup(&column, 0, 0),
+            BlockPos::new(HOP_X, HOP_UPPER_Y, ROW_Z),
+            false,
+        );
+        assert_eq!(
+            signal > 0,
+            powered,
+            "PREMISE FAILED: powered={powered} but the upper hopper at \
+             (x={HOP_X}, y={HOP_UPPER_Y}, z={ROW_Z}) reads signal {signal}"
+        );
+        assert_eq!(
+            hopper_count(&block_entities, HOP_UPPER_Y),
+            5,
+            "PREMISE FAILED: the upper hopper does not start with 5 items"
+        );
+
+        // The mutation a player would make, and the fan-out it owes -- this is
+        // what maintains the `enabled` property.
+        trigger(&world, &feed, BlockPos::new(HOP_X + 1, HOP_UPPER_Y, ROW_Z));
+
+        let _published = drive_hoppers(Arc::clone(&world), &block_entities, &feed, DRIVE_TICKS).await;
+        arms.push((
+            hopper_count(&block_entities, HOP_UPPER_Y),
+            hopper_count(&block_entities, HOP_LOWER_Y),
+        ));
+    }
+
+    assert_eq!(
+        arms[0],
+        (3, 2),
+        "POWERED: the upper hopper at (x={HOP_X}, y={HOP_UPPER_Y}, z={ROW_Z}) is redstone-locked, so \
+         only the lower hopper should act -- one item per acting tick, \
+         {HOPPER_ACTS_ON_TICKS} acting ticks. Got (upper, lower) = {:?}, expected (3, 2)",
+        arms[0]
+    );
+    assert_eq!(
+        arms[1],
+        (1, 4),
+        "UNPOWERED CONTROL: both hoppers should act -- two items per acting tick, \
+         {HOPPER_ACTS_ON_TICKS} acting ticks. Got (upper, lower) = {:?}, expected (1, 4)",
+        arms[1]
+    );
+    assert_ne!(
+        arms[0], arms[1],
+        "the two arms must differ, or this gate cannot see the lock at all"
+    );
+}
+
+/// **The island control for #321, run and observed.**
+///
+/// `BlockEntityRegistry::tick_all` -- the unlocked shorthand, and what
+/// `run_tick_loop` called before this landing -- must produce the *unpowered*
+/// distribution even on the powered rig. That is the whole defect: the signal was
+/// computed and the hopper never heard about it.
+///
+/// So this asserts the shorthand is blind and the locking form is not, against
+/// the identical powered rig. Without it, the gate above could be passing because
+/// of something other than the lock.
+#[tokio::test(start_paused = true)]
+async fn the_unlocked_shorthand_ignores_the_signal_which_is_what_made_this_an_island() {
+    let (world, block_entities) = hopper_rig(true);
+    let feed = BlockTickFeed::default();
+    trigger(&world, &feed, BlockPos::new(HOP_X + 1, HOP_UPPER_Y, ROW_Z));
+
+    // The state really does say locked...
+    assert!(
+        !redstone::hopper_enabled(&world.block_state(HOP_X, HOP_UPPER_Y, ROW_Z)),
+        "PREMISE FAILED: the upper hopper's block state is not enabled=false, so there is no lock \
+         for the shorthand to ignore: {}",
+        world.block_state(HOP_X, HOP_UPPER_Y, ROW_Z)
+    );
+
+    // ...and the shorthand ignores it, ticking 16 times by hand.
+    for _ in 0..DRIVE_TICKS {
+        block_entities.with(crate::block_entities::BlockEntityRegistry::tick_all);
+    }
+    let blind = (
+        hopper_count(&block_entities, HOP_UPPER_Y),
+        hopper_count(&block_entities, HOP_LOWER_Y),
+    );
+    assert_eq!(
+        blind,
+        (1, 4),
+        "CONTROL FAILED: `tick_all` is supposed to be the unlocked shorthand and produce the \
+         unpowered distribution on a powered rig. Got {blind:?}. If this now reports (3, 2) the \
+         shorthand has grown a lock of its own and this control no longer demonstrates the island."
+    );
+}
+
+/// The prediction above must not depend on `HashMap` iteration order, since
+/// `tick_all_with_hopper_lock` walks `self.entities.keys()`.
+///
+/// Argued by exhaustion over both visit orders rather than by trusting one run:
+/// each hopper acts at most once per cooldown cycle, and neither hopper's action
+/// changes whether the other may act this tick (the lower one's pull does not
+/// empty the upper below its non-empty test at these counts, and the upper's push
+/// does not fill the lower). So the per-cycle total is 2 either way. Asserted by
+/// running the locked arm repeatedly and requiring one distribution.
+#[tokio::test(start_paused = true)]
+async fn the_hopper_prediction_does_not_depend_on_registry_iteration_order() {
+    let mut seen: Vec<(u32, u32)> = Vec::new();
+    for _ in 0..8 {
+        let (world, block_entities) = hopper_rig(false);
+        let feed = BlockTickFeed::default();
+        trigger(&world, &feed, BlockPos::new(HOP_X + 1, HOP_UPPER_Y, ROW_Z));
+        let _ = drive_hoppers(Arc::clone(&world), &block_entities, &feed, DRIVE_TICKS).await;
+        let arm = (
+            hopper_count(&block_entities, HOP_UPPER_Y),
+            hopper_count(&block_entities, HOP_LOWER_Y),
+        );
+        if !seen.contains(&arm) {
+            seen.push(arm);
+        }
+    }
+    assert_eq!(
+        seen,
+        vec![(1, 4)],
+        "the unlocked distribution varied across runs, so registry iteration order does leak into \
+         it and the exact predictions above are not safe: observed {seen:?}"
+    );
+}
+
+/// **The lock reaches the client.** The `enabled` flip must be delivered, and it
+/// must be deliverable *precisely*.
+///
+/// Two independent things, both required:
+///
+/// 1. The flip is **published**, so `serve_play` can encode it -- the inline
+///    fan-out reports it, exactly as it reports a dust change. A lock the server
+///    applies but never tells anyone about would leave the client rendering an
+///    unlocked hopper forever, and would look identical from the server side.
+/// 2. The resulting state has an **exact** property-set match in the jar census,
+///    so `v770::resolve_state_id` hits its first tier and cannot degrade. This is
+///    why `redstone::with_property` edits in place instead of rebuilding: dropping
+///    `facing` would fall to the subset tier and hand the client a hopper pointing
+///    somewhere else -- #476's defect, which this deliberately avoids rather than
+///    repeats.
+#[tokio::test(start_paused = true)]
+async fn the_hopper_lock_is_delivered_and_resolves_exactly() {
+    let (world, feed) = {
+        let (world, _entities) = hopper_rig(true);
+        (world, BlockTickFeed::default())
+    };
+    let changed = trigger(&world, &feed, BlockPos::new(HOP_X + 1, HOP_UPPER_Y, ROW_Z));
+
+    let target = BlockPos::new(HOP_X, HOP_UPPER_Y, ROW_Z);
+    let delivered = changed
+        .iter()
+        .find(|(p, _)| *p == target)
+        .map(|(_, s)| s.clone())
+        .unwrap_or_else(|| {
+            panic!(
+                "the lock is COMPUTED but not DELIVERED at (x={HOP_X}, y={HOP_UPPER_Y}, z={ROW_Z}): \
+                 the server's own state is {} and the cells reported to the client were {:?}",
+                world.block_state(HOP_X, HOP_UPPER_Y, ROW_Z),
+                changed.iter().map(|(p, s)| (p.x, p.y, p.z, s.as_str())).collect::<Vec<_>>()
+            )
+        });
+
+    assert!(
+        !redstone::hopper_enabled(&delivered),
+        "the client was told {delivered}, which is still enabled"
+    );
+    assert_eq!(
+        delivered,
+        world.block_state(HOP_X, HOP_UPPER_Y, ROW_Z),
+        "the state delivered to the client differs from the one the server kept"
+    );
+    assert!(
+        delivered.contains("facing=down"),
+        "the lock rewrite dropped `facing`, so the client will be handed a hopper pointing \
+         elsewhere (see #476 for that failure mode): {delivered}"
+    );
+    assert!(
+        has_exact_state_in_census(&delivered),
+        "{delivered} has no exact property-set match in the 26.2 census, so `resolve_state_id` must \
+         fall back and the hopper the client renders is not the one computed"
+    );
+}
+
+/// Premise for the arm above: the rig is *unlocked* to begin with, so the flip
+/// this measures is a real transition and not the initial state.
+#[test]
+fn the_hopper_rig_starts_unlocked() {
+    let (world, _entities) = hopper_rig(true);
+    assert!(
+        redstone::hopper_enabled(&world.block_state(HOP_X, HOP_UPPER_Y, ROW_Z)),
+        "PREMISE FAILED: the hopper is already enabled=false before any fan-out runs, so a gate \
+         asserting it becomes false proves nothing"
+    );
+}

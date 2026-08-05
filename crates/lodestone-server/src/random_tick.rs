@@ -788,9 +788,23 @@ pub(crate) fn react_at_placement(
         && (0..16).contains(&tlz)
         && y >= column.min_y
         && y < column.min_y + column.height;
+    let mut own = Vec::new();
     if in_column {
         let state = column.block_state(tlx, y, tlz).to_string();
         let pos = BlockPos::new(x, y, z);
+        // `HopperBlock.onPlace` (`HopperBlock.java:100-104`) calls the same
+        // `checkPoweredState` its `neighborChanged` does, so a hopper placed
+        // into an already-powered cell must come up locked (issue #321). The
+        // neighbour pass cannot do this: it never notifies the origin.
+        if redstone::is_hopper(&state) {
+            let should_be_on =
+                redstone::best_neighbor_signal(&redstone::make_lookup(column, min_x, min_z), pos, false) == 0;
+            if should_be_on != redstone::hopper_enabled(&state) {
+                let new_state = redstone::with_property(&state, "enabled", if should_be_on { "true" } else { "false" });
+                column.set_block(tlx, y, tlz, &new_state);
+                own.push(RandomTickEvent { pos: (x, y, z), from: state.clone(), to: new_state });
+            }
+        }
         let placed_kind = if redstone::is_repeater(&state) {
             let facing = redstone::diode_facing(&state);
             redstone_diode::repeater_should_turn_on(&redstone::make_lookup(column, min_x, min_z), pos, facing)
@@ -812,7 +826,8 @@ pub(crate) fn react_at_placement(
             }
         }
     }
-    propagate_and_react(column, min_x, min_z, x, y, z, block_ticks, current_tick)
+    own.extend(propagate_and_react(column, min_x, min_z, x, y, z, block_ticks, current_tick));
+    own
 }
 
 pub(crate) fn propagate_and_react(
@@ -959,6 +974,37 @@ fn react_to_notification(
                     current_tick + 2,
                     priority,
                 );
+            }
+            return Vec::new();
+        }
+
+        // 3c-bis. Hoppers (#321). `HopperBlock.checkPoweredState`
+        // (`HopperBlock.java:125-130`), reached from `neighborChanged` (`:119-123`)
+        // and `onPlace` (`:100-104`):
+        //
+        //     boolean shouldBeOn = !level.hasNeighborSignal(pos);
+        //     if (shouldBeOn != state.getValue(ENABLED)) {
+        //        level.setBlock(pos, state.setValue(ENABLED, shouldBeOn), 2);
+        //     }
+        //
+        // Unlike every other family in this function, a hopper's reaction is
+        // **immediate, not scheduled** — vanilla writes the new state right here
+        // and there is no `scheduleTick` in that method. Flag 2 is
+        // `UPDATE_CLIENTS` without `UPDATE_NEIGHBORS`, so the write does not
+        // fan out further; returning an empty notification list is that.
+        //
+        // The `enabled` property is what `BlockEntityRegistry::tick_all` reads to
+        // decide whether the hopper transfers, so this is the whole lock: the
+        // block state is the single source of truth, exactly as in vanilla, and
+        // it is a real property of `minecraft:hopper` so the client is told
+        // precisely (see `redstone::with_property`).
+        if redstone::is_hopper(&state) {
+            let should_be_on =
+                redstone::best_neighbor_signal(&redstone::make_lookup(column, min_x, min_z), n.pos, false) == 0;
+            if should_be_on != redstone::hopper_enabled(&state) {
+                let new_state = redstone::with_property(&state, "enabled", if should_be_on { "true" } else { "false" });
+                column.set_block(tlx, n.pos.y, tlz, &new_state);
+                events.push(RandomTickEvent { pos: (n.pos.x, n.pos.y, n.pos.z), from: state, to: new_state });
             }
             return Vec::new();
         }

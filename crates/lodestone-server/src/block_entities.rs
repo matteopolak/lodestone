@@ -20,12 +20,16 @@
 //!
 //! # What is deliberately not modeled yet
 //!
-//! * **No redstone/power model.** [`BlockEntityRegistry::tick_all`] ticks
-//!   every hopper with `enabled: true` (never locked) — this crate has no
-//!   `hasNeighborSignal` equivalent anywhere (`crate::server`'s
-//!   `WorldAdminState` doc comment already notes there is no `GameRules`/
-//!   redstone model at all), so a hopper here can never be redstone-locked.
-//!   Real, documented gap, not a silent one.
+//! * ~~**No redstone/power model.**~~ **Fixed (issue #321).** This claim was
+//!   true when written and is not any more, which is why it is struck through
+//!   rather than deleted: `crate::redstone::best_neighbor_signal` is the
+//!   `hasNeighborSignal` equivalent, and
+//!   [`BlockEntityRegistry::tick_all_with_hopper_lock`] takes each hopper's
+//!   `enabled` from the caller. `crate::random_tick` maintains that property on
+//!   the block state, as `HopperBlock.checkPoweredState` does. Note the
+//!   plain [`tick_all`](BlockEntityRegistry::tick_all) shorthand still ticks
+//!   every hopper unlocked, so a production caller that holds a world must use
+//!   the locking form.
 //! * **Hopper adjacency only resolves another hopper.** A real container
 //!   (chest, furnace slots) at the adjacent position is not something this
 //!   crate can hand a hopper today: [`Hopper::tick`](crate::hopper::Hopper::tick)
@@ -319,11 +323,30 @@ impl BlockEntityRegistry {
     /// [`BlockEntityHandle`]), so this is a complete, order-independent pass
     /// over exactly what existed when the tick started.
     pub fn tick_all(&mut self) {
+        self.tick_all_with_hopper_lock(&|_| true);
+    }
+
+    /// [`tick_all`](Self::tick_all), with each hopper's redstone lock supplied
+    /// by the caller (issue #321).
+    ///
+    /// `enabled` receives a hopper's position and answers whether it may
+    /// transfer this tick — `false` while redstone-powered. The caller reads it
+    /// off the block state, which is where vanilla keeps it
+    /// (`HopperBlock.ENABLED`, maintained by `checkPoweredState`); this registry
+    /// has no world access and deliberately does not compute it.
+    ///
+    /// `tick_all` remains as the unlocked shorthand for the several tests and
+    /// call sites that hold no world, so this is an addition rather than a
+    /// signature change. **`crate::tick::run_tick_loop` is the one production
+    /// caller that must use this one** — it is the only place holding both a
+    /// `ChunkSource` and this registry, and a hopper ticked through the
+    /// shorthand can never be locked.
+    pub fn tick_all_with_hopper_lock(&mut self, enabled: &dyn Fn(BlockPos) -> bool) {
         let positions: Vec<BlockPos> = self.entities.keys().copied().collect();
         for pos in positions {
             let is_hopper = matches!(self.entities.get(&pos), Some(BlockEntity::Hopper(_)));
             if is_hopper {
-                self.tick_hopper(pos);
+                self.tick_hopper(pos, enabled(pos));
             } else if let Some(entity) = self.entities.get_mut(&pos) {
                 entity.tick_non_hopper();
             }
@@ -344,7 +367,7 @@ impl BlockEntityRegistry {
     /// collide if `pos` were malformed, though `y±1` never equals `y`), so
     /// this sidesteps the borrow entirely rather than reaching for unstable
     /// `get_many_mut`.
-    fn tick_hopper(&mut self, pos: BlockPos) {
+    fn tick_hopper(&mut self, pos: BlockPos, enabled: bool) {
         let Some(BlockEntity::Hopper(mut hopper)) = self.entities.remove(&pos) else {
             return;
         };
@@ -354,10 +377,15 @@ impl BlockEntityRegistry {
         let mut below = self.entities.remove(&below_pos);
         let mut above = self.entities.remove(&above_pos);
 
-        // No redstone/power model exists anywhere in this crate (see the
-        // module doc comment) — always unlocked.
+        // Issue #321: the redstone lock. `enabled` is read from the block state
+        // the caller supplies rather than recomputed here, because the block
+        // state *is* vanilla's source of truth for it —
+        // `HopperBlock.checkPoweredState` (`HopperBlock.java:125-130`) writes
+        // `ENABLED` on every neighbour change and on placement, and
+        // `HopperBlockEntity` then simply obeys it. This registry has no world
+        // access to compute `hasNeighborSignal` itself, and needs none.
         hopper.tick(
-            true,
+            enabled,
             below.as_mut().and_then(BlockEntity::hopper_slots_mut),
             above.as_mut().and_then(BlockEntity::hopper_slots_mut),
         );
