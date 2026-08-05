@@ -481,7 +481,10 @@ impl Cell {
                 return Some(value.clamp(0.0, 1.0));
             }
         }
-        unit_double_default_fraction(spec.accessor)
+        if let Some(fraction) = unit_double_default_fraction(spec.accessor) {
+            return Some(fraction);
+        }
+        int_range_default_fraction(spec.accessor)
     }
 }
 
@@ -557,6 +560,239 @@ fn unit_double_default_fraction(accessor: &str) -> Option<f32> {
         .iter()
         .find(|(a, _)| *a == accessor)
         .map(|(_, v)| *v)
+}
+
+/// One vanilla `OptionInstance.IntRange`'s bounds — the `(minInclusive,
+/// maxInclusive)` pair a slider needs before it can place a handle at all.
+///
+/// `IntRange` is a record of exactly those two ints plus an
+/// `applyValueImmediately` flag (`OptionInstance.java:267-280`); the flag
+/// changes *when* vanilla commits a drag, never where the handle draws, so it
+/// is deliberately absent here.
+///
+/// The arithmetic lives in the `IntRangeBase` interface `IntRange` implements,
+/// and [`Self::to_slider_value`] is that method transcribed — not a
+/// re-derivation. See [`INT_RANGE_SLIDERS`] for the per-accessor bounds and
+/// why each one is a citation rather than a plausible number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SliderRange {
+    /// `IntRange.minInclusive` (`OptionInstance.java:267`).
+    pub min: i32,
+    /// `IntRange.maxInclusive` (`:267`).
+    pub max: i32,
+}
+
+impl SliderRange {
+    /// `IntRangeBase.toSliderValue` (`OptionInstance.java:295-301`), verbatim:
+    ///
+    /// ```java
+    /// default double toSliderValue(final Integer value) {
+    ///    if (value == this.minInclusive()) {
+    ///       return 0.0;
+    ///    } else {
+    ///       return value == this.maxInclusive() ? 1.0
+    ///          : Mth.map(value.intValue() + 0.5, this.minInclusive(),
+    ///                    this.maxInclusive() + 1.0, 0.0, 1.0);
+    ///    }
+    /// }
+    /// ```
+    ///
+    /// **The two endpoint special cases are load-bearing and are not an
+    /// optimisation.** Without them the general `Mth.map` puts the *maximum*
+    /// at `(max + 0.5 - min) / (max + 1 - min)`, which is short of 1.0 by half
+    /// a step — `mipmapLevels`' max would sit at `0.9`, a handle visibly inside
+    /// the track on an option whose shipped default *is* the max.
+    ///
+    /// **The `+ 0.5` and the `max + 1` are equally load-bearing.** They are
+    /// there because an `IntRange` slider is a *bucket* selector, not a point
+    /// selector: `fromSliderValue` is `floor(map(slider, 0, 1, min, max + 1))`
+    /// (`:303-309`), so the handle marks the centre of the value's bucket. The
+    /// naive `(value - min) / (max - min)` a hand-rolled version produces is a
+    /// different function, and
+    /// `the_naive_endpoint_span_hypothesis_is_measurably_wrong` requires the
+    /// measurement to land off it.
+    #[must_use]
+    pub fn to_slider_value(self, value: i32) -> f32 {
+        if value == self.min {
+            return 0.0;
+        }
+        if value == self.max {
+            return 1.0;
+        }
+        // `Mth.map(v, from_lo, from_hi, to_lo, to_hi)` with `to` = `0..1`
+        // reduces to `(v - from_lo) / (from_hi - from_lo)`.
+        let v = f64::from(value) + 0.5;
+        let lo = f64::from(self.min);
+        let hi = f64::from(self.max) + 1.0;
+        (((v - lo) / (hi - lo)) as f32).clamp(0.0, 1.0)
+    }
+}
+
+/// This client's `largeDistances`, the one bound in [`INT_RANGE_SLIDERS`] that
+/// vanilla decides at runtime rather than in a literal.
+///
+/// `Options`' constructor reads
+/// `Runtime.getRuntime().maxMemory() >= 1000000000L` **once** and uses it for
+/// both distance sliders' maximum (`Options.java:1469,1474,1482`):
+///
+/// ```java
+/// boolean largeDistances = Runtime.getRuntime().maxMemory() >= 1000000000L;
+/// … new OptionInstance.IntRange(2, largeDistances ? 32 : 16, false), 12, …
+/// ```
+///
+/// That test is a question about **the JVM's `-Xmx` heap cap**, not about the
+/// machine: it is `false` on a 64 GB box launched with `-Xmx512m`. This client
+/// has no heap cap to interrogate — there is no JVM and no equivalent ceiling —
+/// so the honest mapping is the branch a real launcher takes, which allocates
+/// far above 1 GB by default. Hence `32`, recorded as a named constant so the
+/// **decision** is visible rather than buried as a literal beside fifteen
+/// citations. It is not itself a citation, and must not be relabelled as one.
+pub const LARGE_DISTANCES_MAX: i32 = 32;
+
+/// Every settings-tree slider built on an `OptionInstance.IntRange` — the value
+/// set whose absence was issue #424 — paired with its bounds and the **integer
+/// pre-image** of vanilla's shipped default.
+///
+/// Three columns, and the third is the subtle one. An `IntRange` slider may be
+/// `.xmap`'d to a non-integer displayed value (`OptionInstance.java:311-353`),
+/// and `xmap`'s `toSliderValue` calls `from.applyAsInt(value)` *first* and then
+/// defers to the underlying `IntRangeBase` — so the fraction is always a
+/// function of the **int**, never of the displayed double. Each `.xmap`'d row
+/// below therefore records `from(default)` with the conversion spelled out, not
+/// the default a player sees.
+///
+/// Every entry names the `Options.java` line its bounds and default are read
+/// from. Exhaustive over the settings tree's `slider(...)` rows: an accessor
+/// this client renders as a slider and that appears in neither this table nor
+/// [`UNIT_DOUBLE_DEFAULTS`] is one of the two documented non-`IntRange`
+/// leftovers — see [`int_range_default_fraction`].
+const INT_RANGE_SLIDERS: &[(&str, SliderRange, i32)] = &[
+    // `Options.java:126-128`: `IntRange(1, 26).xmap(v -> v * 10, v -> v / 10,
+    // true)`, default `120`. Pre-image `120 / 10 = 12`.
+    ("framerateLimit", SliderRange { min: 1, max: 26 }, 12),
+    // `Options.java:114,117`: `IntRange(2, 20).xmap(v -> v / 4.0,
+    // v -> (int)(v * 4.0), true)`, default `1.0`. Pre-image
+    // `(int)(1.0 * 4.0) = 4`.
+    ("entityDistanceScaling", SliderRange { min: 2, max: 20 }, 4),
+    // `Options.java:196-197`: `IntRange(2, 128, true)`, default `128` — the
+    // maximum, so the endpoint case pins it to exactly 1.0.
+    ("cloudRange", SliderRange { min: 2, max: 128 }, 128),
+    // `Options.java:208-209`: `IntRange(3, 10, true)`, default `10`.
+    ("weatherRadius", SliderRange { min: 3, max: 10 }, 10),
+    // `Options.java:247,249`: `IntRange(0, 40).xmap(v -> v / 20.0,
+    // v -> (int)(v * 20.0), true)`, default `0.75`. Pre-image
+    // `(int)(0.75 * 20.0) = 15`.
+    (
+        "chunkSectionFadeInTime",
+        SliderRange { min: 0, max: 40 },
+        15,
+    ),
+    // `Options.java:301-302`: `IntRange(0, 10)`, default `5`
+    // (`BLURRINESS_DEFAULT_VALUE`).
+    (
+        "menuBackgroundBlurriness",
+        SliderRange { min: 0, max: 10 },
+        5,
+    ),
+    // `Options.java:401,403`: `IntRange(0, 60).xmap(v -> v / 10.0,
+    // v -> (int)(v * 10.0), true)`, default `0.0`. Pre-image `0` — the
+    // minimum, so the endpoint case pins it to exactly 0.0.
+    ("chatDelay", SliderRange { min: 0, max: 60 }, 0),
+    // `Options.java:411,413`: `IntRange(5, 100).xmap(v -> v / 10.0,
+    // v -> (int)(v * 10.0), true)`, default `1.0`. Pre-image
+    // `(int)(1.0 * 10.0) = 10`.
+    (
+        "notificationDisplayTime",
+        SliderRange { min: 5, max: 100 },
+        10,
+    ),
+    // `Options.java:420-421`: `IntRange(0, 4)`, default `4`.
+    ("mipmapLevels", SliderRange { min: 0, max: 4 }, 4),
+    // `Options.java:431-432`: `IntRange(1, 3)`, default `2`. The value is an
+    // anisotropy *bit*, i.e. the displayed level is `1 << bit` — an exponent,
+    // not the level, which does not change the fraction because the slider
+    // maps the bit.
+    ("maxAnisotropyBit", SliderRange { min: 1, max: 3 }, 2),
+    // `Options.java:472`: `IntRange(0, 7, false)`, default `2`.
+    ("biomeBlendRadius", SliderRange { min: 0, max: 7 }, 2),
+    // `Options.java:637-638`: `IntRange(0, 10)`, default `7`.
+    ("sprintWindow", SliderRange { min: 0, max: 10 }, 7),
+    // `Options.java:806,808`: `IntRange(30, 110)`, default `70`. The
+    // `Codec.DOUBLE.xmap` on the line between them is a **persistence** codec
+    // (the 7-arg `OptionInstance` overload, `OptionInstance.java:96-113`), not
+    // a `ValueSet::xmap`, so it does not touch the slider at all — reading it
+    // as one would put the handle at `(int)(70 * 40 + 70)`, far off the track.
+    ("fov", SliderRange { min: 30, max: 110 }, 70),
+    // `Options.java:1474-1475`: `IntRange(2, largeDistances ? 32 : 16,
+    // false)`, default `12`. See [`LARGE_DISTANCES_MAX`] for the max.
+    (
+        "renderDistance",
+        SliderRange {
+            min: 2,
+            max: LARGE_DISTANCES_MAX,
+        },
+        12,
+    ),
+    // `Options.java:1482-1483`: `IntRange(DEBUG_ALLOW_LOW_SIM_DISTANCE ? 2 : 5,
+    // largeDistances ? 32 : 16, false)`, default `12`. The min is `5`: the `2`
+    // is behind `SharedConstants.DEBUG_ALLOW_LOW_SIM_DISTANCE`, a dev flag off
+    // in a shipped client, and taking the debug branch would shift every
+    // handle on this row.
+    (
+        "simulationDistance",
+        SliderRange {
+            min: 5,
+            max: LARGE_DISTANCES_MAX,
+        },
+        12,
+    ),
+];
+
+/// `graphicsPreset`'s fraction. Its value set is an
+/// `OptionInstance.SliderableEnum`, not an `IntRange`, so it has its own
+/// `toSliderValue` (`OptionInstance.java:486-492`):
+///
+/// ```java
+/// if (value == this.values.getFirst()) { return 0.0; }
+/// else { return value == this.values.getLast() ? 1.0
+///        : Mth.map(this.values.indexOf(value), 0.0, this.values.size() - 1, 0.0, 1.0); }
+/// ```
+///
+/// Note the divisor is `size - 1`, **not** `size` — this family spaces its
+/// values at the track's two ends rather than at bucket centres, which is why
+/// it cannot borrow [`SliderRange`]. `GraphicsPreset` is
+/// `FAST, FANCY, FABULOUS, CUSTOM` (`GraphicsPreset.java:13-16`), so `size` is
+/// 4, and the default is `FANCY` (`Options.java:165`) at index 1 — one third
+/// along.
+#[must_use]
+fn graphics_preset_default_fraction() -> f32 {
+    const COUNT: f32 = 4.0;
+    const FANCY_INDEX: f32 = 1.0;
+    FANCY_INDEX / (COUNT - 1.0)
+}
+
+/// Looks up [`INT_RANGE_SLIDERS`] by accessor and maps its default through
+/// [`SliderRange::to_slider_value`], plus the one `SliderableEnum` row.
+///
+/// Returns `None` for an accessor in neither table. Two settings-tree sliders
+/// land there **deliberately**, and both are absences with a reason rather than
+/// gaps to be filled with a plausible number:
+///
+/// - `fullscreenResolution` is not slider-shaped in vanilla at all. Its value
+///   set is a lazily-populated list of the monitor's real video modes, so its
+///   "range" is a property of the display and there is no default int to place
+///   a handle at. This client renders it as a slider row; the missing handle is
+///   the honest answer until the row itself is reclassified.
+/// - `gamma` is in [`UNIT_DOUBLE_DEFAULTS`], reached before this function.
+#[must_use]
+fn int_range_default_fraction(accessor: &str) -> Option<f32> {
+    if accessor == "graphicsPreset" {
+        return Some(graphics_preset_default_fraction());
+    }
+    INT_RANGE_SLIDERS
+        .iter()
+        .find(|(a, _, _)| *a == accessor)
+        .map(|(_, range, default)| range.to_slider_value(*default))
 }
 
 /// `mouseWheelSensitivity`'s slider fraction from the real, live config
@@ -2845,6 +3081,270 @@ mod tests {
         assert_eq!(width.slider_fraction(&o), Some(1.0));
         o.chat_width = -3.0;
         assert_eq!(width.slider_fraction(&o), Some(0.0));
+    }
+
+    // -- issue #424: the `IntRange` slider ranges ----------------------------
+
+    /// The two rival formulas an `IntRange` fraction could plausibly use, kept
+    /// **executable** so the assertions below are controls and not descriptions
+    /// of controls.
+    ///
+    /// Both are what a hand-rolled implementation actually produces, and both
+    /// agree with vanilla's on "the handle is somewhere sensible" — which is
+    /// exactly why the tests predict *values*.
+    mod rival {
+        /// Hypothesis A, "endpoint span": map the value linearly onto
+        /// `min..=max`. This is the obvious reading of a range, and it is what
+        /// you get by forgetting that vanilla's slider selects a **bucket**
+        /// (`fromSliderValue` floors, `OptionInstance.java:303-309`) rather
+        /// than a point. Differs from vanilla's by up to half a bucket.
+        pub fn endpoint_span(min: i32, max: i32, value: i32) -> f32 {
+            ((f64::from(value - min) / f64::from(max - min)) as f32).clamp(0.0, 1.0)
+        }
+
+        /// Hypothesis B, "unpinned centres": vanilla's bucket-centre `Mth.map`
+        /// but *without* the two endpoint special cases at
+        /// `OptionInstance.java:296-299`. Correct in the interior, short of the
+        /// ends by half a bucket — the failure that leaves a maxed-out slider
+        /// drawing its handle inside the track.
+        pub fn unpinned_centres(min: i32, max: i32, value: i32) -> f32 {
+            let v = f64::from(value) + 0.5;
+            let lo = f64::from(min);
+            let hi = f64::from(max) + 1.0;
+            (((v - lo) / (hi - lo)) as f32).clamp(0.0, 1.0)
+        }
+    }
+
+    /// The ported ranges put each slider's handle where vanilla's
+    /// `IntRangeBase.toSliderValue` puts it.
+    ///
+    /// Each expectation is written as the **explicit ratio** the jar's formula
+    /// yields for that row's own `(min, max, default)` — `(v + 0.5 - min) /
+    /// (max + 1 - min)` worked out by hand from the numbers transcribed in
+    /// [`INT_RANGE_SLIDERS`], not by calling the function under test. Hand
+    /// arithmetic and the implementation are two independent paths to the same
+    /// number, which is the strongest available check here: there is **no JVM
+    /// runtime on this machine**, so vanilla's own `toSliderValue` cannot be
+    /// executed to produce the oracle.
+    #[test]
+    fn every_int_range_slider_lands_on_vanillas_own_fraction() {
+        let o = crate::config::Options::default();
+        let expect = |accessor: &'static str, want: f32, why: &str| {
+            let got = slider(accessor, "caption")
+                .slider_fraction(&o)
+                .unwrap_or_else(|| panic!("{accessor} still has no fraction: {why}"));
+            assert!(
+                (got - want).abs() < 1e-6,
+                "{accessor}: handle at {got}, vanilla puts it at {want} ({why})"
+            );
+        };
+
+        // Interior values: the general `Mth.map` branch.
+        expect("framerateLimit", 11.5 / 26.0, "IntRange(1,26), default int 12");
+        expect(
+            "entityDistanceScaling",
+            2.5 / 19.0,
+            "IntRange(2,20), default 1.0 -> int 4",
+        );
+        expect(
+            "chunkSectionFadeInTime",
+            15.5 / 41.0,
+            "IntRange(0,40), default 0.75 -> int 15",
+        );
+        expect(
+            "menuBackgroundBlurriness",
+            5.5 / 11.0,
+            "IntRange(0,10), default 5",
+        );
+        expect(
+            "notificationDisplayTime",
+            5.5 / 96.0,
+            "IntRange(5,100), default 1.0 -> int 10",
+        );
+        expect("maxAnisotropyBit", 1.5 / 3.0, "IntRange(1,3), default 2");
+        expect("biomeBlendRadius", 2.5 / 8.0, "IntRange(0,7), default 2");
+        expect("sprintWindow", 7.5 / 11.0, "IntRange(0,10), default 7");
+        expect("fov", 40.5 / 81.0, "IntRange(30,110), default 70");
+        expect(
+            "renderDistance",
+            10.5 / 31.0,
+            "IntRange(2,32), default 12 — the max is LARGE_DISTANCES_MAX",
+        );
+        expect(
+            "simulationDistance",
+            7.5 / 28.0,
+            "IntRange(5,32), default 12 — min 5, not the debug-flag 2",
+        );
+
+        // Endpoint values: the two special cases, pinned exactly.
+        expect("mipmapLevels", 1.0, "IntRange(0,4), default 4 == max");
+        expect("cloudRange", 1.0, "IntRange(2,128), default 128 == max");
+        expect("weatherRadius", 1.0, "IntRange(3,10), default 10 == max");
+        expect("chatDelay", 0.0, "IntRange(0,60), default 0.0 -> int 0 == min");
+
+        // The one `SliderableEnum`, whose divisor is `size - 1`.
+        expect(
+            "graphicsPreset",
+            1.0 / 3.0,
+            "FAST/FANCY/FABULOUS/CUSTOM, default FANCY at index 1",
+        );
+    }
+
+    /// Control for hypothesis A: the naive `(v - min) / (max - min)` span.
+    ///
+    /// Run, and observed to disagree. Three rows are chosen because their two
+    /// hypotheses are **far enough apart to be a visible pixel difference** on
+    /// the 150 px settings slider, so this is a magnitude claim and not a sign
+    /// claim: `biomeBlendRadius` differs by 0.027 (≈4 px of handle travel),
+    /// `entityDistanceScaling` by 0.020, `sprintWindow` by 0.018.
+    ///
+    /// It also records the rows that **cannot** discriminate, because a gate
+    /// that happened to pick only those would pass against the wrong formula
+    /// and prove nothing: `fov` (40.5/81 and 40/80 are both exactly 0.5),
+    /// `menuBackgroundBlurriness` (5.5/11 == 5/10) and `maxAnisotropyBit`
+    /// (1.5/3 == 1/2) are algebraic coincidences of their own bounds.
+    #[test]
+    fn the_naive_endpoint_span_hypothesis_is_measurably_wrong() {
+        let o = crate::config::Options::default();
+        // (accessor, min, max, default int, minimum fraction the two must
+        // differ by)
+        let discriminating = [
+            ("biomeBlendRadius", 0, 7, 2, 0.026_f32),
+            ("entityDistanceScaling", 2, 20, 4, 0.019_f32),
+            ("sprintWindow", 0, 10, 7, 0.017_f32),
+        ];
+        for (accessor, min, max, default, floor) in discriminating {
+            let ours = slider(accessor, "caption")
+                .slider_fraction(&o)
+                .expect("a ported range");
+            let rival = rival::endpoint_span(min, max, default);
+            let gap = (ours - rival).abs();
+            assert!(
+                gap > floor,
+                "{accessor}: ours {ours} and the naive span {rival} are only \
+                 {gap} apart — this row has stopped discriminating, so the \
+                 control is vacuous and a wrong formula would pass"
+            );
+            // And the wrong one must actually fail the real assertion.
+            let want = SliderRange { min, max }.to_slider_value(default);
+            assert!(
+                (rival - want).abs() > floor,
+                "{accessor}: the naive span must FAIL the predicted value"
+            );
+        }
+
+        // The recorded non-discriminators, asserted as equalities so that if a
+        // future range change makes one of them *able* to discriminate, this
+        // says so rather than silently leaving the claim stale.
+        for (min, max, default) in [(30, 110, 70), (0, 10, 5), (1, 3, 2)] {
+            let ours = SliderRange { min, max }.to_slider_value(default);
+            assert!(
+                (ours - rival::endpoint_span(min, max, default)).abs() < 1e-6,
+                "({min},{max},{default}) was recorded as a coincidence where both \
+                 formulas agree; it no longer is, so the doc comment is stale"
+            );
+        }
+    }
+
+    /// Control for hypothesis B: bucket centres without the endpoint pinning.
+    ///
+    /// Run, and observed to disagree at both ends. `mipmapLevels`' default *is*
+    /// its maximum, and the unpinned formula puts it at 0.9 — a handle sitting
+    /// a tenth of the track short of the end on a slider a player sees maxed.
+    #[test]
+    fn dropping_the_endpoint_special_cases_is_measurably_wrong() {
+        // Maximum: pinned to 1.0, unpinned falls short.
+        for (min, max, default, unpinned) in [
+            (0, 4, 4, 4.5 / 5.0),      // mipmapLevels: 0.9
+            (3, 10, 10, 7.5 / 8.0),    // weatherRadius: 0.9375
+            (2, 128, 128, 126.5 / 127.0), // cloudRange: 0.99606
+        ] {
+            let ours = SliderRange { min, max }.to_slider_value(default);
+            let rival = rival::unpinned_centres(min, max, default);
+            assert_eq!(ours, 1.0, "the max pins to exactly 1.0");
+            assert!(
+                (rival - unpinned).abs() < 1e-6,
+                "the control's own value moved: {rival} vs {unpinned}"
+            );
+            assert!(
+                rival < ours,
+                "the unpinned formula must FAIL the pinned value, short of the end"
+            );
+        }
+        // The strongest single case, stated as a magnitude: mipmapLevels is a
+        // tenth of the track out, which at 150 px is 15 px of handle.
+        let gap = 1.0 - rival::unpinned_centres(0, 4, 4);
+        assert!(
+            (gap - 0.1).abs() < 1e-6,
+            "mipmapLevels' unpinned error is {gap}, expected exactly 0.1"
+        );
+
+        // Minimum: pinned to 0.0, unpinned overshoots.
+        let ours = SliderRange { min: 0, max: 60 }.to_slider_value(0);
+        let rival = rival::unpinned_centres(0, 60, 0);
+        assert_eq!(ours, 0.0, "chatDelay's default is its minimum");
+        assert!(
+            rival > ours,
+            "the unpinned formula must FAIL at the minimum too, past the start"
+        );
+    }
+
+    /// Coverage: every slider row the settings tree renders now reports a
+    /// fraction, except the one documented non-slider-shaped leftover.
+    ///
+    /// This is the island check for #424 — a range ported into
+    /// [`INT_RANGE_SLIDERS`] that no row's accessor matches would be dead data,
+    /// and a row whose accessor is in neither table would silently draw no
+    /// handle. Sweeping the real `PAGES` is what makes it a coverage claim
+    /// rather than a spot check on the rows I happened to think of.
+    #[test]
+    fn every_slider_the_tree_renders_can_place_its_handle() {
+        let o = crate::config::Options::default();
+        // `fullscreenResolution`'s value set is the monitor's real video-mode
+        // list, so it has no range and no default int — see
+        // `int_range_default_fraction`'s doc.
+        const KNOWN_HANDLE_LESS: &[&str] = &["fullscreenResolution"];
+
+        let mut seen: Vec<&str> = Vec::new();
+        let mut missing: Vec<&str> = Vec::new();
+        for in_world in [false, true] {
+            for page in PAGES {
+                for cell in all_controls(page, in_world) {
+                    let Cell::Option(spec) = cell else { continue };
+                    if spec.widget != OptionWidget::Slider {
+                        continue;
+                    }
+                    seen.push(spec.accessor);
+                    if cell.slider_fraction(&o).is_none() {
+                        missing.push(spec.accessor);
+                    }
+                }
+            }
+        }
+        missing.sort_unstable();
+        missing.dedup();
+        assert_eq!(
+            missing, KNOWN_HANDLE_LESS,
+            "these slider rows draw no handle; either port their range into \
+             INT_RANGE_SLIDERS or document why they cannot have one"
+        );
+
+        // The mirror direction: no ported range is dead data.
+        for (accessor, _, _) in INT_RANGE_SLIDERS {
+            assert!(
+                seen.contains(accessor),
+                "{accessor} has a ported range but no row on any page renders \
+                 it — dead data, or the accessor string does not match"
+            );
+        }
+
+        // And the detector works: a slider the tables do not know must still
+        // report `None`, or the sweep above would pass vacuously.
+        assert_eq!(
+            slider("notAnOption", "caption").slider_fraction(&o),
+            None,
+            "an unported accessor must report no handle"
+        );
     }
 
     /// Every [`LiveOption`] must be placed on some page — the island check in
