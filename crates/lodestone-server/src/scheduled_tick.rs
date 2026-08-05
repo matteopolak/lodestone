@@ -260,6 +260,32 @@ impl<T: Eq + Hash + Clone> ScheduledTickQueue<T> {
         self.scheduled.contains(&(pos, kind.clone()))
     }
 
+    /// Every pending tick, in **heap order — not due order**.
+    ///
+    /// **Non-destructive**, which is the entire reason it exists: [`drain_due`]
+    /// is the only other way to see the contents and it *removes* them, so
+    /// saving the world through it would desync the running server from what
+    /// lands on disk. Added for #468's remaining half.
+    ///
+    /// Two schema traps for whoever serialises these, both measured against
+    /// 4,023 real vanilla chunks read with an independent parser, and both of
+    /// which the decompiled source reads misleadingly:
+    ///
+    /// * vanilla's `p` is an `Int` carrying the priority **value** in `-3..3`,
+    ///   **not** an ordinal. Our [`TickPriority`] is declaration-ordered so its
+    ///   `Ord` matches Java's `compareTo`, which makes `Normal`'s ordinal `3`
+    ///   and its value `0` — writing the ordinal would silently turn every
+    ///   normal tick into `EXTREMELY_LOW`.
+    /// * vanilla's `t` is a delay **relative to game time at save, and can be
+    ///   negative** (`-33` observed for an overdue lava tick). Loading is
+    ///   `trigger_tick = game_time_at_load + delay`; an unsigned conversion
+    ///   panics or wraps.
+    ///
+    /// [`drain_due`]: Self::drain_due
+    pub fn iter(&self) -> impl Iterator<Item = &ScheduledTick<T>> {
+        self.heap.iter().map(|entry| &entry.0)
+    }
+
     /// Drains every tick due at or before `current_tick` (`trigger_tick <=
     /// current_tick`), in `DRAIN_ORDER`, up to `max_to_process` entries —
     /// mirrors `LevelTicks::tick`/`ServerLevel`'s `65536` cap
