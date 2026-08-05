@@ -823,6 +823,31 @@ impl WindowApp {
             menu.render_overlay(device, queue, frame.view(), &settings_frame, w, h);
         }
 
+        // Issue #474: the command block edit screen was drawn **nowhere**.
+        // `menu::render::frame_for` correctly has no arm — it is an overlay, not
+        // a full screen — but neither did `on_screen_frame`, and neither did
+        // this function, so `command_block_frame` had no production caller at
+        // all and the screen's clicks never hit-tested. Right-clicking a command
+        // block opened a screen that rendered nothing.
+        //
+        // Exactly the shape of the in-world Settings block above, and of
+        // `0d0ae93`'s fix: a screen whose `frame_for` answers `None` for a
+        // correct reason still needs someone to draw it, or the `None` means
+        // "invisible" rather than "overlay".
+        //
+        // `command_tree()` is passed rather than `None`: the suggestion popup on
+        // this screen is fed by the real server's tree now that #470 decodes it
+        // and #471 routes it to the shell. `None` draws no popup at all, which
+        // is the honest fallback before a tree arrives.
+        if self.ui.is_command_block_open()
+            && let Some(state) = self.nav.command_block()
+            && let Some(menu) = self.menu.as_mut()
+        {
+            let command_block_frame =
+                crate::menu::render::command_block_frame(state, self.nav.command_tree());
+            menu.render_overlay(device, queue, frame.view(), &command_block_frame, w, h);
+        }
+
         // `key.screenshot` (issue #16), and **this position is the whole
         // correctness argument**: every pass above — world, HUD, container, and
         // the three overlay blocks — has now written into `frame.view()`, and

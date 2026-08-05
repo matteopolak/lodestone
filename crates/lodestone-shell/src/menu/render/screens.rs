@@ -192,10 +192,15 @@ pub fn death_frame(nav: &super::nav::MenuNav, message: Option<&str>) -> MenuFram
 /// vanilla's own `isInGameUi() == true`
 /// (`AbstractCommandBlockEditScreen.java:123-126`).
 ///
-/// `tree` is threaded through purely so this function is testable against a
-/// real completion list — every production caller passes `None` today (see
-/// [`super::command_block`]'s module doc), and `None` here draws no suggestion
-/// popup at all rather than a fabricated one.
+/// `tree` carries the real server's command tree. This used to read "threaded
+/// through purely so this function is testable — every production caller passes
+/// `None` today", which was true when written and is not now: #470 decodes
+/// clientbound `COMMANDS`, #471 routes it to the shell, and `app/redraw.rs`'s
+/// overlay block (#474) passes `self.nav.command_tree()` here.
+///
+/// `None` remains the honest state before a tree arrives — a session that has
+/// not received one, or a hermetic test — and draws no suggestion popup at all
+/// rather than a fabricated one.
 #[must_use]
 pub fn command_block_frame(
     state: &command_block::CommandBlockState,
