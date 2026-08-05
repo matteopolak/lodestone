@@ -54,7 +54,7 @@ use crate::chunk::ChunkSource;
 use crate::mobs::{Detonation, LiveMobSource, MobHandle, MobSim};
 use lodestone_entity::ai::mob::EatenBlock;
 use crate::random_tick::{DEFAULT_RANDOM_TICK_SPEED, RandomTickScheduler};
-use crate::scheduled_tick::{ScheduledTick, ScheduledTickQueue, TickPriority};
+use crate::scheduled_tick::{ScheduledTick, TickPriority};
 use lodestone_model::BlockPos;
 
 /// Vanilla's `mobGriefing` game rule, which gates whether a mob may change the
@@ -603,6 +603,18 @@ pub(crate) async fn run_tick_loop<W>(
     block_tick_out: BlockTickFeed,
     tick_area: (RangeInclusive<i32>, RangeInclusive<i32>),
     explosion_out: ExplosionFeed,
+    // Issue #468's last wire. The two scheduled-tick queues used to be locals
+    // here, so the queues the persistence path reads were always empty in
+    // production and a pending repeater tick was lost on quit — the schema
+    // (`chunk_nbt::SavedTick`) and the save/load halves were both built and both
+    // gated against real vanilla bytes while nothing filled them.
+    //
+    // The game tick they are measured against travels with them, because it must
+    // come from *this* counter and not be re-derived. A second clock here is
+    // issue #323's bug in a new place: `SET_TIME` decoded, really did darken the
+    // sky, every link in the wire green, while the value was wall-clock
+    // elapsed-since-join rather than the tick counter.
+    scheduled: crate::region_source::ScheduledTickHandle,
 ) where
     W: ChunkSource,
 {
@@ -616,10 +628,9 @@ pub(crate) async fn run_tick_loop<W>(
     let mut last_overload_warning_at: Option<tokio::time::Instant> = None;
     let mut game_tick: u64 = 0;
     // #308: one queue per vanilla queue (`ServerLevel.blockTicks`/
-    // `fluidTicks`, `ServerLevel.java:209-210`) — see this function's own
-    // doc comment for why nothing schedules into either yet.
-    let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
-    let mut fluid_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+    // `fluidTicks`, `ServerLevel.java:209-210`). Owned by `scheduled` rather
+    // than by this function since #468, which is what lets them be saved; they
+    // are borrowed out of it once per tick below.
     // #307.
     let mut random_ticks = RandomTickScheduler::new(RANDOM_TICK_POSITION_SEED, RANDOM_TICK_BEHAVIOR_SEED);
     let (tick_cx_range, tick_cz_range) = tick_area;
@@ -712,7 +723,32 @@ pub(crate) async fn run_tick_loop<W>(
         });
 
         game_tick += 1;
+        // Issue #468: the tick every pending `trigger_tick` is relative to, so a
+        // saved queue can be rebased on load. One relaxed atomic store — the
+        // tick-thread cost is a count of one, no I/O and no encoding.
+        scheduled.set_game_tick(game_tick);
 
+        // Issue #468: both queues are borrowed out of `scheduled` for the whole
+        // scheduled-tick and random-tick section, and every use site inside is
+        // textually unchanged — deliberately a wrapper rather than a rewrite,
+        // because this is the function the redstone work lives in.
+        //
+        // `with` is **synchronous**, and that is the safety property rather than
+        // a limitation: a closure cannot contain an `.await`, so the compiler —
+        // not a reviewer — guarantees the `MutexGuard` never crosses a suspension
+        // point, which would make this task non-`Send`. Verified: there is no
+        // `.await` anywhere in the wrapped region.
+        //
+        // The region extends past the last use of `fluid_ticks` to the end of the
+        // random-tick pass, which `docs/tick-scheduling.md`'s step 3 does not
+        // mention: `random_ticks.tick_chunk` also takes `&mut block_ticks`, so
+        // closing the closure at the fluid loop would put that call out of scope.
+        // The body below is left at its original indentation for the same reason
+        // the wrapper shape was chosen — re-indenting it would touch every line
+        // of the section and bury the real change.
+        scheduled.with(|queues| {
+        let mut block_ticks = &mut queues.block;
+        let fluid_ticks = &mut queues.fluid;
         // Issue #465: adopt the block ticks a player's own mutation scheduled.
         // `server::propagate_placement` runs the fan-out inline at packet time
         // (like vanilla) and cannot host what it schedules, because the queue
@@ -842,6 +878,7 @@ pub(crate) async fn run_tick_loop<W>(
                 }
             }
         }
+        });
 
         clock.record_tick(tick_start.elapsed());
     }
@@ -851,6 +888,9 @@ pub(crate) async fn run_tick_loop<W>(
 mod tests {
     use super::*;
     use crate::mobs::ChunkWorld;
+    // No longer imported at module scope: `run_tick_loop` borrows its queues out
+    // of `ScheduledTickHandle` since #468 and names the type nowhere.
+    use crate::scheduled_tick::ScheduledTickQueue;
     // For `ResourceKey::from_str` in the issue-#456 graze gates below.
     use std::str::FromStr;
 
@@ -904,6 +944,7 @@ mod tests {
             block_tick_out,
             tick_area,
             ExplosionFeed::default(),
+            crate::region_source::ScheduledTickHandle::default(),
         ));
         // Let the freshly spawned task reach its first `Instant::now()` call (its
         // `next_tick_at` baseline) before any `advance()` below — otherwise the
@@ -943,6 +984,7 @@ mod tests {
             block_tick_out,
             tick_area,
             ExplosionFeed::default(),
+            crate::region_source::ScheduledTickHandle::default(),
         ));
         // Let the freshly spawned task reach its first `Instant::now()` call (its
         // `next_tick_at` baseline) before any `advance()` below — otherwise the
@@ -1161,6 +1203,7 @@ mod tests {
             block_tick_out,
             tick_area,
             ExplosionFeed::default(),
+            crate::region_source::ScheduledTickHandle::default(),
         ));
         // Let the freshly spawned task reach its first `Instant::now()` call (its
         // `next_tick_at` baseline) before any `advance()` below — otherwise the
@@ -1334,6 +1377,7 @@ mod tests {
             feed.clone(),
             (64..=64, 64..=64),
             ExplosionFeed::default(),
+            crate::region_source::ScheduledTickHandle::default(),
         ));
         // See `ten_periods_advance_exactly_ten_ticks_with_no_overrun`: the
         // spawned task must reach its first `Instant::now()` before any
