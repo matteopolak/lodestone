@@ -7,7 +7,7 @@
 //! the architecture, not to port every goal.
 
 use super::goal::{Flag, FlagSet, Goal};
-use super::mob::{MobController, distance_sqr};
+use super::mob::{EatenBlock, MobController, distance_sqr};
 use lodestone_model::Vec3;
 
 /// Swims: repeatedly requests a jump while in water or lava so the mob floats.
@@ -872,6 +872,117 @@ impl Goal for BreedGoal {
             && distance_sqr(partner, mob.position()) < Self::BREED_RANGE_SQR
         {
             mob.breed();
+        }
+    }
+}
+
+/// Grazes: stands still, plays out an eat animation, and consumes the grass at
+/// or under the mob's feet.
+///
+/// Vanilla `EatBlockGoal` (flags MOVE + LOOK + JUMP —
+/// `ai/goal/EatBlockGoal.java:24`), registered by the sheep at goal-priority 5
+/// (`animal/sheep/Sheep.java`). **The first goal in this module whose predicate
+/// reads the world**, which is why it could not exist before issue #456 put
+/// [`MobController::block_cues_below`] on the seam.
+///
+/// Two blocks, two behaviours, and vanilla checks them in this order
+/// (`:33-34`, and again at `:62-78`): the block the mob is standing *in* if it
+/// is `#edible_for_sheep`, otherwise the `grass_block` it is standing *on*.
+/// Which one it was decides the host's mutation, so the goal reports it as an
+/// [`EatenBlock`].
+///
+/// # Timing, and why every constant here is halved
+///
+/// `Goal.adjustedTickDelay` is `reducedTickDelay` — `Mth.positiveCeilDiv(t, 2)` —
+/// for any goal that does not override `requiresUpdateEveryTick`, and this one
+/// does not (`ai/goal/Goal.java:53-55`). So the jar's `1000`, `50`, `40` and `4`
+/// are **500, 25, 20 and 2** ticks in practice. Transcribing the unhalved
+/// numbers would make a sheep graze half as often and hold the animation twice
+/// as long, which no test asserting only "it eventually ate" would catch.
+#[derive(Debug, Default)]
+pub struct EatBlockGoal {
+    /// Counts down from [`EAT_ANIMATION_TICKS`](Self::EAT_ANIMATION_TICKS);
+    /// `> 0` is "still eating" (`ai/goal/EatBlockGoal.java:19`, `:50-52`).
+    eat_animation_tick: i32,
+}
+
+impl EatBlockGoal {
+    /// `adjustedTickDelay(40)` — the eat animation's length in ticks
+    /// (`ai/goal/EatBlockGoal.java:15`, `:39`).
+    pub const EAT_ANIMATION_TICKS: i32 = 20;
+
+    /// `adjustedTickDelay(1000)` — an adult's mean interval between grazing
+    /// attempts (`ai/goal/EatBlockGoal.java:29`).
+    pub const ADULT_INTERVAL: i32 = 500;
+
+    /// `adjustedTickDelay(50)` — a baby's, which grazes 20× as often.
+    pub const BABY_INTERVAL: i32 = 25;
+
+    /// `adjustedTickDelay(4)` — the tick *within* the animation on which the
+    /// block is actually consumed (`ai/goal/EatBlockGoal.java:61`). Note this is
+    /// near the animation's **end**, so a goal interrupted early eats nothing.
+    pub const CONSUME_AT: i32 = 2;
+
+    /// Creates the goal.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ticks left in the eat animation (vanilla's `getEatAnimationTick`,
+    /// `ai/goal/EatBlockGoal.java:54-56`). Vanilla drives the head-down pose
+    /// from this, broadcast as entity event `10` (`:40`) — a wire concern this
+    /// crate cannot reach, so a host that wants the animation reads it here.
+    #[must_use]
+    pub fn eat_animation_tick(&self) -> i32 {
+        self.eat_animation_tick
+    }
+}
+
+impl Goal for EatBlockGoal {
+    fn flags(&self) -> FlagSet {
+        FlagSet::of(&[Flag::Move, Flag::Look, Flag::Jump])
+    }
+
+    fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        let interval = if mob.is_baby() {
+            Self::BABY_INTERVAL
+        } else {
+            Self::ADULT_INTERVAL
+        };
+        if mob.next_i32(interval) != 0 {
+            return false;
+        }
+        // `IS_EDIBLE.test(getBlockState(pos)) ? true : getBlockState(pos.below())
+        // .is(GRASS_BLOCK)` (`ai/goal/EatBlockGoal.java:34`).
+        mob.block_cues_at_feet().edible_for_sheep || mob.block_cues_below().grass_block
+    }
+
+    fn can_continue_to_use(&mut self, _mob: &mut dyn MobController) -> bool {
+        self.eat_animation_tick > 0
+    }
+
+    fn start(&mut self, mob: &mut dyn MobController) {
+        self.eat_animation_tick = Self::EAT_ANIMATION_TICKS;
+        mob.stop_navigation();
+    }
+
+    fn stop(&mut self, _mob: &mut dyn MobController) {
+        self.eat_animation_tick = 0;
+    }
+
+    fn tick(&mut self, mob: &mut dyn MobController) {
+        self.eat_animation_tick = (self.eat_animation_tick - 1).max(0);
+        if self.eat_animation_tick != Self::CONSUME_AT {
+            return;
+        }
+        // Re-read rather than trusting `can_use`'s answer: vanilla re-tests both
+        // blocks here (`:63`, `:71`) because the mob has been standing on them
+        // for 20 ticks and something else may have changed them.
+        if mob.block_cues_at_feet().edible_for_sheep {
+            mob.ate(EatenBlock::AtFeet);
+        } else if mob.block_cues_below().grass_block {
+            mob.ate(EatenBlock::Below);
         }
     }
 }

@@ -28,9 +28,9 @@
 use lodestone_model::{BlockPos, Vec3};
 
 use super::goal::GoalSelector;
-use super::mob::{MobController, ProjectileLaunch, distance_sqr};
+use super::mob::{EatenBlock, MobController, ProjectileLaunch, distance_sqr};
 use crate::pathfinding::{
-    MobShape, PathFinder, PathNavigator, PathParams, PathStart, PathType, PathWorld,
+    BlockCues, MobShape, PathFinder, PathNavigator, PathParams, PathStart, PathType, PathWorld,
 };
 
 /// Vanilla `Animal::setInLove`'s love-mode duration, in ticks
@@ -340,6 +340,11 @@ pub struct NavigatingMob<'w> {
     /// three anger-gated target rows are deliberately `Coverage::Missing`
     /// (`roster::neutral`'s `no_anger_gated_target_row_is_modelled`).
     angry_target: Option<Vec3>,
+    /// Blocks a grazing goal has eaten, awaiting a host drain via
+    /// [`take_new_eaten`](Self::take_new_eaten) — the
+    /// [`attacks`](Self::attacks)/[`launches`](Self::launches) shape, for the
+    /// same reason: this crate can write neither a block nor entity metadata.
+    eaten: Vec<EatenBlock>,
 }
 
 /// Minecraft body yaw (degrees) for a horizontal movement delta: 0 = +Z (south),
@@ -421,6 +426,7 @@ impl<'w> NavigatingMob<'w> {
             damage_ticks: 0,
             follow_range: DEFAULT_FOLLOW_RANGE,
             angry_target: None,
+            eaten: Vec::new(),
         }
     }
 
@@ -475,6 +481,38 @@ impl<'w> NavigatingMob<'w> {
     /// and what proves it.
     pub fn take_new_launches(&mut self) -> Vec<ProjectileLaunch> {
         std::mem::take(&mut self.launches)
+    }
+
+    /// The blocks a grazing goal has eaten (for tests).
+    #[must_use]
+    pub fn eaten(&self) -> &[EatenBlock] {
+        &self.eaten
+    }
+
+    /// Drains the blocks eaten since the last call — the
+    /// [`take_new_attacks`](Self::take_new_attacks) shape, for issue #456's
+    /// block-perception goals.
+    ///
+    /// **A host that never calls this makes grazing an island** (issue #238):
+    /// `EatBlockGoal` runs, the eat animation plays out, the sheep's head goes
+    /// down, and no grass ever turns to dirt. The host owes two things per
+    /// drained entry — the world mutation described on
+    /// [`EatenBlock`](super::mob::EatenBlock), gated on `mobGriefing`, and the
+    /// species' `ate()` effects (for a sheep, wool regrowth as entity metadata,
+    /// which is a wire concern this crate cannot reach).
+    pub fn take_new_eaten(&mut self) -> Vec<EatenBlock> {
+        std::mem::take(&mut self.eaten)
+    }
+
+    /// The block position this mob occupies — vanilla `mob.blockPosition()`,
+    /// the floor of its feet position.
+    #[must_use]
+    pub fn block_position(&self) -> BlockPos {
+        BlockPos::new(
+            self.pos.x.floor() as i32,
+            self.pos.y.floor() as i32,
+            self.pos.z.floor() as i32,
+        )
     }
 
     /// How many times a goal asked this mob to move.
@@ -1063,6 +1101,23 @@ impl MobController for NavigatingMob<'_> {
 
     fn angry_target(&self) -> Option<Vec3> {
         self.angry_target
+    }
+
+    /// Answered from the [`PathWorld`] this mob already borrows for
+    /// pathfinding — the whole reason issue #456's seam needs no world handle on
+    /// [`MobController`] and no per-tick block feed.
+    fn block_cues_at_feet(&self) -> BlockCues {
+        let p = self.block_position();
+        self.world.block_cues(p.x, p.y, p.z)
+    }
+
+    fn block_cues_below(&self) -> BlockCues {
+        let p = self.block_position();
+        self.world.block_cues(p.x, p.y - 1, p.z)
+    }
+
+    fn ate(&mut self, what: EatenBlock) {
+        self.eaten.push(what);
     }
 
     fn attack(&mut self, target: Vec3) {

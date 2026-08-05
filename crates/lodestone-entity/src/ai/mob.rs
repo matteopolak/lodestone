@@ -11,6 +11,8 @@
 
 use lodestone_model::Vec3;
 
+use crate::pathfinding::BlockCues;
+
 /// The mob-facing operations a [`Goal`](crate::ai::Goal) may perform.
 ///
 /// All methods take `&mut self` because goals both observe and command the mob;
@@ -239,6 +241,69 @@ pub trait MobController {
         let _ = dir;
     }
 
+    /// The [`BlockCues`] of the block the mob is standing **in** — vanilla's
+    /// `level.getBlockState(mob.blockPosition())`.
+    ///
+    /// # Why this is a query and not a per-tick feed (issue #456)
+    ///
+    /// Every other perception method on this trait is a value the host's census
+    /// pushed in once per tick (`nearest_player`, `temptation`, …), and a
+    /// pre-fed block snapshot would have matched that shape. It would also have
+    /// been about **three orders of magnitude** more work than the goals need:
+    /// `EatBlockGoal` is the only reader, and its `can_use` consults a block on
+    /// roughly one tick in 500 (`random.nextInt(adjustedTickDelay(1000))`,
+    /// `ai/goal/EatBlockGoal.java:29`). Pushing two block lookups per mob per
+    /// tick to serve that multiplies by the whole mob population; pulling them
+    /// costs exactly nothing on the 499 ticks nobody asks.
+    ///
+    /// It stays object-safe and mockable because the *world handle does not go
+    /// on this trait*. The production implementor already borrows a
+    /// `&dyn PathWorld` for pathfinding and answers from that, so there is no
+    /// new lifetime and no new parameter here — which is why this is neither of
+    /// the two options #456 posed, and cheaper than both.
+    ///
+    /// Defaults to [`BlockCues::NONE`]. A controller that cannot see blocks
+    /// makes every cue-reading goal inert rather than wrong.
+    fn block_cues_at_feet(&self) -> BlockCues {
+        BlockCues::NONE
+    }
+
+    /// The [`BlockCues`] of the block **below** the mob — vanilla's
+    /// `mob.blockPosition().below()`, the one a sheep grazes when it is standing
+    /// on grass rather than in it (`ai/goal/EatBlockGoal.java:34`).
+    ///
+    /// Two separate methods rather than one taking an offset because these are
+    /// the only two positions any of the goals in question reads, and vanilla
+    /// spells them as two distinct expressions. A goal that needs to *search* a
+    /// neighbourhood (`MoveToBlockGoal`'s 16- or 24-block spiral) must not be
+    /// built on this — see `docs/mob-block-perception.md` for why that is a
+    /// host-computed candidate position instead.
+    fn block_cues_below(&self) -> BlockCues {
+        BlockCues::NONE
+    }
+
+    /// Records that the mob just ate a block, for the host to resolve into the
+    /// world mutation and the species' own `ate()` side effects.
+    ///
+    /// Vanilla `EatBlockGoal.tick` does the mutation inline — `destroyBlock` for
+    /// the block at the mob's feet, `setBlock(below, DIRT)` for the grass block
+    /// under it (`ai/goal/EatBlockGoal.java:59-80`) — and then calls
+    /// `mob.ate()`, which for a sheep is `setSheared(false)` plus `ageUp(60)`
+    /// (wool regrowth, `animal/sheep/Sheep.java`). None of that is expressible
+    /// here: this crate can neither write a block nor touch entity metadata. So
+    /// this is an **intent**, the same shape as [`attack`](MobController::attack)
+    /// and [`launch_projectile`](MobController::launch_projectile), drained once
+    /// per tick by the host.
+    ///
+    /// **A host that never drains it turns grazing into an island**: the goal
+    /// runs, the animation plays, and the grass never changes. Note vanilla
+    /// calls `ate()` even when the `mobGriefing` gamerule suppresses the block
+    /// change (`:64-68`), so the two effects are separable on the host side and
+    /// the gamerule check belongs there, not here.
+    fn ate(&mut self, what: EatenBlock) {
+        let _ = what;
+    }
+
     /// Records the intent to launch a projectile this tick — vanilla's
     /// `RangedAttackMob.performRangedAttack`
     /// (`monster/RangedAttackMob.java:5-7`).
@@ -253,6 +318,22 @@ pub trait MobController {
     fn launch_projectile(&mut self, launch: ProjectileLaunch) {
         let _ = launch;
     }
+}
+
+/// Which block a grazing mob just ate, relative to the mob — the two positions
+/// `EatBlockGoal` distinguishes, because vanilla's world mutation differs
+/// between them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EatenBlock {
+    /// The block the mob was standing *in* (`#edible_for_sheep`, e.g.
+    /// `short_grass`). Vanilla **destroys** it: `level.destroyBlock(pos, false)`
+    /// (`ai/goal/EatBlockGoal.java:65`) — no drops, hence the `false`.
+    AtFeet,
+    /// The `grass_block` the mob was standing *on*. Vanilla **replaces** it with
+    /// dirt rather than destroying it, plus level event `2001` for the break
+    /// particles: `setBlock(below, Blocks.DIRT.defaultBlockState(), 2)`
+    /// (`ai/goal/EatBlockGoal.java:72-74`).
+    Below,
 }
 
 /// Which projectile a [`ProjectileLaunch`] asks the host to spawn.

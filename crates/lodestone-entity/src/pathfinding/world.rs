@@ -93,6 +93,56 @@ impl Aabb {
     }
 }
 
+/// The block-*identity* facts a goal needs, classified by the host.
+///
+/// [`PathType`] answers "can a mob walk here", which is all the pathfinder ever
+/// asks and is deliberately blind to which block it is: `grass_block`, `stone`
+/// and `dirt` are one `Blocked`. But several vanilla goals branch on identity —
+/// a sheep eats grass and not stone — so they were inexpressible at the
+/// [`MobController`](crate::ai::MobController) seam, which is issue #456: the
+/// trait declared 33 methods and not one read a block.
+///
+/// # Why booleans rather than a block id or a `PathType`-style enum
+///
+/// Vanilla's own tests are **predicates over tags**, not equality against a
+/// block: `EatBlockGoal`'s is `state.is(BlockTags.EDIBLE_FOR_SHEEP)`
+/// (`ai/goal/EatBlockGoal.java:16`) beside `state.is(Blocks.GRASS_BLOCK)`
+/// (`:34`). Two independent predicates that can hold together, so an enum would
+/// have to enumerate the combinations. A block id would drag a registry into
+/// `lodestone-entity`, which the whole `PathWorld` seam exists to avoid, and
+/// would put tag resolution in the goal — the wrong side, exactly as with
+/// `TemptGoal`'s per-species food tags.
+///
+/// # How to add a cue
+///
+/// Add a field, answer it in the host's `PathWorld` impl, and cite the jar
+/// predicate it stands for in a doc comment. Do **not** add one speculatively:
+/// a cue nothing reads is a per-block cost paid on the host's side for nothing.
+/// Cues are cheap here precisely because they are pulled on demand — see
+/// [`MobController::block_cues_below`](crate::ai::MobController::block_cues_below)
+/// for why this is a query and not a per-tick feed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BlockCues {
+    /// The block is in `#minecraft:edible_for_sheep`
+    /// (`tags/BlockTags.java:110`) — what a sheep grazes when it is standing
+    /// *in* it (`short_grass` and friends), consumed by
+    /// `EatBlockGoal`'s `IS_EDIBLE` (`ai/goal/EatBlockGoal.java:16`).
+    pub edible_for_sheep: bool,
+    /// The block is exactly `minecraft:grass_block` — what a sheep grazes when
+    /// standing *on* it, and the only cue whose vanilla test is block equality
+    /// rather than a tag (`ai/goal/EatBlockGoal.java:34`, `:71`).
+    pub grass_block: bool,
+}
+
+impl BlockCues {
+    /// No cue applies — the correct answer for the overwhelming majority of
+    /// blocks, and the default a host that classifies nothing returns.
+    pub const NONE: Self = Self {
+        edible_for_sheep: false,
+        grass_block: false,
+    };
+}
+
 /// The pathfinder's read-only view of the world.
 ///
 /// Coordinates are block coordinates. Only [`base_path_type`](PathWorld::base_path_type)
@@ -147,6 +197,28 @@ pub trait PathWorld: Send + Sync {
     /// case. Defaults to matching [`PathType::Water`].
     fn is_water(&self, x: i32, y: i32, z: i32) -> bool {
         matches!(self.base_path_type(x, y, z), PathType::Water)
+    }
+
+    /// The block-identity [`BlockCues`] at this position — the goal-facing
+    /// counterpart to [`base_path_type`](PathWorld::base_path_type), which
+    /// cannot tell `grass_block` from `stone`.
+    ///
+    /// This is on the *world* seam rather than on
+    /// [`MobController`](crate::ai::MobController) because that is where
+    /// registry knowledge already lives: every other version-specific block
+    /// question in this crate is answered here, by the host adapter that owns
+    /// the block registry. A goal reaches it through the controller, whose
+    /// production implementor (`NavigatingMob`) already holds a
+    /// `&dyn PathWorld` and so needs no new borrow, no lifetime and no change
+    /// to the controller's object safety.
+    ///
+    /// Defaults to [`BlockCues::NONE`], so an adapter that classifies nothing
+    /// still compiles — at the price of every cue-reading goal being inert.
+    /// **That is not a neutral default**: a sheep in a world whose adapter does
+    /// not answer this will never graze, and nothing will fail.
+    fn block_cues(&self, x: i32, y: i32, z: i32) -> BlockCues {
+        let _ = (x, y, z);
+        BlockCues::NONE
     }
 }
 
