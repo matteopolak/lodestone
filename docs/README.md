@@ -775,6 +775,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   geometry: a `HeaderAndFooterLayout` title, 36 px list rows with a 32×32 favicon,
   wrapped MOTD and a status column, and seven footer buttons three of which are
   inactive when there is nothing selected.
+- [Server-list status (the Status phase)](./server-status.md) — How Lodestone's
+  integrated server answers a client's **server-list ping** — the MOTD, player
+  count, version, protocol number, and optional favicon a player sees in their
+  multiplayer list before they ever try to join, plus the latency `pong` that renders
+  the connection-strength bars. Issue #277.
 - [The server tick clock: MSPT/TPS accounting and overrun handling](./server-tick-loop.md) —
   `crates/lodestone-server/src/tick.rs`: [`TickClock`]/[`TickStats`] plus
   `run_tick_loop`, the single background task that advances world state (the mob

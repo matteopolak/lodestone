@@ -114,6 +114,32 @@ pub enum ServerBound {
         /// from the session server).
         uuid: Uuid,
     },
+    /// The client asked for the server-list status (mirrors
+    /// `ServerboundStatusRequestPacket`, whose body is *empty* —
+    /// `StreamCodec.unit(INSTANCE)`,
+    /// `net/minecraft/network/protocol/status/ServerboundStatusRequestPacket.java:10`).
+    ///
+    /// This is the very first thing a real client sends after a handshake whose
+    /// `next_state` was Status, i.e. when a player adds our server to their
+    /// multiplayer list. The loop answers with
+    /// [`ServerProtocol::encode_status_response`].
+    StatusRequest,
+    /// The client asked us to echo a clock reading so it can compute latency
+    /// (mirrors `ServerboundPingRequestPacket`: a single big-endian `long`,
+    /// `net/minecraft/network/protocol/ping/ServerboundPingRequestPacket.java:19`).
+    ///
+    /// Sent in the Status phase immediately after
+    /// [`ServerBound::StatusRequest`]; the loop answers with
+    /// [`ServerProtocol::encode_pong_response`] carrying `time` unchanged and
+    /// then terminates the connection, exactly as vanilla's own
+    /// `ServerStatusPacketListenerImpl.handlePingRequest` does
+    /// (`net/minecraft/server/network/ServerStatusPacketListenerImpl.java:44-47`).
+    PingRequest {
+        /// The client's local clock reading, echoed back verbatim. Vanilla
+        /// treats this as opaque — it is the *client* that subtracts it from
+        /// its own clock — so the server must not reinterpret or clamp it.
+        time: i64,
+    },
     /// The client acknowledged login success. This is the server-side signal
     /// to move the connection into [`State::Configuration`] and start sending
     /// configuration-phase directives, mirroring
@@ -478,6 +504,64 @@ pub trait ServerProtocol: Send + Sync {
     /// configuration phase from the server's side.
     fn begin_configuration(&self) -> Vec<ServerDirective>;
 
+    /// Encodes the server-list status reply to a [`ServerBound::StatusRequest`]
+    /// (vanilla `ClientboundStatusResponsePacket`, whose whole body is one
+    /// length-prefixed JSON document — `ByteBufCodecs.lenientJson(32767)`,
+    /// `net/minecraft/network/protocol/status/ClientboundStatusResponsePacket.java:16`).
+    ///
+    /// The parameters are deliberately scalars rather than a struct: everything
+    /// here is version-free, but the two fields vanilla's own `ServerStatus`
+    /// also carries — `version.name` and `version.protocol` — are *not*, so the
+    /// implementor fills those from its own protocol number, exactly as
+    /// vanilla's `ServerStatus.Version.current()` does
+    /// (`status/ServerStatus.java:71-74`). This crate must never name a
+    /// protocol number, so it cannot pass them in.
+    ///
+    /// * `description` — the MOTD, serialized as a text component.
+    /// * `players_online` / `players_max` — vanilla's `players.online` /
+    ///   `players.max` (`status/ServerStatus.java:52-60`).
+    /// * `sample` — `players.sample`, a list of `(uuid, name)` pairs
+    ///   (`NameAndId`, `server/players/NameAndId.java:11-13`). Empty is legal
+    ///   and is what vanilla sends when the sample is disabled.
+    /// * `favicon_png` — raw PNG bytes, which the implementor base64-encodes
+    ///   behind vanilla's mandatory `data:image/png;base64,` prefix
+    ///   (`status/ServerStatus.java:36`). `None` omits the field entirely.
+    /// * `enforces_secure_chat` — vanilla's `enforcesSecureChat`, default
+    ///   `false` (`status/ServerStatus.java:30`).
+    ///
+    /// The default emits nothing, so a protocol with no status support behaves
+    /// exactly as it did before this method existed.
+    fn encode_status_response(
+        &self,
+        description: &str,
+        players_online: i32,
+        players_max: i32,
+        sample: &[(Uuid, String)],
+        favicon_png: Option<&[u8]>,
+        enforces_secure_chat: bool,
+    ) -> ServerDirective {
+        let _ = (
+            description,
+            players_online,
+            players_max,
+            sample,
+            favicon_png,
+            enforces_secure_chat,
+        );
+        ServerDirective::None
+    }
+
+    /// Encodes the reply to a [`ServerBound::PingRequest`] (vanilla
+    /// `ClientboundPongResponsePacket`: the same single big-endian `long`,
+    /// echoed unchanged —
+    /// `net/minecraft/network/protocol/ping/ClientboundPongResponsePacket.java:14-19`).
+    ///
+    /// The default emits nothing.
+    fn encode_pong_response(&self, time: i64) -> ServerDirective {
+        let _ = time;
+        ServerDirective::None
+    }
+
     /// Emits the join sequence once the connection has moved into
     /// [`State::Play`] (in reply to [`ServerBound::ConfigurationFinished`]):
     /// the join-game packet, default spawn position, initial teleport, and
@@ -800,6 +884,29 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn begin_configuration(&self) -> Vec<ServerDirective> {
         (**self).begin_configuration()
+    }
+
+    fn encode_status_response(
+        &self,
+        description: &str,
+        players_online: i32,
+        players_max: i32,
+        sample: &[(Uuid, String)],
+        favicon_png: Option<&[u8]>,
+        enforces_secure_chat: bool,
+    ) -> ServerDirective {
+        (**self).encode_status_response(
+            description,
+            players_online,
+            players_max,
+            sample,
+            favicon_png,
+            enforces_secure_chat,
+        )
+    }
+
+    fn encode_pong_response(&self, time: i64) -> ServerDirective {
+        (**self).encode_pong_response(time)
     }
 
     fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective> {

@@ -56,7 +56,7 @@ use lodestone_data::entity_types::entity_type_id;
 use lodestone_data::items::{item_id, item_name};
 use lodestone_data::menus::menu_id;
 use lodestone_data::mob_effects::mob_effect_name;
-use crate::packet_ids::{configuration, handshaking, login, play};
+use crate::packet_ids::{MINECRAFT_VERSION, configuration, handshaking, login, play, status};
 use crate::packets::chunk::ChunkShape;
 use crate::packets::common::{
     BrandPayload, ClientInformation, KeepAlive, PingRequest, Pong, ResourcePackResponse,
@@ -746,6 +746,128 @@ fn encode_system_chat(message: &str, overlay: bool) -> Vec<u8> {
     w.into_vec()
 }
 
+/// Base64-encodes `bytes` with the standard RFC 4648 alphabet and `=`
+/// padding — the exact inverse of `lodestone_net::status::decode_base64`, which
+/// this crate's *client* half already uses to read a real server's favicon.
+///
+/// Hand-rolled for the same reason that decoder is: it is a dozen lines, and
+/// vanilla's favicon field is the only thing in this file that needs base64 at
+/// all (`ServerStatus.Favicon`'s codec is literally
+/// `Base64.getEncoder().encode(...)` behind a fixed prefix —
+/// `status/ServerStatus.java:49`). Standard alphabet, not base64url: vanilla
+/// uses `java.util.Base64.getEncoder()`, which is the `+`/`/` variant.
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    for chunk in bytes.chunks(3) {
+        // Pack the (1..=3) input bytes left-aligned into 24 bits, then peel
+        // off four 6-bit groups, emitting `=` for any group with no input
+        // bits behind it at all.
+        let mut buf = [0u8; 3];
+        buf[..chunk.len()].copy_from_slice(chunk);
+        let packed = (u32::from(buf[0]) << 16) | (u32::from(buf[1]) << 8) | u32::from(buf[2]);
+        for group in 0..4 {
+            if group <= chunk.len() {
+                let index = (packed >> (18 - 6 * group)) & 0x3f;
+                out.push(char::from(ALPHABET[index as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// Serializes vanilla's `ServerStatus` document
+/// (`status/ServerStatus.java:17-33`) into the JSON body of a
+/// `status_response` packet.
+///
+/// Field-by-field against that record's codec, in vanilla's own declaration
+/// order:
+///
+/// | JSON key | vanilla source | notes |
+/// |---|---|---|
+/// | `description` | `ComponentSerialization.CODEC` | written as `{"text": …}` |
+/// | `players` | `Players.CODEC` (`:53-60`) | `max`, `online`, `sample` |
+/// | `version` | `Version.CODEC` (`:64-69`) | `name`, `protocol` |
+/// | `favicon` | `Favicon.CODEC` (`:37-49`) | `data:image/png;base64,…` |
+/// | `enforcesSecureChat` | `Codec.BOOL` (`:30`) | omitted when `false` |
+///
+/// Two deliberate choices about *omission*, both licensed by that codec rather
+/// than guessed. `players`, `version`, `favicon` and `enforcesSecureChat` are
+/// each `lenientOptionalFieldOf`, so a missing key is legal — but `players` and
+/// `version` are what a client's server-list row actually renders, so they are
+/// always written. `favicon` is omitted entirely when there is no icon (an
+/// empty-string favicon is *not* legal: `Favicon.CODEC` errors with
+/// `"Unknown format"` on anything lacking the prefix, `:38-40`), and
+/// `enforcesSecureChat` is omitted when `false` because that is its declared
+/// default (`:30`) and vanilla's own encoder drops defaulted optional fields.
+///
+/// `description` is written as a `{"text": …}` object rather than a bare JSON
+/// string. **A live 26.2 server emits the bare-string form** for a MOTD set in
+/// `server.properties` — captured, not assumed; see
+/// `tests/fixtures/vanilla_status_response_26_2.json`, whose `description` is
+/// the string `"Lodestone survival test world"` with no wrapper. `Component`'s
+/// serializer collapses a plain literal that way. This function deliberately
+/// does *not* match that, because both forms decode
+/// (`ComponentSerialization.CODEC` accepts either, and our own client-side
+/// `lodestone_net::status::parse_status_json` has gates for both) and the object
+/// form is unambiguous for a MOTD that happens to look like a number, `true`, or
+/// `null` — which the bare-string form would still encode correctly but which is
+/// one fewer thing to reason about. If a future gate ever needs byte-identity
+/// with vanilla's own output, this is the field that will differ, and this
+/// paragraph is why.
+fn encode_status_response_body(
+    description: &str,
+    players_online: i32,
+    players_max: i32,
+    sample: &[(Uuid, String)],
+    favicon_png: Option<&[u8]>,
+    enforces_secure_chat: bool,
+) -> Vec<u8> {
+    let mut document = serde_json::Map::new();
+    document.insert(
+        "description".to_owned(),
+        serde_json::json!({ "text": description }),
+    );
+    document.insert(
+        "players".to_owned(),
+        serde_json::json!({
+            "max": players_max,
+            "online": players_online,
+            // `NameAndId.CODEC` keys these `id` and `name`, and writes the
+            // uuid through `UUIDUtil.STRING_CODEC` — the hyphenated string
+            // form, not the two-longs array a *packet* field would use
+            // (`server/players/NameAndId.java:12-13`).
+            "sample": sample
+                .iter()
+                .map(|(id, name)| serde_json::json!({ "id": id.to_string(), "name": name }))
+                .collect::<Vec<_>>(),
+        }),
+    );
+    document.insert(
+        "version".to_owned(),
+        serde_json::json!({ "name": MINECRAFT_VERSION, "protocol": crate::PROTOCOL }),
+    );
+    if let Some(png) = favicon_png {
+        document.insert(
+            "favicon".to_owned(),
+            serde_json::Value::String(format!("data:image/png;base64,{}", base64_encode(png))),
+        );
+    }
+    if enforces_secure_chat {
+        document.insert(
+            "enforcesSecureChat".to_owned(),
+            serde_json::Value::Bool(true),
+        );
+    }
+
+    let json = serde_json::Value::Object(document).to_string();
+    let mut w = Writer::default();
+    w.string(&json);
+    w.into_vec()
+}
+
 /// Writes one `ItemStack.OPTIONAL_STREAM_CODEC` value (used by both
 /// `container_set_content`'s list/carried entries and `container_set_slot`'s
 /// single item): a VarInt count (`<= 0` is the empty stack), then, only if
@@ -1127,6 +1249,35 @@ impl ServerProtocol for V770ServerProtocol {
                         };
                         ServerBound::Handshake { next_state }
                     }
+                    None => ServerBound::Ignored,
+                }
+            }
+            // Issue #277: the Status phase. A handshake with `next_state == 1`
+            // has always *reached* `State::Status` here, but nothing answered
+            // it, so our server was invisible in a real client's multiplayer
+            // list — the client sends `status_request`, waits, and gives up.
+            //
+            // `ServerboundStatusRequestPacket` is `StreamCodec.unit(INSTANCE)`
+            // (`status/ServerboundStatusRequestPacket.java:10`): the body is
+            // genuinely empty, so an empty payload is the *correct* decode, not
+            // a truncation. `decode_full` on a zero-field struct would be an
+            // equivalent way to say this; the explicit emptiness check is
+            // clearer and still rejects a payload carrying junk.
+            State::Status if packet_id == status::serverbound::STATUS_REQUEST => {
+                if payload.is_empty() {
+                    ServerBound::StatusRequest
+                } else {
+                    ServerBound::Ignored
+                }
+            }
+            // `ServerboundPingRequestPacket`: a single big-endian `long`
+            // (`ping/ServerboundPingRequestPacket.java:19`). The same struct
+            // the Play-state arm below already decodes — vanilla shares one
+            // packet class across both states, which is why
+            // `packets::common::PingRequest` documents itself that way.
+            State::Status if packet_id == status::serverbound::PING_REQUEST => {
+                match decode_full::<PingRequest>(payload) {
+                    Some(ping) => ServerBound::PingRequest { time: ping.time },
                     None => ServerBound::Ignored,
                 }
             }
@@ -1786,6 +1937,37 @@ impl ServerProtocol for V770ServerProtocol {
             session_id: uuid,
         };
         vec![send(login::clientbound::LOGIN_FINISHED, &finished)]
+    }
+
+    fn encode_status_response(
+        &self,
+        description: &str,
+        players_online: i32,
+        players_max: i32,
+        sample: &[(Uuid, String)],
+        favicon_png: Option<&[u8]>,
+        enforces_secure_chat: bool,
+    ) -> ServerDirective {
+        ServerDirective::Send {
+            packet_id: status::clientbound::STATUS_RESPONSE,
+            payload: encode_status_response_body(
+                description,
+                players_online,
+                players_max,
+                sample,
+                favicon_png,
+                enforces_secure_chat,
+            ),
+        }
+    }
+
+    fn encode_pong_response(&self, time: i64) -> ServerDirective {
+        // `ClientboundPongResponsePacket` is a single big-endian `long`
+        // (`ping/ClientboundPongResponsePacket.java:14-19`), byte-identical to
+        // the `ServerboundPingRequestPacket` it answers — which is why the
+        // client-side `PingRequest` struct is the right thing to encode here
+        // rather than a second one-field mirror of it.
+        send(status::clientbound::PONG_RESPONSE, &PingRequest { time })
     }
 
     fn begin_configuration(&self) -> Vec<ServerDirective> {

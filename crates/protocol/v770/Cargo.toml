@@ -23,6 +23,14 @@ uuid = { workspace = true }
 # rolls it client-side in `ClientPacketListener.handleExplosion`), so decoding
 # it faithfully means rolling the same die here.
 rand = { workspace = true }
+# Promoted from a dev-dependency to a production one by issue #277: the
+# `status_response` packet's entire body is a JSON document
+# (`ByteBufCodecs.lenientJson(32767)`), so `V770ServerProtocol`'s server-list
+# reply has to *emit* JSON, not just read it in tests. Building it with a real
+# serializer rather than `format!` is what makes a MOTD containing a quote,
+# backslash, or newline encode correctly — the same reason `lodestone-net`
+# parses the other direction with serde_json instead of hand-scanning.
+serde_json = { workspace = true }
 # Direct path dep (not a workspace alias) so the addition stays inside this
 # crate's manifest — this is the `V770ServerProtocol` seam: it implements the
 # version-free `lodestone_server::ServerProtocol` trait so `lodestone-server`
@@ -32,7 +40,6 @@ rand = { workspace = true }
 lodestone-server = { path = "../../lodestone-server" }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 lodestone-net = { workspace = true }
 lodestone-testsupport = { workspace = true }
 # `test-util` for `#[tokio::test(start_paused = true)]` + time-auto-advance,
