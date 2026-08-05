@@ -175,3 +175,15 @@ wasm-size:
 # idle machine, per CLAUDE.md.
 worldgen-sweep *args:
     ./scripts/worldgen-region-sweep.sh {{args}}
+
+# Live-oracle launchers — one recipe per canonical oracle. Each script
+# creates a fresh container and tears it down when it exits. See
+# docs/oracle-runtimes.md and CLAUDE.md for the spawn contracts.
+oracle-creative:
+    ./scripts/live-oracles/creative.sh
+
+oracle-terrain:
+    ./scripts/live-oracles/terrain.sh
+
+oracle-survival:
+    ./scripts/live-oracles/survival.sh
