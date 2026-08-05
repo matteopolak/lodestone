@@ -340,7 +340,7 @@ fn resolve_biome_id(name: &str) -> u32 {
 /// column rather than calling it per block; do not reach for this function
 /// itself in a true per-block hot path without the same memoization.
 ///
-/// # Three-tier fallback: exact match, then same-name default, then air
+/// # Four-tier fallback: exact, subset, real-property subset, then same-name default, then air
 ///
 /// 1. **Exact match** — name and every property value agree. The common case
 ///    for anything decoded off a real edit or a fully-qualified generator
@@ -399,14 +399,23 @@ fn resolve_state_id(state: &str) -> u32 {
 
     let mut same_name_default: Option<u32> = None;
     let mut subset_match: Option<u32> = None;
+    let mut last_id: Option<u32> = None;
+    // Real property keys for this block name — populated during the scan so tier
+    // 3 (below) can distinguish a synthetic property that no state carries from a
+    // real one the caller omitted.
+    let mut real_keys: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for id in 0..lodestone_data::block_states::STATE_COUNT {
         if block_name(id) != Some(name) {
             continue;
         }
+        last_id = Some(id);
         if same_name_default.is_none() {
             same_name_default = Some(id);
         }
         let have_raw = properties(id).unwrap_or(&[]);
+        for (k, _) in have_raw {
+            real_keys.insert(k);
+        }
         let mut have: Vec<(&str, &str)> = have_raw.to_vec();
         have.sort_unstable();
         if have == wanted {
@@ -435,6 +444,42 @@ fn resolve_state_id(state: &str) -> u32 {
                 .all(|(k, v)| have_raw.iter().any(|(hk, hv)| hk == k && hv == v))
         {
             subset_match = Some(id);
+        }
+    }
+    // Tier 3, issue #476. A synthetic property — one that no state of this
+    // block actually carries — makes a Tier-2 subset match structurally
+    // impossible. `redstone_diode::set_comparator` emits
+    // `minecraft:comparator[…,output=N]`; vanilla keeps `output` in a
+    // `ComparatorBlockEntity`, not as a block-state property, so `output` does
+    // not appear on any of the ~16 real comparator states. Tier 2 therefore
+    // never matched, and every comparator fell through to the lowest id — whose
+    // `powered` and `mode` are wrong.
+    //
+    // Strip synthetic properties and re-scan. The strip is at the encode
+    // boundary rather than at the call site so the server model can keep its
+    // synthetic properties for its own use, and so every future synthetic
+    // property is covered without a per-occurrence fix.
+    if subset_match.is_none() && !wanted.is_empty() {
+        let filtered: Vec<(&str, &str)> = wanted
+            .iter()
+            .filter(|(k, _)| real_keys.contains(k))
+            .copied()
+            .collect();
+        if filtered.len() < wanted.len() {
+            // Some wanted property is synthetic — re-scan over this block's id
+            // range only (same_name_default..=last_id).
+            if let (Some(start), Some(end)) = (same_name_default, last_id) {
+                for id in start..=end {
+                    let have_raw = properties(id).unwrap_or(&[]);
+                    if filtered
+                        .iter()
+                        .all(|(k, v)| have_raw.iter().any(|(hk, hv)| hk == k && hv == v))
+                    {
+                        subset_match = Some(id);
+                        break;
+                    }
+                }
+            }
         }
     }
     // Known cosmetic caveat, kept deliberately: this picks the lowest id among
@@ -2257,6 +2302,13 @@ impl ServerProtocol for V770ServerProtocol {
     }
 
     fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective> {
+        // Issue #461: the pre-#461 hardcoded spawn — see the module doc
+        // comment for why these unitless numbers existed. Delegates to
+        // `begin_play_at` so the body lives in one place.
+        self.begin_play_at(view_radius, Vec3::new(8.0, 100.0, 8.0))
+    }
+
+    fn begin_play_at(&self, view_radius: i32, spawn: Vec3) -> Vec<ServerDirective> {
         let login = GameLogin {
             entity_id: LOCAL_PLAYER_ENTITY_ID,
             hardcore: false,
@@ -2274,13 +2326,13 @@ impl ServerProtocol for V770ServerProtocol {
             rest: encode_game_login_rest(),
         };
 
-        let spawn_x = 8;
-        let spawn_y = 100;
-        let spawn_z = 8;
+        let spawn_block_x = spawn.x.floor() as i32;
+        let spawn_block_y = spawn.y.floor() as i32;
+        let spawn_block_z = spawn.z.floor() as i32;
         let spawn_position = SetDefaultSpawnPosition {
             location: GlobalPos {
                 dimension: "minecraft:overworld".to_string(),
-                position: pack_block_pos(spawn_x, spawn_y, spawn_z),
+                position: pack_block_pos(spawn_block_x, spawn_block_y, spawn_block_z),
             },
             yaw: 0.0,
             pitch: 0.0,
@@ -2288,12 +2340,17 @@ impl ServerProtocol for V770ServerProtocol {
 
         let teleport_payload = encode_player_position_teleport(
             0,
-            f64::from(spawn_x),
-            f64::from(spawn_y),
-            f64::from(spawn_z),
+            spawn.x,
+            spawn.y,
+            spawn.z,
             0.0,
             0.0,
         );
+
+        // Chunk column containing the spawn point, derived from the
+        // position rather than assumed (0, 0) — issue #461.
+        let spawn_cx = (spawn.x / 16.0).floor() as i32;
+        let spawn_cz = (spawn.z / 16.0).floor() as i32;
 
         vec![
             send(play::clientbound::LOGIN, &login),
@@ -2305,12 +2362,11 @@ impl ServerProtocol for V770ServerProtocol {
                 packet_id: play::clientbound::PLAYER_POSITION,
                 payload: teleport_payload,
             },
-            // Spawn is chunk (0, 0) (`spawn_x`/`spawn_z` = 8, inside that
-            // column), matching `serve_connection`'s own initial view
-            // center — reused via the trait method rather than duplicating
-            // the encoder so join-time and move-time cache-center packets
-            // can never drift apart.
-            self.encode_chunk_cache_center(0, 0),
+            // Chunk cache center must agree with `ViewTracker::new`'s
+            // center in `serve_connection_inner`, so both derive from the
+            // same `spawn` position — the existing comment's "when a real
+            // spawn position arrives this and that line move together."
+            self.encode_chunk_cache_center(spawn_cx, spawn_cz),
             // Vanilla fresh-spawn defaults. Without this the client's
             // `PlayerSnapshot::health` stays `None` (never having received a
             // `SetHealth`), which a HUD would show as absent/dead rather than
