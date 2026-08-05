@@ -1665,24 +1665,47 @@ where
                 let t_chunks = Instant::now();
                 let mut batch_size = 0;
                 let mut ring_idx = 0u32;
+                // Issue #293: for the join burst, fan each *column* individually
+                // into the blocking pool rather than one spawn_blocking per ring.
+                // One spawn_blocking per ring started available_parallelism() scoped
+                // threads inside it, serialising rings and competing with the mob
+                // seed task for the same scoped-thread pool. Individually each
+                // column can use all blocking-pool threads at once, so ring 7's 56
+                // columns take max(col) not sum(col) — ~130ms instead of ~7300ms.
+                let shared_source: Option<Arc<_>> = match &source {
+                    SourceRef::Shared(src) => Some(Arc::clone(src)),
+                    SourceRef::Borrowed(_) => None,
+                };
                 for ring in join_view_rings(view_radius) {
                     let t_ring = Instant::now();
-                    let columns = source.generate(ring.clone()).await;
-                    let gen_ms = t_ring.elapsed().as_millis();
-                    let encode_start = Instant::now();
-                    for (&(cx, cz), column) in ring.iter().zip(columns.iter()) {
-                        apply(conn, &mut state, proto.encode_chunk(cx, cz, column)).await?;
-                        batch_size += 1;
+                    if let Some(shared) = &shared_source {
+                        // Concurrent per-column generation — every column in
+                        // this ring races through the blocking pool at once.
+                        let handles: Vec<_> = ring.iter().map(|&(cx, cz)| {
+                            let src = Arc::clone(shared);
+                            ((cx, cz), tokio::task::spawn_blocking(move || src.column(cx, cz)))
+                        }).collect();
+                        for ((cx, cz), handle) in handles {
+                            let column = handle.await.expect("worldgen join burst panicked");
+                            apply(conn, &mut state, proto.encode_chunk(cx, cz, &column)).await?;
+                            batch_size += 1;
+                        }
+                    } else {
+                        // Borrowed path (tests): keep existing batch-parallel
+                        let columns = source.generate(ring.clone()).await;
+                        for (&(cx, cz), column) in ring.iter().zip(columns.iter()) {
+                            apply(conn, &mut state, proto.encode_chunk(cx, cz, column)).await?;
+                            batch_size += 1;
+                        }
                     }
-                    let encode_ms = encode_start.elapsed().as_millis();
+                    let gen_ms = t_ring.elapsed().as_millis();
                     let ring_columns = ring.len();
                     tracing::info!(
-                        "join ring {}/{}: {} columns, gen={}ms encode={}ms",
+                        "join ring {}/{}: {} columns, gen+encode={}ms",
                         ring_idx,
                         view_radius,
                         ring_columns,
                         gen_ms,
-                        encode_ms,
                     );
                     ring_idx += 1;
                 }
