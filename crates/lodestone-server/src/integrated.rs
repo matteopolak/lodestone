@@ -389,6 +389,7 @@ impl IntegratedServer {
             mob_count,
             view_radius,
             BlockEntityHandle::default(),
+            crate::region_source::ScheduledTickHandle::default(),
         )
     }
 
@@ -420,6 +421,12 @@ impl IntegratedServer {
         mob_count: usize,
         view_radius: i32,
         block_entities: BlockEntityHandle,
+        // Issue #468. Threaded exactly as `block_entities` above is, and for the
+        // same reason: the tick loop owns the queues at runtime, the persistence
+        // path needs the same instance to save them, and only the caller knows
+        // whether there is a world on disk to save to. In-memory passes a fresh
+        // default; `open_persistent_with_mobs` passes the region source's own.
+        scheduled: crate::region_source::ScheduledTickHandle,
     ) -> (Self, DuplexStream)
     where
         P: ServerProtocol + 'static,
@@ -603,6 +610,7 @@ impl IntegratedServer {
                 block_tick_feed,
                 tick_area,
                 explosion_feed,
+                scheduled,
             )
             .await;
         });
@@ -695,6 +703,8 @@ impl IntegratedServer {
         let persistent =
             crate::region_source::RegionChunkSource::new(source, world_dir, min_y, height)?;
         let save = persistent.save_handle();
+        // Read out before `persistent` is moved into the constructor below.
+        let persistent_scheduled = persistent.scheduled_ticks();
         // Before any task spawns, and before the first chunk is written: a
         // world directory that has region files but no `level.dat` is not a
         // world any other tool — vanilla included — will open. Creating it
@@ -733,6 +743,9 @@ impl IntegratedServer {
             mob_count,
             view_radius,
             block_entities,
+            // Issue #468's last wire: the same handle the save path reads, so a
+            // pending repeater tick survives a quit.
+            persistent_scheduled,
         );
 
         let autosave_handle = save.clone();
@@ -963,6 +976,10 @@ impl IntegratedServer {
                     -LAN_TICK_RADIUS..=LAN_TICK_RADIUS,
                 ),
                 tick_explosions,
+                // Issue #468: LAN has no world on disk (`save: None` below), so
+                // there is nothing to persist these into — a fresh handle, which
+                // makes the queues behave exactly as the locals they replaced.
+                crate::region_source::ScheduledTickHandle::default(),
             )
             .await;
         });

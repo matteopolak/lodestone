@@ -288,6 +288,7 @@ fn spawn_loop(world: Arc<RigWorld>, feed: &BlockTickFeed) {
         // random-tick pass over it is inert.
         (0..=0, 0..=0),
         ExplosionFeed::default(),
+        crate::region_source::ScheduledTickHandle::default(),
     ));
 }
 
@@ -1266,6 +1267,7 @@ async fn drive_hoppers(
         feed.clone(),
         (0..=0, 0..=0),
         ExplosionFeed::default(),
+        crate::region_source::ScheduledTickHandle::default(),
     ));
     tokio::task::yield_now().await;
     let mut published = Vec::new();
@@ -1501,5 +1503,197 @@ fn the_hopper_rig_starts_unlocked() {
         redstone::hopper_enabled(&world.block_state(HOP_X, HOP_UPPER_Y, ROW_Z)),
         "PREMISE FAILED: the hopper is already enabled=false before any fan-out runs, so a gate \
          asserting it becomes false proves nothing"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #468 -- the tick loop's queues really are the persistable ones
+// ---------------------------------------------------------------------------
+
+/// Like [`drive`], but over a caller-supplied [`ScheduledTickHandle`] so a gate
+/// can inspect (or pre-load) the very queues the loop uses.
+async fn drive_with_handle(
+    world: Arc<RigWorld>,
+    feed: &BlockTickFeed,
+    scheduled: &crate::region_source::ScheduledTickHandle,
+    ticks: u64,
+) -> Vec<Published> {
+    tokio::spawn(run_tick_loop(
+        MobHandle::new(ChunkWorld::new(MIN_Y, HEIGHT)),
+        LiveMobSource::default(),
+        BlockEntityHandle::default(),
+        Arc::new(TickClock::new()),
+        world,
+        feed.clone(),
+        (0..=0, 0..=0),
+        ExplosionFeed::default(),
+        scheduled.clone(),
+    ));
+    tokio::task::yield_now().await;
+    let mut published = Vec::new();
+    for tick in 1..=ticks {
+        tokio::time::advance(TICK_PERIOD).await;
+        tokio::task::yield_now().await;
+        for (x, y, z, state) in feed.drain_all() {
+            published.push(Published { tick, pos: (x, y, z), state });
+        }
+    }
+    published
+}
+
+/// **The island proof for #468's last wire.** A tick the loop schedules must be
+/// visible in the handle the save path reads.
+///
+/// `tests/scheduled_tick_persistence.rs` gates the handle and the schema in both
+/// directions and passes whether or not `run_tick_loop` uses them — it drives the
+/// handle directly. So it structurally cannot see the defect that mattered: the
+/// loop holding its two queues as **locals**, leaving the persistable queues
+/// permanently empty in production and losing every pending repeater tick on
+/// quit. This is the assertion that can.
+///
+/// Predicts the count, not merely non-emptiness: a `repeater[delay=4]` on a
+/// rising edge schedules exactly **one** entry, at the repeater's own position,
+/// due at tick `1 + 8`. The drive stops at tick 3, well short, so the entry must
+/// still be pending rather than already fired.
+#[tokio::test(start_paused = true)]
+async fn a_tick_the_loop_schedules_is_visible_in_the_handle_the_save_path_reads() {
+    let world = edge_rig(4, true, false);
+    let feed = BlockTickFeed::default();
+    let scheduled = crate::region_source::ScheduledTickHandle::default();
+
+    assert_eq!(
+        scheduled.with(|queues| queues.block.len()),
+        0,
+        "PREMISE FAILED: the handle is not empty before the loop runs"
+    );
+
+    trigger(&world, &feed, BlockPos::new(SRC_X, Y, ROW_Z));
+    let published = drive_with_handle(Arc::clone(&world), &feed, &scheduled, 3).await;
+
+    let pending: Vec<((i32, i32, i32), String, u64)> = scheduled.with(|queues| {
+        queues.block.iter().map(|t| (t.pos, t.kind.clone(), t.trigger_tick)).collect()
+    });
+    assert_eq!(
+        pending.len(),
+        1,
+        "expected exactly one pending block tick in the handle after 3 ticks; got {pending:?}. \
+         If this is 0, `run_tick_loop` is still scheduling into a local queue and every pending \
+         repeater tick is lost on quit -- which is the whole of #468's last wire. Published:\n{}",
+        log(&published)
+    );
+    assert_eq!(
+        pending[0].0,
+        (DIODE_X, Y, ROW_Z),
+        "the pending tick is at the wrong position: {pending:?}"
+    );
+    assert_eq!(
+        pending[0].1, redstone::TICK_REPEATER,
+        "the pending tick is the wrong kind: {pending:?}"
+    );
+    assert_eq!(
+        pending[0].2, 9,
+        "repeater[delay=4] on a rising edge is due at tick 1+8; the handle says {}",
+        pending[0].2
+    );
+}
+
+/// **The other direction: a reopened world resumes its pending ticks.**
+///
+/// A tick pre-loaded into the handle before the loop starts — which is exactly
+/// what a load from disk produces — must be drained by the loop at its own
+/// `trigger_tick`.
+///
+/// The discrimination is deliberate: the repeater is at `delay=4`, whose natural
+/// signal-change delay is **8** ticks, and the pre-loaded entry is due at tick
+/// **3**. So a pass proves the loop honoured the *loaded* schedule rather than
+/// recomputing one of its own — two numbers that cannot be confused. The
+/// circuit is pre-settled so nothing else schedules anything.
+#[tokio::test(start_paused = true)]
+async fn a_tick_pre_loaded_into_the_handle_is_drained_by_the_loop_at_its_own_trigger_tick() {
+    const LOADED_TRIGGER: u64 = 3;
+    const NATURAL_DELAY: u64 = 8; // 2d for delay=4, from the live oracle.
+
+    let world = settled_line_with_a_gap();
+    world.set_block(
+        DIODE_X,
+        Y,
+        ROW_Z,
+        &redstone_diode::set_repeater(Direction::West, 4, false, false),
+    );
+    let feed = BlockTickFeed::default();
+    let scheduled = crate::region_source::ScheduledTickHandle::default();
+    scheduled.with(|queues| {
+        queues.block.schedule(
+            (DIODE_X, Y, ROW_Z),
+            redstone::TICK_REPEATER.to_owned(),
+            LOADED_TRIGGER,
+            crate::scheduled_tick::TickPriority::Normal,
+        );
+    });
+
+    // No `trigger` call at all: nothing in this test publishes a schedule, so the
+    // only entry the loop can possibly drain is the pre-loaded one.
+    let published = drive_with_handle(Arc::clone(&world), &feed, &scheduled, DRIVE_TICKS).await;
+
+    let fired = tick_dust_reached(&published, (OUT_X, Y, ROW_Z), ORACLE_FULL_POWER);
+    assert_eq!(
+        fired,
+        Some(LOADED_TRIGGER),
+        "a pending tick loaded at trigger_tick {LOADED_TRIGGER} must fire on tick \
+         {LOADED_TRIGGER}; the output dust at (x={OUT_X}, y={Y}, z={ROW_Z}) fired on {fired:?}. \
+         Note {NATURAL_DELAY} would mean the loop ignored the loaded queue and recomputed. \
+         Published:\n{}",
+        log(&published)
+    );
+    assert_ne!(
+        LOADED_TRIGGER, NATURAL_DELAY,
+        "PREMISE FAILED: the loaded trigger equals the natural delay, so this gate cannot tell \
+         'honoured the loaded schedule' from 'recomputed its own'"
+    );
+    assert_eq!(
+        scheduled.with(|queues| queues.block.len()),
+        0,
+        "the loaded tick should have been drained, not left pending"
+    );
+}
+
+/// The handle's game tick must come from the loop's **own** counter.
+///
+/// Predicts the exact count after a known number of virtual ticks. This is
+/// issue #323's shape — `SET_TIME` decoded, really did darken the sky, every link
+/// green, while the value was wall-clock elapsed-since-join rather than the tick
+/// counter — so a wrong clock here would rebase every loaded `trigger_tick`
+/// against the wrong origin and look entirely healthy.
+///
+/// The wall-clock hypothesis is separated explicitly: under `start_paused` the
+/// loop advances 12 ticks while elapsed virtual time is 12 x 50ms = 600, so a
+/// millisecond-derived counter would read 600 and a second-derived one 0.
+#[tokio::test(start_paused = true)]
+async fn the_handle_game_tick_is_the_loops_own_counter_and_not_a_wall_clock() {
+    const TICKS: u64 = 12;
+    let world = settled_line_with_a_gap();
+    let feed = BlockTickFeed::default();
+    let scheduled = crate::region_source::ScheduledTickHandle::default();
+
+    assert_eq!(
+        scheduled.game_tick(),
+        0,
+        "PREMISE FAILED: the handle reports a non-zero tick before the loop has run"
+    );
+
+    let _ = drive_with_handle(Arc::clone(&world), &feed, &scheduled, TICKS).await;
+
+    let observed = scheduled.game_tick();
+    assert_eq!(
+        observed, TICKS,
+        "the handle must report the loop's own tick count. Wrong models: a millisecond wall clock \
+         would read {} and a second-derived one 0",
+        TICKS * 50
+    );
+    assert_ne!(
+        observed,
+        TICKS * 50,
+        "the observed value coincides with the millisecond wall clock, so this gate cannot \
+         separate them"
     );
 }

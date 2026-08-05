@@ -594,6 +594,9 @@ mod tests {
             BlockTickFeed::default(),
             area,
             ExplosionFeed::default(),
+            // Issue #468: this gate measures column generation, not persistence,
+            // so a fresh handle -- behaviourally the locals this replaced.
+            crate::region_source::ScheduledTickHandle::default(),
         ));
         tokio::task::yield_now().await;
         for _ in 0..ticks {
