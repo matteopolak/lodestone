@@ -87,8 +87,17 @@ being recompiled per agent.
 - ~87% of rustc invocations are cacheable; warm workspace-check hit rate
   **94.28%** (643/682). Non-cacheable: 68 `crate-type` (proc-macro dylibs +
   build-script executables — every *user* of `lodestone-macros` caches
-  fine), 31 `incremental` (workspace crates), 8 misc. C/C++ inside
-  `aws-lc-sys` etc. hit 99.6%.
+  fine), 31 `incremental` (workspace crates), 8 misc.
+- **A retracted figure, kept as a warning.** This bullet used to end *"C/C++
+  inside `aws-lc-sys` etc. hit 99.6%."* **Distrust it.** `.cargo/config.toml`
+  sets `rustc-wrapper` and **nothing else** — no `CC`, no `CXX` — so `sccache`
+  never saw a C compilation from a build script, and a hit rate over
+  compilations it never observed cannot mean what the sentence says. The figure
+  is not merely stale; it contradicts the "what this does **not** cover" section
+  below, which was written from the opposite direction after `aws-lc-sys` was
+  measured being rebuilt from scratch in 25 target directories at once.
+  Retracted rather than corrected because no re-measurement has been done, and
+  guessing at what it *did* measure would just relocate the error.
 - Cold worktree render-subtree check: **36.4s / 32.4s-user uncached vs
   16.4s / 8.1s-user warm** (86.5% hits) — 2.2× wall, 4× less CPU.
 - Build-mode warm restore of a render-tests dir: **28.6s** wall, vs 39.1s
