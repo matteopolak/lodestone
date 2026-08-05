@@ -398,6 +398,7 @@ fn resolve_state_id(state: &str) -> u32 {
     wanted.sort_unstable();
 
     let mut same_name_default: Option<u32> = None;
+    let mut subset_match: Option<u32> = None;
     for id in 0..lodestone_data::block_states::STATE_COUNT {
         if block_name(id) != Some(name) {
             continue;
@@ -405,13 +406,45 @@ fn resolve_state_id(state: &str) -> u32 {
         if same_name_default.is_none() {
             same_name_default = Some(id);
         }
-        let mut have: Vec<(&str, &str)> = properties(id).unwrap_or(&[]).to_vec();
+        let have_raw = properties(id).unwrap_or(&[]);
+        let mut have: Vec<(&str, &str)> = have_raw.to_vec();
         have.sort_unstable();
         if have == wanted {
             return id;
         }
+        // Tier 2, issue #465. This server's own state strings carry only the
+        // properties it models, so an exact-set match can be structurally
+        // impossible: `redstone_wire::set_power` emits
+        // `minecraft:redstone_wire[power=N]` while the real block carries five
+        // properties across 1296 states. `have == wanted` was therefore never
+        // true for any dust state, and every update fell through to the
+        // lowest id — `4011`, whose `power` is **0**.
+        //
+        // So the whole redstone subsystem computed correct signals and
+        // delivered zero, from placement, random ticks and scheduled ticks
+        // alike, since it was written. A fully-connected wire carrying the
+        // wrong value, which `cargo xtask connectedness` cannot see.
+        //
+        // Prefer the lowest id agreeing on every property the caller *did*
+        // specify. `wanted.is_empty()` is excluded so a bare name keeps its
+        // existing same-name-default behaviour rather than matching everything.
+        if subset_match.is_none()
+            && !wanted.is_empty()
+            && wanted
+                .iter()
+                .all(|(k, v)| have_raw.iter().any(|(hk, hv)| hk == k && hv == v))
+        {
+            subset_match = Some(id);
+        }
     }
-    same_name_default.unwrap_or_else(air_id)
+    // Known cosmetic caveat, kept deliberately: this picks the lowest id among
+    // the matching states, and lowest-id is not the marked default for 661 of
+    // 797 multi-state blocks (see this file's own doc). For dust the four
+    // connection properties come out `up` rather than `none`, so the wire
+    // renders climbing rather than flat. `power` — the load-bearing half — is
+    // now exact. Getting the shape right too is the connection-graph work,
+    // which nothing models yet.
+    subset_match.or(same_name_default).unwrap_or_else(air_id)
 }
 
 /// Unpacks vanilla's `BlockPos.asLong` form (the inverse of
