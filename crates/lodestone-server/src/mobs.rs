@@ -828,6 +828,44 @@ const CREEPER_EXPLOSION_RADIUS: f32 = 3.0;
 /// Configure it after spawning with [`add_goal`](SimMob::add_goal) and
 /// [`set_attack_target`](SimMob::set_attack_target); observe it with
 /// [`position`](SimMob::position) / [`path_searches`](SimMob::path_searches).
+/// A live persistent grudge: vanilla's `NeutralMob` anger state, resolved by
+/// the host (issue #458).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Anger {
+    /// The absolute [`MobSim::tick_count`] at which this grudge expires. The
+    /// grudge is live while `tick_count < end_time`.
+    end_time: u64,
+    /// Where the offending entity was when the grudge was set. A position
+    /// rather than an id because that is all
+    /// [`MobController::angry_target`] carries; an *ownership* relation (#458's
+    /// primitive 5) is what a real identity would need, and it does not exist
+    /// at this seam yet.
+    target: Vec3,
+}
+
+/// Vanilla's persistent-anger duration, in ticks, **inclusive at both ends**.
+///
+/// `NeutralMob.PERSISTENT_ANGER_TIME = TimeUtil.rangeOfSeconds(20, 39)`, which
+/// is `UniformInt.of(400, 780)` — `rangeOfSeconds` multiplies by 20, so this is
+/// already ticks. Identical for all four neutral species.
+///
+/// **Ticks, not seconds.** Sampling `[20, 39]` here would expire a grudge in
+/// under two seconds; `anger_expires_inside_the_jars_tick_window` separates
+/// those two hypotheses explicitly rather than asserting a grudge merely ends.
+const ANGER_TICKS: (u64, u64) = (400, 780);
+
+/// One draw from [`ANGER_TICKS`], matching vanilla's
+/// `UniformInt.sample` / `Mth.randomBetweenInclusive`: `lo + nextInt(hi - lo + 1)`.
+///
+/// The `+ 1` is the inclusive upper bound, and dropping it is the classic
+/// off-by-one that makes 780 unreachable — a difference no "does the grudge
+/// expire" assertion could see.
+fn grudge_ticks(mob: &mut impl MobController) -> u64 {
+    let (lo, hi) = ANGER_TICKS;
+    let span = i32::try_from(hi - lo + 1).expect("the anger window fits in i32");
+    lo + u64::try_from(mob.next_i32(span)).unwrap_or(0)
+}
+
 #[derive(Debug)]
 pub struct SimMob<'w> {
     id: i32,
@@ -857,6 +895,23 @@ pub struct SimMob<'w> {
     /// Armour/resistance/absorption state `damage::apply_reductions` reads for
     /// every incoming hit; absorption is written back after each hit.
     defenses: Defenses,
+    /// Vanilla's persistent-anger state, host-side (issue #458, primitive 1):
+    /// the **absolute game tick** the grudge ends at, plus where the entity it
+    /// is held against was when it was set.
+    ///
+    /// `None` means no live grudge — vanilla's `NO_ANGER_END_TIME = -1`
+    /// (`.cache/mc/26.2/src/net/minecraft/world/entity/NeutralMob.java:20-22`).
+    ///
+    /// **A deadline, not a countdown.** 26.2 stores an absolute game time and
+    /// compares against it (`NeutralMob.java:112-120`); a decrementing counter
+    /// drifts against a stepped tick loop. The comparison is against
+    /// [`MobSim::tick_count`], which is the only clock this sim has.
+    ///
+    /// This lives on the host rather than on `NavigatingMob` because
+    /// [`MobController::angry_target`] is deliberately an *answer*, not a
+    /// query: the seam has no shared clock, so the host resolves expiry and
+    /// only `Option<Vec3>` crosses. See that method's own doc comment.
+    anger: Option<Anger>,
     /// Raw melee damage this mob's own attacks deal (`ATTACK_DAMAGE`
     /// attribute), applied to whatever [`attack_target_id`](SimMob::attack_target_id)
     /// names when a `MeleeAttackGoal` connects.
@@ -1590,6 +1645,7 @@ impl<'w> MobSim<'w> {
             entity_type,
             health: max_health,
             defenses,
+            anger: None,
             attack_damage,
             hurt_cooldown: HurtCooldown::default(),
             attack_target_id: None,
@@ -1951,6 +2007,26 @@ impl<'w> MobSim<'w> {
         let mut partner = vec![None; n];
         let mut parent = vec![None; n];
 
+        // --- persistent anger (issue #458, primitive 1) --------------------
+        //
+        // Resolved here, in the feed, for the same reason every other
+        // pre-computed answer is: `MobController::angry_target` hands the goal
+        // an `Option<Vec3>`, never a query, because the seam has no shared game
+        // clock to compare an absolute deadline against. So the host does the
+        // comparison and only the answer crosses.
+        //
+        // `now >= end_time` clears the grudge outright rather than merely
+        // reporting `None`, mirroring vanilla's `stopBeingAngry` — a grudge
+        // that expired must not come back if the clock is ever read again.
+        let now = self.tick_count;
+        for me in &mut self.mobs {
+            if me.anger.is_some_and(|a| now >= a.end_time) {
+                me.anger = None;
+            }
+            let target = me.anger.map(|a| a.target);
+            me.mob.set_angry_target(target);
+        }
+
         for i in 0..n {
             let me = &self.mobs[i];
             let pos = me.position();
@@ -2271,6 +2347,9 @@ impl<'w> MobSim<'w> {
         flags: DamageFlags,
         knockback_power: f64,
     ) -> Option<AttackOutcome> {
+        // Read before the mutable borrow below: the grudge deadline is
+        // absolute, so it needs the clock as of this tick.
+        let now = self.tick_count;
         let (health, velocity, damage_dealt) = {
             let mob = self.get_mut(target_id)?;
             let damage_dealt = mob.apply_damage(raw_damage, flags);
@@ -2281,6 +2360,21 @@ impl<'w> MobSim<'w> {
             // and it needs no new plumbing, because `attacker_pos` was already
             // a parameter here for knockback direction.
             mob.mob.note_hurt(Some(attacker_pos));
+            // Issue #458, primitive 1. Vanilla's `NeutralMob.setLastHurtByMob`
+            // starts a persistent grudge alongside the retaliation record, so
+            // the two begin at the same instant and by the same event.
+            //
+            // Started for **every** mob, with no species list. That is #455's
+            // structural route deliberately reused: only a species whose
+            // jar-cited roster registers an anger-gated target row can ever
+            // *read* `angry_target`, so an always-hostile zombie carrying an
+            // unread grudge is inert, whereas a name list here would be one
+            // more `is_hostile_species` waiting to go stale.
+            let end_time = now + grudge_ticks(&mut mob.mob);
+            mob.anger = Some(Anger {
+                end_time,
+                target: attacker_pos,
+            });
             if knockback_power > 0.0 && mob.health() > 0.0 {
                 let target_pos = mob.position();
                 let dx = target_pos.x - attacker_pos.x;
@@ -3271,6 +3365,176 @@ mod follow_range_tests {
             35.0,
             "Zombie.java:133 — if this also reads 16.0 the accessor is not \
              observing what spawn_species installed"
+        );
+    }
+}
+
+/// Issue #458, primitive 1: the host-resolved persistent-anger deadline.
+#[cfg(test)]
+mod anger_tests {
+    use super::*;
+
+    /// The jar's grudge window, in ticks, stated **independently of
+    /// [`ANGER_TICKS`]**.
+    ///
+    /// `NeutralMob.PERSISTENT_ANGER_TIME = TimeUtil.rangeOfSeconds(20, 39)`,
+    /// and `rangeOfSeconds` multiplies by 20, giving `UniformInt.of(400, 780)`.
+    ///
+    /// **These literals are load-bearing and must not be replaced by a read of
+    /// `ANGER_TICKS`.** The first version of this module did exactly that, and
+    /// the control proved it vacuous: setting `ANGER_TICKS` to `(20, 39)` — the
+    /// seconds-as-ticks misreading these tests exist to exclude — left every
+    /// assertion **passing**, because the expectation moved with the subject.
+    /// That is `decode(encode(x)) == x` wearing a jar citation.
+    const JAR_LO: u64 = 400;
+    const JAR_HI: u64 = 780;
+
+    fn flat_world() -> ChunkWorld {
+        let mut world = ChunkWorld::new(-64, 384);
+        for x in -8..=8 {
+            for z in -8..=8 {
+                world.set_solid(x, -1, z, true);
+            }
+        }
+        world
+    }
+
+    /// Spawns one **real** mob through the production path and hits it once,
+    /// then reports the tick offset at which `angry_target` first reads `None`.
+    ///
+    /// Drives `MobSim` + `NavigatingMob`, never `ScriptMob` and never
+    /// `roster::probe`'s double: both override the perception methods wholesale,
+    /// which is exactly how #441's and #455's islands stayed hidden.
+    fn ticks_until_anger_clears(species: &str, limit: u64) -> Option<u64> {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let key = ResourceKey::from_str(&format!("minecraft:{species}")).expect("valid key");
+        let id = sim.spawn_species(key, Vec3::new(0.0, 0.0, 0.0)).id();
+
+        let attacker = Vec3::new(1.0, 0.0, 0.0);
+        sim.attack(id, attacker, 1.0, DamageFlags::default(), 0.0)
+            .expect("the mob must still be alive to hold a grudge");
+
+        // One tick to run the feed, then poll.
+        for elapsed in 0..limit {
+            sim.tick();
+            if sim.get(id).expect("alive").mob.angry_target().is_none() {
+                return Some(elapsed);
+            }
+        }
+        None
+    }
+
+    /// **The gate.** A grudge must expire inside the jar's `[400, 780]` tick
+    /// window — and the assertion has to separate that from the
+    /// seconds-as-ticks reading of `rangeOfSeconds(20, 39)`, which would expire
+    /// it in `[20, 39]` ticks.
+    ///
+    /// Predicting only "it eventually expires" is satisfied by both hypotheses
+    /// and by an off-by-one on the inclusive upper bound, which is the
+    /// magnitude species of vacuous test. Both bounds are asserted, and the
+    /// wrong hypothesis is named in the failure message rather than left
+    /// implicit.
+    #[test]
+    fn anger_expires_inside_the_jars_tick_window() {
+        let (lo, hi) = (JAR_LO, JAR_HI);
+        // Generous headroom over `hi`, so "never expired" is distinguishable
+        // from "expired late" rather than both timing out.
+        let limit = hi * 2;
+
+        for species in ["wolf", "bee", "enderman", "zombified_piglin"] {
+            let elapsed = ticks_until_anger_clears(species, limit).unwrap_or_else(|| {
+                panic!("{species}'s grudge never expired within {limit} ticks")
+            });
+            assert!(
+                elapsed >= lo,
+                "{species}'s grudge expired after {elapsed} ticks, before the jar's \
+                 minimum of {lo}. A value in [20, 39] means rangeOfSeconds(20, 39) \
+                 was read as seconds; it already returns ticks"
+            );
+            assert!(
+                elapsed <= hi,
+                "{species}'s grudge lasted {elapsed} ticks, past the jar's maximum \
+                 of {hi}"
+            );
+        }
+    }
+
+    /// The grudge must be **live** immediately after the hit, and must name the
+    /// attacker's position — not merely be non-`None` at some later point.
+    ///
+    /// Control for the test above: without this, a mob whose anger was never
+    /// set at all would "expire" at tick 0 and only the lower-bound assertion
+    /// would catch it, for the wrong reason.
+    #[test]
+    fn a_hit_starts_a_grudge_naming_the_attacker() {
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let key = ResourceKey::from_str("minecraft:wolf").expect("valid key");
+        let id = sim.spawn_species(key, Vec3::new(0.0, 0.0, 0.0)).id();
+
+        assert_eq!(
+            sim.get(id).expect("alive").mob.angry_target(),
+            None,
+            "an unprovoked neutral mob must hold no grudge — if this is Some, \
+             every neutral species is hostile on sight"
+        );
+
+        let attacker = Vec3::new(3.0, 0.0, 4.0);
+        sim.attack(id, attacker, 1.0, DamageFlags::default(), 0.0)
+            .expect("alive");
+        sim.tick();
+
+        assert_eq!(
+            sim.get(id).expect("alive").mob.angry_target(),
+            Some(attacker),
+            "the grudge must name where the attacker was"
+        );
+    }
+
+    /// The deadline is **absolute**, so a grudge refreshed by a second hit
+    /// extends from the *new* tick rather than from the first.
+    ///
+    /// This is the assertion a decrementing counter passes only by accident:
+    /// it pins that the stored value is compared against `tick_count` rather
+    /// than decremented, by advancing the clock a long way between two hits and
+    /// requiring the grudge to outlive the first deadline's worst case.
+    #[test]
+    fn a_second_hit_extends_the_deadline_from_the_new_tick() {
+        let (lo, hi) = (JAR_LO, JAR_HI);
+        let world = flat_world();
+        let mut sim = MobSim::new(&world);
+        let key = ResourceKey::from_str("minecraft:wolf").expect("valid key");
+        let id = sim.spawn_species(key, Vec3::new(0.0, 0.0, 0.0)).id();
+
+        let attacker = Vec3::new(1.0, 0.0, 0.0);
+        sim.attack(id, attacker, 1.0, DamageFlags::default(), 0.0)
+            .expect("alive");
+        // Advance well past the first grudge's *minimum* but not its maximum,
+        // then hit again.
+        for _ in 0..lo {
+            sim.tick();
+        }
+        sim.attack(id, attacker, 1.0, DamageFlags::default(), 0.0)
+            .expect("alive");
+
+        // The refreshed grudge must still be live `lo` ticks later, which the
+        // first grudge could not guarantee: its worst case was `hi`, and we are
+        // now at `lo + lo = 800 > hi`.
+        for _ in 0..lo {
+            sim.tick();
+        }
+        assert!(
+            lo + lo > hi,
+            "this test's arithmetic assumes 2*{lo} exceeds {hi}; if the window \
+             changed, the schedule below no longer proves anything"
+        );
+        assert_eq!(
+            sim.get(id).expect("alive").mob.angry_target(),
+            Some(attacker),
+            "the second hit must extend the deadline from the tick it landed on; \
+             a grudge that has already expired here means the deadline was not \
+             recomputed against the current clock"
         );
     }
 }
