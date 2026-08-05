@@ -1512,12 +1512,15 @@ fn chebyshev(cx: i32, cz: i32) -> i32 {
 ///    ~180 of 361;
 /// 2. Chebyshev distance from the centre never decreases — terrain grows
 ///    outward from the player instead of inward from a corner;
-/// 3. the first chunk was encoded after **at most one ring's worth** of
+/// 3. the first chunk was encoded after **at most two columns** of
 ///    generation — the "generate everything, then encode" half.
 ///
-/// Rule 3's bound is `1`, predicted rather than tuned: ring 0 is exactly one
-/// column, so a correct implementation generates precisely one column before the
-/// first `encode_chunk` call. The wrong hypothesis is the full view.
+/// Rule 3's bound is `2`, not `1`: issue #461's terrain-derived spawn Y
+/// queries the spawn column's surface height before the ring generation
+/// starts (one call to `ChunkSource::column` that outlives the batch), and
+/// ring 0 is the same column generated a second time. Two columns is still
+/// the player's own column plus one infra query, not the full view. The
+/// wrong hypothesis is 361.
 fn check_proximity_stream(observed: &[(i32, i32, usize)], view_radius: i32) -> Result<(), String> {
     let expected_total = ((2 * view_radius + 1) * (2 * view_radius + 1)) as usize;
     if observed.len() != expected_total {
@@ -1535,9 +1538,10 @@ fn check_proximity_stream(observed: &[(i32, i32, usize)], view_radius: i32) -> R
             chebyshev(cx, cz)
         ));
     }
-    if generated_at_first > 1 {
+    if generated_at_first > 2 {
         return Err(format!(
-            "the first chunk must be encoded after 1 column of generation (ring 0); \
+            "the first chunk must be encoded after at most 2 columns of generation \
+             (1 for the spawn-surface query plus ring 0); \
              {generated_at_first} columns had already been generated, meaning the whole view \
              is generated before anything is encoded"
         ));

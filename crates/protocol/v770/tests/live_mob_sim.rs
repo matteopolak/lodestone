@@ -68,7 +68,8 @@
 //!
 //! Reporting a position is only half of it: the position has to be somewhere the
 //! mobs are. `v770`'s `begin_play` teleports a joining client to a hardcoded
-//! `(8, 100, 8)` (`lodestone-server/src/server.rs`'s `JOIN_SPAWN_POSITION`, and
+//! `(8, ~64, 8)` (issue #461: spawn Y is terrain-derived via
+//! `PlayerSpawnFinder.getLevelRespawnPos`, and
 //! the `spawn_x`/`spawn_y`/`spawn_z` literals it must agree with), and there is
 //! no terrain-derived spawn anywhere in the server. This gate's floor used to be
 //! at y=0 inside a world of `-64..=63`, so the reported player sat **100 blocks
@@ -87,9 +88,9 @@
 //!
 //! The hardcoded spawn altitude is a real defect in its own right — on normal
 //! terrain, whose surface is nearer y=64, it puts every joining player in the air
-//! by construction — but it is filed separately: fixing it needs the
-//! `ServerProtocol` "where is spawn" seam that `JOIN_SPAWN_POSITION`'s own doc
-//! comment describes, which is wider than this gate.
+//! by construction — but it is filed separately (#461) and now fixed: spawn Y
+//! comes from `PlayerSpawnFinder.getLevelRespawnPos` and `begin_play_at` carries
+//! the terrain-derived position through the protocol seam.
 
 use std::time::Duration;
 
