@@ -157,6 +157,39 @@ pub fn build(
         draw_scrollbar(&mut b, list, *row_right);
     }
 
+    // The active list's own row text, clipped to its band (see
+    // `MenuFrame::list_labels`). Drawn through the same `Origin::anchor` →
+    // `Align` path as `frame.labels` above rather than a second copy of it, so
+    // a screen's list rows and its title cannot drift apart in how they place
+    // text; the *only* difference is the scissor.
+    if !frame.list_labels.is_empty() {
+        let band = active_list
+            .as_ref()
+            .map(|(list, _)| (list.top(), list.height()));
+        let mut draw_list_labels = |b: &mut Quads<'_>| {
+            for label in &frame.list_labels {
+                let (ax, ay) = label.origin.anchor(width, height);
+                let tw = b.text_width(&label.text, label.scale);
+                let x = match label.align {
+                    Align::Left => ax + label.dx,
+                    Align::Centre => (ax + label.dx - tw * 0.5).floor(),
+                    Align::Right => ax + label.dx - tw,
+                };
+                b.text(&label.text, x, ay + label.dy, label.scale, label.colour);
+            }
+        };
+        match band {
+            // Full canvas width: a list label is positioned from its own
+            // `Origin`, which for a two-column screen straddles the centre, so
+            // clipping horizontally to `row_w` would crop the value column.
+            // The band is vertical; that is the whole of what must be clipped.
+            Some((top, height_px)) => {
+                b.with_clip(0.0, top, width, height_px, |b| draw_list_labels(b));
+            }
+            None => draw_list_labels(&mut b),
+        }
+    }
+
     for (i, row) in frame.rows.iter().enumerate() {
         // A multiplayer-list entry (#396) is neither a button nor a field: it is
         // an `ObjectSelectionList` row with a favicon, two text columns, a status

@@ -405,6 +405,23 @@ pub struct MenuFrame<'a> {
     /// `None` means "no scrolling list on this screen", which is most of them, and
     /// the draw then paints no bar at all rather than a full-height stub.
     pub list: Option<widget::ListSpec>,
+    /// Labels belonging to [`Self::list`]'s rows, drawn **clipped** to the band
+    /// that spec declares. Empty for every screen that has no list.
+    ///
+    /// **The separate vector is the primitive, not a convenience.** A list that
+    /// scrolls by pixels will routinely have a row half outside its band, and
+    /// the only alternative to clipping it is what every unconverted screen
+    /// still does: skip any row that does not *wholly* fit — which is exactly
+    /// the snap-to-row behaviour pixel scrolling exists to remove. A screen
+    /// whose rows are [`MenuRow`]s gets this from [`super::draw`]'s own
+    /// per-row `with_clip`; a screen whose rows are free text (`stats.rs`,
+    /// where a stat row is not a control and vanilla only narrates it) had
+    /// nowhere to put it until this field.
+    ///
+    /// Drawn unclipped when [`Self::list`] is `None`, which is what a screen
+    /// with no scrollbar wants anyway — so this degrades to [`Self::labels`]
+    /// rather than to nothing.
+    pub list_labels: Vec<MenuLabel>,
 }
 
 /// Decoded favicon mosaics, keyed by the status cache's address key.
