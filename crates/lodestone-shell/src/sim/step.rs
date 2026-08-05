@@ -159,7 +159,22 @@ impl Sim {
         // `send_action` is a channel push today, but the whole `NetClient` surface
         // otherwise reads this same `World` through `ClientHandle`, and holding a
         // write guard into it would deadlock the moment one of those was reached.
-        let actions = self.write(|w| std::mem::take(&mut w.resource_mut::<ActionQueue>().0));
+        let actions = self.write(|w| {
+            let mut actions = std::mem::take(&mut w.resource_mut::<ActionQueue>().0);
+            // Issue #157's outbound hook: a plugin's chance to inspect, replace
+            // or suppress what another plugin queued, before any of it reaches
+            // the socket. Inside the guard we already hold — the filters receive
+            // only `&ClientAction`, never the `World`, so this cannot re-enter
+            // the lock (see `lodestone_ecs::egress`'s module doc).
+            //
+            // `get_resource`, so a client with no plugin installed pays one
+            // resource lookup and nothing else; `apply` itself returns after a
+            // single `is_empty` check when no filter is registered.
+            if let Some(filters) = w.get_resource::<lodestone_ecs::EgressFilters>() {
+                filters.apply(&mut actions);
+            }
+            actions
+        });
         // Only the *main* hand drives the first-person arm and the self-avatar's
         // right arm. An off-hand swing animates the left arm, which neither
         // consumer draws — treating it as a main-hand swing would swing the wrong

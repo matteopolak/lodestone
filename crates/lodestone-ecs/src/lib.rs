@@ -129,6 +129,7 @@
 pub mod async_task;
 pub mod chunks;
 pub mod commands;
+pub mod egress;
 pub mod entity;
 pub mod events;
 mod handle;
@@ -169,6 +170,7 @@ pub use commands::{
     CommandRegistry, CommandSource, PlayerDirectory, PluginCommand, PluginCommandsPlugin,
     RegisteredCommand, choice_argument, command_tree_for, dispatch, player_argument, suggest,
 };
+pub use egress::{EgressFilterPlugin, EgressFilters, EgressStats, Verdict};
 pub use events::{GameEvent, GameEventBus, GameEventBusPlugin};
 pub use handle::{
     EcsHandle, HoldStats, LockHolds, hold_read, hold_write, new_handle, new_ingest_handle,

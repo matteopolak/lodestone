@@ -636,6 +636,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   (https://github.com/apple/container) instead of Docker. Docker is gone from every
   one of these paths — there is no `LODESTONE_ORACLE_RUNTIME` switch and no
   fallback; `container` is simply what these scripts and tests invoke.
+- [The outbound action hook](./outbound-action-hook.md) — `EgressFilters`
+  (`crates/lodestone-ecs/src/egress.rs`) is the seam where a plugin inspects, replaces
+  or suppresses a `ClientAction` that another plugin queued, after `GameTick` has
+  finished and before it reaches the socket. ProtocolLib's outbound side, at the one
+  layer where it is version-free. Issue #157.
 - [The particle catalogue: what's wired, what isn't, and why](./particle-catalogue.md) —
   `lodestone-particle`'s `Sheet` enum names a physical texture sheet under
   `textures/particle/*.png`; `Behaviour` names a per-type tick/quad-size/layer
@@ -657,11 +662,6 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   resolver trait a permissions *plugin* can use to take the whole decision over. One
   resource, `lodestone_ecs::permissions::Permissions`, answering one question: does
   this subject hold this permission?
-- [Player entities](./player-entities.md) — The server-side machinery that makes a
-  connected player an **entity other connections receive** (issue #438): a shared
-  registry of connected players, a per-connection tab-list diff, and the two
-  `ServerProtocol` encoders that put both on the wire. Before it, two players on one
-  server — including over LAN — were completely invisible to one another.
 - [The plugin API](./plugin-api.md) — The surface a third-party bevy plugin uses to
   do everything native Lodestone code can do — read world/entity/player state, write
   intent, order systems against internal ones, and observe events — specified
@@ -743,13 +743,6 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   translation layer — the ViaVersion shape, not sixteen parallel simulations). This
   doc settles two questions before fifteen more `crates/protocol/vNNN` crates get
   created:
-- [Runtime recipe registration](./recipe-registration.md) — The plugin-facing door
-  onto the crafting corpus (issue
-  [#148](https://github.com/matteopolak/lodestone/issues/148)) — the
-  `Bukkit.addRecipe` analogue. A plugin registers a shaped/shapeless/cooking recipe
-  from inside its own `Plugin::build`, and that recipe becomes matchable by the
-  crafting-table screen and browsable in the recipe-book panel exactly like one of the
-  1585 vanilla recipes.
 - [Redstone: dust, torches, repeaters, comparators, observers](./redstone.md) — Five
   new modules in `crates/lodestone-server/src/`, all pure query/decision functions
   with no `ChunkColumn` in scope except through a `lookup: Fn(BlockPos) -> String`
