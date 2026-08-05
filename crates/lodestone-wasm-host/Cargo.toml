@@ -1,0 +1,68 @@
+# The WASM plugin host — issue #172's scaffold, #173's ABI, #175's manifest.
+#
+# # Why this crate is not a dependency of `lodestone-app` (and must not become
+# # one without a plan)
+#
+# `wasmtime` is a JIT: it maps executable pages, and there is no
+# wasmtime-inside-a-wasm-guest story. Adding this crate to `lodestone-app` — the
+# one composition point the shell and every consumer share — would therefore
+# **break the browser build outright**, not merely inflate it, because `web/`
+# compiles that graph for `wasm32-unknown-unknown`. The plan
+# (`docs/plans/runtime-plugin-loading.md` §"wasm-in-wasm") settles this: the
+# browser gets compiled-in plugins only, and runtime loading is a desktop
+# feature. The consequence for *this* manifest is that nothing above it may
+# depend on it unconditionally; a `#[cfg(not(target_arch = "wasm32"))]` edge, or
+# a target-gated dependency in the consumer, is the shape that would work.
+#
+# Measured, so the claim is not merely architectural: `scripts/wasm-size.sh`
+# reports gzip 845,034 B before this crate existed and 845,034 B after — the same
+# byte count, because the browser graph does not reach it. See
+# `docs/wasm-plugin-host.md` §"The size budget".
+[package]
+name = "lodestone-wasm-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Pinned to a minor, per the plan's note that component tooling is younger than
+# core wasm and churns. `default-features = false` matters: the default feature
+# set pulls the whole CLI-shaped runtime (WASI, caching, the pooling allocator,
+# a dozen more). We want the compiler, the runtime and the component model, and
+# emphatically **not** `wasmtime-wasi` — a guest's only imports are the ones this
+# crate's `Linker` grants it, and WASI is not among them.
+#
+# Gotcha discovered the hard way: with default features off, `wasmtime::Error`
+# does **not** implement `std::error::Error`, so `?` into an `anyhow::Error` does
+# not compile. `HostError` below converts explicitly.
+wasmtime = { version = "47", default-features = false, features = [
+    "runtime",
+    "cranelift",
+    "component-model",
+    "std",
+] }
+# Turns a plain core module into a component. This is a *normal* dependency, not
+# a dev-dependency, on purpose: it is what lets a plugin author run a bare
+# `cargo build --target wasm32-unknown-unknown` and have the result load, instead
+# of needing `cargo-component` on their PATH. `PluginHost::load` sniffs the
+# module/component discriminant in the wasm preamble and encodes only when it
+# has to. Kept version-aligned with wasmtime's own wasm-tools (0.252).
+wit-component = "0.252"
+# The manifest (issue #175). TOML rather than YAML, matching Cargo's own format
+# and this codebase's preference — `plugin.yml`'s shape, not its syntax.
+toml = "0.9"
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+# The vocabulary the ABI mirrors. Version-free, exactly as the plan requires of
+# this crate: `ClientEvent`/`ClientAction`/`Text`/`BlockPos`, no protocol family.
+#
+# Note what is deliberately *not* here yet: `lodestone-ecs`, `bevy_app` and
+# `bevy_ecs`, which the conductor (`src/conductor.rs`) needs. They arrive with it,
+# in the commit that closes issue #173 — the scaffold in this commit has no ECS
+# involvement at all, and keeping the edge out until something uses it is what let
+# this crate compile while `lodestone-ecs` was mid-refactor by another author.
+lodestone-model = { workspace = true }

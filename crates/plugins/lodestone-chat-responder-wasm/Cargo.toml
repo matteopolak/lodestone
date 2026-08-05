@@ -1,0 +1,66 @@
+# The worked example for the wasm plugin tier: observe chat, act by chatting.
+#
+# # Why this is NOT a workspace member
+#
+# It is in the root `Cargo.toml`'s `exclude` list, and that is deliberate rather
+# than incidental. `crates/plugins/*` is a member glob, so without the exclude
+# this crate would be built for `aarch64-apple-darwin` by every
+# `cargo check --workspace --all-targets` in `CLAUDE.md`'s health list — and a
+# `cdylib` whose `wit-bindgen` bindings declare
+# `#[link(wasm_import_module = ...)]` externs does not *link* on a native target.
+# The health checks would go red for a crate that is not meant to be built that
+# way at all.
+#
+# Its own `[workspace]` table below is the other half: it makes this directory a
+# workspace root in its own right, so `cargo build` inside it does not go looking
+# upward, and it gets its own `Cargo.lock` rather than churning the shared one.
+#
+# # Why the plugin the plan named is deliberately not this
+#
+# `docs/plans/runtime-plugin-loading.md` §"The compiled-in path" argues at length
+# that `lodestone-autopilot` is the *wrong* first conformance plugin for this tier
+# — it is the native tier's stress case (owned `Arc<ChunkSection>` snapshots,
+# ~15k `Arc` clones per snapshot, thousands of collider queries per search step),
+# and `docs/plugin-api.md`'s cost analysis concludes it does not fit through a
+# call-shaped ABI. Forcing it through one would prove the wrong point at maximum
+# cost. A chat responder covers both directions of the boundary — it observes and
+# it acts — at a size where the ABI, not the plugin, is what is under test.
+[workspace]
+
+[package]
+name = "lodestone-chat-responder-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Example Lodestone wasm plugin: replies in chat, counting what it has seen."
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+# The deny-case fixture, built from *this* source so the misbehaving artifact and
+# the well-behaved one differ by exactly one call. See
+# `crates/lodestone-wasm-host/tests/capability_denial.rs`: a control built from a
+# different crate could differ in a dozen ways, and the refusal could be about any
+# of them.
+misbehave = []
+# The preemption fixture: a guest that never returns. Same reasoning as
+# `misbehave` — a fuel-exhaustion test pointed at a well-behaved plugin measures
+# nothing, because the plugin returns long before the budget runs out.
+spin = []
+
+[dependencies]
+# The only dependency, and it must stay that way: everything a guest links is
+# bytes in the artifact, and the artifact is the thing a user downloads.
+wit-bindgen = { version = "0.57", default-features = false, features = ["macros"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+# A guest panic becomes a wasm trap, which the host records as a permanent
+# failure and stops calling — the failure isolation that is this tier's strongest
+# advantage over the native one. Unwinding would buy nothing: there is no host
+# frame to unwind into.
+panic = "abort"
