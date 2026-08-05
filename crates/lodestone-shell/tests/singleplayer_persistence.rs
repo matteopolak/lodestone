@@ -441,16 +441,39 @@ fn the_stored_seed_governs_chunks_the_first_session_never_generated() {
 /// This does not re-derive #437's "a tick that mutates nothing writes nothing",
 /// which is gated server-side. What it adds is that reaching the save path
 /// through the **shell** did not change the proportionality.
+///
+/// # A false premise this gate used to carry, and what replaced it
+///
+/// Until now it asserted `region_files().len() == 1`, "every column of a
+/// radius-1 view is inside region (0,0)". **That is false**, and it made the
+/// gate fail on roughly two runs in five in a way that looked exactly like
+/// #473's harness race — which is the trap, because retrying or widening the
+/// bound would have made it green while measuring nothing.
+///
+/// A region index is an **arithmetic shift**, `chunk >> 5`
+/// (`lodestone_anvil::region::region_and_local`), so `-1 >> 5 == -1`: a
+/// radius-1 view centred on chunk `(0, 0)` spans chunks `(-1, -1)..=(1, 1)`
+/// and therefore **four** regions, `(-1,-1)`, `(-1,0)`, `(0,-1)` and `(0,0)`.
+/// Which of the four actually gets a file varies per run with *which* columns
+/// a random tick happened to touch, and that is the whole of the
+/// intermittency.
+///
+/// The replacement derives the expected region set from the same shift the
+/// code uses rather than restating a constant, and — the part that matters
+/// more — counts saved columns across **every** region file instead of only
+/// `r.0.0.mca`. The old form could be satisfied by a residency-proportional
+/// save that happened to spread its nine columns over four regions, leaving
+/// four or fewer in the one file it looked at.
 #[test]
 fn a_session_saves_columns_in_proportion_to_mutation_not_residency() {
-    const RESIDENT_COLUMNS: usize = 9;
+    const VIEW_RADIUS: i32 = 1;
     const MUTATION_PROPORTIONAL_BOUND: usize = 4;
 
     let world = TempWorld::new("cost");
     let seed = lodestone::menu::world_select::BUNDLED_WORLD.seed;
 
     {
-        let Some(net) = require_hostable(open_session(seed, 1, Some(world.path()))) else {
+        let Some(net) = require_hostable(open_session(seed, VIEW_RADIUS, Some(world.path()))) else {
             return;
         };
         wait_for_chunk(&net, ChunkPos { x: 0, z: 0 });
@@ -460,27 +483,59 @@ fn a_session_saves_columns_in_proportion_to_mutation_not_residency() {
         break_block_over_the_wire(&net, BlockPos::new(SPAWN_X, surface, SPAWN_Z), air);
     }
 
-    let files = region_files(&world.path());
+    // Both the resident column set and the region set it maps to are derived,
+    // never restated: `>> 5` is the same expression `region_and_local` uses,
+    // which is what stops this drifting into a constant that is true only for
+    // a view that never crosses zero.
+    let resident: Vec<(i32, i32)> = (-VIEW_RADIUS..=VIEW_RADIUS)
+        .flat_map(|cz| (-VIEW_RADIUS..=VIEW_RADIUS).map(move |cx| (cx, cz)))
+        .collect();
+    let resident_columns = resident.len();
+    let mut reachable: Vec<String> = resident
+        .iter()
+        .map(|&(cx, cz)| format!("r.{}.{}.mca", cx >> 5, cz >> 5))
+        .collect();
+    reachable.sort_unstable();
+    reachable.dedup();
     assert_eq!(
-        files.len(),
-        1,
-        "every column of a radius-1 view is inside region (0,0), so one file is expected: {files:?}"
-    );
-    assert!(
-        files[0].ends_with("r.0.0.mca"),
-        "the spawn column belongs to region (0,0): {files:?}"
+        reachable.len(),
+        4,
+        "a radius-1 view straddles zero, so it touches four regions, not one: {reachable:?}"
     );
 
-    let saved = saved_column_count(&files[0]);
+    let files = region_files(&world.path());
+    let names: Vec<String> = files
+        .iter()
+        .map(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_owned()
+        })
+        .collect();
+    assert!(
+        names.iter().all(|n| reachable.contains(n)),
+        "a region file was written that no column of the view could belong to: \
+         wrote {names:?}, reachable {reachable:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "r.0.0.mca"),
+        "the mutated column is chunk (0,0), which is region (0,0), so that file \
+         must exist: {names:?}"
+    );
+
+    // Across **every** file, not just region (0,0): the mutated column and any
+    // column a random tick also touched, wherever they landed.
+    let saved: usize = files.iter().map(|f| saved_column_count(f)).sum();
     assert!(
         saved >= 1,
-        "the mutated column was not saved at all ({saved} columns on disk)"
+        "the mutated column was not saved at all ({saved} columns on disk across {names:?})"
     );
     assert!(
         saved <= MUTATION_PROPORTIONAL_BOUND,
-        "saved {saved} columns for one mutation in a {RESIDENT_COLUMNS}-column view — that is \
+        "saved {saved} columns for one mutation in a {resident_columns}-column view — that is \
          residency-proportional, not mutation-proportional, and it would write ~100 MiB per \
-         autosave for a player standing still in a full {}-column store",
+         autosave for a player standing still in a full {}-column store. Files: {names:?}",
         512
     );
 }
