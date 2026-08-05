@@ -211,8 +211,12 @@ impl Sim {
         let mut player = PlayerState::at(Vec3d::new(feet[0], feet[1], feet[2]), 180.0);
         player.pitch = 10.0;
 
+        // Mesh is CPU-bound; use all cores. The saturating_sub(1) was for
+        // the old mutex-contended implementation, where an extra worker
+        // would just contend harder. With crossbeam MPMC, more workers =
+        // strictly more throughput until saturating memory bandwidth.
         let workers = std::thread::available_parallelism()
-            .map(|n| n.get().saturating_sub(1).max(1))
+            .map(|n| n.get().max(1))
             .unwrap_or(2);
 
         // Pick the block-id world once. A client session wants the vanilla atlas
