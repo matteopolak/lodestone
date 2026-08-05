@@ -30,8 +30,12 @@ use crate::chunk::{
 use crate::fall::FallTracker;
 use crate::inventory::{ContainerMenuSlot, PlayerInventory, container_menu_slot};
 use crate::mobs::{MobHandle, PlayerPerception};
+use crate::neighbor_update::Direction;
 use crate::players::{ChatLine, PlayerListStreamer, PlayerRegistry, PlayerTicket};
 use crate::protocol::{EntitySnapshot, ServerBound, ServerDirective, ServerProtocol};
+use crate::redstone::{COMPARATOR, OBSERVER, REPEATER};
+use crate::redstone_diode::{set_comparator, set_repeater};
+use crate::redstone_observer::set_observer;
 use crate::scheduled_tick::{ScheduledTick, ScheduledTickQueue};
 use crate::tick::{BlockTickFeed, ExplosionFeed};
 use crate::vitals::{EYE_HEIGHT, PlayerVitals};
@@ -1855,15 +1859,73 @@ where
     Ok(())
 }
 
+/// Vanilla's `Direction.fromYRot` (`Direction.java:291-293`) restricted to the
+/// four horizontal directions, from a player yaw in degrees.
+///
+/// The 2d-data layout is `south=0, west=1, north=2, east=3`
+/// (`Direction.java:33-38`), so `floor(yaw / 90 + 0.5) & 3` maps yaw `0` →
+/// south, `90` → west, `±180` → north, `-90` → east — the same "yaw 0 =
+/// south, increasing clockwise" convention the shell's `camera_rig`/`hud`
+/// use for the yaw this server receives from `move_player_rot`. Implemented
+/// as a range match on the wrapped `[0, 360)` value rather than the bit-mask
+/// formula, with the 45°/135°/225°/315° midpoints landing exactly as the
+/// mask's `floor` does.
+///
+/// The returned direction is the one the player is **looking**, matching the
+/// horizontal component of `BlockPlaceContext.getNearestLookingDirection` —
+/// a placed diode then applies `.opposite()` so the block faces the player.
+#[must_use]
+fn horizontal_look_direction(yaw: f32) -> Direction {
+    match yaw.rem_euclid(360.0) {
+        y if (45.0..135.0).contains(&y) => Direction::West,
+        y if (135.0..225.0).contains(&y) => Direction::North,
+        y if (225.0..315.0).contains(&y) => Direction::East,
+        _ => Direction::South,
+    }
+}
+
+/// `BlockState.getStateForPlacement` for the blocks this crate places with a
+/// yaw-derived orientation, and `None` for every other block — the caller
+/// then keeps the census's bare default-state name (stairs/slabs/logs/dust
+/// need click-face, cursor and neighbour state this path does not decode,
+/// `docs/block-edit.md`).
+///
+/// `player_yaw` is `None` before the first packet carrying angles arrives;
+/// placement then falls back to the block's default state.
+///
+/// The two `DiodeBlock` families cite `DiodeBlock.getStateForPlacement`
+/// (`DiodeBlock.java:155-158`): `FACING = getHorizontalDirection().getOpposite()`
+/// — the block faces the player, so the **opposite** of the player's look
+/// direction. The observer is the deliberate exception:
+/// `ObserverBlock.getStateForPlacement` (`ObserverBlock.java:133-136`) sets
+/// `FACING = getNearestLookingDirection().getOpposite().getOpposite()`, a
+/// double negation that is the player's **look** direction — the observer
+/// watches the block the player is looking at, and its redstone output faces
+/// the player. Not opposite: an observer placed while looking north watches
+/// north.
+#[must_use]
+fn placed_block_state(block: &str, player_yaw: Option<f32>) -> Option<String> {
+    let look = horizontal_look_direction(player_yaw?);
+    match block {
+        REPEATER => Some(set_repeater(look.opposite(), 1, false, false)),
+        COMPARATOR => Some(set_comparator(look.opposite(), false, false, 0)),
+        OBSERVER => Some(set_observer(look, false)),
+        _ => None,
+    }
+}
+
 /// Applies a right-click placement, mirroring
 /// `ServerGamePacketListenerImpl.handleUseItemOn`'s replace-vs-relative
 /// choice of placement cell (`BlockPlaceContext`'s constructor: place at the
 /// clicked block if it `canBeReplaced`, otherwise at its `face`-neighbour) —
 /// simplified per this crate's documented scope (`docs/block-edit.md`): no
 /// survival/collision validation beyond "is the target cell currently
-/// replaceable" (air or a fluid — see [`is_air_or_fluid`]), and no per-block
-/// orientation (stairs/slabs/doors would need a precise cursor hit this
-/// crate does not decode).
+/// replaceable" (air or a fluid — see [`is_air_or_fluid`]). Per-block
+/// orientation is partial: the redstone directional families (repeater,
+/// comparator, observer) derive their facing from the placing player's yaw
+/// via [`placed_block_state`] (issue #475), while the click-face/cursor-driven
+/// families (stairs/slabs/doors) would need a precise cursor hit this crate
+/// does not decode and still place with their default state.
 ///
 /// **Placement honours the held item for every block in the game** (#466).
 /// `inventory`'s currently selected item is resolved through
@@ -1886,11 +1948,13 @@ where
 /// one; the `block_update` for both cells is still sent below, so a client
 /// that predicted a placement is corrected rather than left desynchronised.
 ///
-/// **Block *state* remains out of scope** (`docs/block-edit.md`): stairs,
-/// slabs, logs and redstone dust place with orientation or connection state
-/// derived from the click face, cursor and neighbours, and this path still
-/// writes each block's default state. #466 is about placing the *right
-/// block*; the right *state* is a separate and larger piece of work.
+/// **Block *state* is now partial** (`docs/block-edit.md`): the redstone
+/// directional families place with a yaw-derived `facing` (issue #475 — the
+/// repeater that always faced north is fixed), but the state that depends on
+/// the click face, cursor and neighbours — stairs, slabs, logs and redstone
+/// dust's connection state — still places with the block's default state.
+/// #466 is about placing the *right block*; the right *state* for the
+/// remaining families is a separate and larger piece of work.
 ///
 /// Sends [`ServerProtocol::encode_block_update`] for **both** `pos` and its
 /// `face`-neighbour unconditionally, matching vanilla's own
@@ -1918,6 +1982,11 @@ async fn apply_use_item_on<T, P, S>(
     state: &mut State,
     pos: BlockPos,
     face: BlockFace,
+    // Issue #475. The placing player's yaw, so the redstone directional
+    // families can derive their `facing` (see [`placed_block_state`]). `None`
+    // until the first packet carrying angles arrives; placement then falls
+    // back to the block's default state.
+    player_yaw: Option<f32>,
     inventory: &PlayerInventory,
     block_entities: &BlockEntityHandle,
     next_window_id: &mut i32,
@@ -1983,7 +2052,11 @@ where
                 );
                 block_entities.with(|registry| registry.insert(target, entity));
             }
-            source.set_block(target.x, target.y, target.z, block_name);
+            // Issue #475. `placed_block_state` overrides the census's bare
+            // name with a `facing=`-bearing state for the redstone directional
+            // families; everything else keeps the default state.
+            let state = placed_block_state(block_name, player_yaw).unwrap_or_else(|| block_name.to_string());
+            source.set_block(target.x, target.y, target.z, &state);
             // Issue #465: placing a block is a mutation like any other, so it
             // owes its neighbours the same fan-out a random tick or a drained
             // scheduled tick already performs. Without this the redstone model
@@ -2673,6 +2746,11 @@ where
                 state,
                 pos,
                 face,
+                // Issue #475. The placing player's yaw, so
+                // `apply_use_item_on` can give directional blocks their
+                // placement facing. `None` until a packet carrying angles
+                // arrives — placement then uses the block's default state.
+                player_rot.map(|rotation| rotation.yaw),
                 inventory,
                 block_entities,
                 next_window_id,
@@ -3842,5 +3920,66 @@ mod tests {
     fn join_view_rings_at_a_negative_radius_is_empty() {
         assert!(join_view_rings(-1).is_empty());
         assert!(join_view_rings(i32::MIN).is_empty());
+    }
+
+    /// The yaw → horizontal-facing map is vanilla's `Direction.fromYRot`
+    /// (`Direction.java:291-293`): yaw 0 = south, 90 = west, ±180 = north,
+    /// -90 = east, split at the 45° midpoints (the value at which
+    /// `floor(yaw / 90 + 0.5) & 3` rolls over). This is the facing a placed
+    /// diode then inverts so the block faces the player (issue #475).
+    #[test]
+    fn horizontal_look_direction_matches_vanilla_from_y_rot() {
+        assert_eq!(horizontal_look_direction(0.0), Direction::South);
+        assert_eq!(horizontal_look_direction(90.0), Direction::West);
+        assert_eq!(horizontal_look_direction(180.0), Direction::North);
+        assert_eq!(horizontal_look_direction(-90.0), Direction::East);
+        // The 45°/135°/225°/315° midpoints land exactly as the bit-mask's
+        // `floor` does.
+        assert_eq!(horizontal_look_direction(44.0), Direction::South);
+        assert_eq!(horizontal_look_direction(45.0), Direction::West);
+        assert_eq!(horizontal_look_direction(135.0), Direction::North);
+        assert_eq!(horizontal_look_direction(225.0), Direction::East);
+        assert_eq!(horizontal_look_direction(315.0), Direction::South);
+        assert_eq!(horizontal_look_direction(-45.0), Direction::South);
+        assert_eq!(horizontal_look_direction(-135.0), Direction::East);
+        assert_eq!(horizontal_look_direction(-225.0), Direction::North);
+        assert_eq!(horizontal_look_direction(-315.0), Direction::West);
+        // Wraps around rather than clamping at ±180.
+        assert_eq!(horizontal_look_direction(450.0), Direction::West);
+        assert_eq!(horizontal_look_direction(-450.0), Direction::East);
+    }
+
+    /// `placed_block_state` gives the three redstone directional families a
+    /// yaw-derived facing and leaves every other block alone. The observer is
+    /// deliberately **not** inverted: `ObserverBlock.getStateForPlacement`
+    /// applies `.getOpposite()` twice (`ObserverBlock.java:133-136`), so it
+    /// watches in the player's look direction — unlike the diodes' single
+    /// inversion (`DiodeBlock.java:155-158`), which makes them face the player.
+    #[test]
+    fn placed_block_state_faces_diodes_at_the_player_and_observers_with_the_player() {
+        // Looking north (yaw 180): a repeater and comparator face the player —
+        // south — while an observer watches north.
+        assert_eq!(
+            placed_block_state("minecraft:repeater", Some(180.0)),
+            Some("minecraft:repeater[facing=south,delay=1,locked=false,powered=false]".to_string())
+        );
+        assert_eq!(
+            placed_block_state("minecraft:comparator", Some(180.0)),
+            Some("minecraft:comparator[facing=south,mode=compare,powered=false,output=0]".to_string())
+        );
+        assert_eq!(
+            placed_block_state("minecraft:observer", Some(180.0)),
+            Some("minecraft:observer[facing=north,powered=false]".to_string())
+        );
+        // Looking east (yaw -90): a repeater faces west.
+        assert_eq!(
+            placed_block_state("minecraft:repeater", Some(-90.0)),
+            Some("minecraft:repeater[facing=west,delay=1,locked=false,powered=false]".to_string())
+        );
+        // Blocks without a yaw-derived orientation keep the bare census name.
+        assert_eq!(placed_block_state("minecraft:dirt", Some(0.0)), None);
+        // And no yaw reported yet keeps the bare name for the directional
+        // families too.
+        assert_eq!(placed_block_state("minecraft:repeater", None), None);
     }
 }
