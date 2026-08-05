@@ -179,6 +179,9 @@ mod tests {
     /// relies on.
     #[tokio::test]
     async fn no_selected_account_is_no_cached_token_with_no_network_call() {
+        // Issue #446: `Client::new()` panics without an installed rustls crypto
+        // provider, which makes this test an incidental provider canary too.
+        crate::install_crypto_provider();
         let client = reqwest::Client::new();
         let secrets = MemoryStore::new();
         let metadata = AccountsMetadata::default();
@@ -191,6 +194,7 @@ mod tests {
 
     #[tokio::test]
     async fn selected_account_with_no_stored_token_is_no_cached_token() {
+        crate::install_crypto_provider();
         let client = reqwest::Client::new();
         let secrets = MemoryStore::new();
         let mut metadata = AccountsMetadata::default();

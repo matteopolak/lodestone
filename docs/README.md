@@ -882,6 +882,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   half described as declined is now built** — see ["`SKY_LIGHT_COLOR`: now built"
   below](#sky_light_color-now-built-n1n2n3) for what changed and why the objections
   below stopped applying.
+- [TLS crypto provider (`ring`, not `aws-lc-rs`)](./tls-crypto-provider.md) —
+  Lodestone's HTTPS stack is `reqwest` → `rustls`, and rustls requires a
+  *`CryptoProvider`* to be chosen. We choose **`ring`**, installed once per process by
+  `lodestone_auth::install_crypto_provider()`, so that `aws-lc-rs` — and with it
+  `aws-lc-sys`'s roughly 1,500 vendored C translation units — stays out of the
+  dependency graph entirely (issue #446).
 - [Tool mining speeds](./tool-mining.md) — How fast a *held item* mines a given
   block state, and whether it is the correct tool for that block's drops — vanilla
   `ItemStack.getDestroySpeed` and `Player.hasCorrectToolForDrops`, for protocol 776

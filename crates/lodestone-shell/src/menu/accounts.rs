@@ -772,6 +772,10 @@ fn run_device_code_login(tx: Sender<WorkerMsg>, cancel: Arc<AtomicBool>) {
                 return;
             }
         };
+        // Issue #446: reqwest is built with `rustls-no-provider`, so
+        // `Client::new()` panics unless a rustls crypto provider is installed.
+        // Idempotent, and deliberately adjacent to the construction it protects.
+        lodestone_auth::install_crypto_provider();
         let client = reqwest::Client::new();
         let mut pending = match lodestone_auth::flow::PendingLogin::begin(&client, &client_id).await {
             Ok(p) => p,
@@ -873,6 +877,9 @@ fn run_browser_login(tx: Sender<WorkerMsg>, cancel: Arc<AtomicBool>) {
                 return;
             }
         };
+        // Issue #446, as above: `rustls-no-provider` makes this a runtime panic
+        // without an installed provider.
+        lodestone_auth::install_crypto_provider();
         let client = reqwest::Client::new();
         let mut pending = match lodestone_auth::browser_login::LoopbackLogin::begin(&client_id).await
         {
