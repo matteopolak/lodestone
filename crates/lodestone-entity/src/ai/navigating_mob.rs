@@ -28,7 +28,7 @@
 use lodestone_model::{BlockPos, Vec3};
 
 use super::goal::GoalSelector;
-use super::mob::MobController;
+use super::mob::{MobController, ProjectileLaunch};
 use crate::pathfinding::{
     MobShape, PathFinder, PathNavigator, PathParams, PathStart, PathType, PathWorld,
 };
@@ -124,6 +124,11 @@ pub struct NavigatingMob<'w> {
     last_look: Option<Vec3>,
     jumping: bool,
     attacks: Vec<Vec3>,
+    /// Projectile launches a ranged goal asked for, awaiting a host drain
+    /// (issue #227). The mirror of [`attacks`](Self::attacks): this crate can
+    /// resolve neither into a real world effect, so both accumulate here for
+    /// whoever owns the entity ids.
+    launches: Vec<ProjectileLaunch>,
     move_calls: u32,
     path_searches: u32,
     /// Monotonic tick counter (advanced once per [`advance`]/[`tick`]), used to
@@ -337,6 +342,7 @@ impl<'w> NavigatingMob<'w> {
             last_look: None,
             jumping: false,
             attacks: Vec::new(),
+            launches: Vec::new(),
             move_calls: 0,
             path_searches: 0,
             tick_count: 0,
@@ -395,6 +401,25 @@ impl<'w> NavigatingMob<'w> {
     /// instead of re-processing the whole history every tick.
     pub fn take_new_attacks(&mut self) -> Vec<Vec3> {
         std::mem::take(&mut self.attacks)
+    }
+
+    /// The projectile launches a ranged goal has asked for (for tests).
+    #[must_use]
+    pub fn launches(&self) -> &[ProjectileLaunch] {
+        &self.launches
+    }
+
+    /// Drains the projectile launches recorded since the last call — the
+    /// [`take_new_attacks`](Self::take_new_attacks) shape, for issue #227's
+    /// ranged goals.
+    ///
+    /// **A host that never calls this turns every ranged goal into an island.**
+    /// The goal runs, `can_use` is true, the launch lands in this `Vec`, and no
+    /// projectile ever exists. `lodestone_server::mobs::MobSim::tick` is the one
+    /// production caller; see [`ranged`](super::roster::ranged) for the wiring
+    /// and what proves it.
+    pub fn take_new_launches(&mut self) -> Vec<ProjectileLaunch> {
+        std::mem::take(&mut self.launches)
     }
 
     /// How many times a goal asked this mob to move.
@@ -907,6 +932,10 @@ impl MobController for NavigatingMob<'_> {
 
     fn attack(&mut self, target: Vec3) {
         self.attacks.push(target);
+    }
+
+    fn launch_projectile(&mut self, launch: ProjectileLaunch) {
+        self.launches.push(launch);
     }
 
     fn random_stroll_target(&mut self) -> Option<Vec3> {
