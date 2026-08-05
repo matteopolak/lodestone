@@ -232,6 +232,9 @@ fn signed_chat(signature: Vec<u8>, was_shown: bool) -> Directive {
     Directive::Emit(ClientEvent::Chat {
         text: Text::literal("hi"),
         kind: ChatKind::Chat,
+        // The driver's last-seen tracker keys on `ack` only, so the sender is
+        // out of this test's scope.
+        sender: None,
         ack: Some(ChatAckInfo {
             signature,
             global_index: 0,
@@ -906,6 +909,7 @@ async fn signed_chat_is_acknowledged_on_keep_alive_tick() {
             vec![Directive::Emit(ClientEvent::Chat {
                 text: Text::literal("[Server] hello"),
                 kind: ChatKind::System,
+                sender: None,
                 ack: None,
             })],
         )

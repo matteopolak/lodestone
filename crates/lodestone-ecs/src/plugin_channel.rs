@@ -4,11 +4,13 @@
 //!
 //! The dispatch layer issue #301 asks for, at the one layer where a *plugin*
 //! can actually be the consumer: a plugin declares a channel with
-//! [`PluginChannel`], calls [`PluginChannelAppExt::add_plugin_channel`] in its
-//! own `Plugin::build`, and reads its own decoded type with an ordinary
-//! `MessageReader<T>`. No plugin ever matches on
-//! [`ClientEvent::CustomPayload`], string-compares a channel name, or parses a
-//! [`ResourceKey`] itself.
+//! [`PluginChannel`] (inbound) or [`OutboundPluginChannel`] (outbound), calls
+//! [`PluginChannelAppExt::add_plugin_channel`] /
+//! [`PluginChannelAppExt::add_outbound_plugin_channel`] in its own
+//! `Plugin::build`, and reads its own decoded type with an ordinary
+//! `MessageReader<T>` — or writes one to reach the wire. No plugin ever matches
+//! on [`ClientEvent::CustomPayload`], string-compares a channel name, or parses
+//! a [`ResourceKey`] itself.
 //!
 //! # Why this exists when `ChannelRegistry` already does
 //!
@@ -66,22 +68,51 @@
 //! [`crate::TickSet::Send`] aging point, and two plugins may declare the same
 //! channel type idempotently for the same reason.
 //!
+//! # Outbound: a plugin can also send (the half that had no producer)
+//!
+//! [`OutboundPluginChannel`] is the mirror of [`PluginChannel`]: declare the
+//! channel and how to encode it, call
+//! [`PluginChannelAppExt::add_outbound_plugin_channel`], then write the typed
+//! message. [`dispatch_plugin_channel_outbound`] turns every written `T` into a
+//! [`lodestone_model::ClientAction::SendCustomPayload`] pushed onto the
+//! [`crate::ActionQueue`] — the one sanctioned egress
+//! (`docs/bevy-migration.md` §6). The shell's `Sim` drains that queue after
+//! every `GameTick`, so a payload written this tick is on the wire this tick;
+//! nothing here touches a socket or a version crate. Before this existed,
+//! `SendCustomPayload` had **no producer in the workspace at all**: the `v770`
+//! encoder arm for it was reachable only from outside the tree via
+//! `ClientHandle::send_action` (see `docs/plugin-channels.md`).
+//!
+//! # A type registered for both directions echoes inbound back out
+//!
+//! Both halves fold the *same* `Messages<T>`. If a type implements both
+//! [`PluginChannel`] and [`OutboundPluginChannel`] and is registered both ways,
+//! then every inbound payload the decoder accepts is re-queued for the wire —
+//! the `Messages<T>` the inbound dispatch writes is exactly what the outbound
+//! drain reads. That is a documented consequence (`a_type_registered_both_ways_echoes_inbound_payloads_back_out`
+//! pins it), not a bug; a plugin that wants echo-free two-way messaging uses two
+//! types, one per direction.
+//!
 //! # What this does not do
 //!
-//! Nothing here *sends* a payload. Outbound is
-//! `lodestone_model::ClientAction::SendCustomPayload`, which has no producer in
-//! this workspace at all; `minecraft:brand` goes out through the dedicated
-//! `ClientAction::SendBrand` from `lodestone_client::driver` on entering
-//! `Configuration`. Inbound-only is the whole scope of this module.
+//! It does not change [`lodestone_model::event::route`]: `CustomPayload` stays
+//! `Route::NOWHERE`, because nothing in the ingest/session/shell pipeline
+//! consumes arbitrary plugin data. And the outbound half does **not** install
+//! the game-event bus — sending needs no inbound machinery, so
+//! `add_outbound_plugin_channel` alone leaves `SharedState`'s `game_event_bus_enabled`
+//! exactly where it found it. `minecraft:brand` continues to go out through the
+//! dedicated `ClientAction::SendBrand` from `lodestone_client::driver` on
+//! entering `Configuration`, untouched by this module.
 
 use std::marker::PhantomData;
 
 use bevy_app::{App, Plugin};
 use bevy_ecs::message::{MessageReader, MessageWriter};
 use bevy_ecs::prelude::{IntoScheduleConfigs, Message, ResMut, Resource};
-use lodestone_model::{ClientEvent, ResourceKey};
+use lodestone_model::{ClientAction, ClientEvent, ResourceKey};
 
 use crate::events::{GameEvent, GameEventBusPlugin};
+use crate::player::ActionQueue;
 use crate::plugin_message::PluginMessageAppExt;
 use crate::schedules::GameTick;
 use crate::sets::EventPriority;
@@ -110,6 +141,35 @@ pub trait PluginChannel: Message + Sized {
     /// [`PluginChannelState::rejected`] so "nothing arrived" and "it arrived and
     /// would not decode" stay distinguishable.
     fn decode(data: &[u8]) -> Option<Self>;
+}
+
+/// A plugin-defined `custom_payload` channel it wants to **send** on: the
+/// outbound mirror of [`PluginChannel`].
+///
+/// Implement this on the message type the plugin writes when it wants a payload
+/// to reach the server. [`PluginChannelAppExt::add_outbound_plugin_channel`]
+/// registers it; from then on every `T` written is encoded with
+/// [`OutboundPluginChannel::encode`] and queued as
+/// [`ClientAction::SendCustomPayload`] on the parsed channel by
+/// [`dispatch_plugin_channel_outbound`], reaching the wire on the same tick
+/// (the sim's `ActionQueue` drain runs after `GameTick`). See the module doc's
+/// outbound section for the full chain.
+///
+/// A type may implement **both** [`PluginChannel`] and [`OutboundPluginChannel`]
+/// — the module doc's "both directions echo" section says what that means.
+pub trait OutboundPluginChannel: Message + Sized {
+    /// The wire channel identifier, e.g. `"minecraft:brand"`.
+    ///
+    /// Parsed to a [`ResourceKey`] once at `App`-build time, with the same
+    /// panic-on-unparseable contract as [`PluginChannel::CHANNEL`] — a constant
+    /// that cannot parse is a channel that could never be sent on.
+    const CHANNEL: &'static str;
+
+    /// Encodes `self` into the channel's raw wire bytes.
+    ///
+    /// Return `&[u8]`-shaped data however the channel wants it — there is no
+    /// decode here to agree with, so the shape is entirely the channel's.
+    fn encode(&self) -> Vec<u8>;
 }
 
 /// Per-channel dispatch state, and the resource to assert in a test.
@@ -148,6 +208,33 @@ impl<T: PluginChannel> PluginChannelState<T> {
     #[must_use]
     pub fn rejected(&self) -> u64 {
         self.rejected
+    }
+}
+
+/// Per-outbound-channel dispatch state, and the resource to assert in a test —
+/// the outbound analogue of [`PluginChannelState`].
+///
+/// **Assert this, not `is_plugin_added`.** [`Self::sent`] is a fact about
+/// payloads that really reached the [`ActionQueue`], so it separates "the
+/// plugin never wrote anything" from "it wrote, but the drain never ran".
+#[derive(Resource, Debug)]
+pub struct OutboundPluginChannelState<T: OutboundPluginChannel> {
+    key: ResourceKey,
+    sent: u64,
+    _marker: PhantomData<fn() -> T>,
+}
+
+impl<T: OutboundPluginChannel> OutboundPluginChannelState<T> {
+    /// The parsed channel this type sends on.
+    #[must_use]
+    pub fn key(&self) -> &ResourceKey {
+        &self.key
+    }
+
+    /// How many payloads were queued for the wire.
+    #[must_use]
+    pub fn sent(&self) -> u64 {
+        self.sent
     }
 }
 
@@ -202,6 +289,62 @@ impl<T: PluginChannel> Plugin for PluginChannelPlugin<T> {
     }
 }
 
+/// Registers one [`OutboundPluginChannel`] type.
+///
+/// **Prefer [`PluginChannelAppExt::add_outbound_plugin_channel`]** — adding a
+/// bevy plugin twice panics, and two plugins sharing one channel type is the
+/// normal case.
+#[derive(Debug)]
+pub struct OutboundPluginChannelPlugin<T: OutboundPluginChannel>(PhantomData<fn() -> T>);
+
+impl<T: OutboundPluginChannel> Default for OutboundPluginChannelPlugin<T> {
+    fn default() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<T: OutboundPluginChannel> Plugin for OutboundPluginChannelPlugin<T> {
+    /// # Panics
+    ///
+    /// If [`OutboundPluginChannel::CHANNEL`] is not a parseable [`ResourceKey`].
+    /// See [`PluginChannelPlugin::build`] for why that is better than a channel
+    /// that is silently never sent on.
+    fn build(&self, app: &mut App) {
+        let key: ResourceKey = T::CHANNEL.parse().unwrap_or_else(|error| {
+            panic!(
+                "OutboundPluginChannel::CHANNEL for `{}` is {:?}, which is not a \
+                 valid namespaced identifier: {error}. A channel that does not \
+                 parse could never be sent on, so this fails loudly at build \
+                 rather than dropping every payload silently (issue #301).",
+                std::any::type_name::<T>(),
+                T::CHANNEL,
+            )
+        });
+
+        // `dispatch_plugin_channel_outbound` is anchored `.after(EventPriority::Monitor)`,
+        // so it runs after every cross-plugin tier a writer could sit in — which
+        // requires the chain `CorePlugin` configures in `GameTick`.
+        if !app.is_plugin_added::<crate::CorePlugin>() {
+            app.add_plugins(crate::CorePlugin);
+        }
+
+        // The queue the drain pushes into. Idempotent (`init_resource`), so a
+        // shell that already installs `LocalPlayerPlugin` — which inits the same
+        // resource — builds either way.
+        app.init_resource::<ActionQueue>();
+        app.add_plugin_message::<T>();
+        app.insert_resource(OutboundPluginChannelState::<T> {
+            key,
+            sent: 0,
+            _marker: PhantomData,
+        });
+        app.add_systems(
+            GameTick,
+            dispatch_plugin_channel_outbound::<T>.after(EventPriority::Monitor),
+        );
+    }
+}
+
 /// Folds this tick's [`GameEvent`]s, writing a `T` for every
 /// [`ClientEvent::CustomPayload`] on `T::CHANNEL` that decodes.
 ///
@@ -228,6 +371,32 @@ pub fn dispatch_plugin_channel<T: PluginChannel>(
     }
 }
 
+/// Folds this tick's written `T` messages into the [`ActionQueue`] as
+/// [`ClientAction::SendCustomPayload`] on `T::CHANNEL`.
+///
+/// Runs **after every [`EventPriority`] tier** — the opposite anchor to
+/// [`dispatch_plugin_channel`]: inbound dispatch must run before its subscribers
+/// so they see this tick's payloads, while outbound must run after its *writers*
+/// so everything a plugin queued this tick leaves on this tick. The shell's
+/// `Sim` drains the queue right after `GameTick`, so the payload reaches the
+/// wire in the same tick. A writer not ordered in an `EventPriority` tier has no
+/// ordering relation with this drain and may be delayed a tick (the message
+/// double-buffer retains it) — the tier is the contract, exactly as it is for
+/// inbound subscribers.
+pub fn dispatch_plugin_channel_outbound<T: OutboundPluginChannel>(
+    mut inbox: MessageReader<T>,
+    mut queue: ResMut<ActionQueue>,
+    mut state: ResMut<OutboundPluginChannelState<T>>,
+) {
+    for message in inbox.read() {
+        queue.0.push(ClientAction::SendCustomPayload {
+            channel: state.key.clone(),
+            data: T::encode(message),
+        });
+        state.sent += 1;
+    }
+}
+
 /// The idempotent registration call a plugin uses.
 pub trait PluginChannelAppExt {
     /// Declares `T` as a plugin channel: installs the game-event bus if needed,
@@ -239,12 +408,30 @@ pub trait PluginChannelAppExt {
     /// [`crate::plugin_message::PluginMessageAppExt::add_plugin_message`] is
     /// idempotent.
     fn add_plugin_channel<T: PluginChannel>(&mut self) -> &mut Self;
+
+    /// Declares `T` as an **outbound** plugin channel: every `T` written from
+    /// now on is encoded by [`OutboundPluginChannel::encode`] and queued as a
+    /// `custom_payload` on `T::CHANNEL`, reaching the server on the same tick
+    /// (see [`dispatch_plugin_channel_outbound`]).
+    ///
+    /// Idempotent, like [`add_plugin_channel`](Self::add_plugin_channel). Does
+    /// **not** install the game-event bus: sending needs no inbound machinery.
+    /// A type registered here is only ever sent when the plugin itself writes
+    /// it.
+    fn add_outbound_plugin_channel<T: OutboundPluginChannel>(&mut self) -> &mut Self;
 }
 
 impl PluginChannelAppExt for App {
     fn add_plugin_channel<T: PluginChannel>(&mut self) -> &mut Self {
         if !self.is_plugin_added::<PluginChannelPlugin<T>>() {
             self.add_plugins(PluginChannelPlugin::<T>::default());
+        }
+        self
+    }
+
+    fn add_outbound_plugin_channel<T: OutboundPluginChannel>(&mut self) -> &mut Self {
+        if !self.is_plugin_added::<OutboundPluginChannelPlugin<T>>() {
+            self.add_plugins(OutboundPluginChannelPlugin::<T>::default());
         }
         self
     }
@@ -255,10 +442,14 @@ mod tests {
     use bevy_app::App;
     use bevy_ecs::message::MessageReader;
     use bevy_ecs::prelude::{Message, ResMut, Resource};
-    use lodestone_model::{ClientEvent, ResourceKey};
+    use lodestone_model::{ClientAction, ClientEvent, ResourceKey};
 
-    use super::{PluginChannel, PluginChannelAppExt, PluginChannelPlugin, PluginChannelState};
+    use super::{
+        OutboundPluginChannel, OutboundPluginChannelPlugin, OutboundPluginChannelState,
+        PluginChannel, PluginChannelAppExt, PluginChannelPlugin, PluginChannelState,
+    };
     use crate::events::{GameEvent, GameEventBus};
+    use crate::player::ActionQueue;
     use crate::schedules::GameTick;
 
     /// A channel carrying its payload as raw UTF-8, the simplest real shape.
@@ -282,6 +473,45 @@ mod tests {
 
         fn decode(data: &[u8]) -> Option<Self> {
             Some(Self(data.to_vec()))
+        }
+    }
+
+    /// A two-way channel payload: four big-endian bytes for a sequence number.
+    /// Implements *both* traits so the "registered both ways echoes" semantics
+    /// can be pinned — see that test.
+    #[derive(Message, Debug, Clone, PartialEq, Eq)]
+    struct Ping {
+        seq: u32,
+    }
+
+    impl PluginChannel for Ping {
+        const CHANNEL: &'static str = "example:ping";
+
+        fn decode(data: &[u8]) -> Option<Self> {
+            Some(Self {
+                seq: u32::from_be_bytes(data.try_into().ok()?),
+            })
+        }
+    }
+
+    impl OutboundPluginChannel for Ping {
+        const CHANNEL: &'static str = "example:ping";
+
+        fn encode(&self) -> Vec<u8> {
+            self.seq.to_be_bytes().to_vec()
+        }
+    }
+
+    /// An outbound-only type on a different channel, so the two directions'
+    /// discrimination is each checked against two.
+    #[derive(Message, Debug, Clone, PartialEq, Eq)]
+    struct Beacon(String);
+
+    impl OutboundPluginChannel for Beacon {
+        const CHANNEL: &'static str = "example:beacon";
+
+        fn encode(&self) -> Vec<u8> {
+            self.0.clone().into_bytes()
         }
     }
 
@@ -463,5 +693,181 @@ mod tests {
             app.world().resource::<PluginChannelState<Greeting>>().matched(),
             0
         );
+    }
+
+    /// **The outbound headline.** A plugin writing `Ping` gets a
+    /// [`ClientAction::SendCustomPayload`] on the parsed channel in the
+    /// [`ActionQueue`] after one `GameTick`, with exactly the bytes `encode`
+    /// produced — and `sent()` proves it was the drain, not a phantom, that ran.
+    #[test]
+    fn a_written_outbound_payload_reaches_the_action_queue_encoded_same_tick() {
+        let mut app = App::new();
+        app.add_outbound_plugin_channel::<Ping>();
+        app.world_mut().write_message(Ping { seq: 7 });
+        app.world_mut().run_schedule(GameTick);
+
+        let queue = &app.world().resource::<ActionQueue>().0;
+        assert_eq!(queue.len(), 1);
+        match &queue[0] {
+            ClientAction::SendCustomPayload { channel, data } => {
+                assert_eq!(channel.to_string(), "example:ping");
+                assert_eq!(data, &7u32.to_be_bytes().to_vec());
+            }
+            other => panic!("expected SendCustomPayload, got {other:?}"),
+        }
+        assert_eq!(
+            app.world()
+                .resource::<OutboundPluginChannelState<Ping>>()
+                .sent(),
+            1
+        );
+    }
+
+    /// **The control for the headline.** The outbound half must not drag the
+    /// inbound machinery along: `add_outbound_plugin_channel` alone leaves the
+    /// game-event bus uninstalled (so `SharedState`'s cached
+    /// `game_event_bus_enabled` stays false), and an inbound `GameEvent` on the
+    /// *same* channel sends nothing — outbound reacts only to what a plugin
+    /// writes, never to the wire.
+    #[test]
+    fn outbound_registration_installs_no_inbound_bus_and_ignores_inbound_payloads() {
+        let mut app = App::new();
+        app.add_outbound_plugin_channel::<Ping>();
+        assert!(
+            app.world().get_resource::<GameEventBus>().is_none(),
+            "sending must not require (or install) the inbound bus"
+        );
+
+        // Even though `Ping` *could* decode inbound, no inbound dispatch is
+        // registered, so a server→client payload on the same channel reaches
+        // nothing and is certainly never re-sent.
+        app.world_mut()
+            .write_message(payload("example:ping", &[1, 2, 3]));
+        app.world_mut().run_schedule(GameTick);
+        assert!(app.world().resource::<ActionQueue>().0.is_empty());
+        assert_eq!(
+            app.world()
+                .resource::<OutboundPluginChannelState<Ping>>()
+                .sent(),
+            0
+        );
+    }
+
+    /// Two outbound channels coexist, each with its own key and counter — and a
+    /// payload on one never leaks onto the other.
+    #[test]
+    fn two_outbound_channels_register_independently() {
+        let mut app = App::new();
+        app.add_outbound_plugin_channel::<Ping>();
+        app.add_outbound_plugin_channel::<Beacon>();
+        assert_eq!(
+            app.world()
+                .resource::<OutboundPluginChannelState<Ping>>()
+                .key(),
+            &channel("example:ping")
+        );
+        assert_eq!(
+            app.world()
+                .resource::<OutboundPluginChannelState<Beacon>>()
+                .key(),
+            &channel("example:beacon")
+        );
+
+        app.world_mut().write_message(Ping { seq: 3 });
+        app.world_mut().run_schedule(GameTick);
+        let queue = &app.world().resource::<ActionQueue>().0;
+        assert_eq!(queue.len(), 1);
+        let ClientAction::SendCustomPayload { channel, .. } = &queue[0] else {
+            panic!("expected SendCustomPayload");
+        };
+        assert_eq!(channel.to_string(), "example:ping");
+        assert_eq!(
+            app.world()
+                .resource::<OutboundPluginChannelState<Beacon>>()
+                .sent(),
+            0,
+            "a Ping must never be queued under Beacon's channel"
+        );
+    }
+
+    /// Registration is idempotent, exactly like the inbound side — the property
+    /// that lets two plugins that never heard of each other share a channel type.
+    #[test]
+    fn declaring_an_outbound_channel_twice_is_idempotent() {
+        let mut app = App::new();
+        app.add_outbound_plugin_channel::<Ping>();
+        app.add_outbound_plugin_channel::<Ping>();
+        app.add_outbound_plugin_channel::<Ping>();
+        assert!(app.is_plugin_added::<OutboundPluginChannelPlugin<Ping>>());
+    }
+
+    /// **The control for idempotency.** A bare `add_plugins` twice *does* panic,
+    /// which is what the `is_plugin_added` check buys.
+    #[test]
+    #[should_panic(expected = "already added")]
+    fn adding_the_outbound_channel_plugin_directly_twice_panics() {
+        let mut app = App::new();
+        app.add_plugins(OutboundPluginChannelPlugin::<Ping>::default());
+        app.add_plugins(OutboundPluginChannelPlugin::<Ping>::default());
+    }
+
+    /// A channel constant that is not a valid identifier must panic at build,
+    /// naming the type — never register a channel that can never be sent on.
+    #[test]
+    #[should_panic(expected = "not a valid namespaced identifier")]
+    fn a_malformed_outbound_channel_constant_panics_at_build() {
+        #[derive(Message, Debug)]
+        struct Bad;
+
+        impl OutboundPluginChannel for Bad {
+            // Two separators: `ParseIdentifierError::TooManySeparators`.
+            const CHANNEL: &'static str = "a:b:c";
+
+            fn encode(&self) -> Vec<u8> {
+                vec![]
+            }
+        }
+
+        let mut app = App::new();
+        app.add_outbound_plugin_channel::<Bad>();
+    }
+
+    /// A type may be registered for both directions without a build-time panic —
+    /// the two plugins are distinct registrations of the same `T`.
+    #[test]
+    fn inbound_and_outbound_registration_of_the_same_type_coexist() {
+        let mut app = App::new();
+        app.add_plugin_channel::<Ping>();
+        app.add_outbound_plugin_channel::<Ping>();
+        assert!(app.is_plugin_added::<PluginChannelPlugin<Ping>>());
+        assert!(app.is_plugin_added::<OutboundPluginChannelPlugin<Ping>>());
+        // A tick runs clean with both systems in the schedule.
+        app.world_mut().run_schedule(GameTick);
+    }
+
+    /// The documented consequence of registering one type both ways: an inbound
+    /// payload the decoder accepts lands in `Messages<T>`, which the outbound
+    /// drain also reads — so it is re-queued for the wire. Pinned here so the
+    /// semantics are a fact, not a guess; a plugin that wants echo-free two-way
+    /// messaging uses two types, one per direction (see the module doc).
+    #[test]
+    fn a_type_registered_both_ways_echoes_inbound_payloads_back_out() {
+        let mut app = App::new();
+        app.add_plugin_channel::<Ping>();
+        app.add_outbound_plugin_channel::<Ping>();
+
+        app.world_mut()
+            .write_message(payload("example:ping", &7u32.to_be_bytes()));
+        app.world_mut().run_schedule(GameTick);
+
+        let queue = &app.world().resource::<ActionQueue>().0;
+        assert_eq!(queue.len(), 1, "the inbound payload is re-queued for the wire");
+        match &queue[0] {
+            ClientAction::SendCustomPayload { channel, data } => {
+                assert_eq!(channel.to_string(), "example:ping");
+                assert_eq!(data, &7u32.to_be_bytes().to_vec());
+            }
+            other => panic!("expected SendCustomPayload, got {other:?}"),
+        }
     }
 }

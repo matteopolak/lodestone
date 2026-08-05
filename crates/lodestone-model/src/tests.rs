@@ -134,6 +134,7 @@ fn chat_events_carry_acknowledgement_inputs_for_signed_messages() {
     let shown = ClientEvent::Chat {
         text: Text::literal("hello"),
         kind: ChatKind::Chat,
+        sender: None,
         ack: Some(ChatAckInfo {
             signature: vec![1, 2, 3, 4],
             global_index: 12,
@@ -143,6 +144,7 @@ fn chat_events_carry_acknowledgement_inputs_for_signed_messages() {
     let filtered = ClientEvent::Chat {
         text: Text::literal("filtered"),
         kind: ChatKind::Chat,
+        sender: None,
         ack: Some(ChatAckInfo {
             signature: vec![5, 6, 7, 8],
             global_index: 13,

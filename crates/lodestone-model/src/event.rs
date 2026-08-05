@@ -1031,6 +1031,14 @@ pub enum ClientEvent {
         text: Text,
         /// Message kind.
         kind: ChatKind,
+        /// The sender's profile UUID — issue #419's filter key. Only a signed
+        /// player-chat message carries one on the wire (`PLAYER_CHAT`); system,
+        /// disguised, and action-bar messages have none (the server
+        /// pre-decorates the display name into the text), and the legacy
+        /// protocol families' chat packets carry no sender field at all. A
+        /// consumer that filters by hidden senders must treat `None` as "not a
+        /// player message" and show it.
+        sender: Option<Uuid>,
         /// Signed-chat acknowledgement metadata, when this chat contributes to
         /// the last-seen acknowledgement window.
         ack: Option<ChatAckInfo>,

@@ -130,6 +130,8 @@ use lodestone_render::{SectionLight as _, SkyDefault, WorldSectionLight};
 
 pub use lodestone_testsupport::unique_username;
 
+use uuid::Uuid;
+
 use crate::entities::NameTag;
 
 /// A handle to the live client, published by the net thread once the session is
@@ -561,6 +563,11 @@ pub enum NetUpdate {
         text: lodestone_model::Text,
         /// Whether this is player chat (vs system/game-info).
         player: bool,
+        /// The sender's profile UUID — issue #419's filter key, mirrored from
+        /// [`ClientEvent::Chat`] verbatim. Only v770's signed `player_chat`
+        /// carries one; system, disguised, action-bar and every legacy-family
+        /// message are `None` (`None` must be shown, never hidden).
+        sender: Option<Uuid>,
     },
     /// A chunk became dirty at this position: the server sent (and the client
     /// applied to its world) chunk data here, so any mesh covering this column
@@ -2019,7 +2026,12 @@ fn forward(
 ) -> Result<(), ()> {
     let update = match event {
         ClientEvent::Login { entity_id, .. } => NetUpdate::LoggedIn { entity_id },
-        ClientEvent::Chat { text, kind, .. } => match kind {
+        ClientEvent::Chat {
+            text,
+            kind,
+            sender,
+            ..
+        } => match kind {
             // GameInfo is the action bar (SystemChat overlay), not the chat feed:
             // route it to the ActionBar overlay so it draws above the hotbar and
             // fades, instead of piling into the scrollback.
@@ -2027,6 +2039,11 @@ fn forward(
             _ => NetUpdate::Chat {
                 text,
                 player: matches!(kind, lodestone_model::event::ChatKind::Chat),
+                // Carried verbatim so the sim can filter hidden players (issue
+                // #419) — the suppression lives in `net_apply`, not here, so this
+                // router keeps its one-job shape and the reader sees *every* chat
+                // event routed, filtered or not.
+                sender,
             },
         },
         // 2001 is the only level event the shell acts on today; the rest are

@@ -31,14 +31,16 @@
 //!   immediately through [`crate::config::HiddenPlayers`], the same
 //!   eager-persistence rule `docs/keybindings.md` documents for rebinding).
 //! - **Decorative**: the Report button, always inactive — the real dependency
-//!   named above, not filled in by this issue. **Hiding a player has no
-//!   consumer yet either**: this module only *records* the choice
-//!   ([`crate::config::HiddenPlayers`]); nothing in `chat.rs` (off-limits for
-//!   this batch — see the issue's file-ownership note) reads it back to
-//!   actually suppress a hidden player's messages. So today, hiding a player
-//!   persists correctly and self-heals trivially (toggle again, or it simply
-//!   has no visible effect) but changes nothing on screen — an honestly
-//!   declared island half, not an implied feature.
+//!   named above, not filled in by this issue.
+//! - **Wired since this patch (issue #419) — Hide in Chat now has a consumer.**
+//!   This section used to read "hiding a player has no consumer yet". A
+//!   `sender: Option<Uuid>` field now threads from `ClientEvent::Chat` through
+//!   `net.rs::forward`'s `NetUpdate::Chat` to the sim's chat arm, which
+//!   consults [`should_show_message`] against the persisted
+//!   [`crate::config::HiddenPlayers`] set this screen writes. Only signed v770
+//!   player chat carries a sender; system/disguised/action-bar chat and every
+//!   legacy-family player message are `None` and always show — vanilla's Hide
+//!   in Chat filters signed player chat and nothing else.
 //! - **Wired since `2453c0f` — the list itself.** This section used to say
 //!   "nothing calls [`SocialNav::refresh`] yet, because feeding it the live
 //!   `TabList` needs a per-frame call from `app.rs`"; that patch has landed.
@@ -260,6 +262,29 @@ pub fn placement_anchor(placement: SocialPlacement, width: f32, _height: f32) ->
 #[must_use]
 pub fn available_for(kind: Option<super::SessionKind>) -> bool {
     matches!(kind, Some(super::SessionKind::Multiplayer))
+}
+
+/// Whether a chat message from `sender` should be shown given the hidden set
+/// (issue #419) — the consumer this screen's Hide/Show toggle was missing.
+///
+/// `None` is always shown: system and disguised chat, action-bar messages, and
+/// every legacy-family player message carry no sender on the wire, and vanilla's
+/// Hide in Chat only ever suppresses signed player chat. `Some(id)` shows unless
+/// `id` is in `hidden`.
+///
+/// The caller is `sim/net_apply.rs`'s chat arm, re-reading the set from the file
+/// this screen's toggles write (the same eager-persistence rule the toggle
+/// itself uses), so a hide made seconds ago is already in force here. Free and
+/// pure so the policy is testable without a session or disk state.
+#[must_use]
+pub fn should_show_message(
+    hidden: &crate::config::HiddenPlayers,
+    sender: Option<Uuid>,
+) -> bool {
+    match sender {
+        Some(id) => !hidden.contains(id),
+        None => true,
+    }
 }
 
 /// This screen's own cursor and hidden-player choices.
@@ -704,6 +729,58 @@ mod tests {
         assert!(!available_for(None), "no session at all");
         assert!(!available_for(Some(super::super::SessionKind::Singleplayer)));
         assert!(available_for(Some(super::super::SessionKind::Multiplayer)));
+    }
+
+    // -- should_show_message (issue #419) ----------------------------------
+
+    /// Hide-in-Chat must actually suppress the hidden player's messages once
+    /// the toggle has been clicked — driven through the real toggle path
+    /// (click, persist) rather than a hand-built set, so the predicate is
+    /// tested against the state the screen actually writes.
+    #[test]
+    fn a_hidden_player_is_suppressed_and_everyone_else_shows() {
+        let mut nav = with_three("suppress");
+        let bob = nav
+            .visible()
+            .iter()
+            .position(|(c, _)| *c == SocialControl::HideToggle(1))
+            .unwrap();
+        nav.click_row(bob);
+
+        assert!(
+            !should_show_message(&nav.hidden, Some(uuid(2))),
+            "Bob is suppressed after Hide in Chat"
+        );
+        assert!(should_show_message(&nav.hidden, Some(uuid(1))), "Alice still shows");
+        assert!(should_show_message(&nav.hidden, Some(uuid(3))), "Carol still shows");
+    }
+
+    /// `None` — system/disguised/action-bar chat and every legacy-family
+    /// player message — has no sender key to filter on, so it must always
+    /// show, even with a non-empty hidden set. This is the negative control
+    /// that keeps the predicate from becoming a mute-all: vanilla's Hide in
+    /// Chat filters signed player chat and nothing else.
+    #[test]
+    fn senderless_chat_is_never_suppressed() {
+        let mut nav = with_three("suppress-none");
+        for row in [0usize, 1] {
+            let visible_row = nav
+                .visible()
+                .iter()
+                .position(|(c, _)| *c == SocialControl::HideToggle(row))
+                .unwrap();
+            nav.click_row(visible_row);
+        }
+        assert!(
+            should_show_message(&nav.hidden, None),
+            "senderless chat must show even when players are hidden"
+        );
+    }
+
+    #[test]
+    fn an_id_not_in_the_set_is_shown() {
+        let hidden = crate::config::HiddenPlayers::default();
+        assert!(should_show_message(&hidden, Some(uuid(99))));
     }
 
     #[test]
