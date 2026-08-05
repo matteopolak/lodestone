@@ -879,6 +879,8 @@ pub enum CliCommand {
         candidate_sha: Option<String>,
         tolerance: f64,
     },
+    /// wasm32 compile + confinement-guard tripwire (issue #431).
+    WasmCheck,
     Planned {
         name: &'static str,
     },
@@ -886,7 +888,7 @@ pub enum CliCommand {
 
 #[must_use]
 pub const fn root_help() -> &'static str {
-    "xtask\n\nUsage:\n    cargo run -p xtask -- <command> [options]\n\nCommands:\n    gen-packet-ids   Generate Rust packet ID tables from a Mojang report or minecraft-data\n    fetch-assets     Download and verify vanilla client.jar, the asset index, and the asset-store objects client.jar stubs, into .cache/mc/<version>/\n    fetch-sounds     Download and verify the vanilla .ogg sound corpus (~80 MB) into .cache/mc/<version>/objects/\n    fetch-version    Download and verify vanilla server.jar into .cache/mc/<version>/\n    version-table    Generate/check the epic-343 16-version protocol/data-version table\n    gen-registries   Generate selected registry id->ResourceKey tables from registries.json\n    check-isolation  Enforce protocol version crate dependency isolation\n    check-connected  Enforce workspace crates are reachable from shipped binary/cdylib roots\n    connectedness    Report v770 play packet reachability\n    check-deletable  Simulate deleting a version family's folder and report the fallout\n    codegen-ratio    Report generated-vs-hand-written codec metrics per protocol family\n    new-version      Scaffold a protocol family; registry support is withheld until SHAPE_REVIEW.toml is discharged\n    gen-reports      Not implemented yet\n    conformance      Run packet-id, registry, isolation, deletability, test, and clippy checks for a family\n    docs-index       Generate docs/README.md from every doc's own H1 + `## What it is` summary\n    bench-compare    Ratio + verdict between two recorded bench-results/*.jsonl runs (issue #82)\n\nOptions for gen-packet-ids:\n    --version <version>   Minecraft version, e.g. 26.2 (Mojang) or 1.8 (minecraft-data dir)\n    --protocol <id>       Protocol version, e.g. 776 or 47\n    --source <source>     Report source: mojang (default) or minecraft-data\n    --out <path>          Output path under crates/protocol/*/src/generated/\n    --check               Compare generated output against disk and fail on drift without writing\n\nOptions for gen-registries:\n    --version <version>       Minecraft version, e.g. 26.2\n    --protocol <id>           Protocol version, e.g. 776\n    --out-dir <path>          Output directory under crates/protocol/*/src/generated\n    --registries <csv>        Registry keys to generate (default: sound_event,particle_type,menu,item)\n    --check                   Compare generated registry tables against disk without writing\n\nOptions for check-connected:\n    --allowlist <path>    TOML file of explicit exceptions (default: xtask/check-connected.toml)\n\nOptions for connectedness:\n    Parses v770's generated packet_ids.rs for play denominators, then classifies adapter dispatch outlets (ClientEvent, Directive, world/sink writes) with explicit UNCLASSIFIED output.\n\nOptions for check-deletable:\n    <version>             Version family to simulate deleting: package name (lodestone-v47), folder (v47), or path\n\nOptions for codegen-ratio:\n    Reports both the optimistic per-struct derive/manual ratio and the more decision-useful absolute hand-written source lines.\n\nOptions for new-version:\n    --protocol <id>       Protocol number for the new family (required)\n    --minecraft <ver>    Minecraft version key for the packet-id oracle (required)\n    --from <family>       Existing family to copy from, e.g. v770 (default) or v47\n    --source <source>     Oracle: mojang or minecraft-data (default inferred from --from)\n    --name <vNNN>         Family folder/label (default v<protocol>)\n    --force               Overwrite the target folder if it already exists\n    SHAPE_REVIEW.toml     Generated when packet shapes differ; every entry must be reviewed before registry support may be added\n\nOptions for conformance:\n    --family <vNNN>       Version family folder/label to check, e.g. v735\n    --minecraft <ver>     Minecraft version key for packet-id/registry checks\n    --protocol <id>       Protocol number for the family\n    --source <source>     Packet-id oracle: mojang or minecraft-data (default mojang)\n    --skip-cargo          Only run xtask structural checks; skip cargo test/clippy\n\nOptions for fetch-version:\n    --version <version>   Minecraft version, e.g. 1.16.5\n    --force               Re-download even when cached server.jar already matches its SHA-1\n\nOptions for fetch-assets:\n    --version <version>   Minecraft version, e.g. 26.2\n    --force               Re-download even when cached files already match their SHA-1\n    -h, --help            Print help\n  Also fetches asset-store objects, ~3.2 MB in total:\n    - the 8 whose name is in client.jar at a DIFFERENT size, i.e. the stubs the jar ships to be\n      overridden (the 6 panorama faces, panorama_overlay, unifont.json). Nothing at runtime can\n      tell a stub from the real asset, which is why these must be eager.\n    - minecraft/sounds.json (626 KB), which ShellAudio reads eagerly and cannot start without.\n  The 4871 .ogg samples (375 MB) are NOT fetched: a missing sample is one silent sound, resolved\n  lazily per event. Run `fetch-sounds` for the corpus.\n\nOptions for fetch-sounds:\n    --version <version>   Minecraft version, e.g. 26.2 (fetch-assets must have run first)\n    --all                 Also fetch background music and jukebox discs (+293 MB, 92 objects)\n    --jobs <n>            Concurrent downloads (default 12)\n    --force               Re-download every object even when it already matches its SHA-1\n  Derives the corpus from sounds.json, not a file list: every sample any non-music event can\n  select. Measured on 26.2 -- 4751 objects, 80.14 MB, including all six biome ambience loops.\n  Excluded by default: 70 music tracks + 22 jukebox records = 92 objects, 293.23 MB. The 28 index\n  .ogg objects no event references are fetched in neither mode. Every object's SHA-1 is verified\n  against the index, and a re-run of a complete fetch downloads nothing.\n\nOptions for version-table:\n    --check               Compare the generated table against crates/lodestone-registry/src/generated/version_table.rs and fail on drift without writing\n    --fetch-missing       Also run fetch-version for any of the 16 target versions with no cached .cache/mc/<version>/server.jar (network + disk heavy; off by default)\n\nOptions for docs-index:\n    --check               Compare the generated index against docs/README.md and fail on drift without writing\n  Do not hand-edit docs/README.md: add/edit a doc under docs/ (with an H1 and a `## What\n  it is`/`## What this is` summary paragraph) and re-run this command. `cargo test -p xtask`\n  already fails if the committed file drifts from the generator.\n\nOptions for bench-compare:\n    <path>                 A bench-results/<bench>.jsonl file (gitignored local measurement log)\n    --metric <name>        Metric name to compare, e.g. neighbourhood_factor_vs_single\n    --scene <name>          Scene string to compare (must match exactly, including punctuation)\n    --candidate <sha>       Git-sha prefix of the \"after\" run (default: most recent recorded run)\n    --baseline <sha>        Git-sha prefix of the \"before\" run (default: the run immediately\n                            preceding the candidate on the same machine/profile)\n    --tolerance <pct>       Tolerance band as a percentage (default 25, i.e. +/-25%)\n  Never wired into CI by this command -- a manual/local/scheduled check, per\n  docs/roadmap/benchmarks.md's policy. Exits non-zero when the ratio falls outside the\n  tolerance band (useful for a future opt-in script; this alone does not make anything\n  CI-blocking).\n"
+    "xtask\n\nUsage:\n    cargo run -p xtask -- <command> [options]\n\nCommands:\n    gen-packet-ids   Generate Rust packet ID tables from a Mojang report or minecraft-data\n    fetch-assets     Download and verify vanilla client.jar, the asset index, and the asset-store objects client.jar stubs, into .cache/mc/<version>/\n    fetch-sounds     Download and verify the vanilla .ogg sound corpus (~80 MB) into .cache/mc/<version>/objects/\n    fetch-version    Download and verify vanilla server.jar into .cache/mc/<version>/\n    version-table    Generate/check the epic-343 16-version protocol/data-version table\n    gen-registries   Generate selected registry id->ResourceKey tables from registries.json\n    check-isolation  Enforce protocol version crate dependency isolation\n    check-connected  Enforce workspace crates are reachable from shipped binary/cdylib roots\n    connectedness    Report v770 play packet reachability\n    check-deletable  Simulate deleting a version family's folder and report the fallout\n    codegen-ratio    Report generated-vs-hand-written codec metrics per protocol family\n    new-version      Scaffold a protocol family; registry support is withheld until SHAPE_REVIEW.toml is discharged\n    gen-reports      Not implemented yet\n    conformance      Run packet-id, registry, isolation, deletability, test, and clippy checks for a family\n    docs-index       Generate docs/README.md from every doc's own H1 + `## What it is` summary\n    bench-compare    Ratio + verdict between two recorded bench-results/*.jsonl runs (issue #82)\n    wasm-check       wasm32 compile + confinement-guard tripwire (tested port of scripts/wasm-check.sh)\n\nOptions for gen-packet-ids:\n    --version <version>   Minecraft version, e.g. 26.2 (Mojang) or 1.8 (minecraft-data dir)\n    --protocol <id>       Protocol version, e.g. 776 or 47\n    --source <source>     Report source: mojang (default) or minecraft-data\n    --out <path>          Output path under crates/protocol/*/src/generated/\n    --check               Compare generated output against disk and fail on drift without writing\n\nOptions for gen-registries:\n    --version <version>       Minecraft version, e.g. 26.2\n    --protocol <id>           Protocol version, e.g. 776\n    --out-dir <path>          Output directory under crates/protocol/*/src/generated\n    --registries <csv>        Registry keys to generate (default: sound_event,particle_type,menu,item)\n    --check                   Compare generated registry tables against disk without writing\n\nOptions for check-connected:\n    --allowlist <path>    TOML file of explicit exceptions (default: xtask/check-connected.toml)\n\nOptions for connectedness:\n    Parses v770's generated packet_ids.rs for play denominators, then classifies adapter dispatch outlets (ClientEvent, Directive, world/sink writes) with explicit UNCLASSIFIED output.\n\nOptions for check-deletable:\n    <version>             Version family to simulate deleting: package name (lodestone-v47), folder (v47), or path\n\nOptions for codegen-ratio:\n    Reports both the optimistic per-struct derive/manual ratio and the more decision-useful absolute hand-written source lines.\n\nOptions for new-version:\n    --protocol <id>       Protocol number for the new family (required)\n    --minecraft <ver>    Minecraft version key for the packet-id oracle (required)\n    --from <family>       Existing family to copy from, e.g. v770 (default) or v47\n    --source <source>     Oracle: mojang or minecraft-data (default inferred from --from)\n    --name <vNNN>         Family folder/label (default v<protocol>)\n    --force               Overwrite the target folder if it already exists\n    SHAPE_REVIEW.toml     Generated when packet shapes differ; every entry must be reviewed before registry support may be added\n\nOptions for conformance:\n    --family <vNNN>       Version family folder/label to check, e.g. v735\n    --minecraft <ver>     Minecraft version key for packet-id/registry checks\n    --protocol <id>       Protocol number for the family\n    --source <source>     Packet-id oracle: mojang or minecraft-data (default mojang)\n    --skip-cargo          Only run xtask structural checks; skip cargo test/clippy\n\nOptions for fetch-version:\n    --version <version>   Minecraft version, e.g. 1.16.5\n    --force               Re-download even when cached server.jar already matches its SHA-1\n\nOptions for fetch-assets:\n    --version <version>   Minecraft version, e.g. 26.2\n    --force               Re-download even when cached files already match their SHA-1\n    -h, --help            Print help\n  Also fetches asset-store objects, ~3.2 MB in total:\n    - the 8 whose name is in client.jar at a DIFFERENT size, i.e. the stubs the jar ships to be\n      overridden (the 6 panorama faces, panorama_overlay, unifont.json). Nothing at runtime can\n      tell a stub from the real asset, which is why these must be eager.\n    - minecraft/sounds.json (626 KB), which ShellAudio reads eagerly and cannot start without.\n  The 4871 .ogg samples (375 MB) are NOT fetched: a missing sample is one silent sound, resolved\n  lazily per event. Run `fetch-sounds` for the corpus.\n\nOptions for fetch-sounds:\n    --version <version>   Minecraft version, e.g. 26.2 (fetch-assets must have run first)\n    --all                 Also fetch background music and jukebox discs (+293 MB, 92 objects)\n    --jobs <n>            Concurrent downloads (default 12)\n    --force               Re-download every object even when it already matches its SHA-1\n  Derives the corpus from sounds.json, not a file list: every sample any non-music event can\n  select. Measured on 26.2 -- 4751 objects, 80.14 MB, including all six biome ambience loops.\n  Excluded by default: 70 music tracks + 22 jukebox records = 92 objects, 293.23 MB. The 28 index\n  .ogg objects no event references are fetched in neither mode. Every object's SHA-1 is verified\n  against the index, and a re-run of a complete fetch downloads nothing.\n\nOptions for version-table:\n    --check               Compare the generated table against crates/lodestone-registry/src/generated/version_table.rs and fail on drift without writing\n    --fetch-missing       Also run fetch-version for any of the 16 target versions with no cached .cache/mc/<version>/server.jar (network + disk heavy; off by default)\n\nOptions for docs-index:\n    --check               Compare the generated index against docs/README.md and fail on drift without writing\n  Do not hand-edit docs/README.md: add/edit a doc under docs/ (with an H1 and a `## What\n  it is`/`## What this is` summary paragraph) and re-run this command. `cargo test -p xtask`\n  already fails if the committed file drifts from the generator.\n\nOptions for bench-compare:\n    <path>                 A bench-results/<bench>.jsonl file (gitignored local measurement log)\n    --metric <name>        Metric name to compare, e.g. neighbourhood_factor_vs_single\n    --scene <name>          Scene string to compare (must match exactly, including punctuation)\n    --candidate <sha>       Git-sha prefix of the \"after\" run (default: most recent recorded run)\n    --baseline <sha>        Git-sha prefix of the \"before\" run (default: the run immediately\n                            preceding the candidate on the same machine/profile)\n    --tolerance <pct>       Tolerance band as a percentage (default 25, i.e. +/-25%)\n  Never wired into CI by this command -- a manual/local/scheduled check, per\n  docs/roadmap/benchmarks.md's policy. Exits non-zero when the ratio falls outside the\n  tolerance band (useful for a future opt-in script; this alone does not make anything\n  CI-blocking).\n"
 }
 
 pub fn parse_cli_args<I, S>(args: I) -> Result<CliCommand>
@@ -919,6 +921,7 @@ where
         "conformance" => parse_conformance_args(&args[1..]),
         "docs-index" => parse_docs_index_args(&args[1..]),
         "bench-compare" => parse_bench_compare_args(&args[1..]),
+        "wasm-check" => Ok(CliCommand::WasmCheck),
         "gen-reports" => Ok(CliCommand::Planned {
             name: planned_command_name(command).expect("matched planned command has a name"),
         }),
@@ -1147,6 +1150,11 @@ pub fn run_cli_command(command: CliCommand) -> Result<()> {
                 std::process::exit(1);
             }
             Ok(())
+        }
+        CliCommand::WasmCheck => {
+            let workspace_root =
+                std::env::current_dir().context("determine current workspace directory")?;
+            run_wasm_check(&workspace_root)
         }
         CliCommand::Planned { name } => bail!("xtask command {name:?} is not implemented yet"),
     }
@@ -8314,6 +8322,526 @@ fn validate_relative_child_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// wasm-check — wasm32 compile + confinement-guard tripwire (issue #431).
+//
+// Tested port of scripts/wasm-check.sh. The script is a shell pipeline with no
+// gate (it relies on manual review of its output); this command runs the same
+// three phases — compile the wasm crate subset, grep-based CONFINEMENT guards,
+// trunk build of web/ — but reports every failure through Result so a leak is a
+// non-zero exit rather than something a `| grep | tail` can swallow. The
+// scanners are unit-tested below; the shell original has none.
+//
+// Read scripts/wasm-check.sh's header for the WHY this exists: "compiles to
+// wasm" and "works on wasm" are different, and std::fs / Instant::now /
+// std::thread::spawn / tokio::time all COMPILE for wasm32 and only die at
+// runtime. The compile pass is structurally blind to them; the confinement
+// guards are the tripwire that actually catches a leaked hazard.
+// ---------------------------------------------------------------------------
+
+/// Target triple the wasm crate subset is compiled for.
+pub const WASM_TARGET: &str = "wasm32-unknown-unknown";
+
+/// One crate in the wasm compile subset, plus any extra `cargo build` args the
+/// browser configuration requires (the script's `"pkg|extra"` rows).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WasmCrate {
+    pub name: &'static str,
+    pub extra_args: &'static [&'static str],
+}
+
+/// The wasm compile subset, in build order — parity with scripts/wasm-check.sh.
+/// The two non-obvious rows' whys are kept from the script: lodestone-net needs
+/// the `ws-web` feature for browser websockets; every other crate builds
+/// default.
+pub fn wasm_crates() -> Vec<WasmCrate> {
+    vec![
+        WasmCrate {
+            name: "lodestone-core",
+            extra_args: &[],
+        },
+        WasmCrate {
+            name: "lodestone-model",
+            extra_args: &[],
+        },
+        WasmCrate {
+            name: "lodestone-world",
+            extra_args: &[],
+        },
+        WasmCrate {
+            name: "lodestone-physics",
+            extra_args: &[],
+        },
+        WasmCrate {
+            name: "lodestone-assets",
+            extra_args: &[],
+        },
+        WasmCrate {
+            name: "lodestone-registry",
+            extra_args: &[],
+        },
+        WasmCrate {
+            name: "lodestone-render",
+            extra_args: &[],
+        },
+        WasmCrate {
+            name: "lodestone-audio",
+            extra_args: &[],
+        },
+        // Event→sound bridge. Its default build is device-free and version-free
+        // (lodestone-audio, lodestone-assets, lodestone-model, glam, thiserror
+        // — all wasm-safe); the live gate's client/tokio/registry deps are
+        // gated behind the off-by-default `live-v770` feature.
+        WasmCrate {
+            name: "lodestone-sound",
+            extra_args: &[],
+        },
+        // Canonical 26.2 game-data censuses (issue #361); depends on nothing
+        // but lodestone-model, listed separately so a regression is
+        // unambiguous rather than only surfacing via v770.
+        WasmCrate {
+            name: "lodestone-data",
+            extra_args: &[],
+        },
+        WasmCrate {
+            name: "lodestone-v770",
+            extra_args: &[],
+        },
+        WasmCrate {
+            name: "lodestone-v47",
+            extra_args: &[],
+        },
+        WasmCrate {
+            name: "lodestone-net",
+            extra_args: &["--features", "ws-web"],
+        },
+        // bevy_ecs must be wasm32-clean or the bevy migration stops here.
+        WasmCrate {
+            name: "lodestone-ecs",
+            extra_args: &[],
+        },
+        WasmCrate {
+            name: "lodestone-client",
+            extra_args: &[],
+        },
+        WasmCrate {
+            name: "lodestone-controller",
+            extra_args: &[],
+        },
+        // Integrated server runs in the browser under the `spawn_local` seam;
+        // browser singleplayer depends on it.
+        WasmCrate {
+            name: "lodestone-server",
+            extra_args: &[],
+        },
+        WasmCrate {
+            name: "lodestone-worldgen",
+            extra_args: &[],
+        },
+    ]
+}
+
+/// One confinement guard rule — parity with scripts/wasm-check.sh's
+/// CONFINEMENT_RULES table. `banned` is matched as a literal substring, which
+/// is exactly what the script's rules mean today: every token (`std::fs::`,
+/// `Instant::now(`, `tokio::time::`, `cpal::`, `std::thread`, `tokio::spawn`)
+/// is literal in grep's BRE/ERE and none carries an active regex
+/// metacharacter.
+#[derive(Debug, Clone)]
+pub struct ConfinementRule {
+    /// Report label, e.g. "lodestone-assets fs-confinement".
+    pub label: &'static str,
+    /// Directory under the workspace root to scan, e.g. "crates/lodestone-assets/src".
+    pub src_dir: &'static str,
+    /// Banned symbol, matched as a literal substring.
+    pub banned: &'static str,
+    /// File basenames allowed to contain the banned symbol — the
+    /// cfg(not(target_arch = "wasm32"))-gated files that confine the hazard.
+    pub allowlist: &'static [&'static str],
+}
+
+/// The confinement rules in effect — parity with scripts/wasm-check.sh. Add a
+/// row only after the crate actually confines the hazard to an allowlisted,
+/// cfg(not(wasm32))-gated file; a rule for ungated code goes red for everyone.
+pub fn confinement_rules() -> Vec<ConfinementRule> {
+    vec![
+        // lodestone-audio has NO time source at all (sample-driven clock), so
+        // Instant::now() is banned across the whole crate with an empty
+        // allowlist — "audio never touches wall-clock time" is a checked
+        // invariant, not a promise.
+        ConfinementRule {
+            label: "lodestone-assets fs-confinement",
+            src_dir: "crates/lodestone-assets/src",
+            banned: "std::fs::",
+            allowlist: &["source_native.rs"],
+        },
+        ConfinementRule {
+            label: "lodestone-audio device-confinement",
+            src_dir: "crates/lodestone-audio/src",
+            banned: "cpal::",
+            allowlist: &["sink.rs"],
+        },
+        ConfinementRule {
+            label: "lodestone-audio time-confinement",
+            src_dir: "crates/lodestone-audio/src",
+            banned: "Instant::now(",
+            allowlist: &[],
+        },
+        ConfinementRule {
+            label: "lodestone-sound time-confinement",
+            src_dir: "crates/lodestone-sound/src",
+            banned: "Instant::now(",
+            allowlist: &[],
+        },
+        // lodestone-client confines tokio::time to native_time.rs and bans the
+        // whole Instant/std::fs/std::thread family across the crate (the driver
+        // is event-driven and never reads a wall clock); tokio::spawn is
+        // confined to the spawn.rs seam, whose wasm arm uses
+        // wasm_bindgen_futures::spawn_local.
+        ConfinementRule {
+            label: "lodestone-client time-confinement",
+            src_dir: "crates/lodestone-client/src",
+            banned: "tokio::time::",
+            allowlist: &["native_time.rs"],
+        },
+        ConfinementRule {
+            label: "lodestone-client instant-ban",
+            src_dir: "crates/lodestone-client/src",
+            banned: "Instant::now(",
+            allowlist: &[],
+        },
+        ConfinementRule {
+            label: "lodestone-client fs-ban",
+            src_dir: "crates/lodestone-client/src",
+            banned: "std::fs::",
+            allowlist: &[],
+        },
+        ConfinementRule {
+            label: "lodestone-client thread-ban",
+            src_dir: "crates/lodestone-client/src",
+            banned: "std::thread",
+            allowlist: &[],
+        },
+        ConfinementRule {
+            label: "lodestone-client spawn-confinement",
+            src_dir: "crates/lodestone-client/src",
+            banned: "tokio::spawn",
+            allowlist: &["spawn.rs"],
+        },
+    ]
+}
+
+/// A single banned-symbol hit outside the allowlisted file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfinementLeak {
+    /// Path relative to the workspace root.
+    pub path: PathBuf,
+    /// 1-based line number.
+    pub line: usize,
+    /// Full line content.
+    pub content: String,
+}
+
+/// Scans one rule's src dir for the banned symbol, skipping allowlisted file
+/// basenames. A missing src dir is an ERROR, not a silent pass — a rule
+/// pointing at a typo'd path would otherwise report green forever (the
+/// script's `grep … 2>/dev/null || true` swallows exactly that hole).
+pub fn scan_confinement(
+    workspace_root: &Path,
+    rule: &ConfinementRule,
+) -> Result<Vec<ConfinementLeak>> {
+    let root = workspace_root.join(rule.src_dir);
+    if !root.is_dir() {
+        bail!(
+            "confinement rule {:?} scans a missing dir: {}",
+            rule.label,
+            root.display()
+        );
+    }
+    let mut leaks = Vec::new();
+    scan_confinement_dir(&root, workspace_root, rule, &mut leaks)?;
+    leaks.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
+    Ok(leaks)
+}
+
+fn scan_confinement_dir(
+    dir: &Path,
+    workspace_root: &Path,
+    rule: &ConfinementRule,
+    leaks: &mut Vec<ConfinementLeak>,
+) -> Result<()> {
+    let entries = std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("read dir entry under {}", dir.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("stat {}", path.display()))?;
+        if file_type.is_dir() {
+            scan_confinement_dir(&path, workspace_root, rule, leaks)?;
+        } else if file_type.is_file() {
+            if rule
+                .allowlist
+                .contains(&entry.file_name().to_string_lossy().as_ref())
+            {
+                continue;
+            }
+            // Lossy read (not read_to_string) so a non-UTF-8 file is still
+            // scanned rather than silently skipped, matching grep's behaviour.
+            let bytes =
+                std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+            let text = String::from_utf8_lossy(&bytes);
+            for (index, line) in text.lines().enumerate() {
+                if line.contains(rule.banned) {
+                    let rel = path
+                        .strip_prefix(workspace_root)
+                        .unwrap_or(&path)
+                        .to_path_buf();
+                    leaks.push(ConfinementLeak {
+                        path: rel,
+                        line: index + 1,
+                        content: line.to_string(),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Runs the full wasm-check tripwire: prereqs, per-crate compile, confinement
+/// guards, then the trunk build of web/. Returns Err (non-zero exit) on any
+/// failure — `cargo xtask wasm-check`, the tested replacement for
+/// scripts/wasm-check.sh.
+pub fn run_wasm_check(workspace_root: &Path) -> Result<()> {
+    ensure_wasm_prereqs()?;
+
+    println!("== Lodestone wasm32 compile guard ==");
+    println!("target: {WASM_TARGET}");
+    println!();
+
+    let mut failures: Vec<String> = Vec::new();
+
+    for wasm_crate in wasm_crates() {
+        let display = if wasm_crate.extra_args.is_empty() {
+            wasm_crate.name.to_string()
+        } else {
+            format!("{} {}", wasm_crate.name, wasm_crate.extra_args.join(" "))
+        };
+        print!("  {display:<34} ");
+        match compile_crate_for_wasm(workspace_root, &wasm_crate) {
+            Ok(()) => println!("PASS"),
+            Err(output) => {
+                println!("FAIL");
+                failures.push(format!(
+                    "{} {}",
+                    wasm_crate.name,
+                    wasm_crate.extra_args.join(" ")
+                ));
+                for line in filter_cargo_error_lines(&output) {
+                    println!("      │ {line}");
+                }
+                println!(
+                    "      └─ two common causes: (a) a dependency pulled '{}' onto native-only",
+                    wasm_crate.name
+                );
+                println!("         code (threads / std::fs / OS sockets / OS audio like cpal) — fix by gating");
+                println!("         that dep or call behind cfg(not(target_arch = \"wasm32\")) or an");
+                println!("         off-by-default feature; or (b) a plain compile error in '{}' or a crate", wasm_crate.name);
+                println!("         it depends on — which, in this shared workspace, is often a sibling crate");
+                println!("         mid-edit (see the named crate in the error above): wait and re-run.");
+                println!(
+                    "         Reproduce: cargo build -p {} --target {WASM_TARGET} {}",
+                    wasm_crate.name,
+                    wasm_crate.extra_args.join(" ")
+                );
+            }
+        }
+    }
+
+    for rule in confinement_rules() {
+        print!("  {:<34} ", rule.label);
+        match scan_confinement(workspace_root, &rule) {
+            Ok(leaks) if leaks.is_empty() => println!("PASS"),
+            Ok(leaks) => {
+                println!("FAIL");
+                for leak in &leaks {
+                    println!(
+                        "      {}:{}:{}",
+                        leak.path.display(),
+                        leak.line,
+                        leak.content
+                    );
+                }
+                failures.push(format!(
+                    "{}: '{}' used outside {{{}}}",
+                    rule.label,
+                    rule.banned,
+                    rule.allowlist.join(",")
+                ));
+            }
+            Err(err) => {
+                println!("FAIL");
+                println!("      {err:#}");
+                failures.push(format!("{}: scanner error: {err:#}", rule.label));
+            }
+        }
+    }
+
+    // The browser app is its own workspace (outside the crates/ glob), built
+    // through trunk so a wasm-bindgen-level break is caught, not just a rustc
+    // one. Cheap because the crate graph above is already warm in the shared
+    // target dir.
+    if workspace_root.join("web").join("Cargo.toml").is_file() {
+        print!("  {:<34} ", "lodestone-web (trunk build)");
+        match build_web_with_trunk(workspace_root) {
+            Ok(()) => println!("PASS"),
+            Err(output) => {
+                println!("FAIL");
+                failures.push("lodestone-web (trunk build)".to_string());
+                for line in filter_trunk_error_lines(&output) {
+                    println!("      │ {line}");
+                }
+                println!("      └─ the browser app failed to build. If the per-crate rows above are all");
+                println!("         PASS, this is a wasm-bindgen/trunk-level break in web/ itself.");
+                println!("         Reproduce: (cd web && trunk build)");
+            }
+        }
+    }
+
+    println!();
+    if !failures.is_empty() {
+        bail!(
+            "RESULT: FAIL — {} item(s) failed the wasm check:\n  - {}",
+            failures.len(),
+            failures.join("\n  - ")
+        );
+    }
+
+    println!("RESULT: PASS — all listed crates COMPILE to {WASM_TARGET}.");
+    println!();
+    println!("NOTE: the COMPILE pass proves compilation, NOT runtime, and is blind to the");
+    println!("      'compiles on wasm, panics at runtime' family: std::fs, Instant::now,");
+    println!("      std::thread::spawn, tokio::time all build green here. cfg(target_arch)");
+    println!("      does NOT turn a fresh ungated call into a compile error (it only removes");
+    println!("      existing native entry points), and a Cargo feature is weaker still");
+    println!("      (unification re-enables it). The CONFINEMENT guards above are what");
+    println!("      actually catch a leaked hazard, by reporting it back to file:line.");
+    Ok(())
+}
+
+/// A check that cannot run must FAIL, not pass quietly (the script's own
+/// philosophy, kept here): a missing wasm32 target or trunk is an error with
+/// the install command, never a silent green.
+fn ensure_wasm_prereqs() -> Result<()> {
+    let installed = Command::new("rustup")
+        .args(["target", "list", "--installed"])
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
+        .unwrap_or_default();
+    if !installed.contains(WASM_TARGET) {
+        bail!(
+            "error: rust target '{WASM_TARGET}' is not installed.\n       \
+             this check CANNOT RUN without it — failing rather than passing quietly.\n       \
+             run: rustup target add {WASM_TARGET}"
+        );
+    }
+
+    let trunk_present = Command::new("trunk")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false);
+    if !trunk_present {
+        bail!(
+            "error: 'trunk' is not installed (required to build/serve the browser app).\n       \
+             this check CANNOT RUN without it — failing rather than passing quietly.\n       \
+             run: cargo install trunk --version 0.21.14\n       \
+             or (prebuilt, faster): curl -sSL \\\n       \
+             https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-$(uname -m)-apple-darwin.tar.gz \\\n       \
+             | tar xz -C ~/.cargo/bin trunk"
+        );
+    }
+    Ok(())
+}
+
+/// Runs `cargo build -p <name> --target wasm32-unknown-unknown [extra]` from
+/// the workspace root, returning the captured cargo output on failure. The
+/// native xtask binary's own `--target-dir` is deliberately NOT forwarded: the
+/// wasm build shares the default target/ dir, exactly as the script did.
+fn compile_crate_for_wasm(workspace_root: &Path, wasm_crate: &WasmCrate) -> Result<(), String> {
+    let output = Command::new("cargo")
+        .arg("build")
+        .arg("-p")
+        .arg(wasm_crate.name)
+        .arg("--target")
+        .arg(WASM_TARGET)
+        .args(wasm_crate.extra_args)
+        .current_dir(workspace_root)
+        .output()
+        .map_err(|err| format!("spawn cargo build for {}: {err}", wasm_crate.name))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Err(format!("{stdout}{stderr}"))
+    }
+}
+
+/// Runs `trunk build` inside web/, returning the captured output on failure.
+fn build_web_with_trunk(workspace_root: &Path) -> Result<(), String> {
+    let output = Command::new("trunk")
+        .arg("build")
+        .current_dir(workspace_root.join("web"))
+        .output()
+        .map_err(|err| format!("spawn trunk build: {err}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Err(format!("{stdout}{stderr}"))
+    }
+}
+
+/// Extracts the lines of a captured cargo build that name the actual offender
+/// (mirrors the script's error grep), capped at the same 6 lines.
+fn filter_cargo_error_lines(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter(|line| {
+            line.starts_with("error")
+                || line.contains("could not compile")
+                || line.contains("is not supported")
+                || line.starts_with("cannot find function")
+                || line.starts_with("cannot find type")
+                || line.starts_with("cannot find crate")
+                || line.contains("unresolved import")
+                || line.contains("native")
+        })
+        .take(6)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The trunk-build variant of the above, capped at 8 lines.
+fn filter_trunk_error_lines(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter(|line| {
+            line.starts_with("error")
+                || line.contains("could not compile")
+                || line.contains("is not supported")
+                || line.contains("unresolved import")
+                || line.contains("wasm-bindgen")
+                || line.contains("error from")
+        })
+        .take(8)
+        .map(str::to_owned)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8345,11 +8873,200 @@ mod tests {
         assert!(help.contains("codegen-ratio"));
         assert!(help.contains("new-version"));
         assert!(help.contains("conformance"));
+        assert!(help.contains("wasm-check"));
     }
 
     #[test]
     fn cli_parses_codegen_ratio_command() -> Result<()> {
         assert_eq!(parse_cli_args(["codegen-ratio"])?, CliCommand::CodegenRatio);
+        Ok(())
+    }
+
+    // --- wasm-check --------------------------------------------------------
+
+    fn write_fixture(root: &Path, rel: &str, content: &str) {
+        let path = root.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, content).unwrap();
+    }
+
+    fn demo_rule() -> ConfinementRule {
+        ConfinementRule {
+            label: "demo fs-confinement",
+            src_dir: "crates/demo/src",
+            banned: "std::fs::",
+            allowlist: &[],
+        }
+    }
+
+    #[test]
+    fn cli_parses_wasm_check_command() -> Result<()> {
+        // Flagless, like codegen-ratio / connectedness: trailing args are
+        // ignored by the parser (the wasm-check run itself does the work).
+        assert_eq!(parse_cli_args(["wasm-check"])?, CliCommand::WasmCheck);
+        Ok(())
+    }
+
+    #[test]
+    fn confinement_scanner_reports_path_line_and_content() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        write_fixture(
+            tmp.path(),
+            "crates/demo/src/lib.rs",
+            "line one\nlet x = std::fs::read(\"a\");\nline three",
+        );
+        let leaks = scan_confinement(tmp.path(), &demo_rule())?;
+        assert_eq!(leaks.len(), 1);
+        assert_eq!(leaks[0].path, PathBuf::from("crates/demo/src/lib.rs"));
+        assert_eq!(leaks[0].line, 2);
+        assert_eq!(leaks[0].content, "let x = std::fs::read(\"a\");");
+        Ok(())
+    }
+
+    #[test]
+    fn confinement_scanner_honors_allowlist_by_basename() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        write_fixture(tmp.path(), "crates/demo/src/native.rs", "std::fs::read_allowed");
+        write_fixture(tmp.path(), "crates/demo/src/lib.rs", "std::fs::read_banned");
+        let rule = ConfinementRule {
+            src_dir: "crates/demo/src",
+            allowlist: &["native.rs"],
+            ..demo_rule()
+        };
+        let leaks = scan_confinement(tmp.path(), &rule)?;
+        assert_eq!(leaks.len(), 1);
+        assert_eq!(leaks[0].path, PathBuf::from("crates/demo/src/lib.rs"));
+        Ok(())
+    }
+
+    #[test]
+    fn confinement_scanner_empty_allowlist_reports_every_file() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        write_fixture(tmp.path(), "crates/demo/src/a.rs", "Instant::now()");
+        write_fixture(tmp.path(), "crates/demo/src/sub/b.rs", "Instant::now()");
+        let rule = ConfinementRule {
+            label: "demo time-confinement",
+            banned: "Instant::now(",
+            ..demo_rule()
+        };
+        let leaks = scan_confinement(tmp.path(), &rule)?;
+        assert_eq!(leaks.len(), 2);
+        assert_eq!(leaks[0].path, PathBuf::from("crates/demo/src/a.rs"));
+        assert_eq!(leaks[1].path, PathBuf::from("crates/demo/src/sub/b.rs"));
+        Ok(())
+    }
+
+    #[test]
+    fn confinement_scanner_sorts_by_path_then_line() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        write_fixture(tmp.path(), "crates/demo/src/b.rs", "std::fs::\nstd::fs::\nstd::fs::");
+        write_fixture(tmp.path(), "crates/demo/src/a.rs", "std::fs::");
+        let leaks = scan_confinement(tmp.path(), &demo_rule())?;
+        assert_eq!(leaks.len(), 4);
+        assert_eq!(leaks[0].path, PathBuf::from("crates/demo/src/a.rs"));
+        assert_eq!(leaks[1].path, PathBuf::from("crates/demo/src/b.rs"));
+        assert_eq!(leaks[1].line, 1);
+        assert_eq!(leaks[2].line, 2);
+        assert_eq!(leaks[3].line, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn confinement_scanner_missing_dir_is_an_error_not_a_pass() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rule = ConfinementRule {
+            src_dir: "crates/does-not-exist/src",
+            ..demo_rule()
+        };
+        assert!(scan_confinement(tmp.path(), &rule).is_err());
+    }
+
+    #[test]
+    fn wasm_crates_match_the_reference_script_subset() {
+        let names: Vec<&str> = wasm_crates().iter().map(|c| c.name).collect();
+        let expected = [
+            "lodestone-core",
+            "lodestone-model",
+            "lodestone-world",
+            "lodestone-physics",
+            "lodestone-assets",
+            "lodestone-registry",
+            "lodestone-render",
+            "lodestone-audio",
+            "lodestone-sound",
+            "lodestone-data",
+            "lodestone-v770",
+            "lodestone-v47",
+            "lodestone-net",
+            "lodestone-ecs",
+            "lodestone-client",
+            "lodestone-controller",
+            "lodestone-server",
+            "lodestone-worldgen",
+        ];
+        assert_eq!(names, expected);
+        // The one crate with extra args: lodestone-net needs the ws-web feature.
+        assert_eq!(wasm_crates()[12].extra_args, &["--features", "ws-web"]);
+        let mut sorted = names.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), names.len(), "duplicate crate in wasm subset");
+    }
+
+    #[test]
+    fn confinement_rules_match_the_reference_script_table() {
+        let rules = confinement_rules();
+        let labels: Vec<&str> = rules.iter().map(|r| r.label).collect();
+        assert_eq!(
+            labels,
+            [
+                "lodestone-assets fs-confinement",
+                "lodestone-audio device-confinement",
+                "lodestone-audio time-confinement",
+                "lodestone-sound time-confinement",
+                "lodestone-client time-confinement",
+                "lodestone-client instant-ban",
+                "lodestone-client fs-ban",
+                "lodestone-client thread-ban",
+                "lodestone-client spawn-confinement",
+            ]
+        );
+        for rule in &rules {
+            assert!(!rule.src_dir.is_empty(), "{} has empty src_dir", rule.label);
+            assert!(!rule.banned.is_empty(), "{} has empty banned", rule.label);
+        }
+    }
+
+    #[test]
+    fn confinement_rules_hold_across_the_real_workspace() -> Result<()> {
+        // The guard as a test: every configured rule must scan clean against
+        // the real crates, so `cargo test -p xtask` (and thus `just health`)
+        // trips on a leaked wasm hazard instead of waiting for a manual script
+        // run. Env-var manifest dir, not cwd, so it works from any cwd.
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let workspace_root = workspace_root.canonicalize()?;
+        let mut failures = Vec::new();
+        for rule in confinement_rules() {
+            let leaks = scan_confinement(&workspace_root, &rule)?;
+            if !leaks.is_empty() {
+                failures.push(format!("{}: {} leak(s)", rule.label, leaks.len()));
+                for leak in &leaks {
+                    failures.push(format!(
+                        "  {}:{}:{}",
+                        leak.path.display(),
+                        leak.line,
+                        leak.content
+                    ));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "wasm confinement guards leaked:\n{}",
+            failures.join("\n")
+        );
         Ok(())
     }
 
