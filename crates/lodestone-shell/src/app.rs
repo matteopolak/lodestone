@@ -226,9 +226,11 @@ fn mouse_action_for(binds: &Keybinds, button: MouseButton) -> Option<InputAction
 /// while container screens have no dimmed background pass to hide behind
 /// (issue #51).
 ///
-/// [`Screen::Connecting`] is excluded because there is no world yet — it reaches
-/// the world render path only because it is not an `owns_frame` screen. The
-/// menu and error screens never get here at all: `draw_menu` returns early.
+/// [`Screen::Connecting`] is excluded because there is no world yet — since
+/// issue #449 it is an `owns_frame` screen, so `draw_menu` returns early and
+/// this function is never even asked about it, but the negative control in
+/// `app/tests.rs` asserts the answer anyway so the set cannot silently grow.
+/// The menu and error screens never get here at all: `draw_menu` returns early.
 fn hud_follows_world(screen: crate::menu::Screen) -> bool {
     use crate::menu::Screen;
     // `Screen::Death` (issue #103) follows the same rule as `Paused`: vanilla's

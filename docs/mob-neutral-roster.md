@@ -139,13 +139,13 @@ new `const` table and add the species to the module's own multiset gate. Nothing
 
 This is the actionable part. Each row is a gap in the AI seam, not in this file:
 
-| # | primitive | file that must change | unblocks |
+| # | primitive | landed as | unblocks |
 |---|---|---|---|
 | 1 | ~~anger deadline + anger target~~ — **landed**, see below | `mobs.rs` (host state + resolution), seam already had the rest | all four species' anger-gated targeting |
-| 2 | a gaze test — "is that player looking at me", needing the player's **view vector**, which `PlayerPerception` does not carry | `ai/mob.rs` + `mobs.rs` (feed) | enderman freeze + stare |
-| 3 | instant relocation of a mob | `ai/mob.rs` + `ai/navigating_mob.rs` (must also invalidate the active path) | enderman teleport |
-| 4 | a mob damaging **itself** (drain-flag shape) | `ai/navigating_mob.rs` + a `MobSim::tick` arm | bee sting-then-die |
-| 5 | an ownership relation, which needs a **player identity** the seam has none of | `ai/mob.rs`, `mobs.rs`, `PlayerPerception` | wolf tame half, and the owner filter inside pack alert |
+| 2 | ~~a gaze test~~ — **landed**, see below | `MobController::is_being_stared_at` + free `is_in_view_cone`; the **feed is blocked** on `PlayerPerception` carrying a view vector | enderman freeze + stare |
+| 3 | ~~instant relocation of a mob~~ — **landed**, see below | `MobController::teleport_to` + `SimMob::teleport_to` | enderman teleport |
+| 4 | ~~a mob damaging **itself**~~ — **landed**, see below | `MobController::damage_self`, drained by a `MobSim::tick` arm | bee sting-then-die |
+| 5 | ~~an ownership relation~~ — **half landed**, see below | `MobController::owner_position` + `SimMob::owner_id`; the **player** half stays blocked on `PlayerPerception` carrying an identity | wolf tame half, and the owner filter inside pack alert |
 
 Plus a sixth that is not a trait method: **same-species propagation**, which belongs in
 `MobSim::feed_perception`'s census rather than in a goal, because the seam deliberately hands a goal
@@ -181,6 +181,33 @@ test module, and the control fails as it must. If you touch these tests, keep th
 **The rows are still `Coverage::Missing`, deliberately.** Anger resolving is necessary but not
 sufficient: flipping a row means retiring `no_anger_gated_target_row_is_modelled`, which is a
 maintainer's call and not a side effect of landing a primitive.
+
+#### Primitives 2-5, as landed (#458)
+
+The remaining four landed as `MobController` methods plus `NavigatingMob` overrides and a `MobSim`
+host half. Each primitive is necessary but not sufficient: the roster rows stay `Coverage::Missing`
+because the enderman's goals, the bee's sting hook, the wolf's tame half and `alertOthers` all need
+more, named below.
+
+- **Gaze.** `MobController::is_being_stared_at` (a fed boolean) plus the free function
+  `is_in_view_cone`, which is vanilla's exact `dot > 1.0 - coneSize / (adjustForDistance ? dist : 1.0)`
+  (`LivingEntity.java:1756-1775`) with the line-of-sight half left to the host (the same disclosed gap
+  `find_nearest_target` names). `NavigatingMob::set_stared_at` is the feed. **The feed is blocked**:
+  `PlayerPerception` carries no view vector, so nothing computes a stare in `feed_perception` yet and
+  every mob reads `false` in production — the correct neutral default rather than a wrong one.
+- **Teleport.** `MobController::teleport_to` rewrites position instantly and abandons the active path;
+  `SimMob::teleport_to` is the host command. No goal calls it yet (the enderman's `teleport()` /
+  `teleportTowards` are `Missing`), so it is API, not behaviour.
+- **Self-damage.** `MobController::damage_self` records an intent drained by `MobSim::tick` and
+  applied through `SimMob::apply_damage` (i-frames and reductions included, matching vanilla's
+  `hurtServer`). The bee's `hasStung` flag, `timeSinceSting` counter and `customServerAiStep` roll are
+  **not** implemented — the primitive is the pipeline, not the bee.
+- **Ownership.** `MobController::owner_position` (a fed position) plus `SimMob::owner_id` and
+  `set_owner_id`; `feed_perception` resolves the id to a position each tick. The **player** half is
+  blocked exactly as the row predicted: vanilla's owner is a player `UUID`
+  (`TamableAnimal.DATA_OWNERUUID_ID`), and `PlayerPerception` carries no identity, so only mob-to-mob
+  ownership can be fed today. The wolf-pack same-owner filter inside `HurtByTargetGoal.alertOthers`
+  (`:88`) still needs that player identity before it can compare owners.
 
 ### Gotchas
 

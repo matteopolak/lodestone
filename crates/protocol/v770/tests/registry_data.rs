@@ -448,6 +448,85 @@ fn an_unusable_sky_color_reads_as_absent_rather_than_as_a_default() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Server-side mirror (issue #275)
+// ---------------------------------------------------------------------------
+
+/// The server's `registry_data` payloads are byte-identical to the captured
+/// vanilla fixtures this file decodes above.
+///
+/// Issue #275 made the server *send* registry data during Configuration.
+/// [`V770ServerProtocol::encode_registry_data`](lodestone_v770::V770ServerProtocol)'s
+/// NBT bodies are copied verbatim from the same two fixtures this file decodes,
+/// so the proof is a round-trip through the public seam: the directives it
+/// emits, compared against every byte a real vanilla 26.2 server authored. The
+/// fixture stands outside both encoder and decoder, so two symmetric
+/// misunderstandings cannot satisfy it (`CLAUDE.md`, evidence standards).
+#[test]
+fn server_registry_data_payloads_match_the_captured_vanilla_fixtures() {
+    use lodestone_server::{ServerDirective, ServerProtocol};
+    use lodestone_v770::{V770ServerProtocol, packet_ids::configuration::clientbound::REGISTRY_DATA};
+
+    let directives = V770ServerProtocol.encode_registry_data();
+    let sends: Vec<(&[u8], i32)> = directives
+        .iter()
+        .filter_map(|directive| match directive {
+            ServerDirective::Send { packet_id, payload } => {
+                Some((payload.as_slice(), *packet_id))
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        sends.len(),
+        2,
+        "exactly the two registries this server's join sequence depends on"
+    );
+    for (_, packet_id) in &sends {
+        assert_eq!(*packet_id, REGISTRY_DATA, "every payload is a registry_data packet");
+    }
+    assert_eq!(
+        sends[0].0,
+        fixture("registry_data_dimension_type.hex"),
+        "dimension_type payload must match vanilla's captured bytes byte-for-byte"
+    );
+    assert_eq!(
+        sends[1].0,
+        fixture("registry_data_world_clock.hex"),
+        "world_clock payload must match vanilla's captured bytes byte-for-byte"
+    );
+}
+
+/// **Control.** A protocol family that does not host (no `ServerProtocol`
+/// impl, or a family that hosts but has nothing to declare) emits **no**
+/// registry data at all — the trait default is empty. The `Numbered` test
+/// double in `lodestone-server` overrides this, so this proves the empty
+/// answer comes from the default, not from some latent "send nothing"
+/// convention in the seam.
+#[test]
+fn the_server_protocol_default_emits_no_registry_data() {
+    use lodestone_server::ServerProtocol;
+
+    struct EmitsNothing;
+    impl ServerProtocol for EmitsNothing {
+        fn decode(
+            &self,
+            _state: lodestone_core::State,
+            _packet_id: i32,
+            _payload: &[u8],
+        ) -> lodestone_server::ServerBound {
+            lodestone_server::ServerBound::Ignored
+        }
+    }
+
+    assert!(
+        EmitsNothing.encode_registry_data().is_empty(),
+        "a hosting family that sends no registries must be representable — \
+         the seam defaults to an empty stream"
+    );
+}
+
 /// **Control.** `minecraft:biome` — the name this lookup is *tempting* to use —
 /// must yield nothing, because the registry actually arrives as
 /// `minecraft:worldgen/biome`. If a future refactor matched the short name, the

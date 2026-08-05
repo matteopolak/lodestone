@@ -117,3 +117,8 @@ lodestone-world = { path = "../lodestone-world" }
 # than through this crate's own loader, so the oracle reads the file with
 # something other than the code under test.
 lodestone-anvil = { path = "../lodestone-anvil" }
+# `tests/rcon.rs` (issue #331) points the same `RconClient`/`AsyncRconClient`
+# the live oracle tests use against vanilla at our own listener — the
+# verification the issue body calls for. `lodestone-testsupport` does not
+# depend on `lodestone-server`, so this adds no cycle.
+lodestone-testsupport = { workspace = true }

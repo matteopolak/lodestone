@@ -259,8 +259,13 @@ fn a_fence_is_one_and_a_half_blocks_tall_and_cannot_be_stepped_over() {
     // block tall and the auto-step is 0.6.
     let profile = PhysicsProfile::mc_1_21();
     let mut rest_x = [0.0_f64; 2];
+    // Auto-jump off for this measurement: the test isolates *collision-stop
+    // fidelity* (the 0.6 auto-step), and a 1.0-tall cube is a height auto-jump
+    // legitimately clears — so with it on, the cube-only control would simply
+    // jump the phantom and walk on, confounding the very stop the two views are
+    // being compared on. Auto-jump's own behaviour is asserted in `golden.rs`.
     for (i, view) in [&shaped, &cubes].into_iter().enumerate() {
-        let mut state = PlayerState::at(Vec3d::new(0.5, feet, 0.5), -90.0);
+        let mut state = PlayerState::at(Vec3d::new(0.5, feet, 0.5), -90.0).with_auto_jump(false);
         for _ in 0..60 {
             tick(&mut state, WALK_FORWARD, view, &profile);
         }

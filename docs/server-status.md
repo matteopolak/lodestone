@@ -195,9 +195,13 @@ above will be visible when someone checks.
   decodes it: `lodestone_net::status::parse_status_json` fills
   `ServerStatus.sample` (a `Vec<PlayerSample>` of `name` + raw `id`, malformed
   entries skipped), and `lodestone-shell`'s `menu::status::net_probe` threads the
-  names into its display `ServerStatus.sample`. What remains is rendering: the
-  "who's online" row tooltip (`ServerSelectionList.java:410,430`) does not exist
-  in the shell yet.
+  names into its display `ServerStatus.sample`, alongside the numeric
+  `players.online` count. Rendering is done too: hovering the row's status text
+  shows the "who's online" box (`ServerSelectionList.java:410,430`) — the
+  sample's names, plus vanilla's `... and N more ...` when the sample is short of
+  the count (`menu::status::player_sample_lines`). With our own server's
+  `players.online: 0` gap above, that tail line is absent and the box shows the
+  sample's names alone.
 - Issue #280 — the keep-alive timeout, which is Play's version of the same
   "never hold a connection open forever" concern this phase handles with its
   disconnect-after-answer.

@@ -34,7 +34,7 @@ use std::sync::Arc;
 use lodestone_autopilot::{AutopilotGoal, AutopilotPlugin, AutopilotStatus, FailReason};
 use lodestone_ecs::app::App;
 use lodestone_ecs::player::{CollisionSource, LocalPlayerPlugin, PhysicsState, PlayerCollision, spawn_local_player};
-use lodestone_ecs::{ChunkWorld, GameTick, VersionData};
+use lodestone_ecs::{ChunkWorld, ChunkWorldWrite, GameTick, VersionData};
 use lodestone_model::{
     AdapterError, BlockAabb, BlockPos, ClientAction, ConnectionState, Directive, LoginProfile,
     ServerAddress, VersionAdapter, WorldSink,
@@ -162,7 +162,11 @@ impl CollisionSource for FlatFloor {
 /// loaded with the same flat stone floor `FlatFloor` collides against — the
 /// **planning** world `lodestone_nav::SnapshotView` reads. `min_y = 0`,
 /// 4 sections (0..64), matching a short walk test's needs.
-fn flat_chunk_world(radius: i32) -> ChunkWorld {
+///
+/// Returns the issue #423 **pair** — the read handle the planner reads, plus the
+/// write handle the one test that breaks a block needs, on the same `Arc`. Only
+/// `app_on_flat_floor` consumes it; everything else in this file reads.
+fn flat_chunk_world(radius: i32) -> (ChunkWorld, ChunkWorldWrite) {
     let mut world = World::new();
     let block_kind = PaletteKind::block_states();
     let biome_kind = PaletteKind::biomes();
@@ -186,7 +190,9 @@ fn flat_chunk_world(radius: i32) -> ChunkWorld {
         }
     }
 
-    ChunkWorld::new(world)
+    let write = ChunkWorldWrite::new(world);
+    let read = write.read_handle();
+    (read, write)
 }
 
 /// A world with a floor but the player walled into a 1×1 pocket: real
@@ -228,7 +234,12 @@ fn app_on_flat_floor(chunk_radius: i32) -> (App, bevy_ecs::entity::Entity) {
     app.add_plugins((lodestone_ecs::CorePlugin, LocalPlayerPlugin, AutopilotPlugin));
 
     app.insert_resource(PlayerCollision::View(Arc::new(FlatFloor)));
-    app.insert_resource(flat_chunk_world(chunk_radius));
+    // Issue #423: install the *pair*, so the test that breaks a block under a
+    // committed plan has a sanctioned write route on the same store the planner
+    // reads.
+    let (chunk_world, chunk_world_write) = flat_chunk_world(chunk_radius);
+    app.insert_resource(chunk_world);
+    app.insert_resource(chunk_world_write);
     app.insert_resource(VersionData(Some(Box::new(FixtureAdapter))));
 
     let state = PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0);
@@ -451,7 +462,7 @@ fn a_block_broken_under_a_committed_plan_forces_a_replan_around_it() {
     // that column with no standable surface at all: not a shorter step, a
     // genuine hole a straight walk can no longer cross.
     app.world()
-        .resource::<ChunkWorld>()
+        .resource::<ChunkWorldWrite>()
         .write()
         .set_block(8, 0, 0, AIR);
 

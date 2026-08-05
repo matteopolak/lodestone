@@ -168,7 +168,8 @@ cargo test -p lodestone-v770 --test registry_data   # hermetic replay, always on
   `.cache/mc/26.2/client-src/data/minecraft/dimension_type/*.json` — Mojang's own
   shipped data files, parsed at test time rather than transcribed.
 - `tests/registry_data.rs` replays those fixtures hermetically with a
-  trailing-byte check.
+  trailing-byte check, and — since issue #275 — asserts the server's own
+  `encode_registry_data` payloads are byte-identical to them.
 
 Two notes on the oracle, both of which cost time to discover:
 
@@ -179,6 +180,37 @@ Two notes on the oracle, both of which cost time to discover:
 - Nothing in the decode path is validated against bytes our own encoder produced.
   `decode(encode(x)) == x` is satisfied by two symmetric misunderstandings, which
   has already burned this repo (`CLAUDE.md`, evidence standards).
+
+## The server-side mirror (issue #275)
+
+The decode above exists because *vanilla* sends these packets; issue #275 gave
+`lodestone-server` the same ability, so a real vanilla client can join our
+integrated server. The encoder lives in `crates/protocol/v770/src/server_protocol.rs`:
+
+- `ServerProtocol::encode_registry_data` is a version-free trait method returning
+  the Configuration-phase `registry_data` directives. The `V770ServerProtocol`
+  override emits exactly two packets — `minecraft:dimension_type` and
+  `minecraft:world_clock` — the two this join sequence actually depends on.
+- The per-entry NBT bodies are **captured vanilla bytes**, not values rebuilt from
+  `lodestone-data`: byte constants copied from the same
+  `tests/fixtures/registry_data_*.hex` fixtures this doc's live gate writes, so a
+  vanilla client reads its own wire format rather than a re-encoding of our
+  understanding. `tests/registry_data.rs` asserts the emitted payloads are
+  byte-identical to those fixtures — `decode(encode(fixture)) == fixture` with the
+  fixture standing outside both.
+- `serve_connection_inner`'s `LoginAcknowledged` arm calls `encode_registry_data`
+  **before** `begin_configuration`, so the registries precede
+  `FINISH_CONFIGURATION`. That ordering is a version-free invariant in the loop,
+  not a per-implementor promise.
+- The default method emits nothing, so a hosting family with nothing to declare,
+  or a legacy family that does not host at all, sends no packets — the same
+  additive seam as every other optional encoder.
+
+**How to change it.** To ship more registries (e.g. `minecraft:worldgen/biome`),
+capture the payload from the live oracle (extend `tests/live_registry_data.rs`),
+check the fixture in, and add a packet to the override's vec. Our join claims **no
+known packs**, so the server must not elide entry contents either — the
+`bool(true)` + full-NBT shape is what a vanilla client that knows no packs expects.
 
 Measured values, from the live run:
 
@@ -229,9 +261,11 @@ handler. The `live-registry` Cargo feature gates only the live capture test, and
   `EnvironmentAttributes.SKY_LIGHT_LEVEL`, not directly from a clock. The
   `attributes` map is dropped by this decode, so the sky curve is still our own
   port rather than a data-driven read. See [`dimension-visuals.md`](./dimension-visuals.md).
-- Server side: `lodestone-server` still sends no `registry_data` (epic #5). The
-  wire type in `packets/registry.rs` is decode-only; an encode impl is what that
-  needs.
+- The other 27 registries are names-only on the *client* and not emitted at all
+  by our *server* — issue #275 shipped only `dimension_type` and `world_clock`,
+  the two this join sequence reads. When a third becomes load-bearing (damage
+  types, `worldgen/biome`), the capture-and-replay harness above extends to it in
+  both directions.
 
 [#288]: https://github.com/matteopolak/lodestone/issues/288
 [#34]: https://github.com/matteopolak/lodestone/issues/34

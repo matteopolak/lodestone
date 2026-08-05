@@ -36,7 +36,7 @@ use bevy_ecs::resource::Resource;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_ecs::system::{Res, ResMut};
 use lodestone_ecs::app::{App, Plugin};
-use lodestone_ecs::{ChunkWorld, FrameSet, Update};
+use lodestone_ecs::{ChunkWorld, ChunkWorldWrite, FrameSet, Update};
 use lodestone_render::{
     BlockClassifier, BlockModels, ChunkSectionView, FluidCell, FluidKind, FluidMeshes,
     FluidSectionView, FluidSprites, Mesh, ModelMesh, ModelSectionView, SectionLight,
@@ -3258,7 +3258,11 @@ mod tests {
     /// arrival half wired and the unload half absent. Everything else is
     /// identical, so the two runs differ only in the thing under test.
     fn walk(evict: bool) -> (BTreeSet<(i32, i32)>, BTreeSet<(i32, i32)>) {
-        let store = ChunkWorld::new(World::new());
+        // Issue #423: the test edits the store, so it holds the write handle and
+        // hands the paired read handle to the mesher — the same split production
+        // (`drive_placement`) observes.
+        let write = ChunkWorldWrite::new(World::new());
+        let store = write.read_handle();
         let mut terrain = streaming_terrain();
         // The modelled GPU: what `RenderState`'s section map would hold, driven
         // by the same two drains `app/redraw.rs` calls, in the same order.
@@ -3270,7 +3274,7 @@ mod tests {
             let next = window(step);
             // Arrivals: the adapter writes the column, then the shell is told.
             for &(cx, cz) in next.difference(&live) {
-                store
+                write
                     .write()
                     .load(ChunkPos::new(cx, cz), crate::worldgen::generate_column(cx, cz));
                 visited.insert((cx, cz));
@@ -3284,7 +3288,7 @@ mod tests {
             // that order is the point — a `forget_column` that tried to read the
             // store would enumerate nothing.
             for &(cx, cz) in live.difference(&next) {
-                store.write().unload(ChunkPos::new(cx, cz));
+                write.write().unload(ChunkPos::new(cx, cz));
                 if evict {
                     terrain.forget_column(cx, cz);
                     terrain.force_neighbours_of_departed(&store, cx, cz);
@@ -3446,7 +3450,8 @@ mod tests {
         // diverge, it diverges here.
         const FRAMES_PER_STEP: usize = 1;
 
-        let store = ChunkWorld::new(World::new());
+        let write = ChunkWorldWrite::new(World::new());
+        let store = write.read_handle();
         let mut terrain = streaming_terrain();
         let mut gpu: HashSet<SectionKey> = HashSet::new();
         let mut max_backlog = 0usize;
@@ -3455,7 +3460,7 @@ mod tests {
         for step in 0..=WALK_STEPS {
             let next = window(step);
             for &(cx, cz) in next.difference(&live) {
-                store
+                write
                     .write()
                     .load(ChunkPos::new(cx, cz), crate::worldgen::generate_column(cx, cz));
             }
@@ -3464,7 +3469,7 @@ mod tests {
                 terrain.mark_neighbours_dirty(&store, cx, cz);
             }
             for &(cx, cz) in live.difference(&next) {
-                store.write().unload(ChunkPos::new(cx, cz));
+                write.write().unload(ChunkPos::new(cx, cz));
                 terrain.forget_column(cx, cz);
                 terrain.force_neighbours_of_departed(&store, cx, cz);
             }

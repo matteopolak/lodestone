@@ -636,15 +636,19 @@ a placeable item the census cannot resolve a state for.
   `SelectedSlot`'s existing echo path in `lodestone-shell`) rather than folded into this one, since it
   is additive and does not block `PlaceIntent` itself for a plugin that only ever wants to place
   whatever is already in the active hotbar slot.
-- **`ChunkWorld` being `pub` with a `pub fn write()`, and `ActionQueue` accepting a raw
-  `ClientAction::UseItemOn` with a fabricated sequence, are both doors guarded by doc contract rather
-  than structurally.** Nothing stops a plugin from writing the chunk store directly (bypassing
-  `write_predicted_block`'s state+block-entity pairing) or pushing a hand-rolled `UseItemOn` with an
-  invented sequence (forking `PlacementPredictor`'s counter, exactly what §5's `BreakIntent` section
-  says must never happen). `PlaceIntent`/`BreakIntent` are the *sanctioned* route around both, but
-  they do not remove the unsanctioned one. A read-handle/write-handle split on `ChunkWorld` is the
-  structural fix and is real churn — it reaches `lodestone-client` — so it is tracked as its own item
-  rather than folded into this one.
+- **`ChunkWorld` no longer has a `pub fn write()` — the split landed (issue #423).** The store is a
+  read/write pair: `lodestone_ecs::ChunkWorld` (read, no `write()`, no `Arc`) and
+  `lodestone_ecs::ChunkWorldWrite` (the only write route, held by `drive_placement`,
+  `Sim::predict_block`, the demo world's `set_block_world` and the net-ingest path). A plugin that
+  takes `Res<ChunkWorld>` compiles nowhere that mutates the store, so `write_predicted_block`'s
+  state+block-entity pairing and the re-mesh cannot be bypassed by accident.
+- **`ActionQueue` still accepts a raw `ClientAction::UseItemOn` (or `::BlockAction`) with a
+  fabricated `sequence` — the second door remains.** `ActionQueue(pub Vec<ClientAction>)` is a plain
+  `Vec` resource with public field access, so a plugin system can still push a hand-built action
+  carrying a sequence `PlacementPredictor`/`MiningPredictor` never drew, forking the block-prediction
+  counter. The fix is either a smaller, checked enum of plugin-sendable actions (excluding anything
+  carrying a predictor-owned `sequence`) or a separate, narrower egress; it is tracked separately
+  because it is a decision about the whole action model, not a single type.
 
 ### Native versus WASM
 
