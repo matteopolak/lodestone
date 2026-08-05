@@ -1738,6 +1738,53 @@ impl TerrainMesh {
         }
     }
 
+    /// Drop every GPU section belonging to the column at `(cx, cz)`, which the
+    /// server has just told us to forget (issue #479).
+    ///
+    /// **This is the mesh side of an eviction that only ever had a collision
+    /// side.** The adapter answers `forget_level_chunk` by calling
+    /// `WorldSink::unload`, so the one [`ChunkWorld`] store loses the column
+    /// immediately — and collision, which re-reads the store every tick
+    /// (`sim/collide.rs`), tracks that for free. Nothing did the same for the
+    /// renderer: `ClientEvent::ChunkUnloaded` had four producers and **zero**
+    /// consumers, so [`Self::uploaded_sections`], `RenderState`'s section map
+    /// and the fixed-capacity section-origin arena only ever grew, for the
+    /// whole session, while the store shrank underneath them. Walking in one
+    /// direction therefore accumulated every column ever visited as live draw
+    /// calls — `gpu/frame.rs` iterates `model.sections` with no distance or
+    /// frustum cull — and ended at an exhausted origin arena, whose failure
+    /// mode is `upload_section` returning early: **new terrain stops drawing
+    /// while its collision is perfectly present.** That is the reported symptom.
+    ///
+    /// Derived from [`Self::uploaded_sections`] rather than from the store,
+    /// deliberately: by the time this runs the column is *already gone* from
+    /// the store (the adapter unloads before it emits), so `store.extent()` and
+    /// `contains_column` cannot enumerate what to drop. The uploaded set is the
+    /// only record of what this column put on the GPU.
+    ///
+    /// Neighbours are **not** marked dirty. The eight columns around this one
+    /// now have a hole across one seam, but they are already on screen, so
+    /// [`Self::route`]'s `uploaded_sections` clause rebuilds them on their next
+    /// ordinary dirty signal instead of blinking them out — the same rule
+    /// vanilla's `sectionMesh.get() != UNCOMPILED` clause encodes. Dirtying
+    /// them here would re-mesh the whole trailing edge of the view on every
+    /// step the player takes.
+    pub fn forget_column(&mut self, cx: i32, cz: i32) {
+        // A queued boundary heal for a column that has left is budget spent on
+        // a `mesh_column` that will early-return anyway.
+        self.dirty_columns.remove(&(cx, cz));
+        let gone: Vec<SectionKey> = self
+            .uploaded_sections
+            .iter()
+            .filter(|key| key.cx == cx && key.cz == cz)
+            .copied()
+            .collect();
+        for key in gone {
+            self.uploaded_sections.remove(&key);
+            self.pending_removals.push(key);
+        }
+    }
+
     /// Re-snapshot and re-schedule the section holding `block`, plus any
     /// neighbour section that shares the boundary the block sits on (a face on
     /// a section edge changes the neighbour's mesh via culling/AO). Sections
@@ -2994,6 +3041,232 @@ mod tests {
             quad_light(&bare_own, [2, 6, 2], Direction::Up),
             Some(0x08),
             "control: roofed top face, own cell 0 smoothed against three block-11 corners"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #479: the walk harness
+    // -----------------------------------------------------------------------
+
+    /// Chebyshev radius of the simulated tracking view, in columns. Small on
+    /// purpose — the defect is about *unbounded growth*, which a short walk
+    /// already separates from a bounded window by a factor of two.
+    const WALK_RD: i32 = 3;
+    /// How many columns the simulated player advances in `+x`.
+    const WALK_STEPS: i32 = 12;
+
+    /// The columns a tracking view centred on `(ccx, 0)` holds.
+    fn window(ccx: i32) -> BTreeSet<(i32, i32)> {
+        let mut out = BTreeSet::new();
+        for cx in (ccx - WALK_RD)..=(ccx + WALK_RD) {
+            for cz in -WALK_RD..=WALK_RD {
+                out.insert((cx, cz));
+            }
+        }
+        out
+    }
+
+    /// Every column that at some point during the walk had all eight of its
+    /// horizontal neighbours resident at once — i.e. exactly the columns that can
+    /// ever have escaped [`SnapshotOutcome::Deferred`] and reached the GPU.
+    ///
+    /// Derived from the walk's geometry rather than measured, so it is an
+    /// *outside* expectation: the two frontier columns in `x` (the first view's
+    /// trailing ring, which is unloaded before the view ever advances past it,
+    /// and the last view's leading ring) never qualify, and neither do the
+    /// `z = ±WALK_RD` rows, since the view never moves in `z`. At the constants
+    /// above that is 17 × 5 = 85 columns out of 133 visited.
+    fn ever_interior() -> BTreeSet<(i32, i32)> {
+        let mut out = BTreeSet::new();
+        for cx in (-WALK_RD + 1)..=(WALK_STEPS + WALK_RD - 1) {
+            for cz in (-WALK_RD + 1)..=(WALK_RD - 1) {
+                out.insert((cx, cz));
+            }
+        }
+        out
+    }
+
+    /// A `TerrainMesh` whose deferral rule is the **live** one.
+    ///
+    /// `ColumnSource` is derived from the classifier, and the demo classifier
+    /// yields `Complete` — under which nothing ever defers and the frontier
+    /// behaviour this harness exists to model does not exist. Overriding the
+    /// field is how a hermetic test reaches the `Streaming` rule without the
+    /// vanilla atlas; it is the one production fact the demo classifier cannot
+    /// supply. The eviction path under test (`forget_column` →
+    /// `pending_removals` → `drain_removals`) is id-space agnostic.
+    fn streaming_terrain() -> TerrainMesh {
+        let mut terrain =
+            TerrainMesh::new(MeshScheduler::new(2, ShellClassifier::Demo(DemoClassifier)));
+        terrain.column_source = ColumnSource::Streaming;
+        terrain
+    }
+
+    /// Walk `+x` across `WALK_STEPS` columns behind a moving tracking view,
+    /// returning the columns still resident on the (modelled) GPU at the end.
+    ///
+    /// `evict` is the switch this test and its control share: `true` is the
+    /// fixed client, `false` reproduces the pre-#479 client exactly — the
+    /// arrival half wired and the unload half absent. Everything else is
+    /// identical, so the two runs differ only in the thing under test.
+    fn walk(evict: bool) -> (BTreeSet<(i32, i32)>, BTreeSet<(i32, i32)>) {
+        let store = ChunkWorld::new(World::new());
+        let mut terrain = streaming_terrain();
+        // The modelled GPU: what `RenderState`'s section map would hold, driven
+        // by the same two drains `app/redraw.rs` calls, in the same order.
+        let mut gpu: HashSet<SectionKey> = HashSet::new();
+        let mut visited: BTreeSet<(i32, i32)> = BTreeSet::new();
+
+        let mut live = BTreeSet::new();
+        for step in 0..=WALK_STEPS {
+            let next = window(step);
+            // Arrivals: the adapter writes the column, then the shell is told.
+            for &(cx, cz) in next.difference(&live) {
+                store
+                    .write()
+                    .load(ChunkPos::new(cx, cz), crate::worldgen::generate_column(cx, cz));
+                visited.insert((cx, cz));
+            }
+            for &(cx, cz) in next.difference(&live) {
+                terrain.mesh_column(&store, cx, cz);
+                terrain.mark_neighbours_dirty(&store, cx, cz);
+            }
+            // Departures: the adapter unloads the column *before* it emits, so
+            // the store has already lost it when `forget_column` runs. Modelling
+            // that order is the point — a `forget_column` that tried to read the
+            // store would enumerate nothing.
+            for &(cx, cz) in live.difference(&next) {
+                store.write().unload(ChunkPos::new(cx, cz));
+                if evict {
+                    terrain.forget_column(cx, cz);
+                }
+            }
+            live = next;
+
+            // Drain the heal queue completely rather than at
+            // `DIRTY_COLUMN_BUDGET`: the subject is eviction, and leaving a
+            // backlog would let a *starved* run masquerade as a bounded one.
+            while let Some((cx, cz)) = terrain.dirty_columns.pop_first() {
+                terrain.mesh_column(&store, cx, cz);
+            }
+            for key in terrain.drain_removals() {
+                gpu.remove(&key);
+            }
+            for meshed in terrain.drain_all_meshes() {
+                gpu.insert(meshed.key);
+            }
+        }
+
+        let resident: BTreeSet<(i32, i32)> = gpu.iter().map(|k| (k.cx, k.cz)).collect();
+        (resident, visited)
+    }
+
+    /// **The invariant gate.** Nothing may stay on the GPU for a column the
+    /// client no longer has.
+    ///
+    /// Stated as a *predicted magnitude*, not a direction: the two hypotheses
+    /// are computed from the walk's own geometry and the measurement has to land
+    /// on one of them. Bounded (correct) is at most `window()`'s 49 columns;
+    /// unbounded (pre-#479) is every column the walk ever visited, 126 at these
+    /// constants. "Fewer than it visited" would be satisfied by both, so it is
+    /// not what this asserts.
+    #[test]
+    fn walking_away_evicts_meshes_for_columns_the_client_dropped() {
+        let (resident, visited) = walk(true);
+        let live = window(WALK_STEPS);
+
+        // Not vacuous: the walk has to have drawn something, and to have moved
+        // far enough that the two hypotheses are actually distinguishable.
+        assert!(
+            visited.len() >= live.len() * 2,
+            "harness must outrun its own window for the bound to mean anything: \
+             visited {} vs window {}",
+            visited.len(),
+            live.len()
+        );
+        // Both hypotheses, computed from outside the code under test, so the
+        // measurement has to land on one of them. Correct: the columns that ever
+        // escaped deferral *and* are still in view. Pre-#479: every column that
+        // ever escaped deferral, in view or not.
+        let correct: BTreeSet<(i32, i32)> =
+            ever_interior().intersection(&live).copied().collect();
+        let leaked = ever_interior();
+        assert!(
+            correct.len() * 2 < leaked.len(),
+            "the two hypotheses must be far apart or this asserts nothing: \
+             {} vs {}",
+            correct.len(),
+            leaked.len()
+        );
+        assert!(
+            !correct.is_empty(),
+            "the interior of the final view must be drawn, else this gate would \
+             pass on a client that renders nothing at all"
+        );
+
+        let stale: Vec<(i32, i32)> = resident.difference(&live).copied().collect();
+        assert!(
+            stale.is_empty(),
+            "{} column(s) still hold GPU geometry after the client dropped them; \
+             x range {:?}..={:?} — the renderer is drawing blocks the store no \
+             longer has, and its section-origin arena never gets those slots back. \
+             resident={} live-window={} ever-visited={}",
+            stale.len(),
+            stale.iter().map(|c| c.0).min(),
+            stale.iter().map(|c| c.0).max(),
+            resident.len(),
+            live.len(),
+            visited.len()
+        );
+        assert_eq!(
+            resident, correct,
+            "residency must be exactly the in-view columns that escaped deferral \
+             ({} of them); the leak hypothesis is {} columns",
+            correct.len(),
+            leaked.len()
+        );
+    }
+
+    /// **The control for the gate above, and it must fail that gate's
+    /// assertion.** Without the eviction call the identical walk leaves every
+    /// column it ever visited resident — so the assertion is answering the
+    /// question it claims to, rather than passing because the harness never
+    /// evicts anything or never draws at all.
+    #[test]
+    fn control_without_eviction_the_walk_leaks_every_column_it_visited() {
+        let (resident, visited) = walk(false);
+        let live = window(WALK_STEPS);
+
+        let stale: Vec<(i32, i32)> = resident.difference(&live).copied().collect();
+        assert!(
+            !stale.is_empty(),
+            "premise check: with eviction suppressed the walk MUST leak, or the \
+             gate above proves nothing — resident {} vs window {}",
+            resident.len(),
+            live.len()
+        );
+        // The leak is unbounded, not merely present: residency tracks the whole
+        // walk rather than the view. This is the number that turns into an
+        // exhausted origin arena and a silently dropped section.
+        assert!(
+            resident.len() > live.len(),
+            "the pre-#479 leak grows past the view: resident {} vs window {}",
+            resident.len(),
+            live.len()
+        );
+        // And it leaks by exactly the predicted amount: residency tracks the
+        // *walk*, not the view. 85 columns at these constants, against a 49-column
+        // view — after twelve steps. This is the growth that ends at an exhausted
+        // section-origin arena, whose failure mode is `upload_section` returning
+        // early and new terrain never drawing.
+        assert_eq!(
+            resident,
+            ever_interior(),
+            "the pre-#479 leak is every column that ever escaped deferral: \
+             resident {} vs view {} vs visited {}",
+            resident.len(),
+            live.len(),
+            visited.len()
         );
     }
 }
