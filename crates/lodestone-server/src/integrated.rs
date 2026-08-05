@@ -44,6 +44,7 @@ use tokio::sync::Notify;
 
 use crate::block_entities::BlockEntityHandle;
 use crate::chunk::ChunkSource;
+use crate::chunk_store::ChunkStore;
 use crate::mobs::{LiveMobSource, MobHandle};
 use crate::protocol::ServerProtocol;
 use crate::server::{
@@ -230,7 +231,16 @@ impl IntegratedServer {
         // and `crate::server::SourceRef`. There is exactly one connection
         // here, so the `Arc` is not about sharing between tasks; it is
         // purely what makes the closure `'static`.
-        let source = Arc::new(source);
+        //
+        // Issue #289 / `docs/plans/chunk-lifecycle.md` U3: wrapped in a
+        // [`ChunkStore`] so a column is generated **once** and thereafter read.
+        // This constructor spawns no tick loop, so it does not suffer the
+        // per-tick regeneration `open_in_memory_with_mobs` did — but it does
+        // serve a connection, and `serve_connection`'s `vitals_tick` probes a
+        // single block every 50 ms through `ChunkSource::block_state`, whose
+        // *default* implementation regenerates a whole column to read one cell.
+        // See `crate::chunk_store`'s module docs.
+        let source = Arc::new(ChunkStore::new(source));
         // A fresh, empty registry for this one connection's lifetime. Nothing
         // ticks it here — only `open_in_memory_with_mobs` spawns the tick
         // loop (see that constructor's doc comment) — so a block entity
@@ -368,7 +378,23 @@ impl IntegratedServer {
         // deliberately unshared (see this function's own doc comment on
         // that parameter) — that one backs *mob pathing*, which never needs
         // to agree with what the client was sent, only with itself.
-        let source = Arc::new(source);
+        //
+        // Issue #289 / `docs/plans/chunk-lifecycle.md` U3 — **this is the
+        // singleplayer starvation fix.** [`ChunkStore`] makes a column
+        // generated once and thereafter read, which matters here more than
+        // anywhere because both tasks sharing this source were regenerating on
+        // a 50 ms timer: `run_tick_loop` re-fetched every column of
+        // `tick_area` every tick (49 columns at the shell's
+        // `view_radius.clamp(1, 3)`), and the connection's `vitals_tick`
+        // regenerated one column per 50 ms to read a single block. At the
+        // 909 ms per composed column measured in release (see `chunk_store`), either one alone
+        // exceeds the 50 ms tick budget by more than an order of magnitude.
+        // See `crate::chunk_store`'s module docs for the full accounting.
+        //
+        // Note `world_source: M` above is deliberately **not** wrapped: it is
+        // read exactly once per column by `MobHandle::seeded`, so retention
+        // would buy it nothing.
+        let source = Arc::new(ChunkStore::new(source));
         let conn_signal = shutdown.clone();
         let conn_entities = live_mobs.clone();
         let conn_block_entities = block_entities.clone();
@@ -481,7 +507,15 @@ impl IntegratedServer {
         let local_addr = listener.local_addr().ok();
 
         let protocol = Arc::new(protocol);
-        let source = Arc::new(source);
+        // Issue #289 / `docs/plans/chunk-lifecycle.md` U3, for the same two
+        // reasons as `open_in_memory_with_mobs` above: one `run_tick_loop`
+        // re-fetching every column of its tick area every tick, plus one
+        // `vitals_tick` per connection regenerating a column per 50 ms to read
+        // a single block. LAN's tick area is smaller (`LAN_TICK_RADIUS`, 25
+        // columns) but the per-column cost is the same, and the store is
+        // shared across every accepted connection exactly as `source` already
+        // was. See `crate::chunk_store`'s module docs.
+        let source = Arc::new(ChunkStore::new(source));
         let shutdown = Arc::new(Notify::new());
         let signal = shutdown.clone();
         // Shared across every accepted connection (like `protocol`/`source`
