@@ -742,6 +742,16 @@ pub struct PermissionQuery<'a> {
     pub store: &'a PermissionStore,
 }
 
+impl std::fmt::Debug for PermissionQuery<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PermissionQuery")
+            .field("subject", &self.subject)
+            .field("permission", &self.permission)
+            .field("level", &self.level)
+            .finish_non_exhaustive()
+    }
+}
+
 impl PermissionQuery<'_> {
     /// The node string, for the [`Permission::Atom`] case. `None` for a
     /// [`Permission::HasCommandLevel`] query, which has no node.
