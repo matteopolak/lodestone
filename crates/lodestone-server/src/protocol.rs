@@ -444,6 +444,31 @@ pub enum ServerBound {
         /// first is acked) and this field's own future scope.
         desired_chunks_per_tick: f32,
     },
+    /// The client ran a command (`ServerboundChatCommandPacket`, issues #48
+    /// and #464).
+    ///
+    /// `command` is the text **without** its leading `/` — that is the wire
+    /// format, not a normalisation we apply: vanilla's own packet carries it
+    /// stripped (`crates/protocol/v770/src/packets/game.rs`'s `ChatCommand`
+    /// documents the same layout from the client-encode side).
+    ///
+    /// This crate cannot execute it. The Brigadier registry plugins register
+    /// into lives in `lodestone-ecs`, which this crate deliberately does not
+    /// depend on, so `crate::server` hands this to the host through
+    /// [`CommandDispatch`](crate::CommandDispatch) and turns the answer into
+    /// [`encode_system_chat`](ServerProtocol::encode_system_chat) directives.
+    /// See `crate::command`'s module doc for the whole argument, including
+    /// why the two rejected alternatives were rejected.
+    ///
+    /// Only the *unsigned* `chat_command` produces this. `chat_command_signed`
+    /// carries a signature block this crate has no session key to verify and
+    /// stays [`Ignored`](Self::Ignored); a client only sends the signed form
+    /// for commands whose arguments the server declared signable, which
+    /// requires a `COMMANDS` tree we do not yet send.
+    ChatCommand {
+        /// Command text without the leading `/`.
+        command: String,
+    },
     /// A packet the loop does not need to act on (teleport confirmations,
     /// look-only or status-only movement, and several other decoded-but-
     /// unmodelled families — see `crates/protocol/v770/src/server_protocol.rs`'s
@@ -618,6 +643,25 @@ pub trait ServerProtocol: Send + Sync {
     /// The default emits nothing.
     fn encode_pong_response(&self, time: i64) -> ServerDirective {
         let _ = time;
+        ServerDirective::None
+    }
+
+    /// Encodes one line of server-originated chat to the calling client
+    /// (vanilla `ClientboundSystemChatPacket`: a text component plus an
+    /// `overlay` flag, where `false` selects the normal chat history and
+    /// `true` the action bar).
+    ///
+    /// This is command feedback's only route back to the player (issues #48,
+    /// #464) — a refusal and a success are both delivered through it, which is
+    /// why the failure to implement it is silent rather than loud: the command
+    /// still *runs*, the player just never learns what happened. A family that
+    /// wants commands must implement this.
+    ///
+    /// `message` is plain text, not a serialized component: this crate must
+    /// never name a wire format, so the implementor wraps it. The default
+    /// emits nothing, matching every other optional encoder here.
+    fn encode_system_chat(&self, message: &str) -> ServerDirective {
+        let _ = message;
         ServerDirective::None
     }
 
@@ -1007,6 +1051,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn encode_disconnect(&self, state: State, reason: &Text) -> ServerDirective {
         (**self).encode_disconnect(state, reason)
+    }
+
+    fn encode_system_chat(&self, message: &str) -> ServerDirective {
+        (**self).encode_system_chat(message)
     }
 
     fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective> {
