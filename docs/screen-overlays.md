@@ -661,7 +661,7 @@ nothing looks wrong until a player dies burning).
   the overlay input is a separate pair of methods,
   `render_with_effects`/`render_with_crack_and_effects`, that forward to the
   same private `render_inner` with a real `ScreenEffects` instead of
-  `ScreenEffects::default()`. Only `app.rs`'s two real per-frame call sites
+  `ScreenEffects::default()`. Only `app/redraw.rs`'s two real per-frame call sites
   were switched over; every other caller (every existing pixel-gate test)
   is untouched and still gets `ScreenEffects::default()` — no overlay, the
   pre-existing behaviour.
@@ -670,9 +670,9 @@ nothing looks wrong until a player dies burning).
   a boxed closure installed once at connect time. Those exist because
   `RenderState` has no way to reach `Sim` or the network handle itself;
   `eye_in_water`/`spectator`/`tick` are already synchronously available
-  wherever `app.rs` calls `render`, the same place `outline` is computed —
+  wherever `app/redraw.rs` calls `render`, the same place `outline` is computed —
   see `gpu/screen_effects.rs`'s module doc.
-- **The headless single-frame smoke path (`run_headless` in `app.rs`) still
+- **The headless single-frame smoke path (`run_headless` in `app/runners.rs`) still
   calls plain `render`, not `render_with_effects`.** That path has no live
   water/fire state to feed anyway (`Sim::with_demo_world`, no network) and
   exists to prove the acquire→record→submit→present path works, not to

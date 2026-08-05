@@ -4166,8 +4166,9 @@ mod tests {
         assert_eq!(nav.options_save_error(), None);
     }
 
-    /// The anti-island control for every chat option: `app.rs` must still copy
-    /// all eight fields out of `nav.options()` into `hud_frame.chat_options`.
+    /// The anti-island control for every chat option: `app/redraw.rs` must still
+    /// copy all eight fields out of `nav.options()` into
+    /// `hud_frame.chat_options`.
     ///
     /// The gate above drives the real widget and measures the real
     /// `HudGeometry`, but it builds its `ChatDisplayOptions` itself — because
@@ -4182,10 +4183,10 @@ mod tests {
     /// point this at the new home rather than deleting it.
     #[test]
     fn app_rs_still_threads_every_chat_option_into_the_hud_frame() {
-        let src = include_str!("../app.rs");
+        let src = include_str!("../app/redraw.rs");
         assert!(
             src.contains("hud_frame.chat_options"),
-            "app.rs must still populate `hud_frame.chat_options`"
+            "app/redraw.rs must still populate `hud_frame.chat_options`"
         );
         for field in [
             "chat_scale",
@@ -4199,7 +4200,7 @@ mod tests {
         ] {
             assert!(
                 src.contains(&format!("chat_opts.{field}")),
-                "app.rs no longer reads `chat_opts.{field}` — the settings row for \
+                "app/redraw.rs no longer reads `chat_opts.{field}` — the settings row for \
                  it is now an island, and no other test in this crate can see that"
             );
         }

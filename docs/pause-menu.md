@@ -320,8 +320,9 @@ actually took.
   line here — the "what it keeps" list is short and deliberate, so anything
   not explicitly listed as kept should be assumed to need resetting, and the
   acceptance test above is the way to prove it actually is.
-- **Wiring**: `App::apply_menu_action`, `crates/lodestone-shell/src/app.rs`,
-  is the only call site of `end_session` — driven by `MenuAction::QuitToTitle`
+- **Wiring**: `App::apply_menu_action`,
+  `crates/lodestone-shell/src/app/menus.rs`, is the only call site of
+  `end_session` — driven by `MenuAction::QuitToTitle`
   from `apply_menu_action`'s dispatch over what `nav.key`/mouse-click
   handling returns.
 
