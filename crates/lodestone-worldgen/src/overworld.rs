@@ -911,9 +911,16 @@ impl OverworldGenerator {
     /// approximation, at the cost this module's own doc "Performance"
     /// section already names for `ore_stage` itself: no cache exists across
     /// this recursion, so a full sweep pays it 9× again on top of ore's own
-    /// 9×). Biome (and therefore feature list) is resolved per-source via
-    /// [`Self::biome_for_carver_source`] — the same one-biome-per-chunk
-    /// convention [`Self::ore_stage`] already uses for `ores_for_source`.
+    /// 9×). Biome (and therefore feature list) is resolved per-source from
+    /// that source's own **surface-height** biome — [`Self::biome_stage`]'s
+    /// per-quart map, quart 0 (the source's min-block corner) — **not**
+    /// [`Self::biome_for_carver_source`]'s y=0 answer: issue #480, the
+    /// `crate::biome` module doc's "y = 0 trap" (at y=0 the `depth` gradient
+    /// is already ≈ +1.0, so surface dark_forest chunks resolved as lush_caves
+    /// and decorated with that biome's all-silent feature list). Vegetation
+    /// selects its list at the surface the player sees; carver *selection*
+    /// and ore placement stay on the y=0 [`Self::biome_for_carver_source`]
+    /// convention (their own deliberate, different question).
     ///
     /// No-op (returns `world` unchanged) when the resolver supplied no biome
     /// with a vegetation step, matching every other #295/#406/#427 resolver
@@ -965,7 +972,22 @@ impl OverworldGenerator {
         }
 
         let features_for_source = |source_x: i32, source_z: i32| -> &[(usize, crate::feature::vegetation::PlacedRef)] {
-            let biome = self.biome_for_carver_source(source_x, source_z);
+            // Issue #480: resolve the per-source feature list from the source
+            // chunk's own SURFACE-HEIGHT biome — [`Self::biome_stage`]'s
+            // per-quart map, quart 0 = the source's min-block corner sampled
+            // at its own generated surface height — **not** the y=0
+            // [`Self::biome_for_carver_source`] answer. At y=0 the `depth`
+            // gradient is already ≈ +1.0 (`crate::biome`'s "y = 0 trap"), so
+            // a surface dark_forest chunk resolved as lush_caves and decorated
+            // with lush_caves' feature list (vines/vegetation_patch/
+            // root_system — all silent no-ops), meaning dark_forest's own step
+            // (including the 66.7%-weight dark oak branch, issue #428) never
+            // ran. The source's `PreOreResult` is already in
+            // [`Self::pre_ore_cache`] from the stitching loop above
+            // (each neighbour's `post_ore_world` ran its own `pre_ore_stage`),
+            // so this lookup is a cache hit, not a new pipeline pass.
+            let pre = self.pre_ore_stage(source_x, source_z);
+            let biome = &pre.2[0].0;
             self.vegetation_by_biome.get(biome).map(Vec::as_slice).unwrap_or(&[])
         };
 
