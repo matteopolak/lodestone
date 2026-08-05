@@ -12,34 +12,43 @@
 //! specific Minecraft version — and nothing else in this workspace depends on
 //! it yet.
 //!
-//! ## This is a declared island, on purpose
+//! ## This crate is no longer an island
 //!
-//! This crate has **zero consumers today**. That is a sanctioned outcome
-//! here, not an oversight: per the architecture review that produced this
-//! crate, it is capability landed ahead of its wiring, and the follow-up work
-//! is named rather than left implicit (an *unnamed* island is this repo's
-//! most common defect class — see `CLAUDE.md`). Three consumers are expected,
-//! none of which exist yet and none of which this crate builds:
+//! It was landed deliberately ahead of its wiring, with three named expected
+//! consumers. **One of them now exists:** `lodestone_ecs::commands` (issue
+//! #118) builds its trees here, and `lodestone_ecs::permissions` resolves the
+//! permissions this crate's [`filter`] seam asks about (#122). The other two
+//! remain open and unchanged:
 //!
-//! - **#48** — the server-side Brigadier dispatcher. This crate has no
-//!   `CommandSource`, no command callback, and no execution semantics at
-//!   all — `executable` is a bare flag with nothing attached to run.
-//! - **#46** — the client command UX (autocomplete, inline highlighting).
-//!   `CommandTree::suggest` exists specifically so #46 has something to call
-//!   once it decodes a tree off the wire, but this crate builds no tree from
-//!   network bytes — see "What this crate does *not* do" below.
-//! - **#118** — plugin command registration. Its own text says the plugin
-//!   registry and #48's dispatcher "should share rather than diverge" — this
-//!   crate is that shared argument-tree substrate for both.
+//! - **#48** — the server-side Brigadier dispatcher. Still nothing: this crate
+//!   has no `CommandSource` and no execution semantics; `executable` is a bare
+//!   flag. `lodestone_ecs::commands` attaches its own executors *outside* the
+//!   tree (a `NodeId`-keyed side table), precisely so this crate stays free of
+//!   an execution model that #48 will want to define differently.
+//! - **#46** — the client command UX. `CommandTree::suggest` exists for it, but
+//!   #46 shipped against `lodestone_model::command_tree` instead; see issue
+//!   #435 and `docs/plugin-commands.md` for why that duplication is the right
+//!   call and what was collapsed instead.
 //!
-//! ## The `permission` field
+//! ## The `permission` field, and its corrected type
 //!
-//! Every [`Node`] carries `pub permission: Option<NodeId>`
-//! ([`CommandTree::set_permission`]). **Nothing reads it.** It is here from
-//! day one, unconsumed, so that #122's per-node permission check has
-//! somewhere to land without changing every node constructor's signature
-//! when it arrives — the field, not a real permission system, is the
-//! deliverable.
+//! Every [`Node`] carries `pub permission: Option<String>`
+//! ([`CommandTree::set_permission`], [`CommandTree::require_permission`]), and
+//! it **is** read now — by [`CommandTree::parse_filtered`] and
+//! [`CommandTree::suggest_filtered`], against a caller-supplied
+//! [`PermissionFilter`].
+//!
+//! It was reserved as `Option<NodeId>`, which was the wrong type: a `NodeId` is
+//! a handle into *this tree's own arena*, and a permission node is a dotted
+//! string (`myplugin.admin`) with nothing in a command tree to point at. The
+//! field was never read, so correcting it broke no caller — but it is a good
+//! example of a reservation that looked right and would have had to change
+//! anyway.
+//!
+//! Gating is not applied by this crate's own resolution: it has no
+//! dependencies and cannot know what a player is. See [`filter`] for the two
+//! *different* behaviours a denied node gets (loud on parse, silent on
+//! suggest) and why vanilla needs neither.
 //!
 //! ## What this crate does *not* do
 //!
@@ -107,13 +116,15 @@
 
 pub mod argument;
 pub mod error;
+pub mod filter;
 pub mod node;
 pub mod parse;
 pub mod reader;
 pub mod suggest;
 
-pub use argument::{ArgumentType, ArgumentTypeRegistry, BoolArgument, DoubleArgument, FloatArgument, IntegerArgument, LongArgument, StringArgument, StringKind};
+pub use argument::{ArgumentType, ArgumentTypeRegistry, BoolArgument, ChoicesArgument, DoubleArgument, FloatArgument, IntegerArgument, LongArgument, StringArgument, StringKind, SuggestionProvider};
 pub use error::{ParseError, ParseErrorKind};
+pub use filter::{AllowAll, DenyAll, PermissionFilter};
 pub use node::{CommandTree, Node, NodeId, ParsedValue};
 pub use parse::ParsedCommand;
 pub use reader::StringReader;

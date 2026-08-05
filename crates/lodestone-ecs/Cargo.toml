@@ -56,3 +56,12 @@ lodestone-world = { workspace = true }
 # `EntityUuid`. `lodestone-model` already speaks `Uuid` in `EntitySpawned`, so
 # this adds no new type to the graph, only the name.
 uuid = { workspace = true }
+# The Brigadier argument tree, parser and suggester behind `commands` (issues
+# #118/#119/#122). This is that crate's *first* consumer — it was landed as a
+# declared island with three named expected consumers, and this closes one.
+#
+# Safe to add and cannot cycle: `lodestone-command` has a literally empty
+# `[dependencies]` section, so it is a graph sink. It is also trivially
+# wasm-safe for the same reason, which matters because this crate is in
+# `scripts/wasm-check.sh`'s list.
+lodestone-command = { workspace = true }

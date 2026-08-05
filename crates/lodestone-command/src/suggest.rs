@@ -11,6 +11,7 @@
 //! `getCompletionSuggestions` operates on the best-effort `ParseResults`
 //! rather than requiring `execute`'s stricter success).
 
+use crate::filter::{AllowAll, PermissionFilter};
 use crate::node::{CommandTree, NodeId};
 use crate::reader::StringReader;
 
@@ -25,16 +26,36 @@ impl CommandTree {
     /// Returned in the exact order vanilla's `Suggestions::merge` produces:
     /// deduplicated, sorted case-insensitively.
     pub fn suggest(&self, input: &str) -> Vec<String> {
+        self.suggest_filtered(input, &AllowAll)
+    }
+
+    /// [`CommandTree::suggest`], with per-node permission gating (issue #122).
+    ///
+    /// A node the filter denies is **silently absent** from the results, and so
+    /// is everything beneath it — the player is told nothing about a branch
+    /// they cannot use, which is what vanilla achieves by never sending the
+    /// node in the first place (see [`crate::filter`]). This is deliberately
+    /// the opposite of [`CommandTree::parse_filtered`], which reports an
+    /// explicit [`crate::ParseErrorKind::NoPermission`]: suggesting a gated
+    /// node would leak the tree, while silently failing to *execute* one would
+    /// be indistinguishable from a typo.
+    pub fn suggest_filtered(&self, input: &str, filter: &dyn PermissionFilter) -> Vec<String> {
         let token_start = input.rfind(' ').map(|i| i + 1).unwrap_or(0);
         let committed = &input[..token_start];
         let partial = &input[token_start..];
         let partial_lower = partial.to_lowercase();
 
-        let node_id = self.walk_committed(committed);
+        let node_id = self.walk_committed(committed, filter);
         let node = self.node(node_id);
 
         let mut out: Vec<String> = Vec::new();
         for &child_id in node.children() {
+            // Pruned here as well as during the walk: the walk stops a player
+            // descending *into* a denied branch, this stops the denied branch
+            // being offered at the point it would be entered.
+            if !self.node_allowed(child_id, filter) {
+                continue;
+            }
             let child = self.node(child_id);
             match child.as_literal() {
                 Some(name) => {
@@ -66,7 +87,7 @@ impl CommandTree {
     /// always propagate the specific error — the two failure policies don't
     /// compose cleanly into one function without a mode flag that would
     /// obscure both.
-    fn walk_committed(&self, committed: &str) -> NodeId {
+    fn walk_committed(&self, committed: &str, filter: &dyn PermissionFilter) -> NodeId {
         let mut reader = StringReader::new(committed);
         let mut node_id = self.root;
 
@@ -75,9 +96,15 @@ impl CommandTree {
             let token = reader.peek_token();
 
             if let Some(&literal_child) = node.literal_children.get(token.as_str()) {
-                reader.advance(token.chars().count());
-                node_id = self.step_after_match(literal_child, &mut reader);
-                continue;
+                if self.node_allowed(literal_child, filter) {
+                    reader.advance(token.chars().count());
+                    node_id = self.step_after_match(literal_child, &mut reader);
+                    continue;
+                }
+                // Denied: stop the walk here rather than descending. Everything
+                // beneath the denied node is thereby unreachable, which is the
+                // subtree half of the pruning.
+                break;
             }
 
             let mut matched = None;
@@ -85,8 +112,12 @@ impl CommandTree {
                 let checkpoint = reader.cursor();
                 let argument_type = self.node(child_id).argument_type().expect("argument_children only holds Argument nodes");
                 if argument_type.parse(&mut reader).is_ok() {
-                    matched = Some(child_id);
-                    break;
+                    if self.node_allowed(child_id, filter) {
+                        matched = Some(child_id);
+                        break;
+                    }
+                    reader.set_cursor(checkpoint);
+                    continue;
                 }
                 reader.set_cursor(checkpoint);
             }

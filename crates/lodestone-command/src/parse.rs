@@ -7,6 +7,7 @@
 //! future consumers are expected to build.
 
 use crate::error::{ParseError, ParseErrorKind};
+use crate::filter::{AllowAll, PermissionFilter};
 use crate::node::{CommandTree, NodeId, ParsedValue};
 use crate::reader::StringReader;
 
@@ -43,12 +44,37 @@ impl CommandTree {
     /// the end is `UnknownArgument` (something matched, but not everything)
     /// or `UnknownCommand` (nothing at the root matched at all).
     pub fn parse(&self, input: &str) -> Result<ParsedCommand, ParseError> {
+        self.parse_filtered(input, &AllowAll)
+    }
+
+    /// [`CommandTree::parse`], with per-node permission gating (issue #122).
+    ///
+    /// A node whose [`crate::Node::permission`] `filter` rejects is treated as
+    /// absent, together with its whole subtree — vanilla's
+    /// `fillUsableCommands` semantics, see [`crate::filter`]. When a token
+    /// matched such a node and nothing else could take it, the error is
+    /// [`ParseErrorKind::NoPermission`] naming the node required, **not**
+    /// `UnknownCommand`: Bukkit tells the player the command is not theirs
+    /// rather than pretending it does not exist. Suggestion is the opposite —
+    /// see [`CommandTree::suggest_filtered`].
+    pub fn parse_filtered(
+        &self,
+        input: &str,
+        filter: &dyn PermissionFilter,
+    ) -> Result<ParsedCommand, ParseError> {
         let mut reader = StringReader::new(input);
         let mut visited_redirects: Vec<(NodeId, usize)> = Vec::new();
         let mut nodes = Vec::new();
         let mut arguments = Vec::new();
 
-        self.parse_nodes(self.root, &mut reader, &mut visited_redirects, &mut nodes, &mut arguments)?;
+        self.parse_nodes(
+            self.root,
+            &mut reader,
+            &mut visited_redirects,
+            &mut nodes,
+            &mut arguments,
+            filter,
+        )?;
 
         if reader.can_read() {
             let kind = if nodes.is_empty() { ParseErrorKind::UnknownCommand } else { ParseErrorKind::UnknownArgument };
@@ -63,6 +89,16 @@ impl CommandTree {
         Ok(ParsedCommand { nodes, arguments })
     }
 
+    /// Is this node visible to the filter? A node with no permission always
+    /// is. Denial prunes the node *and* its subtree, because a walk that never
+    /// steps onto the node can never reach its children.
+    pub(crate) fn node_allowed(&self, id: NodeId, filter: &dyn PermissionFilter) -> bool {
+        match self.node(id).permission.as_deref() {
+            None => true,
+            Some(permission) => filter.allows(permission),
+        }
+    }
+
     fn parse_nodes(
         &self,
         node_id: NodeId,
@@ -70,12 +106,19 @@ impl CommandTree {
         visited_redirects: &mut Vec<(NodeId, usize)>,
         nodes: &mut Vec<NodeId>,
         arguments: &mut Vec<(String, ParsedValue)>,
+        filter: &dyn PermissionFilter,
     ) -> Result<(), ParseError> {
         if !reader.can_read() {
             return Ok(());
         }
 
         let node = self.node(node_id);
+
+        // A token that matched a node the filter denies, remembered so the
+        // error can be `NoPermission` rather than `UnknownCommand` if nothing
+        // else in this position accepts the token. See `crate::filter` for why
+        // parse is loud where suggest is silent.
+        let mut denied: Option<String> = None;
 
         // Literal exact match takes priority over any argument child, and is
         // unambiguous by construction (`add_literal` rejects names with a
@@ -84,9 +127,19 @@ impl CommandTree {
         // restated as "the token up to the next space equals the literal".
         let token = reader.peek_token();
         if let Some(&literal_child) = node.literal_children.get(token.as_str()) {
-            reader.advance(token.chars().count());
-            nodes.push(literal_child);
-            return self.after_match(literal_child, reader, visited_redirects, nodes, arguments);
+            if self.node_allowed(literal_child, filter) {
+                reader.advance(token.chars().count());
+                nodes.push(literal_child);
+                return self.after_match(
+                    literal_child,
+                    reader,
+                    visited_redirects,
+                    nodes,
+                    arguments,
+                    filter,
+                );
+            }
+            denied = self.node(literal_child).permission.clone();
         }
 
         // No literal matched: try argument children in insertion order.
@@ -102,16 +155,45 @@ impl CommandTree {
             let argument_type = self.node(child_id).argument_type().expect("argument_children only holds Argument nodes");
             match argument_type.parse(reader) {
                 Ok(value) => {
+                    // The permission check happens *after* a successful parse
+                    // rather than before it, so a denied argument node does
+                    // not shadow a later sibling that would have accepted the
+                    // same token. Restoring the cursor is required: the
+                    // argument type moved it.
+                    if !self.node_allowed(child_id, filter) {
+                        reader.set_cursor(checkpoint);
+                        if denied.is_none() {
+                            denied = self.node(child_id).permission.clone();
+                        }
+                        continue;
+                    }
                     let name = self.node(child_id).name().expect("Argument nodes always have a name").to_string();
                     arguments.push((name, value));
                     nodes.push(child_id);
-                    return self.after_match(child_id, reader, visited_redirects, nodes, arguments);
+                    return self.after_match(
+                        child_id,
+                        reader,
+                        visited_redirects,
+                        nodes,
+                        arguments,
+                        filter,
+                    );
                 }
                 Err(e) => {
                     reader.set_cursor(checkpoint);
                     last_error = Some(e);
                 }
             }
+        }
+
+        // A denied match outranks a failed parse: the player's problem is the
+        // permission, and reporting "invalid integer" for a branch they cannot
+        // use would be actively misleading.
+        if let Some(permission) = denied {
+            return Err(ParseError::new(
+                reader.cursor(),
+                ParseErrorKind::NoPermission { permission },
+            ));
         }
 
         if let Some(e) = last_error {
@@ -135,6 +217,7 @@ impl CommandTree {
         visited_redirects: &mut Vec<(NodeId, usize)>,
         nodes: &mut Vec<NodeId>,
         arguments: &mut Vec<(String, ParsedValue)>,
+        filter: &dyn PermissionFilter,
     ) -> Result<(), ParseError> {
         // `CommandDispatcher::parseNodes` only bothers skipping the separator
         // and recursing (into a redirect target, or into the child's own
@@ -172,11 +255,11 @@ impl CommandTree {
                 return Err(ParseError::new(reader.cursor(), ParseErrorKind::RedirectCycle));
             }
             visited_redirects.push(key);
-            return self.parse_nodes(target, reader, visited_redirects, nodes, arguments);
+            return self.parse_nodes(target, reader, visited_redirects, nodes, arguments, filter);
         }
 
         if !self.node(child_id).children().is_empty() {
-            return self.parse_nodes(child_id, reader, visited_redirects, nodes, arguments);
+            return self.parse_nodes(child_id, reader, visited_redirects, nodes, arguments, filter);
         }
 
         Ok(())

@@ -268,6 +268,121 @@ impl ArgumentType for StringArgument {
     }
 }
 
+/// Supplies completion candidates that are not known until the moment of the
+/// query — the primitive the Minecraft-flavoured argument types need.
+///
+/// [`ArgumentType::suggest`] takes only the partial token, so a type whose
+/// candidates are *live state* (the online player list, the loaded worlds, a
+/// plugin's own registry keys) has nowhere to read them from. Rather than
+/// widening the trait with a context parameter every built-in would ignore,
+/// such a type holds an `Arc<dyn SuggestionProvider>` and asks it.
+///
+/// # Why this rather than a context argument on `suggest`
+///
+/// A context parameter would have to be typed, and the only honest type is
+/// something ECS-shaped — which this crate must not depend on. A provider is
+/// a closure the *caller* built while it still had access to whatever it
+/// needed, so the dependency points the right way:
+/// `lodestone_ecs::commands` captures what it needs and hands the closure in.
+///
+/// The cost, which is real: a provider is called during suggestion and must
+/// not block or take a lock the caller already holds. `lodestone_ecs::commands`
+/// snapshots player names into a plain `Vec` rather than closing over the
+/// `World`, for exactly that reason.
+pub trait SuggestionProvider: Send + Sync {
+    fn candidates(&self) -> Vec<String>;
+}
+
+impl<F> SuggestionProvider for F
+where
+    F: Fn() -> Vec<String> + Send + Sync,
+{
+    fn candidates(&self) -> Vec<String> {
+        self()
+    }
+}
+
+/// A string argument whose completions come from a [`SuggestionProvider`] —
+/// issue #119's "player name, block id" shape, without this crate having to
+/// know what a player or a block is.
+///
+/// Parsing is a plain unquoted word (`StringReader::readUnquotedString`), so
+/// this is `StringArgument::word()` plus live suggestions. `strict` decides
+/// whether a value *outside* the candidate list is rejected:
+///
+/// - `strict: false` — anything word-shaped parses. Right for a player name,
+///   because vanilla accepts an offline player's name in most commands and the
+///   candidate list is only who happens to be online.
+/// - `strict: true` — the value must be in the candidate list. Right for a
+///   closed set like a block id, where a typo should fail at parse rather than
+///   reach the executor.
+///
+/// The `strict` distinction is the whole reason this is not just
+/// `StringArgument::word()` with suggestions bolted on, and getting it wrong is
+/// silent: a non-strict block id would hand the executor `"stnoe"` and make the
+/// mistake look like a bug in the executor.
+pub struct ChoicesArgument {
+    provider: Arc<dyn SuggestionProvider>,
+    strict: bool,
+}
+
+impl ChoicesArgument {
+    /// Suggest from `provider`, but accept any word-shaped value.
+    pub fn lenient(provider: Arc<dyn SuggestionProvider>) -> Self {
+        Self { provider, strict: false }
+    }
+
+    /// Suggest from `provider` and reject anything not in it.
+    pub fn strict(provider: Arc<dyn SuggestionProvider>) -> Self {
+        Self { provider, strict: true }
+    }
+
+    /// A fixed candidate list — the common case for a closed set that does not
+    /// change at runtime.
+    pub fn fixed(candidates: Vec<String>, strict: bool) -> Self {
+        Self {
+            provider: Arc::new(move || candidates.clone()),
+            strict,
+        }
+    }
+}
+
+impl std::fmt::Debug for ChoicesArgument {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChoicesArgument")
+            .field("strict", &self.strict)
+            .field("candidates", &self.provider.candidates())
+            .finish()
+    }
+}
+
+impl ArgumentType for ChoicesArgument {
+    fn parse(&self, reader: &mut StringReader) -> Result<ParsedValue, ParseError> {
+        let start = reader.cursor();
+        let value = reader.read_unquoted_string();
+        if self.strict && !self.provider.candidates().iter().any(|c| c == &value) {
+            reader.set_cursor(start);
+            // `InvalidBool`-style "found this, expected one of" is the closest
+            // built-in shape; a dedicated variant would be nicer but this crate
+            // keeps `ParseErrorKind` aligned with Brigadier's own set plus the
+            // one addition #122 forced (`NoPermission`).
+            return Err(ParseError::new(
+                start,
+                ParseErrorKind::InvalidBool(value),
+            ));
+        }
+        Ok(ParsedValue::String(value))
+    }
+
+    fn suggest(&self, _partial: &str) -> Vec<String> {
+        // Unfiltered on purpose: `CommandTree::suggest` applies the
+        // case-insensitive prefix filter uniformly for every node kind, exactly
+        // as `SharedSuggestionProvider.suggest` does. Filtering here as well
+        // would be harmless but would put the same rule in two places.
+        self.provider.candidates()
+    }
+}
+
 /// A lookup table a plugin populates with its own [`ArgumentType`]
 /// implementations, keyed by name — issue #119's "a way for a plugin to
 /// register a custom `ArgumentType` with the same two functions [parse and
