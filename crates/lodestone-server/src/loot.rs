@@ -1,0 +1,1551 @@
+//! Loot-table loading and rolling (issue #337, server-plumbing epic #339).
+//!
+//! # What it is
+//!
+//! The version-free server-side loot system: parses Mojang's datapack loot-table
+//! JSON (the same format `net.minecraft.world.level.storage.loot` reads), then
+//! "rolls" a table with a deterministic RNG to produce `Vec<ItemStack>` — the
+//! data that becomes a chest fill, a mob drop, or a block drop. This is the
+//! server half of the client's `lodestone-game` recipe loader: both consume
+//! vanilla datapack JSON behind a version seam, neither names a protocol.
+//!
+//! # How it works
+//!
+//! A table is `pools` (each a weighted `entries` list, a `rolls` count, and
+//! optional `conditions`/`functions`); an entry is a weighted leaf (`item`,
+//! `empty`, `loot_table`) or a composite (`alternatives`, `group`,
+//! `sequence`). [`LootTable::roll_with`] walks the structure exactly as
+//! `LootPool.addRandomItems`/`LootPool.addRandomItem` (`LootPool.java:97-95`)
+//! do:
+//!
+//! 1. A pool whose conditions all pass emits `rolls` rolls. A roll expands the
+//!    pool's entry tree into weighted leaves (an `alternatives` stops at the
+//!    first child that expands, a `group`/`sequence` expands every child), sums
+//!    the *luck-adjusted* weights (`max(floor(weight + quality·luck), 0)`),
+//!    draws `nextInt(totalWeight)`, and emits the leaf the draw lands on.
+//! 2. A selected leaf applies its entry functions, the pool's functions, and
+//!    the table's functions in that order (the same `LootItemFunction.decorate`
+//!    nesting as vanilla).
+//! 3. Nested `minecraft:loot_table` entries resolve through the
+//!    [`LootTableResolver`] supplied to [`LootTable::roll_with`], with vanilla's
+//!    visited-set recursion guard against table cycles
+//!    (`LootContext.pushVisitedElement`).
+//!
+//! ## The empty loot context
+//!
+//! Issue #337's starting point is the **empty** context — no entity, no level,
+//! no tool, no block state, no explosion — carrying only `luck`. Every
+//! condition/function this module understands has a *defined* empty-context
+//! value, so a table with zero unsupported features rolls **correctly** here:
+//!
+//! | feature | empty-context value | vanilla source |
+//! |---|---|---|
+//! | `random_chance` | `nextFloat() < chance` | `LootItemRandomChanceCondition` |
+//! | `random_chance_with_enchanted_bonus` | uses `unenchanted_chance` (no attacker → level 0) | `…Condition.java:41-45` |
+//! | `killed_by_player` | `false` (no `LAST_DAMAGE_PLAYER` param) | `…Condition.java:26-28` |
+//! | `survives_explosion` | `true` (no `EXPLOSION_RADIUS` param) | `ExplosionCondition.java:27-36` |
+//! | `match_tool` / `entity_properties` / `block_state_property` | `false` (no tool/entity/state) | `MatchTool`, `…EntityProperty…`, `…BlockStateProperty…` |
+//! | `table_bonus` | `chances[0]` (fortune level 0) | `BonusLevelTableCondition.java:37-42` |
+//! | `set_count` | uniform/constant/binomial rolled | `SetItemCountFunction` |
+//! | `enchanted_count_increase` | no-op (no attacker → level 0) | `…Function.java:74-89` |
+//! | `apply_bonus` | no-op (no tool) | `ApplyBonusCount.java:63-72` |
+//! | `explosion_decay` | no-op (no `EXPLOSION_RADIUS`) | `ApplyExplosionDecay.java:25-41` |
+//! | `furnace_smelt` | smelted via [`crate::furnace::recipe_for`] | `SmeltItemFunction` |
+//!
+//! A feature this module does not recognise is **parsed but marked
+//! unsupported** (see [`LootTable::unsupported_features`]) rather than aborting
+//! the load — the same tolerance `recipe_json` shows for future recipe types —
+//! and contributes nothing to a roll: an unsupported condition fails, an
+//! unsupported function/entry/provider is a no-op. Every table shipped under
+//! `assets/loot_table/` is curated to have **zero** unsupported features, so
+//! [`LootTableSet::load_bundled`] rolls exactly the vanilla loot those JSON
+//! files define.
+//!
+//! # How to change it
+//!
+//! To support a new condition/function/number-provider: add the variant to the
+//! enum, add its arm to the parse function, add its empty-context semantics to
+//! `test`/`apply`/`int`/`float`, and add a test. To bundle another table, drop
+//! the verbatim JSON under `assets/loot_table/` (ids are `minecraft:` +
+//! path-minus-extension) — `build.rs` re-embeds it. Keep the "zero unsupported"
+//! invariant for bundled tables: [`LootTableSet::load_bundled`] asserts it in
+//! debug builds.
+//!
+//! ## Gotchas
+//!
+//! * **The RNG is `SpawnRng`, not a JVM-compatible one.** Rolling with a fixed
+//!   seed is deterministic and the *distribution* of every draw matches Java
+//!   (`nextFloat`, `nextDouble`, uniform `nextInt` ranges), but the exact
+//!   stream differs from `RandomSource.create(seed)` (SplitMix64 here vs
+//!   Xoroshiro, modulo vs rejection-sampled `nextInt(bound)`). The issue's
+//!   JVM-roll oracle gate — byte-exact stream parity — is a follow-up built on
+//!   top of this seam, not part of it.
+//! * **`set_count` can produce a count-0 stack** and the roller keeps it, exactly
+//!   as vanilla's `createStackSplitter` passes a `count < maxStackSize` stack
+//!   through (a `uniform 0..N` count is common, e.g. zombie rotten-flesh).
+//!   Container `fill` drops zero stacks; a `getRandomItems`-style Vec consumer
+//!   sees them. [`roll_loot`] filters nothing.
+//! * **Nested-table recursion is guarded by table id**, so a self-referential
+//!   table produces nothing on the recursive branch rather than hanging
+//!   (vanilla's `LootTable.getRandomItemsRaw` warns instead).
+//! * `minecraft:tag` entries are unsupported here: expanding an item tag needs
+//!   an item-tag census, which `lodestone-data` does not bundle (only the block
+//!   tags `tool.rs` decodes at runtime). Only one table in the 26.2 corpus uses
+//!   one.
+//!
+//! The data under `assets/loot_table/` is copied verbatim from
+//! `.cache/mc/26.2/client-src/data/minecraft/loot_table/` (Mojang's own
+//! generated data, CLAUDE.md data-source #1); the `tests/loot_corpus.rs` gate
+//! re-reads the full corpus from that cache and cross-checks the bundle against
+//! it.
+
+use std::str::FromStr;
+
+use lodestone_model::{ItemStack, ResourceKey};
+use serde_json::Value;
+use thiserror::Error;
+
+use crate::mob_spawn::SpawnRng;
+
+include!(concat!(env!("OUT_DIR"), "/embedded_loot.rs"));
+
+/// The loot context a roll can read. Issue #337's starting point is the empty
+/// context — no entity, no level, no tool, no block state, no explosion —
+/// carrying only luck. Later landings extend this struct (and the condition/
+/// function evaluators) with entity/level state rather than threading new
+/// arguments through every call.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LootContext {
+    /// `LootContextParams.luck` — 0 for the empty context. Feeds entry quality
+    /// (`weight + quality·luck`) and `bonus_rolls`.
+    pub luck: f32,
+}
+
+/// Resolves a nested `minecraft:loot_table` entry to its table during a roll.
+///
+/// [`LootTableSet`] implements this against its own loaded set. A table rolled
+/// through [`LootTable::roll`] (no resolver) resolves every nested reference to
+/// nothing.
+pub trait LootTableResolver {
+    /// The table registered under `id`, if any.
+    fn loot_table(&self, id: &ResourceKey) -> Option<&LootTable>;
+}
+
+/// One parsed loot table.
+///
+/// Parsing never fails on an *unknown* feature — those are recorded in
+/// [`unsupported_features`](Self::unsupported_features) and ignored when
+/// rolling. A structurally malformed known shape is a [`LootError`].
+#[derive(Debug, Clone)]
+pub struct LootTable {
+    /// The table's id, e.g. `minecraft:blocks/dirt`.
+    pub id: ResourceKey,
+    pools: Vec<LootPool>,
+    functions: Vec<LootFunction>,
+    unsupported: Vec<String>,
+}
+
+impl LootTable {
+    /// Parses one table document. `id` is the table's registry id (e.g.
+    /// `minecraft:blocks/dirt`), used for self-references and resolution.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LootError::Json`] on malformed JSON and [`LootError`] on a
+    /// structurally malformed known shape (a missing required field, a
+    /// mistyped weight, a non-list `entries`...). Unknown feature *types* are
+    /// never an error — see [`unsupported_features`](Self::unsupported_features).
+    pub fn from_json(id: &ResourceKey, text: &str) -> Result<Self, LootError> {
+        let value: Value =
+            serde_json::from_str(text).map_err(|e| LootError::Json(e.to_string()))?;
+        let mut audit = Vec::new();
+        let table = Self::from_value(id.clone(), &value, &mut audit)?;
+        Ok(table)
+    }
+
+    fn from_value(id: ResourceKey, value: &Value, audit: &mut Vec<String>) -> Result<Self, LootError> {
+        // `type` (the param set) and `random_sequence` do not affect a roll.
+        let pools = match value.get("pools") {
+            Some(p) => p
+                .as_array()
+                .ok_or_else(|| LootError::UnexpectedType("pools", "an array"))?
+                .iter()
+                .map(|p| LootPool::from_value(p, audit))
+                .collect::<Result<Vec<_>, _>>()?,
+            None => Vec::new(),
+        };
+        let functions = parse_functions(value.get("functions"), audit)?;
+        Ok(Self { id, pools, functions, unsupported: audit.clone() })
+    }
+
+    /// Rolls the table in `context` with `rng`, resolving nested
+    /// `minecraft:loot_table` entries through `resolver`.
+    ///
+    /// The order of application mirrors vanilla: entry functions, then pool
+    /// functions, then table functions, per produced stack.
+    #[must_use]
+    pub fn roll_with(
+        &self,
+        context: &LootContext,
+        rng: &mut SpawnRng,
+        resolver: &dyn LootTableResolver,
+    ) -> Vec<ItemStack> {
+        let mut out = Vec::new();
+        let mut visited = vec![self.id.clone()];
+        self.roll_into(context, rng, resolver, &mut out, &mut visited);
+        out
+    }
+
+    /// Rolls the table with no resolver — nested `minecraft:loot_table` entries
+    /// produce nothing. Prefer [`LootTableSet::roll`] / [`roll_loot`] when a
+    /// table may reference others.
+    #[must_use]
+    pub fn roll(&self, context: &LootContext, rng: &mut SpawnRng) -> Vec<ItemStack> {
+        self.roll_with(context, rng, &NoTables)
+    }
+
+    fn roll_into(
+        &self,
+        context: &LootContext,
+        rng: &mut SpawnRng,
+        resolver: &dyn LootTableResolver,
+        out: &mut Vec<ItemStack>,
+        visited: &mut Vec<ResourceKey>,
+    ) {
+        for pool in &self.pools {
+            pool.roll_into(context, rng, resolver, out, visited);
+        }
+        if !self.functions.is_empty() {
+            for stack in out.iter_mut() {
+                for function in &self.functions {
+                    function.apply(stack, context, rng);
+                }
+            }
+        }
+    }
+
+    /// Feature ids this table uses that the empty-context roller does not
+    /// evaluate — e.g. `"function minecraft:enchant_randomly"`. Empty for every
+    /// bundled table, so a non-empty list means "rolls here are best-effort,
+    /// not vanilla-exact".
+    #[must_use]
+    pub fn unsupported_features(&self) -> &[String] {
+        &self.unsupported
+    }
+}
+
+/// Accumulates a whole loot-table corpus from arbitrarily-sourced JSON
+/// documents, the `CorpusBuilder` shape `recipe_json` established.
+///
+/// A malformed document is recorded in [`failures`](Self::failures) rather than
+/// aborting the load; a document that only uses *unknown* features loads but is
+/// reported by [`LootTable::unsupported_features`].
+#[derive(Debug, Default)]
+pub struct LootTableBuilder {
+    tables: Vec<LootTable>,
+    failures: Vec<(String, LootError)>,
+}
+
+impl LootTableBuilder {
+    /// An empty builder.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Parses and stages one table document.
+    pub fn push_table(&mut self, id: &str, json: &str) {
+        match ResourceKey::from_str(id) {
+            Ok(key) => match LootTable::from_json(&key, json) {
+                Ok(table) => self.tables.push(table),
+                Err(error) => self.failures.push((id.to_string(), error)),
+            },
+            Err(error) => self.failures.push((id.to_string(), LootError::BadIdentifier(error.to_string()))),
+        }
+    }
+
+    /// Documents that failed to parse, as `(id, error)`.
+    #[must_use]
+    pub fn failures(&self) -> &[(String, LootError)] {
+        &self.failures
+    }
+
+    /// Number of tables staged so far.
+    #[must_use]
+    pub fn table_count(&self) -> usize {
+        self.tables.len()
+    }
+
+    /// Builds the [`LootTableSet`], consuming the builder.
+    #[must_use]
+    pub fn finish(self) -> LootTableSet {
+        LootTableSet { tables: self.tables }
+    }
+}
+
+/// A loaded set of loot tables, keyed by id. This is the object a server holds
+/// — the analogue of `RecipeBook` — and the provider for [`roll_loot`].
+#[derive(Debug, Default)]
+pub struct LootTableSet {
+    tables: Vec<LootTable>,
+}
+
+impl LootTableSet {
+    /// Loads every table bundled under `assets/loot_table/` (issue #337's
+    /// "bundled assets" seam; `build.rs` embeds them as `include_str!`s).
+    ///
+    /// # Panics
+    ///
+    /// Panics on a malformed embedded document, and — in debug builds — if any
+    /// bundled table uses a feature the empty-context roller does not support:
+    /// the bundle is curated to be fully supported, so a non-empty report here
+    /// is a packaging error, not a runtime condition.
+    #[must_use]
+    pub fn load_bundled() -> Self {
+        let mut builder = LootTableBuilder::new();
+        for (id, raw) in EMBEDDED_LOOT {
+            builder.push_table(&format!("minecraft:{id}"), raw);
+        }
+        let set = builder.finish();
+        for table in &set.tables {
+            debug_assert!(
+                table.unsupported.is_empty(),
+                "bundled table {} uses unsupported features: {table:?}",
+                table.id,
+            );
+        }
+        set
+    }
+
+    /// The table registered under `id`, if any.
+    #[must_use]
+    pub fn get(&self, id: &ResourceKey) -> Option<&LootTable> {
+        self.tables.iter().find(|t| &t.id == id)
+    }
+
+    /// Number of loaded tables.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.tables.len()
+    }
+
+    /// Whether the set is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.tables.is_empty()
+    }
+
+    /// Every loaded table, in insertion order.
+    #[must_use]
+    pub fn iter(&self) -> impl Iterator<Item = &LootTable> {
+        self.tables.iter()
+    }
+
+    /// Rolls the table `id` in `context` with `rng`, resolving nested tables
+    /// within this set. An unknown id rolls to nothing (the same answer
+    /// vanilla's `LootTable.EMPTY` gives for a missing table).
+    #[must_use]
+    pub fn roll(&self, id: &ResourceKey, context: &LootContext, rng: &mut SpawnRng) -> Vec<ItemStack> {
+        match self.get(id) {
+            Some(table) => table.roll_with(context, rng, self),
+            None => Vec::new(),
+        }
+    }
+}
+
+impl LootTableResolver for LootTableSet {
+    fn loot_table(&self, id: &ResourceKey) -> Option<&LootTable> {
+        self.get(id)
+    }
+}
+
+/// Issue #337's starting point: roll the table `table_id` from `set` in the
+/// empty loot context (luck 0, no entity/level/tool) and return the item stacks
+/// it produces. Nested `minecraft:loot_table` entries resolve within `set`.
+///
+/// This is the `roll_loot(table_id) -> Vec<ItemStack>` of the issue — the call
+/// a future mob-death handler (`MobSim`'s `killed` branch, `mobs.rs`) or chest
+/// filler makes after it has mapped its entity/block to a table id.
+#[must_use]
+pub fn roll_loot(set: &LootTableSet, table_id: &ResourceKey, rng: &mut SpawnRng) -> Vec<ItemStack> {
+    set.roll(table_id, &LootContext::default(), rng)
+}
+
+/// One pool: a weighted entry list rolled `rolls` times.
+#[derive(Debug, Clone)]
+struct LootPool {
+    entries: Vec<LootEntry>,
+    conditions: Vec<LootCondition>,
+    functions: Vec<LootFunction>,
+    rolls: NumberProvider,
+    bonus_rolls: NumberProvider,
+}
+
+impl LootPool {
+    fn from_value(value: &Value, audit: &mut Vec<String>) -> Result<Self, LootError> {
+        let entries = value
+            .get("entries")
+            .and_then(Value::as_array)
+            .ok_or(LootError::MissingField("entries"))?
+            .iter()
+            .map(|e| LootEntry::from_value(e, audit))
+            .collect::<Result<Vec<_>, _>>()?;
+        let conditions = parse_conditions(value.get("conditions"), audit)?;
+        let functions = parse_functions(value.get("functions"), audit)?;
+        let rolls = value
+            .get("rolls")
+            .ok_or(LootError::MissingField("rolls"))
+            .and_then(|r| parse_number_provider(r, audit))?;
+        let bonus_rolls = match value.get("bonus_rolls") {
+            Some(b) => parse_number_provider(b, audit)?,
+            None => NumberProvider::Constant(0.0),
+        };
+        Ok(Self { entries, conditions, functions, rolls, bonus_rolls })
+    }
+
+    fn roll_into(
+        &self,
+        context: &LootContext,
+        rng: &mut SpawnRng,
+        resolver: &dyn LootTableResolver,
+        out: &mut Vec<ItemStack>,
+        visited: &mut Vec<ResourceKey>,
+    ) {
+        if !self.conditions.iter().all(|c| c.test(context, rng)) {
+            return;
+        }
+        // `LootPool.addRandomItems`: rolls + floor(bonus_rolls * luck).
+        let rolls = self.rolls.int(context, rng)
+            + (self.bonus_rolls.float(context, rng) * context.luck).floor() as i32;
+        for _ in 0..rolls.max(0) {
+            let mut produced = Vec::new();
+            self.roll_one(context, rng, resolver, &mut produced, visited);
+            // The pool's functions decorate each item the roll produced.
+            for function in &self.functions {
+                for stack in &mut produced {
+                    function.apply(stack, context, rng);
+                }
+            }
+            out.extend(produced);
+        }
+    }
+
+    /// One `LootPool.addRandomItem`: expand the entry tree into weighted leaves,
+    /// draw a leaf, emit it.
+    fn roll_one(
+        &self,
+        context: &LootContext,
+        rng: &mut SpawnRng,
+        resolver: &dyn LootTableResolver,
+        out: &mut Vec<ItemStack>,
+        visited: &mut Vec<ResourceKey>,
+    ) {
+        let mut leaves: Vec<Leaf> = Vec::new();
+        let mut total_weight: i32 = 0;
+        for entry in &self.entries {
+            entry.expand(context, rng, resolver, visited, &mut leaves, &mut total_weight);
+        }
+        if total_weight == 0 || leaves.is_empty() {
+            return;
+        }
+        if leaves.len() == 1 {
+            leaves[0].create(context, rng, resolver, visited, out);
+            return;
+        }
+        // The weight stored on each leaf is already luck-adjusted, so this
+        // walk subtracts the same values `entry.getWeight(luck)` would.
+        let mut index = rng.next_int(total_weight);
+        for leaf in &leaves {
+            index -= leaf.weight;
+            if index < 0 {
+                leaf.create(context, rng, resolver, visited, out);
+                return;
+            }
+        }
+    }
+}
+
+/// A pool entry: a weighted leaf or a composite of entries.
+#[derive(Debug, Clone)]
+enum LootEntry {
+    Item {
+        name: ResourceKey,
+        weight: i32,
+        quality: i32,
+        conditions: Vec<LootCondition>,
+        functions: Vec<LootFunction>,
+    },
+    Empty {
+        weight: i32,
+        quality: i32,
+        conditions: Vec<LootCondition>,
+    },
+    /// Nested `minecraft:loot_table` reference. Only the id form is supported;
+    /// an *inline* table value is parsed as unsupported (rare, needs a
+    /// sub-parser for the embedded document).
+    Table {
+        name: ResourceKey,
+        weight: i32,
+        quality: i32,
+        conditions: Vec<LootCondition>,
+        functions: Vec<LootFunction>,
+    },
+    Alternatives {
+        conditions: Vec<LootCondition>,
+        children: Vec<LootEntry>,
+    },
+    Group {
+        conditions: Vec<LootCondition>,
+        children: Vec<LootEntry>,
+    },
+    Sequence {
+        conditions: Vec<LootCondition>,
+        children: Vec<LootEntry>,
+    },
+    /// A feature this build does not support (`minecraft:tag`,
+    /// `minecraft:dynamic`, ...). Never expands, so it can never win a roll;
+    /// the feature id is reported by [`LootTable::unsupported_features`].
+    Unsupported,
+}
+
+impl LootEntry {
+    fn from_value(value: &Value, audit: &mut Vec<String>) -> Result<Self, LootError> {
+        let id = value
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or(LootError::MissingField("type"))?;
+        match id {
+            "minecraft:item" => {
+                let name = parse_id(value.get("name"), "name")?;
+                let weight = parse_int_default(value.get("weight"), 1)?;
+                let quality = parse_int_default(value.get("quality"), 0)?;
+                let conditions = parse_conditions(value.get("conditions"), audit)?;
+                let functions = parse_functions(value.get("functions"), audit)?;
+                Ok(Self::Item { name, weight, quality, conditions, functions })
+            }
+            "minecraft:empty" => {
+                let weight = parse_int_default(value.get("weight"), 1)?;
+                let quality = parse_int_default(value.get("quality"), 0)?;
+                let conditions = parse_conditions(value.get("conditions"), audit)?;
+                Ok(Self::Empty { weight, quality, conditions })
+            }
+            "minecraft:loot_table" => {
+                let weight = parse_int_default(value.get("weight"), 1)?;
+                let quality = parse_int_default(value.get("quality"), 0)?;
+                let conditions = parse_conditions(value.get("conditions"), audit)?;
+                let functions = parse_functions(value.get("functions"), audit)?;
+                let entry_value = value.get("value").ok_or(LootError::MissingField("value"))?;
+                if let Some(name) = entry_value.as_str() {
+                    let name = name
+                        .parse()
+                        .map_err(|_| LootError::BadIdentifier(name.to_string()))?;
+                    Ok(Self::Table { name, weight, quality, conditions, functions })
+                } else {
+                    audit.push("entry minecraft:loot_table (inline table value)".to_string());
+                    Ok(Self::Unsupported)
+                }
+            }
+            "minecraft:alternatives" => {
+                let conditions = parse_conditions(value.get("conditions"), audit)?;
+                let children = parse_entries(value.get("children"), audit)?;
+                Ok(Self::Alternatives { conditions, children })
+            }
+            "minecraft:group" => {
+                let conditions = parse_conditions(value.get("conditions"), audit)?;
+                let children = parse_entries(value.get("children"), audit)?;
+                Ok(Self::Group { conditions, children })
+            }
+            "minecraft:sequence" => {
+                let conditions = parse_conditions(value.get("conditions"), audit)?;
+                let children = parse_entries(value.get("children"), audit)?;
+                Ok(Self::Sequence { conditions, children })
+            }
+            other => {
+                audit.push(format!("entry {other}"));
+                Ok(Self::Unsupported)
+            }
+        }
+    }
+
+    /// Expands this entry into weighted [`Leaf`]s for one roll, mirroring
+    /// `LootPoolEntryContainer.expand` / the `ComposableEntryContainer`
+    /// compositions. Returns whether anything (even a zero-weight leaf) was
+    /// produced — what `alternatives` short-circuits on.
+    fn expand(
+        &self,
+        context: &LootContext,
+        rng: &mut SpawnRng,
+        resolver: &dyn LootTableResolver,
+        visited: &mut Vec<ResourceKey>,
+        leaves: &mut Vec<Leaf>,
+        total_weight: &mut i32,
+    ) -> bool {
+        let mut pass = |conditions: &[LootCondition]| conditions.iter().all(|c| c.test(context, rng));
+        match self {
+            Self::Item { name, weight, quality, conditions, functions } => {
+                if !pass(conditions) {
+                    return false;
+                }
+                push_leaf(LeafKind::Item(name.clone()), *weight, *quality, functions, context, leaves, total_weight);
+                true
+            }
+            Self::Empty { weight, quality, conditions } => {
+                if !pass(conditions) {
+                    return false;
+                }
+                push_leaf(LeafKind::Empty, *weight, *quality, &[], context, leaves, total_weight);
+                true
+            }
+            Self::Table { name, weight, quality, conditions, functions } => {
+                if !pass(conditions) {
+                    return false;
+                }
+                push_leaf(LeafKind::Table(name.clone()), *weight, *quality, functions, context, leaves, total_weight);
+                true
+            }
+            Self::Alternatives { conditions, children } => {
+                if !pass(conditions) {
+                    return false;
+                }
+                for child in children {
+                    if child.expand(context, rng, resolver, visited, leaves, total_weight) {
+                        return true;
+                    }
+                }
+                false
+            }
+            Self::Group { conditions, children } => {
+                if !pass(conditions) {
+                    return false;
+                }
+                for child in children {
+                    child.expand(context, rng, resolver, visited, leaves, total_weight);
+                }
+                true
+            }
+            Self::Sequence { conditions, children } => {
+                if !pass(conditions) {
+                    return false;
+                }
+                for child in children {
+                    if !child.expand(context, rng, resolver, visited, leaves, total_weight) {
+                        return false;
+                    }
+                }
+                true
+            }
+            Self::Unsupported => false,
+        }
+    }
+}
+
+/// A single weighted leaf a pool roll can select.
+#[derive(Debug, Clone)]
+struct Leaf {
+    kind: LeafKind,
+    /// Luck-adjusted weight, already `max(floor(weight + quality·luck), 0)` and
+    /// already filtered to `> 0`.
+    weight: i32,
+    functions: Vec<LootFunction>,
+}
+
+/// What a selected leaf emits.
+#[derive(Debug, Clone)]
+enum LeafKind {
+    /// A stack of `item` (count 1 before functions).
+    Item(ResourceKey),
+    /// Nothing — a selected `minecraft:empty` entry still consumes the roll.
+    Empty,
+    /// Roll the referenced table, recursively.
+    Table(ResourceKey),
+}
+
+impl Leaf {
+    /// `LootPoolEntry.createItemStack`: emit the leaf's item(s), applying the
+    /// entry's functions first.
+    fn create(
+        &self,
+        context: &LootContext,
+        rng: &mut SpawnRng,
+        resolver: &dyn LootTableResolver,
+        visited: &mut Vec<ResourceKey>,
+        out: &mut Vec<ItemStack>,
+    ) {
+        match &self.kind {
+            LeafKind::Item(name) => {
+                let mut stack = ItemStack::new(name.clone(), 1);
+                for function in &self.functions {
+                    function.apply(&mut stack, context, rng);
+                }
+                out.push(stack);
+            }
+            LeafKind::Empty => {}
+            LeafKind::Table(id) => {
+                if visited.contains(id) {
+                    return;
+                }
+                visited.push(id.clone());
+                // `LootTableReference.createItemStack`: every stack the
+                // referenced table produced is decorated by this entry's own
+                // functions before being emitted.
+                let start = out.len();
+                if let Some(table) = resolver.loot_table(id) {
+                    table.roll_into(context, rng, resolver, out, visited);
+                }
+                visited.pop();
+                for stack in &mut out[start..] {
+                    for function in &self.functions {
+                        function.apply(stack, context, rng);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn push_leaf(
+    kind: LeafKind,
+    weight: i32,
+    quality: i32,
+    functions: &[LootFunction],
+    context: &LootContext,
+    leaves: &mut Vec<Leaf>,
+    total_weight: &mut i32,
+) {
+    // `LootPoolSingletonContainer.EntryBase.getWeight`: max(floor(w + q·luck), 0).
+    let effective = (weight as f32 + quality as f32 * context.luck).floor().max(0.0) as i32;
+    if effective > 0 {
+        *total_weight += effective;
+        leaves.push(Leaf { kind, weight: effective, functions: functions.to_vec() });
+    }
+}
+
+/// A number provider (`NumberProviders.CODEC`): a bare float constant, a typed
+/// object, or the bare-`{min,max}` uniform fallback.
+#[derive(Debug, Clone)]
+enum NumberProvider {
+    Constant(f32),
+    Uniform {
+        min: Box<NumberProvider>,
+        max: Box<NumberProvider>,
+    },
+    Binomial {
+        n: Box<NumberProvider>,
+        p: Box<NumberProvider>,
+    },
+    Sum(Vec<NumberProvider>),
+    /// A number-provider type this build does not evaluate (`minecraft:linear`,
+    /// `minecraft:score`, ...). Rolls as 0; the feature id is reported by
+    /// [`LootTable::unsupported_features`].
+    Unsupported,
+}
+
+impl NumberProvider {
+    fn from_value(value: &Value, audit: &mut Vec<String>) -> Result<Self, LootError> {
+        if let Some(f) = value.as_f64() {
+            return Ok(Self::Constant(f as f32));
+        }
+        let object = value
+            .as_object()
+            .ok_or_else(|| LootError::UnexpectedType("number provider", "a number or object"))?;
+        // Vanilla's `Codec.withAlternative(TYPED_CODEC, UniformGenerator.MAP_CODEC)`:
+        // a bare `{min, max}` (no `type`) is a uniform.
+        if object.get("type").is_none() && object.contains_key("min") && object.contains_key("max") {
+            return Ok(Self::Uniform {
+                min: Box::new(parse_number_provider(value.get("min").unwrap(), audit)?),
+                max: Box::new(parse_number_provider(value.get("max").unwrap(), audit)?),
+            });
+        }
+        let id = value
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or(LootError::MissingField("type"))?;
+        match id {
+            "minecraft:constant" => {
+                let value = value.get("value").ok_or(LootError::MissingField("value"))?;
+                Ok(Self::Constant(parse_f32(value, "value")?))
+            }
+            "minecraft:uniform" => {
+                let min = parse_number_provider(value.get("min").ok_or(LootError::MissingField("min"))?, audit)?;
+                let max = parse_number_provider(value.get("max").ok_or(LootError::MissingField("max"))?, audit)?;
+                Ok(Self::Uniform { min: Box::new(min), max: Box::new(max) })
+            }
+            "minecraft:binomial" => {
+                let n = parse_number_provider(value.get("n").ok_or(LootError::MissingField("n"))?, audit)?;
+                let p = parse_number_provider(value.get("p").ok_or(LootError::MissingField("p"))?, audit)?;
+                Ok(Self::Binomial { n: Box::new(n), p: Box::new(p) })
+            }
+            "minecraft:sum" => {
+                let summands = parse_number_providers(value.get("summands"), audit)?;
+                Ok(Self::Sum(summands))
+            }
+            other => {
+                audit.push(format!("number provider {other}"));
+                Ok(Self::Unsupported)
+            }
+        }
+    }
+
+    /// `NumberProvider.getInt` — `Mth.floor(getFloat)` unless overridden.
+    fn int(&self, context: &LootContext, rng: &mut SpawnRng) -> i32 {
+        match self {
+            Self::Constant(v) => v.floor() as i32,
+            // `Mth.nextInt`: min >= max ? min : min + nextInt(max - min + 1).
+            Self::Uniform { min, max } => {
+                let lo = min.int(context, rng);
+                let hi = max.int(context, rng);
+                if lo >= hi { lo } else { rng.next_int(hi - lo + 1) + lo }
+            }
+            Self::Binomial { n, p } => {
+                let draws = n.int(context, rng);
+                let probability = p.float(context, rng);
+                let mut hits = 0;
+                for _ in 0..draws.max(0) {
+                    if rng.next_f32() < probability {
+                        hits += 1;
+                    }
+                }
+                hits
+            }
+            Self::Sum(summands) => summands.iter().map(|s| s.float(context, rng)).sum::<f32>().floor() as i32,
+            Self::Unsupported => 0,
+        }
+    }
+
+    fn float(&self, context: &LootContext, rng: &mut SpawnRng) -> f32 {
+        match self {
+            Self::Constant(v) => *v,
+            // `Mth.nextFloat`: min >= max ? min : nextFloat * (max - min) + min.
+            Self::Uniform { min, max } => {
+                let lo = min.float(context, rng);
+                let hi = max.float(context, rng);
+                if lo >= hi { lo } else { rng.next_f32() * (hi - lo) + lo }
+            }
+            Self::Binomial { .. } => self.int(context, rng) as f32,
+            Self::Sum(summands) => summands.iter().map(|s| s.float(context, rng)).sum(),
+            Self::Unsupported => 0.0,
+        }
+    }
+}
+
+/// A loot-table function (`LootItemFunctions` dispatch on `function`).
+///
+/// Each variant here has a defined empty-context effect (see the module doc's
+/// table); an unsupported function is a no-op and is reported by
+/// [`LootTable::unsupported_features`].
+#[derive(Debug, Clone)]
+enum LootFunction {
+    SetCount {
+        count: NumberProvider,
+        add: bool,
+        conditions: Vec<LootCondition>,
+    },
+    SetItem {
+        item: ResourceKey,
+        conditions: Vec<LootCondition>,
+    },
+    /// No attacker in the empty context, so enchantment level is 0 and the
+    /// function is a no-op — parsed so the table is recognised as supported.
+    EnchantedCountIncrease {
+        conditions: Vec<LootCondition>,
+    },
+    /// No tool in the empty context, so no fortune bonus — a no-op.
+    ApplyBonus {
+        conditions: Vec<LootCondition>,
+    },
+    /// No explosion in the empty context — a no-op.
+    ExplosionDecay {
+        conditions: Vec<LootCondition>,
+    },
+    FurnaceSmelt {
+        use_input_count: bool,
+        conditions: Vec<LootCondition>,
+    },
+    /// `minecraft:sequence` — applies each child in order.
+    Sequence(Vec<LootFunction>),
+    /// A function this build does not apply (`minecraft:enchant_randomly`,
+    /// `minecraft:set_potion`, ...). A no-op in a roll; the feature id is
+    /// reported by [`LootTable::unsupported_features`].
+    Unsupported,
+}
+
+impl LootFunction {
+    fn from_value(value: &Value, audit: &mut Vec<String>) -> Result<Self, LootError> {
+        let id = value
+            .get("function")
+            .and_then(Value::as_str)
+            .ok_or(LootError::MissingField("function"))?;
+        let conditions = parse_conditions(value.get("conditions"), audit)?;
+        match id {
+            "minecraft:set_count" => {
+                let count = parse_number_provider(value.get("count").ok_or(LootError::MissingField("count"))?, audit)?;
+                let add = value.get("add").and_then(Value::as_bool).unwrap_or(false);
+                Ok(Self::SetCount { count, add, conditions })
+            }
+            "minecraft:set_item" => {
+                let item = parse_id(value.get("item"), "item")?;
+                Ok(Self::SetItem { item, conditions })
+            }
+            "minecraft:enchanted_count_increase" => Ok(Self::EnchantedCountIncrease { conditions }),
+            "minecraft:apply_bonus" => Ok(Self::ApplyBonus { conditions }),
+            "minecraft:explosion_decay" => Ok(Self::ExplosionDecay { conditions }),
+            "minecraft:furnace_smelt" => {
+                let use_input_count = value.get("use_input_count").and_then(Value::as_bool).unwrap_or(true);
+                Ok(Self::FurnaceSmelt { use_input_count, conditions })
+            }
+            "minecraft:sequence" => {
+                let functions = parse_functions(value.get("functions"), audit)?;
+                Ok(Self::Sequence(functions))
+            }
+            other => {
+                audit.push(format!("function {other}"));
+                Ok(Self::Unsupported)
+            }
+        }
+    }
+
+    fn apply(&self, stack: &mut ItemStack, context: &LootContext, rng: &mut SpawnRng) {
+        match self {
+            Self::SetCount { count, add, conditions } => {
+                if !conditions.iter().all(|c| c.test(context, rng)) {
+                    return;
+                }
+                let base = if *add { stack.count as i32 } else { 0 };
+                stack.count = (base + count.int(context, rng)).max(0) as u32;
+            }
+            Self::SetItem { item, conditions } => {
+                if conditions.iter().all(|c| c.test(context, rng)) {
+                    stack.item = item.clone();
+                }
+            }
+            Self::EnchantedCountIncrease { conditions }
+            | Self::ApplyBonus { conditions }
+            | Self::ExplosionDecay { conditions } => {
+                let _ = conditions;
+                // No attacker/tool/explosion in the empty context: each is a
+                // no-op. (A condition gate is still respected for the no-op.)
+            }
+            Self::FurnaceSmelt { use_input_count, conditions } => {
+                if !conditions.iter().all(|c| c.test(context, rng)) {
+                    return;
+                }
+                let ingredient = stack.item.to_string();
+                if let Some(recipe) = crate::furnace::recipe_for(crate::furnace::FurnaceKind::Furnace, &ingredient) {
+                    // `SmeltItemFunction.run`: result × (use_input_count ? count : 1).
+                    let count = if *use_input_count { stack.count } else { 1 } * recipe.count;
+                    if let Ok(output) = recipe.result.parse::<ResourceKey>() {
+                        stack.item = output;
+                        stack.count = count;
+                    }
+                }
+            }
+            Self::Sequence(functions) => {
+                for function in functions {
+                    function.apply(stack, context, rng);
+                }
+            }
+            Self::Unsupported => {}
+        }
+    }
+}
+
+/// A loot condition (`LootItemConditions` dispatch on `condition`).
+///
+/// Each variant evaluates exactly as vanilla does when its referenced context
+/// params are absent — which is what the empty context is. An unsupported
+/// condition fails (so the entry/pool it gates produces nothing).
+#[derive(Debug, Clone)]
+enum LootCondition {
+    RandomChance(NumberProvider),
+    RandomChanceWithEnchantedBonus {
+        unenchanted_chance: f32,
+    },
+    KilledByPlayer,
+    SurvivesExplosion,
+    MatchTool,
+    EntityProperties,
+    BlockStateProperty,
+    DamageSourceProperties,
+    LocationCheck,
+    TableBonus {
+        chances: Vec<f32>,
+    },
+    Inverted(Box<LootCondition>),
+    AllOf(Vec<LootCondition>),
+    AnyOf(Vec<LootCondition>),
+    /// A condition this build does not evaluate (`minecraft:weather_check`,
+    /// ...). Always fails in a roll; the feature id is reported by
+    /// [`LootTable::unsupported_features`].
+    Unsupported,
+}
+
+impl LootCondition {
+    fn from_value(value: &Value, audit: &mut Vec<String>) -> Result<Self, LootError> {
+        // Inline `{"all_of": [...]}` form (`AllOfCondition.INLINE_CODEC`).
+        if let Some(terms) = value.get("all_of").and_then(Value::as_array) {
+            let terms = terms.iter().map(|t| Self::from_value(t, audit)).collect::<Result<Vec<_>, _>>()?;
+            return Ok(Self::AllOf(terms));
+        }
+        let id = value
+            .get("condition")
+            .and_then(Value::as_str)
+            .ok_or(LootError::MissingField("condition"))?;
+        match id {
+            "minecraft:random_chance" => {
+                let chance = parse_number_provider(value.get("chance").ok_or(LootError::MissingField("chance"))?, audit)?;
+                Ok(Self::RandomChance(chance))
+            }
+            "minecraft:random_chance_with_enchanted_bonus" => {
+                let unenchanted_chance = parse_f32(value.get("unenchanted_chance").ok_or(LootError::MissingField("unenchanted_chance"))?, "unenchanted_chance")?;
+                Ok(Self::RandomChanceWithEnchantedBonus { unenchanted_chance })
+            }
+            "minecraft:killed_by_player" => Ok(Self::KilledByPlayer),
+            "minecraft:survives_explosion" => Ok(Self::SurvivesExplosion),
+            "minecraft:match_tool" => Ok(Self::MatchTool),
+            "minecraft:entity_properties" => Ok(Self::EntityProperties),
+            "minecraft:block_state_property" => Ok(Self::BlockStateProperty),
+            "minecraft:damage_source_properties" => Ok(Self::DamageSourceProperties),
+            "minecraft:location_check" => Ok(Self::LocationCheck),
+            "minecraft:table_bonus" => {
+                let chances = value
+                    .get("chances")
+                    .and_then(Value::as_array)
+                    .ok_or(LootError::MissingField("chances"))?
+                    .iter()
+                    .map(|c| parse_f32(c, "chances entry"))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if chances.is_empty() {
+                    return Err(LootError::EmptyTableBonus);
+                }
+                Ok(Self::TableBonus { chances })
+            }
+            "minecraft:inverted" => {
+                let term = Self::from_value(value.get("term").ok_or(LootError::MissingField("term"))?, audit)?;
+                Ok(Self::Inverted(Box::new(term)))
+            }
+            "minecraft:all_of" => {
+                let terms = parse_conditions(value.get("terms"), audit)?;
+                Ok(Self::AllOf(terms))
+            }
+            "minecraft:any_of" => {
+                let terms = parse_conditions(value.get("terms"), audit)?;
+                Ok(Self::AnyOf(terms))
+            }
+            other => {
+                audit.push(format!("condition {other}"));
+                Ok(Self::Unsupported)
+            }
+        }
+    }
+
+    fn test(&self, context: &LootContext, rng: &mut SpawnRng) -> bool {
+        match self {
+            Self::RandomChance(chance) => rng.next_f32() < chance.float(context, rng),
+            Self::RandomChanceWithEnchantedBonus { unenchanted_chance } => rng.next_f32() < *unenchanted_chance,
+            // No relevant context param, so vanilla's `hasParameter`/null check
+            // reads absent: each is `false`.
+            Self::KilledByPlayer
+            | Self::MatchTool
+            | Self::EntityProperties
+            | Self::BlockStateProperty
+            | Self::DamageSourceProperties
+            | Self::LocationCheck => false,
+            Self::SurvivesExplosion => true,
+            // No tool → fortune level 0 → `values[min(0, len-1)]` = `values[0]`.
+            Self::TableBonus { chances } => rng.next_f32() < chances[0],
+            Self::Inverted(term) => !term.test(context, rng),
+            Self::AllOf(terms) => terms.iter().all(|t| t.test(context, rng)),
+            Self::AnyOf(terms) => terms.iter().any(|t| t.test(context, rng)),
+            Self::Unsupported => false,
+        }
+    }
+}
+
+/// A resolver that resolves no nested tables — [`LootTable::roll`]'s default.
+struct NoTables;
+
+impl LootTableResolver for NoTables {
+    fn loot_table(&self, _id: &ResourceKey) -> Option<&LootTable> {
+        None
+    }
+}
+
+/// Errors from parsing a loot-table document.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum LootError {
+    /// The document was not valid JSON.
+    #[error("invalid json: {0}")]
+    Json(String),
+    /// A required field was absent.
+    #[error("missing required field {0}")]
+    MissingField(&'static str),
+    /// A field had the wrong shape.
+    #[error("expected {0}, found {1}")]
+    UnexpectedType(&'static str, &'static str),
+    /// A namespaced id could not be parsed.
+    #[error("invalid identifier {0:?}")]
+    BadIdentifier(String),
+    /// A `table_bonus` condition carried an empty `chances` list.
+    #[error("table_bonus condition has no chances")]
+    EmptyTableBonus,
+}
+
+fn parse_id(value: Option<&Value>, field: &'static str) -> Result<ResourceKey, LootError> {
+    let raw = value
+        .and_then(Value::as_str)
+        .ok_or(LootError::MissingField(field))?;
+    raw.parse().map_err(|_| LootError::BadIdentifier(raw.to_string()))
+}
+
+fn parse_f32(value: &Value, field: &'static str) -> Result<f32, LootError> {
+    value
+        .as_f64()
+        .map(|f| f as f32)
+        .ok_or_else(|| LootError::UnexpectedType(field, "a number"))
+}
+
+fn parse_int_default(value: Option<&Value>, default: i32) -> Result<i32, LootError> {
+    match value {
+        Some(v) => v
+            .as_i64()
+            .and_then(|i| i32::try_from(i).ok())
+            .ok_or_else(|| LootError::UnexpectedType("weight/quality", "an integer")),
+        None => Ok(default),
+    }
+}
+
+fn parse_conditions(value: Option<&Value>, audit: &mut Vec<String>) -> Result<Vec<LootCondition>, LootError> {
+    match value {
+        Some(v) => v
+            .as_array()
+            .ok_or(LootError::UnexpectedType("conditions", "an array"))?
+            .iter()
+            .map(|c| LootCondition::from_value(c, audit))
+            .collect(),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn parse_functions(value: Option<&Value>, audit: &mut Vec<String>) -> Result<Vec<LootFunction>, LootError> {
+    match value {
+        Some(v) => v
+            .as_array()
+            .ok_or(LootError::UnexpectedType("functions", "an array"))?
+            .iter()
+            .map(|f| LootFunction::from_value(f, audit))
+            .collect(),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn parse_number_providers(value: Option<&Value>, audit: &mut Vec<String>) -> Result<Vec<NumberProvider>, LootError> {
+    match value {
+        Some(v) => v
+            .as_array()
+            .ok_or(LootError::UnexpectedType("number providers", "an array"))?
+            .iter()
+            .map(|p| parse_number_provider(p, audit))
+            .collect(),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn parse_number_provider(value: &Value, audit: &mut Vec<String>) -> Result<NumberProvider, LootError> {
+    NumberProvider::from_value(value, audit)
+}
+
+fn parse_entries(value: Option<&Value>, audit: &mut Vec<String>) -> Result<Vec<LootEntry>, LootError> {
+    value
+        .ok_or(LootError::MissingField("children"))?
+        .as_array()
+        .ok_or(LootError::UnexpectedType("children", "an array"))?
+        .iter()
+        .map(|e| LootEntry::from_value(e, audit))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bundled `minecraft:blocks/dirt` table, re-parsed from a raw string
+    /// so the test does not depend on the embedded build table (which
+    /// `load_bundled` exercises separately).
+    const DIRT: &str = r#"{
+      "type": "minecraft:block",
+      "pools": [
+        {
+          "conditions": [ { "condition": "minecraft:survives_explosion" } ],
+          "entries": [ { "type": "minecraft:item", "name": "minecraft:dirt" } ],
+          "rolls": 1.0
+        }
+      ]
+    }"#;
+
+    fn table(id: &str, json: &str) -> LootTable {
+        let key: ResourceKey = id.parse().unwrap();
+        LootTable::from_json(&key, json).expect("table parses")
+    }
+
+    fn describe(stacks: &[ItemStack]) -> Vec<String> {
+        stacks.iter().map(|s| format!("{}x{}", s.item, s.count)).collect()
+    }
+
+    #[test]
+    fn dirt_rolls_exactly_one_dirt() {
+        let t = table("minecraft:blocks/dirt", DIRT);
+        assert!(t.unsupported_features().is_empty());
+        let mut rng = SpawnRng::new(1);
+        let out = t.roll(&LootContext::default(), &mut rng);
+        assert_eq!(describe(&out), vec!["minecraft:dirtx1".to_string()]);
+    }
+
+    #[test]
+    fn stone_drops_cobblestone_not_stone_in_empty_context() {
+        // `alternatives`: the silk-touch arm is gated on `match_tool` (no tool
+        // → false), so the roll lands on the `survives_explosion` cobblestone
+        // arm.
+        let json = r#"{
+          "pools": [{
+            "entries": [{
+              "type": "minecraft:alternatives",
+              "children": [
+                { "type": "minecraft:item", "name": "minecraft:stone",
+                  "conditions": [ { "condition": "minecraft:match_tool", "predicate": {} } ] },
+                { "type": "minecraft:item", "name": "minecraft:cobblestone",
+                  "conditions": [ { "condition": "minecraft:survives_explosion" } ] }
+              ]
+            }],
+            "rolls": 1.0
+          }]
+        }"#;
+        let t = table("minecraft:blocks/stone", json);
+        assert!(t.unsupported_features().is_empty());
+        let mut rng = SpawnRng::new(2);
+        let out = t.roll(&LootContext::default(), &mut rng);
+        assert_eq!(describe(&out), vec!["minecraft:cobblestonex1".to_string()]);
+    }
+
+    #[test]
+    fn weighted_item_selection_follows_the_weights() {
+        // Two entries, weights 3 and 1: the first must win ~75% of rolls.
+        let json = r#"{
+          "pools": [{
+            "entries": [
+              { "type": "minecraft:item", "name": "minecraft:common", "weight": 3 },
+              { "type": "minecraft:item", "name": "minecraft:rare", "weight": 1 }
+            ],
+            "rolls": 1.0
+          }]
+        }"#;
+        let t = table("minecraft:test/weighted", json);
+        let mut common = 0usize;
+        const SAMPLES: usize = 40_000;
+        for seed in 0..SAMPLES as u64 {
+            let mut rng = SpawnRng::new(seed);
+            let out = t.roll(&LootContext::default(), &mut rng);
+            assert_eq!(out.len(), 1, "one roll produces one stack");
+            if out[0].item.to_string() == "minecraft:common" {
+                common += 1;
+            }
+        }
+        let p = common as f64 / SAMPLES as f64;
+        // p = 0.75, σ ≈ sqrt(0.75·0.25/40000) ≈ 0.0022 → 3σ ≈ 0.0065.
+        assert!((0.72..0.78).contains(&p), "weight-3 entry won {p:.4} of rolls");
+    }
+
+    #[test]
+    fn empty_entry_can_absorb_a_roll() {
+        let json = r#"{
+          "pools": [{
+            "entries": [
+              { "type": "minecraft:item", "name": "minecraft:loot", "weight": 1 },
+              { "type": "minecraft:empty", "weight": 1 }
+            ],
+            "rolls": 1.0
+          }]
+        }"#;
+        let t = table("minecraft:test/empty", json);
+        let mut looted = 0usize;
+        const SAMPLES: usize = 40_000;
+        for seed in 0..SAMPLES as u64 {
+            let mut rng = SpawnRng::new(seed);
+            let out = t.roll(&LootContext::default(), &mut rng);
+            if !out.is_empty() {
+                assert_eq!(describe(&out), vec!["minecraft:lootx1".to_string()]);
+                looted += 1;
+            }
+        }
+        let p = looted as f64 / SAMPLES as f64;
+        assert!((0.48..0.52).contains(&p), "empty entry absorbed {:.4} of rolls", p);
+    }
+
+    #[test]
+    fn uniform_set_count_produces_the_expected_distribution() {
+        let json = r#"{
+          "pools": [{
+            "entries": [{
+              "type": "minecraft:item",
+              "name": "minecraft:item",
+              "functions": [{
+                "function": "minecraft:set_count",
+                "count": { "type": "minecraft:uniform", "min": 1.0, "max": 3.0 }
+              }]
+            }],
+            "rolls": 1.0
+          }]
+        }"#;
+        let t = table("minecraft:test/count", json);
+        let mut counts = [0usize; 3];
+        for seed in 0..12_000u64 {
+            let mut rng = SpawnRng::new(seed);
+            let out = t.roll(&LootContext::default(), &mut rng);
+            assert_eq!(out.len(), 1);
+            counts[(out[0].count - 1) as usize] += 1;
+        }
+        for (i, n) in counts.iter().enumerate() {
+            let p = *n as f64 / 12_000.0;
+            assert!((0.31..0.36).contains(&p), "count {} appeared {p:.4}", i + 1);
+        }
+    }
+
+    #[test]
+    fn zombie_rolls_only_rotten_flesh_in_the_empty_context() {
+        // The killed_by_player / entity_properties pools gate to false without
+        // an entity; the rotten-flesh pool always rolls, count uniform 0..2.
+        let set = LootTableSet::load_bundled();
+        let id: ResourceKey = "minecraft:entities/zombie".parse().unwrap();
+        let zombie = set.get(&id).expect("bundled zombie table");
+        assert!(zombie.unsupported_features().is_empty());
+        for seed in 0..2000u64 {
+            let mut rng = SpawnRng::new(seed);
+            let out = set.roll(&id, &LootContext::default(), &mut rng);
+            assert!(!out.is_empty(), "rotten-flesh pool always rolls");
+            for stack in &out {
+                assert_eq!(stack.item.to_string(), "minecraft:rotten_flesh");
+                assert!((0..=2).contains(&stack.count));
+            }
+        }
+    }
+
+    #[test]
+    fn random_chance_gates_a_roll() {
+        // chance 1.0 → always; chance 0.0 → never.
+        let always = table(
+            "minecraft:test/chance_always",
+            r#"{
+              "pools": [{
+                "conditions": [ { "condition": "minecraft:random_chance", "chance": 1.0 } ],
+                "entries": [ { "type": "minecraft:item", "name": "minecraft:yes" } ],
+                "rolls": 1.0
+              }]
+            }"#,
+        );
+        let never = table(
+            "minecraft:test/chance_never",
+            r#"{
+              "pools": [{
+                "conditions": [ { "condition": "minecraft:random_chance", "chance": 0.0 } ],
+                "entries": [ { "type": "minecraft:item", "name": "minecraft:yes" } ],
+                "rolls": 1.0
+              }]
+            }"#,
+        );
+        for seed in 0..500u64 {
+            let mut rng = SpawnRng::new(seed);
+            assert_eq!(always.roll(&LootContext::default(), &mut rng).len(), 1);
+            assert!(never.roll(&LootContext::default(), &mut rng).is_empty());
+        }
+    }
+
+    #[test]
+    fn nested_table_resolves_through_the_resolver() {
+        let outer = table(
+            "minecraft:test/outer",
+            r#"{
+              "pools": [{
+                "entries": [
+                  { "type": "minecraft:loot_table", "value": "minecraft:test/inner", "weight": 1 },
+                  { "type": "minecraft:item", "name": "minecraft:outer_item", "weight": 1 }
+                ],
+                "rolls": 1.0
+              }]
+            }"#,
+        );
+        let inner = table(
+            "minecraft:test/inner",
+            r#"{
+              "pools": [{
+                "entries": [ { "type": "minecraft:item", "name": "minecraft:inner_item" } ],
+                "rolls": 1.0
+              }]
+            }"#,
+        );
+        let set = LootTableBuilder::new()
+            .push_table_owned(outer)
+            .push_table_owned(inner)
+            .finish();
+        let id: ResourceKey = "minecraft:test/outer".parse().unwrap();
+        let mut rng = SpawnRng::new(7);
+        let out = set.roll(&id, &LootContext::default(), &mut rng);
+        // Both leaves have weight 1; every roll emits exactly one of them.
+        assert_eq!(out.len(), 1);
+        let name = out[0].item.to_string();
+        assert!(name == "minecraft:inner_item" || name == "minecraft:outer_item");
+    }
+
+    #[test]
+    fn self_referential_table_terminates() {
+        // The self branch shares the pool's weight with the anchor, so a roll
+        // that selects it correctly produces nothing rather than recursing
+        // forever (the visited-set guard). The anchor must still be reachable.
+        let self_ref = table(
+            "minecraft:test/self",
+            r#"{
+              "pools": [{
+                "entries": [
+                  { "type": "minecraft:loot_table", "value": "minecraft:test/self", "weight": 1 },
+                  { "type": "minecraft:item", "name": "minecraft:anchor", "weight": 1 }
+                ],
+                "rolls": 1.0
+              }]
+            }"#,
+        );
+        let set = LootTableBuilder::new().push_table_owned(self_ref).finish();
+        let id: ResourceKey = "minecraft:test/self".parse().unwrap();
+        let mut saw_anchor = false;
+        for seed in 0..200u64 {
+            let mut rng = SpawnRng::new(seed);
+            let out = set.roll(&id, &LootContext::default(), &mut rng);
+            assert!(out.len() <= 1, "the self branch produces nothing");
+            if let Some(stack) = out.first() {
+                assert_eq!(stack.item.to_string(), "minecraft:anchor");
+                saw_anchor = true;
+            }
+        }
+        assert!(saw_anchor, "the anchor must be reachable");
+    }
+
+    #[test]
+    fn unknown_function_is_reported_not_fatal() {
+        let t = table(
+            "minecraft:test/unknown",
+            r#"{
+              "pools": [{
+                "entries": [{
+                  "type": "minecraft:item",
+                  "name": "minecraft:book",
+                  "functions": [ { "function": "minecraft:enchant_randomly" } ]
+                }],
+                "rolls": 1.0
+              }]
+            }"#,
+        );
+        assert_eq!(
+            t.unsupported_features(),
+            &["function minecraft:enchant_randomly".to_string()],
+        );
+        // The unknown function is skipped; the item still drops, unenchanted.
+        let mut rng = SpawnRng::new(9);
+        let out = t.roll(&LootContext::default(), &mut rng);
+        assert_eq!(describe(&out), vec!["minecraft:bookx1".to_string()]);
+    }
+
+    #[test]
+    fn malformed_known_shape_is_a_failure() {
+        let mut builder = LootTableBuilder::new();
+        // `minecraft:item` with no `name`.
+        builder.push_table(
+            "minecraft:test/bad",
+            r#"{ "pools": [ { "entries": [ { "type": "minecraft:item" } ], "rolls": 1.0 } ] }"#,
+        );
+        assert_eq!(builder.failures().len(), 1);
+        assert!(builder.failures()[0].0.ends_with("minecraft:test/bad"));
+        // A pool without `entries` is also malformed.
+        let mut builder = LootTableBuilder::new();
+        builder.push_table("minecraft:test/bad2", r#"{ "pools": [ { "rolls": 1.0 } ] }"#);
+        assert_eq!(builder.failures().len(), 1);
+    }
+
+    #[test]
+    fn inline_all_of_condition_parses() {
+        let t = table(
+            "minecraft:test/inline_all_of",
+            r#"{
+              "pools": [{
+                "conditions": [
+                  { "all_of": [ { "condition": "minecraft:survives_explosion" } ] }
+                ],
+                "entries": [ { "type": "minecraft:item", "name": "minecraft:yes" } ],
+                "rolls": 1.0
+              }]
+            }"#,
+        );
+        let mut rng = SpawnRng::new(4);
+        assert_eq!(t.roll(&LootContext::default(), &mut rng).len(), 1);
+    }
+
+    #[test]
+    fn bare_min_max_uniform_parses_as_a_number_provider() {
+        let t = table(
+            "minecraft:test/bare_uniform",
+            r#"{
+              "pools": [{
+                "entries": [{
+                  "type": "minecraft:item",
+                  "name": "minecraft:item",
+                  "functions": [
+                    { "function": "minecraft:set_count", "count": { "min": 2.0, "max": 4.0 } }
+                  ]
+                }],
+                "rolls": 1.0
+              }]
+            }"#,
+        );
+        let mut rng = SpawnRng::new(5);
+        let out = t.roll(&LootContext::default(), &mut rng);
+        assert!((2..=4).contains(&out[0].count), "count was {}", out[0].count);
+    }
+
+    #[test]
+    fn bundled_tables_are_all_fully_supported_and_roll() {
+        let set = LootTableSet::load_bundled();
+        assert_eq!(set.len(), 6, "six curated tables are bundled");
+        for table in set.iter() {
+            assert!(
+                table.unsupported_features().is_empty(),
+                "bundled {} must be fully supported, got {:?}",
+                table.id,
+                table.unsupported_features(),
+            );
+        }
+        // Every bundled table rolls deterministically.
+        for table in set.iter() {
+            let mut rng = SpawnRng::new(42);
+            let out = set.roll(&table.id, &LootContext::default(), &mut rng);
+            assert!(!out.is_empty(), "{} rolled nothing", table.id);
+        }
+    }
+
+    #[test]
+    fn roll_loot_convenience_matches_set_roll() {
+        let set = LootTableSet::load_bundled();
+        let id: ResourceKey = "minecraft:blocks/dirt".parse().unwrap();
+        let mut a = SpawnRng::new(11);
+        let mut b = SpawnRng::new(11);
+        assert_eq!(roll_loot(&set, &id, &mut a), set.roll(&id, &LootContext::default(), &mut b));
+    }
+
+    /// Test helper so a `LootTableBuilder` can be built from owned tables
+    /// without threading a `&str` json round-trip.
+    trait TapBuilder {
+        fn push_table_owned(self, table: LootTable) -> Self;
+    }
+
+    impl TapBuilder for LootTableBuilder {
+        fn push_table_owned(mut self, table: LootTable) -> Self {
+            self.tables.push(table);
+            self
+        }
+    }
+}
