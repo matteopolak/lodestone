@@ -182,8 +182,8 @@ pub use mobs::{
 };
 pub use neighbor_update::{Direction, NeighborPropagator, Notification, UPDATE_ORDER};
 pub use players::{
-    PLAYER_ENTITY_ID_BASE, PlayerAwareSource, PlayerListStreamer, PlayerRegistry, PlayerTicket,
-    PlayerView,
+    PLAYER_ENTITY_ID_BASE, ChatLine, PlayerAwareSource, PlayerListStreamer, PlayerRegistry,
+    PlayerTicket, PlayerView,
 };
 pub use protocol::{
     EntitySnapshot, MetadataField, PlayerListing, ServerBound, ServerDirective, ServerProtocol,

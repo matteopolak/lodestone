@@ -91,7 +91,7 @@
 //! wire layout — [`ServerProtocol::encode_player_info_add`](crate::ServerProtocol::encode_player_info_add)
 //! and its sibling are the seam a version crate implements.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use lodestone_model::{ResourceKey, Rotation, Vec3};
@@ -195,13 +195,132 @@ struct Inner {
     /// to a *different* player.
     next_offset: i32,
     players: Vec<TrackedPlayer>,
+    /// The chat log (#469). See [`PlayerRegistry::say`].
+    chat: VecDeque<ChatLine>,
+    /// Sequence number of `chat.front()`. Cursors are absolute sequence
+    /// numbers, so trimming the front of the window cannot silently rewind
+    /// a reader — it makes the gap detectable instead.
+    chat_base: u64,
 }
+
+/// One line of player chat, as broadcast to every connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatLine {
+    /// The username of the player who sent it.
+    pub sender: String,
+    /// The raw message text, exactly as the sender typed it.
+    pub message: String,
+}
+
+impl ChatLine {
+    /// Vanilla's rendered form for the default chat type: `chat.type.text` is
+    /// `"<%s> %s"` (`assets/minecraft/lang/en_us.json`, bound to
+    /// `ChatType.CHAT` by `ChatType.DEFAULT_CHAT_DECORATION`,
+    /// `ChatType.java:30/44`).
+    ///
+    /// This crate broadcasts chat as a `system_chat` component rather than a
+    /// real `player_chat` packet, so the decoration vanilla's client would
+    /// apply from the chat-type registry has to be applied here instead. See
+    /// [`PlayerRegistry::say`] for why that trade was made.
+    #[must_use]
+    pub fn rendered(&self) -> String {
+        format!("<{}> {}", self.sender, self.message)
+    }
+}
+
+/// How many chat lines the shared log retains.
+///
+/// The log is bounded because it is process-lifetime shared state that every
+/// connection appends to and no one ever truncates — an unbounded `Vec` here
+/// is a slow leak on a long-running server. 256 is far more than the 50 ms
+/// drain interval can fall behind by; a reader that somehow does fall behind
+/// loses the overflow rather than the whole window, because cursors are
+/// absolute sequence numbers rather than indices.
+const CHAT_LOG_CAPACITY: usize = 256;
 
 impl PlayerRegistry {
     /// A fresh, empty registry.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Appends one player chat line to the shared log (#469).
+    ///
+    /// # Why the chat log lives here, of all places
+    ///
+    /// Chat is the first thing this crate carries that is genuinely a *push*:
+    /// unlike the roster and the entity stream, "Alice said hello" is not a
+    /// state another connection can rediscover by diffing what is true now
+    /// against what it last sent — see this module's own "why there is no
+    /// broadcast channel" section, which is still correct about everything it
+    /// was written about.
+    ///
+    /// It is nonetheless bolted onto `PlayerRegistry` rather than given its
+    /// own feed, for one structural reason: this registry is **already** the
+    /// single object every LAN connection shares, and it is already reachable
+    /// from `serve_play` through [`crate::EntitySource::players`] — a
+    /// defaulted trait method that exists precisely so shared state could be
+    /// added without changing `serve_connection`'s signature. A new
+    /// `ChatFeed` would have needed a new parameter on seven entry points and
+    /// a third relay copy in `IntegratedServer::bind`, and would still have
+    /// been absent in singleplayer.
+    ///
+    /// The log is append-only with per-reader cursors, which is the shape
+    /// `crate::tick`'s own doc notes is the right one for a growing subscriber
+    /// count (unlike `BlockTickFeed`'s drain-all, where the first reader takes
+    /// everything and a second sees nothing — fatal for a broadcast).
+    ///
+    /// **Every connection reads every line, including the sender's own.**
+    /// That is vanilla: `PlayerList.broadcastChatMessage`
+    /// (`PlayerList.java:738-753`) loops `for (ServerPlayer player :
+    /// this.players)` with no sender exclusion, and a vanilla client does not
+    /// echo its own chat locally — it waits for the server. Excluding the
+    /// sender here would make their own messages invisible to them.
+    pub fn say(&self, sender: &str, message: &str) {
+        let mut inner = self.lock();
+        inner.chat.push_back(ChatLine {
+            sender: sender.to_owned(),
+            message: message.to_owned(),
+        });
+        while inner.chat.len() > CHAT_LOG_CAPACITY {
+            inner.chat.pop_front();
+            inner.chat_base += 1;
+        }
+    }
+
+    /// Every chat line appended since `cursor`, advancing `cursor` past them.
+    ///
+    /// `cursor` is an absolute sequence number, so a fresh connection starts
+    /// at [`PlayerRegistry::chat_cursor`] (the current end) and therefore sees
+    /// only messages sent *after* it joined — never a replay of the backlog.
+    ///
+    /// If `cursor` has fallen behind the retained window it is snapped
+    /// forward to the oldest retained line, dropping the overflow. That is a
+    /// deliberate loss rather than a panic or a silent rewind: a rewind would
+    /// re-send messages the client already displayed.
+    pub fn chat_since(&self, cursor: &mut u64) -> Vec<ChatLine> {
+        let inner = self.lock();
+        if *cursor < inner.chat_base {
+            *cursor = inner.chat_base;
+        }
+        let end = inner.chat_base + inner.chat.len() as u64;
+        if *cursor >= end {
+            *cursor = end;
+            return Vec::new();
+        }
+        let start = (*cursor - inner.chat_base) as usize;
+        let lines: Vec<ChatLine> = inner.chat.iter().skip(start).cloned().collect();
+        *cursor = end;
+        lines
+    }
+
+    /// The sequence number one past the newest chat line — where a connection
+    /// that wants only future messages should start its cursor.
+    #[must_use]
+    pub fn chat_cursor(&self) -> u64 {
+        let inner = self.lock();
+        inner.chat_base + inner.chat.len() as u64
     }
 
     /// Registers a connection's player and returns the ticket that owns the
