@@ -1445,6 +1445,18 @@ impl MenuNav {
                 super::stats::GENERAL_STATS.len(),
                 self.stats.scroll(),
             )),
+            // Issue #445's second adoption. **Keyed on the settings *page*, not
+            // just the screen**: `Screen::Settings` is one screen with a dozen
+            // pages and only some of them are lists, so an arm on the bare screen
+            // would hang a scrollbar beside the root page's two-column grid. The
+            // page's own `KeyBindsNav` owns the offset, in pixels.
+            super::Screen::Settings
+                if self.settings.page() == crate::menu::options::SettingsPage::KeyBinds =>
+            {
+                Some(super::key_binds::list_spec(
+                    self.settings.key_binds().scroll(),
+                ))
+            }
             _ => None,
         }
     }
@@ -1482,6 +1494,17 @@ impl MenuNav {
                 let before = self.stats.scroll();
                 self.stats.scroll_by(notches, canvas_height);
                 self.stats.scroll() != before
+            }
+            // Key Binds (#445). Same page guard as `active_list`'s arm — the two
+            // sets must agree, or the wheel scrolls a screen with no bar or a bar
+            // sits beside a screen the wheel does not reach.
+            super::Screen::Settings
+                if self.settings.page() == crate::menu::options::SettingsPage::KeyBinds =>
+            {
+                let binds = self.settings.key_binds_mut();
+                let before = binds.scroll();
+                binds.scroll_by(notches, canvas_height);
+                binds.scroll() != before
             }
             _ => false,
         }
