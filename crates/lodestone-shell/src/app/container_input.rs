@@ -266,6 +266,31 @@ impl WindowApp {
     /// caller. Thin by design, like [`Self::send_offhand_swap`]: everything
     /// decidable is in [`drop_selected_action`], testable without a window, a
     /// GPU or a live `Sim`.
+    ///
+    /// # The local prediction is not optional (issue #436)
+    ///
+    /// This used to be `send_action` and nothing else, and an owner reported the
+    /// consequence: *"throwing out items with Q doesn't update the count in my
+    /// inventory or hotbar, but it does work properly otherwise."* `DROP_ITEM` /
+    /// `DROP_ALL_ITEMS` are the one inventory change a vanilla server applies
+    /// **silently** — `ServerGamePacketListenerImpl.java:1303-1314` calls
+    /// `player.drop(…)` and returns with no slot or content packet — so an
+    /// unpredicted drop leaves the count wrong *forever*, not briefly.
+    ///
+    /// Two things about the shape below are deliberate:
+    ///
+    /// * **Order.** Predict, then send, which is vanilla's
+    ///   (`LocalPlayer.java:316-317`: `removeFromSelected` on line 316, the packet
+    ///   on 317).
+    /// * **Inside the `if let`.** [`drop_selected_action`] already returns `None`
+    ///   for a spectator, so putting the prediction here gives it that gate for
+    ///   free rather than duplicating the game-mode check — a spectator predicts
+    ///   nothing and sends nothing, decided once.
+    ///
+    /// The prediction itself is `lodestone_game::menus::Menus::drop_selected`, a
+    /// port of `Inventory.removeFromSelected`; see `docs/container-clicks.md` for
+    /// why the container-screen `Q` ([`Self::send_container_drop`]) never had this
+    /// bug.
     pub(super) fn send_drop_selected(&self, ctrl: bool) {
         let Some(net) = self.sim.net() else { return };
         let game_mode = net
@@ -274,6 +299,7 @@ impl WindowApp {
             .cloned()
             .and_then(|handle| handle.game_mode());
         if let Some(action) = drop_selected_action(game_mode, ctrl) {
+            net.predict_drop_selected(self.sim.selected_slot(), ctrl);
             net.send_action(action);
         }
     }

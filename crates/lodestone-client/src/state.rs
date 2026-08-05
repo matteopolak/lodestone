@@ -1061,6 +1061,42 @@ impl SharedState {
         self.wake();
         action
     }
+
+    /// Predicts a `key.drop` press against the one authoritative
+    /// [`SessionMenus`], returning whether anything was actually dropped.
+    ///
+    /// The `bool` is vanilla's own return at this layer: `LocalPlayer.drop`
+    /// (`LocalPlayer.java:314-319`) discards the stack and returns
+    /// `!prediction.isEmpty()`, which `Minecraft.java:1907-1911` uses for exactly
+    /// one thing — swinging the arm only when the slot was not empty. The stack
+    /// itself stays inside `lodestone_game`; the dropped item entity is
+    /// server-authoritative and arrives as an ordinary spawn packet, so no caller
+    /// out here needs it.
+    ///
+    /// Same "must run here, not on a snapshot" argument as
+    /// [`menu_click`](Self::menu_click) — and here it is the whole point of the
+    /// method. A drop is the one inventory mutation the server performs
+    /// **silently**: `ServerGamePacketListenerImpl.java:1303-1314` calls
+    /// `player.drop(…)` and returns without sending a slot update, so nothing
+    /// will ever arrive to fix a missed prediction. `lodestone_game::menus::Menus::drop_selected`
+    /// carries the citations.
+    ///
+    /// `selected` comes from the caller because the selected hotbar slot is a
+    /// *driver*-owned component (`lodestone_ecs::SelectedSlot`, on the driver's
+    /// local-player entity) and this state holds only [`Self::session`].
+    pub(crate) fn drop_selected(&self, selected: usize, all: bool) -> bool {
+        let dropped = {
+            let mut world = self.ecs.write();
+            world
+                .get_mut::<SessionMenus>(self.session)
+                .expect("the session entity always carries SessionMenus")
+                .0
+                .drop_selected(selected, all)
+                .is_some()
+        };
+        self.wake();
+        dropped
+    }
 }
 
 impl LocalEcho {

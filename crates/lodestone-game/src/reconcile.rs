@@ -263,6 +263,28 @@ impl ClientMenu {
         }
     }
 
+    /// Applies a `key.drop` removal from hotbar slot `selected` to **both** the
+    /// prediction and the confirmation, returning what was removed.
+    ///
+    /// The semantics are entirely [`Menu::remove_from_selected`]'s — this exists
+    /// only to answer *which copies* move, and the answer is unusual enough to be
+    /// worth its own method rather than a `menu_mut()` accessor that would let any
+    /// caller desynchronise the pair.
+    ///
+    /// Unlike [`predict`](Self::predict), a drop is **not** a container click: it
+    /// travels as a bare `ServerboundPlayerActionPacket` and the server answers
+    /// with no slot update at all, having already performed the identical removal
+    /// on its own inventory. So `confirmed` is not "what the server last told us"
+    /// here but "what we know the server did", and it has to follow `predicted`
+    /// or the next full `container_set_content` diffs as a visible correction
+    /// that never happened. See [`crate::menus::Menus::drop_selected`].
+    pub fn remove_from_selected(&mut self, selected: usize, all: bool) -> Option<ItemStack> {
+        let removed = self.predicted.remove_from_selected(selected, all)?;
+        let remainder = self.predicted.player_native(selected).cloned();
+        self.confirmed.set_player_native(selected, remainder);
+        Some(removed)
+    }
+
     /// Applies a server update, overwriting the prediction where the server
     /// disagrees. Returns whether a visible correction occurred.
     pub fn reconcile(&mut self, update: ServerUpdate) -> Reconciliation {

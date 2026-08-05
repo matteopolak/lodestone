@@ -299,6 +299,31 @@ impl ClientHandle {
         self.send_action(self.state.menu_click(click, ctx))
     }
 
+    /// Predicts a `key.drop` press (`Q` / `Ctrl`+`Q`) on the selected hotbar
+    /// slot, returning whether anything was there to drop.
+    ///
+    /// **Prediction only — this sends nothing.** The serverbound half is a
+    /// [`ClientAction::DropSelectedItem`]/`DropSelectedItemStack` the caller
+    /// submits itself, because the caller is also where the game-mode gate lives
+    /// (a spectator drops nothing and sends nothing, and that decision must not
+    /// be duplicated). Order matters and is vanilla's: predict, *then* send —
+    /// `LocalPlayer.java:316-317`.
+    ///
+    /// # Why a prediction is mandatory here rather than an optimisation
+    ///
+    /// This is the one inventory mutation with **no** server echo. `DROP_ITEM`
+    /// and `DROP_ALL_ITEMS` reach `ServerGamePacketListenerImpl.java:1303-1314`,
+    /// which calls `player.drop(…)` and returns — no `SET_CONTAINER_SLOT`, no
+    /// content packet, nothing. So an unpredicted drop leaves the local count
+    /// *permanently* wrong, not briefly wrong: the item really is gone
+    /// server-side and only our display disagrees. That was the reported bug.
+    ///
+    /// `selected` is the caller's `SelectedSlot` (`0..9`); the selected hotbar
+    /// index is driver-owned state this crate does not hold.
+    pub fn drop_selected(&self, selected: usize, all: bool) -> bool {
+        self.state.drop_selected(selected, all)
+    }
+
     /// Returns the block-state id at `pos`, or `None` if that block's chunk is
     /// not currently loaded.
     ///

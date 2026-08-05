@@ -504,6 +504,44 @@ impl Menus {
         intent.to_action(window_id)
     }
 
+    /// Predicts a `key.drop` press in normal gameplay: removes from hotbar slot
+    /// `selected` (`0..9`) and returns what was dropped, or `None` if the slot was
+    /// empty.
+    ///
+    /// `all == false` is plain `Q` (one item), `all == true` is `Ctrl`+`Q` (the
+    /// whole stack) — the same fork
+    /// [`ClientAction::DropSelectedItem`](lodestone_model::ClientAction::DropSelectedItem)
+    /// / `DropSelectedItemStack` already carries on the wire. Semantics are
+    /// [`Menu::remove_from_selected`]'s; what this layer adds is *which copy* gets
+    /// mutated.
+    ///
+    /// # Why this is not a container click, and why it writes both copies
+    ///
+    /// Drop is **not** a `ClickType::THROW`. It travels as a bare
+    /// `ServerboundPlayerActionPacket` with no window id, no slot and no state
+    /// id, so there is nothing for [`ClientMenu::reconcile`] to correct against
+    /// and no `state_id` to bump — going through [`Self::click`] would fabricate
+    /// a container-click round trip the server never sees.
+    ///
+    /// It therefore writes **`predicted` and `confirmed` alike**, via
+    /// [`ClientMenu::set_player_native`], because the server performs the *same*
+    /// mutation on its own inventory without telling us
+    /// (`ServerGamePacketListenerImpl.java:1303-1314` — `player.drop(…)`, then
+    /// `return`). Predicting only into `predicted` would leave `confirmed`
+    /// permanently one item richer than the server, so the next full
+    /// `container_set_content` would diff as a *visible correction* that never
+    /// actually happened. Prediction here means "we know what the server did",
+    /// not "we are guessing ahead of a reply".
+    ///
+    /// Routing goes through [`Self::inventory_owner_mut`] for issue #373's
+    /// reason: while a container screen is open the one player inventory is owned
+    /// by the *container's* menu and window 0's copy is an empty husk, so writing
+    /// `self.player` would land the removal in a menu nothing draws.
+    pub fn drop_selected(&mut self, selected: usize, all: bool) -> Option<ItemStack> {
+        self.inventory_owner_mut()
+            .remove_from_selected(selected, all)
+    }
+
     /// The active menu's crafting grid contents, if it has a crafting grid.
     ///
     /// This is the player's 2×2 on the inventory screen and the 3×3 in an open
