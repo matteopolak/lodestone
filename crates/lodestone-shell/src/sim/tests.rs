@@ -1124,7 +1124,7 @@ fn invert_mouse_y_negates_the_pitch_delta_exactly() {
 #[test]
 fn toggle_sneak_option_reaches_live_input_and_survives_key_release() {
     let mut toggle = Sim::new(test_config());
-    toggle.set_toggle_modes(true, false);
+    toggle.set_toggle_modes(true, false, false, false);
     // `step` is what actually applies the pushed option to `InputState`;
     // see that method's doc. Without this call, `set` below would still
     // run in hold mode.
@@ -1143,7 +1143,7 @@ fn toggle_sneak_option_reaches_live_input_and_survives_key_release() {
 
     // -- negative control -------------------------------------------------
     let mut hold = Sim::new(test_config());
-    hold.set_toggle_modes(false, false);
+    hold.set_toggle_modes(false, false, false, false);
     hold.step(1.0 / 20.0);
     hold.input_mut(|i| i.set(lodestone_controller::Action::Sneak, true));
     assert!(lodestone_controller::movement_intent(&hold.input()).sneak);
@@ -1162,7 +1162,7 @@ fn toggle_sneak_option_reaches_live_input_and_survives_key_release() {
 #[test]
 fn toggle_sprint_option_reaches_live_input_and_survives_key_release() {
     let mut toggle = Sim::new(test_config());
-    toggle.set_toggle_modes(false, true);
+    toggle.set_toggle_modes(false, true, false, false);
     toggle.step(1.0 / 20.0);
 
     toggle.input_mut(|i| i.set(lodestone_controller::Action::Forward, true));
@@ -4536,6 +4536,58 @@ fn walking_accumulates_a_real_bob_that_only_the_render_camera_sees() {
         sim.camera(1.0).position,
         "control failed: the bob is gone regardless of the option, so the \
          equality above proves nothing about the option"
+    );
+}
+
+/// The camera-side half of `bobHurt`: a local-player damage report must reach
+/// the interpolated bob frame with its direction, and must **survive View
+/// Bobbing being off** — vanilla's `bobHurt` is unconditional
+/// (`GameRenderer.java:534-536`), only `bobView` is gated on the option.
+///
+/// The net-apply feed (`ClientEvent::EntityHurtAnimation` naming the local
+/// player's own id → [`Sim::on_local_player_hurt`]) is the other half and does
+/// not exist yet — that is the documented next hop (`docs/view-bobbing.md`), so
+/// this test drives the hook directly. What it pins is the *camera's* contract:
+/// the countdown and the wire `yaw` (90° here, a side hit — a frontal hit is
+/// `hurtDir 0`, the pure-roll case, see `render_camera`) both reach the frame,
+/// and the option must not mute them.
+#[test]
+fn local_player_hurt_reaches_the_bob_frame_and_survives_view_bobbing_off() {
+    let mut sim = Sim::new(test_config());
+    // Precondition: a never-hit player has no flash and no direction.
+    assert!(sim.bob_frame().hurt <= 0.0, "no flash before any hit");
+    assert_eq!(sim.bob_frame().hurt_dir_degrees, 0.0);
+
+    sim.on_local_player_hurt(90.0);
+    let hurt = sim.bob_frame();
+    assert!(hurt.hurt > 0.0, "a fresh hit must be flashing");
+    assert_eq!(hurt.hurt_dir_degrees, 90.0, "the wire yaw must survive");
+
+    // Only the walk terms are gated on the option; the tilt is not.
+    sim.set_view_bobbing(false);
+    let off = sim.bob_frame();
+    assert_eq!(off.walk_phase, 0.0, "the walk terms must still be muted");
+    assert_eq!(off.bob, 0.0, "the walk terms must still be muted");
+    assert!(off.hurt > 0.0, "bobHurt must not be muted by the option");
+    assert_eq!(off.hurt_dir_degrees, 90.0);
+
+    // The countdown is driven by the 20 Hz tick, like `LivingEntity.tick`'s.
+    sim.step(1.0 / 20.0);
+    assert!(
+        sim.bob_frame().hurt < off.hurt,
+        "the tilt must count down one tick at a time"
+    );
+
+    // The world fold still holds the tilt at zero: `bobbed_camera` cannot carry
+    // roll, so `render_camera` passes `damage_tilt_strength = 0.0` until
+    // `Camera` grows roll. Asserting the hold is a tripwire — when that lands
+    // and the strength flips, this equality is exactly the assertion that must
+    // change into "the camera rolled".
+    sim.set_view_bobbing(true);
+    assert_eq!(
+        sim.render_camera(1.0).pitch,
+        sim.camera(1.0).pitch,
+        "the world tilt is held at zero pending Camera roll support"
     );
 }
 

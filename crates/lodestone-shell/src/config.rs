@@ -1213,19 +1213,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
-    // -- toggle sneak/sprint, mouse invert/sensitivity (issues #202/#203) ---
+    // -- toggle sneak/sprint/attack/use, auto-jump, mouse invert/sensitivity
+    //    (issues #202/#203/#444) ---
 
     #[test]
     fn toggle_and_invert_default_off_and_write_no_key_when_untouched() {
         let path = temp_options_path("toggle-invert-defaults");
         assert!(!Options::default().toggle_sneak);
         assert!(!Options::default().toggle_sprint);
+        assert!(!Options::default().toggle_attack);
+        assert!(!Options::default().toggle_use);
+        assert!(!Options::default().auto_jump);
         assert!(!Options::default().invert_mouse_x);
         assert!(!Options::default().invert_mouse_y);
 
         Options::default().save_to(&path).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        for key in ["toggle_sneak", "toggle_sprint", "invert_mouse_x", "invert_mouse_y"] {
+        for key in [
+            "toggle_sneak",
+            "toggle_sprint",
+            "toggle_attack",
+            "toggle_use",
+            "auto_jump",
+            "sprint_window_ticks",
+            "invert_mouse_x",
+            "invert_mouse_y",
+        ] {
             assert!(!text.contains(key), "the default writes no {key} key: {text}");
         }
         assert_eq!(Options::load_from(&path), Options::default());
@@ -1238,13 +1251,24 @@ mod tests {
         let on = Options {
             toggle_sneak: true,
             toggle_sprint: true,
+            toggle_attack: true,
+            toggle_use: true,
+            auto_jump: true,
             invert_mouse_x: true,
             invert_mouse_y: true,
             ..Options::default()
         };
         on.save_to(&path).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        for key in ["toggle_sneak", "toggle_sprint", "invert_mouse_x", "invert_mouse_y"] {
+        for key in [
+            "toggle_sneak",
+            "toggle_sprint",
+            "toggle_attack",
+            "toggle_use",
+            "auto_jump",
+            "invert_mouse_x",
+            "invert_mouse_y",
+        ] {
             assert!(text.contains(key), "an explicit `true` must be written: {text}");
         }
         assert_eq!(Options::load_from(&path), on);
@@ -1256,6 +1280,8 @@ mod tests {
                 &path,
                 format!(
                     "{{\"toggle_sneak\": {bad}, \"toggle_sprint\": {bad}, \
+                      \"toggle_attack\": {bad}, \"toggle_use\": {bad}, \
+                      \"auto_jump\": {bad}, \
                       \"invert_mouse_x\": {bad}, \"invert_mouse_y\": {bad}}}"
                 ),
             )
@@ -1263,9 +1289,51 @@ mod tests {
             let loaded = Options::load_from(&path);
             assert!(!loaded.toggle_sneak, "toggle_sneak: {bad} must degrade to OFF");
             assert!(!loaded.toggle_sprint, "toggle_sprint: {bad} must degrade to OFF");
+            assert!(!loaded.toggle_attack, "toggle_attack: {bad} must degrade to OFF");
+            assert!(!loaded.toggle_use, "toggle_use: {bad} must degrade to OFF");
+            assert!(!loaded.auto_jump, "auto_jump: {bad} must degrade to OFF");
             assert!(!loaded.invert_mouse_x, "invert_mouse_x: {bad} must degrade to OFF");
             assert!(!loaded.invert_mouse_y, "invert_mouse_y: {bad} must degrade to OFF");
         }
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn sprint_window_default_is_vanish_and_round_trips_clamped_to_ten() {
+        let path = temp_options_path("sprint-window");
+        // Boots at vanilla's shipped 7 (Options.java:631-640, IntRange(0,10)).
+        assert_eq!(
+            Options::default().sprint_window_ticks,
+            lodestone_controller::SPRINT_TRIGGER_WINDOW_TICKS
+        );
+        // Off is a real state (0) that must be written, unlike the default.
+        let off = Options {
+            sprint_window_ticks: 0,
+            ..Options::default()
+        };
+        off.save_to(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("sprint_window_ticks"), "0 must be written: {text}");
+        assert_eq!(Options::load_from(&path), off);
+
+        // A value above the slider max clamps to 10, matching `IntRange`.
+        let three = Options {
+            sprint_window_ticks: 3,
+            ..Options::default()
+        };
+        three.save_to(&path).unwrap();
+        std::fs::write(
+            &path,
+            "{\"sprint_window_ticks\": 99}",
+        )
+        .unwrap();
+        assert_eq!(Options::load_from(&path).sprint_window_ticks, 10);
+        // A malformed value degrades to the default, never to 0.
+        std::fs::write(&path, "{\"sprint_window_ticks\": \"high\"}").unwrap();
+        assert_eq!(
+            Options::load_from(&path).sprint_window_ticks,
+            lodestone_controller::SPRINT_TRIGGER_WINDOW_TICKS
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
