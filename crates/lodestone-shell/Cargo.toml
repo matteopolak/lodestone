@@ -43,6 +43,11 @@ bevy_ecs = { workspace = true }
 # build the recipe corpus out of `client.jar`'s `data/**` at startup.
 lodestone-game = { workspace = true, features = ["json"] }
 lodestone-model = { workspace = true }
+# Brigadier argument parsing for `chat.rs`'s command highlighting (issue #435):
+# the hand-rolled numeric/string/bool validators and the quoted-string scanner
+# delegate to this sink crate's `ArgumentType`s and `StringReader`. Zero deps of
+# its own, so this edge cannot cycle.
+lodestone-command = { workspace = true }
 lodestone-assets = { workspace = true }
 lodestone-sound = { workspace = true }
 lodestone-world = { workspace = true }

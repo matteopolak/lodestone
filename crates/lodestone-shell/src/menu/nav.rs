@@ -1214,6 +1214,38 @@ impl MenuNav {
         self.options.toggle_sprint
     }
 
+    /// As [`MenuNav::toggle_sneak`], for `key.attack` (issue #444).
+    #[must_use]
+    pub fn toggle_attack(&self) -> bool {
+        self.options.toggle_attack
+    }
+
+    /// As [`MenuNav::toggle_sneak`], for `key.use` (issue #444).
+    #[must_use]
+    pub fn toggle_use(&self) -> bool {
+        self.options.toggle_use
+    }
+
+    /// Vanilla's `options.autoJump` (issue #444) — see
+    /// [`crate::config::Options::auto_jump`]. Pushed into `Sim` once per frame
+    /// by `app/redraw.rs`, the same way [`Self::view_bobbing`] is, so a change
+    /// in Controls applies on the very next tick's auto-jump gate rather than
+    /// at the next launch.
+    #[must_use]
+    pub fn auto_jump(&self) -> bool {
+        self.options.auto_jump
+    }
+
+    /// Vanilla's `options.sprintWindow` (issue #444) — the double-tap-forward
+    /// window in 20 Hz ticks. See [`crate::config::Options::sprint_window_ticks`].
+    /// Pushed into `Sim` once per frame by `app/redraw.rs` and forwarded to
+    /// the live `InputState`, so a change in Controls applies on the very next
+    /// tick.
+    #[must_use]
+    pub fn sprint_window_ticks(&self) -> u8 {
+        self.options.sprint_window_ticks
+    }
+
     /// Vanilla's `options.sensitivity` (issue #443) — see
     /// [`crate::config::Options::sensitivity`]. Pushed into `Sim` once per
     /// frame by `app/redraw.rs`, the same way [`Self::invert_mouse_x`] is,
@@ -2948,6 +2980,22 @@ impl MenuNav {
                 self.toggle_toggle_sprint();
                 MenuAction::None
             }
+            SettingsOutcome::Cycle(LiveOption::ToggleAttack) => {
+                self.toggle_toggle_attack();
+                MenuAction::None
+            }
+            SettingsOutcome::Cycle(LiveOption::ToggleUse) => {
+                self.toggle_toggle_use();
+                MenuAction::None
+            }
+            SettingsOutcome::Cycle(LiveOption::AutoJump) => {
+                self.toggle_auto_jump();
+                MenuAction::None
+            }
+            SettingsOutcome::Cycle(LiveOption::SprintWindow) => {
+                self.step_sprint_window(1);
+                MenuAction::None
+            }
             SettingsOutcome::Cycle(LiveOption::InvertMouseX) => {
                 self.toggle_invert_mouse_x();
                 MenuAction::None
@@ -3346,6 +3394,40 @@ impl MenuNav {
     /// As [`MenuNav::toggle_toggle_sneak`], for `key.sprint`.
     fn toggle_toggle_sprint(&mut self) {
         self.options.toggle_sprint = !self.options.toggle_sprint;
+        self.persist_options();
+    }
+
+    /// As [`MenuNav::toggle_toggle_sneak`], for `key.attack` (issue #444).
+    fn toggle_toggle_attack(&mut self) {
+        self.options.toggle_attack = !self.options.toggle_attack;
+        self.persist_options();
+    }
+
+    /// As [`MenuNav::toggle_toggle_sneak`], for `key.use` (issue #444).
+    fn toggle_toggle_use(&mut self) {
+        self.options.toggle_use = !self.options.toggle_use;
+        self.persist_options();
+    }
+
+    /// Flips `options.autoJump` (issue #444) and saves immediately, same
+    /// eager-persistence rule as [`MenuNav::toggle_toggle_sneak`].
+    fn toggle_auto_jump(&mut self) {
+        self.options.auto_jump = !self.options.auto_jump;
+        self.persist_options();
+    }
+
+    /// Steps `options.sprintWindow` by one 20 Hz tick and wraps between `0`
+    /// and `10` inclusive — vanilla's `IntRange(0, 10)` (`Options.java:637-638`),
+    /// the same bounds `menu::options::INT_RANGE_SLIDERS` places the handle
+    /// with, so the value a click can reach and the track it draws on cannot
+    /// disagree. `0` is the "OFF" endpoint (double-tap sprint disabled).
+    fn step_sprint_window(&mut self, delta: i32) {
+        const MIN: u8 = 0;
+        const MAX: u8 = 10;
+        let span = (MAX - MIN + 1) as i32;
+        let offset = self.options.sprint_window_ticks as i32 - MIN as i32;
+        let wrapped = (offset + delta).rem_euclid(span);
+        self.options.sprint_window_ticks = MIN + wrapped as u8;
         self.persist_options();
     }
 
@@ -4755,11 +4837,11 @@ mod tests {
         assert_eq!(ui.screen(), Screen::Settings);
     }
 
-    /// #202: clicking Sneak/Sprint's rows on the Controls page toggles their
-    /// hold/toggle mode and persists immediately, isolated from each other
-    /// and from an inactive neighbour — same shape as
+    /// #202/#444: clicking Sneak/Sprint's rows on the Controls page toggles
+    /// their hold/toggle mode and persists immediately, isolated from each
+    /// other and from an inactive neighbour — same shape as
     /// [`clicking_a_settings_row_acts_on_that_row_and_no_other`], scoped to
-    /// the two new live rows.
+    /// the live rows.
     #[test]
     fn clicking_sneak_or_sprint_toggles_only_that_ones_mode() {
         let (mut nav, path) = self::nav("settings-toggle-sneak-sprint");
@@ -4769,12 +4851,14 @@ mod tests {
 
         assert!(!nav.toggle_sneak(), "vanilla's own default is hold");
         assert!(!nav.toggle_sprint());
+        assert!(!nav.toggle_attack(), "the #444 rows share the hold default");
 
         open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::Controls);
         let sneak = settings_row(&mut nav, &mut ui, is_option("toggleCrouch"));
         assert_eq!(nav.click(&mut ui, sneak), MenuAction::None);
         assert!(nav.toggle_sneak(), "the clicked row must flip");
         assert!(!nav.toggle_sprint(), "and not its neighbour");
+        assert!(!nav.toggle_attack());
         assert!(crate::config::Options::load_from(&options_path).toggle_sneak);
         assert!(!crate::config::Options::load_from(&options_path).toggle_sprint);
 
@@ -4783,12 +4867,16 @@ mod tests {
         assert_eq!(nav.click(&mut ui, sprint), MenuAction::None);
         assert!(nav.toggle_sprint());
         assert!(nav.toggle_sneak(), "sprint's click must not un-flip sneak");
+        assert!(!nav.toggle_attack());
 
-        // An inactive neighbour (Attack/Destroy) does nothing.
+        // Attack/Destroy is now a live row too (#444): clicking it flips only
+        // its own mode, leaving Sneak and Sprint untouched.
         let attack = settings_row(&mut nav, &mut ui, is_option("toggleAttack"));
         assert_eq!(nav.click(&mut ui, attack), MenuAction::None);
-        assert!(nav.toggle_sneak());
+        assert!(nav.toggle_attack(), "the clicked row must flip");
+        assert!(nav.toggle_sneak(), "and not its neighbours");
         assert!(nav.toggle_sprint());
+        assert!(crate::config::Options::load_from(&options_path).toggle_attack);
     }
 
     /// #203: clicking the Mouse page's Scroll Sensitivity / Invert X / Invert

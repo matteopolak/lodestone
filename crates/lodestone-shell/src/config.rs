@@ -238,6 +238,17 @@ pub struct Options {
     /// As [`Self::toggle_sneak`], for `key.sprint`/`Options::toggleSprint`
     /// (`Options.java:611-618`).
     pub toggle_sprint: bool,
+    /// As [`Self::toggle_sneak`], for `key.attack`/`Options::toggleAttack`
+    /// (issue #444).
+    pub toggle_attack: bool,
+    /// As [`Self::toggle_sneak`], for `key.use`/`Options::toggleUse`
+    /// (issue #444).
+    pub toggle_use: bool,
+    /// Vanilla's `options.autoJump` (`Options.java:527`), default `false`.
+    pub auto_jump: bool,
+    /// Vanilla's `options.sprintWindow` (`Options.java:630`), an
+    /// `IntRange(0, 10)` with default `7`. `0` disables double-tap sprint.
+    pub sprint_window_ticks: u8,
     /// Vanilla's `options.invertMouseX` (`Options.java:524`), default `false`.
     /// Fed to [`lodestone_controller::apply_look_inverted`].
     pub invert_mouse_x: bool,
@@ -338,6 +349,10 @@ impl Default for Options {
             view_bobbing: true,
             toggle_sneak: false,
             toggle_sprint: false,
+            toggle_attack: false,
+            toggle_use: false,
+            auto_jump: false,
+            sprint_window_ticks: lodestone_controller::SPRINT_TRIGGER_WINDOW_TICKS,
             invert_mouse_x: false,
             invert_mouse_y: false,
             discrete_mouse_scroll: false,
@@ -407,6 +422,23 @@ impl Options {
             .get("toggle_sprint")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
+        let toggle_attack = obj
+            .get("toggle_attack")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let toggle_use = obj
+            .get("toggle_use")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let auto_jump = obj
+            .get("auto_jump")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let sprint_window_ticks = obj
+            .get("sprint_window_ticks")
+            .and_then(serde_json::Value::as_u64)
+            .map(|v| v.min(10) as u8)
+            .unwrap_or(lodestone_controller::SPRINT_TRIGGER_WINDOW_TICKS);
         let invert_mouse_x = obj
             .get("invert_mouse_x")
             .and_then(serde_json::Value::as_bool)
@@ -475,6 +507,10 @@ impl Options {
             view_bobbing,
             toggle_sneak,
             toggle_sprint,
+            toggle_attack,
+            toggle_use,
+            auto_jump,
+            sprint_window_ticks,
             invert_mouse_x,
             invert_mouse_y,
             discrete_mouse_scroll,
@@ -529,6 +565,18 @@ impl Options {
         }
         if self.toggle_sprint {
             obj.insert("toggle_sprint".into(), true.into());
+        }
+        if self.toggle_attack {
+            obj.insert("toggle_attack".into(), true.into());
+        }
+        if self.toggle_use {
+            obj.insert("toggle_use".into(), true.into());
+        }
+        if self.auto_jump {
+            obj.insert("auto_jump".into(), true.into());
+        }
+        if self.sprint_window_ticks != lodestone_controller::SPRINT_TRIGGER_WINDOW_TICKS {
+            obj.insert("sprint_window_ticks".into(), (self.sprint_window_ticks as u64).into());
         }
         if self.invert_mouse_x {
             obj.insert("invert_mouse_x".into(), true.into());

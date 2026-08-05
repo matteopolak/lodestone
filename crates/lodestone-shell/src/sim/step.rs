@@ -169,6 +169,63 @@ impl Sim {
         self.sprint_window_ticks = ticks;
     }
 
+    /// Fire this tick's auto-jump request, mirroring `LocalPlayer.updateAutoJump`
+    /// (`LocalPlayer.java:1001-1097`) — the gate, with the look-ahead raycast
+    /// simplified out. Reads the **post-tick** player, exactly as vanilla runs
+    /// `updateAutoJump` after `super.move`.
+    ///
+    /// # Why it runs after the `GameTick` schedule
+    ///
+    /// The request set now is consumed by the **next** schedule's
+    /// [`lodestone_controller::movement_intent`] and cleared by
+    /// [`InputState::tick`] at the end of that same schedule — so it can never
+    /// fire twice. That is vanilla's own N+1 shape: `updateAutoJump` sets
+    /// `autoJumpTime = 1` after tick N's move, and tick N+1's `aiStep` turns it
+    /// into exactly one `input.makeJump()` (`LocalPlayer.java:784-789`).
+    ///
+    /// # The gate
+    ///
+    /// `canAutoJump` (`LocalPlayer.java:1117-1125`): option on, on the ground,
+    /// moving, not already jumping. The passenger and `getBlockJumpFactor`
+    /// conjuncts have no analogue here (this client has no riding, and honey is
+    /// the only common sub-1.0 jump factor).
+    ///
+    /// # The simplification
+    ///
+    /// Vanilla's obstacle test is a swept-box look-ahead that only fires when a
+    /// step `0.5 < height <= 1.2` blocks the path. Here the physics' own result
+    /// stands in: the player hit *something* horizontally this tick
+    /// ([`PlayerState::horizontal_collision`]) and that something stopped the
+    /// intended motion (`moveDistSq <= 0.001` is vanilla's own blocked
+    /// threshold, at :1008 — a player sliding along a wall still moves, so it
+    /// does **not** fire). A 2-block wall satisfies both, so this hops at walls
+    /// where vanilla would not: the cost of skipping the headroom raycast,
+    /// recorded here rather than re-adding it speculatively.
+    fn maybe_request_auto_jump(&mut self, before: Vec3d, after: &PlayerState) {
+        if !after.on_ground
+            || after.pose == lodestone_physics::Pose::Swimming
+            || !after.horizontal_collision
+        {
+            return;
+        }
+        // The intended move didn't happen — `moveDistSq <= 0.001` is vanilla's
+        // own "blocked" threshold (LocalPlayer.java:1008).
+        let dx = after.position.x - before.x;
+        let dz = after.position.z - before.z;
+        if dx * dx + dz * dz > 0.001 {
+            return;
+        }
+        let input = self.input();
+        let intent = movement_intent(&input);
+        if intent.forward == 0.0 && intent.strafe == 0.0 {
+            return; // not trying to move
+        }
+        if input.jump() {
+            return; // already jumping; nothing for auto-jump to add
+        }
+        self.input_mut(|i| i.set_auto_jump_request(true));
+    }
+
     /// Hand everything the `GameTick` systems queued to the socket, in order.
     ///
     /// The queue is drained (not read) even with no connection, so a
@@ -402,6 +459,15 @@ impl Sim {
                 pre_dead,
                 pre_swimming,
             );
+            // Vanilla's auto-jump fires *after* this tick's movement
+            // (`LocalPlayer.updateAutoJump` runs at the end of `super.move`),
+            // and the jump it requests lands on the *next* tick — the same
+            // N+1 shape as this request, which the next `GameTick`'s
+            // `compute_movement_intent` consumes and `InputState::tick`
+            // clears. See [`Self::maybe_request_auto_jump`] for the gate.
+            if self.auto_jump {
+                self.maybe_request_auto_jump(pre_position, &p);
+            }
             // Vanilla emits a movement packet every tick (20 Hz); mirror that so
             // the server sees our authoritative position/rotation and never has
             // to correct us. `TickSet::Send` produced it; this is where it and

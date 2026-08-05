@@ -388,7 +388,7 @@ impl Sim {
             // caller that forgets `set_view_bobbing` gets the vanilla behaviour
             // rather than a silently disabled feature.
             view_bobbing: true,
-            // Vanilla's defaults (both options default `false` — see
+            // Vanilla's defaults (all six options default `false` — see
             // `docs/input-options.md`); a caller that forgets the setters gets
             // vanilla's own behaviour, not a silently-inverted or
             // silently-toggling one.
@@ -399,8 +399,17 @@ impl Sim {
             // behaves exactly as it did before the field existed. The menu
             // layer overwrites it every frame once there is a menu.
             sensitivity: seed_sensitivity,
+            // Issues #202/#444: hold-vs-toggle and auto-jump all default off
+            // in vanilla; the sprint window boots at vanilla's shipped 7
+            // (`Options.java:631-640`), because a derived `0` would silently
+            // disable double-tap sprint for any caller that never calls
+            // `set_sprint_window_ticks`.
             toggle_sneak: false,
             toggle_sprint: false,
+            toggle_attack: false,
+            toggle_use: false,
+            auto_jump: false,
+            sprint_window_ticks: lodestone_controller::SPRINT_TRIGGER_WINDOW_TICKS,
             chest_lids: crate::block_entities::ChestLids::new(),
             pickups: lodestone_game::mining::PickupFeed::new(),
         };

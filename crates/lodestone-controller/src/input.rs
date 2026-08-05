@@ -359,6 +359,12 @@ impl InputState {
         self.sprint_window_ticks = options.4;
     }
 
+    /// Whether the jump key is currently held (issue #444).
+    #[must_use]
+    pub fn jump(&self) -> bool {
+        self.jump
+    }
+
     /// Whether any movement key is held (used to gate sprint etc.).
     #[must_use]
     pub fn any_move(&self) -> bool {
