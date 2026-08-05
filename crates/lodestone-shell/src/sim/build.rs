@@ -139,6 +139,16 @@ impl Sim {
             // because it asserts that plugin is present rather than adding it
             // itself, and `add_systems` does not deduplicate.
             InteractPlugin,
+            // Issue #148: the recipe corpus becomes a resource, so a plugin can
+            // register a recipe into the same book the container screen matches
+            // against. Installed here rather than in `lodestone_app::client_app`
+            // only because the *shell* is what loads `client.jar`'s corpus and
+            // adopts it (`WindowApp::adopt_recipe_corpus`); a headless consumer
+            // that registers a recipe gets the resource on demand from
+            // `RecipeRegistryExt::add_recipe`, so nothing depends on this line
+            // for correctness — it guarantees the shell can *read* the registry
+            // even when no plugin registered anything.
+            lodestone_ecs::RecipeRegistryPlugin,
         ));
         app
     }

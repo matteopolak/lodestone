@@ -137,6 +137,7 @@ pub mod permissions;
 pub mod player;
 mod plugin;
 pub mod plugin_message;
+pub mod recipes;
 mod resources;
 pub mod riding;
 mod runner;
@@ -187,6 +188,7 @@ pub use player::{
 };
 pub use plugin::CorePlugin;
 pub use plugin_message::{PluginMessageAppExt, PluginMessagePlugin};
+pub use recipes::{RecipeRegistry, RecipeRegistryExt, RecipeRegistryPlugin};
 pub use resources::{
     FrameClock, MAX_CATCH_UP_SECS, MAX_CATCH_UP_TICKS, TICK_PERIOD, VersionData, WorldTime,
 };

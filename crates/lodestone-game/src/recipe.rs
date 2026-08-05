@@ -129,12 +129,51 @@ impl Ingredient {
 /// A tag's `values` list may contain item ids or `#tag` references; references
 /// are followed recursively with cycle protection. The resolver memoises each
 /// tag's flattened set on first query.
-#[derive(Debug, Default, Clone)]
+///
+/// # Why the memo is an `RwLock` and not a `RefCell`
+///
+/// It was a `RefCell` until issue #148. A `RefCell` is `!Sync`, and `Sync`
+/// propagates: [`TagResolver`] is a field of [`RecipeBook`], so the whole recipe
+/// corpus was `!Sync` and therefore **could not be a `bevy_ecs` `Resource` at
+/// all**. That is what confined the corpus to a private `Option<RecipeBook>`
+/// field on the shell's `WindowApp`, reachable by no plugin — the memo cache of
+/// a read-only lookup table was, transitively, the reason there was no recipe
+/// registration API.
+///
+/// The cost is a lock acquisition per tag query rather than a borrow flag check.
+/// It is not on any hot path: [`Self::resolve`] already *clones* the resolved
+/// `HashSet` on every call, hit or miss, so the lock is far from the dominant
+/// term. Poisoning is tolerated rather than propagated
+/// (`unwrap_or_else(PoisonError::into_inner)`) — the cache is a pure memo of
+/// `raw`, so a panic mid-insert can leave it stale-but-never-wrong, and taking
+/// down recipe matching because one query panicked elsewhere would be strictly
+/// worse than recomputing.
+#[derive(Debug, Default)]
 pub struct TagResolver {
     /// Raw tag definitions: tag id -> its direct entries.
     raw: HashMap<Identifier, Vec<TagEntry>>,
-    /// Memoised transitive resolutions.
-    cache: std::cell::RefCell<HashMap<Identifier, HashSet<Identifier>>>,
+    /// Memoised transitive resolutions. See the type docs for why this is a
+    /// lock: it is what makes [`RecipeBook`] `Sync`, and so ownable by the ECS.
+    cache: std::sync::RwLock<HashMap<Identifier, HashSet<Identifier>>>,
+}
+
+impl Clone for TagResolver {
+    /// Clones the definitions and the memo. Hand-written because
+    /// `std::sync::RwLock` is not `Clone`; carrying the memo over rather than
+    /// starting empty keeps a cloned book (see
+    /// [`crate::recipe::RecipeBook`]'s use from `lodestone_ecs::recipes`) as warm
+    /// as the one it came from.
+    fn clone(&self) -> Self {
+        Self {
+            raw: self.raw.clone(),
+            cache: std::sync::RwLock::new(
+                self.cache
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
+            ),
+        }
+    }
 }
 
 /// One entry in a tag's `values` list.
@@ -155,8 +194,15 @@ impl TagResolver {
 
     /// Registers a tag definition.
     pub fn insert(&mut self, tag: Identifier, entries: Vec<TagEntry>) {
-        self.cache.borrow_mut().clear();
+        self.cache_mut().clear();
         self.raw.insert(tag, entries);
+    }
+
+    /// The memo, write-locked, tolerating a poisoned lock. See the type docs.
+    fn cache_mut(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<Identifier, HashSet<Identifier>>> {
+        self.cache
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Number of registered tags.
@@ -181,13 +227,18 @@ impl TagResolver {
     /// the empty set.
     #[must_use]
     pub fn resolve(&self, tag: &Identifier) -> HashSet<Identifier> {
-        if let Some(hit) = self.cache.borrow().get(tag) {
+        if let Some(hit) = self
+            .cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(tag)
+        {
             return hit.clone();
         }
         let mut out = HashSet::new();
         let mut seen = HashSet::new();
         self.resolve_into(tag, &mut out, &mut seen);
-        self.cache.borrow_mut().insert(tag.clone(), out.clone());
+        self.cache_mut().insert(tag.clone(), out.clone());
         out
     }
 
@@ -961,7 +1012,186 @@ impl RecipeBook {
             })
             .collect()
     }
+
+    // -- Runtime registration (issue #148) -----------------------------
+
+    /// Registers a plugin's recipe, the `Bukkit.addRecipe` analogue.
+    ///
+    /// Unlike [`insert`](Self::insert) — which is the *loader's* door and
+    /// silently replaces an existing id, because a datapack legitimately
+    /// overrides one — this validates first and **refuses** on conflict. The
+    /// asymmetry is deliberate: a datapack override is a feature, whereas two
+    /// plugins claiming one id is a bug that must surface at the registering
+    /// plugin rather than as a mysteriously wrong result slot later.
+    ///
+    /// The registration keeps [`RecipeBook`]'s `grid_index` coherent (it goes
+    /// through `insert`), so a recipe registered here is matchable by
+    /// [`match_grid`](Self::match_grid) and browsable by
+    /// [`browse`](Self::browse) immediately, with no rebuild step.
+    ///
+    /// # Errors
+    ///
+    /// See [`RecipeRegisterError`]. Every variant is a refusal to register;
+    /// the book is left untouched in all of them.
+    pub fn register(
+        &mut self,
+        registration: RecipeRegistration,
+    ) -> Result<(), RecipeRegisterError> {
+        registration.validate()?;
+        if self.contains(&registration.id) {
+            return Err(RecipeRegisterError::Duplicate(registration.id));
+        }
+        let RecipeRegistration {
+            id,
+            recipe,
+            category,
+        } = registration;
+        match category {
+            Some(category) => self.insert_with_category(id, recipe, category),
+            None => self.insert(id, recipe),
+        }
+        Ok(())
+    }
+
+    /// Whether an id is already claimed, by vanilla or by another plugin.
+    #[must_use]
+    pub fn contains(&self, id: &Identifier) -> bool {
+        self.recipes.binary_search_by(|(k, _)| k.cmp(id)).is_ok()
+    }
+
+    /// Removes a recipe by id, returning it, and keeps the grid index coherent.
+    ///
+    /// The index half is the whole reason this cannot be a caller-side
+    /// `Vec::remove`: a stale `grid_index` entry does not panic, it degrades to
+    /// a *missed match* (see [`match_grid_entry`](Self::match_grid_entry)'s
+    /// `continue`), so a hand-rolled removal would unregister the recipe and
+    /// leave a silent hole in an unrelated bucket.
+    pub fn unregister(&mut self, id: &Identifier) -> Option<Recipe> {
+        let at = self.recipes.binary_search_by(|(k, _)| k.cmp(id)).ok()?;
+        let (id, recipe) = self.recipes.remove(at);
+        if let Some(bucket) = recipe.occupied_cell_count() {
+            remove_sorted(self.grid_index.entry(bucket).or_default(), &id);
+        }
+        Some(recipe)
+    }
 }
+
+/// A plugin's pending recipe registration: a namespaced id, the recipe, and an
+/// optional explicit recipe-book category.
+///
+/// A separate type from `(Identifier, Recipe)` because registration is
+/// *validated* and load-order-independent: a plugin builds these during
+/// `Plugin::build`, before any corpus exists, and they are applied to whichever
+/// [`RecipeBook`] the process later loads. See `lodestone_ecs::recipes` for the
+/// bevy-facing half.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecipeRegistration {
+    id: Identifier,
+    recipe: Recipe,
+    category: Option<RecipeCategory>,
+}
+
+impl RecipeRegistration {
+    /// A registration for `id`, taking the recipe-book category from
+    /// [`Recipe::category`].
+    #[must_use]
+    pub fn new(id: Identifier, recipe: Recipe) -> Self {
+        Self {
+            id,
+            recipe,
+            category: None,
+        }
+    }
+
+    /// Overrides the recipe-book category the recipe would otherwise report.
+    #[must_use]
+    pub fn with_category(mut self, category: RecipeCategory) -> Self {
+        self.category = Some(category);
+        self
+    }
+
+    /// The id this registration claims.
+    #[must_use]
+    pub fn id(&self) -> &Identifier {
+        &self.id
+    }
+
+    /// The recipe being registered.
+    #[must_use]
+    pub fn recipe(&self) -> &Recipe {
+        &self.recipe
+    }
+
+    /// Checks everything about a registration that does not depend on the
+    /// target book's contents — namespace, result, ingredient count.
+    ///
+    /// # Errors
+    ///
+    /// See [`RecipeRegisterError`]; [`RecipeRegisterError::Duplicate`] is the
+    /// one variant this cannot produce, since it is a property of the book.
+    pub fn validate(&self) -> Result<(), RecipeRegisterError> {
+        if self.id.namespace() == VANILLA_NAMESPACE {
+            return Err(RecipeRegisterError::ReservedNamespace(self.id.clone()));
+        }
+        // A result stack of count 0 is not "nothing", it is a recipe whose
+        // result slot renders as empty while still consuming ingredients —
+        // the shape a plugin author never intends and the matcher cannot
+        // distinguish from a real result.
+        if let Some(result) = self.recipe.result_stack()
+            && result.count() <= 0
+        {
+            return Err(RecipeRegisterError::EmptyResult(self.id.clone()));
+        }
+        // Zero occupied cells would land in `grid_index`'s bucket 0 and match
+        // an *empty* crafting grid, so every open crafting table would show a
+        // free result. Vanilla's own corpus contains no such recipe.
+        if self.recipe.occupied_cell_count() == Some(0) {
+            return Err(RecipeRegisterError::NoIngredients(self.id.clone()));
+        }
+        Ok(())
+    }
+}
+
+/// The namespace vanilla's own corpus owns. A plugin may not register into it:
+/// doing so would let a plugin silently replace a vanilla recipe by id, which
+/// is a datapack's privilege and not an extension's.
+pub const VANILLA_NAMESPACE: &str = "minecraft";
+
+/// Why [`RecipeBook::register`] refused a registration.
+///
+/// Every variant carries the offending id, because a plugin registering a batch
+/// needs to know *which* one failed — a bare error kind would send the author
+/// back to bisecting their own list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecipeRegisterError {
+    /// The id is in the `minecraft:` namespace, which is vanilla's.
+    ReservedNamespace(Identifier),
+    /// Another recipe — vanilla or another plugin's — already claims this id.
+    Duplicate(Identifier),
+    /// The recipe's result stack has a count of zero or less.
+    EmptyResult(Identifier),
+    /// The recipe requires no occupied grid cells, so it would match an empty
+    /// crafting grid.
+    NoIngredients(Identifier),
+}
+
+impl std::fmt::Display for RecipeRegisterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ReservedNamespace(id) => write!(
+                f,
+                "recipe `{id}` is in the reserved `{VANILLA_NAMESPACE}:` namespace"
+            ),
+            Self::Duplicate(id) => write!(f, "recipe `{id}` is already registered"),
+            Self::EmptyResult(id) => write!(f, "recipe `{id}` has an empty result stack"),
+            Self::NoIngredients(id) => {
+                write!(f, "recipe `{id}` requires no ingredients")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RecipeRegisterError {}
 
 /// One step of an auto-fill plan (issue #163, "click recipe to auto-fill"):
 /// move one item from inventory slot `source_slot` into grid cell `cell`.

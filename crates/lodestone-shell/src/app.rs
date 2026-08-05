@@ -415,7 +415,19 @@ struct WindowApp {
     /// loaded. Used only for the container screen's ghost-preview draw and the
     /// debug-overlay counter — the crafting result slot itself is always the
     /// server's, never a local match (see `docs/crafting.md`).
+    ///
+    /// Since issue #148 this is a **cache** of `lodestone_ecs::RecipeRegistry`'s
+    /// book, not the authority: plugins register recipes into that resource, and
+    /// `Self::sync_recipe_book` re-clones this field when
+    /// [`recipe_book_revision`](Self::recipe_book_revision) falls behind. Reads
+    /// stay on a plain field rather than a guard because the four read sites are
+    /// all inside the render pass, and `lodestone_ecs::EcsHandle`'s discipline
+    /// forbids holding a guard across one.
     recipe_book: Option<RecipeBook>,
+    /// The `RecipeRegistry::revision` [`recipe_book`](Self::recipe_book) was
+    /// cloned at, so a plugin registering mid-session refreshes the cache exactly
+    /// once rather than on every frame. Issue #148.
+    recipe_book_revision: u64,
     /// Persisted recipe-book **panel** state (issue #163): whether the panel is
     /// open, and the search/tab/page the user last left it on.
     ///

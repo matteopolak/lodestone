@@ -6,6 +6,10 @@ use super::*;
 
 impl WindowApp {
     pub(super) fn redraw(&mut self) {
+        // Issue #148: refresh the cached recipe corpus if a plugin registered
+        // since the last frame. Revision-gated, so the ordinary frame pays one
+        // `u64` comparison under a short read guard and nothing else.
+        self.sync_recipe_book();
         // Reconcile the menu with the live session before we borrow GPU state.
         self.drive_ui_from_session();
         if self.sim.open_menu().is_some() && self.ui.is_playing() {
