@@ -57,11 +57,11 @@ use crate::server::{
 };
 use crate::spawn::{Task, spawn};
 use crate::tick::{BlockTickFeed, ExplosionFeed, TickClock, TickStats};
-// `run_tick_loop` (like `open_in_memory_with_mobs` and, since issue #439,
-// `bind` — its two callers) is
-// `#[cfg(not(target_arch = "wasm32"))]`-gated in `tick.rs` — this import must
-// carry the identical `cfg`, or it is an unresolved-import hard error on
-// wasm32 regardless of whether the name is ever reached at that target.
+// `run_tick_loop`/`run_tick_loop_with_weather` (like `open_in_memory_with_mobs`
+// and, since issue #439, `bind` — their callers) are
+// `#[cfg(not(target_arch = "wasm32"))]`-gated in `tick.rs` — these imports must
+// carry the identical `cfg`, or they are unresolved-import hard errors on
+// wasm32 regardless of whether the names are ever reached at that target.
 // **This was already broken on `main` before this change**: the two
 // functions this loop replaces (`mobs::run_mob_tick_loop`,
 // `block_entities::run_block_entity_tick_loop`) were imported by this same
@@ -71,7 +71,20 @@ use crate::tick::{BlockTickFeed, ExplosionFeed, TickClock, TickStats};
 // crate's own pre-#284 `HEAD`, not assumed. Fixed here rather than left,
 // since this refactor already touches every one of these imports.
 #[cfg(not(target_arch = "wasm32"))]
-use crate::tick::run_tick_loop;
+use crate::tick::{run_tick_loop, run_tick_loop_with_weather};
+// Issue #325: the night-skip vote and its feed, wired into
+// `open_in_memory_with_mobs_using` (singleplayer) — see that constructor and
+// `crate::sleep`'s module doc. Native-only for the same reason the tick-loop
+// import above is: `run_tick_loop_with_weather` is `cfg`-gated, and the
+// sleep-feed `container_sync_tick` arm in `serve_play` is native-only too.
+#[cfg(not(target_arch = "wasm32"))]
+use crate::sleep::{SleepFeed, SleepVote};
+// Issue #325 calls `run_tick_loop_with_weather` directly (to carry the real
+// sleep vote), and that function needs the weather pair even though this crate
+// does not wire weather yet — see the call in
+// `open_in_memory_with_mobs_using`.
+#[cfg(not(target_arch = "wasm32"))]
+use crate::weather::{WeatherFeed, WeatherState};
 
 /// Chebyshev radius, in chunks, of the region [`IntegratedServer::bind`]'s
 /// world tick loop random-ticks around the origin (issue #439).
@@ -475,6 +488,19 @@ impl IntegratedServer {
         // doc comment for why this is safe with exactly one connection (this
         // constructor's own shape).
         let explosion_feed = ExplosionFeed::default();
+        // Issue #325 / `docs/plans/world-state.md` S1: the night-skip vote and
+        // its feed, shared between the connection task and the tick task the
+        // same way the two feeds above are. The connection records `lay_down`/
+        // `get_up` (bed click / wake-up) and feeds the voter count on its
+        // `container_sync_tick`; the tick task's loop computes the vote and
+        // publishes any `SkippedNight` back through the feed the connection
+        // drains. One inner handle each, cloned twice — see [`SleepVote`]'s
+        // own doc comment. A fresh vote and feed are the singleplayer shape:
+        // no `PlayerRegistry`, so the voter count stays 0 and
+        // `SleepState::sleepers_needed`'s `max(1, …)` floor demands exactly
+        // one sleeper.
+        let sleep_vote = SleepVote::new();
+        let sleep_feed = SleepFeed::default();
         // Issue #12: the *handle* is still built synchronously here, before any
         // task spawns, so the exact same `MobSim` can be shared by the
         // connection task (which mutates it on an `Attack` packet, through
@@ -591,6 +617,12 @@ impl IntegratedServer {
         let conn_source = Arc::clone(&source);
         let conn_block_ticks = block_tick_feed.clone();
         let conn_explosions = explosion_feed.clone();
+        // Issue #325: cloned out here rather than inside the `async move`
+        // below, for the same reason `clock` is — an `Arc::clone` *inside* the
+        // block would move the original out of reach of the tick task, which
+        // passes the same inner handle to `run_tick_loop_with_weather`.
+        let conn_sleep_vote = sleep_vote.clone();
+        let conn_sleep_feed = sleep_feed.clone();
         let task = spawn(async move {
             let mut conn = Connection::new(server_end);
             tokio::select! {
@@ -610,6 +642,8 @@ impl IntegratedServer {
                     &conn_mobs,
                     &conn_block_ticks,
                     &conn_explosions,
+                    &conn_sleep_vote,
+                    &conn_sleep_feed,
                 ) => {}
             }
         });
@@ -642,7 +676,15 @@ impl IntegratedServer {
             // Phase 1 replaces this binding with a `&mut` argument to
             // `run_tick_loop` and runs `GameTick` once per iteration.
             let _server_world = server_world;
-            run_tick_loop(
+            // Issue #325: the `_with_weather` variant so the real sleep vote
+            // and feed reach the loop (the plain `run_tick_loop` wrapper only
+            // forwards a fresh, disconnected vote — that is the loop `bind`'s
+            // LAN worlds run on, which is why they do not skip the night yet).
+            // Weather itself is not wired here (issue #324's own change), so a
+            // default feed and state are passed — exactly what the wrapper
+            // would have passed, which is why switching variants is
+            // observably a no-op for the sky.
+            run_tick_loop_with_weather(
                 mob_handle,
                 live_mobs,
                 block_entities,
@@ -651,6 +693,10 @@ impl IntegratedServer {
                 block_tick_feed,
                 tick_area,
                 explosion_feed,
+                WeatherFeed::default(),
+                WeatherState::default(),
+                &sleep_vote,
+                &sleep_feed,
                 scheduled,
             )
             .await;
@@ -1146,10 +1192,16 @@ impl IntegratedServer {
                             // boundary no longer stalls the tick loop spawned
                             // above — which on a current-thread runtime would
                             // otherwise be the very same thread.
+                            // Issue #325: LAN stays sleep-free — a fresh vote
+                            // no connection calls, matching the fresh
+                            // disconnected vote `run_tick_loop` (the loop this
+                            // world's tick task runs) forwards. See
+                            // `crate::sleep`'s module doc.
                             let _ = serve_connection_with_mob_events_shared(
                                 &mut conn, &*protocol, &source, &entities, view_radius,
                                 &block_entities, &mobs,
                                 &conn_block_ticks, &conn_explosions,
+                                &SleepVote::new(), &SleepFeed::default(),
                             )
                             .await;
                             // Lets the relay arm above drop this connection's

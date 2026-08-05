@@ -82,11 +82,18 @@ impl Sim {
                     self.set_phase(SessionPhase::Connected);
                 }
                 NetUpdate::Chunk { x, z } => {
-                    // PERF INSTRUMENT: track first chunk arrival
+                    // Track first chunk + log every 50th chunk arrival
                     if self.first_chunk_at.is_none() {
                         self.first_chunk_at = Some(std::time::Instant::now());
                         tracing::info!(
                             "first chunk ({x}, {z}) arrived at client, meshing begins"
+                        );
+                    }
+                    self.chunks_arrived += 1;
+                    if self.chunks_arrived % 50 == 0 {
+                        tracing::info!(
+                            "{} chunks arrived so far (latest: {},{})",
+                            self.chunks_arrived, x, z,
                         );
                     }
                     // §12.24 dirty-region signal: no block data travels on the

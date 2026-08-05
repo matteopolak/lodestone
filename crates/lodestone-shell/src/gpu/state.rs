@@ -300,6 +300,9 @@ impl RenderState {
             // No rain/snow droplets until the shell installs the two environment
             // textures; see `install_weather`.
             weather: None,
+            // No enchantment glint until the shell installs the glint sheet; see
+            // `install_glint`.
+            glint: None,
             // A calm sky blue, so terrain reads clearly against it.
             clear: wgpu::Color {
                 r: SKY_COLOR[0] as f64,
@@ -565,6 +568,50 @@ impl RenderState {
         self.weather.is_some()
     }
 
+    /// Install the enchantment-glint pass from the already-decoded glint sheet
+    /// (issue #452) — same caller/IO split as [`install_sky`](Self::install_sky):
+    /// `crate::resources::load_glint_texture` owns the `client.jar` read, this
+    /// owns the upload and pipeline build.
+    ///
+    /// The sheet is uploaded as **`Rgba8Unorm`**, not `_Srgb` — see
+    /// `glint::GlintPass`'s module doc for why the glint is the one texture in
+    /// this crate that must *not* be colour-decoded on the way in.
+    pub fn install_glint(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color_format: wgpu::TextureFormat,
+        img: &lodestone_assets::Image,
+    ) {
+        self.glint = Some(super::glint::GlintPass::new(device, queue, color_format, img));
+    }
+
+    /// Whether the glint pass is installed. Same reason as
+    /// [`has_sky`](Self::has_sky): a wrong *value* and a missing *wiring* must
+    /// not look identical from outside this module.
+    #[must_use]
+    pub fn has_glint(&self) -> bool {
+        self.glint.is_some()
+    }
+
+    /// Write the shared glint group-0 uniform for one glint draw this frame.
+    ///
+    /// `view_proj` is whatever the *base* item pass just drew through — the
+    /// depth-`EQUAL` contract requires the glint pass to rasterise byte-identical
+    /// clip positions, so this value is not a second projection but the first
+    /// one, handed back by the site that wrote it. No-op with no pass installed
+    /// (a jar-less run, or before [`install_glint`](Self::install_glint)), so a
+    /// caller need not branch.
+    fn write_glint_uniform(&self, queue: &wgpu::Queue, view_proj: [[f32; 4]; 4]) {
+        if let Some(glint) = &self.glint {
+            queue.write_buffer(
+                &glint.uniform_buffer,
+                0,
+                bytemuck::bytes_of(&glint::glint_uniform(view_proj)),
+            );
+        }
+    }
+
     /// Upload this frame's precipitation columns. Must run **before**
     /// [`render`](Self::render), like [`prepare_particles`](Self::prepare_particles)
     /// and for the same reason: buffers cannot be created mid-pass.
@@ -757,8 +804,9 @@ impl RenderState {
     ///
     /// Until installed, the bare arm is drawn unconditionally — vanilla's
     /// empty-hand branch — which is what this shell did before the item path
-    /// existed. `f` returns the item id of the *selected hotbar slot*, or `None`
-    /// for an empty hand.
+    /// existed. `f` returns the item id of the *selected hotbar slot* together
+    /// with whether that stack is enchanted (the foil flag that drives the glint
+    /// second pass, issue #452), or `None` for an empty hand.
     ///
     /// **Re-install it every frame**, for the same reason
     /// [`set_hand_swing_source`](Self::set_hand_swing_source) says to: the value
@@ -770,8 +818,8 @@ impl RenderState {
     /// ```no_run
     /// # fn wire(render: &mut lodestone::gpu::RenderState, sim: &lodestone::sim::Sim) {
     /// // `Sim::selected_slot()` indexes the hotbar records `app.rs` already
-    /// // builds for the HUD; take that record's item id.
-    /// let held: Option<lodestone_assets::ResourceLocation> = None; // = hotbar[selected].item
+    /// // builds for the HUD; take that record's item id and `enchanted` flag.
+    /// let held: Option<(lodestone_assets::ResourceLocation, bool)> = None; // = hotbar[selected]
     /// render.set_main_hand_source(move || held.clone());
     /// # }
     /// ```
@@ -797,11 +845,11 @@ impl RenderState {
     /// `prepare_first_person_hand` would have seen — one spelling of "the selected
     /// item", not two. The closure is invoked
     /// once per install and must stay cheap and side-effect-free (a clone of an
-    /// `Option<ResourceLocation>`, as the example above), which it already is for
-    /// every caller.
+    /// `Option<(ResourceLocation, bool)>`, as the example above), which it
+    /// already is for every caller.
     pub fn set_main_hand_source(
         &mut self,
-        f: impl Fn() -> Option<lodestone_assets::ResourceLocation> + Send + Sync + 'static,
+        f: impl Fn() -> Option<(lodestone_assets::ResourceLocation, bool)> + Send + Sync + 'static,
     ) {
         self.main_hand = MainHandSource(Some(Box::new(f)));
         let selected = self.main_hand.value();

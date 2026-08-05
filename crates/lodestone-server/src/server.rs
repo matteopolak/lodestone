@@ -45,6 +45,7 @@ use crate::redstone::{COMPARATOR, OBSERVER, REPEATER};
 use crate::redstone_diode::{set_comparator, set_repeater};
 use crate::redstone_observer::set_observer;
 use crate::scheduled_tick::{ScheduledTick, ScheduledTickQueue};
+use crate::sleep::{SleepEvent, SleepFeed, SleepVote};
 use crate::tick::{BlockTickFeed, ExplosionFeed};
 use crate::weather::WeatherFeed;
 use crate::vitals::{EYE_HEIGHT, PlayerVitals};
@@ -79,6 +80,15 @@ pub const STATUS_MOTD: &str = "A Lodestone Server";
 /// deliberately the same number: a client that sees `0/20` in its list and then
 /// joins a 20-slot server should not see the cap change.
 pub const STATUS_MAX_PLAYERS: i32 = 20;
+
+/// Issue #325 / `crate::sleep`: the server-side entity id of the single local
+/// player in a singleplayer world — the roster key a connection with no
+/// [`PlayerRegistry`] uses when it votes (see `SleepVoteInner.sleepers`'s doc
+/// comment). Matches `crates/protocol/v770/src/server_protocol.rs`'s
+/// `LOCAL_PLAYER_ENTITY_ID`, which is what the v770 encoder believes the local
+/// player's id is; keeping the two constants equal is the join, and the
+/// reason `crate::sleep`'s module doc names this crate as the source.
+pub(crate) const LOCAL_PLAYER_ENTITY_ID: i32 = 1;
 
 /// The disconnect reason for an unanswered keep-alive (issue #279).
 ///
@@ -981,6 +991,10 @@ where
         &BlockTickFeed::default(),
         &ExplosionFeed::default(),
         &WeatherFeed::default(),
+        // Issue #325: a fresh vote/feed no tick loop reads — see
+        // `serve_connection_inner`'s parameter comments.
+        &SleepVote::default(),
+        &SleepFeed::default(),
         &CommandDispatch::none(),
         &BorderFeed::default(),
         &ResourcePackPushFeed::default(),
@@ -1008,6 +1022,13 @@ pub(crate) async fn serve_connection_with_mob_events_shared<T, P, S, E>(
     mobs: &MobHandle,
     block_ticks: &BlockTickFeed,
     explosions: &ExplosionFeed,
+    // Issue #325: the singleplayer night-skip vote and its feed — the same
+    // inner handles `crate::integrated`'s tick loop reads. This is the
+    // **only** feed-carrying entry point that threads a real one; every other
+    // `serve_connection_inner` caller passes a fresh default no loop reads.
+    // See `serve_connection_inner`'s own parameter comments.
+    sleep_vote: &SleepVote,
+    sleep_feed: &SleepFeed,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -1026,6 +1047,8 @@ where
         block_ticks,
         explosions,
         &WeatherFeed::default(),
+        sleep_vote,
+        sleep_feed,
         &CommandDispatch::none(),
         &BorderFeed::default(),
         &ResourcePackPushFeed::default(),
@@ -1085,6 +1108,10 @@ where
         block_ticks,
         explosions,
         &WeatherFeed::default(),
+        // Issue #325: a fresh vote/feed no tick loop reads (see
+        // `serve_connection_inner`'s parameter comments).
+        &SleepVote::default(),
+        &SleepFeed::default(),
         commands,
         &BorderFeed::default(),
         &ResourcePackPushFeed::default(),
@@ -1134,6 +1161,9 @@ where
         block_ticks,
         &ExplosionFeed::default(),
         &WeatherFeed::default(),
+        // Issue #325: a fresh vote/feed no tick loop reads.
+        &SleepVote::default(),
+        &SleepFeed::default(),
         &CommandDispatch::none(),
         &BorderFeed::default(),
         &ResourcePackPushFeed::default(),
@@ -1198,6 +1228,11 @@ where
         block_ticks,
         explosions,
         weather,
+        // Issue #325: the borrow-shaped twin stays sleep-free — no caller of
+        // this dead-code entry point wires a vote, and the twin of the *feed*
+        // wiring lives in `serve_connection_with_mob_events_shared`.
+        &SleepVote::default(),
+        &SleepFeed::default(),
         &CommandDispatch::none(),
         &BorderFeed::default(),
         &ResourcePackPushFeed::default(),
@@ -1255,6 +1290,9 @@ where
         block_ticks,
         explosions,
         &WeatherFeed::default(),
+        // Issue #325: a fresh vote/feed no tick loop reads.
+        &SleepVote::default(),
+        &SleepFeed::default(),
         commands,
         &BorderFeed::default(),
         &ResourcePackPushFeed::default(),
@@ -1312,6 +1350,9 @@ where
         block_ticks,
         explosions,
         &WeatherFeed::default(),
+        // Issue #325: a fresh vote/feed no tick loop reads.
+        &SleepVote::default(),
+        &SleepFeed::default(),
         &CommandDispatch::none(),
         &BorderFeed::default(),
         resource_packs,
@@ -1369,6 +1410,9 @@ where
         block_ticks,
         explosions,
         &WeatherFeed::default(),
+        // Issue #325: a fresh vote/feed no tick loop reads.
+        &SleepVote::default(),
+        &SleepFeed::default(),
         &CommandDispatch::none(),
         &BorderFeed::default(),
         &ResourcePackPushFeed::default(),
@@ -1406,6 +1450,21 @@ async fn serve_connection_inner<T, P, S, E>(
     // feed — the compatibility shape this file established for `block_ticks`
     // and `explosions`, and the reason no off-limits call site broke.
     weather: &WeatherFeed,
+    // Issue #325. The night-skip vote, consulted by this connection and by
+    // the world tick loop: `dispatch_play_packet` records this connection's
+    // player `lay_down`/`get_up` on it (the `UseItemOn` bed arm and the
+    // `PlayerCommand` arm), and `serve_play`'s `container_sync_tick` feeds it
+    // the voter count. Same compatibility shape as every feed above —
+    // pre-existing entry points pass a fresh vote no tick loop reads, which
+    // is observably a vote that never passes; the feed-carrying
+    // `serve_connection_with_mob_events_shared` (singleplayer) carries the
+    // real one alongside the tick loop's, so the two share one inner handle.
+    sleep_vote: &SleepVote,
+    // Issue #325: where this connection learns a night skip happened. Drained
+    // in `serve_play`'s `container_sync_tick` arm into a real
+    // `encode_set_time` so the client's day clock jumps to the morning — see
+    // that arm's own comment for why a timer, not a packet, drives it.
+    sleep_feed: &SleepFeed,
     // Issues #48/#464. `CommandDispatch::none()` — the `Default` — is the
     // inert value every pre-existing entry point passes, so adding this
     // changed no caller's behaviour and no caller's wire bytes.
@@ -1753,6 +1812,8 @@ where
                     block_ticks,
                     explosions,
                     weather,
+                    sleep_vote,
+                    sleep_feed,
                     commands,
                     advancements,
                     player_uuid,
@@ -2672,6 +2733,11 @@ async fn apply_use_item_on<T, P, S>(
     // loop to redo the fan-out on its next iteration, where the schedule
     // survives. See `BlockTickFeed`'s own doc comment.
     block_ticks: &BlockTickFeed,
+    // Issue #325. The night-skip vote, written on a bed click (the bed arm
+    // above — `lay_down`), and the key it stores this connection's player
+    // under — see `dispatch_play_packet`'s parameter comment.
+    sleep_vote: &SleepVote,
+    player_entity_id: i32,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -2783,6 +2849,15 @@ where
     // and this crate has no localization table or action-bar encoder, so the
     // honest equivalent is a plain system-chat line.
     if is_bed_block(&source.block_state(pos.x, pos.y, pos.z)) {
+        // Issue #325: a bed click registers this connection's player in the
+        // night-skip vote. Vanilla's `ServerPlayer.startSleepInBed` calls
+        // `sleepStatus.setSleeping` (`ServerPlayer.java`) — this arm is this
+        // crate's stand-in for that call (see `crate::sleep`'s module doc for
+        // the disclosed gap: bed-entry *gates* — day/night, monsters nearby,
+        // already-sleeping — are unmodelled, and the 100-tick deep-sleep
+        // threshold is what makes an accidental daytime click harmless).
+        // Idempotent: a re-click on the same bed does not double-count.
+        sleep_vote.lay_down(player_entity_id);
         if is_legal_bed_respawn(source, pos, player_pos)
             && !respawn.is_some_and(|existing| existing.pos == pos)
         {
@@ -3408,6 +3483,14 @@ async fn dispatch_play_packet<T, P, S>(
     // state. Read back by no caller yet — the placement half of P2 is the
     // next consumer (see `crate::world_spawn`'s module doc).
     respawn: &mut Option<RespawnPoint>,
+    // Issue #325. The night-skip vote, fed by the two arms below — `lay_down`
+    // on a bed click (`UseItemOn`), `get_up` on a wake-up (`PlayerCommand`
+    // action 0). `player_entity_id` is this connection's roster key, resolved
+    // once in `serve_play` (a `PlayerRegistry` ticket id where one exists,
+    // `LOCAL_PLAYER_ENTITY_ID` in singleplayer) — see `serve_play`'s own
+    // binding and `crate::sleep`'s module doc.
+    sleep_vote: &SleepVote,
+    player_entity_id: i32,
     packet_id: i32,
     payload: &[u8],
 ) -> Result<(), ServerError>
@@ -3482,6 +3565,12 @@ where
             let cx = (x / 16.0).floor() as i32;
             let cz = (z / 16.0).floor() as i32;
             let update = view.recenter(proto, source, cx, cz).await;
+            if !update.batch.is_empty() {
+                tracing::info!(
+                    "player moved to chunk ({cx},{cz}), sending {} new chunk directives",
+                    update.batch.len(),
+                );
+            }
             send_view_update(conn, state, update, awaiting_chunk_batch_ack, pending_chunk_batches).await?;
 
             if let Some(raw) = fall.on_player_moved(y, on_ground)
@@ -3571,6 +3660,8 @@ where
                 mobs,
                 roll,
                 block_ticks,
+                sleep_vote,
+                player_entity_id,
             )
             .await?;
         }
@@ -3697,6 +3788,19 @@ where
                 plugin_channels.dispatch(&channel, &data);
             }
         }
+        // Issue #325: `PlayerCommand` action 0 is `STOP_SLEEPING` — the "wake
+        // up" a client sends when the player climbs out of bed or dies. It is
+        // the only ordinal the version crates surface (the others decode to
+        // `Ignored`; see `ServerBound::PlayerCommand`'s own doc comment), and
+        // the packet carries no player identity — the `get_up` roster key is
+        // this connection's own `player_entity_id`, resolved once in
+        // `serve_play` (see `crate::sleep::SleepVote` for why the wire cannot
+        // supply it).
+        ServerBound::PlayerCommand { action } => {
+            if action == 0 {
+                sleep_vote.get_up(player_entity_id);
+            }
+        }
         // The pre-Play phase signals, unreachable here by construction: a
         // connection in `State::Play` cannot decode a handshake, a login, or
         // (issue #277) a Status-phase status/ping request, because every
@@ -3707,7 +3811,6 @@ where
         | ServerBound::ConfigurationFinished
         | ServerBound::StatusRequest
         | ServerBound::PingRequest { .. }
-        | ServerBound::PlayerCommand { .. }
         | ServerBound::Ignored => {}
     }
     Ok(())
@@ -3787,6 +3890,15 @@ async fn serve_play<T, P, S, E>(
     // Issue #324. Weather transitions published by the world tick loop's
     // `WeatherState`, drained on this same timer — see that arm's comment.
     weather: &WeatherFeed,
+    // Issue #325. The night-skip vote (see `serve_connection_inner`'s
+    // parameter comment). `dispatch_play_packet` records this connection's
+    // player `lay_down`/`get_up` on it, and the `container_sync_tick` arm
+    // feeds it the voter count from the shared `PlayerRegistry`.
+    sleep_vote: &SleepVote,
+    // Issue #325. Where this connection learns a night skip happened — drained
+    // on `container_sync_tick` into a real `encode_set_time`, same timer as
+    // the weather drain (see that arm's comment).
+    sleep_feed: &SleepFeed,
     // Issues #48/#464. Owned rather than borrowed: it is built once, here at
     // the Play handoff, from *this* connection's login, and it is cheap
     // (an `Option<Arc>` plus a `Uuid` and a `String`).
@@ -3851,6 +3963,14 @@ where
     // `apply_use_item_on`'s bed arm. Never read here — the placement half of
     // P2 is the next consumer (see `crate::world_spawn`'s module doc).
     let mut respawn: Option<RespawnPoint> = None;
+    // Issue #325: this connection's server-side entity id — the key the
+    // night-skip vote stores this player under. A `PlayerRegistry` ticket
+    // carries it where a registry exists (LAN, and every `serve_play` gate);
+    // singleplayer has no registry, and `LOCAL_PLAYER_ENTITY_ID` is the same
+    // constant the v770 encoder uses for the local player — see that const's
+    // doc comment.
+    let player_entity_id =
+        player_ticket.as_ref().map_or(LOCAL_PLAYER_ENTITY_ID, |t| t.entity_id());
     // Issue #270's chunk-batch flow-control gate (`ServerBound::
     // ChunkBatchAcknowledged`, see `send_view_update`'s own doc comment):
     // starts `true` because `serve_connection`'s own initial full-view dump
@@ -3942,6 +4062,8 @@ where
                     client_channels,
                     plugin_channels,
                     &mut respawn,
+                    sleep_vote,
+                    player_entity_id,
                     packet_id,
                     &payload,
                 )
@@ -4142,6 +4264,40 @@ where
                     let (kind, value) = event.wire();
                     apply(conn, &mut state, proto.encode_game_event(kind, value)).await?;
                 }
+                // Issue #325: same shape again — the world tick loop's
+                // night-skip vote has no packet driving it either. Two duties,
+                // both here because this is the connection's only regular
+                // timer:
+                //
+                // 1. Feed the voter count. Vanilla excludes spectators
+                //    (`SleepStatus.updateSleepingPlayers`); this crate has no
+                //    spectator concept, so every player in the shared
+                //    `PlayerRegistry` counts. Where no registry exists
+                //    (singleplayer), nothing is fed and
+                //    `SleepState::sleepers_needed`'s `max(1, …)` floor yields
+                //    exactly 1 — the correct single-player vote.
+                if let Some(registry) = entities.players() {
+                    sleep_vote.set_active(registry.len() as u32);
+                }
+                // 2. Learn of a skip. `SleepEvent::SkippedNight` re-anchors
+                //    this client's day clock to the morning — `encode_set_time`
+                //    with a `Some` day-time — exactly the broadcast vanilla's
+                //    skip path sends: the world's clock jumped, so every
+                //    connection must re-anchor. `SleepFeed::drain_all` is
+                //    single-consumer for the same reason the drains above are
+                //    (see that type's own doc comment).
+                for event in sleep_feed.drain_all() {
+                    match event {
+                        SleepEvent::SkippedNight { game_time, morning } => {
+                            apply(
+                                conn,
+                                &mut state,
+                                proto.encode_set_time(game_time, Some(morning)),
+                            )
+                            .await?;
+                        }
+                    }
+                }
                 // Issue #334: same shape again — a resource pack push is
                 // published by the host (a config surface on `IntegratedServer`,
                 // or a future command), never by an inbound packet, so this
@@ -4239,6 +4395,17 @@ async fn serve_play<T, P, S, E>(
     // `container_sync_tick`, the native loop's drain point) never surfaces
     // one. Accepted for signature parity, exactly like its two neighbours.
     _weather: &WeatherFeed,
+    // Issue #325, **inbound half wired** (same as the native definition): the
+    // `lay_down`/`get_up` arms in `dispatch_play_packet` are packet-driven, so
+    // a bed click and a wake-up vote identically on this target through the
+    // shared call below. The two timer-fed halves are gaps like `_weather`:
+    // `set_active` (the voter count) and the `SkippedNight` drain both ride
+    // the native loop's `container_sync_tick`, which this target owns none
+    // of — so the vote's roster never reaches a passing size here, and a skip
+    // would be published to a feed nobody drains. Accepted for signature
+    // parity with the native definition, exactly like its neighbours.
+    sleep_vote: &SleepVote,
+    _sleep_feed: &SleepFeed,
     // Issues #48/#464 — **not** a gap on this target. Commands are entirely
     // packet-driven (a `chat_command` frame arrives, the sink answers, system
     // chat goes back), so the missing timers cost nothing here and this loop
@@ -4321,6 +4488,12 @@ where
     // per-player respawn point has no timer and no wasm32 dependency, so it
     // is wired identically on this target.
     let mut respawn: Option<RespawnPoint> = None;
+    // Issue #325 — see the native `serve_play`'s identical binding: the
+    // night-skip vote's roster key has no timer and no wasm32 dependency, so
+    // it is wired identically on this target (the vote's inbound arms are the
+    // only thing this target can drive).
+    let player_entity_id =
+        player_ticket.as_ref().map_or(LOCAL_PLAYER_ENTITY_ID, |t| t.entity_id());
     // See the native `serve_play`'s identical field for why this starts
     // `true` (the initial join dump is itself an unacknowledged batch).
     let mut awaiting_chunk_batch_ack = true;
@@ -4361,6 +4534,8 @@ where
             client_channels,
             plugin_channels,
             &mut respawn,
+            sleep_vote,
+            player_entity_id,
             packet_id,
             &payload,
         )
