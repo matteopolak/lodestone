@@ -210,6 +210,46 @@ impl ChunkColumn {
             .filter(|&&id| !is_air_or_fluid(&self.palette[id as usize]))
             .count()
     }
+
+    /// The column-wide block-state palette, borrowed.
+    ///
+    /// Exists for [`crate::chunk_nbt`], which has to walk the palette and the
+    /// index grid together to build vanilla's *per-section* palettes. Going
+    /// through [`block_state`](Self::block_state) instead would mean 98,304
+    /// string lookups and a fresh `String` per block for every column saved.
+    #[must_use]
+    pub fn raw_palette(&self) -> &[String] {
+        &self.palette
+    }
+
+    /// The raw palette-index grid, `blocks[(y_local * 16 + z) * 16 + x]`.
+    ///
+    /// Same rationale as [`raw_palette`](Self::raw_palette). The layout is
+    /// deliberately identical to a vanilla section's `(y << 8) | (z << 4) | x`
+    /// order restricted to a 16-row window, so `chunk_nbt` slices it directly.
+    #[must_use]
+    pub fn raw_blocks(&self) -> &[u16] {
+        &self.blocks
+    }
+
+    /// The 16 per-quart biome ids, row-major `qz * 4 + qx`.
+    #[must_use]
+    pub fn biome_quarts(&self) -> &[String; 16] {
+        &self.biome_quarts
+    }
+
+    /// Overwrites the per-quart biome ids from a slice of at least 16 entries;
+    /// shorter slices leave the remaining quarts untouched.
+    ///
+    /// Only [`crate::chunk_nbt`] calls this, restoring biomes read off disk.
+    /// It is not a gameplay mutation and has no `set_block`-style persistence
+    /// path — a loaded column carries its biomes, a generated one gets them
+    /// from the generator, and nothing else changes them.
+    pub fn set_biome_quarts(&mut self, quarts: &[String]) {
+        for (slot, value) in self.biome_quarts.iter_mut().zip(quarts) {
+            slot.clone_from(value);
+        }
+    }
 }
 
 /// Supplies terrain columns to the integrated server.

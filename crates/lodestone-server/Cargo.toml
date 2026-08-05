@@ -68,6 +68,14 @@ uuid = { workspace = true }
 # only — native behaviour is byte-for-byte unchanged.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
+# World persistence (issue #437): the `.mca` region container and `level.dat`.
+# **Target-gated deliberately.** `lodestone-anvil`'s readers and writers are
+# `std::fs`-based, and this crate is one of the few that really does build for
+# `wasm32-unknown-unknown` (see the tokio split above and `open_in_memory`'s
+# browser use). A browser singleplayer world has no filesystem to save to, so
+# the whole `region_source` module is `cfg`-gated off there rather than
+# compiled against a filesystem that would fail at runtime.
+lodestone-anvil = { path = "../lodestone-anvil" }
 
 # --- wasm32 target dependencies ---
 # `wasm32-unknown-unknown` cannot build `mio` (hence tokio's `net`), so tokio
@@ -98,3 +106,7 @@ serde_json = { workspace = true }
 lodestone-client = { path = "../lodestone-client" }
 lodestone-model = { path = "../lodestone-model" }
 lodestone-world = { path = "../lodestone-world" }
+# `tests/chunk_nbt_vanilla_oracle.rs` opens a real 26.2 `.mca` directly, rather
+# than through this crate's own loader, so the oracle reads the file with
+# something other than the code under test.
+lodestone-anvil = { path = "../lodestone-anvil" }

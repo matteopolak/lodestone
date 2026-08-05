@@ -101,6 +101,7 @@
 mod block_entities;
 mod brewing;
 mod chunk;
+pub mod chunk_nbt;
 mod chunk_store;
 mod composter;
 pub mod ecs;
