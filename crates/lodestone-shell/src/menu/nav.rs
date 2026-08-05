@@ -1769,6 +1769,12 @@ impl MenuNav {
         if ui.screen() == Screen::CommandBlockEdit {
             return self.activate_command_block_row(ui, row);
         }
+        // Statistics (issue #188) — the newest instance of #391's shape, and it
+        // became *necessary* rather than merely tidy when Enter there stopped
+        // being unconditional: see `click_statistics`.
+        if ui.screen() == Screen::Statistics {
+            return self.click_statistics(ui, row);
+        }
         self.hover(ui, row);
         self.key(ui, MenuKey::Enter)
     }
@@ -2955,10 +2961,24 @@ impl MenuNav {
         MenuAction::None
     }
 
-    /// The Statistics screen (issue #188). No selection/activation at all —
-    /// the General list is not clickable in vanilla either (only narrated),
-    /// so Up/Down just scroll and Enter does nothing; Escape/Done are the
-    /// only ways out.
+    /// The Statistics screen (issue #188). No selection/activation at all on
+    /// the General list — it is not clickable in vanilla either (only
+    /// narrated), so Up/Down just scroll.
+    ///
+    /// **Enter is gated on focus, and Tab is what grants it.** A player report
+    /// (2026-08-04, "the Statistics menu always has the 'Done' button focused
+    /// for some reason") traced to `stats::frame` hard-coding `selected: 0` on
+    /// a frame whose only row is Done; see
+    /// [`crate::menu::stats::StatsNav::focused`] for what the jar says. Enter
+    /// used to close unconditionally, which is `Screen.keyPressed` with a
+    /// focused widget — correct behaviour reached from a premise (something is
+    /// focused) that is false on open. With nothing focused, vanilla's Enter
+    /// does nothing.
+    ///
+    /// Escape is deliberately **not** gated: `shouldCloseOnEsc()` is true here
+    /// and Escape is handled by the screen itself, not by a focused child, so
+    /// it is unconditional — which also means there is always a keyboard way
+    /// out even before the first Tab.
     fn key_statistics(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         match key {
             MenuKey::Up => {
@@ -2969,9 +2989,14 @@ impl MenuNav {
                 self.stats.scroll(true);
                 MenuAction::None
             }
+            MenuKey::Tab => {
+                self.stats.focus_next();
+                MenuAction::None
+            }
             MenuKey::Enter => {
-                // The only control is Done, always at the cursor.
-                ui.close_statistics();
+                if self.stats.focused() {
+                    ui.close_statistics();
+                }
                 MenuAction::None
             }
             MenuKey::Escape => {
@@ -2980,6 +3005,24 @@ impl MenuNav {
             }
             _ => MenuAction::None,
         }
+    }
+
+    /// [`Self::click`]'s Statistics arm — `ContainerEventHandler.mouseClicked`:
+    /// focus the child that was hit, *then* call its `onClick`.
+    ///
+    /// Its own arm rather than the shared `hover` + `Enter` fall-through, for
+    /// #391's reason one screen further: with Enter now gated on focus (see
+    /// [`Self::key_statistics`]) that pair would need `hover` to grant focus,
+    /// and hover granting focus is itself a bug this repo has already fixed
+    /// once on the server list. So the click grants focus directly and hover
+    /// still grants none.
+    fn click_statistics(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
+        if row != crate::menu::stats::DONE_ROW {
+            return MenuAction::None;
+        }
+        self.stats.focus_done();
+        ui.close_statistics();
+        MenuAction::None
     }
 
     /// Steps the persisted `gui_scale` option by `delta`, wrapping between
@@ -3097,6 +3140,69 @@ impl MenuNav {
             Err(e) => Some(format!("could not save {}: {e}", self.path.display())),
         };
     }
+}
+
+/// The frame that is **actually on screen**, however it got there — the one
+/// source `app.rs`'s mouse hit-test (`menu_row_at`) may consult.
+///
+/// # Why this exists rather than a call to `render::frame_for`
+///
+/// A player report (2026-08-04, "i cant click anything in the options menu")
+/// was exactly this function's absence. `render::frame_for` is the authority on
+/// which screens the *menu renderer owns* — screens it draws with a `Clear`
+/// pass, replacing the world — and it deliberately answers `None` for the
+/// screens that draw as an **overlay** over a still-rendering world. There are
+/// now three of those: `Screen::Paused`, `Screen::Death`, and — since
+/// `d096de8` — `Screen::Settings` when [`UiState::settings_in_world`], which
+/// was made an overlay so that in-world Options stopped drawing the title
+/// screen's panorama behind itself.
+///
+/// `menu_row_at` consulted `frame_for` with a `?`. Pause and death had each
+/// been given their own branch there when they became overlays; the third was
+/// not, so in-world Options had **no frame to hit-test against at all** and
+/// every click returned `None` before it reached a row. Nothing was wrong with
+/// the options screen's own geometry: the title-screen copy of the very same
+/// rows hit-tests correctly (`clicking_an_options_row_at_its_own_coordinates_
+/// activates_that_row` measures it), which is why the geometry was the wrong
+/// place to look.
+///
+/// So the fix is not a fourth branch — it is putting the branch set *somewhere a
+/// test can reach*, because three `if`s inlined in a private `app.rs` method
+/// cannot be enumerated from anywhere, which is why the third one could go
+/// missing silently. [`crate::menu::render::owns_frame`] says which screens
+/// route mouse input; this says where their rows come from; and
+/// `every_mouse_routable_screen_has_a_frame_to_hit_test` asserts the two sets
+/// agree, so the *next* overlay screen fails a test instead of losing its
+/// clicks.
+///
+/// Returns `None` only when no menu-ish screen is up at all — the same meaning
+/// `frame_for`'s `None` had at the call site.
+#[must_use]
+pub fn on_screen_frame<'a>(
+    ui: &UiState,
+    nav: &MenuNav,
+    death_message: Option<&str>,
+    statuses: &super::status::StatusCache,
+    favicons: &mut super::render::FaviconCache,
+) -> Option<super::render::MenuFrame<'a>> {
+    if ui.is_paused() {
+        return Some(super::render::pause_frame(nav));
+    }
+    if ui.is_death() {
+        return Some(super::render::death_frame(nav, death_message));
+    }
+    // The third overlay screen, and the one whose absence was the bug. Built
+    // from exactly the call `app.rs`'s redraw uses to *draw* it, so the frame
+    // the click hit-tests against is the frame on the glass — a second
+    // construction here is how a click lands on a row the draw put elsewhere.
+    if ui.is_settings() && ui.settings_in_world() {
+        return Some(crate::menu::options::settings_frame(
+            nav.settings(),
+            nav.options(),
+            nav.options_save_error(),
+        ));
+    }
+    super::render::frame_for(ui, nav, statuses, favicons)
 }
 
 /// Steps `i` one row in `forward`'s direction, wrapping, and keeps stepping
@@ -6172,5 +6278,391 @@ mod tests {
         nav.key(&mut ui, MenuKey::Refresh);
         assert_eq!(nav.form().name(), "home", "F5 must not type anything");
         assert_eq!(ui.screen(), Screen::ServerEdit, "and must not navigate");
+    }
+
+    // -- the mouse click path, at real coordinates (two player reports) -------
+
+    /// `app.rs::menu_row_at`'s hit-test scan, verbatim, at `gui_scale == 1`
+    /// (where the logical canvas is the framebuffer, so no `/ scale` applies).
+    ///
+    /// Reproduced here rather than restated: the *rects* come from
+    /// `render::row_rect`, which is the same function the draw and `menu_row_at`
+    /// both call, so a click coordinate in these tests is derived from the
+    /// expression that draws the row and never from a copied constant. Only the
+    /// `find` loop is duplicated.
+    fn hit_test(
+        frame: &crate::menu::render::MenuFrame<'_>,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> Option<usize> {
+        (0..frame.rows.len()).find(|&i| {
+            crate::menu::render::row_rect(&frame.rows, i, w, h).is_some_and(|(rx, ry, rw, rh)| {
+                x >= rx && x <= rx + rw && y >= ry && y <= ry + rh
+            })
+        })
+    }
+
+    /// The centre of row `row`'s own rect, in logical pixels.
+    fn row_centre(
+        frame: &crate::menu::render::MenuFrame<'_>,
+        row: usize,
+        w: f32,
+        h: f32,
+    ) -> (f32, f32) {
+        let (rx, ry, rw, rh) = crate::menu::render::row_rect(&frame.rows, row, w, h)
+            .expect("the row under test must have a rect to click in");
+        (rx + rw * 0.5, ry + rh * 0.5)
+    }
+
+    fn empty_statuses() -> crate::menu::status::StatusCache {
+        crate::menu::status::StatusCache::with_probe(crate::menu::status::unavailable_probe())
+    }
+
+    /// A canvas wide enough for the settings grid's two 150 px columns at their
+    /// vanilla pitch, and tall enough that `HeaderAndFooterLayout` puts the
+    /// footer below the content band — i.e. an ordinary window.
+    const CLICK_W: f32 = 854.0;
+    const CLICK_H: f32 = 480.0;
+
+    /// The **positive control** for the in-world test below: on the title-screen
+    /// options tree, a click at a named row's own coordinates activates that row
+    /// and no other.
+    ///
+    /// This is what proves the machinery in [`hit_test`]/[`row_centre`] can
+    /// resolve a click at all, which matters because the in-world test's whole
+    /// content is that the *same* rows became unreachable. Without this control,
+    /// a hit-test that answered `None` everywhere would make that test pass for
+    /// the wrong reason once it was fixed by any means.
+    ///
+    /// It also measures the hypothesis the bug was first attributed to, and
+    /// disproves it: the options screen keeps its own entry-index window
+    /// (`options::LIST_WINDOW_PX`, `visible_entries`, `Placement::ListCell`'s
+    /// `first`) and never adopted the shared pixel-scrolled `ScrollList`, so a
+    /// units mismatch between the two was the obvious suspect. It is not one —
+    /// these coordinates resolve exactly.
+    #[test]
+    fn clicking_an_options_row_at_its_own_coordinates_activates_that_row() {
+        let (mut nav, _p) = self::nav("options-click-coords");
+        let mut ui = UiState::new();
+        ui.open_settings();
+        open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::Video);
+        let scale = settings_row(&mut nav, &mut ui, is_option("guiScale"));
+        assert_eq!(nav.gui_scale(), 0, "precondition: the scale starts at auto");
+
+        let mut favicons = crate::menu::render::FaviconCache::default();
+        let statuses = empty_statuses();
+        let frame = on_screen_frame(&ui, &nav, None, &statuses, &mut favicons)
+            .expect("the title-screen options frame must exist");
+        assert!(
+            frame.rows[scale].label.starts_with("GUI Scale"),
+            "premise: row {scale} is the GUI Scale row, not {:?}",
+            frame.rows[scale].label
+        );
+
+        let (cx, cy) = row_centre(&frame, scale, CLICK_W, CLICK_H);
+        assert_eq!(
+            hit_test(&frame, cx, cy, CLICK_W, CLICK_H),
+            Some(scale),
+            "a click inside the GUI Scale row must resolve to that row"
+        );
+        assert_eq!(nav.click(&mut ui, scale), MenuAction::None);
+        assert_eq!(nav.gui_scale(), 1, "and must cycle that row's own option");
+
+        // The negative half: a coordinate in a *different* named row must
+        // resolve to that other row, so the assertion above is row-resolution
+        // and not "every coordinate answers `scale`".
+        let vsync = frame
+            .rows
+            .iter()
+            .position(|r| r.label.starts_with("VSync"))
+            .expect("premise: the Video page has a VSync row");
+        assert_ne!(vsync, scale, "premise: they are different rows");
+        let (vx, vy) = row_centre(&frame, vsync, CLICK_W, CLICK_H);
+        assert_eq!(hit_test(&frame, vx, vy, CLICK_W, CLICK_H), Some(vsync));
+
+        // And a coordinate in the gap above the first row is on no row at all.
+        assert_eq!(
+            hit_test(&frame, CLICK_W * 0.5, 1.0, CLICK_W, CLICK_H),
+            None,
+            "the backdrop must not resolve to a row"
+        );
+    }
+
+    /// **The player report**: "i cant click anything in the options menu".
+    ///
+    /// Options opened from the **pause menu** — the in-world case — could not be
+    /// clicked at all, while the identical rows on the title screen worked
+    /// perfectly (the test above). The cause was not geometry: `d096de8` made
+    /// `render::frame_for` answer `None` for `Screen::Settings` whenever
+    /// [`UiState::settings_in_world`], so the screen would draw as an overlay
+    /// over the still-rendering world instead of replacing it with the title
+    /// screen's panorama. `app.rs::menu_row_at` consulted `frame_for` with a
+    /// `?`, so from that commit on it had **no rows to hit-test** here and every
+    /// click returned before reaching one.
+    ///
+    /// The assertion below is deliberately not "clicking does something": it
+    /// names the GUI Scale row, derives the coordinate from that row's own rect,
+    /// and requires *that* option to have cycled — a partial fix that resolved
+    /// clicks to the wrong row would fail it.
+    #[test]
+    fn in_world_options_clicks_reach_the_row_they_land_on() {
+        let (mut nav, _p) = self::nav("options-click-in-world");
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.pause();
+        ui.open_settings_from_pause();
+        assert_eq!(ui.screen(), Screen::Settings, "precondition: options is up");
+        assert!(
+            ui.settings_in_world(),
+            "precondition: this is the in-world screen, not the title one"
+        );
+        open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::Video);
+        let scale = settings_row(&mut nav, &mut ui, is_option("guiScale"));
+        assert_eq!(nav.gui_scale(), 0, "precondition: the scale starts at auto");
+
+        let mut favicons = crate::menu::render::FaviconCache::default();
+        let statuses = empty_statuses();
+
+        // The observed pre-fix failure, kept in the test rather than described:
+        // the frame source `menu_row_at` used before the fix is **empty** here,
+        // so its `?` bailed and no coordinate could resolve. This is the control
+        // for the assertion that follows — it proves the row below was genuinely
+        // unreachable, not merely reachable by a different route.
+        assert!(
+            crate::menu::render::frame_for(&ui, &nav, &statuses, &mut favicons).is_none(),
+            "premise: `frame_for` still answers `None` in-world (that is what \
+             makes it an overlay screen); if this ever becomes `Some`, the \
+             overlay draw in `app/redraw.rs` is drawing the screen twice"
+        );
+
+        let frame = on_screen_frame(&ui, &nav, None, &statuses, &mut favicons)
+            .expect("the in-world options screen must have a frame to hit-test");
+        assert!(
+            frame.rows[scale].label.starts_with("GUI Scale"),
+            "premise: row {scale} is the GUI Scale row, not {:?}",
+            frame.rows[scale].label
+        );
+
+        let (cx, cy) = row_centre(&frame, scale, CLICK_W, CLICK_H);
+        let hit = hit_test(&frame, cx, cy, CLICK_W, CLICK_H);
+        assert_eq!(
+            hit,
+            Some(scale),
+            "a click inside the in-world GUI Scale row must resolve to that row"
+        );
+        assert_eq!(nav.click(&mut ui, hit.unwrap()), MenuAction::None);
+        assert_eq!(
+            nav.gui_scale(),
+            1,
+            "and must cycle GUI Scale — the row the click actually landed in"
+        );
+        assert!(
+            nav.view_bobbing(),
+            "and must not fall through to whatever Enter means on this screen"
+        );
+    }
+
+    /// Every screen the mouse is allowed to route to must have somewhere for its
+    /// rows to come from.
+    ///
+    /// This is the invariant whose violation was the report above:
+    /// `render::owns_frame` (plus the pause/death overlays) decides where
+    /// `app.rs` *routes* a click, and [`on_screen_frame`] decides where the rows
+    /// come from. When the two disagree, the screen is live to the mouse and has
+    /// no rows — which is silent, because nothing panics and no pixel changes.
+    ///
+    /// Bounded to the screens a `UiState` can be driven into here; it cannot see
+    /// a future overlay screen that is never listed. That is why the list is
+    /// spelled out per screen with its own setup rather than derived — a new
+    /// overlay screen has to be added here, and the report above is the argument
+    /// for doing it.
+    #[test]
+    fn every_mouse_routable_screen_has_a_frame_to_hit_test() {
+        let mut favicons = crate::menu::render::FaviconCache::default();
+        let statuses = empty_statuses();
+
+        let cases: Vec<(&str, fn(&mut UiState))> = vec![
+            ("MainMenu", |_ui| {}),
+            ("ServerList", |ui| ui.open_server_list()),
+            ("Settings-title", |ui| ui.open_settings()),
+            ("Paused", |ui| {
+                ui.enter_dev_world();
+                ui.pause();
+            }),
+            // The one that was broken.
+            ("Settings-in-world", |ui| {
+                ui.enter_dev_world();
+                ui.pause();
+                ui.open_settings_from_pause();
+            }),
+            ("Statistics", |ui| {
+                ui.enter_dev_world();
+                ui.pause();
+                ui.open_statistics_from_pause();
+            }),
+        ];
+
+        for (what, setup) in cases {
+            let (nav, _p) = self::nav(&format!("routable-{what}"));
+            let mut ui = UiState::new();
+            setup(&mut ui);
+            let routable =
+                crate::menu::render::owns_frame(ui.screen()) || ui.is_paused() || ui.is_death();
+            assert!(routable, "{what}: premise — the mouse routes to this screen");
+            assert!(
+                on_screen_frame(&ui, &nav, None, &statuses, &mut favicons).is_some(),
+                "{what}: the mouse routes clicks to this screen but `on_screen_frame` \
+                 has no frame for it, so every click is dropped before it reaches a row"
+            );
+        }
+    }
+
+    // -- Statistics: nothing is focused until Tab (player report) -------------
+
+    /// **The player report**: "the Statistics menu always has the 'Done' button
+    /// focused for some reason".
+    ///
+    /// `stats::frame` set `selected: 0` on a frame whose only row *is* Done, so
+    /// it was drawn focused the moment the screen opened. Vanilla focuses
+    /// nothing: `Screen.setInitialFocus` (`Screen.java:161-169`) runs its whole
+    /// body only `if (this.minecraft.getLastInputType().isKeyboard())`, and this
+    /// screen is reached by clicking the pause menu's Statistics button.
+    /// `StatsScreen` does not override `setInitialFocus`, and even if the last
+    /// input *had* been a keyboard, `StatsScreen.init` puts Done in
+    /// `setTabOrderGroup(1)` behind the tab bar, so Done is not the first tab
+    /// stop either.
+    ///
+    /// `usize::MAX` rather than an arbitrary out-of-range index: it is
+    /// `MenuFrame::selected`'s own documented "highlights nothing" value, the
+    /// same one the command-block frame uses.
+    #[test]
+    fn opening_statistics_focuses_nothing_and_tab_then_focuses_done() {
+        let (mut nav, _p) = self::nav("stats-initial-focus");
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.pause();
+        ui.open_statistics_from_pause();
+        assert_eq!(ui.screen(), Screen::Statistics, "precondition");
+
+        let snapshot = crate::menu::stats::StatsSnapshot::default();
+        let frame = crate::menu::stats::frame(nav.stats(), &snapshot);
+        assert_eq!(frame.rows.len(), 1, "premise: Done is the only control");
+        assert_eq!(frame.rows[0].label, "Done", "premise: and it is row 0");
+        assert_eq!(
+            frame.selected,
+            usize::MAX,
+            "on open, nothing may be focused — a `0` here is Done, which is \
+             precisely the reported bug"
+        );
+
+        // Enter must therefore do nothing: vanilla routes it to the *focused*
+        // widget, and there is none. Escape is the screen's own handler and is
+        // deliberately still unconditional, so there is always a way out.
+        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
+        assert_eq!(
+            ui.screen(),
+            Screen::Statistics,
+            "Enter with nothing focused must not close the screen"
+        );
+
+        // Tab is `Screen.keyPressed`'s TabNavigation, and this screen has one
+        // focusable child for it to land on.
+        nav.key(&mut ui, MenuKey::Tab);
+        let focused = crate::menu::stats::frame(nav.stats(), &snapshot);
+        assert_eq!(
+            focused.selected,
+            crate::menu::stats::DONE_ROW,
+            "Tab must focus Done"
+        );
+        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
+        assert_eq!(
+            ui.screen(),
+            Screen::Paused,
+            "and Enter on a focused Done must close back to the pause menu"
+        );
+    }
+
+    /// Hover must not focus, and a click must — `ContainerEventHandler.
+    /// mouseClicked` focuses the child it hit and then calls its `onClick`,
+    /// while hover touches focus on no screen (the server-list report).
+    ///
+    /// Without this, gating Enter on focus would have broken clicking Done: the
+    /// shared `click` fall-through is `hover` + `Enter`, and hover grants no
+    /// focus, so Enter would have found nothing focused and done nothing. That
+    /// is why `Screen::Statistics` gained its own `click` arm.
+    #[test]
+    fn hovering_statistics_focuses_nothing_but_clicking_done_closes_it() {
+        let (mut nav, _p) = self::nav("stats-hover-vs-click");
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.pause();
+        ui.open_statistics_from_pause();
+        let snapshot = crate::menu::stats::StatsSnapshot::default();
+
+        nav.hover(&ui, crate::menu::stats::DONE_ROW);
+        assert_eq!(
+            crate::menu::stats::frame(nav.stats(), &snapshot).selected,
+            usize::MAX,
+            "hovering Done must not focus it"
+        );
+        assert_eq!(ui.screen(), Screen::Statistics, "nor activate it");
+
+        // A row this screen does not have does nothing at all, rather than
+        // falling through to whatever Enter means.
+        assert_eq!(nav.click(&mut ui, 7), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::Statistics);
+
+        assert_eq!(
+            nav.click(&mut ui, crate::menu::stats::DONE_ROW),
+            MenuAction::None
+        );
+        assert_eq!(
+            ui.screen(),
+            Screen::Paused,
+            "but clicking Done focuses it and closes the screen"
+        );
+    }
+
+    /// Re-entering Statistics must not arrive with Done still focused from last
+    /// time — vanilla builds a fresh `StatsScreen` on every entry, which is the
+    /// same rule `PauseButton::Statistics` already applies to the scroll offset.
+    #[test]
+    fn re_entering_statistics_starts_unfocused_again() {
+        let (mut nav, _p) = self::nav("stats-refocus");
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.pause();
+        ui.open_statistics_from_pause();
+        nav.key(&mut ui, MenuKey::Tab);
+        let snapshot = crate::menu::stats::StatsSnapshot::default();
+        assert_eq!(
+            crate::menu::stats::frame(nav.stats(), &snapshot).selected,
+            crate::menu::stats::DONE_ROW,
+            "premise: Tab focused Done"
+        );
+        nav.key(&mut ui, MenuKey::Escape);
+        assert_eq!(ui.screen(), Screen::Paused, "premise: back at the pause menu");
+
+        // Through the real pause-menu path, which is what calls `reset`.
+        let target = PAUSE_BUTTONS
+            .iter()
+            .position(|b| *b == PauseButton::Statistics)
+            .expect("the pause menu has a Statistics button");
+        for _ in 0..=PAUSE_BUTTONS.len() {
+            if nav.pause_index() == target {
+                break;
+            }
+            nav.key(&mut ui, MenuKey::Down);
+        }
+        assert_eq!(nav.pause_index(), target, "premise: the cursor reached it");
+        nav.key(&mut ui, MenuKey::Enter);
+        assert_eq!(ui.screen(), Screen::Statistics, "premise: re-opened");
+        assert_eq!(
+            crate::menu::stats::frame(nav.stats(), &snapshot).selected,
+            usize::MAX,
+            "a fresh entry must focus nothing again"
+        );
     }
 }
