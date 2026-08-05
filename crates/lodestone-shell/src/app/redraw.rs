@@ -30,17 +30,24 @@ impl WindowApp {
         // itself, once per `RedrawRequested`, by calling `update()` directly
         // — no internal timer, so packet ingest is never gated on frame rate.
         self.ecs.update();
-        // Issues #202/#203: pushed down before `step`, not after like View
-        // Bobbing below — `step` is what actually reads them this call
-        // (`apply_mouse`'s look-inversion, and the toggle-mode push into
-        // `InputState` for every catch-up tick this call runs), so pushing
-        // them post-step would apply this frame's option change one frame
-        // late.
+        // Issues #202/#203/#443/#444: pushed down before `step`, not after
+        // like View Bobbing below — `step` is what actually reads them this
+        // call (`apply_mouse`'s look-inversion, the toggle-mode and
+        // sprint-window pushes into `InputState`, and the auto-jump gate in
+        // the tick loop), so pushing them post-step would apply this frame's
+        // option change one frame late.
         self.sim
             .set_mouse_invert(self.nav.invert_mouse_x(), self.nav.invert_mouse_y());
         self.sim.set_sensitivity(self.nav.sensitivity());
+        self.sim.set_toggle_modes(
+            self.nav.toggle_sneak(),
+            self.nav.toggle_sprint(),
+            self.nav.toggle_attack(),
+            self.nav.toggle_use(),
+        );
         self.sim
-            .set_toggle_modes(self.nav.toggle_sneak(), self.nav.toggle_sprint());
+            .set_sprint_window_ticks(self.nav.sprint_window_ticks());
+        self.sim.set_auto_jump(self.nav.auto_jump());
         self.sim.step(dt);
         if !step.render {
             // Unfocused (throttled to ~30 fps) or occluded: skip presenting

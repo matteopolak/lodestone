@@ -15,7 +15,7 @@ use lodestone_client::{BlockPos, ClientAction, Hand, OpenMenuSnapshot, Rotation}
 // `ControllerPlugin` is no longer named here: composition moved to
 // `Sim::client_app`, which reaches it through `lodestone_app::client_app` along
 // with `CorePlugin`, `LocalPlayerPlugin` and `SessionHudPlugin`.
-use lodestone_controller::{InputState, RawInput, apply_look_inverted};
+use lodestone_controller::{InputState, RawInput, apply_look_inverted, movement_intent};
 pub use lodestone_ecs::SessionPhase;
 use lodestone_ecs::entity::{Attributes, EntityIndex, EntityKind, MinecraftEntityId, Position};
 use lodestone_ecs::player::{
@@ -586,6 +586,25 @@ pub struct Sim {
     /// frame runs.
     toggle_sneak: bool,
     toggle_sprint: bool,
+    /// Vanilla's `key.attack`/`key.use` hold-vs-toggle options
+    /// ([`crate::config::Options::toggle_attack`]/`toggle_use`, issue #444),
+    /// pushed down the same way as [`Self::toggle_sneak`]/[`Self::toggle_sprint`]
+    /// and applied to the live [`InputState`] in the same place. Carried by the
+    /// sim even though `interact.rs` has no toggle-mode consumer yet — the
+    /// *option* reaches the model end to end, so a future consumer reads it
+    /// without touching the plumbing again.
+    toggle_attack: bool,
+    toggle_use: bool,
+    /// Vanilla's `options.autoJump` ([`crate::config::Options::auto_jump`],
+    /// issue #444), pushed down by [`Self::set_auto_jump`]. Read once per tick
+    /// in [`Self::step`]'s loop to decide whether to request an auto-jump for
+    /// the `GameTick` schedule — see the request firing there.
+    auto_jump: bool,
+    /// Vanilla's `options.sprintWindow` ([`crate::config::Options::sprint_window_ticks`],
+    /// issue #444) — the double-tap-forward window in 20 Hz ticks, pushed down
+    /// by [`Self::set_sprint_window_ticks`] and forwarded to the live
+    /// [`InputState`] once per frame at the top of [`Self::step`].
+    sprint_window_ticks: u8,
     /// Per-position chest lid animation state (issue #23) — vanilla's
     /// `ChestLidController`, one per open or closing chest.
     ///

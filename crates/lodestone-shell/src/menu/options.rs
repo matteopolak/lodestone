@@ -241,6 +241,18 @@ pub enum LiveOption {
     ToggleSneak,
     /// `key.sprint` → [`crate::config::Options::toggle_sprint`] (issue #202).
     ToggleSprint,
+    /// `key.attack` → [`crate::config::Options::toggle_attack`] (issue #444).
+    ToggleAttack,
+    /// `key.use` → [`crate::config::Options::toggle_use`] (issue #444).
+    ToggleUse,
+    /// `options.autoJump` → [`crate::config::Options::auto_jump`] (issue #444).
+    /// Fed to `Sim::set_auto_jump`, read by the tick loop's auto-jump gate.
+    AutoJump,
+    /// `options.sprintWindow` → [`crate::config::Options::sprint_window_ticks`]
+    /// (issue #444). An `IntRange(0, 10)`, so it goes through
+    /// `SliderRange`/[`slider_fraction`] like `RenderDistance`, not
+    /// [`Self::unit_double`]. Fed to `Sim::set_sprint_window_ticks`.
+    SprintWindow,
     /// `options.invertMouseX` → [`crate::config::Options::invert_mouse_x`]
     /// (issue #203). Fed to `apply_look_inverted`.
     InvertMouseX,
@@ -250,14 +262,14 @@ pub enum LiveOption {
     /// `options.discreteMouseScroll` →
     /// [`crate::config::Options::discrete_mouse_scroll`] (issue #444).
     ///
-    /// The one row of #444's six that had a consumer reachable without a new
-    /// subsystem. `MouseHandler.onScroll` applies it at the input boundary
+    /// The first row of #444's six, and the one that needed no new subsystem:
+    /// `MouseHandler.onScroll` applies it at the input boundary
     /// (`MouseHandler.java:189-192`), which is `app/lifecycle.rs` here — so it
     /// affects **both** wheel consumers, the hotbar and every menu list, from one
-    /// place. The other five need `Sim`/`InputState` changes (`toggleAttack`,
-    /// `toggleUse`, `autoJump`, `sprintWindow`) or a subsystem that does not exist
-    /// (`allowCursorChanges`, `rawMouseInput`), and a row for those would be the
-    /// island this enum's `ChatScale` doc describes in reverse.
+    /// place. The other four are now live too (`toggleAttack`/`toggleUse`/
+    /// `autoJump`/`sprintWindow` — see this enum's variants); only
+    /// `allowCursorChanges` and `rawMouseInput` still have no subsystem, so no
+    /// row exists for them.
     DiscreteMouseScroll,
     /// `options.mouseWheelSensitivity` →
     /// [`crate::config::Options::mouse_wheel_sensitivity`] (issue #203). Fed
@@ -340,6 +352,10 @@ impl LiveOption {
             | LiveOption::ViewBobbing
             | LiveOption::ToggleSneak
             | LiveOption::ToggleSprint
+            | LiveOption::ToggleAttack
+            | LiveOption::ToggleUse
+            | LiveOption::AutoJump
+            | LiveOption::SprintWindow
             | LiveOption::InvertMouseX
             | LiveOption::InvertMouseY
             | LiveOption::DiscreteMouseScroll
@@ -528,6 +544,11 @@ impl Cell {
         // existed.
         if spec.live == Some(LiveOption::RenderDistance) {
             return Some(render_distance_slider_fraction(options.render_distance));
+        }
+        // Same shape, for `sprintWindow`'s `IntRange(0, 10)` (issue #444): the
+        // handle must track the live tick count, not the frozen default 7.
+        if spec.live == Some(LiveOption::SprintWindow) {
+            return Some(sprint_window_slider_fraction(options.sprint_window_ticks));
         }
         // A **live** `UnitDouble` option reads its handle position from the
         // real, persisted value; only an inactive one falls through to the
@@ -874,6 +895,23 @@ pub fn render_distance_slider_fraction(chunks: u32) -> f32 {
     range.to_slider_value(i32::try_from(chunks).unwrap_or(range.min))
 }
 
+/// `sprintWindow`'s slider fraction from the real, persisted tick count.
+///
+/// Reuses the same [`INT_RANGE_SLIDERS`] row the inactive version used, so the
+/// live handle and the frozen-default handle are placed by one expression and
+/// cannot drift. Falls back to the range's own minimum if the table row ever
+/// goes missing, which is a visible handle at the left rather than none at all.
+/// Mirrors [`render_distance_slider_fraction`] — same shape, same reasoning,
+/// an `IntRange(0, 10)` (`Options.java:637-638`) rather than the chunk range.
+#[must_use]
+pub fn sprint_window_slider_fraction(ticks: u8) -> f32 {
+    let range = INT_RANGE_SLIDERS
+        .iter()
+        .find(|(a, _, _)| *a == "sprintWindow")
+        .map_or(SliderRange { min: 0, max: 10 }, |(_, r, _)| *r);
+    range.to_slider_value(i32::from(ticks))
+}
+
 /// `mouseWheelSensitivity`'s slider fraction from the real, live config
 /// value — the one place this module inverts vanilla's own stringifier
 /// rather than restating a table.
@@ -950,6 +988,29 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
         }
         LiveOption::ToggleSprint => {
             if options.toggle_sprint { "Toggle" } else { "Hold" }.to_string()
+        }
+        LiveOption::ToggleAttack => {
+            if options.toggle_attack { "Toggle" } else { "Hold" }.to_string()
+        }
+        LiveOption::ToggleUse => {
+            if options.toggle_use { "Toggle" } else { "Hold" }.to_string()
+        }
+        // `createBoolean("options.autoJump", false)` (`Options.java:501`) —
+        // the plain boolean stringifier, `OPTIONS_ON`/`OPTIONS_OFF`, not the
+        // `ToggleKeyMapping` "Toggle"/"Hold".
+        LiveOption::AutoJump => {
+            if options.auto_jump { "ON" } else { "OFF" }.to_string()
+        }
+        // `IntRange(0, 10)` (`Options.java:631-640`), stringifier
+        // `value == 0 ? genericValueLabel(caption, OPTION_OFF) :
+        // genericValueLabel(caption, OPTION_VALUE, value)` — "OFF" at 0,
+        // else the tick count.
+        LiveOption::SprintWindow => {
+            if options.sprint_window_ticks == 0 {
+                "OFF".to_string()
+            } else {
+                options.sprint_window_ticks.to_string()
+            }
         }
         LiveOption::InvertMouseX => {
             if options.invert_mouse_x { "ON" } else { "OFF" }.to_string()
@@ -1240,11 +1301,13 @@ static VIDEO: &[Entry] = &[
 /// `key.attack`, `key.use` (`Options.java:603-629`) — and their values are
 /// `options.key.toggle`/`options.key.hold` rather than ON/OFF.
 ///
-/// **Sneak and Sprint are live** (issue #202) — [`crate::config::Options::toggle_sneak`]/
-/// `toggle_sprint`, read by `InputState::set` (`lodestone-controller`).
-/// Attack/Destroy and Use Item/Place Block stay inactive: #202 is scoped to
-/// movement, and this crate's attack/use handling (`interact.rs`) has no
-/// toggle concept to hang a mode off yet.
+/// **All four toggles are live** — Sneak/Sprint since #202
+/// ([`crate::config::Options::toggle_sneak`]/`toggle_sprint`, read by
+/// `InputState::set_toggle_modes`), Attack/Use since #444
+/// (`toggle_attack`/`toggle_use`, carried by the same setter; the flags reach
+/// the model end to end, and `interact.rs` will hang its own consumers off
+/// them). **`autoJump` and `sprintWindow` are live since #444 too** — the
+/// tick loop's auto-jump gate, and the double-tap-sprint window respectively.
 static CONTROLS: &[Entry] = &[
     pair(
         nav("Mouse Settings...", SettingsPage::Mouse),
@@ -1258,12 +1321,12 @@ static CONTROLS: &[Entry] = &[
         live_cycle("toggleSprint", "Sprint", LiveOption::ToggleSprint),
     ),
     pair(
-        cycle("toggleAttack", "Attack/Destroy"),
-        cycle("toggleUse", "Use Item/Place Block"),
+        live_cycle("toggleAttack", "Attack/Destroy", LiveOption::ToggleAttack),
+        live_cycle("toggleUse", "Use Item/Place Block", LiveOption::ToggleUse),
     ),
     pair(
-        cycle("autoJump", "Auto-Jump"),
-        slider("sprintWindow", "Sprint Window"),
+        live_cycle("autoJump", "Auto-Jump", LiveOption::AutoJump),
+        live_slider("sprintWindow", "Sprint Window", LiveOption::SprintWindow),
     ),
     lone(cycle("operatorItemsTab", "Operator Items Tab")),
 ];
@@ -3065,6 +3128,8 @@ mod tests {
                 LiveOption::RenderDistance,
                 LiveOption::ToggleSneak,
                 LiveOption::ToggleSprint,
+                LiveOption::ToggleAttack,
+                LiveOption::ToggleUse,
                 // Mouse page: look Sensitivity is the #443 migration, and it
                 // is declared *before* Scroll Sensitivity in `MOUSE`'s first
                 // `pair`, which is why it sorts here.
@@ -3720,6 +3785,8 @@ mod tests {
             LiveOption::ViewBobbing,
             LiveOption::ToggleSneak,
             LiveOption::ToggleSprint,
+            LiveOption::ToggleAttack,
+            LiveOption::ToggleUse,
             LiveOption::InvertMouseX,
             LiveOption::InvertMouseY,
             LiveOption::MouseWheelSensitivity,
@@ -3763,6 +3830,8 @@ mod tests {
                 | LiveOption::ViewBobbing
                 | LiveOption::ToggleSneak
                 | LiveOption::ToggleSprint
+                | LiveOption::ToggleAttack
+                | LiveOption::ToggleUse
                 | LiveOption::InvertMouseX
                 | LiveOption::InvertMouseY
                 | LiveOption::MouseWheelSensitivity
