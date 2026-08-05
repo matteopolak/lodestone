@@ -82,6 +82,13 @@ impl Sim {
                     self.set_phase(SessionPhase::Connected);
                 }
                 NetUpdate::Chunk { x, z } => {
+                    // PERF INSTRUMENT: track first chunk arrival
+                    if self.first_chunk_at.is_none() {
+                        self.first_chunk_at = Some(std::time::Instant::now());
+                        tracing::info!(
+                            "first chunk ({x}, {z}) arrived at client, meshing begins"
+                        );
+                    }
                     // §12.24 dirty-region signal: no block data travels on the
                     // event — the client applies decoded chunks to its own
                     // `World`, which we read via `NetClient::sections_and_light_at`

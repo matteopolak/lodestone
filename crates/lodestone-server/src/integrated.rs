@@ -559,7 +559,13 @@ impl IntegratedServer {
         let mob_handle = MobHandle::default();
         let seed_mobs = mob_handle.clone();
         let seed_task = spawn_tick_task(&shutdown, async move {
+            let t_seed = std::time::Instant::now();
+            tracing::info!(
+                "mob seed task: generating {} columns for mob_area",
+                seed_coords.len(),
+            );
             let columns = generate_columns_offloaded(seed_source, seed_coords.clone()).await;
+            let gen_ms = t_seed.elapsed().as_millis();
             // `generate_columns_offloaded` guarantees the result is aligned
             // index-for-index with the coordinates it was given, which is what
             // makes this zip correct rather than merely plausible — see its own
@@ -569,6 +575,12 @@ impl IntegratedServer {
                 center_x,
                 center_z,
                 mob_count,
+            );
+            tracing::info!(
+                "mob seed task done: {}ms (gen={}ms, reseed={}ms)",
+                t_seed.elapsed().as_millis(),
+                gen_ms,
+                t_seed.elapsed().as_millis() - gen_ms,
             );
         });
 
