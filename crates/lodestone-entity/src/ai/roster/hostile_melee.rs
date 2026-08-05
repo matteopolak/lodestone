@@ -231,8 +231,11 @@ pub const SPIDER: &[Registration] = &[
 /// A zombie gets **no** `FloatGoal`, which is not an omission: vanilla does not
 /// register one, because zombies sink and walk along the bottom.
 pub const ZOMBIE: &[Registration] = &[
-    // `Zombie.ZombieAttackTurtleEggGoal(this, 1.0, 3)` — a block-breaking goal
-    // with no turtle eggs to break.
+    // `Zombie.ZombieAttackTurtleEggGoal(this, 1.0, 3)` — a `RemoveBlockGoal`
+    // subclass: a 24-block spiral search (vertical range 3) for a `turtle_egg`,
+    // then break-progress and a destroy intent. Neither the candidate search
+    // nor the mutation exists on this seam (`docs/mob-block-perception.md`), and
+    // no turtle can spawn in this sim regardless.
     Registration::missing(Selector::Goal, 4, "Zombie.ZombieAttackTurtleEggGoal"),
     Registration::goal(8, "LookAtPlayerGoal(Player)", look_at_player_8),
     Registration::goal(8, "RandomLookAroundGoal", random_look_around),
@@ -356,9 +359,13 @@ pub const DROWNED: &[Registration] = &[
 ///
 /// [`GoalSelector::remove`]: crate::ai::GoalSelector::remove
 pub const SKELETON: &[Registration] = &[
-    // `RestrictSunGoal(this)` and `FleeSunGoal(this, 1.0)` both need a
-    // sky-light-and-daytime query the AI seam does not expose, so a skeleton
-    // does not seek shade. Daylight *burning* is separately #226's.
+    // `RestrictSunGoal(this)` and `FleeSunGoal(this, 1.0)` — two different
+    // mechanisms, both absent. `RestrictSunGoal` reads no block: its gate is a
+    // daytime query plus an empty HEAD slot, and its *effect* is
+    // `GroundPathNavigation.setAvoidSun(true)` — a sky-light penalty in the
+    // path evaluator, a pathfinder feature. `FleeSunGoal` needs a host-computed
+    // shaded position (`FleeSunGoal.java:64-73` probes ten spots). So a
+    // skeleton does not seek shade. Daylight *burning* is separately #226's.
     Registration::missing(Selector::Goal, 2, "RestrictSunGoal"),
     Registration::missing(Selector::Goal, 3, "FleeSunGoal"),
     Registration::goal(3, "AvoidEntityGoal(Wolf)", avoid_entity),

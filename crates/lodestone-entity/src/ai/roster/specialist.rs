@@ -96,8 +96,6 @@
 //! [#227]: https://github.com/matteopolak/lodestone/issues/227
 //! [`MeleeAttackGoal`]: crate::ai::goals::MeleeAttackGoal
 
-use lodestone_model::Vec3;
-
 use crate::ai::goal::{Flag, FlagSet, Goal};
 use crate::ai::mob::{MobController, distance_sqr};
 
@@ -748,7 +746,7 @@ mod tests {
         let world = Flat::new();
         let (mut mob, mut ai) = rostered(&world, "guardian", GUARDIAN_SPEED);
 
-        let mut run = |mob: &mut NavigatingMob<'_>, ai: &mut GoalSelector| {
+        let run = |mob: &mut NavigatingMob<'_>, ai: &mut GoalSelector| {
             mob.set_attack_target(Some(target));
             let mut first = None;
             for tick in 1..=200 {
