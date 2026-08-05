@@ -388,6 +388,10 @@ pub struct PersistenceStats {
     pub block_entities_loaded: AtomicU64,
     /// Block entities encoded into a chunk across all saves.
     pub block_entities_written: AtomicU64,
+    /// Pending block and fluid ticks rescheduled from disk across all loads.
+    pub scheduled_ticks_loaded: AtomicU64,
+    /// Pending block and fluid ticks encoded into a chunk across all saves.
+    pub scheduled_ticks_written: AtomicU64,
 }
 
 /// The state a save needs, shared between the source and its save handle.
@@ -416,7 +420,171 @@ struct WorldState {
     /// `tick_all`, so saving through them would have desynchronised the
     /// running server from what landed on disk.
     block_entities: BlockEntityHandle,
+    /// The world's pending block and fluid ticks — the same queues the tick
+    /// loop drains, not a copy. See [`ScheduledTickHandle`].
+    scheduled: ScheduledTickHandle,
     stats: PersistenceStats,
+}
+
+/// The world's two scheduled-tick queues, plus the game tick their
+/// `trigger_tick`s are measured against — shared, so the save path can read
+/// them.
+///
+/// # Why this type exists rather than the queues being locals
+///
+/// `tick::run_tick_loop` owned both queues as local `let mut` bindings, which
+/// made them unreachable from anywhere else: the only non-destructive way to
+/// see a queue's contents is [`crate::ScheduledTickQueue::iter`], and no
+/// reference to the queue escaped the function. So `chunk_nbt` wrote an empty
+/// `block_ticks` list for every chunk and a pending redstone or fluid tick was
+/// lost on quit (issue #468).
+///
+/// # The game tick lives here, and that is deliberate
+///
+/// Saving a tick means writing `delay = trigger_tick - game_time_at_save`, so
+/// the save path needs the same counter the queues were scheduled against.
+/// Taking it from a second source is issue #323's scar exactly — `SET_TIME`
+/// decoded, darkened the sky, and carried wall-clock elapsed-since-join while
+/// `tick.rs`'s real counter never reached the encoder, with every link in the
+/// wire green. So the tick loop stores its own `game_tick` here, one relaxed
+/// atomic store per tick, and the save path reads that.
+#[derive(Debug, Clone, Default)]
+pub struct ScheduledTickHandle {
+    queues: Arc<Mutex<ScheduledTickQueues>>,
+    game_tick: Arc<AtomicU64>,
+}
+
+/// The pair of queues [`ScheduledTickHandle`] guards, mirroring
+/// `ServerLevel.blockTicks`/`fluidTicks` (`ServerLevel.java:209-210`).
+#[derive(Debug, Default)]
+pub struct ScheduledTickQueues {
+    /// `ServerLevel.blockTicks`.
+    pub block: crate::scheduled_tick::ScheduledTickQueue<String>,
+    /// `ServerLevel.fluidTicks`.
+    pub fluid: crate::scheduled_tick::ScheduledTickQueue<String>,
+}
+
+impl ScheduledTickHandle {
+    /// A handle onto a fresh, empty pair of queues.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Runs `f` against both locked queues, returning its result.
+    ///
+    /// Both at once, and **synchronously**, for two reasons. Handing over both
+    /// lets `tick::run_tick_loop` wrap its existing scheduled-tick section in
+    /// one closure with every use site textually unchanged, so the wiring diff
+    /// is a wrapper rather than a rewrite of code the redstone work is actively
+    /// editing. And a closure cannot contain an `.await`, so the compiler — not
+    /// a reviewer — guarantees the guard is never held across a suspension
+    /// point, which would make the tick task non-`Send`.
+    ///
+    /// Same shape as [`crate::BlockEntityHandle::with`], and a poisoned lock is
+    /// a bug rather than a recoverable condition, for the same reason.
+    pub fn with<R>(&self, f: impl FnOnce(&mut ScheduledTickQueues) -> R) -> R {
+        let mut guard = self.queues.lock().expect("scheduled tick lock poisoned");
+        f(&mut guard)
+    }
+
+    /// Records the tick the queues' `trigger_tick`s are relative to.
+    ///
+    /// Called once per tick by `tick::run_tick_loop`. A single relaxed atomic
+    /// store — the cost on the tick thread is a count of one, no I/O and no
+    /// encoding, which is the property `docs/world-open-latency.md` exists to
+    /// protect.
+    pub fn set_game_tick(&self, tick: u64) {
+        self.game_tick.store(tick, Ordering::Relaxed);
+    }
+
+    /// The last tick recorded by [`set_game_tick`](Self::set_game_tick), or `0`
+    /// if the loop has not run — which is correct for a world that is saved
+    /// before its first tick.
+    #[must_use]
+    pub fn game_tick(&self) -> u64 {
+        self.game_tick.load(Ordering::Relaxed)
+    }
+
+    /// Every pending tick in chunk `(cx, cz)`, as [`chunk_nbt::SavedTick`]s
+    /// with delays relative to [`game_tick`](Self::game_tick).
+    ///
+    /// The conversion is vanilla's, inverted: `SavedTick::unpack` loads with
+    /// `trigger_tick = current_tick + delay`, so saving is `delay =
+    /// trigger_tick - game_tick`. Computed as a **signed** subtraction on
+    /// purpose — a tick already overdue at save time yields a negative delay,
+    /// which is not an edge case but 1,584 of the 133,051 entries measured in
+    /// real vanilla worlds.
+    fn saved_ticks_for(&self, cx: i32, cz: i32) -> (Vec<chunk_nbt::SavedTick>, Vec<chunk_nbt::SavedTick>) {
+        let now = i64::try_from(self.game_tick()).unwrap_or(i64::MAX);
+        let convert = |queue: &crate::scheduled_tick::ScheduledTickQueue<String>| {
+            queue
+                .iter()
+                .filter(|tick| (tick.pos.0 >> 4, tick.pos.2 >> 4) == (cx, cz))
+                .map(|tick| chunk_nbt::SavedTick {
+                    pos: tick.pos,
+                    kind: tick.kind.clone(),
+                    delay: i32::try_from(
+                        i64::try_from(tick.trigger_tick).unwrap_or(i64::MAX) - now,
+                    )
+                    .unwrap_or(i32::MAX),
+                    priority: tick.priority,
+                })
+                .collect::<Vec<_>>()
+        };
+        self.with(|queues| (convert(&queues.block), convert(&queues.fluid)))
+    }
+
+    /// The set of chunks holding at least one pending tick in either queue.
+    fn chunks_with_pending_ticks(&self) -> HashSet<(i32, i32)> {
+        self.with(|queues| {
+            queues
+                .block
+                .iter()
+                .map(|tick| (tick.pos.0 >> 4, tick.pos.2 >> 4))
+                .chain(
+                    queues
+                        .fluid
+                        .iter()
+                        .map(|tick| (tick.pos.0 >> 4, tick.pos.2 >> 4)),
+                )
+                .collect()
+        })
+    }
+
+    /// Schedules a loaded chunk's saved ticks, rebasing each delay onto the
+    /// current game tick. Returns how many were actually scheduled.
+    ///
+    /// A delay so negative that `game_tick + delay` would go below zero
+    /// saturates to `0`, i.e. "due immediately" — which is what an overdue tick
+    /// means, and the only reading that cannot panic or wrap. `schedule`'s own
+    /// `(pos, kind)` dedup then silently drops anything already pending, which
+    /// is what makes reloading a chunk idempotent.
+    fn restore(&self, block: &[chunk_nbt::SavedTick], fluid: &[chunk_nbt::SavedTick]) -> u64 {
+        if block.is_empty() && fluid.is_empty() {
+            return 0;
+        }
+        let now = i64::try_from(self.game_tick()).unwrap_or(i64::MAX);
+        self.with(|queues| {
+            let mut count = 0u64;
+            for (saved, is_block) in block
+                .iter()
+                .map(|t| (t, true))
+                .chain(fluid.iter().map(|t| (t, false)))
+            {
+                let trigger = (now + i64::from(saved.delay)).max(0) as u64;
+                let target = if is_block {
+                    &mut queues.block
+                } else {
+                    &mut queues.fluid
+                };
+                if target.schedule(saved.pos, saved.kind.clone(), trigger, saved.priority) {
+                    count += 1;
+                }
+            }
+            count
+        })
+    }
 }
 
 /// The chunk a block position belongs to.
@@ -476,6 +644,7 @@ impl<S: ChunkSource> RegionChunkSource<S> {
                 dirty: Mutex::new(HashSet::new()),
                 pending_unload: Mutex::new(HashSet::new()),
                 block_entities: BlockEntityHandle::default(),
+                scheduled: ScheduledTickHandle::default(),
                 stats: PersistenceStats::default(),
             }),
         })
@@ -493,6 +662,18 @@ impl<S: ChunkSource> RegionChunkSource<S> {
     #[must_use]
     pub fn block_entities(&self) -> BlockEntityHandle {
         self.state.block_entities.clone()
+    }
+
+    /// The world's scheduled-tick queues, for the tick loop to drain and for
+    /// the save path to read.
+    ///
+    /// Handed out from here for exactly the reason
+    /// [`block_entities`](Self::block_entities) is: a queue the tick loop owns
+    /// privately is a queue persistence can never see, and that was the whole
+    /// of #468's remaining half.
+    #[must_use]
+    pub fn scheduled_ticks(&self) -> ScheduledTickHandle {
+        self.state.scheduled.clone()
     }
 
     /// How many columns the edit map is holding.
@@ -546,6 +727,14 @@ impl<S: ChunkSource> RegionChunkSource<S> {
             chunk_nbt::column_from_nbt(&nbt, self.state.min_y, self.state.height).ok()?;
         let extras = chunk_nbt::extras_from_nbt(&nbt);
         let restored = self.restore_block_entities(&extras);
+        let ticks = self
+            .state
+            .scheduled
+            .restore(&extras.block_ticks, &extras.fluid_ticks);
+        self.state
+            .stats
+            .scheduled_ticks_loaded
+            .fetch_add(ticks, Ordering::Relaxed);
         Some(LoadedChunk {
             column,
             holds_block_entities: restored > 0,
@@ -748,14 +937,11 @@ impl WorldSaveHandle {
                 .map(|(pos, entity)| (*pos, entity.clone()))
                 .collect::<Vec<_>>()
         });
+        let (block_ticks, fluid_ticks) = self.state.scheduled.saved_ticks_for(cx, cz);
         ChunkExtras {
             block_entities,
-            // Scheduled ticks are not reachable from here yet: the queues are
-            // locals inside `tick::run_tick_loop` rather than a shared handle,
-            // so nothing outside that function can see them. The schema half
-            // is done (`chunk_nbt::SavedTick`) and this is where they plug in.
-            block_ticks: Vec::new(),
-            fluid_ticks: Vec::new(),
+            block_ticks,
+            fluid_ticks,
         }
     }
 
@@ -787,6 +973,11 @@ impl WorldSaveHandle {
         // block entities in the world, not by the 512-column store. A world
         // with no containers pays nothing.
         pending.extend(self.block_entity_chunks());
+        // And every chunk holding a pending tick, for the same reason: nothing
+        // marks a chunk dirty when a redstone repeater's tick is scheduled into
+        // it, so a dirty-only save would drop the timing and a redstone clock
+        // would come back stopped.
+        pending.extend(self.state.scheduled.chunks_with_pending_ticks());
         let taken: Vec<(i32, i32)> = pending.into_iter().collect();
         if taken.is_empty() {
             self.state.stats.empty_saves.fetch_add(1, Ordering::Relaxed);
@@ -867,8 +1058,12 @@ impl WorldSaveHandle {
         };
 
         // Taken before `edits`, for the lock-order reason `save_region`
-        // documents.
-        let holds_block_entities = self.block_entity_chunks();
+        // documents. Pending ticks join block entities in the "never release"
+        // set on the same argument: a chunk whose only unsaved state is a
+        // scheduled tick is not dirty, so releasing it would let the next save
+        // carry its old bytes across and the tick would be gone.
+        let mut holds_block_entities = self.block_entity_chunks();
+        holds_block_entities.extend(self.state.scheduled.chunks_with_pending_ticks());
 
         let mut released = 0u64;
         let mut deferred: Vec<(i32, i32)> = Vec::new();
@@ -1027,6 +1222,10 @@ impl WorldSaveHandle {
                     .stats
                     .block_entities_written
                     .fetch_add(extras.block_entities.len() as u64, Ordering::Relaxed);
+                self.state.stats.scheduled_ticks_written.fetch_add(
+                    (extras.block_ticks.len() + extras.fluid_ticks.len()) as u64,
+                    Ordering::Relaxed,
+                );
                 let nbt = chunk_nbt::column_to_nbt_with(cx, cz, column, extras);
                 let mut writer = Writer::default();
                 write_named_nbt(&mut writer, "", &nbt).map_err(Error::Nbt)?;
