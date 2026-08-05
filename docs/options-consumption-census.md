@@ -53,7 +53,7 @@ non-`keybinds` field of `config::Options` has a row that reaches it.
 
 ## The census
 
-### Wired (42 rows outside a world / 41 inside, 17 distinct options)
+### Wired (43 rows outside a world / 42 inside, 18 distinct options)
 
 | option | page(s) | type | vanilla default | consumer |
 |---|---|---|---|---|
@@ -61,7 +61,8 @@ non-`keybinds` field of `config::Options` has a row that reaches it.
 | `bobView` | Accessibility | toggle | `true` | `Sim::set_view_bobbing` |
 | `toggleCrouch` / `toggleSprint` | Controls | cycle (Toggle/Hold) | `false` | `InputState::set_toggle_modes` |
 | `invertMouseX` / `invertMouseY` | Mouse | toggle | `false` | `apply_look_inverted` |
-| `mouseWheelSensitivity` | Mouse | slider, log `IntRange(-200,100)` → `0.01..=10.0` | `1.0` | hotbar scroll handler |
+| `mouseWheelSensitivity` | Mouse | slider, log `IntRange(-200,100)` → `0.01..=10.0` | `1.0` | `app::scale_scroll` — **both** wheel consumers, hotbar and every menu list |
+| `discreteMouseScroll` | Mouse | toggle | `false` | `app::scale_scroll` — `signum` **before** the sensitivity multiply (#444) |
 | `chatColors` | Chat | toggle | `true` | `hud.rs` — strips legacy `§` codes |
 | `chatScale` | Chat | slider `UnitDouble` | `1.0` | chat pose scale |
 | `chatWidth` | Chat | slider `UnitDouble` | `1.0` | box width, `floor(pct*280+40)` px |
@@ -77,8 +78,8 @@ Three options appear on **two pages each** — that is vanilla's own shape, one
 `OptionInstance` placed on both `ChatOptionsScreen` and
 `AccessibilityOptionsScreen`, so editing either row moves the other's label too.
 This is why `LiveOption` is keyed by the option and not by the row, and why the
-live *row* count (42 outside a world, 41 inside) exceeds the distinct-option
-count (17). Both numbers are asserted by
+live *row* count (43 outside a world, 42 inside) exceeds the distinct-option
+count (18). Both numbers are asserted by
 `the_disabled_majority_is_the_point_and_it_is_measured`, so they cannot drift
 here without a build failure.
 
@@ -95,7 +96,7 @@ here without a build failure.
 | **Narrator / high contrast** | `narrator`, `narratorHotkey`, `highContrast`, `highContrastBlockOutline` | no narrator, and high contrast is a resource pack swap |
 | **Skin & model parts** | all 7 `modelPart.*`, `mainHand` | needs the parts to reach the entity renderer *and* the serverbound client-settings packet |
 | **Menu chrome** | `menuBackgroundBlurriness`, `panoramaSpeed`, `notificationDisplayTime`, `hideSplashTexts`, `darkMojangStudiosBackground`, `hideLightningFlashes`, `backgroundForChatOnly`, `rotateWithMinecart`, `inGameNotification`, `sharePresence` | assorted; mostly small but each needs its own consumer |
-| **Input** | `toggleAttack`, `toggleUse`, `autoJump`, `sprintWindow`, `rawMouseInput`, `discreteMouseScroll`, `allowCursorChanges`, `operatorItemsTab` | `lodestone-controller` knobs; the closest to cheap of the greyed groups |
+| **Input** | `toggleAttack`, `toggleUse`, `autoJump`, `sprintWindow`, `rawMouseInput`, ~~`discreteMouseScroll`~~, `allowCursorChanges`, `operatorItemsTab` | see the breakdown below — this group is **not** one tier |
 
 ## How to change it
 
@@ -220,3 +221,24 @@ handles the click, and `slider_fraction` already returns the live value because
 - `.cache/mc/26.2/client-src/net/minecraft/client/Options.java` and the
   `gui/screens/options/*` screens — the authority for every type, range,
   default and label string above.
+
+## The Input group is three tiers, not one (issue #444)
+
+The table above used to call this group "the closest to cheap of the greyed
+groups". That is true of the *plumbing* and false of the work, and the difference
+is which subsystem each row needs. Measured while wiring #444:
+
+| option | what it needs | owner |
+|---|---|---|
+| `discreteMouseScroll` | **nothing new** — `app`'s wheel boundary already existed | **live since #444** |
+| `toggleAttack`, `toggleUse` | `InputState::set_toggle_modes` widened to four flags, `Sim::set_toggle_modes` to match, then one line in `app/redraw.rs` | `lodestone-controller` + `lodestone-shell/src/sim/**` |
+| `autoJump`, `sprintWindow` | a physics/timing consumer that does not exist yet | `sim/**` |
+| `rawMouseInput`, `allowCursorChanges` | **no subsystem at all** — this shell never changes the OS cursor and has no raw-input mode to toggle | not a wiring job |
+
+The load-bearing correction: **#444's premise that all six rows pass through one
+line (`app/redraw.rs`'s `set_toggle_modes` call) is false.** Only `toggleAttack`
+and `toggleUse` do. `discreteMouseScroll` goes through the wheel handler,
+`autoJump`/`sprintWindow` need sim consumers, and the last two have no consumer to
+reach. So "unblock that one line and wire all six" is not a plan that exists —
+each tier is separate work, and the bottom tier should be closed as won't-do until
+a subsystem exists rather than given a row.

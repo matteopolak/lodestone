@@ -241,6 +241,44 @@ fn hud_follows_world(screen: crate::menu::Screen) -> bool {
     )
 }
 
+/// `MouseHandler.onScroll`'s scroll-delta transform (`MouseHandler.java:189-192`),
+/// which is the boundary **both** wheel consumers read (issues #203, #444):
+///
+/// ```java
+/// boolean discreteScroll = this.minecraft.options.discreteMouseScroll().get();
+/// double scrollSensitivity = this.minecraft.options.mouseWheelSensitivity().get();
+/// double scaledYOffset = (discreteScroll ? Math.signum(yoffset) : yoffset) * scrollSensitivity;
+/// ```
+///
+/// ## Why it is one function, applied in two arms
+///
+/// Vanilla computes `scaledYOffset` **once** and hands the same value to
+/// `screen().mouseScrolled(..)` and to `ScrollWheelHandler.onMouseScroll`. So neither
+/// `discreteMouseScroll` nor `mouseWheelSensitivity` is a hotbar option or a
+/// list option — they define what a wheel notch *is*, before anything decides what to
+/// do with it. Putting the transform inside either consumer would have made the other
+/// one silently ignore both options, which is how `discreteMouseScroll` came to be
+/// #444's only row with a consumer this shell could actually reach.
+///
+/// **The order matters and is vanilla's:** `signum` first, *then* the sensitivity
+/// multiply. Reversed, a sensitivity of 2.0 with discrete scrolling on would yield
+/// `signum(2 * dy) == 1.0` and the option would silently cap wheel speed at one notch
+/// — the sensitivity row would stop working whenever this row was on.
+///
+/// Free function rather than a `WindowApp` method so it is testable without a window,
+/// exactly as [`accumulate_scroll`] and [`resolve_key`] are.
+fn scale_scroll(dy: f64, discrete: bool, sensitivity: f32) -> f64 {
+    let d = if discrete {
+        // `Math.signum`, which is 0.0 for 0.0 — not `1.0`. `f64::signum` returns
+        // 1.0 for +0.0, so a zero delta must be handled explicitly or a stationary
+        // wheel would scroll one notch per event.
+        if dy == 0.0 { 0.0 } else { dy.signum() }
+    } else {
+        dy
+    };
+    d * f64::from(sensitivity)
+}
+
 /// Vanilla's `ScrollWheelHandler.onMouseScroll` (issue #203): folds a
 /// sensitivity-scaled, possibly-fractional scroll offset into a whole number
 /// of hotbar slots, carrying the remainder in `accum` across calls so a

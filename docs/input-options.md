@@ -144,15 +144,30 @@ Three options, three different depths of wiring:
   wrap-safe angular delta, since `apply_look` wraps yaw into `[-180, 180)`
   and a fixture whose starting yaw sits near that seam can wrap the plain and
   inverted runs on opposite sides.
-- **`sensitivity` (mouse look, not the wheel)** is deliberately still
-  inactive. It lives on `config::Config`, parsed from argv every run and never
-  written back — see `menu/options.rs`'s `LiveOption` doc. A settings row that
-  appeared to persist it would be fabricated.
-- **`discreteMouseScroll`/`allowCursorChanges`/`rawMouseInput`** are also
-  still inactive: none has a consumer in this shell (no discrete-vs-continuous
-  scroll distinction, no OS cursor swap, no raw-input toggle). Wiring the
-  label without the behaviour would be the exact fabrication #203 exists to
-  fix, one row over — see `menu/options.rs`'s `MOUSE` doc comment.
+- ~~**`sensitivity` (mouse look, not the wheel)** is deliberately still
+  inactive.~~ **Live since #443** (`afba832`): it moved off the argv-only
+  `config::Config` onto the persisted `config::Options`, and
+  `Config::resolve_persisted` folds it in at launch so the seven existing readers
+  needed no edit. **Known limitation: the fold happens at launch, so a change made
+  in the settings screen applies on the next one.** Closing that needs a
+  `Sim::set_sensitivity` in `sim/step.rs` plus a per-frame push from
+  `app/redraw.rs` beside `set_mouse_invert` — it is *not* the ~2-line
+  `app/redraw.rs` change it looks like, because there is no setter to call yet.
+- ~~**`discreteMouseScroll`**~~ is **live since #444**. Its consumer is
+  `app::scale_scroll`, which reproduces `MouseHandler.onScroll`
+  (`MouseHandler.java:189-192`): `(discrete ? signum(dy) : dy) * sensitivity`,
+  computed **once** and handed to both wheel consumers — the hotbar and every menu
+  list — exactly as vanilla hands one `scaledYOffset` to `ScrollWheelHandler` and
+  `screen().mouseScrolled(..)`. The order is load-bearing: scaling before `signum`
+  would cap wheel speed at one notch and silently break the sensitivity row, which
+  is what `discrete_scrolling_takes_the_sign_before_sensitivity_scales_it` executes
+  as its wrong hypothesis rather than describing.
+- **`allowCursorChanges`/`rawMouseInput`** remain inactive, and they are a
+  different tier from the row above rather than the same one: neither has a
+  *subsystem* to gate, not merely an unwired consumer. This shell never changes the
+  OS cursor and has no raw-input mode. Wiring either label would be the exact
+  fabrication #203 exists to fix. See `docs/options-consumption-census.md`'s
+  three-tier breakdown of the Input group.
 
 ## How to change it
 

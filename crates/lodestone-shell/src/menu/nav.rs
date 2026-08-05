@@ -1212,6 +1212,13 @@ impl MenuNav {
         self.options.invert_mouse_x
     }
 
+    /// [`crate::config::Options::discrete_mouse_scroll`] (issue #444), read by
+    /// `app/lifecycle.rs`'s two wheel arms — see that field's doc for why both.
+    #[must_use]
+    pub fn discrete_mouse_scroll(&self) -> bool {
+        self.options.discrete_mouse_scroll
+    }
+
     /// As [`MenuNav::invert_mouse_x`], for Y.
     #[must_use]
     pub fn invert_mouse_y(&self) -> bool {
@@ -2795,6 +2802,10 @@ impl MenuNav {
                 self.toggle_invert_mouse_x();
                 MenuAction::None
             }
+            SettingsOutcome::Cycle(LiveOption::DiscreteMouseScroll) => {
+                self.toggle_discrete_mouse_scroll();
+                MenuAction::None
+            }
             SettingsOutcome::Cycle(LiveOption::InvertMouseY) => {
                 self.toggle_invert_mouse_y();
                 MenuAction::None
@@ -3197,6 +3208,12 @@ impl MenuNav {
     /// As [`MenuNav::toggle_invert_mouse_x`], for Y.
     fn toggle_invert_mouse_y(&mut self) {
         self.options.invert_mouse_y = !self.options.invert_mouse_y;
+        self.persist_options();
+    }
+
+    /// Flips `options.discreteMouseScroll` (issue #444) and saves immediately.
+    fn toggle_discrete_mouse_scroll(&mut self) {
+        self.options.discrete_mouse_scroll = !self.options.discrete_mouse_scroll;
         self.persist_options();
     }
 

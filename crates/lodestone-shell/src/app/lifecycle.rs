@@ -508,7 +508,7 @@ impl ApplicationHandler for WindowApp {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => f64::from(y),
                     winit::event::MouseScrollDelta::PixelDelta(p) => p.y,
                 };
-                let scaled = dy * f64::from(self.nav.mouse_wheel_sensitivity());
+                let scaled = scale_scroll(dy, self.nav.discrete_mouse_scroll(), self.nav.mouse_wheel_sensitivity());
                 let step = accumulate_scroll(&mut self.scroll_accum, scaled);
                 if step != 0 {
                     self.sim.cycle_slot(-step);
@@ -560,6 +560,16 @@ impl ApplicationHandler for WindowApp {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => f64::from(y),
                     winit::event::MouseScrollDelta::PixelDelta(p) => p.y,
                 };
+                // The same boundary transform the hotbar arm above uses, because
+                // vanilla computes it **once** for both: `MouseHandler.onScroll`
+                // (`MouseHandler.java:189-192`) hands one `scaledYOffset` to
+                // `screen().mouseScrolled(..)` and to `ScrollWheelHandler` alike.
+                // Deliberately **not** run through `accumulate_scroll`, which exists
+                // for the hotbar's sub-notch *quantization*: `cycle_slot` takes a
+                // discrete slot step so it must carry fractions until one is due,
+                // while a pixel offset needs no accumulator — a fraction of a notch
+                // is already a meaningful number of pixels.
+                let dy = scale_scroll(dy, self.nav.discrete_mouse_scroll(), self.nav.mouse_wheel_sensitivity());
                 if dy != 0.0
                     && let Some((fb_w, fb_h)) = self.target.as_ref().map(RenderTarget::size)
                 {

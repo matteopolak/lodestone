@@ -298,6 +298,67 @@ fn ticks_for(sim: &mut Sim, dt: f64) -> u64 {
     sim.tick_count() - before
 }
 
+/// Issue #444, `discreteMouseScroll`: the delta collapses to its **sign**, and the
+/// sensitivity multiply happens **after**.
+///
+/// The order is the whole content of this gate, because both orders "work" on the
+/// common case (a single `LineDelta` notch of 1.0 at sensitivity 1.0 gives 1.0 either
+/// way). They diverge exactly where a player would notice, and the wrong hypothesis is
+/// *computed* here rather than described:
+///
+/// | input | vanilla, `signum` then scale | reversed, scale then `signum` |
+/// |---|---|---|
+/// | `dy = 0.4`, sens `2.0` | **2.0** | 1.0 |
+/// | `dy = 12.0` (trackpad), sens `0.5` | **0.5** | 1.0 |
+///
+/// Reversed, `signum` would eat the sensitivity entirely and cap wheel speed at one
+/// notch — i.e. turning this row on would silently break the sensitivity row. That is
+/// the defect a direction-only assertion cannot see.
+#[test]
+fn discrete_scrolling_takes_the_sign_before_sensitivity_scales_it() {
+    // Off: the raw delta passes through, scaled. This is also the proof the option is
+    // a pure addition — a trackpad's fractional delta is still proportional.
+    assert_eq!(scale_scroll(0.4, false, 2.0), 0.8);
+    assert_eq!(scale_scroll(12.0, false, 0.5), 6.0);
+
+    // On: sign first, then scale.
+    let small = scale_scroll(0.4, true, 2.0);
+    assert_eq!(small, 2.0, "a sub-notch delta becomes a full notch, then doubles");
+    let reversed_small = (0.4_f64 * 2.0).signum();
+    assert_ne!(
+        small, reversed_small,
+        "scale-then-signum gives {reversed_small}, so this gate does not discriminate"
+    );
+
+    let big = scale_scroll(12.0, true, 0.5);
+    assert_eq!(big, 0.5, "a 12 px trackpad delta becomes one notch, then halves");
+    let reversed_big = (12.0_f64 * 0.5).signum();
+    assert_ne!(
+        big, reversed_big,
+        "scale-then-signum gives {reversed_big}, so this gate does not discriminate"
+    );
+
+    // Direction survives the collapse.
+    assert_eq!(scale_scroll(-7.5, true, 1.0), -1.0);
+    assert_eq!(scale_scroll(7.5, true, 1.0), 1.0);
+
+    // `Math.signum(0.0)` is **0.0**, not 1.0. `f64::signum` disagrees, so this is the
+    // one place the Java and Rust primitives are not interchangeable — without the
+    // explicit zero case a stationary wheel would emit a notch per event.
+    assert_eq!(scale_scroll(0.0, true, 1.0), 0.0, "a zero delta must stay zero");
+    assert_eq!(
+        0.0_f64.signum(),
+        1.0,
+        "premise: f64::signum(0.0) really is 1.0, which is why the guard exists"
+    );
+
+    // And it composes with the hotbar's accumulator rather than replacing it: at a
+    // low sensitivity a discrete notch still needs several gestures to move a slot.
+    let mut accum = 0.0;
+    assert_eq!(accumulate_scroll(&mut accum, scale_scroll(0.1, true, 0.5)), 0);
+    assert_eq!(accumulate_scroll(&mut accum, scale_scroll(0.1, true, 0.5)), 1);
+}
+
 /// Issue #203: at the vanilla default sensitivity (`1.0`), one wheel
 /// notch (`LineDelta` magnitude `1.0`) must move exactly one hotbar slot
 /// — the pre-#203 behaviour — so the sensitivity feature is provably a
