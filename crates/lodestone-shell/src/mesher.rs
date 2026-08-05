@@ -1978,6 +1978,13 @@ impl TerrainMesh {
     /// [`Self::uploaded_sections`].
     pub fn drain_meshes(&mut self) -> Vec<Meshed> {
         let meshes = self.scheduler.drain();
+        let still_pending = self.scheduler.pending();
+        if still_pending > 50 {
+            tracing::info!(
+                "mesh scheduler: {} drained this frame, {} still pending in workers",
+                meshes.len(), still_pending,
+            );
+        }
         self.uploaded_sections.extend(meshes.iter().map(|m| m.key));
         meshes
     }
@@ -2039,6 +2046,20 @@ pub fn heal_dirty_columns(store: Res<ChunkWorld>, mut terrain: ResMut<TerrainMes
     }
     for _ in 0..DIRTY_COLUMN_BUDGET {
         let Some((cx, cz)) = terrain.dirty_columns.pop_first() else {
+            // PERF: log when backlog exists but budget is depleted for this frame
+            if !terrain.dirty_columns.is_empty() {
+                static BACKLOG_FRAME_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let n = BACKLOG_FRAME_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // Throttle: log every ~2 seconds at 120fps
+                if n % 240 == 0 {
+                    tracing::warn!(
+                        "mesh column backlog: {} dirty columns waiting (heal budget is {} forced + {} dirty), {} backlogged frames",
+                        terrain.dirty_columns.len(),
+                        DIRTY_COLUMN_BUDGET, DIRTY_COLUMN_BUDGET,
+                        n,
+                    );
+                }
+            }
             return;
         };
         terrain.mesh_column(&store, cx, cz);
