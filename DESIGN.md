@@ -3199,3 +3199,26 @@ Measured: the new control `a_sibling_threads_allocation_does_not_contaminate_a_m
 **The generalisation.** Ask of any lock-based isolation: *what is the set of code paths that mutate this state, and what is the set that takes this lock?* When the first set is "anything that allocates", "anything that logs", "anything that touches this global" — i.e. defined by a language or runtime facility rather than by a module — no lock can cover it and the fix has to move the state instead. This is §12.43's **duration** species (a counter outliving the gate) in its spatial form: **the state outlives the gate's scope sideways, across threads, rather than forwards in time.** Both are unreadable from the test source, because the test is exemplary and the defect is a property of what it was pointed at.
 
 Same session, adjacent: `NullSink` discards writes and therefore **structurally cannot distinguish a refused packet from a wrapped one**, so the v340 overflow gate had to assert through a `RecordingSink` (`AdapterError::Decode` **and** zero `set_block` calls). A test double complete enough to pass is the dangerous kind (§12.43's *world* species). And the two-row control table there is the reason the fix is not half of one: `checked_mul(16)` alone accepts `chunk_x = 1_875_000`, which multiplies to 30,000,000 and fits an `i32` perfectly well while sitting outside `WorldBorder.absoluteMaxSize`. Without the border-pair control, the incomplete fix looked complete.
+
+**12.95 The counter-over-duration rule, with the number that settles it: 585×.**
+
+`CLAUDE.md` says prefer a counter over a duration, and that a timing taken under load is attributed to the wrong cause. This is the cleanest measurement of that this repo has, taken while verifying `main` at `d197d555` in an isolated detached worktree with its own `--target-dir`.
+
+`sim::tests::a_frame_takes_many_short_world_guards_and_no_long_one` asserts that no single `World` guard in a frame approaches a frame's duration. It was the **only** failure in `cargo test --workspace --no-fail-fast` (5048 passed), and it failed on the duration:
+
+| run | longest guard hold | holds counted |
+|---|---|---|
+| inside the full workspace suite (`--test-threads=2`, six agents building) | **27,028,583 ns** | **45** |
+| alone, run 1 | 46,209 ns | **45** |
+| alone, run 2 | 47,000 ns | **45** |
+| alone, run 3 | 44,708 ns | **45** |
+
+**A 585× spread on a byte-identical binary, while the counter does not move at all.** The gate's *subject* — "does the frame take many short guards rather than one long one" — is a claim about the count, 45, which was correct throughout. The gate's *assertion* is about a duration, which is a property of the machine at that moment.
+
+Three things worth keeping:
+
+- **This is not a flaky test in the usual sense.** The code under test never changed behaviour; the instrument measured the load. A "fix" that widened the bound would have destroyed the gate's ability to detect the real defect it exists for (one long guard instead of many short ones), because the real defect and machine load both move the same number.
+- **The procedure that produced the right answer is the repo's own:** re-run a timing-shaped failure **alone**, a bounded number of times, before calling it a regression. Three runs, not one — a single alone-run agreeing with the assertion is consistent with luck.
+- **Where a duration is genuinely the subject, report the counter beside it.** Here the counter was already in the failure output, and it is what made the diagnosis take one step instead of a bisect. A gate that prints only the quantity it asserts on gives a reader nothing to cross-check against.
+
+Corollary for §12.19's ratio correction: a ratio of two *sequential* durations is not protected either, and this measurement bounds how badly — a 585× excursion on one arm swamps any ratio whose arms are not measured concurrently.
