@@ -12,7 +12,7 @@ fn main() -> anyhow::Result<()> {
     // world exist — so the binary is discoverable and `--help` never boots a game.
     match Config::from_args(std::env::args().skip(1)) {
         CliOutcome::Run(mut config) => {
-            init_logging();
+            let _chrome_guard = init_logging();
             // Fold `options.json` into the argv-parsed config, for the settings
             // that live in both (issue #443). An explicit flag still wins for
             // this run; everything else takes the persisted value, so the
@@ -36,8 +36,28 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// Initialise `tracing` from `RUST_LOG`, defaulting to `info`.
-fn init_logging() {
-    use tracing_subscriber::{EnvFilter, fmt};
+/// When `LODESTONE_TRACE` is set, also writes a chrome://tracing flamegraph
+/// to the named file.
+fn init_logging() -> Option<tracing_chrome::FlushGuard> {
+    use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::prelude::*;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = fmt().with_env_filter(filter).with_target(false).try_init();
+
+    let trace_path = std::env::var("LODESTONE_TRACE").ok().filter(|p| !p.is_empty());
+
+    if let Some(path) = trace_path {
+        let (chrome_layer, guard) = tracing_chrome::ChromeLayerBuilder::new().file(&path).build();
+        let _ = tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer().with_filter(filter))
+            .with(chrome_layer)
+            .try_init();
+        tracing::info!("chrome trace writing to {path}");
+        Some(guard)
+    } else {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .try_init();
+        None
+    }
 }

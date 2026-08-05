@@ -421,6 +421,7 @@ pub(crate) fn generate_columns_parallel<S: ChunkSource>(
 /// `generate_columns_parallel`'s scope either), so there it calls straight
 /// through — unchanged behaviour on a target that never had a second thread
 /// to protect.
+#[tracing::instrument(skip_all, fields(count = coords.len()))]
 pub(crate) async fn generate_columns_offloaded<S: ChunkSource + 'static>(
     source: Arc<S>,
     coords: Vec<(i32, i32)>,
