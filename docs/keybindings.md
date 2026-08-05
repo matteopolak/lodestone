@@ -309,7 +309,7 @@ CPU buffer and writes it as a PNG, entirely locally, to
 | default binding | `Options.java:675`, GLFW keysym `291` = F2, category `MISC` | `InputAction::Screenshot`, `Binding::Key(KeyCode::F2)` |
 | file location | `<gameDirectory>/screenshots/` | `screenshots/`, relative to the process's working directory (this client has no separate "game directory" concept yet) |
 | filename | `Util.getFilenameFormattedDateTime()` (`yyyy-MM-dd_HH.mm.ss`) + `_2`, `_3`, … on a same-second collision, `.png` (`Screenshot.getFile`, `:136-148`) | same scheme — never overwrites an existing file |
-| format | PNG, straight from the render target's own colour data | PNG via the `png` crate (already a `lodestone-shell` dependency; see `container.rs`/`menu/render.rs` for existing encode call sites in this same crate) |
+| format | PNG, straight from the render target's own colour data | PNG via the `png` crate. **This row used to claim `png` was already a `lodestone-shell` dependency. It was not** — it sat in `[dev-dependencies]`, where its only job was encoding fixture images *into* the favicon-mosaic tests, so nothing shippable could reach it. Landing the verb moved it to `[dependencies]`; a plausible-sounding claim about a manifest is still a claim (§12) |
 | capture point | `RenderSystem`'s `copyTextureToBuffer` against `GameRenderer.mainRenderTarget()`, mapped and walked into a `NativeImage` | the same `copy_texture_to_buffer` → `map_async(MapMode::Read)` idiom this repo already uses for pixel-gate readback (`lodestone_render::HeadlessTarget::read_texels`, `crates/lodestone-render/src/target.rs`) — applied to the **window** target instead of a headless one |
 
 **Not modelled: the Control-held panorama variant.**
@@ -361,9 +361,24 @@ someone actually traces where pixels land — caught here before it shipped
 rather than after, only because implementing it required tracing `redraw()`'s
 real call order instead of restating the earlier note.
 
-**The patch, drafted end-to-end this pass and handed to the orchestrator**
-(brokered — `app.rs`, `gpu.rs` are choke points; `lodestone-render` is a
-separate off-limits crate):
+**Landed.** The patch below was drafted a session earlier and brokered through
+issue #436 because `app.rs` was a choke point; the `app.rs` → `app/` split
+(`7be1b2f`) removed that constraint and it was applied directly. What follows is
+therefore a record of what is in the tree, not a plan — with one correction
+found on applying it, and one on re-verification:
+
+- **The `lodestone-render` half was still genuinely missing**, exactly as the
+  "Confirmed, not assumed" paragraph above says. A later report claimed the
+  `COPY_SRC`/`texture()` pieces already existed and had merely been found on
+  `HeadlessTarget`; re-reading `SurfaceTarget::new` settled it — the window
+  target had neither piece, and `HeadlessTarget` having both is *why* the
+  confusion is available. **A neighbouring type answering the question is
+  harder to catch than a stale claim.**
+- The code lives in `crates/lodestone-shell/src/screenshot.rs`
+  (`timestamp_name`, `unused_path`, `to_rgba8`, `encode_png`, `capture`), wired
+  from `app/input.rs` (`KeyOutcome::Screenshot` + the `resolve_key` arm),
+  `app.rs` (`pending_screenshot`), `app/lifecycle.rs` (the effects arm) and
+  `app/redraw.rs` (the drain, immediately before `frame.present(queue)`).
 
 - `lodestone-render/src/target.rs`: OR `wgpu::TextureUsages::COPY_SRC` into
   the config in `SurfaceTarget::new` before `surface.configure(device,
@@ -396,6 +411,18 @@ separate off-limits crate):
   without returning `"screenshots"`, plus a test asserting the temp-dir body
   is the one actually compiled — so deleting the fork fails a test instead of
   silently reverting to writing into the real directory on every `cargo test`.
+
+**What only a live frame can confirm.** Everything above the GPU is unit-gated
+(`screenshot.rs`'s five tests: the `#[cfg(test)]` directory fork, the civil-date
+arithmetic against hand-checked leap years, same-second collision suffixing, the
+BGRA/RGBA swizzle with an unrepresentable-format refusal, and padded-row
+stripping across three rows). What no test here can reach is the one thing that
+needed `lodestone-render`: that a **real windowed swapchain**, configured with
+`COPY_SRC`, actually permits `copy_texture_to_buffer` on this adapter, and that
+the resulting file shows the frame the player saw rather than the previous one.
+A headless target's `AcquiredFrame::texture()` is `None` by construction, so the
+capture path cannot be exercised without a window. Press F2 in-game and open the
+file.
 
 Tracked on [#436](https://github.com/matteopolak/lodestone/issues/436) and
 [#16](https://github.com/matteopolak/lodestone/issues/16).

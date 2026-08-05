@@ -37,6 +37,23 @@ pub(crate) enum KeyOutcome {
     Pause,
     CloseContainer,
     ToggleDebugOverlay,
+    /// `key.screenshot` (issue #16): capture the window's own frame to a PNG.
+    ///
+    /// **No payload**, and the two things it does not carry are deliberate,
+    /// both recorded in `docs/keybindings.md`'s "Screenshot" section: vanilla's
+    /// Ctrl-held panorama variant is gated behind
+    /// `SharedConstants.DEBUG_PANORAMA_SCREENSHOT`, which ships `false`, so a
+    /// player's Ctrl+F2 is byte-identical to a plain F2; and vanilla's
+    /// screen-independence (`Minecraft.handleGlobalKeyPress`) is not modelled
+    /// here, because this `resolve_key` swallows every key behind `gate.menu`
+    /// before any action arm runs — exactly as it already does for
+    /// `key.debug.overlay`.
+    ///
+    /// The effect is deferred rather than performed here: the frame has not
+    /// been drawn yet at key time, so the arm only sets
+    /// `WindowApp::pending_screenshot` and `redraw()` drains it immediately
+    /// before `present`.
+    Screenshot,
     /// Hold-to-show the player list; carries the new held state.
     PlayerList(bool),
     /// Open the chat prompt. `command` pre-fills the `/` prefix.
@@ -239,6 +256,13 @@ pub(crate) fn resolve_key(
         }
     } else if binds.is(InputAction::DebugOverlay, code) && pressed {
         Some(KeyOutcome::ToggleDebugOverlay)
+    } else if binds.is(InputAction::Screenshot, code) && pressed {
+        // Same tier as `DebugOverlay` immediately above, and for the same
+        // reason: vanilla's `key.screenshot` is `Category.MISC` and takes no
+        // account of what the player is doing. So it is gated on `pressed`
+        // only — **not** on `gate.gameplay`, which would make a screenshot
+        // impossible with the debug overlay's own subject on screen.
+        Some(KeyOutcome::Screenshot)
     } else if binds.is(InputAction::PlayerList, code) && gate.gameplay {
         // Deliberately *not* gated on `pressed`: this tracks a held state, so it
         // needs both edges. Gating it would leave the overlay stuck on.

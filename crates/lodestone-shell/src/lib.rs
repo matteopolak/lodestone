@@ -47,6 +47,7 @@ pub mod particles;
 pub mod raycast;
 pub mod resources;
 pub mod scoreboard;
+pub mod screenshot;
 pub mod sim;
 pub mod tablist;
 pub mod worldgen;

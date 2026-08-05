@@ -806,6 +806,32 @@ impl WindowApp {
             menu.render_overlay(device, queue, frame.view(), &settings_frame, w, h);
         }
 
+        // `key.screenshot` (issue #16), and **this position is the whole
+        // correctness argument**: every pass above — world, HUD, container, and
+        // the three overlay blocks — has now written into `frame.view()`, and
+        // `present` below consumes `frame` by value. Capturing right after
+        // `acquire()` (the plan this replaced) would copy out a swapchain image
+        // with no defined content yet. See `docs/keybindings.md`'s "Screenshot".
+        //
+        // A failure is logged and dropped: a screenshot must never take the
+        // frame loop down. The flag is cleared either way, so a target that
+        // structurally cannot be captured (headless — `texture()` is `None`
+        // there) does not retry forever.
+        if self.pending_screenshot {
+            self.pending_screenshot = false;
+            if let Some(texture) = frame.texture() {
+                match crate::screenshot::capture(device, queue, texture, SystemTime::now()) {
+                    Ok(path) => println!("Saved screenshot as {}", path.display()),
+                    Err(e) => tracing::warn!(target: "screenshot", "capture failed: {e}"),
+                }
+            } else {
+                tracing::warn!(
+                    target: "screenshot",
+                    "this render target has no presentable texture to capture"
+                );
+            }
+        }
+
         if let Some(window) = &self.window {
             window.pre_present_notify();
         }
