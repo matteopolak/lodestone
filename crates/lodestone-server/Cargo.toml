@@ -28,6 +28,13 @@ workspace = true
 # follow-up rather than a prerequisite. See `src/ecs/schedules.rs`'s own doc.
 bevy_app = { workspace = true }
 bevy_ecs = { workspace = true }
+# The Brigadier argument tree the server's own built-in commands parse against
+# (issue #48, `src/commands.rs`). Safe to depend on where `lodestone-ecs` is
+# not, and the distinction is the whole reason `src/command.rs`'s seam exists:
+# `lodestone-command` has an **empty** `[dependencies]` (see its own
+# `Cargo.toml`), so it drags in no ECS, no client vocabulary, no protocol crate
+# and nothing new into the browser bundle. It is a parser, not a runtime.
+lodestone-command = { workspace = true }
 lodestone-core = { path = "../lodestone-core" }
 lodestone-net = { path = "../lodestone-net" }
 lodestone-worldgen = { path = "../lodestone-worldgen" }
