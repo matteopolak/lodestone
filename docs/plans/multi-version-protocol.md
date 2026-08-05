@@ -89,10 +89,20 @@ debt, unit U0 below.
 **Scaffolding that did not exist when the family map was first drawn:** `xtask
 new-version` now generates a family skeleton and **withholds registry support until a
 generated `SHAPE_REVIEW.toml` is discharged** — a structural mitigation for the "1.12.2
-client wearing 1.16 packet IDs" failure the roadmap recorded. `xtask conformance --family
-<vNNN>` runs packet-id, registry, isolation, deletability, test and clippy checks per
-family, and `xtask check-deletable <vNNN>` simulates deleting a family and reports the
-fallout. Every family unit below should use all three.
+client wearing 1.16 packet IDs" failure the roadmap recorded. `xtask conformance` runs
+packet-id, registry, isolation, deletability, test and clippy checks per family, and
+`xtask check-deletable <vNNN>` simulates deleting a family and reports the fallout. Every
+family unit below should use all three.
+
+**`conformance` does not take `--family <vNNN>` alone**, which this document claimed in two
+places and U3 found unrunnable. It also needs `--minecraft` and `--protocol`, plus
+`--source minecraft-data` for a legacy family, and it **rejects `--target-dir`** — so it
+cannot be pointed at a private build directory the way every other command here is. It then
+bails at the pre-existing `lodestone-fuzz` isolation failure (that crate has non-optional
+deps on all four families), so its later stages have to be run separately. U3 did exactly
+that: clippy 0 errors, and `check-deletable v47` naming `lodestone-canonical` nowhere.
+**Run it, read its `--help`, and expect to split it — do not transcribe an invocation from
+this document.**
 
 ## Join versus host: two different sets, stated per version
 
@@ -345,8 +355,10 @@ the whole reason. Units adding a `FAMILIES`/feature line touch
 `crates/lodestone-registry/src/lib.rs` and its `Cargo.toml` (2 lines each); those two
 files are the one collision surface, so the orchestrator serializes just those edits.
 Every family unit finishes by running `cargo xtask connectedness` and `cargo xtask
-conformance --family <vNNN>` and quoting the output in its report — never a remembered
-number.
+conformance` and quoting the output in its report — never a remembered number. See the
+`conformance` note above: its real invocation needs `--minecraft` and `--protocol` (plus
+`--source minecraft-data` for a legacy family), rejects `--target-dir`, and bails early on
+`lodestone-fuzz`'s pre-existing isolation failure, so the later stages run separately.
 
 **U0 — pay the standing evidence debt (dispatch first, smallest unit).**
 Run `scripts/live-oracles/legacy-1.12.sh`; against it, verify `multi_block_change`'s
