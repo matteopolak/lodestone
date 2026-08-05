@@ -23,20 +23,21 @@
 //!
 //! There is no disabled widget type in vanilla and none here — see
 //! [`super::widget`]'s module docs. [`Cell::is_live`] is what decides it, and
-//! it answers `false` for **101 or 102 of the 143** controls this module
-//! renders. The 42-or-41 live ones break down as:
+//! it answers `false` for **100 or 101 of the 143** controls this module
+//! renders. The 43-or-42 live ones break down as:
 //!
-//! - **20 option rows**, driving **17** distinct [`LiveOption`]s — three of them
+//! - **21 option rows**, driving **18** distinct [`LiveOption`]s — three of them
 //!   (`textBackgroundOpacity`, `chatOpacity`, `chatLineSpacing`) are placed on
 //!   two pages each, which is vanilla's own shape and why the row count exceeds
-//!   the option count. The 17 are `guiScale`/`bobView` (#55),
+//!   the option count. The 18 are `guiScale`/`bobView` (#55),
 //!   `toggleCrouch`/`toggleSprint`/`invertMouseX`/`invertMouseY`/
 //!   `mouseWheelSensitivity` (#200/#202/#203), the eight chat options
-//!   (`9eba2bb`), and `sensitivity`/`renderDistance` (#443).
+//!   (`9eba2bb`), `sensitivity`/`renderDistance` (#443), and
+//!   `discreteMouseScroll` (#444).
 //! - **9 `Done` buttons**, one per page, always live.
 //! - **13 or 12 working nav buttons** — the swing is the root's Online button:
 //!   live outside a world, the inactive World Options placeholder inside one
-//!   (see [`online_cell`]), which is the whole of the 42-vs-41 difference.
+//!   (see [`online_cell`]), which is the whole of the 43-vs-42 difference.
 //!
 //! **These numbers are asserted, not maintained by hand** —
 //! `the_disabled_majority_is_the_point_and_it_is_measured` and
@@ -246,6 +247,18 @@ pub enum LiveOption {
     /// `options.invertMouseY` → [`crate::config::Options::invert_mouse_y`]
     /// (issue #203).
     InvertMouseY,
+    /// `options.discreteMouseScroll` →
+    /// [`crate::config::Options::discrete_mouse_scroll`] (issue #444).
+    ///
+    /// The one row of #444's six that had a consumer reachable without a new
+    /// subsystem. `MouseHandler.onScroll` applies it at the input boundary
+    /// (`MouseHandler.java:189-192`), which is `app/lifecycle.rs` here — so it
+    /// affects **both** wheel consumers, the hotbar and every menu list, from one
+    /// place. The other five need `Sim`/`InputState` changes (`toggleAttack`,
+    /// `toggleUse`, `autoJump`, `sprintWindow`) or a subsystem that does not exist
+    /// (`allowCursorChanges`, `rawMouseInput`), and a row for those would be the
+    /// island this enum's `ChatScale` doc describes in reverse.
+    DiscreteMouseScroll,
     /// `options.mouseWheelSensitivity` →
     /// [`crate::config::Options::mouse_wheel_sensitivity`] (issue #203). Fed
     /// to the hotbar scroll handler.
@@ -329,6 +342,7 @@ impl LiveOption {
             | LiveOption::ToggleSprint
             | LiveOption::InvertMouseX
             | LiveOption::InvertMouseY
+            | LiveOption::DiscreteMouseScroll
             | LiveOption::MouseWheelSensitivity
             | LiveOption::ChatColors => None,
         }
@@ -943,6 +957,9 @@ pub fn live_value(live: LiveOption, options: &crate::config::Options) -> String 
         LiveOption::InvertMouseY => {
             if options.invert_mouse_y { "ON" } else { "OFF" }.to_string()
         }
+        LiveOption::DiscreteMouseScroll => {
+            if options.discrete_mouse_scroll { "ON" } else { "OFF" }.to_string()
+        }
         // `String.format(Locale.ROOT, "%.2f", value)` (`Options.java:479`).
         LiveOption::MouseWheelSensitivity => {
             format!("{:.2}", options.mouse_wheel_sensitivity)
@@ -1280,7 +1297,11 @@ static MOUSE: &[Entry] = &[
         ),
     ),
     pair(
-        cycle("discreteMouseScroll", "Discrete Scrolling"),
+        live_cycle(
+            "discreteMouseScroll",
+            "Discrete Scrolling",
+            LiveOption::DiscreteMouseScroll,
+        ),
         live_cycle("invertMouseX", "Invert Mouse X", LiveOption::InvertMouseX),
     ),
     pair(
@@ -2957,6 +2978,10 @@ mod tests {
                 // `pair`, which is why it sorts here.
                 LiveOption::Sensitivity,
                 LiveOption::MouseWheelSensitivity,
+                // Discrete Scrolling, issue #444 — the first item of `MOUSE`'s
+                // second `pair`, so it sorts between Scroll Sensitivity and
+                // Invert Mouse X.
+                LiveOption::DiscreteMouseScroll,
                 LiveOption::InvertMouseX,
                 LiveOption::InvertMouseY,
                 // Chat page, in `ChatOptionsScreen.options` order.
@@ -3013,8 +3038,8 @@ mod tests {
             render_distance.is_live(),
             "renderDistance is a persisted `Options` field since #443"
         );
-        // The count itself, not just the ratio's ingredients: 20 live option
-        // *rows* (17 distinct options, three of them placed twice — see above) +
+        // The count itself, not just the ratio's ingredients: 21 live option
+        // *rows* (18 distinct options, three of them placed twice — see above) +
         // 9 Done buttons (one per page, always live) + 13 working nav buttons
         // (Skin/Sound/Video/Controls/Chat/Accessibility/**Language**/
         // **Telemetry**/**Resource Packs** from the root grid — issue #415
@@ -3022,7 +3047,7 @@ mod tests {
         // Controls -> Key Binds, and the root's own Online button, live
         // outside a world).
         // A change that adds or removes a live row anywhere must say so here.
-        assert_eq!(live.len(), 42, "outside a world: {live:?}");
+        assert_eq!(live.len(), 43, "outside a world: {live:?}");
     }
 
     /// The companion to [`the_disabled_majority_is_the_point_and_it_is_measured`]:
@@ -3044,8 +3069,8 @@ mod tests {
             .flat_map(|&p| all_controls(p, true))
             .filter(|c| c.is_live())
             .collect();
-        assert_eq!(outside.len(), 42);
-        assert_eq!(inside.len(), 41, "one fewer: the root's Online button");
+        assert_eq!(outside.len(), 43);
+        assert_eq!(inside.len(), 42, "one fewer: the root's Online button");
         assert!(
             outside.contains(&nav("Online...", SettingsPage::Online)),
             "outside a world the root links to Online"
@@ -3618,6 +3643,9 @@ mod tests {
             // now persisted `Options` fields with a real row.
             LiveOption::Sensitivity,
             LiveOption::RenderDistance,
+            // Issue #444: the one row of that issue's six whose consumer this shell
+            // already had — `app`'s wheel boundary. See the variant's own doc.
+            LiveOption::DiscreteMouseScroll,
         ];
         let placed: Vec<LiveOption> = PAGES
             .iter()
@@ -3655,10 +3683,11 @@ mod tests {
                 | LiveOption::TextBackgroundOpacity
                 | LiveOption::ChatColors
                 | LiveOption::Sensitivity
-                | LiveOption::RenderDistance => {}
+                | LiveOption::RenderDistance
+                | LiveOption::DiscreteMouseScroll => {}
             }
         }
-        assert_eq!(ALL.len(), 17, "seventeen distinct live options");
+        assert_eq!(ALL.len(), 18, "eighteen distinct live options");
     }
 
     /// [`crate::config::step_unit_double`]'s wrap, including the two places it

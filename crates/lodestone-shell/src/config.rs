@@ -243,6 +243,20 @@ pub struct Options {
     pub invert_mouse_x: bool,
     /// Vanilla's `options.invertMouseY` (`Options.java:525`), default `false`.
     pub invert_mouse_y: bool,
+    /// Vanilla's `options.discreteMouseScroll` (`Options.java:526`), default
+    /// `false`: collapse a scroll delta to its **sign** before
+    /// [`Self::mouse_wheel_sensitivity`] scales it, so a high-resolution trackpad
+    /// moves one notch's worth per gesture instead of a proportional amount.
+    ///
+    /// Applied at the input boundary in `app/lifecycle.rs`, because that is where
+    /// vanilla applies it: `MouseHandler.onScroll` computes
+    /// `(discreteScroll ? signum(yoffset) : yoffset) * scrollSensitivity` **once**
+    /// (`MouseHandler.java:189-192`) and hands the result to both
+    /// `screen().mouseScrolled(..)` and the hotbar's `ScrollWheelHandler`. It is
+    /// therefore not a list-specific or hotbar-specific transform — it is what a
+    /// wheel notch *is* once the options are honoured, which is why it wraps the
+    /// raw delta rather than living inside either consumer.
+    pub discrete_mouse_scroll: bool,
     /// Vanilla's `options.mouseWheelSensitivity` (`Options.java:476-484`): a
     /// multiplier on the raw scroll delta before it reaches slot selection
     /// (`MouseHandler.java:190-191`). Default `1.0` — vanilla's own default is
@@ -326,6 +340,7 @@ impl Default for Options {
             toggle_sprint: false,
             invert_mouse_x: false,
             invert_mouse_y: false,
+            discrete_mouse_scroll: false,
             mouse_wheel_sensitivity: 1.0,
             chat_scale: 1.0,
             chat_width: 1.0,
@@ -400,6 +415,10 @@ impl Options {
             .get("invert_mouse_y")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
+        let discrete_mouse_scroll = obj
+            .get("discrete_mouse_scroll")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
         // Degrades to `1.0` (no scaling), not `0.0` — a `0.0` multiplier would
         // silently disable the scroll wheel entirely for anyone whose file
         // got mangled, which is a far worse failure than "sensitivity reset
@@ -458,6 +477,7 @@ impl Options {
             toggle_sprint,
             invert_mouse_x,
             invert_mouse_y,
+            discrete_mouse_scroll,
             mouse_wheel_sensitivity,
             chat_scale,
             chat_width,
@@ -515,6 +535,9 @@ impl Options {
         }
         if self.invert_mouse_y {
             obj.insert("invert_mouse_y".into(), true.into());
+        }
+        if self.discrete_mouse_scroll {
+            obj.insert("discrete_mouse_scroll".into(), true.into());
         }
         if (self.mouse_wheel_sensitivity - 1.0).abs() > f32::EPSILON {
             obj.insert(
