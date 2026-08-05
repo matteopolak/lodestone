@@ -335,22 +335,59 @@ pub fn visible_rows_len() -> usize {
     (LIST_WINDOW_PX / ROW_H).floor().max(1.0) as usize
 }
 
+/// Top of the list band — the y a row at scroll `0.0` starts at.
+#[must_use]
+pub fn band_top() -> f32 {
+    options::SUB_HEADER_HEIGHT + options::LIST_TOP_INSET
+}
+
+/// This screen's [`widget::ListSpec`] (issue #445), the one declaration the
+/// scrollbar, the wheel and the row placement all read.
+///
+/// `top` is [`options::SUB_HEADER_HEIGHT`] rather than [`band_top`]: the spec's
+/// band is the *window*, and [`widget::ScrollList`] adds
+/// [`widget::LIST_CONTENT_PADDING`] itself as `first_entry_y`. Passing the
+/// already-inset value would inset twice, which is the one arithmetic slip this
+/// conversion can make and still look right at scroll zero.
+#[must_use]
+pub fn list_spec(len: usize, scroll: f32) -> widget::ListSpec {
+    widget::ListSpec::uniform(
+        ROW_H,
+        options::SUB_HEADER_HEIGHT,
+        options::FOOTER_HEIGHT,
+        len,
+        COLUMN_HALF_W * 2.0,
+    )
+    .at(scroll)
+}
+
 /// This screen has no per-row control (a stat row is not clickable — vanilla
 /// itself only narrates it), so there is nothing to place beyond the row's
 /// own text: every row is a pair of [`super::render::MenuLabel`]s at this y,
 /// not a [`super::render::MenuRow`]/[`Slot`].
+///
+/// **The offset is pixels** (issue #445). This used to be
+/// `band_top + (row - first) * ROW_H` against a `first: usize` row index,
+/// which structurally could not express a half-scrolled row. `scroll.floor()`
+/// matches [`widget::ScrollList::row_top`]'s single `(int)` truncation —
+/// vanilla truncates the offset once, not per entry.
 #[must_use]
-pub fn row_label_y(row: u16, first: u16) -> f32 {
-    let index = row.saturating_sub(first);
-    options::SUB_HEADER_HEIGHT + options::LIST_TOP_INSET + f32::from(index) * ROW_H
+pub fn row_label_y(row: u16, scroll: f32) -> f32 {
+    band_top() - scroll.floor() + f32::from(row) * ROW_H
 }
 
 /// This screen's own scroll cursor. No selection/activation at all on the
 /// General list (vanilla's own rows are not buttons); only Done is a real
 /// control.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct StatsNav {
-    first: usize,
+    /// Scroll offset in **pixels** (issue #445), not a row index.
+    ///
+    /// `Eq` came off this derive when the field changed type, and that is the
+    /// point rather than a cost: a row-index offset is always a multiple of
+    /// [`ROW_H`], which is precisely the snap-to-row behaviour the wheel work
+    /// exists to remove. See [`widget::ListSpec`]'s own doc.
+    scroll: f32,
     /// Whether Done — the screen's only control — currently holds keyboard
     /// focus. **`false` on open, and that is the whole of a player report**
     /// (2026-08-04, "the Statistics menu always has the 'Done' button focused
@@ -391,13 +428,32 @@ pub struct StatsNav {
 
 impl StatsNav {
     pub fn reset(&mut self) {
-        self.first = 0;
+        self.scroll = 0.0;
         self.focused = false;
     }
 
+    /// The offset, in pixels.
     #[must_use]
-    pub fn first(&self) -> usize {
-        self.first
+    pub fn scroll(&self) -> f32 {
+        self.scroll
+    }
+
+    /// The live [`widget::ScrollList`] for a given canvas height, or `None`
+    /// when there is nothing to scroll.
+    #[must_use]
+    fn model(&self, canvas_height: f32) -> Option<widget::ScrollList> {
+        list_spec(GENERAL_STATS.len(), self.scroll).model(canvas_height)
+    }
+
+    /// One mouse-wheel notch, through the primitive. Positive scrolls **up**;
+    /// the negation lives in [`widget::ScrollList::mouse_scrolled`] and nowhere
+    /// else.
+    pub fn scroll_by(&mut self, notches: f32, canvas_height: f32) {
+        let Some(mut list) = self.model(canvas_height) else {
+            return;
+        };
+        list.mouse_scrolled(notches);
+        self.scroll = list.scroll();
     }
 
     /// Whether Done holds keyboard focus. See [`Self::focused`]'s own doc for
@@ -422,22 +478,23 @@ impl StatsNav {
         self.focused = true;
     }
 
-    /// Scrolls by one row. The census (77) is fixed, so this needs no
-    /// snapshot — unlike [`GENERAL_STATS`]'s *values*, its *length* never
-    /// changes.
-    pub fn scroll(&mut self, forward: bool) {
-        let len = GENERAL_STATS.len();
-        let window = visible_rows_len();
-        if len <= window {
-            self.first = 0;
+    /// Arrow-key scroll: one row's worth of pixels, clamped by the primitive.
+    ///
+    /// The census (77) is fixed, so this needs no snapshot — unlike
+    /// [`GENERAL_STATS`]'s *values*, its *length* never changes.
+    ///
+    /// Measured against [`crate::config::MIN_SCALED_HEIGHT`] rather than the
+    /// live canvas for the same reason the accounts screen's keyboard path
+    /// does: a keypress has no canvas in hand, and the smallest supported
+    /// canvas is the conservative choice — it can only over-scroll into a
+    /// region a larger canvas also shows.
+    pub fn step(&mut self, forward: bool) {
+        let Some(mut list) = self.model(crate::config::MIN_SCALED_HEIGHT as f32) else {
             return;
-        }
-        let max_first = len - window;
-        self.first = if forward {
-            (self.first + 1).min(max_first)
-        } else {
-            self.first.saturating_sub(1)
         };
+        let delta = if forward { ROW_H } else { -ROW_H };
+        list.set_scroll(list.scroll() + delta);
+        self.scroll = list.scroll();
     }
 }
 
@@ -445,8 +502,6 @@ impl StatsNav {
 #[must_use]
 pub fn frame(nav: &StatsNav, snapshot: &StatsSnapshot) -> MenuFrame<'static> {
     let rows = general_rows(snapshot);
-    let first = nav.first().min(rows.len());
-    let end = (first + visible_rows_len()).min(rows.len());
 
     let mut labels = vec![
         MenuLabel {
@@ -492,10 +547,16 @@ pub fn frame(nav: &StatsNav, snapshot: &StatsSnapshot) -> MenuFrame<'static> {
         },
     ];
 
-    for (i, (caption, value)) in rows[first..end].iter().enumerate() {
-        let row = (first + i) as u16;
-        let y = row_label_y(row, first as u16);
-        labels.push(MenuLabel {
+    // **Every** row is emitted, not a `[first..end]` window (issue #445). The
+    // slice was what made a partially-scrolled row impossible to express: a
+    // row either fitted wholly or was absent. `list_labels` is clipped to the
+    // band by `render::draw`, so a row straddling the bottom now paints its
+    // visible half instead of vanishing.
+    let scroll = nav.scroll();
+    let mut list_labels = Vec::with_capacity(rows.len() * 2);
+    for (i, (caption, value)) in rows.iter().enumerate() {
+        let y = row_label_y(i as u16, scroll);
+        list_labels.push(MenuLabel {
             text: (*caption).to_string(),
             origin: Origin::ScreenTop,
             dx: -COLUMN_HALF_W + NAME_LEFT_INSET,
@@ -504,7 +565,7 @@ pub fn frame(nav: &StatsNav, snapshot: &StatsSnapshot) -> MenuFrame<'static> {
             colour: widget::ACTIVE_LABEL,
             scale: 1.0,
         });
-        labels.push(MenuLabel {
+        list_labels.push(MenuLabel {
             text: value.clone(),
             origin: Origin::ScreenTop,
             dx: COLUMN_HALF_W - VALUE_RIGHT_MARGIN,
@@ -535,6 +596,7 @@ pub fn frame(nav: &StatsNav, snapshot: &StatsSnapshot) -> MenuFrame<'static> {
         selected: if nav.focused() { DONE_ROW } else { usize::MAX },
         vanilla: true,
         labels,
+        list_labels,
         ..Default::default()
     }
 }
@@ -651,45 +713,120 @@ mod tests {
         assert!(f.rows[0].enabled);
         assert!(f.labels.iter().any(|l| l.text == TITLE));
 
-        // Scrolling to the end must eventually show the last alphabetical
-        // row somewhere in `labels` (caption + value pair).
-        for _ in 0..GENERAL_STATS.len() {
-            nav.scroll(true);
-        }
-        let f = frame(&nav, &snapshot);
+        // Every row is emitted now, not a window — the slice is what made a
+        // half-scrolled row inexpressible. The last alphabetical row is present
+        // at rest; whether it is *visible* is the primitive's question, asked
+        // below.
         let last_caption = general_rows(&snapshot).last().unwrap().0;
         assert!(
-            f.labels.iter().any(|l| l.text == last_caption),
-            "scrolling to the end must reach the last row"
+            f.list_labels.iter().any(|l| l.text == last_caption),
+            "every row must be emitted into list_labels, visible or not"
+        );
+        assert!(
+            !f.labels.iter().any(|l| l.text == last_caption),
+            "list rows belong in list_labels, which is the clipped vector — \
+             leaving them in `labels` paints them over the footer"
+        );
+
+        // Scrolling to the end must bring it inside the band.
+        for _ in 0..GENERAL_STATS.len() {
+            nav.step(true);
+        }
+        let f = frame(&nav, &snapshot);
+        let list = list_spec(GENERAL_STATS.len(), nav.scroll())
+            .model(crate::config::MIN_SCALED_HEIGHT as f32)
+            .expect("the stats list scrolls");
+        assert!(
+            list.row_visible(GENERAL_STATS.len() - 1),
+            "scrolling to the end must bring the last row into the band"
+        );
+        assert!(
+            f.list_labels.iter().any(|l| l.text == last_caption),
+            "the last row must still be emitted"
+        );
+    }
+
+    /// **The magnitude assertion, not the sign.** "It scrolled" is satisfied by
+    /// a snap-to-row implementation, which is exactly what this conversion
+    /// removed — so the predicted value is computed from this screen's own
+    /// `ROW_H` and the rival hypotheses are named and excluded.
+    #[test]
+    fn one_notch_is_half_a_row_in_pixels_and_lands_on_no_row_top() {
+        let canvas = crate::config::MIN_SCALED_HEIGHT as f32;
+        let mut nav = StatsNav::default();
+        nav.scroll_by(-1.0, canvas);
+
+        // `scrollRate` is `defaultEntryHeight / 2` under *integer* division
+        // (`AbstractSelectionList.java:44`): 20 / 2 = 10.
+        let predicted = (ROW_H / 2.0).floor();
+        assert_eq!(predicted, 10.0, "derived from this screen's own ROW_H of 20");
+        assert_eq!(nav.scroll(), predicted, "one notch must be {predicted} px");
+        assert_ne!(nav.scroll(), ROW_H, "the row-index model's answer is excluded");
+        assert_ne!(
+            nav.scroll(),
+            LIST_WINDOW_PX,
+            "a page-sized notch is excluded"
+        );
+
+        // And the offset coincides with no row top — the property a row index
+        // structurally cannot have. Derived from `row_label_y`, the same
+        // expression the draw places rows by, not from a restated constant.
+        let at_rest = band_top();
+        assert!(
+            (0..GENERAL_STATS.len()).all(|i| row_label_y(i as u16, nav.scroll()) != at_rest),
+            "offset {} coincides with a row top, so it is indistinguishable from a jump",
+            nav.scroll()
+        );
+
+        // Three notches must land somewhere that is not a whole number of rows.
+        let mut three = StatsNav::default();
+        three.scroll_by(-3.0, canvas);
+        assert_eq!(three.scroll(), 30.0);
+        assert_ne!(
+            three.scroll() % ROW_H,
+            0.0,
+            "30 px must not be expressible as whole rows, or this gate has stopped \
+             discriminating against the row-index model"
         );
     }
 
     #[test]
     fn scrolling_never_goes_negative_or_past_the_last_window() {
+        let canvas = crate::config::MIN_SCALED_HEIGHT as f32;
         let mut nav = StatsNav::default();
-        nav.scroll(false);
-        assert_eq!(nav.first(), 0, "cannot scroll above the top");
+        nav.step(false);
+        assert_eq!(nav.scroll(), 0.0, "cannot scroll above the top");
+        nav.scroll_by(5.0, canvas);
+        assert_eq!(nav.scroll(), 0.0, "the wheel cannot go negative either");
+
         for _ in 0..1000 {
-            nav.scroll(true);
+            nav.step(true);
         }
-        let window = visible_rows_len();
-        assert!(
-            nav.first() + window >= GENERAL_STATS.len(),
-            "must be able to see the last row"
+        // The clamp is vanilla's `maxScrollAmount() = contentHeight() - height`,
+        // computed here from the outside rather than read back off the nav.
+        let content = GENERAL_STATS.len() as f32 * ROW_H + 2.0 * widget::LIST_CONTENT_PADDING;
+        let band = canvas - options::FOOTER_HEIGHT - options::SUB_HEADER_HEIGHT;
+        assert_eq!(
+            nav.scroll(),
+            content - band,
+            "the clamp must be maxScrollAmount(), not a row count"
         );
+        let list = list_spec(GENERAL_STATS.len(), nav.scroll())
+            .model(canvas)
+            .expect("scrollable");
         assert!(
-            nav.first() <= GENERAL_STATS.len(),
-            "must not scroll past the content entirely"
+            list.row_visible(GENERAL_STATS.len() - 1),
+            "must be able to see the last row"
         );
     }
 
     #[test]
     fn reset_returns_to_the_top() {
         let mut nav = StatsNav::default();
-        nav.scroll(true);
-        nav.scroll(true);
-        assert!(nav.first() > 0);
+        nav.step(true);
+        nav.step(true);
+        assert!(nav.scroll() > 0.0);
         nav.reset();
-        assert_eq!(nav.first(), 0);
+        assert_eq!(nav.scroll(), 0.0);
     }
 }

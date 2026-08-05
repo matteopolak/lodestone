@@ -1429,6 +1429,12 @@ impl MenuNav {
                     None
                 }
             }
+            // Issue #445's first adoption. Its offset is pixels, which is the
+            // prerequisite this arm exists to assert — see `ListSpec`'s doc.
+            super::Screen::Statistics => Some(super::stats::list_spec(
+                super::stats::GENERAL_STATS.len(),
+                self.stats.scroll(),
+            )),
             _ => None,
         }
     }
@@ -1461,6 +1467,11 @@ impl MenuNav {
                 let before = accounts.scroll();
                 accounts.scroll_by(notches, canvas_height);
                 accounts.scroll() != before
+            }
+            super::Screen::Statistics => {
+                let before = self.stats.scroll();
+                self.stats.scroll_by(notches, canvas_height);
+                self.stats.scroll() != before
             }
             _ => false,
         }
@@ -3132,11 +3143,11 @@ impl MenuNav {
     fn key_statistics(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         match key {
             MenuKey::Up => {
-                self.stats.scroll(false);
+                self.stats.step(false);
                 MenuAction::None
             }
             MenuKey::Down => {
-                self.stats.scroll(true);
+                self.stats.step(true);
                 MenuAction::None
             }
             MenuKey::Tab => {
