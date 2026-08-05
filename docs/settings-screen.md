@@ -523,12 +523,60 @@ and it is not, for two kinds of slider:
   table, one entry per accessor, cited to the `Options.java` line it boots
   from.
 
-A slider whose value set this client has not ported (an `IntRange` or an
-`IntRange.xmap` — `renderDistance`, `chatDelay`, `menuBackgroundBlurriness`, …)
-still draws no handle: that fraction really is unknown, and departure 1's
-reasoning still applies to it unmodified. `Widget::slider_handle_sprite`
-draws the handle sprite itself; `MenuRow::slider_value: Option<f32>` is what
-carries the fraction from `Cell::slider_fraction` to the draw.
+- Every `IntRange`-family slider now has its real bounds ported too (issue
+  #424): `SliderRange` in `options.rs` plus the `INT_RANGE_SLIDERS` table, one
+  row per accessor, each citing the `Options.java` line its `(min, max)` and
+  default are read from. `SliderRange::to_slider_value` is
+  `IntRangeBase.toSliderValue` (`OptionInstance.java:295-301`) transcribed.
+- `graphicsPreset` is an `OptionInstance.SliderableEnum`, a third family whose
+  divisor is `size - 1` rather than a bucket width (`:486-492`), so it has its
+  own one-line function instead of borrowing `SliderRange`.
+
+**Three things about that port are easy to get wrong, and each is gated.** The
+`+ 0.5` and `max + 1` are there because an `IntRange` slider selects a *bucket*
+(`fromSliderValue` floors, `:303-309`), so the handle marks a bucket's centre;
+the naive `(v - min) / (max - min)` is a different function. The two endpoint
+special cases are not an optimisation — without them a maxed-out slider draws
+its handle short of the end, and `mipmapLevels` (whose shipped default *is* its
+max) sits at 0.9. And `fov`'s `Codec.DOUBLE.xmap` is a **persistence** codec,
+not a `ValueSet::xmap`, so it must not touch the slider at all.
+
+Observed, not described: with the naive formula
+`every_int_range_slider_lands_on_vanillas_own_fraction` fails at
+`framerateLimit` (0.44 against vanilla's 0.4423), and with the endpoint cases
+removed it fails at `mipmapLevels` (0.9 against 1.0). Both rival formulas are
+kept **executable** in `mod rival`, and
+`the_naive_endpoint_span_hypothesis_is_measurably_wrong` additionally asserts
+that its three chosen rows are still *far enough apart to discriminate* — it
+fails loudly if a range change ever makes the control vacuous, which is what it
+did when the naive formula was installed. `fov`,
+`menuBackgroundBlurriness` and `maxAnisotropyBit` are recorded as rows where the
+two formulas coincide algebraically, so a gate built only from those would prove
+nothing.
+
+`renderDistance`/`simulationDistance` are the one runtime-decided bound:
+vanilla's max is `largeDistances ? 32 : 16`, and `largeDistances` asks whether
+the **JVM's `-Xmx` heap cap** is at least 1 GB (`Options.java:1469`). There is no
+JVM here and no equivalent ceiling, so `LARGE_DISTANCES_MAX = 32` is a documented
+**decision**, not a citation, and is named as a constant so it stays visible.
+
+`fullscreenResolution` still draws no handle, and that is the honest answer
+rather than a gap: its value set is the monitor's real video-mode list, so it has
+neither a range nor a default int. `every_slider_the_tree_renders_can_place_its_handle`
+sweeps every slider row on every page in both in-world states and asserts that
+it is the *only* one, in both directions — a ported range that no row renders
+fails the same test as a row with no range.
+
+`Widget::slider_handle_sprite` draws the handle sprite itself;
+`MenuRow::slider_value: Option<f32>` is what carries the fraction from
+`Cell::slider_fraction` to the draw.
+
+**There is no JVM runtime on this machine**, so vanilla's `toSliderValue` could
+not be executed to produce an oracle. The expectations are the jar's formula
+applied by hand to the jar's own transcribed numbers — two independent paths to
+each value — plus the two executed rival formulas above. If a JVM becomes
+available, running `OptionInstance`'s own method over these accessors is the
+stronger check and should replace the hand arithmetic.
 
 **3. The scroll snaps to whole entries, and the visible window is a fixed pixel
 budget.** `AbstractSelectionList` scrolls continuously and scissors the band;
