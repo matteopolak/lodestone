@@ -556,6 +556,11 @@ mod tests {
         ("minecraft:birch_forest", &["fallen_tree", "multiface_growth"]),
         ("minecraft:cherry_grove", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
         ("minecraft:cold_ocean", &["kelp", "multiface_growth", "seagrass", "tree: unsupported trunk/foliage/size/provider"]),
+        // dark_forest's `"tree: unsupported..."` entry REMAINS even after
+        // issue #428's `DarkOakTrunkPlacer`/`DarkOakFoliagePlacer`: the
+        // 66.7%-weight dark_oak branch of dark_forest_vegetation now parses
+        // and places, but the 10%-weight `fancy_oak_leaf_litter` branch is
+        // still a `FancyTrunkPlacer`/`FancyFoliagePlacer` tree — unmodelled.
         ("minecraft:dark_forest", &["fallen_tree", "huge_brown_mushroom", "huge_red_mushroom", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
         ("minecraft:deep_cold_ocean", &["kelp", "multiface_growth", "seagrass", "tree: unsupported trunk/foliage/size/provider"]),
         ("minecraft:deep_dark", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
@@ -583,7 +588,10 @@ mod tests {
         ("minecraft:old_growth_birch_forest", &["fallen_tree", "multiface_growth"]),
         ("minecraft:old_growth_pine_taiga", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
         ("minecraft:old_growth_spruce_taiga", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
-        ("minecraft:pale_garden", &["multiface_growth", "tree: unsupported trunk/foliage/size/provider", "vegetation_patch"]),
+        // pale_garden's `"tree: unsupported..."` entry closed with the same
+        // issue #428 change — pale_oak/pale_oak_creaking reuse the dark oak
+        // trunk/foliage placers with their own providers.
+        ("minecraft:pale_garden", &["multiface_growth", "vegetation_patch"]),
         ("minecraft:plains", &["fallen_tree", "multiface_growth", "tree: unsupported trunk/foliage/size/provider"]),
         ("minecraft:river", &["multiface_growth", "seagrass", "tree: unsupported trunk/foliage/size/provider"]),
         // savanna/savanna_plateau/windswept_savanna all resolve through
