@@ -9,7 +9,7 @@
 //! `TcpStream` client (open-to-LAN).
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
@@ -21,7 +21,9 @@ use lodestone_model::{
 use lodestone_data::block_items;
 use lodestone_net::{Connection, NetError, Transport};
 
+use crate::advancements::AdvancementManager;
 use crate::block_entities::{BlockEntity, BlockEntityHandle, block_entity_for_item};
+use crate::border::BorderFeed;
 use crate::brewing::{Bottle, BottleKind, is_ingredient};
 use crate::composter::{InsertOutcome, compostable_chance};
 use crate::command::{CommandCaller, CommandDispatch, CommandSession};
@@ -35,7 +37,10 @@ use crate::mob_spawn::SpawnRng;
 use crate::mobs::{MobHandle, PlayerPerception};
 use crate::neighbor_update::Direction;
 use crate::players::{ChatLine, PlayerListStreamer, PlayerRegistry, PlayerTicket};
-use crate::protocol::{EntitySnapshot, ServerBound, ServerDirective, ServerProtocol};
+use crate::plugin_channels::{ClientChannels, PluginChannelRegistry};
+use crate::protocol::{
+    EntitySnapshot, ResourcePackPush, ServerBound, ServerDirective, ServerProtocol,
+};
 use crate::redstone::{COMPARATOR, OBSERVER, REPEATER};
 use crate::redstone_diode::{set_comparator, set_repeater};
 use crate::redstone_observer::set_observer;
@@ -43,6 +48,7 @@ use crate::scheduled_tick::{ScheduledTick, ScheduledTickQueue};
 use crate::tick::{BlockTickFeed, ExplosionFeed};
 use crate::weather::WeatherFeed;
 use crate::vitals::{EYE_HEIGHT, PlayerVitals};
+use crate::world_spawn::{RespawnPoint, find_initial_spawn, is_bed_block, is_legal_bed_respawn};
 
 /// Server-initiated keep-alive interval, and the width of the window in
 /// which an echo must arrive before the connection is treated as dead.
@@ -193,42 +199,6 @@ const SPRINT_ATTACK_KNOCKBACK_POWER: f64 = 0.5;
 /// 20 TPS rate rather than some coarser stand-in.
 #[cfg(not(target_arch = "wasm32"))]
 const VITALS_TICK_INTERVAL: Duration = Duration::from_millis(50);
-
-/// Returns the Y level a player should stand at for a given local column
-/// position `(lx, lz)` in `[0..16)` within the supplied chunk column.
-///
-/// This is vanilla's `PlayerSpawnFinder.getLevelRespawnPos`
-/// (`.cache/mc/26.2/src/net/minecraft/server/level/PlayerSpawnFinder.java:148`),
-/// simplified to the two operations the current worldgen meaningfully exercises:
-///
-/// 1. Scan downward from the top of the column to find the highest non-air,
-///    non-fluid block — the analogue of vanilla's `MOTION_BLOCKING` heightmap
-///    query, which this column has no persisted heightmap for.
-/// 2. Return one block above it (the standing position), exactly like vanilla's
-///    `return pos.above().immutable()` at `:177`.
-///
-/// Vanilla additionally aborts a column where a fluid block is encountered
-/// between the surface and the sky (`!blockState.getFluidState().isEmpty()`
-/// at `:171` — ocean columns, which would place a player in water); this
-/// generator produces neither surface water nor lava at chunk `(0, 0)`
-/// (plains biome), so a fluid abort would never fire in practice. The check
-/// is still expressed here: a block that `is_water` or `is_lava` is treated
-/// as non-solid and skipped, so a column whose surface IS water yields
-/// `min_y + 1` — the same fail-closed direction as the `min_y` fallback.
-///
-/// The returned Y is the **feet** position (vanilla's `pos.above()`), not
-/// the block the player stands on — the caller does not add one.
-fn spawn_surface_y(column: &ChunkColumn, lx: i32, lz: i32) -> i32 {
-    let top_y = column.min_y + column.height - 1;
-    for y in (column.min_y..=top_y).rev() {
-        let state = column.block_state(lx, y, lz);
-        if !is_air_or_fluid(state) {
-            return y + 1;
-        }
-    }
-    // No solid block at all in this column — air world or void.
-    column.min_y + 1
-}
 
 /// A read-only view of the entities in the world right now, supplied by the
 /// caller that owns the simulation and its tick.
@@ -842,6 +812,39 @@ async fn apply<T: Transport>(
     Ok(())
 }
 
+/// A shared feed of server-initiated resource pack pushes (issue #334) — the
+/// exact idiom [`BlockTickFeed`]/[`ExplosionFeed`]/[`WeatherFeed`] establish
+/// for block changes, detonations and weather transitions, applied to a
+/// resource pack push instead. A host publishes one [`ResourcePackPush`] per
+/// push; `serve_play`'s `container_sync_tick` arm drains it into a real
+/// clientbound `resource_pack_push` frame, on the same timer the three feeds
+/// above ride.
+///
+/// Same single-consumer caveat as all three, and the same resolution:
+/// singleplayer (`crate::IntegratedServer::open_in_memory_with_mobs`) spawns
+/// exactly one connection task per feed instance. A push is broadcast-shaped
+/// in vanilla (every connection must receive it), so this is the documented
+/// limitation the other single-consumer feeds share, not a new one.
+#[derive(Debug, Clone, Default)]
+pub struct ResourcePackPushFeed(Arc<Mutex<Vec<ResourcePackPush>>>);
+
+impl ResourcePackPushFeed {
+    /// Records one push for every consumer to learn about on their next
+    /// [`drain_all`](Self::drain_all).
+    pub fn publish(&self, push: ResourcePackPush) {
+        self.0
+            .lock()
+            .expect("resource pack feed lock poisoned")
+            .push(push);
+    }
+
+    /// Drains and returns every push published since the last call — see the
+    /// struct doc comment for why this is safe only for exactly one consumer.
+    pub fn drain_all(&self) -> Vec<ResourcePackPush> {
+        std::mem::take(&mut *self.0.lock().expect("resource pack feed lock poisoned"))
+    }
+}
+
 /// Serves one client connection through login, configuration, the play join
 /// sequence, and the initial chunk view — then keeps serving until the client
 /// disconnects.
@@ -853,7 +856,9 @@ async fn apply<T: Transport>(
 /// 1. [`ServerBound::LoginStart`] → [`ServerProtocol::login_success`] (no
 ///    state change yet).
 /// 2. [`ServerBound::LoginAcknowledged`] → state becomes
-///    [`State::Configuration`], then [`ServerProtocol::begin_configuration`].
+///    [`State::Configuration`], then [`ServerProtocol::encode_registry_data`]
+///    (issue #275: the registries must precede the finish signal), then
+///    [`ServerProtocol::begin_configuration`].
 /// 3. [`ServerBound::ConfigurationFinished`] → state becomes [`State::Play`],
 ///    then [`ServerProtocol::begin_play`], then every column in
 ///    `[-view_radius, view_radius]²` (chunk coordinates) from `source` as a
@@ -977,6 +982,9 @@ where
         &ExplosionFeed::default(),
         &WeatherFeed::default(),
         &CommandDispatch::none(),
+        &BorderFeed::default(),
+        &ResourcePackPushFeed::default(),
+        &PluginChannelRegistry::default(),
     )
     .await
 }
@@ -1019,6 +1027,9 @@ where
         explosions,
         &WeatherFeed::default(),
         &CommandDispatch::none(),
+        &BorderFeed::default(),
+        &ResourcePackPushFeed::default(),
+        &PluginChannelRegistry::default(),
     )
     .await
 }
@@ -1075,6 +1086,9 @@ where
         explosions,
         &WeatherFeed::default(),
         commands,
+        &BorderFeed::default(),
+        &ResourcePackPushFeed::default(),
+        &PluginChannelRegistry::default(),
     )
     .await
 }
@@ -1121,6 +1135,9 @@ where
         &ExplosionFeed::default(),
         &WeatherFeed::default(),
         &CommandDispatch::none(),
+        &BorderFeed::default(),
+        &ResourcePackPushFeed::default(),
+        &PluginChannelRegistry::default(),
     )
     .await
 }
@@ -1182,6 +1199,9 @@ where
         explosions,
         weather,
         &CommandDispatch::none(),
+        &BorderFeed::default(),
+        &ResourcePackPushFeed::default(),
+        &PluginChannelRegistry::default(),
     )
     .await
 }
@@ -1236,6 +1256,123 @@ where
         explosions,
         &WeatherFeed::default(),
         commands,
+        &BorderFeed::default(),
+        &ResourcePackPushFeed::default(),
+        &PluginChannelRegistry::default(),
+    )
+    .await
+}
+
+/// [`serve_connection`], plus a host-observable [`ResourcePackPushFeed`]
+/// (issue #334) — the entry point that makes a server-initiated resource pack
+/// push reach a player at all.
+///
+/// The compatibility shape this file established for the feed-carrying
+/// variants holds here too: `crates/protocol/v770/tests/*` call
+/// [`serve_connection`] and [`serve_connection_with_commands`] directly and
+/// are off-limits, so a real feed gets a *new* entry point rather than a
+/// changed signature on those two. A host that wants to push constructs a
+/// [`ResourcePackPushFeed`], passes it here, and publishes [`ResourcePackPush`]es
+/// into it; `serve_play`'s `container_sync_tick` arm drains them into real
+/// clientbound `resource_pack_push` frames (see that arm's own comment). A
+/// future `IntegratedServer` config surface (`open_in_memory_with_mobs` et al.)
+/// is a purely additive constructor calling this (or the `_shared` twin of it)
+/// with a feed the config parsed.
+///
+/// # Errors
+///
+/// As [`serve_connection`].
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_connection_with_resource_pack<T, P, S, E>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &S,
+    entities: &E,
+    view_radius: i32,
+    block_entities: &BlockEntityHandle,
+    mobs: &MobHandle,
+    block_ticks: &BlockTickFeed,
+    explosions: &ExplosionFeed,
+    resource_packs: &ResourcePackPushFeed,
+) -> Result<ServeSummary, ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource + 'static,
+    E: EntitySource,
+{
+    serve_connection_inner(
+        conn,
+        proto,
+        SourceRef::Borrowed(source),
+        entities,
+        view_radius,
+        block_entities,
+        mobs,
+        block_ticks,
+        explosions,
+        &WeatherFeed::default(),
+        &CommandDispatch::none(),
+        &BorderFeed::default(),
+        resource_packs,
+        &PluginChannelRegistry::default(),
+    )
+    .await
+}
+
+/// [`serve_connection`], plus a live [`PluginChannelRegistry`] (issue #335) —
+/// the entry point that makes wire-level plugin messaging reach a player at all.
+///
+/// The compatibility shape this file established for the feed-carrying variants
+/// holds here too: `crates/protocol/v770/tests/*` call [`serve_connection`] and
+/// [`serve_connection_with_commands`] directly and are off-limits, so a live
+/// registry gets a *new* entry point rather than a changed signature on those
+/// two. A host that wants plugin messaging constructs a [`PluginChannelRegistry`],
+/// registers its [`PluginChannelHandler`]s on it, and passes it here; inbound
+/// `custom_payload` packets on a registered channel are dispatched to the
+/// handler, and [`PluginChannelRegistry::broadcast`] payloads are drained into
+/// real clientbound `custom_payload` frames by `serve_play`'s
+/// `container_sync_tick` arm, filtered to the channels each client announced
+/// (see that arm's own comment). The plugin-facing API this will eventually sit
+/// under is issue #77; this entry point is the wire-level seam.
+///
+/// # Errors
+///
+/// As [`serve_connection`].
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_connection_with_plugin_channels<T, P, S, E>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &S,
+    entities: &E,
+    view_radius: i32,
+    block_entities: &BlockEntityHandle,
+    mobs: &MobHandle,
+    block_ticks: &BlockTickFeed,
+    explosions: &ExplosionFeed,
+    plugin_channels: &PluginChannelRegistry,
+) -> Result<ServeSummary, ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource + 'static,
+    E: EntitySource,
+{
+    serve_connection_inner(
+        conn,
+        proto,
+        SourceRef::Borrowed(source),
+        entities,
+        view_radius,
+        block_entities,
+        mobs,
+        block_ticks,
+        explosions,
+        &WeatherFeed::default(),
+        &CommandDispatch::none(),
+        &BorderFeed::default(),
+        &ResourcePackPushFeed::default(),
+        plugin_channels,
     )
     .await
 }
@@ -1273,6 +1410,33 @@ async fn serve_connection_inner<T, P, S, E>(
     // inert value every pre-existing entry point passes, so adding this
     // changed no caller's behaviour and no caller's wire bytes.
     commands: &CommandDispatch,
+    // Issue #326 B1: the world border the connection snapshots for its join
+    // `initialize_border` broadcast and reads every vitals tick for border
+    // damage. Same shape as the feeds above — every pre-existing entry point
+    // passes a fresh `BorderFeed::default()`, the compatibility shape this
+    // file established for `block_ticks`/`explosions`/`weather`. Nothing
+    // mutates a default feed today (the tick loop owns a private border — see
+    // `crate::border`'s module doc, shape B), so a default feed and a
+    // shared one are observably identical until a resize caller exists.
+    border: &BorderFeed,
+    // Issue #334. Same shape as every feed above: server-initiated resource
+    // pack pushes, drained by `serve_play`'s `container_sync_tick` arm. Every
+    // pre-existing entry point passes a permanently-empty default feed — the
+    // compatibility shape this file established for `block_ticks`/`explosions`
+    // /`weather`/`border`, and the reason no off-limits call site broke. A host
+    // that wants to push reaches [`serve_connection_with_resource_pack`]
+    // instead, which carries a real feed.
+    resource_packs: &ResourcePackPushFeed,
+    // Issue #335. Same shape as every feed above: the wire-level plugin
+    // messaging registry — host-installed channel handlers plus the
+    // server→client broadcast queue — drained by `serve_play`'s
+    // `container_sync_tick` arm alongside the resource-pack pushes. Every
+    // pre-existing entry point passes a permanently-inert default registry,
+    // the compatibility shape this file established for the feeds and
+    // `commands`, so no off-limits call site broke. A host that wants plugin
+    // messaging reaches [`serve_connection_with_plugin_channels`] instead,
+    // which carries a live registry.
+    plugin_channels: &PluginChannelRegistry,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -1294,6 +1458,12 @@ where
     // (`ServerStatusPacketListenerImpl.java:17`): one status reply per
     // connection, a second request is a disconnect.
     let mut status_requested = false;
+    // Issue #335. This connection's declared channel support, populated from
+    // its `minecraft:register`/`minecraft:unregister` custom payloads — first
+    // during Configuration (the arm below), then in Play via the same
+    // `ServerBound::CustomPayload` arm in `dispatch_play_packet`. It is the
+    // per-connection filter the broadcast drain in `serve_play` applies.
+    let mut client_channels = ClientChannels::default();
 
     while let Some((packet_id, payload)) = conn.read_packet().await? {
         match proto.decode(state, packet_id, &payload) {
@@ -1361,33 +1531,35 @@ where
             }
             ServerBound::LoginAcknowledged => {
                 state = State::Configuration;
+                // Issue #275: the registries a real client must resolve — the
+                // `dimension_type` holder ids `login`/`respawn` carry, the
+                // `world_clock` keys `set_time` uses — must arrive **before**
+                // the finish signal, or the client cannot make sense of them.
+                for directive in proto.encode_registry_data() {
+                    apply(conn, &mut state, directive).await?;
+                }
                 for directive in proto.begin_configuration() {
                     apply(conn, &mut state, directive).await?;
                 }
             }
             ServerBound::ConfigurationFinished => {
-                // Issue #461: derive spawn Y from terrain at the spawn
-                // column instead of the pre-#461 hardcoded 100. The spawn
-                // X/Z stay at the centre of chunk (0, 0) — the same column
-                // vanilla's own `LevelData.RespawnData.DEFAULT`
-                // (`GlobalPos.of(Level.OVERWORLD, BlockPos.ZERO)`, i.e.
-                // `(0, 0, 0)`) centres on, and the column the ring walk
-                // below already generates first (ring 0 is the spawn
-                // column). If the surface height ever places the player
-                // outside chunk (0, 0), `spawn_cx`/`spawn_cz` below move
-                // the view centre with it.
-                //
-                // Uses vanilla's `PlayerSpawnFinder.getLevelRespawnPos`
-                // rule (`.cache/mc/26.2/src/net/minecraft/server/level/
-                // PlayerSpawnFinder.java:148`): scan downward from the top
-                // for the first solid block, stand one above it — see
-                // [`spawn_surface_y`].
-                let spawn_column = source.get().column(0, 0);
-                let spawn_y = spawn_surface_y(&spawn_column, 8, 8);
-                let spawn = Vec3::new(8.0, spawn_y as f64, 8.0);
+                // Issue #329: the world spawn point is a *search*, not a
+                // fixed local `(8, 8)` in the origin column. Vanilla's
+                // `MinecraftServer.setInitialSpawn` walks a ±5-chunk spiral
+                // and picks the first chunk with a `getLevelRespawnPos`-valid
+                // surface (`world_spawn::find_initial_spawn`). Issue #461 had
+                // already replaced the hardcoded Y with terrain, but X/Z
+                // stayed fixed, so an ocean origin chunk spawned the player
+                // under water and no search ever moved them. The search keeps
+                // the same vanilla `getLevelRespawnPos` rule and yields
+                // `(8, y, 8)` for a plains origin — the pre-#329 result — so
+                // normal terrain is unchanged; the change is that an invalid
+                // origin now moves the spawn to the nearest valid chunk
+                // instead of stranding the player.
+                let spawn = find_initial_spawn(source.get());
 
                 state = State::Play;
-                for directive in proto.begin_play_at(view_radius, spawn) {
+                for directive in proto.begin_play_at(view_radius, spawn.pos) {
                     apply(conn, &mut state, directive).await?;
                 }
 
@@ -1464,7 +1636,7 @@ where
                     registry.join(
                         &username,
                         login_uuid.unwrap_or_else(uuid::Uuid::nil),
-                        spawn,
+                        spawn.pos,
                     )
                 });
 
@@ -1489,8 +1661,8 @@ where
                 // 8) both floor to 0, so the centre does not change today;
                 // the derivation is the point — when the spawn column or
                 // the X/Z offsets move, this follows automatically.
-                let spawn_cx = (spawn.x / 16.0).floor() as i32;
-                let spawn_cz = (spawn.z / 16.0).floor() as i32;
+                let spawn_cx = (spawn.pos.x / 16.0).floor() as i32;
+                let spawn_cz = (spawn.pos.z / 16.0).floor() as i32;
                 let view = ViewTracker::new((spawn_cx, spawn_cz), view_radius);
                 // Issues #48/#464. Built here, at the Play handoff, because
                 // this is the first point where both halves of a caller's
@@ -1507,13 +1679,27 @@ where
                 // `unwrap_or_default` is a total fallback rather than a panic
                 // because a nil uuid resolves to no player and therefore no
                 // permissions — failing closed, not open.
+                let player_uuid = login_uuid.unwrap_or_default();
                 let commands = CommandSession {
                     dispatch: commands.clone(),
-                    caller: CommandCaller::new(
-                        login_uuid.unwrap_or_default(),
-                        username.clone(),
-                    ),
+                    caller: CommandCaller::new(player_uuid, username.clone()),
                 };
+                // Issue #338. The server-authoritative advancement/statistics
+                // store for this connection, created at the Play handoff and
+                // carried into `serve_play` so the per-packet flush and the
+                // `REQUEST_STATS` reply can reach it. The first packet is sent
+                // here, at join, exactly where vanilla's
+                // `PlayerAdvancements.flushDirty` first-packet path fires:
+                // `reset` true, the whole builtin tree as `added`, and every
+                // advancement's (currently empty) progress — the client builds
+                // its screen from this one packet and nothing after it until a
+                // criterion actually flips. A protocol without an
+                // `encode_update_advancements` override simply sends nothing
+                // (the trait default), so this is a silent no-op rather than a
+                // failure on such a version.
+                let mut advancements = AdvancementManager::builtin();
+                let initial = advancements.initial_update(player_uuid, true);
+                apply(conn, &mut state, proto.encode_update_advancements(&initial)).await?;
                 return serve_play(
                     conn,
                     proto,
@@ -1533,8 +1719,27 @@ where
                     explosions,
                     weather,
                     commands,
+                    advancements,
+                    player_uuid,
+                    border,
+                    resource_packs,
+                    &mut client_channels,
+                    plugin_channels,
                 )
                 .await;
+            }
+            // Issue #335. Wire-level plugin messaging, Configuration-phase: a
+            // client announces the channels it supports here (via
+            // `minecraft:register`) before the Play handoff, so the broadcast
+            // drain in `serve_play` filters against them from the first drain
+            // onward. Same interpretation as the `dispatch_play_packet` arm:
+            // control channels update this connection's supported set, anything
+            // else is dispatched to its registered handler (silently dropped
+            // when the server registered no interest).
+            ServerBound::CustomPayload { channel, data } => {
+                if !client_channels.apply_custom_payload(&channel, &data) {
+                    plugin_channels.dispatch(&channel, &data);
+                }
             }
             ServerBound::KeepAlive { .. }
             | ServerBound::PlayerMoved { .. }
@@ -2394,6 +2599,16 @@ async fn apply_use_item_on<T, P, S>(
     state: &mut State,
     pos: BlockPos,
     face: BlockFace,
+    // Issue #329. The player's world-space position, for the bed-respawn
+    // reach test (vanilla's `bedInRange`, bed ±3 x/z and ±2 y). `None` until
+    // the first `PlayerMoved` packet arrives; a bed click before any move
+    // skips the reach test rather than rejecting (see
+    // [`is_legal_bed_respawn`]'s doc comment).
+    player_pos: Option<Vec3>,
+    // Issue #329. The player's per-player respawn point, written when a legal
+    // bed is right-clicked (see the bed arm below). `&mut`: the set writes
+    // through this slot.
+    respawn: &mut Option<RespawnPoint>,
     // Issue #475. The placing player's yaw, so the redstone directional
     // families can derive their `facing` (see [`placed_block_state`]). `None`
     // until the first packet carrying angles arrives; placement then falls
@@ -2510,6 +2725,35 @@ where
         ComposterUseOutcome::NotComposter => {
             // Fall through to the ordinary placement logic below.
         }
+    }
+
+    // Issue #329: right-clicking a bed sets the player's per-player respawn
+    // point (vanilla `BedBlock.useWithoutItem` → `ServerPlayer.startSleepInBed`
+    // → `setRespawnPosition`). A bed click is an *interaction*, not a
+    // placement — it must not fall through to the inventory-placement logic
+    // below (a bed is itself placeable, and the click target's cell may well
+    // be air-adjacent). The legality gate is issue #329's own requirement
+    // ("beds/anchors validated for a legal respawn spot before being
+    // accepted") — see [`is_legal_bed_respawn`] for the three checks and the
+    // documented monster-check remainder.
+    //
+    // The message is sent only when the stored point *changes* — vanilla's
+    // `setRespawnPosition` gates its message on the position having moved —
+    // so a re-click on the same bed is silent, and the message is a faithful
+    // observable proxy for "the tracking state changed" (the client has no
+    // "your respawn point is X" packet; the placement half of P2 will be the
+    // next consumer). The message itself is a stand-in: vanilla's
+    // `SPAWN_SET_MESSAGE` is a translatable component shown in the action bar,
+    // and this crate has no localization table or action-bar encoder, so the
+    // honest equivalent is a plain system-chat line.
+    if is_bed_block(&source.block_state(pos.x, pos.y, pos.z)) {
+        if is_legal_bed_respawn(source, pos, player_pos)
+            && !respawn.is_some_and(|existing| existing.pos == pos)
+        {
+            *respawn = Some(RespawnPoint { pos });
+            apply(conn, state, proto.encode_system_chat("Respawn point set")).await?;
+        }
+        return Ok(());
     }
 
     let neighbour = relative(pos, face);
@@ -2778,11 +3022,19 @@ where
 }
 
 /// Applies a `client_command` request (`ServerBound::ClientCommand`, issue
-/// #270), mirroring `ServerGamePacketListenerImpl::handleClientCommand`'s two
-/// modellable ordinals — `action == 1` (`REQUEST_STATS`) has no stats model
-/// in this crate and is a documented no-op, matching every other
-/// "decoded, no model to act on yet" gap this crate already discloses
-/// elsewhere (e.g. `PLAYER_ACTION`'s item-action ordinals).
+/// #270), mirroring `ServerGamePacketListenerImpl::handleClientCommand`'s
+/// modellable ordinals.
+///
+/// # `action == 1`, `REQUEST_STATS`
+///
+/// Issue #338. Vanilla answers with `player.getStats().sendStats(player)`
+/// (`ServerGamePacketListenerImpl.java:1910`) — a full `ClientboundAwardStatsPacket`.
+/// Here the same reply is built from [`AdvancementManager::stats_snapshot`] of
+/// this connection's [`crate::advancements`] store and lowered through
+/// [`ServerProtocol::encode_award_stats`] (a no-op default on protocols
+/// without a stats encoder). This is the *framework* reply: individual
+/// statistic producers (block-break mined counters, etc.) are follow-up wiring
+/// of this epic, so a fresh session typically answers an empty batch.
 ///
 /// # `action == 0`, `PERFORM_RESPAWN`
 ///
@@ -2818,6 +3070,8 @@ async fn apply_client_command<T, P>(
     state: &mut State,
     vitals: &mut PlayerVitals,
     admin: &WorldAdminState,
+    advancements: &mut AdvancementManager,
+    player_uuid: uuid::Uuid,
     action: i32,
 ) -> Result<(), ServerError>
 where
@@ -2829,6 +3083,10 @@ where
             vitals.respawn();
             apply(conn, state, proto.encode_set_health(vitals.health())).await?;
             apply(conn, state, proto.encode_air_supply_update(vitals.air_supply())).await?;
+        }
+        1 => {
+            let snapshot = advancements.stats_snapshot(player_uuid);
+            apply(conn, state, proto.encode_award_stats(&snapshot)).await?;
         }
         2 => {
             let entries: Vec<(String, String)> = admin
@@ -3084,6 +3342,12 @@ async fn dispatch_play_packet<T, P, S>(
     // identity) because this function already takes 24; see
     // [`CommandSession`]'s own doc comment.
     commands: &CommandSession,
+    // Issue #338. This connection's advancement/statistics store and the player
+    // key its progress lives under. Threaded only to reach `apply_client_command`
+    //'s `REQUEST_STATS` arm, which answers with the player's current stats —
+    // see that function's own doc comment.
+    advancements: &mut AdvancementManager,
+    player_uuid: uuid::Uuid,
     // Issue #469. Mirrors `player_pos`/`player_rot` exactly — filled here,
     // read back by the caller, republished to the `PlayerRegistry` so *other*
     // connections see it. An out-parameter rather than two more parameters (a
@@ -3098,6 +3362,16 @@ async fn dispatch_play_packet<T, P, S>(
     // `serve_play`, advanced once per right-click (see
     // [`apply_composter_use`]'s `roll` parameter).
     composter_rng: &mut SpawnRng,
+    // Issue #335. This connection's declared channel support (register/
+    // unregister interpretation happens here, in Play) and the shared registry
+    // to dispatch ordinary payloads on.
+    client_channels: &mut ClientChannels,
+    plugin_channels: &PluginChannelRegistry,
+    // Issue #329. The player's per-player respawn point, written by the bed
+    // arm of `apply_use_item_on` and threaded through `serve_play`'s session
+    // state. Read back by no caller yet — the placement half of P2 is the
+    // next consumer (see `crate::world_spawn`'s module doc).
+    respawn: &mut Option<RespawnPoint>,
     packet_id: i32,
     payload: &[u8],
 ) -> Result<(), ServerError>
@@ -3244,6 +3518,10 @@ where
                 state,
                 pos,
                 face,
+                // Issue #329. The player's position, for the bed reach test —
+                // `None` until a `PlayerMoved` packet carries one.
+                player_pos.as_ref().map(|&(x, y, z)| Vec3::new(x, y, z)),
+                respawn,
                 // Issue #475. The placing player's yaw, so
                 // `apply_use_item_on` can give directional blocks their
                 // placement facing. `None` until a packet carrying angles
@@ -3304,7 +3582,8 @@ where
             apply_creative_mode_slot_set(inventory, slot, item);
         }
         ServerBound::ClientCommand { action } => {
-            apply_client_command(conn, proto, state, vitals, admin, action).await?;
+            apply_client_command(conn, proto, state, vitals, admin, advancements, player_uuid, action)
+                .await?;
         }
         ServerBound::ClientInformationChanged { view_distance } => {
             // Clamp against the server's own configured cap (`view_radius`,
@@ -3370,6 +3649,16 @@ where
         ServerBound::Chat { message } => {
             if !message.trim().is_empty() {
                 outgoing_chat.push(message);
+            }
+        }
+        // Issue #335. Wire-level plugin messaging, Play-phase: the
+        // register/unregister control channels update this connection's
+        // supported set, and any other channel is dispatched to its registered
+        // handler (silently dropped when the server registered no interest —
+        // vanilla's `DiscardedPayload` fallback).
+        ServerBound::CustomPayload { channel, data } => {
+            if !client_channels.apply_custom_payload(&channel, &data) {
+                plugin_channels.dispatch(&channel, &data);
             }
         }
         // The pre-Play phase signals, unreachable here by construction: a
@@ -3465,6 +3754,32 @@ async fn serve_play<T, P, S, E>(
     // the Play handoff, from *this* connection's login, and it is cheap
     // (an `Option<Arc>` plus a `Uuid` and a `String`).
     commands: CommandSession,
+    // Issue #338. The connection's server-authoritative advancement/statistics
+    // store, built in `serve_connection_inner` (which already sent its
+    // first-packet `update_advancements` at join). Mutable because both the
+    // per-packet flush below and the `REQUEST_STATS` reply in
+    // `dispatch_play_packet` award into / read from it.
+    mut advancements: AdvancementManager,
+    // Issue #338. The player key this connection's advancement/statistic
+    // progress is stored under — the same `login_uuid` that built
+    // `CommandSession`'s caller, resolved the same way (a nil uuid fails
+    // closed: the connection tracks nothing).
+    player_uuid: uuid::Uuid,
+    // Issue #326 B1: the world border, snapshotted on the vitals timer for
+    // border damage (a default feed is the full-size static border today — see
+    // `serve_connection_inner`'s parameter comment).
+    border: &BorderFeed,
+    // Issue #334. Server-initiated resource pack pushes, drained on
+    // `container_sync_tick` — same timer as the block-tick/explosion/weather
+    // drains below, for the same reason: a push is published by the host (not
+    // by an inbound packet) and needs this connection's own timer to notice.
+    resource_packs: &ResourcePackPushFeed,
+    // Issue #335. The connection's declared channel support (the filter the
+    // broadcast drain below applies) and the shared wire-level registry whose
+    // broadcast queue that drain reads. `client_channels` is owned, not
+    // borrowed: it was created here for this connection and dies with it.
+    client_channels: &mut ClientChannels,
+    plugin_channels: &PluginChannelRegistry,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -3495,6 +3810,10 @@ where
     // Issue #249. This connection's composter roll stream — see
     // `COMPOSTER_BEHAVIOR_SEED` and `dispatch_play_packet`'s parameter comment.
     let mut composter_rng = SpawnRng::new(COMPOSTER_BEHAVIOR_SEED);
+    // Issue #329. This connection's per-player respawn point, written by
+    // `apply_use_item_on`'s bed arm. Never read here — the placement half of
+    // P2 is the next consumer (see `crate::world_spawn`'s module doc).
+    let mut respawn: Option<RespawnPoint> = None;
     // Issue #270's chunk-batch flow-control gate (`ServerBound::
     // ChunkBatchAcknowledged`, see `send_view_update`'s own doc comment):
     // starts `true` because `serve_connection`'s own initial full-view dump
@@ -3510,6 +3829,12 @@ where
     // log's *current end* so a joining player is not replayed the backlog of
     // everything said before they arrived.
     let mut chat_cursor = entities.players().map_or(0, PlayerRegistry::chat_cursor);
+    // Issue #335. This connection's read position in the shared plugin-channel
+    // broadcast queue. Started at 0 — unlike chat, a *broadcast* is
+    // host-published state a new connection legitimately receives: a client
+    // that announces `minecraft:brand` support at join is owed the brand
+    // payload that was queued before it arrived.
+    let mut plugin_channel_cursor: u64 = 0;
     let mut keep_alive_tick = tokio::time::interval_at(
         tokio::time::Instant::now() + KEEP_ALIVE_INTERVAL,
         KEEP_ALIVE_INTERVAL,
@@ -3572,13 +3897,30 @@ where
                     &mut awaiting_chunk_batch_ack,
                     &mut pending_chunk_batches,
                     &commands,
+                    &mut advancements,
+                    player_uuid,
                     &mut outgoing_chat,
                     block_ticks,
                     &mut composter_rng,
+                    client_channels,
+                    plugin_channels,
+                    &mut respawn,
                     packet_id,
                     &payload,
                 )
                 .await?;
+                // Issue #338: drain the advancement flush for anything the
+                // packet just granted. Vanilla flushes every server tick
+                // (`ServerPlayer.tick()` → `advancements.flushDirty(player,
+                // true)`); every advancement producer in this crate today is
+                // packet-driven, so flushing here — immediately after the
+                // packet was applied — is equivalent and needs no timer this
+                // loop may not own. `flush_dirty` returns `None` on the
+                // no-change fast path, so the common case adds one cheap
+                // `is_empty` check and no packet.
+                if let Some(update) = advancements.flush_dirty(player_uuid, true) {
+                    apply(conn, &mut state, proto.encode_update_advancements(&update)).await?;
+                }
                 // Issue #469: republish this player's chat for *every*
                 // connection to pick up, this one included. Same read-back
                 // idiom as `player_pos`/`player_rot` below, and for the same
@@ -3675,6 +4017,25 @@ where
                 // than guess a spawn position this version-free crate does
                 // not otherwise track (see `crate::vitals`'s module docs).
                 if let Some((x, y, z)) = player_pos {
+                    // Issue #326 B1: border damage, applied *before* the
+                    // submersion test — vanilla's `LivingEntity.baseTick` runs
+                    // the border `else if` ahead of the water-breath block
+                    // (`LivingEntity.java:425-434`). Snapshot the border once
+                    // per timer tick and ask it for the damage the tracked
+                    // position attracts; `apply_border_damage` is `Some` only
+                    // when the hit landed (a dead player is a no-op), and a
+                    // player past the safe zone takes `max(1, floor(d*0.2))`
+                    // *every* tick — the plan gate's per-tick cadence. With a
+                    // default full-size border the distance is far inside and
+                    // `damage_for_position` is always `None`: nothing is sent
+                    // and this costs one clone + one distance scan per 50ms.
+                    let border_state = border.get();
+                    if let Some(damage) = border_state.damage_for_position(x, z) {
+                        if vitals.apply_border_damage(damage).is_some() {
+                            apply(conn, &mut state, proto.encode_set_health(vitals.health())).await?;
+                        }
+                    }
+
                     let eye_state = source.get().block_state(
                         x.floor() as i32,
                         (y + EYE_HEIGHT).floor() as i32,
@@ -3744,6 +4105,16 @@ where
                     let (kind, value) = event.wire();
                     apply(conn, &mut state, proto.encode_game_event(kind, value)).await?;
                 }
+                // Issue #334: same shape again — a resource pack push is
+                // published by the host (a config surface on `IntegratedServer`,
+                // or a future command), never by an inbound packet, so this
+                // connection learns of it only when this timer drains the feed.
+                // `ResourcePackPushFeed::drain_all` is single-consumer for the
+                // same reason the three drains above are (see that type's own
+                // doc comment).
+                for push in resource_packs.drain_all() {
+                    apply(conn, &mut state, proto.encode_resource_pack_push(&push)).await?;
+                }
                 // Issue #469: player chat, riding the same timer as the three
                 // above for the same reason. Unlike them this is *not* a
                 // drain-all feed — `chat_since` advances this connection's own
@@ -3757,6 +4128,26 @@ where
                         apply(conn, &mut state, proto.encode_system_chat(&line.rendered()))
                             .await?;
                     }
+                }
+                // Issue #335: same shape as chat above — a broadcast is
+                // host-published (a future #77 plugin, a command, a config
+                // surface), never an inbound packet, so this connection learns
+                // of it only when this timer drains the shared queue. Also like
+                // chat, it is *not* a drain-all feed: every connection reads
+                // every payload through its own cursor, filtered to the
+                // channels this client announced. See `outbound_since`'s doc
+                // comment for why a channel this client never registered is a
+                // skip, not a block.
+                for (channel, data) in plugin_channels.outbound_since(
+                    &mut plugin_channel_cursor,
+                    client_channels,
+                ) {
+                    apply(
+                        conn,
+                        &mut state,
+                        proto.encode_custom_payload(&channel, &data),
+                    )
+                    .await?;
                 }
             }
         }
@@ -3816,6 +4207,36 @@ async fn serve_play<T, P, S, E>(
     // chat goes back), so the missing timers cost nothing here and this loop
     // dispatches commands identically to the native one.
     commands: CommandSession,
+    // Issue #338 — **not** a gap on this target. Advancements and statistics
+    // are entirely packet-driven (a criterion flips on an inbound packet, the
+    // reply rides the same packet), so the missing timers cost nothing here and
+    // this loop flushes and answers `REQUEST_STATS` identically to the native
+    // one. Same signature and same position as the native definition's pair.
+    mut advancements: AdvancementManager,
+    player_uuid: uuid::Uuid,
+    // Issue #326 B1: same gap as `_weather`/`_explosions`, same reason —
+    // border damage is applied on the native loop's `vitals_tick` timer, which
+    // this target owns none of, so a browser singleplayer world never deals
+    // border damage. Accepted for signature parity with the native definition
+    // (and with `serve_connection_inner`'s call, which is target-agnostic).
+    _border: &BorderFeed,
+    // Issue #334: same gap as `_weather`/`_explosions`, same reason — a
+    // resource pack push has no packet driving it either, and the drain point
+    // is the native loop's `container_sync_tick`, which this target owns none
+    // of, so a browser singleplayer world never surfaces one. Accepted for
+    // signature parity with the native definition.
+    _resource_packs: &ResourcePackPushFeed,
+    // Issue #335. The *inbound* half (register/unregister + dispatch) is
+    // packet-driven, so it is wired identically on this target through the
+    // shared `dispatch_play_packet` call. The *outbound* half — draining
+    // `plugin_channels`'s broadcast queue — is the same gap as `_resource_packs`:
+    // it rides the native loop's `container_sync_tick`, which this target owns
+    // none of, so a browser singleplayer world never receives a broadcast
+    // until an inbound packet happens to flow. `plugin_channels` is passed
+    // through for signature parity and so the inbound dispatch reaches the
+    // shared registry.
+    client_channels: &mut ClientChannels,
+    plugin_channels: &PluginChannelRegistry,
 ) -> Result<ServeSummary, ServerError>
 where
     T: Transport,
@@ -3859,6 +4280,10 @@ where
     // composter roll stream has no timer and no wasm32 dependency, so it is
     // wired identically on this target.
     let mut composter_rng = SpawnRng::new(COMPOSTER_BEHAVIOR_SEED);
+    // Issue #329 — see the native `serve_play`'s identical binding: the
+    // per-player respawn point has no timer and no wasm32 dependency, so it
+    // is wired identically on this target.
+    let mut respawn: Option<RespawnPoint> = None;
     // See the native `serve_play`'s identical field for why this starts
     // `true` (the initial join dump is itself an unacknowledged batch).
     let mut awaiting_chunk_batch_ack = true;
@@ -3891,13 +4316,25 @@ where
             &mut awaiting_chunk_batch_ack,
             &mut pending_chunk_batches,
             &commands,
+            &mut advancements,
+            player_uuid,
             &mut outgoing_chat,
             block_ticks,
             &mut composter_rng,
+            client_channels,
+            plugin_channels,
+            &mut respawn,
             packet_id,
             &payload,
         )
         .await?;
+        // Issue #338 — identical to the native loop, and **not** a gap on this
+        // target: the advancement flush is packet-driven (a criterion flips on
+        // the packet just dispatched, the reply rides this same iteration), so
+        // the missing timers cost nothing here. See the native loop's comment.
+        if let Some(update) = advancements.flush_dirty(player_uuid, true) {
+            apply(conn, &mut state, proto.encode_update_advancements(&update)).await?;
+        }
         // Issue #469, identical to the native loop's publish. The *drain*,
         // though, is a real gap on this target: it rides the native loop's
         // `container_sync_tick`, which `tokio::time` gives this target none

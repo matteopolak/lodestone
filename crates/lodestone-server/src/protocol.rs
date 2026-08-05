@@ -84,6 +84,37 @@ pub struct PlayerListing {
     pub username: String,
 }
 
+/// A server-initiated resource pack push (vanilla
+/// `ClientboundResourcePackPushPacket`) in version-free vocabulary — the
+/// server side of issue #334, fed by
+/// [`ServerProtocol::encode_resource_pack_push`].
+///
+/// Mirrors the wire record exactly: a fresh per-push [`Uuid`] the client
+/// echoes back verbatim in its accept/decline response, the download [`url`],
+/// the pack's SHA-1 [`hash`] (lowercase hex, at most 40 chars — vanilla's
+/// `ClientboundResourcePackPushPacket.MAX_HASH_LENGTH`), the [`required`]
+/// flag that makes declining a disconnect, and an optional [`prompt`] chat
+/// component shown on the accept/decline screen. `url` and `hash` are owned
+/// `String`s (not borrowed) so a push can outlive its construction site and
+/// ride a feed across a task boundary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResourcePackPush {
+    /// The push's own uuid — vanilla generates a fresh one per push, and the
+    /// client's response echoes it (see
+    /// `crate::server`'s decode of the serverbound `RESOURCE_PACK` frame).
+    pub id: Uuid,
+    /// The pack's download URL.
+    pub url: String,
+    /// The SHA-1 hash of the pack, lowercase hex, at most 40 characters
+    /// (may be empty if the pack does not declare one).
+    pub hash: String,
+    /// Whether the client must accept the pack to keep playing — a declined
+    /// or failed download disconnects it.
+    pub required: bool,
+    /// An optional prompt component shown on the accept/decline screen.
+    pub prompt: Option<Text>,
+}
+
 /// One per-species entity-metadata field a [`ServerProtocol`] can push over
 /// `SET_ENTITY_DATA` (issue #425) — the general vocabulary
 /// [`ServerProtocol::encode_set_entity_data`] takes a slice of, replacing
@@ -542,6 +573,24 @@ pub enum ServerBound {
         /// characters by the wire format.
         message: String,
     },
+    /// A custom plugin-message payload from the client
+    /// (`ServerboundCustomPayloadPacket`, issue #335) — the version-free
+    /// lowering of the packet, exactly as it crossed the wire: a namespaced
+    /// channel identifier plus the channel's raw bytes.
+    ///
+    /// Two channels are *interpreted* by the loop rather than dispatched —
+    /// `minecraft:register` / `minecraft:unregister` update which channels this
+    /// connection supports (see [`crate::ClientChannels`]) — and every other
+    /// channel is looked up in the server's
+    /// [`PluginChannelRegistry`](crate::PluginChannelRegistry) and delivered to
+    /// whatever registered interest owns it, or silently dropped when none
+    /// does, exactly vanilla's `DiscardedPayload` fallback.
+    CustomPayload {
+        /// The namespaced channel identifier (e.g. `minecraft:brand`).
+        channel: ResourceKey,
+        /// The channel-specific payload bytes, verbatim.
+        data: Vec<u8>,
+    },
     /// A packet the loop does not need to act on (teleport confirmations,
     /// look-only or status-only movement, and several other decoded-but-
     /// unmodelled families — see `crates/protocol/v770/src/server_protocol.rs`'s
@@ -581,9 +630,11 @@ pub enum ServerDirective {
 ///    [`ServerBound::LoginStart`] arrives, to emit the login-success reply
 ///    (this does **not** change state — vanilla's client only moves to
 ///    Configuration once it has sent its own acknowledgement);
-/// 3. [`begin_configuration`](ServerProtocol::begin_configuration) once the
-///    resulting [`ServerBound::LoginAcknowledged`] arrives, to emit whatever
-///    configuration-phase packets precede the finish signal;
+/// 3. [`encode_registry_data`](ServerProtocol::encode_registry_data) then
+///    [`begin_configuration`](ServerProtocol::begin_configuration) once the
+///    resulting [`ServerBound::LoginAcknowledged`] arrives, to emit the
+///    Configuration-phase registry stream followed by the finish signal
+///    (issue #275: the registries must precede `FINISH_CONFIGURATION`);
 /// 4. [`begin_play`](ServerProtocol::begin_play) once
 ///    [`ServerBound::ConfigurationFinished`] arrives, to emit the join
 ///    sequence (join game, spawn position, initial teleport, chunk cache
@@ -629,6 +680,29 @@ pub trait ServerProtocol: Send + Sync {
     /// [`ServerBound::LoginAcknowledged`]), ending with whatever finishes the
     /// configuration phase from the server's side.
     fn begin_configuration(&self) -> Vec<ServerDirective>;
+
+    /// Emits the Configuration-phase `registry_data` packets — one per
+    /// synchronized registry, so the client can resolve the bare holder ids
+    /// later packets carry (`login`'s `dimension_type` index, `set_time`'s
+    /// `world_clock` keys). **Issue #275.** Sent by the server loop **before**
+    /// [`begin_configuration`](ServerProtocol::begin_configuration)'s finish
+    /// signal; a real client expects the registries to precede
+    /// `FINISH_CONFIGURATION`.
+    ///
+    /// The default emits nothing. A protocol that does not host (every legacy
+    /// family — only a family with a `ServerProtocol` implementation hosts),
+    /// or a host that has no registry data to declare yet, sends no packets
+    /// and behaves exactly as it did before this method existed — the same
+    /// additive, version-free seam [`encode_status_response`](ServerProtocol::encode_status_response)
+    /// established. This is deliberately a separate call rather than a
+    /// prefix inside [`begin_configuration`](ServerProtocol::begin_configuration):
+    /// routing the registry stream through its own method makes "registries
+    /// before finish" a version-free invariant of the choreography in
+    /// `crate::server`'s `serve_connection_inner`, instead of something each
+    /// implementor must remember inside its own `begin_configuration`.
+    fn encode_registry_data(&self) -> Vec<ServerDirective> {
+        Vec::new()
+    }
 
     /// Encodes the server-list status reply to a [`ServerBound::StatusRequest`]
     /// (vanilla `ClientboundStatusResponsePacket`, whose whole body is one
@@ -735,6 +809,21 @@ pub trait ServerProtocol: Send + Sync {
     /// emits nothing, matching every other optional encoder here.
     fn encode_system_chat(&self, message: &str) -> ServerDirective {
         let _ = message;
+        ServerDirective::None
+    }
+
+    /// Encodes a server→client plugin-message payload (vanilla
+    /// `ClientboundCustomPayloadPacket`, wire id `custom_payload`, issue #335).
+    /// `channel` is the namespaced channel identifier; `data` is the
+    /// channel-specific raw bytes, written verbatim — the same two-field shape
+    /// [`ServerBound::CustomPayload`] lifts on the inbound side.
+    ///
+    /// This is the one wire-level route a server-initiated payload takes to a
+    /// connected client. The default emits nothing, so a protocol without
+    /// plugin-message support need not override it — the same convention as
+    /// every other optional encoder here.
+    fn encode_custom_payload(&self, channel: &ResourceKey, data: &[u8]) -> ServerDirective {
+        let _ = (channel, data);
         ServerDirective::None
     }
 
@@ -1006,6 +1095,20 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
+    /// Encodes a weather transition (vanilla `ClientboundGameEventPacket`,
+    /// wire id `game_event` — the same packet the client's adapter decodes
+    /// into `ClientEvent::WeatherChanged`).
+    /// `kind` is the vanilla event id: 1 = `START_RAINING`, 2 = `STOP_RAINING`,
+    /// 7 = `RAIN_LEVEL_CHANGE`, 8 = `THUNDER_LEVEL_CHANGE`. `value` is the
+    /// float parameter — 0.0 for the start/stop pair, the level for the
+    /// level-change pair — matching `ClientboundGameEventPacket`'s own
+    /// `writeByte(event) + writeFloat(param)` layout. The default emits
+    /// nothing, so a protocol without weather support simply never rains.
+    fn encode_game_event(&self, kind: u8, value: f32) -> ServerDirective {
+        let _ = (kind, value);
+        ServerDirective::None
+    }
+
     /// Opens a container's screen on the client (vanilla
     /// `ClientboundOpenScreenPacket`, sent by `ServerPlayer::openMenu`).
     /// `window_id` is the container id every subsequent `container_click`/
@@ -1072,6 +1175,127 @@ pub trait ServerProtocol: Send + Sync {
         let _ = (window_id, property, value);
         ServerDirective::None
     }
+
+    /// Encodes the clientbound `initialize_border` packet (vanilla
+    /// `ClientboundInitializeBorderPacket`, wire id 43 in 26.2) — the border
+    /// state a player is told about on join, sent by `PlayerList.sendLevelInfo`
+    /// **before** the time sync and spawn-position packets (`PlayerList.java:
+    /// 648-663`). The default emits nothing.
+    ///
+    /// Passed the whole [`WorldBorder`](crate::border::WorldBorder) because
+    /// the packet's `old_size`/`new_size`/`lerp_time` triple is exactly the
+    /// extent's `size`/`lerp_target`/`lerp_time` readout
+    /// (`ClientboundInitializeBorderPacket.java:35-38`), and its
+    /// `absolute_max_size`/`warning_blocks`/`warning_time` are flat fields —
+    /// the encoder should not have to re-derive that mapping from primitives.
+    fn encode_initialize_border(&self, border: &crate::border::WorldBorder) -> ServerDirective {
+        let _ = border;
+        ServerDirective::None
+    }
+
+    /// Encodes the clientbound `set_border_center` packet (vanilla
+    /// `ClientboundSetBorderCenterPacket`, wire id 88 in 26.2). The default
+    /// emits nothing.
+    fn encode_set_border_center(&self, x: f64, z: f64) -> ServerDirective {
+        let _ = (x, z);
+        ServerDirective::None
+    }
+
+    /// Encodes the clientbound `set_border_lerp_size` packet (vanilla
+    /// `ClientboundSetBorderLerpSizePacket`, wire id 89 in 26.2) — the *live*
+    /// resize delta a border shrink/grow broadcasts, carrying `old_size`,
+    /// `new_size` and the lerp time in **milliseconds**. Vanilla writes
+    /// `border.getLerpTime()` — remaining server **ticks** — directly
+    /// (`ClientboundSetBorderLerpSizePacket.java:20`, no ×50), but this crate's
+    /// client decodes the field as `lerp_time_ms` and interpolates on wall-clock
+    /// (`lodestone-game::worldborder`'s `BorderExtent::Moving`), so the caller
+    /// converts ticks → ms (`* 50`) before calling and this method writes the ms
+    /// value verbatim — the same deliberate divergence
+    /// [`encode_initialize_border`](Self::encode_initialize_border) documents
+    /// for its own lerp-time field. The default emits nothing.
+    fn encode_set_border_lerp_size(
+        &self,
+        old_size: f64,
+        new_size: f64,
+        lerp_time_ms: i64,
+    ) -> ServerDirective {
+        let _ = (old_size, new_size, lerp_time_ms);
+        ServerDirective::None
+    }
+
+    /// Encodes the clientbound `set_border_size` packet (vanilla
+    /// `ClientboundSetBorderSizePacket`, wire id 90 in 26.2) — the instant
+    /// snap a `set_size` broadcasts. The default emits nothing.
+    fn encode_set_border_size(&self, size: f64) -> ServerDirective {
+        let _ = size;
+        ServerDirective::None
+    }
+
+    /// Encodes the clientbound `set_border_warning_delay` packet (vanilla
+    /// `ClientboundSetBorderWarningDelayPacket`, wire id 91 in 26.2).
+    /// The default emits nothing.
+    fn encode_set_border_warning_delay(&self, warning_time: i32) -> ServerDirective {
+        let _ = warning_time;
+        ServerDirective::None
+    }
+
+    /// Encodes the clientbound `set_border_warning_distance` packet (vanilla
+    /// `ClientboundSetBorderWarningDistancePacket`, wire id 92 in 26.2).
+    /// The default emits nothing.
+    fn encode_set_border_warning_distance(&self, warning_blocks: i32) -> ServerDirective {
+        let _ = warning_blocks;
+        ServerDirective::None
+    }
+
+    /// Encodes the clientbound `resource_pack_push` packet (vanilla
+    /// `ClientboundResourcePackPushPacket`) — the server-initiated half of the
+    /// resource-pack lifecycle (issue #334). The body is the [`ResourcePackPush`]
+    /// record verbatim: a raw 16-byte uuid, a VarInt-prefixed UTF-8 url, a
+    /// VarInt-prefixed UTF-8 SHA-1 hash capped at 40 characters (vanilla's
+    /// `MAX_HASH_LENGTH`), a bool `required` flag, then — only if present — an
+    /// NBT chat component prompt. The default emits nothing.
+    fn encode_resource_pack_push(&self, push: &ResourcePackPush) -> ServerDirective {
+        let _ = push;
+        ServerDirective::None
+    }
+
+    /// Encodes the full `ClientboundUpdateAdvancementsPacket` (26.2) — the
+    /// advancement tree plus per-player progress (issue #338). The payload is
+    /// [`crate::advancements::AdvancementUpdate`] verbatim, built by
+    /// [`AdvancementManager::initial_update`](crate::advancements::AdvancementManager::initial_update)
+    /// on join (`reset` true, the whole tree as `added`) and by
+    /// [`flush_dirty`](crate::advancements::AdvancementManager::flush_dirty)
+    /// on every tick that something changed (incremental `added`/`removed`
+    /// deltas plus the changed `progress`). Vanilla's `AdvancementHolder`
+    /// travels as the `added` list and `CriterionProgress` as each
+    /// `AdvancementProgressUpdate` entry's epoch-millis. The default emits
+    /// nothing, so a protocol without advancement support never shows a tree.
+    fn encode_update_advancements(&self, update: &crate::advancements::AdvancementUpdate) -> ServerDirective {
+        let _ = update;
+        ServerDirective::None
+    }
+
+    /// Encodes the `ClientboundAwardStatsPacket` (26.2): a batch of
+    /// `(StatKey, count)` pairs, sent in reply to the client's
+    /// `ClientCommand(REQUEST_STATS)` (issue #338). Each `StatKey` is the
+    /// stat-type registry id (e.g. `minecraft:mined`) plus the value key
+    /// (item/block/entity id, or the custom-stat id), exactly vanilla's
+    /// `Stat.STREAM_CODEC` dispatch; an implementor maps those to registry
+    /// ids and writes the count as a varint. The default emits nothing.
+    fn encode_award_stats(&self, stats: &[(crate::advancements::StatKey, i32)]) -> ServerDirective {
+        let _ = stats;
+        ServerDirective::None
+    }
+
+    /// Encodes the `ClientboundSelectAdvancementsTabPacket` (26.2), sent in
+    /// reply to the client's `select_advancements_tab` request (issue #338).
+    /// `tab` is the advancement id to open, or `None` to close the screen —
+    /// vanilla answers the client's own request with the same id it was given.
+    /// The default emits nothing.
+    fn encode_select_advancements_tab(&self, tab: Option<&str>) -> ServerDirective {
+        let _ = tab;
+        ServerDirective::None
+    }
 }
 
 /// Forwards every method to the boxed implementor, so a **trait object** can be
@@ -1112,6 +1336,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn begin_configuration(&self) -> Vec<ServerDirective> {
         (**self).begin_configuration()
+    }
+
+    fn encode_registry_data(&self) -> Vec<ServerDirective> {
+        (**self).encode_registry_data()
     }
 
     fn encode_status_response(
@@ -1225,6 +1453,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         (**self).encode_game_rule_values(entries)
     }
 
+    fn encode_game_event(&self, kind: u8, value: f32) -> ServerDirective {
+        (**self).encode_game_event(kind, value)
+    }
+
     fn encode_open_screen(&self, window_id: i32, menu: &str, title: &str) -> ServerDirective {
         (**self).encode_open_screen(window_id, menu, title)
     }
@@ -1251,6 +1483,54 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn encode_container_data(&self, window_id: i32, property: i32, value: i32) -> ServerDirective {
         (**self).encode_container_data(window_id, property, value)
+    }
+
+    fn encode_initialize_border(&self, border: &crate::border::WorldBorder) -> ServerDirective {
+        (**self).encode_initialize_border(border)
+    }
+
+    fn encode_set_border_center(&self, x: f64, z: f64) -> ServerDirective {
+        (**self).encode_set_border_center(x, z)
+    }
+
+    fn encode_set_border_lerp_size(
+        &self,
+        old_size: f64,
+        new_size: f64,
+        lerp_time_ms: i64,
+    ) -> ServerDirective {
+        (**self).encode_set_border_lerp_size(old_size, new_size, lerp_time_ms)
+    }
+
+    fn encode_set_border_size(&self, size: f64) -> ServerDirective {
+        (**self).encode_set_border_size(size)
+    }
+
+    fn encode_set_border_warning_delay(&self, warning_time: i32) -> ServerDirective {
+        (**self).encode_set_border_warning_delay(warning_time)
+    }
+
+    fn encode_set_border_warning_distance(&self, warning_blocks: i32) -> ServerDirective {
+        (**self).encode_set_border_warning_distance(warning_blocks)
+    }
+
+    fn encode_resource_pack_push(&self, push: &ResourcePackPush) -> ServerDirective {
+        (**self).encode_resource_pack_push(push)
+    }
+
+    fn encode_update_advancements(
+        &self,
+        update: &crate::advancements::AdvancementUpdate,
+    ) -> ServerDirective {
+        (**self).encode_update_advancements(update)
+    }
+
+    fn encode_award_stats(&self, stats: &[(crate::advancements::StatKey, i32)]) -> ServerDirective {
+        (**self).encode_award_stats(stats)
+    }
+
+    fn encode_select_advancements_tab(&self, tab: Option<&str>) -> ServerDirective {
+        (**self).encode_select_advancements_tab(tab)
     }
 }
 
@@ -1285,6 +1565,9 @@ mod tests {
         }
         fn begin_configuration(&self) -> Vec<ServerDirective> {
             vec![send(3)]
+        }
+        fn encode_registry_data(&self) -> Vec<ServerDirective> {
+            vec![send(4)]
         }
         fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective> {
             vec![send(100 + view_radius)]
@@ -1347,6 +1630,9 @@ mod tests {
         fn encode_game_rule_values(&self, entries: &[(String, String)]) -> ServerDirective {
             send(entries.len() as i32)
         }
+        fn encode_game_event(&self, kind: u8, value: f32) -> ServerDirective {
+            send(900 + i32::from(kind) * 100 + value as i32)
+        }
         fn encode_open_screen(&self, window_id: i32, _menu: &str, _title: &str) -> ServerDirective {
             send(300 + window_id)
         }
@@ -1371,6 +1657,44 @@ mod tests {
         fn encode_container_data(&self, window_id: i32, property: i32, value: i32) -> ServerDirective {
             send(600 + window_id * 100 + property * 10 + value)
         }
+        fn encode_initialize_border(&self, border: &crate::border::WorldBorder) -> ServerDirective {
+            send(1000 + border.size() as i32)
+        }
+        fn encode_set_border_center(&self, x: f64, z: f64) -> ServerDirective {
+            send(1100 + x as i32 + z as i32)
+        }
+        fn encode_set_border_lerp_size(
+            &self,
+            old_size: f64,
+            new_size: f64,
+            lerp_time_ms: i64,
+        ) -> ServerDirective {
+            send(1200 + old_size as i32 + new_size as i32 + lerp_time_ms as i32)
+        }
+        fn encode_set_border_size(&self, size: f64) -> ServerDirective {
+            send(1300 + size as i32)
+        }
+        fn encode_set_border_warning_delay(&self, warning_time: i32) -> ServerDirective {
+            send(1400 + warning_time)
+        }
+        fn encode_set_border_warning_distance(&self, warning_blocks: i32) -> ServerDirective {
+            send(1500 + warning_blocks)
+        }
+        fn encode_resource_pack_push(&self, push: &ResourcePackPush) -> ServerDirective {
+            send(1600 + push.url.len() as i32 + push.hash.len() as i32 + i32::from(push.required))
+        }
+        fn encode_update_advancements(
+            &self,
+            update: &crate::advancements::AdvancementUpdate,
+        ) -> ServerDirective {
+            send(1700 + update.added.len() as i32 + update.removed.len() as i32 + i32::from(update.reset))
+        }
+        fn encode_award_stats(&self, stats: &[(crate::advancements::StatKey, i32)]) -> ServerDirective {
+            send(1800 + stats.len() as i32)
+        }
+        fn encode_select_advancements_tab(&self, tab: Option<&str>) -> ServerDirective {
+            send(1900 + tab.map_or(0, |t| t.len() as i32))
+        }
     }
 
     fn snapshot(id: i32) -> EntitySnapshot {
@@ -1390,8 +1714,8 @@ mod tests {
     /// `Box<dyn ServerProtocol>` and through the concrete value.
     ///
     /// This is the control for the forwarding impl above, and the reason it is
-    /// worth writing is that **fifteen of the twenty methods have defaults**:
-    /// forgetting to forward one is not a compile error, it silently answers
+    /// worth writing is that **most of the methods have defaults**: forgetting
+    /// to forward one is not a compile error, it silently answers
     /// `ServerDirective::None`. That failure only ever shows up in a boxed
     /// server — i.e. only in singleplayer, which is exactly the path with no
     /// live oracle to catch it.
@@ -1411,6 +1735,10 @@ mod tests {
             direct.login_success("a", Uuid::nil())
         );
         assert_eq!(boxed.begin_configuration(), direct.begin_configuration());
+        assert_eq!(
+            boxed.encode_registry_data(),
+            direct.encode_registry_data()
+        );
         assert_eq!(boxed.begin_play(7), direct.begin_play(7));
         assert_eq!(boxed.begin_chunk_batch(), direct.begin_chunk_batch());
         assert_eq!(
@@ -1475,6 +1803,10 @@ mod tests {
             boxed.encode_open_screen(7, "minecraft:furnace", "Furnace"),
             direct.encode_open_screen(7, "minecraft:furnace", "Furnace")
         );
+        assert_eq!(
+            boxed.encode_game_event(7, 0.5),
+            direct.encode_game_event(7, 0.5)
+        );
         let items = [None, Some(ItemStack::new(
             ResourceKey::new("minecraft", "coal").expect("static key is valid"),
             1,
@@ -1490,6 +1822,73 @@ mod tests {
         assert_eq!(
             boxed.encode_container_data(7, 0, 42),
             direct.encode_container_data(7, 0, 42)
+        );
+        let border = crate::border::WorldBorder::default();
+        assert_eq!(
+            boxed.encode_initialize_border(&border),
+            direct.encode_initialize_border(&border)
+        );
+        assert_eq!(
+            boxed.encode_set_border_center(1.0, 2.0),
+            direct.encode_set_border_center(1.0, 2.0)
+        );
+        assert_eq!(
+            boxed.encode_set_border_lerp_size(1000.0, 100.0, 20000),
+            direct.encode_set_border_lerp_size(1000.0, 100.0, 20000)
+        );
+        assert_eq!(
+            boxed.encode_set_border_size(512.0),
+            direct.encode_set_border_size(512.0)
+        );
+        assert_eq!(
+            boxed.encode_set_border_warning_delay(15),
+            direct.encode_set_border_warning_delay(15)
+        );
+        assert_eq!(
+            boxed.encode_set_border_warning_distance(5),
+            direct.encode_set_border_warning_distance(5)
+        );
+        let push = ResourcePackPush {
+            id: Uuid::nil(),
+            url: "https://example.com/pack.zip".to_owned(),
+            hash: "0123456789abcdef".to_owned(),
+            required: true,
+            prompt: None,
+        };
+        assert_eq!(
+            boxed.encode_resource_pack_push(&push),
+            direct.encode_resource_pack_push(&push)
+        );
+        let advancement_update = crate::advancements::AdvancementUpdate {
+            reset: true,
+            added: vec![crate::advancements::Advancement::new(
+                "minecraft:story/root",
+                vec![vec!["crafting_table".to_string()]],
+                true,
+            )],
+            removed: vec!["minecraft:story/removed".to_string()],
+            progress: Vec::new(),
+            show_advancements: true,
+        };
+        assert_eq!(
+            boxed.encode_update_advancements(&advancement_update),
+            direct.encode_update_advancements(&advancement_update)
+        );
+        let stats = [(
+            crate::advancements::StatKey::new(crate::advancements::StatType::Mined, "minecraft:stone"),
+            3,
+        )];
+        assert_eq!(
+            boxed.encode_award_stats(&stats),
+            direct.encode_award_stats(&stats)
+        );
+        assert_eq!(
+            boxed.encode_select_advancements_tab(Some("minecraft:story/root")),
+            direct.encode_select_advancements_tab(Some("minecraft:story/root"))
+        );
+        assert_eq!(
+            boxed.encode_select_advancements_tab(None),
+            direct.encode_select_advancements_tab(None)
         );
 
         // -- control ---------------------------------------------------------
@@ -1508,6 +1907,7 @@ mod tests {
             direct.encode_open_screen(7, "minecraft:furnace", "Furnace"),
             ServerDirective::None
         );
+        assert_ne!(direct.encode_game_event(7, 0.5), ServerDirective::None);
         assert_ne!(
             direct.encode_container_content(7, 1, &items, None),
             ServerDirective::None
@@ -1525,5 +1925,34 @@ mod tests {
             direct.encode_explode(Vec3::new(1.0, 2.0, 3.0), 3.0),
             ServerDirective::None
         );
+        assert_ne!(direct.encode_initialize_border(&border), ServerDirective::None);
+        assert_ne!(
+            direct.encode_set_border_center(1.0, 2.0),
+            ServerDirective::None
+        );
+        assert_ne!(
+            direct.encode_set_border_lerp_size(1000.0, 100.0, 20000),
+            ServerDirective::None
+        );
+        assert_ne!(direct.encode_set_border_size(512.0), ServerDirective::None);
+        assert_ne!(
+            direct.encode_set_border_warning_delay(15),
+            ServerDirective::None
+        );
+        assert_ne!(
+            direct.encode_set_border_warning_distance(5),
+            ServerDirective::None
+        );
+        assert_ne!(direct.encode_resource_pack_push(&push), ServerDirective::None);
+        assert_ne!(
+            direct.encode_update_advancements(&advancement_update),
+            ServerDirective::None
+        );
+        assert_ne!(direct.encode_award_stats(&stats), ServerDirective::None);
+        assert_ne!(
+            direct.encode_select_advancements_tab(Some("minecraft:story/root")),
+            ServerDirective::None
+        );
+        assert_ne!(direct.encode_select_advancements_tab(None), ServerDirective::None);
     }
 }

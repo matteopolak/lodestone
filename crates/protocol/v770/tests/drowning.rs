@@ -97,6 +97,13 @@ impl ChunkSource for WaterSource {
     fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
         "minecraft:water".to_string()
     }
+
+    // No storage: this fixture serves fresh columns and edits are discarded by
+    // design (an edit a test needs to survive goes through a source with real
+    // retention). Explicit rather than inherited — issue #440.
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+        // No storage; edits are discarded by design.
+    }
 }
 
 /// A cheap, deterministic, all-dry terrain source — the same shape
