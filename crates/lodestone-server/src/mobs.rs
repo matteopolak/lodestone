@@ -68,9 +68,8 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use lodestone_data::{block_states, collision_shapes, entity_dimensions, entity_types, path_types};
-use lodestone_entity::ai::goals::{
-    MeleeAttackGoal, RandomLookAroundGoal, RandomStrollGoal, SwellGoal,
-};
+use lodestone_entity::ai::goals::{RandomLookAroundGoal, RandomStrollGoal};
+use lodestone_entity::ai::roster::{self, SpeciesContext};
 use lodestone_entity::ai::navigating_mob::{BABY_START_AGE, PARENT_AGE_AFTER_BREEDING};
 use lodestone_entity::ai::{Goal, GoalSelector, MobController, NavigatingMob};
 use lodestone_entity::attribute::default_attributes;
@@ -492,17 +491,25 @@ fn species_shape(entity_type: &ResourceKey, attrs: &AttributeMap) -> MobShape {
     shape
 }
 
-/// Whether `entity_type` is one of the hostile "monster" species that should
-/// get a target-seeking [`MeleeAttackGoal`] by default, versus a passive
-/// species that only wanders and looks around.
+/// Whether `entity_type` is one of the hostile "monster" species, for the
+/// purpose of picking its [`MobCategory`] and whether it resists natural
+/// despawn.
 ///
-/// A coarse species→behaviour split, not a full roster: it covers exactly the
-/// families [`lodestone_entity::attribute::default_attributes`]'s own
-/// hand-verified template table names (`type_spec`, that module's private
-/// function) as `Monster`-templated. Per-species roster issues refine
-/// individual species' actual goal sets on top of this baseline; this only
-/// has to make two different species behave *observably* differently instead
-/// of both getting an empty [`GoalSelector`].
+/// **This no longer decides anything about goals.** It used to be the
+/// hostile-versus-passive switch that gave a monster a `MeleeAttackGoal` and a
+/// farm animal nothing, which is why it was a literal 8-name string match; that
+/// job now belongs to [`lodestone_entity::ai::roster`], keyed per species and
+/// cited against the jar. What is left here is spawn-category data, and it stays
+/// here on purpose: `MobCategory` is one of **two** independent types by that
+/// name in this workspace (this crate's, 7 variants, and
+/// [`lodestone_entity::spawn::MobCategory`], 8 variants with a different
+/// `check_despawn` signature), the roster deliberately takes no side in that fork,
+/// and unifying them is issue #221's call.
+///
+/// It still covers exactly the families
+/// [`lodestone_entity::attribute::default_attributes`] templates as `Monster`.
+/// A species outside this list is treated as a persistent `Creature`, which is
+/// the safe direction: it will not be despawned out from under a player.
 fn is_hostile_species(entity_type: &ResourceKey) -> bool {
     matches!(
         entity_type.path(),
@@ -1443,17 +1450,28 @@ impl<'w> MobSim<'w> {
     ///   directly as blocks/tick — the same convention
     ///   [`run_spawn_cycle`](Self::run_spawn_cycle)'s candidates and
     ///   [`seed_demo_mobs`]'s hardcoded `0.23` already use for a zombie.
-    /// * **Goals**: every species gets the wander/look baseline
-    ///   [`run_spawn_cycle`](Self::run_spawn_cycle) already gives a naturally
-    ///   spawned mob. A hostile species ([`is_hostile_species`]) additionally
-    ///   gets a [`MeleeAttackGoal`], so it can actually connect once something
-    ///   gives it an [`attack_target`](SimMob::set_attack_target) — a passive
-    ///   species never does, structurally, regardless of what target it is
-    ///   given. This is deliberately *not* the full per-species roster
-    ///   (`NearestAttackableTargetGoal`'s own population search is a separate,
-    ///   larger feature, the same explicit scope cut this file already makes
-    ///   for breeding candidates); it is the baseline that makes two species
-    ///   behave observably differently instead of both getting nothing.
+    /// * **Goals** come from [`lodestone_entity::ai::roster`], which resolves the
+    ///   species path to the goal set vanilla's own `registerGoals()` installs,
+    ///   at vanilla's own priority numbers. This function no longer knows
+    ///   anything about any individual species: a species with no roster entry
+    ///   gets `roster::FALLBACK` (wander and look around), which is exactly the
+    ///   baseline every species used to get here.
+    ///
+    ///   That matters beyond tidiness. Until the roster existed, `FloatGoal`,
+    ///   `PanicGoal`, `BreedGoal`, `TemptGoal` and `FollowParentGoal` were
+    ///   installed **only** by tests — implemented, unit-tested, and fed real
+    ///   perception by [`tick`](Self::tick), with zero production call sites. A
+    ///   cow could not panic or follow food in the running game no matter what
+    ///   the perception feed reported. This is where that stopped being true.
+    ///
+    ///   Two consequences worth knowing when reading a mob's behaviour:
+    ///   priorities here are vanilla's absolute numbers, so a creeper's
+    ///   `SwellGoal` is at 2 and its `MeleeAttackGoal` at 4 rather than the `-1`
+    ///   and `2` of the private scale this replaced; and the old
+    ///   `step_per_tick.max(0.2)` floor on melee speed is gone, because vanilla
+    ///   expresses speed as a multiplier on the mob's own `movement_speed` and
+    ///   every hostile species in the roster is already above that floor
+    ///   (slowest is a zombie's `0.23`).
     pub fn spawn_species(&mut self, entity_type: ResourceKey, pos: Vec3) -> &mut SimMob<'w> {
         let attrs = default_attributes(&entity_type).unwrap_or_else(AttributeMap::new);
         let shape = species_shape(&entity_type, &attrs);
@@ -1461,30 +1479,19 @@ impl<'w> MobSim<'w> {
         let visited_budget = (attr(&attrs, "follow_range") * 16.0).floor() as i32;
         let hostile = is_hostile_species(&entity_type);
 
+        // Built *before* `entity_type` is moved into the spawn, so the species
+        // path is borrowed rather than cloned.
+        let goals = roster::goals_for(entity_type.path(), &SpeciesContext::new(step_per_tick));
+
         let mob = self.spawn_with_type(pos, shape, step_per_tick, visited_budget, entity_type);
         mob.set_category(if hostile {
             MobCategory::Monster
         } else {
             MobCategory::Creature
         })
-        .set_persistent(!hostile)
-        .add_goal(0, Box::new(RandomStrollGoal::new(step_per_tick)))
-        .add_goal(1, Box::new(RandomLookAroundGoal::new()));
-        if hostile {
-            mob.add_goal(2, Box::new(MeleeAttackGoal::new(step_per_tick.max(0.2), 2.0)));
-        }
-        if mob.entity_type().path() == "creeper" {
-            // Vanilla `Creeper.java:66` registers `SwellGoal` at priority 2,
-            // one below `MeleeAttackGoal`'s own priority 4 — i.e. *higher*
-            // precedence, alongside it rather than instead of it
-            // (`Creeper.java:65-74` registers both). The priority numbers
-            // above (0/1/2) are this baseline's own private numbering, not
-            // vanilla's absolute scale — `GoalSelector` preemption only ever
-            // compares priorities within one mob's own goal set — so `-1`
-            // (lower than every baseline goal added above, including
-            // `MeleeAttackGoal` at `2`) is what reproduces "Swell preempts
-            // Melee" here.
-            mob.add_goal(-1, Box::new(SwellGoal::new()));
+        .set_persistent(!hostile);
+        for (priority, goal) in goals {
+            mob.add_goal(priority, goal);
         }
         mob
     }
@@ -2501,10 +2508,20 @@ fn seed_demo_mobs(sim: &mut MobSim<'_>, center_x: i32, center_z: i32, count: usi
             continue;
         };
         let pos = Vec3::new(f64::from(x) + 0.5, f64::from(y + 1), f64::from(z) + 0.5);
-        let mob = sim.spawn(pos, MobShape::land(0.6, 1.95), 0.23, 400);
-        mob.set_entity_type(zombie.clone())
-            .add_goal(0, Box::new(RandomStrollGoal::new(0.23)))
-            .add_goal(1, Box::new(RandomLookAroundGoal::new()));
+        // Through `spawn_species`, not `spawn` + `set_entity_type` + two
+        // hardcoded goals. This is the **only** production path that creates a
+        // mob a connected client can see, so it is also the only place the
+        // per-species roster can reach pixels: routed this way, a demo zombie
+        // gets vanilla's real zombie set — `HurtByTargetGoal`,
+        // `NearestAttackableTargetGoal`, `MeleeAttackGoal`, `LookAtPlayerGoal` —
+        // instead of wandering obliviously past the player.
+        //
+        // The shape, speed and A* budget were hardcoded here as `0.6 × 1.95`,
+        // `0.23` and `400`; `spawn_species` derives the first two from the same
+        // dimension census and `movement_speed` attribute and gets the same
+        // numbers, and the third from `follow_range * 16` = `560`, which is
+        // vanilla's own figure rather than this call site's guess.
+        sim.spawn_species(zombie.clone(), pos);
     }
 }
 
