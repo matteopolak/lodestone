@@ -30,7 +30,7 @@
 //! itself are here rather than in a submodule.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use lodestone_render::{
     GpuContext, HeadlessTarget, RenderTarget, TargetError, fog::FogSettings, window::attach_window,
@@ -381,6 +381,16 @@ struct WindowApp {
     show_debug: bool,
     /// Whether the player-list binding is currently held (shows the overlay).
     tab_held: bool,
+    /// A `key.screenshot` press waiting to be serviced (issue #16).
+    ///
+    /// **The capture cannot happen at key time**, which is the whole reason
+    /// this field exists rather than the effects arm doing the work: a
+    /// swapchain image has no defined content until a pass has rendered into
+    /// it, so reading the texture when the key arrives copies out either the
+    /// *previous* frame or undefined memory. `redraw()` drains this flag
+    /// immediately before `AcquiredFrame::present`, once world, HUD and every
+    /// menu overlay have already written into `frame.view()`.
+    pending_screenshot: bool,
     /// The rebindable action → input table (`docs/keybindings.md`), loaded from
     /// the persisted [`crate::config::Options`] at construction.
     ///

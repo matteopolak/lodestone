@@ -32,6 +32,7 @@ impl WindowApp {
             cursor: (0.0, 0.0),
             show_debug: false,
             tab_held: false,
+            pending_screenshot: false,
             // Read from `options.json` via the same loader the menu uses.
             // Missing, partial or corrupt is vanilla's defaults, never an error
             // — see `Keybinds::from_json_value`.

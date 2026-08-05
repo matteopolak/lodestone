@@ -56,6 +56,27 @@ impl AcquiredFrame {
         &self.view
     }
 
+    /// The backing swapchain texture, when this frame came from a window.
+    ///
+    /// `None` for a [`HeadlessTarget`], which owns its texture for the whole of
+    /// its life and exposes it as [`HeadlessTarget::texture`] instead — there is
+    /// no per-frame texture to hand back.
+    ///
+    /// This exists so a caller can `copy_texture_to_buffer` out of the window's
+    /// own frame (`key.screenshot`, issue #16). [`Self::view`] cannot serve:
+    /// a [`wgpu::TextureView`] is not a valid copy source. Reading it is only
+    /// legal because [`SurfaceTarget::new`] ORs [`wgpu::TextureUsages::COPY_SRC`]
+    /// into the swapchain config — without that flag the copy is a validation
+    /// error, so the two changes are one change.
+    ///
+    /// **The content is undefined until something has rendered into the view.**
+    /// Call this immediately before [`Self::present`], never straight after
+    /// `acquire`.
+    #[must_use]
+    pub fn texture(&self) -> Option<&wgpu::Texture> {
+        self.surface_texture.as_ref().map(|t| &t.texture)
+    }
+
     /// Present the frame. A no-op for headless targets; schedules presentation
     /// of a swapchain frame on `queue` (wgpu 30 presents via the queue).
     pub fn present(self, queue: &wgpu::Queue) {
@@ -269,7 +290,17 @@ impl<'window> SurfaceTarget<'window> {
         width: u32,
         height: u32,
     ) -> Option<Self> {
-        let config = surface.get_default_config(adapter, width.max(1), height.max(1))?;
+        let mut config = surface.get_default_config(adapter, width.max(1), height.max(1))?;
+        // `get_default_config` returns `RENDER_ATTACHMENT` alone. `COPY_SRC` is
+        // what makes `AcquiredFrame::texture` usable as a `copy_texture_to_buffer`
+        // source, which is the whole of `key.screenshot`'s read-back (issue #16);
+        // without it the copy is a validation error rather than a black image.
+        // OR rather than assign, so a backend that already asked for more keeps it.
+        //
+        // Every other `configure` call site (`reconfigure`, `set_present_mode`,
+        // `resize`) re-applies *this* `config`, so the flag survives a resize and
+        // a surface-lost recovery without a second edit.
+        config.usage |= wgpu::TextureUsages::COPY_SRC;
         surface.configure(device, &config);
         let default_present_mode = config.present_mode;
         Some(Self {

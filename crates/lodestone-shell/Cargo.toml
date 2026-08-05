@@ -123,12 +123,14 @@ uuid = { workspace = true }
 # shell stays within the workspace's `deny(unsafe_code)` — the unsafe FFI lives
 # in the dependency, not here. A zero-reading gauge is worse than none (§12).
 memory-stats = "1"
+# Writes `key.screenshot`'s PNG (issue #16, `src/screenshot.rs`). **A normal
+# dependency, not a dev one** — it was `[dev-dependencies]` while its only use
+# was encoding genuine PNG streams as *input* to the favicon-mosaic tests, and
+# `docs/keybindings.md` recorded it as already shippable, which it was not. Test
+# targets see normal dependencies too, so those fixtures are unaffected.
+png = { workspace = true }
 
 [dev-dependencies]
-# Encodes genuine PNG streams for the favicon-mosaic tests, so their input is a
-# real image (IHDR/IDAT/IEND, zlib, CRCs) rather than bytes only our own decoder
-# would accept.
-png = { workspace = true }
 # Same pin as every other bench site in the workspace. `default-features = false`
 # is load-bearing: it drops plotters and criterion's own rayon.
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }

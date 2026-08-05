@@ -707,6 +707,12 @@ impl ApplicationHandler for WindowApp {
                         // belongs in the table — see `keybinds`' module docs.
                         self.show_debug = !self.show_debug;
                     }
+                    Some(KeyOutcome::Screenshot) => {
+                        // Arm it; `redraw()` services it after the frame is
+                        // drawn. Capturing here would read an undrawn (or
+                        // stale) swapchain image — see the field's own doc.
+                        self.pending_screenshot = true;
+                    }
                     Some(KeyOutcome::PlayerList(held)) => self.tab_held = held,
                     Some(KeyOutcome::OpenChat { command }) => {
                         // Release held movement so we don't walk while typing.
