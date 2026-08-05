@@ -73,6 +73,14 @@ use super::widget;
 /// `gui.stats`.
 pub const TITLE: &str = "Statistics";
 
+/// The row index of Done, this screen's only [`MenuRow`] — vanilla's
+/// `layout.addToFooter(Button.builder(GUI_DONE, …))` (`StatsScreen.java:90`).
+///
+/// Named rather than written as a bare `0` at three sites, because "row 0" and
+/// "the Done button" being the same number is exactly what made the focus bug
+/// in [`StatsNav::focused`] read as harmless.
+pub const DONE_ROW: usize = 0;
+
 /// `StatFormatter.java`'s four formatters, transcribed. `DEFAULT` is vanilla's
 /// `NumberFormat.getIntegerInstance(Locale.US)` — thousands-grouped, no
 /// decimals.
@@ -343,16 +351,75 @@ pub fn row_label_y(row: u16, first: u16) -> f32 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct StatsNav {
     first: usize,
+    /// Whether Done — the screen's only control — currently holds keyboard
+    /// focus. **`false` on open, and that is the whole of a player report**
+    /// (2026-08-04, "the Statistics menu always has the 'Done' button focused
+    /// for some reason").
+    ///
+    /// [`frame`] used to hard-code `selected: 0` on a frame whose only row *is*
+    /// Done, so the button was drawn focused the instant the screen appeared.
+    /// Vanilla focuses nothing here, and the jar is unusually explicit about
+    /// it in two independent ways:
+    ///
+    /// - `Screen.init` calls `setInitialFocus()` (`Screen.java:328`), whose
+    ///   base implementation (`:161-169`) is wrapped entirely in
+    ///   `if (this.minecraft.getLastInputType().isKeyboard())`. This screen is
+    ///   reached by **clicking** the pause menu's Statistics button, so the
+    ///   last input type is a mouse and the whole body is skipped — nothing is
+    ///   focused at all. `StatsScreen` does not override `setInitialFocus`
+    ///   (grepped: it appears in eight screens, none of them this one).
+    /// - Even opened from the keyboard, Done would still not be it. `StatsScreen.init`
+    ///   (`:79-98`) adds the `MenuTabBar` **first** and then puts the footer's
+    ///   Done in `setTabOrderGroup(1)`, which sorts it *after* every default-group
+    ///   widget — so the first tab stop is the General tab, not Done.
+    ///
+    /// So a focused Done is wrong under both input types, which is why this is
+    /// a plain `false` default rather than a modelled `lastInputType` (nothing
+    /// in this shell tracks one, and no reachable path would make it keyboard).
+    /// Tab is what grants focus — see [`Self::focus_next`] — and a click grants
+    /// it too, because `ContainerEventHandler.mouseClicked` focuses the child it
+    /// hit before calling its `onClick`.
+    ///
+    /// Note this is the same shape as, but a *different mechanism* from, the
+    /// earlier "hovering should not focus it" report on the server list: that
+    /// one was hover writing into selection, and was fixed by splitting
+    /// `hovered` from `selected`. This one is the initial value of the
+    /// selection itself, which that split did not touch — so the two had to be
+    /// found separately.
+    focused: bool,
 }
 
 impl StatsNav {
     pub fn reset(&mut self) {
         self.first = 0;
+        self.focused = false;
     }
 
     #[must_use]
     pub fn first(&self) -> usize {
         self.first
+    }
+
+    /// Whether Done holds keyboard focus. See [`Self::focused`]'s own doc for
+    /// why this starts `false`.
+    #[must_use]
+    pub fn focused(&self) -> bool {
+        self.focused
+    }
+
+    /// Tab traversal: `Screen.keyPressed`'s `TabNavigation`
+    /// (`Screen.java:153`), which on this screen has exactly one focusable
+    /// child to land on. With one child, forward Tab focuses it and stays
+    /// there — vanilla's wrap is `clearFocus()`-then-retry, which re-finds the
+    /// same child — so this is idempotent rather than a toggle.
+    pub fn focus_next(&mut self) {
+        self.focused = true;
+    }
+
+    /// `ContainerEventHandler.mouseClicked`: a click on a widget focuses it
+    /// *and then* activates it. Hover does not — see [`Self::focused`].
+    pub fn focus_done(&mut self) {
+        self.focused = true;
     }
 
     /// Scrolls by one row. The census (77) is fixed, so this needs no
@@ -461,7 +528,11 @@ pub fn frame(nav: &StatsNav, snapshot: &StatsSnapshot) -> MenuFrame<'static> {
             }),
             ..Default::default()
         }],
-        selected: 0,
+        // `usize::MAX` is `MenuFrame::selected`'s documented "highlights
+        // nothing" sentinel (the same value `command_block`'s frame uses), not
+        // an out-of-range accident. It used to be a hard `0`, i.e. Done, which
+        // is the player report [`StatsNav::focused`] documents.
+        selected: if nav.focused() { DONE_ROW } else { usize::MAX },
         vanilla: true,
         labels,
         ..Default::default()

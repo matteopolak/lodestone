@@ -245,6 +245,68 @@ frame is brokered (`app.rs` is not this module's file) and may not have
 landed yet; `frame_for_defers_to_an_overlay_for_in_world_settings` is the
 regression gate for the half that has.
 
+### A third player report: that panorama fix made in-world Options unclickable
+
+**"i cant click anything in the options menu"** (2026-08-04). Not the geometry —
+the *frame source*.
+
+The paragraph above ends with the reasoning that broke it, and it is worth
+quoting because it reads as airtight:
+
+> `owns_frame(Screen::Settings)` is deliberately left `true` regardless of
+> `in_world`, because every other caller of it is about input routing
+> (mouse/keyboard treated as menu rows), which is true either way; only
+> `frame_for`, the render decision, has the exception.
+
+`owns_frame` and `frame_for` are not independent. `owns_frame` decides whether a
+click on this screen is *routed as a menu row at all*; `frame_for` is where the
+rows it routes to come from. `app.rs`'s `menu_row_at` opened with
+
+```rust
+let frame = if self.ui.is_paused() { pause_frame(..) }
+            else if self.ui.is_death() { death_frame(..) }
+            else { frame_for(..)? };          // <-- `?`
+```
+
+so making `frame_for` answer `None` in-world left the screen live to the mouse
+with **no rows to hit-test**: every click returned at that `?` before reaching
+one. Pause and death had each been given a branch there when *they* became
+overlay screens; in-world Options became the third overlay screen and did not.
+
+Three things generalise, and the third is the fix:
+
+- **The identical rows on the title screen worked throughout.** That is what made
+  the obvious hypothesis wrong: this screen keeps its own entry-index window
+  (`LIST_WINDOW_PX`, `visible_entries`, `Placement::ListCell`'s `first`) and never
+  adopted the shared pixel-scrolled `ScrollList`, so a units mismatch between the
+  two — row index vs. pixels — was the natural suspect after `29d9f88`/`ed2aadc`.
+  It is not one. `nav::tests::clicking_an_options_row_at_its_own_coordinates_
+  activates_that_row` measures the title-screen path at real coordinates and it
+  resolves exactly. When a screen is unclickable, check whether it has a frame
+  before checking where its rows are.
+- **No `cargo check` and no existing test could see this.** The break is a
+  runtime `None`, the render half had its own passing gate
+  (`frame_for_defers_to_an_overlay_for_in_world_settings` asserts the `None`
+  *is* returned), and every settings click test in the crate clicks by **row
+  index** — which is downstream of the hit-test that had already failed. A gate
+  that starts from a row index cannot see a hit-test that never produces one.
+- **The fix is not a fourth `if`.** Three branches inlined in a private
+  `app.rs` method cannot be enumerated from anywhere, which is exactly why the
+  third could go missing silently — the same island shape `CLAUDE.md`'s
+  "every terminal `_ =>` arm in an event router is an island factory" describes,
+  reached without an enum. The branch set now lives in
+  `menu::nav::on_screen_frame`, one function answering "which frame is on
+  screen", and `nav::tests::every_mouse_routable_screen_has_a_frame_to_hit_test`
+  asserts that every screen `owns_frame`/`is_paused`/`is_death` routes the mouse
+  to has one. `menu_row_at` calls it instead of `frame_for`.
+
+`nav::tests::in_world_options_clicks_reach_the_row_they_land_on` is the
+behavioural gate: it opens Options from the pause menu, derives a click
+coordinate from the **GUI Scale** row's own `row_rect`, and requires *that*
+option to have cycled 0 → 1. It keeps the pre-fix observation as an in-test
+control — `frame_for` must still answer `None` here, or the overlay draw in
+`app/redraw.rs` is drawing the screen twice.
+
 ### The Key Binds page (issue #15)
 
 `SettingsPage::KeyBinds` — vanilla's `KeyBindsScreen`/`KeyBindsList`. Reached
