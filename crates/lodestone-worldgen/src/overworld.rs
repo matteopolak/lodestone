@@ -1050,6 +1050,17 @@ impl OverworldGenerator {
         {
             return (world, crate::feature::top_layer::FreezeCounts::default());
         }
+        // Debug-only escape hatch, mirroring `LODESTONE_ORE_SINGLE_SOURCE_DEBUG`
+        // and `LODESTONE_VEG_SINGLE_SOURCE_DEBUG` above: skip the step entirely
+        // so the A arm of a timing comparison can be measured in the same
+        // process as the B arm. Never used by `column()`'s normal path. Note a
+        // timing comparison must still build a FRESH generator per arm —
+        // `pre_ore_cache`/`post_ore_cache` are per-generator and would otherwise
+        // make the second arm measure nothing (the trap `049c603` already had to
+        // fix in two determinism gates).
+        if std::env::var("LODESTONE_FREEZE_DISABLE_DEBUG").is_ok() {
+            return (world, crate::feature::top_layer::FreezeCounts::default());
+        }
         // `level.getBiome(topPos)` resolves through the quart grid. `biome_stage`
         // samples each quart at its own corner, so a column's quart index is
         // `(lz >> 2) * 4 + (lx >> 2)` — the same rounding `Self::surface_stage`'s
@@ -1177,8 +1188,15 @@ impl OverworldGenerator {
         let world = self.carve_stage(cx, cz, &aquifer, &heights, &biome_quarts, base_x, base_z, world);
         let world = self.ore_stage(cx, cz, world, &heights);
         let world = self.vegetation_stage(cx, cz, world);
-        let col = self.intern_from_dense(world, biome_quarts);
         let t4 = std::time::Instant::now();
+        // Issue #404's U2. This call is why `StageTimes` grew a field rather
+        // than folding another stage into `intern`: `top_layer_stage` is the
+        // first stage cheap enough that its cost had to be *measured* to be
+        // believed, and `docs/plans/worldgen-parity.md` §6 predicts <5% for it.
+        let (world, _) = self.top_layer_stage(cx, cz, world, &biome_quarts);
+        let t5 = std::time::Instant::now();
+        let col = self.intern_from_dense(world, biome_quarts);
+        let t6 = std::time::Instant::now();
 
         (
             col,
@@ -1186,7 +1204,8 @@ impl OverworldGenerator {
                 shape: t1 - t0,
                 fluid_heightmap: t2 - t1,
                 surface: t3 - t2,
-                intern: t4 - t3,
+                intern: (t4 - t3) + (t6 - t5),
+                top_layer: t5 - t4,
             },
         )
     }
@@ -1530,15 +1549,21 @@ pub struct StageTimes {
     pub fluid_heightmap: std::time::Duration,
     pub surface: std::time::Duration,
     pub intern: std::time::Duration,
+    /// `TOP_LAYER_MODIFICATION` — `freeze_top_layer`'s snow and ice (issue
+    /// #404's U2). The first stage to earn its own field rather than being
+    /// folded into `intern`, because `docs/plans/worldgen-parity.md` §6 makes a
+    /// *quantitative* prediction about it (<5% of composed column cost) that
+    /// something has to be able to check.
+    pub top_layer: std::time::Duration,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl StageTimes {
-    /// Total of the four stages (wall-clock, so approximately equal to but not
+    /// Total of every stage (wall-clock, so approximately equal to but not
     /// exactly the same instant range as timing the whole `column()` call).
     #[must_use]
     pub fn total(&self) -> std::time::Duration {
-        self.shape + self.fluid_heightmap + self.surface + self.intern
+        self.shape + self.fluid_heightmap + self.surface + self.intern + self.top_layer
     }
 }
 

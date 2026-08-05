@@ -414,6 +414,81 @@ mod tests {
         }
     }
 
+    /// Release-profile cost of the `TOP_LAYER_MODIFICATION` stage as a share of
+    /// the whole composed `column()` call (issue #404's U2).
+    ///
+    /// **This is the first release-profile figure for the composed pipeline.**
+    /// `docs/plans/worldgen-parity.md` §6 records that every number on file for
+    /// it — the 144-chunk sweep at ~68 s pre-ore and 700.57 s after, the ore
+    /// sweep — is **debug** profile, so there is no release baseline to compare
+    /// against. Debug timings are ordering evidence only; run this with
+    /// `--release` or the answer means nothing.
+    ///
+    /// ```text
+    /// cargo test --release -p lodestone-server --lib freeze_stage_release_timing \
+    ///     -- --ignored --nocapture
+    /// ```
+    ///
+    /// The split comes from `OverworldGenerator::column_timed`'s own
+    /// `StageTimes.top_layer` field rather than from an A/B of two runs. That is
+    /// deliberate: an A/B needs a fresh generator per arm (the
+    /// `pre_ore_cache`/`post_ore_cache` are per-generator and 512 entries deep, so
+    /// a reused generator makes the second arm recompute nothing and report a
+    /// fabricated delta — the vacuity `049c603` had to fix in two determinism
+    /// gates), and even then it measures two different process states. One
+    /// instrumented pass measures the stage where it actually runs.
+    #[test]
+    #[ignore = "release-profile timing; a measurement, not an assertion"]
+    fn freeze_stage_release_timing() {
+        // Snowy, frozen and warm coordinates together, so the figure is not taken
+        // only from columns where the step short-circuits on temperature.
+        const CHUNKS: [(i32, i32); 8] = [
+            (-1200, -2400),
+            (-1201, -2400),
+            (1200, 600),
+            (1201, 600),
+            (2400, -600),
+            (-600, 0),
+            (0, 240),
+            (-160, -240),
+        ];
+        let generator = overworld_generator(42);
+        let mut top_layer = std::time::Duration::ZERO;
+        let mut total = std::time::Duration::ZERO;
+        let mut wall = std::time::Duration::ZERO;
+        for (cx, cz) in CHUNKS {
+            let start = std::time::Instant::now();
+            let (column, times) = generator.column_timed(cx, cz);
+            wall += start.elapsed();
+            assert!(column.non_air_count() > 0);
+            top_layer += times.top_layer;
+            total += times.total();
+        }
+        let n = CHUNKS.len() as u32;
+        let share = top_layer.as_secs_f64() / total.as_secs_f64() * 100.0;
+        println!(
+            "release, {n} chunks: wall {wall:?} ({:?}/chunk), staged total {total:?}, \
+             top_layer {top_layer:?} ({:?}/chunk) = {share:.3}% of composed column cost",
+            wall / n,
+            top_layer / n,
+        );
+        assert!(
+            top_layer > std::time::Duration::ZERO,
+            "the freeze stage measured as exactly zero, so this is timing a no-op rather \
+             than the stage — check that the fixtures' biomes list freeze_top_layer"
+        );
+        // The prediction from `docs/plans/worldgen-parity.md` §6: a new decoration
+        // step is "<5 % each of composed column cost". Asserted as a ceiling so a
+        // regression fails here rather than being absorbed — the specific shape to
+        // guard against is a per-column `ClimateNoise::new()`, which would be
+        // ~780 RNG draws per column instead of per generator.
+        assert!(
+            share < 5.0,
+            "the freeze stage is {share:.3}% of composed column cost, above the 5% \
+             prediction (top_layer {top_layer:?}, total {total:?})"
+        );
+    }
+
     #[test]
     fn embedded_table_is_sorted_and_nonempty() {
         assert!(
@@ -1321,5 +1396,623 @@ mod tests {
         assert!(!tags.replaceable_by_trees.is_empty());
         assert!(!tags.logs.is_empty());
         assert!(!tags.cannot_replace_below_tree_trunk.is_empty());
+    }
+}
+
+/// Bit-exact `freeze_top_layer` parity against the real 26.2 server (issue
+/// #404's U2).
+///
+/// # Why a *worldgen* parity gate lives in `lodestone-server`
+///
+/// This gate needs two things at once: `lodestone-worldgen`'s engine, and the
+/// jar-sourced per-block-state facts that engine runs on. Only this crate has
+/// both — the engine is version-free by construction and takes all its data
+/// through [`Resolver`], so it cannot reach `lodestone_data` itself. Putting the
+/// gate here also means it drives [`freeze_facts`] and [`EmbeddedResolver`]
+/// **directly**, i.e. the exact production data rather than a re-derivation that
+/// could quietly diverge from it. The fixtures live with the other worldgen
+/// oracle dumps in `crates/lodestone-worldgen/tests/support/`, reached with one
+/// extra `../` (the same cross-crate fixture arrangement `lodestone-data`'s
+/// `tests/collision_shapes.rs` already uses).
+///
+/// # What the fixtures are
+///
+/// `scripts/worldgen-oracle/TopLayerOracle.java` boots the real 26.2 server,
+/// runs vanilla's own `doFill` + `buildSurface` + `applyCarvers` +
+/// `UNDERGROUND_ORES` + `VEGETAL_DECORATION` over a 3×3 neighbourhood, and then
+/// runs the real `TOP_LAYER_MODIFICATION` step through
+/// `PlacedFeature.placeWithBiomeCheck` — vanilla's `SnowAndFreezeFeature`, not a
+/// reimplementation. It dumps the centre chunk's pre-step field (`base.`, RLE),
+/// vanilla's own `getHeight(MOTION_BLOCKING)` per column (`top.`), and every cell
+/// the step changed (`freeze.`).
+///
+/// So the gate is: **load vanilla's own post-vegetation field, run our engine on
+/// it, and require the same writes at the same coordinates.** Nothing upstream of
+/// this step is involved, which is why a residual here can only be this step's.
+///
+/// # Fixture choice, and why each one can fail
+///
+/// | fixture | biome | what it can catch |
+/// |---|---|---|
+/// | `snowy_plains` | temp 0.0 | 250 snow + 250 `snowy` flips: the ordinary path, and the flip |
+/// | `frozen_ocean` | temp 0.0, modifier `frozen` | 36 ice, **0 snow**: the write order, and `TemperatureModifier.FROZEN`'s ice patches |
+/// | `windswept_hills` | temp 0.2 | 115 snow: **the height-adjusted temperature** |
+/// | `desert` | temp 2.0, no precipitation | **0 cells**: the negative fixture |
+///
+/// `windswept_hills` is the one that discriminates the trap. Its declared
+/// temperature `0.2` is *above* the `0.15` rain threshold, so a port reading the
+/// flat biome temperature places **zero** snow there — while vanilla places 115.
+/// A snowy-biome fixture cannot see that error (temperature `0.0` snows under
+/// either reading), which is exactly the *world* species of vacuous test.
+///
+/// It also turned out to discriminate more than intended. The snowed and bare
+/// columns' `top.` heights **fully overlap** (119–125 for both), because the
+/// `TEMPERATURE_NOISE` term contributes `±8` against a `(y − 120) / 800`
+/// altitude term — so `freeze_top_layer` produces a *speckle* at every height,
+/// not a snow line. A port that thresholded on altitude alone would also fail
+/// here.
+#[cfg(test)]
+mod top_layer_parity {
+    use std::collections::{BTreeMap, HashMap, HashSet};
+
+    use lodestone_worldgen::dense_grid::DenseBlockGrid;
+    use lodestone_worldgen::feature::top_layer::{
+        self, BiomeClimate, FreezeCounts, SnowSupport,
+    };
+    use lodestone_worldgen::noise::ClimateNoise;
+
+    use super::{EmbeddedResolver, Resolver, freeze_facts};
+
+    struct Fixture {
+        biome: String,
+        chunk_x: i32,
+        chunk_z: i32,
+        min_y: i32,
+        height: i32,
+        sea_level: i32,
+        step_index: i32,
+        /// `base.` runs, expanded into one state per `(lx, y, lz)`.
+        base: BTreeMap<(i32, i32, i32), String>,
+        /// `freeze.` cells: `(lx, y, lz) -> state`.
+        freeze: BTreeMap<(i32, i32, i32), String>,
+        /// `top.` — vanilla's own `getHeight(MOTION_BLOCKING, x, z)`.
+        top: BTreeMap<(i32, i32), i32>,
+        snow: usize,
+        ice: usize,
+        snowy: usize,
+        /// `meta.proxyCall` — the oracle's own record of which `WorldGenLevel`
+        /// methods the feature actually reached. Read by
+        /// [`the_oracle_actually_exercised_the_feature`] so a fixture cannot be a
+        /// dump from a proxy that silently returned defaults.
+        proxy_calls: Vec<String>,
+    }
+
+    fn load(name: &str) -> Fixture {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../lodestone-worldgen/tests/support")
+            .join(format!("top_layer_{name}_jvm.txt"));
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+
+        let mut biome = None;
+        let mut chunk_x = None;
+        let mut chunk_z = None;
+        let mut min_y = None;
+        let mut height = None;
+        let mut sea_level = None;
+        let mut step_index = None;
+        let mut base = BTreeMap::new();
+        let mut freeze = BTreeMap::new();
+        let mut top = BTreeMap::new();
+        let mut snow = None;
+        let mut ice = None;
+        let mut snowy = None;
+        let mut proxy_calls = Vec::new();
+        let mut done = false;
+
+        for line in text.lines() {
+            let Some((key, rest)) = line.split_once(' ') else {
+                continue;
+            };
+            // The oracle's own JVM log noise precedes the data; any line whose
+            // key is not one of ours is skipped. `meta.done` being required
+            // below is what stops a truncated dump reading as a small one.
+            match key {
+                "meta.biome" => biome = Some(rest.to_owned()),
+                "meta.chunkX" => chunk_x = Some(rest.parse().expect("chunkX")),
+                "meta.chunkZ" => chunk_z = Some(rest.parse().expect("chunkZ")),
+                "meta.minY" => min_y = Some(rest.parse().expect("minY")),
+                "meta.height" => height = Some(rest.parse().expect("height")),
+                "meta.seaLevel" => sea_level = Some(rest.parse().expect("seaLevel")),
+                "meta.stepIndex" => step_index = Some(rest.parse().expect("stepIndex")),
+                "meta.freezeSnow" => snow = Some(rest.parse().expect("freezeSnow")),
+                "meta.freezeIce" => ice = Some(rest.parse().expect("freezeIce")),
+                "meta.freezeSnowy" => snowy = Some(rest.parse().expect("freezeSnowy")),
+                "meta.proxyCall" => proxy_calls.push(rest.to_owned()),
+                "meta.done" => done = true,
+                _ => {
+                    if let Some(coords) = key.strip_prefix("base.") {
+                        let (lx, lz) = split2(coords);
+                        let mut parts = rest.split(' ');
+                        let start: i32 = parts.next().expect("base y").parse().expect("y");
+                        let run: i32 = parts.next().expect("base run").parse().expect("run");
+                        let state = parts.next().expect("base state");
+                        assert!(parts.next().is_none(), "base line has 3 fields: {line}");
+                        for y in start..start + run {
+                            let previous = base.insert((lx, y, lz), state.to_owned());
+                            assert!(previous.is_none(), "base overlaps at ({lx},{y},{lz})");
+                        }
+                    } else if let Some(coords) = key.strip_prefix("freeze.") {
+                        let (lx, y, lz) = split3(coords);
+                        let previous = freeze.insert((lx, y, lz), rest.to_owned());
+                        assert!(previous.is_none(), "duplicate freeze at ({lx},{y},{lz})");
+                    } else if let Some(coords) = key.strip_prefix("top.") {
+                        let (lx, lz) = split2(coords);
+                        let previous = top.insert((lx, lz), rest.parse().expect("top y"));
+                        assert!(previous.is_none(), "duplicate top at ({lx},{lz})");
+                    }
+                }
+            }
+        }
+
+        assert!(done, "{name}: fixture has no meta.done — truncated dump");
+        let fixture = Fixture {
+            biome: biome.expect("meta.biome"),
+            chunk_x: chunk_x.expect("meta.chunkX"),
+            chunk_z: chunk_z.expect("meta.chunkZ"),
+            min_y: min_y.expect("meta.minY"),
+            height: height.expect("meta.height"),
+            sea_level: sea_level.expect("meta.seaLevel"),
+            step_index: step_index.expect("meta.stepIndex"),
+            base,
+            freeze,
+            top,
+            snow: snow.expect("meta.freezeSnow"),
+            ice: ice.expect("meta.freezeIce"),
+            snowy: snowy.expect("meta.freezeSnowy"),
+            proxy_calls,
+        };
+        // Shape checks that make every later assertion non-vacuous: a fixture
+        // missing columns would let a comparison "pass" over the part it has.
+        assert_eq!(
+            fixture.top.len(),
+            256,
+            "{name}: every one of the 16x16 columns needs a `top.` row"
+        );
+        assert_eq!(
+            fixture.base.len(),
+            256 * fixture.height as usize,
+            "{name}: `base.` must expand to the whole 16x{}x16 box",
+            fixture.height
+        );
+        assert_eq!(
+            fixture.step_index,
+            top_layer::STEP_TOP_LAYER_MODIFICATION,
+            "{name}: fixture is not from the TOP_LAYER_MODIFICATION step"
+        );
+        assert_eq!(
+            fixture.sea_level, 63,
+            "{name}: overworld sea level is 63; snowLevel = seaLevel + 17 depends on it"
+        );
+        fixture
+    }
+
+    fn split2(s: &str) -> (i32, i32) {
+        let (a, b) = s.split_once(',').expect("two comma-separated ints");
+        (a.parse().expect("int"), b.parse().expect("int"))
+    }
+
+    fn split3(s: &str) -> (i32, i32, i32) {
+        let mut it = s.split(',');
+        let a = it.next().expect("3 ints").parse().expect("int");
+        let b = it.next().expect("3 ints").parse().expect("int");
+        let c = it.next().expect("3 ints").parse().expect("int");
+        assert!(it.next().is_none(), "exactly 3 ints");
+        (a, b, c)
+    }
+
+    /// The production `SnowSupport`: [`freeze_facts`]'s real document plus the two
+    /// real tag closures out of the embedded datapack.
+    fn support() -> SnowSupport {
+        let s = top_layer::build_snow_support(&EmbeddedResolver);
+        assert!(
+            !s.is_empty(),
+            "the production block_freeze_facts document is empty, so every assertion \
+             below would be comparing against a no-op engine"
+        );
+        // The two tags are load-bearing in opposite directions (see
+        // `lodestone_data::snow_support`), so both must be non-empty and must
+        // actually contain the members the engine branches on.
+        assert!(
+            s.cannot_support_snow_layer.contains("minecraft:ice"),
+            "ice must be in cannot_support_snow_layer or frozen oceans get snow on ice"
+        );
+        assert!(
+            s.support_override_snow_layer.contains("minecraft:mud"),
+            "mud must be in support_override_snow_layer"
+        );
+        let _ = freeze_facts();
+        s
+    }
+
+    fn climates(biome: &str) -> HashMap<String, BiomeClimate> {
+        let document = EmbeddedResolver.biome_document(biome);
+        let climate = top_layer::parse_biome_climate(&document)
+            .unwrap_or_else(|| panic!("no ClimateSettings in the embedded {biome} document"));
+        let mut map = HashMap::new();
+        map.insert(biome.to_owned(), climate);
+        map
+    }
+
+    /// The fixture's `base.` field as an absolute-coordinate grid, exactly the
+    /// shape [`top_layer::apply_freeze_top_layer`] expects.
+    fn grid_from(fixture: &Fixture) -> DenseBlockGrid {
+        let base_x = fixture.chunk_x * 16;
+        let base_z = fixture.chunk_z * 16;
+        let mut grid = DenseBlockGrid::new(
+            base_x,
+            fixture.min_y,
+            base_z,
+            16,
+            fixture.height,
+            16,
+            "minecraft:air",
+        );
+        for ((lx, y, lz), state) in &fixture.base {
+            grid.set(base_x + lx, *y, base_z + lz, state);
+        }
+        grid
+    }
+
+    /// Runs the engine and returns `(counts, actual diff)` keyed the same way the
+    /// fixture's `freeze.` cells are.
+    fn run(
+        fixture: &Fixture,
+        support: &SnowSupport,
+        sea_level: i32,
+    ) -> (FreezeCounts, BTreeMap<(i32, i32, i32), String>) {
+        let base_x = fixture.chunk_x * 16;
+        let base_z = fixture.chunk_z * 16;
+        let mut grid = grid_from(fixture);
+        let biome = fixture.biome.clone();
+        let biome_at = |_lx: i32, _lz: i32| -> &str { &biome };
+        let counts = top_layer::apply_freeze_top_layer(
+            &mut grid,
+            fixture.chunk_x,
+            fixture.chunk_z,
+            fixture.min_y,
+            fixture.height,
+            sea_level,
+            &biome_at,
+            &climates(&fixture.biome),
+            support,
+            &ClimateNoise::new(),
+        );
+        let mut diff = BTreeMap::new();
+        for ((lx, y, lz), before) in &fixture.base {
+            let after = grid.get(base_x + lx, *y, base_z + lz);
+            if after != before {
+                diff.insert((*lx, *y, *lz), after.to_owned());
+            }
+        }
+        (counts, diff)
+    }
+
+    const FIXTURES: [&str; 4] = ["snowy_plains", "frozen_ocean", "windswept_hills", "desert"];
+
+    // -----------------------------------------------------------------------
+    // The main gate: exact block states at exact coordinates
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn every_fixture_is_bit_exact() {
+        let support = support();
+        for name in FIXTURES {
+            let fixture = load(name);
+            let (counts, diff) = run(&fixture, &support, fixture.sea_level);
+
+            // Both directions, and the *state* not just the position: a snow
+            // layer with the wrong `layers` value, or a `snowy=false` left
+            // unflipped, has to fail here.
+            let missing: Vec<_> = fixture
+                .freeze
+                .iter()
+                .filter(|(k, v)| diff.get(*k) != Some(*v))
+                .map(|(k, v)| (*k, v.clone(), diff.get(k).cloned()))
+                .collect();
+            let extra: Vec<_> = diff
+                .iter()
+                .filter(|(k, _)| !fixture.freeze.contains_key(*k))
+                .map(|(k, v)| (*k, v.clone()))
+                .collect();
+            assert!(
+                missing.is_empty() && extra.is_empty(),
+                "{name}: {} vanilla cells wrong/absent, {} cells we wrote that vanilla did not.\n\
+                 first 8 wrong (coord, vanilla, ours): {:?}\n\
+                 first 8 extra (coord, ours): {:?}",
+                missing.len(),
+                extra.len(),
+                &missing[..missing.len().min(8)],
+                &extra[..extra.len().min(8)],
+            );
+            assert_eq!(diff.len(), fixture.freeze.len(), "{name}: cell count");
+
+            // And the counters, reached a second independent way (the engine's
+            // own tally vs the JVM's).
+            assert_eq!(counts.snow, fixture.snow, "{name}: snow count");
+            assert_eq!(counts.ice, fixture.ice, "{name}: ice count");
+            assert_eq!(counts.snowy_flips, fixture.snowy, "{name}: snowy-flip count");
+        }
+    }
+
+    /// The `MOTION_BLOCKING` heightmap on its own, against vanilla's own
+    /// `getHeight` per column — 1,024 comparisons across the four fixtures.
+    ///
+    /// This is separate from the write gate on purpose. The height the feature
+    /// reads is the product of two cancelling `±1`s (`Heightmap` stores
+    /// `topY + 1`, `getHighestTaken` subtracts one, `WorldGenRegion.getHeight`
+    /// adds it back), and dropping either puts *every* snow layer one block out.
+    /// A single combined gate would report that as "the writes are wrong"
+    /// without saying why.
+    #[test]
+    fn motion_blocking_heightmap_matches_vanilla_per_column() {
+        let support = support();
+        let mut compared = 0usize;
+        for name in FIXTURES {
+            let fixture = load(name);
+            let grid = grid_from(&fixture);
+            let base_x = fixture.chunk_x * 16;
+            let base_z = fixture.chunk_z * 16;
+            for ((lx, lz), &expected) in &fixture.top {
+                let got = top_layer::motion_blocking_first_free(
+                    &grid,
+                    &support,
+                    base_x + lx,
+                    base_z + lz,
+                    fixture.min_y,
+                    fixture.height,
+                );
+                assert_eq!(
+                    got, expected,
+                    "{name} column ({lx},{lz}): vanilla getHeight(MOTION_BLOCKING) is \
+                     {expected}, ours is {got}"
+                );
+                compared += 1;
+            }
+        }
+        assert_eq!(compared, 4 * 256, "every column of every fixture was compared");
+    }
+
+    // -----------------------------------------------------------------------
+    // Non-vacuity: what each fixture actually contains
+    // -----------------------------------------------------------------------
+
+    /// Each fixture must contain the content it exists to test — the *world*
+    /// species of vacuous test is the one that cannot be seen by reading the
+    /// test, so the contents are asserted rather than assumed.
+    #[test]
+    fn fixtures_contain_the_content_they_exist_for() {
+        let snowy = load("snowy_plains");
+        assert_eq!(snowy.snow, 250, "snowy_plains snow cells");
+        assert_eq!(snowy.snowy, 250, "every snowy_plains snow sits on a grass block");
+        assert_eq!(snowy.ice, 0, "snowy_plains has no water surface to freeze");
+
+        let ocean = load("frozen_ocean");
+        assert_eq!(ocean.ice, 36, "frozen_ocean ice cells");
+        assert_eq!(
+            ocean.snow, 0,
+            "frozen_ocean must have ZERO snow: the ice is written at belowPos first and \
+             minecraft:ice is in cannot_support_snow_layer, so nothing survives on top of it"
+        );
+        // The ice must sit exactly one below the column top, which is the
+        // `belowPos` the feature writes to.
+        for ((lx, y, lz), state) in &ocean.freeze {
+            assert_eq!(state, "minecraft:ice", "frozen_ocean writes only ice");
+            assert_eq!(
+                ocean.top[&(*lx, *lz)],
+                y + 1,
+                "ice at ({lx},{y},{lz}) is not at top-1"
+            );
+        }
+        assert!(
+            ocean.ice < 256,
+            "frozen_ocean froze every column, so TemperatureModifier.FROZEN's warm ice \
+             patches are not being exercised by this fixture"
+        );
+
+        let windswept = load("windswept_hills");
+        assert_eq!(windswept.snow, 115, "windswept_hills snow cells");
+        // The finding this fixture produced: the snowed and bare columns' heights
+        // OVERLAP, so the split is a noise speckle rather than an altitude line.
+        // A port that thresholded on Y alone would pass a line-shaped fixture and
+        // fail this one.
+        let snowed: HashSet<(i32, i32)> = windswept
+            .freeze
+            .keys()
+            .filter(|(lx, y, lz)| {
+                windswept.freeze[&(*lx, *y, *lz)].starts_with("minecraft:snow[")
+            })
+            .map(|(lx, _, lz)| (*lx, *lz))
+            .collect();
+        assert_eq!(snowed.len(), 115, "115 distinct columns snowed");
+        let hs: Vec<i32> = snowed.iter().map(|c| windswept.top[c]).collect();
+        let bare: Vec<i32> = windswept
+            .top
+            .iter()
+            .filter(|(c, _)| !snowed.contains(*c))
+            .map(|(_, y)| *y)
+            .collect();
+        let (smin, smax) = (*hs.iter().min().unwrap(), *hs.iter().max().unwrap());
+        let (bmin, bmax) = (*bare.iter().min().unwrap(), *bare.iter().max().unwrap());
+        assert!(
+            smin <= bmax && bmin <= smax,
+            "windswept_hills' snowed heights [{smin},{smax}] and bare heights [{bmin},{bmax}] \
+             do not overlap — this fixture would then be satisfiable by an altitude threshold, \
+             which is not what freeze_top_layer computes"
+        );
+
+        let desert = load("desert");
+        assert!(
+            desert.freeze.is_empty(),
+            "desert must freeze nothing (has_precipitation false, temperature 2.0), got {} cells",
+            desert.freeze.len()
+        );
+        // The detector control: the same emptiness check on a fixture that DOES
+        // have content must fail, or "desert is empty" measures nothing.
+        assert!(
+            !snowy.freeze.is_empty(),
+            "the emptiness detector reports the snowy_plains fixture as empty too, so \
+             desert's zero is a broken reader rather than a climate gate"
+        );
+    }
+
+    /// The oracle's own record of which `WorldGenLevel` methods the feature
+    /// reached. `TopLayerOracle`'s proxy **throws** on an unmodelled method
+    /// rather than returning a default, which is the fix for the precedent that
+    /// cost this repo a whole vegetation gate: `VegetationOracle`'s proxy lacked
+    /// `isStateAtPosition`, its default arm returned `false`, and no tree ever
+    /// placed a block through it while the harness reported success.
+    ///
+    /// This asserts the surface that must have been exercised for the fixture to
+    /// mean anything — in particular `getBrightness` and `isInsideBuildHeight`,
+    /// whose plausible wrong defaults (`0` is right, `false` is not) would each
+    /// have produced an entirely empty, entirely believable dump.
+    #[test]
+    fn the_oracle_actually_exercised_the_feature() {
+        for name in ["snowy_plains", "frozen_ocean", "windswept_hills"] {
+            let fixture = load(name);
+            let calls: HashSet<&str> = fixture.proxy_calls.iter().map(String::as_str).collect();
+            for required in [
+                "getHeight",
+                "getBiome",
+                "getSeaLevel",
+                "getBlockState",
+                "getBrightness",
+                "isInsideBuildHeight",
+                "setBlock",
+            ] {
+                assert!(
+                    calls.contains(required),
+                    "{name}: the oracle never called {required}, so its dump cannot be \
+                     evidence about freeze_top_layer. Calls seen: {:?}",
+                    fixture.proxy_calls
+                );
+            }
+        }
+        // Desert is the interesting one: it reaches NEITHER `getBrightness` nor
+        // `isInsideBuildHeight`, because `has_precipitation: false` and
+        // temperature 2.0 short-circuit in `warmEnoughToRain`/`getPrecipitationAt`
+        // first. That is an independent proof its zero comes from the climate
+        // gate rather than from a proxy that skipped the work.
+        let desert = load("desert");
+        let calls: HashSet<&str> = desert.proxy_calls.iter().map(String::as_str).collect();
+        assert!(
+            calls.contains("getHeight") && calls.contains("getBiome"),
+            "desert must still have read the heightmap and the biome"
+        );
+        assert!(
+            !calls.contains("getBrightness"),
+            "desert reached the block-light gate, so its zero is not purely climatic"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Controls, run and observed to fail — not described
+    // -----------------------------------------------------------------------
+
+    /// **Control: the step disabled.** With `freeze_top_layer` not run at all,
+    /// the very assertion [`every_fixture_is_bit_exact`] makes must fail. Without
+    /// this, that assertion could be satisfied by a fixture whose `freeze.`
+    /// section this reader silently dropped.
+    #[test]
+    fn control_not_running_the_step_fails_the_parity_assertion() {
+        for name in ["snowy_plains", "frozen_ocean", "windswept_hills"] {
+            let fixture = load(name);
+            // "Disabled" = the grid untouched, so the diff is empty.
+            let empty: BTreeMap<(i32, i32, i32), String> = BTreeMap::new();
+            assert_ne!(
+                empty.len(),
+                fixture.freeze.len(),
+                "{name}: with the step disabled the diff still matched the fixture, so the \
+                 parity assertion is vacuous for this fixture"
+            );
+        }
+        // And desert genuinely cannot distinguish them — which is why desert is a
+        // negative fixture and never the only one.
+        let desert = load("desert");
+        assert_eq!(
+            desert.freeze.len(),
+            0,
+            "desert is the one fixture the disabled-step control cannot separate"
+        );
+    }
+
+    /// **Control: the flat biome temperature, i.e. the trap.** Pushing
+    /// `sea_level` far above the terrain makes `y > seaLevel + 17` false
+    /// everywhere, so [`top_layer::height_adjusted_temperature`] returns the
+    /// biome's declared value unmodified — exactly the port this unit was warned
+    /// against, reproduced without touching the engine.
+    ///
+    /// Observed: `windswept_hills` (declared `0.2`, above the `0.15` threshold)
+    /// drops from 115 snow cells to **0**, and the parity assertion fails.
+    /// `snowy_plains` (declared `0.0`) is **unaffected** — which is the whole
+    /// argument for the `windswept_hills` fixture existing.
+    #[test]
+    fn control_flat_temperature_loses_the_windswept_snow_and_not_the_snowy_plains_snow() {
+        let support = support();
+        // `sea_level` chosen so `sea_level + 17` is above the build limit, making
+        // the height-adjustment branch unreachable for every column.
+        let flat = 10_000;
+
+        let windswept = load("windswept_hills");
+        let (real, _) = run(&windswept, &support, windswept.sea_level);
+        let (flattened, flat_diff) = run(&windswept, &support, flat);
+        assert_eq!(real.snow, 115, "the real reading places 115 snow cells");
+        assert_eq!(
+            flattened.snow, 0,
+            "a flat 0.2 temperature is above the 0.15 threshold, so it must place NO snow — \
+             got {}",
+            flattened.snow
+        );
+        assert_ne!(
+            flat_diff.len(),
+            windswept.freeze.len(),
+            "the flat-temperature control still matched vanilla, so this gate cannot \
+             detect the flat-temperature error at all"
+        );
+
+        let snowy = load("snowy_plains");
+        let (snowy_real, _) = run(&snowy, &support, snowy.sea_level);
+        let (snowy_flat, _) = run(&snowy, &support, flat);
+        assert_eq!(
+            snowy_real.snow, snowy_flat.snow,
+            "snowy_plains' declared temperature is 0.0, below the threshold at every \
+             altitude, so the two readings must agree — this is why a snowy-biome fixture \
+             alone cannot catch the trap"
+        );
+    }
+
+    /// **Control: `cannot_support_snow_layer` emptied.** With `ice` no longer in
+    /// the tag, `frozen_ocean`'s ice columns become snow-covered ice, and the
+    /// parity assertion fails. This is the branch-order control: the tag check has
+    /// to run before the geometry check, and `minecraft:ice` genuinely *has* a
+    /// full UP collision face (measured in `lodestone_data::snow_support`), so
+    /// nothing else stops the snow.
+    #[test]
+    fn control_dropping_the_cannot_support_tag_puts_snow_on_frozen_ocean_ice() {
+        let mut support = support();
+        support.cannot_support_snow_layer = HashSet::new();
+        let ocean = load("frozen_ocean");
+        let (counts, diff) = run(&ocean, &support, ocean.sea_level);
+        assert!(
+            counts.snow > 0,
+            "with the tag dropped, snow must appear on the ice — if it does not, the tag \
+             check is not what keeps frozen oceans bare and this control proves nothing"
+        );
+        assert_ne!(
+            diff.len(),
+            ocean.freeze.len(),
+            "the tag-dropped control still matched vanilla"
+        );
     }
 }

@@ -116,6 +116,46 @@ regen-damage-types:
     python3 scripts/extract-damage-types.py .cache/mc/26.2/versions/26.2/server-26.2.jar crates/lodestone-data/tests/support/damage_types_jar.txt
     LODESTONE_REGEN=1 cargo test -p lodestone-data --test damage_types {{jflag}} --target-dir {{tdir}} committed_table_matches_dump -- --ignored --nocapture
 
+# Regenerate crates/lodestone-data's freeze_top_layer support table
+# (src/generated/snow_support.rs) from the committed JVM dump. Test:
+# crates/lodestone-data/tests/snow_support.rs :: committed_table_matches_dump
+# (#[ignore]d). Re-dump first with `just oracle-snow-support` after a data bump.
+regen-snow-support:
+    LODESTONE_REGEN=1 cargo test -p lodestone-data --test snow_support {{jflag}} --target-dir {{tdir}} committed_table_matches_dump -- --ignored --nocapture
+
+# Re-dump the five per-block-state freeze_top_layer facts from the real 26.2
+# server, over the committed anchor. Needs Apple `container` (see
+# docs/oracle-runtimes.md). Follow with `just regen-snow-support`.
+oracle-snow-support:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    CACHE="$(cd .cache/mc/26.2 && pwd)"
+    HERE="$(cd crates/lodestone-data/oracle-java && pwd)"
+    container system start >/dev/null 2>&1 || true
+    container run --rm --memory 3g -v "$CACHE":/mc:ro -v "$HERE":/oracle:ro -w /work \
+      eclipse-temurin:25-jdk bash -c '
+        set -e
+        CP="/mc/versions/26.2/server-26.2.jar:$(find /mc/libraries -name "*.jar" | tr "\n" ":")"
+        mkdir -p /work && cp /oracle/SnowSupportOracle.java /work/
+        javac -cp "$CP" -d /work /work/SnowSupportOracle.java
+        java -cp "/work:$CP" SnowSupportOracle
+      ' > crates/lodestone-data/tests/support/snow_support_jvm.txt
+
+# Re-dump the four freeze_top_layer whole-chunk parity fixtures (issue #404's
+# U2) from the real 26.2 server. Each is one container run of a few minutes.
+# The gate reading them is crates/lodestone-server/src/worldgen_data.rs ::
+# top_layer_parity. See docs/worldgen-freeze-top-layer.md for why these four
+# biomes and not others — windswept_hills is the one that discriminates the
+# height-adjusted temperature from the flat biome field.
+oracle-top-layer:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out=crates/lodestone-worldgen/tests/support
+    ./scripts/worldgen-oracle/run.sh TopLayerOracle minecraft:snowy_plains -1200 -2400 > $out/top_layer_snowy_plains_jvm.txt
+    ./scripts/worldgen-oracle/run.sh TopLayerOracle minecraft:frozen_ocean -600 0 > $out/top_layer_frozen_ocean_jvm.txt
+    ./scripts/worldgen-oracle/run.sh TopLayerOracle minecraft:windswept_hills 0 240 > $out/top_layer_windswept_hills_jvm.txt
+    ./scripts/worldgen-oracle/run.sh TopLayerOracle minecraft:desert -160 -240 > $out/top_layer_desert_jvm.txt
+
 # --- Delegating wrappers (scripts/* keep their bodies and paths) ------------
 
 # wasm32 compile + confinement-guard tripwire (debug build, fast). Does NOT
