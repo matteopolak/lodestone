@@ -17,8 +17,9 @@ client with a real `block_update` packet, and respecting the break *sequence*
 **Out of scope, deliberately:** break timing/hardness validation (the client's own
 `lodestone-shell` predictor already gates when it sends `StopDestroy`, using real
 per-state hardness — see `lodestone-shell/src/interact.rs`'s `drive_mining`), item
-consumption from inventory (this crate has no inventory model at all — see "Placement
-always places stone" below), drops, block-entity data, redstone/neighbour updates, and
+consumption from inventory (placement resolves the held item but never *spends* it —
+see "Placement resolves the held item" below), drops, block-entity data beyond the six
+ticking blocks, redstone/neighbour updates, and
 any placement rule beyond "the state implied by clicking a face" (stairs, slabs, doors,
 fences all need a cursor-derived orientation this does not compute). Interaction-range
 and spawn-protection checks are also skipped: this crate tracks no player position
@@ -106,12 +107,32 @@ is what corrects a client that predicted a placement the server rejected, and wh
 happens to also upgrade the *other* cell's client-visible fidelity (see the wire gap
 below) even when nothing about it actually changed.
 
-**Placement always places `minecraft:stone`.** This crate has no inventory model at
-all — no held-item tracking, no slot state — so there is no way to know what block the
-clicked hand is holding. Rather than half-build an inventory seam for this one purpose,
-placement always writes the one block a "plain full-cube block" claim can honestly make
-regardless of what the client thinks it is holding. A real per-item placement needs a
-server-side inventory model; that is a separate, larger piece of work.
+**Placement resolves the held item (#466).** `apply_use_item_on` reads
+`PlayerInventory::selected_item` and resolves it through
+`lodestone_data::block_items::block_for_item` — the 26.2 census of `BlockItem.getBlock()`
+dumped from the real jar (see [`item-block-census.md`](./item-block-census.md)). Dirt
+places dirt, planks place planks, and `minecraft:redstone` places
+`minecraft:redstone_wire`.
+
+**An item that places no block now places nothing.** A sword, a bucket, a spawn egg or
+an empty hand leaves the world untouched. This replaced the original behaviour, in which
+placement *always* wrote `minecraft:stone`.
+
+That original behaviour outlived its own justification and became #466. It was written
+when this crate genuinely had no inventory model, and was honest then. An inventory model
+and a `block_entity_for_item` lookup arrived later, but the lookup by design resolves only
+the six block-entity items — so its `None` arm, still writing stone, silently became *the
+path every ordinary block took*. Three things kept it hidden: the client predicts
+placement locally and predicted it correctly; the `block_update` really was sent, so the
+wire was fully connected and merely carrying the wrong value (the failure
+`cargo xtask connectedness` structurally cannot see); and the blocks a developer reaches
+for when testing containers — chest, furnace — are exactly the ones that worked.
+
+**Block *state* is still out of scope.** Placement writes each block's bare name, so a
+log lands without its `axis`, a stair without its `facing`/`half`, and redstone dust
+without its connection properties. Getting the right *state* needs the cursor position,
+click face and neighbour states, and is a separate and larger piece of work than getting
+the right *block*.
 
 ### `is_air_or_fluid` doubles as "replaceable"
 
@@ -180,16 +201,22 @@ encoder produced.
   in the client stack consumes that event yet, so sending it would currently be inert.
   A future prediction-reconciliation feature needs both halves; only the decode half
   exists today.
-* **Changing what gets placed:** `apply_use_item_on` in `server.rs` hardcodes
-  `crate::chunk::STONE`. There is no seam to swap it per-item without first adding an
-  inventory model — do not try to thread an item id through without one; the whole
-  point of the current design is that it is honest about not having one.
+* **Changing what gets placed:** `apply_use_item_on` in `server.rs` gates on
+  `lodestone_data::block_items::block_for_item`, and `block_entity_for_item` is
+  consulted *second*, only to supply the live `BlockEntity` for the six ticking blocks.
+  Keep that order. Swapping the gate back onto `block_entity_for_item` is exactly the
+  #466 regression, and `crates/protocol/v770/tests/server_block_placement.rs` is the
+  gate that catches it — it asserts the **server's own** `ChunkSource` per item, because
+  the client predicts correctly and a client-side assertion passes against the bug.
+* **Do not "fix" the table by name-matching the item to a block.** It is wrong on 16 of
+  1,537 items in both directions; see [`item-block-census.md`](./item-block-census.md).
 
 ## Configuration
 
-No env vars or flags. The one constant worth knowing: `crate::chunk::{AIR, STONE}`
-(`pub(crate)` string constants in `chunk.rs`) are what `set_block` ever writes through
-this path.
+No env vars or flags. `crate::chunk::AIR` is what a break writes; a placement writes
+whatever `lodestone_data::block_items::block_for_item` resolves the held item to.
+`crate::chunk::STONE` still exists for other callers but is **no longer written by this
+path** — that was #466.
 
 ## Dependencies
 
