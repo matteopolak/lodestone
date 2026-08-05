@@ -38,6 +38,7 @@ impl WindowApp {
         // late.
         self.sim
             .set_mouse_invert(self.nav.invert_mouse_x(), self.nav.invert_mouse_y());
+        self.sim.set_sensitivity(self.nav.sensitivity());
         self.sim
             .set_toggle_modes(self.nav.toggle_sneak(), self.nav.toggle_sprint());
         self.sim.step(dt);

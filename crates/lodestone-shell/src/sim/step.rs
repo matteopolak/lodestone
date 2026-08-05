@@ -93,7 +93,11 @@ impl Sim {
     pub fn apply_mouse(&mut self) {
         let (dx, dy) = self.input_mut(InputState::take_mouse);
         if dx != 0.0 || dy != 0.0 {
-            let sensitivity = self.config.sensitivity;
+            // Issue #443: the *pushed* option, not `self.config.sensitivity`.
+            // The latter is argv-derived and fixed for the process lifetime,
+            // so reading it made the persisted slider apply only at the next
+            // launch. See `Sim::sensitivity`'s own doc comment.
+            let sensitivity = self.sensitivity;
             let player = self.player();
             let (yaw, pitch) = apply_look_inverted(
                 player.yaw,
@@ -119,6 +123,16 @@ impl Sim {
     pub fn set_mouse_invert(&mut self, invert_x: bool, invert_y: bool) {
         self.invert_mouse_x = invert_x;
         self.invert_mouse_y = invert_y;
+    }
+
+    /// Push vanilla's `sensitivity` option down from the menu layer (issue
+    /// #443), the same way [`Self::set_mouse_invert`] does. Cheap and
+    /// idempotent; `app/redraw.rs` calls it once per frame **before**
+    /// [`Self::step`] so the very tick the slider moves already turns at the
+    /// new rate — pushing it after `step` would apply each change one frame
+    /// late.
+    pub fn set_sensitivity(&mut self, sensitivity: f32) {
+        self.sensitivity = sensitivity;
     }
 
     /// Push vanilla's `key.sneak`/`key.sprint` hold-vs-toggle options down

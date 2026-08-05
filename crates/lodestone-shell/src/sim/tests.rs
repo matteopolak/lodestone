@@ -1025,6 +1025,72 @@ fn invert_mouse_x_negates_the_yaw_delta_exactly() {
     );
 }
 
+/// Issue #443: a `sensitivity` change must take effect on the **next tick of
+/// the same `Sim`**, with no restart.
+///
+/// This is the assertion the issue needs and the one a naive gate misses.
+/// Persistence already worked before this fix — `afba832` made the option
+/// write to disk — so a gate that asserts the *stored* value changed passes
+/// against the bug and proves nothing. It is the *precondition* species of
+/// vacuous test: the setup, not the assert, is what is wrong.
+///
+/// The defect was that [`Sim::apply_mouse`] read `self.config.sensitivity`,
+/// the **argv-derived** [`Config`] value, which is fixed for the process's
+/// lifetime. Dragging the slider therefore persisted correctly and changed
+/// nothing until relaunch.
+///
+/// Both deltas are **predicted exactly** from
+/// [`lodestone_controller::sensitivity_factor`] rather than merely compared to
+/// each other, and the value the *unfixed* code would produce is computed
+/// alongside — without that third number, "the two deltas differ" is also
+/// satisfied by a fix that scales by the wrong amount (`CLAUDE.md`'s
+/// *magnitude* species). At vanilla's curve `(s·0.6 + 0.2)³ · 8 · 0.15`, a
+/// 50-pixel drag gives 30.72° at slider 1.0, 1.05° at 0.1, and 7.5° at the
+/// fixture's own config value of 0.5 — three well-separated numbers.
+#[test]
+fn a_sensitivity_change_applies_to_the_same_sim_without_a_restart() {
+    // `apply_look` wraps yaw into `[-180, 180)`, so a raw `after - before`
+    // can report deltas 360° apart if the fixture's yaw sits near the seam.
+    // Same normalisation as `invert_mouse_x_negates_the_yaw_delta_exactly`.
+    fn yaw_delta(before: f32, after: f32) -> f32 {
+        (after - before + 180.0).rem_euclid(360.0) - 180.0
+    }
+
+    const DRAG_PX: f32 = 50.0;
+    let cfg = test_config();
+    // The value the pre-fix code read, and therefore the wrong hypothesis.
+    let stale = DRAG_PX * lodestone_controller::sensitivity_factor(cfg.sensitivity);
+
+    let mut sim = Sim::new(cfg);
+
+    // One `Sim`, two sensitivities, no reconstruction between them — that is
+    // the whole point. A test that built a second `Sim` would pass even if
+    // the value were only read at construction.
+    let mut measure = |sim: &mut Sim, slider: f32| {
+        sim.set_sensitivity(slider);
+        let before = sim.player().yaw;
+        sim.input_mut(|i| i.add_mouse(DRAG_PX, 0.0));
+        sim.apply_mouse();
+        yaw_delta(before, sim.player().yaw)
+    };
+
+    for slider in [1.0_f32, 0.1] {
+        let want = DRAG_PX * lodestone_controller::sensitivity_factor(slider);
+        let got = measure(&mut sim, slider);
+        assert!(
+            (got - want).abs() < 1e-3,
+            "slider {slider} must turn the player {want}° for a {DRAG_PX}px drag, \
+             got {got}° — apply_mouse is not reading the pushed sensitivity"
+        );
+        assert!(
+            (got - stale).abs() > 1.0,
+            "slider {slider} produced {got}°, within 1° of the {stale}° the \
+             argv-derived config value would give — the fix is not observable, \
+             so this gate would pass against the bug"
+        );
+    }
+}
+
 /// As [`invert_mouse_x_negates_the_yaw_delta_exactly`], for `invertMouseY`
 /// and pitch.
 #[test]

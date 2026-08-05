@@ -343,6 +343,11 @@ impl Sim {
         // component nothing had.
         let local = lodestone_app::spawn_session_in(&mut ecs, player);
 
+        // Issue #443: read before the literal, because `config` moves into the
+        // `config` field below and struct-literal fields evaluate in written
+        // order.
+        let seed_sensitivity = config.sensitivity;
+
         let mut sim = Self {
             config,
             stats,
@@ -377,6 +382,11 @@ impl Sim {
             // silently-toggling one.
             invert_mouse_x: false,
             invert_mouse_y: false,
+            // Issue #443: seeded from the argv-derived `Config` so a caller
+            // that never calls `set_sensitivity` — a headless bot, a test —
+            // behaves exactly as it did before the field existed. The menu
+            // layer overwrites it every frame once there is a menu.
+            sensitivity: seed_sensitivity,
             toggle_sneak: false,
             toggle_sprint: false,
             chest_lids: crate::block_entities::ChestLids::new(),

@@ -564,6 +564,18 @@ pub struct Sim {
     /// `apply_look` now that there is somewhere to source the two bools from.
     invert_mouse_x: bool,
     invert_mouse_y: bool,
+    /// Vanilla's `sensitivity` option ([`crate::config::Options::sensitivity`],
+    /// issue #443), pushed down the same way as [`Self::invert_mouse_x`] — see
+    /// [`Self::set_sensitivity`].
+    ///
+    /// This exists because [`Self::apply_mouse`] previously read
+    /// `self.config.sensitivity`, which is the **argv-derived** [`Config`]
+    /// value and is therefore fixed for the process's lifetime. #443 made the
+    /// option persist, so dragging the slider wrote to disk and changed
+    /// nothing until the next launch. Seeded from `config.sensitivity` at
+    /// construction so a caller that never calls the setter (a headless bot,
+    /// or a test) keeps exactly the old behaviour.
+    sensitivity: f32,
     /// Vanilla's `key.sneak`/`key.sprint` hold-vs-toggle options
     /// ([`crate::config::Options::toggle_sneak`]/`toggle_sprint`, issue
     /// #202), pushed down the same way. Applied to the live [`InputState`]
