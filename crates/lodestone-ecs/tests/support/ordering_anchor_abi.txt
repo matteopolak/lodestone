@@ -1,0 +1,42 @@
+# The plugin ABI's ordering anchors. GENERATED -- do not hand-edit.
+#
+# Regenerate with:
+#   LODESTONE_REGEN=1 cargo test -p lodestone-ecs --test ordering_anchor_abi
+#
+# If this file changed, you changed the plugin ABI. Add an entry to
+# docs/plugin-api.md's "Ordering-anchor changelog" section in the same
+# commit -- additions included (that section asks for every PR, not only
+# renames). A rename or removal also needs a deprecation window.
+#
+# See crates/lodestone-ecs/tests/ordering_anchor_abi.rs for what this
+# gate cannot see.
+
+[variants] src/sets.rs, declaration order
+EventPriority = Lowest, Low, Normal, High, Highest, Monitor
+IngestSet = Drain, Apply, Index
+TickSet = Input, Intent, Physics, Predict, Animate, Send
+FrameSet = Input, Interpolate, Camera, Terrain
+ExtractSet = Terrain, Entities, Debug, Hud
+
+[chain] src/plugin.rs, source order of anchor mentions
+000 EventPriority::Lowest
+001 EventPriority::Low
+002 EventPriority::Normal
+003 EventPriority::High
+004 EventPriority::Highest
+005 EventPriority::Monitor
+006 IngestSet::Drain
+007 IngestSet::Apply
+008 IngestSet::Index
+009 TickSet::Input
+010 TickSet::Physics
+011 TickSet::Predict
+012 TickSet::Animate
+013 TickSet::Send
+014 FrameSet::Input
+015 FrameSet::Interpolate
+016 FrameSet::Camera
+017 FrameSet::Terrain
+018 ExtractSet::Terrain
+019 ExtractSet::Entities
+020 ExtractSet::Hud

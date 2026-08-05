@@ -783,6 +783,37 @@ and not harmful, but its value is narrower than issue #170's framing suggests; s
 disposition and the patch (outside this document's own file ownership — `sets.rs` is
 `crates/lodestone-ecs/`, a different agent's cluster as of this writing).
 
+### The changelog is now enforced, and its first run found two real defects
+
+The paragraphs above state the policy correctly and enforced nothing. `cargo test -p lodestone-ecs
+--test ordering_anchor_abi` (`crates/lodestone-ecs/tests/ordering_anchor_abi.rs`) is the gate that
+closes that, in the same shape as `xtask`'s `docs_index_matches_committed`: a committed snapshot
+(`crates/lodestone-ecs/tests/support/ordering_anchor_abi.txt`) of the whole anchor surface,
+regenerated with `LODESTONE_REGEN=1`, failing loudly on **any** change with a message naming this
+section. It fails on *additions* too, deliberately — this changelog asks for an entry from every PR,
+not only renames, so a gate that caught only renames would leave its own rule unenforced.
+
+It snapshots two things, and the second one is why:
+
+1. the five enums' **variant lists**, from `sets.rs`;
+2. the **sequence of anchor mentions in `plugin.rs`**, which is where `CorePlugin` actually
+   `chain()`s them — so a reordering with no rename is visible.
+
+**On its first run the chain half found that `TickSet::Intent` and `ExtractSet::Debug` are declared
+but never chained.** The `0d82ab4` rows above describe both as landing "between `Input` and `Physics`"
+and "between `Entities` and `Hud`" respectively. The variants landed and these changelog rows landed;
+`CorePlugin`'s two `configure_sets` calls (`plugin.rs:80-84`, `plugin.rs:108`) were never updated. So
+both are **published ordering anchors carrying no ordering guarantee** — a plugin writing
+`.in_set(TickSet::Intent)`, which `crates/plugins/lodestone-autopilot` does and which
+`TickSet::Intent`'s own doc comment instructs, gets no relation to `TickSet::Physics` at all and may
+run either side of it. They are named in that test's `KNOWN_UNCHAINED` constant rather than silently
+snapshotted, so **fixing them fails the gate** with an instruction to shrink the list.
+
+What the gate cannot see is written into its own module doc: a sixth anchor enum declared in a new
+file (`ANCHOR_ENUMS` is a hardcoded list — the docs-index gate's `docs/plans/` failure mode exactly),
+semantic changes that keep a name, and whether this changelog was actually updated. It makes a
+reviewer look; it cannot read prose.
+
 ## See also
 
 - [`docs/bevy-migration.md`](./bevy-migration.md) — the six-stage plan this document specifies
