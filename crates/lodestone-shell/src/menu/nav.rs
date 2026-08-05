@@ -3410,7 +3410,86 @@ pub fn on_screen_frame<'a>(
             nav.options_save_error(),
         ));
     }
+    // The fourth overlay screen (#474), and the second instance of the exact
+    // shape above. `command_block_overlay_frame` is the *same call* the draw
+    // path in `app/redraw.rs` makes — see its own doc for why it is a function
+    // rather than a second construction here.
+    if let Some(frame) = command_block_overlay_frame(ui, nav) {
+        return Some(frame);
+    }
     super::render::frame_for(ui, nav, statuses, favicons)
+}
+
+/// The command block edit screen's overlay frame, or `None` when that screen is
+/// not up — **one expression with two consumers**.
+///
+/// [`on_screen_frame`] hit-tests a click against this, and `app/redraw.rs`'s
+/// overlay block draws it. That is the whole reason it is a function: issue
+/// #474's draw half (`0948f59`) put `render::command_block_frame(state,
+/// nav.command_tree())` inline in `redraw.rs`, and a *second* construction here
+/// would be free to disagree with it — which is a click landing on a row the
+/// draw put somewhere else, the failure mode that is invisible in a screenshot
+/// because both halves look individually correct.
+///
+/// The in-world Settings arm above still constructs `settings_frame` twice for
+/// historical reasons; this one does not, and is the shape to copy for the next
+/// overlay screen.
+///
+/// `nav.command_tree()` rather than `None`: the suggestion popup is fed by the
+/// tree the server actually sent (#470 decodes it, #471 routes it here), and
+/// the popup is part of the frame the click has to hit-test against.
+#[must_use]
+pub fn command_block_overlay_frame<'a>(
+    ui: &UiState,
+    nav: &MenuNav,
+) -> Option<super::render::MenuFrame<'a>> {
+    if !ui.is_command_block_open() {
+        return None;
+    }
+    let state = nav.command_block()?;
+    Some(super::render::command_block_frame(
+        state,
+        nav.command_tree(),
+    ))
+}
+
+/// Whether the mouse and keyboard are routed to the menu layer rather than to
+/// gameplay — the predicate `app/lifecycle.rs` guards its `CursorMoved`,
+/// `MouseInput` and `KeyGate::menu` arms on.
+///
+/// # Why this is a function and not three copies of one expression
+///
+/// It was three copies. `render::owns_frame(screen) || ui.is_paused() ||
+/// ui.is_death()` appeared literally in the hover guard, the click guard and
+/// the `KeyGate` construction, and a *fourth* copy appeared in
+/// `every_mouse_routable_screen_has_a_frame_to_hit_test` — which is precisely
+/// why that gate could not see issue #474. The gate re-derived the routing rule
+/// instead of calling it, so it asserted a self-consistent pair of its own
+/// making: `Screen::CommandBlockEdit` was not in the gate's copy either, and
+/// adding a frame for it would not have made the gate fail, nor would omitting
+/// one.
+///
+/// With the rule named once, the gate's `routable` premise and the production
+/// guard are the same code, so a screen the driver routes to and
+/// [`on_screen_frame`] has no frame for is a test failure rather than a silent
+/// dropped click.
+///
+/// `Screen::CommandBlockEdit` is in the set for the same reason `Paused` and
+/// `Death` are: it is an overlay ([`render::owns_frame`](super::render::
+/// owns_frame) is `false` for it, deliberately — the world keeps rendering
+/// behind it, matching vanilla's `isInGameUi() == true`) with its own rows to
+/// hover, click and type into. Without it the screen opened, and neither a
+/// click nor a keystroke ever reached it.
+///
+/// Not a `UiState` method: `owns_frame` lives in `render`, so putting this on
+/// `UiState` would make `menu.rs` depend on the renderer to answer an input
+/// question.
+#[must_use]
+pub fn routes_menu_input(ui: &UiState) -> bool {
+    super::render::owns_frame(ui.screen())
+        || ui.is_paused()
+        || ui.is_death()
+        || ui.is_command_block_open()
 }
 
 /// Steps `i` one row in `forward`'s direction, wrapping, and keeps stepping
@@ -6686,45 +6765,115 @@ mod tests {
     /// spelled out per screen with its own setup rather than derived — a new
     /// overlay screen has to be added here, and the report above is the argument
     /// for doing it.
+    ///
+    /// # This gate was itself vacuous until #474
+    ///
+    /// The `routable` premise below used to be a **hand-copy** of the driver's
+    /// `owns_frame(..) || is_paused() || is_death()`, not a call to it. So it
+    /// tested two things this file controls against each other, and could not
+    /// see the driver at all: `Screen::CommandBlockEdit` was absent from
+    /// `on_screen_frame` *and* from the copied premise, which is a screen that
+    /// silently never appears in `cases` rather than a failure. It now calls
+    /// [`routes_menu_input`] — the same function `app/lifecycle.rs` guards on —
+    /// so the premise is the production rule and a screen the driver routes to
+    /// with no frame is a red test.
+    ///
+    /// It still cannot see whether `app.rs` hit-tests the frame *correctly*;
+    /// that is `app/tests.rs`'s
+    /// `clicking_a_command_block_row_at_its_own_coordinates_activates_that_row`.
     #[test]
     fn every_mouse_routable_screen_has_a_frame_to_hit_test() {
         let mut favicons = crate::menu::render::FaviconCache::default();
         let statuses = empty_statuses();
 
-        let cases: Vec<(&str, fn(&mut UiState))> = vec![
-            ("MainMenu", |_ui| {}),
-            ("ServerList", |ui| ui.open_server_list()),
-            ("Settings-title", |ui| ui.open_settings()),
-            ("Paused", |ui| {
+        let cases: Vec<(&str, fn(&mut UiState, &mut MenuNav))> = vec![
+            ("MainMenu", |_ui, _nav| {}),
+            ("ServerList", |ui, _nav| ui.open_server_list()),
+            ("Settings-title", |ui, _nav| ui.open_settings()),
+            ("Paused", |ui, _nav| {
                 ui.enter_dev_world();
                 ui.pause();
             }),
-            // The one that was broken.
-            ("Settings-in-world", |ui| {
+            // The one that was broken in `0d0ae93`.
+            ("Settings-in-world", |ui, _nav| {
                 ui.enter_dev_world();
                 ui.pause();
                 ui.open_settings_from_pause();
             }),
-            ("Statistics", |ui| {
+            ("Statistics", |ui, _nav| {
                 ui.enter_dev_world();
                 ui.pause();
                 ui.open_statistics_from_pause();
             }),
+            // The one that was broken in #474. Needs the `nav` half too — the
+            // frame is built from `MenuNav::command_block`, so a `UiState` on
+            // this screen with no widget state is not the production state.
+            ("CommandBlockEdit", |ui, nav| {
+                ui.enter_dev_world();
+                nav.open_command_block(ui, command_block::CommandBlockOpen::default());
+            }),
         ];
 
         for (what, setup) in cases {
-            let (nav, _p) = self::nav(&format!("routable-{what}"));
+            let (mut nav, _p) = self::nav(&format!("routable-{what}"));
             let mut ui = UiState::new();
-            setup(&mut ui);
-            let routable =
-                crate::menu::render::owns_frame(ui.screen()) || ui.is_paused() || ui.is_death();
-            assert!(routable, "{what}: premise — the mouse routes to this screen");
+            setup(&mut ui, &mut nav);
+            assert!(
+                routes_menu_input(&ui),
+                "{what}: premise — the driver routes menu input to this screen"
+            );
             assert!(
                 on_screen_frame(&ui, &nav, None, &statuses, &mut favicons).is_some(),
                 "{what}: the mouse routes clicks to this screen but `on_screen_frame` \
                  has no frame for it, so every click is dropped before it reaches a row"
             );
         }
+    }
+
+    /// **The control for the gate above, run and observed.**
+    ///
+    /// The gate asserts an implication, and an implication is satisfied for
+    /// free by a premise that is never true. If `routes_menu_input` answered
+    /// `true` for *everything* — a plausible way to make the gate pass — it
+    /// would be worthless, so this pins the other direction: `Screen::Playing`
+    /// and `Screen::Container` are live gameplay screens, the mouse there is
+    /// look/attack and a container's own hit-test, and neither may be routed to
+    /// the menu row path.
+    ///
+    /// `Screen::Container` is the sharper half: it *is* a screen with clickable
+    /// rows, drawn as an overlay, and it has its own `hit_test_with_scale`
+    /// path in `app/lifecycle.rs`. Adding it to `routes_menu_input` "for
+    /// symmetry" would break every slot click, so it is here to make that a
+    /// test failure rather than a discovery.
+    #[test]
+    fn gameplay_screens_are_not_routed_to_the_menu_row_path() {
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        assert!(
+            !routes_menu_input(&ui),
+            "Playing: gameplay input must not be swallowed by the menu layer"
+        );
+
+        ui.open_container();
+        assert_eq!(ui.screen(), Screen::Container, "premise: the container is up");
+        assert!(
+            !routes_menu_input(&ui),
+            "Container: has its own `hit_test_with_scale` path — routing it here \
+             would break every slot click"
+        );
+
+        // And the command block screen must go back to `false` once it closes,
+        // so this is a property of the screen and not a latch.
+        let (mut nav, _p) = self::nav("routable-control");
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        nav.open_command_block(&mut ui, command_block::CommandBlockOpen::default());
+        assert!(routes_menu_input(&ui), "premise: open routes input");
+        nav.close_command_block(&mut ui);
+        assert!(
+            !routes_menu_input(&ui),
+            "and closing it must hand the mouse back to gameplay"
+        );
     }
 
     // -- Statistics: nothing is focused until Tab (player report) -------------

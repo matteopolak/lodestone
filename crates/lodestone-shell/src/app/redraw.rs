@@ -839,12 +839,17 @@ impl WindowApp {
         // this screen is fed by the real server's tree now that #470 decodes it
         // and #471 routes it to the shell. `None` draws no popup at all, which
         // is the honest fallback before a tree arrives.
-        if self.ui.is_command_block_open()
-            && let Some(state) = self.nav.command_block()
+        //
+        // The frame comes from `nav::command_block_overlay_frame` rather than
+        // from a `render::command_block_frame` call written out here, because
+        // `nav::on_screen_frame` — what the *mouse* hit-tests against — calls
+        // the same function. Two constructions of one screen's geometry is a
+        // click landing on a row the draw put elsewhere, and it is invisible in
+        // a screenshot. One expression, two consumers.
+        if let Some(command_block_frame) =
+            crate::menu::nav::command_block_overlay_frame(&self.ui, &self.nav)
             && let Some(menu) = self.menu.as_mut()
         {
-            let command_block_frame =
-                crate::menu::render::command_block_frame(state, self.nav.command_tree());
             menu.render_overlay(device, queue, frame.view(), &command_block_frame, w, h);
         }
 
