@@ -75,7 +75,6 @@ fn production_server() -> IntegratedServer {
     let (server, _client) = IntegratedServer::open_in_memory_with_mobs(
         Silent,
         AirWorld,
-        AirWorld,
         (0..=0, 0..=0),
         (0, 0),
         0,

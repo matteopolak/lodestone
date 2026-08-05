@@ -1495,21 +1495,26 @@ fn run(
                 // `crate::worldgen` calls directly for the dev world, reached
                 // through the server's `ChunkSource` so the client sees it over
                 // the real wire instead of by a local shortcut. Generation is
-                // lazy per column, but the *initial view* is generated before the
-                // client can finish loading: at ~12 ms/column (see
-                // `docs/chunk-memory-pool-footprint.md`) a radius-8 view is a few
-                // seconds on this thread, which is why the shell stays on the
-                // loading screen rather than the world appearing instantly.
+                // lazy per column, and since issue #453 the initial view is
+                // streamed **outward from the player's own column**, one Chebyshev
+                // ring generated and encoded before the next is asked for — so the
+                // first terrain reaches the client after a single column rather
+                // than after all 361. A composed column measures ~222 ms for
+                // contiguous columns from one source (see
+                // `docs/world-open-latency.md`); the ~12 ms in
+                // `docs/chunk-memory-pool-footprint.md` predates carvers, ores and
+                // vegetation composing in and is not the figure to reason from.
                 let source = lodestone_server::overworld_chunk_source(seed);
                 // Issue #217: `MobSim` computed AI motion server-side with no
                 // production consumer streaming it anywhere — an island by its
                 // own module doc's admission. `open_in_memory_with_mobs` is
-                // the production wiring: it spawns a second task that owns a
-                // live `MobSim` over its own snapshot of the same
-                // (deterministically regenerated — same seed) terrain and
-                // republishes positions every tick through the entity-sync
-                // pass `serve_connection` already runs on this connection's
-                // own inbound-packet cadence. `wasm32` gets the old
+                // the production wiring: it spawns a task that owns a live
+                // `MobSim` over a snapshot of the **same** terrain this
+                // connection is served — one shared `ChunkStore` since issue
+                // #454, where it used to be a second independent generator that
+                // merely agreed — and republishes positions every tick through
+                // the entity-sync pass `serve_connection` already runs on this
+                // connection's own inbound-packet cadence. `wasm32` gets the old
                 // mob-free path: the tick loop needs `tokio::time`, which is
                 // unavailable there (see `lodestone_server`'s own doc
                 // comment on `mobs::run_mob_tick_loop`) — a real, documented
@@ -1523,11 +1528,9 @@ fn run(
                     // since this only needs to be big enough for a handful
                     // of wandering mobs, not the whole streamed view.
                     let mob_radius = view_radius.clamp(1, 3);
-                    let mob_world_source = lodestone_server::overworld_chunk_source(seed);
                     lodestone_server::IntegratedServer::open_in_memory_with_mobs(
                         server_protocol,
                         source,
-                        mob_world_source,
                         (-mob_radius..=mob_radius, -mob_radius..=mob_radius),
                         (8, 8),
                         6,

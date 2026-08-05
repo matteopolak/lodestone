@@ -73,18 +73,19 @@ async fn a_real_client_observes_a_real_ai_ticked_mob_sim() {
     let height = 128;
     let view_radius = 1;
 
-    // Two independent instances of the same deterministic generator — one
-    // for the terrain the client is streamed, one for the terrain the mob
-    // sim paths over. `open_in_memory_with_mobs`'s own doc comment explains
-    // why this is two handles onto the same world, not two different worlds.
+    // **One** generator instance, shared. It used to be two independent
+    // instances of the same deterministic generator — one for the terrain the
+    // client is streamed, one for the terrain the mob sim paths over — which was
+    // observationally equivalent and generated the whole mob area twice at world
+    // open (issue #454). Since #436 there is one parameter and one source, so the
+    // mob sim paths over the byte-identical terrain the client was sent rather
+    // than over a second copy that merely agrees.
     let source = WorldgenChunkSource::new(floor_density(), min_y, height);
-    let mob_world_source = WorldgenChunkSource::new(floor_density(), min_y, height);
 
     let mob_count = 3;
     let (server, client_io) = IntegratedServer::open_in_memory_with_mobs(
         V770ServerProtocol,
         source,
-        mob_world_source,
         (-1..=1, -1..=1),
         (8, 8),
         mob_count,
