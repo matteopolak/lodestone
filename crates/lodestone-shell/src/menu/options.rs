@@ -1765,7 +1765,11 @@ impl SettingsPage {
 /// [`Origin`]. That is why the scroll position is *in here*: a row's y depends
 /// on which entry is at the top of the window, and nothing downstream of
 /// `frame_for` knows that either.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// **`Eq` went with issue #445**: `ListCell`/`ListHeader` carry an `f32` pixel
+/// scroll offset instead of a `u16` entry index, for the reason
+/// [`super::key_binds::KeyPlacement`]'s doc gives. `PartialEq` + `Debug` is all
+/// `assert_eq!` needs, so nothing that compared two `Placement`s loses anything.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Placement {
     /// One widget of `OptionsScreen`'s own arranged layout, by `visitWidgets`
     /// index: `0` the title `StringWidget`, `1` the FOV slider, `2` the
@@ -1785,8 +1789,9 @@ pub enum Placement {
         page: SettingsPage,
         /// The entry's absolute index in [`SettingsPage::entries`].
         entry: u16,
-        /// The entry currently at the top of the visible window.
-        first: u16,
+        /// The list's scroll offset in **pixels** (issue #445), not the index of
+        /// the entry at the top of the window. See [`entry_offset`].
+        scroll: f32,
         /// `0` or `1` — the `addSmall` column.
         column: u8,
     },
@@ -1796,8 +1801,8 @@ pub enum Placement {
         page: SettingsPage,
         /// The entry's absolute index.
         entry: u16,
-        /// The entry at the top of the visible window.
-        first: u16,
+        /// The list's scroll offset in **pixels** (issue #445).
+        scroll: f32,
     },
 }
 
@@ -1844,7 +1849,7 @@ impl Control {
 /// [`online_cell`] — and is otherwise ignored, exactly as vanilla's `inWorld`
 /// only ever changes the one header button.
 #[must_use]
-pub fn controls(page: SettingsPage, first: usize, in_world: bool) -> Vec<Control> {
+pub fn controls(page: SettingsPage, scroll: f32, in_world: bool) -> Vec<Control> {
     let mut out = Vec::new();
     if page == SettingsPage::Root {
         // 1 = the FOV slider, 2 = the Online / World Options button; the title
@@ -1874,8 +1879,13 @@ pub fn controls(page: SettingsPage, first: usize, in_world: bool) -> Vec<Control
         return out;
     }
 
+    // **Every** entry, not a `visible_entries(entries, first)` window (#445).
+    // The slice had to exclude any entry that did not wholly fit; clipping to the
+    // band is `render::draw`'s job now, so a half-scrolled row draws its visible
+    // half. `visible_entries` survives only as `LIST_WINDOW_PX`'s own
+    // documentation and its tests — nothing in the draw path calls it.
     let entries = page.entries();
-    for entry in visible_entries(entries, first) {
+    for entry in 0..entries.len() {
         let (a, b, width) = match entries[entry] {
             // A header carries no control; it is drawn as a `MenuLabel` by
             // `settings_frame` instead.
@@ -1890,7 +1900,7 @@ pub fn controls(page: SettingsPage, first: usize, in_world: bool) -> Vec<Control
                 placement: Placement::ListCell {
                     page,
                     entry: entry as u16,
-                    first: first as u16,
+                    scroll,
                     column: column as u8,
                 },
                 width,
@@ -2015,8 +2025,8 @@ pub fn header_padding_top(index: usize) -> f32 {
 /// `getFirstEntryY() - scrollAmount` (`AbstractSelectionList.java:143-150`);
 /// snapping the scroll to an entry boundary makes that sum start at `first`.
 #[must_use]
-pub fn entry_offset(entries: &[Entry], first: usize, index: usize) -> f32 {
-    (first..index).map(|k| entry_height(entries, k)).sum()
+pub fn entry_offset(entries: &[Entry], index: usize) -> f32 {
+    (0..index).map(|k| entry_height(entries, k)).sum()
 }
 
 /// The entries visible with `first` at the top: as many as fit
@@ -2026,6 +2036,48 @@ pub fn entry_offset(entries: &[Entry], first: usize, index: usize) -> f32 {
 /// The distinction is 5 px on a control row and it is load-bearing: an entry is
 /// 25 px tall but paints a 20 px widget inset 2 px, so the trailing 3 px are
 /// blank and excluding a row for them would drop a row that fits.
+#[must_use]
+/// This page's list, as the generic [`super::widget::ListSpec`] (issue #445).
+///
+/// **The one screen here with non-uniform rows**, which is why
+/// `ScrollList::new_variable` was settled before any conversion started: a header
+/// entry is `header_padding_top + HEADER_LINE_HEIGHT + HEADER_PADDING_BOTTOM` and
+/// a control row is [`DEFAULT_ITEM_HEIGHT`], so a uniform-pitch list cannot place
+/// this page's entries at all. The `heights` table is [`entry_height`]'s own
+/// answer per entry, so the scrollbar's thumb, the wheel's clamp and
+/// [`list_cell_origin`]'s walk are all reading the same numbers.
+///
+/// `row_h` stays [`DEFAULT_ITEM_HEIGHT`] even with `heights` set — it is
+/// `defaultEntryHeight`, what `scrollRate` is defined against, and **not** "the
+/// height of a row". That is what makes one notch `floor(25 / 2)` = 12 px here
+/// regardless of which entry happens to be under the cursor.
+///
+/// The band is [`BIG_BUTTON_WIDTH`] (310) wide and centred, matching
+/// [`row_left`]'s `ipx(width) / 2 - ROW_LEFT_INSET` for column 0 — 155 either
+/// side of the centre. Gated in this module's tests against `row_left` itself.
+#[must_use]
+pub fn list_spec(page: SettingsPage, scroll: f32) -> super::widget::ListSpec {
+    let entries = page.entries();
+    let heights: Vec<f32> = (0..entries.len())
+        .map(|i| entry_height(entries, i))
+        .collect();
+    super::widget::ListSpec::uniform(
+        DEFAULT_ITEM_HEIGHT,
+        page.header_height(),
+        FOOTER_HEIGHT,
+        entries.len(),
+        BIG_BUTTON_WIDTH,
+    )
+    .with_heights(heights)
+    .at(scroll)
+}
+
+/// The entries visible with entry `first` at the top.
+///
+/// **No longer on the draw path (issue #445)** — `controls` and `settings_frame`
+/// emit every entry and let `render::draw` clip to the band. This survives as
+/// [`LIST_WINDOW_PX`]'s executable documentation and for the tests that describe
+/// the old window budget; nothing that positions a widget calls it.
 #[must_use]
 pub fn visible_entries(entries: &[Entry], first: usize) -> std::ops::Range<usize> {
     let mut used = 0.0f32;
@@ -2070,15 +2122,21 @@ pub fn row_left(width: f32, column: u8) -> f32 {
 pub fn list_cell_origin(
     page: SettingsPage,
     entry: usize,
-    first: usize,
+    scroll: f32,
     column: u8,
     width: f32,
 ) -> (f32, f32) {
     let entries = page.entries();
+    // Pixel scrolling (#445): the entry's **absolute** offset in the list, minus
+    // the scroll. `entry_offset` used to sum from `first`, which made entry
+    // `first` sit at offset 0 and skipped its own header padding; summing from 0
+    // is vanilla's own absolute layout and the offset is subtracted once here.
+    // `scroll.floor()` is vanilla's `(int)scrollAmount`.
     let y = page.header_height()
         + LIST_TOP_INSET
-        + entry_offset(entries, first, entry)
-        + ENTRY_CONTENT_INSET;
+        + entry_offset(entries, entry)
+        + ENTRY_CONTENT_INSET
+        - scroll.floor();
     (row_left(width, column), y)
 }
 
@@ -2089,10 +2147,10 @@ pub fn list_cell_origin(
 pub fn list_header_origin(
     page: SettingsPage,
     entry: usize,
-    first: usize,
+    scroll: f32,
     width: f32,
 ) -> (f32, f32) {
-    let (x, y) = list_cell_origin(page, entry, first, 0, width);
+    let (x, y) = list_cell_origin(page, entry, scroll, 0, width);
     (x, y + header_padding_top(entry))
 }
 
@@ -2225,11 +2283,11 @@ pub fn placement_anchor(placement: Placement, width: f32, height: f32) -> (f32, 
         Placement::ListCell {
             page,
             entry,
-            first,
+            scroll,
             column,
-        } => list_cell_origin(page, usize::from(entry), usize::from(first), column, width),
-        Placement::ListHeader { page, entry, first } => {
-            list_header_origin(page, usize::from(entry), usize::from(first), width)
+        } => list_cell_origin(page, usize::from(entry), scroll, column, width),
+        Placement::ListHeader { page, entry, scroll } => {
+            list_header_origin(page, usize::from(entry), scroll, width)
         }
     }
 }
@@ -2295,7 +2353,9 @@ pub struct SettingsNav {
     page: SettingsPage,
     stack: Vec<SettingsPage>,
     cursor: usize,
-    first: usize,
+    /// Scroll offset in **pixels** (issue #445), not the index of the entry at
+    /// the top of the window.
+    scroll: f32,
     /// Vanilla's `inWorld` (`OptionsScreen.java:41-47`): whether this screen
     /// was opened from the pause menu rather than the title —
     /// [`super::UiState::settings_in_world`], threaded in once at
@@ -2345,7 +2405,7 @@ impl SettingsNav {
             page: SettingsPage::Root,
             stack: Vec::new(),
             cursor: 0,
-            first: 0,
+            scroll: 0.0,
             in_world: false,
             key_binds: super::key_binds::KeyBindsNav::default(),
             language: super::language::LanguageNav::default(),
@@ -2484,8 +2544,25 @@ impl SettingsNav {
 
     /// The entry at the top of the visible window.
     #[must_use]
-    pub fn first(&self) -> usize {
-        self.first
+    pub fn scroll(&self) -> f32 {
+        self.scroll
+    }
+
+    /// The live [`super::widget::ScrollList`] for the current page at this canvas
+    /// height, or `None` when there is nothing to scroll.
+    #[must_use]
+    fn model(&self, canvas_height: f32) -> Option<super::widget::ScrollList> {
+        list_spec(self.page, self.scroll).model(canvas_height)
+    }
+
+    /// One mouse-wheel notch, through the primitive. Positive scrolls **up**;
+    /// the negation lives in [`super::widget::ScrollList::mouse_scrolled`].
+    pub fn scroll_by(&mut self, notches: f32, canvas_height: f32) {
+        let Some(mut list) = self.model(canvas_height) else {
+            return;
+        };
+        list.mouse_scrolled(notches);
+        self.scroll = list.scroll();
     }
 
     /// The controls actually on screen, with their placements — what
@@ -2493,7 +2570,7 @@ impl SettingsNav {
     /// indexes into.
     #[must_use]
     pub fn visible(&self) -> Vec<Control> {
-        controls(self.page, self.first, self.in_world)
+        controls(self.page, self.scroll, self.in_world)
     }
 
     /// The cursor's position **within [`Self::visible`]**, i.e. the row index
@@ -2537,24 +2614,30 @@ impl SettingsNav {
         self.scroll_to_cursor();
     }
 
-    /// `AbstractSelectionList.scrollToEntry`'s job, at entry granularity: bring
-    /// the cursor's entry inside the window, moving the window as little as
-    /// possible. Modelled on `super::accounts`' `scroll_to_show`.
+    /// `AbstractSelectionList.scrollToEntry`, through
+    /// [`super::widget::ScrollList::scroll_to_entry`] (issue #445) — bring the
+    /// cursor's entry into the band, moving the **minimum number of pixels**.
+    ///
+    /// Was a `while !visible_entries(entries, self.first).contains(&entry) {
+    /// self.first += 1 }` walk at *entry* granularity, so it moved a whole entry
+    /// height at a time — and on this screen entry heights differ (a header is
+    /// `padding_top + line + padding_bottom`, a control row is
+    /// [`DEFAULT_ITEM_HEIGHT`]), which made the step size depend on which entry
+    /// happened to be at the top. `scroll_to_entry` works in pixels against the
+    /// same `heights` table [`list_spec`] declares, so it cannot disagree with the
+    /// draw.
+    ///
+    /// [`crate::config::MIN_SCALED_HEIGHT`] rather than the live canvas, for the
+    /// reason `stats::step` records: a keypress has no canvas in hand.
     fn scroll_to_cursor(&mut self) {
         let Some(entry) = entry_of_control(self.page, self.cursor) else {
             return;
         };
-        let entries = self.page.entries();
-        if entry < self.first {
-            self.first = entry;
+        let Some(mut list) = self.model(crate::config::MIN_SCALED_HEIGHT as f32) else {
             return;
-        }
-        while !visible_entries(entries, self.first).contains(&entry) {
-            if self.first + 1 >= entries.len() {
-                break;
-            }
-            self.first += 1;
-        }
+        };
+        list.scroll_to_entry(entry);
+        self.scroll = list.scroll();
     }
 
     /// Puts the cursor on the control at visible row `row` — the mouse's half.
@@ -2565,7 +2648,7 @@ impl SettingsNav {
     /// failure mode one screen over.
     pub fn hover_row(&mut self, row: usize) {
         let page = self.page;
-        let visible = controls(page, self.first, self.in_world);
+        let visible = controls(page, self.scroll, self.in_world);
         let Some(control) = visible.get(row).copied() else {
             return;
         };
@@ -2619,7 +2702,7 @@ impl SettingsNav {
             Some(page) => {
                 self.page = page;
                 self.cursor = 0;
-                self.first = 0;
+                self.scroll = 0.0;
                 SettingsOutcome::None
             }
             None => SettingsOutcome::Close,
@@ -2646,7 +2729,7 @@ impl SettingsNav {
                 self.stack.push(self.page);
                 self.page = page;
                 self.cursor = 0;
-                self.first = 0;
+                self.scroll = 0.0;
                 // A fresh `KeyBindsNav` on every entry, matching vanilla
                 // building a new `KeyBindsScreen` each time — the same rule
                 // `reset` already applies to the outer cursor, one page
@@ -2823,16 +2906,21 @@ pub fn settings_frame(
         colour: HEADER_COLOUR,
         scale: 1.0,
     }];
-    // `OptionsList.HeaderEntry`'s `StringWidget`s, for the visible entries only.
+    // `OptionsList.HeaderEntry`'s `StringWidget`s.
     let entries = page.entries();
-    for entry in visible_entries(entries, nav.first()) {
+    let mut list_labels = Vec::new();
+    // Every header, clipped to the band by `render::draw` (#445). These go in
+    // `list_labels` and not `labels`: they scroll, and a free text label has
+    // nowhere else to carry a clip rect, so in `labels` a scrolled-away header
+    // would draw over the footer. The title above does not scroll and stays.
+    for entry in 0..entries.len() {
         if let Entry::Header(text) = entries[entry] {
-            labels.push(MenuLabel {
+            list_labels.push(MenuLabel {
                 text: text.to_string(),
                 origin: Origin::Settings(Placement::ListHeader {
                     page,
                     entry: entry as u16,
-                    first: nav.first() as u16,
+                    scroll: nav.scroll(),
                 }),
                 dx: 0.0,
                 dy: 0.0,
@@ -2864,6 +2952,10 @@ pub fn settings_frame(
         selected: selected.unwrap_or(usize::MAX),
         vanilla: true,
         labels,
+        list_labels,
+        // `list` is deliberately not set: `render::dispatch` stamps
+        // `f.list = nav.active_list(ui)`, so the bar the draw paints and the
+        // offset the wheel clamps stay two readers of one declaration.
         ..Default::default()
     }
 }
@@ -3757,21 +3849,29 @@ mod tests {
         // `+160`. The first entry's widget is at
         // `headerHeight(33) + getFirstEntryY()'s 2 + getContentY()'s 2 = 37`.
         let page = SettingsPage::Mouse;
-        assert_eq!(list_cell_origin(page, 0, 0, 0, 480.0), (85.0, 37.0));
-        assert_eq!(list_cell_origin(page, 0, 0, 1, 480.0), (245.0, 37.0));
+        assert_eq!(list_cell_origin(page, 0, 0.0, 0, 480.0), (85.0, 37.0));
+        assert_eq!(list_cell_origin(page, 0, 0.0, 1, 480.0), (245.0, 37.0));
         // Entry 2 is two 25 px entries down.
-        assert_eq!(list_cell_origin(page, 2, 0, 0, 480.0), (85.0, 87.0));
-        // Scrolled so entry 2 is at the top, entry 2 lands where entry 0 was.
-        assert_eq!(list_cell_origin(page, 2, 2, 0, 480.0), (85.0, 37.0));
+        assert_eq!(list_cell_origin(page, 2, 0.0, 0, 480.0), (85.0, 87.0));
+        // Scrolled by entry 2's own absolute offset (two 25 px entries = 50 px),
+        // entry 2 lands exactly where entry 0 was. The third argument is now
+        // **pixels** (issue #445), not the index of the top entry — `2` used to
+        // mean "entry 2 at the top" and `50.0` means the same thing here, which is
+        // the conversion in one line.
+        assert_eq!(entry_offset(page.entries(), 2), 50.0);
+        assert_eq!(list_cell_origin(page, 2, 50.0, 0, 480.0), (85.0, 37.0));
+        // And a *fractional* scroll no row-index offset could express: 10 px down
+        // from the top puts entry 0 ten pixels higher, not a whole row higher.
+        assert_eq!(list_cell_origin(page, 0, 10.0, 0, 480.0), (85.0, 27.0));
         // Java integer division on an odd width: `481 / 2 == 240`, not 240.5.
         assert_eq!(row_left(481.0, 0), 85.0);
         assert_eq!(row_left(480.0, 0), 85.0);
         // A header's `StringWidget` is at `getContentY() + paddingTop`, and the
         // 18 px padding is what separates a mid-list header from its neighbour.
         let video = SettingsPage::Video;
-        assert_eq!(list_header_origin(video, 0, 0, 480.0), (85.0, 37.0));
-        let (_, quality_y) = list_header_origin(video, 6, 0, 480.0);
-        let (_, cell_y) = list_cell_origin(video, 6, 0, 0, 480.0);
+        assert_eq!(list_header_origin(video, 0, 0.0, 480.0), (85.0, 37.0));
+        let (_, quality_y) = list_header_origin(video, 6, 0.0, 480.0);
+        let (_, cell_y) = list_cell_origin(video, 6, 0.0, 0, 480.0);
         assert_eq!(quality_y - cell_y, 18.0, "the second header's paddingTop");
     }
 
@@ -3787,8 +3887,13 @@ mod tests {
         for page in PAGES {
             let entries = page.entries();
             for first in 0..entries.len().max(1) {
+                // The pixel offset that puts entry `first` at the band's top —
+                // `entry_offset` is the conversion, so this asserts exactly the
+                // property it did before #445 (a window opening at entry `first`
+                // never overruns the footer) in the new units.
+                let first_px = entry_offset(entries, first);
                 for entry in visible_entries(entries, first) {
-                    let (_, y) = list_cell_origin(page, entry, first, 0, 480.0);
+                    let (_, y) = list_cell_origin(page, entry, first_px, 0, 480.0);
                     let bottom = match entries[entry] {
                         Entry::Header(_) => y + header_padding_top(entry) + HEADER_LINE_HEIGHT,
                         _ => y + WIDGET_H,
@@ -3805,7 +3910,7 @@ mod tests {
         let entries = SettingsPage::Chat.entries();
         let window = visible_entries(entries, 0);
         assert!(window.len() >= 6, "at least six 25 px rows fit 172 px");
-        let overrun = list_cell_origin(SettingsPage::Chat, window.end, 0, 0, 480.0).1 + WIDGET_H;
+        let overrun = list_cell_origin(SettingsPage::Chat, window.end, 0.0, 0, 480.0).1 + WIDGET_H;
         assert!(
             overrun > footer_top,
             "the first entry the window rejects must be the one that would not fit \
@@ -3824,8 +3929,13 @@ mod tests {
         nav.page = page;
         let mut seen = std::collections::BTreeSet::new();
         for _ in 0..all_controls(page, false).len() {
-            for entry in visible_entries(page.entries(), nav.first()) {
-                seen.insert(entry);
+            // The band the *primitive* reports visible at this pixel offset, not
+            // `visible_entries`' old index window — that function is no longer on
+            // the draw path (see its doc).
+            if let Some(list) = list_spec(page, nav.scroll()).model(crate::config::MIN_SCALED_HEIGHT as f32) {
+                for entry in list.visible_range() {
+                    seen.insert(entry);
+                }
             }
             nav.step(true);
         }
@@ -3845,7 +3955,7 @@ mod tests {
             let mut nav = SettingsNav::new();
             nav.page = page;
             for first in 0..page.entries().len().max(1) {
-                nav.first = first;
+                nav.scroll = entry_offset(page.entries(), first);
                 let frame = settings_frame(&nav, &options, None);
                 let visible = nav.visible();
                 assert_eq!(
@@ -3886,7 +3996,7 @@ mod tests {
                 .expect("Video carries guiScale"),
         )
         .expect("and it is a list cell");
-        nav.first = entry;
+        nav.scroll = entry_offset(SettingsPage::Video.entries(), entry);
         let visible = nav.visible();
         let scale_row = visible
             .iter()
@@ -4035,9 +4145,9 @@ mod tests {
             for _ in 0..all_controls(page, false).len() * 2 {
                 assert!(
                     nav.selected_row().is_some(),
-                    "{page:?}: cursor {} off-window at first={}",
+                    "{page:?}: cursor {} off-window at scroll={}",
                     nav.cursor(),
-                    nav.first()
+                    nav.scroll()
                 );
                 nav.step(true);
             }
@@ -4058,9 +4168,10 @@ mod tests {
             let mut nav = SettingsNav::new();
             nav.page = page;
             for first in 0..page.entries().len().max(1) {
-                nav.first = first;
+                let first_px = entry_offset(page.entries(), first);
+                nav.scroll = first_px;
                 for row in 0..nav.visible().len() {
-                    nav.first = first;
+                    nav.scroll = first_px;
                     nav.hover_row(row);
                     assert_eq!(
                         nav.selected_row(),
@@ -4155,29 +4266,175 @@ mod tests {
         }
     }
 
+    /// The anti-island assertion at this layer: every control of every page, at
+    /// every scroll position, must land inside the canvas **horizontally**, and
+    /// every control *inside the band* must land inside the band vertically. A
+    /// `Placement` whose index ran past its arranged tree resolves to the -1000
+    /// sentinel in `placement_anchor`, so it fails here rather than drawing
+    /// nothing and looking like a table that was never wired.
+    ///
+    /// **The vertical bound changed with issue #445.** It used to require every
+    /// control to fit the canvas, which was true only because `controls` emitted a
+    /// window that excluded anything not wholly visible. Emitting every entry and
+    /// letting `render::draw` clip is the conversion, so a control below the band
+    /// now resolves below the canvas on purpose — asserting the canvas would be
+    /// asserting the old implementation. The x bound is unchanged and still
+    /// catches the sentinel, which is negative in **both** axes.
     #[test]
     fn every_placement_resolves_to_a_rect_on_screen() {
-        // The anti-island assertion at this layer: every control of every page,
-        // at every scroll position, must land inside the canvas. A `Placement`
-        // whose index ran past its arranged tree resolves to the -1000 sentinel
-        // in `placement_anchor`, so it fails here rather than drawing nothing
-        // and looking like a table that was never wired.
+        let mut in_band = 0usize;
         for page in PAGES {
             for first in 0..page.entries().len().max(1) {
+                let first_px = entry_offset(page.entries(), first);
+                // `SettingsPage::Root` is an arranged widget grid, not an
+                // `OptionsList` — its `entries()` is empty, so it has no band and
+                // `MenuNav::active_list` reports no list for it. Its controls are
+                // `Placement::Root`/`Footer`, which do not scroll, so the x bound
+                // below still covers them and only the band bound is skipped.
+                let (band_top, band_bottom) = match list_spec(page, first_px).model(320.0) {
+                    Some(band) => (band.top(), band.top() + band.height()),
+                    None => (f32::INFINITY, f32::NEG_INFINITY),
+                };
                 for in_world in [false, true] {
-                    for control in controls(page, first, in_world) {
+                    for control in controls(page, first_px, in_world) {
                         let (x, y) = placement_anchor(control.placement, 480.0, 320.0);
                         assert!(
-                            x >= 0.0
-                                && y >= 0.0
-                                && x + control.width <= 480.0
-                                && y + WIDGET_H <= 320.0,
-                            "{page:?} first={first} in_world={in_world} {:?} at ({x}, {y})",
+                            x >= 0.0 && x + control.width <= 480.0,
+                            "{page:?} first={first} in_world={in_world} {:?} at \
+                             x={x} w={w} runs off a 480 px canvas — and the -1000 \
+                             sentinel fails here too, since it is negative in x",
+                            control.placement,
+                            w = control.width
+                        );
+                        // A footer control does not scroll and sits below the band
+                        // by construction; a list control above or below the band
+                        // is clipped. Only what is inside the band is bounded.
+                        if y < band_top || y > band_bottom {
+                            continue;
+                        }
+                        in_band += 1;
+                        assert!(
+                            y >= 0.0 && y + WIDGET_H <= 320.0,
+                            "{page:?} first={first} in_world={in_world} {:?} is \
+                             inside the band and yet off the canvas at y={y}",
                             control.placement
                         );
                     }
                 }
             }
+        }
+        assert!(
+            in_band > 200,
+            "premise: this must actually have examined controls inside the band \
+             ({in_band} seen) — a filter that skipped everything would pass \
+             vacuously"
+        );
+    }
+
+    /// **One notch is `floor(DEFAULT_ITEM_HEIGHT / 2)` = `floor(25 / 2)` = 12 px**
+    /// (issue #445), and the offset must coincide with no entry top.
+    ///
+    /// 25, not 20: [`DEFAULT_ITEM_HEIGHT`] is `AbstractSelectionList`'s
+    /// `defaultEntryHeight` and [`WIDGET_H`] is the 20 px widget drawn *inside*
+    /// it. `floor(20 / 2)` is 10, so a mix-up reports 10 here — named as an
+    /// excluded hypothesis rather than left to chance, because 10 is exactly what
+    /// three of the other four adopted screens correctly report.
+    ///
+    /// **The `heights` table does not change the notch, and that is the
+    /// assertion.** `scrollRate` is defined against `defaultEntryHeight`, never
+    /// against the height of the row you happen to be on — so a page whose first
+    /// entry is a 31 px header still scrolls 12 px per notch. Video's entry 0 *is*
+    /// a header, so this page exercises that rather than assuming it.
+    #[test]
+    fn one_wheel_notch_is_half_a_default_entry_and_ignores_the_heights_table() {
+        const CANVAS_H: f32 = 240.0;
+        let page = SettingsPage::Video;
+        let mut nav = SettingsNav::new();
+        nav.page = page;
+
+        // Premise, executed: this page really does overflow the band, and its
+        // first entry really is a header taller than DEFAULT_ITEM_HEIGHT — so the
+        // "notch ignores the heights table" claim is being measured, not assumed.
+        assert!(
+            list_spec(page, 0.0)
+                .model(CANVAS_H)
+                .is_some_and(|l| l.scrollable()),
+            "premise: the Video page must overflow the band at {CANVAS_H} px"
+        );
+        assert!(
+            matches!(page.entries().first(), Some(Entry::Header(_))),
+            "premise: entry 0 is a header, whose height is not DEFAULT_ITEM_HEIGHT"
+        );
+        assert_ne!(
+            entry_height(page.entries(), 0),
+            DEFAULT_ITEM_HEIGHT,
+            "premise: and its height really does differ ({} vs {DEFAULT_ITEM_HEIGHT})",
+            entry_height(page.entries(), 0)
+        );
+        assert_eq!(nav.scroll(), 0.0, "precondition: starts at the top");
+
+        nav.scroll_by(-1.0, CANVAS_H);
+        assert_eq!(
+            nav.scroll(),
+            12.0,
+            "one notch must be floor(DEFAULT_ITEM_HEIGHT / 2) = floor(25 / 2) = 12"
+        );
+        assert_ne!(
+            nav.scroll(),
+            10.0,
+            "control: 10 is floor(WIDGET_H / 2) — WIDGET_H is the widget drawn \
+             inside a 25 px entry, not the entry pitch"
+        );
+        assert_ne!(
+            nav.scroll(),
+            DEFAULT_ITEM_HEIGHT,
+            "control: 25 is the entry-index answer"
+        );
+        assert_ne!(
+            nav.scroll(),
+            (entry_height(page.entries(), 0) / 2.0).floor(),
+            "control: and it must NOT be half the first entry's own height — the \
+             scroll rate is defined against defaultEntryHeight"
+        );
+
+        nav.scroll_by(-2.0, CANVAS_H);
+        assert_eq!(nav.scroll(), 36.0, "three notches: 36");
+
+        // The cross-check: 36 must coincide with no entry top. Computed against
+        // the real `heights` walk, not against a single pitch, because on this
+        // page the tops are not evenly spaced.
+        let tops: Vec<f32> = (0..page.entries().len())
+            .map(|i| entry_offset(page.entries(), i))
+            .collect();
+        assert!(
+            !tops.contains(&nav.scroll()),
+            "the offset {} must land on no entry top; tops are {tops:?}",
+            nav.scroll()
+        );
+    }
+
+    /// The band `list_spec` declares must agree with [`row_left`] on where a row
+    /// starts — two expressions from two modules, at four widths.
+    ///
+    /// `BIG_BUTTON_WIDTH` (310) is 155 either side of the centre, which is exactly
+    /// `ROW_LEFT_INSET`, so `ListSpec::row_left` and this module's own
+    /// `row_left(width, 0)` must coincide. Asserted rather than eyeballed because
+    /// the scrollbar hangs off `row_right` and the columns off `row_left`.
+    #[test]
+    fn the_declared_band_agrees_with_this_screens_own_row_left() {
+        for w in [640.0_f32, 854.0, 1280.0, 1920.0] {
+            let spec = list_spec(SettingsPage::Video, 0.0);
+            assert_eq!(
+                spec.row_left(w),
+                row_left(w, 0),
+                "at {w} px the primitive's row_left must equal this screen's own"
+            );
+            assert_eq!(
+                spec.row_w(w),
+                BIG_BUTTON_WIDTH,
+                "and the band is a full-width cell wide"
+            );
+            assert_eq!(ROW_LEFT_INSET * 2.0, BIG_BUTTON_WIDTH, "155 either side");
         }
     }
 
@@ -4194,6 +4451,13 @@ mod tests {
         }
     }
 
+    /// The y `settings_frame` positioned the named header label at, resolved
+    /// through the same `placement_anchor` the draw uses.
+    fn header_y(frame: &MenuFrame<'_>, text: &str) -> Option<f32> {
+        let label = frame.list_labels.iter().find(|l| l.text == text)?;
+        Some(label.origin.anchor(480.0, crate::config::MIN_SCALED_HEIGHT as f32).1 + label.dy)
+    }
+
     #[test]
     fn the_frame_carries_a_header_label_for_every_visible_header() {
         // `OptionsList.HeaderEntry` is a `StringWidget`, not a control, so it
@@ -4205,17 +4469,52 @@ mod tests {
         let mut nav = SettingsNav::new();
         nav.page = SettingsPage::Video;
         let frame = settings_frame(&nav, &options, None);
-        // The page title plus the "Display" header.
-        let texts: Vec<&str> = frame.labels.iter().map(|l| l.text.as_str()).collect();
-        assert!(texts.contains(&"Video Settings"), "{texts:?}");
-        assert!(texts.contains(&"Display"), "{texts:?}");
-        // The control: scrolled past it, the header must be gone rather than
-        // drawn at a stale position.
-        nav.first = 7;
+        // **The split changed with issue #445**: a header scrolls, so it now
+        // reaches `list_labels` — the vector `render::draw` clips to the band —
+        // while the page title, which does not scroll, stays in `labels`. This
+        // assertion is what pins the two apart.
+        let titles: Vec<&str> = frame.labels.iter().map(|l| l.text.as_str()).collect();
+        let headers: Vec<&str> = frame.list_labels.iter().map(|l| l.text.as_str()).collect();
+        assert!(titles.contains(&"Video Settings"), "{titles:?}");
+        assert!(
+            !titles.contains(&"Display"),
+            "a scrolling header must NOT be in `labels`, or it draws over the \
+             footer once scrolled away: {titles:?}"
+        );
+        assert!(headers.contains(&"Display"), "{headers:?}");
+
+        // **The control, and the behaviour it measures is deliberately different
+        // now.** It used to read "scrolled past it, the header must be gone
+        // rather than drawn at a stale position" — because `settings_frame`
+        // emitted only the visible window, so absence *was* the mechanism.
+        // Emitting every entry and clipping is the whole point of the
+        // conversion, so the header is still in the vector; what must change is
+        // its *position*, which has to leave the band. Asserting absence here
+        // would now be asserting the old implementation.
+        let before = header_y(&frame, "Display").expect("the header is positioned");
+        nav.scroll = entry_offset(SettingsPage::Video.entries(), 7);
         let frame = settings_frame(&nav, &options, None);
-        let texts: Vec<&str> = frame.labels.iter().map(|l| l.text.as_str()).collect();
-        assert!(!texts.contains(&"Display"), "{texts:?}");
-        assert!(texts.contains(&"Video Settings"), "the title stays");
+        let after = header_y(&frame, "Display").expect("still emitted, now clipped");
+        let band_top = list_spec(SettingsPage::Video, nav.scroll())
+            .model(crate::config::MIN_SCALED_HEIGHT as f32)
+            .expect("a band")
+            .top();
+        assert!(
+            after < before,
+            "scrolling down must move the header up: {before} -> {after}"
+        );
+        assert!(
+            after < band_top,
+            "and past the band's top ({band_top}), so `render::draw` clips it — \
+             it is at {after}"
+        );
+        assert!(
+            frame
+                .labels
+                .iter()
+                .any(|l| l.text == "Video Settings"),
+            "the title stays, and stays unscrolled"
+        );
     }
 
     #[test]
@@ -4269,11 +4568,11 @@ mod tests {
         nav.page = SettingsPage::Video;
         nav.stack.push(SettingsPage::Root);
         nav.cursor = 5;
-        nav.first = 4;
+        nav.scroll = 4.0 * DEFAULT_ITEM_HEIGHT;
         nav.in_world = true;
         nav.reset(false);
         assert_eq!(nav.page(), SettingsPage::Root);
-        assert_eq!((nav.cursor(), nav.first()), (0, 0));
+        assert_eq!((nav.cursor(), nav.scroll()), (0, 0.0));
         assert!(!nav.in_world, "reset must also re-derive in_world, not carry the old visit's over");
         assert_eq!(nav.escape(), SettingsOutcome::Close, "with an empty stack");
     }

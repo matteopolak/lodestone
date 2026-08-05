@@ -1478,6 +1478,27 @@ impl MenuNav {
                 self.social.entries().len(),
                 self.social.scroll(),
             )),
+            // Every other settings page (#445's last adoption). Its entry heights
+            // are **non-uniform** — a header is taller than a control row — so
+            // this is the one arm that goes through `ListSpec::with_heights`.
+            // Placed after the KeyBinds/Language arms, which are their own
+            // geometry rather than `OptionsList`'s.
+            //
+            // **`None` for a page with no list.** `SettingsPage::Root` is an
+            // arranged widget grid, not an `OptionsList` — `Root.entries()` is
+            // empty — so reporting a spec there would hang a scrollbar beside a
+            // screen with no rows. `ListSpec::model` would reject it anyway, but
+            // saying so here is the same explicitness the `Accounts` arm above
+            // uses for its sign-in views, and it keeps `active_list`'s answer
+            // meaning "this screen has a list".
+            super::Screen::Settings => {
+                let page = self.settings.page();
+                if page.entries().is_empty() {
+                    None
+                } else {
+                    Some(crate::menu::options::list_spec(page, self.settings.scroll()))
+                }
+            }
             _ => None,
         }
     }
@@ -1541,6 +1562,12 @@ impl MenuNav {
                 let before = self.social.scroll();
                 self.social.scroll_by(notches, canvas_height);
                 self.social.scroll() != before
+            }
+            // Every other settings page (#445). Same ordering as `active_list`.
+            super::Screen::Settings => {
+                let before = self.settings.scroll();
+                self.settings.scroll_by(notches, canvas_height);
+                self.settings.scroll() != before
             }
             _ => false,
         }
