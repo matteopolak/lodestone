@@ -304,10 +304,33 @@ pub const DROWNED: &[Registration] = &[
 ///
 /// That priority-4 slot is the reason [`GoalSelector::remove`] exists: vanilla
 /// removes *both* candidate goals and re-adds exactly one every time the
-/// skeleton's held item changes (`:132-146`). This table installs the melee half
-/// unconditionally, because `RangedBowAttackGoal` has no equivalent here and a
-/// skeleton that never attacks is worse than one that punches. Issue #227 turns
-/// this row into the real swap.
+/// skeleton's held item changes (`:132-148`).
+///
+/// **Which one it re-adds is not a coin toss.** `populateDefaultEquipmentSlots`
+/// puts a `BOW` in the main hand *unconditionally* (`:109-112` — no random roll,
+/// no difficulty gate), so `usedWeapon.is(Items.BOW)` at `:137` is true for every
+/// normally-spawned skeleton and the `else` at `:146` **never runs**. This table
+/// therefore carries the bow half, which is the only branch the game reaches.
+/// It used to carry the melee half, modelling a state a skeleton is never in
+/// (#226) — and a *second* priority-4 row would have been worse than either,
+/// since both goals claim MOVE and the winner would be registration-order
+/// dependent.
+///
+/// [`WITHER_SKELETON`] is the exception, and the boundary is the **equipment**
+/// override, not the goal method: `WitherSkeleton.java:74-76` overrides
+/// `populateDefaultEquipmentSlots` to hand out a `STONE_SWORD`, and the
+/// *inherited* `reassessWeaponGoal` then takes the `else`. It does not override
+/// `reassessWeaponGoal` itself — only calls it (`:88`). `Skeleton`, `Stray`,
+/// `Bogged` and `Parched` override neither method, so all four inherit the bow
+/// and share this table.
+///
+/// One known simplification inside the shared row: `Bogged` and `Parched` *do*
+/// override the interval, to `70` below Hard against `AbstractSkeleton`'s `40`
+/// (`Bogged.java:117-124`, `Parched.java:57-64`, `AbstractSkeleton.java:151-157`).
+/// All four get `40` here, because the interval is an argument to the shared
+/// builder rather than a row identity, and nothing in this repo carries a world
+/// difficulty for the Hard half either. Splitting it needs a per-species field on
+/// [`SpeciesContext`], not a fourth table.
 ///
 /// [`GoalSelector::remove`]: crate::ai::GoalSelector::remove
 pub const SKELETON: &[Registration] = &[
@@ -317,11 +340,12 @@ pub const SKELETON: &[Registration] = &[
     Registration::missing(Selector::Goal, 2, "RestrictSunGoal"),
     Registration::missing(Selector::Goal, 3, "FleeSunGoal"),
     Registration::goal(3, "AvoidEntityGoal(Wolf)", avoid_entity),
-    // `reassessWeaponGoal()` at `:146`: the non-bow branch. Vanilla's
-    // `meleeGoal` field is `new MeleeAttackGoal(this, 1.2, false)` (`:56`), and
-    // the bow branch at `:144` installs `bowGoal`,
-    // `new RangedBowAttackGoal<>(this, 1.0, 20, 15.0F)` (`:55`).
-    Registration::goal(4, "MeleeAttackGoal", melee_attack_1_2),
+    // `reassessWeaponGoal()` at `:144`: the bow branch, the only one a
+    // normally-spawned skeleton takes. Vanilla's `bowGoal` field is
+    // `new RangedBowAttackGoal<>(this, 1.0, 20, 15.0F)` (`:55`), with the
+    // interval overwritten per difficulty at `:138-143`. The `else` at `:146`
+    // installs `meleeGoal` and belongs to `WITHER_SKELETON` alone.
+    Registration::goal(4, "RangedBowAttackGoal", super::ranged::bow_attack),
     Registration::goal(5, "WaterAvoidingRandomStrollGoal", stroll),
     Registration::goal(6, "LookAtPlayerGoal(Player)", look_at_player_8),
     Registration::goal(6, "RandomLookAroundGoal", random_look_around),
@@ -355,6 +379,10 @@ pub const WITHER_SKELETON: &[Registration] = &[
     Registration::missing(Selector::Goal, 2, "RestrictSunGoal"),
     Registration::missing(Selector::Goal, 3, "FleeSunGoal"),
     Registration::goal(3, "AvoidEntityGoal(Wolf)", avoid_entity),
+    // The `else` half of `reassessWeaponGoal` (`:146`) — the one branch of this
+    // family that is really melee, because `WitherSkeleton.java:74-76` overrides
+    // `populateDefaultEquipmentSlots` with a `STONE_SWORD` and so fails the
+    // `is(Items.BOW)` test at `:137`. [`SKELETON`] takes `:144` instead.
     Registration::goal(4, "MeleeAttackGoal", melee_attack_1_2),
     Registration::goal(5, "WaterAvoidingRandomStrollGoal", stroll),
     Registration::goal(6, "LookAtPlayerGoal(Player)", look_at_player_8),
@@ -371,9 +399,13 @@ fn stroll_0_8(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(RandomStrollGoal::new(ctx.speed * 0.8))
 }
 
-/// `MeleeAttackGoal(this, 1.2, false)` — the skeleton's melee goal
+/// `MeleeAttackGoal(this, 1.2, false)` — `AbstractSkeleton`'s `meleeGoal` field
 /// (`monster/skeleton/AbstractSkeleton.java:56`), faster than the 1.0 every other
 /// species in this family uses.
+///
+/// Declared on `AbstractSkeleton` but reachable only by [`WITHER_SKELETON`]: the
+/// `else` branch that installs it needs a non-bow main hand, and only the wither
+/// overrides `populateDefaultEquipmentSlots` to have one.
 fn melee_attack_1_2(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(MeleeAttackGoal::new(ctx.speed * 1.2, ctx.attack_reach))
 }
@@ -524,24 +556,63 @@ mod tests {
 
     /// [`WITHER_SKELETON`] duplicates eleven rows of [`SKELETON`] by hand, so pin
     /// the relationship the duplication represents: the piglin row, then the base
-    /// table unchanged. Editing one table and not the other fails here rather than
-    /// silently giving the wither a stale set.
+    /// table with exactly **one** divergence. Editing one table and not the other
+    /// fails here rather than silently giving the wither a stale set.
+    ///
+    /// That divergence is the priority-4 weapon row, and it is *asserted* rather
+    /// than filtered away. `reassessWeaponGoal` picks its branch from the held
+    /// item, so the skeleton's unconditional `BOW`
+    /// (`AbstractSkeleton.java:109-112`) reaches `:144` and the wither's
+    /// `STONE_SWORD` (`WitherSkeleton.java:74-76`) reaches `:146`. A gate that
+    /// merely skipped priority 4 would still pass with both tables carrying the
+    /// *same* goal — which is precisely the state #226 found.
     #[test]
-    fn wither_skeleton_is_the_base_table_plus_the_piglin_row() {
-        let shape = |t: &[Registration]| {
-            t.iter()
-                .map(|r| (r.selector, r.priority, r.vanilla))
-                .collect::<Vec<_>>()
-        };
+    fn wither_skeleton_is_the_base_table_plus_the_piglin_row_and_the_weapon_swap() {
         assert_eq!(
             WITHER_SKELETON[0].vanilla,
             "NearestAttackableTargetGoal(AbstractPiglin)"
         );
+
+        // The weapon row: one slot, and a different occupant on each side.
+        let weapon = |t: &[Registration]| {
+            let rows: Vec<&str> = t
+                .iter()
+                .filter(|r| r.selector == Selector::Goal && r.priority == 4)
+                .map(|r| r.vanilla)
+                .collect();
+            assert_eq!(
+                rows.len(),
+                1,
+                "exactly one priority-4 goal row is allowed: vanilla removes both \
+                 candidates and re-adds one (`AbstractSkeleton.java:132-148`), so a \
+                 second row here would put two MOVE claimants in one slot and make \
+                 the winner registration-order dependent"
+            );
+            rows[0]
+        };
         assert_eq!(
-            shape(&WITHER_SKELETON[1..]),
-            shape(SKELETON),
-            "WitherSkeleton.java:40 calls super.registerGoals(), so everything \
-             after its own row must be AbstractSkeleton's table verbatim"
+            weapon(SKELETON),
+            "RangedBowAttackGoal",
+            "every normally-spawned skeleton holds a bow"
+        );
+        assert_eq!(
+            weapon(&WITHER_SKELETON[1..]),
+            "MeleeAttackGoal",
+            "the wither skeleton is handed a stone sword instead"
+        );
+
+        // Everything else, row for row and in jar order.
+        let without_weapon = |t: &[Registration]| {
+            t.iter()
+                .filter(|r| !(r.selector == Selector::Goal && r.priority == 4))
+                .map(|r| (r.selector, r.priority, r.vanilla))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            without_weapon(&WITHER_SKELETON[1..]),
+            without_weapon(SKELETON),
+            "WitherSkeleton.java:40 calls super.registerGoals(), so every row other \
+             than the weapon row must be AbstractSkeleton's table verbatim"
         );
     }
 
@@ -576,18 +647,26 @@ mod tests {
     /// value each row must produce and require the measurement to land on it
     /// rather than merely move in the right direction.
     ///
-    /// The interesting row is the skeleton's melee. Vanilla's `meleeGoal` field is
-    /// `new MeleeAttackGoal(this, 1.2, false)`
+    /// The interesting row is the wither skeleton's melee. Vanilla's `meleeGoal`
+    /// field is `new MeleeAttackGoal(this, 1.2, false)`
     /// (`monster/skeleton/AbstractSkeleton.java:56`) — every other melee row in
-    /// this family is `1.0` — so at the skeleton's `MOVEMENT_SPEED 0.25`
+    /// this family is `1.0` — so at the skeleton family's `MOVEMENT_SPEED 0.25`
     /// (`:90`) the two hypotheses are `0.30` and `0.25`, and the assertion is
     /// written to fail on the wrong one.
+    ///
+    /// The plain skeleton's priority-4 row is the *bow* goal, whose multiplier is
+    /// `1.0` (`:55`), so it cannot host that discriminator — 1.0 × 0.25 is its
+    /// bare movement speed. It is still pinned to the value, just without the
+    /// inequality; the wither carries the inequality.
     #[test]
     fn transcribed_speed_multipliers_land_on_the_jars_value() {
         // (species, movement_speed, vanilla row, jar factor)
         let cases: &[(&str, f64, &str, f64)] = &[
-            // `AbstractSkeleton.java:56` — 1.2, at `:90`'s MOVEMENT_SPEED 0.25.
-            ("skeleton", 0.25, "MeleeAttackGoal", 1.2),
+            // `AbstractSkeleton.java:55` — the bowGoal's 1.0, at `:90`'s
+            // MOVEMENT_SPEED 0.25.
+            ("skeleton", 0.25, "RangedBowAttackGoal", 1.0),
+            // `AbstractSkeleton.java:56` — the meleeGoal's 1.2, at the same 0.25.
+            // Only the wither ever installs it.
             ("wither_skeleton", 0.25, "MeleeAttackGoal", 1.2),
             // `Creeper.java:69` — 1.0, at 0.25.
             ("creeper", 0.25, "MeleeAttackGoal", 1.0),
@@ -620,13 +699,19 @@ mod tests {
         }
 
         // The discriminating control, stated as an inequality against the
-        // hypothesis a copy-paste from the creeper's row would produce.
+        // hypothesis a copy-paste from the creeper's row would produce. It lives on
+        // the wither skeleton because the plain skeleton's row is now the bow goal,
+        // whose 1.0 *is* the bare movement speed.
         let unshifted = SpeciesContext::new(0.25).speed;
-        let skeleton = speed_of("skeleton", "MeleeAttackGoal", &SpeciesContext::new(0.25));
+        let wither = speed_of(
+            "wither_skeleton",
+            "MeleeAttackGoal",
+            &SpeciesContext::new(0.25),
+        );
         assert!(
-            (skeleton - unshifted).abs() > 0.04,
-            "a skeleton's melee must not be its bare movement_speed — that is the \
-             1.0 hypothesis, and AbstractSkeleton.java:56 is 1.2"
+            (wither - unshifted).abs() > 0.04,
+            "a wither skeleton's melee must not be its bare movement_speed — that \
+             is the 1.0 hypothesis, and AbstractSkeleton.java:56 is 1.2"
         );
     }
 
@@ -682,6 +767,9 @@ mod tests {
         gap: (f64, f64),
         /// How many times a goal reached [`MobController::attack`].
         attacks: usize,
+        /// How many times a goal reached
+        /// [`MobController::launch_projectile`](crate::ai::mob::MobController::launch_projectile).
+        launches: usize,
         /// Peak fuse counter — non-zero only if `SwellGoal` ran.
         swell: i32,
     }
@@ -728,6 +816,7 @@ mod tests {
         Outcome {
             gap: (before, horizontal(mob.position())),
             attacks: mob.attacks().len(),
+            launches: mob.launches().len(),
             swell,
         }
     }
@@ -829,6 +918,97 @@ mod tests {
             drowned.gap.1 < drowned.gap.0 - 3.0,
             "and close the distance: {:?}",
             drowned.gap
+        );
+    }
+
+    /// A skeleton **shoots** and a wither skeleton **punches** — the behavioural
+    /// gate for #226's weapon-branch fix.
+    ///
+    /// A priority multiset cannot see this fix: the slot is 4 on both sides either
+    /// way and only the occupant changes. So assert the observable instead, and
+    /// assert it in *both* directions from the same world, target, speed and
+    /// family — the two runs differ in exactly one table row.
+    ///
+    /// Under the pre-fix table (`MeleeAttackGoal` in [`SKELETON`]) the skeleton's
+    /// three assertions all invert: it records attacks and no launches, and it
+    /// closes to contact. That is the control, and it was run.
+    ///
+    /// The launch count is predicted rather than merely required to be positive.
+    /// The bow draws for `BOW_FULL_DRAW_TICKS` = 20 (vanilla's
+    /// `getTicksUsingItem() >= 20`) and then waits out `getAttackInterval()` = 40,
+    /// the value `reassessWeaponGoal` installs below Hard
+    /// (`AbstractSkeleton.java:139-143`, `:151-157`) — a 60-tick cycle whose first
+    /// release lands on tick 21, so ticks 21, 81, … 741 give **13** releases in
+    /// 800. A wrong interval or a missing draw phase lands somewhere else.
+    ///
+    /// The **target is 30 blocks out**, which is what makes the distance assertion
+    /// mean anything. At 6 blocks a skeleton legitimately walks *in* — the goal
+    /// only parks once `seeTime` reaches 20 (`RangedBowAttackGoal.java:86-92`), and
+    /// 20 ticks at 0.25 blocks/tick is 5 blocks, so it arrives at 1.25 and a
+    /// "did not close" bound would fail on correct code. Measured, and the reason
+    /// this gate is shaped the way it is. From 30 the binding constraint is instead
+    /// the bow's own `attackRadius` of `15.0F` (`AbstractSkeleton.java:55`), so the
+    /// hold distance itself becomes the prediction.
+    #[test]
+    fn a_skeleton_shoots_from_range_and_a_wither_skeleton_closes_and_punches() {
+        // 30 blocks out — beyond the bow's 15.0 radius, inside the 35.0 follow
+        // range `run` gives the navigator.
+        let target = Vec3::new(30.5, 0.0, 0.5);
+        let skeleton = run("skeleton", 0.25, target, 800);
+        let wither = run("wither_skeleton", 0.25, target, 800);
+
+        // -- the skeleton shoots --------------------------------------------
+        assert_eq!(
+            skeleton.launches, 13,
+            "a skeleton built only from the roster must release 13 arrows in 800 \
+             ticks (a 20-tick draw plus a 40-tick interval, first release on tick \
+             21). Measured {} launches, {} attacks, gap {:?}. Zero means the \
+             priority-4 row is not the bow goal — which is #226's original defect",
+            skeleton.launches, skeleton.attacks, skeleton.gap
+        );
+        assert_eq!(
+            skeleton.attacks, 0,
+            "and it must never swing: {} melee attacks means a MeleeAttackGoal is \
+             still in the table, modelling a branch `reassessWeaponGoal` never \
+             takes for a bow-holding skeleton (AbstractSkeleton.java:137, :146)",
+            skeleton.attacks
+        );
+        // The bow's radius is 15.0 and it stops navigating on crossing it, so it
+        // parks just inside. Bracket that rather than predict a float: the melee
+        // hypothesis settles at `SpeciesContext::attack_reach` = 2.0, which is
+        // nowhere near this window, and "never moved" (30.0) is excluded too.
+        assert!(
+            (12.0..17.0).contains(&skeleton.gap.1),
+            "and it must stop at bow range, not melee range: the goal holds \
+             position on crossing its 15.0 attackRadius \
+             (AbstractSkeleton.java:55, RangedBowAttackGoal.java:86-92), so from \
+             {} blocks it must settle near 15. Ended at {} — ~2 means a melee goal \
+             walked it to contact, ~30 means nothing claimed MOVE at all",
+            skeleton.gap.0,
+            skeleton.gap.1
+        );
+
+        // -- the wither skeleton punches, from the same everything -----------
+        assert!(
+            wither.attacks > 0,
+            "a wither skeleton keeps the melee branch (a STONE_SWORD fails \
+             `is(Items.BOW)`, WitherSkeleton.java:74-76), so it must reach attack: \
+             gap {:?}, attacks {}",
+            wither.gap,
+            wither.attacks
+        );
+        assert_eq!(
+            wither.launches, 0,
+            "and must never shoot — {} launches means the bow row leaked into \
+             WITHER_SKELETON",
+            wither.launches
+        );
+        assert!(
+            wither.gap.1 < 4.0,
+            "and it must close all the way to contact, which the skeleton does not: \
+             {:?}. If both species settle at the same distance they are sharing one \
+             table",
+            wither.gap
         );
     }
 }
