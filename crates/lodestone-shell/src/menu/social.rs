@@ -131,23 +131,29 @@ impl SocialControl {
 }
 
 /// Where one [`SocialControl`] sits, mirroring [`super::key_binds::KeyPlacement`]'s
-/// shape: every content-list variant shares `{row, first}`, only the x differs.
+/// shape: every content-list variant shares `{row, scroll}`, only the x differs.
 ///
-/// **Still a row index, and issue #445 records why.** Converting it to a pixel
-/// offset is blocked on a `ListSpec` change, not on this screen: this list's
-/// rows are **full-width and left-anchored** (`name_x` is a flat
-/// `NAME_LEFT_INSET`, the buttons hang off `width - RIGHT_MARGIN`), while
-/// `ListSpec::row_left` is `floor(width / 2) - floor(row_w / 2)` — a *centred,
-/// fixed-width* row. There is no constant `row_w` that makes `row_right` land
-/// in this screen's right margin at every canvas width, so the scrollbar the
-/// spec exists to place cannot be positioned from it. The primitive needs a
-/// canvas-relative row edge before this screen, `key_binds` or `language` can
-/// adopt it honestly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// **`scroll` is pixels (issue #445), and this screen was the last to get there.**
+/// This doc used to read: *"Still a row index... blocked on a `ListSpec` change,
+/// not on this screen: this list's rows are full-width and left-anchored, while
+/// `ListSpec::row_left` is `floor(width / 2) - floor(row_w / 2)` — a centred,
+/// fixed-width row. There is no constant `row_w` that makes `row_right` land in
+/// this screen's right margin at every canvas width."* That was correct, and it
+/// was the right call to wait: the primitive gained
+/// [`super::widget::RowBand::Inset`] first, and
+/// `widget::tests::no_constant_row_width_can_express_a_full_width_row` now
+/// carries the arithmetic that paragraph asserted in prose — a constant tuned
+/// exact at 854 px is off by 107 px at 640 and 533 at 1920, because a centred row
+/// edge moves at half the canvas edge's rate.
+///
+/// The one visible consequence of adopting it is in [`RIGHT_MARGIN`]: the row's
+/// right gutter had to grow from 10 px to 14 to make room for the scrollbar,
+/// which is what "this screen has a bar now" costs.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SocialPlacement {
-    Name { row: u16, first: u16 },
-    Hide { row: u16, first: u16 },
-    Report { row: u16, first: u16 },
+    Name { row: u16, scroll: f32 },
+    Hide { row: u16, scroll: f32 },
+    Report { row: u16, scroll: f32 },
 }
 
 /// Row height. Not vanilla-sourced (vanilla's `PlayerEntry` is 36 px with a
@@ -159,7 +165,22 @@ pub const ROW_H: f32 = options::WIDGET_H;
 pub const HIDE_BUTTON_W: f32 = 110.0;
 pub const REPORT_BUTTON_W: f32 = options::SMALL_BUTTON_WIDTH;
 const BUTTON_GAP: f32 = 5.0;
-const RIGHT_MARGIN: f32 = 10.0;
+/// The row's right gutter — **and since #445 it is the scrollbar's, not a
+/// decorative margin**.
+///
+/// This was a flat `10.0`. [`super::widget::RowBand::Inset`] requires
+/// `SCROLLBAR_WIDTH + 2 + SCROLLBAR_WIDTH` = 14 px beyond where the row's own
+/// content ends, because `AbstractSelectionList` overrides `scrollBarX()` to
+/// `getRowRight() + scrollbarWidth() + 2` — the bar sits *outside* the row and
+/// nothing clamps it to the canvas, so a 10 px gutter put it 4 px off the right
+/// edge, silently (an off-canvas rect simply does not draw). Measured, not
+/// assumed: `widget::tests::an_inset_rows_right_gutter_must_reserve_room_for_the_
+/// scrollbar` observes 10 px failing and pins 14 as the boundary.
+///
+/// A centred list gets this gutter for free from the canvas margin either side.
+/// A full-width one has to declare it, which is why the Hide/Report buttons moved
+/// 4 px left when this screen adopted the primitive.
+const RIGHT_MARGIN: f32 = super::widget::SCROLLBAR_WIDTH + 2.0 + super::widget::SCROLLBAR_WIDTH;
 const NAME_LEFT_INSET: f32 = 4.0;
 
 /// How many rows of list a canvas may show — same fixed-budget departure as
@@ -172,6 +193,29 @@ pub const LIST_WINDOW_PX: f32 =
 #[must_use]
 pub fn visible_rows_len() -> usize {
     (LIST_WINDOW_PX / ROW_H).floor().max(1.0) as usize
+}
+
+/// This screen's list, as the generic [`super::widget::ListSpec`] (issue #445) —
+/// **the first and only adopter of [`super::widget::RowBand::Inset`]**.
+///
+/// The `row_w` argument to `uniform` is dead here: `spanning` replaces the whole
+/// [`super::widget::RowBand`], so `0.0` is passed to say so rather than a number
+/// that looks meaningful. The band runs from [`NAME_LEFT_INSET`] — where
+/// [`name_x`] actually puts the name — to [`RIGHT_MARGIN`] from the canvas's
+/// right edge, so `row_right` is exactly the x [`report_button_x`] hangs its
+/// button's right edge off, at every width. That equality is gated below; it is
+/// the property no centred `row_w` could have.
+#[must_use]
+pub fn list_spec(len: usize, scroll: f32) -> super::widget::ListSpec {
+    super::widget::ListSpec::uniform(
+        ROW_H,
+        options::SUB_HEADER_HEIGHT,
+        options::FOOTER_HEIGHT,
+        len,
+        0.0,
+    )
+    .spanning(NAME_LEFT_INSET, RIGHT_MARGIN)
+    .at(scroll)
 }
 
 #[must_use]
@@ -193,18 +237,17 @@ pub fn name_x(_width: f32) -> f32 {
 /// [`super::key_binds::placement_anchor`].
 #[must_use]
 pub fn placement_anchor(placement: SocialPlacement, width: f32, _height: f32) -> (f32, f32) {
-    let (row, first) = match placement {
-        SocialPlacement::Name { row, first }
-        | SocialPlacement::Hide { row, first }
-        | SocialPlacement::Report { row, first } => (row, first),
+    let (row, scroll) = match placement {
+        SocialPlacement::Name { row, scroll }
+        | SocialPlacement::Hide { row, scroll }
+        | SocialPlacement::Report { row, scroll } => (row, scroll),
     };
-    let Some(index) = row.checked_sub(first) else {
-        // Off-window: the anti-island sentinel every other placement in this
-        // tree uses (see `super::options::placement_anchor`,
-        // `super::key_binds::placement_anchor`).
-        return (-1000.0, -1000.0);
-    };
-    let row_y = options::SUB_HEADER_HEIGHT + options::LIST_TOP_INSET + f32::from(index) * ROW_H;
+    // Pixel scrolling (#445): the row's absolute offset minus the scroll, so no
+    // `checked_sub` to underflow and no off-canvas sentinel — a row above the
+    // band resolves above it and `render::draw` clips it. `scroll.floor()` is
+    // vanilla's `(int)scrollAmount`.
+    let row_y = options::SUB_HEADER_HEIGHT + options::LIST_TOP_INSET + f32::from(row) * ROW_H
+        - scroll.floor();
     match placement {
         SocialPlacement::Name { .. } => (name_x(width), row_y),
         SocialPlacement::Hide { .. } => (hide_button_x(width), row_y),
@@ -220,11 +263,13 @@ pub fn available_for(kind: Option<super::SessionKind>) -> bool {
 }
 
 /// This screen's own cursor and hidden-player choices.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SocialNav {
     entries: Vec<SocialEntry>,
     cursor: usize,
-    first: usize,
+    /// Scroll offset in **pixels** (issue #445), not a row index. `Eq` went with
+    /// the change — see [`SocialPlacement`]'s doc.
+    scroll: f32,
     hidden: crate::config::HiddenPlayers,
     hidden_path: std::path::PathBuf,
 }
@@ -244,7 +289,7 @@ impl SocialNav {
         Self {
             entries: Vec::new(),
             cursor: 0,
-            first: 0,
+            scroll: 0.0,
             hidden: crate::config::HiddenPlayers::load_from(&path),
             hidden_path: path,
         }
@@ -256,7 +301,7 @@ impl SocialNav {
     /// even have any more.
     pub fn reset(&mut self) {
         self.cursor = 0;
-        self.first = 0;
+        self.scroll = 0.0;
     }
 
     /// Replaces the online-player snapshot — see [`entries_from_tablist`]'s
@@ -271,7 +316,15 @@ impl SocialNav {
         } else if self.cursor >= len {
             self.cursor = len - 1;
         }
-        self.first = self.first.min(self.entries.len());
+        // Re-clamp the pixel offset against the new, possibly shorter list. Done
+        // through the primitive rather than by hand: `ListSpec::model` runs
+        // `set_scroll`, which is the one place the clamp lives.
+        if let Some(list) = self.model(crate::config::MIN_SCALED_HEIGHT as f32) {
+            self.scroll = list.scroll();
+        } else {
+            // No band, or no entries at all — nothing to scroll to.
+            self.scroll = 0.0;
+        }
     }
 
     #[must_use]
@@ -306,24 +359,45 @@ impl SocialNav {
         out
     }
 
-    fn visible_range(&self) -> std::ops::Range<usize> {
-        let len = self.entries.len();
-        let end = (self.first + visible_rows_len()).min(len);
-        self.first.min(len)..end
+    /// The scroll offset, in pixels.
+    #[must_use]
+    pub fn scroll(&self) -> f32 {
+        self.scroll
+    }
+
+    /// The live [`super::widget::ScrollList`] at this canvas height, or `None`
+    /// when there is nothing to scroll.
+    #[must_use]
+    fn model(&self, canvas_height: f32) -> Option<super::widget::ScrollList> {
+        list_spec(self.entries.len(), self.scroll).model(canvas_height)
+    }
+
+    /// One mouse-wheel notch, through the primitive. Positive scrolls **up**;
+    /// the negation lives in [`super::widget::ScrollList::mouse_scrolled`].
+    pub fn scroll_by(&mut self, notches: f32, canvas_height: f32) {
+        let Some(mut list) = self.model(canvas_height) else {
+            return;
+        };
+        list.mouse_scrolled(notches);
+        self.scroll = list.scroll();
     }
 
     /// Every control on screen, scrolled, then the footer — mirrors
     /// [`super::key_binds::controls`].
     #[must_use]
     pub fn visible(&self) -> Vec<(SocialControl, Slot)> {
+        // **Every** row, not a `visible_range()` window (issue #445): clipping to
+        // the band is `render::draw`'s job now, so a half-scrolled row draws its
+        // visible half instead of vanishing. `selected_row` matches on the
+        // control, not the index, so it is indifferent.
         let mut out = Vec::new();
-        for row in self.visible_range() {
+        for row in 0..self.entries.len() {
             out.push((
                 SocialControl::HideToggle(row),
                 Slot {
                     origin: Origin::Social(SocialPlacement::Hide {
                         row: row as u16,
-                        first: self.first as u16,
+                        scroll: self.scroll,
                     }),
                     dx: 0.0,
                     dy: 0.0,
@@ -336,7 +410,7 @@ impl SocialNav {
                 Slot {
                     origin: Origin::Social(SocialPlacement::Report {
                         row: row as u16,
-                        first: self.first as u16,
+                        scroll: self.scroll,
                     }),
                     dx: 0.0,
                     dy: 0.0,
@@ -387,16 +461,16 @@ impl SocialNav {
             SocialControl::HideToggle(r) | SocialControl::Report(r) => r,
             SocialControl::Done => return,
         };
-        if row < self.first {
-            self.first = row;
+        // `ScrollList::scroll_to_entry` moves the MINIMUM pixels — vanilla's
+        // `ensureVisible` — where the loop this replaced stepped a whole ROW_H at
+        // a time. `MIN_SCALED_HEIGHT` for the reason `stats::step` records: a
+        // keypress has no canvas in hand, and the smallest canvas can only
+        // over-scroll into a region a larger one also shows.
+        let Some(mut list) = self.model(crate::config::MIN_SCALED_HEIGHT as f32) else {
             return;
-        }
-        while !self.visible_range().contains(&row) {
-            if self.first + 1 >= self.entries.len() {
-                break;
-            }
-            self.first += 1;
-        }
+        };
+        list.scroll_to_entry(row);
+        self.scroll = list.scroll();
     }
 
     pub fn hover_row(&mut self, row: usize) {
@@ -529,21 +603,26 @@ pub fn frame(nav: &SocialNav, kind: Option<super::SessionKind>) -> MenuFrame<'st
         })
         .collect();
 
-    for row in nav.visible_range() {
-        if let Some(entry) = nav.entries().get(row) {
-            labels.push(MenuLabel {
-                text: entry.name.clone(),
-                origin: Origin::Social(SocialPlacement::Name {
-                    row: row as u16,
-                    first: nav.first as u16,
-                }),
-                dx: 0.0,
-                dy: 0.0,
-                align: Align::Left,
-                colour: widget::ACTIVE_LABEL,
-                scale: 1.0,
-            });
-        }
+    // **`list_labels`, not `labels` (issue #445)** — the vector `render::draw`
+    // clips to the band. These player names are the only labels here that scroll;
+    // a free text label has nowhere else to carry a clip rect, so in `labels` a
+    // scrolled-away name would draw over the footer. The Hide/Report buttons are
+    // `MenuRow`s and get their clip from draw.rs's per-row `with_clip`. Same
+    // split `stats::frame` and `key_binds::frame` make.
+    let mut list_labels = Vec::with_capacity(nav.entries().len());
+    for (row, entry) in nav.entries().iter().enumerate() {
+        list_labels.push(MenuLabel {
+            text: entry.name.clone(),
+            origin: Origin::Social(SocialPlacement::Name {
+                row: row as u16,
+                scroll: nav.scroll(),
+            }),
+            dx: 0.0,
+            dy: 0.0,
+            align: Align::Left,
+            colour: widget::ACTIVE_LABEL,
+            scale: 1.0,
+        });
     }
 
     if nav.entries().is_empty() {
@@ -563,6 +642,11 @@ pub fn frame(nav: &SocialNav, kind: Option<super::SessionKind>) -> MenuFrame<'st
         selected: selected.unwrap_or(usize::MAX),
         vanilla: true,
         labels,
+        list_labels,
+        // `list` is deliberately not set: `render::dispatch` stamps
+        // `f.list = nav.active_list(ui)` on every frame, so the bar the draw
+        // paints and the offset the wheel clamps stay two readers of one
+        // declaration. See `key_binds::frame`'s note.
         ..Default::default()
     }
 }
@@ -791,9 +875,127 @@ mod tests {
         }
     }
 
+    /// A row scrolled above the band resolves **above** it, not at the old
+    /// `(-1000, -1000)` sentinel, which existed only because
+    /// `row.checked_sub(first)` could underflow.
     #[test]
-    fn placement_off_the_window_is_the_anti_island_sentinel() {
-        let (x, y) = placement_anchor(SocialPlacement::Hide { row: 0, first: 5 }, 480.0, 320.0);
-        assert!(x < 0.0 && y < 0.0, "off-canvas sentinel, not a wrapped u16");
+    fn a_row_scrolled_above_the_band_resolves_above_it_not_at_a_sentinel() {
+        let band_top = options::SUB_HEADER_HEIGHT + options::LIST_TOP_INSET;
+        let (_, y) = placement_anchor(
+            SocialPlacement::Hide {
+                row: 0,
+                scroll: 5.0 * ROW_H,
+            },
+            480.0,
+            320.0,
+        );
+        assert_eq!(
+            y,
+            band_top - 5.0 * ROW_H,
+            "five rows above the band's top, exactly"
+        );
+    }
+
+    /// **The property no centred `row_w` could have, and the whole reason
+    /// `RowBand::Inset` exists** (issue #445): the band's right edge is exactly
+    /// where [`report_button_x`] hangs its button's right edge, **at every canvas
+    /// width**.
+    ///
+    /// Two expressions from two modules required to agree, at four widths, with no
+    /// tolerance. This is the gate that would have been impossible before the
+    /// primitive grew a canvas-relative edge — and
+    /// `widget::tests::no_constant_row_width_can_express_a_full_width_row`
+    /// measures how badly the centred alternative misses (107 px at 640, 533 at
+    /// 1920), so the pair together is the argument rather than either alone.
+    #[test]
+    fn the_declared_band_tracks_this_screens_own_right_anchored_buttons() {
+        for w in [640.0_f32, 854.0, 1280.0, 1920.0] {
+            let spec = list_spec(40, 0.0);
+            assert_eq!(
+                spec.row_right(w),
+                report_button_x(w) + REPORT_BUTTON_W,
+                "at {w} px the band's right edge must land on the Report button's \
+                 own right edge — this is what a centred `row_w` cannot do"
+            );
+            assert_eq!(
+                spec.row_left(w),
+                name_x(w),
+                "and the band's left edge on where the name actually draws"
+            );
+            // And the bar fits on the canvas, which is what RIGHT_MARGIN grew for.
+            let list = spec.model(240.0).expect("a band at 240 px");
+            assert!(
+                list.scrollbar_x(spec.row_right(w)) + super::super::widget::SCROLLBAR_WIDTH <= w,
+                "the scrollbar must fit on a {w} px canvas — a 10 px gutter put it \
+                 4 px off the edge, which is why RIGHT_MARGIN is now 14"
+            );
+        }
+    }
+
+    /// **One notch is `floor(ROW_H / 2)` = `floor(20 / 2)` = 10 px** (issue #445),
+    /// and the offset must coincide with no row top.
+    ///
+    /// Hypotheses named and separated rather than a tolerance: the row-index
+    /// answer is 20, the page answer is `LIST_WINDOW_PX` (172), the pixel answer
+    /// is 10. Three notches is 30, **not** a multiple of `ROW_H` — an offset no
+    /// row-index implementation can produce at all, so that assertion excludes the
+    /// whole family.
+    ///
+    /// Driven through `SocialNav` itself with a synthetic roster, because unlike
+    /// `language` this screen's list length is a live tablist fact rather than a
+    /// one-entry constant — so the real production path is reachable here.
+    #[test]
+    fn one_wheel_notch_is_half_a_row_and_lands_off_every_row_top() {
+        const CANVAS_H: f32 = 240.0;
+        let mut nav = nav_with("notch");
+        nav.refresh(
+            (1..=40)
+                .map(|i| SocialEntry::new(uuid(i), format!("player{i}")))
+                .collect(),
+        );
+        assert!(
+            list_spec(nav.entries().len(), 0.0)
+                .model(CANVAS_H)
+                .is_some_and(|l| l.scrollable()),
+            "premise: 40 rows of {ROW_H} px must overflow the band at {CANVAS_H} \
+             px, or every assertion below is vacuous"
+        );
+        assert_eq!(nav.scroll(), 0.0, "precondition: starts at the top");
+
+        nav.scroll_by(-1.0, CANVAS_H);
+        assert_eq!(
+            nav.scroll(),
+            10.0,
+            "one notch must be floor(ROW_H / 2) = 10, not the row-index answer \
+             ({ROW_H}) and not a page ({LIST_WINDOW_PX})"
+        );
+        assert_ne!(nav.scroll(), ROW_H, "control: the row-index answer is excluded");
+
+        nav.scroll_by(-2.0, CANVAS_H);
+        assert_eq!(nav.scroll(), 30.0, "three notches: 30");
+        assert_ne!(
+            nav.scroll() % ROW_H,
+            0.0,
+            "30 must coincide with no row top — a multiple of {ROW_H} is exactly \
+             what snap-to-row produces"
+        );
+
+        // The keyboard half: `scroll_to_entry` moves the minimum pixels, so it too
+        // can land off a row top — the loop it replaced never could.
+        nav.reset();
+        let mut moved = false;
+        for _ in 0..nav.all_controls().len() {
+            nav.step(true);
+            if nav.scroll() > 0.0 && nav.scroll() % ROW_H != 0.0 {
+                moved = true;
+                break;
+            }
+        }
+        assert!(
+            moved,
+            "keyboard scroll-into-view must be able to land off a row top; it \
+             stopped at {}",
+            nav.scroll()
+        );
     }
 }
