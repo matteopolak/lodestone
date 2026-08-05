@@ -1490,6 +1490,151 @@ impl ScrollList {
     }
 }
 
+/// A screen's **canvas-independent** declaration of its scrolling list: everything
+/// a [`ScrollList`] needs except the one fact only the caller knows, the canvas.
+///
+/// ## What it is
+///
+/// The generic hook the scrollbar draw and the mouse wheel both go through, so
+/// that "this screen has a scrolling list" is a thing a screen can *say* rather
+/// than something the draw and the input layer each hardcode one screen's answer
+/// to.
+///
+/// It exists because of a measured island. `render::draw`'s scrollbar block used to
+/// call `server_scroll_list` **by name**, and `app`'s wheel arm was gated on
+/// `Screen::ServerList`, so those two pixels-and-input paths knew about exactly one
+/// screen. A second screen adopting [`ScrollList`] would then have had correct
+/// geometry, green unit tests and **zero pixels** — no bar, no wheel. Converting a
+/// screen before this type existed produced an island *by construction*, which is
+/// why this landed first and the conversions second.
+///
+/// ## How it works
+///
+/// A screen declares one of these; [`Self::model`] turns it into the live
+/// [`ScrollList`] once a canvas is known. **Both consumers call `model`**, so the
+/// bar the draw paints and the offset the wheel clamps come from one expression
+/// rather than two that agree today — the property that stops a thumb drifting away
+/// from its rows, and the same reasoning `server_scroll_model`'s doc records.
+///
+/// The band is declared as `top` plus `footer_h`, not as a finished height, because
+/// that is the form the screens here already state their layout in (a
+/// `content_top` and a footer constant) and it is what keeps the declaration
+/// independent of the canvas. Likewise the row *width* is carried and
+/// [`Self::row_right`] derives the scrollbar's anchor, rather than the anchor being
+/// passed in already computed: `(width * 0.5).floor() - (row_w * 0.5).floor()` is
+/// the expression both `server_row_left` and `accounts_row_left` already use, so
+/// deriving it here means the bar cannot sit somewhere the rows are not.
+///
+/// ## How to change it
+///
+/// To give a screen a scrollbar and a wheel, return one of these from
+/// `MenuNav::active_list` and store the offset in **pixels**. A screen whose offset
+/// is a row *index* cannot use this honestly: it would report a `scroll` that is
+/// always a multiple of the row height, which is precisely the snap-to-row
+/// behaviour the wheel work existed to remove. Convert the field first.
+///
+/// `heights` being `Some` selects [`ScrollList::new_variable`]; leave it `None`
+/// for a uniform list. `row_h` is `defaultEntryHeight` in **both** cases — it is
+/// what `scrollRate` is defined against, never "the height of a row" — see
+/// [`ScrollList::new_variable`].
+///
+/// ## Dependencies
+///
+/// None beyond [`ScrollList`]; pure data plus one constructor.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListSpec {
+    /// `AbstractSelectionList.defaultEntryHeight`, and the basis of
+    /// [`ScrollList::scroll_rate`] whether or not [`Self::heights`] is set.
+    pub row_h: f32,
+    /// The band's top y, in logical pixels — a screen's `content_top`.
+    pub top: f32,
+    /// How much of the canvas below the band the footer occupies. The band's
+    /// height is `canvas_height - footer_h - top`.
+    pub footer_h: f32,
+    /// Number of entries. Ignored when [`Self::heights`] is `Some`, which carries
+    /// its own length — see [`ScrollList::new_variable`] on why the two can never
+    /// be allowed to disagree.
+    pub len: usize,
+    /// Per-entry heights for a non-uniform list, or `None` for a uniform one.
+    pub heights: Option<Vec<f32>>,
+    /// The current offset, in **pixels**.
+    pub scroll: f32,
+    /// A row's width — `getRowWidth()`. Used only to derive [`Self::row_right`].
+    pub row_w: f32,
+}
+
+impl ListSpec {
+    /// A uniform list: `len` entries of `row_h`, in the band `top..(h - footer_h)`.
+    #[must_use]
+    pub fn uniform(row_h: f32, top: f32, footer_h: f32, len: usize, row_w: f32) -> Self {
+        Self {
+            row_h,
+            top,
+            footer_h,
+            len,
+            heights: None,
+            scroll: 0.0,
+            row_w,
+        }
+    }
+
+    /// This spec with `scroll` as its offset — the builder the frame producers use,
+    /// so a screen states its geometry and its position in one expression.
+    #[must_use]
+    pub fn at(mut self, scroll: f32) -> Self {
+        self.scroll = scroll;
+        self
+    }
+
+    /// Per-entry heights instead of a uniform `row_h`; `row_h` stays
+    /// `defaultEntryHeight` and keeps defining the scroll rate.
+    #[must_use]
+    pub fn with_heights(mut self, heights: Vec<f32>) -> Self {
+        self.len = heights.len();
+        self.heights = Some(heights);
+        self
+    }
+
+    /// `getRowLeft()`, the expression `server_row_left`/`accounts_row_left` share.
+    #[must_use]
+    pub fn row_left(&self, width: f32) -> f32 {
+        (width * 0.5).floor() - (self.row_w * 0.5).floor()
+    }
+
+    /// `getRowRight()` — what [`ScrollList::scrollbar_rects`] hangs the bar off.
+    #[must_use]
+    pub fn row_right(&self, width: f32) -> f32 {
+        self.row_left(width) + self.row_w
+    }
+
+    /// The live [`ScrollList`] at this canvas height, already carrying
+    /// [`Self::scroll`], or `None` when there is no band to scroll in.
+    ///
+    /// `None` for an empty list and for a canvas too short to have a band, matching
+    /// `server_scroll_model`'s two rejections — a `Some` here would report a
+    /// negative height and place every row off-canvas.
+    ///
+    /// The offset goes through [`ScrollList::set_scroll`] rather than being written
+    /// to the field, so a stale offset left over from a taller canvas is re-clamped
+    /// instead of surviving as an out-of-range value.
+    #[must_use]
+    pub fn model(&self, canvas_height: f32) -> Option<ScrollList> {
+        if self.len == 0 {
+            return None;
+        }
+        let band = canvas_height - self.footer_h - self.top;
+        if band <= 0.0 {
+            return None;
+        }
+        let mut list = match &self.heights {
+            Some(h) => ScrollList::new_variable(self.row_h, self.top, band, h),
+            None => ScrollList::new(self.row_h, self.top, band, self.len),
+        };
+        list.set_scroll(self.scroll);
+        Some(list)
+    }
+}
+
 /// An `(x, y, w, h)` rect in logical pixels, as every menu draw helper takes it.
 pub type Rect = (f32, f32, f32, f32);
 

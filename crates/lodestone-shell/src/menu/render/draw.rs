@@ -10,7 +10,7 @@
 //! Split out of `menu/render.rs` verbatim: a pure move by line range.
 
 use super::*;
-use super::account_screen::{ACCOUNTS_DETAIL_Y, ACCOUNTS_DIM, ACCOUNTS_HEAD_ICON, ACCOUNTS_SELECTION_FILL, ACCOUNTS_SPACING, ACCOUNTS_TEXT_GAP};
+use super::account_screen::{ACCOUNTS_DETAIL_Y, ACCOUNTS_DIM, ACCOUNTS_HEAD_ICON, ACCOUNTS_ROW_W, ACCOUNTS_SELECTION_FILL, ACCOUNTS_SPACING, ACCOUNTS_TEXT_GAP};
 use super::frame::notice_lines;
 use super::measure::{advance, clip};
 use super::renderer::FLOATS_PER_VERTEX;
@@ -142,10 +142,19 @@ pub fn build(
     // `server_list_block().content_top`, `SERVER_LIST_FOOTER_H`,
     // `SERVER_LIST_ITEM_H`, `server_row_left` — rather than restated, which is the
     // rule a HUD gate here broke by hardcoding an anchor the draw computed.
-    let server_list = server_scroll_list(frame, width, height);
-    if let Some(list) = server_list.as_ref() {
-        let row_right = server_row_left(width) + SERVER_LIST_ROW_W;
-        draw_scrollbar(&mut b, list, row_right);
+    // **Generic since the `ListSpec` hook landed.** This used to call
+    // `server_scroll_list` *by name*, which made it the multiplayer list's scrollbar
+    // rather than "the active screen's" — so a second screen adopting `ScrollList`
+    // got correct geometry, green tests and no bar at all. Any screen that returns a
+    // spec from `MenuNav::active_list` is drawn here now, and `row_right` comes off
+    // the spec's own `getRowLeft()` expression rather than from a screen-specific
+    // constant, so the bar cannot sit somewhere its rows are not.
+    let active_list = frame.list.as_ref().and_then(|spec| {
+        spec.model(height)
+            .map(|list| (list, spec.row_right(width)))
+    });
+    if let Some((list, row_right)) = active_list.as_ref() {
+        draw_scrollbar(&mut b, list, *row_right);
     }
 
     for (i, row) in frame.rows.iter().enumerate() {
@@ -167,8 +176,8 @@ pub fn build(
             //
             // The rect is the band `server_scroll_list` derived, not a restated
             // one, so the clip and the row placement cannot disagree.
-            match server_list.as_ref() {
-                Some(list) => {
+            match active_list.as_ref() {
+                Some((list, _)) => {
                     let (bx, bw) = (server_row_left(width), SERVER_LIST_ROW_W);
                     let (by, bh) = (list.top(), list.height());
                     b.with_clip(bx, by, bw, bh, |b| {
@@ -184,7 +193,23 @@ pub fn build(
         // not a button. Tested before `slot` for the same reason — it carries
         // none.
         if row.account.is_some() {
-            draw_account_entry(&mut b, &frame.rows, i, width, height);
+            // Clipped to the band, exactly as a server entry is. This became
+            // *required* rather than tidy when the account list went pixel-granular:
+            // `accounts_row_visible` is a partial-overlap test now, so a row
+            // straddling the band's bottom edge is the normal case at an
+            // intermediate offset, and without the clip it would paint over the four
+            // footer buttons. The rect is the band the spec derived, not a restated
+            // one, so the clip and the row placement cannot disagree.
+            match active_list.as_ref() {
+                Some((list, row_right)) => {
+                    let bw = ACCOUNTS_ROW_W;
+                    let (by, bh) = (list.top(), list.height());
+                    b.with_clip(row_right - bw, by, bw, bh, |b| {
+                        draw_account_entry(b, &frame.rows, i, width, height);
+                    });
+                }
+                None => draw_account_entry(&mut b, &frame.rows, i, width, height),
+            }
             continue;
         }
         if row.slot.is_some() {
@@ -690,7 +715,7 @@ fn draw_account_entry(b: &mut Quads<'_>, rows: &[MenuRow], i: usize, width: f32,
     let Some(view) = row.account.as_ref() else {
         return;
     };
-    if !accounts_row_visible(view.index, height) {
+    if !accounts_row_visible(view.index, height, view.scroll) {
         return;
     }
     let Some((x, y, w, h)) = row_rect(rows, i, width, height) else {
@@ -707,7 +732,7 @@ fn draw_account_entry(b: &mut Quads<'_>, rows: &[MenuRow], i: usize, width: f32,
         b.rect(x + 1.0, y + 1.0, w - 2.0, h - 2.0, ACCOUNTS_SELECTION_FILL);
     }
 
-    let (cx, cy, cw, _) = accounts_row_content_rect(view.index, width);
+    let (cx, cy, cw, _) = accounts_row_content_rect(view.index, width, view.scroll);
     let text_x = cx + ACCOUNTS_HEAD_ICON + ACCOUNTS_TEXT_GAP;
 
     // The head, through the same `FaviconMosaic` path a server's favicon takes —
@@ -752,46 +777,12 @@ fn draw_account_entry(b: &mut Quads<'_>, rows: &[MenuRow], i: usize, width: f32,
 /// `Button.java:128-132`) and, for icons,
 /// `SpriteIconButton.CenteredIcon.extractContents`
 /// (`SpriteIconButton.java:236-244`).
-/// The multiplayer list as a [`widget::ScrollList`], or `None` when this frame is
-/// not a server list.
-///
-/// ## Why the frame is reconstructed rather than carried
-///
-/// `MenuNav` owns a bare `f32` offset rather than a whole `ScrollList` — the
-/// keyboard paths run with no canvas, so a resident list could not be kept sized
-/// — so this rebuilds the geometry per frame through [`server_scroll_model`],
-/// the *same* constructor `MenuNav::scroll_server_list` drives the wheel through.
-/// The entry count comes from the frame's own rows and the offset from
-/// `entry.scroll`, so the bar cannot disagree with the rows about where the list
-/// is.
-///
-/// ## The offset is pixels, and the thumb is continuous (issue #445)
-///
-/// `entry.scroll` is a **pixel** amount now, handed to `set_scroll` verbatim with
-/// no multiply — which is exactly what the thumb needs to move continuously, and
-/// what the rows are placed by in [`server_row_top`]. When this was a row count
-/// it was multiplied up here, and the thumb consequently stepped 36 px at a time:
-/// the geometry was already continuous, the *input* was not. There is now one
-/// number for both, which is the property that keeps them in sync — a thumb
-/// computed from its own expression is how these drift.
-fn server_scroll_list(
-    frame: &MenuFrame<'_>,
-    _width: f32,
-    height: f32,
-) -> Option<widget::ScrollList> {
-    let mut count = 0usize;
-    let mut scroll_px = 0.0f32;
-    for row in &frame.rows {
-        if let Some(view) = row.entry.as_ref() {
-            count += 1;
-            scroll_px = view.scroll;
-        }
-    }
-    let mut list = server_scroll_model(count, height)?;
-    list.set_scroll(scroll_px);
-    Some(list)
-}
-
+/// **`server_scroll_list` is gone.** It rebuilt the multiplayer list's geometry per
+/// frame for the scrollbar, and it was the by-name call that made this file's
+/// scrollbar the *multiplayer* list's rather than the active screen's. Its job now
+/// belongs to `MenuNav::active_list`, which every screen answers, plus
+/// `widget::ListSpec::model` — one declaration, and the draw asks the frame instead
+/// of naming a screen. See `render::accounts_list_spec` for the second client.
 /// Draw a [`widget::ScrollList`]'s scrollbar — `extractScrollbar`
 /// (`AbstractScrollArea.java:110-137`).
 ///

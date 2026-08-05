@@ -1804,6 +1804,31 @@ fn accounts_nav(tag: &str, names: &[&str]) -> MenuNav {
     MenuNav::with_path(path)
 }
 
+/// An accounts nav holding `n` generated accounts (so `n + 1` logical rows) with the
+/// list parked at `scroll` **pixels**.
+///
+/// The offset is set through `AccountsNav::scroll_by`, i.e. the real wheel path, so a
+/// test cannot park the list somewhere the wheel could never reach — and the notch
+/// count is derived from the rate rather than being restated, so this helper does not
+/// quietly encode a second opinion about how far a notch goes.
+fn accounts_nav_scrolled(tag: &str, n: usize, scroll: f32) -> MenuNav {
+    let names: Vec<String> = (0..n).map(|i| format!("p{i}")).collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let nav = accounts_nav(tag, &refs);
+    let accounts = nav.accounts();
+    let rate = crate::menu::render::accounts_list_spec(n + 1, 0.0)
+        .model(crate::config::MIN_SCALED_HEIGHT as f32)
+        .expect("the band must exist at the minimum canvas")
+        .scroll_rate();
+    accounts.scroll_by(-(scroll / rate), crate::config::MIN_SCALED_HEIGHT as f32);
+    assert_eq!(
+        accounts.scroll(),
+        scroll,
+        "the helper failed to park the list at {scroll} px"
+    );
+    nav
+}
+
 #[test]
 fn the_accounts_slots_do_not_depend_on_the_reference_canvas() {
     // The same argument the multiplayer screen's version of this makes: the
@@ -1913,14 +1938,14 @@ fn an_account_row_draws_inside_its_own_36px_row_and_not_the_one_below() {
 
     // Row 0 is Alex, row 1 the offline entry, row 2 is past the end.
     for i in 0..2 {
-        let rect = accounts_row_rect(i, w);
+        let rect = accounts_row_rect(i, w, 0.0);
         assert!(
             coverage(&v, w, h, rect) > 0.05,
             "row {i} drew nothing in {rect:?}: {}",
             coverage(&v, w, h, rect)
         );
     }
-    let empty = accounts_row_rect(2, w);
+    let empty = accounts_row_rect(2, w, 0.0);
     assert_eq!(
         coverage(&v, w, h, empty),
         0.0,
@@ -1929,7 +1954,7 @@ fn an_account_row_draws_inside_its_own_36px_row_and_not_the_one_below() {
 
     // The 32 px head fills the content box's full height, which is the whole
     // point of a 36 px pitch with 2 px of padding.
-    let (cx, cy, _, _) = accounts_row_content_rect(0, w);
+    let (cx, cy, _, _) = accounts_row_content_rect(0, w, 0.0);
     let head = (cx, cy, ACCOUNTS_HEAD_ICON, ACCOUNTS_HEAD_ICON);
     assert!(
         coverage(&v, w, h, head) > 0.95,
@@ -2043,46 +2068,300 @@ fn wrap_bounded_breaks_a_run_that_no_whitespace_wrap_could() {
     assert!(starved.iter().all(|l| l.chars().count() == 1));
 }
 
+/// One wheel notch on the accounts list moves **18 px**, through the generic router.
+///
+/// The magnitude is the claim, not the direction: "it scrolled" is satisfied by the
+/// row-index model this replaced, which is the defect the owner reported. So the
+/// prediction is separated from both rivals, each computed from outside constants:
+///
+/// | hypothesis | one notch |
+/// |---|---|
+/// | vanilla, `floor(defaultEntryHeight / 2)` (`AbstractSelectionList.java:44`) | **18** |
+/// | the row-index model this replaced, one notch one row | 36 |
+/// | a whole band, if the notch were mistaken for a page | 147 |
+///
+/// It then asserts 18 lands strictly *inside* row 0 (which spans 0..36 in content
+/// space) and coincides with **no** row top, so a snap-to-row implementation cannot
+/// pass. Driven through `MenuNav::scroll_active_list` — the router `app`'s single
+/// `MouseWheel` arm calls — rather than through `AccountsNav::scroll_by`, because the
+/// router is the part that was missing: before it, `app/` had exactly two wheel arms
+/// and neither was this screen's.
 #[test]
-fn a_short_canvas_truncates_the_account_window_instead_of_drawing_over_the_footer() {
-    // #402's residual gap, bounded rather than closed: `VISIBLE_ROWS` is a
-    // count and this module has no canvas, so the *draw* is what refuses a row
-    // that would not fit whole. The footer band is where all four actions are,
-    // so a half-drawn row there is worse than a missing one.
-    //
-    // Checked against the **arranged button row's own y** rather than against
-    // `accounts_row_visible`'s own formula, which would only restate it: two
-    // independent derivations of one fact is the only shape that catches a
-    // guard that is self-consistently wrong.
-    use crate::menu::accounts::VISIBLE_ROWS;
-    let (w, short) = (854.0, 240.0);
-    let fitting = (0..VISIBLE_ROWS)
-        .filter(|&i| accounts_row_visible(i, short))
-        .count();
-    assert!(
-        fitting < VISIBLE_ROWS,
-        "premise: {short} px must be too short for all {VISIBLE_ROWS} rows of the window"
+fn one_notch_on_the_accounts_list_is_half_a_row_through_the_generic_router() {
+    const CANVAS_H: f32 = 240.0;
+    let mut nav = accounts_nav("acct-notch", &["a", "b", "c", "d", "e", "f", "g", "h"]);
+    let mut ui = crate::menu::UiState::default();
+    ui.open_accounts();
+    assert_eq!(
+        nav.accounts().scroll(),
+        0.0,
+        "precondition: a freshly opened list is at the top"
     );
-    assert!(fitting > 0, "premise: some rows must still fit at {short} px");
 
-    let (_, button_y, _, _) = accounts_button_slot(0).resolve(w, short);
-    for i in 0..VISIBLE_ROWS {
-        if !accounts_row_visible(i, short) {
-            continue;
-        }
-        let (_, y, _, rh) = accounts_row_rect(i, w);
-        assert!(
-            y + rh <= button_y,
-            "row {i} is kept but reaches {}, past the button row at {button_y}",
-            y + rh
-        );
-    }
-    // The control: at a full-size canvas every row of the window fits, so the
-    // premise above is measuring the canvas rather than a guard that is
-    // unconditionally false.
+    // Negative `dy` scrolls down, matching vanilla's sign (the negation lives in
+    // `ScrollList::mouse_scrolled`, so this is winit's `scrollY` verbatim).
+    let moved = nav.scroll_active_list(&ui, -1.0, CANVAS_H);
+    assert!(moved, "the router must report that the accounts list moved");
+    let one = nav.accounts().scroll();
+
+    assert_eq!(one, 18.0, "one notch is floor(36 / 2), not a whole row");
+    assert_ne!(one, 36.0, "the row-index model's answer must be excluded");
+    assert_ne!(one, 147.0, "a page-sized notch must be excluded");
+
+    // Strictly inside row 0, and on no row's top — the property a snap-to-row
+    // implementation structurally cannot have. Row tops are derived from the same
+    // helper the draw places rows with.
+    let band_top = crate::menu::render::accounts_band_top();
     assert!(
-        (0..VISIBLE_ROWS).all(|i| accounts_row_visible(i, 480.0)),
-        "no row of the window fits even at 480 px"
+        (0..9).all(|i| crate::menu::render::accounts_row_top(i, one) != band_top),
+        "offset {one} coincides with a row top, so it is indistinguishable from a jump"
+    );
+    assert!(
+        one > 0.0 && one < 36.0,
+        "offset {one} must sit strictly inside the first row"
+    );
+
+    // Three notches reach 54 — not a multiple of 36, so no row counter can represent
+    // it at all. This is the assertion that cannot be satisfied by rescaling a
+    // row-quantized implementation.
+    nav.scroll_active_list(&ui, -2.0, CANVAS_H);
+    let three = nav.accounts().scroll();
+    assert_eq!(three, 54.0, "three notches of travel");
+    assert_ne!(three % 36.0, 0.0, "54 must not be expressible as whole rows");
+
+    // And the clamp is the primitive's: scrolling far past the end lands exactly on
+    // `max_scroll`, computed here from vanilla's own expression rather than read back.
+    nav.scroll_active_list(&ui, -1000.0, CANVAS_H);
+    let content = 9.0 * 36.0 + 2.0 * widget::LIST_CONTENT_PADDING;
+    let band = CANVAS_H - 60.0 - 33.0;
+    assert_eq!(
+        nav.accounts().scroll(),
+        content - band,
+        "the clamp must be maxScrollAmount() = contentHeight() - height"
+    );
+
+    // Scrolling up past the top clamps at zero rather than going negative.
+    nav.scroll_active_list(&ui, 1000.0, CANVAS_H);
+    assert_eq!(nav.accounts().scroll(), 0.0, "the top clamp is zero");
+}
+
+/// The router answers `false` for a screen with no list, which is what lets `app`
+/// have **one** wheel arm instead of one per screen.
+///
+/// The control for the test above: without this, `scroll_active_list` returning
+/// `true` unconditionally would still pass every assertion there while making the
+/// wheel do something on screens that have no list.
+#[test]
+fn the_wheel_router_declines_a_screen_with_no_list() {
+    let mut nav = accounts_nav("router-decline", &["a", "b", "c", "d", "e", "f", "g", "h"]);
+    let mut ui = crate::menu::UiState::default();
+    // The title screen is `owns_frame`, so `app`'s arm *does* fire here — which is
+    // exactly why the router rather than the arm has to be the thing that declines.
+    assert!(
+        owns_frame(ui.screen()),
+        "premise: the title screen is inside the set app's wheel arm covers"
+    );
+    assert!(
+        nav.active_list(&ui).is_none(),
+        "the title screen must declare no list"
+    );
+    assert!(
+        !nav.scroll_active_list(&ui, -1.0, 240.0),
+        "the router must decline a screen with no list"
+    );
+    // And the accounts list, reached from the same nav, still moves — so the `false`
+    // above is the screen's answer and not a broken router.
+    ui.open_accounts();
+    assert!(
+        nav.scroll_active_list(&ui, -1.0, 240.0),
+        "the same router must still move a screen that does have a list"
+    );
+}
+
+/// **The accounts screen has a scrollbar, and it is the multiplayer list's.**
+///
+/// This is the gate for the generic `ListSpec` hook, and it is a pixel gate on
+/// purpose: the hook's whole reason for existing is that a screen adopting
+/// `ScrollList` before it landed would have had correct geometry, green unit tests
+/// and *nothing on screen* — `render::draw` called `server_scroll_list` by name, so
+/// only one screen could ever have a bar. So the claim is not "the geometry is
+/// right", it is "pixels appear in the scrollbar's rect on a screen that is not the
+/// multiplayer list".
+///
+/// Measured **by location and by colour**, never as a frame fraction:
+///
+/// - the thumb's rect carries `LABEL`, the colour `draw_scrollbar` gives the scroller
+/// - the 8 px gutter between the rows' right edge and the bar carries nothing, which
+///   is what pins the bar *outside* the row column (`scrollBarX() = getRowRight() +
+///   scrollbarWidth() + 2`) rather than inset into it
+/// - a list short enough not to scroll draws **no bar at all** — vanilla's
+///   `if (this.scrollable())` gate, and the control that stops the two assertions
+///   above passing on a bar that is unconditionally painted
+///
+/// Every rect comes from `ScrollList::scrollbar_rects`, the same call the draw makes,
+/// rather than from restated arithmetic.
+#[test]
+fn the_accounts_screen_draws_the_same_scrollbar_the_server_list_does() {
+    let (w, h) = (854.0, 240.0);
+    let nav = accounts_nav_scrolled("acct-bar", 8, 18.0);
+    let mut ui = crate::menu::UiState::default();
+    ui.open_accounts();
+    let statuses =
+        crate::menu::status::StatusCache::with_probe(crate::menu::status::unavailable_probe());
+    let mut fav = FaviconCache::new();
+    let f = frame_for(&ui, &nav, &statuses, &mut fav).expect("the accounts screen owns its frame");
+    let v = geometry(&f, w, h);
+
+    let spec = f
+        .list
+        .as_ref()
+        .expect("frame_for must stamp the accounts screen's ListSpec");
+    let list = spec.model(h).expect("nine 36 px rows in a 147 px band");
+    let row_right = spec.row_right(w);
+    let (track, thumb) = list
+        .scrollbar_rects(row_right)
+        .expect("premise: nine rows in a 147 px band must scroll");
+
+    let on_thumb = coverage_of(&v, w, h, thumb, LABEL);
+    assert!(
+        on_thumb > 0.90,
+        "the scroller is not painted at {thumb:?}: only {on_thumb} of it carries LABEL \
+         (track {track:?}, row right {row_right})"
+    );
+
+    // The gutter: `scrollbar_x` is `row_right + 6 + 2`, so the 8 px immediately right
+    // of the rows belongs to neither. Derived from the same expression, not restated.
+    let gutter = (row_right, list.top(), widget::SCROLLBAR_WIDTH + 2.0, list.height());
+    let in_gutter = coverage(&v, w, h, gutter);
+    assert_eq!(
+        in_gutter, 0.0,
+        "something painted {in_gutter} of the gutter {gutter:?} between the rows and \
+         the bar, so the bar is inset into the row column rather than outside it"
+    );
+
+    // The control, run rather than described: two accounts is three rows, which fit
+    // the band, so `scrollable()` is false and the bar must vanish entirely. If this
+    // still found LABEL in the same rect, the assertion above would be measuring a
+    // bar that is always drawn — which is what "the bar exists" must not mean.
+    let short_nav = accounts_nav("acct-bar-short", &["A", "B"]);
+    let short_f =
+        frame_for(&ui, &short_nav, &statuses, &mut fav).expect("still the accounts screen");
+    let short_v = geometry(&short_f, w, h);
+    let short_spec = short_f.list.as_ref().expect("a short list still declares a spec");
+    let short_list = short_spec.model(h).expect("and still has a band");
+    assert!(
+        !short_list.scrollable(),
+        "premise: three 36 px rows must fit a {} px band",
+        short_list.height()
+    );
+    assert!(
+        short_list.scrollbar_rects(short_spec.row_right(w)).is_none(),
+        "a list that does not scroll must report no scrollbar rects"
+    );
+    let on_thumb_short = coverage_of(&short_v, w, h, thumb, LABEL);
+    assert_eq!(
+        on_thumb_short, 0.0,
+        "a non-scrolling list still painted {on_thumb_short} of {thumb:?} in LABEL"
+    );
+}
+
+/// A straddling account row is **cut at the band**, not drawn over the footer.
+///
+/// ## Why this replaced `a_short_canvas_truncates_the_account_window_…`
+///
+/// That test asserted the opposite rule, and its premise expired the moment the
+/// list went pixel-granular. It required `accounts_row_visible` to reject any row
+/// not wholly inside the band, and checked the survivors ended above the arranged
+/// button row. Both halves are now false *by design*: at an intermediate offset a
+/// straddling row is the normal case, and rejecting it would drop a row at every
+/// position between two whole-row stops — a worse artefact than the 36 px stepping
+/// the conversion removed. `draw_account_entry` is wrapped in `Quads::with_clip`
+/// instead, so the row is drawn **and cut**.
+///
+/// Note how it would have failed: the old premise assertion `fitting < VISIBLE_ROWS`
+/// goes false (all five rows now "fit" the partial-overlap test), so the test would
+/// have failed loudly rather than silently passing — which is why this is a rewrite
+/// and not a deletion. The rule worth keeping is the *consequence* the old test was
+/// really about, and it is the stronger claim: **no account row paints below the
+/// band**, whatever the offset.
+///
+/// Measured by location, in the rows' own 305 px column, at an offset deliberately
+/// chosen to put a row across the boundary. Failure prints the offending band.
+#[test]
+fn an_account_row_straddling_the_band_is_clipped_not_drawn_over_the_footer() {
+    let (w, h) = (854.0, 240.0);
+    // Nine logical rows in a 147 px band: the list scrolls, so an intermediate
+    // offset is reachable. 18 px is one wheel notch — half a row, which guarantees
+    // some row crosses each edge of the band.
+    let nav = accounts_nav_scrolled("clip-band", 8, 18.0);
+    // **Through `frame_for`, not `accounts_idle_frame`.** The spec is stamped by
+    // `frame_for`'s tail, the same place `gui_scale` is, so calling the per-screen
+    // builder directly gets a frame with `list: None` — which is exactly the island
+    // this whole hook exists to prevent, and worth exercising rather than working
+    // around. This assertion is therefore also the guard that the stamp happens.
+    let mut ui = crate::menu::UiState::default();
+    ui.open_accounts();
+    let statuses = crate::menu::status::StatusCache::with_probe(
+        crate::menu::status::unavailable_probe(),
+    );
+    let mut fav = FaviconCache::new();
+    let f = frame_for(&ui, &nav, &statuses, &mut fav).expect("the accounts screen owns its frame");
+    let v = geometry(&f, w, h);
+
+    let spec = f
+        .list
+        .as_ref()
+        .expect("frame_for must stamp the accounts screen's ListSpec");
+    let list = spec.model(h).expect("and it has a band at 240 px");
+    let band_bottom = list.top() + list.height();
+    let col_x = spec.row_left(w);
+    let col_w = spec.row_w;
+
+    // Precondition, executed rather than assumed: a row really does straddle the
+    // bottom edge at this offset. Without it this test could pass on a list that
+    // simply ends above the band.
+    let straddler = (0..9).find(|&i| {
+        let (_, y, _, rh) = accounts_row_rect(i, w, 18.0);
+        y < band_bottom && y + rh > band_bottom
+    });
+    assert!(
+        straddler.is_some(),
+        "premise: no row crosses the band bottom at {band_bottom}, so the clip is untested"
+    );
+
+    // The claim: nothing the list draws lands below the band, in the list's own
+    // column.
+    //
+    // **The strip is band-bottom to the *button row's* top, not to the canvas
+    // bottom, and getting that wrong is instructive.** The first version of this
+    // measured all the way down and read 0.352 covered — which looks exactly like a
+    // broken clip and is in fact the four action buttons, which legitimately own the
+    // footer band. A control has to ask what *else* already paints in the rect before
+    // it can attribute coverage to the thing under test; here 0.352 is almost
+    // precisely the button row's own 20 px out of the 60 px band. The button y comes
+    // off `accounts_button_slot` — the same arranged slot the draw places the buttons
+    // from — rather than being restated as a constant.
+    let (_, button_y, _, _) = accounts_button_slot(0).resolve(w, h);
+    assert!(
+        button_y > band_bottom,
+        "premise: the button row at {button_y} must sit below the band at {band_bottom}"
+    );
+    let below = (col_x, band_bottom, col_w, button_y - band_bottom);
+    let spill = coverage(&v, w, h, below);
+    assert_eq!(
+        spill, 0.0,
+        "an account row painted {spill} of the gap {below:?} between the band bottom \
+         ({band_bottom}) and the button row ({button_y}); straddling row {straddler:?}"
+    );
+
+    // The control this needs: the clip must not be achieving that by drawing
+    // nothing at all. The band itself has to be covered.
+    let inside = (col_x, list.top(), col_w, list.height());
+    let drawn = coverage(&v, w, h, inside);
+    assert!(
+        drawn > 0.10,
+        "the band {inside:?} is nearly empty ({drawn}), so the zero above proves \
+         only that the list is not drawing"
     );
 }
 

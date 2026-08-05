@@ -94,8 +94,8 @@ mod title_pause;
 mod world_list;
 
 pub use account_screen::{
-    accounts_row_content_rect, accounts_row_left, accounts_row_rect, accounts_row_top,
-    accounts_row_visible,
+    accounts_band_top, accounts_list_spec, accounts_row_content_rect, accounts_row_left,
+    accounts_row_rect, accounts_row_top, accounts_row_visible,
 };
 pub use dispatch::frame_for;
 pub use draw::{MenuGeometry, build, geometry};
@@ -111,7 +111,8 @@ pub use screens::{command_block_frame, death_frame, pause_frame};
 pub use server_list::{
     SERVER_LIST_ITEM_H, server_entry_icon_rect, server_list_footer_slot, server_list_max_scroll,
     server_list_title_label, server_list_window_rows, server_row_content_rect, server_row_left,
-    server_row_rect, server_row_top, server_row_visible, server_scroll_model,
+    server_list_spec, server_row_rect, server_row_top, server_row_visible,
+    server_scroll_model,
     server_status_icon_rect,
 };
 pub use title_pause::{death_slot, pause_grid_size, pause_slot, title_slot};

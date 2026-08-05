@@ -1358,6 +1358,95 @@ impl MenuNav {
         self.server_scroll
     }
 
+    /// The scrolling list on the screen `ui` is showing, or `None` when that screen
+    /// has none.
+    ///
+    /// ## Why this is one function and not a field per screen
+    ///
+    /// This is the **generic hook** the scrollbar draw and the mouse wheel both ask.
+    /// Before it existed, `render::draw` called `server_scroll_list` by name and
+    /// `app`'s wheel arm was gated on `Screen::ServerList`, so exactly one screen
+    /// could have a bar or respond to the wheel — and a second screen adopting
+    /// `ScrollList` would have had correct geometry, green tests and zero pixels.
+    /// Both consumers now go through here, so *declaring* a list is all a screen has
+    /// to do.
+    ///
+    /// Each arm delegates to the screen's own `*_list_spec`, which derives the band
+    /// and the pitch from the same constants that screen's draw uses. This function
+    /// therefore holds no geometry of its own — it is a router, and the thing it is
+    /// routing is the answer to "which screen is up".
+    ///
+    /// ## How to add a screen
+    ///
+    /// Add an arm, and make sure the screen's offset is stored in **pixels**. A
+    /// screen whose offset is a row index cannot be added honestly: it would report a
+    /// `scroll` that is always a multiple of the row height, which is exactly the
+    /// snap-to-row stepping the wheel work removed. `menu/stats.rs`,
+    /// `menu/social.rs`, `menu/language.rs`, `menu/key_binds.rs` and
+    /// `menu/options.rs` all still hold a `first: usize` entry index and are
+    /// therefore **not** here yet; converting the field is the prerequisite, not an
+    /// afterthought.
+    #[must_use]
+    pub fn active_list(&self, ui: &super::UiState) -> Option<super::widget::ListSpec> {
+        match ui.screen() {
+            super::Screen::ServerList => Some(super::render::server_list_spec(
+                self.list.len(),
+                self.server_scroll,
+            )),
+            // Only the idle frame has a list at all: the sign-in and failure frames
+            // draw one wide button over a text notice, and reporting a list there
+            // would hang a scrollbar beside a screen with no rows.
+            super::Screen::Accounts => {
+                let accounts = self.accounts();
+                if matches!(
+                    accounts.sign_in_view(),
+                    super::accounts::SignInView::Idle
+                ) {
+                    Some(super::render::accounts_list_spec(
+                        accounts.rows().len(),
+                        accounts.scroll(),
+                    ))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Scroll whichever list [`Self::active_list`] reports by `notches` of mouse
+    /// wheel, at a `canvas_height`-tall canvas — vanilla's
+    /// `AbstractScrollArea::mouseScrolled` on the active screen.
+    ///
+    /// The write-back half of the hook, and the reason `app` needs exactly **one**
+    /// `MouseWheel` arm for the whole menu rather than one per screen. Returns
+    /// whether anything moved, so the caller can tell "no list here" from "the list
+    /// is already at its clamp" if it ever needs to.
+    ///
+    /// The arithmetic is [`super::widget::ScrollList`]'s in every arm — this only
+    /// decides *which* offset field the result lands in.
+    pub fn scroll_active_list(
+        &mut self,
+        ui: &super::UiState,
+        notches: f32,
+        canvas_height: f32,
+    ) -> bool {
+        match ui.screen() {
+            super::Screen::ServerList => {
+                let before = self.server_scroll;
+                self.scroll_server_list(notches, canvas_height);
+                self.server_scroll != before
+            }
+            super::Screen::Accounts => {
+                let accounts = self.accounts();
+                let before = accounts.scroll();
+                accounts.scroll_by(notches, canvas_height);
+                accounts.scroll() != before
+            }
+            _ => false,
+        }
+    }
+
     /// Scrolls the multiplayer list by `notches` of mouse wheel — vanilla's
     /// `AbstractScrollArea::mouseScrolled`,
     /// `setScrollAmount(scrollAmount() - scrollY * scrollRate())`

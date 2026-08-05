@@ -408,20 +408,28 @@ pub fn server_list_window_rows() -> usize {
 /// the draw uses.
 #[must_use]
 pub fn server_scroll_model(entry_count: usize, height: f32) -> Option<widget::ScrollList> {
-    if entry_count == 0 {
-        return None;
-    }
-    let top = server_list_block().content_top;
-    let band = height - SERVER_LIST_FOOTER_H - top;
-    if band <= 0.0 {
-        return None;
-    }
-    Some(widget::ScrollList::new(
+    server_list_spec(entry_count, 0.0).model(height)
+}
+
+/// This screen's list as the generic [`widget::ListSpec`], which is what
+/// `MenuNav::active_list` hands the scrollbar draw and the wheel arm.
+///
+/// [`server_scroll_model`] is now a thin wrapper over this rather than the other way
+/// round, so the band and pitch are stated **once** and the generic hook cannot
+/// disagree with the screen-specific helpers (`server_row_top`,
+/// `server_list_max_scroll`) about where the list is. That direction matters: a spec
+/// that rebuilt the band itself would be a second expression, which is the exact
+/// failure `server_scroll_model`'s own doc exists to prevent.
+#[must_use]
+pub fn server_list_spec(entry_count: usize, scroll: f32) -> widget::ListSpec {
+    widget::ListSpec::uniform(
         SERVER_LIST_ITEM_H,
-        top,
-        band,
+        server_list_block().content_top,
+        SERVER_LIST_FOOTER_H,
         entry_count,
-    ))
+        SERVER_LIST_ROW_W,
+    )
+    .at(scroll)
 }
 
 /// The largest legal `scroll` for `entry_count` rows at a `height`-tall canvas,

@@ -196,29 +196,100 @@ scrollbar colours".
 |---|---|
 | scrollbar on the server list | **done** — `render::draw_scrollbar` |
 | hover must not focus (accounts) | **done** — `accounts::AccountsNav::hover` |
-| both screens share one primitive | **partly** — the geometry is shared; the two screens still own their offsets |
-| pixel-granular ("smooth") scrolling | **done for the server list** (#445) — still row-indexed on the accounts screen |
+| both screens share one primitive | **done** — `widget::ListSpec`, below |
+| pixel-granular ("smooth") scrolling | **done on the server list and the accounts screen**; the other five still hold a `first: usize` |
 
-That last row is now the honest gap, and it is narrower than it was.
-`MenuNav::server_scroll` is an `f32` pixel offset and `app.rs`'s wheel handler
-passes the real `dy` through to `ScrollList::mouse_scrolled`, so the server list
-moves vanilla's 18 px per notch and the thumb is continuous — see
-[`server-list.md`](./server-list.md)'s scrolling section for the gates and the
-observed control.
+### The generic hook: `widget::ListSpec`
 
-**`accounts::State::scroll` is still a `usize` row index**, deliberately. It was
-checked rather than assumed while #445's input half landed: the accounts screen
-has **no mouse-wheel arm at all** in `app.rs`, so its offset only ever moves by
-whole rows anyway (`scroll_to_show`, driven by keyboard cursor-follow), and
-converting the field alone would change no pixel while touching a file outside
-that change's ownership. The conversion belongs with wiring a wheel arm for that
-screen, not before it — see the adoption audit below.
+`ScrollList` was already shared *arithmetic*. What was not shared was the two ends
+that reach a player: the scrollbar draw called `server_scroll_list` **by name**
+(`render/draw.rs`), and `app`'s wheel arm was gated on `Screen::ServerList`. So a
+screen could adopt `ScrollList`, be correct, be green, and show nothing.
+
+`ListSpec` is a screen's **canvas-independent declaration** of its list — `row_h`,
+`top`, `footer_h`, `len`, optional per-entry `heights`, `scroll`, `row_w — and
+`ListSpec::model(canvas_height)` turns it into the live `ScrollList`. There is now
+exactly one declaration point and two readers:
+
+| | |
+|---|---|
+| declares | `MenuNav::active_list(&UiState)` — one arm per screen, each delegating to that screen's own `*_list_spec` |
+| stamped onto the frame by | `render::frame_for`'s tail, beside `gui_scale`, so a screen cannot forget to tell the draw |
+| read for pixels by | `render/draw.rs` → `draw_scrollbar`, plus `Quads::with_clip` for the rows |
+| read for input by | `MenuNav::scroll_active_list`, called from **one** `MouseWheel` arm in `app/lifecycle.rs` |
+
+Each screen's spec derives its band and pitch from the same constants its draw uses:
+`render::server_list_spec` and `render::accounts_list_spec`. `server_scroll_model` is
+now a thin wrapper over `server_list_spec` rather than the reverse, so the band is
+stated once.
+
+**To give a screen a scrollbar and a wheel, add an `active_list` arm.** The
+prerequisite is that its offset is stored in **pixels**: a `first: usize` reports an
+offset that is always a multiple of the row height, which is exactly the snap-to-row
+stepping this work removed. Convert the field first — that is the work, not the arm.
+
+### The accounts screen, converted
+
+`accounts::State::scroll` is an `f32` pixel offset. Three changes went together,
+because none of them is observable alone:
+
+- `accounts_row_top(index, scroll)` takes a pixel offset and `index` is the row's
+  position in the **full** list. It was the rendered-window position, which is only
+  expressible at whole-row offsets.
+- `accounts_idle_frame` emits **every** logical row instead of
+  `rows[scroll..scroll + VISIBLE_ROWS]`, and `measure::row_rect` gates on
+  `accounts_row_visible` so a click cannot land on a row that scrolled away.
+- `accounts_row_visible` is a **partial**-overlap test now, and `draw_account_entry`
+  is wrapped in `Quads::with_clip`. At a pixel offset a straddling row is the normal
+  case; rejecting it would drop a row at every intermediate position, which is worse
+  than the stepping it replaced.
+
+`VISIBLE_ROWS`'s hardcoded 5 is gone, and the number it stood for is now *measured*:
+at `MIN_SCALED_HEIGHT` the derived band is `240 - 60 - 33 = 147` px, which
+`visible_range` resolves to exactly five 36 px rows. A taller canvas legitimately
+shows more, which is the residual gap that constant documented.
+
+`scroll_to_show` delegates to `ScrollList::scroll_to_entry` rather than restating a
+clamp, and uses `MIN_SCALED_HEIGHT` for `scroll_server_to_show`'s reason: a keyboard
+press has no canvas, and the smallest supported one can only under-use a taller
+window, never scroll a row off screen.
+
+The **"Showing 1-5 of 9" counter was removed**. It was this screen's stand-in for a
+scrollbar; there is a real one now, and vanilla has no such label on any selection
+list. Re-adding it would mean re-deriving a "shown" count that no longer exists —
+which rows are visible is the real canvas's answer, not the frame's.
+
+#### Gates, with both controls executed and observed
+
+| gate | asserts |
+|---|---|
+| `the_accounts_screen_draws_the_same_scrollbar_the_server_list_does` | the thumb's rect carries `LABEL`; the 8 px gutter between rows and bar carries **nothing**; a non-scrolling list draws no bar |
+| `one_notch_on_the_accounts_list_is_half_a_row_through_the_generic_router` | **18 px**, separated from 36 (row-index) and 147 (page); 54 after three notches, not a multiple of 36; both clamps |
+| `the_wheel_router_declines_a_screen_with_no_list` | `false` on the title screen, `true` on accounts from the same nav |
+| `an_account_row_straddling_the_band_is_clipped_not_drawn_over_the_footer` | zero coverage between the band bottom and the button row, with a straddling row proven present |
+| `hover_takes_a_logical_row_and_the_offset_is_pixels` | offset 145 — **not** a multiple of 36, so a row index could not express it |
+
+- **De-generalising the hook** (stamping `list` only for `Screen::ServerList`) was
+  observed to fail both accounts pixel gates at `frame_for must stamp the accounts
+  screen's ListSpec`.
+- **Removing the accounts arm from `scroll_active_list`** — the pre-change state, where
+  `app/` had two wheel arms and neither was this screen's — was observed to fail the
+  notch gate at `the router must report that the accounts list moved`.
+
+One near-miss worth recording, because it is the *false-premise control* species: the
+clip gate first measured the whole strip from the band bottom to the canvas bottom and
+read **0.352 covered**, which looks exactly like a broken clip. It was the four footer
+buttons, which legitimately own that band — 20 px of 60 is 0.333. Before believing a
+coverage-is-zero control, ask what else already paints in the rect. The gate now
+measures band-bottom to the *button row's* own arranged `y`.
 
 ## Adoption audit — the other list screens
 
-Measured, not guessed. **No scrollbar is drawn anywhere else in the shell**, and
-mouse-wheel input is wired for exactly *one* list in the whole app; the other seven
-scroll only by keyboard cursor-follow.
+Measured, not guessed. Two screens now draw a scrollbar and respond to the wheel
+(the server list and the accounts screen), through one `MouseWheel` arm rather than
+one arm each. The five below still scroll only by keyboard cursor-follow, and the
+reason is uniform: each holds a `first: usize` **entry index**, so it cannot report a
+pixel offset to `active_list` without converting the field.
 
 | screen | offset | hover vs selection | verdict |
 |---|---|---|---|
@@ -241,23 +312,28 @@ Two things fall out and both are decisions, not details:
   primitive and then again against a variable one is the one sequencing mistake
   available here.
 
-  **What is still outstanding is the adoption itself**, and one thing found while
-  sizing it is worth writing down because it changes the estimate: the scrollbar
-  draw is **not** generic today. `render/draw.rs:145-149` calls
-  `server_scroll_list` by name, so it is the *multiplayer list's* scrollbar rather
-  than "the active screen's". Adopting the primitive on a second screen therefore
-  means adding that hook — the issue's own suggested shape, "one arm that asks the
-  active screen for its list" — before any of the four conversions produces a
-  single new pixel. Do that first; a screen converted to `ScrollList` while the
-  draw still asks for the server list is a textbook island (green tests, no
-  scrollbar, no wheel).
+  ~~**What is still outstanding is the adoption itself**, and the scrollbar draw is
+  not generic today.~~ **The hook landed**: `widget::ListSpec` plus
+  `MenuNav::active_list` / `scroll_active_list`, and `render/draw.rs` asks the frame
+  instead of naming a screen. `server_scroll_list` is deleted. So the sequencing
+  warning that used to live here is discharged, and the four conversions now each
+  produce real pixels the moment their offset becomes an `f32`.
+
+  The prerequisite that remains is per-screen and is the *field*, not the hook: each
+  of the five below positions its rows as `list_top + (row - first) * ROW_H` through
+  an `Origin::*(Placement { row, first })`. Converting one means replacing
+  `first * ROW_H` with a pixel offset in that placement, exactly as
+  `accounts_row_top` now does — see the accounts section above for the three changes
+  that have to land together.
 - **`world_select.rs` is the model for the hover half, not the six `self.cursor = row`
   screens.** It is the only screen that already keeps hover and focus apart. If the
   primitive's hover concept is copied from any of the others, a mouse-over will steal
   the keyboard out of a search field.
 
-Net: four thin adoptions removing roughly 180-210 lines of near-duplicated
-window/clamp/hover code, gated on the variable-height decision.
+Net: five thin adoptions removing roughly 180-210 lines of near-duplicated
+window/clamp/hover code. Both blockers are now discharged — the variable-height
+decision (`new_variable`) and the generic hook (`ListSpec`) — so what is left is
+per-screen field conversion with no shared prerequisite in front of it.
 
 ## Dependencies
 

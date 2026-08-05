@@ -89,11 +89,20 @@ pub fn row_rect(rows: &[MenuRow], i: usize, width: f32, height: f32) -> Option<(
     // An account row (#66/#402) is placed the same way and for the same reason —
     // `floor(width / 2) - floor(305 / 2)` is two integer divisions, not
     // `anchor + dx`. Answered here so the draw and `app.rs`'s hit-test read one
-    // definition; note this also reports a rect for a row
-    // `accounts_row_visible` would skip, which is the bounded consequence that
-    // function documents.
+    // definition.
+    //
+    // **The visibility gate is no longer the gap the comment above used to record.**
+    // It became load-bearing rather than merely tidy when the account frame stopped
+    // slicing its rows: `accounts_idle_frame` now emits *every* logical row and
+    // positions them by pixel offset, exactly as the multiplayer list does, so
+    // without this a click below a scrolled list would hit-test onto a row that is
+    // nowhere near the cursor. Same shape as the arm above, and `menu_row_at`'s
+    // `find` already scans past a `None`.
     if let Some(view) = row.account.as_ref() {
-        return Some(accounts_row_rect(view.index, width));
+        if !accounts_row_visible(view.index, height, view.scroll) {
+            return None;
+        }
+        return Some(accounts_row_rect(view.index, width, view.scroll));
     }
     if let Some(slot) = row.slot {
         return Some(slot.resolve(width, height));

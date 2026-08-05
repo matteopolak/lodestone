@@ -36,7 +36,7 @@ const ACCOUNTS_HEADER_H: f32 = 33.0;
 /// leaves is not waste: the `FrameLayout` splits it 20/20, and the lower half is
 /// where the key-hint line sits (see [`accounts_hint_dy`]). A 33 px band would
 /// put that line off the bottom of the canvas.
-const ACCOUNTS_FOOTER_H: f32 = 60.0;
+pub(super) const ACCOUNTS_FOOTER_H: f32 = 60.0;
 /// `LinearLayout.horizontal().spacing(4)` — [`SERVER_LIST_FOOTER_SPACING`].
 pub(super) const ACCOUNTS_FOOTER_SPACING: i32 = 4;
 /// One footer button: [`SERVER_LIST_LOWER_BUTTON_W`]'s 74, so the four of them
@@ -50,7 +50,7 @@ pub(super) const ACCOUNTS_BUTTON_W: f32 = 74.0;
 /// way a favicon does.
 const ACCOUNTS_ITEM_H: f32 = 36.0;
 /// A list row's width: [`SERVER_LIST_ROW_W`]'s 305.
-const ACCOUNTS_ROW_W: f32 = 305.0;
+pub(super) const ACCOUNTS_ROW_W: f32 = 305.0;
 /// `AbstractSelectionList.Entry.CONTENT_PADDING`'s 2, per side.
 const ACCOUNTS_ENTRY_PADDING: f32 = 2.0;
 /// `getFirstEntryY() = getY() + 2` — the gap above row 0. A different
@@ -279,24 +279,65 @@ pub fn accounts_row_left(width: f32) -> f32 {
     (width * 0.5).floor() - (ACCOUNTS_ROW_W * 0.5).floor()
 }
 
-/// The top of account row `index`, where `index` is its position **in the
-/// rendered window** rather than in the full list: `getFirstEntryY() + index *
-/// itemHeight`.
+/// The y the content band starts at — the top of row 0 with nothing scrolled.
 ///
-/// The scroll offset is applied by [`accounts_idle_frame`], which slices the
-/// list before building rows — so this needs no scroll term and the row a click
-/// hit-tests onto is the row that was drawn.
+/// Kept as its own expression because the sign-in, failure and empty-list states
+/// anchor their text to it and have **no list to scroll**: calling
+/// `accounts_row_top(0, ..)` there would make a notice's position depend on an
+/// offset belonging to a frame that is not being drawn.
 #[must_use]
-pub fn accounts_row_top(index: usize) -> f32 {
-    accounts_block().content_top + ACCOUNTS_FIRST_ENTRY_Y + index as f32 * ACCOUNTS_ITEM_H
+pub fn accounts_band_top() -> f32 {
+    accounts_block().content_top + ACCOUNTS_FIRST_ENTRY_Y
 }
 
-/// The rect of account row `index` at a `width`-wide canvas.
+/// This screen's list, as the generic [`widget::ListSpec`] the scrollbar draw and
+/// the mouse wheel both go through.
+///
+/// **The single expression the whole screen's scrolling derives from**, the role
+/// [`server_scroll_model`] plays for the multiplayer list: `AccountsNav`'s keyboard
+/// cursor-follow and its wheel handler drive `ScrollList` through this, the
+/// scrollbar is placed from it, and [`accounts_row_top`] positions rows from the
+/// offset it produced. Band and pitch are derived from
+/// `accounts_block().content_top`, [`ACCOUNTS_FOOTER_H`] and [`ACCOUNTS_ITEM_H`] —
+/// the same three values the draw uses — rather than restated.
+///
+/// Note what this **replaced**: [`super::accounts::VISIBLE_ROWS`]'s hardcoded 5.
+/// At [`crate::config::MIN_SCALED_HEIGHT`] the derived band is
+/// `240 - 60 - 33 = 147` px, which `ScrollList::visible_range` resolves to exactly
+/// five 36 px rows — so the constant was right, and is now *measured* instead of
+/// asserted. A taller canvas legitimately shows more.
 #[must_use]
-pub fn accounts_row_rect(index: usize, width: f32) -> (f32, f32, f32, f32) {
+pub fn accounts_list_spec(len: usize, scroll: f32) -> widget::ListSpec {
+    widget::ListSpec::uniform(
+        ACCOUNTS_ITEM_H,
+        accounts_block().content_top,
+        ACCOUNTS_FOOTER_H,
+        len,
+        ACCOUNTS_ROW_W,
+    )
+    .at(scroll)
+}
+
+/// The top of account row `index` — `getFirstEntryY() + index * itemHeight -
+/// scrollAmount`, `repositionEntries` (`AbstractSelectionList.java:993-996`).
+///
+/// **`index` is the row's position in the full list and `scroll` is pixels.** Both
+/// changed together: `index` used to be the rendered-window position because
+/// [`accounts_idle_frame`] sliced the list first, which is precisely why this
+/// screen could only ever sit at a whole-row offset. The `floor` is vanilla's
+/// single `(int)this.scrollAmount()` truncation (`:144`) — outside the multiply, so
+/// the column moves as a unit and rows stay exactly [`ACCOUNTS_ITEM_H`] apart.
+#[must_use]
+pub fn accounts_row_top(index: usize, scroll: f32) -> f32 {
+    accounts_band_top() - scroll.floor() + index as f32 * ACCOUNTS_ITEM_H
+}
+
+/// The rect of account row `index` at a `width`-wide canvas, `scroll` px down.
+#[must_use]
+pub fn accounts_row_rect(index: usize, width: f32, scroll: f32) -> (f32, f32, f32, f32) {
     (
         accounts_row_left(width),
-        accounts_row_top(index),
+        accounts_row_top(index, scroll),
         ACCOUNTS_ROW_W,
         ACCOUNTS_ITEM_H,
     )
@@ -305,8 +346,8 @@ pub fn accounts_row_rect(index: usize, width: f32) -> (f32, f32, f32, f32) {
 /// A row's *content* rect — the row inset by [`ACCOUNTS_ENTRY_PADDING`] a side.
 /// Everything a row draws is measured from this, not from the row.
 #[must_use]
-pub fn accounts_row_content_rect(index: usize, width: f32) -> (f32, f32, f32, f32) {
-    let (x, y, w, h) = accounts_row_rect(index, width);
+pub fn accounts_row_content_rect(index: usize, width: f32, scroll: f32) -> (f32, f32, f32, f32) {
+    let (x, y, w, h) = accounts_row_rect(index, width, scroll);
     (
         x + ACCOUNTS_ENTRY_PADDING,
         y + ACCOUNTS_ENTRY_PADDING,
@@ -315,23 +356,28 @@ pub fn accounts_row_content_rect(index: usize, width: f32) -> (f32, f32, f32, f3
     )
 }
 
-/// Whether rendered row `index` fits **entirely** between the content band's top
-/// and the footer on a `height`-tall canvas.
+/// Whether row `index` overlaps the content band at all on a `height`-tall canvas
+/// — `extractListItems`' own test (`AbstractSelectionList.java:346-352`).
 ///
-/// [`server_row_visible`]'s job, one degree stricter: that one reproduces
-/// `extractListItems`' test, which keeps a row that merely *overlaps* the band's
-/// bottom edge (vanilla then scissors it). This pipeline has no scissor, so a
-/// partially-visible row would paint over the footer buttons — and this screen's
-/// footer is where its four actions are. A row that would not fit is therefore
-/// skipped whole.
+/// **This is a *partial*-overlap test now, and that is the point.** It used to be
+/// one degree stricter — a row that did not fit *entirely* was skipped whole —
+/// because this pipeline had no scissor and a straddling row would have painted
+/// over the four footer buttons. At a pixel-granular offset a straddling row is the
+/// *normal* case rather than an edge case, so skipping it would drop a row at every
+/// intermediate position: a worse artefact than the 36 px stepping it replaced.
+/// `draw_account_entry` is wrapped in `Quads::with_clip` against this same band, so
+/// the row is **cut** instead, exactly as vanilla's `enableScissor` cuts it.
 ///
-/// The consequence is the same bounded one the multiplayer list documents and
-/// that #402 records: [`row_rect`] still answers for a skipped row, so a click
-/// there selects it and nothing else. See [`super::accounts::VISIBLE_ROWS`],
-/// which is the other half of this.
+/// Delegates to [`widget::ScrollList::row_visible`] through
+/// [`accounts_list_spec`], so the band this tests against and the band the
+/// scrollbar is drawn in are one expression. `len` is unknown here, so the spec is
+/// built long enough to contain `index` — visibility depends on the row's own top
+/// and the band, never on how many rows follow it.
 #[must_use]
-pub fn accounts_row_visible(index: usize, height: f32) -> bool {
-    accounts_row_top(index) + ACCOUNTS_ITEM_H <= height - ACCOUNTS_FOOTER_H
+pub fn accounts_row_visible(index: usize, height: f32, scroll: f32) -> bool {
+    accounts_list_spec(index + 1, scroll)
+        .model(height)
+        .is_some_and(|l| l.row_visible(index))
 }
 
 /// The wrapped-text notice the sign-in and failure states use: the content band,
@@ -352,7 +398,7 @@ fn accounts_notice(text: String, colour: [f32; 4]) -> MenuNotice {
         // offset is `width * 0.5 + dx` unrounded, and this keeps the text block
         // on the rows' column rather than half a pixel off it.
         dx: -(ACCOUNTS_ROW_W * 0.5).floor(),
-        dy: accounts_row_top(0),
+        dy: accounts_band_top(),
         w: ACCOUNTS_ROW_W,
         bottom: ACCOUNTS_FOOTER_H,
         colour,
@@ -389,7 +435,7 @@ fn accounts_band_label(text: String, line: f32, colour: [f32; 4]) -> MenuLabel {
         text,
         origin: Origin::ScreenTop,
         dx: 0.0,
-        dy: accounts_row_top(0) + LINE_H * line,
+        dy: accounts_band_top() + LINE_H * line,
         align: Align::Centre,
         colour,
         scale: 1.0,
@@ -434,24 +480,35 @@ fn accounts_hint_label(text: &str) -> MenuLabel {
 pub(super) fn accounts_idle_frame(accounts: &super::accounts::AccountsNav) -> MenuFrame<'static> {
     use super::accounts::{
         AccountRow, BUTTON_ADD, BUTTON_CANCEL, BUTTON_COUNT, BUTTON_REMOVE, BUTTON_SELECT,
-        VISIBLE_ROWS,
     };
 
     let all_rows = accounts.rows();
     let list_len = all_rows.len();
     let accounts_len = list_len.saturating_sub(1); // the offline row is always last
-    let scroll = accounts.scroll().min(list_len.saturating_sub(1));
-    let shown = list_len.saturating_sub(scroll).min(VISIBLE_ROWS);
+    let scroll = accounts.scroll();
     let highlighted = accounts.highlighted();
     let focus = accounts.focus();
 
-    let mut rows: Vec<MenuRow> = all_rows[scroll..scroll + shown]
+    // **Every** logical row, not a `rows[scroll..scroll + VISIBLE_ROWS]` slice —
+    // the multiplayer list's shape. Three things follow, and they are the reason the
+    // conversion is here rather than only in the offset's type:
+    //
+    // 1. A row's `index` is its position in the full list, so `accounts_row_top`
+    //    can subtract a *pixel* offset. A sliced frame forced the index to be the
+    //    rendered position, which is only expressible at whole-row offsets.
+    // 2. The band is decided by `accounts_row_visible` against the **real** canvas
+    //    at draw time instead of by a canvas-independent count, so a taller window
+    //    legitimately shows more rows — the residual gap `VISIBLE_ROWS` documented.
+    // 3. `row_rect` gates on visibility (see `measure.rs`), which is what stops a
+    //    click landing on a row that scrolled out from under it.
+    let mut rows: Vec<MenuRow> = all_rows
         .iter()
         .enumerate()
-        .map(|(rendered, row)| {
+        .map(|(index, row)| {
             let view = AccountEntryView {
-                index: rendered,
-                selected: scroll + rendered == highlighted,
+                index,
+                scroll,
+                selected: index == highlighted,
             };
             match row {
                 AccountRow::Account(p) => MenuRow {
@@ -510,10 +567,14 @@ pub(super) fn accounts_idle_frame(accounts: &super::accounts::AccountsNav) -> Me
     ));
     rows.push(button_row(BUTTON_CANCEL, "Back", true));
 
+    // `rows` is now `list_len` list rows followed by the four buttons, so a focused
+    // button's row index is `list_len + n` rather than the old `shown + n`. The two
+    // agreed only while the whole list fitted in the window — with a slice, focusing
+    // a button on a scrolled list pointed at the wrong row.
     let selected = if focus < list_len {
         usize::MAX
     } else {
-        shown + (focus - list_len).min(BUTTON_COUNT - 1)
+        list_len + (focus - list_len).min(BUTTON_COUNT - 1)
     };
 
     let mut labels = vec![
@@ -523,31 +584,28 @@ pub(super) fn accounts_idle_frame(accounts: &super::accounts::AccountsNav) -> Me
     if list_len == 1 {
         // Placed under the last row rather than under the title: the header band
         // is 33 px and holds a 9 px title, so there is no room for a subtitle
-        // there. `accounts_row_top(shown)` is the first free row line, derived
-        // from the same expression the rows themselves are placed by.
+        // there. Row 1's top is the first free line, derived from the same two
+        // values the rows are placed by rather than restated — and a one-row list
+        // has nothing to scroll, so the unscrolled band top is the right anchor.
         labels.push(MenuLabel {
             text: "No accounts signed in - add one, or play offline".to_string(),
             origin: Origin::ScreenTop,
             dx: 0.0,
-            dy: accounts_row_top(shown) + 4.0,
+            dy: accounts_band_top() + ACCOUNTS_ITEM_H + 4.0,
             align: Align::Centre,
             colour: ACCOUNTS_DIM,
             scale: 1.0,
         });
     }
-    if list_len > shown {
-        // Right-aligned on the hint line's own baseline, so the two cannot
-        // collide however wide either gets.
-        labels.push(MenuLabel {
-            text: format!("Showing {}-{} of {}", scroll + 1, scroll + shown, list_len),
-            origin: Origin::BottomRight,
-            dx: -4.0,
-            dy: accounts_hint_dy(),
-            align: Align::Right,
-            colour: ACCOUNTS_DIM,
-            scale: 1.0,
-        });
-    }
+    // **The "Showing 1-5 of 9" counter is deliberately gone.** It was this screen's
+    // stand-in for a scrollbar, and it existed only because the frame knew its own
+    // window size while the draw had no bar to show. There is a real
+    // `AbstractScrollArea` scrollbar now, drawn from `MenuFrame::list` by the same
+    // `draw_scrollbar` the multiplayer list uses, so the counter would be a second
+    // answer to the question the thumb already answers — and vanilla has no such
+    // label on any selection list. Re-adding it would also mean re-deriving a
+    // "shown" count that no longer exists: which rows are visible is now the real
+    // canvas's answer, not the frame's.
 
     MenuFrame {
         rows,
