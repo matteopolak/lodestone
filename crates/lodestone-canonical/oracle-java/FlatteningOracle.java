@@ -84,7 +84,7 @@ import com.mojang.datafixers.Dynamic;
  * and the upper half of double plants (species is read from the paired lower
  * half at conversion time, not stored in the upper half's own meta at all).
  * These are reported, not silently resolved, in the generated table (see
- * {@code crates/protocol/v340/tests/flattening.rs}).
+ * {@code crates/lodestone-canonical/tests/flattening.rs}).
  *
  * <h2>Output format</h2>
  *

@@ -148,6 +148,17 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   stops the action before the predictor runs and before anything reaches the wire.
   This is what separates "plugins can read state" from "plugins can be a protection
   plugin". Issue #109.
+- [`lodestone-canonical`: the shared pre-Flattening → 26.2 block-state layer](./canonical-block-states.md) —
+  The crate every pre-1.13 protocol family maps its blocks through. It holds two
+  things that used to live inside `lodestone-v340`: the JVM-dumped `(old_block_id,
+  meta)` → modern-block table (vanilla's own 1.13.2 `DataFixerUpper` flattening
+  fix), and the bridge from that table's output to a concrete canonical **26.2**
+  block-state id — the id space `lodestone-world`'s palette consumers (the mesher's
+  atlas, collision) are actually built from. Extracted here as unit U1 of epic #343's
+  dispatch plan
+  ([`plans/multi-version-protocol.md`](./plans/multi-version-protocol.md)) so that the
+  four pre-1.13 families do not each carry a private copy of a 9,000-line generated
+  table.
 - [Chat](./chat.md) — The chat box: the outbound input line
   (`crate::chat::ChatInput`), the received scrollback
   (`lodestone_game::chat::ChatLog`, folded into legacy `§`-coded strings at read
@@ -754,14 +765,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `ThrownTridentRenderer`: `minecraft:arrow`, `minecraft:spectral_arrow` and
   `minecraft:trident`. Each is a code-built cuboid rig aligned to the projectile's
   **velocity**, not a billboard and not a mob.
-- [Wiring v340's flattening table into the adapter (`crates/protocol/v340/src/canonical.rs`)](./protocol-340-canonical-bridge.md) —
+- [Wiring v340's flattening table into the adapter (`crates/lodestone-canonical/src/canonical.rs`)](./protocol-340-canonical-bridge.md) —
   The follow-up to
   [`protocol-340-flattening-table.md`](./protocol-340-flattening-table.md): that
   document built and verified the `id:meta` → modern-block table but explicitly did
   not wire it up (its own "What wiring `v340` would need" section). This closes that
-  gap. `crates/protocol/v340/src/canonical.rs` bridges [`flattening::lookup`]'s answer
-  — vanilla's own first flattening step, in its own intermediate spelling — to a
-  real, canonical **26.2** [`lodestone_data::block_states`] id, and
+  gap. `crates/lodestone-canonical/src/canonical.rs` bridges [`flattening::lookup`]'s
+  answer — vanilla's own first flattening step, in its own intermediate spelling —
+  to a real, canonical **26.2** [`lodestone_data::block_states`] id, and
   `crates/protocol/v340/src/packets/chunk.rs`'s `map_chunk` decode now calls it for
   every block a 1.12.2 server sends. A 1.12.2 chunk decodes into the same id space
   `lodestone-world`'s storage, the mesher, and collision already assume.

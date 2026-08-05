@@ -1,11 +1,11 @@
-# Wiring v340's flattening table into the adapter (`crates/protocol/v340/src/canonical.rs`)
+# Wiring v340's flattening table into the adapter (`crates/lodestone-canonical/src/canonical.rs`)
 
 ## What it is
 
 The follow-up to [`protocol-340-flattening-table.md`](./protocol-340-flattening-table.md):
 that document built and verified the `id:meta` → modern-block table but explicitly did not
 wire it up (its own "What wiring `v340` would need" section). This closes that gap.
-`crates/protocol/v340/src/canonical.rs` bridges [`flattening::lookup`]'s answer — vanilla's own
+`crates/lodestone-canonical/src/canonical.rs` bridges [`flattening::lookup`]'s answer — vanilla's own
 first flattening step, in its own intermediate spelling — to a real, canonical **26.2**
 [`lodestone_data::block_states`] id, and `crates/protocol/v340/src/packets/chunk.rs`'s
 `map_chunk` decode now calls it for every block a 1.12.2 server sends. A 1.12.2 chunk decodes
