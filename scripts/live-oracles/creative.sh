@@ -48,6 +48,34 @@ if [ ! -f "$WORLD/server.jar" ]; then
   exit 1
 fi
 
+# `pause-when-empty-seconds` defaults to **60**, and it silently makes every
+# RCON timing gate vacuous.
+#
+# With no player connected, the server pauses the whole world after a minute:
+# `gameTime` stops advancing, and because `ServerLevel.tick` calls
+# `blockTicks.tick(getGameTime())`, **no scheduled block tick ever fires again**.
+# Every oracle here drives the world over RCON with nobody logged in, so this is
+# the normal state, not an edge case.
+#
+# What makes it dangerous rather than merely broken is that the rig still looks
+# half-alive: redstone dust propagates synchronously inside `setBlock`, so a dust
+# probe answers correctly while anything with a delay — repeaters, comparators,
+# observers, torches — never changes. A gate measuring "the signal arrived"
+# passes; a gate measuring *when* it arrived reads a frozen world.
+#
+# This was root-caused (#315/#317) after a falling-sand control failed, and it is
+# also the likely source of the older folklore that `tick step N` does not
+# advance scheduled block ticks: the jar sets
+# `runGameElements = !isFrozen || frozenTicksToRun > 0` and gates block ticks on
+# exactly that, so a paused world and a frozen one present identically.
+if [ -f "$WORLD/server.properties" ]; then
+  if grep -q '^pause-when-empty-seconds=' "$WORLD/server.properties"; then
+    sed -i '' 's/^pause-when-empty-seconds=.*/pause-when-empty-seconds=0/' "$WORLD/server.properties"
+  else
+    echo 'pause-when-empty-seconds=0' >> "$WORLD/server.properties"
+  fi
+fi
+
 # Idempotent: a no-op if the system services are already up. Unlike Docker
 # Desktop (launched by hand before any script runs), `container run` does not
 # start its own services — this script has to.
