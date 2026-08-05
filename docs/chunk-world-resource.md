@@ -105,6 +105,34 @@ It is not a second copy of anything: it is the one fact nothing else can answer
 once `net` has been dropped, and `end_session` needs it to release a server's
 terrain while leaving the fixture's alone.
 
+### The read/write split (issue #423)
+
+`ChunkWorld` is the **read** handle; `lodestone_ecs::ChunkWorldWrite` is the
+**write** handle, installed beside it at every site that owns the store. The two
+always name the same `Arc` — an installer builds the write handle from the raw
+`World` (or the client's `Arc<RwLock<World>>`) and derives the read handle from
+*it* (`ChunkWorldWrite::read_handle`), so the "one store" invariant is one
+`Arc`, not two agreeing stores.
+
+The split exists so a plugin system that takes `Res<ChunkWorld>` physically
+cannot mutate the store: the read handle exposes no `write()` and no `Arc`.
+Writing goes through `ChunkWorldWrite` only, which is held by the store's
+legitimate writers:
+
+| writer | holds | route |
+|---|---|---|
+| `drive_placement`'s predicted write | `Res<ChunkWorldWrite>` (system param) | `write_predicted_block` + re-mesh |
+| `Sim::predict_block` / `Sim::set_block_world` | `Sim::chunk_world_write()` accessor | the write resource in `self.ecs` |
+| the net-ingest path (`lodestone-client`) | `SharedState.world` itself | the adapter's `WorldSink` through `world_write`, untouched by the split |
+| test harnesses | the write handle they build (`ChunkWorldWrite::new` + `read_handle`) | `client.chunk_world_write()` for live-shaped tests |
+
+`Sim::adopt_live_world` and `Sim::end_session` replace the **pair** together —
+a write handle left naming the released server store while the read resource
+names a fresh empty one would be the two-worlds defect this design exists to
+delete. The split reaches `lodestone-client`: `ClientHandle` now hands out both
+`chunk_world()` and `chunk_world_write()` on the same `Arc`, and the client's
+own ECS resource install pairs them.
+
 ### `MeshPolicy`: the two facts the store cannot answer
 
 ```rust
@@ -306,8 +334,9 @@ None. No feature flags, no env vars. `DIRTY_COLUMN_BUDGET` (4) moved from
 - `lodestone-ecs` → **`lodestone-world`** is new. wasm-safe: `lodestone-client`
   already depended on it and is in `scripts/wasm-check.sh`'s crate list. Still
   never a version crate.
-- `lodestone-client` → unchanged set; `state.rs` inserts `ChunkWorld` as a
-  resource sharing `SharedState.world`'s `Arc`, and `handle.rs` hands the same
-  handle out through `ClientHandle::chunk_world()`.
+- `lodestone-client` → unchanged set; `state.rs` inserts `ChunkWorld` **and**
+  `ChunkWorldWrite` as resources sharing `SharedState.world`'s `Arc`, and
+  `handle.rs` hands the pair out through `ClientHandle::chunk_world()` /
+  `ClientHandle::chunk_world_write()`.
 - `lodestone-shell` → unchanged set; `mesher.rs` gained `bevy_ecs` /
   `lodestone_ecs` imports and lost nothing.

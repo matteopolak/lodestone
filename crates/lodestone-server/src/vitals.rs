@@ -311,6 +311,70 @@ impl PlayerVitals {
         Some(outcome.to_health)
     }
 
+    /// Applies border damage (issue #326, B1 enforcement) — the
+    /// `max(1, floor(-dist * damage_per_block))` hit `LivingEntity.baseTick`
+    /// lands on a player standing past the world border's safe zone
+    /// (`LivingEntity.java:425-434`, read verbatim):
+    ///
+    /// ```java
+    /// else if (isPlayer && !level.getWorldBorder().isWithinBounds(this.getBoundingBox())) {
+    ///     double dist = getDistanceToBorder() + getSafeZone();
+    ///     if (dist < 0.0) {
+    ///         double damagePerBlock = getDamagePerBlock();
+    ///         if (damagePerBlock > 0.0) {
+    ///             this.hurtServer(level, damageSources().outOfBorder(),
+    ///                 Math.max(1, Mth.floor(-dist * damagePerBlock)));
+    ///         }
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// It is an `else if` *before* the water-breath block in `baseTick`, which
+    /// is why [`tick`](Self::tick) and this entry point run side by side: a
+    /// player under water outside the border takes border damage *and*
+    /// drowning, in that order (vanilla's own branch order, one branch per
+    /// `baseTick`).
+    ///
+    /// `raw` is already the `max(1, floor(...))` value computed by
+    /// [`crate::WorldBorder::damage_for_position`] — this method is the
+    /// *application* half, mirroring how [`apply_fall_damage`](Self::apply_fall_damage)
+    /// receives a pre-floored value from [`crate::FallTracker`]. Like that
+    /// method it bypasses the i-frame gate ([`hurt_cooldown`](Self::hurt_cooldown)),
+    /// matching vanilla's `outOfBorder()` damage type carrying no
+    /// `bypassesCooldown`-style exemption — border damage lands **every
+    /// tick** a player is past the safe zone, exactly as the plan's gate
+    /// ("a player at distance d outside takes exactly `max(1, floor(d*0.2))`
+    /// per tick") requires.
+    ///
+    /// # Why `DamageFlags::default()` instead of the derived table
+    ///
+    /// `apply_fall_damage` resolves its flags from the real `minecraft:damage_type`
+    /// table; border damage cannot, because **`minecraft:outside_border` is
+    /// not in the generated table** (verified: `grep outside_border
+    /// crates/lodestone-data/src/damage_types.rs` → empty — the table is a
+    /// byproduct of Mojang's generator and omits it). The vanilla JSON
+    /// (`outside_border.json`: `exhaustion 0.0, message_id outsideBorder,
+    /// scaling when_caused_by_living_non_player`) carries **no bypass tags**,
+    /// so the derived [`lodestone_entity::DamageFlags`] for it would be all
+    /// `false` anyway — `DamageFlags::default()` is exactly that, sourced from
+    /// the datapack definition rather than a table that lacks the entry.
+    ///
+    /// Returns `Some(damage_dealt)` if the hit landed (a dead player is a
+    /// no-op, mirroring [`apply_fall_damage`](Self::apply_fall_damage)), `None`
+    /// otherwise.
+    pub fn apply_border_damage(&mut self, raw: f64) -> Option<f32> {
+        if self.health <= 0.0 {
+            return None;
+        }
+        let outcome = lodestone_entity::apply_reductions(
+            raw as f32,
+            &lodestone_entity::Defenses::default(),
+            lodestone_entity::DamageFlags::default(),
+        );
+        self.health = (self.health - outcome.to_health).max(0.0);
+        Some(outcome.to_health)
+    }
+
     /// Applies a generic incoming hit (issue #12: "mob-on-player damage needs
     /// a `PlayerVitals` entry point") through the same two-stage pipeline
     /// [`crate::SimMob::apply_damage`] already runs for a mob: the
@@ -633,6 +697,82 @@ mod tests {
         let dealt = v.apply_fall_damage(5.0);
         assert_eq!(dealt, None, "a dead player must not take more damage");
         assert_eq!(v.health(), 0.0);
+    }
+
+    // ---- `apply_border_damage` (issue #326, B1 enforcement) --------------
+
+    /// A border hit reduces health by exactly the `max(1, floor(-dist *
+    /// damage_per_block))` value [`WorldBorder::damage_for_position`] handed
+    /// in — outside_border has no bypass tags but this crate tracks no armour
+    /// either, so with `Defenses::default()` the pipeline is a pass-through.
+    /// The magnitude is pinned, not just the sign: `2.0` in means `2.0` out
+    /// and `20.0 - 2.0` on the wire's health.
+    #[test]
+    fn border_damage_reaches_health_unreduced_with_no_armour_tracked() {
+        let mut v = PlayerVitals::default();
+        let dealt = v.apply_border_damage(2.0);
+        assert_eq!(dealt, Some(2.0));
+        assert_eq!(v.health(), MAX_HEALTH - 2.0);
+    }
+
+    /// The `f64` → `f32` narrowing is faithful for the values the border can
+    /// actually produce: a `f64` that lands exactly on a representable `f32`
+    /// (every integer `max(1, floor(...))` value is) must not drift. The
+    /// enforcement calls this with `f64` amounts — the plan gate's per-tick
+    /// `max(1, floor(d * 0.2))` values are all small exact integers.
+    #[test]
+    fn border_damage_narrowing_f64_to_f32_is_exact_for_wire_values() {
+        let mut v = PlayerVitals::default();
+        for (raw, expected) in [(1.0, 1.0), (2.0, 2.0), (4.0, 4.0), (5.0, 5.0)] {
+            let dealt = v.apply_border_damage(raw);
+            assert_eq!(dealt, Some(expected));
+            v = PlayerVitals::default();
+        }
+    }
+
+    /// **Control**: a dead player's vitals must not take further border
+    /// damage — the same `health <= 0.0` guard as every other damage source.
+    #[test]
+    fn dead_player_takes_no_further_border_damage() {
+        let mut v = PlayerVitals::default();
+        v.apply_border_damage(999.0);
+        assert_eq!(v.health(), 0.0);
+        let dealt = v.apply_border_damage(1.0);
+        assert_eq!(dealt, None, "a dead player must not take more border damage");
+        assert_eq!(v.health(), 0.0);
+    }
+
+    /// Border damage **bypasses the i-frame gate** — that is the plan gate's
+    /// "per tick" cadence (`LivingEntity.baseTick` lands it every tick a
+    /// player is past the safe zone). Two back-to-back hits both land, unlike
+    /// a gated [`apply_damage`](Self::apply_damage) whose second call within
+    /// 20 ticks is ignored. This is the property that distinguishes border
+    /// damage from a generic hit, so it is asserted directly rather than left
+    /// to a comment.
+    #[test]
+    fn border_damage_bypasses_the_iframe_gate_for_the_per_tick_cadence() {
+        let mut v = PlayerVitals::default();
+        assert_eq!(v.apply_border_damage(1.0), Some(1.0));
+        assert_eq!(
+            v.apply_border_damage(1.0),
+            Some(1.0),
+            "the very next tick lands too — no 20-tick cooldown"
+        );
+        assert_eq!(v.health(), MAX_HEALTH - 2.0);
+    }
+
+    /// Why [`apply_border_damage`](Self::apply_border_damage) uses
+    /// `DamageFlags::default()`: `minecraft:outside_border` is **not** in the
+    /// generated damage-type table (verified: the table derives from Mojang's
+    /// generator and omits it), so `for_damage_type(outside_border_type())`
+    /// would be a runtime `expect` panic. Pin the premise so nobody "fixes"
+    /// the flags back to a table lookup that cannot resolve.
+    #[test]
+    fn outside_border_is_absent_from_the_generated_damage_type_table() {
+        assert!(
+            lodestone_data::damage_types::DamageType::from_name("minecraft:outside_border").is_none(),
+            "if this starts resolving, route apply_border_damage through for_damage_type"
+        );
     }
 
     // ---- `apply_damage` (issue #12's "mob-on-player" entry point) --------

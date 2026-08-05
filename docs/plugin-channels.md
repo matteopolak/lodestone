@@ -117,13 +117,15 @@ no such call site, which is why it could not use it — `ChannelRegistry` was
 constructed nowhere outside its own tests. The two coexist; neither is layered on
 the other.
 
-**The server side is not wired.** A real client's serverbound `custom_payload`
-reaches `crates/protocol/v770/src/server_protocol.rs`, decodes as a
-`BrandPayload`, and returns `ServerBound::Ignored` — so a vanilla client's brand
-announcement is still dropped. Wiring it needs a `ServerBound` variant and a
-`CommandSink`-shaped seam method in `lodestone-server`, whose module doc
-(`crates/lodestone-server/src/command.rs:44-60`) already names `custom_payload`
-as the next such method. Scoped as its own unit; see #301.
+**The server side is wired at the wire level.** Issue #335 added
+`ServerBound::CustomPayload`, the defaulted
+`ServerProtocol::encode_custom_payload` seam method, and the
+`lodestone-server` registry/dispatch in `crates/lodestone-server/src/
+plugin_channels.rs` — so a real client's serverbound `custom_payload` no longer
+lands in `Ignored`. What still is **not** wired is the plugin-facing API on top
+of that registry: reaching a plugin's `MessageReader<T>` from a registered
+[`PluginChannelHandler`](https://docs.rs/lodestone-server/latest/lodestone_server/trait.PluginChannelHandler.html)
+is issue #77's job. See [`server-plugin-channels.md`](./server-plugin-channels.md).
 
 ## Configuration
 

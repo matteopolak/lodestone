@@ -1479,9 +1479,11 @@ fn a_write_through_the_chunk_world_resource_is_what_the_sim_reads() {
         "the cell starts empty"
     );
 
-    // The write goes through the resource handle, not through any `Sim` method.
+    // The write goes through the *write* resource handle, not through any `Sim`
+    // method — issue #423: the read handle `sim.chunk_world()` yields has no
+    // write path.
     {
-        let store = sim.chunk_world();
+        let store = sim.chunk_world_write();
         let mut world = store.write();
         let chunk = world
             .get_mut(ChunkPos {

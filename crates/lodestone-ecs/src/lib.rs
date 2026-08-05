@@ -167,7 +167,7 @@ pub use async_task::{
     AsyncTaskPool, AsyncTaskPoolPlugin, PendingTask, PoolStats, drain_completed_tasks,
     in_async_worker,
 };
-pub use chunks::{ChunkWorld, WorldExtent};
+pub use chunks::{ChunkWorld, ChunkWorldWrite, WorldExtent};
 pub use commands::{
     CommandDispatchError, CommandHandler, CommandInvocation, CommandOutcome, CommandRegisterError,
     CommandRegistry, CommandSource, PlayerDirectory, PluginCommand, PluginCommandsPlugin,

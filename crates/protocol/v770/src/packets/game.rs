@@ -152,6 +152,131 @@ pub struct SetHealth {
     pub saturation: f32,
 }
 
+/// Clientbound `initialize_border` packet (wire id 43 in 26.2) — the world
+/// border's full state, sent on join by `PlayerList.sendLevelInfo` before the
+/// time sync and spawn-position packets.
+///
+/// Wire layout mirrors `ClientboundInitializeBorderPacket.write`'s field order
+/// exactly: two big-endian `f64` centre coordinates, `old_size` and `new_size`
+/// f64s, a VarLong lerp time, then three VarInts for `absolute_max_size`,
+/// `warning_blocks` and `warning_time`.
+///
+/// **One deliberate divergence: the lerp time is in milliseconds, not vanilla's
+/// ticks.** Vanilla writes `border.getLerpTime()` — the extent's remaining
+/// *server ticks* — directly (`ClientboundInitializeBorderPacket.java:32`),
+/// and the vanilla client re-runs that count as its own tick count. This
+/// crate's client instead decodes the field as `lerp_time_ms` and interpolates
+/// on
+/// wall-clock (`lodestone-game::worldborder`'s `BorderExtent::Moving`), so the
+/// server encoder converts ticks → ms (`* 50`) before writing. A vanilla client
+/// served by this crate would lerp 50× too fast; a vanilla *server* joining
+/// this crate's client already shows the same mismatch on this field.
+///
+/// `old_size`/`new_size` are the extent's `getSize()` and `getLerpTarget()`
+/// (`ClientboundInitializeBorderPacket.java:35-38`) — for a static border they
+/// are equal and the lerp time is 0.
+#[derive(Debug, Clone, PartialEq, Decode, Encode, Packet)]
+#[mc(name = "minecraft:initialize_border", state = Play, bound = Client)]
+pub struct InitializeBorder {
+    /// Border centre X.
+    pub center_x: f64,
+    /// Border centre Z.
+    pub center_z: f64,
+    /// Size at the start of the current lerp (`getSize()`).
+    pub old_size: f64,
+    /// Size at the end of the current lerp (`getLerpTarget()`).
+    pub new_size: f64,
+    /// Remaining lerp time in **milliseconds** (0 for a static border) — see
+    /// the packet doc for why this crate diverges from vanilla's ticks.
+    #[mc(varlong)]
+    pub lerp_time: i64,
+    /// The border's absolute maximum size (`WorldBorder.getAbsoluteMaxSize`).
+    #[mc(varint)]
+    pub absolute_max_size: i32,
+    /// Warning distance in blocks.
+    #[mc(varint)]
+    pub warning_blocks: i32,
+    /// Warning delay in seconds.
+    #[mc(varint)]
+    pub warning_time: i32,
+}
+
+/// Clientbound `set_border_center` packet (wire id 88 in 26.2) — moves the
+/// border without changing its size.
+///
+/// Wire layout: two big-endian `f64` coordinates
+/// (`ClientboundSetBorderCenterPacket`).
+#[derive(Debug, Clone, PartialEq, Decode, Encode, Packet)]
+#[mc(name = "minecraft:set_border_center", state = Play, bound = Client)]
+pub struct SetBorderCenter {
+    /// New border centre X.
+    pub center_x: f64,
+    /// New border centre Z.
+    pub center_z: f64,
+}
+
+/// Clientbound `set_border_lerp_size` packet (wire id 89 in 26.2) — the live
+/// resize delta a border shrink/grow broadcasts.
+///
+/// Wire layout: `old_size` and `new_size` big-endian f64s, then a VarLong
+/// lerp time in **milliseconds** — the same deliberate divergence from the
+/// vanilla wire as [`InitializeBorder`]'s lerp time (see that packet's doc).
+/// Vanilla writes `border.getLerpTime()` — remaining *server ticks* — directly
+/// in both packets (`ClientboundSetBorderLerpSizePacket.java:20`, no ×50); this
+/// crate's client decodes the field as `lerp_time_ms` and interpolates on
+/// wall-clock, so the server converts ticks → ms before it reaches this
+/// encoder, which writes the ms value verbatim. A vanilla client served by
+/// this crate would lerp 50× too fast.
+#[derive(Debug, Clone, PartialEq, Decode, Encode, Packet)]
+#[mc(name = "minecraft:set_border_lerp_size", state = Play, bound = Client)]
+pub struct SetBorderLerpSize {
+    /// Size at the start of the lerp.
+    pub old_size: f64,
+    /// Size at the end of the lerp.
+    pub new_size: f64,
+    /// Lerp duration in milliseconds.
+    #[mc(varlong)]
+    pub lerp_time_ms: i64,
+}
+
+/// Clientbound `set_border_size` packet (wire id 90 in 26.2) — the instant
+/// snap a `WorldBorder.setSize` broadcasts.
+///
+/// Wire layout: a single big-endian `f64` size
+/// (`ClientboundSetBorderSizePacket`).
+#[derive(Debug, Clone, PartialEq, Decode, Encode, Packet)]
+#[mc(name = "minecraft:set_border_size", state = Play, bound = Client)]
+pub struct SetBorderSize {
+    /// New border size.
+    pub size: f64,
+}
+
+/// Clientbound `set_border_warning_delay` packet (wire id 91 in 26.2) — the
+/// warning *time* delta.
+///
+/// Wire layout: a single VarInt seconds value
+/// (`ClientboundSetBorderWarningDelayPacket`).
+#[derive(Debug, Clone, PartialEq, Decode, Encode, Packet)]
+#[mc(name = "minecraft:set_border_warning_delay", state = Play, bound = Client)]
+pub struct SetBorderWarningDelay {
+    /// Warning delay in seconds.
+    #[mc(varint)]
+    pub warning_time: i32,
+}
+
+/// Clientbound `set_border_warning_distance` packet (wire id 92 in 26.2) —
+/// the warning *blocks* delta.
+///
+/// Wire layout: a single VarInt blocks value
+/// (`ClientboundSetBorderWarningDistancePacket`).
+#[derive(Debug, Clone, PartialEq, Decode, Encode, Packet)]
+#[mc(name = "minecraft:set_border_warning_distance", state = Play, bound = Client)]
+pub struct SetBorderWarningDistance {
+    /// Warning distance in blocks.
+    #[mc(varint)]
+    pub warning_blocks: i32,
+}
+
 /// A dimension-qualified block position (`GlobalPos`).
 ///
 /// Wire layout: an identifier string naming the dimension, then a single

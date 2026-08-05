@@ -563,6 +563,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `hardness`, `item_prototypes`, `items`, `menus`, `mob_effects`, `outline_shapes`,
   `particle_types`, `path_types`, `sound_events`, `tools`) describe **the game**, not
   **the protocol**, and now live here instead.
+- [Server loot tables: loading and rolling](./loot-tables.md) — The version-free
+  server-side loot system in `crates/lodestone-server/src/loot.rs`: it parses Mojang's
+  datapack loot-table JSON (the same format `net.minecraft.world.level.storage.loot`
+  reads) and **rolls** a table with the server's deterministic RNG to produce
+  `Vec<ItemStack>` — the data that becomes a mob drop, a block drop, or a chest
+  fill. This is the server half of the client's `lodestone-game` recipe loader: both
+  consume vanilla datapack JSON behind a version seam, neither names a protocol.
 - [Main menu](./main-menu.md) — The GUI entry point. Running `lodestone` with no
   connection flags opens on a title screen instead of dropping straight into the local
   dev world: Singleplayer / Multiplayer / Quit, a persisted multiplayer server list
@@ -907,6 +914,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   The three things that make a served session (singleplayer over `memory_pair`, or
   open-to-LAN over TCP) survive, keep time, and follow the player, instead of being a
   static, timeless island that a real client would eventually give up on:
+- [Server-side advancements and statistics](./server-advancements.md) — The
+  version-free server-authoritative model for advancement and statistic tracking in
+  `crates/lodestone-server/src/advancements.rs` (issue #338): the advancement tree,
+  per-player criteria progress and completion, the every-tick flush to the client, NBT
+  persistence for the #437 world-save hook, and a statistics counter answered on
+  `REQUEST_STATS`. It is the "server plumbing" half of the epic — the data model and
+  rules, never the wire bytes.
 - [Server chunk generation: fanned out over scoped threads (issue #414)](./server-chunk-generation-parallelism.md) —
   `crates/lodestone-server/src/chunk.rs`'s `generate_columns_parallel` runs a batch of
   `ChunkSource::column()` calls across `std::thread::scope` worker threads and hands
@@ -963,6 +977,23 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   geometry: a `HeaderAndFooterLayout` title, 36 px list rows with a 32×32 favicon,
   wrapped MOTD and a status column, and seven footer buttons three of which are
   inactive when there is nothing selected.
+- [Server-side plugin messaging: the channel registry and dispatch](./server-plugin-channels.md) —
+  The server side of Minecraft's custom plugin-message machinery, in
+  `crates/lodestone-server/src/plugin_channels.rs`: a registry of channels the server
+  has registered interest in, per-connection tracking of which channels each client
+  announced, and dispatch both ways on the wire. A client sends a raw payload on a
+  named channel and it reaches the server handler registered for that channel; the
+  server broadcasts a payload and every connection that declared support for the
+  channel receives it. **Deliberately not** the plugin-facing API — that is issue
+  #77's plugin framework; this is the wire-level registry and dispatch seam it will
+  sit on.
+- [Server-initiated resource pack push (issue #334)](./server-resource-pack.md) —
+  How Lodestone's integrated server pushes a resource pack to a connected player —
+  the download URL, SHA-1 hash, required flag, and optional prompt that a client shows
+  on its accept/decline screen. The client-side **decode** of the packet landed first
+  (issue #294); this issue is the server half: the version-free vocabulary struct, the
+  `ServerProtocol` seam method, its `v770` encoder, and the feed a host publishes a
+  push into. Part of the server-plumbing epic (#339).
 - [Server-list status (the Status phase)](./server-status.md) — How Lodestone's
   integrated server answers a client's **server-list ping** — the MOTD, player
   count, version, protocol number, and optional favicon a player sees in their

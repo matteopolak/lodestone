@@ -299,10 +299,13 @@ every time.
 - **No double-click to join.** `app.rs` reports one click at a time with no
   interval. Joining is one click away on the icon's right half, and one keypress
   away with Enter or Join Server.
-- **No tooltips.** The status icon and the player-count text both carry one in
-  vanilla. Nothing in this shell tracks hover *dwell time* — the same gap
-  `menu-widgets.md` and `menu-focus.md` record — so a tooltip would reach zero
-  pixels.
+- **No latency tooltip.** Vanilla shows the ping round-trip on hover over the
+  status *icon* (`ServerSelectionList.java:358-362`). The "who's online" tooltip
+  on the player-count text is implemented — vanilla fires both on hover
+  *position*, not dwell time, so the gap `menu-widgets.md` and `menu-focus.md`
+  record does not cover it — but the latency half has no model to draw, and the
+  icon and text rects are disjoint, so neither tooltip can cover the other's
+  trigger.
 - **No delete confirmation.** Vanilla opens a `ConfirmScreen`; Delete here removes
   immediately, as it always has.
 - **No `Shift`+Up/Down reorder.** Vanilla's `OnlineServerEntry.keyPressed` has it,

@@ -9,13 +9,14 @@
 
 use super::*;
 use super::account_screen::{ACCOUNTS_BUTTON_W, ACCOUNTS_FOOTER_SPACING, ACCOUNTS_HEAD_ICON, AccountsBlock, accounts_block, accounts_button_slot, accounts_failed_frame, accounts_idle_frame};
-use super::draw::{Quads, wrap_bounded, wrap_measured};
+use super::draw::{Quads, TOOLTIP_BG, wrap_bounded, wrap_measured};
 use super::renderer::{FLOATS_PER_VERTEX, SPRITE_FLOATS_PER_VERTEX};
 use super::screens::credits_frame;
-use super::server_list::{SERVER_ICON_DARKEN, SERVER_JOIN_SPRITES, SERVER_LIST_REF_CANVAS, SERVER_LIST_ROW_W, SERVER_MOVE_DOWN_SPRITES, SERVER_MOVE_UP_SPRITES, ServerListBlock};
+use super::server_list::{SERVER_ENTRY_SPACING, SERVER_ICON_DARKEN, SERVER_JOIN_SPRITES, SERVER_LIST_REF_CANVAS, SERVER_LIST_ROW_W, SERVER_MOVE_DOWN_SPRITES, SERVER_MOVE_UP_SPRITES, ServerListBlock};
 use super::title_pause::pause_menu_grid_with;
 use super::world_list::{WorldSelectBlock, world_select_block};
 use crate::menu::nav::{MenuKey, MenuNav};
+use crate::menu::servers::ServerEntry;
 use crate::menu::status::{ServerStatus, StatusCache, unavailable_probe};
 use crate::menu::{Screen, SessionKind, UiState};
 
@@ -347,6 +348,7 @@ fn the_server_list_shows_the_motd_players_and_latency_from_a_status() {
             // identically to before the styled path existed.
             motd_spans: Vec::new(),
             players: "3/20".into(),
+            online: Some(3),
             sample: Vec::new(),
             version: "26.2".into(),
             // Our own protocol, so the row resolves to
@@ -830,6 +832,169 @@ fn the_hover_overlay_follows_the_cursor_rather_than_the_row() {
     is(dim_at(&f), icon0, "the whole row hovers");
     f.cursor = Some((10.0, 10.0));
     assert_eq!(dim_at(&f), None, "the backdrop is not a row");
+}
+
+/// Asserts `got` — a [`colour_bounds`] box — equals `want` within the NDC
+/// round-trip's epsilon. A tolerance, not `assert_eq!`: the measurement
+/// round-trips through NDC and back, so 555.0 comes out 555.00003.
+fn assert_box(got: Option<(f32, f32, f32, f32)>, want: (f32, f32, f32, f32), what: &str) {
+    let g = got.unwrap_or_else(|| panic!("{what}: nothing drew, expected {want:?}"));
+    let near = (g.0 - want.0).abs() < 0.01
+        && (g.1 - want.1).abs() < 0.01
+        && (g.2 - want.2).abs() < 0.01
+        && (g.3 - want.3).abs() < 0.01;
+    assert!(near, "{what}: got {g:?}, expected {want:?}");
+}
+
+/// A cache of `Ok` statuses, one per entry in `nav`'s list, each spec
+/// `(host, players, sample, online)` seeded so its row resolves to
+/// `ServerState::Successful` — the state vanilla shows the "who's online"
+/// tooltip for (`ServerSelectionList.java:410,430`).
+fn ok_statuses(
+    nav: &MenuNav,
+    specs: &[(&str, &str, &[&str], Option<u32>)],
+) -> StatusCache {
+    // The probe outlives the caller's `specs` (`Probe` is a `'static` `dyn`), so
+    // the specs are copied into owned data the closure can hold without borrowing
+    // the test's locals.
+    let owned: Vec<(String, String, Vec<String>, Option<u32>)> = specs
+        .iter()
+        .map(|(host, players, sample, online)| {
+            (
+                host.to_string(),
+                players.to_string(),
+                sample.iter().map(|s| s.to_string()).collect(),
+                *online,
+            )
+        })
+        .collect();
+    let mut statuses = StatusCache::with_probe(std::sync::Arc::new(move |e: &ServerEntry| {
+        let (_, players, sample, online) = owned
+            .iter()
+            .find(|(host, ..)| host == &e.host)
+            .expect("the probe only ever sees an entry the test added");
+        Ok(ServerStatus {
+            motd: "hi".into(),
+            motd_spans: Vec::new(),
+            players: players.clone(),
+            online: *online,
+            sample: sample.clone(),
+            version: "26.2".into(),
+            protocol: Some(crate::menu::status::STATUS_PROTOCOL),
+            favicon_png: None,
+            latency_ms: Some(5),
+        })
+    }));
+    let entries = nav.list().entries().to_vec();
+    statuses.refresh(&entries);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while statuses.pump() == 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert_eq!(statuses.len(), entries.len(), "every entry must drain");
+    statuses
+}
+
+/// #421's "who's online" tooltip, from the frame side and the draw side
+/// together: `server_list_frame` shapes the lines from the sample — vanilla's
+/// `... and N more ...` when the sample is short of the count — and
+/// `draw_server_entry` only shows the box when the cursor is over the status
+/// *text* (the player count), not over the row (`ServerSelectionList.java:356-361`).
+#[test]
+fn the_who_is_online_tooltip_lists_the_sample_and_tracks_the_status_text() {
+    let (nav, ui) = list_nav("who", &[("A", "a.example"), ("B", "b.example")]);
+    let statuses = ok_statuses(
+        &nav,
+        &[
+            ("a.example", "5/20", &["Alice", "Bob"], Some(5)),
+            // A server that omits the sample: legal and common, and vanilla's
+            // `else { data.playerList = List.of() }` (`ServerStatusPinger.java:109`)
+            // gives it no tooltip.
+            ("b.example", "1/20", &[], Some(1)),
+        ],
+    );
+    let mut fav = FaviconCache::new();
+    let mut f = frame_for(&ui, &nav, &statuses, &mut fav).unwrap();
+
+    // The frame resolves the lines once per status, exactly as
+    // `ServerStatusPinger` builds `data.playerList` (`:90-110`): the two named
+    // players, then the and-more line for the unnamed three.
+    let a = f.rows[0].entry.as_ref().expect("row 0 is an entry");
+    assert_eq!(
+        a.online_players,
+        ["Alice", "Bob", "... and 3 more ..."],
+        "2 of 5 named must carry vanilla's `... and 3 more ...`"
+    );
+    assert!(
+        f.rows[1].entry.as_ref().unwrap().online_players.is_empty(),
+        "an empty sample is an empty tooltip"
+    );
+
+    let fill_at = |f: &MenuFrame<'_>| colour_bounds(&geometry(f, V_W, V_H), V_W, V_H, TOOLTIP_BG);
+
+    // The status text is right-aligned to its status icon
+    // (`status_x = icon_x - width - spacing`), and the box lands by
+    // `DefaultTooltipPositioner` — content at the cursor + (12, -12), here with
+    // no edge to clamp — so the fill is `(rx - 3, ry - 3, w + 6, h + 6)`.
+    let (icon_x, ..) = server_status_icon_rect(0, V_W, 0.0);
+    let (_, cy, ..) = server_row_content_rect(0, V_W, 0.0);
+    let status_x = icon_x - text_px("5/20", 1.0) - SERVER_ENTRY_SPACING;
+    assert_eq!((status_x, cy), (534.0, 37.0), "premise: the cursor lands on the text");
+    f.cursor = Some((status_x + 12.0, cy + 4.0));
+    // Width 108 is `"... and 3 more ..."` (18 chars at the fixed 6 px advance);
+    // height 30 is three 10 px tooltip lines; fill is the 3 px pad on each side.
+    assert_box(
+        fill_at(&f),
+        (555.0, 26.0, 114.0, 36.0),
+        "row 0's tooltip",
+    );
+
+    // Inside the row but off the status column: no tooltip — vanilla fires it
+    // over the text only, never over the row.
+    f.cursor = Some((status_x - 40.0, cy + 4.0));
+    assert_eq!(fill_at(&f), None, "inside the row, off the status text");
+
+    // Row 1's status text, over an empty sample: still no tooltip.
+    let (_, cy1, ..) = server_row_content_rect(1, V_W, 0.0);
+    let sx1 = icon_x - text_px("1/20", 1.0) - SERVER_ENTRY_SPACING;
+    f.cursor = Some((sx1 + 12.0, cy1 + 4.0));
+    assert_eq!(fill_at(&f), None, "an empty sample draws no tooltip");
+
+    // No cursor — the keyboard-only control (and every hermetic test's default).
+    f.cursor = None;
+    assert_eq!(fill_at(&f), None, "no cursor means no tooltip");
+}
+
+/// The tooltip is drawn **after** the band-clipped rows, so a tooltip for the
+/// first row — whose top necessarily reaches above the band, because the status
+/// text sits a few pixels below the band's top edge — is not scissored off. A
+/// tooltip clipped to the band would measure a box whose top edge is the band's,
+/// not the predicted `ry - 3`; asserting the exact unclipped value is what tells
+/// "escaped the clip" from "nothing drew".
+#[test]
+fn the_who_is_online_tooltip_escapes_the_band_clip() {
+    let (nav, ui) = list_nav("clip", &[("A", "a.example")]);
+    let statuses = ok_statuses(&nav, &[("a.example", "5/20", &["Alice", "Bob"], Some(5))]);
+    let mut fav = FaviconCache::new();
+    let mut f = frame_for(&ui, &nav, &statuses, &mut fav).unwrap();
+
+    let (icon_x, ..) = server_status_icon_rect(0, V_W, 0.0);
+    let (_, cy, ..) = server_row_content_rect(0, V_W, 0.0);
+    let status_x = icon_x - text_px("5/20", 1.0) - SERVER_ENTRY_SPACING;
+    // The top of the status text box (`mouseY == getContentY()` is inclusive in
+    // vanilla), the highest this row can push the tooltip.
+    f.cursor = Some((status_x + 12.0, cy));
+    let got = colour_bounds(&geometry(&f, V_W, V_H), V_W, V_H, TOOLTIP_BG)
+        .expect("the tooltip must draw");
+    assert_box(Some(got), (555.0, 22.0, 114.0, 36.0), "the unclipped fill");
+
+    let band_top = f.list.as_ref().unwrap().model(V_H).unwrap().top();
+    assert!(
+        got.1 < band_top,
+        "the fill's top ({}) must reach above the band ({band_top}), or the \
+         clip would have cut the tooltip",
+        got.1
+    );
 }
 
 /// A synthetic pack carrying the `server_list/*` sprites plus the button set,
