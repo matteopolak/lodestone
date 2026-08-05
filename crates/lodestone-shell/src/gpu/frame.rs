@@ -322,7 +322,7 @@ impl RenderState {
             self.prepare_first_person_hand(device, queue, camera)
         };
         stats.first_person_arm_drawn = matches!(first_person_hand, Some(FirstPersonHand::Arm(_)));
-        stats.first_person_item_drawn = matches!(first_person_hand, Some(FirstPersonHand::Item(_)));
+        stats.first_person_item_drawn = matches!(first_person_hand, Some(FirstPersonHand::Item(..)));
 
         // Build every mining-crack overlay mesh before the pass (buffers can't be
         // created mid-pass) — one per entry in `cracks`, not just the local

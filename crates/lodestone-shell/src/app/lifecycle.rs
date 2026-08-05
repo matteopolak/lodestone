@@ -240,6 +240,15 @@ impl ApplicationHandler for WindowApp {
             {
                 render.install_weather(gpu.device(), gpu.queue(), format, &textures);
             }
+            // See `install_session_render_sources`: the enchantment-glint pass, from
+            // the same local GPU handles. `install_glint` uploads the sheet as
+            // `Rgba8Unorm` — see `gpu/glint.rs`'s module doc for why that is the
+            // opposite of every diffuse loader and deliberate.
+            if !render.has_glint()
+                && let Some(img) = crate::resources::load_glint_texture()
+            {
+                render.install_glint(gpu.device(), gpu.queue(), format, &img);
+            }
         }
         // No target requested: stay on `Screen::MainMenu`, which `UiState::new`
         // already put us on. Nothing else to do.

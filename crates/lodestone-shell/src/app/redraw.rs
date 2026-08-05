@@ -199,12 +199,12 @@ impl WindowApp {
         let held = hotbar_records
             .get(self.sim.selected_slot())
             .and_then(|record| record.as_ref())
-            .map(|record| record.item.clone());
-        // Cloned rather than moved whole into the closure below: issue #154's
-        // spyglass FOV/vignette needs this same value further down in this
-        // function (`ScreenEffects::scoping`), and the closure otherwise
-        // takes ownership for the render source's lifetime.
-        let held_for_scoping = held.clone();
+            .map(|record| (record.item.clone(), record.enchanted));
+        // The tuple's first element, re-derived rather than cloned: issue #154's
+        // spyglass FOV/vignette needs the bare location further down in this
+        // function (`ScreenEffects::scoping`), and the closure otherwise takes
+        // ownership of the whole tuple for the render source's lifetime.
+        let held_for_scoping = held.as_ref().map(|(loc, _)| loc.clone());
         render.set_main_hand_source(move || held.clone());
 
         // Block entities — chests (issue #23). **This install is what makes a
